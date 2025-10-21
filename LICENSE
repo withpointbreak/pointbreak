@@ -1,17 +1,121 @@
-Copyright (c) 2025 Kevin Swiber
+Pointbreak End User License Agreement (EULA)
 
-All rights reserved.
+Copyright (c) 2025 Kevin Swiber. All rights reserved.
 
-This software and associated documentation files (the "Software") are proprietary
-and confidential. No part of this Software may be reproduced, distributed, or
-transmitted in any form or by any means, including photocopying, recording, or
-other electronic or mechanical methods, without the prior written permission of
-the copyright holder, except in the case of brief quotations embodied in critical
-reviews and certain other noncommercial uses permitted by copyright law.
+This End User License Agreement ("Agreement") is a legal agreement between you 
+(either an individual or a single entity) and Kevin Swiber ("Licensor") for the 
+Pointbreak software product, which includes computer software and may include 
+associated media, printed materials, and online or electronic documentation 
+("Software").
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
-IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
-CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+BY INSTALLING, COPYING, OR OTHERWISE USING THE SOFTWARE, YOU AGREE TO BE BOUND 
+BY THE TERMS OF THIS AGREEMENT. IF YOU DO NOT AGREE TO THE TERMS OF THIS 
+AGREEMENT, DO NOT INSTALL OR USE THE SOFTWARE.
+
+1. GRANT OF LICENSE
+
+Subject to the terms and conditions of this Agreement, Licensor grants you a 
+limited, non-exclusive, non-transferable, revocable license to:
+
+   a) Install and use the Software on any number of computers
+   b) Use the Software for personal, commercial, or educational purposes
+   c) Use the Software in connection with open source and proprietary projects
+
+2. RESTRICTIONS
+
+You may NOT:
+
+   a) Modify, adapt, translate, reverse engineer, decompile, disassemble, or 
+      create derivative works based on the Software
+   b) Remove, alter, or obscure any proprietary notices (including copyright 
+      and trademark notices) on the Software
+   c) Redistribute, sublicense, rent, lease, or lend the Software to third parties
+   d) Use the Software to create competing debugging or development tools
+   e) Publish benchmarks or performance results without written permission
+   f) Use the Software in any way that violates applicable laws or regulations
+
+3. OWNERSHIP
+
+The Software is licensed, not sold. Licensor retains all right, title, and 
+interest in and to the Software, including all intellectual property rights. 
+This Agreement does not grant you any rights to trademarks or service marks 
+of Licensor.
+
+4. UPDATES AND MODIFICATIONS
+
+Licensor may provide updates, bug fixes, or modifications to the Software. 
+Such updates may be automatically downloaded and installed. Continued use of 
+the Software after any update constitutes acceptance of the updated terms.
+
+5. FUTURE PAID FEATURES
+
+Licensor reserves the right to introduce paid features, subscriptions, or 
+services in the future. Core local debugging functionality will remain free. 
+Any paid features will be governed by separate commercial terms.
+
+6. TELEMETRY AND DATA COLLECTION
+
+The Software may collect anonymous usage statistics and error reports if you 
+opt-in. You may opt-out at any time. See the Privacy Policy at 
+https://withpointbreak.com/privacy for details.
+
+7. DISCLAIMER OF WARRANTIES
+
+THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS 
+OR IMPLIED, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+LICENSOR DOES NOT WARRANT THAT THE SOFTWARE WILL BE ERROR-FREE, THAT DEFECTS 
+WILL BE CORRECTED, OR THAT THE SOFTWARE WILL MEET YOUR REQUIREMENTS.
+
+8. LIMITATION OF LIABILITY
+
+IN NO EVENT SHALL LICENSOR BE LIABLE FOR ANY SPECIAL, INCIDENTAL, INDIRECT, 
+OR CONSEQUENTIAL DAMAGES WHATSOEVER (INCLUDING, WITHOUT LIMITATION, DAMAGES 
+FOR LOSS OF BUSINESS PROFITS, BUSINESS INTERRUPTION, LOSS OF BUSINESS 
+INFORMATION, OR ANY OTHER PECUNIARY LOSS) ARISING OUT OF THE USE OF OR 
+INABILITY TO USE THE SOFTWARE, EVEN IF LICENSOR HAS BEEN ADVISED OF THE 
+POSSIBILITY OF SUCH DAMAGES.
+
+BECAUSE SOME JURISDICTIONS DO NOT ALLOW THE EXCLUSION OR LIMITATION OF 
+LIABILITY FOR CONSEQUENTIAL OR INCIDENTAL DAMAGES, THE ABOVE LIMITATION 
+MAY NOT APPLY TO YOU.
+
+9. BETA SOFTWARE
+
+You acknowledge that the Software may be beta or pre-release software and may 
+contain bugs, errors, or other issues. You assume all risks associated with 
+using beta software.
+
+10. TERMINATION
+
+This Agreement is effective until terminated. Your rights under this Agreement 
+will terminate automatically without notice if you fail to comply with any term 
+of this Agreement. Upon termination, you must cease all use of the Software 
+and destroy all copies.
+
+11. EXPORT RESTRICTIONS
+
+You agree to comply with all applicable export and import laws and regulations. 
+You shall not export or re-export the Software in violation of any such laws 
+or regulations.
+
+12. GOVERNING LAW
+
+This Agreement shall be governed by and construed in accordance with the laws 
+of the State of California, United States, without regard to its conflict of 
+law provisions.
+
+13. ENTIRE AGREEMENT
+
+This Agreement constitutes the entire agreement between you and Licensor 
+regarding the Software and supersedes all prior agreements and understandings.
+
+14. CONTACT
+
+For questions about this Agreement, contact:
+Email: legal@withpointbreak.com
+Website: https://withpointbreak.com
+
+Full Terms of Service: https://withpointbreak.com/terms
+Privacy Policy: https://withpointbreak.com/privacy

@@ -1,142 +1,309 @@
 # Security Policy
 
-## Reporting Security Vulnerabilities
+## Our Commitment
 
-The security of Pointbreak is a top priority. If you discover a security vulnerability, please follow responsible disclosure practices.
+Security is critical for Pointbreak. As a debugging tool that accesses your IDE and code, we take security seriously and appreciate the security community's help in keeping Pointbreak safe.
 
-### ⚠️ Do NOT Create Public Issues
+## Supported Versions
 
-**Do not file public GitHub issues for security vulnerabilities.** Public disclosure of security issues can put users at risk before a fix is available.
+| Version | Supported          |
+| ------- | ------------------ |
+| 0.x.x   | :white_check_mark: |
+
+**Note:** Pointbreak is currently in beta (0.x.x versions). We support only the latest release. Please update to the latest version before reporting issues.
+
+## Reporting a Vulnerability
+
+**🚨 DO NOT open public GitHub issues for security vulnerabilities.**
+
+Public disclosure of security issues puts all users at risk. Instead:
 
 ### How to Report
 
-To report a security vulnerability, please email:
+**Email:** security@withpointbreak.com
 
-**security@withpointbreak.com**
+**Subject line:** "Security Vulnerability in Pointbreak"
 
-Include the following information in your report:
+### What to Include
 
-1. **Description** - Clear description of the vulnerability
-2. **Impact** - What could an attacker accomplish?
-3. **Steps to Reproduce** - Detailed steps to reproduce the issue
-4. **Proof of Concept** - Code, screenshots, or videos demonstrating the vulnerability (if applicable)
-5. **Affected Versions** - Which version(s) of Pointbreak are affected
-6. **Suggested Fix** - If you have ideas for how to fix it (optional)
+Please provide:
 
-### What to Expect
+1. **Description** - What's the vulnerability?
+2. **Impact** - What can an attacker do?
+3. **Steps to Reproduce** - How did you find it?
+4. **Affected Versions** - Which versions are vulnerable?
+5. **Suggested Fix** - (Optional) How might we fix it?
+6. **Your Details** - Name/handle for credit (optional)
 
-After you submit a security report:
+**Example Report:**
 
-1. **Acknowledgment** - We'll acknowledge receipt within 2 business days
-2. **Assessment** - We'll investigate and assess severity within 5 business days
-3. **Updates** - We'll keep you informed of progress
-4. **Fix** - We'll develop and test a fix
-5. **Release** - We'll release a patched version
-6. **Credit** - We'll credit you in the release notes (unless you prefer to remain anonymous)
+```
+Subject: Security Vulnerability in Pointbreak
 
-### Security Update Policy
+Description:
+Pointbreak MCP server accepts unauthenticated connections allowing 
+arbitrary debug commands from any process on the system.
 
-- **Critical vulnerabilities:** Patched and released as soon as possible (typically within 7 days)
-- **High severity:** Patched in the next release (typically within 30 days)
-- **Medium/Low severity:** Patched in regular releases
+Impact:
+Local attacker could connect to MCP server and control debug sessions,
+potentially executing code in the context of the debugged process.
 
-### Scope
+Steps to Reproduce:
+1. Start Pointbreak MCP server
+2. From separate process, connect to MCP socket
+3. Send arbitrary debug commands
+4. Commands execute without authentication
 
-Security reports are in scope for:
+Affected Versions: 0.1.0 - 0.2.5
 
-- **Pointbreak VS Code Extension** - Vulnerabilities in the extension code
-- **Pointbreak MCP Server** - Vulnerabilities in the MCP server binary
-- **Privilege Escalation** - Local privilege escalation
-- **Code Execution** - Remote or local code execution
-- **Information Disclosure** - Exposure of sensitive information
-- **Debugger Control** - Unauthorized debugger access or control
+Suggested Fix:
+Add authentication token requirement for MCP connections
 
-### Out of Scope
+Contact: @security_researcher (prefer anonymous credit)
+```
 
-The following are out of scope:
+## Our Response Process
 
-- Third-party dependencies (report directly to the maintainer)
-- VS Code itself (report to Microsoft)
-- Debug adapters (CodeLLDB, debugpy, etc. - report to their maintainers)
-- Social engineering attacks
-- Physical attacks
-- Denial of service via resource exhaustion
-- Issues requiring physical access to the machine
+We treat security reports seriously and will respond promptly:
 
-### Safe Harbor
+### Timeline
 
-We support safe harbor for security researchers who:
+- **Within 48 hours:** Acknowledge your report
+- **Within 1 week:** Provide initial assessment and timeline
+- **Within 30 days:** Release fix or provide detailed plan
+- **After fix:** Public disclosure (coordinated with you)
 
-- Make a good faith effort to avoid privacy violations, data destruction, and service interruption
-- Only interact with accounts you own or with explicit permission of the account holder
-- Do not exploit a vulnerability beyond what is necessary to demonstrate it
-- Report vulnerabilities promptly
-- Keep vulnerability details confidential until a fix is released
+### What We'll Do
+
+1. **Acknowledge** - Confirm we received your report
+2. **Investigate** - Assess severity and impact
+3. **Develop Fix** - Create and test a patch
+4. **Release** - Deploy fix in new version
+5. **Disclose** - Publish security advisory
+6. **Credit** - Thank you publicly (if you want)
+
+## Severity Levels
+
+We assess vulnerabilities using these levels:
+
+### Critical 🔴
+- Remote code execution
+- Arbitrary file read/write outside project
+- Authentication bypass in paid features
+- Data exfiltration of code/credentials
+
+**Response:** Patch within 7 days
+
+### High 🟠
+- Local privilege escalation
+- Unauthorized debug session access
+- MCP protocol bypass
+- IDE crash or data loss
+
+**Response:** Patch within 14 days
+
+### Medium 🟡
+- Information disclosure (non-sensitive)
+- Denial of service (local)
+- Debug session hijacking
+
+**Response:** Patch within 30 days
+
+### Low 🟢
+- UI spoofing
+- Error message information leakage
+- Minor security improvements
+
+**Response:** Patch in next release
+
+## What We Consider Security Issues
+
+**IN SCOPE:** ✅
+
+- **Code execution vulnerabilities**
+  - RCE via MCP protocol
+  - Arbitrary code in debug context
+  
+- **Authentication/Authorization issues**
+  - Bypassing session controls
+  - Unauthorized debug access
+  
+- **Data exposure**
+  - Leaking code or credentials
+  - Exposing debug session data
+  
+- **Injection attacks**
+  - Command injection
+  - Path traversal
+  
+- **MCP protocol vulnerabilities**
+  - Protocol bypass
+  - Unauthenticated access
+  
+- **IDE integration exploits**
+  - Escaping sandbox
+  - Cross-session attacks
+
+**OUT OF SCOPE:** ❌
+
+- **Social engineering** (not a technical bug)
+- **Physical access attacks** (requires local access)
+- **Denial of service** (user can just restart)
+- **Issues in third-party services** (report to them)
+- **Known issues in dependencies** (we'll upgrade)
+- **Theoretical vulnerabilities** (no working exploit)
+- **Beta software bugs** (use GitHub issues)
+
+**When in doubt, report it!** We'd rather evaluate a non-issue than miss a real vulnerability.
+
+## Safe Harbor
+
+We consider security research conducted according to this policy to be:
+
+- ✅ **Authorized** under the Computer Fraud and Abuse Act
+- ✅ **Exempt** from DMCA anti-circumvention provisions
+- ✅ **Lawful** and conducted in good faith
+
+**We will not pursue legal action** against security researchers who:
+
+- Follow this responsible disclosure policy
+- Don't access user data beyond what's needed to demonstrate the vulnerability
+- Don't intentionally harm users or our systems
+- Don't publicly disclose before we've patched
+- Act in good faith
+
+## What We Ask From You
+
+**Please:**
+
+- ✅ Give us reasonable time to fix before public disclosure
+- ✅ Don't access user data beyond proof-of-concept
+- ✅ Don't harm users or our services
+- ✅ Don't use vulnerabilities maliciously
+- ✅ Follow responsible disclosure practices
+
+**Don't:**
+
+- ❌ Publicly disclose before we've patched
+- ❌ Access other users' debug sessions or data
+- ❌ Perform denial of service attacks
+- ❌ Demand payment (we don't pay bounties currently)
+- ❌ Violate laws in your research
+
+## Recognition
+
+We believe in recognizing security researchers:
+
+### Security Hall of Fame
+
+We maintain a Security Hall of Fame listing researchers who've helped us:
+
+- Your name/handle (if you want credit)
+- Brief description of the issue
+- Date fixed
+- Severity level
+
+**View at:** https://withpointbreak.com/security/hall-of-fame
+
+### What We Offer
+
+**Currently (pre-revenue):**
+- 🏆 Public recognition
+- 🎖️ Listed in Security Hall of Fame
+- 📢 Mention in release notes
+- 💜 Eternal gratitude
+
+**Future (when we have revenue):**
+- 💰 Potential bug bounties
+- 🎁 Free premium subscriptions
+- 👕 Swag and merchandise
 
 ## Security Best Practices for Users
 
-### Keep Pointbreak Updated
+### For Developers Using Pointbreak
 
-Always use the latest version of Pointbreak. Security fixes are included in new releases.
+- ✅ Keep Pointbreak updated to the latest version
+- ✅ Only install from official sources (npm, VS Code marketplace)
+- ✅ Review MCP server permissions
+- ✅ Don't share debug sessions with untrusted parties
+- ✅ Be careful debugging untrusted code
+- ✅ Use security features in your IDE
 
-- **VS Code Extension:** Enable auto-updates in VS Code settings
-- **Manual Installation:** Check [GitHub Releases](https://github.com/withpointbreak/pointbreak/releases) regularly
+### For Organizations
 
-### Use Trusted Debug Adapters
+- ✅ Audit Pointbreak before deploying internally
+- ✅ Monitor for security updates
+- ✅ Restrict MCP server network access
+- ✅ Follow your organization's security policies
+- ✅ Consider security implications of AI assistant access
 
-Only use debug adapters from trusted sources:
-- Official debug adapters (CodeLLDB, debugpy, Node Debug)
-- Well-maintained community adapters with good security track records
+## Security Features in Pointbreak
 
-### Be Cautious with Debug Configurations
+**Current protections:**
 
-- Review launch configurations before debugging
-- Be careful with debug configurations from untrusted sources
-- Don't run debug sessions on untrusted code
+- 🔒 MCP server runs locally (not exposed to internet)
+- 🔒 No remote code execution by default
+- 🔒 Respects IDE security boundaries
+- 🔒 No persistent storage of debug data
+- 🔒 Minimal telemetry (opt-in only)
 
-### Report Suspicious Behavior
+**Planned protections:**
 
-If you notice suspicious behavior while using Pointbreak:
-- Stop using the extension immediately
-- Document what you observed
-- Report to **security@withpointbreak.com**
+- 🔐 MCP connection authentication
+- 🔐 Signed releases (code signing)
+- 🔐 Integrity verification
+- 🔐 Session isolation
+- 🔐 Audit logging
 
-## Privacy & Data Collection
+## Keeping Informed
 
-Pointbreak does not:
-- Collect telemetry
-- Send code to external servers
-- Phone home for any reason
-- Track usage or analytics
+**Subscribe to security updates:**
 
-All debugging happens locally on your machine. MCP communication is local-only (via terminal or WebSocket on localhost).
+- 📧 **Email:** security-announce@withpointbreak.com (coming soon)
+- 📰 **GitHub:** Watch releases for security tags
+- 🐦 **Twitter:** @withpointbreak (security announcements)
+- 📝 **Blog:** https://withpointbreak.com/blog
 
-## Known Security Considerations
+**Security advisories will be posted at:**
 
-### Debug Adapter Access
+- GitHub Security Advisories
+- Release notes (for each patched version)
+- Our blog (for major issues)
 
-Pointbreak provides programmatic access to your IDE's debugger. AI assistants with access to Pointbreak can:
-- Set breakpoints in your code
-- Read variable values during debugging
-- Step through code execution
-- Evaluate expressions in the debug context
+## Contact
 
-**Recommendation:** Only use trusted AI assistants and MCP clients with Pointbreak.
+**For security issues:**
+- 📧 security@withpointbreak.com
+- 🔐 PGP Key: (coming soon)
 
-### WebSocket Bridge
+**For other concerns:**
+- General: legal@withpointbreak.com
+- Privacy: privacy@withpointbreak.com
+- Support: https://github.com/withpointbreak/pointbreak/issues
 
-The Pointbreak bridge exposes a local WebSocket server on localhost. This is intentionally limited to local connections only.
+## Additional Resources
 
-**Recommendation:** Do not expose the bridge to external networks.
-
-## Questions?
-
-For security-related questions that don't involve vulnerabilities, you can:
-- Ask in [GitHub Discussions](https://github.com/withpointbreak/pointbreak/discussions)
-- Review documentation at [withpointbreak.com](https://withpointbreak.com)
-
-For vulnerability reports, always email **security@withpointbreak.com**.
+- **Privacy Policy:** https://withpointbreak.com/privacy
+- **Terms of Service:** https://withpointbreak.com/terms
+- **Documentation:** https://github.com/withpointbreak/pointbreak
+- **Report Non-Security Bugs:** https://github.com/withpointbreak/pointbreak/issues
 
 ---
 
-Thank you for helping keep Pointbreak and its users safe!
+## Quick Reference
+
+**Found a security issue?**
+
+1. ✉️ Email: security@withpointbreak.com
+2. 🤐 Don't post publicly
+3. 📋 Include detailed reproduction steps
+4. ⏱️ We'll respond within 48 hours
+5. 🏆 We'll credit you (if you want)
+
+**Thank you for helping keep Pointbreak secure!**
+
+---
+
+**Last Updated:** January 20, 2025
+
+*This security policy is inspired by industry best practices from GitHub, HackerOne, and the security community.*
