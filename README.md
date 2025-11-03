@@ -1,4 +1,4 @@
-# Pointbreak
+# Pointbreak 🌊
 
 **AI assistants can write code. Now they can debug it too.**
 
