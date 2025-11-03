@@ -2,19 +2,60 @@
 
 Setup guides for using Pointbreak with different AI assistants.
 
-## Claude Code (Recommended)
+## Two Installation Paths
 
-Claude Code works automatically with Pointbreak—no configuration needed!
+**Built-in AI agents (GitHub Copilot, Cursor):**
+- Just install the extension—MCP server auto-registers
+- No additional configuration needed
+
+**External AI assistants (Claude Code, Cline, Windsurf, etc.):**
+- Install the extension + install MCP server separately
+- Configure your AI assistant to use the MCP server
+
+---
+
+## GitHub Copilot (VS Code Built-in)
+
+GitHub Copilot works automatically with Pointbreak—no additional setup needed!
 
 ### Setup
 
 1. Install Pointbreak extension in VS Code
-2. Install Claude Code: [docs.claude.com](https://docs.claude.com)
-3. Open your project in VS Code
-4. Open integrated terminal (Cmd+` / Ctrl+`)
-5. Start Claude Code: `claude-code`
+2. Use GitHub Copilot as normal
 
-That's it! Claude automatically discovers and connects to Pointbreak.
+The MCP server auto-registers with GitHub Copilot when you install the extension.
+
+### Usage
+
+Ask Copilot to debug your code:
+
+```
+"Set a breakpoint at line 42 and start debugging"
+"Step through this function and show me variable values"
+"Why is this returning null?"
+```
+
+## Claude Code
+
+Claude Code requires MCP server installation.
+
+### Setup
+
+1. Install Pointbreak extension in VS Code
+2. Install MCP server:
+   ```bash
+   # macOS / Linux
+   curl -fsSL https://raw.githubusercontent.com/withpointbreak/pointbreak/main/scripts/install.sh | sh
+
+   # Windows (PowerShell)
+   irm https://raw.githubusercontent.com/withpointbreak/pointbreak/main/scripts/install.ps1 | iex
+   ```
+3. Install Claude Code: [docs.claude.com](https://docs.claude.com)
+4. Open your project in VS Code
+5. Open integrated terminal (Cmd+` / Ctrl+`)
+6. Start Claude Code: `claude-code`
+
+Claude will discover Pointbreak through your MCP configuration.
 
 ### Usage
 
@@ -26,16 +67,16 @@ Just ask Claude to debug your code:
 "Why is this returning null?"
 ```
 
-## Cursor
+## Cursor (Built-in Agent)
 
-Cursor has built-in MCP support and Pointbreak auto-registers.
+Cursor's built-in AI agent works automatically with Pointbreak—no additional setup needed!
 
 ### Setup
 
 1. Install Pointbreak extension in Cursor
 2. Use Cursor's AI panel (Cmd+K / Ctrl+K)
 
-Pointbreak is automatically available as an MCP server.
+The MCP server auto-registers with Cursor's built-in agent when you install the extension.
 
 ### Usage
 
@@ -48,35 +89,42 @@ Ask Cursor's AI to debug:
 
 ## Cline (VS Code Extension)
 
-Cline can use Pointbreak through MCP.
+Cline can use Pointbreak through MCP. Requires MCP server installation.
 
 ### Setup
 
 1. Install Pointbreak extension
 2. Install Cline extension
-3. Configure Cline to use MCP servers
+3. Install MCP server:
+   ```bash
+   # macOS / Linux
+   curl -fsSL https://raw.githubusercontent.com/withpointbreak/pointbreak/main/scripts/install.sh | sh
+
+   # Windows (PowerShell)
+   irm https://raw.githubusercontent.com/withpointbreak/pointbreak/main/scripts/install.ps1 | iex
+   ```
+4. Configure Cline's MCP settings to point to the installed binary
 
 ### Usage
 
 Ask Cline to use debugging tools through natural language.
 
-## Zed
+## Windsurf
 
-Zed supports MCP servers.
+Windsurf requires manual MCP server installation.
 
 ### Setup
 
-Configure Pointbreak in Zed's MCP settings:
+1. Install Pointbreak extension in Windsurf
+2. Install MCP server:
+   ```bash
+   # macOS / Linux
+   curl -fsSL https://raw.githubusercontent.com/withpointbreak/pointbreak/main/scripts/install.sh | sh
 
-```json
-{
-  "mcp_servers": {
-    "pointbreak": {
-      "command": "/path/to/pointbreak-binary"
-    }
-  }
-}
-```
+   # Windows (PowerShell)
+   irm https://raw.githubusercontent.com/withpointbreak/pointbreak/main/scripts/install.ps1 | iex
+   ```
+3. Configure Windsurf's MCP settings to point to the installed binary
 
 ## Other MCP Clients
 

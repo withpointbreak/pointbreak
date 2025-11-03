@@ -57,19 +57,17 @@ Technically yes, but it's designed for AI interaction. For manual debugging, use
 ### Which AI assistants work with Pointbreak?
 
 Any MCP-compatible AI assistant:
+- GitHub Copilot (VS Code built-in) ✅
+- Cursor (built-in agent) ✅
 - Claude Code ✅
-- Cursor ✅
 - Cline ✅
-- Zed ✅
 - Custom MCP clients ✅
 
 ### Do I need to configure anything?
 
-**Claude Code:** No configuration needed—works automatically.
+**GitHub Copilot / Cursor (built-in agents):** No configuration needed—MCP server auto-registers when you install the extension.
 
-**Cursor:** Auto-registered, no configuration needed.
-
-**Other clients:** May need MCP server configuration.
+**Claude Code, Cline, Windsurf, and other external AI assistants:** Need to install the MCP server separately and configure your AI assistant.
 
 See [AI Assistants Guide](ai-assistants.md).
 
