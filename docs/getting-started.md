@@ -7,7 +7,7 @@ This guide will help you set up Pointbreak and complete your first AI-assisted d
 Before you begin, you'll need:
 
 - **VS Code** (or compatible editor: Cursor, Windsurf, VS Codium)
-- **An MCP-compatible AI assistant** (Claude Code, Cursor AI, Cline, etc.)
+- **An MCP-compatible AI assistant** (Claude Code, Cursor AI, Codex, etc.)
 - **A debug adapter** for your language (e.g., CodeLLDB for Rust, debugpy for Python)
 
 ## Step 1: Install the Pointbreak Extension

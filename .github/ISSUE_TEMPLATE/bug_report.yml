@@ -121,10 +121,11 @@ body:
       label: AI Assistant
       description: Which AI assistant were you using?
       options:
-        - Claude Code
+        - GitHub Copilot
         - Cursor
-        - Cline
-        - Zed
+        - Claude Code
+        - Codex
+        - Windsurf
         - Other (please specify)
     validations:
       required: false

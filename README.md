@@ -14,7 +14,7 @@ Your AI assistant can now:
 - 🪜 **Step through execution** ("step into this function")
 - 🐛 **Find bugs** by actually running and examining your code
 
-Works with GitHub Copilot, Cursor, Claude Code, Cline, and other MCP-compatible AI assistants.
+Works with GitHub Copilot, Cursor, Claude Code, Codex, and other MCP-compatible AI assistants.
 
 ## Quick Start
 
@@ -31,7 +31,7 @@ Works with GitHub Copilot, Cursor, Claude Code, Cline, and other MCP-compatible 
 
 That's it. The MCP server auto-registers with your built-in AI agent.
 
-### For Other AI Assistants (Claude Code, Cline, Windsurf, etc.)
+### For Other AI Assistants (Claude Code, Codex, Windsurf, etc.)
 
 1. **Install** the Pointbreak extension (same as above)
 
@@ -97,7 +97,7 @@ For advanced users, standalone MCP server binaries are available from [GitHub Re
 - GitHub Copilot (VS Code built-in)
 - Cursor (built-in agent)
 - Claude Code
-- Cline
+- Codex
 - Any tool supporting Model Context Protocol
 
 **Operating Systems:**

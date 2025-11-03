@@ -8,7 +8,7 @@ Setup guides for using Pointbreak with different AI assistants.
 - Just install the extension—MCP server auto-registers
 - No additional configuration needed
 
-**External AI assistants (Claude Code, Cline, Windsurf, etc.):**
+**External AI assistants (Claude Code, Codex, Windsurf, etc.):**
 - Install the extension + install MCP server separately
 - Configure your AI assistant to use the MCP server
 
@@ -87,15 +87,14 @@ Ask Cursor's AI to debug:
 "Set a breakpoint and inspect the state"
 ```
 
-## Cline (VS Code Extension)
+## Codex
 
-Cline can use Pointbreak through MCP. Requires MCP server installation.
+Codex can use Pointbreak through MCP. Requires MCP server installation.
 
 ### Setup
 
-1. Install Pointbreak extension
-2. Install Cline extension
-3. Install MCP server:
+1. Install Pointbreak extension in VS Code
+2. Install MCP server:
    ```bash
    # macOS / Linux
    curl -fsSL https://raw.githubusercontent.com/withpointbreak/pointbreak/main/scripts/install.sh | sh
@@ -103,11 +102,11 @@ Cline can use Pointbreak through MCP. Requires MCP server installation.
    # Windows (PowerShell)
    irm https://raw.githubusercontent.com/withpointbreak/pointbreak/main/scripts/install.ps1 | iex
    ```
-4. Configure Cline's MCP settings to point to the installed binary
+3. Configure Codex's MCP settings to point to the installed binary
 
 ### Usage
 
-Ask Cline to use debugging tools through natural language.
+Ask Codex to use debugging tools through natural language.
 
 ## Windsurf
 
