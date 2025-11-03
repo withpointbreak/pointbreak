@@ -14,11 +14,13 @@ Your AI assistant can now:
 - 🪜 **Step through execution** ("step into this function")
 - 🐛 **Find bugs** by actually running and examining your code
 
-Works with Claude Code, Cursor, Cline, Zed, and other MCP-compatible AI assistants.
+Works with GitHub Copilot, Cursor, Claude Code, Cline, and other MCP-compatible AI assistants.
 
 ## Quick Start
 
-1. **Install** the Pointbreak extension in VS Code or Cursor
+### For GitHub Copilot / Cursor Users
+
+1. **Install** the Pointbreak extension
    - Search "Pointbreak" in Extensions (publisher: `pointbreak`)
    - [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=pointbreak.pointbreak)
 
@@ -27,9 +29,23 @@ Works with Claude Code, Cursor, Cline, Zed, and other MCP-compatible AI assistan
    "Set a breakpoint on main.rs line 42 and start debugging"
    ```
 
-3. **Watch** as breakpoints appear and your debugger runs automatically
+That's it. The MCP server auto-registers with your built-in AI agent.
 
-That's it. Your AI assistant now controls your debugger.
+### For Other AI Assistants (Claude Code, Cline, Windsurf, etc.)
+
+1. **Install** the Pointbreak extension (same as above)
+
+2. **Install** the MCP server on your system:
+   ```bash
+   # macOS / Linux
+   curl -fsSL https://raw.githubusercontent.com/withpointbreak/pointbreak/main/scripts/install.sh | sh
+
+   # Windows (PowerShell)
+   irm https://raw.githubusercontent.com/withpointbreak/pointbreak/main/scripts/install.ps1 | iex
+   ```
+
+3. **Configure** your AI assistant's MCP settings
+   - See detailed setup guides: [docs/ai-assistants.md](docs/ai-assistants.md)
 
 ## Downloads
 
@@ -78,10 +94,10 @@ For advanced users, standalone MCP server binaries are available from [GitHub Re
 - Any language with a Debug Adapter Protocol implementation
 
 **AI Assistants** (MCP-compatible):
+- GitHub Copilot (VS Code built-in)
+- Cursor (built-in agent)
 - Claude Code
-- Cursor
 - Cline
-- Zed
 - Any tool supporting Model Context Protocol
 
 **Operating Systems:**
