@@ -135,7 +135,7 @@ Pointbreak bridges AI assistants to your IDE's **native debugger**:
 
 ## Contributing
 
-Pointbreak is proprietary software. We welcome community input through:
+Pointbreak is free, but it's not currently Open Source Software. At this early stage, your feedback is highly valued in helping shape the future of the project:
 
 - 🐛 **[Bug reports](https://github.com/withpointbreak/pointbreak/issues/new?template=bug_report.yml)** - Help identify and fix issues
 - 💡 **[Feature requests](https://github.com/withpointbreak/pointbreak/issues/new?template=feature_request.yml)** - Share your ideas for improvements

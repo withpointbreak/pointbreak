@@ -155,7 +155,7 @@ See [SECURITY.md](../SECURITY.md).
 
 ### Is Pointbreak open source?
 
-No. Pointbreak is proprietary software. The source code is not publicly available.
+Not currently. Pointbreak is free to use, but the source code is not publicly available at this time.
 
 ### Can I contribute code?
 
@@ -169,11 +169,11 @@ See [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ### Why isn't it open source?
 
-We've chosen to launch as proprietary software. We may open source in the future based on community demand.
+At this early stage, the focus is on building a solid product and gathering feedback. Open sourcing is a possibility for the future based on community demand and project maturity.
 
 ### Can I see the source code?
 
-No. The source code is proprietary and not available for viewing.
+No. The source code is not publicly available at this time.
 
 ## Platform Support
 

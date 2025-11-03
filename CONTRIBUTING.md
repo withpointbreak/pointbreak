@@ -4,9 +4,9 @@ Thank you for your interest in Pointbreak!
 
 ## Important Note
 
-**Pointbreak is proprietary software.** The source code is not publicly available, and we do not accept code contributions at this time.
+**Pointbreak is free, but it's not currently Open Source Software.** The source code is not publicly available at this time, and we do not accept code contributions.
 
-However, we greatly value community input and welcome contributions in the following ways:
+However, at this early stage, your feedback is highly valued in helping shape the future of the project. You can contribute in the following ways:
 
 ## How You Can Contribute
 
