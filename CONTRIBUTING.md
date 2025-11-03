@@ -2,9 +2,7 @@
 
 Thank you for your interest in Pointbreak!
 
-## Important Note
-
-**Pointbreak is free, but it's not currently Open Source Software.** The source code is not publicly available at this time, and we do not accept code contributions.
+Pointbreak is free, but it's not currently Open Source Software. The source code is not publicly available at this time.
 
 However, at this early stage, your feedback is highly valued in helping shape the future of the project. You can contribute in the following ways:
 
@@ -15,11 +13,13 @@ However, at this early stage, your feedback is highly valued in helping shape th
 Found a bug? Help us fix it by filing a detailed bug report.
 
 **Before reporting:**
+
 1. Check [existing issues](https://github.com/withpointbreak/pointbreak/issues) to avoid duplicates
 2. Try reproducing the issue with the latest version
 3. Gather relevant information (OS, VS Code version, debug adapter, etc.)
 
 **To report a bug:**
+
 - Use the [Bug Report template](https://github.com/withpointbreak/pointbreak/issues/new?template=bug_report.yml)
 - Provide clear steps to reproduce
 - Include error messages, logs, and screenshots if applicable
@@ -27,9 +27,10 @@ Found a bug? Help us fix it by filing a detailed bug report.
 
 ### 💡 Request Features
 
-Have an idea for improving Pointbreak? We'd love to hear it!
+Have an idea for improving Pointbreak? Would love to hear it!
 
 **To request a feature:**
+
 - Use the [Feature Request template](https://github.com/withpointbreak/pointbreak/issues/new?template=feature_request.yml)
 - Describe the problem you're trying to solve
 - Explain how you envision the feature working
@@ -40,6 +41,7 @@ Have an idea for improving Pointbreak? We'd love to hear it!
 Share your experiences, ask questions, and engage with the community.
 
 **Discussion topics:**
+
 - Use cases and workflows
 - Integration ideas
 - Questions about functionality
@@ -53,6 +55,7 @@ Visit [GitHub Discussions](https://github.com/withpointbreak/pointbreak/discussi
 Help make documentation clearer and more useful.
 
 **Ways to help:**
+
 - Suggest improvements to existing docs
 - Point out confusing sections
 - Share examples and use cases
@@ -65,6 +68,7 @@ File documentation suggestions as [issues](https://github.com/withpointbreak/poi
 When filing issues:
 
 ✅ **Do:**
+
 - Be respectful and constructive
 - Provide detailed information
 - Stay on topic
@@ -72,6 +76,7 @@ When filing issues:
 - Search before posting
 
 ❌ **Don't:**
+
 - Demand features or fixes
 - Post "+1" or "me too" comments (use reactions instead)
 - Open duplicate issues
@@ -86,16 +91,18 @@ See [SECURITY.md](SECURITY.md) for instructions on privately reporting security 
 
 ## Response Times
 
-We aim to:
+The goal:
+
 - Acknowledge new issues within 3 business days
 - Provide initial feedback on feature requests within 1 week
 - Fix critical bugs in the next release
 
-Please be patient—Pointbreak is maintained by a small team.
+Please be patient.
 
 ## Code of Conduct
 
-We expect all community members to:
+All community members should:
+
 - Be respectful and inclusive
 - Welcome newcomers
 - Focus on constructive feedback
@@ -114,7 +121,3 @@ Harassment, trolling, and abusive behavior will not be tolerated.
 ## Thank You!
 
 We appreciate your interest in making Pointbreak better. Every bug report, feature request, and piece of feedback helps improve the product for everyone.
-
----
-
-**Remember:** While we can't accept code contributions, your ideas, bug reports, and community participation are invaluable. Thank you for being part of the Pointbreak community!

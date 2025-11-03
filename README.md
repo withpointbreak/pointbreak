@@ -4,8 +4,6 @@
 
 > **Note:** This is the public documentation and issue tracking repository for Pointbreak. The source code is not publicly available at this time. For documentation, downloads, and support, you're in the right place!
 
-## What is Pointbreak?
-
 Pointbreak enables AI assistants to control VS Code debuggers through natural language. Set breakpoints, step through code, and inspect variables—all through AI.
 
 Your AI assistant can now:
@@ -148,7 +146,7 @@ Pointbreak is free, but it's not currently Open Source Software. At this early s
 - 💬 **[Discussions](https://github.com/withpointbreak/pointbreak/discussions)** - Share your use cases and experiences
 - 📝 **Documentation improvements** - Suggest clearer explanations
 
-**Note:** We do not accept code contributions at this time. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+**Note:** Code contributions are not accepted at this time. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ## Support
 
