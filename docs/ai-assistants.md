@@ -37,12 +37,14 @@ Ask Copilot to debug your code:
 
 ## Claude Code
 
-Claude Code requires MCP server installation.
+Claude Code requires MCP server installation and configuration.
 
 ### Setup
 
+**Step 1: Install Prerequisites**
+
 1. Install Pointbreak extension in VS Code
-2. Install MCP server:
+2. Install Pointbreak CLI:
    ```bash
    # macOS / Linux
    curl -fsSL https://raw.githubusercontent.com/withpointbreak/pointbreak/main/scripts/install.sh | sh
@@ -50,22 +52,49 @@ Claude Code requires MCP server installation.
    # Windows (PowerShell)
    irm https://raw.githubusercontent.com/withpointbreak/pointbreak/main/scripts/install.ps1 | iex
    ```
-3. Install Claude Code: [docs.claude.com](https://docs.claude.com)
-4. Open your project in VS Code
-5. Open integrated terminal (Cmd+` / Ctrl+`)
-6. Start Claude Code: `claude-code`
 
-Claude will discover Pointbreak through your MCP configuration.
+**Step 2: Add Pointbreak as an MCP Server**
+
+Use the Claude Code CLI to add Pointbreak:
+
+```bash
+claude mcp add --transport stdio pointbreak -- pointbreak
+```
+
+This command:
+- Registers Pointbreak as an MCP server in Claude Code
+- Uses the `pointbreak` binary from your PATH (installed in Step 1)
+- Configures it to communicate via stdio transport
+
+**Step 3: Verify Installation**
+
+Start Claude Code and use the `/mcp` command to view configured servers. You should see Pointbreak listed.
 
 ### Usage
 
-Just ask Claude to debug your code:
+Ask Claude to debug your code:
 
 ```
 "Set a breakpoint at line 42 and start debugging"
 "Step through this function and show me variable values"
 "Why is this returning null?"
 ```
+
+### Troubleshooting
+
+**Claude can't find Pointbreak MCP server**:
+- Verify the CLI is installed: `pointbreak --version`
+- Check PATH includes binary location: `which pointbreak` (macOS/Linux) or `where.exe pointbreak` (Windows)
+- List configured servers: `claude mcp list`
+- Try removing and re-adding: `claude mcp remove pointbreak` then re-add
+
+**Pointbreak binary not found**:
+- Make sure you completed Step 1 (install script)
+- Verify installation: `pointbreak --version`
+- If using custom path, specify it explicitly:
+  ```bash
+  claude mcp add --transport stdio pointbreak -- /full/path/to/pointbreak
+  ```
 
 ## Cursor (Built-in Agent)
 
@@ -89,12 +118,14 @@ Ask Cursor's AI to debug:
 
 ## Codex
 
-Codex can use Pointbreak through MCP. Requires MCP server installation.
+Codex can use Pointbreak through MCP.
 
 ### Setup
 
+**Step 1: Install Prerequisites**
+
 1. Install Pointbreak extension in VS Code
-2. Install MCP server:
+2. Install Pointbreak CLI:
    ```bash
    # macOS / Linux
    curl -fsSL https://raw.githubusercontent.com/withpointbreak/pointbreak/main/scripts/install.sh | sh
@@ -102,7 +133,18 @@ Codex can use Pointbreak through MCP. Requires MCP server installation.
    # Windows (PowerShell)
    irm https://raw.githubusercontent.com/withpointbreak/pointbreak/main/scripts/install.ps1 | iex
    ```
-3. Configure Codex's MCP settings to point to the installed binary
+
+**Step 2: Add Pointbreak as an MCP Server**
+
+Use the Codex CLI to add Pointbreak:
+
+```bash
+codex mcp add pointbreak -- pointbreak
+```
+
+**Step 3: Verify Installation**
+
+Start Codex and use the `/mcp` command to view configured servers. You should see Pointbreak listed.
 
 ### Usage
 
@@ -127,25 +169,24 @@ Windsurf requires manual MCP server installation.
 
 ## Other MCP Clients
 
-Any MCP-compatible client can use Pointbreak.
+Any MCP-compatible client can use Pointbreak through the Model Context Protocol.
 
-### Configuration
+### Setup
 
-Add to your MCP client configuration:
+1. Install Pointbreak extension in your IDE
+2. Install Pointbreak CLI:
+   ```bash
+   # macOS / Linux
+   curl -fsSL https://raw.githubusercontent.com/withpointbreak/pointbreak/main/scripts/install.sh | sh
 
-```json
-{
-  "mcpServers": {
-    "pointbreak": {
-      "command": "/path/to/pointbreak-binary"
-    }
-  }
-}
-```
+   # Windows (PowerShell)
+   irm https://raw.githubusercontent.com/withpointbreak/pointbreak/main/scripts/install.ps1 | iex
+   ```
+3. Configure your MCP client to use the Pointbreak binary
 
-The binary path depends on your platform:
-- macOS/Linux: Usually in extension folder
-- Windows: Check extension installation directory
+Refer to your MCP client's documentation for specific configuration instructions. The Pointbreak binary is typically installed at:
+- **macOS/Linux**: `~/.local/bin/pointbreak`
+- **Windows**: `%LOCALAPPDATA%\Pointbreak\bin\pointbreak.exe`
 
 ## Tips for All AI Assistants
 

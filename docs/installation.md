@@ -2,7 +2,18 @@
 
 Complete installation instructions for all platforms and methods.
 
-## VS Code Marketplace (Recommended)
+**📌 Important:** Your installation depends on which AI assistant you're using!
+
+- **GitHub Copilot or Cursor** → Install extension only (stop after [Step 1](#step-1-install-vs-code-extension))
+- **Claude Code, Codex, Windsurf, or other external AI assistants** → Install extension ([Step 1](#step-1-install-vs-code-extension)) + CLI ([Step 2](#step-2-install-cli-external-ai-assistants-only))
+
+**Don't skip the CLI installation if you're using an external AI assistant!**
+
+---
+
+## Step 1: Install VS Code Extension
+
+### VS Code Marketplace (Recommended)
 
 The easiest way to install Pointbreak:
 
@@ -14,9 +25,9 @@ The easiest way to install Pointbreak:
 
 **Direct link:** [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=pointbreak.pointbreak)
 
-## Manual Installation
+### Manual Installation (Alternative)
 
-### Step 1: Download VSIX
+**Step 1a: Download VSIX**
 
 Download the platform-specific VSIX from [GitHub Releases](https://github.com/withpointbreak/pointbreak/releases):
 
@@ -29,7 +40,7 @@ Download the platform-specific VSIX from [GitHub Releases](https://github.com/wi
 | Windows x64           | `pointbreak-win32-x64-*.vsix`    | x64              |
 | Windows ARM64         | `pointbreak-win32-arm64-*.vsix`  | ARM64            |
 
-### Step 2: Install VSIX
+**Step 1b: Install VSIX**
 
 **Via Command Line:**
 
@@ -58,6 +69,79 @@ surf --install-extension path/to/pointbreak-*.vsix
 3. Click the "..." menu (top right)
 4. Select "Install from VSIX..."
 5. Choose the downloaded file
+
+## Step 2: Install CLI (External AI Assistants Only)
+
+**Note:** Skip this step if you're using GitHub Copilot or Cursor - the extension is all you need!
+
+If you're using **Claude Code, Codex, Windsurf**, or another external AI assistant, you need to install the Pointbreak CLI in addition to the VS Code extension.
+
+### Install Script (Recommended)
+
+**macOS / Linux:**
+```bash
+curl -fsSL https://raw.githubusercontent.com/withpointbreak/pointbreak/main/scripts/install.sh | sh
+```
+
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/withpointbreak/pointbreak/main/scripts/install.ps1 | iex
+```
+
+### What It Does
+
+The install script:
+1. Detects your platform and architecture
+2. Downloads the appropriate binary from GitHub Releases
+3. Verifies the binary with SHA256 checksums
+4. Installs to user directory (no sudo required)
+5. Checks PATH configuration
+
+### Installation Paths
+
+After installation, the binary is located at:
+
+**macOS / Linux:**
+```
+~/.local/bin/pointbreak
+```
+
+**Windows:**
+```
+%LOCALAPPDATA%\Pointbreak\bin\pointbreak.exe
+```
+
+### Verify CLI Installation
+
+```bash
+# Check binary is installed
+pointbreak --version
+# Should output: pointbreak X.X.X
+
+# macOS / Linux - Find binary location
+which pointbreak
+# Should show: /Users/username/.local/bin/pointbreak
+
+# Windows - Find binary location
+where.exe pointbreak
+# Should show: C:\Users\username\AppData\Local\Pointbreak\bin\pointbreak.exe
+```
+
+### PATH Configuration
+
+The install script checks if the binary location is in your PATH. If not, you'll see instructions to add it.
+
+**macOS / Linux** - Add to `~/.bashrc`, `~/.zshrc`, or `~/.profile`:
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+**Windows** - The install script offers to add to PATH automatically.
+
+### Next Steps After CLI Installation
+
+1. Configure your AI assistant's MCP settings - See [MCP Configuration Reference](mcp-configuration.md)
+2. Specifically for Claude Code - See [AI Assistants Guide](ai-assistants.md#claude-code)
 
 ## Verifying Installation
 
