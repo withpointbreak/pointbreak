@@ -2,7 +2,7 @@
 
 ## Our Commitment
 
-Security is critical for Pointbreak. As a debugging tool that accesses your IDE and code, we take security seriously and appreciate the security community's help in keeping Pointbreak safe.
+Security is critical for Pointbreak. As a debugging tool that accesses your IDE and code, security is taken seriously, and the security community's help in keeping Pointbreak safe is appreciated.
 
 ## Supported Versions
 
@@ -10,7 +10,7 @@ Security is critical for Pointbreak. As a debugging tool that accesses your IDE 
 | ------- | ------------------ |
 | 0.x.x   | :white_check_mark: |
 
-**Note:** Pointbreak is currently in beta (0.x.x versions). We support only the latest release. Please update to the latest version before reporting issues.
+**Note:** Pointbreak is currently in beta (0.x.x versions). Please update to the latest version before reporting issues.
 
 ## Reporting a Vulnerability
 
@@ -41,7 +41,7 @@ Please provide:
 Subject: Security Vulnerability in Pointbreak
 
 Description:
-Pointbreak MCP server accepts unauthenticated connections allowing 
+Pointbreak MCP server accepts unauthenticated connections allowing
 arbitrary debug commands from any process on the system.
 
 Impact:
@@ -62,9 +62,9 @@ Add authentication token requirement for MCP connections
 Contact: @security_researcher (prefer anonymous credit)
 ```
 
-## Our Response Process
+## Response Process
 
-We treat security reports seriously and will respond promptly:
+Security reports are treated seriously and will responded to promptly:
 
 ### Timeline
 
@@ -73,7 +73,7 @@ We treat security reports seriously and will respond promptly:
 - **Within 30 days:** Release fix or provide detailed plan
 - **After fix:** Public disclosure (coordinated with you)
 
-### What We'll Do
+### Process
 
 1. **Acknowledge** - Confirm we received your report
 2. **Investigate** - Assess severity and impact
@@ -84,62 +84,61 @@ We treat security reports seriously and will respond promptly:
 
 ## Severity Levels
 
-We assess vulnerabilities using these levels:
+Vulnerabilities are assessed using these levels:
 
 ### Critical 🔴
+
 - Remote code execution
 - Arbitrary file read/write outside project
 - Authentication bypass in paid features
 - Data exfiltration of code/credentials
 
-**Response:** Patch within 7 days
+**Response goal:** Patch within 7 days
 
 ### High 🟠
+
 - Local privilege escalation
 - Unauthorized debug session access
 - MCP protocol bypass
 - IDE crash or data loss
 
-**Response:** Patch within 14 days
+**Response goal:** Patch within 14 days
 
 ### Medium 🟡
+
 - Information disclosure (non-sensitive)
 - Denial of service (local)
 - Debug session hijacking
 
-**Response:** Patch within 30 days
+**Response goal:** Patch within 30 days
 
 ### Low 🟢
+
 - UI spoofing
 - Error message information leakage
 - Minor security improvements
 
-**Response:** Patch in next release
+**Response goal:** Patch in next release
 
-## What We Consider Security Issues
+## What's Considered a Security Issue
 
 **IN SCOPE:** ✅
 
 - **Code execution vulnerabilities**
   - RCE via MCP protocol
   - Arbitrary code in debug context
-  
 - **Authentication/Authorization issues**
   - Bypassing session controls
   - Unauthorized debug access
-  
 - **Data exposure**
   - Leaking code or credentials
   - Exposing debug session data
-  
 - **Injection attacks**
   - Command injection
   - Path traversal
-  
 - **MCP protocol vulnerabilities**
   - Protocol bypass
   - Unauthenticated access
-  
 - **IDE integration exploits**
   - Escaping sandbox
   - Cross-session attacks
@@ -154,7 +153,7 @@ We assess vulnerabilities using these levels:
 - **Theoretical vulnerabilities** (no working exploit)
 - **Beta software bugs** (use GitHub issues)
 
-**When in doubt, report it!** We'd rather evaluate a non-issue than miss a real vulnerability.
+**When in doubt, report it!** It's better to evaluate a non-issue than miss a real vulnerability.
 
 ## Safe Harbor
 
@@ -184,37 +183,28 @@ We consider security research conducted according to this policy to be:
 
 **Don't:**
 
-- ❌ Publicly disclose before we've patched
+- ❌ Publicly disclose before it's patched
 - ❌ Access other users' debug sessions or data
 - ❌ Perform denial of service attacks
-- ❌ Demand payment (we don't pay bounties currently)
+- ❌ Demand payment (no bounties currently)
 - ❌ Violate laws in your research
 
 ## Recognition
 
 We believe in recognizing security researchers:
 
-### Security Hall of Fame
-
-We maintain a Security Hall of Fame listing researchers who've helped us:
-
-- Your name/handle (if you want credit)
-- Brief description of the issue
-- Date fixed
-- Severity level
-
-**View at:** https://withpointbreak.com/security/hall-of-fame
-
 ### What We Offer
 
-**Currently (pre-revenue):**
+**Currently:**
+
 - 🏆 Public recognition
 - 🎖️ Listed in Security Hall of Fame
 - 📢 Mention in release notes
 - 💜 Eternal gratitude
 
-**Future (when we have revenue):**
-- 💰 Potential bug bounties
+**Future (potentially):**
+
+- 💰 Bug bounties
 - 🎁 Free premium subscriptions
 - 👕 Swag and merchandise
 
@@ -273,10 +263,12 @@ We maintain a Security Hall of Fame listing researchers who've helped us:
 ## Contact
 
 **For security issues:**
+
 - 📧 security@withpointbreak.com
 - 🔐 PGP Key: (coming soon)
 
 **For other concerns:**
+
 - General: legal@withpointbreak.com
 - Privacy: privacy@withpointbreak.com
 - Support: https://github.com/withpointbreak/pointbreak/issues
@@ -304,6 +296,6 @@ We maintain a Security Hall of Fame listing researchers who've helped us:
 
 ---
 
-**Last Updated:** January 20, 2025
+**Last Updated:** November 3, 2025
 
-*This security policy is inspired by industry best practices from GitHub, HackerOne, and the security community.*
+_This security policy is inspired by industry best practices from GitHub, HackerOne, and the security community._
