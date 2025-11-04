@@ -20,23 +20,39 @@ The easiest way to install Pointbreak:
 
 Download the platform-specific VSIX from [GitHub Releases](https://github.com/withpointbreak/pointbreak/releases):
 
-| Platform | File Pattern | Architecture |
-|----------|--------------|--------------|
+| Platform              | File Pattern                     | Architecture     |
+| --------------------- | -------------------------------- | ---------------- |
 | macOS (Apple Silicon) | `pointbreak-darwin-arm64-*.vsix` | ARM64 (M1/M2/M3) |
-| macOS (Intel) | `pointbreak-darwin-x64-*.vsix` | x64 |
-| Linux x64 | `pointbreak-linux-x64-*.vsix` | x64 |
-| Linux ARM64 | `pointbreak-linux-arm64-*.vsix` | ARM64 |
-| Windows x64 | `pointbreak-win32-x64-*.vsix` | x64 |
-| Windows ARM64 | `pointbreak-win32-arm64-*.vsix` | ARM64 |
+| macOS (Intel)         | `pointbreak-darwin-x64-*.vsix`   | x64              |
+| Linux x64             | `pointbreak-linux-x64-*.vsix`    | x64              |
+| Linux ARM64           | `pointbreak-linux-arm64-*.vsix`  | ARM64            |
+| Windows x64           | `pointbreak-win32-x64-*.vsix`    | x64              |
+| Windows ARM64         | `pointbreak-win32-arm64-*.vsix`  | ARM64            |
 
 ### Step 2: Install VSIX
 
 **Via Command Line:**
+
+Visual Studio Code, Cursor, Windsurf (or compatible editors) must be installed and in your PATH.
+
 ```bash
 code --install-extension path/to/pointbreak-*.vsix
 ```
 
+```bash
+code-insiders --install-extension path/to/pointbreak-*.vsix
+```
+
+```bash
+cursor --install-extension path/to/pointbreak-*.vsix
+```
+
+```bash
+surf --install-extension path/to/pointbreak-*.vsix
+```
+
 **Via VS Code UI:**
+
 1. Open VS Code
 2. Go to Extensions (Cmd+Shift+X / Ctrl+Shift+X)
 3. Click the "..." menu (top right)
@@ -48,8 +64,8 @@ code --install-extension path/to/pointbreak-*.vsix
 After installation:
 
 1. Open the Output panel: **View → Output**
-2. Select **"Pointbreak MCP Server"** from the dropdown
-3. You should see: `Pointbreak MCP server started`
+2. Select **"Pointbreak"** from the dropdown
+3. You should see: `Pointbreak debug bridge started successfully`
 
 If you see errors, continue to the Troubleshooting section below.
 
@@ -72,6 +88,7 @@ Updates happen automatically if you have auto-update enabled:
 ## Uninstalling
 
 **Via VS Code UI:**
+
 1. Go to Extensions
 2. Find Pointbreak
 3. Click the gear icon
@@ -79,6 +96,7 @@ Updates happen automatically if you have auto-update enabled:
 5. Restart VS Code
 
 **Via Command Line:**
+
 ```bash
 code --uninstall-extension pointbreak.pointbreak
 ```
@@ -96,6 +114,7 @@ code --uninstall-extension pointbreak.pointbreak
 **Problem:** Can't find Pointbreak in marketplace
 
 **Solution:**
+
 1. Check you're searching for exactly "Pointbreak"
 2. Look for publisher: `pointbreak`
 3. Try the direct marketplace link
@@ -115,6 +134,7 @@ code --uninstall-extension pointbreak.pointbreak
 Check your architecture:
 
 **macOS:**
+
 ```bash
 uname -m
 # arm64 = Apple Silicon
@@ -122,6 +142,7 @@ uname -m
 ```
 
 **Linux:**
+
 ```bash
 uname -m
 # x86_64 = x64
@@ -129,6 +150,7 @@ uname -m
 ```
 
 **Windows:**
+
 ```powershell
 echo $env:PROCESSOR_ARCHITECTURE
 # AMD64 = x64
@@ -157,10 +179,9 @@ Download the matching VSIX.
 
 Pointbreak works with any Debug Adapter Protocol (DAP) compliant debugger:
 
-- ✅ CodeLLDB (Rust, C, C++)
 - ✅ debugpy (Python)
-- ✅ Node Debug (JavaScript, TypeScript)
 - ✅ vscode-js-debug (JavaScript, TypeScript, Chrome)
+- ✅ CodeLLDB (Rust, C, C++)
 - ✅ Delve (Go)
 - ✅ And many more...
 

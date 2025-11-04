@@ -142,8 +142,8 @@ fn calculate_sum(numbers: &[i32]) -> i32 {
 
 ```javascript
 function fetchUserData(userId) {
-    const response = fetch(`/api/users/${userId}`);  // Breakpoint here
-    return response.json();
+  const response = fetch(`/api/users/${userId}`); // Breakpoint here
+  return response.json();
 }
 ```
 

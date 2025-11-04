@@ -52,12 +52,14 @@ Pointbreak is a **bridge** between AI assistants and IDE debuggers. It doesn't i
 **Role:** Protocol translator and command interface
 
 **Responsibilities:**
+
 - Exposes debugging capabilities via MCP protocol
 - Translates AI requests into debugging actions
 - Manages communication with VS Code extension
 - Handles multiple concurrent debugging sessions
 
 **Key Features:**
+
 - Fast, efficient Rust implementation
 - Cross-platform (macOS, Linux, Windows)
 - Bundled with VS Code extension
@@ -67,6 +69,7 @@ Pointbreak is a **bridge** between AI assistants and IDE debuggers. It doesn't i
 **Role:** Bridge between MCP server and VS Code
 
 **Responsibilities:**
+
 - Controls VS Code's Debug API
 - Manages debug sessions
 - Syncs breakpoints between AI and IDE UI
@@ -74,6 +77,7 @@ Pointbreak is a **bridge** between AI assistants and IDE debuggers. It doesn't i
 - Provides WebSocket server for MCP communication
 
 **Key Features:**
+
 - Uses official VS Code Debug API
 - Works with any debug adapter
 - Breakpoints visible in IDE gutter
@@ -84,6 +88,7 @@ Pointbreak is a **bridge** between AI assistants and IDE debuggers. It doesn't i
 **Role:** Language-specific debuggers
 
 **Examples:**
+
 - CodeLLDB (Rust, C, C++)
 - debugpy (Python)
 - Node Debug (JavaScript/TypeScript)
@@ -201,6 +206,7 @@ Pointbreak is a **bridge** between AI assistants and IDE debuggers. It doesn't i
 ### Multiple Sessions
 
 Pointbreak supports multiple debug sessions simultaneously:
+
 - Different programming languages
 - Multiple programs
 - Independent control
@@ -210,6 +216,7 @@ Pointbreak supports multiple debug sessions simultaneously:
 ### Local-Only Operation
 
 **All communication happens locally:**
+
 - MCP: stdio or localhost WebSocket
 - Extension: VS Code API (local)
 - No external network access
@@ -218,11 +225,13 @@ Pointbreak supports multiple debug sessions simultaneously:
 ### Trust Model
 
 **Pointbreak trusts:**
+
 - The IDE it runs in
 - The debug adapters installed
 - The AI assistant using it
 
 **Users should trust:**
+
 - Pointbreak extension (from VS Code Marketplace)
 - Their AI assistant (Claude, Cursor, etc.)
 - Their debug adapters

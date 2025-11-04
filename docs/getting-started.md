@@ -29,12 +29,6 @@ Before you begin, you'll need:
 
 Pointbreak works with your IDE's native debugger, so you need the appropriate debug adapter for your language.
 
-### Rust (CodeLLDB)
-
-1. Open VS Code Extensions
-2. Search for "CodeLLDB"
-3. Install the extension by vadimcn
-
 ### Python (debugpy)
 
 1. Open VS Code Extensions
@@ -45,6 +39,12 @@ Pointbreak works with your IDE's native debugger, so you need the appropriate de
 
 Built into VS Code - no installation needed!
 
+### Rust (CodeLLDB)
+
+1. Open VS Code Extensions
+2. Search for "CodeLLDB"
+3. Install the extension by vadimcn
+
 ### Go (Delve)
 
 1. Open VS Code Extensions
@@ -53,21 +53,12 @@ Built into VS Code - no installation needed!
 
 ## Step 3: Set Up Your AI Assistant
 
-### Option A: Claude Code (Recommended)
+### Option A: GitHub Copilot or Cursor (Built-in)
 
-1. Install Claude Code: [docs.claude.com](https://docs.claude.com)
-2. Open your project in VS Code
-3. Open the integrated terminal (Cmd+` / Ctrl+`)
-4. Start Claude Code in the terminal
+1. Install Pointbreak extension in VS Code or Cursor
+2. Use the IDE's built-in AI panel
 
-**That's it!** Claude Code will automatically discover and connect to Pointbreak.
-
-### Option B: Cursor
-
-1. Install Pointbreak extension in Cursor
-2. Use Cursor's AI panel
-
-Pointbreak is automatically registered as an MCP server in Cursor.
+Pointbreak is automatically registered as an MCP server in VS Code's GitHub Copilot and Cursor.
 
 ### Option C: Other MCP Clients
 
@@ -78,8 +69,8 @@ Configure your MCP client to use Pointbreak. See [AI Assistants Guide](ai-assist
 Check that Pointbreak is working:
 
 1. Open the Output panel: View → Output
-2. Select "Pointbreak MCP Server" from the dropdown
-3. You should see: `Pointbreak MCP server started`
+2. Select "Pointbreak" from the dropdown
+3. You should see: `Pointbreak debug bridge started successfully`
 
 If you see errors, check [Troubleshooting](troubleshooting.md).
 
