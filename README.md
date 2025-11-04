@@ -46,7 +46,7 @@ That's it. The MCP server auto-registers with your built-in AI agent.
    ```
 
 3. **Configure** your AI assistant's MCP settings
-   - See detailed setup guides: [docs/ai-assistants.md](docs/ai-assistants.md)
+   - See [AI Assistants Guide](https://docs.withpointbreak.com/ai-assistants)
 
 ## Downloads
 
@@ -77,13 +77,15 @@ For advanced users, standalone MCP server binaries are available from [GitHub Re
 
 ## Documentation
 
-- **[Getting Started](docs/getting-started.md)** - Step-by-step guide to your first debugging session
-- **[Installation](docs/installation.md)** - Detailed installation instructions for all platforms
-- **[AI Assistants](docs/ai-assistants.md)** - Setup guides for Claude Code, Cursor, and more
-- **[Usage Guide](docs/usage.md)** - Examples and common debugging workflows
-- **[Troubleshooting](docs/troubleshooting.md)** - Common issues and solutions
-- **[Architecture](docs/architecture.md)** - High-level architecture overview
-- **[FAQ](docs/faq.md)** - Frequently asked questions
+📚 **[Full documentation at docs.withpointbreak.com](https://docs.withpointbreak.com)**
+
+- [Getting Started](https://docs.withpointbreak.com/quickstart) - Complete your first debugging session in 5 minutes
+- [Installation](https://docs.withpointbreak.com/installation) - Detailed installation instructions for all platforms
+- [AI Assistants](https://docs.withpointbreak.com/ai-assistants) - Setup guides for Claude Code, Cursor, Codex, and more
+- [Usage Guide](https://docs.withpointbreak.com/usage) - Examples and common debugging workflows
+- [Troubleshooting](https://docs.withpointbreak.com/troubleshooting) - Common issues and solutions
+- [Architecture](https://docs.withpointbreak.com/architecture) - How Pointbreak works
+- [FAQ](https://docs.withpointbreak.com/faq) - Frequently asked questions
 
 ## Supported Platforms
 
