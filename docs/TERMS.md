@@ -1,7 +1,7 @@
 # Terms of Service
 
-**Effective Date:** January 20, 2025  
-**Last Updated:** January 20, 2025
+**Effective Date:** November 3, 2025  
+**Last Updated:** November 3, 2025
 
 ## 1. Acceptance of Terms
 
@@ -67,18 +67,20 @@ We plan to introduce optional paid features, which may include:
 - Advanced analytics
 
 **Important:**
+
 - Core local debugging will remain free
 - Paid features will be clearly labeled
 - You can continue using free features indefinitely
 - Separate commercial terms will govern paid features
 
-We will provide 30 days notice before launching paid features.
+We will provide notice before launching paid features.
 
 ## 6. Beta Software Disclaimer
 
 **Pointbreak is currently beta software.**
 
 This means:
+
 - ⚠️ Expect bugs, errors, and unexpected behavior
 - ⚠️ Features may change or be removed without notice
 - ⚠️ Breaking changes may occur between versions
@@ -92,6 +94,7 @@ This means:
 Your privacy is important to us. Our data practices are governed by our Privacy Policy at https://withpointbreak.com/privacy.
 
 **Key points:**
+
 - We collect NO data from your debugging sessions by default
 - Optional telemetry is opt-in only
 - Your code stays on your machine
@@ -111,6 +114,7 @@ We disclaim all warranties, express or implied, including but not limited to:
 - ❌ Security of data
 
 **We do not guarantee that:**
+
 - Pointbreak will meet your requirements
 - Pointbreak will be error-free or bug-free
 - Defects will be corrected
@@ -199,6 +203,7 @@ We may terminate or suspend your access immediately if you:
 ### 13.3 Effect of Termination
 
 Upon termination:
+
 - Your license to use Pointbreak ends immediately
 - You must uninstall and delete Pointbreak
 - Sections that should survive termination will survive (liability, warranties, etc.)
@@ -212,6 +217,7 @@ We may update these Terms to reflect:
 - Clarifications or corrections
 
 **How we'll notify you:**
+
 - Post updated Terms at https://withpointbreak.com/terms
 - Update "Last Updated" date at the top
 - Show notification in Pointbreak (for material changes)
@@ -251,7 +257,7 @@ These Terms are governed by the laws of the State of California, United States, 
 
 ### 18.2 Disputes
 
-Any disputes shall be resolved in the state or federal courts located in San Francisco County, California. You consent to personal jurisdiction in those courts.
+Any disputes shall be resolved in the state or federal courts located in Santa Cruz County, California. You consent to personal jurisdiction in those courts.
 
 ### 18.3 No Class Actions
 
@@ -300,21 +306,25 @@ By using Pointbreak, you acknowledge that:
 ## Quick Summary (Not Legal Advice)
 
 **What you can do:**
-- ✅ Use Pointbreak for free, forever (core features)
+
+- ✅ Use Pointbreak for free (core features)
 - ✅ Use for personal and commercial projects
 - ✅ Install on unlimited devices
 
 **What you can't do:**
+
 - ❌ Reverse engineer or redistribute
 - ❌ Build competing products
 - ❌ Hold us liable for bugs or data loss
 
 **What we promise:**
+
 - ✅ Core debugging stays free
 - ✅ We respect your privacy
 - ✅ We'll be transparent about changes
 
 **What we don't promise:**
+
 - ❌ Bug-free software (it's beta!)
 - ❌ That it will work perfectly
 - ❌ That we won't introduce paid features
@@ -322,7 +332,5 @@ By using Pointbreak, you acknowledge that:
 **The bottom line:** Use Pointbreak responsibly, back up your work, and report bugs to help us improve!
 
 ---
-
-**Last Updated:** January 20, 2025
 
 Thank you for using Pointbreak!
