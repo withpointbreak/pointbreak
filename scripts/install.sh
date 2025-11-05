@@ -40,8 +40,8 @@ for arg in "$@"; do
             shift
             ;;
         *)
-            echo "${RED}Unknown option: $arg${NC}"
-            echo "Usage: install.sh [--version=VERSION] [--prefix=PATH] [--no-verify]"
+            echo "${RED}Unknown option: $arg${NC}" >&2
+            echo "Usage: install.sh [--version=VERSION] [--prefix=PATH] [--no-verify]" >&2
             exit 1
             ;;
     esac
@@ -51,6 +51,17 @@ echo "${BLUE}━━━━━━━━━━━━━━━━━━━━━━�
 echo "${BLUE}  Pointbreak Installer${NC}"
 echo "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
+
+# Detect download tool
+DOWNLOADER=""
+if command -v curl >/dev/null 2>&1; then
+    DOWNLOADER="curl"
+elif command -v wget >/dev/null 2>&1; then
+    DOWNLOADER="wget"
+else
+    echo "${RED}Error: Neither curl nor wget found. Please install one of them.${NC}" >&2
+    exit 1
+fi
 
 # Detect platform
 detect_platform() {
@@ -63,23 +74,28 @@ detect_platform() {
             ;;
         Linux)
             # Detect if Alpine (musl) or regular Linux (glibc)
-            if [ -f /etc/os-release ]; then
+            # Check for musl library files first (most reliable)
+            if [ -f /lib/libc.musl-x86_64.so.1 ] || [ -f /lib/libc.musl-aarch64.so.1 ]; then
+                OS_NAME="alpine"
+            # Fallback to checking ldd output
+            elif ldd /bin/ls 2>&1 | grep -q musl; then
+                OS_NAME="alpine"
+            # Fallback to os-release file
+            elif [ -f /etc/os-release ]; then
                 . /etc/os-release
                 if [ "$ID" = "alpine" ]; then
                     OS_NAME="alpine"
                 else
                     OS_NAME="linux"
                 fi
-            elif ldd --version 2>&1 | grep -q musl; then
-                OS_NAME="alpine"
             else
                 OS_NAME="linux"
             fi
             ;;
         *)
-            echo "${RED}Error: Unsupported operating system: $OS${NC}"
-            echo "This script only supports macOS and Linux."
-            echo "For Windows, use: irm https://raw.githubusercontent.com/withpointbreak/pointbreak/main/scripts/install.ps1 | iex"
+            echo "${RED}Error: Unsupported operating system: $OS${NC}" >&2
+            echo "This script only supports macOS and Linux." >&2
+            echo "For Windows, use: irm https://withpointbreak.com/install.ps1 | iex" >&2
             exit 1
             ;;
     esac
@@ -92,8 +108,8 @@ detect_platform() {
             ARCH_NAME="arm64"
             ;;
         *)
-            echo "${RED}Error: Unsupported architecture: $ARCH${NC}"
-            echo "Supported architectures: x86_64, aarch64"
+            echo "${RED}Error: Unsupported architecture: $ARCH${NC}" >&2
+            echo "Supported architectures: x86_64, aarch64" >&2
             exit 1
             ;;
     esac
@@ -113,22 +129,19 @@ get_download_url() {
     fi
 
     # Fetch release info
-    if command -v curl >/dev/null 2>&1; then
+    if [ "$DOWNLOADER" = "curl" ]; then
         RELEASE_JSON=$(curl -fsSL "$API_URL")
-    elif command -v wget >/dev/null 2>&1; then
-        RELEASE_JSON=$(wget -qO- "$API_URL")
     else
-        echo "${RED}Error: Neither curl nor wget found. Please install one of them.${NC}"
-        exit 1
+        RELEASE_JSON=$(wget -qO- "$API_URL")
     fi
 
     # Extract version
     RELEASE_TAG=$(echo "$RELEASE_JSON" | grep -o '"tag_name": *"[^"]*"' | head -1 | sed 's/.*: *"\(.*\)".*/\1/')
 
     if [ -z "$RELEASE_TAG" ]; then
-        echo "${RED}Error: Could not fetch release information${NC}"
+        echo "${RED}Error: Could not fetch release information${NC}" >&2
         if [ "$VERSION" != "latest" ]; then
-            echo "Version $VERSION not found. Check: https://github.com/${REPO}/releases"
+            echo "Version $VERSION not found. Check: https://github.com/${REPO}/releases" >&2
         fi
         exit 1
     fi
@@ -146,9 +159,9 @@ download_file() {
     URL=$1
     OUTPUT=$2
 
-    if command -v curl >/dev/null 2>&1; then
+    if [ "$DOWNLOADER" = "curl" ]; then
         curl -fsSL -o "$OUTPUT" "$URL"
-    elif command -v wget >/dev/null 2>&1; then
+    else
         wget -qO "$OUTPUT" "$URL"
     fi
 }
@@ -165,7 +178,7 @@ download_binary() {
     download_file "$BINARY_URL" "$BINARY_PATH"
 
     if [ ! -f "$BINARY_PATH" ]; then
-        echo "${RED}Error: Download failed${NC}"
+        echo "${RED}Error: Download failed${NC}" >&2
         exit 1
     fi
 
@@ -187,8 +200,11 @@ download_binary() {
             EXPECTED_CHECKSUM=$(grep "$BINARY_NAME" "$CHECKSUMS_PATH" | awk '{print $1}')
 
             if [ -z "$EXPECTED_CHECKSUM" ]; then
-                echo "${YELLOW}Warning: Checksum not found in checksums.txt${NC}"
-                echo "Skipping checksum verification"
+                echo "${YELLOW}Warning: Checksum not found in checksums.txt${NC}" >&2
+                echo "Skipping checksum verification" >&2
+            elif ! echo "$EXPECTED_CHECKSUM" | grep -Eq '^[a-f0-9]{64}$'; then
+                echo "${YELLOW}Warning: Invalid checksum format (expected 64 hex characters)${NC}" >&2
+                echo "Skipping checksum verification" >&2
             else
                 # Calculate actual checksum
                 if command -v sha256sum >/dev/null 2>&1; then
@@ -196,8 +212,8 @@ download_binary() {
                 elif command -v shasum >/dev/null 2>&1; then
                     ACTUAL_CHECKSUM=$(shasum -a 256 "$BINARY_PATH" | awk '{print $1}')
                 else
-                    echo "${YELLOW}Warning: sha256sum/shasum not found${NC}"
-                    echo "Skipping checksum verification"
+                    echo "${YELLOW}Warning: sha256sum/shasum not found${NC}" >&2
+                    echo "Skipping checksum verification" >&2
                     ACTUAL_CHECKSUM=""
                 fi
 
@@ -205,9 +221,9 @@ download_binary() {
                     if [ "$ACTUAL_CHECKSUM" = "$EXPECTED_CHECKSUM" ]; then
                         echo "${GREEN}✓${NC} Checksum verified"
                     else
-                        echo "${RED}Error: Checksum mismatch!${NC}"
-                        echo "Expected: $EXPECTED_CHECKSUM"
-                        echo "Got:      $ACTUAL_CHECKSUM"
+                        echo "${RED}Error: Checksum mismatch!${NC}" >&2
+                        echo "Expected: $EXPECTED_CHECKSUM" >&2
+                        echo "Got:      $ACTUAL_CHECKSUM" >&2
                         exit 1
                     fi
                 fi
@@ -226,6 +242,17 @@ download_binary() {
     chmod +x "$TARGET_PATH"
 
     echo "${GREEN}✓${NC} Installed successfully"
+
+    # Verify installation
+    echo ""
+    echo "Verifying installation..."
+    if "$TARGET_PATH" --version >/dev/null 2>&1; then
+        INSTALLED_VERSION=$("$TARGET_PATH" --version 2>/dev/null | head -1 || echo "unknown")
+        echo "${GREEN}✓${NC} Verification successful: ${BLUE}${INSTALLED_VERSION}${NC}"
+    else
+        echo "${YELLOW}⚠${NC}  Warning: Could not verify installation" >&2
+        echo "Binary installed but --version check failed" >&2
+    fi
 }
 
 # Check if directory is in PATH

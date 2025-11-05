@@ -155,17 +155,24 @@ function Install-Binary {
                 if ($expectedLine) {
                     $expectedChecksum = $expectedLine.Split()[0]
 
-                    $actualHash = Get-FileHash -Path $binaryPath -Algorithm SHA256
-                    $actualChecksum = $actualHash.Hash.ToLower()
-
-                    if ($actualChecksum -eq $expectedChecksum) {
-                        Write-Success "Checksum verified"
+                    # Validate checksum format (64 hex characters for SHA256)
+                    if ($expectedChecksum -notmatch '^[a-f0-9]{64}$') {
+                        Write-Warning "Invalid checksum format (expected 64 hex characters)"
+                        Write-Info "Skipping checksum verification"
                     }
                     else {
-                        Write-Error "Checksum mismatch!"
-                        Write-Info "Expected: $expectedChecksum"
-                        Write-Info "Got:      $actualChecksum"
-                        exit 1
+                        $actualHash = Get-FileHash -Path $binaryPath -Algorithm SHA256
+                        $actualChecksum = $actualHash.Hash.ToLower()
+
+                        if ($actualChecksum -eq $expectedChecksum) {
+                            Write-Success "Checksum verified"
+                        }
+                        else {
+                            Write-Error "Checksum mismatch!"
+                            Write-Info "Expected: $expectedChecksum"
+                            Write-Info "Got:      $actualChecksum"
+                            exit 1
+                        }
                     }
                 }
                 else {
@@ -192,10 +199,31 @@ function Install-Binary {
 
         Write-Success "Installed successfully"
 
+        # Verify installation
+        Write-Host ""
+        Write-Info "Verifying installation..."
+        try {
+            $versionOutput = & $targetPath --version 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $installedVersion = ($versionOutput | Select-Object -First 1).ToString()
+                Write-Success "Verification successful: $installedVersion"
+            }
+            else {
+                Write-Warning "Could not verify installation"
+                Write-Info "Binary installed but --version check failed"
+            }
+        }
+        catch {
+            Write-Warning "Could not verify installation: $_"
+            Write-Info "Binary installed but verification failed"
+        }
+
         return $targetPath
     }
     finally {
         # Cleanup temp directory
+        # Add small delay to avoid Windows file locking issues
+        Start-Sleep -Seconds 1
         if (Test-Path $tempDir) {
             Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue
         }
