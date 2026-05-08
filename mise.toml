@@ -1,0 +1,19 @@
+[env]
+_.path = [
+  "{{config_root}}/target/release",
+  "{{config_root}}/target/debug",
+]
+
+[tools]
+github-cli = "latest"
+jq = "latest"
+just = "latest"
+"cargo:cargo-edit" = "latest"
+"cargo:cargo-nextest" = "latest"
+
+[tools."cargo:cocogitto"]
+version = "6.5"
+postinstall = "cog install-hook --all --overwrite"
+
+[settings]
+experimental = true

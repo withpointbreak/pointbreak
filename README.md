@@ -39,6 +39,11 @@ The first version should be a focused terminal review tool, not a generic "AI di
 Hunk is the practical inspiration: a terminal-first diff viewer with agent-context sidecars,
 hunk-level notes, live review sessions, and keyboard navigation across notes.
 
+Detailed field notes from a real agent-review session are captured in
+[docs/hunk-feedback.md](docs/hunk-feedback.md). Treat those notes as product input, especially
+around persistence, reload semantics, stable comment anchors, and separating long-lived reviews
+from individual diff snapshots.
+
 The most important lesson from maintaining a [hunk fork](https://github.com/kevinswiber/hunk) is that the hard part is not simply drawing a
 diff in a TUI. The hard part is keeping these behaviors aligned:
 
@@ -205,4 +210,3 @@ Shore should not initially try to be:
 - a terminal framework experiment
 
 The narrow goal is a reliable terminal review surface for agent-produced changesets.
-

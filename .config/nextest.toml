@@ -1,0 +1,21 @@
+[profile.default]
+# Fail fast: stop on first failure to save time during development.
+fail-fast = true
+# Status level: show pass/fail summary only (skip individual pass lines).
+status-level = "fail"
+# Final status: show only failed tests in summary.
+final-status-level = "fail"
+
+[profile.ci]
+# CI: run all tests even if some fail.
+fail-fast = false
+# Show everything in CI for debugging.
+status-level = "pass"
+final-status-level = "all"
+
+[profile.ignored-only]
+# Run only ignored tests, and show all results for debugging.
+# Run with `cargo nextest run --profile ignored-only --run-ignored only`.
+fail-fast = false
+status-level = "pass"
+final-status-level = "fail"

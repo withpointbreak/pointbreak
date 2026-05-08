@@ -1,0 +1,100 @@
+from_latest_tag = true
+ignore_merge_commits = true
+ignore_fixup_commits = true
+disable_changelog = false
+disable_bump_commit = false
+generate_mono_repository_global_tag = false
+generate_mono_repository_package_tags = false
+branch_whitelist = []
+skip_ci = "[skip ci]"
+skip_untracked = false
+tag_prefix = "v"
+
+# Scopes are intentionally not enforced yet. Add scopes once the crate has
+# stable module/package boundaries that should be reflected in commit headers.
+scopes = []
+
+pre_bump_hooks = [
+    "just lint",
+    "just test",
+    "cargo set-version {{version}}",
+]
+post_bump_hooks = []
+
+# CI profile: skip local lint/test and leave publishing orchestration to CI.
+# Usage: cog bump --auto --hook-profile ci
+[bump_profiles.ci]
+pre_bump_hooks = [
+    "cargo set-version {{version}}",
+]
+post_bump_hooks = []
+
+[git_hooks.commit-msg]
+script = '''#!/bin/sh
+set -e
+cog verify --file $1
+
+# Enforce header max 100 characters.
+header=$(head -1 "$1")
+if [ ${#header} -gt 100 ]; then
+    echo "error: commit header exceeds 100 characters (${#header})"
+    exit 1
+fi
+
+# Enforce lowercase first letter in subject (strip type and optional scope).
+subject=$(echo "$header" | sed 's/^[a-z]*([^)]*): //' | sed 's/^[a-z]*: //')
+first_char=$(printf '%.1s' "$subject")
+if echo "$first_char" | grep -q '^[A-Z]'; then
+    echo "error: commit subject must start with a lowercase letter"
+    exit 1
+fi
+
+# Enforce no trailing period in subject.
+if echo "$header" | grep -q '\.$'; then
+    echo "error: commit subject must not end with a period"
+    exit 1
+fi
+'''
+
+[git_hooks.pre-push]
+script = '''#!/bin/sh
+branch=$(git rev-parse --abbrev-ref HEAD)
+
+# Allow main and detached HEAD.
+case "$branch" in
+    main|HEAD) exit 0 ;;
+esac
+
+# Enforce conventional branch format: type/description.
+if ! echo "$branch" | grep -qE '^(feat|fix|hotfix|release|chore)/[a-z0-9][a-z0-9.-]*[a-z0-9]$'; then
+    echo "error: branch name '$branch' does not follow Conventional Branch format"
+    echo "  expected: <type>/<description>"
+    echo "  types: feat, fix, hotfix, release, chore"
+    echo "  description: lowercase letters, numbers, and hyphens only"
+    exit 1
+fi
+'''
+
+[commit_types]
+feat = { changelog_title = "Features", bump_minor = true, order = 1 }
+fix = { changelog_title = "Bug Fixes", bump_patch = true, order = 2 }
+perf = { changelog_title = "Performance Improvements", order = 3 }
+revert = { changelog_title = "Revert", order = 4 }
+docs = { changelog_title = "Documentation", order = 5 }
+test = { changelog_title = "Tests", omit_from_changelog = true, order = 6 }
+build = { changelog_title = "Build system", omit_from_changelog = true, order = 7 }
+ci = { changelog_title = "Continuous Integration", omit_from_changelog = true, order = 8 }
+refactor = { changelog_title = "Refactoring", order = 9 }
+chore = { changelog_title = "Miscellaneous Chores", omit_from_changelog = true, order = 10 }
+style = { changelog_title = "Style", omit_from_changelog = true, order = 11 }
+
+[changelog]
+path = "CHANGELOG.md"
+template = "remote"
+remote = "github.com"
+repository = "shore"
+owner = "kevinswiber"
+
+[[changelog.authors]]
+signature = "Kevin Swiber"
+username = "kevinswiber"
