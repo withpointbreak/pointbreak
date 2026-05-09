@@ -59,6 +59,21 @@ impl DumpDocument {
         repo: impl AsRef<Path>,
         parsed: ParsedReviewNotes,
     ) -> Result<Self> {
+        Self::from_parsed_notes(repo, parsed, DumpInputSource::ReviewNotes)
+    }
+
+    pub fn from_legacy_hunk_agent_context(
+        repo: impl AsRef<Path>,
+        parsed: ParsedReviewNotes,
+    ) -> Result<Self> {
+        Self::from_parsed_notes(repo, parsed, DumpInputSource::LegacyHunkAgentContext)
+    }
+
+    fn from_parsed_notes(
+        repo: impl AsRef<Path>,
+        parsed: ParsedReviewNotes,
+        source: DumpInputSource,
+    ) -> Result<Self> {
         let snapshot = ingest_tracked_diff(repo)?;
         let ordered = apply_file_order(snapshot.files, &parsed.sidecar);
         let ordered_snapshot =
@@ -71,9 +86,7 @@ impl DumpDocument {
             ReviewStream::from_snapshot_with_resolved_notes(&ordered_snapshot, &resolved.notes);
 
         Ok(Self::new(
-            DumpInputSummary {
-                source: DumpInputSource::ReviewNotes,
-            },
+            DumpInputSummary { source },
             ordered_snapshot,
             resolved.notes,
             stream,

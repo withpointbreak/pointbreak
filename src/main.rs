@@ -5,7 +5,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use shore::dump::DumpDocument;
-use shore::sidecar::parse_review_notes_sidecar;
+use shore::sidecar::{parse_hunk_agent_context, parse_review_notes_sidecar};
 
 #[derive(Debug, Parser)]
 #[command(name = "shore", version, about = "Inspect review streams")]
@@ -24,8 +24,11 @@ struct DumpArgs {
     #[arg(long, default_value = ".")]
     repo: PathBuf,
 
-    #[arg(long)]
+    #[arg(long, conflicts_with = "legacy_hunk_agent_context")]
     review_notes: Option<PathBuf>,
+
+    #[arg(long, conflicts_with = "review_notes")]
+    legacy_hunk_agent_context: Option<PathBuf>,
 
     #[arg(long, conflicts_with = "compact")]
     pretty: bool,
@@ -51,12 +54,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn dump(args: DumpArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let document = if let Some(review_notes) = &args.review_notes {
-        let json = fs::read_to_string(review_notes)?;
-        let parsed = parse_review_notes_sidecar(&json)?;
-        DumpDocument::from_parsed_review_notes(&args.repo, parsed)?
-    } else {
-        DumpDocument::from_repo(&args.repo)?
+    let document = match (&args.review_notes, &args.legacy_hunk_agent_context) {
+        (Some(review_notes), None) => {
+            let json = fs::read_to_string(review_notes)?;
+            let parsed = parse_review_notes_sidecar(&json)?;
+            DumpDocument::from_parsed_review_notes(&args.repo, parsed)?
+        }
+        (None, Some(agent_context)) => {
+            let json = fs::read_to_string(agent_context)?;
+            let parsed = parse_hunk_agent_context(&json)?;
+            DumpDocument::from_legacy_hunk_agent_context(&args.repo, parsed)?
+        }
+        (None, None) => DumpDocument::from_repo(&args.repo)?,
+        (Some(_), Some(_)) => unreachable!("clap rejects mutually exclusive sidecar flags"),
     };
     let json = if should_pretty_print(&args) {
         serde_json::to_string_pretty(&document)?

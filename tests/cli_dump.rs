@@ -185,6 +185,86 @@ fn dump_cli_rejects_malformed_review_notes_json() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("json parse failed"));
 }
 
+#[test]
+fn dump_cli_imports_legacy_hunk_agent_context() {
+    let repo = dump_repo();
+    let sidecar_dir = tempfile::tempdir().expect("create sidecar tempdir");
+    let sidecar_path = sidecar_dir.path().join("agent-context.json");
+    fs::write(&sidecar_path, legacy_hunk_agent_context_json()).expect("write Hunk context");
+
+    let output = shore([
+        "dump",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--legacy-hunk-agent-context",
+        sidecar_path.to_str().unwrap(),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf-8");
+    let json = parse_json(&stdout);
+    assert_eq!(json["input"]["source"], "legacy_hunk_agent_context");
+    assert_eq!(json["summary"]["note_count"], 1);
+    assert_eq!(json["summary"]["diagnostic_count"], 0);
+    assert_eq!(json["notes"][0]["title"], "Legacy summary");
+    assert_eq!(json["notes"][0]["body"], "Legacy rationale");
+    assert!(has_note_row(&json));
+}
+
+#[test]
+fn dump_cli_imports_legacy_hunk_diagnostics_as_review_note_diagnostics() {
+    let repo = dump_repo();
+    let sidecar_dir = tempfile::tempdir().expect("create sidecar tempdir");
+    let sidecar_path = sidecar_dir.path().join("agent-context.json");
+    fs::write(&sidecar_path, recoverable_legacy_hunk_json()).expect("write Hunk context");
+
+    let output = shore([
+        "dump",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--legacy-hunk-agent-context",
+        sidecar_path.to_str().unwrap(),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf-8");
+    let json = parse_json(&stdout);
+    assert_eq!(json["summary"]["diagnostic_count"], 1);
+    assert_eq!(json["diagnostics"][0]["code"], "missing_note_title");
+    assert_eq!(json["diagnostics"][0]["path"], "files[0].notes[0].title");
+}
+
+#[test]
+fn dump_cli_rejects_native_and_legacy_sidecars_together() {
+    let repo = dump_repo();
+    let sidecar_dir = tempfile::tempdir().expect("create sidecar tempdir");
+    let review_notes_path = sidecar_dir.path().join("review-notes.json");
+    let legacy_path = sidecar_dir.path().join("agent-context.json");
+    fs::write(&review_notes_path, native_review_notes_json()).expect("write review notes");
+    fs::write(&legacy_path, legacy_hunk_agent_context_json()).expect("write Hunk context");
+
+    let output = shore([
+        "dump",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--review-notes",
+        review_notes_path.to_str().unwrap(),
+        "--legacy-hunk-agent-context",
+        legacy_path.to_str().unwrap(),
+    ]);
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot be used with"));
+}
+
 fn shore<I, S>(args: I) -> std::process::Output
 where
     I: IntoIterator<Item = S>,
@@ -291,6 +371,46 @@ fn recoverable_review_notes_json() -> &'static str {
             "startLine": 1,
             "endLine": 1
           }
+        }
+      ]
+    }
+  ]
+}"#
+}
+
+fn legacy_hunk_agent_context_json() -> &'static str {
+    r#"{
+  "schema": "shore.agent-context",
+  "summary": "Legacy Hunk context",
+  "files": [
+    {
+      "path": "src/untracked.rs",
+      "annotations": [
+        {
+          "id": "legacy-note",
+          "newRange": [1, 1],
+          "summary": "Legacy summary",
+          "rationale": "Legacy rationale",
+          "source": "hunk",
+          "author": "legacy reviewer"
+        }
+      ]
+    }
+  ]
+}"#
+}
+
+fn recoverable_legacy_hunk_json() -> &'static str {
+    r#"{
+  "schema": "shore.agent-context",
+  "summary": "Legacy Hunk context",
+  "files": [
+    {
+      "path": "src/lib.rs",
+      "annotations": [
+        {
+          "newRange": [1, 1],
+          "rationale": "Missing legacy summary maps to missing note title."
         }
       ]
     }
