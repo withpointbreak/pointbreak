@@ -33,6 +33,19 @@ impl GitRepo {
         self.root.path()
     }
 
+    pub fn init_at(path: impl AsRef<Path>) {
+        let path = path.as_ref();
+        fs::create_dir_all(path).expect("create nested git repository directory");
+        run_git(path, ["init"]);
+        run_git(path, ["config", "user.name", "Shore Tests"]);
+        run_git(path, ["config", "user.email", "shore-tests@example.com"]);
+        run_git(path, ["config", "commit.gpgsign", "false"]);
+    }
+
+    pub fn read(&self, path: impl AsRef<Path>) -> String {
+        fs::read_to_string(self.root.path().join(path)).expect("read test repository file")
+    }
+
     pub fn write(&self, path: impl AsRef<Path>, contents: impl AsRef<[u8]>) {
         let path = self.root.path().join(path);
         if let Some(parent) = path.parent() {

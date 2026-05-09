@@ -1,5 +1,5 @@
 use std::ffi::OsStr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::error::{Result, ShoreError};
@@ -15,6 +15,20 @@ where
     S: AsRef<OsStr>,
 {
     run_git_allowing_statuses(cwd, args, &[0])
+}
+
+pub fn git_worktree_root(repo: &Path) -> Result<PathBuf> {
+    let output = run_git(repo, ["rev-parse", "--show-toplevel"])?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let root = stdout.trim_end_matches(['\r', '\n']);
+    if root.is_empty() {
+        return Err(ShoreError::Message(format!(
+            "git rev-parse returned empty worktree root for {}",
+            repo.display()
+        )));
+    }
+
+    Ok(PathBuf::from(root))
 }
 
 pub(crate) fn run_git_allowing_statuses<I, S>(
