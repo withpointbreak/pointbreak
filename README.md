@@ -1,16 +1,16 @@
 # Shore
 
-Shore is an experimental Rust terminal review tool for understanding what a coding agent changed
-and why.
+Shore is an experimental Rust terminal review tool for understanding what changed and why,
+especially in tool-assisted changesets.
 
 It is inspired by [hunk](https://github.com/modem-dev/hunk), but it is not intended to be a direct clone or fork. The goal is to build a
-small, Rust-native agent-review core with a data model that is easy to reason about, test, and
-eventually expose to other tools.
+small, Rust-native review core with a data model that is easy to reason about, test, and eventually
+expose to other tools.
 
 ## Name
 
-The name connects to Pointbreak and the idea of reviewing the wake of agent work once it reaches
-shore. It also works as a verb: `shore up` can become the command that reviews and hardens an agent
+The name connects to Pointbreak and the idea of reviewing the wake of tool-assisted work once it
+reaches shore. It also works as a verb: `shore up` can become the command that reviews and hardens a
 changeset.
 
 The metaphor should stay light. Command names should remain mostly plain and practical:
@@ -24,15 +24,15 @@ The metaphor should stay light. Command names should remain mostly plain and pra
 
 ## Product Intent
 
-Shore is for agent-aware code review in a terminal. It should help a human reviewer inspect:
+Shore is for code review in a terminal. It should help a reviewer inspect:
 
-- the actual diff an agent left behind
-- the review notes an agent or reviewer attached to files and hunks
+- the actual working-tree diff
+- the review notes a reviewer or tool attached to files and hunks
 - the hunk stream in the order the reviewer should read it
 - which notes are attached to which code rows
 - enough recoverable session state that review context is not lost when a UI is restarted
 
-The first version should be a focused terminal review tool, not a generic "AI diff" product.
+The first version should be a focused terminal review tool, not a generic summarizer.
 
 ## Inspiration And Lessons
 
@@ -40,7 +40,7 @@ Hunk is the practical inspiration: a terminal-first diff viewer with Hunk-compat
 `agent-context.json` sidecars, hunk-level notes, live review sessions, and keyboard navigation
 across notes.
 
-Detailed field notes from a real agent-review session are captured in
+Detailed field notes from a real Hunk review session are captured in
 [docs/hunk-feedback.md](docs/hunk-feedback.md). Treat those notes as product input, especially
 around persistence, reload semantics, stable comment anchors, and separating long-lived reviews
 from individual diff snapshots.
@@ -98,6 +98,30 @@ Build:
 - snapshot and acceptance fixtures for the review model
 
 Prefer shelling out to `git` at first. A VCS abstraction can come later if the model earns it.
+
+## Current CLI
+
+The current executable surface is `shore dump`. It is a JSON contract over the headless model and
+exists before the TUI so other frontends can consume the same review stream.
+
+```bash
+shore dump [--repo <path>] [--review-notes <path> | --legacy-hunk-agent-context <path>] [--pretty | --compact]
+```
+
+Behavior:
+
+- `--repo <path>` defaults to `.` and may point at the repository root or a subdirectory inside it.
+- `--review-notes <path>` loads Shore-native `review-notes.json`.
+- `--legacy-hunk-agent-context <path>` imports a Hunk-compatible `agent-context.json` through the
+  explicit legacy adapter.
+- `--pretty` and `--compact` override formatting; otherwise output is pretty when stdout is a
+  terminal and compact when stdout is piped or redirected.
+- Recoverable review-note diagnostics stay in the JSON document and the command exits successfully.
+- Fatal errors, such as unreadable files or malformed JSON, are written to stderr and exit
+  non-zero.
+
+The dump output is Shore introspection JSON and uses snake_case fields. Native `review-notes.json`
+input keeps its schema-defined camelCase fields such as `oldPath`, `startLine`, and `createdAt`.
 
 ## Explicit V1 Deferrals
 
@@ -245,7 +269,7 @@ Shore should not initially try to be:
 - a general Git porcelain
 - a complete nunk replacement
 - a web review UI
-- an AI summarizer detached from the code
+- a summarizer detached from the code
 - a terminal framework experiment
 
-The narrow goal is a reliable terminal review surface for agent-produced changesets.
+The narrow goal is a reliable terminal review surface for tool-assisted or review-heavy changesets.
