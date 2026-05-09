@@ -6,6 +6,13 @@ mod ids;
 mod review;
 mod row;
 
+pub fn decode_json<T>(json: &str) -> crate::error::Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    Ok(serde_json::from_str(json)?)
+}
+
 pub use annotation::{
     Anchor, AnchorResolution, AnchorResolutionReason, Annotation, AnnotationSource, LineRange,
     ResolutionStatus, Side, re_resolve_annotations,

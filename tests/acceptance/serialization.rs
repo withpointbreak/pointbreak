@@ -1,8 +1,12 @@
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use shore::model::{
-    Anchor, AnnotationId, DiffSnapshot, FileId, HunkId, LineRange, ResolutionStatus, Review,
-    ReviewId, ReviewStream, RowId, Side, SnapshotId,
+    Anchor, Annotation, AnnotationId, AnnotationSource, CursorState, DiffFile, DiffRow,
+    DiffRowKind, DiffSnapshot, FileId, FileMetadataKind, FileMetadataRow, FileStatus, HunkId,
+    LineRange, ResolutionStatus, Review, ReviewHunk, ReviewId, ReviewStream, RowId, Side,
+    SnapshotId,
 };
+use shore::stream::{LayoutSnapshot, ViewportSpec};
 
 #[test]
 fn top_level_review_models_round_trip_through_json() {
@@ -90,4 +94,166 @@ fn anchors_store_durable_location_without_row_ids() {
 
     let decoded: Anchor = serde_json::from_value(json).expect("anchor deserializes");
     assert_eq!(decoded, anchor);
+}
+
+#[test]
+fn core_review_state_round_trips_with_annotations_cursor_and_layout() {
+    let review = Review {
+        id: ReviewId::new("review-full"),
+    };
+    let snapshot = snapshot_with_diff(review.id.clone());
+    let annotations = vec![annotation_for_snapshot(&snapshot)];
+    let stream = ReviewStream::from_snapshot_and_annotations(&snapshot, &annotations);
+    let annotation_row_id = stream
+        .rows
+        .iter()
+        .find(|row| {
+            matches!(
+                row.kind,
+                shore::model::ReviewRowKind::Annotation {
+                    ref summary,
+                    ..
+                } if summary == "check new call"
+            )
+        })
+        .expect("stream should contain annotation row")
+        .id
+        .clone();
+    let cursor = CursorState::at_row(annotation_row_id);
+    let layout = LayoutSnapshot::from_stream(&stream, ViewportSpec::new(80, 10));
+
+    let decoded_review = round_trip(&review);
+    let decoded_snapshot = round_trip(&snapshot);
+    let decoded_annotations = round_trip(&annotations);
+    let decoded_stream = round_trip(&stream);
+    let decoded_cursor = round_trip(&cursor);
+    let decoded_layout = round_trip(&layout);
+
+    assert_eq!(decoded_review, review);
+    assert_eq!(decoded_snapshot.review_id, review.id);
+    assert_eq!(
+        decoded_snapshot.snapshot_id,
+        SnapshotId::new("snapshot-full")
+    );
+    assert_eq!(decoded_annotations[0].id, AnnotationId::new("annotation-1"));
+    assert_eq!(
+        decoded_annotations[0].anchor.file_id,
+        FileId::new("src/lib.rs")
+    );
+    assert_eq!(decoded_stream, stream);
+    assert_eq!(decoded_cursor, cursor);
+    assert_eq!(decoded_layout, layout);
+
+    let rebuilt_stream =
+        ReviewStream::from_snapshot_and_annotations(&decoded_snapshot, &decoded_annotations);
+    assert_eq!(row_ids(&rebuilt_stream), row_ids(&stream));
+    assert_eq!(rebuilt_stream, stream);
+}
+
+#[test]
+fn malformed_model_json_returns_shore_error() {
+    let error = shore::model::decode_json::<ReviewStream>("{\"review_id\":")
+        .expect_err("malformed JSON should fail");
+
+    assert!(error.to_string().contains("json parse failed"));
+}
+
+fn round_trip<T>(value: &T) -> T
+where
+    T: Serialize + DeserializeOwned,
+{
+    let json = serde_json::to_string(value).expect("value serializes");
+    serde_json::from_str(&json).expect("value deserializes")
+}
+
+fn row_ids(stream: &ReviewStream) -> Vec<RowId> {
+    stream.rows.iter().map(|row| row.id.clone()).collect()
+}
+
+fn snapshot_with_diff(review_id: ReviewId) -> DiffSnapshot {
+    DiffSnapshot::new(
+        review_id,
+        SnapshotId::new("snapshot-full"),
+        vec![DiffFile {
+            id: FileId::new("src/lib.rs"),
+            status: FileStatus::Modified,
+            old_path: Some("src/lib.rs".to_owned()),
+            new_path: Some("src/lib.rs".to_owned()),
+            old_mode: Some("100644".to_owned()),
+            new_mode: Some("100644".to_owned()),
+            old_oid: Some("old-oid".to_owned()),
+            new_oid: Some("new-oid".to_owned()),
+            similarity: None,
+            is_binary: false,
+            is_submodule: false,
+            is_mode_only: false,
+            synthetic: false,
+            metadata_rows: vec![FileMetadataRow {
+                kind: FileMetadataKind::ModeChange,
+                text: "mode unchanged fixture metadata".to_owned(),
+            }],
+            hunks: vec![ReviewHunk {
+                id: HunkId::new("src/lib.rs:1:1"),
+                header: "@@ -1,3 +1,4 @@".to_owned(),
+                old_start: 1,
+                old_lines: 3,
+                new_start: 1,
+                new_lines: 4,
+                rows: vec![
+                    DiffRow {
+                        kind: DiffRowKind::Context,
+                        old_line: Some(1),
+                        new_line: Some(1),
+                        text: "fn main() {".to_owned(),
+                    },
+                    DiffRow {
+                        kind: DiffRowKind::Removed,
+                        old_line: Some(2),
+                        new_line: None,
+                        text: "    old_call();".to_owned(),
+                    },
+                    DiffRow {
+                        kind: DiffRowKind::Added,
+                        old_line: None,
+                        new_line: Some(2),
+                        text: "    new_call();".to_owned(),
+                    },
+                    DiffRow {
+                        kind: DiffRowKind::Added,
+                        old_line: None,
+                        new_line: Some(3),
+                        text: "    extra_call();".to_owned(),
+                    },
+                    DiffRow {
+                        kind: DiffRowKind::Context,
+                        old_line: Some(3),
+                        new_line: Some(4),
+                        text: "}".to_owned(),
+                    },
+                ],
+            }],
+        }],
+    )
+}
+
+fn annotation_for_snapshot(snapshot: &DiffSnapshot) -> Annotation {
+    Annotation {
+        id: AnnotationId::new("annotation-1"),
+        anchor: Anchor {
+            file_id: FileId::new("src/lib.rs"),
+            side: Side::New,
+            line_range: LineRange::new(2, 2),
+            hunk_signature: snapshot.files[0].hunks[0].signature(),
+            target_text_hash: "sha256:new-call".to_owned(),
+            status: ResolutionStatus::Exact,
+        },
+        source: AnnotationSource::Sidecar,
+        summary: "check new call".to_owned(),
+        rationale: Some("round-trip fixture rationale".to_owned()),
+        tags: vec!["serialization".to_owned()],
+        confidence: Some("high".to_owned()),
+        external_source: Some("test".to_owned()),
+        author: Some("codex".to_owned()),
+        created_at: Some("2026-05-08T00:00:00Z".to_owned()),
+    }
 }
