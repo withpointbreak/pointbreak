@@ -1,63 +1,62 @@
 use crate::model::{
-    Annotation, DiffFile, DiffRow, DiffSnapshot, FileId, HunkId, ReviewRow, ReviewRowKind,
+    DiffFile, DiffRow, DiffSnapshot, FileId, HunkId, ReviewNote, ReviewRow, ReviewRowKind,
     ReviewStream, RowId,
 };
-use crate::sidecar::{AgentContext, SidecarDiagnostic, apply_file_order, resolve_annotations};
+use crate::sidecar::{ReviewNotesDiagnostic, ReviewNotesSidecar, apply_file_order, resolve_notes};
 
-fn build_review_stream(snapshot: &DiffSnapshot, annotations: &[Annotation]) -> ReviewStream {
-    let builder = StreamBuilder::new(snapshot, annotations);
+fn build_review_stream(snapshot: &DiffSnapshot, notes: &[ReviewNote]) -> ReviewStream {
+    let builder = StreamBuilder::new(snapshot, notes);
     builder.build()
 }
 
 impl ReviewStream {
-    pub fn from_snapshot_and_annotations(
-        snapshot: &DiffSnapshot,
-        annotations: &[Annotation],
-    ) -> Self {
-        build_review_stream(snapshot, annotations)
+    pub fn from_snapshot_and_notes(snapshot: &DiffSnapshot, notes: &[ReviewNote]) -> Self {
+        build_review_stream(snapshot, notes)
     }
 
-    pub fn from_snapshot_and_sidecar(
+    pub fn from_snapshot_and_review_notes(
         snapshot: &DiffSnapshot,
-        context: &AgentContext,
-    ) -> BuiltReviewStream {
-        build_review_stream_from_sidecar(snapshot, context)
+        sidecar: &ReviewNotesSidecar,
+    ) -> BuiltReviewNotesStream {
+        build_review_stream_from_review_notes(snapshot, sidecar)
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BuiltReviewStream {
+pub struct BuiltReviewNotesStream {
     pub stream: ReviewStream,
-    pub diagnostics: Vec<SidecarDiagnostic>,
+    pub diagnostics: Vec<ReviewNotesDiagnostic>,
 }
 
-fn build_review_stream_from_sidecar(
+fn build_review_stream_from_review_notes(
     snapshot: &DiffSnapshot,
-    context: &AgentContext,
-) -> BuiltReviewStream {
-    let ordered = apply_file_order(snapshot.files.clone(), context);
+    sidecar: &ReviewNotesSidecar,
+) -> BuiltReviewNotesStream {
+    let ordered = apply_file_order(snapshot.files.clone(), sidecar);
     let ordered_snapshot = DiffSnapshot::new(
         snapshot.review_id.clone(),
         snapshot.snapshot_id.clone(),
         ordered.files,
     );
-    let resolved = resolve_annotations(&ordered_snapshot.files, context);
-    let mut diagnostics = Vec::new();
-    extend_unique_diagnostics(&mut diagnostics, ordered.diagnostics);
-    extend_unique_diagnostics(&mut diagnostics, resolved.diagnostics);
+    let resolved = resolve_notes(&ordered_snapshot.files, sidecar);
+    let mut diagnostics = ordered.diagnostics;
+    extend_unique_review_notes_diagnostics(&mut diagnostics, resolved.diagnostics);
 
-    BuiltReviewStream {
-        stream: build_review_stream(&ordered_snapshot, &resolved.annotations),
+    BuiltReviewNotesStream {
+        stream: build_review_stream(&ordered_snapshot, &resolved.notes),
         diagnostics,
     }
 }
 
-fn extend_unique_diagnostics(
-    diagnostics: &mut Vec<SidecarDiagnostic>,
-    new_diagnostics: Vec<SidecarDiagnostic>,
+fn extend_unique_review_notes_diagnostics(
+    diagnostics: &mut Vec<ReviewNotesDiagnostic>,
+    new_diagnostics: Vec<ReviewNotesDiagnostic>,
 ) {
     for diagnostic in new_diagnostics {
-        if !diagnostics.contains(&diagnostic) {
+        if !diagnostics
+            .iter()
+            .any(|existing| existing.code == diagnostic.code && existing.path == diagnostic.path)
+        {
             diagnostics.push(diagnostic);
         }
     }
@@ -65,15 +64,15 @@ fn extend_unique_diagnostics(
 
 struct StreamBuilder<'a> {
     snapshot: &'a DiffSnapshot,
-    annotations: &'a [Annotation],
+    notes: &'a [ReviewNote],
     rows: Vec<ReviewRow>,
 }
 
 impl<'a> StreamBuilder<'a> {
-    fn new(snapshot: &'a DiffSnapshot, annotations: &'a [Annotation]) -> Self {
+    fn new(snapshot: &'a DiffSnapshot, notes: &'a [ReviewNote]) -> Self {
         Self {
             snapshot,
-            annotations,
+            notes,
             rows: Vec::new(),
         }
     }
@@ -139,14 +138,14 @@ impl<'a> StreamBuilder<'a> {
                     },
                 );
 
-                for annotation in self.annotation_rows_for_row(file, &hunk_signature, diff_row) {
+                for note in self.note_rows_for_row(file, &hunk_signature, diff_row) {
                     self.push_row(
                         Some(file.id.clone()),
                         Some(hunk.id.clone()),
-                        ReviewRowKind::Annotation {
-                            annotation_id: annotation.annotation_id,
+                        ReviewRowKind::Note {
+                            note_id: note.note_id,
                             target_row_id: target_row_id.clone(),
-                            summary: annotation.summary,
+                            title: note.title,
                         },
                     );
                 }
@@ -154,24 +153,24 @@ impl<'a> StreamBuilder<'a> {
         }
     }
 
-    fn annotation_rows_for_row(
+    fn note_rows_for_row(
         &self,
         file: &DiffFile,
         hunk_signature: &str,
         row: &DiffRow,
-    ) -> Vec<AnnotationRowData> {
-        self.annotations
+    ) -> Vec<NoteRowData> {
+        self.notes
             .iter()
-            .filter(|annotation| {
-                annotation.anchor.file_id == file.id
-                    && annotation.anchor.hunk_signature == hunk_signature
+            .filter(|note| {
+                note.anchor.file_id == file.id
+                    && note.anchor.hunk_signature == hunk_signature
                     && row
-                        .line_on_side(annotation.anchor.side)
-                        .is_some_and(|line| line == annotation.anchor.line_range.end)
+                        .line_on_side(note.anchor.side)
+                        .is_some_and(|line| line == note.anchor.line_range.end)
             })
-            .map(|annotation| AnnotationRowData {
-                annotation_id: annotation.id.clone(),
-                summary: annotation.summary.clone(),
+            .map(|note| NoteRowData {
+                note_id: note.id.clone(),
+                title: note.title.clone(),
             })
             .collect()
     }
@@ -195,9 +194,9 @@ impl<'a> StreamBuilder<'a> {
     }
 }
 
-struct AnnotationRowData {
-    annotation_id: crate::model::AnnotationId,
-    summary: String,
+struct NoteRowData {
+    note_id: crate::model::ReviewNoteId,
+    title: String,
 }
 
 fn display_path(file: &DiffFile) -> String {

@@ -1,15 +1,15 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use super::{AnnotationId, DiffFile, DiffRow, FileId, ReviewHunk};
+use super::{DiffFile, DiffRow, FileId, ReviewHunk, ReviewNoteId};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct Annotation {
-    pub id: AnnotationId,
+pub struct ReviewNote {
+    pub id: ReviewNoteId,
     pub anchor: Anchor,
-    pub source: AnnotationSource,
-    pub summary: String,
-    pub rationale: Option<String>,
+    pub source: ReviewNoteSource,
+    pub title: String,
+    pub body: Option<String>,
     pub tags: Vec<String>,
     pub confidence: Option<String>,
     pub external_source: Option<String>,
@@ -19,7 +19,7 @@ pub struct Annotation {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AnnotationSource {
+pub enum ReviewNoteSource {
     Sidecar,
 }
 
@@ -81,18 +81,15 @@ pub enum AnchorResolutionReason {
     AmbiguousTargetText,
 }
 
-pub fn re_resolve_annotations(annotations: &[Annotation], files: &[DiffFile]) -> Vec<Annotation> {
-    annotations
-        .iter()
-        .map(|annotation| annotation.re_resolve(files))
-        .collect()
+pub fn re_resolve_review_notes(notes: &[ReviewNote], files: &[DiffFile]) -> Vec<ReviewNote> {
+    notes.iter().map(|note| note.re_resolve(files)).collect()
 }
 
-impl Annotation {
+impl ReviewNote {
     pub fn re_resolve(&self, files: &[DiffFile]) -> Self {
-        let mut annotation = self.clone();
-        annotation.anchor = self.anchor.re_resolve(files).anchor;
-        annotation
+        let mut note = self.clone();
+        note.anchor = self.anchor.re_resolve(files).anchor;
+        note
     }
 }
 

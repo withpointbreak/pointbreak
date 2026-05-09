@@ -1,10 +1,9 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use shore::model::{
-    Anchor, Annotation, AnnotationId, AnnotationSource, CursorState, DiffFile, DiffRow,
-    DiffRowKind, DiffSnapshot, FileId, FileMetadataKind, FileMetadataRow, FileStatus, HunkId,
-    LineRange, ResolutionStatus, Review, ReviewHunk, ReviewId, ReviewStream, RowId, Side,
-    SnapshotId,
+    Anchor, CursorState, DiffFile, DiffRow, DiffRowKind, DiffSnapshot, FileId, FileMetadataKind,
+    FileMetadataRow, FileStatus, HunkId, LineRange, ResolutionStatus, Review, ReviewHunk, ReviewId,
+    ReviewNote, ReviewNoteId, ReviewNoteSource, ReviewStream, RowId, Side, SnapshotId,
 };
 use shore::stream::{LayoutSnapshot, ViewportSpec};
 
@@ -35,7 +34,7 @@ fn top_level_review_models_round_trip_through_json() {
 struct DurableIds {
     review_id: ReviewId,
     file_id: FileId,
-    annotation_id: AnnotationId,
+    review_note_id: ReviewNoteId,
 }
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -50,7 +49,7 @@ fn durable_and_snapshot_local_ids_round_trip_as_distinct_types() {
     let durable = DurableIds {
         review_id: ReviewId::new("review-1"),
         file_id: FileId::new("src/lib.rs"),
-        annotation_id: AnnotationId::new("annotation-1"),
+        review_note_id: ReviewNoteId::new("note-1"),
     };
     let snapshot_local = SnapshotLocalIds {
         snapshot_id: SnapshotId::new("snapshot-1"),
@@ -97,34 +96,67 @@ fn anchors_store_durable_location_without_row_ids() {
 }
 
 #[test]
-fn core_review_state_round_trips_with_annotations_cursor_and_layout() {
+fn review_notes_store_title_body_and_anchor_without_annotation_names() {
+    let note = ReviewNote {
+        id: ReviewNoteId::new("note-1"),
+        anchor: Anchor {
+            file_id: FileId::new("src/lib.rs"),
+            side: Side::New,
+            line_range: LineRange::new(10, 12),
+            hunk_signature: "sha256:hunk-body".to_owned(),
+            target_text_hash: "sha256:target-text".to_owned(),
+            status: ResolutionStatus::Exact,
+        },
+        source: ReviewNoteSource::Sidecar,
+        title: "check new call".to_owned(),
+        body: Some("full note body".to_owned()),
+        tags: vec!["serialization".to_owned()],
+        confidence: Some("high".to_owned()),
+        external_source: Some("codex".to_owned()),
+        author: None,
+        created_at: None,
+    };
+
+    let json = serde_json::to_value(&note).expect("note serializes");
+
+    assert_eq!(json["title"], "check new call");
+    assert_eq!(json["body"], "full note body");
+    assert!(json.get("summary").is_none());
+    assert!(json.get("rationale").is_none());
+
+    let decoded: ReviewNote = serde_json::from_value(json).expect("note deserializes");
+    assert_eq!(decoded, note);
+}
+
+#[test]
+fn core_review_state_round_trips_with_notes_cursor_and_layout() {
     let review = Review {
         id: ReviewId::new("review-full"),
     };
     let snapshot = snapshot_with_diff(review.id.clone());
-    let annotations = vec![annotation_for_snapshot(&snapshot)];
-    let stream = ReviewStream::from_snapshot_and_annotations(&snapshot, &annotations);
-    let annotation_row_id = stream
+    let notes = vec![review_note_for_snapshot(&snapshot)];
+    let stream = ReviewStream::from_snapshot_and_notes(&snapshot, &notes);
+    let note_row_id = stream
         .rows
         .iter()
         .find(|row| {
             matches!(
                 row.kind,
-                shore::model::ReviewRowKind::Annotation {
-                    ref summary,
+                shore::model::ReviewRowKind::Note {
+                    ref title,
                     ..
-                } if summary == "check new call"
+                } if title == "check new call"
             )
         })
-        .expect("stream should contain annotation row")
+        .expect("stream should contain note row")
         .id
         .clone();
-    let cursor = CursorState::at_row(annotation_row_id);
+    let cursor = CursorState::at_row(note_row_id);
     let layout = LayoutSnapshot::from_stream(&stream, ViewportSpec::new(80, 10));
 
     let decoded_review = round_trip(&review);
     let decoded_snapshot = round_trip(&snapshot);
-    let decoded_annotations = round_trip(&annotations);
+    let decoded_notes = round_trip(&notes);
     let decoded_stream = round_trip(&stream);
     let decoded_cursor = round_trip(&cursor);
     let decoded_layout = round_trip(&layout);
@@ -135,17 +167,13 @@ fn core_review_state_round_trips_with_annotations_cursor_and_layout() {
         decoded_snapshot.snapshot_id,
         SnapshotId::new("snapshot-full")
     );
-    assert_eq!(decoded_annotations[0].id, AnnotationId::new("annotation-1"));
-    assert_eq!(
-        decoded_annotations[0].anchor.file_id,
-        FileId::new("src/lib.rs")
-    );
+    assert_eq!(decoded_notes[0].id, ReviewNoteId::new("note-1"));
+    assert_eq!(decoded_notes[0].anchor.file_id, FileId::new("src/lib.rs"));
     assert_eq!(decoded_stream, stream);
     assert_eq!(decoded_cursor, cursor);
     assert_eq!(decoded_layout, layout);
 
-    let rebuilt_stream =
-        ReviewStream::from_snapshot_and_annotations(&decoded_snapshot, &decoded_annotations);
+    let rebuilt_stream = ReviewStream::from_snapshot_and_notes(&decoded_snapshot, &decoded_notes);
     assert_eq!(row_ids(&rebuilt_stream), row_ids(&stream));
     assert_eq!(rebuilt_stream, stream);
 }
@@ -236,9 +264,9 @@ fn snapshot_with_diff(review_id: ReviewId) -> DiffSnapshot {
     )
 }
 
-fn annotation_for_snapshot(snapshot: &DiffSnapshot) -> Annotation {
-    Annotation {
-        id: AnnotationId::new("annotation-1"),
+fn review_note_for_snapshot(snapshot: &DiffSnapshot) -> ReviewNote {
+    ReviewNote {
+        id: ReviewNoteId::new("note-1"),
         anchor: Anchor {
             file_id: FileId::new("src/lib.rs"),
             side: Side::New,
@@ -247,9 +275,9 @@ fn annotation_for_snapshot(snapshot: &DiffSnapshot) -> Annotation {
             target_text_hash: "sha256:new-call".to_owned(),
             status: ResolutionStatus::Exact,
         },
-        source: AnnotationSource::Sidecar,
-        summary: "check new call".to_owned(),
-        rationale: Some("round-trip fixture rationale".to_owned()),
+        source: ReviewNoteSource::Sidecar,
+        title: "check new call".to_owned(),
+        body: Some("round-trip fixture body".to_owned()),
         tags: vec!["serialization".to_owned()],
         confidence: Some("high".to_owned()),
         external_source: Some("test".to_owned()),

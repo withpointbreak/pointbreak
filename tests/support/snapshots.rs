@@ -6,7 +6,7 @@ pub struct StreamSummary {
     pub hunk_headers: usize,
     pub diff_rows: usize,
     pub metadata_rows: usize,
-    pub annotation_rows: usize,
+    pub note_rows: usize,
     pub empty_rows: usize,
     pub total_rows: usize,
 }
@@ -17,7 +17,7 @@ pub fn stream_summary(stream: &ReviewStream) -> StreamSummary {
         hunk_headers: 0,
         diff_rows: 0,
         metadata_rows: 0,
-        annotation_rows: 0,
+        note_rows: 0,
         empty_rows: 0,
         total_rows: stream.rows.len(),
     };
@@ -28,7 +28,7 @@ pub fn stream_summary(stream: &ReviewStream) -> StreamSummary {
             ReviewRowKind::HunkHeader { .. } => summary.hunk_headers += 1,
             ReviewRowKind::Diff { .. } => summary.diff_rows += 1,
             ReviewRowKind::Metadata { .. } => summary.metadata_rows += 1,
-            ReviewRowKind::Annotation { .. } => summary.annotation_rows += 1,
+            ReviewRowKind::Note { .. } => summary.note_rows += 1,
             ReviewRowKind::EmptyState { .. } => summary.empty_rows += 1,
         }
     }

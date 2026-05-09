@@ -1,78 +1,60 @@
 use shore::model::{
-    AnnotationSource, DiffFile, DiffRow, DiffRowKind, FileId, FileStatus, HunkId, LineRange,
-    ResolutionStatus, ReviewHunk, Side,
+    DiffFile, DiffRow, DiffRowKind, FileId, FileStatus, HunkId, LineRange, ResolutionStatus,
+    ReviewHunk, ReviewNoteSource, Side,
 };
 use shore::sidecar::{
-    AgentAnnotation, AgentContext, AgentFileContext, DiagnosticCode, DiagnosticLevel, Range,
-    apply_file_order, parse_agent_context, resolve_annotations,
+    DiagnosticLevel, ReviewNoteEntry, ReviewNoteTarget, ReviewNotesDiagnosticCode, ReviewNotesFile,
+    ReviewNotesSidecar, apply_file_order, parse_hunk_agent_context, parse_review_notes_sidecar,
+    resolve_notes,
 };
 
 #[test]
-fn hunk_compatible_agent_context_parses_file_order_and_annotations() {
-    let parsed = parse_agent_context(include_str!(
-        "../fixtures/sidecars/basic-agent-context.json"
-    ))
-    .expect("valid sidecar parses");
+fn native_review_notes_sidecar_parses_file_order_and_notes() {
+    let parsed =
+        parse_review_notes_sidecar(include_str!("../fixtures/sidecars/basic-review-notes.json"))
+            .expect("valid review notes sidecar parses");
 
     assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
-    assert_eq!(parsed.context.version, 1);
+    assert_eq!(parsed.sidecar.schema.as_deref(), Some("shore.review-notes"));
+    assert_eq!(parsed.sidecar.version, 1);
     assert_eq!(
-        parsed.context.schema.as_deref(),
-        Some("shore.agent-context")
-    );
-    assert_eq!(
-        parsed.context.summary.as_deref(),
-        Some("Phase 3 parser fixture")
+        parsed.sidecar.summary.as_deref(),
+        Some("Review notes parser fixture")
     );
 
     let paths = parsed
-        .context
+        .sidecar
         .files
         .iter()
         .map(|file| file.path.as_str())
         .collect::<Vec<_>>();
     assert_eq!(paths, vec!["src/new_name.rs", "src/git/raw.rs"]);
 
-    let renamed = &parsed.context.files[0];
+    let renamed = &parsed.sidecar.files[0];
     assert_eq!(renamed.old_path.as_deref(), Some("src/old_name.rs"));
     assert_eq!(
         renamed.summary.as_deref(),
         Some("Narrative summary for renamed file")
     );
-    assert_eq!(renamed.annotations.len(), 2);
-    assert_eq!(renamed.annotations[0].id.as_deref(), Some("ann-new-range"));
-    assert_eq!(
-        renamed.annotations[0].new_range,
-        Some(Range { start: 10, end: 12 })
-    );
-    assert_eq!(
-        renamed.annotations[0].summary.as_deref(),
-        Some("New-side annotation")
-    );
-    assert_eq!(
-        renamed.annotations[0].rationale.as_deref(),
-        Some("Explains why the new range matters")
-    );
-    assert_eq!(renamed.annotations[0].tags, vec!["risk", "parser"]);
-
-    assert_eq!(
-        renamed.annotations[1].old_range,
-        Some(Range { start: 7, end: 7 })
-    );
-    assert_eq!(
-        renamed.annotations[1].summary.as_deref(),
-        Some("Old-side annotation")
-    );
+    assert_eq!(renamed.notes.len(), 2);
+    assert_eq!(renamed.notes[0].id.as_deref(), Some("note-new-range"));
+    assert_eq!(renamed.notes[0].title.as_deref(), Some("New-side note"));
+    assert_eq!(renamed.notes[0].body.as_deref(), Some("Why it matters"));
+    assert_eq!(renamed.notes[0].tags, vec!["risk", "parser"]);
+    let target = renamed.notes[0].target.as_ref().expect("note has target");
+    assert_eq!(target.side, Side::New);
+    assert_eq!(target.start_line, 10);
+    assert_eq!(target.end_line, 12);
 }
 
 #[test]
-fn invalid_sidecar_entries_return_recoverable_diagnostics() {
-    let parsed = parse_agent_context(include_str!(
-        "../fixtures/sidecars/invalid-agent-context.json"
+fn invalid_review_notes_entries_return_recoverable_diagnostics() {
+    let parsed = parse_review_notes_sidecar(include_str!(
+        "../fixtures/sidecars/invalid-review-notes.json"
     ))
-    .expect("invalid annotations remain recoverable");
+    .expect("invalid review notes remain recoverable");
 
-    assert_eq!(parsed.context.files.len(), 2);
+    assert_eq!(parsed.sidecar.files.len(), 2);
     assert_eq!(parsed.diagnostics.len(), 4);
 
     let diagnostics = parsed
@@ -92,22 +74,22 @@ fn invalid_sidecar_entries_return_recoverable_diagnostics() {
         vec![
             (
                 DiagnosticLevel::Warning,
-                DiagnosticCode::InvalidRange,
-                "files[0].annotations[0].newRange"
+                ReviewNotesDiagnosticCode::InvalidRange,
+                "files[0].notes[0].target"
             ),
             (
                 DiagnosticLevel::Warning,
-                DiagnosticCode::InvalidRange,
-                "files[0].annotations[1].oldRange"
+                ReviewNotesDiagnosticCode::MissingNoteTitle,
+                "files[0].notes[1].title"
             ),
             (
                 DiagnosticLevel::Warning,
-                DiagnosticCode::MissingAnnotationSummary,
-                "files[0].annotations[2].summary"
+                ReviewNotesDiagnosticCode::MissingNoteTarget,
+                "files[0].notes[2].target"
             ),
             (
                 DiagnosticLevel::Warning,
-                DiagnosticCode::MissingFilePath,
+                ReviewNotesDiagnosticCode::MissingFilePath,
                 "files[1].path"
             ),
         ]
@@ -115,180 +97,247 @@ fn invalid_sidecar_entries_return_recoverable_diagnostics() {
 }
 
 #[test]
-fn sidecar_order_reorders_matching_files_and_warns_for_stale_paths() {
-    let files = vec![
-        modified_file("src/a.rs"),
-        modified_file("src/b.rs"),
-        renamed_file("src/old_c.rs", "src/c.rs"),
-        modified_file("src/d.rs"),
-    ];
-    let context = AgentContext {
-        schema: Some("shore.agent-context".to_owned()),
+fn legacy_hunk_agent_context_imports_as_review_notes() {
+    let parsed = parse_hunk_agent_context(include_str!(
+        "../fixtures/sidecars/legacy-hunk-agent-context.json"
+    ))
+    .expect("legacy Hunk context imports");
+
+    assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
+    assert_eq!(parsed.sidecar.schema.as_deref(), Some("shore.review-notes"));
+    assert_eq!(parsed.sidecar.version, 1);
+    assert_eq!(
+        parsed.sidecar.summary.as_deref(),
+        Some("Legacy Hunk parser fixture")
+    );
+
+    let file = &parsed.sidecar.files[0];
+    assert_eq!(file.path, "src/new_name.rs");
+    assert_eq!(file.old_path.as_deref(), Some("src/old_name.rs"));
+    assert_eq!(file.notes.len(), 2);
+
+    let note = &file.notes[0];
+    assert_eq!(note.id.as_deref(), Some("ann-new-range"));
+    assert_eq!(note.title.as_deref(), Some("New-side annotation"));
+    assert_eq!(
+        note.body.as_deref(),
+        Some("Explains why the new range matters")
+    );
+    assert_eq!(note.source.as_deref(), Some("hunk"));
+    let target = note
+        .target
+        .as_ref()
+        .expect("legacy newRange becomes target");
+    assert_eq!(target.side, Side::New);
+    assert_eq!(target.start_line, 10);
+    assert_eq!(target.end_line, 12);
+
+    let old_note = &file.notes[1];
+    assert_eq!(old_note.title.as_deref(), Some("Old-side annotation"));
+    assert_eq!(
+        old_note.target.as_ref().expect("old range target").side,
+        Side::Old
+    );
+}
+
+#[test]
+fn invalid_legacy_hunk_agent_context_import_maps_diagnostics_to_note_paths() {
+    let parsed = parse_hunk_agent_context(include_str!(
+        "../fixtures/sidecars/legacy-invalid-hunk-agent-context.json"
+    ))
+    .expect("invalid legacy Hunk context imports recoverably");
+
+    assert_eq!(parsed.sidecar.files.len(), 2);
+    assert_eq!(parsed.diagnostics.len(), 4);
+
+    let diagnostics = parsed
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            (
+                diagnostic.level.clone(),
+                diagnostic.code.clone(),
+                diagnostic.path.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        diagnostics,
+        vec![
+            (
+                DiagnosticLevel::Warning,
+                ReviewNotesDiagnosticCode::InvalidRange,
+                "files[0].notes[0].target"
+            ),
+            (
+                DiagnosticLevel::Warning,
+                ReviewNotesDiagnosticCode::InvalidRange,
+                "files[0].notes[1].target"
+            ),
+            (
+                DiagnosticLevel::Warning,
+                ReviewNotesDiagnosticCode::MissingNoteTitle,
+                "files[0].notes[2].title"
+            ),
+            (
+                DiagnosticLevel::Warning,
+                ReviewNotesDiagnosticCode::MissingFilePath,
+                "files[1].path"
+            ),
+        ]
+    );
+}
+
+#[test]
+fn native_review_notes_parser_does_not_accept_hunk_aliases() {
+    let parsed = parse_review_notes_sidecar(include_str!(
+        "../fixtures/sidecars/legacy-hunk-agent-context.json"
+    ))
+    .expect("legacy Hunk shape remains JSON-parseable");
+
+    assert_eq!(
+        parsed.sidecar.schema.as_deref(),
+        Some("shore.agent-context")
+    );
+    assert!(parsed.sidecar.files[0].notes.is_empty());
+    assert!(parsed.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == ReviewNotesDiagnosticCode::InvalidSchema && diagnostic.path == "schema"
+    }));
+    assert!(parsed.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == ReviewNotesDiagnosticCode::MissingNotes
+            && diagnostic.path == "files[0].notes"
+    }));
+}
+
+#[test]
+fn native_review_notes_apply_order_and_resolve_to_minimal_anchors() {
+    let files = vec![modified_file("src/other.rs"), annotated_file()];
+    let sidecar = ReviewNotesSidecar {
+        schema: Some("shore.review-notes".to_owned()),
         version: 1,
         summary: None,
-        ownership: None,
         files: vec![
-            sidecar_file("src/context-c.rs", Some("src/old_c.rs")),
-            sidecar_file("src/a.rs", None),
-            sidecar_file("src/stale.rs", None),
+            ReviewNotesFile {
+                path: "src/lib.rs".to_owned(),
+                old_path: None,
+                summary: None,
+                notes: vec![
+                    review_note("added row", Side::New, 2, 2),
+                    review_note("removed row", Side::Old, 2, 2),
+                    review_note("context row", Side::New, 3, 3),
+                    review_note("multi-line range", Side::New, 3, 4),
+                ],
+            },
+            ReviewNotesFile {
+                path: "src/stale.rs".to_owned(),
+                old_path: None,
+                summary: None,
+                notes: Vec::new(),
+            },
+            ReviewNotesFile {
+                path: "src/other.rs".to_owned(),
+                old_path: None,
+                summary: None,
+                notes: Vec::new(),
+            },
         ],
     };
 
-    let ordered = apply_file_order(files, &context);
+    let ordered = apply_file_order(files, &sidecar);
 
     let paths = ordered
         .files
         .iter()
-        .map(|file| {
-            file.new_path
-                .as_deref()
-                .or(file.old_path.as_deref())
-                .unwrap()
-        })
+        .map(|file| file.new_path.as_deref().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(paths, vec!["src/c.rs", "src/a.rs", "src/b.rs", "src/d.rs"]);
+    assert_eq!(paths, vec!["src/lib.rs", "src/other.rs"]);
     assert_eq!(ordered.diagnostics.len(), 1);
-    assert_eq!(ordered.diagnostics[0].level, DiagnosticLevel::Warning);
-    assert_eq!(ordered.diagnostics[0].code, DiagnosticCode::StaleFilePath);
-    assert_eq!(ordered.diagnostics[0].path, "files[2].path");
-    assert!(ordered.diagnostics[0].message.contains("src/stale.rs"));
-}
-
-#[test]
-fn sidecar_annotations_resolve_to_exact_minimal_anchors() {
-    let files = vec![annotated_file()];
-    let context = AgentContext {
-        schema: Some("shore.agent-context".to_owned()),
-        version: 1,
-        summary: None,
-        ownership: None,
-        files: vec![AgentFileContext {
-            path: "src/lib.rs".to_owned(),
-            old_path: None,
-            summary: None,
-            annotations: vec![
-                annotation("added row", None, Some(Range { start: 2, end: 2 })),
-                annotation("removed row", Some(Range { start: 2, end: 2 }), None),
-                annotation("context row", None, Some(Range { start: 3, end: 3 })),
-                annotation("multi-line range", None, Some(Range { start: 3, end: 4 })),
-            ],
-        }],
-    };
-
-    let resolved = resolve_annotations(&files, &context);
-
-    assert!(
-        resolved.diagnostics.is_empty(),
-        "{:#?}",
-        resolved.diagnostics
+    assert_eq!(
+        ordered.diagnostics[0].code,
+        ReviewNotesDiagnosticCode::StaleFilePath
     );
-    assert_eq!(resolved.annotations.len(), 4);
+    assert_eq!(ordered.diagnostics[0].path, "files[1].path");
 
-    assert_annotation(
-        annotation_by_summary(&resolved.annotations, "added row"),
+    let resolved = resolve_notes(&ordered.files, &sidecar);
+
+    assert_eq!(resolved.notes.len(), 4);
+    assert_eq!(resolved.diagnostics.len(), 1);
+    assert_eq!(
+        resolved.diagnostics[0].code,
+        ReviewNotesDiagnosticCode::StaleFilePath
+    );
+    assert_eq!(resolved.diagnostics[0].path, "files[1].path");
+
+    assert_note(
+        note_by_title(&resolved.notes, "added row"),
         Side::New,
         LineRange::new(2, 2),
         "sha256:569dd3149acd6f05a7736e6ff2e3aed60f472171aeb74a3cc43c6e6813ca8c8c",
     );
-    assert_annotation(
-        annotation_by_summary(&resolved.annotations, "removed row"),
+    assert_note(
+        note_by_title(&resolved.notes, "removed row"),
         Side::Old,
         LineRange::new(2, 2),
         "sha256:489f4336b2747c25479b8e1409c076c44baf968183ec052ade602214795fdde9",
     );
-    assert_annotation(
-        annotation_by_summary(&resolved.annotations, "context row"),
+    assert_note(
+        note_by_title(&resolved.notes, "context row"),
         Side::New,
         LineRange::new(3, 3),
         "sha256:c0e9a8fcaa59a634469252d037aba2004dfdb824b565c72102f58dba2a4134d0",
     );
-    assert_annotation(
-        annotation_by_summary(&resolved.annotations, "multi-line range"),
+    assert_note(
+        note_by_title(&resolved.notes, "multi-line range"),
         Side::New,
         LineRange::new(3, 4),
         "sha256:7dfd8a717636663d5e7bc9b988060d22ad6fea1ca6e8034cda845e304f67c633",
     );
 }
 
-#[test]
-fn unresolved_sidecar_annotations_return_diagnostics() {
-    let files = vec![annotated_file()];
-    let context = AgentContext {
-        schema: Some("shore.agent-context".to_owned()),
-        version: 1,
-        summary: None,
-        ownership: None,
-        files: vec![AgentFileContext {
-            path: "src/lib.rs".to_owned(),
-            old_path: None,
-            summary: None,
-            annotations: vec![annotation(
-                "out of range",
-                None,
-                Some(Range { start: 99, end: 99 }),
-            )],
-        }],
-    };
-
-    let resolved = resolve_annotations(&files, &context);
-
-    assert!(resolved.annotations.is_empty());
-    assert_eq!(resolved.diagnostics.len(), 1);
-    assert_eq!(resolved.diagnostics[0].level, DiagnosticLevel::Warning);
-    assert_eq!(
-        resolved.diagnostics[0].code,
-        DiagnosticCode::UnresolvedAnnotation
-    );
-    assert_eq!(
-        resolved.diagnostics[0].path,
-        "files[0].annotations[0].newRange"
-    );
-}
-
-fn assert_annotation(
-    annotation: &shore::model::Annotation,
+fn assert_note(
+    note: &shore::model::ReviewNote,
     side: Side,
     line_range: LineRange,
     target_text_hash: &str,
 ) {
-    assert_eq!(annotation.source, AnnotationSource::Sidecar);
-    assert_eq!(annotation.anchor.file_id, FileId::new("src/lib.rs"));
-    assert_eq!(annotation.anchor.side, side);
-    assert_eq!(annotation.anchor.line_range, line_range);
-    assert_eq!(annotation.anchor.status, ResolutionStatus::Exact);
+    assert_eq!(note.source, ReviewNoteSource::Sidecar);
+    assert_eq!(note.anchor.file_id, FileId::new("src/lib.rs"));
+    assert_eq!(note.anchor.side, side);
+    assert_eq!(note.anchor.line_range, line_range);
+    assert_eq!(note.anchor.status, ResolutionStatus::Exact);
     assert_eq!(
-        annotation.anchor.hunk_signature,
+        note.anchor.hunk_signature,
         "sha256:0ed5a197d3bd2107a7250d2e36c33328dcf6c135e84bec170f342e22397a64f7"
     );
-    assert_eq!(annotation.anchor.target_text_hash, target_text_hash);
+    assert_eq!(note.anchor.target_text_hash, target_text_hash);
 }
 
-fn annotation_by_summary<'a>(
-    annotations: &'a [shore::model::Annotation],
-    summary: &str,
-) -> &'a shore::model::Annotation {
-    annotations
+fn note_by_title<'a>(
+    notes: &'a [shore::model::ReviewNote],
+    title: &str,
+) -> &'a shore::model::ReviewNote {
+    notes
         .iter()
-        .find(|annotation| annotation.summary == summary)
-        .expect("annotation exists")
+        .find(|note| note.title == title)
+        .expect("note exists")
 }
 
-fn annotation(
-    summary: &str,
-    old_range: Option<Range>,
-    new_range: Option<Range>,
-) -> AgentAnnotation {
-    AgentAnnotation {
-        id: Some(format!("annotation-{summary}")),
-        old_range,
-        new_range,
-        summary: Some(summary.to_owned()),
-        rationale: Some(format!("rationale for {summary}")),
+fn review_note(title: &str, side: Side, start_line: u32, end_line: u32) -> ReviewNoteEntry {
+    ReviewNoteEntry {
+        id: Some(format!("note-{title}")),
+        title: Some(title.to_owned()),
+        body: Some(format!("body for {title}")),
+        target: Some(ReviewNoteTarget {
+            side,
+            start_line,
+            end_line,
+        }),
         tags: vec!["fixture".to_owned()],
         confidence: Some("high".to_owned()),
         source: Some("test".to_owned()),
         author: Some("codex".to_owned()),
-        created_at: Some("2026-05-08T00:00:00Z".to_owned()),
+        created_at: Some("2026-05-09T00:00:00Z".to_owned()),
     }
 }
 
@@ -354,15 +403,6 @@ fn removed_row(old_line: u32, text: &str) -> DiffRow {
     }
 }
 
-fn sidecar_file(path: &str, old_path: Option<&str>) -> AgentFileContext {
-    AgentFileContext {
-        path: path.to_owned(),
-        old_path: old_path.map(str::to_owned),
-        summary: None,
-        annotations: Vec::new(),
-    }
-}
-
 fn modified_file(path: &str) -> DiffFile {
     DiffFile {
         id: FileId::new(path),
@@ -374,26 +414,6 @@ fn modified_file(path: &str) -> DiffFile {
         old_oid: None,
         new_oid: None,
         similarity: None,
-        is_binary: false,
-        is_submodule: false,
-        is_mode_only: false,
-        synthetic: false,
-        metadata_rows: Vec::new(),
-        hunks: Vec::new(),
-    }
-}
-
-fn renamed_file(old_path: &str, new_path: &str) -> DiffFile {
-    DiffFile {
-        id: FileId::new(new_path),
-        status: FileStatus::Renamed,
-        old_path: Some(old_path.to_owned()),
-        new_path: Some(new_path.to_owned()),
-        old_mode: None,
-        new_mode: None,
-        old_oid: None,
-        new_oid: None,
-        similarity: Some(92),
         is_binary: false,
         is_submodule: false,
         is_mode_only: false,

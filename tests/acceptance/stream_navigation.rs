@@ -1,17 +1,19 @@
 use shore::model::{
-    Anchor, Annotation, AnnotationId, AnnotationSource, DiffFile, DiffRow, DiffRowKind,
-    DiffSnapshot, FileId, FileMetadataKind, FileMetadataRow, FileStatus, HunkId, LineRange,
-    ResolutionStatus, ReviewHunk, ReviewId, ReviewRow, ReviewRowKind, ReviewStream, RowId, Side,
-    SnapshotId,
+    Anchor, DiffFile, DiffRow, DiffRowKind, DiffSnapshot, FileId, FileMetadataKind,
+    FileMetadataRow, FileStatus, HunkId, LineRange, ResolutionStatus, ReviewHunk, ReviewId,
+    ReviewNote, ReviewNoteId, ReviewNoteSource, ReviewRow, ReviewRowKind, ReviewStream, RowId,
+    Side, SnapshotId,
 };
-use shore::sidecar::{AgentContext, AgentFileContext, DiagnosticCode, DiagnosticLevel};
+use shore::sidecar::{
+    DiagnosticLevel, ReviewNotesDiagnosticCode, ReviewNotesFile, ReviewNotesSidecar,
+};
 use shore::stream::{NavigationCommand, RevealTarget};
 
 #[test]
-fn review_stream_emits_deterministic_rows_for_diff_metadata_and_annotations() {
+fn review_stream_emits_deterministic_rows_for_diff_metadata_and_notes() {
     let hunk = text_hunk();
-    let annotation = Annotation {
-        id: AnnotationId::new("annotation-added"),
+    let note = ReviewNote {
+        id: ReviewNoteId::new("note-added"),
         anchor: Anchor {
             file_id: FileId::new("src/lib.rs"),
             side: Side::New,
@@ -20,9 +22,9 @@ fn review_stream_emits_deterministic_rows_for_diff_metadata_and_annotations() {
             target_text_hash: "sha256:target".to_owned(),
             status: ResolutionStatus::Exact,
         },
-        source: AnnotationSource::Sidecar,
-        summary: "explain added call".to_owned(),
-        rationale: None,
+        source: ReviewNoteSource::Sidecar,
+        title: "explain added call".to_owned(),
+        body: None,
         tags: Vec::new(),
         confidence: None,
         external_source: None,
@@ -35,7 +37,7 @@ fn review_stream_emits_deterministic_rows_for_diff_metadata_and_annotations() {
         vec![text_file(hunk), metadata_file()],
     );
 
-    let stream = ReviewStream::from_snapshot_and_annotations(&snapshot, &[annotation]);
+    let stream = ReviewStream::from_snapshot_and_notes(&snapshot, &[note]);
 
     let row_ids = stream
         .rows
@@ -89,13 +91,13 @@ fn review_stream_emits_deterministic_rows_for_diff_metadata_and_annotations() {
 
     assert!(matches!(
         &stream.rows[5].kind,
-        ReviewRowKind::Annotation {
-            annotation_id,
+        ReviewRowKind::Note {
+            note_id,
             target_row_id,
-            summary,
-        } if annotation_id == &AnnotationId::new("annotation-added")
+            title,
+        } if note_id == &ReviewNoteId::new("note-added")
             && target_row_id == &RowId::new("row:0004")
-            && summary == "explain added call"
+            && title == "explain added call"
     ));
     assert_eq!(stream.rows[5].file_id, Some(FileId::new("src/lib.rs")));
     assert_eq!(stream.rows[5].hunk_id, Some(HunkId::new("src/lib.rs:1:1")));
@@ -137,7 +139,7 @@ fn review_stream_emits_empty_state_when_snapshot_has_no_changes() {
         Vec::new(),
     );
 
-    let stream = ReviewStream::from_snapshot_and_annotations(&snapshot, &[]);
+    let stream = ReviewStream::from_snapshot_and_notes(&snapshot, &[]);
 
     assert_eq!(stream.review_id, ReviewId::new("review-1"));
     assert_eq!(stream.snapshot_id, SnapshotId::new("snapshot-1"));
@@ -153,21 +155,20 @@ fn review_stream_emits_empty_state_when_snapshot_has_no_changes() {
 }
 
 #[test]
-fn review_stream_from_sidecar_applies_order_and_dedupes_stale_path_diagnostics() {
+fn review_stream_from_review_notes_applies_order_and_dedupes_stale_path_diagnostics() {
     let snapshot = DiffSnapshot::new(
         ReviewId::new("review-1"),
         SnapshotId::new("snapshot-1"),
         vec![modified_file("src/a.rs"), modified_file("src/b.rs")],
     );
-    let context = AgentContext {
-        schema: Some("shore.agent-context".to_owned()),
+    let sidecar = ReviewNotesSidecar {
+        schema: Some("shore.review-notes".to_owned()),
         version: 1,
         summary: None,
-        ownership: None,
         files: vec![sidecar_file("src/b.rs"), sidecar_file("src/stale.rs")],
     };
 
-    let built = ReviewStream::from_snapshot_and_sidecar(&snapshot, &context);
+    let built = ReviewStream::from_snapshot_and_review_notes(&snapshot, &sidecar);
 
     let file_headers = built
         .stream
@@ -181,7 +182,10 @@ fn review_stream_from_sidecar_applies_order_and_dedupes_stale_path_diagnostics()
     assert_eq!(file_headers, vec!["src/b.rs", "src/a.rs"]);
     assert_eq!(built.diagnostics.len(), 1);
     assert_eq!(built.diagnostics[0].level, DiagnosticLevel::Warning);
-    assert_eq!(built.diagnostics[0].code, DiagnosticCode::StaleFilePath);
+    assert_eq!(
+        built.diagnostics[0].code,
+        ReviewNotesDiagnosticCode::StaleFilePath
+    );
     assert_eq!(built.diagnostics[0].path, "files[1].path");
 }
 
@@ -234,12 +238,12 @@ fn navigation_moves_between_full_hunk_headers_and_clamps_at_edges() {
 }
 
 #[test]
-fn annotated_navigation_targets_annotation_rows_from_unannotated_hunks() {
+fn note_navigation_targets_note_rows_from_unnoted_hunks() {
     let stream = navigation_stream();
 
     let next = stream.navigate(
         &shore::model::CursorState::at_row(RowId::new("row:0007")),
-        NavigationCommand::NextAnnotatedHunk,
+        NavigationCommand::NextNoteHunk,
     );
     assert_eq!(
         next.cursor,
@@ -251,52 +255,50 @@ fn annotated_navigation_targets_annotation_rows_from_unannotated_hunks() {
             row_id: RowId::new("row:0011")
         })
     );
-    assert!(is_annotation_row(row_by_id(&stream, "row:0011")));
+    assert!(is_note_row(row_by_id(&stream, "row:0011")));
     assert!(!next.clamped);
 
     let previous = stream.navigate(
         &shore::model::CursorState::at_row(RowId::new("row:0007")),
-        NavigationCommand::PreviousAnnotatedHunk,
+        NavigationCommand::PreviousNoteHunk,
     );
     assert_eq!(
         previous.cursor,
         shore::model::CursorState::at_row(RowId::new("row:0004"))
     );
-    assert!(is_annotation_row(row_by_id(&stream, "row:0004")));
+    assert!(is_note_row(row_by_id(&stream, "row:0004")));
     assert!(!previous.clamped);
 }
 
 #[test]
-fn annotated_navigation_clamps_to_last_annotation_when_current_hunk_is_past_it() {
+fn note_navigation_clamps_to_last_note_when_current_hunk_is_past_it() {
     let stream = navigation_stream();
 
-    let before_first_annotation = stream.navigate(
+    let before_first_note = stream.navigate(
         &shore::model::CursorState::at_row(RowId::new("row:0001")),
-        NavigationCommand::PreviousAnnotatedHunk,
+        NavigationCommand::PreviousNoteHunk,
     );
     assert_eq!(
-        before_first_annotation.cursor,
+        before_first_note.cursor,
         shore::model::CursorState::at_row(RowId::new("row:0004"))
     );
-    assert!(before_first_annotation.clamped);
+    assert!(before_first_note.clamped);
 
-    let from_unannotated_tail = stream.navigate(
+    let from_unnoted_tail = stream.navigate(
         &shore::model::CursorState::at_row(RowId::new("row:0012")),
-        NavigationCommand::NextAnnotatedHunk,
+        NavigationCommand::NextNoteHunk,
     );
     assert_eq!(
-        from_unannotated_tail.cursor,
+        from_unnoted_tail.cursor,
         shore::model::CursorState::at_row(RowId::new("row:0011"))
     );
-    assert!(from_unannotated_tail.clamped);
+    assert!(from_unnoted_tail.clamped);
 
-    let from_last_annotation = stream.navigate(
-        &from_unannotated_tail.cursor,
-        NavigationCommand::NextAnnotatedHunk,
-    );
-    assert_eq!(from_last_annotation.cursor, from_unannotated_tail.cursor);
-    assert_eq!(from_last_annotation.reveal, from_unannotated_tail.reveal);
-    assert!(from_last_annotation.clamped);
+    let from_last_note =
+        stream.navigate(&from_unnoted_tail.cursor, NavigationCommand::NextNoteHunk);
+    assert_eq!(from_last_note.cursor, from_unnoted_tail.cursor);
+    assert_eq!(from_last_note.reveal, from_unnoted_tail.reveal);
+    assert!(from_last_note.clamped);
 }
 
 #[test]
@@ -331,13 +333,13 @@ fn text_file(hunk: ReviewHunk) -> DiffFile {
 }
 
 fn navigation_stream() -> ReviewStream {
-    let first = navigation_hunk("src/lib.rs:10:10", 10, "first annotated");
-    let second = navigation_hunk("src/lib.rs:20:20", 20, "middle unannotated");
-    let third = navigation_hunk("src/lib.rs:30:30", 30, "last annotated");
-    let fourth = navigation_hunk("src/lib.rs:40:40", 40, "tail unannotated");
-    let annotations = vec![
-        hunk_annotation("annotation-first", &first, 11),
-        hunk_annotation("annotation-last", &third, 31),
+    let first = navigation_hunk("src/lib.rs:10:10", 10, "first noted");
+    let second = navigation_hunk("src/lib.rs:20:20", 20, "middle unnoted");
+    let third = navigation_hunk("src/lib.rs:30:30", 30, "last noted");
+    let fourth = navigation_hunk("src/lib.rs:40:40", 40, "tail unnoted");
+    let notes = vec![
+        hunk_note("note-first", &first, 11),
+        hunk_note("note-last", &third, 31),
     ];
     let snapshot = DiffSnapshot::new(
         ReviewId::new("review-1"),
@@ -361,7 +363,7 @@ fn navigation_stream() -> ReviewStream {
         }],
     );
 
-    ReviewStream::from_snapshot_and_annotations(&snapshot, &annotations)
+    ReviewStream::from_snapshot_and_notes(&snapshot, &notes)
 }
 
 fn navigation_hunk(id: &str, start: u32, added_text: &str) -> ReviewHunk {
@@ -389,9 +391,9 @@ fn navigation_hunk(id: &str, start: u32, added_text: &str) -> ReviewHunk {
     }
 }
 
-fn hunk_annotation(id: &str, hunk: &ReviewHunk, line: u32) -> Annotation {
-    Annotation {
-        id: AnnotationId::new(id),
+fn hunk_note(id: &str, hunk: &ReviewHunk, line: u32) -> ReviewNote {
+    ReviewNote {
+        id: ReviewNoteId::new(id),
         anchor: Anchor {
             file_id: FileId::new("src/lib.rs"),
             side: Side::New,
@@ -400,9 +402,9 @@ fn hunk_annotation(id: &str, hunk: &ReviewHunk, line: u32) -> Annotation {
             target_text_hash: "sha256:target".to_owned(),
             status: ResolutionStatus::Exact,
         },
-        source: AnnotationSource::Sidecar,
-        summary: id.to_owned(),
-        rationale: None,
+        source: ReviewNoteSource::Sidecar,
+        title: id.to_owned(),
+        body: None,
         tags: Vec::new(),
         confidence: None,
         external_source: None,
@@ -419,8 +421,8 @@ fn row_by_id<'a>(stream: &'a ReviewStream, row_id: &str) -> &'a ReviewRow {
         .expect("row exists")
 }
 
-fn is_annotation_row(row: &ReviewRow) -> bool {
-    matches!(row.kind, ReviewRowKind::Annotation { .. })
+fn is_note_row(row: &ReviewRow) -> bool {
+    matches!(row.kind, ReviewRowKind::Note { .. })
 }
 
 fn modified_file(path: &str) -> DiffFile {
@@ -443,12 +445,12 @@ fn modified_file(path: &str) -> DiffFile {
     }
 }
 
-fn sidecar_file(path: &str) -> AgentFileContext {
-    AgentFileContext {
+fn sidecar_file(path: &str) -> ReviewNotesFile {
+    ReviewNotesFile {
         path: path.to_owned(),
         old_path: None,
         summary: None,
-        annotations: Vec::new(),
+        notes: Vec::new(),
     }
 }
 

@@ -7,8 +7,8 @@ use crate::model::{CursorState, HunkId, ReviewRowKind, ReviewStream, RowId};
 pub enum NavigationCommand {
     NextHunk,
     PreviousHunk,
-    NextAnnotatedHunk,
-    PreviousAnnotatedHunk,
+    NextNoteHunk,
+    PreviousNoteHunk,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -32,11 +32,9 @@ fn navigate_review_stream(
     match command {
         NavigationCommand::NextHunk => navigate_hunk(stream, cursor, Direction::Next),
         NavigationCommand::PreviousHunk => navigate_hunk(stream, cursor, Direction::Previous),
-        NavigationCommand::NextAnnotatedHunk => {
-            navigate_annotated_hunk(stream, cursor, Direction::Next)
-        }
-        NavigationCommand::PreviousAnnotatedHunk => {
-            navigate_annotated_hunk(stream, cursor, Direction::Previous)
+        NavigationCommand::NextNoteHunk => navigate_note_hunk(stream, cursor, Direction::Next),
+        NavigationCommand::PreviousNoteHunk => {
+            navigate_note_hunk(stream, cursor, Direction::Previous)
         }
     }
 }
@@ -93,7 +91,7 @@ fn navigate_hunk(
     result_for_index(stream, target_index, clamped)
 }
 
-fn navigate_annotated_hunk(
+fn navigate_note_hunk(
     stream: &ReviewStream,
     cursor: &CursorState,
     direction: Direction,
@@ -101,7 +99,7 @@ fn navigate_annotated_hunk(
     let Some(selected_index) = selected_row_index(stream, cursor) else {
         return unresolved_result();
     };
-    let targets = annotated_hunk_targets(stream);
+    let targets = note_hunk_targets(stream);
     if targets.is_empty() {
         return result_for_index(stream, selected_index, true);
     }
@@ -122,7 +120,7 @@ fn navigate_annotated_hunk(
             .unwrap_or_else(|| (targets[0], true)),
     };
 
-    result_for_index(stream, target.0.annotation_row_index, target.1)
+    result_for_index(stream, target.0.note_row_index, target.1)
 }
 
 fn selected_row_index(stream: &ReviewStream, cursor: &CursorState) -> Option<usize> {
@@ -147,17 +145,17 @@ fn current_hunk_header_index(stream: &ReviewStream, selected_index: usize) -> Op
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct AnnotatedHunkTarget {
+struct NoteHunkTarget {
     hunk_header_index: usize,
-    annotation_row_index: usize,
+    note_row_index: usize,
 }
 
-fn annotated_hunk_targets(stream: &ReviewStream) -> Vec<AnnotatedHunkTarget> {
+fn note_hunk_targets(stream: &ReviewStream) -> Vec<NoteHunkTarget> {
     let mut targets = Vec::new();
     let mut seen_hunks = Vec::<HunkId>::new();
 
-    for (annotation_row_index, row) in stream.rows.iter().enumerate() {
-        if !matches!(row.kind, ReviewRowKind::Annotation { .. }) {
+    for (note_row_index, row) in stream.rows.iter().enumerate() {
+        if !matches!(row.kind, ReviewRowKind::Note { .. }) {
             continue;
         }
         let Some(hunk_id) = row.hunk_id.as_ref() else {
@@ -170,9 +168,9 @@ fn annotated_hunk_targets(stream: &ReviewStream) -> Vec<AnnotatedHunkTarget> {
             continue;
         };
         seen_hunks.push(hunk_id.clone());
-        targets.push(AnnotatedHunkTarget {
+        targets.push(NoteHunkTarget {
             hunk_header_index,
-            annotation_row_index,
+            note_row_index,
         });
     }
 

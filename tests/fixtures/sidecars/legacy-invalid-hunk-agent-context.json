@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Invalid parser fixture",
+  "summary": "Invalid legacy Hunk parser fixture",
   "files": [
     {
       "path": "src/lib.rs",

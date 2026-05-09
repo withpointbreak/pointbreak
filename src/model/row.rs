@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{AnnotationId, FileId, FileStatus, HunkId, RowId, Side};
+use super::{FileId, FileStatus, HunkId, ReviewNoteId, RowId, Side};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -67,10 +67,10 @@ pub enum ReviewRowKind {
     Metadata {
         metadata: FileMetadataRow,
     },
-    Annotation {
-        annotation_id: AnnotationId,
+    Note {
+        note_id: ReviewNoteId,
         target_row_id: RowId,
-        summary: String,
+        title: String,
     },
     EmptyState {
         message: String,

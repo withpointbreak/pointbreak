@@ -1,9 +1,11 @@
 use shore::git::ingest_tracked_diff;
 use shore::model::{
-    Annotation, DiffFile, DiffRow, DiffRowKind, FileId, FileStatus, HunkId, ResolutionStatus,
-    ReviewHunk, re_resolve_annotations,
+    DiffFile, DiffRow, DiffRowKind, FileId, FileStatus, HunkId, ResolutionStatus, ReviewHunk,
+    ReviewNote, Side, re_resolve_review_notes,
 };
-use shore::sidecar::{AgentAnnotation, AgentContext, AgentFileContext, Range, resolve_annotations};
+use shore::sidecar::{
+    ReviewNoteEntry, ReviewNoteTarget, ReviewNotesFile, ReviewNotesSidecar, resolve_notes,
+};
 
 use crate::support::git_repo::GitRepo;
 
@@ -29,19 +31,18 @@ fn read_only_anchors_re_resolve_after_reingesting_git_diff() {
     );
 
     let initial = ingest_tracked_diff(repo.path()).expect("initial diff should ingest");
-    let context = AgentContext {
-        schema: Some("shore.agent-context".to_owned()),
+    let sidecar = ReviewNotesSidecar {
+        schema: Some("shore.review-notes".to_owned()),
         version: 1,
         summary: None,
-        ownership: None,
         files: vec![
-            agent_file("exact.rs", "exact target", 2),
-            agent_file("shifted.rs", "shifted target", 2),
-            agent_file("gone.rs", "gone target", 2),
-            agent_file("file_level.rs", "file-level target", 2),
+            review_notes_file("exact.rs", "exact target", 2),
+            review_notes_file("shifted.rs", "shifted target", 2),
+            review_notes_file("gone.rs", "gone target", 2),
+            review_notes_file("file_level.rs", "file-level target", 2),
         ],
     };
-    let initial_annotations = resolve_annotations(&initial.files, &context).annotations;
+    let initial_notes = resolve_notes(&initial.files, &sidecar).notes;
 
     repo.write("exact.rs", "fn main() {\n    exact_new();\n}\n");
     repo.write(
@@ -55,7 +56,7 @@ fn read_only_anchors_re_resolve_after_reingesting_git_diff() {
     );
 
     let fresh = ingest_tracked_diff(repo.path()).expect("fresh diff should ingest");
-    let resolved = re_resolve_annotations(&initial_annotations, &fresh.files);
+    let resolved = re_resolve_review_notes(&initial_notes, &fresh.files);
 
     assert_status(&resolved, "exact target", ResolutionStatus::Exact);
     assert_status(&resolved, "shifted target", ResolutionStatus::Relocated);
@@ -124,18 +125,17 @@ fn anchors_relocate_within_same_hunk_and_report_stale_or_ambiguous_targets() {
             }],
         ),
     ];
-    let context = AgentContext {
-        schema: Some("shore.agent-context".to_owned()),
+    let sidecar = ReviewNotesSidecar {
+        schema: Some("shore.review-notes".to_owned()),
         version: 1,
         summary: None,
-        ownership: None,
         files: vec![
-            agent_file("src/same.rs", "same hunk target", 2),
-            agent_file("src/stale.rs", "stale context target", 3),
-            agent_file("src/ambiguous.rs", "ambiguous target", 2),
+            review_notes_file("src/same.rs", "same hunk target", 2),
+            review_notes_file("src/stale.rs", "stale context target", 3),
+            review_notes_file("src/ambiguous.rs", "ambiguous target", 2),
         ],
     };
-    let initial_annotations = resolve_annotations(&initial, &context).annotations;
+    let initial_notes = resolve_notes(&initial, &sidecar).notes;
 
     let fresh = vec![
         annotated_model_file(
@@ -191,7 +191,7 @@ fn anchors_relocate_within_same_hunk_and_report_stale_or_ambiguous_targets() {
         ),
     ];
 
-    let resolved = re_resolve_annotations(&initial_annotations, &fresh);
+    let resolved = re_resolve_review_notes(&initial_notes, &fresh);
 
     assert_status(&resolved, "same hunk target", ResolutionStatus::Relocated);
     assert_eq!(
@@ -205,19 +205,19 @@ fn anchors_relocate_within_same_hunk_and_report_stale_or_ambiguous_targets() {
     assert_status(&resolved, "ambiguous target", ResolutionStatus::Unresolved);
 }
 
-fn agent_file(path: &str, summary: &str, line: u32) -> AgentFileContext {
-    AgentFileContext {
+fn review_notes_file(path: &str, title: &str, line: u32) -> ReviewNotesFile {
+    ReviewNotesFile {
         path: path.to_owned(),
         old_path: None,
         summary: None,
-        annotations: vec![AgentAnnotation {
+        notes: vec![ReviewNoteEntry {
             id: None,
-            summary: Some(summary.to_owned()),
-            rationale: None,
-            old_range: None,
-            new_range: Some(Range {
-                start: line,
-                end: line,
+            title: Some(title.to_owned()),
+            body: None,
+            target: Some(ReviewNoteTarget {
+                side: Side::New,
+                start_line: line,
+                end_line: line,
             }),
             tags: Vec::new(),
             confidence: None,
@@ -228,14 +228,14 @@ fn agent_file(path: &str, summary: &str, line: u32) -> AgentFileContext {
     }
 }
 
-fn annotation<'a>(annotations: &'a [Annotation], summary: &str) -> &'a Annotation {
+fn annotation<'a>(annotations: &'a [ReviewNote], summary: &str) -> &'a ReviewNote {
     annotations
         .iter()
-        .find(|annotation| annotation.summary == summary)
+        .find(|annotation| annotation.title == summary)
         .expect("annotation should exist")
 }
 
-fn assert_status(annotations: &[Annotation], summary: &str, status: ResolutionStatus) {
+fn assert_status(annotations: &[ReviewNote], summary: &str, status: ResolutionStatus) {
     assert_eq!(annotation(annotations, summary).anchor.status, status);
 }
 

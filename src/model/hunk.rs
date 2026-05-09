@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::annotation::{push_normalized_line, sha256_prefixed};
+use super::review_note::{push_normalized_line, sha256_prefixed};
 use super::{DiffRow, DiffRowKind, HunkId};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

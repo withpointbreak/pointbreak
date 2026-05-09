@@ -1,7 +1,8 @@
 use shore::git::ingest_tracked_diff;
-use shore::model::{Annotation, CursorState, DiffSnapshot, ReviewRowKind, ReviewStream, RowId};
+use shore::model::{CursorState, DiffSnapshot, ReviewNote, ReviewRowKind, ReviewStream, RowId};
 use shore::sidecar::{
-    AgentAnnotation, AgentContext, AgentFileContext, Range, apply_file_order, resolve_annotations,
+    ReviewNoteEntry, ReviewNoteTarget, ReviewNotesFile, ReviewNotesSidecar, apply_file_order,
+    resolve_notes,
 };
 use shore::stream::{LayoutSnapshot, NavigationCommand, ViewportSpec};
 
@@ -12,27 +13,27 @@ use crate::support::snapshots::{StreamSummary, stream_summary};
 fn bounded_large_changeset_exercises_full_read_only_pipeline() {
     let repo = bounded_changeset_repo();
     let snapshot = ingest_tracked_diff(repo.path()).expect("large changeset should ingest");
-    let context = large_changeset_context();
+    let sidecar = large_changeset_review_notes();
 
     assert_eq!(snapshot.files.len(), 5);
     assert_eq!(hunk_count(&snapshot), 5);
 
-    let ordered = apply_file_order(snapshot.files.clone(), &context);
+    let ordered = apply_file_order(snapshot.files.clone(), &sidecar);
     assert!(ordered.diagnostics.is_empty(), "{:#?}", ordered.diagnostics);
     let ordered_snapshot = DiffSnapshot::new(
         snapshot.review_id.clone(),
         snapshot.snapshot_id.clone(),
         ordered.files,
     );
-    let resolved = resolve_annotations(&ordered_snapshot.files, &context);
+    let resolved = resolve_notes(&ordered_snapshot.files, &sidecar);
     assert!(
         resolved.diagnostics.is_empty(),
         "{:#?}",
         resolved.diagnostics
     );
-    assert_eq!(resolved.annotations.len(), 4);
+    assert_eq!(resolved.notes.len(), 4);
 
-    let built = ReviewStream::from_snapshot_and_sidecar(&snapshot, &context);
+    let built = ReviewStream::from_snapshot_and_review_notes(&snapshot, &sidecar);
     assert!(built.diagnostics.is_empty(), "{:#?}", built.diagnostics);
     assert_eq!(
         file_header_paths(&built.stream),
@@ -53,7 +54,7 @@ fn bounded_large_changeset_exercises_full_read_only_pipeline() {
             hunk_headers: 5,
             diff_rows: 33,
             metadata_rows: 2,
-            annotation_rows: 4,
+            note_rows: 4,
             empty_rows: 0,
             total_rows: 49,
         }
@@ -74,12 +75,10 @@ fn bounded_large_changeset_exercises_full_read_only_pipeline() {
         serde_json::to_string(&ordered_snapshot).expect("ordered snapshot serializes");
     let decoded_snapshot: DiffSnapshot =
         shore::model::decode_json(&snapshot_json).expect("ordered snapshot deserializes");
-    let annotations_json =
-        serde_json::to_string(&resolved.annotations).expect("annotations serialize");
-    let decoded_annotations: Vec<Annotation> =
-        shore::model::decode_json(&annotations_json).expect("annotations deserialize");
-    let rebuilt_stream =
-        ReviewStream::from_snapshot_and_annotations(&decoded_snapshot, &decoded_annotations);
+    let notes_json = serde_json::to_string(&resolved.notes).expect("notes serialize");
+    let decoded_notes: Vec<ReviewNote> =
+        shore::model::decode_json(&notes_json).expect("notes deserialize");
+    let rebuilt_stream = ReviewStream::from_snapshot_and_notes(&decoded_snapshot, &decoded_notes);
 
     assert_eq!(stream_summary(&rebuilt_stream), summary);
     assert_eq!(row_ids(&rebuilt_stream), row_ids(&built.stream));
@@ -111,39 +110,38 @@ fn bounded_changeset_repo() -> GitRepo {
     repo
 }
 
-fn large_changeset_context() -> AgentContext {
-    AgentContext {
-        schema: Some("shore.agent-context".to_owned()),
+fn large_changeset_review_notes() -> ReviewNotesSidecar {
+    ReviewNotesSidecar {
+        schema: Some("shore.review-notes".to_owned()),
         version: 1,
         summary: None,
-        ownership: None,
         files: vec![
-            sidecar_file("src/untracked.rs", &[("annotation-untracked", 2)]),
-            sidecar_file("src/file_b.rs", &[("annotation-file-b-4", 4)]),
+            sidecar_file("src/untracked.rs", &[("note-untracked", 2)]),
+            sidecar_file("src/file_b.rs", &[("note-file-b-4", 4)]),
             sidecar_file(
                 "src/file_a.rs",
-                &[("annotation-file-a-2", 2), ("annotation-file-a-14", 14)],
+                &[("note-file-a-2", 2), ("note-file-a-14", 14)],
             ),
         ],
     }
 }
 
-fn sidecar_file(path: &str, annotations: &[(&str, u32)]) -> AgentFileContext {
-    AgentFileContext {
+fn sidecar_file(path: &str, notes: &[(&str, u32)]) -> ReviewNotesFile {
+    ReviewNotesFile {
         path: path.to_owned(),
         old_path: None,
         summary: None,
-        annotations: annotations
+        notes: notes
             .iter()
-            .map(|(summary, line)| AgentAnnotation {
-                id: Some(format!("sidecar:{summary}")),
-                old_range: None,
-                new_range: Some(Range {
-                    start: *line,
-                    end: *line,
+            .map(|(title, line)| ReviewNoteEntry {
+                id: Some(format!("sidecar:{title}")),
+                title: Some((*title).to_owned()),
+                body: None,
+                target: Some(ReviewNoteTarget {
+                    side: shore::model::Side::New,
+                    start_line: *line,
+                    end_line: *line,
                 }),
-                summary: Some((*summary).to_owned()),
-                rationale: None,
                 tags: Vec::new(),
                 confidence: None,
                 source: None,
@@ -217,34 +215,26 @@ fn assert_navigation_endpoints(stream: &ReviewStream) {
     );
     assert!(next_from_last.clamped);
 
-    let annotation_rows = row_ids_matching(stream, |kind| {
-        matches!(kind, ReviewRowKind::Annotation { .. })
-    });
-    assert_eq!(annotation_rows.len(), 4);
+    let note_rows = row_ids_matching(stream, |kind| matches!(kind, ReviewRowKind::Note { .. }));
+    assert_eq!(note_rows.len(), 4);
 
-    let first_annotated = stream.navigate(
+    let first_noted = stream.navigate(
         &CursorState::at_row(RowId::new("row:0000")),
-        NavigationCommand::NextAnnotatedHunk,
+        NavigationCommand::NextNoteHunk,
     );
     assert_eq!(
-        first_annotated.cursor,
-        CursorState::at_row(annotation_rows[0].clone())
+        first_noted.cursor,
+        CursorState::at_row(note_rows[0].clone())
     );
-    assert!(!first_annotated.clamped);
+    assert!(!first_noted.clamped);
 
-    let last_annotated = annotation_rows
-        .last()
-        .expect("annotation row exists")
-        .clone();
-    let next_from_last_annotated = stream.navigate(
-        &CursorState::at_row(last_annotated.clone()),
-        NavigationCommand::NextAnnotatedHunk,
+    let last_noted = note_rows.last().expect("note row exists").clone();
+    let next_from_last_note = stream.navigate(
+        &CursorState::at_row(last_noted.clone()),
+        NavigationCommand::NextNoteHunk,
     );
-    assert_eq!(
-        next_from_last_annotated.cursor,
-        CursorState::at_row(last_annotated)
-    );
-    assert!(next_from_last_annotated.clamped);
+    assert_eq!(next_from_last_note.cursor, CursorState::at_row(last_noted));
+    assert!(next_from_last_note.clamped);
 }
 
 fn row_ids_matching(

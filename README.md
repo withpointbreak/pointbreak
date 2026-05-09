@@ -27,7 +27,7 @@ The metaphor should stay light. Command names should remain mostly plain and pra
 Shore is for agent-aware code review in a terminal. It should help a human reviewer inspect:
 
 - the actual diff an agent left behind
-- the rationale the agent attached to files and hunks
+- the review notes an agent or reviewer attached to files and hunks
 - the hunk stream in the order the reviewer should read it
 - which notes are attached to which code rows
 - enough recoverable session state that review context is not lost when a UI is restarted
@@ -36,8 +36,9 @@ The first version should be a focused terminal review tool, not a generic "AI di
 
 ## Inspiration And Lessons
 
-Hunk is the practical inspiration: a terminal-first diff viewer with agent-context sidecars,
-hunk-level notes, live review sessions, and keyboard navigation across notes.
+Hunk is the practical inspiration: a terminal-first diff viewer with Hunk-compatible
+`agent-context.json` sidecars, hunk-level notes, live review sessions, and keyboard navigation
+across notes.
 
 Detailed field notes from a real agent-review session are captured in
 [docs/hunk-feedback.md](docs/hunk-feedback.md). Treat those notes as product input, especially
@@ -53,9 +54,9 @@ diff in a TUI. The hard part is keeping these behaviors aligned:
 - scroll position
 - selected hunk
 - note anchors
-- annotated-hunk navigation
+- note-hunk navigation
 - terminal resize behavior
-- saved or live agent context
+- saved or live review-note context
 
 Shore should avoid parallel sources of truth. Rendering, scrolling, and navigation should derive
 from one explicit review-stream model.
@@ -74,7 +75,7 @@ That model should own:
 - row and section geometry
 - note anchors and resolved note targets
 - hunk navigation cursors
-- annotated-hunk navigation cursors
+- note-hunk navigation cursors
 - serializable review/session state
 
 The TUI should be a projection of that model. Widgets may render state, but they should not become
@@ -90,10 +91,10 @@ Build:
 - working-tree `diff` support
 - tracked and untracked file support
 - unified-diff parsing into Shore's own file/hunk/row model
-- an `agent-context.json` sidecar loader
+- a native `review-notes.json` sidecar loader
 - a split terminal diff view
 - `[` and `]` navigation through the full hunk stream
-- `{` and `}` navigation through annotated hunks
+- `{` and `}` navigation through hunks with review notes
 - snapshot and acceptance fixtures for the review model
 
 Prefer shelling out to `git` at first. A VCS abstraction can come later if the model earns it.
@@ -136,19 +137,57 @@ them plainly:
 Line-level diff is acceptable for the first version. If word-level diff is deferred, make that an
 honest product constraint.
 
-## Agent Context
+## Review Notes Sidecar
+
+Shore's native sidecar is `review-notes.json`. It is a transport/import file for ordered review
+notes, not a persisted `.shore/` session-state format.
 
 The sidecar should stay review-oriented and concise:
 
 - one changeset summary
 - file summaries in narrative order
-- hunk-level or line-level annotations with real rationale
+- hunk-level or line-level review notes with clear title and body text
 
-Agent context belongs beside the code. The first UI should render notes spatially near the annotated
+Review notes belong beside the code. The first UI should render notes spatially near the targeted
 hunk or row, and note navigation should move through hunk-specific notes in the review stream.
 
 The sidecar file order is intentional. Shore should preserve that order when it differs from the raw
 Git diff order.
+
+Example native sidecar shape:
+
+```json
+{
+  "schema": "shore.review-notes",
+  "version": 1,
+  "summary": "Review notes for the current change",
+  "files": [
+    {
+      "path": "src/model/mod.rs",
+      "notes": [
+        {
+          "id": "note:decode-json",
+          "title": "decode_json keeps the error boundary explicit",
+          "body": "Full review note body in markdown.",
+          "target": {
+            "side": "new",
+            "startLine": 9,
+            "endLine": 9
+          },
+          "author": "reviewer",
+          "source": "codex",
+          "createdAt": "2026-05-09T00:04:07.818Z",
+          "tags": ["parser"],
+          "confidence": "high"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Shore can import Hunk-compatible `agent-context.json` through a legacy adapter, but Shore's native
+sidecar is `review-notes.json`.
 
 ## Future Session Model
 
@@ -190,9 +229,9 @@ Useful fixtures:
 - rename diffs
 - binary and mode-only changes
 - notes on context rows inside a hunk
-- current hunk not annotated, then `{` or `}` should resolve relative to the full stream
-- current hunk past the last annotation, then `}` should clamp to the last annotated hunk rather
-  than wrap
+- current hunk has no notes, then `{` or `}` should resolve relative to the full stream
+- current hunk past the last note, then `}` should clamp to the last hunk with notes rather than
+  wrap
 - terminal resize causing geometry recomputation
 - large synthetic changesets
 

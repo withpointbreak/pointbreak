@@ -1,7 +1,11 @@
-mod agent_context;
+mod legacy_hunk;
+mod legacy_hunk_agent_context;
+mod review_notes;
 
-pub use agent_context::{
-    AgentAnnotation, AgentContext, AgentFileContext, DiagnosticCode, DiagnosticLevel,
-    OrderedDiffFiles, Ownership, ParsedAgentContext, Range, ResolvedSidecarAnnotations,
-    SidecarDiagnostic, apply_file_order, parse_agent_context, resolve_annotations,
+pub use legacy_hunk::parse_hunk_agent_context;
+pub use review_notes::{
+    DiagnosticLevel, OrderedReviewNoteFiles, ParsedReviewNotes, ResolvedReviewNotes,
+    ReviewNoteEntry, ReviewNoteTarget, ReviewNotesDiagnostic, ReviewNotesDiagnosticCode,
+    ReviewNotesFile, ReviewNotesSidecar, apply_review_notes_file_order as apply_file_order,
+    parse_review_notes_sidecar, resolve_notes,
 };

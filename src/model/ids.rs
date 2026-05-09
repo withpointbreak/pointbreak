@@ -20,7 +20,7 @@ macro_rules! id_type {
 
 id_type!(ReviewId);
 id_type!(FileId);
-id_type!(AnnotationId);
+id_type!(ReviewNoteId);
 id_type!(SnapshotId);
 id_type!(HunkId);
 id_type!(RowId);
