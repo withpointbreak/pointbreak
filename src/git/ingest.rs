@@ -6,12 +6,22 @@ use crate::error::{Result, ShoreError};
 use crate::git::command::{run_git, run_git_allowing_statuses};
 use crate::git::patch::{PatchFile, parse_patch};
 use crate::git::raw::{RawFile, parse_raw};
-use crate::model::{
-    DiffFile, DiffSnapshot, FileId, FileMetadataKind, FileMetadataRow, ReviewId, SnapshotId,
-};
+use crate::model::{DiffFile, DiffSnapshot, FileId, FileMetadataKind, FileMetadataRow, ReviewId};
+use crate::session::worktree_fingerprint_for_files;
 
 pub fn ingest_tracked_diff(repo: impl AsRef<Path>) -> Result<DiffSnapshot> {
     let repo = repo.as_ref();
+    let files = capture_worktree_diff_files(repo)?;
+    let fingerprint = worktree_fingerprint_for_files(repo, &files)?;
+
+    Ok(DiffSnapshot::new(
+        ReviewId::new("working-tree"),
+        fingerprint.snapshot_id,
+        files,
+    ))
+}
+
+pub(crate) fn capture_worktree_diff_files(repo: &Path) -> Result<Vec<DiffFile>> {
     let raw_output = run_git(
         repo,
         [
@@ -62,11 +72,7 @@ pub fn ingest_tracked_diff(repo: impl AsRef<Path>) -> Result<DiffSnapshot> {
         .collect::<Result<Vec<_>>>()?;
     files.extend(synthesize_untracked_files(repo)?);
 
-    Ok(DiffSnapshot::new(
-        ReviewId::new("working-tree"),
-        SnapshotId::new("git-diff-head"),
-        files,
-    ))
+    Ok(files)
 }
 
 fn synthesize_untracked_files(repo: &Path) -> Result<Vec<DiffFile>> {

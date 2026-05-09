@@ -1,6 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize};
-use sha2::{Digest, Sha256};
 
+use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::error::{Result, ShoreError};
 use crate::model::{ActorId, EventId, ReviewId, RevisionId, SnapshotId, WorkUnitId};
 
@@ -53,10 +53,10 @@ impl ShoreEvent {
         }
 
         let payload = serde_json::to_value(payload)?;
-        let payload_hash = sha256_json_value(&payload)?;
+        let payload_hash = sha256_json_prefixed(&payload)?;
         let event_id = EventId::new(format!(
             "evt:sha256:{}",
-            sha256_bytes(idempotency_key.as_bytes())
+            sha256_bytes_hex(idempotency_key.as_bytes())
         ));
 
         Ok(Self {
@@ -226,51 +226,6 @@ impl From<FixedClock> for String {
     }
 }
 
-fn sha256_json_value(value: &serde_json::Value) -> Result<String> {
-    let canonical = canonical_json_value(value);
-    let bytes = serde_json::to_vec(&canonical)?;
-    Ok(format!("sha256:{}", sha256_bytes(&bytes)))
-}
-
-fn canonical_json_value(value: &serde_json::Value) -> serde_json::Value {
-    match value {
-        serde_json::Value::Array(values) => {
-            serde_json::Value::Array(values.iter().map(canonical_json_value).collect())
-        }
-        serde_json::Value::Object(object) => {
-            let mut keys = object.keys().collect::<Vec<_>>();
-            keys.sort_unstable();
-
-            let mut canonical = serde_json::Map::new();
-            for key in keys {
-                let value = object
-                    .get(key)
-                    .expect("key collected from object remains present");
-                canonical.insert(key.clone(), canonical_json_value(value));
-            }
-
-            serde_json::Value::Object(canonical)
-        }
-        _ => value.clone(),
-    }
-}
-
-fn sha256_bytes(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hex_lower(hasher.finalize().as_slice())
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
-}
-
 fn deserialize_non_empty_idempotency_key<'de, D>(
     deserializer: D,
 ) -> std::result::Result<String, D::Error>
@@ -386,12 +341,8 @@ mod tests {
                 .expect("json parses");
 
         assert_eq!(
-            sha256_json_value(&second).unwrap(),
-            sha256_json_value(&first).unwrap()
-        );
-        assert_eq!(
-            serde_json::to_string(&canonical_json_value(&first)).unwrap(),
-            r#"{"items":[{"c":3,"d":4}],"outer":{"a":1,"b":2}}"#
+            sha256_json_prefixed(&second).unwrap(),
+            sha256_json_prefixed(&first).unwrap()
         );
     }
 

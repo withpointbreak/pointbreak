@@ -6,5 +6,7 @@ pub mod session;
 pub mod sidecar;
 pub mod stream;
 
+mod canonical_hash;
+
 #[cfg(test)]
 mod test_tracing;
