@@ -17,4 +17,10 @@ pub enum ShoreError {
         stdout: String,
         stderr: String,
     },
+
+    #[error("invalid event: {message}")]
+    InvalidEvent { message: String },
+
+    #[error("unsupported event schema/version: {schema} v{version}")]
+    UnsupportedEventSchemaVersion { schema: String, version: u32 },
 }

@@ -16,7 +16,10 @@ where
 pub use cursor::CursorState;
 pub use file::{DiffFile, FileStatus};
 pub use hunk::ReviewHunk;
-pub use ids::{FileId, HunkId, ReviewId, ReviewNoteId, RowId, SnapshotId};
+pub use ids::{
+    ActorId, EventId, FileId, HunkId, ReviewId, ReviewNoteId, RevisionId, RowId, SnapshotId,
+    WorkUnitId,
+};
 pub use review::{DiffSnapshot, Review, ReviewStream};
 pub use review_note::{
     Anchor, AnchorResolution, AnchorResolutionReason, LineRange, ResolutionStatus, ReviewNote,
