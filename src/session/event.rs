@@ -4,7 +4,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::error::{Result, ShoreError};
-use crate::model::{ActorId, EventId, ReviewId, RevisionId, Side, SnapshotId, WorkUnitId};
+use crate::model::{
+    AcknowledgementId, ActorId, EventId, ReviewArtifactId, ReviewId, RevisionId, Side, SnapshotId,
+    WorkUnitId,
+};
 
 const EVENT_SCHEMA: &str = "shore.event";
 const EVENT_VERSION: u32 = 1;
@@ -95,6 +98,8 @@ pub enum EventType {
     SnapshotObserved,
     SidecarObserved,
     ReviewNoteImported,
+    ReviewArtifactPublished,
+    ReviewArtifactAcknowledged,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -132,6 +137,17 @@ impl Writer {
             },
         }
     }
+
+    pub fn shore_local_reviewer(version: impl Into<String>) -> Self {
+        Self {
+            actor_id: ActorId::new("actor:local"),
+            role: WriterRole::Reviewer,
+            tool: WriterTool {
+                name: "shore".to_owned(),
+                version: version.into(),
+            },
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -146,6 +162,23 @@ pub enum WriterRole {
 pub struct WriterTool {
     pub name: String,
     pub version: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerdictDecision {
+    Pass,
+    PassMinorNit,
+    RequestChanges,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AcknowledgementNextAction {
+    Accept,
+    Address,
+    Defer,
+    Obsolete,
 }
 
 pub trait EventPayload: Serialize {
@@ -248,6 +281,71 @@ pub struct ReviewNoteImportedPayload {
 impl EventPayload for ReviewNoteImportedPayload {
     fn event_type(&self) -> EventType {
         EventType::ReviewNoteImported
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewArtifactPublishedPayload {
+    pub review_artifact_id: ReviewArtifactId,
+    pub work_unit_id: WorkUnitId,
+    pub revision_id: RevisionId,
+    pub decision: VerdictDecision,
+    pub summary: Option<String>,
+    pub summary_artifact_path: Option<String>,
+    pub summary_byte_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replaces_review_artifact_ids: Vec<ReviewArtifactId>,
+    pub reviewer: Writer,
+}
+
+impl ReviewArtifactPublishedPayload {
+    pub fn idempotency_key(
+        work_unit_id: &WorkUnitId,
+        review_artifact_id: &ReviewArtifactId,
+    ) -> String {
+        format!(
+            "review_artifact_published:{}:{}",
+            work_unit_id.as_str(),
+            review_artifact_id.as_str()
+        )
+    }
+}
+
+impl EventPayload for ReviewArtifactPublishedPayload {
+    fn event_type(&self) -> EventType {
+        EventType::ReviewArtifactPublished
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewArtifactAcknowledgedPayload {
+    pub acknowledgement_id: AcknowledgementId,
+    pub review_artifact_id: ReviewArtifactId,
+    pub next_action: AcknowledgementNextAction,
+    pub reason: Option<String>,
+    pub reason_artifact_path: Option<String>,
+    pub reason_byte_size: Option<u64>,
+    pub acknowledger: Writer,
+}
+
+impl ReviewArtifactAcknowledgedPayload {
+    pub fn idempotency_key(
+        review_artifact_id: &ReviewArtifactId,
+        acknowledgement_id: &AcknowledgementId,
+    ) -> String {
+        format!(
+            "review_artifact_acknowledged:{}:{}",
+            review_artifact_id.as_str(),
+            acknowledgement_id.as_str()
+        )
+    }
+}
+
+impl EventPayload for ReviewArtifactAcknowledgedPayload {
+    fn event_type(&self) -> EventType {
+        EventType::ReviewArtifactAcknowledged
     }
 }
 
@@ -393,6 +491,97 @@ mod tests {
         assert_eq!(
             sha256_json_prefixed(&second).unwrap(),
             sha256_json_prefixed(&first).unwrap()
+        );
+    }
+
+    #[test]
+    fn writer_shore_local_reviewer_stamps_reviewer_role() {
+        let writer = Writer::shore_local_reviewer("0.0.1");
+
+        assert_eq!(writer.role, WriterRole::Reviewer);
+        assert_eq!(writer.tool.name, "shore");
+        assert_eq!(writer.tool.version, "0.0.1");
+    }
+
+    #[test]
+    fn verdict_decision_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&VerdictDecision::Pass).unwrap(),
+            "\"pass\""
+        );
+        assert_eq!(
+            serde_json::to_string(&VerdictDecision::PassMinorNit).unwrap(),
+            "\"pass_minor_nit\""
+        );
+        assert_eq!(
+            serde_json::to_string(&VerdictDecision::RequestChanges).unwrap(),
+            "\"request_changes\""
+        );
+    }
+
+    #[test]
+    fn acknowledgement_next_action_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&AcknowledgementNextAction::Accept).unwrap(),
+            "\"accept\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AcknowledgementNextAction::Address).unwrap(),
+            "\"address\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AcknowledgementNextAction::Defer).unwrap(),
+            "\"defer\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AcknowledgementNextAction::Obsolete).unwrap(),
+            "\"obsolete\""
+        );
+    }
+
+    #[test]
+    fn review_artifact_published_payload_round_trips_and_hashes_deterministically() {
+        let payload = ReviewArtifactPublishedPayload {
+            review_artifact_id: ReviewArtifactId::new("review-artifact:sha256:abc"),
+            work_unit_id: WorkUnitId::new("wu:1"),
+            revision_id: RevisionId::new("rev:sha256:r1"),
+            decision: VerdictDecision::Pass,
+            summary: Some("Looks good.".to_owned()),
+            summary_artifact_path: None,
+            summary_byte_size: Some(11),
+            replaces_review_artifact_ids: vec![],
+            reviewer: Writer::shore_local_reviewer("0.0.1"),
+        };
+        let hash_a = crate::canonical_hash::sha256_json_hex(&payload).unwrap();
+        let hash_b = crate::canonical_hash::sha256_json_hex(&payload.clone()).unwrap();
+        assert_eq!(hash_a, hash_b);
+
+        let json = serde_json::to_value(&payload).unwrap();
+        let round: ReviewArtifactPublishedPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(round.decision, VerdictDecision::Pass);
+    }
+
+    #[test]
+    fn review_artifact_published_idempotency_key_is_stable() {
+        let key = ReviewArtifactPublishedPayload::idempotency_key(
+            &WorkUnitId::new("wu:1"),
+            &ReviewArtifactId::new("review-artifact:sha256:abc"),
+        );
+        assert_eq!(
+            key,
+            "review_artifact_published:wu:1:review-artifact:sha256:abc"
+        );
+    }
+
+    #[test]
+    fn review_artifact_acknowledged_idempotency_key_is_stable() {
+        let key = ReviewArtifactAcknowledgedPayload::idempotency_key(
+            &ReviewArtifactId::new("review-artifact:sha256:abc"),
+            &AcknowledgementId::new("ack:sha256:def"),
+        );
+        assert_eq!(
+            key,
+            "review_artifact_acknowledged:review-artifact:sha256:abc:ack:sha256:def"
         );
     }
 

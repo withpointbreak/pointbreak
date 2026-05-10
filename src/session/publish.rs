@@ -494,22 +494,36 @@ fn supersedes_revision_ids(
 }
 
 pub(crate) fn writer_from_git_config(repo: &Path) -> Writer {
-    let actor_id = git_config_value(repo, "user.email")
-        .map(|email| ActorId::new(format!("actor:git-email:{email}")))
-        .or_else(|| {
-            git_config_value(repo, "user.name")
-                .map(|name| ActorId::new(format!("actor:git-name:{name}")))
-        })
-        .unwrap_or_else(|| ActorId::new("actor:local"));
-
     Writer {
-        actor_id,
+        actor_id: actor_id_from_git_config(repo),
         role: WriterRole::Author,
         tool: WriterTool {
             name: "shore".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
         },
     }
+}
+
+#[allow(dead_code)]
+pub(crate) fn reviewer_from_git_config(repo: &Path) -> Writer {
+    Writer {
+        actor_id: actor_id_from_git_config(repo),
+        role: WriterRole::Reviewer,
+        tool: WriterTool {
+            name: "shore".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+        },
+    }
+}
+
+fn actor_id_from_git_config(repo: &Path) -> ActorId {
+    git_config_value(repo, "user.email")
+        .map(|email| ActorId::new(format!("actor:git-email:{email}")))
+        .or_else(|| {
+            git_config_value(repo, "user.name")
+                .map(|name| ActorId::new(format!("actor:git-name:{name}")))
+        })
+        .unwrap_or_else(|| ActorId::new("actor:local"))
 }
 
 fn git_config_value(repo: &Path, key: &str) -> Option<String> {
@@ -545,6 +559,8 @@ fn event_type_key(event_type: EventType) -> &'static str {
         EventType::SnapshotObserved => "snapshot_observed",
         EventType::SidecarObserved => "sidecar_observed",
         EventType::ReviewNoteImported => "review_note_imported",
+        EventType::ReviewArtifactPublished => "review_artifact_published",
+        EventType::ReviewArtifactAcknowledged => "review_artifact_acknowledged",
     }
 }
 
@@ -557,6 +573,8 @@ fn event_type_sidecar_source_key(source: SidecarSource) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::event_type_key;
     use crate::session::EventType;
 
@@ -566,5 +584,81 @@ mod tests {
             event_type_key(EventType::ReviewNoteImported),
             "review_note_imported"
         );
+    }
+
+    #[test]
+    fn event_type_key_covers_the_new_variants() {
+        assert_eq!(
+            event_type_key(EventType::ReviewArtifactPublished),
+            "review_artifact_published"
+        );
+        assert_eq!(
+            event_type_key(EventType::ReviewArtifactAcknowledged),
+            "review_artifact_acknowledged"
+        );
+    }
+
+    #[test]
+    fn reviewer_from_git_config_uses_email_then_name_then_actor_local() {
+        let email_repo = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(email_repo.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "reviewer@example.com"])
+            .current_dir(email_repo.path())
+            .output()
+            .unwrap();
+        let email_writer = super::reviewer_from_git_config(email_repo.path());
+        assert_eq!(
+            email_writer.actor_id.as_str(),
+            "actor:git-email:reviewer@example.com"
+        );
+        assert_eq!(email_writer.role, crate::session::WriterRole::Reviewer);
+
+        let name_repo = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(name_repo.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", ""])
+            .current_dir(name_repo.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "reviewer-name"])
+            .current_dir(name_repo.path())
+            .output()
+            .unwrap();
+        let name_writer = super::reviewer_from_git_config(name_repo.path());
+        assert_eq!(
+            name_writer.actor_id.as_str(),
+            "actor:git-name:reviewer-name"
+        );
+        assert_eq!(name_writer.role, crate::session::WriterRole::Reviewer);
+
+        let local_repo = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(local_repo.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", ""])
+            .current_dir(local_repo.path())
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", ""])
+            .current_dir(local_repo.path())
+            .output()
+            .unwrap();
+        let local_writer = super::reviewer_from_git_config(local_repo.path());
+        assert_eq!(local_writer.actor_id.as_str(), "actor:local");
+        assert_eq!(local_writer.role, crate::session::WriterRole::Reviewer);
     }
 }

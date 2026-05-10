@@ -106,8 +106,8 @@ Prefer shelling out to `git` at first. A VCS abstraction can come later if the m
 
 ## Current CLI
 
-The current executable surfaces are `shore show`, `shore dump`, and
-`shore review publish`.
+The current executable surfaces are `shore show`, `shore dump`, `shore review publish`,
+`shore review verdict`, `shore review ack`, and `shore notes apply`.
 
 All commands accept optional tracing flags:
 
@@ -196,6 +196,51 @@ Behavior:
 `shore review publish` does not add a daemon, delivery queue, acknowledgement flow, intervention
 runtime, async or remote storage backend, or note mutation. `.shore/events/` is the local
 authoritative event log, not a mailbox or retry queue.
+
+`shore review verdict` records a reviewer verdict against the current or named revision:
+
+```bash
+shore review verdict [--repo <path>] --decision <pass|pass-minor-nit|request-changes> \
+  [--summary <text> | --summary-file <path>] [--target-revision <revision-id>] \
+  [--replaces <review-artifact-id>...] [--reviewer-id <opaque>]
+```
+
+Behavior:
+
+- `--repo <path>` defaults to `.` and may point at the repository root or a subdirectory inside it.
+- `--decision` is required and uses reviewer-oriented verdict vocabulary.
+- `--summary` and `--summary-file` are mutually exclusive.
+- `--target-revision <revision-id>` overrides the current durable revision; otherwise Shore uses the
+  current revision projected from `.shore/state.json`.
+- `--replaces <review-artifact-id>` marks older verdict artifacts as superseded inline in the new
+  verdict event.
+- `--reviewer-id <opaque>` overrides the reviewer actor ID; otherwise Shore derives reviewer
+  identity from local Git config.
+- Large summaries are externalized as content-addressed `shore.note-body` artifacts under
+  `.shore/artifacts/notes/`; small summaries remain inline in the durable event payload.
+- Output is compact `shore.review-verdict` JSON with the returned `reviewArtifactId`, event counts,
+  and diagnostics.
+
+`shore review ack` records an acknowledgement against a published review artifact:
+
+```bash
+shore review ack [--repo <path>] --review-artifact <review-artifact-id> \
+  --next-action <accept|address|defer|obsolete> [--reason <text> | --reason-file <path>] \
+  [--actor-id <opaque>]
+```
+
+Behavior:
+
+- `--repo <path>` defaults to `.` and may point at the repository root or a subdirectory inside it.
+- `--review-artifact <review-artifact-id>` is required and must reference an existing published
+  review artifact in the local event store.
+- `--next-action` is required and records the acknowledgement decision.
+- `--reason` and `--reason-file` are mutually exclusive.
+- `--actor-id <opaque>` overrides the acknowledging actor ID; otherwise Shore derives author-side
+  identity from local Git config.
+- Large reasons reuse the shared `shore.note-body` artifact path under `.shore/artifacts/notes/`.
+- Output is compact `shore.review-ack` JSON with the returned `acknowledgementId`, event counts,
+  and diagnostics.
 
 `shore notes apply` imports review notes into Shore-owned durable state without publishing a
 revision:

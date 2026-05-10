@@ -1,4 +1,30 @@
+use std::ffi::OsStr;
+use std::process::{Command, Output};
+
 #[allow(dead_code)]
 pub mod git_repo;
 #[allow(dead_code)]
 pub mod snapshots;
+
+#[allow(dead_code)]
+pub fn shore<I, S>(args: I) -> Output
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    Command::new(env!("CARGO_BIN_EXE_shore"))
+        .args(args)
+        .env_remove("SHORE_LOG")
+        .env_remove("RUST_LOG")
+        .output()
+        .expect("run shore binary")
+}
+
+#[allow(dead_code)]
+pub fn dump_repo() -> git_repo::GitRepo {
+    let repo = git_repo::GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    repo
+}

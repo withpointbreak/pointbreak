@@ -3,9 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, ShoreError};
-use crate::model::{ReviewId, RevisionId, SnapshotId, WorkUnitId};
+use crate::model::{ReviewArtifactId, ReviewId, RevisionId, SnapshotId, WorkUnitId};
 use crate::session::event::{
-    EventType, RevisionPublishedPayload, ShoreEvent, SnapshotObservedPayload,
+    EventType, ReviewArtifactAcknowledgedPayload, ReviewArtifactPublishedPayload,
+    RevisionPublishedPayload, ShoreEvent, SnapshotObservedPayload, VerdictDecision,
 };
 
 const STATE_SCHEMA: &str = "shore.state";
@@ -23,6 +24,12 @@ pub struct SessionState {
     pub event_count: usize,
     pub sidecar_count: usize,
     pub note_count: usize,
+    #[serde(default)]
+    pub review_artifact_count: usize,
+    #[serde(default)]
+    pub acknowledgement_count: usize,
+    #[serde(default)]
+    pub last_verdict_decision: Option<VerdictDecision>,
     pub diagnostics: Vec<ProjectionDiagnostic>,
 }
 
@@ -63,6 +70,10 @@ struct StateReducer {
     snapshots_by_revision_id: BTreeMap<RevisionId, SnapshotId>,
     sidecar_count: usize,
     note_count: usize,
+    review_artifact_count: usize,
+    acknowledgement_count: usize,
+    published_artifacts: BTreeMap<ReviewArtifactId, (RevisionId, VerdictDecision)>,
+    replaced_artifacts: BTreeSet<ReviewArtifactId>,
 }
 
 impl Default for StateReducer {
@@ -75,6 +86,10 @@ impl Default for StateReducer {
             snapshots_by_revision_id: BTreeMap::new(),
             sidecar_count: 0,
             note_count: 0,
+            review_artifact_count: 0,
+            acknowledgement_count: 0,
+            published_artifacts: BTreeMap::new(),
+            replaced_artifacts: BTreeSet::new(),
         }
     }
 }
@@ -100,6 +115,12 @@ impl StateReducer {
             }
             EventType::ReviewNoteImported => {
                 self.note_count += 1;
+            }
+            EventType::ReviewArtifactPublished => {
+                self.apply_review_artifact_published(event)?;
+            }
+            EventType::ReviewArtifactAcknowledged => {
+                self.apply_review_artifact_acknowledged(event)?;
             }
         }
 
@@ -131,6 +152,26 @@ impl StateReducer {
         Ok(())
     }
 
+    fn apply_review_artifact_published(&mut self, event: &ShoreEvent) -> Result<()> {
+        let payload: ReviewArtifactPublishedPayload =
+            serde_json::from_value(event.payload.clone())?;
+        self.review_artifact_count += 1;
+        for review_artifact_id in payload.replaces_review_artifact_ids {
+            self.replaced_artifacts.insert(review_artifact_id);
+        }
+        self.published_artifacts.insert(
+            payload.review_artifact_id,
+            (payload.revision_id, payload.decision),
+        );
+        Ok(())
+    }
+
+    fn apply_review_artifact_acknowledged(&mut self, event: &ShoreEvent) -> Result<()> {
+        let _: ReviewArtifactAcknowledgedPayload = serde_json::from_value(event.payload.clone())?;
+        self.acknowledgement_count += 1;
+        Ok(())
+    }
+
     fn finish(self, event_count: usize) -> Result<SessionState> {
         let mut diagnostics = Vec::new();
         let unsuperseded_revision_ids = self
@@ -153,6 +194,39 @@ impl StateReducer {
             .as_ref()
             .and_then(|revision_id| self.snapshots_by_revision_id.get(revision_id))
             .cloned();
+        let last_verdict_decision = match current_revision_id.as_ref() {
+            Some(revision_id) => {
+                let candidate_ids = self
+                    .published_artifacts
+                    .iter()
+                    .filter(|(review_artifact_id, (artifact_revision_id, _))| {
+                        artifact_revision_id == revision_id
+                            && !self.replaced_artifacts.contains(*review_artifact_id)
+                    })
+                    .map(|(review_artifact_id, (_, decision))| (review_artifact_id, *decision))
+                    .collect::<Vec<_>>();
+                match candidate_ids.as_slice() {
+                    [] => None,
+                    [(_, decision)] => Some(*decision),
+                    _ => {
+                        diagnostics.push(ProjectionDiagnostic {
+                            code: "ambiguous_current_verdict".to_owned(),
+                            message: format!(
+                                "multiple unsuperseded verdicts remain current for revision {}: {}",
+                                revision_id.as_str(),
+                                candidate_ids
+                                    .iter()
+                                    .map(|(review_artifact_id, _)| review_artifact_id.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                        });
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
 
         Ok(SessionState {
             schema: STATE_SCHEMA.to_owned(),
@@ -164,6 +238,9 @@ impl StateReducer {
             event_count,
             sidecar_count: self.sidecar_count,
             note_count: self.note_count,
+            review_artifact_count: self.review_artifact_count,
+            acknowledgement_count: self.acknowledgement_count,
+            last_verdict_decision,
             diagnostics,
         })
     }
@@ -172,8 +249,13 @@ impl StateReducer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ReviewId, RevisionId, Side, SnapshotId, WorkUnitId};
-    use crate::session::event::{ImportedNoteTarget, ReviewNoteImportedPayload};
+    use crate::model::{
+        AcknowledgementId, ReviewArtifactId, ReviewId, RevisionId, Side, SnapshotId, WorkUnitId,
+    };
+    use crate::session::event::{
+        AcknowledgementNextAction, ImportedNoteTarget, ReviewArtifactAcknowledgedPayload,
+        ReviewArtifactPublishedPayload, ReviewNoteImportedPayload, VerdictDecision,
+    };
     use crate::session::{
         EventTarget, EventType, ReviewInitializedPayload, RevisionPublishedPayload, ShoreEvent,
         SidecarObservedPayload, SidecarSource, SnapshotObservedPayload, Writer,
@@ -266,6 +348,98 @@ mod tests {
     }
 
     #[test]
+    fn review_artifact_published_increments_count_order_independently() {
+        let events_a = vec![
+            publish_event(),
+            verdict_event("review-artifact:sha256:a"),
+            verdict_event("review-artifact:sha256:b"),
+        ];
+        let events_b = vec![
+            verdict_event("review-artifact:sha256:b"),
+            publish_event(),
+            verdict_event("review-artifact:sha256:a"),
+        ];
+
+        let state_a = SessionState::from_events(&events_a).expect("state builds");
+        let state_b = SessionState::from_events(&events_b).expect("state builds");
+
+        assert_eq!(state_a.review_artifact_count, 2);
+        assert_eq!(state_a, state_b);
+    }
+
+    #[test]
+    fn acknowledgement_count_is_order_independent() {
+        let order_one = vec![
+            ack_event("ack:sha256:a", "review-artifact:sha256:a"),
+            ack_event("ack:sha256:b", "review-artifact:sha256:a"),
+        ];
+        let order_two = vec![
+            ack_event("ack:sha256:b", "review-artifact:sha256:a"),
+            ack_event("ack:sha256:a", "review-artifact:sha256:a"),
+        ];
+
+        let state_a = SessionState::from_events(&order_one).expect("state builds");
+        let state_b = SessionState::from_events(&order_two).expect("state builds");
+
+        assert_eq!(state_a.acknowledgement_count, 2);
+        assert_eq!(state_a, state_b);
+    }
+
+    #[test]
+    fn last_verdict_decision_resolves_when_one_artifact_unreplaced() {
+        let events = vec![
+            publish_event(),
+            verdict_event_with("review-artifact:sha256:v1", VerdictDecision::Pass, vec![]),
+            verdict_event_with(
+                "review-artifact:sha256:v2",
+                VerdictDecision::RequestChanges,
+                vec!["review-artifact:sha256:v1"],
+            ),
+        ];
+
+        let state = SessionState::from_events(&events).expect("state builds");
+
+        assert_eq!(
+            state.last_verdict_decision,
+            Some(VerdictDecision::RequestChanges)
+        );
+    }
+
+    #[test]
+    fn last_verdict_decision_is_none_and_emits_diagnostic_when_ambiguous() {
+        let events = vec![
+            publish_event(),
+            verdict_event_with("review-artifact:sha256:v1", VerdictDecision::Pass, vec![]),
+            verdict_event_with("review-artifact:sha256:v2", VerdictDecision::Pass, vec![]),
+        ];
+
+        let state = SessionState::from_events(&events).expect("state builds");
+
+        assert_eq!(state.last_verdict_decision, None);
+        assert!(
+            state
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "ambiguous_current_verdict")
+        );
+    }
+
+    #[test]
+    fn state_serialization_does_not_embed_event_lists_or_artifact_maps() {
+        let events = vec![
+            publish_event(),
+            verdict_event("review-artifact:sha256:a"),
+            ack_event("ack:sha256:a", "review-artifact:sha256:a"),
+        ];
+
+        let state = SessionState::from_events(&events).expect("state builds");
+        let json = serde_json::to_value(&state).expect("state serializes");
+
+        assert!(json.get("publishedReviewArtifactIds").is_none());
+        assert!(json.get("acknowledgedReviewArtifactIds").is_none());
+    }
+
+    #[test]
     fn projection_rejects_unsupported_event_schema_version() {
         let mut event = revision_published("rev:worktree:sha256:one", vec![]);
         event.version = 2;
@@ -294,6 +468,27 @@ mod tests {
             error,
             ShoreError::UnsupportedStateSchemaVersion { .. }
         ));
+    }
+
+    #[test]
+    fn state_deserialization_defaults_new_bounded_verdict_fields() {
+        let projection: SessionState = serde_json::from_value(serde_json::json!({
+            "schema": "shore.state",
+            "version": 1,
+            "reviewId": "review:default",
+            "workUnitId": "work:default",
+            "currentRevisionId": null,
+            "currentSnapshotId": null,
+            "eventCount": 0,
+            "sidecarCount": 0,
+            "noteCount": 0,
+            "diagnostics": []
+        }))
+        .expect("projection deserializes");
+
+        assert_eq!(projection.review_artifact_count, 0);
+        assert_eq!(projection.acknowledgement_count, 0);
+        assert_eq!(projection.last_verdict_decision, None);
     }
 
     fn review_initialized(review_id: &str, work_unit_id: &str) -> ShoreEvent {
@@ -397,6 +592,72 @@ mod tests {
             "2026-05-09T20:42:45Z",
         )
         .expect("review note imported event builds")
+    }
+
+    fn publish_event() -> ShoreEvent {
+        revision_published("rev:worktree:sha256:current", vec![])
+    }
+
+    fn verdict_event(review_artifact_id: &str) -> ShoreEvent {
+        verdict_event_with(review_artifact_id, VerdictDecision::Pass, vec![])
+    }
+
+    fn verdict_event_with(
+        review_artifact_id: &str,
+        decision: VerdictDecision,
+        replaces_review_artifact_ids: Vec<&str>,
+    ) -> ShoreEvent {
+        let review_artifact_id = ReviewArtifactId::new(review_artifact_id);
+        ShoreEvent::new(
+            EventType::ReviewArtifactPublished,
+            ReviewArtifactPublishedPayload::idempotency_key(
+                &WorkUnitId::new("work:default"),
+                &review_artifact_id,
+            ),
+            target("review:default", "work:default"),
+            Writer::shore_local_reviewer("0.1.0"),
+            ReviewArtifactPublishedPayload {
+                review_artifact_id,
+                work_unit_id: WorkUnitId::new("work:default"),
+                revision_id: RevisionId::new("rev:worktree:sha256:current"),
+                decision,
+                summary: Some("looks good".to_owned()),
+                summary_artifact_path: None,
+                summary_byte_size: Some(10),
+                replaces_review_artifact_ids: replaces_review_artifact_ids
+                    .into_iter()
+                    .map(ReviewArtifactId::new)
+                    .collect(),
+                reviewer: Writer::shore_local_reviewer("0.1.0"),
+            },
+            "2026-05-10T00:00:00Z",
+        )
+        .expect("review artifact published event builds")
+    }
+
+    fn ack_event(acknowledgement_id: &str, review_artifact_id: &str) -> ShoreEvent {
+        let acknowledgement_id = AcknowledgementId::new(acknowledgement_id);
+        let review_artifact_id = ReviewArtifactId::new(review_artifact_id);
+        ShoreEvent::new(
+            EventType::ReviewArtifactAcknowledged,
+            ReviewArtifactAcknowledgedPayload::idempotency_key(
+                &review_artifact_id,
+                &acknowledgement_id,
+            ),
+            target("review:default", "work:default"),
+            Writer::shore_local_author("0.1.0"),
+            ReviewArtifactAcknowledgedPayload {
+                acknowledgement_id,
+                review_artifact_id,
+                next_action: AcknowledgementNextAction::Accept,
+                reason: Some("accepted".to_owned()),
+                reason_artifact_path: None,
+                reason_byte_size: Some(8),
+                acknowledger: Writer::shore_local_author("0.1.0"),
+            },
+            "2026-05-10T00:00:00Z",
+        )
+        .expect("review artifact acknowledged event builds")
     }
 
     fn target(review_id: &str, work_unit_id: &str) -> EventTarget {

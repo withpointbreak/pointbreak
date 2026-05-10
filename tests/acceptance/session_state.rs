@@ -1,7 +1,10 @@
 use shore::git::{git_worktree_root, ingest_tracked_diff};
+use shore::model::ReviewArtifactId;
+use shore::session::event::{AcknowledgementNextAction, VerdictDecision};
 use shore::session::{
-    EventType, ImportNotesOptions, PublishOptions, RevisionPublishedPayload, SessionState,
-    ShoreEvent, capture_worktree_fingerprint, ensure_shore_ignored, import_notes,
+    AcknowledgeReviewOptions, EventType, ImportNotesOptions, PublishOptions, PublishVerdictOptions,
+    RevisionPublishedPayload, SessionState, ShoreEvent, acknowledge_review,
+    capture_worktree_fingerprint, ensure_shore_ignored, import_notes, publish_verdict,
     publish_worktree_review, read_events, rebuild_state, shore_dir_for_repo,
 };
 
@@ -165,6 +168,9 @@ fn first_publish_creates_shore_store_events_artifacts_and_state() {
     assert_eq!(state.current_revision_id, Some(result.revision_id));
     assert_eq!(state.current_snapshot_id, Some(result.snapshot_id));
     assert_eq!(state.event_count, 3);
+    assert_eq!(state.review_artifact_count, 0);
+    assert_eq!(state.acknowledgement_count, 0);
+    assert_eq!(state.last_verdict_decision, None);
 }
 
 #[test]
@@ -661,6 +667,10 @@ fn first_note_event(repo: &GitRepo) -> ShoreEvent {
         .expect("review note imported event exists")
 }
 
+fn read_session_state(repo: &std::path::Path) -> SessionState {
+    serde_json::from_str(&std::fs::read_to_string(repo.join(".shore/state.json")).unwrap()).unwrap()
+}
+
 fn write_native_review_notes(repo: &GitRepo) -> std::path::PathBuf {
     let sidecar = repo.path().join("review-notes.json");
     std::fs::write(&sidecar, native_review_notes_json()).unwrap();
@@ -833,5 +843,226 @@ fn load_durable_notes_for_repo_still_works_with_small_inline_bodies() {
     assert_eq!(
         parsed.sidecar.files[0].notes[0].body.as_deref(),
         Some(small_body)
+    );
+}
+
+#[test]
+fn publish_verdict_records_review_artifact_event_and_increments_state() {
+    let repo = modified_repo();
+    publish_worktree_review(PublishOptions::new(repo.path())).unwrap();
+
+    let result = publish_verdict(
+        PublishVerdictOptions::new(repo.path())
+            .with_decision(VerdictDecision::Pass)
+            .with_summary("Looks good."),
+    )
+    .unwrap();
+
+    assert_eq!(result.events_created, 1);
+    let state = read_session_state(repo.path());
+    assert_eq!(state.review_artifact_count, 1);
+    assert_eq!(state.last_verdict_decision, Some(VerdictDecision::Pass));
+}
+
+#[test]
+fn publish_verdict_is_idempotent_on_identical_inputs() {
+    let repo = modified_repo();
+    publish_worktree_review(PublishOptions::new(repo.path())).unwrap();
+    let opts = || {
+        PublishVerdictOptions::new(repo.path())
+            .with_decision(VerdictDecision::Pass)
+            .with_summary("Looks good.")
+    };
+
+    let first = publish_verdict(opts()).unwrap();
+    let second = publish_verdict(opts()).unwrap();
+
+    assert_eq!(first.review_artifact_id, second.review_artifact_id);
+    assert_eq!(second.events_created, 0);
+    assert_eq!(second.events_existing, 1);
+}
+
+#[test]
+fn publish_verdict_externalizes_large_summaries() {
+    let repo = modified_repo();
+    publish_worktree_review(PublishOptions::new(repo.path())).unwrap();
+    let large = "x".repeat(5000);
+
+    publish_verdict(
+        PublishVerdictOptions::new(repo.path())
+            .with_decision(VerdictDecision::Pass)
+            .with_summary(&large),
+    )
+    .unwrap();
+
+    let artifacts: Vec<_> = std::fs::read_dir(repo.path().join(".shore/artifacts/notes"))
+        .unwrap()
+        .collect();
+    assert!(!artifacts.is_empty(), "expected at least one body artifact");
+}
+
+#[test]
+fn publish_verdict_errors_with_no_current_revision() {
+    let repo = modified_repo();
+
+    let err = publish_verdict(
+        PublishVerdictOptions::new(repo.path()).with_decision(VerdictDecision::Pass),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("no current revision"));
+
+    let events_dir = repo.path().join(".shore/events");
+    assert!(!events_dir.exists() || std::fs::read_dir(&events_dir).unwrap().count() == 0);
+}
+
+#[test]
+fn publish_verdict_with_replaces_supersedes_prior_verdicts() {
+    let repo = modified_repo();
+    publish_worktree_review(PublishOptions::new(repo.path())).unwrap();
+
+    let first = publish_verdict(
+        PublishVerdictOptions::new(repo.path())
+            .with_decision(VerdictDecision::RequestChanges)
+            .with_summary("rev1"),
+    )
+    .unwrap();
+    let second = publish_verdict(
+        PublishVerdictOptions::new(repo.path())
+            .with_decision(VerdictDecision::Pass)
+            .with_summary("rev2")
+            .replacing(vec![first.review_artifact_id]),
+    )
+    .unwrap();
+
+    let state = read_session_state(repo.path());
+    assert_eq!(state.review_artifact_count, 2);
+    assert_eq!(state.last_verdict_decision, Some(VerdictDecision::Pass));
+    let _ = second;
+}
+
+#[test]
+fn acknowledge_review_records_event_and_increments_state() {
+    let repo = modified_repo();
+    publish_worktree_review(PublishOptions::new(repo.path())).unwrap();
+    let verdict = publish_verdict(
+        PublishVerdictOptions::new(repo.path()).with_decision(VerdictDecision::Pass),
+    )
+    .unwrap();
+
+    let result = acknowledge_review(
+        AcknowledgeReviewOptions::new(repo.path(), verdict.review_artifact_id.clone())
+            .with_next_action(AcknowledgementNextAction::Accept)
+            .with_reason("ack"),
+    )
+    .unwrap();
+
+    assert_eq!(result.events_created, 1);
+    let state = read_session_state(repo.path());
+    assert_eq!(state.acknowledgement_count, 1);
+}
+
+#[test]
+fn acknowledge_review_is_idempotent_on_identical_inputs() {
+    let repo = modified_repo();
+    publish_worktree_review(PublishOptions::new(repo.path())).unwrap();
+    let verdict = publish_verdict(
+        PublishVerdictOptions::new(repo.path()).with_decision(VerdictDecision::Pass),
+    )
+    .unwrap();
+    let opts = || {
+        AcknowledgeReviewOptions::new(repo.path(), verdict.review_artifact_id.clone())
+            .with_next_action(AcknowledgementNextAction::Accept)
+            .with_reason("ack")
+    };
+
+    let first = acknowledge_review(opts()).unwrap();
+    let second = acknowledge_review(opts()).unwrap();
+    assert_eq!(first.acknowledgement_id, second.acknowledgement_id);
+    assert_eq!(second.events_created, 0);
+    assert_eq!(second.events_existing, 1);
+}
+
+#[test]
+fn acknowledge_review_errors_when_artifact_unknown() {
+    let repo = modified_repo();
+    publish_worktree_review(PublishOptions::new(repo.path())).unwrap();
+
+    let err = acknowledge_review(
+        AcknowledgeReviewOptions::new(
+            repo.path(),
+            ReviewArtifactId::new("review-artifact:sha256:nonexistent"),
+        )
+        .with_next_action(AcknowledgementNextAction::Accept),
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .to_lowercase()
+            .contains("unknown review artifact")
+    );
+
+    let state = read_session_state(repo.path());
+    assert_eq!(state.acknowledgement_count, 0);
+}
+
+#[test]
+fn acknowledge_review_externalizes_large_reasons() {
+    let repo = modified_repo();
+    publish_worktree_review(PublishOptions::new(repo.path())).unwrap();
+    let verdict = publish_verdict(
+        PublishVerdictOptions::new(repo.path()).with_decision(VerdictDecision::Pass),
+    )
+    .unwrap();
+    let large = "y".repeat(5000);
+
+    acknowledge_review(
+        AcknowledgeReviewOptions::new(repo.path(), verdict.review_artifact_id)
+            .with_next_action(AcknowledgementNextAction::Address)
+            .with_reason(&large),
+    )
+    .unwrap();
+
+    let artifacts: Vec<_> = std::fs::read_dir(repo.path().join(".shore/artifacts/notes"))
+        .unwrap()
+        .collect();
+    assert!(!artifacts.is_empty());
+}
+
+#[test]
+fn publish_verdict_ack_rebuild_flow_preserves_state() {
+    let repo = modified_repo();
+    publish_worktree_review(PublishOptions::new(repo.path())).unwrap();
+    let first = publish_verdict(
+        PublishVerdictOptions::new(repo.path())
+            .with_decision(VerdictDecision::RequestChanges)
+            .with_summary("first pass"),
+    )
+    .unwrap();
+    let second = publish_verdict(
+        PublishVerdictOptions::new(repo.path())
+            .with_decision(VerdictDecision::Pass)
+            .with_summary("second pass")
+            .replacing(vec![first.review_artifact_id.clone()]),
+    )
+    .unwrap();
+    acknowledge_review(
+        AcknowledgeReviewOptions::new(repo.path(), second.review_artifact_id.clone())
+            .with_next_action(AcknowledgementNextAction::Accept)
+            .with_reason("ship it"),
+    )
+    .unwrap();
+
+    std::fs::remove_file(repo.path().join(".shore/state.json")).unwrap();
+    rebuild_state(repo.path()).unwrap();
+
+    let state = read_session_state(repo.path());
+    assert_eq!(state.review_artifact_count, 2);
+    assert_eq!(state.acknowledgement_count, 1);
+    assert_eq!(state.last_verdict_decision, Some(VerdictDecision::Pass));
+    assert!(
+        state
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "ambiguous_current_verdict")
     );
 }

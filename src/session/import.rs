@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
 use serde_json::json;
 
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::error::{Result, ShoreError};
 use crate::git::git_worktree_root;
 use crate::model::WorkUnitId;
+use crate::session::body_artifact::{BodyArtifactOutcome, stage_body_artifact};
 use crate::session::event::{
     EventTarget, EventType, ImportedNoteTarget, ReviewInitializedPayload,
     ReviewNoteImportedPayload, ShoreEvent, SidecarSource,
@@ -16,21 +16,11 @@ use crate::session::{ProjectionDiagnostic, SessionState, ensure_shore_ignored};
 use crate::sidecar::{ReviewNoteEntry, ReviewNoteTarget, ReviewNotesFile, ReviewNotesSidecar};
 use crate::storage::{Durability, EventStore, EventWriteOutcome, LocalStorage, TempSweepAge};
 
-pub(crate) const BODY_INLINE_LIMIT: usize = 4096;
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct NoteImportRecord {
     pub(crate) idempotency_key: String,
     pub(crate) payload: ReviewNoteImportedPayload,
     pub(crate) body_artifact_bytes: Option<Vec<u8>>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct NoteBodyArtifact<'a> {
-    schema: &'static str,
-    version: u32,
-    body: &'a str,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -163,8 +153,25 @@ pub(crate) fn extract_note_import_records(
     for file in &sidecar.files {
         for note in &file.notes {
             let note_id = stable_note_id(file, note)?;
-            let (body, body_artifact_path, body_artifact_bytes, body_byte_size) =
-                note_body_storage(note.body.as_deref())?;
+            let (body, body_artifact_path, body_artifact_bytes, body_byte_size) = match note
+                .body
+                .as_deref()
+            {
+                Some(body) => match stage_body_artifact(body.as_bytes())? {
+                    BodyArtifactOutcome::Inline { .. } => (Some(body.to_owned()), None, None, None),
+                    BodyArtifactOutcome::Artifact {
+                        relative_path,
+                        byte_size,
+                        body_envelope,
+                    } => (
+                        None,
+                        Some(relative_path),
+                        Some(body_envelope.to_json_bytes()?),
+                        Some(byte_size as usize),
+                    ),
+                },
+                None => (None, None, None, None),
+            };
 
             let payload = ReviewNoteImportedPayload {
                 sidecar_source,
@@ -219,38 +226,6 @@ fn stable_note_id(file: &ReviewNotesFile, note: &ReviewNoteEntry) -> Result<Stri
     Ok(format!("note:{content_hash}"))
 }
 
-type BodyStorage = (
-    Option<String>,
-    Option<String>,
-    Option<Vec<u8>>,
-    Option<usize>,
-);
-
-fn note_body_storage(body: Option<&str>) -> Result<BodyStorage> {
-    let Some(body) = body else {
-        return Ok((None, None, None, None));
-    };
-
-    if body.len() <= BODY_INLINE_LIMIT {
-        return Ok((Some(body.to_owned()), None, None, None));
-    }
-
-    let body_hash = sha256_bytes_hex(body.as_bytes());
-    let artifact_path = format!("artifacts/notes/{body_hash}.json");
-    let artifact_bytes = serde_json::to_vec(&NoteBodyArtifact {
-        schema: "shore.note-body",
-        version: 1,
-        body,
-    })?;
-
-    Ok((
-        None,
-        Some(artifact_path),
-        Some(artifact_bytes),
-        Some(body.len()),
-    ))
-}
-
 fn imported_note_target(target: ReviewNoteTarget) -> ImportedNoteTarget {
     ImportedNoteTarget {
         side: target.side,
@@ -303,6 +278,7 @@ mod tests {
 
     use super::*;
     use crate::model::Side;
+    use crate::session::body_artifact::BODY_INLINE_LIMIT;
     use crate::sidecar::{ReviewNotesFile, ReviewNotesSidecar};
 
     #[test]

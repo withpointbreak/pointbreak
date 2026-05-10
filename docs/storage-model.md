@@ -41,6 +41,19 @@ On the read path, Shore reconstructs imported notes by replaying `review_note_im
 loading any optional note-body artifacts under `artifacts/notes/`. `state.json` remains a bounded
 projection and is not the durable source of note content.
 
+Verdict and acknowledgement events follow the same disciplines as note events:
+
+- `review_artifact_published` records a single immutable verdict for a `(workUnitId, revisionId)`
+  pair. The payload may name prior `reviewArtifactId`s it replaces; supersession is recorded inline
+  rather than as a separate event type.
+- `review_artifact_acknowledged` records an acknowledgement that targets a known
+  `reviewArtifactId` with one of the four `nextAction` values: `accept`, `address`, `defer`,
+  `obsolete`.
+
+Both events use canonical-hash identity, externalize large bodies through the shared
+`shore.note-body` envelope at `.shore/artifacts/notes/<hash>.json`, and project bounded counters
+plus a `last_verdict_decision` into `state.json` without per-ID arrays or maps.
+
 A future delivery queue is a separate subsystem. Queue concepts such as `pending/`, `failed/`,
 retry counts, backoff, circuit breakers, and acknowledgement markers do not belong in
 `.shore/events/`.
