@@ -21,6 +21,7 @@ Use distinct storage concepts for distinct semantics:
   events/       immutable event log
   state.json    rebuildable projection
   artifacts/    immutable or content-addressed support records
+    notes/      optional content-addressed note-body records
 ```
 
 `events/` is the authoritative log. Events are immutable, independently written, and never moved to
@@ -28,6 +29,13 @@ Use distinct storage concepts for distinct semantics:
 
 `state.json` is a cache/projection. It must be rebuildable from durable records. If it is missing,
 stale, or invalid, Shore should rebuild it rather than treating it as authority.
+
+Imported review notes should follow the same split:
+
+- immutable `review_note_imported` events in `events/` carry durable imported-note facts
+- bounded `state.json` may summarize imported-note state, such as `noteCount`
+- large note bodies may live in content-addressed `artifacts/notes/` records instead of expanding
+  event payloads or the projection without bound
 
 A future delivery queue is a separate subsystem. Queue concepts such as `pending/`, `failed/`,
 retry counts, backoff, circuit breakers, and acknowledgement markers do not belong in
@@ -90,6 +98,10 @@ it should not grow linearly with the event log.
 If a projection needs unbounded history, split it into paged or content-addressed records under
 `artifacts/` and keep `state.json` as an index or summary. A large `state.json` is a design smell
 because it becomes a shared mutable file, a slow health check, and a crash-recovery hazard.
+
+Imported review-note bodies follow this rule directly: small bodies may stay inline in the durable
+event payload, but oversized bodies should move to content-addressed `artifacts/notes/` records so
+the authoritative event and rebuildable projection remain bounded.
 
 ## Shared Mutable Files
 

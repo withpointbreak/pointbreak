@@ -1,8 +1,8 @@
 use shore::git::{git_worktree_root, ingest_tracked_diff};
 use shore::session::{
-    EventType, PublishOptions, RevisionPublishedPayload, SessionState, ShoreEvent,
-    capture_worktree_fingerprint, ensure_shore_ignored, publish_worktree_review, read_events,
-    rebuild_state, shore_dir_for_repo,
+    EventType, ImportNotesOptions, PublishOptions, RevisionPublishedPayload, SessionState,
+    ShoreEvent, capture_worktree_fingerprint, ensure_shore_ignored, import_notes,
+    publish_worktree_review, read_events, rebuild_state, shore_dir_for_repo,
 };
 
 use crate::support::git_repo::GitRepo;
@@ -336,6 +336,162 @@ fn malformed_sidecar_fails_before_writing_events() {
 }
 
 #[test]
+fn import_notes_from_native_sidecar_records_note_events_and_updates_state() {
+    let repo = modified_repo();
+    let sidecar = write_native_review_notes(&repo);
+
+    let result =
+        import_notes(ImportNotesOptions::new(repo.path()).with_review_notes(&sidecar)).unwrap();
+    let state: SessionState = serde_json::from_str(&repo.read(".shore/state.json")).unwrap();
+
+    assert_eq!(result.note_count, 1);
+    assert_eq!(result.notes_created, 1);
+    assert_eq!(result.notes_existing, 0);
+    assert_eq!(state.note_count, 1);
+    assert_eq!(review_note_imported_events(&repo).len(), 1);
+}
+
+#[test]
+fn reimporting_same_sidecar_is_idempotent() {
+    let repo = modified_repo();
+    let sidecar = write_native_review_notes(&repo);
+
+    let first =
+        import_notes(ImportNotesOptions::new(repo.path()).with_review_notes(&sidecar)).unwrap();
+    let second =
+        import_notes(ImportNotesOptions::new(repo.path()).with_review_notes(&sidecar)).unwrap();
+    let state: SessionState = serde_json::from_str(&repo.read(".shore/state.json")).unwrap();
+
+    assert_eq!(first.notes_created, 1);
+    assert_eq!(second.notes_created, 0);
+    assert_eq!(second.notes_existing, 1);
+    assert_eq!(state.note_count, 1);
+    assert_eq!(review_note_imported_events(&repo).len(), 1);
+}
+
+#[test]
+fn changing_imported_note_creates_one_new_durable_event() {
+    let repo = modified_repo();
+    let sidecar = write_native_review_notes(&repo);
+
+    import_notes(ImportNotesOptions::new(repo.path()).with_review_notes(&sidecar)).unwrap();
+    std::fs::write(&sidecar, changed_review_notes_json()).unwrap();
+
+    let result =
+        import_notes(ImportNotesOptions::new(repo.path()).with_review_notes(&sidecar)).unwrap();
+    let state: SessionState = serde_json::from_str(&repo.read(".shore/state.json")).unwrap();
+
+    assert_eq!(result.notes_created, 1);
+    assert_eq!(result.notes_existing, 0);
+    assert_eq!(state.note_count, 2);
+    assert_eq!(review_note_imported_events(&repo).len(), 2);
+}
+
+#[test]
+fn importing_before_publish_auto_initializes_shore() {
+    let repo = modified_repo();
+    let sidecar = write_native_review_notes(&repo);
+
+    let result =
+        import_notes(ImportNotesOptions::new(repo.path()).with_review_notes(&sidecar)).unwrap();
+    let state: SessionState = serde_json::from_str(&repo.read(".shore/state.json")).unwrap();
+
+    assert!(repo.path().join(".shore/events").is_dir());
+    assert!(repo.path().join(".shore/state.json").is_file());
+    assert_eq!(result.note_count, 1);
+    assert_eq!(state.note_count, 1);
+    assert_eq!(state.current_revision_id, None);
+    assert_eq!(state.current_snapshot_id, None);
+}
+
+#[test]
+fn importing_legacy_hunk_sidecar_records_legacy_note_source() {
+    let repo = modified_repo();
+    let sidecar = write_legacy_hunk_context(&repo);
+
+    let result =
+        import_notes(ImportNotesOptions::new(repo.path()).with_legacy_hunk_agent_context(&sidecar))
+            .unwrap();
+
+    let events = review_note_imported_events(&repo);
+    assert_eq!(result.note_count, 1);
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].payload["sidecarSource"],
+        "legacy_hunk_agent_context"
+    );
+}
+
+#[test]
+fn malformed_import_sidecar_fails_without_creating_note_events() {
+    let repo = modified_repo();
+    let sidecar = repo.path().join("bad-review-notes.json");
+    std::fs::write(&sidecar, "{").unwrap();
+
+    let error =
+        import_notes(ImportNotesOptions::new(repo.path()).with_review_notes(&sidecar)).unwrap_err();
+
+    assert!(error.to_string().contains("json"));
+    assert!(!repo.path().join(".shore").exists());
+}
+
+#[test]
+fn large_note_body_is_written_to_content_addressed_artifact() {
+    let repo = modified_repo();
+    let sidecar = write_review_notes_with_body(&repo, &"x".repeat(5000));
+
+    import_notes(ImportNotesOptions::new(repo.path()).with_review_notes(&sidecar))
+        .expect("import succeeds");
+
+    let event = first_note_event(&repo);
+    let artifact = event.payload["bodyArtifactPath"].as_str().unwrap();
+
+    assert!(event.payload["body"].is_null());
+    assert!(artifact.starts_with("artifacts/notes/"));
+    assert!(repo.path().join(".shore").join(artifact).is_file());
+}
+
+#[test]
+fn small_note_body_remains_inline_without_note_body_artifact() {
+    let repo = modified_repo();
+    let sidecar = write_review_notes_with_body(&repo, "short body");
+
+    import_notes(ImportNotesOptions::new(repo.path()).with_review_notes(&sidecar))
+        .expect("import succeeds");
+
+    let event = first_note_event(&repo);
+    assert_eq!(event.payload["body"], "short body");
+    assert!(event.payload["bodyArtifactPath"].is_null());
+    assert_eq!(note_body_artifact_file_count(repo.path()), 0);
+}
+
+#[test]
+fn reimporting_same_long_body_reuses_content_addressed_artifact_path() {
+    let repo = modified_repo();
+    let body = "x".repeat(5000);
+    let first_sidecar = write_review_notes_with_body(&repo, &body);
+    let first =
+        import_notes(ImportNotesOptions::new(repo.path()).with_review_notes(&first_sidecar))
+            .expect("first import succeeds");
+
+    let first_path = first_note_event(&repo).payload["bodyArtifactPath"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let second_sidecar = write_review_notes_with_body(&repo, &body);
+    let second =
+        import_notes(ImportNotesOptions::new(repo.path()).with_review_notes(&second_sidecar))
+            .expect("second import succeeds");
+    let event = first_note_event(&repo);
+    let second_path = event.payload["bodyArtifactPath"].as_str().unwrap();
+
+    assert_eq!(first.notes_created, 1);
+    assert_eq!(second.notes_created, 0);
+    assert_eq!(second.notes_existing, 1);
+    assert_eq!(first_path, second_path);
+}
+
+#[test]
 fn publish_pipeline_records_events_sidecar_observation_and_bounded_state() {
     let repo = bounded_publish_repo();
     let sidecar = repo.write_fixture("review-notes.json", native_review_notes_json());
@@ -427,6 +583,25 @@ fn event_file_count(repo: &std::path::Path) -> usize {
         .count()
 }
 
+fn note_body_artifact_file_count(repo: &std::path::Path) -> usize {
+    let notes_dir = repo.join(".shore/artifacts/notes");
+    if !notes_dir.exists() {
+        return 0;
+    }
+
+    std::fs::read_dir(notes_dir)
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .count()
+}
+
 fn corrupt_first_event_payload(repo: &std::path::Path) {
     let event_path = std::fs::read_dir(repo.join(".shore/events"))
         .unwrap()
@@ -471,9 +646,30 @@ fn sidecar_observed_event(repo: &GitRepo, source: &str) -> ShoreEvent {
         .expect("sidecar observed event exists")
 }
 
+fn review_note_imported_events(repo: &GitRepo) -> Vec<ShoreEvent> {
+    read_events(repo.path())
+        .expect("events list")
+        .into_iter()
+        .filter(|event| event.event_type == EventType::ReviewNoteImported)
+        .collect()
+}
+
+fn first_note_event(repo: &GitRepo) -> ShoreEvent {
+    review_note_imported_events(repo)
+        .into_iter()
+        .next()
+        .expect("review note imported event exists")
+}
+
 fn write_native_review_notes(repo: &GitRepo) -> std::path::PathBuf {
     let sidecar = repo.path().join("review-notes.json");
     std::fs::write(&sidecar, native_review_notes_json()).unwrap();
+    sidecar
+}
+
+fn write_review_notes_with_body(repo: &GitRepo, body: &str) -> std::path::PathBuf {
+    let sidecar = repo.path().join("review-notes.json");
+    std::fs::write(&sidecar, review_notes_with_body_json(body)).unwrap();
     sidecar
 }
 
@@ -535,4 +731,25 @@ fn legacy_hunk_context_json() -> &'static str {
     }
   ]
 }"#
+}
+
+fn review_notes_with_body_json(body: &str) -> String {
+    format!(
+        r#"{{
+  "schema": "shore.review-notes",
+  "version": 1,
+  "files": [
+    {{
+      "path": "src/lib.rs",
+      "notes": [
+        {{
+          "title": "Changed return value",
+          "body": {body:?},
+          "target": {{ "side": "new", "startLine": 1, "endLine": 1 }}
+        }}
+      ]
+    }}
+  ]
+}}"#
+    )
 }

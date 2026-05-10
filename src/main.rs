@@ -5,7 +5,10 @@ use std::process::ExitCode;
 use clap::error::ErrorKind;
 use clap::{Args, Parser, Subcommand};
 use shore::dump::{DumpDocument, DumpOptions};
-use shore::session::{PublishOptions, PublishResult, publish_worktree_review};
+use shore::session::{
+    ImportNotesOptions, ImportNotesResult, PublishOptions, PublishResult, import_notes,
+    publish_worktree_review,
+};
 use shore::stream::ViewportSpec;
 
 mod cli_tracing;
@@ -26,6 +29,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Dump(DumpArgs),
+    Notes(NotesArgs),
     Review(ReviewArgs),
     Show(ShowArgs),
 }
@@ -66,6 +70,17 @@ struct ReviewArgs {
     command: ReviewCommand,
 }
 
+#[derive(Debug, Args)]
+struct NotesArgs {
+    #[command(subcommand)]
+    command: NotesCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum NotesCommand {
+    Apply(NotesApplyArgs),
+}
+
 #[derive(Debug, Subcommand)]
 enum ReviewCommand {
     Publish(PublishArgs),
@@ -73,6 +88,12 @@ enum ReviewCommand {
 
 #[derive(Debug, Args)]
 struct PublishArgs {
+    #[command(flatten)]
+    input: ReviewInputArgs,
+}
+
+#[derive(Debug, Args)]
+struct NotesApplyArgs {
     #[command(flatten)]
     input: ReviewInputArgs,
 }
@@ -89,6 +110,18 @@ struct PublishDocument {
     events_created: usize,
     events_existing: usize,
     events_created_by_type: std::collections::BTreeMap<String, usize>,
+    diagnostics: Vec<shore::session::ProjectionDiagnostic>,
+    state_path: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NotesApplyDocument {
+    schema: &'static str,
+    version: u32,
+    note_count: usize,
+    notes_created: usize,
+    notes_existing: usize,
     diagnostics: Vec<shore::session::ProjectionDiagnostic>,
     state_path: String,
 }
@@ -145,6 +178,7 @@ fn run_cli(cli: Cli, stdout: &mut dyn Write) -> Result<(), Box<dyn std::error::E
             tracing::debug!(command = "dump", "command_start");
             dump(args, &cli.tracing, stdout)
         }
+        Command::Notes(args) => notes(args, stdout),
         Command::Review(args) => review(args, &cli.tracing, stdout),
         Command::Show(args) => {
             tracing::debug!(command = "show", "command_start");
@@ -175,6 +209,15 @@ fn show(args: ShowArgs, tracing: &TracingArgs) -> Result<(), Box<dyn std::error:
     tui::terminal::run(app)
 }
 
+fn notes(args: NotesArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::error::Error>> {
+    match args.command {
+        NotesCommand::Apply(args) => {
+            tracing::debug!(command = "notes.apply", "command_start");
+            notes_apply(args, stdout)
+        }
+    }
+}
+
 fn review(
     args: ReviewArgs,
     tracing: &TracingArgs,
@@ -186,6 +229,16 @@ fn review(
             review_publish(args, tracing, stdout)
         }
     }
+}
+
+fn notes_apply(
+    args: NotesApplyArgs,
+    stdout: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let result = import_notes(notes_apply_options(&args.input)?)?;
+    let document = NotesApplyDocument::from(result);
+    writeln!(stdout, "{}", serde_json::to_string(&document)?)?;
+    Ok(())
 }
 
 fn review_publish(
@@ -262,6 +315,24 @@ fn publish_options(args: &ReviewInputArgs, tracing: &TracingArgs) -> PublishOpti
     options
 }
 
+fn notes_apply_options(
+    args: &ReviewInputArgs,
+) -> Result<ImportNotesOptions, Box<dyn std::error::Error>> {
+    let mut options = ImportNotesOptions::new(&args.repo);
+    match (&args.review_notes, &args.legacy_hunk_agent_context) {
+        (Some(review_notes), None) => {
+            options = options.with_review_notes(review_notes);
+            Ok(options)
+        }
+        (None, Some(agent_context)) => {
+            options = options.with_legacy_hunk_agent_context(agent_context);
+            Ok(options)
+        }
+        (None, None) => Err("exactly one review-notes input is required".into()),
+        (Some(_), Some(_)) => unreachable!("clap rejects mutually exclusive sidecar flags"),
+    }
+}
+
 fn should_pretty_print(args: &DumpArgs) -> bool {
     args.pretty && !args.compact
 }
@@ -278,6 +349,20 @@ impl From<PublishResult> for PublishDocument {
             events_created: result.events_created,
             events_existing: result.events_existing,
             events_created_by_type: result.events_created_by_type,
+            diagnostics: result.diagnostics,
+            state_path: result.state_path.to_string_lossy().into_owned(),
+        }
+    }
+}
+
+impl From<ImportNotesResult> for NotesApplyDocument {
+    fn from(result: ImportNotesResult) -> Self {
+        Self {
+            schema: "shore.notes-apply",
+            version: 1,
+            note_count: result.note_count,
+            notes_created: result.notes_created,
+            notes_existing: result.notes_existing,
             diagnostics: result.diagnostics,
             state_path: result.state_path.to_string_lossy().into_owned(),
         }

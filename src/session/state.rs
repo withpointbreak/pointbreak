@@ -173,11 +173,11 @@ impl StateReducer {
 mod tests {
     use super::*;
     use crate::model::{ReviewId, RevisionId, Side, SnapshotId, WorkUnitId};
+    use crate::session::event::{ImportedNoteTarget, ReviewNoteImportedPayload};
     use crate::session::{
         EventTarget, EventType, ReviewInitializedPayload, RevisionPublishedPayload, ShoreEvent,
         SidecarObservedPayload, SidecarSource, SnapshotObservedPayload, Writer,
     };
-    use crate::session::event::{ImportedNoteTarget, ReviewNoteImportedPayload};
 
     #[test]
     fn projection_tracks_current_revision_snapshot_and_sidecar_count_without_event_history() {

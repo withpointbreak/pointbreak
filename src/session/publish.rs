@@ -137,11 +137,7 @@ pub fn publish_worktree_review(options: PublishOptions) -> Result<PublishResult>
         &event_store,
         ShoreEvent::new(
             EventType::ReviewInitialized,
-            format!(
-                "review_initialized:{}:{}",
-                review_id.as_str(),
-                work_unit_id.as_str()
-            ),
+            ReviewInitializedPayload::idempotency_key(&review_id, &work_unit_id),
             target.clone(),
             writer.clone(),
             ReviewInitializedPayload {},
@@ -426,9 +422,10 @@ fn diagnostic_level_key(level: &DiagnosticLevel) -> &'static str {
     }
 }
 
-fn ensure_store_dirs(shore_dir: &Path) -> Result<()> {
+pub(crate) fn ensure_store_dirs(shore_dir: &Path) -> Result<()> {
     for dir in [
         shore_dir.join("events"),
+        shore_dir.join("artifacts/notes"),
         shore_dir.join("artifacts/revisions"),
         shore_dir.join("artifacts/snapshots"),
     ] {
@@ -496,7 +493,7 @@ fn supersedes_revision_ids(
     }
 }
 
-fn writer_from_git_config(repo: &Path) -> Writer {
+pub(crate) fn writer_from_git_config(repo: &Path) -> Writer {
     let actor_id = git_config_value(repo, "user.email")
         .map(|email| ActorId::new(format!("actor:git-email:{email}")))
         .or_else(|| {
@@ -529,7 +526,7 @@ fn git_config_value(repo: &Path, key: &str) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
-fn current_timestamp() -> String {
+pub(crate) fn current_timestamp() -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

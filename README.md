@@ -193,6 +193,27 @@ Behavior:
 runtime, async or remote storage backend, or note mutation. `.shore/events/` is the local
 authoritative event log, not a mailbox or retry queue.
 
+`shore notes apply` imports review notes into Shore-owned durable state without publishing a
+revision:
+
+```bash
+shore notes apply --repo <path> --review-notes <path>
+shore notes apply --repo <path> --legacy-hunk-agent-context <path>
+```
+
+Behavior:
+
+- `--repo <path>` defaults to `.` and may point at the repository root or a subdirectory inside it;
+  durable state is created at the Git worktree root.
+- Exactly one of `--review-notes <path>` or `--legacy-hunk-agent-context <path>` is required.
+- The command initializes local `.shore/` storage when needed, records one immutable durable event
+  per imported note, and rebuilds `.shore/state.json`.
+- Native `review-notes.json` and legacy Hunk `agent-context.json` remain import/transport inputs.
+  They are not the authoritative persisted Shore store.
+- Large note bodies may be stored as content-addressed note-body artifacts under
+  `.shore/artifacts/notes/`; small note bodies remain inline in the imported-note event payload.
+- Output is compact `shore.notes-apply` JSON with note counts, diagnostics, and the `statePath`.
+
 ## Explicit V1 Deferrals
 
 Do not start by rebuilding all of hunk.
@@ -282,6 +303,10 @@ Example native sidecar shape:
 
 Shore can import Hunk-compatible `agent-context.json` through a legacy adapter, but Shore's native
 sidecar is `review-notes.json`.
+
+When Shore imports these sidecars through `shore notes apply`, it persists immutable imported-note
+events under `.shore/events/`. For large note bodies, Shore may store the body text as a
+content-addressed artifact under `.shore/artifacts/notes/` while keeping the event payload bounded.
 
 ## Future Session Model
 

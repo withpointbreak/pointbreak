@@ -84,12 +84,10 @@ impl EventStore {
             .collect()
     }
 
-    #[cfg(test)]
-    pub fn event_exists(&self, idempotency_key: &str) -> Result<bool> {
+    pub(crate) fn event_exists(&self, idempotency_key: &str) -> Result<bool> {
         Ok(self
-            .storage
-            .read_bytes_if_exists(&self.event_path_for_idempotency_key(idempotency_key))?
-            .is_some())
+            .event_path_for_idempotency_key(idempotency_key)
+            .exists())
     }
 }
 

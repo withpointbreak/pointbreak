@@ -156,6 +156,16 @@ pub trait EventPayload: Serialize {
 #[serde(rename_all = "camelCase")]
 pub struct ReviewInitializedPayload {}
 
+impl ReviewInitializedPayload {
+    pub fn idempotency_key(review_id: &ReviewId, work_unit_id: &WorkUnitId) -> String {
+        format!(
+            "review_initialized:{}:{}",
+            review_id.as_str(),
+            work_unit_id.as_str()
+        )
+    }
+}
+
 impl EventPayload for ReviewInitializedPayload {
     fn event_type(&self) -> EventType {
         EventType::ReviewInitialized
