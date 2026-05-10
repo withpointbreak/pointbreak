@@ -19,8 +19,9 @@ The metaphor should stay light. Command names should remain mostly plain and pra
 - `shore show`
 - `shore up`
 - `shore notes`
-- `shore session`
 - `shore dump`
+- `shore review`
+- `shore session`
 
 ## Product Intent
 
@@ -105,7 +106,21 @@ Prefer shelling out to `git` at first. A VCS abstraction can come later if the m
 
 ## Current CLI
 
-The current executable surfaces are `shore show` and `shore dump`.
+The current executable surfaces are `shore show`, `shore dump`, and
+`shore review publish`.
+
+All commands accept optional tracing flags:
+
+```bash
+--log <filter>
+--log-format <compact|pretty|json>
+--log-file <path>
+```
+
+Tracing writes to stderr by default. If stdout is being piped into JSON tools, prefer
+`--log-file <path>` instead of `2>&1`; mixing stderr into stdout will corrupt the JSON stream.
+`shore show` requires `--log-file` when tracing is enabled so trace lines do not scribble over the
+raw-mode TUI.
 
 `shore show` opens the first read-only terminal review view over the same headless review stream
 used by the JSON dump command:
@@ -138,14 +153,37 @@ Behavior:
 - `--review-notes <path>` loads Shore-native `review-notes.json`.
 - `--legacy-hunk-agent-context <path>` imports a Hunk-compatible `agent-context.json` through the
   explicit legacy adapter.
-- `--pretty` and `--compact` override formatting; otherwise output is pretty when stdout is a
-  terminal and compact when stdout is piped or redirected.
+- Output is compact by default for scripts. Use `--pretty` for human-readable formatting;
+  `--compact` is accepted as an explicit compact-format request.
 - Recoverable review-note diagnostics stay in the JSON document and the command exits successfully.
 - Fatal errors, such as unreadable files or malformed JSON, are written to stderr and exit
   non-zero.
 
 The dump output is Shore introspection JSON and uses snake_case fields. Native `review-notes.json`
 input keeps its schema-defined camelCase fields such as `oldPath`, `startLine`, and `createdAt`.
+
+`shore review publish` is the first durable local-state command:
+
+```bash
+shore review publish [--repo <path>] [--review-notes <path> | --legacy-hunk-agent-context <path>]
+```
+
+Behavior:
+
+- `--repo <path>` defaults to `.` and may point at the repository root or a subdirectory inside it;
+  durable state is created at the Git worktree root.
+- The command creates and uses local `.shore/` storage and adds `.shore/` to the worktree
+  `.gitignore` when needed.
+- `.shore/events/` stores immutable local event files. `.shore/state.json` is a rebuildable
+  projection, not the authority.
+- `--review-notes <path>` and `--legacy-hunk-agent-context <path>` are recorded as sidecar
+  observation provenance. Sidecars remain transport/import inputs; they are not Shore-owned
+  persisted session state.
+- Output is compact `shore.publish` JSON with IDs, event counts, diagnostics, and the `statePath`.
+
+`shore review publish` does not add a daemon, delivery queue, acknowledgement flow, intervention
+runtime, async or remote storage backend, or note mutation. `.shore/events/` is the local
+authoritative event log, not a mailbox or retry queue.
 
 ## Explicit V1 Deferrals
 

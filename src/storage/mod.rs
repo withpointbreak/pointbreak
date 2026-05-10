@@ -36,6 +36,7 @@ impl TempSweepAge {
         Self(Duration::ZERO)
     }
 
+    #[cfg(test)]
     pub fn from_duration(duration: Duration) -> Self {
         Self(duration)
     }
@@ -58,6 +59,7 @@ impl LocalStorage {
         fs::read(&path).map_err(|error| io_error("read file", &path, error))
     }
 
+    #[cfg(test)]
     pub fn read_bytes_if_exists(&self, path: &Path) -> Result<Option<Vec<u8>>> {
         let path = self.resolve(path);
         match fs::read(&path) {
@@ -67,6 +69,7 @@ impl LocalStorage {
         }
     }
 
+    #[allow(dead_code)]
     pub fn read_json<T>(&self, path: &Path) -> Result<T>
     where
         T: DeserializeOwned,

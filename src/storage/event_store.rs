@@ -84,6 +84,7 @@ impl EventStore {
             .collect()
     }
 
+    #[cfg(test)]
     pub fn event_exists(&self, idempotency_key: &str) -> Result<bool> {
         Ok(self
             .storage

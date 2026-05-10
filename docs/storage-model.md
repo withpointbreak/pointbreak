@@ -119,8 +119,9 @@ event_store::event_exists
 This keeps the lower layer useful for manifests, JSON, future binary artifacts, and exact conflict
 checks. Event filename construction should live in `event_store`, not in command handlers.
 
-Plan 0005 should keep this synchronous and local. Do not introduce async traits or a runtime until a
-remote backend, subscription API, or second storage backend forces that decision.
+The first local durable-state slice should stay synchronous and local. Do not introduce async traits
+or a runtime until a remote backend, subscription API, or second storage backend forces that
+decision.
 
 ## Output Boundary
 
@@ -147,7 +148,8 @@ If Shore later adds a delivery queue, every retry path must have:
 - a terminal failed state that removes the entry from active rotation
 - target-liveness checks before resume or apply actions
 
-Plan 0005 should not implement this queue. Local event writes should fail loudly rather than loop.
+The local durable-state slice should not implement this queue. Local event writes should fail loudly
+rather than loop.
 
 ## Migrations And Doctor
 
@@ -160,7 +162,8 @@ independent commit.
 
 ## Lock Discipline
 
-Plan 0005 should not need locks. If a future plan introduces locks, follow these constraints:
+The first local event-store implementation should not need locks. If a future change introduces
+locks, follow these constraints:
 
 - keep critical sections short
 - do not perform long I/O while holding a lock when it can be avoided

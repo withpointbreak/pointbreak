@@ -230,6 +230,11 @@ pub fn rebuild_state(repo: impl AsRef<Path>) -> Result<SessionState> {
     Ok(state)
 }
 
+pub fn read_events(repo: impl AsRef<Path>) -> Result<Vec<ShoreEvent>> {
+    let worktree_root = git_worktree_root(repo.as_ref())?;
+    EventStore::open(worktree_root.join(".shore")).list_events()
+}
+
 #[derive(Default)]
 struct PublishRecorder {
     events_created: usize,

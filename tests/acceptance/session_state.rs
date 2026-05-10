@@ -1,10 +1,9 @@
 use shore::git::{git_worktree_root, ingest_tracked_diff};
 use shore::session::{
     EventType, PublishOptions, RevisionPublishedPayload, SessionState, ShoreEvent,
-    capture_worktree_fingerprint, ensure_shore_ignored, publish_worktree_review, rebuild_state,
-    shore_dir_for_repo,
+    capture_worktree_fingerprint, ensure_shore_ignored, publish_worktree_review, read_events,
+    rebuild_state, shore_dir_for_repo,
 };
-use shore::storage::EventStore;
 
 use crate::support::git_repo::GitRepo;
 
@@ -202,8 +201,7 @@ fn publish_writer_identity_prefers_git_config_email() {
     let repo = modified_repo();
 
     let result = publish_worktree_review(PublishOptions::new(repo.path())).unwrap();
-    let store = EventStore::open(repo.path().join(".shore"));
-    let events = store.list_events().expect("events list");
+    let events = read_events(repo.path()).expect("events list");
     let event = events
         .iter()
         .find(|event| {
@@ -420,9 +418,7 @@ fn revision_event_for(
     repo: &GitRepo,
     revision_id: &shore::model::RevisionId,
 ) -> RevisionPublishedPayload {
-    let store = EventStore::open(repo.path().join(".shore"));
-    store
-        .list_events()
+    read_events(repo.path())
         .expect("events list")
         .into_iter()
         .find_map(|event| {
@@ -438,9 +434,7 @@ fn revision_event_for(
 }
 
 fn sidecar_observed_event(repo: &GitRepo, source: &str) -> ShoreEvent {
-    let store = EventStore::open(repo.path().join(".shore"));
-    store
-        .list_events()
+    read_events(repo.path())
         .expect("events list")
         .into_iter()
         .find(|event| {

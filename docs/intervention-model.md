@@ -4,9 +4,9 @@
 
 This is architecture guidance, not current implementation scope.
 
-Plan 0005 should not add intervention commands, prompts, queues, or UI flows. Its durable event
-envelope, target references, state projection, and polling shape should leave room for intervention
-events later.
+The first local durable-state slice should not add intervention commands, prompts, queues, or UI
+flows. Its durable event envelope, target references, state projection, and polling shape should
+leave room for intervention events later.
 
 ## Goal
 
@@ -132,12 +132,12 @@ A client should be able to ask:
 - Which event or artifact caused the intervention?
 
 That implies Shore should eventually expose an `events_since(cursor)` style API or equivalent
-cursor-based projection. Plan 0005 does not need to implement that API, but it should not choose a
-storage shape that makes it awkward.
+cursor-based projection. The first local durable-state slice does not need to implement that API,
+but it should not choose a storage shape that makes it awkward.
 
-## Design Constraints For Plan 0005
+## Design Constraints For Local Durable State
 
-Plan 0005 should preserve these future requirements:
+The local durable-state model should preserve these future requirements:
 
 - Use generic target references in event payloads rather than hard-coded single-target fields.
 - Keep event IDs and idempotency keys stable enough for polling clients.
