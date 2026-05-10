@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -9,11 +9,16 @@ use serde::Serialize;
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::error::{Result, ShoreError};
 use crate::git::{capture_worktree_diff_files, git_worktree_root};
-use crate::model::{ActorId, ReviewId, RevisionId, SnapshotId, WorkUnitId};
+use crate::model::{ActorId, DiffFile, ReviewId, RevisionId, SnapshotId, WorkUnitId};
 use crate::session::{
     EventTarget, EventType, ProjectionDiagnostic, ReviewInitializedPayload,
-    RevisionPublishedPayload, SessionState, ShoreEvent, SnapshotObservedPayload, Writer,
-    WriterRole, WriterTool, ensure_shore_ignored, worktree_fingerprint_for_files,
+    RevisionPublishedPayload, SessionState, ShoreEvent, SidecarObservedPayload, SidecarSource,
+    SnapshotObservedPayload, Writer, WriterRole, WriterTool, ensure_shore_ignored,
+    worktree_fingerprint_for_files,
+};
+use crate::sidecar::{
+    DiagnosticLevel, ParsedReviewNotes, ReviewNotesDiagnosticCode, parse_hunk_agent_context,
+    parse_review_notes_sidecar,
 };
 use crate::storage::{Durability, EventStore, EventWriteOutcome, LocalStorage, TempSweepAge};
 
@@ -74,7 +79,7 @@ pub fn publish_worktree_review(options: PublishOptions) -> Result<PublishResult>
         tracing::info_span!("session.publish_worktree_review", repo = %options.repo.display());
     let _entered = span.enter();
 
-    preflight_sidecar_inputs(&options)?;
+    let sidecar_observations = preflight_sidecar_inputs(&options)?;
 
     let worktree_root = git_worktree_root(&options.repo)?;
     let shore_dir = worktree_root.join(".shore");
@@ -83,7 +88,11 @@ pub fn publish_worktree_review(options: PublishOptions) -> Result<PublishResult>
     ensure_store_dirs(&shore_dir)?;
     ensure_shore_ignored(&worktree_root)?;
 
-    let files = capture_worktree_diff_files(&worktree_root)?;
+    let files = filter_explicit_sidecar_files(
+        capture_worktree_diff_files(&worktree_root)?,
+        &worktree_root,
+        &sidecar_observations,
+    );
     let fingerprint = worktree_fingerprint_for_files(&worktree_root, &files)?;
     let event_store = EventStore::open(&shore_dir);
     let existing_state = SessionState::from_events(&event_store.list_events()?)?;
@@ -157,15 +166,33 @@ pub fn publish_worktree_review(options: PublishOptions) -> Result<PublishResult>
                 work_unit_id.as_str(),
                 fingerprint.snapshot_id.as_str()
             ),
-            target,
-            writer,
+            target.clone(),
+            writer.clone(),
             SnapshotObservedPayload {
                 snapshot_id: fingerprint.snapshot_id.clone(),
                 revision_id: fingerprint.revision_id.clone(),
             },
-            occurred_at,
+            occurred_at.clone(),
         )?,
     )?;
+    for observation in sidecar_observations {
+        recorder.record(
+            &event_store,
+            ShoreEvent::new(
+                EventType::SidecarObserved,
+                format!(
+                    "sidecar_observed:{}:{}:{}",
+                    event_type_sidecar_source_key(observation.source),
+                    observation.path,
+                    observation.content_hash
+                ),
+                target.clone(),
+                writer.clone(),
+                observation.into_payload(),
+                occurred_at.clone(),
+            )?,
+        )?;
+    }
 
     let state = SessionState::from_events(&event_store.list_events()?)?;
     let state_path = shore_dir.join("state.json");
@@ -230,23 +257,189 @@ struct SnapshotArtifact<'a> {
     hunk_count: usize,
 }
 
-fn preflight_sidecar_inputs(options: &PublishOptions) -> Result<()> {
+struct SidecarObservation {
+    source: SidecarSource,
+    path: String,
+    byte_size: usize,
+    content_hash: String,
+    schema: Option<String>,
+    imported_schema: Option<String>,
+    version: Option<u32>,
+    diagnostic_count: usize,
+    diagnostic_levels: BTreeMap<String, usize>,
+}
+
+impl SidecarObservation {
+    fn into_payload(self) -> SidecarObservedPayload {
+        SidecarObservedPayload {
+            source: self.source,
+            path: self.path,
+            byte_size: self.byte_size,
+            content_hash: self.content_hash,
+            schema: self.schema,
+            imported_schema: self.imported_schema,
+            version: self.version,
+            diagnostic_count: self.diagnostic_count,
+            diagnostic_levels: self.diagnostic_levels,
+        }
+    }
+}
+
+fn preflight_sidecar_inputs(options: &PublishOptions) -> Result<Vec<SidecarObservation>> {
     if options.review_notes.is_some() && options.legacy_hunk_agent_context.is_some() {
         return Err(ShoreError::Message(
             "only one review-notes input can be supplied".to_owned(),
         ));
     }
 
-    for path in [&options.review_notes, &options.legacy_hunk_agent_context]
-        .into_iter()
-        .flatten()
-    {
-        fs::read(path).map_err(|error| {
-            ShoreError::Message(format!("read sidecar input {}: {error}", path.display()))
-        })?;
+    if let Some(path) = &options.review_notes {
+        return Ok(vec![observe_native_review_notes(path)?]);
     }
 
-    Ok(())
+    if let Some(path) = &options.legacy_hunk_agent_context {
+        return Ok(vec![observe_legacy_hunk_agent_context(path)?]);
+    }
+
+    Ok(Vec::new())
+}
+
+fn observe_native_review_notes(path: &Path) -> Result<SidecarObservation> {
+    let bytes = read_sidecar_bytes(path)?;
+    let parsed = parse_review_notes_sidecar(sidecar_text(path, &bytes)?)?;
+    Ok(sidecar_observation(
+        SidecarSource::ReviewNotes,
+        path,
+        &bytes,
+        parsed,
+        None,
+    ))
+}
+
+fn observe_legacy_hunk_agent_context(path: &Path) -> Result<SidecarObservation> {
+    let bytes = read_sidecar_bytes(path)?;
+    let parsed = parse_hunk_agent_context(sidecar_text(path, &bytes)?)?;
+    Ok(sidecar_observation(
+        SidecarSource::LegacyHunkAgentContext,
+        path,
+        &bytes,
+        parsed,
+        Some("shore.agent-context".to_owned()),
+    ))
+}
+
+fn sidecar_observation(
+    source: SidecarSource,
+    path: &Path,
+    bytes: &[u8],
+    parsed: ParsedReviewNotes,
+    imported_schema: Option<String>,
+) -> SidecarObservation {
+    let version = if parsed
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == ReviewNotesDiagnosticCode::MissingVersion)
+    {
+        None
+    } else {
+        Some(parsed.sidecar.version)
+    };
+
+    SidecarObservation {
+        source,
+        path: path.to_string_lossy().into_owned(),
+        byte_size: bytes.len(),
+        content_hash: format!("sha256:{}", sha256_bytes_hex(bytes)),
+        schema: parsed.sidecar.schema,
+        imported_schema,
+        version,
+        diagnostic_count: parsed.diagnostics.len(),
+        diagnostic_levels: diagnostic_levels(&parsed.diagnostics),
+    }
+}
+
+fn read_sidecar_bytes(path: &Path) -> Result<Vec<u8>> {
+    fs::read(path).map_err(|error| {
+        ShoreError::Message(format!("read sidecar input {}: {error}", path.display()))
+    })
+}
+
+fn sidecar_text<'a>(path: &Path, bytes: &'a [u8]) -> Result<&'a str> {
+    std::str::from_utf8(bytes).map_err(|error| {
+        ShoreError::Message(format!(
+            "read sidecar input {} as utf-8: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn diagnostic_levels(
+    diagnostics: &[crate::sidecar::ReviewNotesDiagnostic],
+) -> BTreeMap<String, usize> {
+    let mut levels = BTreeMap::new();
+    levels.insert(
+        diagnostic_level_key(&DiagnosticLevel::Warning).to_owned(),
+        0,
+    );
+    for diagnostic in diagnostics {
+        *levels
+            .entry(diagnostic_level_key(&diagnostic.level).to_owned())
+            .or_default() += 1;
+    }
+    levels
+}
+
+fn diagnostic_level_key(level: &DiagnosticLevel) -> &'static str {
+    match level {
+        DiagnosticLevel::Warning => "warning",
+    }
+}
+
+fn filter_explicit_sidecar_files(
+    files: Vec<DiffFile>,
+    worktree_root: &Path,
+    observations: &[SidecarObservation],
+) -> Vec<DiffFile> {
+    let excluded = observations
+        .iter()
+        .filter_map(|observation| worktree_relative_path(worktree_root, &observation.path))
+        .collect::<BTreeSet<_>>();
+    if excluded.is_empty() {
+        return files;
+    }
+
+    files
+        .into_iter()
+        .filter(|file| {
+            !file
+                .new_path
+                .as_ref()
+                .is_some_and(|path| excluded.contains(path))
+                && !file
+                    .old_path
+                    .as_ref()
+                    .is_some_and(|path| excluded.contains(path))
+        })
+        .collect()
+}
+
+fn worktree_relative_path(worktree_root: &Path, path: &str) -> Option<String> {
+    let path = Path::new(path);
+    let absolute_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        worktree_root.join(path)
+    };
+    let canonical_path = absolute_path.canonicalize().ok()?;
+    let canonical_root = worktree_root
+        .canonicalize()
+        .unwrap_or_else(|_| worktree_root.to_path_buf());
+    canonical_path
+        .strip_prefix(canonical_root)
+        .ok()
+        .map(|path| {
+            path.to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/")
+        })
 }
 
 fn ensure_store_dirs(shore_dir: &Path) -> Result<()> {
@@ -370,5 +563,12 @@ fn event_type_key(event_type: EventType) -> &'static str {
         EventType::RevisionPublished => "revision_published",
         EventType::SnapshotObserved => "snapshot_observed",
         EventType::SidecarObserved => "sidecar_observed",
+    }
+}
+
+fn event_type_sidecar_source_key(source: SidecarSource) -> &'static str {
+    match source {
+        SidecarSource::ReviewNotes => "review_notes",
+        SidecarSource::LegacyHunkAgentContext => "legacy_hunk_agent_context",
     }
 }

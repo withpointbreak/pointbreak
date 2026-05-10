@@ -314,6 +314,9 @@ mod tests {
     }
 
     fn sidecar_observed(source: &str, content_hash: &str) -> ShoreEvent {
+        let mut diagnostic_levels = BTreeMap::new();
+        diagnostic_levels.insert("warning".to_owned(), 0);
+
         ShoreEvent::new(
             EventType::SidecarObserved,
             format!("sidecar_observed:{source}:{content_hash}"),
@@ -326,10 +329,13 @@ mod tests {
                     other => panic!("unknown sidecar source: {other}"),
                 },
                 path: "review-notes.json".to_owned(),
+                byte_size: 2,
                 content_hash: content_hash.to_owned(),
                 schema: Some("shore.review-notes".to_owned()),
+                imported_schema: None,
                 version: Some(1),
                 diagnostic_count: 0,
+                diagnostic_levels,
             },
             "2026-05-09T20:42:45Z",
         )

@@ -1,6 +1,6 @@
 use shore::git::{git_worktree_root, ingest_tracked_diff};
 use shore::session::{
-    EventType, PublishOptions, RevisionPublishedPayload, SessionState,
+    EventType, PublishOptions, RevisionPublishedPayload, SessionState, ShoreEvent,
     capture_worktree_fingerprint, ensure_shore_ignored, publish_worktree_review,
     shore_dir_for_repo,
 };
@@ -218,6 +218,97 @@ fn publish_writer_identity_prefers_git_config_email() {
     );
 }
 
+#[test]
+fn native_review_notes_publish_records_sidecar_observation() {
+    let repo = modified_repo();
+    let sidecar = write_native_review_notes(&repo);
+
+    let result = publish_worktree_review(
+        PublishOptions::new(repo.path()).with_review_notes(sidecar.clone()),
+    )
+    .expect("publish succeeds");
+
+    let event = sidecar_observed_event(&repo, "review_notes");
+    assert_eq!(event.payload["source"], "review_notes");
+    assert_eq!(
+        event.payload["path"].as_str().unwrap(),
+        sidecar.to_string_lossy()
+    );
+    assert_eq!(event.payload["schema"], "shore.review-notes");
+    assert_eq!(event.payload["version"], 1);
+    assert_eq!(
+        event.payload["byteSize"].as_u64().unwrap(),
+        native_review_notes_json().len() as u64
+    );
+    assert!(
+        event.payload["contentHash"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+    assert_eq!(event.payload["diagnosticCount"], 0);
+    assert_eq!(event.payload["diagnosticLevels"]["warning"], 0);
+    assert_ne!(event.payload_hash, event.payload["contentHash"]);
+
+    let state: SessionState =
+        serde_json::from_str(&repo.read(".shore/state.json")).expect("state decodes");
+    assert_eq!(state.sidecar_count, 1);
+    assert_eq!(result.events_created_by_type["sidecar_observed"], 1);
+}
+
+#[test]
+fn legacy_hunk_context_publish_records_legacy_sidecar_observation() {
+    let repo = modified_repo();
+    let sidecar = write_legacy_hunk_context(&repo);
+
+    publish_worktree_review(
+        PublishOptions::new(repo.path()).with_legacy_hunk_agent_context(sidecar.clone()),
+    )
+    .expect("publish succeeds");
+
+    let event = sidecar_observed_event(&repo, "legacy_hunk_agent_context");
+    assert_eq!(event.payload["source"], "legacy_hunk_agent_context");
+    assert_eq!(
+        event.payload["path"].as_str().unwrap(),
+        sidecar.to_string_lossy()
+    );
+    assert_eq!(event.payload["schema"], "shore.review-notes");
+    assert_eq!(event.payload["importedSchema"], "shore.agent-context");
+    assert_eq!(event.payload["version"], 1);
+}
+
+#[test]
+fn sidecar_content_change_records_new_observation_without_changing_revision() {
+    let repo = modified_repo();
+    let sidecar = write_native_review_notes(&repo);
+    let first = publish_worktree_review(
+        PublishOptions::new(repo.path()).with_review_notes(sidecar.clone()),
+    )
+    .unwrap();
+
+    std::fs::write(&sidecar, changed_review_notes_json()).unwrap();
+    let second =
+        publish_worktree_review(PublishOptions::new(repo.path()).with_review_notes(sidecar))
+            .unwrap();
+
+    assert_eq!(first.revision_id, second.revision_id);
+    assert_eq!(second.events_created_by_type["sidecar_observed"], 1);
+}
+
+#[test]
+fn malformed_sidecar_fails_before_writing_events() {
+    let repo = modified_repo();
+    let sidecar = repo.path().join("bad-review-notes.json");
+    std::fs::write(&sidecar, "{").unwrap();
+
+    let error =
+        publish_worktree_review(PublishOptions::new(repo.path()).with_review_notes(sidecar))
+            .expect_err("malformed sidecar is fatal");
+
+    assert!(error.to_string().contains("json"));
+    assert!(!repo.path().join(".shore").exists());
+}
+
 fn modified_repo() -> GitRepo {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
@@ -245,4 +336,82 @@ fn revision_event_for(
             }
         })
         .expect("revision event exists")
+}
+
+fn sidecar_observed_event(repo: &GitRepo, source: &str) -> ShoreEvent {
+    let store = EventStore::open(repo.path().join(".shore"));
+    store
+        .list_events()
+        .expect("events list")
+        .into_iter()
+        .find(|event| {
+            event.event_type == EventType::SidecarObserved && event.payload["source"] == source
+        })
+        .expect("sidecar observed event exists")
+}
+
+fn write_native_review_notes(repo: &GitRepo) -> std::path::PathBuf {
+    let sidecar = repo.path().join("review-notes.json");
+    std::fs::write(&sidecar, native_review_notes_json()).unwrap();
+    sidecar
+}
+
+fn write_legacy_hunk_context(repo: &GitRepo) -> std::path::PathBuf {
+    let sidecar = repo.path().join("agent-context.json");
+    std::fs::write(&sidecar, legacy_hunk_context_json()).unwrap();
+    sidecar
+}
+
+fn native_review_notes_json() -> &'static str {
+    r#"{
+  "schema": "shore.review-notes",
+  "version": 1,
+  "files": [
+    {
+      "path": "src/lib.rs",
+      "notes": [
+        {
+          "title": "Changed return value",
+          "target": { "side": "new", "startLine": 1, "endLine": 1 }
+        }
+      ]
+    }
+  ]
+}"#
+}
+
+fn changed_review_notes_json() -> &'static str {
+    r#"{
+  "schema": "shore.review-notes",
+  "version": 1,
+  "summary": "changed only in sidecar",
+  "files": [
+    {
+      "path": "src/lib.rs",
+      "notes": [
+        {
+          "title": "Changed return value again",
+          "target": { "side": "new", "startLine": 1, "endLine": 1 }
+        }
+      ]
+    }
+  ]
+}"#
+}
+
+fn legacy_hunk_context_json() -> &'static str {
+    r#"{
+  "schema": "shore.agent-context",
+  "files": [
+    {
+      "path": "src/lib.rs",
+      "annotations": [
+        {
+          "summary": "Changed return value",
+          "newRange": [1, 1]
+        }
+      ]
+    }
+  ]
+}"#
 }

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
@@ -190,10 +192,13 @@ impl EventPayload for SnapshotObservedPayload {
 pub struct SidecarObservedPayload {
     pub source: SidecarSource,
     pub path: String,
+    pub byte_size: usize,
     pub content_hash: String,
     pub schema: Option<String>,
+    pub imported_schema: Option<String>,
     pub version: Option<u32>,
     pub diagnostic_count: usize,
+    pub diagnostic_levels: BTreeMap<String, usize>,
 }
 
 impl EventPayload for SidecarObservedPayload {
