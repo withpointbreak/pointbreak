@@ -93,6 +93,35 @@ fn review_publish_rejects_malformed_sidecar_before_shore_writes() {
     assert!(!repo.path().join(".shore").exists());
 }
 
+#[test]
+fn review_publish_with_review_notes_records_sidecar_observation() {
+    let repo = modified_repo();
+    let sidecar_path = repo.path().join("review-notes.json");
+    fs::write(&sidecar_path, native_review_notes_json()).expect("write review notes");
+
+    let output = shore([
+        "review",
+        "publish",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--review-notes",
+        sidecar_path.to_str().unwrap(),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = parse_json(&output.stdout);
+    assert_eq!(json["eventsCreated"], 4);
+    assert_eq!(json["eventsCreatedByType"]["sidecar_observed"], 1);
+
+    let state: Value =
+        serde_json::from_str(&repo.read(".shore/state.json")).expect("state is json");
+    assert_eq!(state["sidecarCount"], 1);
+}
+
 fn shore<I, S>(args: I) -> std::process::Output
 where
     I: IntoIterator<Item = S>,
@@ -116,4 +145,22 @@ fn modified_repo() -> GitRepo {
     repo.commit_all("base");
     repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
     repo
+}
+
+fn native_review_notes_json() -> &'static str {
+    r#"{
+  "schema": "shore.review-notes",
+  "version": 1,
+  "files": [
+    {
+      "path": "src/lib.rs",
+      "notes": [
+        {
+          "title": "Changed return value",
+          "target": { "side": "new", "startLine": 1, "endLine": 1 }
+        }
+      ]
+    }
+  ]
+}"#
 }

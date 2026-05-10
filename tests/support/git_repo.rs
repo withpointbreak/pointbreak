@@ -54,6 +54,19 @@ impl GitRepo {
         fs::write(path, contents).expect("write test repository file");
     }
 
+    pub fn write_fixture(
+        &self,
+        path: impl AsRef<Path>,
+        contents: impl AsRef<[u8]>,
+    ) -> std::path::PathBuf {
+        let path = self.root.path().join(path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent directories");
+        }
+        fs::write(&path, contents).expect("write test fixture file");
+        path
+    }
+
     pub fn remove(&self, path: impl AsRef<Path>) {
         let path = self.root.path().join(path);
         if path.is_dir() {

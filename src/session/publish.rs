@@ -211,6 +211,25 @@ pub fn publish_worktree_review(options: PublishOptions) -> Result<PublishResult>
     })
 }
 
+pub fn rebuild_state(repo: impl AsRef<Path>) -> Result<SessionState> {
+    let worktree_root = git_worktree_root(repo.as_ref())?;
+    let shore_dir = worktree_root.join(".shore");
+    let storage = LocalStorage::new(&shore_dir);
+    storage.sweep_temp_files(&shore_dir, TempSweepAge::zero())?;
+
+    let span = tracing::info_span!("session.rebuild_state", repo = %worktree_root.display());
+    let _entered = span.enter();
+
+    let event_store = EventStore::open(&shore_dir);
+    let state = SessionState::from_events(&event_store.list_events()?)?;
+    storage.write_json_atomic(
+        &shore_dir.join("state.json"),
+        &state,
+        Durability::Projection,
+    )?;
+    Ok(state)
+}
+
 #[derive(Default)]
 struct PublishRecorder {
     events_created: usize,

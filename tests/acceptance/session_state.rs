@@ -1,7 +1,7 @@
 use shore::git::{git_worktree_root, ingest_tracked_diff};
 use shore::session::{
     EventType, PublishOptions, RevisionPublishedPayload, SessionState, ShoreEvent,
-    capture_worktree_fingerprint, ensure_shore_ignored, publish_worktree_review,
+    capture_worktree_fingerprint, ensure_shore_ignored, publish_worktree_review, rebuild_state,
     shore_dir_for_repo,
 };
 use shore::storage::EventStore;
@@ -309,12 +309,111 @@ fn malformed_sidecar_fails_before_writing_events() {
     assert!(!repo.path().join(".shore").exists());
 }
 
+#[test]
+fn publish_pipeline_records_events_sidecar_observation_and_bounded_state() {
+    let repo = bounded_publish_repo();
+    let sidecar = repo.write_fixture("review-notes.json", native_review_notes_json());
+
+    let result =
+        publish_worktree_review(PublishOptions::new(repo.path()).with_review_notes(sidecar))
+            .expect("publish succeeds");
+    let state_json = repo.read(".shore/state.json");
+    let state: serde_json::Value = serde_json::from_str(&state_json).expect("state is json");
+
+    assert_eq!(state["schema"], "shore.state");
+    assert_eq!(state["eventCount"], 4);
+    assert_eq!(state["sidecarCount"], 1);
+    assert!(state.get("events").is_none());
+    assert_eq!(event_file_count(repo.path()), 4);
+    assert_eq!(result.diagnostics.len(), 0);
+}
+
+#[test]
+fn state_can_be_deleted_and_rebuilt_from_events() {
+    let repo = bounded_publish_repo();
+    publish_worktree_review(PublishOptions::new(repo.path())).expect("publish succeeds");
+    let original_state = repo.read(".shore/state.json");
+    std::fs::remove_file(repo.path().join(".shore/state.json")).unwrap();
+
+    let rebuilt = rebuild_state(repo.path()).expect("state rebuilds");
+    let rebuilt_state = repo.read(".shore/state.json");
+
+    assert!(repo.path().join(".shore/state.json").is_file());
+    assert!(rebuilt.event_count >= 3);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&rebuilt_state).unwrap(),
+        serde_json::from_str::<serde_json::Value>(&original_state).unwrap()
+    );
+}
+
+#[test]
+fn corrupt_state_json_is_ignored_and_rebuilt_from_events() {
+    let repo = bounded_publish_repo();
+    publish_worktree_review(PublishOptions::new(repo.path())).expect("publish succeeds");
+    let original_state = repo.read(".shore/state.json");
+    std::fs::write(repo.path().join(".shore/state.json"), "{").unwrap();
+
+    rebuild_state(repo.path()).expect("state rebuilds from events");
+    let rebuilt_state = repo.read(".shore/state.json");
+
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&rebuilt_state).unwrap(),
+        serde_json::from_str::<serde_json::Value>(&original_state).unwrap()
+    );
+}
+
+#[test]
+fn event_store_detects_corrupted_event_payload_hash() {
+    let repo = bounded_publish_repo();
+    publish_worktree_review(PublishOptions::new(repo.path())).expect("publish succeeds");
+    corrupt_first_event_payload(repo.path());
+
+    let error = rebuild_state(repo.path()).expect_err("corrupt event is rejected");
+
+    assert!(error.to_string().contains("payload"));
+}
+
 fn modified_repo() -> GitRepo {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
     repo.commit_all("base");
     repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
     repo
+}
+
+fn bounded_publish_repo() -> GitRepo {
+    let repo = modified_repo();
+    repo.write("src/untracked.rs", "pub fn untracked() -> u32 { 3 }\n");
+    repo
+}
+
+fn event_file_count(repo: &std::path::Path) -> usize {
+    std::fs::read_dir(repo.join(".shore/events"))
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .count()
+}
+
+fn corrupt_first_event_payload(repo: &std::path::Path) {
+    let event_path = std::fs::read_dir(repo.join(".shore/events"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .expect("event file exists");
+    let mut event: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&event_path).unwrap()).unwrap();
+    event["payload"]["revisionId"] = serde_json::json!("rev:worktree:sha256:corrupted");
+    std::fs::write(&event_path, serde_json::to_vec(&event).unwrap()).unwrap();
 }
 
 fn revision_event_for(
