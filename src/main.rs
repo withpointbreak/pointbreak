@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use clap::error::ErrorKind;
 use clap::{Args, Parser, Subcommand};
 use shore::dump::DumpDocument;
+use shore::session::{PublishOptions, PublishResult, publish_worktree_review};
 use shore::sidecar::{parse_hunk_agent_context, parse_review_notes_sidecar};
 use shore::stream::ViewportSpec;
 
@@ -27,6 +28,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Dump(DumpArgs),
+    Review(ReviewArgs),
     Show(ShowArgs),
 }
 
@@ -58,6 +60,39 @@ struct ReviewInputArgs {
 struct ShowArgs {
     #[command(flatten)]
     input: ReviewInputArgs,
+}
+
+#[derive(Debug, Args)]
+struct ReviewArgs {
+    #[command(subcommand)]
+    command: ReviewCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ReviewCommand {
+    Publish(PublishArgs),
+}
+
+#[derive(Debug, Args)]
+struct PublishArgs {
+    #[command(flatten)]
+    input: ReviewInputArgs,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PublishDocument {
+    schema: &'static str,
+    version: u32,
+    review_id: String,
+    work_unit_id: String,
+    revision_id: String,
+    snapshot_id: String,
+    events_created: usize,
+    events_existing: usize,
+    events_created_by_type: std::collections::BTreeMap<String, usize>,
+    diagnostics: Vec<shore::session::ProjectionDiagnostic>,
+    state_path: String,
 }
 
 fn main() -> ExitCode {
@@ -112,6 +147,7 @@ fn run_cli(cli: Cli, stdout: &mut dyn Write) -> Result<(), Box<dyn std::error::E
             tracing::debug!(command = "dump", "command_start");
             dump(args, stdout)
         }
+        Command::Review(args) => review(args, stdout),
         Command::Show(args) => {
             tracing::debug!(command = "show", "command_start");
             show(args)
@@ -135,6 +171,25 @@ fn show(args: ShowArgs) -> Result<(), Box<dyn std::error::Error>> {
     let viewport = ViewportSpec::new(80, 24);
     let app = tui::app::TuiApp::new(document, viewport);
     tui::terminal::run(app)
+}
+
+fn review(args: ReviewArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::error::Error>> {
+    match args.command {
+        ReviewCommand::Publish(args) => {
+            tracing::debug!(command = "review.publish", "command_start");
+            review_publish(args, stdout)
+        }
+    }
+}
+
+fn review_publish(
+    args: PublishArgs,
+    stdout: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let result = publish_worktree_review(publish_options(&args.input))?;
+    let document = PublishDocument::from(result);
+    writeln!(stdout, "{}", serde_json::to_string(&document)?)?;
+    Ok(())
 }
 
 fn document_for_dump(args: &DumpArgs) -> Result<DumpDocument, Box<dyn std::error::Error>> {
@@ -163,8 +218,37 @@ fn load_dump_document(args: &ReviewInputArgs) -> Result<DumpDocument, Box<dyn st
     Ok(document)
 }
 
+fn publish_options(args: &ReviewInputArgs) -> PublishOptions {
+    let mut options = PublishOptions::new(&args.repo);
+    if let Some(review_notes) = &args.review_notes {
+        options = options.with_review_notes(review_notes);
+    }
+    if let Some(agent_context) = &args.legacy_hunk_agent_context {
+        options = options.with_legacy_hunk_agent_context(agent_context);
+    }
+    options
+}
+
 fn should_pretty_print(args: &DumpArgs) -> bool {
     args.pretty && !args.compact
+}
+
+impl From<PublishResult> for PublishDocument {
+    fn from(result: PublishResult) -> Self {
+        Self {
+            schema: "shore.publish",
+            version: 1,
+            review_id: result.review_id.as_str().to_owned(),
+            work_unit_id: result.work_unit_id.as_str().to_owned(),
+            revision_id: result.revision_id.as_str().to_owned(),
+            snapshot_id: result.snapshot_id.as_str().to_owned(),
+            events_created: result.events_created,
+            events_existing: result.events_existing,
+            events_created_by_type: result.events_created_by_type,
+            diagnostics: result.diagnostics,
+            state_path: result.state_path.to_string_lossy().into_owned(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -266,6 +350,20 @@ mod tests {
         let show_document = document_for_show(&ShowArgs { input }).expect("show document builds");
 
         assert_eq!(show_document, dump_document);
+    }
+
+    #[test]
+    fn show_loader_does_not_create_shore_state() {
+        let repo = dump_repo();
+        let input = ReviewInputArgs {
+            repo: repo.path().to_owned(),
+            review_notes: None,
+            legacy_hunk_agent_context: None,
+        };
+
+        document_for_show(&ShowArgs { input }).expect("show document builds");
+
+        assert!(!repo.path().join(".shore").exists());
     }
 
     fn dump_repo() -> GitRepo {
