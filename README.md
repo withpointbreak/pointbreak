@@ -136,6 +136,8 @@ Behavior:
 - `--review-notes <path>` loads Shore-native `review-notes.json`.
 - `--legacy-hunk-agent-context <path>` imports a Hunk-compatible `agent-context.json` through the
   explicit legacy adapter.
+- When no explicit sidecar is supplied, repo-only `shore show` auto-loads durable imported notes
+  from `.shore/` if the store exists.
 - Explicit sidecar inputs are command helpers and are not themselves included in the reviewed
   snapshot for that command. Other unrelated tracked and untracked files remain visible.
 - The view is read-only: it renders the working-tree diff, resolved review notes, and recoverable
@@ -156,6 +158,8 @@ Behavior:
 - `--review-notes <path>` loads Shore-native `review-notes.json`.
 - `--legacy-hunk-agent-context <path>` imports a Hunk-compatible `agent-context.json` through the
   explicit legacy adapter.
+- When no explicit sidecar is supplied, repo-only `shore dump` auto-loads durable imported notes
+  from `.shore/` if the store exists.
 - Explicit sidecar inputs and `--log-file <path>` are command helpers and are not themselves
   included in the reviewed snapshot for that command. Other unrelated tracked and untracked files
   remain visible.

@@ -182,6 +182,7 @@ fn input_source(source: &DumpInputSource) -> &'static str {
         DumpInputSource::None => "no notes",
         DumpInputSource::ReviewNotes => "review notes",
         DumpInputSource::LegacyHunkAgentContext => "legacy hunk",
+        DumpInputSource::Durable => "durable",
     }
 }
 

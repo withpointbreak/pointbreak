@@ -140,6 +140,95 @@ fn dump_cli_loads_native_review_notes() {
 }
 
 #[test]
+fn dump_cli_loads_durable_imported_notes_by_default() {
+    let repo = dump_repo();
+    let sidecar_path = repo.write_fixture("review-notes.json", native_review_notes_json());
+
+    let apply = shore([
+        "notes",
+        "apply",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--review-notes",
+        sidecar_path.to_str().unwrap(),
+    ]);
+    assert!(
+        apply.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
+
+    let output = shore(["dump", "--repo", repo.path().to_str().unwrap()]);
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf-8");
+    let json = parse_json(&stdout);
+    assert_eq!(json["input"]["source"], "durable");
+    assert_eq!(json["summary"]["note_count"], 1);
+    assert!(
+        json["notes"]
+            .as_array()
+            .expect("notes are an array")
+            .iter()
+            .any(|note| note["title"] == "Untracked note")
+    );
+}
+
+#[test]
+fn dump_cli_explicit_review_notes_overrides_durable_default() {
+    let repo = dump_repo();
+    let durable_dir = tempfile::tempdir().expect("create durable tempdir");
+    let durable_path = durable_dir.path().join("review-notes.json");
+    fs::write(&durable_path, native_review_notes_json()).expect("write durable review notes");
+    let apply = shore([
+        "notes",
+        "apply",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--review-notes",
+        durable_path.to_str().unwrap(),
+    ]);
+    assert!(
+        apply.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
+
+    let explicit_dir = tempfile::tempdir().expect("create explicit tempdir");
+    let explicit_path = explicit_dir.path().join("override-review-notes.json");
+    fs::write(&explicit_path, explicit_review_notes_json()).expect("write explicit review notes");
+
+    let output = shore([
+        "dump",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--review-notes",
+        explicit_path.to_str().unwrap(),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf-8");
+    let json = parse_json(&stdout);
+    assert_eq!(json["input"]["source"], "review_notes");
+    assert_eq!(json["summary"]["note_count"], 1);
+    assert!(
+        json["notes"]
+            .as_array()
+            .expect("notes are an array")
+            .iter()
+            .any(|note| note["title"] == "Explicit sidecar title")
+    );
+}
+
+#[test]
 fn dump_cli_excludes_explicit_in_repo_review_notes_from_stream() {
     let repo = dump_repo();
     let sidecar_path = repo.path().join("review-notes.json");
@@ -499,6 +588,25 @@ fn native_review_notes_json() -> &'static str {
     {
       "path": "src/lib.rs",
       "notes": []
+    }
+  ]
+}"#
+}
+
+fn explicit_review_notes_json() -> &'static str {
+    r#"{
+  "schema": "shore.review-notes",
+  "version": 1,
+  "files": [
+    {
+      "path": "src/lib.rs",
+      "notes": [
+        {
+          "title": "Explicit sidecar title",
+          "body": "Explicit override body.",
+          "target": { "side": "new", "startLine": 1, "endLine": 1 }
+        }
+      ]
     }
   ]
 }"#

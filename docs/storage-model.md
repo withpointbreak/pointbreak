@@ -37,6 +37,10 @@ Imported review notes should follow the same split:
 - large note bodies may live in content-addressed `artifacts/notes/` records instead of expanding
   event payloads or the projection without bound
 
+On the read path, Shore reconstructs imported notes by replaying `review_note_imported` events and
+loading any optional note-body artifacts under `artifacts/notes/`. `state.json` remains a bounded
+projection and is not the durable source of note content.
+
 A future delivery queue is a separate subsystem. Queue concepts such as `pending/`, `failed/`,
 retry counts, backoff, circuit breakers, and acknowledgement markers do not belong in
 `.shore/events/`.

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use crate::git::{IngestOptions, ingest_tracked_diff_with_options};
 use crate::model::{DiffSnapshot, ReviewNote, ReviewStream};
+use crate::session::load_durable_notes_for_repo;
 use crate::sidecar::{
     ParsedReviewNotes, ReviewNotesDiagnostic, apply_file_order, parse_hunk_agent_context,
     parse_review_notes_sidecar, read_legacy_hunk_agent_context_file,
@@ -73,7 +74,20 @@ impl DumpDocument {
     }
 
     pub fn from_repo_with_options(repo: impl AsRef<Path>, options: DumpOptions) -> Result<Self> {
-        let snapshot = ingest_tracked_diff_with_options(repo, options.ingest_options())?;
+        let repo_path = repo.as_ref();
+
+        // Try to load durable notes first; fall back to empty if none exist
+        if let Some(parsed) = load_durable_notes_for_repo(repo_path)? {
+            return Self::from_parsed_notes_with_snapshot_order(
+                repo_path,
+                parsed,
+                DumpInputSource::Durable,
+                options,
+            );
+        }
+
+        // No durable notes; ingest diff and use empty note path
+        let snapshot = ingest_tracked_diff_with_options(repo_path, options.ingest_options())?;
         let notes = Vec::new();
         let stream = ReviewStream::from_snapshot_with_resolved_notes(&snapshot, &notes);
         Ok(Self::new(
@@ -172,6 +186,27 @@ impl DumpDocument {
             diagnostics,
         ))
     }
+
+    fn from_parsed_notes_with_snapshot_order(
+        repo: impl AsRef<Path>,
+        parsed: ParsedReviewNotes,
+        source: DumpInputSource,
+        options: DumpOptions,
+    ) -> Result<Self> {
+        let snapshot = ingest_tracked_diff_with_options(repo, options.ingest_options())?;
+        let resolved = resolve_notes(&snapshot.files, &parsed.sidecar);
+        let mut diagnostics = parsed.diagnostics;
+        extend_unique_diagnostics(&mut diagnostics, resolved.diagnostics);
+        let stream = ReviewStream::from_snapshot_with_resolved_notes(&snapshot, &resolved.notes);
+
+        Ok(Self::new(
+            DumpInputSummary { source },
+            snapshot,
+            resolved.notes,
+            stream,
+            diagnostics,
+        ))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -185,6 +220,7 @@ pub enum DumpInputSource {
     None,
     ReviewNotes,
     LegacyHunkAgentContext,
+    Durable,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

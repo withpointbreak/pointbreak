@@ -1,3 +1,4 @@
+mod consume;
 pub mod event;
 mod fingerprint;
 mod import;
@@ -5,6 +6,7 @@ mod publish;
 pub mod state;
 mod store_init;
 
+pub use consume::load_durable_notes_for_repo;
 pub use event::{
     EventPayload, EventTarget, EventType, ReviewInitializedPayload, RevisionPublishedPayload,
     ShoreEvent, SidecarObservedPayload, SidecarSource, SnapshotObservedPayload, Writer, WriterRole,

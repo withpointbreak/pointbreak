@@ -753,3 +753,85 @@ fn review_notes_with_body_json(body: &str) -> String {
 }}"#
     )
 }
+
+#[test]
+fn load_durable_notes_for_repo_returns_none_without_shore_store() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+
+    let parsed = shore::session::load_durable_notes_for_repo(repo.path()).expect("load succeeds");
+
+    assert_eq!(parsed, None);
+    assert!(!repo.path().join(".shore").exists());
+}
+
+#[test]
+fn load_durable_notes_for_repo_replays_imported_notes() {
+    let repo = modified_repo();
+    let sidecar = write_native_review_notes(&repo);
+    import_notes(ImportNotesOptions::new(repo.path()).with_review_notes(&sidecar))
+        .expect("notes import succeeds");
+
+    let parsed = shore::session::load_durable_notes_for_repo(repo.path())
+        .expect("load succeeds")
+        .expect("durable notes exist");
+
+    assert_eq!(parsed.sidecar.files.len(), 1);
+    assert_eq!(parsed.sidecar.files[0].notes.len(), 1);
+    assert_eq!(
+        parsed.sidecar.files[0].notes[0].title.as_deref(),
+        Some("Changed return value")
+    );
+}
+
+#[test]
+fn load_durable_notes_for_repo_returns_none_with_empty_store() {
+    let repo = modified_repo();
+    // Publish to create .shore/events/ directory, but no notes
+    publish_worktree_review(PublishOptions::new(repo.path())).expect("publish succeeds");
+
+    // Verify .shore exists but no imported notes have been recorded
+    assert!(repo.path().join(".shore/events").exists());
+
+    let parsed = shore::session::load_durable_notes_for_repo(repo.path()).expect("load succeeds");
+
+    // Empty store should return None (not Some(empty))
+    assert_eq!(parsed, None);
+}
+
+#[test]
+fn load_durable_notes_for_repo_resolves_large_body_artifact() {
+    let repo = modified_repo();
+    let large_body = "x".repeat(5000);
+    let sidecar = write_review_notes_with_body(&repo, &large_body);
+    import_notes(ImportNotesOptions::new(repo.path()).with_review_notes(&sidecar))
+        .expect("notes import succeeds");
+
+    let parsed = shore::session::load_durable_notes_for_repo(repo.path())
+        .unwrap()
+        .expect("durable notes exist");
+
+    assert_eq!(
+        parsed.sidecar.files[0].notes[0].body.as_deref(),
+        Some(&large_body[..])
+    );
+}
+
+#[test]
+fn load_durable_notes_for_repo_still_works_with_small_inline_bodies() {
+    let repo = modified_repo();
+    let small_body = "small body content";
+    let sidecar = write_review_notes_with_body(&repo, small_body);
+    import_notes(ImportNotesOptions::new(repo.path()).with_review_notes(&sidecar))
+        .expect("notes import succeeds");
+
+    let parsed = shore::session::load_durable_notes_for_repo(repo.path())
+        .unwrap()
+        .expect("durable notes exist");
+
+    assert_eq!(
+        parsed.sidecar.files[0].notes[0].body.as_deref(),
+        Some(small_body)
+    );
+}

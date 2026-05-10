@@ -376,6 +376,9 @@ mod tests {
     use std::path::Path;
     use std::process::{Command, ExitCode};
 
+    use shore::dump::DumpInputSource;
+    use shore::session::ImportNotesOptions;
+
     use super::cli_tracing::{LogFormatArg, TracingArgs};
     use super::{
         DumpArgs, ReviewInputArgs, ShowArgs, document_for_dump, document_for_show, run_with_io,
@@ -477,6 +480,39 @@ mod tests {
     }
 
     #[test]
+    fn dump_and_show_load_durable_notes_by_default() {
+        let repo = dump_repo();
+        let sidecar_dir = tempfile::tempdir().expect("create durable tempdir");
+        let sidecar_path = sidecar_dir.path().join("review-notes.json");
+        fs::write(&sidecar_path, native_review_notes_json()).expect("write review notes");
+        super::import_notes(ImportNotesOptions::new(repo.path()).with_review_notes(&sidecar_path))
+            .expect("notes import succeeds");
+
+        let input = ReviewInputArgs {
+            repo: repo.path().to_owned(),
+            review_notes: None,
+            legacy_hunk_agent_context: None,
+        };
+        let tracing = tracing_args(None);
+
+        let dump_document = document_for_dump(
+            &DumpArgs {
+                input: input.clone(),
+                pretty: false,
+                compact: true,
+            },
+            &tracing,
+        )
+        .expect("dump document builds");
+        let show_document =
+            document_for_show(&ShowArgs { input }, &tracing).expect("show document builds");
+
+        assert_eq!(dump_document.input.source, DumpInputSource::Durable);
+        assert_eq!(dump_document.summary.note_count, 1);
+        assert_eq!(dump_document, show_document);
+    }
+
+    #[test]
     fn dump_and_show_use_the_same_filtered_review_notes_loader() {
         let repo = dump_repo();
         let sidecar_path = repo.path().join("review-notes.json");
@@ -540,6 +576,42 @@ mod tests {
         assert!(!repo.path().join(".shore").exists());
     }
 
+    #[test]
+    fn dump_and_show_prefer_explicit_review_notes_over_durable_notes() {
+        let repo = dump_repo();
+        let durable_sidecar = write_native_review_notes(&repo);
+        super::import_notes(
+            ImportNotesOptions::new(repo.path()).with_review_notes(&durable_sidecar),
+        )
+        .unwrap();
+
+        let explicit_path = repo.path().join("override-review-notes.json");
+        fs::write(&explicit_path, explicit_review_notes_json()).expect("write explicit notes");
+
+        let input = ReviewInputArgs {
+            repo: repo.path().to_owned(),
+            review_notes: Some(explicit_path),
+            legacy_hunk_agent_context: None,
+        };
+
+        let tracing = tracing_args(None);
+        let dump_document = document_for_dump(
+            &DumpArgs {
+                input: input.clone(),
+                pretty: false,
+                compact: true,
+            },
+            &tracing,
+        )
+        .expect("dump document builds");
+        let show_document =
+            document_for_show(&ShowArgs { input }, &tracing).expect("show document builds");
+
+        assert_eq!(dump_document.input.source, DumpInputSource::ReviewNotes);
+        assert_eq!(dump_document, show_document);
+        assert_eq!(dump_document.notes[0].title, "Explicit sidecar title");
+    }
+
     fn tracing_args(log_file: Option<std::path::PathBuf>) -> TracingArgs {
         TracingArgs {
             log: None,
@@ -575,6 +647,39 @@ mod tests {
             "endLine": 1
           },
           "author": "human reviewer",
+          "source": "reviewer"
+        }
+      ]
+    }
+  ]
+}"#
+    }
+
+    fn write_native_review_notes(repo: &GitRepo) -> std::path::PathBuf {
+        let path = repo.path().join("durable-review-notes.json");
+        fs::write(&path, native_review_notes_json()).expect("write durable review notes");
+        path
+    }
+
+    fn explicit_review_notes_json() -> &'static str {
+        r#"{
+  "schema": "shore.review-notes",
+  "version": 1,
+  "summary": "Explicit override review notes",
+  "files": [
+    {
+      "path": "src/lib.rs",
+      "notes": [
+        {
+          "id": "note:explicit",
+          "title": "Explicit sidecar title",
+          "body": "This is from the explicit sidecar.",
+          "target": {
+            "side": "new",
+            "startLine": 1,
+            "endLine": 1
+          },
+          "author": "explicit reviewer",
           "source": "reviewer"
         }
       ]

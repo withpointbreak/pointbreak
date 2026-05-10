@@ -280,3 +280,108 @@ fn snapshot_with_one_hunk() -> DiffSnapshot {
         }],
     )
 }
+
+#[test]
+fn dump_input_source_durable_serializes_as_snake_case() {
+    assert_eq!(
+        serde_json::to_string(&DumpInputSource::Durable).unwrap(),
+        "\"durable\""
+    );
+}
+
+#[test]
+fn from_repo_with_options_uses_durable_notes_when_present() {
+    use shore::session::{ImportNotesOptions, import_notes};
+
+    use crate::support::git_repo::GitRepo;
+
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+
+    let sidecar = repo.path().join("review-notes.json");
+    std::fs::write(
+        &sidecar,
+        r#"{
+  "schema": "shore.review-notes",
+  "version": 1,
+  "files": [
+    {
+      "path": "src/lib.rs",
+      "notes": [
+        {
+          "title": "Changed return value",
+          "target": { "side": "new", "startLine": 1, "endLine": 1 }
+        }
+      ]
+    }
+  ]
+}"#,
+    )
+    .unwrap();
+
+    import_notes(ImportNotesOptions::new(repo.path()).with_review_notes(&sidecar))
+        .expect("notes import succeeds");
+
+    let document = DumpDocument::from_repo_with_options(repo.path(), Default::default())
+        .expect("document builds");
+
+    assert_eq!(document.input.source, DumpInputSource::Durable);
+    assert_eq!(document.summary.note_count, 1);
+}
+
+#[test]
+fn from_repo_with_options_durable_preserves_snapshot_file_order() {
+    use shore::session::{ImportNotesOptions, import_notes};
+
+    use crate::support::git_repo::GitRepo;
+
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.write("tests/test.rs", "pub fn test() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    repo.write("tests/test.rs", "pub fn test() -> u32 { 2 }\n");
+
+    let sidecar = repo.path().join("review-notes.json");
+    std::fs::write(
+        &sidecar,
+        r#"{
+  "schema": "shore.review-notes",
+  "version": 1,
+  "files": [
+    {
+      "path": "tests/test.rs",
+      "notes": [
+        {
+          "title": "Test change",
+          "target": { "side": "new", "startLine": 1, "endLine": 1 }
+        }
+      ]
+    },
+    {
+      "path": "src/lib.rs",
+      "notes": []
+    }
+  ]
+}"#,
+    )
+    .unwrap();
+
+    import_notes(ImportNotesOptions::new(repo.path()).with_review_notes(&sidecar))
+        .expect("notes import succeeds");
+
+    let document = DumpDocument::from_repo_with_options(repo.path(), Default::default())
+        .expect("document builds");
+
+    assert_eq!(document.input.source, DumpInputSource::Durable);
+    let modified_files: Vec<_> = document
+        .snapshot
+        .files
+        .iter()
+        .filter_map(|f| f.new_path.as_deref())
+        .filter(|p| p.contains("src/") || p.contains("tests/"))
+        .collect();
+    assert_eq!(modified_files, vec!["src/lib.rs", "tests/test.rs"]);
+}
