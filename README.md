@@ -145,6 +145,8 @@ Behavior:
 - Press `r` to re-ingest the working tree and reload the projection without losing your cursor
   position. Reload preserves the cursor by row ID when possible, then falls back to file+hunk,
   file, or the first row in the refreshed stream.
+- Stale and orphan review notes appear as dedicated rows you can park the cursor on. The detail
+  pane labels the row with its resolution status and the original target path and line range.
 - Explicit sidecar inputs are command helpers and are not themselves included in the reviewed
   snapshot for that command. Other unrelated tracked and untracked files remain visible.
 - The view is read-only: it renders the working-tree diff, resolved review notes, and recoverable
@@ -175,6 +177,12 @@ Behavior:
   `message`). Individual verdicts and acknowledgements also carry a `stale: true` flag when their
   revision no longer matches `current_revision_id`. Both the `reload_diagnostics` section and the
   `stale` flags are omitted entirely when there is no reload-time staleness.
+- The review stream emits a `stale_note` row variant when a durable note's anchor no longer matches
+  the current diff (the file is present but the line range is unsatisfiable). When a note's file is
+  absent from the snapshot entirely, the stream emits a synthetic `<orphaned notes>` file header
+  followed by one `stale_note` row per orphan note. Stale-note rows carry `note_id`, `title`,
+  `resolution_status` (`stale` or `orphaned`), `target_path`, and `target_line_range`. The
+  synthetic header is omitted when there are no orphan notes.
 - Explicit sidecar inputs and `--log-file <path>` are command helpers and are not themselves
   included in the reviewed snapshot for that command. Other unrelated tracked and untracked files
   remain visible.

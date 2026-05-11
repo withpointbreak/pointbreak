@@ -55,6 +55,7 @@ fn bounded_large_changeset_exercises_full_read_only_pipeline() {
             diff_rows: 33,
             metadata_rows: 2,
             note_rows: 4,
+            stale_note_rows: 0,
             empty_rows: 0,
             total_rows: 49,
         }

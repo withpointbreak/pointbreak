@@ -59,6 +59,9 @@ The read surface (`shore dump`, `shore show`) projects these events through the 
 `review_artifacts` section in the dump JSON and a status banner in the TUI. The section is omitted
 when `.shore/` is absent. `current_verdict.status` is one of `resolved`, `ambiguous`, or `none`;
 the reader never picks a tie-breaker when ambiguity is present.
+The review stream also surfaces stale and orphan notes as dedicated rows so reviewers can park the
+cursor on them; the stream emits an additional synthetic file header for orphan notes when at least
+one is present.
 
 Reload is a read-side projection refresh. The durable event log remains immutable; reload re-runs
 the order-independent projection against the current worktree state and lowers anchor-stale and

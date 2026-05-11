@@ -338,6 +338,37 @@ mod tests {
     }
 
     #[test]
+    fn row_actions_step_into_stale_note_row() {
+        let document = document_with_one_hunk_and_one_stale_note();
+        let mut app = TuiApp::new(document, ViewportSpec::new(80, 20));
+        let stale_row_id = app
+            .document()
+            .stream
+            .rows
+            .last()
+            .map(|row| row.id.clone())
+            .expect("stale row present");
+
+        while app.cursor().row_id.as_ref() != Some(&stale_row_id) {
+            app.handle_action(TuiAction::RowDown);
+        }
+
+        assert_eq!(app.cursor().row_id, Some(stale_row_id));
+        assert!(app.current_row_is_visible());
+    }
+
+    #[test]
+    fn next_note_hunk_action_skips_stale_note_row() {
+        let document = document_with_one_hunk_and_one_stale_note();
+        let mut app = TuiApp::new(document, ViewportSpec::new(80, 20));
+        app.cursor = CursorState::at_row(RowId::new("row:0000"));
+
+        app.handle_action(TuiAction::NextNoteHunk);
+
+        assert_eq!(app.cursor().row_id.as_ref(), Some(&RowId::new("row:0003")));
+    }
+
+    #[test]
     fn resize_recomputes_layout_and_keeps_cursor_visible() {
         let mut app = app_with_two_hunks(ViewportSpec::new(80, 20));
         app.cursor = CursorState::at_row(RowId::new("row:0005"));
@@ -523,6 +554,45 @@ mod tests {
             stream,
             Vec::new(),
         )
+    }
+
+    fn document_with_one_hunk_and_one_stale_note() -> DumpDocument {
+        let mut document = document_with_one_hunk_and_one_note();
+        let file_id = FileId::new("src/lib.rs");
+        let stale_row_ordinal = document.stream.rows.len();
+        document.stream.rows.push(ReviewRow {
+            id: RowId::new(format!("row:{stale_row_ordinal:04}")),
+            ordinal: stale_row_ordinal,
+            file_id: Some(file_id.clone()),
+            hunk_id: None,
+            kind: ReviewRowKind::StaleNote {
+                note_id: ReviewNoteId::new("note:stale"),
+                title: "Stale anchor".to_owned(),
+                resolution_status: ResolutionStatus::Stale,
+                target_path: "src/lib.rs".to_owned(),
+                target_line_range: LineRange::new(99, 99),
+            },
+        });
+        document.notes.push(ReviewNote {
+            id: ReviewNoteId::new("note:stale"),
+            anchor: Anchor {
+                file_id,
+                side: Side::New,
+                line_range: LineRange::new(99, 99),
+                hunk_signature: "hunk:stale".to_owned(),
+                target_text_hash: String::new(),
+                status: ResolutionStatus::Stale,
+            },
+            source: ReviewNoteSource::Sidecar,
+            title: "Stale anchor".to_owned(),
+            body: None,
+            tags: Vec::new(),
+            confidence: None,
+            external_source: None,
+            author: None,
+            created_at: None,
+        });
+        document
     }
 
     fn app_with_two_hunks(viewport: ViewportSpec) -> TuiApp {

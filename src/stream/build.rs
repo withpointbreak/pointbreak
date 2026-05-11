@@ -1,8 +1,12 @@
 use crate::model::{
-    DiffFile, DiffRow, DiffSnapshot, FileId, HunkId, ReviewNote, ReviewRow, ReviewRowKind,
-    ReviewStream, RowId,
+    DiffFile, DiffRow, DiffSnapshot, FileId, FileStatus, HunkId, ReviewNote, ReviewRow,
+    ReviewRowKind, ReviewStream, RowId,
 };
 use crate::sidecar::{ReviewNotesDiagnostic, ReviewNotesSidecar, apply_file_order, resolve_notes};
+
+const STALE_HUNK_SENTINEL: &str = "hunk:stale";
+const ORPHANED_HUNK_SENTINEL: &str = "hunk:orphaned";
+pub const ORPHAN_SECTION_PATH: &str = "<orphaned notes>";
 
 fn build_review_stream(snapshot: &DiffSnapshot, notes: &[ReviewNote]) -> ReviewStream {
     let builder = StreamBuilder::new(snapshot, notes);
@@ -81,7 +85,7 @@ impl<'a> StreamBuilder<'a> {
     }
 
     fn build(mut self) -> ReviewStream {
-        if self.snapshot.files.is_empty() {
+        if self.snapshot.files.is_empty() && !self.has_orphan_notes() {
             self.push_row(
                 None,
                 None,
@@ -93,6 +97,7 @@ impl<'a> StreamBuilder<'a> {
             for file in &self.snapshot.files {
                 self.push_file(file);
             }
+            self.push_orphan_section();
         }
 
         ReviewStream {
@@ -154,6 +159,18 @@ impl<'a> StreamBuilder<'a> {
                 }
             }
         }
+
+        let stale_notes = self
+            .notes
+            .iter()
+            .filter(|note| {
+                note.anchor.file_id == file.id && note.anchor.hunk_signature == STALE_HUNK_SENTINEL
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for note in stale_notes {
+            self.push_row(Some(file.id.clone()), None, stale_note_row_kind(&note));
+        }
     }
 
     fn note_rows_for_row(
@@ -176,6 +193,36 @@ impl<'a> StreamBuilder<'a> {
                 title: note.title.clone(),
             })
             .collect()
+    }
+
+    fn push_orphan_section(&mut self) {
+        let orphan_notes = self
+            .notes
+            .iter()
+            .filter(|note| note.anchor.hunk_signature == ORPHANED_HUNK_SENTINEL)
+            .cloned()
+            .collect::<Vec<_>>();
+        if orphan_notes.is_empty() {
+            return;
+        }
+
+        self.push_row(
+            None,
+            None,
+            ReviewRowKind::FileHeader {
+                path: ORPHAN_SECTION_PATH.to_owned(),
+                status: FileStatus::Modified,
+            },
+        );
+        for note in orphan_notes {
+            self.push_row(None, None, stale_note_row_kind(&note));
+        }
+    }
+
+    fn has_orphan_notes(&self) -> bool {
+        self.notes
+            .iter()
+            .any(|note| note.anchor.hunk_signature == ORPHANED_HUNK_SENTINEL)
     }
 
     fn push_row(
@@ -202,9 +249,240 @@ struct NoteRowData {
     title: String,
 }
 
+fn stale_note_row_kind(note: &ReviewNote) -> ReviewRowKind {
+    ReviewRowKind::StaleNote {
+        note_id: note.id.clone(),
+        title: note.title.clone(),
+        resolution_status: note.anchor.status.clone(),
+        target_path: note.anchor.file_id.as_str().to_owned(),
+        target_line_range: note.anchor.line_range.clone(),
+    }
+}
+
 fn display_path(file: &DiffFile) -> String {
     file.new_path
         .clone()
         .or_else(|| file.old_path.clone())
         .unwrap_or_else(|| file.id.as_str().to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{
+        Anchor, DiffFile, DiffRow, DiffRowKind, DiffSnapshot, FileId, FileStatus, HunkId,
+        LineRange, ResolutionStatus, ReviewHunk, ReviewId, ReviewNote, ReviewNoteId,
+        ReviewNoteSource, ReviewRowKind, Side, SnapshotId,
+    };
+
+    #[test]
+    fn stream_builder_emits_stale_note_row_after_file_hunks() {
+        let snapshot = snapshot_with_one_file_one_hunk();
+        let notes = vec![stale_note("note:stale", "src/lib.rs")];
+
+        let stream = ReviewStream::from_snapshot_with_resolved_notes(&snapshot, &notes);
+
+        let kinds = stream
+            .rows
+            .iter()
+            .map(|row| row.kind.clone())
+            .collect::<Vec<_>>();
+
+        assert!(matches!(kinds[0], ReviewRowKind::FileHeader { .. }));
+        assert!(matches!(kinds[1], ReviewRowKind::HunkHeader { .. }));
+        assert!(matches!(kinds[2], ReviewRowKind::Diff { .. }));
+        match &kinds[3] {
+            ReviewRowKind::StaleNote {
+                note_id,
+                resolution_status,
+                target_path,
+                target_line_range,
+                ..
+            } => {
+                assert_eq!(note_id.as_str(), "note:stale");
+                assert_eq!(*resolution_status, ResolutionStatus::Stale);
+                assert_eq!(target_path, "src/lib.rs");
+                assert_eq!(target_line_range.start, 99);
+                assert_eq!(target_line_range.end, 99);
+            }
+            other => panic!("expected StaleNote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_builder_emits_orphan_section_after_files() {
+        let snapshot = snapshot_with_one_file_one_hunk();
+        let notes = vec![orphan_note("note:orphan", "src/gone.rs")];
+
+        let stream = ReviewStream::from_snapshot_with_resolved_notes(&snapshot, &notes);
+
+        let len = stream.rows.len();
+        assert!(len >= 5, "expected at least 5 rows, got {len}");
+        match &stream.rows[len - 2].kind {
+            ReviewRowKind::FileHeader { path, .. } => {
+                assert_eq!(path, ORPHAN_SECTION_PATH);
+            }
+            other => panic!("expected synthetic FileHeader, got {other:?}"),
+        }
+        match &stream.rows[len - 1].kind {
+            ReviewRowKind::StaleNote {
+                note_id,
+                resolution_status,
+                target_path,
+                ..
+            } => {
+                assert_eq!(note_id.as_str(), "note:orphan");
+                assert_eq!(*resolution_status, ResolutionStatus::Orphaned);
+                assert_eq!(target_path, "src/gone.rs");
+            }
+            other => panic!("expected orphan StaleNote, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_builder_omits_orphan_section_when_no_orphan_notes() {
+        let snapshot = snapshot_with_one_file_one_hunk();
+        let notes: Vec<ReviewNote> = Vec::new();
+
+        let stream = ReviewStream::from_snapshot_with_resolved_notes(&snapshot, &notes);
+
+        assert!(
+            stream.rows.iter().all(
+                |row| !matches!(&row.kind, ReviewRowKind::FileHeader { path, .. } if path == ORPHAN_SECTION_PATH)
+            ),
+            "no synthetic orphan header expected; got rows {:?}",
+            stream.rows.iter().map(|r| &r.kind).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn stream_builder_emits_orphan_section_when_snapshot_is_empty() {
+        let snapshot = empty_snapshot();
+        let notes = vec![orphan_note("note:orphan", "src/gone.rs")];
+
+        let stream = ReviewStream::from_snapshot_with_resolved_notes(&snapshot, &notes);
+
+        match &stream.rows.first().map(|row| &row.kind) {
+            Some(ReviewRowKind::FileHeader { path, .. }) => {
+                assert_eq!(path, ORPHAN_SECTION_PATH);
+            }
+            other => panic!("expected synthetic orphan header first; got {other:?}"),
+        }
+        assert!(
+            stream
+                .rows
+                .iter()
+                .all(|row| !matches!(row.kind, ReviewRowKind::EmptyState { .. })),
+            "empty-state row should be suppressed when orphan section is present; got rows {:?}",
+            stream.rows.iter().map(|r| &r.kind).collect::<Vec<_>>(),
+        );
+        assert!(
+            stream.rows.iter().any(|row| matches!(
+                &row.kind,
+                ReviewRowKind::StaleNote { resolution_status, .. }
+                    if *resolution_status == ResolutionStatus::Orphaned
+            )),
+            "expected at least one orphaned StaleNote row",
+        );
+    }
+
+    #[test]
+    fn stream_builder_stale_row_carries_no_hunk_id() {
+        let snapshot = snapshot_with_one_file_one_hunk();
+        let notes = vec![stale_note("note:stale", "src/lib.rs")];
+
+        let stream = ReviewStream::from_snapshot_with_resolved_notes(&snapshot, &notes);
+
+        let stale_row = stream
+            .rows
+            .iter()
+            .find(|row| matches!(row.kind, ReviewRowKind::StaleNote { .. }))
+            .expect("stale row present");
+        assert_eq!(
+            stale_row.file_id.as_ref().map(FileId::as_str),
+            Some("src/lib.rs")
+        );
+        assert!(
+            stale_row.hunk_id.is_none(),
+            "stale row has no hunk to point at"
+        );
+    }
+
+    fn snapshot_with_one_file_one_hunk() -> DiffSnapshot {
+        let review_id = ReviewId::new("review:test");
+        let snapshot_id = SnapshotId::new("snapshot:test");
+        let file_id = FileId::new("src/lib.rs");
+        let hunk = ReviewHunk {
+            id: HunkId::new("src/lib.rs:1:1"),
+            header: "@@ -0,0 +1,1 @@".to_owned(),
+            old_start: 0,
+            old_lines: 0,
+            new_start: 1,
+            new_lines: 1,
+            rows: vec![DiffRow {
+                kind: DiffRowKind::Added,
+                old_line: None,
+                new_line: Some(1),
+                text: "line one".to_owned(),
+            }],
+        };
+        DiffSnapshot::new(
+            review_id,
+            snapshot_id,
+            vec![DiffFile {
+                id: file_id,
+                status: FileStatus::Modified,
+                old_path: Some("src/lib.rs".to_owned()),
+                new_path: Some("src/lib.rs".to_owned()),
+                old_mode: None,
+                new_mode: None,
+                old_oid: None,
+                new_oid: None,
+                similarity: None,
+                is_binary: false,
+                is_submodule: false,
+                is_mode_only: false,
+                synthetic: false,
+                metadata_rows: Vec::new(),
+                hunks: vec![hunk],
+            }],
+        )
+    }
+
+    fn empty_snapshot() -> DiffSnapshot {
+        DiffSnapshot::new(
+            ReviewId::new("review:test"),
+            SnapshotId::new("snapshot:test"),
+            Vec::new(),
+        )
+    }
+
+    fn stale_note(note_id: &str, path: &str) -> ReviewNote {
+        ReviewNote {
+            id: ReviewNoteId::new(note_id),
+            anchor: Anchor {
+                file_id: FileId::new(path),
+                side: Side::New,
+                line_range: LineRange::new(99, 99),
+                hunk_signature: STALE_HUNK_SENTINEL.to_owned(),
+                target_text_hash: String::new(),
+                status: ResolutionStatus::Stale,
+            },
+            source: ReviewNoteSource::Sidecar,
+            title: "Stale".to_owned(),
+            body: None,
+            tags: Vec::new(),
+            confidence: None,
+            external_source: None,
+            author: None,
+            created_at: None,
+        }
+    }
+
+    fn orphan_note(note_id: &str, path: &str) -> ReviewNote {
+        let mut note = stale_note(note_id, path);
+        note.anchor.hunk_signature = ORPHANED_HUNK_SENTINEL.to_owned();
+        note.anchor.status = ResolutionStatus::Orphaned;
+        note
+    }
 }

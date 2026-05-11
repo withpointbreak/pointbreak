@@ -4,7 +4,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use shore::dump::{CurrentVerdictStatusName, DumpDocument, DumpInputSource};
-use shore::model::{ReviewNoteId, ReviewRow, ReviewRowKind};
+use shore::model::{LineRange, ResolutionStatus, ReviewNoteId, ReviewRow, ReviewRowKind};
 use shore::session::ReloadDiagnosticCode;
 use shore::session::event::{AcknowledgementNextAction, VerdictDecision};
 use shore::sidecar::ReviewNotesDiagnosticCode;
@@ -190,15 +190,23 @@ fn render_stream(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
 }
 
 fn render_detail(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    let (title, lines) = if let Some((title, body)) = selected_note_detail(app) {
-        (
-            "Note",
-            vec![
-                Line::styled(title, Style::default().add_modifier(Modifier::BOLD)),
-                Line::from(""),
-                Line::from(body.unwrap_or_else(|| "No note body".to_owned())),
-            ],
-        )
+    let (title, lines) = if let Some(detail) = selected_note_detail(app) {
+        let mut lines = vec![Line::styled(
+            detail.title,
+            Style::default().add_modifier(Modifier::BOLD),
+        )];
+        lines.push(Line::from(""));
+        if let Some(status_line) = detail.status_line {
+            lines.push(Line::styled(
+                status_line,
+                Style::default().fg(Color::Yellow),
+            ));
+            lines.push(Line::from(""));
+        }
+        lines.push(Line::from(
+            detail.body.unwrap_or_else(|| "No note body".to_owned()),
+        ));
+        ("Note", lines)
     } else if let Some(summary) = current_verdict_summary(app.document()) {
         (
             "Verdict",
@@ -238,13 +246,38 @@ fn render_detail(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     frame.render_widget(paragraph, area);
 }
 
-fn selected_note_detail(app: &TuiApp) -> Option<(String, Option<String>)> {
+struct NoteDetail {
+    title: String,
+    status_line: Option<String>,
+    body: Option<String>,
+}
+
+fn selected_note_detail(app: &TuiApp) -> Option<NoteDetail> {
     let selected_row = selected_row(app)?;
-    let ReviewRowKind::Note { note_id, title, .. } = &selected_row.kind else {
-        return None;
-    };
-    let body = note_body(app, note_id);
-    Some((title.clone(), body))
+    match &selected_row.kind {
+        ReviewRowKind::Note { note_id, title, .. } => Some(NoteDetail {
+            title: title.clone(),
+            status_line: None,
+            body: note_body(app, note_id),
+        }),
+        ReviewRowKind::StaleNote {
+            note_id,
+            title,
+            resolution_status,
+            target_path,
+            target_line_range,
+        } => Some(NoteDetail {
+            title: title.clone(),
+            status_line: Some(format!(
+                "status: {} at {}:{}",
+                resolution_status_word(resolution_status),
+                target_path,
+                display_line_range(target_line_range),
+            )),
+            body: note_body(app, note_id),
+        }),
+        _ => None,
+    }
 }
 
 fn selected_row(app: &TuiApp) -> Option<&ReviewRow> {
@@ -290,7 +323,29 @@ fn row_style(kind: DisplayRowKind) -> Style {
         DisplayRowKind::Context => Style::default(),
         DisplayRowKind::Metadata => Style::default().fg(Color::Magenta),
         DisplayRowKind::Note => Style::default().fg(Color::LightBlue),
+        DisplayRowKind::StaleNote => Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::ITALIC),
         DisplayRowKind::Empty => Style::default().fg(Color::DarkGray),
+    }
+}
+
+fn resolution_status_word(status: &ResolutionStatus) -> &'static str {
+    match status {
+        ResolutionStatus::Stale => "stale",
+        ResolutionStatus::Orphaned => "orphaned",
+        ResolutionStatus::Exact => "exact",
+        ResolutionStatus::Relocated => "relocated",
+        ResolutionStatus::FileLevel => "file-level",
+        ResolutionStatus::Unresolved => "unresolved",
+    }
+}
+
+fn display_line_range(range: &LineRange) -> String {
+    if range.start == range.end {
+        range.start.to_string()
+    } else {
+        format!("{}-{}", range.start, range.end)
     }
 }
 
@@ -537,6 +592,64 @@ mod tests {
     }
 
     #[test]
+    fn render_frame_shows_stale_note_row_in_body() {
+        let app = TuiApp::new(
+            document_with_stale_note(Vec::new()),
+            ViewportSpec::new(100, 20),
+        );
+
+        let buffer = render_to_buffer(&app, 100, 20);
+        let text = buffer_text(&buffer);
+
+        assert!(
+            text.contains("Stale anchor"),
+            "stale note title missing; got:\n{text}",
+        );
+        assert!(
+            text.contains("src/lib.rs:99"),
+            "target path/line missing; got:\n{text}",
+        );
+        assert!(
+            text.contains("(stale)"),
+            "status marker missing; got:\n{text}",
+        );
+    }
+
+    #[test]
+    fn render_frame_shows_stale_note_detail_when_selected() {
+        let mut app = TuiApp::new(
+            document_with_stale_note(Vec::new()),
+            ViewportSpec::new(100, 20),
+        );
+        let last_row_id = app
+            .document()
+            .stream
+            .rows
+            .last()
+            .map(|row| row.id.clone())
+            .expect("stream non-empty");
+        while app.cursor().row_id.as_ref() != Some(&last_row_id) {
+            app.handle_action(TuiAction::RowDown);
+        }
+
+        let buffer = render_to_buffer(&app, 100, 20);
+        let text = buffer_text(&buffer);
+
+        assert!(
+            text.contains("Stale anchor"),
+            "title missing in detail pane"
+        );
+        assert!(
+            text.contains("status: stale at src/lib.rs:99"),
+            "status line missing in detail pane; got:\n{text}",
+        );
+        assert!(
+            text.contains("This anchor no longer matches"),
+            "body missing in detail pane; got:\n{text}",
+        );
+    }
+
+    #[test]
     fn render_frame_shows_reload_hint_in_footer() {
         let app = app_with_note(ViewportSpec::new(100, 20));
 
@@ -718,6 +831,49 @@ mod tests {
             stream,
             diagnostics,
         )
+    }
+
+    fn document_with_stale_note(diagnostics: Vec<ReviewNotesDiagnostic>) -> DumpDocument {
+        let mut document = document_with_note(diagnostics);
+        let file_id = FileId::new("src/lib.rs");
+        let note_id = ReviewNoteId::new("note:stale");
+
+        let stale_note = ReviewNote {
+            id: note_id.clone(),
+            anchor: Anchor {
+                file_id: file_id.clone(),
+                side: Side::New,
+                line_range: LineRange::new(99, 99),
+                hunk_signature: "hunk:stale".to_owned(),
+                target_text_hash: String::new(),
+                status: ResolutionStatus::Stale,
+            },
+            source: ReviewNoteSource::Sidecar,
+            title: "Stale anchor".to_owned(),
+            body: Some("This anchor no longer matches.".to_owned()),
+            tags: Vec::new(),
+            confidence: None,
+            external_source: None,
+            author: None,
+            created_at: None,
+        };
+        document.notes.push(stale_note);
+
+        let next_ordinal = document.stream.rows.len();
+        document.stream.rows.push(ReviewRow {
+            id: RowId::new(format!("row:{next_ordinal:04}")),
+            ordinal: next_ordinal,
+            file_id: Some(file_id),
+            hunk_id: None,
+            kind: ReviewRowKind::StaleNote {
+                note_id,
+                title: "Stale anchor".to_owned(),
+                resolution_status: ResolutionStatus::Stale,
+                target_path: "src/lib.rs".to_owned(),
+                target_line_range: LineRange::new(99, 99),
+            },
+        });
+        document
     }
 
     fn sample_document_without_review_artifacts() -> DumpDocument {
