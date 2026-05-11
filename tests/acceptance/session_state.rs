@@ -203,6 +203,63 @@ fn publishing_changed_worktree_supersedes_previous_revision() {
 }
 
 #[test]
+fn republishing_previous_revision_reuses_original_supersession_payload() {
+    let repo = modified_repo();
+    let first = publish_worktree_review(PublishOptions::new(repo.path())).unwrap();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    let second = publish_worktree_review(PublishOptions::new(repo.path())).unwrap();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+
+    let third = publish_worktree_review(PublishOptions::new(repo.path())).unwrap();
+    let first_event = revision_event_for(&repo, &first.revision_id);
+    let first_artifact = revision_artifact_for(&repo, &first.revision_id);
+    let state = read_session_state(repo.path());
+
+    assert_eq!(third.revision_id, first.revision_id);
+    assert_eq!(third.events_created, 0);
+    assert_eq!(third.events_existing, 3);
+    assert!(first_event.supersedes_revision_ids.is_empty());
+    assert_eq!(first_artifact["revisionId"], first.revision_id.as_str());
+    assert_eq!(
+        first_artifact["supersedesRevisionIds"],
+        serde_json::json!([])
+    );
+    assert_eq!(state.current_revision_id, Some(second.revision_id));
+    assert_eq!(state.event_count, 5);
+}
+
+#[test]
+fn republishing_later_known_revision_reuses_original_supersession_payload() {
+    let repo = modified_repo();
+    let first = publish_worktree_review(PublishOptions::new(repo.path())).unwrap();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    let second = publish_worktree_review(PublishOptions::new(repo.path())).unwrap();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    publish_worktree_review(PublishOptions::new(repo.path())).unwrap();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+
+    let fourth = publish_worktree_review(PublishOptions::new(repo.path())).unwrap();
+    let second_event = revision_event_for(&repo, &second.revision_id);
+    let second_artifact = revision_artifact_for(&repo, &second.revision_id);
+    let state = read_session_state(repo.path());
+
+    assert_eq!(fourth.revision_id, second.revision_id);
+    assert_eq!(fourth.events_created, 0);
+    assert_eq!(fourth.events_existing, 3);
+    assert_eq!(
+        second_event.supersedes_revision_ids,
+        vec![first.revision_id]
+    );
+    assert_eq!(second_artifact["revisionId"], second.revision_id.as_str());
+    assert_eq!(
+        second_artifact["supersedesRevisionIds"],
+        serde_json::json!([second_event.supersedes_revision_ids[0].as_str()])
+    );
+    assert_eq!(state.current_revision_id, Some(second.revision_id));
+    assert_eq!(state.event_count, 5);
+}
+
+#[test]
 fn publish_writer_identity_prefers_git_config_email() {
     let repo = modified_repo();
 
@@ -640,6 +697,25 @@ fn revision_event_for(
             }
         })
         .expect("revision event exists")
+}
+
+fn revision_artifact_for(
+    repo: &GitRepo,
+    revision_id: &shore::model::RevisionId,
+) -> serde_json::Value {
+    std::fs::read_dir(repo.path().join(".shore/artifacts/revisions"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .find_map(|path| {
+            let artifact: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            (artifact["revisionId"] == revision_id.as_str()).then_some(artifact)
+        })
+        .expect("revision artifact exists")
 }
 
 fn sidecar_observed_event(repo: &GitRepo, source: &str) -> ShoreEvent {

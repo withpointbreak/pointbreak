@@ -111,17 +111,21 @@ pub fn publish_worktree_review(options: PublishOptions) -> Result<PublishResult>
     let target = EventTarget::new(review_id.clone(), work_unit_id.clone());
     let writer = writer_from_git_config(&worktree_root);
     let occurred_at = current_timestamp();
-    let supersedes_revision_ids = supersedes_revision_ids(
+    let revision_published_idempotency_key =
+        revision_published_idempotency_key(&work_unit_id, &fingerprint.revision_id);
+    let revision_published_payload = revision_published_payload(
+        &event_store,
+        &revision_published_idempotency_key,
         existing_state.current_revision_id.as_ref(),
         &fingerprint.revision_id,
-    );
+    )?;
 
     write_revision_artifact(
         &storage,
         &shore_dir,
         &work_unit_id,
-        &fingerprint.revision_id,
-        &supersedes_revision_ids,
+        &revision_published_payload.revision_id,
+        &revision_published_payload.supersedes_revision_ids,
     )?;
     write_snapshot_artifact(
         &storage,
@@ -148,17 +152,10 @@ pub fn publish_worktree_review(options: PublishOptions) -> Result<PublishResult>
         &event_store,
         ShoreEvent::new(
             EventType::RevisionPublished,
-            format!(
-                "revision_published:explicit:{}:{}",
-                work_unit_id.as_str(),
-                fingerprint.revision_id.as_str()
-            ),
+            revision_published_idempotency_key,
             target.clone(),
             writer.clone(),
-            RevisionPublishedPayload {
-                revision_id: fingerprint.revision_id.clone(),
-                supersedes_revision_ids,
-            },
+            revision_published_payload,
             occurred_at.clone(),
         )?,
     )?;
@@ -483,7 +480,54 @@ fn write_snapshot_artifact(
     )
 }
 
-fn supersedes_revision_ids(
+// Re-publishing a known revision is treated as an idempotent retry of the original
+// durable fact, not as a new lineage transition. Reuse the original payload so the
+// same idempotency key never acquires a different supersedes set.
+fn revision_published_payload(
+    event_store: &EventStore,
+    idempotency_key: &str,
+    current_revision_id: Option<&RevisionId>,
+    revision_id: &RevisionId,
+) -> Result<RevisionPublishedPayload> {
+    if let Some(existing_payload) =
+        existing_revision_published_payload(event_store, idempotency_key)?
+    {
+        return Ok(existing_payload);
+    }
+
+    Ok(RevisionPublishedPayload {
+        revision_id: revision_id.clone(),
+        supersedes_revision_ids: new_supersedes_revision_ids(current_revision_id, revision_id),
+    })
+}
+
+fn existing_revision_published_payload(
+    event_store: &EventStore,
+    idempotency_key: &str,
+) -> Result<Option<RevisionPublishedPayload>> {
+    let path = event_store.event_path_for_idempotency_key(idempotency_key);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let event = event_store.read_event(&path)?;
+    // If this payload grows required fields in the future, add serde defaults so
+    // older stored events can still be reused on the idempotent retry path.
+    Ok(Some(serde_json::from_value(event.payload)?))
+}
+
+fn revision_published_idempotency_key(
+    work_unit_id: &WorkUnitId,
+    revision_id: &RevisionId,
+) -> String {
+    format!(
+        "revision_published:explicit:{}:{}",
+        work_unit_id.as_str(),
+        revision_id.as_str()
+    )
+}
+
+fn new_supersedes_revision_ids(
     current_revision_id: Option<&RevisionId>,
     revision_id: &RevisionId,
 ) -> Vec<RevisionId> {
