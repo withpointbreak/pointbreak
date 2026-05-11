@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 
 use crate::error::Result;
@@ -9,6 +9,7 @@ use crate::session::event::{
     AcknowledgementNextAction, EventType, ReviewArtifactAcknowledgedPayload,
     ReviewArtifactPublishedPayload, ReviewNoteImportedPayload, VerdictDecision, Writer,
 };
+use crate::session::state::SessionState;
 use crate::sidecar::{
     ParsedReviewNotes, ReviewNoteEntry, ReviewNoteTarget, ReviewNotesFile, ReviewNotesSidecar,
 };
@@ -226,6 +227,64 @@ pub fn read_acknowledgements(repo: impl AsRef<Path>) -> Result<Vec<Acknowledgeme
     }
 
     Ok(acknowledgements)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CurrentVerdictView {
+    Resolved {
+        decision: VerdictDecision,
+        review_artifact_id: ReviewArtifactId,
+    },
+    Ambiguous {
+        review_artifact_ids: Vec<ReviewArtifactId>,
+    },
+    None,
+}
+
+pub fn current_verdict_view(
+    artifacts: &[ReviewArtifact],
+    current_revision_id: Option<&RevisionId>,
+) -> CurrentVerdictView {
+    let Some(revision_id) = current_revision_id else {
+        return CurrentVerdictView::None;
+    };
+
+    // Mirrors StateReducer::finish unreplaced verdict selection.
+    let replaced_ids = artifacts
+        .iter()
+        .flat_map(|artifact| artifact.replaces_review_artifact_ids.iter())
+        .collect::<HashSet<_>>();
+    let unreplaced = artifacts
+        .iter()
+        .filter(|artifact| {
+            &artifact.revision_id == revision_id && !replaced_ids.contains(&artifact.id)
+        })
+        .collect::<Vec<_>>();
+
+    match unreplaced.as_slice() {
+        [] => CurrentVerdictView::None,
+        [artifact] => CurrentVerdictView::Resolved {
+            decision: artifact.decision,
+            review_artifact_id: artifact.id.clone(),
+        },
+        artifacts => CurrentVerdictView::Ambiguous {
+            review_artifact_ids: artifacts
+                .iter()
+                .map(|artifact| artifact.id.clone())
+                .collect(),
+        },
+    }
+}
+
+pub fn load_or_rebuild_session_state(repo: impl AsRef<Path>) -> Result<Option<SessionState>> {
+    let worktree_root = git_worktree_root(repo.as_ref())?;
+    let shore_dir = worktree_root.join(".shore");
+    if !shore_dir.exists() {
+        return Ok(None);
+    }
+
+    let events = crate::session::read_events(&worktree_root)?;
+    Ok(Some(SessionState::from_events(&events)?))
 }
 
 #[cfg(test)]
@@ -499,6 +558,113 @@ mod tests {
         assert_eq!(artifacts[0].summary.as_deref(), Some(body.as_str()));
     }
 
+    #[test]
+    fn current_verdict_view_returns_resolved_when_single_unreplaced_verdict() {
+        let artifacts = vec![sample_verdict_artifact(
+            "rev-1",
+            "review-artifact:1",
+            VerdictDecision::Pass,
+            &[],
+        )];
+
+        let view = current_verdict_view(&artifacts, Some(&RevisionId::new("rev-1")));
+
+        assert!(matches!(
+            view,
+            CurrentVerdictView::Resolved {
+                decision: VerdictDecision::Pass,
+                ref review_artifact_id,
+            } if review_artifact_id.as_str() == "review-artifact:1"
+        ));
+    }
+
+    #[test]
+    fn current_verdict_view_returns_ambiguous_when_two_unreplaced_verdicts() {
+        let artifacts = vec![
+            sample_verdict_artifact("rev-1", "review-artifact:1", VerdictDecision::Pass, &[]),
+            sample_verdict_artifact(
+                "rev-1",
+                "review-artifact:2",
+                VerdictDecision::RequestChanges,
+                &[],
+            ),
+        ];
+
+        let view = current_verdict_view(&artifacts, Some(&RevisionId::new("rev-1")));
+
+        match view {
+            CurrentVerdictView::Ambiguous {
+                review_artifact_ids,
+            } => {
+                assert_eq!(review_artifact_ids.len(), 2);
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn current_verdict_view_returns_none_when_no_verdicts() {
+        let view = current_verdict_view(&[], Some(&RevisionId::new("rev-1")));
+
+        assert!(matches!(view, CurrentVerdictView::None));
+    }
+
+    #[test]
+    fn current_verdict_view_excludes_replaced_artifacts_from_unreplaced_set() {
+        let artifacts = vec![
+            sample_verdict_artifact("rev-1", "review-artifact:1", VerdictDecision::Pass, &[]),
+            sample_verdict_artifact(
+                "rev-1",
+                "review-artifact:2",
+                VerdictDecision::RequestChanges,
+                &["review-artifact:1"],
+            ),
+        ];
+
+        let view = current_verdict_view(&artifacts, Some(&RevisionId::new("rev-1")));
+
+        match view {
+            CurrentVerdictView::Resolved {
+                decision,
+                ref review_artifact_id,
+            } => {
+                assert_eq!(decision, VerdictDecision::RequestChanges);
+                assert_eq!(review_artifact_id.as_str(), "review-artifact:2");
+            }
+            other => panic!("expected Resolved on the replacing artifact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn load_or_rebuild_session_state_returns_none_when_shore_dir_absent() {
+        let repo = tempfile::tempdir().expect("create repo");
+        Command::new("git")
+            .args(["init"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+
+        let state = load_or_rebuild_session_state(repo.path()).unwrap();
+
+        assert!(state.is_none());
+    }
+
+    #[test]
+    fn load_or_rebuild_session_state_rebuilds_from_events_when_shore_dir_present() {
+        let repo = test_repo_with(vec![review_initialized(), revision_published("rev1")]);
+
+        let state = load_or_rebuild_session_state(repo.path()).unwrap();
+        let state = state.expect("state should be present when .shore/ exists");
+
+        assert_eq!(
+            state
+                .current_revision_id
+                .as_ref()
+                .map(|revision| revision.as_str()),
+            Some("rev1"),
+        );
+    }
+
     fn test_repo_with(events: Vec<ShoreEvent>) -> tempfile::TempDir {
         let repo = tempfile::tempdir().expect("create repo");
         Command::new("git")
@@ -534,6 +700,26 @@ mod tests {
         )
         .unwrap();
         repo
+    }
+
+    fn sample_verdict_artifact(
+        revision_id: &str,
+        artifact_id: &str,
+        decision: VerdictDecision,
+        replaces: &[&str],
+    ) -> ReviewArtifact {
+        ReviewArtifact {
+            id: ReviewArtifactId::new(artifact_id),
+            work_unit_id: WorkUnitId::new("work:default"),
+            revision_id: RevisionId::new(revision_id),
+            decision,
+            summary: Some("summary".to_owned()),
+            replaces_review_artifact_ids: replaces
+                .iter()
+                .map(|id| ReviewArtifactId::new(*id))
+                .collect(),
+            reviewer: Writer::shore_local_reviewer("0.1.0"),
+        }
     }
 
     fn review_initialized() -> ShoreEvent {

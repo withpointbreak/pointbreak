@@ -9,7 +9,8 @@ mod store_init;
 mod verdict;
 
 pub use consume::{
-    Acknowledgement, ReviewArtifact, load_durable_notes_for_repo, read_acknowledgements,
+    Acknowledgement, CurrentVerdictView, ReviewArtifact, current_verdict_view,
+    load_durable_notes_for_repo, load_or_rebuild_session_state, read_acknowledgements,
     read_review_artifacts,
 };
 pub use event::{

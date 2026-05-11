@@ -54,6 +54,12 @@ Both events use canonical-hash identity, externalize large bodies through the sh
 `shore.note-body` envelope at `.shore/artifacts/notes/<hash>.json`, and project bounded counters
 plus a `last_verdict_decision` into `state.json` without per-ID arrays or maps.
 
+The read surface (`shore dump`, `shore show`) projects these events through the public
+`read_review_artifacts` and `read_acknowledgements` workflow seams and exposes them via a
+`review_artifacts` section in the dump JSON and a status banner in the TUI. The section is omitted
+when `.shore/` is absent. `current_verdict.status` is one of `resolved`, `ambiguous`, or `none`;
+the reader never picks a tie-breaker when ambiguity is present.
+
 A future delivery queue is a separate subsystem. Queue concepts such as `pending/`, `failed/`,
 retry counts, backoff, circuit breakers, and acknowledgement markers do not belong in
 `.shore/events/`.

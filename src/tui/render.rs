@@ -3,8 +3,9 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use shore::dump::{DumpDocument, DumpInputSource};
+use shore::dump::{CurrentVerdictStatusName, DumpDocument, DumpInputSource};
 use shore::model::{ReviewNoteId, ReviewRow, ReviewRowKind};
+use shore::session::event::{AcknowledgementNextAction, VerdictDecision};
 use shore::sidecar::ReviewNotesDiagnosticCode;
 
 use crate::tui::app::TuiApp;
@@ -12,18 +13,35 @@ use crate::tui::view::{DisplayRow, DisplayRowKind};
 
 pub(crate) fn render(frame: &mut Frame<'_>, app: &TuiApp) {
     let area = frame.area();
-    let shell = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ])
-        .split(area);
+    if let Some(status_line) = review_status_line(app.document()) {
+        let shell = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .split(area);
 
-    frame.render_widget(header(app.document()), shell[0]);
-    render_body(frame, app, shell[1]);
-    frame.render_widget(footer(), shell[2]);
+        frame.render_widget(header(app.document()), shell[0]);
+        frame.render_widget(status_line, shell[1]);
+        render_body(frame, app, shell[2]);
+        frame.render_widget(footer(), shell[3]);
+    } else {
+        let shell = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(0),
+                Constraint::Length(1),
+            ])
+            .split(area);
+
+        frame.render_widget(header(app.document()), shell[0]);
+        render_body(frame, app, shell[1]);
+        frame.render_widget(footer(), shell[2]);
+    }
 }
 
 fn render_body(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
@@ -53,6 +71,44 @@ fn header(document: &DumpDocument) -> Paragraph<'static> {
 
 fn footer() -> Paragraph<'static> {
     Paragraph::new("q/Esc quit | j/k rows | [/] hunks | {/} note hunks")
+}
+
+fn review_status_line(document: &DumpDocument) -> Option<Paragraph<'static>> {
+    let section = document.review_artifacts.as_ref()?;
+    let verdict = match section.current_verdict.status {
+        CurrentVerdictStatusName::Resolved => format!(
+            "verdict: {}",
+            verdict_decision_name(section.current_verdict.decision?)
+        ),
+        CurrentVerdictStatusName::Ambiguous => format!(
+            "verdict: ambiguous ({} candidates)",
+            section.current_verdict.review_artifact_ids.len()
+        ),
+        CurrentVerdictStatusName::None => "verdict: none".to_owned(),
+    };
+    // Accept and obsolete both resolve the current reviewer feedback loop.
+    let resolved_acks = section
+        .acknowledgements
+        .iter()
+        .filter(|ack| {
+            matches!(
+                ack.next_action,
+                AcknowledgementNextAction::Accept | AcknowledgementNextAction::Obsolete
+            )
+        })
+        .count();
+    let mut parts = vec![
+        verdict,
+        format!("acks: {resolved_acks}/{}", section.acknowledgements.len()),
+    ];
+    if section.summary.unreplaced_verdict_count > 1 {
+        parts.push(format!(
+            "({} unreplaced)",
+            section.summary.unreplaced_verdict_count
+        ));
+    }
+
+    Some(Paragraph::new(parts.join(" | ")))
 }
 
 fn render_stream(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
@@ -90,6 +146,13 @@ fn render_detail(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
                 Line::from(""),
                 Line::from(body.unwrap_or_else(|| "No note body".to_owned())),
             ],
+        )
+    } else if let Some(summary) = current_verdict_summary(app.document()) {
+        (
+            "Verdict",
+            vec![Line::from(
+                summary.unwrap_or_else(|| "no verdict summary".to_owned()),
+            )],
         )
     } else if !app.document().diagnostics.is_empty() {
         (
@@ -149,6 +212,15 @@ fn note_body(app: &TuiApp, note_id: &ReviewNoteId) -> Option<String> {
         .and_then(|note| note.body.clone())
 }
 
+fn current_verdict_summary(document: &DumpDocument) -> Option<Option<String>> {
+    document
+        .review_artifacts
+        .as_ref()?
+        .verdicts
+        .last()
+        .map(|verdict| verdict.summary.clone())
+}
+
 fn display_text(row: &DisplayRow) -> String {
     if row.prefix.is_empty() {
         row.text.clone()
@@ -200,18 +272,31 @@ fn diagnostic_code(code: &ReviewNotesDiagnosticCode) -> &'static str {
     }
 }
 
+fn verdict_decision_name(decision: VerdictDecision) -> &'static str {
+    match decision {
+        VerdictDecision::Pass => "pass",
+        VerdictDecision::PassMinorNit => "pass_minor_nit",
+        VerdictDecision::RequestChanges => "request_changes",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use ratatui::style::Color;
-    use shore::dump::{DumpDocument, DumpInputSource, DumpInputSummary};
+    use shore::dump::{
+        AcknowledgementView, CurrentVerdictDumpView, CurrentVerdictStatusName, DumpDocument,
+        DumpInputSource, DumpInputSummary, ReviewArtifactsSection, ReviewArtifactsSummary,
+        VerdictView,
+    };
     use shore::model::{
         Anchor, DiffFile, DiffRow, DiffRowKind, DiffSnapshot, FileId, FileStatus, HunkId,
         LineRange, ResolutionStatus, ReviewHunk, ReviewId, ReviewNote, ReviewNoteId,
         ReviewNoteSource, ReviewRow, ReviewRowKind, ReviewStream, RowId, Side, SnapshotId,
     };
+    use shore::session::event::{AcknowledgementNextAction, VerdictDecision, Writer};
     use shore::sidecar::{DiagnosticLevel, ReviewNotesDiagnostic, ReviewNotesDiagnosticCode};
     use shore::stream::ViewportSpec;
 
@@ -274,6 +359,72 @@ mod tests {
 
         assert_eq!(buffer.area.width, 20);
         assert_eq!(buffer.area.height, 4);
+    }
+
+    #[test]
+    fn render_frame_shows_verdict_status_line_when_durable_state_present() {
+        let document = sample_document_with_verdict(VerdictDecision::Pass, 1, 1);
+        let app = TuiApp::new(document, ViewportSpec::new(80, 24));
+
+        let buffer = render_to_buffer(&app, 80, 24);
+        let text = buffer_text(&buffer);
+
+        assert!(
+            text.contains("verdict: pass"),
+            "verdict status line missing; got:\n{text}"
+        );
+        assert!(
+            text.contains("acks: 1/1"),
+            "ack ratio missing; got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn render_frame_hides_verdict_line_when_no_durable_state() {
+        let document = sample_document_without_review_artifacts();
+        let app = TuiApp::new(document, ViewportSpec::new(80, 24));
+
+        let buffer = render_to_buffer(&app, 80, 24);
+        let text = buffer_text(&buffer);
+
+        assert!(
+            !text.contains("verdict:"),
+            "verdict line should be hidden when review_artifacts is None"
+        );
+    }
+
+    #[test]
+    fn render_frame_shows_ambiguous_marker_when_two_unreplaced_verdicts() {
+        let document = sample_document_with_ambiguous_verdicts(2);
+        let app = TuiApp::new(document, ViewportSpec::new(80, 24));
+
+        let buffer = render_to_buffer(&app, 80, 24);
+        let text = buffer_text(&buffer);
+
+        assert!(text.contains("ambiguous"), "ambiguous marker missing");
+        assert!(text.contains("(2"), "candidate count missing");
+    }
+
+    #[test]
+    fn render_frame_shows_verdict_summary_in_detail_pane_fall_through() {
+        let document = sample_document_with_verdict_summary("ship it");
+        let app = TuiApp::new(document, ViewportSpec::new(80, 24));
+
+        let buffer = render_to_buffer(&app, 80, 24);
+        let text = buffer_text(&buffer);
+
+        assert!(
+            text.contains("ship it"),
+            "verdict summary missing from detail pane; got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn render_frame_handles_tiny_terminals_without_panic_with_verdict_line() {
+        let document = sample_document_with_verdict(VerdictDecision::Pass, 1, 1);
+        let app = TuiApp::new(document, ViewportSpec::new(10, 3));
+
+        let _buffer = render_to_buffer(&app, 10, 3);
     }
 
     fn render_to_buffer(app: &TuiApp, width: u16, height: u16) -> Buffer {
@@ -431,5 +582,104 @@ mod tests {
             stream,
             diagnostics,
         )
+    }
+
+    fn sample_document_without_review_artifacts() -> DumpDocument {
+        document_with_note(Vec::new())
+    }
+
+    fn sample_document_with_verdict(
+        decision: VerdictDecision,
+        resolved_acks: usize,
+        total_acks: usize,
+    ) -> DumpDocument {
+        let mut document = document_with_note(Vec::new());
+        document.review_artifacts = Some(sample_review_artifacts(
+            CurrentVerdictStatusName::Resolved,
+            Some(decision),
+            vec!["artifact:1".to_owned()],
+            Some("ship it".to_owned()),
+            1,
+            resolved_acks,
+            total_acks,
+        ));
+        document
+    }
+
+    fn sample_document_with_ambiguous_verdicts(candidate_count: usize) -> DumpDocument {
+        let mut document = document_with_note(Vec::new());
+        let review_artifact_ids = (0..candidate_count)
+            .map(|index| format!("artifact:{}", index + 1))
+            .collect::<Vec<_>>();
+        document.review_artifacts = Some(sample_review_artifacts(
+            CurrentVerdictStatusName::Ambiguous,
+            None,
+            review_artifact_ids,
+            Some("needs reviewer choice".to_owned()),
+            candidate_count,
+            1,
+            1,
+        ));
+        document
+    }
+
+    fn sample_document_with_verdict_summary(summary: &str) -> DumpDocument {
+        let mut document = document_with_note(Vec::new());
+        document.review_artifacts = Some(sample_review_artifacts(
+            CurrentVerdictStatusName::Resolved,
+            Some(VerdictDecision::Pass),
+            vec!["artifact:1".to_owned()],
+            Some(summary.to_owned()),
+            1,
+            1,
+            1,
+        ));
+        document
+    }
+
+    fn sample_review_artifacts(
+        status: CurrentVerdictStatusName,
+        decision: Option<VerdictDecision>,
+        review_artifact_ids: Vec<String>,
+        verdict_summary: Option<String>,
+        unreplaced_verdict_count: usize,
+        resolved_acks: usize,
+        total_acks: usize,
+    ) -> ReviewArtifactsSection {
+        ReviewArtifactsSection {
+            verdicts: vec![VerdictView {
+                id: "artifact:1".to_owned(),
+                work_unit_id: "work:default".to_owned(),
+                revision_id: "rev:current".to_owned(),
+                decision: VerdictDecision::Pass,
+                summary: verdict_summary,
+                replaces: Vec::new(),
+                reviewer: Writer::shore_local_reviewer("0.1.0"),
+                replaced: false,
+            }],
+            acknowledgements: (0..total_acks)
+                .map(|index| AcknowledgementView {
+                    id: format!("ack:{}", index + 1),
+                    review_artifact_id: "artifact:1".to_owned(),
+                    next_action: if index < resolved_acks {
+                        AcknowledgementNextAction::Accept
+                    } else {
+                        AcknowledgementNextAction::Address
+                    },
+                    reason: Some("ack".to_owned()),
+                    acknowledger: Writer::shore_local_author("0.1.0"),
+                })
+                .collect(),
+            current_verdict: CurrentVerdictDumpView {
+                status,
+                decision,
+                review_artifact_ids,
+            },
+            summary: ReviewArtifactsSummary {
+                verdict_count: 1,
+                acknowledgement_count: total_acks,
+                unreplaced_verdict_count,
+            },
+        }
     }
 }
