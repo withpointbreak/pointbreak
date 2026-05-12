@@ -211,6 +211,9 @@ Behavior:
   `.gitignore` when needed.
 - `.shore/events/` stores immutable local event files. `.shore/state.json` is a rebuildable
   projection, not the authority.
+- `.shore/` is local, synchronous storage. V1 uses a single-writer contract: one active Shore writer
+  at a time per `.shore/` directory. Event writes use per-file durable facts and rebuildable
+  projections rather than a daemon or shared mutable JSON authority.
 - Full captured snapshots are Shore-owned immutable artifacts under `.shore/artifacts/snapshots/`.
   The `review_unit_captured` event binds to the snapshot artifact's canonical content hash, so
   replay can detect changed artifact facts. The output exposes ReviewUnit, revision, and snapshot

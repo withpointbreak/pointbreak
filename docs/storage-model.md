@@ -167,6 +167,24 @@ a deliberate defense against metadata clobbering:
 Shared JSON files are acceptable only for rebuildable projections or configuration whose merge rules
 are explicit and tested.
 
+## V1 Writer Contract
+
+V1 uses a single-writer workflow contract: one active Shore writer per `.shore/` directory at a
+time. Shore does not coordinate writers with lockfiles, leases, a daemon, IPC, or filesystem
+notifications yet.
+
+Event files remain the append-only authority. They are created with exclusive file creation:
+same-key and same-payload retries are idempotent, while same-key and different-payload attempts are
+conflicts. Different event files can be written independently, but reducers and projections decide
+whether the resulting event set is valid, ambiguous, or conflicting.
+
+`state.json` writes are projection cache writes. If projection writers race, events remain
+authoritative and the projection can be rebuilt.
+
+Workflow startup cleanup removes only Shore temp files older than the workflow startup threshold.
+Preserving fresh `.shore-write.*.tmp` files avoids clobbering an in-flight write, but it is not a
+lock or lease and does not make long-running multi-process writes a supported coordination model.
+
 ## Projection Ordering
 
 Event filenames are derived from idempotency-key hashes. Listing event files therefore does not imply

@@ -14,6 +14,7 @@ use crate::error::{Result, ShoreError};
 
 const TEMP_PREFIX: &str = ".shore-write.";
 const TEMP_SUFFIX: &str = ".tmp";
+const WORKFLOW_STARTUP_TEMP_SWEEP_AGE_SECS: u64 = 60;
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -32,13 +33,14 @@ pub enum CreateFileOutcome {
 pub struct TempSweepAge(Duration);
 
 impl TempSweepAge {
+    // Kept available for explicit low-level cleanup; workflow startup uses a conservative age.
     #[allow(dead_code)]
     pub fn zero() -> Self {
         Self(Duration::ZERO)
     }
 
     pub fn workflow_startup() -> Self {
-        Self(Duration::from_secs(60))
+        Self(Duration::from_secs(WORKFLOW_STARTUP_TEMP_SWEEP_AGE_SECS))
     }
 
     #[cfg(test)]
