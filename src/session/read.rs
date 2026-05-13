@@ -5,12 +5,13 @@ use crate::error::Result;
 use crate::session::body_artifact::load_body_artifact;
 use crate::session::event::{EventType, ReviewNoteImportedPayload};
 use crate::session::state::SessionState;
-use crate::session::{EventStore, ShoreStorePaths};
+use crate::session::{EventStore, ShoreEvent, ShoreStorePaths, sweep_stale_temp_files};
 use crate::sidecar::{
     ParsedReviewNotes, ReviewNoteEntry, ReviewNoteTarget, ReviewNotesFile, ReviewNotesSidecar,
 };
+use crate::storage::{Durability, LocalStorage};
 
-pub(crate) fn replay_note_entry(
+fn replay_note_entry(
     payload: &ReviewNoteImportedPayload,
     shore_dir: &Path,
 ) -> Result<ReviewNoteEntry> {
@@ -42,7 +43,7 @@ pub(crate) fn replay_note_entry(
     })
 }
 
-pub(crate) fn parsed_review_notes_from_imports(
+fn parsed_review_notes_from_imports(
     payloads: &[ReviewNoteImportedPayload],
     shore_dir: &Path,
 ) -> Result<ParsedReviewNotes> {
@@ -88,15 +89,12 @@ pub(crate) fn parsed_review_notes_from_imports(
 }
 
 pub fn load_durable_notes_for_repo(repo: impl AsRef<Path>) -> Result<Option<ParsedReviewNotes>> {
-    let paths = ShoreStorePaths::resolve(repo.as_ref())?;
-    let shore_dir = paths.shore_dir();
-
-    if !shore_dir.exists() {
+    let Some((paths, events)) = list_events_if_store_exists(repo)? else {
         return Ok(None);
-    }
+    };
 
     let mut imported_payloads = Vec::new();
-    for event in EventStore::open(shore_dir).list_events()? {
+    for event in events {
         if event.event_type != EventType::ReviewNoteImported {
             continue;
         }
@@ -111,19 +109,52 @@ pub fn load_durable_notes_for_repo(repo: impl AsRef<Path>) -> Result<Option<Pars
 
     Ok(Some(parsed_review_notes_from_imports(
         &imported_payloads,
-        shore_dir,
+        paths.shore_dir(),
     )?))
 }
 
 pub fn load_or_rebuild_session_state(repo: impl AsRef<Path>) -> Result<Option<SessionState>> {
+    let Some((_paths, events)) = list_events_if_store_exists(repo)? else {
+        return Ok(None);
+    };
+
+    Ok(Some(SessionState::from_events(&events)?))
+}
+
+pub fn rebuild_state(repo: impl AsRef<Path>) -> Result<SessionState> {
     let paths = ShoreStorePaths::resolve(repo.as_ref())?;
+    let worktree_root = paths.worktree_root();
     let shore_dir = paths.shore_dir();
-    if !shore_dir.exists() {
+    let storage = LocalStorage::new(shore_dir);
+    sweep_stale_temp_files(&storage, shore_dir)?;
+
+    let span = tracing::info_span!("session.rebuild_state", repo = %worktree_root.display());
+    let _entered = span.enter();
+
+    let state = SessionState::from_events(&list_events_for_paths(&paths)?)?;
+    storage.write_json_atomic(&paths.state_path(), &state, Durability::Projection)?;
+    Ok(state)
+}
+
+pub fn read_events(repo: impl AsRef<Path>) -> Result<Vec<ShoreEvent>> {
+    let paths = ShoreStorePaths::resolve(repo.as_ref())?;
+    list_events_for_paths(&paths)
+}
+
+fn list_events_if_store_exists(
+    repo: impl AsRef<Path>,
+) -> Result<Option<(ShoreStorePaths, Vec<ShoreEvent>)>> {
+    let paths = ShoreStorePaths::resolve(repo.as_ref())?;
+    if !paths.shore_dir().exists() {
         return Ok(None);
     }
 
-    let events = EventStore::open(shore_dir).list_events()?;
-    Ok(Some(SessionState::from_events(&events)?))
+    let events = list_events_for_paths(&paths)?;
+    Ok(Some((paths, events)))
+}
+
+fn list_events_for_paths(paths: &ShoreStorePaths) -> Result<Vec<ShoreEvent>> {
+    EventStore::open(paths.shore_dir()).list_events()
 }
 
 #[cfg(test)]

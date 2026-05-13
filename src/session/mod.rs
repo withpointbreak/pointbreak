@@ -1,10 +1,8 @@
 mod body_artifact;
 mod capture;
-mod consume;
 mod disposition;
 pub mod event;
 mod event_context;
-mod event_log;
 mod event_store;
 mod fingerprint;
 mod history;
@@ -12,6 +10,7 @@ mod import;
 mod intervention;
 mod observation;
 mod projection_freshness;
+mod read;
 mod reload;
 mod review_unit_projection;
 mod snapshot_artifact;
@@ -19,7 +18,6 @@ pub mod state;
 mod store_init;
 
 pub use capture::{CaptureOptions, CaptureResult, capture_worktree_review};
-pub use consume::{load_durable_notes_for_repo, load_or_rebuild_session_state};
 pub use disposition::{
     CurrentDispositionStatus, CurrentDispositionView, DispositionAddOptions, DispositionAddResult,
     DispositionOverrideSelector, DispositionRecordStatus, DispositionShowFilters,
@@ -34,7 +32,6 @@ pub use event::{
     WriterRole, WriterTool,
 };
 pub(crate) use event_context::{current_timestamp, writer_from_git_config};
-pub use event_log::{read_events, rebuild_state};
 pub(crate) use event_store::{EventStore, EventWriteOutcome};
 pub(crate) use fingerprint::worktree_fingerprint_for_files;
 pub use fingerprint::{
@@ -58,6 +55,9 @@ pub use observation::{
     ObservationAddOptions, ObservationAddResult, ObservationListFilters, ObservationListOptions,
     ObservationListResult, ObservationStatus, ObservationTargetSelector, ObservationView,
     list_observations, record_observation,
+};
+pub use read::{
+    load_durable_notes_for_repo, load_or_rebuild_session_state, read_events, rebuild_state,
 };
 pub(crate) use reload::reload_diagnostics_for_document;
 pub use reload::{ReloadDiagnostic, ReloadDiagnosticCode, ReloadOutcome, reload_session};
