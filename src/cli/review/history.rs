@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use clap::{Args, ValueEnum};
 use shore::model::ReviewUnitId;
 use shore::session::{
-    EventType, ProjectionDiagnostic, ReviewHistoryEntry, ReviewHistoryFilters,
-    ReviewHistoryOptions, ReviewHistoryResult, review_history,
+    EventType, ReviewHistoryEntry, ReviewHistoryFilters, ReviewHistoryOptions, ReviewHistoryResult,
+    review_history,
 };
 
 use crate::cli::json;
@@ -43,15 +43,12 @@ pub(super) struct HistoryArgs {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct HistoryDocument {
-    schema: &'static str,
-    version: u32,
+struct HistoryBody {
     event_set_hash: String,
     event_count: usize,
     history_count: usize,
     filters: ReviewHistoryFilters,
     entries: Vec<ReviewHistoryEntry>,
-    diagnostics: Vec<ProjectionDiagnostic>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -73,7 +70,7 @@ pub(super) fn run(
     tracing::debug!(command = "review.history", "command_start");
     let pretty = args.pretty;
     let result = review_history(history_options(&args));
-    let document = HistoryDocument::from(result?);
+    let document = history_document(result?);
     json::write_json(stdout, &document, pretty)
 }
 
@@ -91,20 +88,19 @@ fn history_options(args: &HistoryArgs) -> ReviewHistoryOptions {
     options
 }
 
-impl From<ReviewHistoryResult> for HistoryDocument {
-    fn from(result: ReviewHistoryResult) -> Self {
-        let history_count = result.history_count();
-        Self {
-            schema: "shore.review-history",
-            version: 1,
+fn history_document(result: ReviewHistoryResult) -> json::DiagnosticDocument<HistoryBody> {
+    let history_count = result.history_count();
+    json::DiagnosticDocument::new(
+        "shore.review-history",
+        HistoryBody {
             event_set_hash: result.event_set_hash,
             event_count: result.event_count,
             history_count,
             filters: result.filters,
             entries: result.entries,
-            diagnostics: result.diagnostics,
-        }
-    }
+        },
+        result.diagnostics,
+    )
 }
 
 impl From<HistoryEventTypeArg> for EventType {

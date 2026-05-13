@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand};
 use shore::model::{ReviewTargetRef, ReviewUnitId, Side};
 use shore::session::{
-    AdapterNoteView, ProjectionDiagnostic, ReviewUnitProjectionIdentity, ReviewUnitProjectionRow,
+    AdapterNoteView, ReviewUnitProjectionIdentity, ReviewUnitProjectionRow,
     ReviewUnitProjectionSummary, ReviewUnitShowFilters, ReviewUnitShowOptions,
     ReviewUnitShowResult, show_review_unit,
 };
@@ -55,9 +55,7 @@ pub(super) struct UnitShowArgs {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct UnitShowDocument {
-    schema: &'static str,
-    version: u32,
+struct UnitShowBody {
     event_set_hash: String,
     event_count: usize,
     review_unit: UnitReviewUnitDocument,
@@ -69,7 +67,6 @@ struct UnitShowDocument {
     dispositions: Vec<DispositionViewDocument>,
     adapter_notes: Vec<AdapterNoteDocument>,
     rows: Vec<UnitProjectionRowDocument>,
-    diagnostics: Vec<ProjectionDiagnostic>,
 }
 
 #[derive(serde::Serialize)]
@@ -192,7 +189,7 @@ fn review_unit_show_command(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let pretty = args.pretty;
     let result = show_review_unit(review_unit_show_options(&args));
-    let document = UnitShowDocument::from(result?);
+    let document = unit_show_document(result?);
     json::write_json(stdout, &document, pretty)
 }
 
@@ -207,11 +204,10 @@ fn review_unit_show_options(args: &UnitShowArgs) -> ReviewUnitShowOptions {
     options
 }
 
-impl From<ReviewUnitShowResult> for UnitShowDocument {
-    fn from(result: ReviewUnitShowResult) -> Self {
-        Self {
-            schema: "shore.review-unit",
-            version: 1,
+fn unit_show_document(result: ReviewUnitShowResult) -> json::DiagnosticDocument<UnitShowBody> {
+    json::DiagnosticDocument::new(
+        "shore.review-unit",
+        UnitShowBody {
             event_set_hash: result.event_set_hash,
             event_count: result.event_count,
             review_unit: UnitReviewUnitDocument::from(result.review_unit),
@@ -243,9 +239,9 @@ impl From<ReviewUnitShowResult> for UnitShowDocument {
                 .into_iter()
                 .map(UnitProjectionRowDocument::from)
                 .collect(),
-            diagnostics: result.diagnostics,
-        }
-    }
+        },
+        result.diagnostics,
+    )
 }
 
 impl From<ReviewUnitProjectionIdentity> for UnitReviewUnitDocument {

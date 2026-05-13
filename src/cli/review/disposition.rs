@@ -5,8 +5,8 @@ use clap::{Args, Subcommand, ValueEnum};
 use shore::model::{DispositionId, InterventionId, ObservationId, ReviewTargetRef, ReviewUnitId};
 use shore::session::{
     DispositionAddOptions, DispositionAddResult, DispositionShowFilters, DispositionShowOptions,
-    DispositionShowResult, DispositionTargetSelector, ProjectionDiagnostic, ReviewDisposition,
-    record_disposition, show_dispositions,
+    DispositionShowResult, DispositionTargetSelector, ReviewDisposition, record_disposition,
+    show_dispositions,
 };
 
 use crate::cli::json;
@@ -117,7 +117,7 @@ struct DispositionShowArgs {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct DispositionAddDocument {
+struct DispositionAddBody {
     review_unit_id: String,
     disposition_id: String,
     event_id: String,
@@ -130,14 +130,11 @@ struct DispositionAddDocument {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct DispositionShowDocument {
-    schema: &'static str,
-    version: u32,
+struct DispositionShowBody {
     review_unit_id: String,
     filters: DispositionShowFiltersDocument,
     current: CurrentDispositionDocument,
     dispositions: Vec<DispositionViewDocument>,
-    diagnostics: Vec<ProjectionDiagnostic>,
 }
 
 #[derive(serde::Serialize)]
@@ -193,7 +190,7 @@ fn review_disposition_show(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let pretty = args.pretty && !args.compact;
     let result = show_dispositions(disposition_show_options(args));
-    let document = DispositionShowDocument::from(result?);
+    let document = disposition_show_document(result?);
     json::write_json(stdout, &document, pretty)
 }
 
@@ -310,10 +307,10 @@ fn disposition_target(
 
 fn disposition_add_document(
     result: DispositionAddResult,
-) -> json::EventWriteDocument<DispositionAddDocument> {
+) -> json::EventWriteDocument<DispositionAddBody> {
     json::EventWriteDocument::new(
         "shore.review-disposition-add",
-        DispositionAddDocument {
+        DispositionAddBody {
             review_unit_id: result.review_unit_id.as_str().to_owned(),
             disposition_id: result.disposition_id.as_str().to_owned(),
             event_id: result.event_id.as_str().to_owned(),
@@ -329,11 +326,12 @@ fn disposition_add_document(
     )
 }
 
-impl From<DispositionShowResult> for DispositionShowDocument {
-    fn from(result: DispositionShowResult) -> Self {
-        Self {
-            schema: "shore.review-disposition-show",
-            version: 1,
+fn disposition_show_document(
+    result: DispositionShowResult,
+) -> json::DiagnosticDocument<DispositionShowBody> {
+    json::DiagnosticDocument::new(
+        "shore.review-disposition-show",
+        DispositionShowBody {
             review_unit_id: result.review_unit_id.as_str().to_owned(),
             filters: DispositionShowFiltersDocument::from(result.filters),
             current: CurrentDispositionDocument::from(result.current),
@@ -342,9 +340,9 @@ impl From<DispositionShowResult> for DispositionShowDocument {
                 .into_iter()
                 .map(DispositionViewDocument::from)
                 .collect(),
-            diagnostics: result.diagnostics,
-        }
-    }
+        },
+        result.diagnostics,
+    )
 }
 
 impl From<DispositionShowFilters> for DispositionShowFiltersDocument {

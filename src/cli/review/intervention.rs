@@ -8,8 +8,7 @@ use shore::session::{
     InterventionListResult, InterventionMode, InterventionReasonCode, InterventionRequestOptions,
     InterventionRequestResult, InterventionResolutionOutcome, InterventionResolveOptions,
     InterventionResolveResult, InterventionStatusFilter, InterventionTargetSelector,
-    ProjectionDiagnostic, fetch_intervention, list_interventions, request_intervention,
-    resolve_intervention,
+    fetch_intervention, list_interventions, request_intervention, resolve_intervention,
 };
 
 use crate::cli::json;
@@ -150,7 +149,7 @@ struct InterventionResolveArgs {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct InterventionRequestDocument {
+struct InterventionRequestBody {
     review_unit_id: String,
     intervention_id: String,
     event_id: String,
@@ -164,27 +163,21 @@ struct InterventionRequestDocument {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct InterventionListDocument {
-    schema: &'static str,
-    version: u32,
+struct InterventionListBody {
     review_unit_id: String,
     filters: InterventionListFiltersDocument,
     interventions: Vec<InterventionViewDocument>,
-    diagnostics: Vec<ProjectionDiagnostic>,
 }
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct InterventionFetchDocument {
-    schema: &'static str,
-    version: u32,
+struct InterventionFetchBody {
     intervention: InterventionViewDocument,
-    diagnostics: Vec<ProjectionDiagnostic>,
 }
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct InterventionResolveDocument {
+struct InterventionResolveBody {
     intervention_id: String,
     intervention_resolution_id: String,
     event_id: String,
@@ -284,7 +277,7 @@ fn review_intervention_list(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let pretty = args.pretty && !args.compact;
     let result = list_interventions(intervention_list_options(args));
-    let document = InterventionListDocument::from(result?);
+    let document = intervention_list_document(result?);
     json::write_json(stdout, &document, pretty)
 }
 
@@ -297,7 +290,7 @@ fn review_intervention_fetch(
         InterventionFetchOptions::new(&args.repo, InterventionId::new(args.intervention_id))
             .with_include_body(args.include_body),
     );
-    let document = InterventionFetchDocument::from(result?);
+    let document = intervention_fetch_document(result?);
     json::write_json(stdout, &document, pretty)
 }
 
@@ -413,10 +406,10 @@ fn intervention_target(
 
 fn intervention_request_document(
     result: InterventionRequestResult,
-) -> json::EventWriteDocument<InterventionRequestDocument> {
+) -> json::EventWriteDocument<InterventionRequestBody> {
     json::EventWriteDocument::new(
         "shore.review-intervention-request",
-        InterventionRequestDocument {
+        InterventionRequestBody {
             review_unit_id: result.review_unit_id.as_str().to_owned(),
             intervention_id: result.intervention_id.as_str().to_owned(),
             event_id: result.event_id.as_str().to_owned(),
@@ -433,11 +426,12 @@ fn intervention_request_document(
     )
 }
 
-impl From<InterventionListResult> for InterventionListDocument {
-    fn from(result: InterventionListResult) -> Self {
-        Self {
-            schema: "shore.review-intervention-list",
-            version: 1,
+fn intervention_list_document(
+    result: InterventionListResult,
+) -> json::DiagnosticDocument<InterventionListBody> {
+    json::DiagnosticDocument::new(
+        "shore.review-intervention-list",
+        InterventionListBody {
             review_unit_id: result.review_unit_id.as_str().to_owned(),
             filters: InterventionListFiltersDocument {
                 track_id: result
@@ -454,28 +448,29 @@ impl From<InterventionListResult> for InterventionListDocument {
                 .into_iter()
                 .map(InterventionViewDocument::from)
                 .collect(),
-            diagnostics: result.diagnostics,
-        }
-    }
+        },
+        result.diagnostics,
+    )
 }
 
-impl From<InterventionFetchResult> for InterventionFetchDocument {
-    fn from(result: InterventionFetchResult) -> Self {
-        Self {
-            schema: "shore.review-intervention-fetch",
-            version: 1,
+fn intervention_fetch_document(
+    result: InterventionFetchResult,
+) -> json::DiagnosticDocument<InterventionFetchBody> {
+    json::DiagnosticDocument::new(
+        "shore.review-intervention-fetch",
+        InterventionFetchBody {
             intervention: InterventionViewDocument::from(result.intervention),
-            diagnostics: result.diagnostics,
-        }
-    }
+        },
+        result.diagnostics,
+    )
 }
 
 fn intervention_resolve_document(
     result: InterventionResolveResult,
-) -> json::EventWriteDocument<InterventionResolveDocument> {
+) -> json::EventWriteDocument<InterventionResolveBody> {
     json::EventWriteDocument::new(
         "shore.review-intervention-resolve",
-        InterventionResolveDocument {
+        InterventionResolveBody {
             intervention_id: result.intervention_id.as_str().to_owned(),
             intervention_resolution_id: result.intervention_resolution_id.as_str().to_owned(),
             event_id: result.event_id.as_str().to_owned(),

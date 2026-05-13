@@ -5,7 +5,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use shore::model::{ObservationId, ReviewTargetRef, ReviewUnitId};
 use shore::session::{
     ObservationAddOptions, ObservationAddResult, ObservationListOptions, ObservationListResult,
-    ObservationTargetSelector, ProjectionDiagnostic, list_observations, record_observation,
+    ObservationTargetSelector, list_observations, record_observation,
 };
 
 use crate::cli::json;
@@ -98,7 +98,7 @@ struct ObservationListArgs {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ObservationAddDocument {
+struct ObservationAddBody {
     review_unit_id: String,
     observation_id: String,
     event_id: String,
@@ -109,13 +109,10 @@ struct ObservationAddDocument {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ObservationListDocument {
-    schema: &'static str,
-    version: u32,
+struct ObservationListBody {
     review_unit_id: String,
     filters: ObservationListFiltersDocument,
     observations: Vec<ObservationViewDocument>,
-    diagnostics: Vec<ProjectionDiagnostic>,
 }
 
 #[derive(serde::Serialize)]
@@ -167,7 +164,7 @@ fn review_observation_list(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let pretty = args.pretty && !args.compact;
     let result = list_observations(observation_list_options(args));
-    let document = ObservationListDocument::from(result?);
+    let document = observation_list_document(result?);
     json::write_json(stdout, &document, pretty)
 }
 
@@ -236,10 +233,10 @@ fn observation_target(args: &ObservationAddArgs) -> ObservationTargetSelector {
 
 fn observation_add_document(
     result: ObservationAddResult,
-) -> json::EventWriteDocument<ObservationAddDocument> {
+) -> json::EventWriteDocument<ObservationAddBody> {
     json::EventWriteDocument::new(
         "shore.review-observation-add",
-        ObservationAddDocument {
+        ObservationAddBody {
             review_unit_id: result.review_unit_id.as_str().to_owned(),
             observation_id: result.observation_id.as_str().to_owned(),
             event_id: result.event_id.as_str().to_owned(),
@@ -254,11 +251,12 @@ fn observation_add_document(
     )
 }
 
-impl From<ObservationListResult> for ObservationListDocument {
-    fn from(result: ObservationListResult) -> Self {
-        Self {
-            schema: "shore.review-observation-list",
-            version: 1,
+fn observation_list_document(
+    result: ObservationListResult,
+) -> json::DiagnosticDocument<ObservationListBody> {
+    json::DiagnosticDocument::new(
+        "shore.review-observation-list",
+        ObservationListBody {
             review_unit_id: result.review_unit_id.as_str().to_owned(),
             filters: ObservationListFiltersDocument {
                 track_id: result
@@ -273,9 +271,9 @@ impl From<ObservationListResult> for ObservationListDocument {
                 .into_iter()
                 .map(ObservationViewDocument::from)
                 .collect(),
-            diagnostics: result.diagnostics,
-        }
-    }
+        },
+        result.diagnostics,
+    )
 }
 
 impl ConfidenceArg {
