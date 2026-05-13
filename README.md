@@ -109,7 +109,7 @@ Prefer shelling out to `git` at first. A VCS abstraction can come later if the m
 
 The current executable surfaces are `shore show`, `shore dump`, `shore review capture`,
 `shore review observation add/list`, `shore review intervention request/list/fetch/resolve`,
-`shore review disposition add/show`, and `shore notes apply`.
+`shore review disposition add/show`, `shore review history`, and `shore notes apply`.
 
 All commands accept optional tracing flags:
 
@@ -322,6 +322,32 @@ Behavior:
   JSON by default. `disposition show` also accepts `--pretty`.
 - Native dispositions are not yet projected into `shore dump` or `shore show`; that belongs to the
   later ledger projection slice.
+
+`shore review history` reads the chronological ledger of durable Shore events:
+
+```bash
+shore review history [--repo <path>] [--review-unit <id>] [--track <track-id>] \
+  [--event-type <event-type>]... [--include-body] [--pretty | --compact]
+```
+
+Behavior:
+
+- History replays `.shore/events/` and emits compact `shore.review-history` v1 JSON by default.
+- `eventSetHash` and `eventCount` describe the full validated event set used to build the output,
+  even when filters return only a subset of entries.
+- `historyCount` is the number of returned entries after filters.
+- Entries are sorted by `occurredAt`, then `eventId`, as display chronology. Lifecycle projections
+  still use explicit replacement/resolution relationships rather than timestamp winners.
+- `--review-unit`, `--track`, and repeated `--event-type` narrow the returned entries. Event-type
+  CLI values are kebab-case, such as `review-observation-recorded`.
+- Body-like text is omitted by default. `--include-body` hydrates observation bodies, intervention
+  request bodies, intervention resolution reasons, disposition summaries, and imported-note bodies.
+- History preserves raw append-only facts. Duplicate semantic events remain visible as separate
+  entries while shared duplicate diagnostics are included in the document.
+- Raw event files, event filenames, artifact paths, and `state.json` remain internal storage. The
+  command-output JSON is the integration surface.
+- History is not the full ReviewUnit row projection used by `shore dump` or `shore show`; that
+  projection remains a separate slice.
 
 `shore notes apply` imports review notes into Shore-owned durable state without publishing a
 revision:

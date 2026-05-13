@@ -152,6 +152,25 @@ hydrate summaries. Summary artifact paths, event filenames, and `state.json` pat
 storage details, not command-output API. Native disposition projection into `shore dump` and
 `shore show` is deferred to the later ledger projection slice.
 
+Review history is the chronological read surface over durable events:
+
+- `shore review history` returns `shore.review-history` JSON derived from a validated scan of
+  `.shore/events/`
+- `eventSetHash` and `eventCount` describe the full event set read for the command, not only the
+  returned entries after filters
+- `historyCount` describes the filtered entry count
+- entries are sorted by `occurredAt`, then `eventId`, as display chronology only
+- ReviewUnit, track, and event-type filters narrow entries without changing freshness metadata or
+  suppressing full-event-set diagnostics
+- `--include-body` hydrates body-like text from inline payloads or `artifacts/notes/`, while the
+  default output keeps large text omitted
+
+History preserves raw append-only facts. It does not collapse duplicate semantic events, choose
+current dispositions, resolve interventions, or build the full ReviewUnit row projection. Shared
+state diagnostics are still included so callers can see duplicate semantic facts while inspecting
+the underlying events. Raw event files, artifact paths, event filenames, and `state.json` are
+storage details, not history output API.
+
 The review stream also surfaces stale and orphan notes as dedicated rows so reviewers can park the
 cursor on them; the stream emits an additional synthetic file header for orphan notes when at least
 one is present.
@@ -245,8 +264,9 @@ the projection saw; it is not a causal ordering primitive or a raw event-file ch
 
 If a cached projection's `eventSetHash` does not match a fresh scan of `.shore/events/`, the
 projection is stale and should be rebuilt from the event files. The event files remain authoritative;
-`state.json` is still safe to delete and regenerate. Future history, export, and derived-index
-projections should reuse this freshness primitive rather than inventing per-projection hashes.
+`state.json` is still safe to delete and regenerate. `shore review history` reuses this freshness
+primitive, and future export or derived-index projections should do the same rather than inventing
+per-projection hashes.
 
 ## Shared Mutable Files
 
