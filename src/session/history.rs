@@ -17,7 +17,6 @@ use crate::session::event::{
     ShoreEvent, SidecarSource, Writer,
 };
 use crate::session::observation::validated_track_id;
-use crate::session::projection_freshness::event_set_hash_for_events;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store_init::ShoreStorePaths;
 use crate::storage::EventStore;
@@ -256,17 +255,17 @@ pub fn review_history(options: ReviewHistoryOptions) -> Result<ReviewHistoryResu
 fn history_from_events(
     events: &[ShoreEvent],
     filters: ResolvedHistoryFilters,
-    _shore_dir: Option<&Path>,
+    shore_dir: Option<&Path>,
 ) -> Result<ReviewHistoryResult> {
     let state = SessionState::from_events(events)?;
     let event_set_hash = state
         .event_set_hash
         .clone()
-        .unwrap_or(event_set_hash_for_events(events)?);
+        .expect("SessionState::from_events sets event_set_hash");
     let mut entries = events
         .iter()
         .filter(|event| event_matches_filters(event, &filters))
-        .map(|event| history_entry_from_event(event, filters.include_body, _shore_dir))
+        .map(|event| history_entry_from_event(event, filters.include_body, shore_dir))
         .collect::<Result<Vec<_>>>()?;
 
     entries.sort_by(|left, right| {
