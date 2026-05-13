@@ -20,9 +20,10 @@ use shore::session::{
     InterventionResolveResult, InterventionStatusFilter, InterventionTargetSelector,
     InterventionView, ObservationAddOptions, ObservationAddResult, ObservationListOptions,
     ObservationListResult, ObservationTargetSelector, ObservationView, ProjectionDiagnostic,
-    ReviewDisposition, capture_worktree_review, fetch_intervention, import_notes,
+    ReviewDisposition, ReviewHistoryEntry, ReviewHistoryFilters, ReviewHistoryOptions,
+    ReviewHistoryResult, capture_worktree_review, fetch_intervention, import_notes,
     list_interventions, list_observations, record_disposition, record_observation,
-    request_intervention, resolve_intervention, show_dispositions,
+    request_intervention, resolve_intervention, review_history, show_dispositions,
 };
 use shore::stream::ViewportSpec;
 
@@ -99,6 +100,7 @@ enum NotesCommand {
 enum ReviewCommand {
     Capture(CaptureArgs),
     Disposition(DispositionArgs),
+    History(HistoryArgs),
     Intervention(InterventionArgs),
     Observation(ObservationArgs),
 }
@@ -125,6 +127,30 @@ struct InterventionArgs {
 struct DispositionArgs {
     #[command(subcommand)]
     command: DispositionCommand,
+}
+
+#[derive(Debug, Args)]
+struct HistoryArgs {
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+
+    #[arg(long)]
+    review_unit: Option<String>,
+
+    #[arg(long)]
+    track: Option<String>,
+
+    #[arg(long = "event-type")]
+    event_types: Vec<HistoryEventTypeArg>,
+
+    #[arg(long)]
+    include_body: bool,
+
+    #[arg(long, conflicts_with = "compact")]
+    pretty: bool,
+
+    #[arg(long)]
+    compact: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -704,6 +730,19 @@ struct NotesApplyDocument {
     state_path: String,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HistoryDocument {
+    schema: &'static str,
+    version: u32,
+    event_set_hash: String,
+    event_count: usize,
+    history_count: usize,
+    filters: ReviewHistoryFilters,
+    entries: Vec<ReviewHistoryEntry>,
+    diagnostics: Vec<ProjectionDiagnostic>,
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 #[value(rename_all = "kebab-case")]
 enum SideArg {
@@ -769,6 +808,18 @@ enum ReviewDispositionArg {
     Deferred,
     SplitOut,
     Superseded,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum HistoryEventTypeArg {
+    ReviewInitialized,
+    ReviewUnitCaptured,
+    ReviewObservationRecorded,
+    ReviewDispositionRecorded,
+    InterventionRequested,
+    InterventionResolved,
+    ReviewNoteImported,
 }
 
 fn main() -> ExitCode {
@@ -878,9 +929,29 @@ fn review(
             review_capture(args, tracing, stdout)
         }
         ReviewCommand::Disposition(args) => review_disposition(args, stdout),
+        ReviewCommand::History(args) => {
+            tracing::debug!(command = "review.history", "command_start");
+            review_history_command(args, stdout)
+        }
         ReviewCommand::Intervention(args) => review_intervention(args, stdout),
         ReviewCommand::Observation(args) => review_observation(args, stdout),
     }
+}
+
+fn review_history_command(
+    args: HistoryArgs,
+    stdout: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let pretty = args.pretty && !args.compact;
+    let result = review_history(history_options(&args));
+    let document = HistoryDocument::from(result?);
+    let json = if pretty {
+        serde_json::to_string_pretty(&document)?
+    } else {
+        serde_json::to_string(&document)?
+    };
+    writeln!(stdout, "{json}")?;
+    Ok(())
 }
 
 fn review_disposition(
@@ -1365,6 +1436,20 @@ fn observation_list_options(args: ObservationListArgs) -> ObservationListOptions
     options
 }
 
+fn history_options(args: &HistoryArgs) -> ReviewHistoryOptions {
+    let mut options = ReviewHistoryOptions::new(&args.repo).with_include_body(args.include_body);
+    if let Some(review_unit) = &args.review_unit {
+        options = options.with_review_unit_id(ReviewUnitId::new(review_unit.clone()));
+    }
+    if let Some(track) = &args.track {
+        options = options.with_track(track.clone());
+    }
+    for event_type in args.event_types.iter().copied() {
+        options = options.with_event_type(event_type.into());
+    }
+    options
+}
+
 fn observation_target(args: &ObservationAddArgs) -> ObservationTargetSelector {
     match (&args.file, args.start_line) {
         (Some(file), Some(start_line)) => ObservationTargetSelector::range(
@@ -1762,6 +1847,22 @@ impl From<ImportNotesResult> for NotesApplyDocument {
     }
 }
 
+impl From<ReviewHistoryResult> for HistoryDocument {
+    fn from(result: ReviewHistoryResult) -> Self {
+        let history_count = result.history_count();
+        Self {
+            schema: "shore.review-history",
+            version: 1,
+            event_set_hash: result.event_set_hash,
+            event_count: result.event_count,
+            history_count,
+            filters: result.filters,
+            entries: result.entries,
+            diagnostics: result.diagnostics,
+        }
+    }
+}
+
 impl From<SideArg> for Side {
     fn from(value: SideArg) -> Self {
         match value {
@@ -1831,6 +1932,20 @@ impl From<ReviewDispositionArg> for ReviewDisposition {
             ReviewDispositionArg::Deferred => ReviewDisposition::Deferred,
             ReviewDispositionArg::SplitOut => ReviewDisposition::SplitOut,
             ReviewDispositionArg::Superseded => ReviewDisposition::Superseded,
+        }
+    }
+}
+
+impl From<HistoryEventTypeArg> for shore::session::EventType {
+    fn from(value: HistoryEventTypeArg) -> Self {
+        match value {
+            HistoryEventTypeArg::ReviewInitialized => Self::ReviewInitialized,
+            HistoryEventTypeArg::ReviewUnitCaptured => Self::ReviewUnitCaptured,
+            HistoryEventTypeArg::ReviewObservationRecorded => Self::ReviewObservationRecorded,
+            HistoryEventTypeArg::ReviewDispositionRecorded => Self::ReviewDispositionRecorded,
+            HistoryEventTypeArg::InterventionRequested => Self::InterventionRequested,
+            HistoryEventTypeArg::InterventionResolved => Self::InterventionResolved,
+            HistoryEventTypeArg::ReviewNoteImported => Self::ReviewNoteImported,
         }
     }
 }
