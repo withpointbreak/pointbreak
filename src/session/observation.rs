@@ -35,6 +35,15 @@ struct ObservationEventRecord<'a> {
     track_id: TrackId,
 }
 
+pub(crate) struct ObservationProjectionOptions<'a> {
+    pub shore_dir: &'a Path,
+    pub events: &'a [ShoreEvent],
+    pub resolved: &'a ResolvedReviewUnit,
+    pub track_filter: Option<TrackId>,
+    pub file_filter: Option<&'a str>,
+    pub include_body: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObservationAddOptions {
     repo: PathBuf,
@@ -324,15 +333,41 @@ pub fn list_observations(options: ObservationListOptions) -> Result<ObservationL
         .as_deref()
         .map(validated_track_id)
         .transpose()?;
+    let observations = project_observations(ObservationProjectionOptions {
+        shore_dir,
+        events: &events,
+        resolved: &resolved,
+        track_filter: track_filter.clone(),
+        file_filter: options.file.as_deref(),
+        include_body: options.include_body,
+    })?;
+    let diagnostics = SessionState::from_events(&events)?.diagnostics;
+
+    Ok(ObservationListResult {
+        review_unit_id: resolved.review_unit_id,
+        filters: ObservationListFilters {
+            track_id: track_filter,
+            file: options.file,
+            include_body: options.include_body,
+        },
+        observations,
+        diagnostics,
+    })
+}
+
+pub(crate) fn project_observations(
+    options: ObservationProjectionOptions<'_>,
+) -> Result<Vec<ObservationView>> {
     let mut observation_records: BTreeMap<ObservationId, ObservationEventRecord<'_>> =
         BTreeMap::new();
     let mut superseded_ids = BTreeSet::new();
 
-    for event in events
+    for event in options
+        .events
         .iter()
         .filter(|event| event.event_type == EventType::ReviewObservationRecorded)
     {
-        if event.target.review_unit_id.as_ref() != Some(&resolved.review_unit_id) {
+        if event.target.review_unit_id.as_ref() != Some(&options.resolved.review_unit_id) {
             continue;
         }
 
@@ -344,15 +379,15 @@ pub fn list_observations(options: ObservationListOptions) -> Result<ObservationL
             event.target.track_id.clone().ok_or_else(|| {
                 ShoreError::Message("observation event missing track id".to_owned())
             })?;
-        if track_filter
+        if options
+            .track_filter
             .as_ref()
             .is_some_and(|filter| filter != &track_id)
         {
             continue;
         }
         if options
-            .file
-            .as_deref()
+            .file_filter
             .is_some_and(|file| !target_matches_file(&payload.target, file))
         {
             continue;
@@ -381,7 +416,7 @@ pub fn list_observations(options: ObservationListOptions) -> Result<ObservationL
     let mut observations = Vec::new();
     for (_, record) in observation_records {
         let body = if options.include_body {
-            observation_body(shore_dir, &record.payload)?
+            observation_body(options.shore_dir, &record.payload)?
         } else {
             None
         };
@@ -409,18 +444,7 @@ pub fn list_observations(options: ObservationListOptions) -> Result<ObservationL
         }
     }
     sort_observation_views(&mut observations);
-    let diagnostics = SessionState::from_events(&events)?.diagnostics;
-
-    Ok(ObservationListResult {
-        review_unit_id: resolved.review_unit_id,
-        filters: ObservationListFilters {
-            track_id: track_filter,
-            file: options.file,
-            include_body: options.include_body,
-        },
-        observations,
-        diagnostics,
-    })
+    Ok(observations)
 }
 
 pub(crate) fn target_matches_file(target: &ReviewTargetRef, file: &str) -> bool {

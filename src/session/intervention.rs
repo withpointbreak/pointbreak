@@ -235,6 +235,17 @@ pub struct InterventionResolveResult {
     pub diagnostics: Vec<ProjectionDiagnostic>,
 }
 
+pub(crate) struct InterventionProjectionOptions<'a> {
+    pub shore_dir: &'a Path,
+    pub events: &'a [ShoreEvent],
+    pub resolved: &'a ResolvedReviewUnit,
+    pub track_filter: Option<TrackId>,
+    pub mode_filter: Option<InterventionMode>,
+    pub file_filter: Option<&'a str>,
+    pub status_filter: InterventionStatusFilter,
+    pub include_body: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InterventionListFilters {
     pub track_id: Option<TrackId>,
@@ -482,52 +493,16 @@ pub fn list_interventions(options: InterventionListOptions) -> Result<Interventi
         .as_deref()
         .map(validated_track_id)
         .transpose()?;
-    let request_records = collect_request_records(&events)?;
-    let resolutions = collect_resolution_views(&events)?;
-    let mut interventions = Vec::new();
-
-    for record in request_records.into_values() {
-        let event = record.event;
-        if event.target.review_unit_id.as_ref() != Some(&resolved.review_unit_id) {
-            continue;
-        }
-
-        if track_filter
-            .as_ref()
-            .is_some_and(|filter| filter != &record.track_id)
-        {
-            continue;
-        }
-        if options.mode.is_some_and(|mode| mode != record.payload.mode) {
-            continue;
-        }
-        if options
-            .file
-            .as_deref()
-            .is_some_and(|file| !target_matches_file(&record.payload.target, file))
-        {
-            continue;
-        }
-
-        let intervention_id = record.payload.intervention_id.clone();
-        let resolutions = resolutions
-            .get(&intervention_id)
-            .cloned()
-            .unwrap_or_default();
-        let view = intervention_view_from_event(
-            shore_dir,
-            event,
-            record.payload,
-            record.track_id,
-            resolutions,
-            options.include_body,
-        )?;
-        if options.status.matches(view.status) {
-            interventions.push(view);
-        }
-    }
-
-    sort_intervention_views(&mut interventions);
+    let interventions = project_interventions(InterventionProjectionOptions {
+        shore_dir,
+        events: &events,
+        resolved: &resolved,
+        track_filter: track_filter.clone(),
+        mode_filter: options.mode,
+        file_filter: options.file.as_deref(),
+        status_filter: options.status,
+        include_body: options.include_body,
+    })?;
     let diagnostics = SessionState::from_events(&events)?.diagnostics;
 
     Ok(InterventionListResult {
@@ -542,6 +517,61 @@ pub fn list_interventions(options: InterventionListOptions) -> Result<Interventi
         interventions,
         diagnostics,
     })
+}
+
+pub(crate) fn project_interventions(
+    options: InterventionProjectionOptions<'_>,
+) -> Result<Vec<InterventionView>> {
+    let request_records = collect_request_records(options.events)?;
+    let resolutions = collect_resolution_views(options.events)?;
+    let mut interventions = Vec::new();
+
+    for record in request_records.into_values() {
+        let event = record.event;
+        if event.target.review_unit_id.as_ref() != Some(&options.resolved.review_unit_id) {
+            continue;
+        }
+
+        if options
+            .track_filter
+            .as_ref()
+            .is_some_and(|filter| filter != &record.track_id)
+        {
+            continue;
+        }
+        if options
+            .mode_filter
+            .is_some_and(|mode| mode != record.payload.mode)
+        {
+            continue;
+        }
+        if options
+            .file_filter
+            .is_some_and(|file| !target_matches_file(&record.payload.target, file))
+        {
+            continue;
+        }
+
+        let intervention_id = record.payload.intervention_id.clone();
+        let resolutions = resolutions
+            .get(&intervention_id)
+            .cloned()
+            .unwrap_or_default();
+        let view = intervention_view_from_event(
+            options.shore_dir,
+            event,
+            record.payload,
+            record.track_id,
+            resolutions,
+            options.include_body,
+        )?;
+        if options.status_filter.matches(view.status) {
+            interventions.push(view);
+        }
+    }
+
+    sort_intervention_views(&mut interventions);
+    Ok(interventions)
 }
 
 pub fn fetch_intervention(options: InterventionFetchOptions) -> Result<InterventionFetchResult> {

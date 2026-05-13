@@ -185,6 +185,15 @@ pub struct DispositionShowResult {
     pub diagnostics: Vec<ProjectionDiagnostic>,
 }
 
+pub(crate) struct DispositionProjectionOptions<'a> {
+    pub shore_dir: &'a Path,
+    pub events: &'a [ShoreEvent],
+    pub resolved: &'a ResolvedReviewUnit,
+    pub track_filter: Option<TrackId>,
+    pub include_summary: bool,
+    pub include_all: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DispositionShowFilters {
     pub track_id: Option<TrackId>,
@@ -387,7 +396,35 @@ pub fn show_dispositions(options: DispositionShowOptions) -> Result<DispositionS
         .as_deref()
         .map(validated_track_id)
         .transpose()?;
-    let records = collect_disposition_records(&events, &resolved)?;
+    let (current, dispositions) = project_dispositions(DispositionProjectionOptions {
+        shore_dir,
+        events: &events,
+        resolved: &resolved,
+        track_filter: track_filter.clone(),
+        include_summary: options.include_summary,
+        include_all: options.include_all,
+    })?;
+    // Reuse the state reducer for diagnostics so duplicate/corrupt-event policy stays
+    // shared with state.json and other readers; row filtering is disposition-local.
+    let diagnostics = SessionState::from_events(&events)?.diagnostics;
+
+    Ok(DispositionShowResult {
+        review_unit_id: resolved.review_unit_id,
+        filters: DispositionShowFilters {
+            track_id: track_filter,
+            include_summary: options.include_summary,
+            include_all: options.include_all,
+        },
+        current,
+        dispositions,
+        diagnostics,
+    })
+}
+
+pub(crate) fn project_dispositions(
+    options: DispositionProjectionOptions<'_>,
+) -> Result<(CurrentDispositionView, Vec<DispositionView>)> {
+    let records = collect_disposition_records(options.events, options.resolved)?;
     let replaced_ids = records
         .values()
         .flat_map(|record| record.payload.replaces_disposition_ids.iter().cloned())
@@ -395,7 +432,8 @@ pub fn show_dispositions(options: DispositionShowOptions) -> Result<DispositionS
     let mut all_views = Vec::new();
 
     for record in records.into_values() {
-        if track_filter
+        if options
+            .track_filter
             .as_ref()
             .is_some_and(|filter| filter != &record.track_id)
         {
@@ -403,7 +441,7 @@ pub fn show_dispositions(options: DispositionShowOptions) -> Result<DispositionS
         }
 
         let view = disposition_view_from_event(
-            shore_dir,
+            options.shore_dir,
             record.event,
             record.payload,
             record.track_id,
@@ -429,24 +467,14 @@ pub fn show_dispositions(options: DispositionShowOptions) -> Result<DispositionS
     } else {
         current_dispositions.clone()
     };
-    // Reuse the state reducer for diagnostics so duplicate/corrupt-event policy stays
-    // shared with state.json and other readers; row filtering is disposition-local.
-    let diagnostics = SessionState::from_events(&events)?.diagnostics;
 
-    Ok(DispositionShowResult {
-        review_unit_id: resolved.review_unit_id,
-        filters: DispositionShowFilters {
-            track_id: track_filter,
-            include_summary: options.include_summary,
-            include_all: options.include_all,
-        },
-        current: CurrentDispositionView {
+    Ok((
+        CurrentDispositionView {
             status: current_status,
             dispositions: current_dispositions,
         },
         dispositions,
-        diagnostics,
-    })
+    ))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
