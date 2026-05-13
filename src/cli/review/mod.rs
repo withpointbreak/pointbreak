@@ -35,10 +35,7 @@ pub(super) fn run(
     stdout: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match args.command {
-        ReviewCommand::Capture(args) => {
-            tracing::debug!(command = "review.capture", "command_start");
-            capture::run(args, tracing, stdout)
-        }
+        ReviewCommand::Capture(args) => capture::run(args, tracing, stdout),
         ReviewCommand::Disposition(args) => disposition::run(args, stdout),
         ReviewCommand::History(args) => history::run(args, stdout),
         ReviewCommand::Intervention(args) => intervention::run(args, stdout),

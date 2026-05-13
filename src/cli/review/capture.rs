@@ -45,6 +45,7 @@ pub(super) fn run(
     tracing: &TracingArgs,
     stdout: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    tracing::debug!(command = "review.capture", "command_start");
     let result = capture_worktree_review(capture_options(&args, tracing));
     let document = CaptureDocument::from(result?);
     json::write_json(stdout, &document, false)

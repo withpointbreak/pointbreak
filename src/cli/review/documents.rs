@@ -1,5 +1,4 @@
-// Shared review document mappers will move here as observation, intervention,
-// and disposition command modules are split out.
+// Shared view-document mappers used by review unit show and the leaf read commands.
 use shore::model::ReviewTargetRef;
 use shore::session::{
     CurrentDispositionStatus, DispositionView, InterventionView, ObservationView, ReviewDisposition,
