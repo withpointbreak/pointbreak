@@ -3,17 +3,15 @@ mod projection;
 mod result;
 mod summary;
 
+use self::options::ResolvedHistoryFilters;
 pub use self::options::{ReviewHistoryFilters, ReviewHistoryOptions};
+use self::projection::history_from_events;
 pub use self::result::ReviewHistoryResult;
 pub use self::summary::{ReviewHistoryEntry, ReviewHistorySummary};
-
 use crate::error::Result;
 use crate::session::EventStore;
 use crate::session::observation::validated_track_id;
 use crate::session::store_init::ShoreStorePaths;
-
-use self::options::ResolvedHistoryFilters;
-use self::projection::history_from_events;
 
 pub fn review_history(options: ReviewHistoryOptions) -> Result<ReviewHistoryResult> {
     let paths = ShoreStorePaths::resolve(&options.repo)?;
@@ -34,8 +32,8 @@ pub fn review_history(options: ReviewHistoryOptions) -> Result<ReviewHistoryResu
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::projection::{history_entry_from_event, history_from_events};
+    use super::*;
     use crate::model::{
         DispositionId, InterventionId, InterventionResolutionId, ObservationId, ReviewEndpoint,
         ReviewId, ReviewTargetRef, ReviewUnitId, ReviewUnitSource, RevisionId, Side, SnapshotId,

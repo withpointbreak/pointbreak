@@ -1,5 +1,8 @@
 use std::path::Path;
 
+use super::options::ResolvedHistoryFilters;
+use super::result::ReviewHistoryResult;
+use super::summary::{ReviewHistoryEntry, ReviewHistorySummary};
 use crate::error::{Result, ShoreError};
 use crate::session::body_artifact::load_body_artifact;
 use crate::session::event::{
@@ -8,10 +11,6 @@ use crate::session::event::{
     ReviewObservationRecordedPayload, ReviewUnitCapturedPayload, ShoreEvent,
 };
 use crate::session::state::SessionState;
-
-use super::options::ResolvedHistoryFilters;
-use super::result::ReviewHistoryResult;
-use super::summary::{ReviewHistoryEntry, ReviewHistorySummary};
 
 pub(super) fn history_from_events(
     events: &[ShoreEvent],

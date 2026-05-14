@@ -1,9 +1,8 @@
 use serde::Serialize;
 
-use crate::session::state::ProjectionDiagnostic;
-
 use super::ReviewHistoryEntry;
 use super::options::ReviewHistoryFilters;
+use crate::session::state::ProjectionDiagnostic;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
