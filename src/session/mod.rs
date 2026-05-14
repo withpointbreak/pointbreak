@@ -1,11 +1,11 @@
 mod body_artifact;
 mod capture;
-mod clock;
 mod disposition;
 pub mod event;
 mod event_store;
 mod fingerprint;
 mod history;
+mod identity;
 mod import;
 mod intervention;
 mod observation;
@@ -16,10 +16,8 @@ mod review_unit_projection;
 mod snapshot_artifact;
 pub mod state;
 mod store_init;
-mod writer_identity;
 
 pub use capture::{CaptureOptions, CaptureResult, capture_worktree_review};
-pub(crate) use clock::current_timestamp;
 pub use disposition::{
     CurrentDispositionStatus, CurrentDispositionView, DispositionAddOptions, DispositionAddResult,
     DispositionOverrideSelector, DispositionRecordStatus, DispositionShowFilters,
@@ -43,6 +41,7 @@ pub use history::{
     ReviewHistoryEntry, ReviewHistoryFilters, ReviewHistoryOptions, ReviewHistoryResult,
     ReviewHistorySummary, review_history,
 };
+pub(crate) use identity::{current_timestamp, reviewer_from_git_config, writer_from_git_config};
 pub use import::{ImportNotesOptions, ImportNotesResult, import_notes};
 pub use intervention::{
     InterventionFetchOptions, InterventionFetchResult, InterventionListFilters,
@@ -71,7 +70,6 @@ pub use snapshot_artifact::{SnapshotArtifact, read_snapshot_artifact, write_snap
 pub use state::{ProjectionDiagnostic, SessionState};
 pub(crate) use store_init::{ShoreStorePaths, prepare_shore_writer, sweep_stale_temp_files};
 pub use store_init::{ensure_shore_ignored, shore_dir_for_repo};
-pub(crate) use writer_identity::{reviewer_from_git_config, writer_from_git_config};
 
 #[cfg(test)]
 mod tests {
