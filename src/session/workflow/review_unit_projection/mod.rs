@@ -1,7 +1,4 @@
-use std::path::Path;
-
 use crate::error::{Result, ShoreError};
-use crate::model::DiffSnapshot;
 use crate::session::EventStore;
 use crate::session::disposition::{DispositionProjectionOptions, project_dispositions};
 use crate::session::event::{EventType, ReviewUnitCapturedPayload, ShoreEvent};
@@ -12,13 +9,13 @@ use crate::session::observation::{
     ObservationProjectionOptions, ResolvedReviewUnit, project_observations, resolve_review_unit,
     validated_track_id,
 };
-use crate::session::snapshot_artifact::read_snapshot_artifact;
 use crate::session::state::SessionState;
 use crate::session::store_init::ShoreStorePaths;
 
 mod adapter_notes;
 mod identity;
 mod rows;
+mod snapshot;
 
 pub use self::adapter_notes::AdapterNoteView;
 pub use self::identity::{
@@ -32,6 +29,7 @@ use self::rows::{
     build_adapter_note_rows, build_disposition_rows, build_intervention_rows,
     build_observation_rows, build_snapshot_rows, renumber_projection_rows,
 };
+use self::snapshot::load_bound_snapshot_artifact;
 
 pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShowResult> {
     let paths = ShoreStorePaths::resolve(&options.repo)?;
@@ -116,32 +114,6 @@ pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShow
         rows,
         diagnostics: state.diagnostics,
     })
-}
-
-fn load_bound_snapshot_artifact(
-    repo: &Path,
-    review_unit: &ReviewUnitProjectionIdentity,
-) -> Result<DiffSnapshot> {
-    let artifact = read_snapshot_artifact(repo, &review_unit.snapshot_id)?;
-    if artifact.review_unit_id != review_unit.id
-        || artifact.source != review_unit.source
-        || artifact.base != review_unit.base
-        || artifact.target != review_unit.target
-        || artifact.snapshot.snapshot_id != review_unit.snapshot_id
-    {
-        return Err(ShoreError::Message(format!(
-            "snapshot artifact metadata mismatch for {}",
-            review_unit.id.as_str()
-        )));
-    }
-    if artifact.content_hash != review_unit.snapshot_artifact_content_hash {
-        return Err(ShoreError::Message(format!(
-            "snapshot artifact content hash mismatch for {}",
-            review_unit.id.as_str()
-        )));
-    }
-
-    Ok(artifact.snapshot)
 }
 
 fn selected_review_unit_capture(
