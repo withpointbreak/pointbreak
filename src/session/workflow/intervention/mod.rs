@@ -269,7 +269,7 @@ mod tests {
     fn large_intervention_body_is_stored_as_internal_body_artifact() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
-        let body = "x".repeat(super::super::body_artifact::BODY_INLINE_LIMIT + 1);
+        let body = "x".repeat(crate::session::body_artifact::BODY_INLINE_LIMIT + 1);
 
         let result = request_intervention(
             InterventionRequestOptions::new(repo.path())

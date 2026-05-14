@@ -68,11 +68,15 @@ pub fn capture_worktree_review(options: CaptureOptions) -> Result<CaptureResult>
     let snapshot =
         ingest_tracked_diff_with_options(worktree_root, capture_ingest_options(&options))?;
     let files = snapshot.files;
-    let fingerprint = super::fingerprint::review_unit_fingerprint_for_files(worktree_root, &files)?;
+    let fingerprint =
+        crate::session::fingerprint::review_unit_fingerprint_for_files(worktree_root, &files)?;
     let review_id = ReviewId::new("review:default");
     let snapshot = DiffSnapshot::new(review_id.clone(), fingerprint.snapshot_id.clone(), files);
-    let artifact =
-        super::snapshot_artifact::write_snapshot_artifact(worktree_root, &fingerprint, snapshot)?;
+    let artifact = crate::session::snapshot_artifact::write_snapshot_artifact(
+        worktree_root,
+        &fingerprint,
+        snapshot,
+    )?;
 
     let event_store = EventStore::open(shore_dir);
     let mut recorder = CaptureRecorder::default();
