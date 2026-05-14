@@ -17,14 +17,13 @@ mod rows;
 mod snapshot;
 
 pub use self::adapter_notes::AdapterNoteView;
+use self::adapter_notes::project_adapter_notes;
 pub use self::identity::{
     ReviewUnitProjectionIdentity, ReviewUnitProjectionSummary, ReviewUnitShowFilters,
     ReviewUnitShowOptions, ReviewUnitShowResult,
 };
-pub use self::rows::{ReviewUnitProjectionRow, SnapshotOrder};
-
-use self::adapter_notes::project_adapter_notes;
 use self::resolving::selected_review_unit_capture;
+pub use self::rows::{ReviewUnitProjectionRow, SnapshotOrder};
 use self::rows::{
     build_adapter_note_rows, build_disposition_rows, build_intervention_rows,
     build_observation_rows, build_snapshot_rows, renumber_projection_rows,

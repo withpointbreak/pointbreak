@@ -1,8 +1,7 @@
+use super::identity::ReviewUnitProjectionIdentity;
 use crate::error::{Result, ShoreError};
 use crate::session::event::{EventType, ReviewUnitCapturedPayload, ShoreEvent};
 use crate::session::observation::ResolvedReviewUnit;
-
-use super::identity::ReviewUnitProjectionIdentity;
 
 pub(super) fn selected_review_unit_capture(
     events: &[ShoreEvent],

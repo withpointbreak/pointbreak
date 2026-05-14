@@ -1,10 +1,9 @@
 use std::path::Path;
 
+use super::identity::ReviewUnitProjectionIdentity;
 use crate::error::{Result, ShoreError};
 use crate::model::DiffSnapshot;
 use crate::session::snapshot_artifact::read_snapshot_artifact;
-
-use super::identity::ReviewUnitProjectionIdentity;
 
 pub(super) fn load_bound_snapshot_artifact(
     repo: &Path,

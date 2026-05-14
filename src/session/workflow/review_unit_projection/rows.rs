@@ -1,3 +1,5 @@
+use super::ReviewUnitProjectionSummary;
+use super::adapter_notes::AdapterNoteView;
 use crate::model::{
     DiffFile, DiffSnapshot, DispositionId, InterventionId, ObservationId, ReviewTargetRef,
     ReviewUnitId, RowId,
@@ -5,9 +7,6 @@ use crate::model::{
 use crate::session::disposition::DispositionView;
 use crate::session::intervention::InterventionView;
 use crate::session::observation::ObservationView;
-
-use super::ReviewUnitProjectionSummary;
-use super::adapter_notes::AdapterNoteView;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewUnitProjectionRow {
