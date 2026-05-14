@@ -1,159 +1,26 @@
 mod options;
 mod result;
+mod summary;
 
 pub use self::options::{ReviewHistoryFilters, ReviewHistoryOptions};
 pub use self::result::ReviewHistoryResult;
+pub use self::summary::{ReviewHistoryEntry, ReviewHistorySummary};
 
 use std::path::Path;
 
-use serde::Serialize;
-
 use crate::error::{Result, ShoreError};
-use crate::model::{
-    DispositionId, EventId, InterventionId, InterventionResolutionId, ObservationId,
-    ReviewEndpoint, ReviewId, ReviewTargetRef, ReviewUnitId, ReviewUnitSource, RevisionId,
-    SnapshotId, TrackId,
-};
 use crate::session::EventStore;
 use crate::session::body_artifact::load_body_artifact;
 use crate::session::event::{
-    EventType, ImportedNoteTarget, InterventionMode, InterventionReasonCode,
-    InterventionRequestedPayload, InterventionResolutionOutcome, InterventionResolvedPayload,
-    ReviewDisposition, ReviewDispositionRecordedPayload, ReviewInitializedPayload,
-    ReviewNoteImportedPayload, ReviewObservationRecordedPayload, ReviewUnitCapturedPayload,
-    ShoreEvent, SidecarSource, Writer,
+    EventType, InterventionRequestedPayload, InterventionResolvedPayload,
+    ReviewDispositionRecordedPayload, ReviewInitializedPayload, ReviewNoteImportedPayload,
+    ReviewObservationRecordedPayload, ReviewUnitCapturedPayload, ShoreEvent,
 };
 use crate::session::observation::validated_track_id;
 use crate::session::state::SessionState;
 use crate::session::store_init::ShoreStorePaths;
 
 use self::options::ResolvedHistoryFilters;
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReviewHistoryEntry {
-    pub event_id: EventId,
-    pub event_type: EventType,
-    pub occurred_at: String,
-    pub payload_hash: String,
-    pub review_id: ReviewId,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub review_unit_id: Option<ReviewUnitId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub revision_id: Option<RevisionId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub snapshot_id: Option<SnapshotId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub track_id: Option<TrackId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub subject: Option<ReviewTargetRef>,
-    pub writer: Writer,
-    pub summary: ReviewHistorySummary,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(
-    tag = "kind",
-    rename_all = "snake_case",
-    rename_all_fields = "camelCase"
-)]
-pub enum ReviewHistorySummary {
-    ReviewInitialized {},
-    ReviewUnitCaptured {
-        review_unit_id: ReviewUnitId,
-        source: ReviewUnitSource,
-        base: ReviewEndpoint,
-        target: ReviewEndpoint,
-        revision_id: RevisionId,
-        snapshot_id: SnapshotId,
-        snapshot_artifact_content_hash: String,
-    },
-    ReviewObservationRecorded {
-        observation_id: ObservationId,
-        target: ReviewTargetRef,
-        title: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        body: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        body_byte_size: Option<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        body_content_hash: Option<String>,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
-        tags: Vec<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        confidence: Option<String>,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
-        supersedes: Vec<ObservationId>,
-    },
-    InterventionRequested {
-        intervention_id: InterventionId,
-        target: ReviewTargetRef,
-        mode: InterventionMode,
-        reason_code: InterventionReasonCode,
-        title: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        body: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        body_byte_size: Option<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        body_content_hash: Option<String>,
-    },
-    InterventionResolved {
-        intervention_resolution_id: InterventionResolutionId,
-        intervention_id: InterventionId,
-        outcome: InterventionResolutionOutcome,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        reason: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        reason_byte_size: Option<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        reason_content_hash: Option<String>,
-    },
-    ReviewDispositionRecorded {
-        disposition_id: DispositionId,
-        target: ReviewTargetRef,
-        disposition: ReviewDisposition,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        summary: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        summary_byte_size: Option<u64>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        summary_content_hash: Option<String>,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
-        replaces: Vec<DispositionId>,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
-        related_observations: Vec<ObservationId>,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
-        related_interventions: Vec<InterventionId>,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
-        overrides: Vec<ReviewTargetRef>,
-    },
-    ReviewNoteImported {
-        sidecar_source: SidecarSource,
-        note_id: String,
-        file_path: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        file_old_path: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        target: Option<ImportedNoteTarget>,
-        title: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        body: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        body_byte_size: Option<u64>,
-        #[serde(skip_serializing_if = "Vec::is_empty")]
-        tags: Vec<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        confidence: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        external_source: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        author: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        created_at: Option<String>,
-        sidecar_content_hash: String,
-    },
-}
 
 pub fn review_history(options: ReviewHistoryOptions) -> Result<ReviewHistoryResult> {
     let paths = ShoreStorePaths::resolve(&options.repo)?;
