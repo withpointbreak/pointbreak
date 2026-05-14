@@ -184,7 +184,7 @@ pub(super) fn history_entry_from_event(
     })
 }
 
-pub(super) fn optional_text(
+fn optional_text(
     shore_dir: Option<&Path>,
     include_body: bool,
     inline: Option<String>,
@@ -209,7 +209,7 @@ pub(super) fn optional_text(
     }
 }
 
-pub(super) fn event_matches_filters(event: &ShoreEvent, filters: &ResolvedHistoryFilters) -> bool {
+fn event_matches_filters(event: &ShoreEvent, filters: &ResolvedHistoryFilters) -> bool {
     if filters
         .review_unit_id
         .as_ref()

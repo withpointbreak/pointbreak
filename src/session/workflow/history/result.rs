@@ -1,7 +1,7 @@
 use serde::Serialize;
 
-use super::ReviewHistoryEntry;
 use super::options::ReviewHistoryFilters;
+use super::summary::ReviewHistoryEntry;
 use crate::session::state::ProjectionDiagnostic;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
