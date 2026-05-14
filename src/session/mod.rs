@@ -1,9 +1,6 @@
-mod body_artifact;
 mod capture;
 mod disposition;
 pub mod event;
-mod event_store;
-mod fingerprint;
 mod history;
 mod identity;
 mod import;
@@ -12,8 +9,7 @@ mod observation;
 mod projection;
 mod reload;
 mod review_unit_projection;
-mod snapshot_artifact;
-mod store_init;
+mod store;
 
 pub use capture::{CaptureOptions, CaptureResult, capture_worktree_review};
 pub use disposition::{
@@ -28,12 +24,6 @@ pub use event::{
     ReviewDisposition, ReviewDispositionRecordedPayload, ReviewInitializedPayload,
     ReviewObservationRecordedPayload, ReviewUnitCapturedPayload, ShoreEvent, SidecarSource, Writer,
     WriterRole, WriterTool,
-};
-pub(crate) use event_store::{EventStore, EventWriteOutcome};
-pub(crate) use fingerprint::worktree_fingerprint_for_files;
-pub use fingerprint::{
-    ReviewUnitFingerprint, WorktreeFingerprint, capture_worktree_fingerprint,
-    compute_review_unit_fingerprint,
 };
 pub use history::{
     ReviewHistoryEntry, ReviewHistoryFilters, ReviewHistoryOptions, ReviewHistoryResult,
@@ -66,9 +56,16 @@ pub use review_unit_projection::{
     ReviewUnitProjectionSummary, ReviewUnitShowFilters, ReviewUnitShowOptions,
     ReviewUnitShowResult, SnapshotOrder, show_review_unit,
 };
-pub use snapshot_artifact::{SnapshotArtifact, read_snapshot_artifact, write_snapshot_artifact};
-pub(crate) use store_init::{ShoreStorePaths, prepare_shore_writer, sweep_stale_temp_files};
-pub use store_init::{ensure_shore_ignored, shore_dir_for_repo};
+pub(in crate::session) use store::{body_artifact, fingerprint, snapshot_artifact, store_init};
+pub(crate) use store::{
+    EventStore, EventWriteOutcome, ShoreStorePaths, prepare_shore_writer,
+    sweep_stale_temp_files, worktree_fingerprint_for_files,
+};
+pub use store::{
+    ReviewUnitFingerprint, SnapshotArtifact, WorktreeFingerprint, capture_worktree_fingerprint,
+    compute_review_unit_fingerprint, ensure_shore_ignored, read_snapshot_artifact,
+    shore_dir_for_repo, write_snapshot_artifact,
+};
 
 #[cfg(test)]
 mod tests {
