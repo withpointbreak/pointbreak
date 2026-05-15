@@ -293,9 +293,12 @@ Artifact filenames follow two deliberate rules, paired to what the file represen
 - **Content-addressed artifacts** use a hash of the artifact body as the filename stem. Note-body
   artifacts live at `artifacts/notes/<sha256(body)>.json`. Hashing the body gives deterministic
   addressing and deduplication across observations, interventions, and dispositions that share
-  text; the referencing event also records the expected body hash so future read paths or repair
-  tools can verify the artifact against the event ledger. Identifier-hashed artifacts do not gain
-  the same dedup benefit, because their underlying ID is already unique.
+  text. Native-recorded payloads may carry a payload-level body hash
+  (`body_content_hash` / `reason_content_hash` / `summary_content_hash`) so future read paths or
+  repair tools can verify the artifact against the event ledger; imported-note payloads do not
+  carry such a hash and instead rely on the content-addressed filename plus the referring event's
+  `body_artifact_path`. Identifier-hashed artifacts do not gain the same dedup benefit, because
+  their underlying ID is already unique.
 
 The asymmetry is intentional: identifier-hashed naming protects filenames from arbitrary ID
 characters, while content-addressed naming earns its keep through deterministic dedup. Read paths
@@ -353,17 +356,20 @@ artifact-per-body materialization.
 - **Inline path.** Bodies whose byte length is at most `BODY_INLINE_LIMIT` (4096 bytes today, defined
   at `src/session/store/body_artifact.rs:8`) remain inline in the event payload. The on-disk event
   carries the body bytes verbatim under its `body` (or `summary` / `reason`) field.
-  `body_artifact_path` stays `None`. The inline arm also leaves `body_byte_size` as `None`;
-  consumers read length from the inline string directly.
+  `body_artifact_path` stays `None`. The materialization discriminator is `body` vs
+  `body_artifact_path`, not `body_byte_size`: native ledger payloads (observations, interventions,
+  dispositions) currently set `body_byte_size = Some(_)` on the inline arm via the shared
+  `staged_body` helper, while imported-note payloads leave `body_byte_size = None` inline. Consumers
+  that need an inline length should read it from the inline string directly.
 - **Artifact path.** Bodies above the threshold are externalized to
   `artifacts/notes/<sha256(body)>.json` under the `shore.note-body` envelope
   (`{"schema":"shore.note-body","version":1,"body":"..."}`). The event payload's `body` field is
   `None`; its `body_artifact_path` carries the relative path and `body_byte_size` carries the body's
-  length. Native-recorded payloads (observations, interventions, dispositions) additionally carry
-  `body_content_hash` / `summary_content_hash`; imported-note payloads do not. `load_body_artifact`
-  validates the path shape and the envelope's `schema` / `version` fields, not the body bytes
-  themselves — hash-based cross-validation against the event payload, where available, is a
-  caller's responsibility.
+  length. Native-recorded payloads (observations, interventions, intervention resolutions,
+  dispositions) additionally carry `body_content_hash` / `reason_content_hash` /
+  `summary_content_hash`; imported-note payloads do not. `load_body_artifact` validates the path
+  shape and the envelope's `schema` / `version` fields, not the body bytes themselves — hash-based
+  cross-validation against the event payload, where available, is a caller's responsibility.
 
 ### What `artifacts/notes/` is — and isn't
 
@@ -397,7 +403,7 @@ The 4096-byte threshold is internal storage tuning and may change without a depr
 that any given note-shaped body may be either inline or referenced by a `body_artifact_path`, and
 resolve both arms.
 
-See [ADR-0001](./adr-0001-note-body-materialization.md) for the decision rationale.
+See [ADR-0001](./adr/adr-0001-note-body-materialization.md) for the decision rationale.
 
 ## Projection Freshness
 

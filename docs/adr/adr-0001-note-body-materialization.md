@@ -34,6 +34,7 @@ Stay on the threshold model. Replay is authoritative.
 
 - Native-recorded payloads carry a hash: `ReviewObservationRecordedPayload.body_content_hash`,
   `InterventionRequestedPayload.body_content_hash`,
+  `InterventionResolvedPayload.reason_content_hash`,
   `ReviewDispositionRecordedPayload.summary_content_hash`.
 - `ReviewNoteImportedPayload` does **not** carry a payload-level body hash. Imported-note artifact
   identity is content-addressed by `sha256(body)` in the artifact filename, but the event payload
@@ -50,10 +51,12 @@ Stay on the threshold model. Replay is authoritative.
 - Artifact-only tooling is not a supported authority; tools must replay `.shore/events/`.
 - `state.json` continues to project counts only — never body content.
 - The 4096-byte threshold is a tuning parameter and may move without a deprecation cycle.
-- `body_byte_size` (and, where available, `body_content_hash` / `summary_content_hash`) gives
-  tooling replay-derivable handles to body length and — for native-recorded payloads — identity,
-  without re-reading artifacts. The inline arm leaves `body_byte_size` unset; consumers read length
-  from the inline string directly.
+- `body_byte_size` (and, where available, `body_content_hash` / `reason_content_hash` /
+  `summary_content_hash`) gives tooling replay-derivable handles to body length and — for
+  native-recorded payloads — identity, without re-reading artifacts. The materialization
+  discriminator is `body` vs `body_artifact_path`, not `body_byte_size`: native ledger payloads
+  currently set `body_byte_size = Some(_)` on the inline arm via the shared `staged_body` helper,
+  while imported-note payloads leave it `None` inline.
 - No migration is required. Existing repos may have any mix of inline and artifact-backed bodies;
   both are already supported on the read path.
 
