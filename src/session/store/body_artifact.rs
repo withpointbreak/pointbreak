@@ -5,6 +5,18 @@ use serde::{Deserialize, Serialize};
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::error::{Result, ShoreError};
 
+/// Inline/artifact threshold for note-shaped event bodies (observations,
+/// intervention bodies / resolution reasons, disposition summaries, imported
+/// review notes).
+///
+/// Bodies whose byte length is at most this value remain inline in the event
+/// payload. Larger bodies are externalized to `artifacts/notes/<sha256>.json`
+/// under the `shore.note-body` envelope.
+///
+/// This value is internal storage tuning and may change without a deprecation
+/// cycle. The inline-or-artifact bifurcation itself is the stable contract.
+///
+/// See `docs/adr-0001-note-body-materialization.md`.
 pub(crate) const BODY_INLINE_LIMIT: usize = 4096;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -41,6 +53,17 @@ pub(crate) enum BodyArtifactOutcome {
     },
 }
 
+/// Decide whether a note-shaped body stays inline or is externalized to
+/// `artifacts/notes/<sha256(body)>.json`.
+///
+/// Returns [`BodyArtifactOutcome::Inline`] when the body's byte length is at
+/// most [`BODY_INLINE_LIMIT`]; otherwise returns
+/// [`BodyArtifactOutcome::Artifact`] with a content-addressed relative path
+/// and a [`NoteBodyEnvelope`] (`schema = "shore.note-body"`, `version = 1`).
+///
+/// Replay (`EventStore::list_events()` + [`load_body_artifact`]) is the
+/// authoritative read primitive. See
+/// `docs/adr-0001-note-body-materialization.md`.
 pub(crate) fn stage_body_artifact(body_bytes: &[u8]) -> Result<BodyArtifactOutcome> {
     let body = std::str::from_utf8(body_bytes)
         .map_err(|err| ShoreError::Message(format!("body artifact must be utf-8: {err}")))?;
@@ -93,6 +116,11 @@ pub(crate) fn load_body_artifact(shore_dir: &Path, relative_path: &str) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn body_inline_limit_is_the_documented_4096_bytes() {
+        assert_eq!(BODY_INLINE_LIMIT, 4096);
+    }
 
     #[test]
     fn body_of_exactly_inline_limit_bytes_returns_inline() {

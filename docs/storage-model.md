@@ -86,8 +86,9 @@ Imported review notes should follow the same split:
 
 - immutable `review_note_imported` events in `events/` carry durable imported-note facts
 - bounded `state.json` may summarize imported-note state, such as `noteCount`
-- large note bodies may live in content-addressed `artifacts/notes/` records instead of expanding
-  event payloads or the projection without bound
+- bodies under or equal to `BODY_INLINE_LIMIT` (4096 bytes today) stay inline in the event payload;
+  bodies above the threshold are externalized to `artifacts/notes/<sha256(body)>.json` with the
+  `shore.note-body` envelope (schema `shore.note-body`, version `1`)
 
 On the read path, Shore reconstructs imported notes by replaying `review_note_imported` events and
 loading any optional note-body artifacts under `artifacts/notes/`. `state.json` remains a bounded
@@ -110,9 +111,11 @@ Observation read projections use `observationId` as the logical identity. If mul
 events carry the same observation ID, Shore preserves those events but returns one observation row
 and emits a duplicate semantic diagnostic.
 
-Observation bodies use the same inline-or-artifact mechanics as imported notes. Small bodies remain
-inline in the event payload. Larger bodies use the current `shore.note-body` envelope under
-`artifacts/notes/`, keeping `state.json` bounded and avoiding unbounded event payload growth.
+Observation bodies use the same inline-or-artifact mechanics as imported notes. Bodies under or
+equal to `BODY_INLINE_LIMIT` (4096 bytes today) stay inline in the event payload; bodies above the
+threshold are externalized to `artifacts/notes/<sha256(body)>.json` with the `shore.note-body`
+envelope (schema `shore.note-body`, version `1`), keeping `state.json` bounded and avoiding
+unbounded event payload growth.
 
 The direct read surface is `shore review observation list`, which replays events and can optionally
 hydrate bodies. Body artifact paths, event filenames, and `state.json` paths are internal storage
@@ -142,9 +145,11 @@ with a duplicate semantic diagnostic. Multiple `intervention_resolved` events wi
 ambiguous. Distinct resolution IDs remain distinct facts and can still make the intervention
 ambiguous.
 
-Intervention bodies and resolution reasons use the shared inline-or-artifact mechanics. Small text
-stays inline in the event payload. Larger text uses the current `shore.note-body` envelope under
-`artifacts/notes/`, keeping `state.json` bounded and avoiding unbounded event payload growth.
+Intervention bodies and resolution reasons use the shared inline-or-artifact mechanics. Text under
+or equal to `BODY_INLINE_LIMIT` (4096 bytes today) stays inline in the event payload; text above
+the threshold is externalized to `artifacts/notes/<sha256(body)>.json` with the `shore.note-body`
+envelope (schema `shore.note-body`, version `1`), keeping `state.json` bounded and avoiding
+unbounded event payload growth.
 
 The direct read surfaces are `shore review intervention list` and `shore review intervention fetch`,
 which replay events and can optionally hydrate bodies. Body artifact paths, reason artifact paths,
@@ -176,9 +181,11 @@ disposition row with a duplicate semantic diagnostic. Multiple unreplaced dispos
 append-only facts; read surfaces report the current state as ambiguous instead of choosing a
 timestamp winner.
 
-Disposition summaries use the shared inline-or-artifact mechanics. Small summaries stay inline in
-the event payload. Larger summaries use the current `shore.note-body` envelope under
-`artifacts/notes/`, keeping `state.json` bounded and avoiding unbounded event payload growth.
+Disposition summaries use the shared inline-or-artifact mechanics. Summaries under or equal to
+`BODY_INLINE_LIMIT` (4096 bytes today) stay inline in the event payload; summaries above the
+threshold are externalized to `artifacts/notes/<sha256(body)>.json` with the `shore.note-body`
+envelope (schema `shore.note-body`, version `1`), keeping `state.json` bounded and avoiding
+unbounded event payload growth.
 
 The direct read surface is `shore review disposition show`, which replays events and can optionally
 hydrate summaries. Summary artifact paths, event filenames, and `state.json` paths are internal
@@ -332,9 +339,65 @@ If a projection needs unbounded history, split it into paged or content-addresse
 `artifacts/` and keep `state.json` as an index or summary. A large `state.json` is a design smell
 because it becomes a shared mutable file, a slow health check, and a crash-recovery hazard.
 
-Imported review-note bodies follow this rule directly: small bodies may stay inline in the durable
-event payload, but oversized bodies should move to content-addressed `artifacts/notes/` records so
-the authoritative event and rebuildable projection remain bounded.
+Imported review-note bodies follow this rule directly: bodies under or equal to `BODY_INLINE_LIMIT`
+(4096 bytes today) stay inline in the event payload; bodies above the threshold are externalized to
+`artifacts/notes/<sha256(body)>.json` with the `shore.note-body` envelope (schema `shore.note-body`,
+version `1`), so the authoritative event and rebuildable projection remain bounded.
+
+## Note Body Materialization
+
+Shore stores note-shaped event bodies (observations, intervention bodies, intervention resolution
+reasons, disposition summaries, imported review notes) using a threshold split, not as a uniform
+artifact-per-body materialization.
+
+- **Inline path.** Bodies whose byte length is at most `BODY_INLINE_LIMIT` (4096 bytes today, defined
+  at `src/session/store/body_artifact.rs:8`) remain inline in the event payload. The on-disk event
+  carries the body bytes verbatim under its `body` (or `summary` / `reason`) field.
+  `body_artifact_path` stays `None`. The inline arm also leaves `body_byte_size` as `None`;
+  consumers read length from the inline string directly.
+- **Artifact path.** Bodies above the threshold are externalized to
+  `artifacts/notes/<sha256(body)>.json` under the `shore.note-body` envelope
+  (`{"schema":"shore.note-body","version":1,"body":"..."}`). The event payload's `body` field is
+  `None`; its `body_artifact_path` carries the relative path and `body_byte_size` carries the body's
+  length. Native-recorded payloads (observations, interventions, dispositions) additionally carry
+  `body_content_hash` / `summary_content_hash`; imported-note payloads do not. `load_body_artifact`
+  validates the path shape and the envelope's `schema` / `version` fields, not the body bytes
+  themselves — hash-based cross-validation against the event payload, where available, is a
+  caller's responsibility.
+
+### What `artifacts/notes/` is — and isn't
+
+- It is a content-addressed **overflow store**, not a complete inventory of note bodies. Small-body
+  notes have no corresponding file in this directory. The directory may be empty for a repo that
+  has only small notes.
+- The authoritative durable record of every note is its event under `.shore/events/`. Replay
+  (`EventStore::list_events()` followed by `load_body_artifact` for any `body_artifact_path`) is
+  the only supported read primitive for note state.
+- Tooling that wants a complete list of note bodies must replay events; walking `artifacts/notes/`
+  alone is not sufficient and is not a supported authority.
+
+### Why threshold-based
+
+- Most observations and disposition summaries are short. Externalizing every body would emit one
+  additional fsync per body-bearing event (both inline event and artifact use `Durability::Durable`
+  writes), with proportional file-count growth.
+- The body's identity does not depend on materialization: native-recorded payloads (observations,
+  interventions, dispositions) already carry a `*_content_hash`, and imported-note artifacts are
+  content-addressed by `sha256(body)` in their filenames. Materializing every body would not
+  strengthen those guarantees, only change where canonical bytes live.
+- Artifact-only enumeration is not a supported read path. Even if all bodies were materialized, an
+  artifact file under `artifacts/notes/<hash>.json` carries the body and the envelope schema /
+  version but no referrer identity — it cannot answer "which note / observation / disposition does
+  this body belong to?" without joining back to the event ledger.
+
+### Threshold is tunable
+
+The 4096-byte threshold is internal storage tuning and may change without a deprecation cycle. The
+**inline-or-artifact bifurcation itself** is the stable contract: storage consumers must accept
+that any given note-shaped body may be either inline or referenced by a `body_artifact_path`, and
+resolve both arms.
+
+See [ADR-0001](./adr-0001-note-body-materialization.md) for the decision rationale.
 
 ## Projection Freshness
 
