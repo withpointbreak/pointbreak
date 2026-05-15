@@ -7,6 +7,12 @@ It is inspired by [hunk](https://github.com/modem-dev/hunk), but it is not inten
 small, Rust-native review core with a data model that is easy to reason about, test, and eventually
 expose to other tools.
 
+For a narrative end-to-end walkthrough of the current review workflow — capturing a ReviewUnit,
+inspecting it, recording observations, interventions, and dispositions, and the distinction between
+durable events, rebuildable projections, and command-output JSON — see
+[docs/review-workflow.md](docs/review-workflow.md). The "Current CLI" section below remains the
+per-command reference.
+
 ## Name
 
 The name connects to Pointbreak and the idea of reviewing the wake of tool-assisted work once it
