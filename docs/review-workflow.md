@@ -64,18 +64,37 @@ captured snapshot as an immutable Shore-owned artifact. The output document is
 
 You can pin later commands to the captured ReviewUnit with `--review-unit
 <id>`. When only one ReviewUnit exists in `.shore/`, the read commands pick
-it automatically.
+it automatically. When multiple exist, list them with
+`shore review unit list` and pass the ID you want.
 
 The snapshot is now frozen. Re-running `shore review capture` later creates a
 new ReviewUnit; it does not mutate the previous one.
 
 ## 3. Inspect what was captured
 
-Two read surfaces describe a ReviewUnit, and they answer different questions:
+Three read surfaces describe ReviewUnits, and they answer different questions:
 
 ```bash
+shore review unit list     # what ReviewUnits exist in .shore/
 shore review unit show     # composite ReviewUnit view (narrative + snapshot)
 shore review history       # chronological raw event listing
+```
+
+### `shore review unit list`
+
+`shore review unit list` projects every `review_unit_captured` event into a
+flat directory of ReviewUnits. It is the discovery surface — start here when
+`shore review unit show` errors with `multiple captured review units; pass
+--review-unit`, or whenever you need to pick an ID for `--review-unit <id>`.
+
+It returns `shore.review-unit-list` JSON with `eventSetHash`, `eventCount`,
+`reviewUnitCount`, and an `entries` array whose elements include
+`reviewUnitId`, `capturedAt`, `revisionId`, `snapshotId`, `source`, `base`,
+`target`, and `snapshotArtifactContentHash`. Entries are sorted by capture
+time so the newest ReviewUnit appears last.
+
+```bash
+shore review unit list --pretty
 ```
 
 ### `shore review unit show`

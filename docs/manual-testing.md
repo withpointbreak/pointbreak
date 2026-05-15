@@ -212,10 +212,32 @@ shore review history --pretty --include-body \
   is `.summary.body`, a disposition summary is `.summary.summary`, and an intervention resolution
   reason is on the resolved entry's `.summary.reason`.
 
-## G. Review unit show with and without `--include-body`
+## G. Review unit list and show with and without `--include-body`
 
-**Goal.** Confirm the composite ReviewUnit view returns narrative facts before the snapshot
-remainder, and that body text is omitted by default.
+**Goal.** Confirm the discovery surface lists every captured ReviewUnit, and the composite
+ReviewUnit view returns narrative facts before the snapshot remainder with body text omitted by
+default.
+
+### `shore review unit list`
+
+`shore review unit list` projects `review_unit_captured` events into a flat directory of
+ReviewUnits. Reach for it whenever `shore review unit show` errors with
+`multiple captured review units; pass --review-unit`.
+
+```bash
+shore review unit list --pretty | jq '{eventSetHash, reviewUnitCount, ids: [.entries[].reviewUnitId]}'
+shore review unit list --pretty | jq '.entries[] | {reviewUnitId, capturedAt, snapshotArtifactContentHash}'
+```
+
+**Expect.**
+
+- `reviewUnitCount` matches the number of `review_unit_captured` events on disk; capturing a new
+  ReviewUnit increments it by one.
+- Each entry includes `reviewUnitId`, `capturedAt`, `revisionId`, `snapshotId`, `source`, `base`,
+  `target`, and `snapshotArtifactContentHash` and no event paths, artifact paths, or `statePath`.
+- Entries are sorted by `capturedAt`, so the newest ReviewUnit appears last.
+
+### `shore review unit show`
 
 `shore review unit show` puts each ReviewUnit fact in two places:
 

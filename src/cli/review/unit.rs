@@ -4,9 +4,10 @@ use std::path::PathBuf;
 use clap::{Args, Subcommand};
 use shore::model::{ReviewTargetRef, ReviewUnitId, Side};
 use shore::session::{
-    AdapterNoteView, ReviewUnitProjectionIdentity, ReviewUnitProjectionRow,
-    ReviewUnitProjectionSummary, ReviewUnitShowFilters, ReviewUnitShowOptions,
-    ReviewUnitShowResult, show_review_unit,
+    AdapterNoteView, ReviewUnitListEntry, ReviewUnitListOptions, ReviewUnitListResult,
+    ReviewUnitProjectionIdentity, ReviewUnitProjectionRow, ReviewUnitProjectionSummary,
+    ReviewUnitShowFilters, ReviewUnitShowOptions, ReviewUnitShowResult, list_review_units,
+    show_review_unit,
 };
 
 use crate::cli::json;
@@ -23,7 +24,23 @@ pub(super) struct UnitArgs {
 
 #[derive(Debug, Subcommand)]
 enum UnitCommand {
+    List(UnitListArgs),
     Show(UnitShowArgs),
+}
+
+#[derive(Debug, Args)]
+pub(super) struct UnitListArgs {
+    /// Repository root or a path inside the repository.
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+
+    /// Pretty-print the JSON response.
+    #[arg(long, conflicts_with = "compact")]
+    pretty: bool,
+
+    /// Emit compact JSON explicitly.
+    #[arg(long)]
+    compact: bool,
 }
 
 #[derive(Debug, Args)]
@@ -176,6 +193,12 @@ pub(super) fn run(
     stdout: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match args.command {
+        UnitCommand::List(args) => {
+            let span = tracing::info_span!("shore.review.unit.list");
+            let _entered = span.enter();
+            tracing::debug!(command = "review.unit.list", "command_start");
+            review_unit_list_command(args, stdout)
+        }
         UnitCommand::Show(args) => {
             let span = tracing::info_span!("shore.review.unit.show");
             let _entered = span.enter();
@@ -183,6 +206,38 @@ pub(super) fn run(
             review_unit_show_command(args, stdout)
         }
     }
+}
+
+fn review_unit_list_command(
+    args: UnitListArgs,
+    stdout: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let pretty = args.pretty;
+    let result = list_review_units(ReviewUnitListOptions::new(&args.repo))?;
+    let document = unit_list_document(result);
+    json::write_json(stdout, &document, pretty)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UnitListBody {
+    event_set_hash: String,
+    event_count: usize,
+    review_unit_count: usize,
+    entries: Vec<ReviewUnitListEntry>,
+}
+
+fn unit_list_document(result: ReviewUnitListResult) -> json::DiagnosticDocument<UnitListBody> {
+    json::DiagnosticDocument::new(
+        "shore.review-unit-list",
+        UnitListBody {
+            event_set_hash: result.event_set_hash,
+            event_count: result.event_count,
+            review_unit_count: result.review_unit_count,
+            entries: result.entries,
+        },
+        result.diagnostics,
+    )
 }
 
 fn review_unit_show_command(

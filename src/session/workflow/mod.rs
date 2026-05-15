@@ -2,6 +2,7 @@ mod capture;
 mod history;
 mod import;
 mod reload;
+mod review_unit_list;
 mod review_unit_projection;
 
 pub(in crate::session) mod disposition;
@@ -37,6 +38,9 @@ pub use observation::{
 pub use reload::ReloadOutcome;
 pub(crate) use reload::reload_diagnostics_for_document;
 pub use reload::{ReloadDiagnostic, ReloadDiagnosticCode, reload_session};
+pub use review_unit_list::{
+    ReviewUnitListEntry, ReviewUnitListOptions, ReviewUnitListResult, list_review_units,
+};
 pub use review_unit_projection::{
     AdapterNoteView, ReviewUnitProjectionIdentity, ReviewUnitProjectionRow,
     ReviewUnitProjectionSummary, ReviewUnitShowFilters, ReviewUnitShowOptions,

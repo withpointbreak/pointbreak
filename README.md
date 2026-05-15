@@ -120,7 +120,7 @@ Prefer shelling out to `git` at first. A VCS abstraction can come later if the m
 
 The current executable surfaces are `shore show`, `shore dump`, `shore review capture`,
 `shore review observation add/list`, `shore review intervention request/list/fetch/resolve`,
-`shore review disposition add/show`, `shore review history`, `shore review unit show`, and
+`shore review disposition add/show`, `shore review history`, `shore review unit list/show`, and
 `shore notes apply`.
 
 All commands accept optional tracing flags:
