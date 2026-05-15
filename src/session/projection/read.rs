@@ -113,6 +113,7 @@ pub fn load_durable_notes_for_repo(repo: impl AsRef<Path>) -> Result<Option<Pars
     )?))
 }
 
+#[allow(dead_code)]
 pub fn load_or_rebuild_session_state(repo: impl AsRef<Path>) -> Result<Option<SessionState>> {
     let Some((_paths, events)) = list_events_if_store_exists(repo)? else {
         return Ok(None);
