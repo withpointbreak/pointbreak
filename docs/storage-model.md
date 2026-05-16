@@ -64,7 +64,7 @@ Use distinct storage concepts for distinct semantics:
 `state.json` is a cache/projection. It must be rebuildable from durable records. If it is missing,
 stale, or invalid, Shore should rebuild it rather than treating it as authority.
 
-ReviewUnit capture should follow the same authority split:
+ReviewUnit capture follows the same authority split:
 
 - `review_unit_captured` events in `events/` carry durable capture facts
 - a ReviewUnit is the base endpoint, target endpoint, and captured diff snapshot
@@ -79,8 +79,13 @@ command reports ReviewUnit, revision, and snapshot IDs plus the snapshot artifac
 without making snapshot artifact paths a user-facing API.
 
 `SnapshotArtifact.contentHash` is a canonical hash of the artifact body excluding the
-self-referential `contentHash` field. It covers the source, endpoints, ReviewUnit identity, and
-captured snapshot rows; it is not a raw JSON file checksum.
+self-referential `contentHash` field. Under V1 it covers the source, endpoints, ReviewUnit
+identity, and the **full captured row inventory** — every `DiffFile`, every `FileMetadataRow`,
+every `ReviewHunk`, and every `DiffRow`. The hash is not a raw JSON file checksum, and its scope
+includes data that a hypothetical V2 might elide. Any future elision plan must bump
+`SNAPSHOT_ARTIFACT_VERSION` or introduce a separate `contentHashScope` field so consumers can
+tell which scope produced a given hash; see
+[ADR-0002](./adr/adr-0002-large-snapshot-artifact-policy.md).
 
 Imported review notes should follow the same split:
 
@@ -289,7 +294,10 @@ Artifact filenames follow two deliberate rules, paired to what the file represen
   and free of the characters that appear in semantic IDs (such as the `:` separators in
   `snap:git:sha256:…`). This is the same rule events use, applied to a different identifier.
   Snapshot artifacts also carry their own canonical `contentHash` field that the read path
-  recomputes and compares, so tamper or transcription errors are caught at load time.
+  recomputes and compares, so tamper or transcription errors are caught at load time. Under V1
+  the artifact body inlines every captured row; the `contentHash` therefore covers the full row
+  inventory. See [ADR-0002](./adr/adr-0002-large-snapshot-artifact-policy.md) for the V1 policy and
+  the V2 reversal shape.
 - **Content-addressed artifacts** use a hash of the artifact body as the filename stem. Note-body
   artifacts live at `artifacts/notes/<sha256(body)>.json`. Hashing the body gives deterministic
   addressing and deduplication across observations, interventions, and dispositions that share
@@ -404,6 +412,33 @@ that any given note-shaped body may be either inline or referenced by a `body_ar
 resolve both arms.
 
 See [ADR-0001](./adr/adr-0001-note-body-materialization.md) for the decision rationale.
+
+## Large Snapshot Artifact Policy
+
+Shore stores captured review-unit diffs inline in identifier-hashed artifacts under
+`artifacts/snapshots/<sha256(snapshotId)>.json`. The artifact body is one JSON object per snapshot
+and carries every captured file, every metadata row, every hunk, and every diff row. There is no
+elision threshold, no generated-file detection, and no metadata-only marker for "too-large" or
+"elided" files.
+
+- **Row inventory.** A captured snapshot for a newly added 10,000-line text file produces one
+  artifact with roughly 10,000 inline `DiffRow` objects. V1 does not elide.
+- **Metadata rows.** `FileMetadataKind` is `{ BinarySummary, ModeChange, RenameSummary,
+  SubmoduleSummary }` today. `BinarySummary` is the only metadata-only marker emitted by ingest;
+  binary patches set `is_binary = true` and leave `hunks` empty. There is no `ElidedFile` or
+  `GeneratedFile` variant.
+- **Read surface.** `shore review unit show` is narrative-first plus snapshot-complete: reviewed
+  ledger material appears first, and the snapshot remainder includes every captured file, metadata
+  row, hunk header, and diff row. No flag omits row bodies.
+- **Content-hash scope.** `SnapshotArtifact.contentHash` covers the full row inventory under V1.
+  Any future elision must change the hash scope explicitly (either bump
+  `SNAPSHOT_ARTIFACT_VERSION` from `1` to `2`, or add a separate `contentHashScope` field), so a
+  consumer can tell V1 hashes (full inventory) from V2 hashes (elided) on inspection.
+
+The V1 policy is intentionally minimal: every question issue #64 asks ("elide?", "detect
+generated?", "metadata-only rows?", "omit-on-show?", "hash scope?") receives an explicit answer in
+[ADR-0002](./adr/adr-0002-large-snapshot-artifact-policy.md). Each answer's reversal — what would
+have to change to flip it — is recorded in the ADR's "Future Reversal" section.
 
 ## Projection Freshness
 
