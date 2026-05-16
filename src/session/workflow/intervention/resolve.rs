@@ -158,7 +158,8 @@ pub fn resolve_intervention(
     let event_id = event.event_id.clone();
 
     let mut events_created_by_type = BTreeMap::new();
-    let (events_created, events_existing) = match event_store.record_event_once(&event)? {
+    let write_outcome = event_store.record_event_once(&event)?;
+    let (events_created, events_existing) = match write_outcome {
         EventWriteOutcome::Created => {
             events_created_by_type.insert("intervention_resolved".to_owned(), 1);
             (1, 0)
@@ -166,7 +167,7 @@ pub fn resolve_intervention(
         EventWriteOutcome::Existing => (0, 1),
     };
 
-    let state = SessionState::from_events(&event_store.list_events()?)?;
+    let state = SessionState::from_prior_events_and_committed(&events, &event, write_outcome)?;
     storage.write_json_atomic(&paths.state_path(), &state, Durability::Projection)?;
 
     Ok(InterventionResolveResult {

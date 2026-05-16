@@ -20,9 +20,11 @@ struct EventSetHashEntry<'a> {
     payload_hash: &'a str,
 }
 
-pub(crate) fn event_set_hash_for_events(events: &[ShoreEvent]) -> Result<String> {
+pub(crate) fn event_set_hash_for_events<'a>(
+    events: impl IntoIterator<Item = &'a ShoreEvent>,
+) -> Result<String> {
     let mut entries = events
-        .iter()
+        .into_iter()
         .map(|event| EventSetHashEntry {
             event_id: event.event_id.as_str(),
             payload_hash: event.payload_hash.as_str(),

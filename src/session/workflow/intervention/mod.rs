@@ -105,6 +105,83 @@ mod tests {
     }
 
     #[test]
+    fn request_intervention_state_json_equals_full_replay_after_created_and_existing_paths() {
+        let repo = modified_repo();
+        capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+
+        let options = InterventionRequestOptions::new(repo.path())
+            .with_track("agent:codex")
+            .with_title("blocking-finding")
+            .with_mode(InterventionMode::Blocking)
+            .with_reason_code(InterventionReasonCode::UnsafeAction);
+
+        let first = request_intervention(options.clone()).unwrap();
+        assert_eq!(first.events_created, 1);
+        let on_disk: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(repo.path().join(".shore/state.json")).unwrap(),
+        )
+        .unwrap();
+        let events = EventStore::open(repo.path().join(".shore"))
+            .list_events()
+            .unwrap();
+        let replay = serde_json::to_value(SessionState::from_events(&events).unwrap()).unwrap();
+        assert_eq!(on_disk, replay, "Created path drifted");
+
+        let second = request_intervention(options).unwrap();
+        assert_eq!(second.events_existing, 1);
+        let on_disk: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(repo.path().join(".shore/state.json")).unwrap(),
+        )
+        .unwrap();
+        let events = EventStore::open(repo.path().join(".shore"))
+            .list_events()
+            .unwrap();
+        let replay = serde_json::to_value(SessionState::from_events(&events).unwrap()).unwrap();
+        assert_eq!(on_disk, replay, "Existing path drifted");
+    }
+
+    #[test]
+    fn resolve_intervention_state_json_equals_full_replay_after_created_and_existing_paths() {
+        let repo = modified_repo();
+        capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        let request = request_intervention(
+            InterventionRequestOptions::new(repo.path())
+                .with_track("agent:codex")
+                .with_title("to-resolve")
+                .with_mode(InterventionMode::Blocking)
+                .with_reason_code(InterventionReasonCode::UnsafeAction),
+        )
+        .unwrap();
+
+        let options = InterventionResolveOptions::new(repo.path(), request.intervention_id.clone())
+            .with_outcome(InterventionResolutionOutcome::Approved);
+
+        let first = resolve_intervention(options.clone()).unwrap();
+        assert_eq!(first.events_created, 1);
+        let on_disk: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(repo.path().join(".shore/state.json")).unwrap(),
+        )
+        .unwrap();
+        let events = EventStore::open(repo.path().join(".shore"))
+            .list_events()
+            .unwrap();
+        let replay = serde_json::to_value(SessionState::from_events(&events).unwrap()).unwrap();
+        assert_eq!(on_disk, replay, "Resolve Created path drifted");
+
+        let second = resolve_intervention(options).unwrap();
+        assert_eq!(second.events_existing, 1);
+        let on_disk: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(repo.path().join(".shore/state.json")).unwrap(),
+        )
+        .unwrap();
+        let events = EventStore::open(repo.path().join(".shore"))
+            .list_events()
+            .unwrap();
+        let replay = serde_json::to_value(SessionState::from_events(&events).unwrap()).unwrap();
+        assert_eq!(on_disk, replay, "Resolve Existing path drifted");
+    }
+
+    #[test]
     fn request_intervention_requires_a_captured_review_unit() {
         let repo = modified_repo();
 

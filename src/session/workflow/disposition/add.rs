@@ -236,7 +236,8 @@ pub fn record_disposition(options: DispositionAddOptions) -> Result<DispositionA
     let event_id = event.event_id.clone();
 
     let mut events_created_by_type = BTreeMap::new();
-    let (events_created, events_existing) = match event_store.record_event_once(&event)? {
+    let outcome = event_store.record_event_once(&event)?;
+    let (events_created, events_existing) = match outcome {
         EventWriteOutcome::Created => {
             events_created_by_type.insert("review_disposition_recorded".to_owned(), 1);
             (1, 0)
@@ -244,7 +245,7 @@ pub fn record_disposition(options: DispositionAddOptions) -> Result<DispositionA
         EventWriteOutcome::Existing => (0, 1),
     };
 
-    let state = SessionState::from_events(&event_store.list_events()?)?;
+    let state = SessionState::from_prior_events_and_committed(&events, &event, outcome)?;
     storage.write_json_atomic(&paths.state_path(), &state, Durability::Projection)?;
 
     Ok(DispositionAddResult {

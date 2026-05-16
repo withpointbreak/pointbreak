@@ -8,6 +8,7 @@ use crate::model::{
     DispositionId, EventId, InterventionId, InterventionResolutionId, ObservationId, ReviewId,
     ReviewUnitId, RevisionId, SnapshotId, WorkUnitId,
 };
+use crate::session::EventWriteOutcome;
 use crate::session::event::{
     EventType, InterventionMode, InterventionRequestedPayload, InterventionResolvedPayload,
     ReviewDispositionRecordedPayload, ReviewObservationRecordedPayload, ReviewUnitCapturedPayload,
@@ -63,6 +64,46 @@ impl SessionState {
             reducer.apply(event)?;
         }
         reducer.finish(events.len(), event_set_hash)
+    }
+
+    /// Builds the post-write bounded state from the already-loaded prior
+    /// event slice plus the freshly committed event, without re-reading
+    /// the event log. Produces the same value as
+    /// `SessionState::from_events(&[prior + committed])` for
+    /// `EventWriteOutcome::Created`, and the same value as
+    /// `SessionState::from_events(&prior)` for `EventWriteOutcome::Existing`
+    /// (the committed event is already represented in `prior_events`).
+    ///
+    /// Assumes the V1 single-writer workflow contract: the `prior_events`
+    /// slice was loaded by the same workflow that just called
+    /// `record_event_once`, and no other writer mutated `.shore/events/`
+    /// in between. Under that contract, `EventWriteOutcome::Existing`
+    /// always means the matching event is already in `prior_events`.
+    ///
+    /// `.shore/events/` remains the canonical authority. Use `from_events`
+    /// on read paths and for full rebuilds.
+    pub(crate) fn from_prior_events_and_committed(
+        prior_events: &[ShoreEvent],
+        committed: &ShoreEvent,
+        outcome: EventWriteOutcome,
+    ) -> Result<Self> {
+        let mut reducer = StateReducer::default();
+        for event in prior_events {
+            reducer.apply(event)?;
+        }
+        let (event_count, event_set_hash) = match outcome {
+            EventWriteOutcome::Existing => {
+                (prior_events.len(), event_set_hash_for_events(prior_events)?)
+            }
+            EventWriteOutcome::Created => {
+                reducer.apply(committed)?;
+                let event_set_hash = event_set_hash_for_events(
+                    prior_events.iter().chain(std::iter::once(committed)),
+                )?;
+                (prior_events.len() + 1, event_set_hash)
+            }
+        };
+        reducer.finish(event_count, event_set_hash)
     }
 
     pub fn validate_schema_version(&self) -> Result<()> {
@@ -330,6 +371,7 @@ mod tests {
 
     use super::*;
     use crate::model::{ReviewEndpoint, ReviewTargetRef, ReviewUnitSource, WorktreeCaptureMode};
+    use crate::session::EventWriteOutcome;
     use crate::session::event::{EventTarget, ReviewObservationRecordedPayload, Writer};
 
     #[test]
@@ -429,6 +471,117 @@ mod tests {
                     .message
                     .contains("multiple captured review units")
         }));
+    }
+
+    #[test]
+    fn from_prior_events_and_committed_matches_full_replay_for_created() {
+        let prior = vec![review_unit_captured_event(
+            "review-unit:sha256:one",
+            "rev:one",
+            "snap:one",
+        )];
+        let committed = observation_event("retry-a", "obs:sha256:one");
+        let mut all = prior.clone();
+        all.push(committed.clone());
+
+        let incremental = SessionState::from_prior_events_and_committed(
+            &prior,
+            &committed,
+            EventWriteOutcome::Created,
+        )
+        .unwrap();
+        let full = SessionState::from_events(&all).unwrap();
+
+        assert_eq!(incremental, full);
+    }
+
+    #[test]
+    fn from_prior_events_and_committed_matches_full_replay_for_existing() {
+        let committed = observation_event("retry-a", "obs:sha256:one");
+        let prior = vec![
+            review_unit_captured_event("review-unit:sha256:one", "rev:one", "snap:one"),
+            committed.clone(),
+        ];
+
+        let incremental = SessionState::from_prior_events_and_committed(
+            &prior,
+            &committed,
+            EventWriteOutcome::Existing,
+        )
+        .unwrap();
+        let full = SessionState::from_events(&prior).unwrap();
+
+        assert_eq!(incremental, full);
+        assert_eq!(incremental.event_count, 2);
+    }
+
+    #[test]
+    fn from_prior_events_and_committed_empty_prior_with_created() {
+        let committed = review_unit_captured_event("review-unit:sha256:one", "rev:one", "snap:one");
+
+        let incremental = SessionState::from_prior_events_and_committed(
+            &[],
+            &committed,
+            EventWriteOutcome::Created,
+        )
+        .unwrap();
+        let full = SessionState::from_events(std::slice::from_ref(&committed)).unwrap();
+
+        assert_eq!(incremental, full);
+        assert_eq!(incremental.event_count, 1);
+    }
+
+    #[test]
+    fn from_prior_events_and_committed_event_set_hash_is_order_independent() {
+        let a = review_unit_captured_event("review-unit:sha256:one", "rev:one", "snap:one");
+        let b = observation_event("retry-a", "obs:sha256:one");
+
+        let from_a_then_b = SessionState::from_prior_events_and_committed(
+            std::slice::from_ref(&a),
+            &b,
+            EventWriteOutcome::Created,
+        )
+        .unwrap();
+        let from_b_then_a = SessionState::from_prior_events_and_committed(
+            std::slice::from_ref(&b),
+            &a,
+            EventWriteOutcome::Created,
+        )
+        .unwrap();
+        let full_ab = SessionState::from_events(&[a, b]).unwrap();
+
+        assert_eq!(from_a_then_b.event_set_hash, full_ab.event_set_hash);
+        assert_eq!(from_b_then_a.event_set_hash, full_ab.event_set_hash);
+    }
+
+    #[test]
+    fn from_prior_events_and_committed_preserves_duplicate_semantic_diagnostic() {
+        let prior = vec![
+            review_unit_captured_event("review-unit:sha256:one", "rev:one", "snap:one"),
+            observation_event("retry-a", "obs:sha256:same"),
+            observation_event("retry-b", "obs:sha256:same"),
+        ];
+        let committed = observation_event("retry-c", "obs:sha256:same");
+        let mut all = prior.clone();
+        all.push(committed.clone());
+
+        let incremental = SessionState::from_prior_events_and_committed(
+            &prior,
+            &committed,
+            EventWriteOutcome::Created,
+        )
+        .unwrap();
+        let full = SessionState::from_events(&all).unwrap();
+
+        assert_eq!(incremental, full);
+        assert!(
+            incremental
+                .diagnostics
+                .iter()
+                .any(|d| { d.code == DUPLICATE_SEMANTIC_OBSERVATION_EVENT_CODE }),
+            "expected duplicate-semantic-observation diagnostic, got {:?}",
+            incremental.diagnostics
+        );
     }
 
     #[test]

@@ -327,6 +327,45 @@ mod tests {
     }
 
     #[test]
+    fn record_disposition_state_json_equals_full_replay_after_created_and_existing_paths() {
+        let repo = modified_repo();
+        capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+
+        let options = DispositionAddOptions::new(repo.path())
+            .with_track("agent:codex")
+            .with_disposition(ReviewDisposition::Accepted)
+            .with_summary("looks good");
+
+        let first = record_disposition(options.clone()).unwrap();
+        assert_eq!(first.events_created, 1);
+        let on_disk: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(repo.path().join(".shore/state.json")).unwrap(),
+        )
+        .unwrap();
+        let events = EventStore::open(repo.path().join(".shore"))
+            .list_events()
+            .unwrap();
+        let replay =
+            serde_json::to_value(crate::session::SessionState::from_events(&events).unwrap())
+                .unwrap();
+        assert_eq!(on_disk, replay, "Disposition Created path drifted");
+
+        let second = record_disposition(options).unwrap();
+        assert_eq!(second.events_existing, 1);
+        let on_disk: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(repo.path().join(".shore/state.json")).unwrap(),
+        )
+        .unwrap();
+        let events = EventStore::open(repo.path().join(".shore"))
+            .list_events()
+            .unwrap();
+        let replay =
+            serde_json::to_value(crate::session::SessionState::from_events(&events).unwrap())
+                .unwrap();
+        assert_eq!(on_disk, replay, "Disposition Existing path drifted");
+    }
+
+    #[test]
     fn explicit_same_idempotency_key_with_different_payload_conflicts() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
