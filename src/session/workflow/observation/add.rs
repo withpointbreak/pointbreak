@@ -160,8 +160,10 @@ pub fn record_observation(options: ObservationAddOptions) -> Result<ObservationA
         EventType::ReviewObservationRecorded,
         idempotency_key,
         EventTarget {
-            review_id: resolved.review_id,
+            session_id: resolved.session_id,
             work_unit_id: None,
+            work_object_id: None,
+            work_object_type: None,
             review_unit_id: Some(resolved.review_unit_id.clone()),
             revision_id: Some(resolved.revision_id),
             snapshot_id: Some(resolved.snapshot_id),

@@ -173,7 +173,7 @@ pub(super) fn history_entry_from_event(
         event_type: event.event_type,
         occurred_at: event.occurred_at.clone(),
         payload_hash: event.payload_hash.clone(),
-        review_id: event.target.review_id.clone(),
+        session_id: event.target.session_id.clone(),
         review_unit_id: event.target.review_unit_id.clone(),
         revision_id: event.target.revision_id.clone(),
         snapshot_id: event.target.snapshot_id.clone(),

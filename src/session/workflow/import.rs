@@ -65,15 +65,15 @@ pub fn import_notes(options: ImportNotesOptions) -> Result<ImportNotesResult> {
     let event_store = EventStore::open(shore_dir);
     let existing_state = SessionState::from_events(&event_store.list_events()?)?;
 
-    let review_id = existing_state.review_id.clone();
+    let session_id = existing_state.session_id.clone();
     let work_unit_id = existing_state.work_unit_id.clone();
-    let target = EventTarget::new(review_id.clone(), work_unit_id.clone());
+    let target = EventTarget::new(session_id.clone(), work_unit_id.clone());
     let writer = writer_from_git_config(worktree_root);
     let occurred_at = current_timestamp();
 
     match event_store.record_event_once(&ShoreEvent::new(
         EventType::ReviewInitialized,
-        ReviewInitializedPayload::idempotency_key(&review_id, &work_unit_id),
+        ReviewInitializedPayload::idempotency_key(&session_id, &work_unit_id),
         target.clone(),
         writer.clone(),
         ReviewInitializedPayload {},

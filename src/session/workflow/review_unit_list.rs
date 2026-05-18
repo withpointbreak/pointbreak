@@ -4,7 +4,7 @@ use serde::Serialize;
 
 use crate::error::Result;
 use crate::model::{
-    ReviewEndpoint, ReviewId, ReviewUnitId, ReviewUnitSource, RevisionId, SnapshotId,
+    ReviewEndpoint, ReviewUnitId, ReviewUnitSource, RevisionId, SessionId, SnapshotId,
 };
 use crate::session::EventStore;
 use crate::session::event::{EventType, ReviewUnitCapturedPayload, ShoreEvent};
@@ -28,7 +28,7 @@ impl ReviewUnitListOptions {
 #[serde(rename_all = "camelCase")]
 pub struct ReviewUnitListEntry {
     pub review_unit_id: ReviewUnitId,
-    pub review_id: ReviewId,
+    pub session_id: SessionId,
     pub captured_at: String,
     pub revision_id: RevisionId,
     pub snapshot_id: SnapshotId,
@@ -88,7 +88,7 @@ fn entry_from_event(event: &ShoreEvent) -> Result<ReviewUnitListEntry> {
     let payload: ReviewUnitCapturedPayload = serde_json::from_value(event.payload.clone())?;
     Ok(ReviewUnitListEntry {
         review_unit_id: payload.review_unit_id,
-        review_id: event.target.review_id.clone(),
+        session_id: event.target.session_id.clone(),
         captured_at: event.occurred_at.clone(),
         revision_id: payload.revision_id,
         snapshot_id: payload.snapshot_id,
@@ -194,7 +194,7 @@ mod tests {
             EventType::ReviewUnitCaptured,
             format!("capture:{suffix}"),
             EventTarget::for_review_unit(
-                ReviewId::new("review:default"),
+                SessionId::new("session:default"),
                 review_unit_id,
                 revision_id,
                 snapshot_id,

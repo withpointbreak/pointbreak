@@ -25,8 +25,8 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        EventId, ReviewEndpoint, ReviewId, ReviewTargetRef, ReviewUnitId, ReviewUnitSource,
-        RevisionId, Side, SnapshotId, TrackId, WorktreeCaptureMode,
+        EventId, ReviewEndpoint, ReviewTargetRef, ReviewUnitId, ReviewUnitSource, RevisionId,
+        SessionId, Side, SnapshotId, TrackId, WorktreeCaptureMode,
     };
     use crate::session::event::{
         EventTarget, EventType, ReviewUnitCapturedPayload, ShoreEvent, Writer,
@@ -578,7 +578,7 @@ mod tests {
 
     fn resolved_from_capture(capture: &CaptureResult) -> ResolvedReviewUnit {
         ResolvedReviewUnit {
-            review_id: capture.review_id.clone(),
+            session_id: capture.session_id.clone(),
             review_unit_id: capture.review_unit_id.clone(),
             revision_id: capture.revision_id.clone(),
             snapshot_id: capture.snapshot_id.clone(),
@@ -597,7 +597,7 @@ mod tests {
             EventType::ReviewUnitCaptured,
             format!("review_unit_captured:{}", review_unit_id.as_str()),
             EventTarget::for_review_unit(
-                ReviewId::new("review:default"),
+                SessionId::new("session:default"),
                 review_unit_id.clone(),
                 revision_id.clone(),
                 snapshot_id.clone(),

@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use super::freshness::event_set_hash_for_events;
 use crate::error::{Result, ShoreError};
 use crate::model::{
-    DispositionId, EventId, InterventionId, InterventionResolutionId, ObservationId, ReviewId,
-    ReviewUnitId, RevisionId, SnapshotId, WorkUnitId,
+    DispositionId, EventId, InterventionId, InterventionResolutionId, ObservationId, ReviewUnitId,
+    RevisionId, SessionId, SnapshotId, WorkUnitId,
 };
 use crate::session::EventWriteOutcome;
 use crate::session::event::{
@@ -31,7 +31,7 @@ const DUPLICATE_SEMANTIC_DIAGNOSTIC_EVENT_LIMIT: usize = 5;
 pub struct SessionState {
     pub schema: String,
     pub version: u32,
-    pub review_id: ReviewId,
+    pub session_id: SessionId,
     pub work_unit_id: WorkUnitId,
     pub current_revision_id: Option<RevisionId>,
     pub current_snapshot_id: Option<SnapshotId>,
@@ -127,7 +127,7 @@ pub struct ProjectionDiagnostic {
 
 #[derive(Debug)]
 struct StateReducer {
-    review_id: ReviewId,
+    session_id: SessionId,
     work_unit_id: WorkUnitId,
     captured_review_units: BTreeMap<ReviewUnitId, (RevisionId, SnapshotId)>,
     note_count: usize,
@@ -142,7 +142,7 @@ struct StateReducer {
 impl Default for StateReducer {
     fn default() -> Self {
         Self {
-            review_id: ReviewId::new("review:default"),
+            session_id: SessionId::new("session:default"),
             work_unit_id: WorkUnitId::new("work:default"),
             captured_review_units: BTreeMap::new(),
             note_count: 0,
@@ -161,7 +161,7 @@ impl StateReducer {
         event.validate_schema_version()?;
 
         if event.event_type == EventType::ReviewInitialized {
-            self.review_id = event.target.review_id.clone();
+            self.session_id = event.target.session_id.clone();
             if let Some(work_unit_id) = &event.target.work_unit_id {
                 self.work_unit_id = work_unit_id.clone();
             }
@@ -186,8 +186,8 @@ impl StateReducer {
     }
 
     fn set_identity_from_event_if_default(&mut self, event: &ShoreEvent) {
-        if self.review_id.as_str() == "review:default" {
-            self.review_id = event.target.review_id.clone();
+        if self.session_id.as_str() == "session:default" {
+            self.session_id = event.target.session_id.clone();
         }
         if self.work_unit_id.as_str() == "work:default"
             && let Some(work_unit_id) = &event.target.work_unit_id
@@ -318,7 +318,7 @@ impl StateReducer {
         Ok(SessionState {
             schema: STATE_SCHEMA.to_owned(),
             version: STATE_VERSION,
-            review_id: self.review_id,
+            session_id: self.session_id,
             work_unit_id: self.work_unit_id,
             current_revision_id,
             current_snapshot_id,
@@ -622,7 +622,7 @@ mod tests {
         let json = json!({
             "schema": "shore.state",
             "version": 1,
-            "reviewId": "review:default",
+            "sessionId": "session:default",
             "workUnitId": "work:default",
             "currentRevisionId": null,
             "currentSnapshotId": null,
@@ -649,7 +649,7 @@ mod tests {
             EventType::ReviewUnitCaptured,
             format!("review_unit_captured:{review_unit_id}"),
             EventTarget::for_review_unit(
-                ReviewId::new("review:default"),
+                SessionId::new("session:default"),
                 ReviewUnitId::new(review_unit_id),
                 RevisionId::new(revision_id),
                 SnapshotId::new(snapshot_id),
@@ -682,7 +682,7 @@ mod tests {
             EventType::ReviewObservationRecorded,
             format!("review_observation_recorded:{source_key}"),
             EventTarget::for_review_unit(
-                ReviewId::new("review:default"),
+                SessionId::new("session:default"),
                 ReviewUnitId::new("review-unit:sha256:one"),
                 RevisionId::new("rev:one"),
                 SnapshotId::new("snap:one"),

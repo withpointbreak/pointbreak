@@ -4,15 +4,18 @@ use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::error::{Result, ShoreError};
 use crate::model::EventId;
 
+mod assertion;
 mod disposition;
 mod intervention;
 mod kind;
 mod observation;
 mod payload;
 mod review;
+mod source;
 mod target;
 mod writer;
 
+pub use assertion::AssertionMode;
 pub use disposition::{ReviewDisposition, ReviewDispositionRecordedPayload};
 pub use intervention::{
     InterventionMode, InterventionReasonCode, InterventionRequestedPayload,
@@ -25,6 +28,7 @@ pub use review::{
     ImportedNoteTarget, ReviewInitializedPayload, ReviewNoteImportedPayload,
     ReviewUnitCapturedPayload, SidecarSource,
 };
+pub use source::SourceRef;
 pub use target::EventTarget;
 pub use writer::{Writer, WriterRole, WriterTool};
 
@@ -44,6 +48,10 @@ pub struct ShoreEvent {
     pub writer: Writer,
     pub occurred_at: String,
     pub payload_hash: String,
+    #[serde(default, skip_serializing_if = "assertion::is_default_advisory")]
+    pub assertion_mode: AssertionMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_ref: Option<SourceRef>,
     pub payload: serde_json::Value,
 }
 
@@ -93,6 +101,8 @@ impl ShoreEvent {
             writer,
             occurred_at: occurred_at.into(),
             payload_hash,
+            assertion_mode: AssertionMode::Advisory,
+            source_ref: None,
             payload,
         })
     }
@@ -134,7 +144,7 @@ mod tests {
     use crate::error::ShoreError;
     use crate::model::{
         DispositionId, InterventionId, InterventionResolutionId, ObservationId, ReviewEndpoint,
-        ReviewId, ReviewTargetRef, ReviewUnitId, ReviewUnitSource, RevisionId, Side, SnapshotId,
+        ReviewTargetRef, ReviewUnitId, ReviewUnitSource, RevisionId, SessionId, Side, SnapshotId,
         TrackId, WorkUnitId, WorktreeCaptureMode,
     };
 
@@ -161,7 +171,7 @@ mod tests {
             EventType::ReviewInitialized,
             "",
             EventTarget::new(
-                ReviewId::new("review:default"),
+                SessionId::new("session:default"),
                 WorkUnitId::new("work:default"),
             ),
             Writer::shore_local_author("0.1.0"),
@@ -260,7 +270,7 @@ mod tests {
     #[test]
     fn review_unit_captured_event_serializes_target_and_payload() {
         let target = EventTarget::for_review_unit(
-            ReviewId::new("review:default"),
+            SessionId::new("session:default"),
             ReviewUnitId::new("review-unit:sha256:abc"),
             RevisionId::new("rev:git:sha256:def"),
             SnapshotId::new("snap:git:sha256:ghi"),
@@ -295,6 +305,8 @@ mod tests {
 
         let json = serde_json::to_value(event).unwrap();
         assert_eq!(json["eventType"], "review_unit_captured");
+        assert_eq!(json["target"]["sessionId"], "session:default");
+        assert!(json["target"].get("reviewId").is_none());
         assert_eq!(json["target"]["reviewUnitId"], "review-unit:sha256:abc");
         assert_eq!(json["target"]["revisionId"], "rev:git:sha256:def");
         assert_eq!(json["target"]["snapshotId"], "snap:git:sha256:ghi");
@@ -345,8 +357,10 @@ mod tests {
                 disposition_id.as_str(),
             ),
             EventTarget {
-                review_id: ReviewId::new("review:default"),
+                session_id: SessionId::new("session:default"),
                 work_unit_id: None,
+                work_object_id: None,
+                work_object_type: None,
                 review_unit_id: Some(review_unit_id.clone()),
                 revision_id: Some(RevisionId::new("rev:git:sha256:one")),
                 snapshot_id: Some(SnapshotId::new("snap:git:sha256:one")),
@@ -389,7 +403,7 @@ mod tests {
             EventType::ReviewObservationRecorded,
             "review_disposition_recorded:review-unit:sha256:one:human:kevin:disp:sha256:one",
             EventTarget::for_review_unit(
-                ReviewId::new("review:default"),
+                SessionId::new("session:default"),
                 review_unit_id.clone(),
                 RevisionId::new("rev:git:sha256:one"),
                 SnapshotId::new("snap:git:sha256:one"),
@@ -480,7 +494,7 @@ mod tests {
             EventType::ReviewUnitCaptured,
             format!("review_unit_captured:review-unit:sha256:abc:{snapshot_artifact_content_hash}"),
             EventTarget::for_review_unit(
-                ReviewId::new("review:default"),
+                SessionId::new("session:default"),
                 ReviewUnitId::new("review-unit:sha256:abc"),
                 RevisionId::new("rev:git:sha256:def"),
                 SnapshotId::new("snap:git:sha256:ghi"),
@@ -519,8 +533,10 @@ mod tests {
             end_line: 5,
         };
         let target = EventTarget {
-            review_id: ReviewId::new("review:default"),
+            session_id: SessionId::new("session:default"),
             work_unit_id: None,
+            work_object_id: None,
+            work_object_type: None,
             review_unit_id: Some(review_unit_id.clone()),
             revision_id: Some(RevisionId::new("rev:git:sha256:def")),
             snapshot_id: Some(SnapshotId::new("snap:git:sha256:ghi")),
@@ -580,8 +596,10 @@ mod tests {
                 review_unit_id.as_str()
             ),
             EventTarget {
-                review_id: ReviewId::new("review:default"),
+                session_id: SessionId::new("session:default"),
                 work_unit_id: None,
+                work_object_id: None,
+                work_object_type: None,
                 review_unit_id: Some(review_unit_id.clone()),
                 revision_id: Some(RevisionId::new("rev:git:sha256:def")),
                 snapshot_id: Some(SnapshotId::new("snap:git:sha256:ghi")),
@@ -612,7 +630,7 @@ mod tests {
             EventType::ReviewNoteImported,
             "review_note_imported:review_notes:work:default:note:abc",
             EventTarget::new(
-                ReviewId::new("review:default"),
+                SessionId::new("session:default"),
                 WorkUnitId::new("work:default"),
             ),
             Writer::shore_local_author("0.1.0"),
@@ -654,7 +672,7 @@ mod tests {
             EventType::ReviewNoteImported,
             "review_note_imported:review_notes:work:default:note:abc",
             EventTarget::new(
-                ReviewId::new("review:default"),
+                SessionId::new("session:default"),
                 WorkUnitId::new("work:default"),
             ),
             Writer::shore_local_author("0.1.0"),
@@ -705,6 +723,98 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn event_envelope_defaults_missing_assertion_mode_to_advisory() {
+        let mut json = serde_json::to_value(valid_review_unit_captured_event()).unwrap();
+        json.as_object_mut().unwrap().remove("assertionMode");
+
+        let event: ShoreEvent =
+            serde_json::from_value(json).expect("missing assertionMode is accepted");
+
+        assert_eq!(event.assertion_mode, AssertionMode::Advisory);
+    }
+
+    #[test]
+    fn event_envelope_skip_serializes_default_advisory_assertion_mode() {
+        let event = valid_review_unit_captured_event();
+        assert_eq!(event.assertion_mode, AssertionMode::Advisory);
+
+        let json = serde_json::to_value(&event).unwrap();
+
+        assert!(
+            json.get("assertionMode").is_none(),
+            "default Advisory must skip-serialize, got {}",
+            json
+        );
+    }
+
+    #[test]
+    fn event_envelope_serializes_explicit_operative_assertion_mode() {
+        let mut event = valid_review_unit_captured_event();
+        event.assertion_mode = AssertionMode::Operative;
+
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["assertionMode"], "operative");
+
+        let round: ShoreEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(round.assertion_mode, AssertionMode::Operative);
+    }
+
+    #[test]
+    fn event_envelope_defaults_missing_source_ref_to_none() {
+        let mut json = serde_json::to_value(valid_review_unit_captured_event()).unwrap();
+        json.as_object_mut().unwrap().remove("sourceRef");
+
+        let event: ShoreEvent =
+            serde_json::from_value(json).expect("missing sourceRef is accepted");
+
+        assert!(event.source_ref.is_none());
+    }
+
+    #[test]
+    fn event_envelope_skip_serializes_absent_source_ref() {
+        let event = valid_review_unit_captured_event();
+        assert!(event.source_ref.is_none());
+
+        let json = serde_json::to_value(&event).unwrap();
+
+        assert!(
+            json.get("sourceRef").is_none(),
+            "default None must skip-serialize, got {}",
+            json
+        );
+    }
+
+    #[test]
+    fn event_envelope_serializes_source_ref_with_system_and_id() {
+        let mut event = valid_review_unit_captured_event();
+        event.source_ref = Some(SourceRef::new("claude_code", "session:abc/tool_result:1"));
+
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["sourceRef"]["sourceSystem"], "claude_code");
+        assert_eq!(json["sourceRef"]["sourceId"], "session:abc/tool_result:1");
+
+        let round: ShoreEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(round.source_ref, event.source_ref);
+    }
+
+    #[test]
+    fn source_ref_shape_does_not_duplicate_writer_tool() {
+        // Pin the OQ-G decision: actor/tool identity stays in Writer; source_ref
+        // carries only source_system and source_id.
+        let mut event = valid_review_unit_captured_event();
+        event.source_ref = Some(SourceRef::new("claude_code", "tool_result:7"));
+
+        let json = serde_json::to_value(&event).unwrap();
+
+        let source_ref = json["sourceRef"].as_object().expect("sourceRef is object");
+        let keys: Vec<&str> = source_ref.keys().map(String::as_str).collect();
+        assert_eq!(keys, vec!["sourceId", "sourceSystem"]);
+
+        // Writer.tool keeps its identity at the envelope level.
+        assert_eq!(json["writer"]["tool"]["name"], "shore");
+    }
+
     fn valid_review_unit_captured_event() -> ShoreEvent {
         review_unit_captured_event(
             "sha256:artifact",
@@ -720,7 +830,7 @@ mod tests {
             EventType::ReviewUnitCaptured,
             idempotency_key,
             EventTarget::for_review_unit(
-                ReviewId::new("review:default"),
+                SessionId::new("session:default"),
                 ReviewUnitId::new("review-unit:sha256:abc"),
                 RevisionId::new("rev:git:sha256:def"),
                 SnapshotId::new("snap:git:sha256:ghi"),

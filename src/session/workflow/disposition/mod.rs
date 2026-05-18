@@ -24,8 +24,8 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        DispositionId, InterventionId, ObservationId, ReviewId, ReviewTargetRef, ReviewUnitId,
-        RevisionId, Side, SnapshotId, TrackId,
+        DispositionId, InterventionId, ObservationId, ReviewTargetRef, ReviewUnitId, RevisionId,
+        SessionId, Side, SnapshotId, TrackId,
     };
     use crate::session::event::{
         EventTarget, EventType, InterventionMode, InterventionReasonCode, ReviewDisposition,
@@ -810,8 +810,10 @@ mod tests {
                 disposition_id.as_str(),
             ),
             EventTarget {
-                review_id: ReviewId::new("review:default"),
+                session_id: SessionId::new("session:default"),
                 work_unit_id: None,
+                work_object_id: None,
+                work_object_type: None,
                 review_unit_id: Some(review_unit_id.clone()),
                 revision_id: Some(RevisionId::new("rev:git:sha256:one")),
                 snapshot_id: Some(SnapshotId::new("snap:git:sha256:one")),

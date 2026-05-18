@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::kind::EventType;
 use super::payload::EventPayload;
 use crate::model::{
-    ReviewEndpoint, ReviewId, ReviewUnitId, ReviewUnitSource, RevisionId, Side, SnapshotId,
+    ReviewEndpoint, ReviewUnitId, ReviewUnitSource, RevisionId, SessionId, Side, SnapshotId,
     WorkUnitId,
 };
 
@@ -12,10 +12,10 @@ use crate::model::{
 pub struct ReviewInitializedPayload {}
 
 impl ReviewInitializedPayload {
-    pub fn idempotency_key(review_id: &ReviewId, work_unit_id: &WorkUnitId) -> String {
+    pub fn idempotency_key(session_id: &SessionId, work_unit_id: &WorkUnitId) -> String {
         format!(
             "review_initialized:{}:{}",
-            review_id.as_str(),
+            session_id.as_str(),
             work_unit_id.as_str()
         )
     }

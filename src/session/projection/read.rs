@@ -164,7 +164,7 @@ mod tests {
     use std::process::Command;
 
     use super::*;
-    use crate::model::{ReviewId, Side, WorkUnitId};
+    use crate::model::{SessionId, Side, WorkUnitId};
     use crate::session::event::{
         EventTarget, ImportedNoteTarget, ReviewInitializedPayload, ShoreEvent, SidecarSource,
         Writer,
@@ -349,9 +349,9 @@ mod tests {
     fn review_initialized() -> ShoreEvent {
         ShoreEvent::new(
             EventType::ReviewInitialized,
-            "review_initialized:review:default:work:default",
+            "review_initialized:session:default:work:default",
             EventTarget::new(
-                ReviewId::new("review:default"),
+                SessionId::new("session:default"),
                 WorkUnitId::new("work:default"),
             ),
             Writer::shore_local_author("0.1.0"),

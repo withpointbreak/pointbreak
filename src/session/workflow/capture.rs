@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use crate::error::Result;
 use crate::git::{IngestOptions, ingest_tracked_diff_with_options};
 use crate::model::{
-    DiffSnapshot, ReviewEndpoint, ReviewId, ReviewUnitId, ReviewUnitSource, RevisionId, SnapshotId,
+    DiffSnapshot, ReviewEndpoint, ReviewId, ReviewUnitId, ReviewUnitSource, RevisionId, SessionId,
+    SnapshotId,
 };
 use crate::session::event::{EventTarget, EventType, ReviewUnitCapturedPayload, ShoreEvent};
 use crate::session::{
@@ -40,7 +41,7 @@ impl CaptureOptions {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CaptureResult {
-    pub review_id: ReviewId,
+    pub session_id: SessionId,
     pub review_unit_id: ReviewUnitId,
     pub revision_id: RevisionId,
     pub snapshot_id: SnapshotId,
@@ -71,7 +72,8 @@ pub fn capture_worktree_review(options: CaptureOptions) -> Result<CaptureResult>
     let fingerprint =
         crate::session::fingerprint::review_unit_fingerprint_for_files(worktree_root, &files)?;
     let review_id = ReviewId::new("review:default");
-    let snapshot = DiffSnapshot::new(review_id.clone(), fingerprint.snapshot_id.clone(), files);
+    let session_id = SessionId::new("session:default");
+    let snapshot = DiffSnapshot::new(review_id, fingerprint.snapshot_id.clone(), files);
     let artifact = crate::session::snapshot_artifact::write_snapshot_artifact(
         worktree_root,
         &fingerprint,
@@ -88,7 +90,7 @@ pub fn capture_worktree_review(options: CaptureOptions) -> Result<CaptureResult>
             EventType::ReviewUnitCaptured,
             review_unit_captured_idempotency_key(&fingerprint.review_unit_id),
             EventTarget::for_review_unit(
-                review_id.clone(),
+                session_id.clone(),
                 fingerprint.review_unit_id.clone(),
                 fingerprint.revision_id.clone(),
                 fingerprint.snapshot_id.clone(),
@@ -111,7 +113,7 @@ pub fn capture_worktree_review(options: CaptureOptions) -> Result<CaptureResult>
     storage.write_json_atomic(&paths.state_path(), &state, Durability::Projection)?;
 
     Ok(CaptureResult {
-        review_id,
+        session_id,
         review_unit_id: fingerprint.review_unit_id,
         revision_id: fingerprint.revision_id,
         snapshot_id: fingerprint.snapshot_id,

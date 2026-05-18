@@ -19,6 +19,7 @@ macro_rules! id_type {
 }
 
 id_type!(ReviewId);
+id_type!(SessionId);
 id_type!(ReviewUnitId);
 id_type!(EventId);
 id_type!(FileId);
@@ -34,6 +35,7 @@ id_type!(ObservationId);
 id_type!(InterventionId);
 id_type!(InterventionResolutionId);
 id_type!(DispositionId);
+id_type!(WorkObjectId);
 
 #[cfg(test)]
 mod tests {

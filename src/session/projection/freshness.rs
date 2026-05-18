@@ -45,7 +45,7 @@ pub(crate) fn event_set_hash_for_events<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ReviewId, WorkUnitId};
+    use crate::model::{SessionId, WorkUnitId};
     use crate::session::event::{
         EventTarget, EventType, ReviewInitializedPayload, ShoreEvent, Writer,
     };
@@ -97,12 +97,12 @@ mod tests {
     }
 
     fn event(suffix: &str) -> ShoreEvent {
-        let review_id = ReviewId::new(format!("review:{suffix}"));
+        let session_id = SessionId::new(format!("session:{suffix}"));
         let work_unit_id = WorkUnitId::new(format!("work:{suffix}"));
         ShoreEvent::new(
             EventType::ReviewInitialized,
-            ReviewInitializedPayload::idempotency_key(&review_id, &work_unit_id),
-            EventTarget::new(review_id, work_unit_id),
+            ReviewInitializedPayload::idempotency_key(&session_id, &work_unit_id),
+            EventTarget::new(session_id, work_unit_id),
             Writer::shore_local_author("0.1.0"),
             ReviewInitializedPayload {},
             "2026-05-13T14:00:00Z",

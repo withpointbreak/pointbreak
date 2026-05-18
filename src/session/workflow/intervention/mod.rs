@@ -26,7 +26,7 @@ pub use self::view::{InterventionResolutionView, InterventionStatusFilter, Inter
 use crate::canonical_hash::sha256_bytes_hex;
 #[cfg(test)]
 use crate::model::{
-    EventId, InterventionId, InterventionResolutionId, ReviewId, ReviewUnitId, TrackId,
+    EventId, InterventionId, InterventionResolutionId, ReviewUnitId, SessionId, TrackId,
 };
 #[cfg(test)]
 use crate::session::current_timestamp;
@@ -731,7 +731,7 @@ mod tests {
 
     #[test]
     fn collect_intervention_projection_records_is_order_independent_and_collapses_duplicates() {
-        let review_id = ReviewId::new("review:default");
+        let session_id = SessionId::new("session:default");
         let review_unit_id = ReviewUnitId::new("review-unit:sha256:test");
         let track_id = TrackId::new("human:kevin");
         let intervention_id = InterventionId::new("intervention:sha256:alpha");
@@ -741,7 +741,7 @@ mod tests {
             InterventionResolutionId::new("intervention-resolution:sha256:reject");
 
         let request_a = projection_request_event(
-            &review_id,
+            &session_id,
             &review_unit_id,
             &track_id,
             &intervention_id,
@@ -749,7 +749,7 @@ mod tests {
             "2026-01-01T00:00:00Z",
         );
         let request_b = projection_request_event(
-            &review_id,
+            &session_id,
             &review_unit_id,
             &track_id,
             &intervention_id,
@@ -757,7 +757,7 @@ mod tests {
             "2026-01-01T00:00:00Z",
         );
         let approve_x = projection_resolution_event(
-            &review_id,
+            &session_id,
             &review_unit_id,
             &track_id,
             &intervention_id,
@@ -766,7 +766,7 @@ mod tests {
             "2026-01-02T00:00:00Z",
         );
         let approve_y = projection_resolution_event(
-            &review_id,
+            &session_id,
             &review_unit_id,
             &track_id,
             &intervention_id,
@@ -775,7 +775,7 @@ mod tests {
             "2026-01-02T00:00:00Z",
         );
         let reject_z = projection_resolution_event(
-            &review_id,
+            &session_id,
             &review_unit_id,
             &track_id,
             &intervention_id,
@@ -1039,8 +1039,10 @@ mod tests {
             EventType::InterventionResolved,
             InterventionResolvedPayload::idempotency_key(&requested.intervention_id, source_key),
             EventTarget {
-                review_id: crate::model::ReviewId::new("review:default"),
+                session_id: SessionId::new("session:default"),
                 work_unit_id: None,
+                work_object_id: None,
+                work_object_type: None,
                 review_unit_id: Some(requested.review_unit_id.clone()),
                 revision_id: None,
                 snapshot_id: None,
@@ -1063,7 +1065,7 @@ mod tests {
     }
 
     fn projection_request_event(
-        review_id: &ReviewId,
+        session_id: &SessionId,
         review_unit_id: &ReviewUnitId,
         track_id: &TrackId,
         intervention_id: &InterventionId,
@@ -1087,8 +1089,10 @@ mod tests {
             EventType::InterventionRequested,
             InterventionRequestedPayload::idempotency_key(review_unit_id, track_id, source_key),
             EventTarget {
-                review_id: review_id.clone(),
+                session_id: session_id.clone(),
                 work_unit_id: None,
+                work_object_id: None,
+                work_object_type: None,
                 review_unit_id: Some(review_unit_id.clone()),
                 revision_id: None,
                 snapshot_id: None,
@@ -1105,7 +1109,7 @@ mod tests {
     }
 
     fn projection_resolution_event(
-        review_id: &ReviewId,
+        session_id: &SessionId,
         review_unit_id: &ReviewUnitId,
         track_id: &TrackId,
         intervention_id: &InterventionId,
@@ -1126,8 +1130,10 @@ mod tests {
             EventType::InterventionResolved,
             InterventionResolvedPayload::idempotency_key(intervention_id, source_key),
             EventTarget {
-                review_id: review_id.clone(),
+                session_id: session_id.clone(),
                 work_unit_id: None,
+                work_object_id: None,
+                work_object_type: None,
                 review_unit_id: Some(review_unit_id.clone()),
                 revision_id: None,
                 snapshot_id: None,

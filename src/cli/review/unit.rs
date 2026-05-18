@@ -90,7 +90,7 @@ struct UnitShowBody {
 #[serde(rename_all = "camelCase")]
 struct UnitReviewUnitDocument {
     id: String,
-    review_id: String,
+    session_id: String,
     revision_id: String,
     snapshot_id: String,
     source: shore::model::ReviewUnitSource,
@@ -305,7 +305,7 @@ impl From<ReviewUnitProjectionIdentity> for UnitReviewUnitDocument {
     fn from(identity: ReviewUnitProjectionIdentity) -> Self {
         Self {
             id: identity.id.as_str().to_owned(),
-            review_id: identity.review_id.as_str().to_owned(),
+            session_id: identity.session_id.as_str().to_owned(),
             revision_id: identity.revision_id.as_str().to_owned(),
             snapshot_id: identity.snapshot_id.as_str().to_owned(),
             source: identity.source,

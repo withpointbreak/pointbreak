@@ -36,7 +36,7 @@ mod tests {
     use super::*;
     use crate::model::{
         DispositionId, InterventionId, InterventionResolutionId, ObservationId, ReviewEndpoint,
-        ReviewId, ReviewTargetRef, ReviewUnitId, ReviewUnitSource, RevisionId, Side, SnapshotId,
+        ReviewTargetRef, ReviewUnitId, ReviewUnitSource, RevisionId, SessionId, Side, SnapshotId,
         TrackId, WorkUnitId, WorktreeCaptureMode,
     };
     use crate::session::event::{
@@ -305,12 +305,12 @@ mod tests {
     }
 
     fn review_initialized_event(key: &str) -> ShoreEvent {
-        let review_id = ReviewId::new("review:default");
+        let session_id = SessionId::new("session:default");
         let work_unit_id = WorkUnitId::new(format!("work:{key}"));
         ShoreEvent::new(
             EventType::ReviewInitialized,
-            ReviewInitializedPayload::idempotency_key(&review_id, &work_unit_id),
-            EventTarget::new(review_id, work_unit_id),
+            ReviewInitializedPayload::idempotency_key(&session_id, &work_unit_id),
+            EventTarget::new(session_id, work_unit_id),
             Writer::shore_local_author("test"),
             ReviewInitializedPayload {},
             format!("2026-05-13T10:00:0{key}Z"),
@@ -345,7 +345,7 @@ mod tests {
             EventType::ReviewUnitCaptured,
             "capture:one",
             EventTarget::for_review_unit(
-                ReviewId::new("review:default"),
+                SessionId::new("session:default"),
                 review_unit_id,
                 payload.revision_id.clone(),
                 payload.snapshot_id.clone(),
@@ -559,7 +559,7 @@ mod tests {
             EventType::ReviewNoteImported,
             "review-note:one",
             EventTarget::new(
-                ReviewId::new("review:default"),
+                SessionId::new("session:default"),
                 WorkUnitId::new("work:default"),
             ),
             Writer::shore_local_reviewer("test"),
@@ -601,7 +601,7 @@ mod tests {
         P: crate::session::event::EventPayload,
     {
         let mut target = EventTarget::for_review_unit(
-            ReviewId::new("review:default"),
+            SessionId::new("session:default"),
             review_unit_id.clone(),
             revision_id("one"),
             snapshot_id("one"),

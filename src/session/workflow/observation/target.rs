@@ -1,13 +1,13 @@
 use std::path::Path;
 
 use crate::error::{Result, ShoreError};
-use crate::model::{ReviewId, ReviewTargetRef, ReviewUnitId, RevisionId, Side, SnapshotId};
+use crate::model::{ReviewTargetRef, ReviewUnitId, RevisionId, SessionId, Side, SnapshotId};
 use crate::session::event::{EventType, ReviewUnitCapturedPayload, ShoreEvent};
 use crate::session::snapshot_artifact::read_snapshot_artifact;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedReviewUnit {
-    pub review_id: ReviewId,
+    pub session_id: SessionId,
     pub review_unit_id: ReviewUnitId,
     pub revision_id: RevisionId,
     pub snapshot_id: SnapshotId,
@@ -66,7 +66,7 @@ pub(crate) fn resolve_review_unit(
     {
         let payload: ReviewUnitCapturedPayload = serde_json::from_value(event.payload.clone())?;
         let resolved = ResolvedReviewUnit {
-            review_id: event.target.review_id.clone(),
+            session_id: event.target.session_id.clone(),
             review_unit_id: payload.review_unit_id,
             revision_id: payload.revision_id,
             snapshot_id: payload.snapshot_id,

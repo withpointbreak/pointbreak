@@ -2,8 +2,8 @@ use std::path::{Path, PathBuf};
 
 use super::{AdapterNoteView, ReviewUnitProjectionRow};
 use crate::model::{
-    DiffSnapshot, ReviewEndpoint, ReviewId, ReviewUnitId, ReviewUnitSource, RevisionId, SnapshotId,
-    TrackId,
+    DiffSnapshot, ReviewEndpoint, ReviewUnitId, ReviewUnitSource, RevisionId, SessionId,
+    SnapshotId, TrackId,
 };
 use crate::session::disposition::{CurrentDispositionView, DispositionView};
 use crate::session::intervention::InterventionView;
@@ -64,7 +64,7 @@ pub struct ReviewUnitShowResult {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewUnitProjectionIdentity {
     pub id: ReviewUnitId,
-    pub review_id: ReviewId,
+    pub session_id: SessionId,
     pub source: ReviewUnitSource,
     pub base: ReviewEndpoint,
     pub target: ReviewEndpoint,

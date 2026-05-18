@@ -135,8 +135,10 @@ pub fn resolve_intervention(
         EventType::InterventionResolved,
         idempotency_key,
         EventTarget {
-            review_id: request_event.target.review_id.clone(),
+            session_id: request_event.target.session_id.clone(),
             work_unit_id: None,
+            work_object_id: None,
+            work_object_type: None,
             review_unit_id: Some(review_unit_id.clone()),
             revision_id: request_event.target.revision_id.clone(),
             snapshot_id: request_event.target.snapshot_id.clone(),

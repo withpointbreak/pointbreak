@@ -15,7 +15,7 @@ pub(super) fn selected_review_unit_capture(
         if payload.review_unit_id == resolved.review_unit_id {
             return Ok(ReviewUnitProjectionIdentity {
                 id: payload.review_unit_id,
-                review_id: event.target.review_id.clone(),
+                session_id: event.target.session_id.clone(),
                 source: payload.source,
                 base: payload.base,
                 target: payload.target,
