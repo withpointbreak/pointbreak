@@ -29,6 +29,9 @@ pub enum ShoreError {
 
     #[error("{reason}")]
     WorkflowInputInvalid { reason: String },
+
+    #[error("unknown claude code session line type `{kind}` at line {line}")]
+    UnknownClaudeSessionLineType { line: usize, kind: String },
 }
 
 #[cfg(test)]

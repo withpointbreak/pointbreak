@@ -1,3 +1,4 @@
+pub mod adapter;
 pub mod event;
 mod identity;
 mod projection;
