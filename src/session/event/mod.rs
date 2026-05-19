@@ -31,7 +31,7 @@ pub use review::{
 };
 pub use source::SourceRef;
 pub use target::EventTarget;
-pub use task::TaskAttemptCapturedPayload;
+pub use task::{TaskAttemptCapturedPayload, TaskCheckpointCapturedPayload};
 pub use writer::{Writer, WriterRole, WriterTool};
 
 const EVENT_SCHEMA: &str = "shore.event";
