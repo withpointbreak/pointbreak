@@ -65,6 +65,10 @@ pub(crate) struct TaskCheckpointSummary {
     pub checkpoint_id: CheckpointId,
     pub assistant_message_id: String,
     pub tool_use_ids: Vec<String>,
+    /// Opaque fingerprint of the code state at this checkpoint, preserved
+    /// from the payload so the resumption projection can compare it to a
+    /// resolution's `target_fingerprint`.
+    pub checkpoint_fingerprint: Option<String>,
     pub observations: Vec<TaskObservationSummary>,
 }
 
@@ -208,6 +212,7 @@ pub(crate) fn task_attempt_summary_from_events(
                 checkpoint_id: payload.checkpoint_id,
                 assistant_message_id: payload.assistant_message_id,
                 tool_use_ids: payload.tool_use_ids,
+                checkpoint_fingerprint: payload.checkpoint_fingerprint,
                 observations,
             }
         })
@@ -509,6 +514,10 @@ pub(crate) fn agent_resumption_from_events(
         .latest_checkpoint
         .as_ref()
         .map(|cp| cp.checkpoint_id.clone());
+    let latest_checkpoint_fingerprint = summary
+        .latest_checkpoint
+        .as_ref()
+        .and_then(|cp| cp.checkpoint_fingerprint.clone());
 
     let intervention_records = collect_task_intervention_records(events, task_attempt_id)?;
 
@@ -588,7 +597,12 @@ pub(crate) fn agent_resumption_from_events(
             .first()
             .expect("non-empty after open / ambiguous branches");
 
-        let freshness = freshness_for_task_target(&record.view, latest_checkpoint.as_ref());
+        let freshness = freshness_for_task_target(
+            &record.view,
+            latest_checkpoint.as_ref(),
+            latest_checkpoint_fingerprint.as_deref(),
+            resolution.target_fingerprint.as_deref(),
+        );
         let writer_role_binding =
             resolution_writer_role_is_binding(&resolution.envelope.writer.role);
         let outcome_allows = matches!(resolution.outcome, InterventionResolutionOutcome::Approved);
@@ -618,9 +632,28 @@ pub(crate) fn agent_resumption_from_events(
             freshness,
             FreshnessBasis::CheckpointStaleNewerExists
                 | FreshnessBasis::CheckpointWithoutAttemptCheckpoint
+                | FreshnessBasis::CheckpointFingerprintMismatch
         );
 
         if stale {
+            let diagnostic = match freshness {
+                FreshnessBasis::CheckpointFingerprintMismatch => TaskProjectionDiagnostic {
+                    code: "agent_resumption_resolution_target_fingerprint_mismatch".to_owned(),
+                    message: format!(
+                        "task intervention {} resolved against a code state whose fingerprint disagrees with the latest checkpoint on this attempt",
+                        record.view.intervention_id.as_str()
+                    ),
+                    event_id: Some(resolution.envelope.event_id.clone()),
+                },
+                _ => TaskProjectionDiagnostic {
+                    code: "agent_resumption_resolution_targets_stale_checkpoint".to_owned(),
+                    message: format!(
+                        "task intervention {} resolved against an older checkpoint than the latest checkpoint on this attempt",
+                        record.view.intervention_id.as_str()
+                    ),
+                    event_id: Some(resolution.envelope.event_id.clone()),
+                },
+            };
             return Ok(AgentResumptionProjection {
                 reader_actor_id: reader_actor_id.clone(),
                 task_attempt_id: task_attempt_id.clone(),
@@ -631,14 +664,7 @@ pub(crate) fn agent_resumption_from_events(
                 selected_resolution: Some(resolution_view),
                 treated_as_operative: false,
                 freshness: Some(freshness),
-                diagnostics: vec![TaskProjectionDiagnostic {
-                    code: "agent_resumption_resolution_targets_stale_checkpoint".to_owned(),
-                    message: format!(
-                        "task intervention {} resolved against an older checkpoint than the latest checkpoint on this attempt",
-                        record.view.intervention_id.as_str()
-                    ),
-                    event_id: Some(resolution.envelope.event_id.clone()),
-                }],
+                diagnostics: vec![diagnostic],
             });
         }
 
@@ -840,7 +866,20 @@ fn collect_task_intervention_records(
 fn freshness_for_task_target(
     view: &TaskInterventionView,
     latest_checkpoint: Option<&CheckpointId>,
+    latest_checkpoint_fingerprint: Option<&str>,
+    resolution_fingerprint: Option<&str>,
 ) -> FreshnessBasis {
+    // When the writer recorded a fingerprint on both sides, opaque-string
+    // equality is the freshness signal -- the resolver's `target_fingerprint`
+    // is compared to the latest checkpoint's `checkpoint_fingerprint`. The
+    // identity-based fallback below handles every other shape.
+    if let (Some(latest_fp), Some(resolution_fp)) =
+        (latest_checkpoint_fingerprint, resolution_fingerprint)
+        && latest_fp != resolution_fp
+    {
+        return FreshnessBasis::CheckpointFingerprintMismatch;
+    }
+
     match &view.target {
         TargetRef::Task(TaskTargetRef::TaskAttempt) => {
             FreshnessBasis::TaskAttemptNoFingerprintCheck
