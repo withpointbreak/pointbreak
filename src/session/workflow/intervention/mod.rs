@@ -1034,6 +1034,7 @@ mod tests {
             reason_artifact_path: None,
             reason_byte_size: Some(8),
             reason_content_hash: Some("sha256:resolved".to_owned()),
+            target_fingerprint: None,
         };
         let event = ShoreEvent::new(
             EventType::InterventionResolved,
@@ -1084,6 +1085,7 @@ mod tests {
             body_artifact_path: None,
             body_byte_size: None,
             body_content_hash: None,
+            target_fingerprint: None,
         };
         ShoreEvent::new(
             EventType::InterventionRequested,
@@ -1125,6 +1127,7 @@ mod tests {
             reason_artifact_path: None,
             reason_byte_size: None,
             reason_content_hash: None,
+            target_fingerprint: None,
         };
         ShoreEvent::new(
             EventType::InterventionResolved,

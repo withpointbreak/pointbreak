@@ -189,6 +189,7 @@ pub fn request_intervention(
             body_artifact_path,
             body_byte_size,
             body_content_hash: body_content_hash.clone(),
+            target_fingerprint: None,
         },
         current_timestamp(),
     )?;

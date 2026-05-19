@@ -157,6 +157,7 @@ pub fn resolve_intervention(
             reason_artifact_path,
             reason_byte_size,
             reason_content_hash: reason_content_hash.clone(),
+            target_fingerprint: None,
         },
         current_timestamp(),
     )?;

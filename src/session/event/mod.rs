@@ -448,6 +448,7 @@ mod tests {
             body_artifact_path: None,
             body_byte_size: Some(22),
             body_content_hash: Some("sha256:body".to_owned()),
+            target_fingerprint: None,
         };
 
         let json = serde_json::to_value(&payload).unwrap();
@@ -476,6 +477,7 @@ mod tests {
             reason_artifact_path: None,
             reason_byte_size: Some(16),
             reason_content_hash: Some("sha256:reason".to_owned()),
+            target_fingerprint: None,
         };
 
         let json = serde_json::to_value(&payload).unwrap();

@@ -408,8 +408,8 @@ pub(crate) enum AgentResumptionState {
 }
 
 /// Why a task-targeted intervention is considered fresh (or not) for the
-/// resumption rule. The V1 rule only inspects checkpoint identity; a later
-/// fingerprint-fixture rule can strengthen this without changing the enum.
+/// resumption rule. The identity variants cover Phase 5; the fingerprint
+/// variant generalizes staleness to opaque-string code-state fingerprints.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FreshnessBasis {
     /// No fingerprint check applies because the intervention targets the
@@ -421,6 +421,10 @@ pub(crate) enum FreshnessBasis {
     CheckpointStaleNewerExists,
     /// Target was a checkpoint, but no checkpoint exists at all on the attempt.
     CheckpointWithoutAttemptCheckpoint,
+    /// Resolution's `target_fingerprint` disagrees with the latest
+    /// checkpoint's `checkpoint_fingerprint`; both are `Some`. Opaque-string
+    /// `==` comparison only -- no domain semantics.
+    CheckpointFingerprintMismatch,
 }
 
 impl FreshnessBasis {
@@ -447,6 +451,10 @@ pub(crate) struct AgentResolutionPolicyView {
     pub reason_artifact_path: Option<String>,
     pub reason_byte_size: Option<u64>,
     pub reason_content_hash: Option<String>,
+    /// Opaque fingerprint the resolver acted on, preserved verbatim from the
+    /// `InterventionResolvedPayload`. The freshness rule compares this to the
+    /// latest checkpoint's `checkpoint_fingerprint`.
+    pub target_fingerprint: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -603,6 +611,7 @@ pub(crate) fn agent_resumption_from_events(
             reason_artifact_path: resolution.reason_artifact_path.clone(),
             reason_byte_size: resolution.reason_byte_size,
             reason_content_hash: resolution.reason_content_hash.clone(),
+            target_fingerprint: resolution.target_fingerprint.clone(),
         };
 
         let stale = matches!(
@@ -731,6 +740,7 @@ struct TaskResolutionRecord {
     reason_artifact_path: Option<String>,
     reason_byte_size: Option<u64>,
     reason_content_hash: Option<String>,
+    target_fingerprint: Option<String>,
 }
 
 fn collect_task_intervention_records(
@@ -793,6 +803,7 @@ fn collect_task_intervention_records(
                     reason_artifact_path: payload.reason_artifact_path,
                     reason_byte_size: payload.reason_byte_size,
                     reason_content_hash: payload.reason_content_hash,
+                    target_fingerprint: payload.target_fingerprint,
                 };
                 resolution_representatives
                     .entry(resolution_id)
@@ -892,6 +903,7 @@ mod tests {
             claude_session_uuid: claude_session_uuid.to_owned(),
             initial_prompt_hash: "sha256:prompt".to_owned(),
             predecessor: None,
+            base_snapshot_fingerprint: None,
         };
         let idempotency_key = TaskAttemptCapturedPayload::idempotency_key_for_work_object(
             task_attempt_id,
@@ -933,6 +945,7 @@ mod tests {
             parent_task_attempt_id: task_attempt_id.clone(),
             assistant_message_id: assistant_message_id.to_owned(),
             tool_use_ids,
+            checkpoint_fingerprint: None,
         };
         let idempotency_key = TaskCheckpointCapturedPayload::idempotency_key_for_work_object(
             task_attempt_id,
@@ -1397,6 +1410,7 @@ mod tests {
             body_artifact_path: None,
             body_byte_size: None,
             body_content_hash: None,
+            target_fingerprint: None,
         };
         let idempotency_key = InterventionRequestedPayload::idempotency_key_for_work_object(
             task_attempt_id,
@@ -1437,6 +1451,7 @@ mod tests {
             reason_artifact_path: None,
             reason_byte_size: None,
             reason_content_hash: None,
+            target_fingerprint: None,
         };
         let idempotency_key =
             InterventionResolvedPayload::idempotency_key(intervention_id, resolution_id.as_str());
@@ -1483,6 +1498,7 @@ mod tests {
             body_artifact_path: None,
             body_byte_size: None,
             body_content_hash: None,
+            target_fingerprint: None,
         };
         let idempotency_key =
             InterventionRequestedPayload::idempotency_key(review_unit_id, track_id, source_key);
@@ -1768,6 +1784,7 @@ mod tests {
             body_artifact_path: None,
             body_byte_size: None,
             body_content_hash: None,
+            target_fingerprint: None,
         };
         let idempotency_key = InterventionRequestedPayload::idempotency_key_for_work_object(
             task_attempt_id,
@@ -1809,6 +1826,7 @@ mod tests {
             reason_artifact_path: None,
             reason_byte_size: None,
             reason_content_hash: None,
+            target_fingerprint: None,
         };
         let idempotency_key =
             InterventionResolvedPayload::idempotency_key(intervention_id, resolution_id.as_str());
@@ -2447,6 +2465,7 @@ mod tests {
             reason_artifact_path,
             reason_byte_size,
             reason_content_hash,
+            target_fingerprint: None,
         };
         let idempotency_key =
             InterventionResolvedPayload::idempotency_key(intervention_id, resolution_id.as_str());
@@ -2635,5 +2654,399 @@ mod tests {
             .expect("resolution surfaced");
         // Representative selection is by lexicographically lowest event_id.
         assert_eq!(view.envelope.event_id.as_str(), "evt:sha256:duplicate-a");
+    }
+
+    // -- fingerprint-driven freshness ----------------------------------------
+
+    // Realistic-looking opaque fingerprints. Equality is the only operation
+    // the projection performs on these; the format mirrors `initial_prompt_hash`
+    // so no string-ordering shortcut can substitute for `==`.
+    const FP_A: &str = "sha256:000000000000000000000000000000000000000000000000000000000000000a";
+    const FP_B: &str = "sha256:000000000000000000000000000000000000000000000000000000000000000b";
+    const FP_C: &str = "sha256:000000000000000000000000000000000000000000000000000000000000000c";
+
+    fn checkpoint_event_with_fingerprint(
+        task_attempt_id: &WorkObjectId,
+        session_id: &SessionId,
+        checkpoint_id: &CheckpointId,
+        assistant_message_id: &str,
+        tool_use_ids: Vec<String>,
+        occurred_at: &str,
+        fingerprint: Option<&str>,
+    ) -> ShoreEvent {
+        let mut target = EventTarget::for_work_object(
+            session_id.clone(),
+            task_attempt_id.clone(),
+            WorkObjectType::TaskAttempt,
+        );
+        target.subject = Some(TargetRef::Task(TaskTargetRef::Checkpoint {
+            checkpoint_id: checkpoint_id.clone(),
+        }));
+        let payload = TaskCheckpointCapturedPayload {
+            checkpoint_id: checkpoint_id.clone(),
+            parent_task_attempt_id: task_attempt_id.clone(),
+            assistant_message_id: assistant_message_id.to_owned(),
+            tool_use_ids,
+            checkpoint_fingerprint: fingerprint.map(str::to_owned),
+        };
+        let idempotency_key = TaskCheckpointCapturedPayload::idempotency_key_for_work_object(
+            task_attempt_id,
+            WorkObjectType::TaskAttempt,
+            checkpoint_id.as_str(),
+        );
+        let mut event = ShoreEvent::new(
+            EventType::TaskCheckpointCaptured,
+            idempotency_key,
+            target,
+            Writer::shore_local_reviewer("test"),
+            payload,
+            occurred_at,
+        )
+        .unwrap();
+        event.source_ref = Some(SourceRef::new(
+            "claude_code",
+            format!("session:assistant:{assistant_message_id}"),
+        ));
+        event.assertion_mode = AssertionMode::Advisory;
+        event
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn task_intervention_event_with_target_and_fingerprint(
+        task_attempt_id: &WorkObjectId,
+        session_id: &SessionId,
+        intervention_id: &InterventionId,
+        source_key: &str,
+        occurred_at: &str,
+        subject: TargetRef,
+        title: &str,
+        target_fingerprint: Option<&str>,
+    ) -> ShoreEvent {
+        let mut target = EventTarget::for_work_object(
+            session_id.clone(),
+            task_attempt_id.clone(),
+            WorkObjectType::TaskAttempt,
+        );
+        target.subject = Some(subject);
+        let payload = InterventionRequestedPayload {
+            intervention_id: intervention_id.clone(),
+            target: ReviewTargetRef::ReviewUnit {
+                review_unit_id: ReviewUnitId::new("review-unit:placeholder"),
+            },
+            mode: InterventionMode::Blocking,
+            reason_code: InterventionReasonCode::ManualDecisionRequired,
+            title: title.to_owned(),
+            body: None,
+            body_artifact_path: None,
+            body_byte_size: None,
+            body_content_hash: None,
+            target_fingerprint: target_fingerprint.map(str::to_owned),
+        };
+        let idempotency_key = InterventionRequestedPayload::idempotency_key_for_work_object(
+            task_attempt_id,
+            WorkObjectType::TaskAttempt,
+            source_key,
+        );
+        let mut event = ShoreEvent::new(
+            EventType::InterventionRequested,
+            idempotency_key,
+            target,
+            Writer::shore_local_reviewer("test"),
+            payload,
+            occurred_at,
+        )
+        .unwrap();
+        event.source_ref = Some(SourceRef::new("claude_code", source_key));
+        event.assertion_mode = AssertionMode::Advisory;
+        event
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn user_resolution_event_with_fingerprint(
+        intervention_id: &InterventionId,
+        resolution_id: &InterventionResolutionId,
+        outcome: InterventionResolutionOutcome,
+        assertion_mode: AssertionMode,
+        writer_role: WriterRole,
+        occurred_at: &str,
+        target_fingerprint: Option<&str>,
+    ) -> ShoreEvent {
+        let target = EventTarget::for_work_object(
+            SessionId::new("session:claude:uuid-1"),
+            WorkObjectId::new("task-attempt:sha256:ta"),
+            WorkObjectType::TaskAttempt,
+        );
+        let payload = InterventionResolvedPayload {
+            intervention_resolution_id: resolution_id.clone(),
+            intervention_id: intervention_id.clone(),
+            outcome,
+            reason: None,
+            reason_artifact_path: None,
+            reason_byte_size: None,
+            reason_content_hash: None,
+            target_fingerprint: target_fingerprint.map(str::to_owned),
+        };
+        let idempotency_key =
+            InterventionResolvedPayload::idempotency_key(intervention_id, resolution_id.as_str());
+        let writer = Writer {
+            actor_id: ActorId::new("actor:claude_code:user"),
+            role: writer_role,
+            tool: WriterTool {
+                name: "claude_code".to_owned(),
+                version: String::new(),
+            },
+        };
+        let mut event = ShoreEvent::new(
+            EventType::InterventionResolved,
+            idempotency_key,
+            target,
+            writer,
+            payload,
+            occurred_at,
+        )
+        .unwrap();
+        event.assertion_mode = assertion_mode;
+        event.source_ref = Some(SourceRef::new("claude_code", resolution_id.as_str()));
+        event
+    }
+
+    #[test]
+    fn agent_resumption_marks_resolution_stale_when_target_fingerprint_diverges_from_latest_checkpoint()
+     {
+        // §4.5 Scenario A literal: requester saw F1 (checkpoint C_A); a later
+        // checkpoint C_B with F2 exists; the resolver acted on the F1 state.
+        // The projection must flag the resolution stale on the fingerprint
+        // disagreement -- not on identity alone.
+        let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
+        let session_id = SessionId::new("session:claude:uuid-1");
+        let cp_a = CheckpointId::new("checkpoint:sha256:cp-a");
+        let cp_b = CheckpointId::new("checkpoint:sha256:cp-b");
+        let intervention_id = InterventionId::new("intervention:sha256:1");
+        let resolution_id = InterventionResolutionId::new("intervention-resolution:sha256:r");
+
+        let mut events = vec![task_attempt_event(
+            &task_attempt_id,
+            &session_id,
+            "uuid-1",
+            "2026-05-18T00:00:00Z",
+        )];
+        events.push(checkpoint_event_with_fingerprint(
+            &task_attempt_id,
+            &session_id,
+            &cp_a,
+            "msg_a",
+            vec![],
+            "2026-05-18T00:00:01Z",
+            Some(FP_A),
+        ));
+        events.push(task_intervention_event_with_target_and_fingerprint(
+            &task_attempt_id,
+            &session_id,
+            &intervention_id,
+            "source:stale-fp",
+            "2026-05-18T00:00:02Z",
+            TargetRef::Task(TaskTargetRef::Checkpoint {
+                checkpoint_id: cp_a.clone(),
+            }),
+            "needs approval at F1",
+            Some(FP_A),
+        ));
+        events.push(checkpoint_event_with_fingerprint(
+            &task_attempt_id,
+            &session_id,
+            &cp_b,
+            "msg_b",
+            vec![],
+            "2026-05-18T00:00:03Z",
+            Some(FP_B),
+        ));
+        events.push(user_resolution_event_with_fingerprint(
+            &intervention_id,
+            &resolution_id,
+            InterventionResolutionOutcome::Approved,
+            AssertionMode::Operative,
+            WriterRole::User,
+            "2026-05-18T00:00:04Z",
+            Some(FP_A),
+        ));
+
+        let projection =
+            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+
+        assert!(!projection.may_resume);
+        assert_eq!(projection.state, AgentResumptionState::Stale);
+        assert!(!projection.treated_as_operative);
+        assert_eq!(
+            projection.freshness,
+            Some(FreshnessBasis::CheckpointFingerprintMismatch),
+            "fingerprint disagreement is the stale signal, not just identity"
+        );
+        let resolution_view = projection
+            .selected_resolution
+            .as_ref()
+            .expect("selected resolution surfaced");
+        assert_eq!(
+            resolution_view.target_fingerprint.as_deref(),
+            Some(FP_A),
+            "the resolver's fingerprint is preserved on the policy view"
+        );
+        assert!(!resolution_view.fresh_for_target);
+        assert!(
+            projection
+                .diagnostics
+                .iter()
+                .any(|d| { d.code == "agent_resumption_resolution_target_fingerprint_mismatch" }),
+            "diagnostic names the fingerprint mismatch"
+        );
+    }
+
+    #[test]
+    fn agent_resumption_treats_resolution_fresh_when_target_fingerprint_matches_latest_checkpoint()
+    {
+        // §4.5 Scenario B (re-anchored): only one checkpoint, with fingerprint
+        // F1; the resolver acts on the F1 state. Both identity and fingerprint
+        // agree, so the resolution is fresh.
+        let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
+        let session_id = SessionId::new("session:claude:uuid-1");
+        let cp_a = CheckpointId::new("checkpoint:sha256:cp-a");
+        let intervention_id = InterventionId::new("intervention:sha256:1");
+        let resolution_id = InterventionResolutionId::new("intervention-resolution:sha256:r");
+
+        let mut events = vec![task_attempt_event(
+            &task_attempt_id,
+            &session_id,
+            "uuid-1",
+            "2026-05-18T00:00:00Z",
+        )];
+        events.push(checkpoint_event_with_fingerprint(
+            &task_attempt_id,
+            &session_id,
+            &cp_a,
+            "msg_a",
+            vec![],
+            "2026-05-18T00:00:01Z",
+            Some(FP_A),
+        ));
+        events.push(task_intervention_event_with_target_and_fingerprint(
+            &task_attempt_id,
+            &session_id,
+            &intervention_id,
+            "source:fresh-fp",
+            "2026-05-18T00:00:02Z",
+            TargetRef::Task(TaskTargetRef::Checkpoint {
+                checkpoint_id: cp_a.clone(),
+            }),
+            "needs approval at F1",
+            Some(FP_A),
+        ));
+        events.push(user_resolution_event_with_fingerprint(
+            &intervention_id,
+            &resolution_id,
+            InterventionResolutionOutcome::Approved,
+            AssertionMode::Operative,
+            WriterRole::User,
+            "2026-05-18T00:00:03Z",
+            Some(FP_A),
+        ));
+
+        let projection =
+            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+
+        assert!(projection.may_resume);
+        assert_eq!(projection.state, AgentResumptionState::Ready);
+        assert!(projection.treated_as_operative);
+        assert_eq!(
+            projection.freshness,
+            Some(FreshnessBasis::CheckpointMatchesLatest)
+        );
+        let resolution_view = projection
+            .selected_resolution
+            .as_ref()
+            .expect("selected resolution surfaced");
+        assert!(resolution_view.fresh_for_target);
+        assert_eq!(resolution_view.target_fingerprint.as_deref(), Some(FP_A));
+    }
+
+    #[test]
+    fn agent_resumption_holds_ambiguous_when_two_distinct_resolution_facts_carry_different_target_fingerprints()
+     {
+        // Two distinct resolution facts (different `intervention_resolution_id`
+        // values) on the same intervention. The two also disagree on
+        // `target_fingerprint`. The Ambiguous discipline must win before any
+        // freshness check fires; introducing fingerprint comparison must not
+        // accidentally let the projection pick one resolution and call the
+        // other stale.
+        let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
+        let session_id = SessionId::new("session:claude:uuid-1");
+        let cp_a = CheckpointId::new("checkpoint:sha256:cp-a");
+        let intervention_id = InterventionId::new("intervention:sha256:1");
+        let r1 = InterventionResolutionId::new("intervention-resolution:sha256:r1");
+        let r2 = InterventionResolutionId::new("intervention-resolution:sha256:r2");
+
+        let mut events = vec![task_attempt_event(
+            &task_attempt_id,
+            &session_id,
+            "uuid-1",
+            "2026-05-18T00:00:00Z",
+        )];
+        events.push(checkpoint_event_with_fingerprint(
+            &task_attempt_id,
+            &session_id,
+            &cp_a,
+            "msg_a",
+            vec![],
+            "2026-05-18T00:00:01Z",
+            Some(FP_A),
+        ));
+        events.push(task_intervention_event_with_target_and_fingerprint(
+            &task_attempt_id,
+            &session_id,
+            &intervention_id,
+            "source:ambig-fp",
+            "2026-05-18T00:00:02Z",
+            TargetRef::Task(TaskTargetRef::Checkpoint {
+                checkpoint_id: cp_a.clone(),
+            }),
+            "needs approval",
+            Some(FP_A),
+        ));
+        // Two distinct semantic resolutions: each carries its own
+        // `target_fingerprint`. Both are by the same User role at Operative
+        // mode -- the disagreement is on the fingerprint, not the writer.
+        events.push(user_resolution_event_with_fingerprint(
+            &intervention_id,
+            &r1,
+            InterventionResolutionOutcome::Approved,
+            AssertionMode::Operative,
+            WriterRole::User,
+            "2026-05-18T00:00:03Z",
+            Some(FP_B),
+        ));
+        events.push(user_resolution_event_with_fingerprint(
+            &intervention_id,
+            &r2,
+            InterventionResolutionOutcome::Approved,
+            AssertionMode::Operative,
+            WriterRole::User,
+            "2026-05-18T00:00:04Z",
+            Some(FP_C),
+        ));
+
+        let projection =
+            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+
+        assert!(!projection.may_resume);
+        assert_eq!(
+            projection.state,
+            AgentResumptionState::Ambiguous,
+            "Ambiguous wins before any freshness check fires"
+        );
+        assert!(projection.selected_resolution.is_none());
+        assert!(
+            projection
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "agent_resumption_ambiguous_resolutions")
+        );
     }
 }

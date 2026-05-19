@@ -36,6 +36,7 @@ pub(crate) fn intent_to_event(intent: &AdapterIntent) -> Result<ShoreEvent> {
                 claude_session_uuid: claude_session_uuid.clone(),
                 initial_prompt_hash: initial_prompt_hash.clone(),
                 predecessor: predecessor.clone(),
+                base_snapshot_fingerprint: None,
             };
             let idempotency_key = TaskAttemptCapturedPayload::idempotency_key_for_work_object(
                 task_attempt_id,
@@ -83,6 +84,7 @@ pub(crate) fn intent_to_event(intent: &AdapterIntent) -> Result<ShoreEvent> {
                 parent_task_attempt_id: parent_task_attempt_id.clone(),
                 assistant_message_id: assistant_message_id.clone(),
                 tool_use_ids: tool_use_ids.clone(),
+                checkpoint_fingerprint: None,
             };
             let idempotency_key = TaskCheckpointCapturedPayload::idempotency_key_for_work_object(
                 parent_task_attempt_id,

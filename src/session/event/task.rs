@@ -13,6 +13,10 @@ pub struct TaskAttemptCapturedPayload {
     pub initial_prompt_hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub predecessor: Option<WorkObjectId>,
+    /// Opaque fingerprint of the code state at which this attempt began.
+    /// Carries no semantics beyond `==` equality and is compared as a string.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_snapshot_fingerprint: Option<String>,
 }
 
 impl TaskAttemptCapturedPayload {
@@ -48,6 +52,11 @@ pub struct TaskCheckpointCapturedPayload {
     pub assistant_message_id: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_use_ids: Vec<String>,
+    /// Opaque fingerprint of the code state at this checkpoint. Compared as a
+    /// string by the resumption projection's freshness rule; carries no
+    /// semantics beyond `==` equality.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint_fingerprint: Option<String>,
 }
 
 impl TaskCheckpointCapturedPayload {
@@ -135,6 +144,7 @@ mod tests {
             claude_session_uuid: "uuid-1".to_owned(),
             initial_prompt_hash: "sha256:prompt".to_owned(),
             predecessor: None,
+            base_snapshot_fingerprint: None,
         }
     }
 
@@ -155,9 +165,28 @@ mod tests {
         assert_eq!(json["claudeSessionUuid"], "uuid-1");
         assert_eq!(json["initialPromptHash"], "sha256:prompt");
         assert!(json.get("predecessor").is_none());
+        assert!(json.get("baseSnapshotFingerprint").is_none());
         assert!(json.get("assertionMode").is_none());
         assert!(json.get("sourceRef").is_none());
         assert!(json.get("submissionId").is_none());
+    }
+
+    #[test]
+    fn task_attempt_captured_payload_round_trips_base_snapshot_fingerprint() {
+        let payload = TaskAttemptCapturedPayload {
+            base_snapshot_fingerprint: Some(
+                "sha256:000000000000000000000000000000000000000000000000000000000000000a"
+                    .to_owned(),
+            ),
+            ..sample_payload()
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(
+            json["baseSnapshotFingerprint"],
+            "sha256:000000000000000000000000000000000000000000000000000000000000000a"
+        );
+        let round: TaskAttemptCapturedPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(round, payload);
     }
 
     #[test]
@@ -236,6 +265,7 @@ mod tests {
             parent_task_attempt_id: WorkObjectId::new("task-attempt:sha256:ta"),
             assistant_message_id: "msg_1".to_owned(),
             tool_use_ids: vec!["tu_1".to_owned(), "tu_2".to_owned()],
+            checkpoint_fingerprint: None,
         }
     }
 
@@ -255,6 +285,7 @@ mod tests {
         assert_eq!(json["parentTaskAttemptId"], "task-attempt:sha256:ta");
         assert_eq!(json["assistantMessageId"], "msg_1");
         assert_eq!(json["toolUseIds"], serde_json::json!(["tu_1", "tu_2"]));
+        assert!(json.get("checkpointFingerprint").is_none());
         assert!(json.get("target").is_none());
         assert!(json.get("assertionMode").is_none());
         assert!(json.get("sourceRef").is_none());
@@ -262,6 +293,24 @@ mod tests {
         assert!(json.get("toolName").is_none());
         assert!(json.get("submissionId").is_none());
         assert!(json.get("relationType").is_none());
+    }
+
+    #[test]
+    fn task_checkpoint_captured_payload_round_trips_checkpoint_fingerprint() {
+        let payload = TaskCheckpointCapturedPayload {
+            checkpoint_fingerprint: Some(
+                "sha256:000000000000000000000000000000000000000000000000000000000000000b"
+                    .to_owned(),
+            ),
+            ..sample_checkpoint_payload()
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(
+            json["checkpointFingerprint"],
+            "sha256:000000000000000000000000000000000000000000000000000000000000000b"
+        );
+        let round: TaskCheckpointCapturedPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(round, payload);
     }
 
     #[test]

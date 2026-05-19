@@ -601,6 +601,7 @@ mod tests {
             body_artifact_path: None,
             body_byte_size: Some(4),
             body_content_hash: Some("sha256:body".to_owned()),
+            target_fingerprint: None,
         };
         tracked_event(
             EventType::InterventionRequested,
@@ -622,6 +623,7 @@ mod tests {
             reason_artifact_path: None,
             reason_byte_size: Some(8),
             reason_content_hash: Some("sha256:reason".to_owned()),
+            target_fingerprint: None,
         };
         tracked_event(
             EventType::InterventionResolved,
