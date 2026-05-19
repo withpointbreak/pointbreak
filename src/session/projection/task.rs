@@ -8,14 +8,14 @@ use std::collections::BTreeMap;
 
 use crate::error::Result;
 use crate::model::{
-    ActorId, CheckpointId, EventId, InterventionId, ObservationId, ReviewTargetRef, TargetRef,
-    WorkObjectId, WorkObjectType,
+    ActorId, CheckpointId, EventId, InterventionId, InterventionResolutionId, ObservationId,
+    ReviewTargetRef, TargetRef, TaskTargetRef, WorkObjectId, WorkObjectType,
 };
 use crate::session::event::{
     AssertionMode, EventTarget, EventType, InterventionMode, InterventionReasonCode,
-    InterventionRequestedPayload, InterventionResolvedPayload, ShoreEvent, SourceRef,
-    TaskAttemptCapturedPayload, TaskCheckpointCapturedPayload, TaskObservationRecordedPayload,
-    Writer,
+    InterventionRequestedPayload, InterventionResolutionOutcome, InterventionResolvedPayload,
+    ShoreEvent, SourceRef, TaskAttemptCapturedPayload, TaskCheckpointCapturedPayload,
+    TaskObservationRecordedPayload, Writer,
 };
 
 /// Envelope-level fields preserved on every projected event, so the projection
@@ -394,6 +394,413 @@ pub(crate) fn open_task_interventions_from_events(
 fn envelope_targets_task_attempt(target: &EventTarget, task_attempt_id: &WorkObjectId) -> bool {
     target.work_object_id.as_ref() == Some(task_attempt_id)
         && target.work_object_type == Some(WorkObjectType::TaskAttempt)
+}
+
+/// Phase 5 agent-resumption state. Diagnostic-rich rather than scalar so the
+/// caller can present the reason the projection blocked.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AgentResumptionState {
+    NoAttempt,
+    Ready,
+    Blocked,
+    Ambiguous,
+    Stale,
+}
+
+/// Why a task-targeted intervention is considered fresh (or not) for the
+/// resumption rule. Phase 5 only inspects checkpoint identity; Phase 6 will
+/// strengthen this to a fingerprint fixture.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FreshnessBasis {
+    /// No fingerprint check applies because the intervention targets the
+    /// `TaskAttempt` itself rather than a specific checkpoint.
+    TaskAttemptNoFingerprintCheck,
+    /// Target checkpoint is the latest checkpoint on the attempt.
+    CheckpointMatchesLatest,
+    /// Target checkpoint is not the latest checkpoint on the attempt.
+    CheckpointStaleNewerExists,
+    /// Target was a checkpoint, but no checkpoint exists at all on the attempt.
+    CheckpointWithoutAttemptCheckpoint,
+}
+
+impl FreshnessBasis {
+    fn is_fresh(self) -> bool {
+        matches!(
+            self,
+            FreshnessBasis::TaskAttemptNoFingerprintCheck | FreshnessBasis::CheckpointMatchesLatest
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AgentResolutionPolicyView {
+    pub envelope: TaskProjectionEventEnvelope,
+    pub resolution_id: InterventionResolutionId,
+    pub outcome: InterventionResolutionOutcome,
+    pub writer_role_treated_as_binding: bool,
+    pub fresh_for_target: bool,
+    pub operative_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AgentResumptionProjection {
+    pub reader_actor_id: ActorId,
+    pub task_attempt_id: WorkObjectId,
+    pub may_resume: bool,
+    pub state: AgentResumptionState,
+    pub latest_checkpoint: Option<CheckpointId>,
+    pub selected_intervention: Option<TaskInterventionView>,
+    pub selected_resolution: Option<AgentResolutionPolicyView>,
+    pub treated_as_operative: bool,
+    pub freshness: Option<FreshnessBasis>,
+    pub diagnostics: Vec<TaskProjectionDiagnostic>,
+}
+
+/// Read-side projection that answers: may this agent resume the named
+/// `TaskAttempt`? The output is intentionally diagnostic-rich; the policy
+/// never relies on a scheduler, lease, write gate, or global "current task".
+#[allow(dead_code)]
+pub(crate) fn agent_resumption_from_events(
+    events: &[ShoreEvent],
+    task_attempt_id: &WorkObjectId,
+    reader_actor_id: &ActorId,
+) -> Result<AgentResumptionProjection> {
+    let attempt_summary =
+        task_attempt_summary_from_events(events, task_attempt_id, reader_actor_id)?;
+
+    let Some(summary) = attempt_summary else {
+        return Ok(AgentResumptionProjection {
+            reader_actor_id: reader_actor_id.clone(),
+            task_attempt_id: task_attempt_id.clone(),
+            may_resume: false,
+            state: AgentResumptionState::NoAttempt,
+            latest_checkpoint: None,
+            selected_intervention: None,
+            selected_resolution: None,
+            treated_as_operative: false,
+            freshness: None,
+            diagnostics: vec![TaskProjectionDiagnostic {
+                code: "agent_resumption_no_task_attempt".to_owned(),
+                message: format!(
+                    "no TaskAttemptCaptured event for {} — failing closed",
+                    task_attempt_id.as_str()
+                ),
+                event_id: None,
+            }],
+        });
+    };
+
+    let latest_checkpoint = summary
+        .latest_checkpoint
+        .as_ref()
+        .map(|cp| cp.checkpoint_id.clone());
+
+    let intervention_records = collect_task_intervention_records(events, task_attempt_id)?;
+
+    // Open (no representative resolution) interventions short-circuit to
+    // Blocked. Pick the earliest by (occurred_at, event_id) as the selected
+    // one so the diagnostic chain is deterministic.
+    let open_intervention = intervention_records
+        .iter()
+        .filter(|record| record.resolutions.is_empty())
+        .min_by(|left, right| {
+            envelope_chronological_order(&left.view.envelope, &right.view.envelope)
+        })
+        .cloned();
+
+    if let Some(open) = open_intervention {
+        return Ok(AgentResumptionProjection {
+            reader_actor_id: reader_actor_id.clone(),
+            task_attempt_id: task_attempt_id.clone(),
+            may_resume: false,
+            state: AgentResumptionState::Blocked,
+            latest_checkpoint,
+            selected_intervention: Some(open.view.clone()),
+            selected_resolution: None,
+            treated_as_operative: false,
+            freshness: None,
+            diagnostics: vec![TaskProjectionDiagnostic {
+                code: "agent_resumption_open_task_intervention".to_owned(),
+                message: format!(
+                    "task intervention {} is unresolved",
+                    open.view.intervention_id.as_str()
+                ),
+                event_id: Some(open.view.envelope.event_id.clone()),
+            }],
+        });
+    }
+
+    // Ambiguous resolutions block resumption; the projection refuses to pick a
+    // winner.
+    let ambiguous_intervention = intervention_records
+        .iter()
+        .find(|record| record.resolutions.len() > 1)
+        .cloned();
+
+    if let Some(ambiguous) = ambiguous_intervention {
+        return Ok(AgentResumptionProjection {
+            reader_actor_id: reader_actor_id.clone(),
+            task_attempt_id: task_attempt_id.clone(),
+            may_resume: false,
+            state: AgentResumptionState::Ambiguous,
+            latest_checkpoint,
+            selected_intervention: Some(ambiguous.view.clone()),
+            selected_resolution: None,
+            treated_as_operative: false,
+            freshness: None,
+            diagnostics: vec![TaskProjectionDiagnostic {
+                code: "agent_resumption_ambiguous_resolutions".to_owned(),
+                message: format!(
+                    "task intervention {} has {} representative resolutions; projection refuses to pick a winner",
+                    ambiguous.view.intervention_id.as_str(),
+                    ambiguous.resolutions.len()
+                ),
+                event_id: Some(ambiguous.view.envelope.event_id.clone()),
+            }],
+        });
+    }
+
+    // Evaluate each resolved intervention against the binding/freshness rules.
+    // First failure wins so the projection surfaces it.
+    let mut last_satisfied: Option<(
+        TaskInterventionView,
+        AgentResolutionPolicyView,
+        FreshnessBasis,
+    )> = None;
+    for record in &intervention_records {
+        let resolution = record
+            .resolutions
+            .first()
+            .expect("non-empty after open / ambiguous branches");
+
+        let freshness = freshness_for_task_target(&record.view, latest_checkpoint.as_ref());
+        let writer_role_binding =
+            resolution_writer_role_is_binding(&resolution.envelope.writer.role);
+        let outcome_allows = matches!(resolution.outcome, InterventionResolutionOutcome::Approved);
+        let operative = resolution.envelope.assertion_mode == AssertionMode::Operative;
+
+        let operative_reason = if writer_role_binding && operative && outcome_allows {
+            Some("approved by User writer with envelope-level operative assertion mode".to_owned())
+        } else {
+            None
+        };
+
+        let resolution_view = AgentResolutionPolicyView {
+            envelope: resolution.envelope.clone(),
+            resolution_id: resolution.resolution_id.clone(),
+            outcome: resolution.outcome,
+            writer_role_treated_as_binding: writer_role_binding,
+            fresh_for_target: freshness.is_fresh(),
+            operative_reason,
+        };
+
+        let stale = matches!(
+            freshness,
+            FreshnessBasis::CheckpointStaleNewerExists
+                | FreshnessBasis::CheckpointWithoutAttemptCheckpoint
+        );
+
+        if stale {
+            return Ok(AgentResumptionProjection {
+                reader_actor_id: reader_actor_id.clone(),
+                task_attempt_id: task_attempt_id.clone(),
+                may_resume: false,
+                state: AgentResumptionState::Stale,
+                latest_checkpoint,
+                selected_intervention: Some(record.view.clone()),
+                selected_resolution: Some(resolution_view),
+                treated_as_operative: false,
+                freshness: Some(freshness),
+                diagnostics: vec![TaskProjectionDiagnostic {
+                    code: "agent_resumption_resolution_targets_stale_checkpoint".to_owned(),
+                    message: format!(
+                        "task intervention {} resolved against an older checkpoint than the latest checkpoint on this attempt",
+                        record.view.intervention_id.as_str()
+                    ),
+                    event_id: Some(resolution.envelope.event_id.clone()),
+                }],
+            });
+        }
+
+        if !(writer_role_binding && operative && outcome_allows) {
+            let mut diagnostics = Vec::new();
+            if !outcome_allows {
+                diagnostics.push(TaskProjectionDiagnostic {
+                    code: "agent_resumption_outcome_not_approved".to_owned(),
+                    message: format!(
+                        "resolution outcome is {:?}; only Approved permits resumption",
+                        resolution.outcome
+                    ),
+                    event_id: Some(resolution.envelope.event_id.clone()),
+                });
+            }
+            if !operative {
+                diagnostics.push(TaskProjectionDiagnostic {
+                    code: "agent_resumption_resolution_assertion_mode_not_operative".to_owned(),
+                    message:
+                        "resolution envelope assertion_mode is not Operative; advisory resolutions do not bind"
+                            .to_owned(),
+                    event_id: Some(resolution.envelope.event_id.clone()),
+                });
+            }
+            if !writer_role_binding {
+                diagnostics.push(TaskProjectionDiagnostic {
+                    code: "agent_resumption_resolution_writer_role_not_binding".to_owned(),
+                    message: format!(
+                        "resolution writer role {:?} does not bind; only User binds in Phase 5",
+                        resolution.envelope.writer.role
+                    ),
+                    event_id: Some(resolution.envelope.event_id.clone()),
+                });
+            }
+            return Ok(AgentResumptionProjection {
+                reader_actor_id: reader_actor_id.clone(),
+                task_attempt_id: task_attempt_id.clone(),
+                may_resume: false,
+                state: AgentResumptionState::Blocked,
+                latest_checkpoint,
+                selected_intervention: Some(record.view.clone()),
+                selected_resolution: Some(resolution_view),
+                treated_as_operative: false,
+                freshness: Some(freshness),
+                diagnostics,
+            });
+        }
+
+        // This intervention is satisfied. Track the most recent satisfied
+        // resolution for diagnostic completeness.
+        match &last_satisfied {
+            Some((_, prev_resolution_view, _))
+                if envelope_chronological_order(
+                    &prev_resolution_view.envelope,
+                    &resolution_view.envelope,
+                )
+                .is_ge() => {}
+            _ => {
+                last_satisfied = Some((record.view.clone(), resolution_view, freshness));
+            }
+        }
+    }
+
+    // No open, ambiguous, stale, or non-binding intervention found.
+    let (selected_intervention, selected_resolution, freshness, treated_as_operative) =
+        match last_satisfied {
+            Some((view, resolution_view, freshness)) => {
+                (Some(view), Some(resolution_view), Some(freshness), true)
+            }
+            None => (None, None, None, false),
+        };
+
+    Ok(AgentResumptionProjection {
+        reader_actor_id: reader_actor_id.clone(),
+        task_attempt_id: task_attempt_id.clone(),
+        may_resume: true,
+        state: AgentResumptionState::Ready,
+        latest_checkpoint,
+        selected_intervention,
+        selected_resolution,
+        treated_as_operative,
+        freshness,
+        diagnostics: Vec::new(),
+    })
+}
+
+#[derive(Clone, Debug)]
+struct TaskInterventionRecord {
+    view: TaskInterventionView,
+    resolutions: Vec<TaskResolutionRecord>,
+}
+
+#[derive(Clone, Debug)]
+struct TaskResolutionRecord {
+    envelope: TaskProjectionEventEnvelope,
+    resolution_id: InterventionResolutionId,
+    outcome: InterventionResolutionOutcome,
+}
+
+fn collect_task_intervention_records(
+    events: &[ShoreEvent],
+    task_attempt_id: &WorkObjectId,
+) -> Result<Vec<TaskInterventionRecord>> {
+    let mut request_views: Vec<TaskInterventionView> = Vec::new();
+    let mut resolutions_by_intervention: BTreeMap<InterventionId, Vec<TaskResolutionRecord>> =
+        BTreeMap::new();
+
+    for event in events {
+        event.validate_schema_version()?;
+
+        match event.event_type {
+            EventType::InterventionRequested => {
+                if !envelope_targets_task_attempt(&event.target, task_attempt_id) {
+                    continue;
+                }
+                let Some(subject) = event.target.subject.clone() else {
+                    continue;
+                };
+                if !matches!(subject, TargetRef::Task(_)) {
+                    continue;
+                }
+                let payload: InterventionRequestedPayload =
+                    serde_json::from_value(event.payload.clone())?;
+                request_views.push(TaskInterventionView {
+                    intervention_id: payload.intervention_id,
+                    envelope: TaskProjectionEventEnvelope::from_event(event),
+                    target: subject,
+                    payload_review_target: payload.target,
+                    mode: payload.mode,
+                    reason_code: payload.reason_code,
+                    title: payload.title,
+                    body: payload.body,
+                    body_artifact_path: payload.body_artifact_path,
+                    body_byte_size: payload.body_byte_size,
+                    body_content_hash: payload.body_content_hash,
+                });
+            }
+            EventType::InterventionResolved => {
+                let payload: InterventionResolvedPayload =
+                    serde_json::from_value(event.payload.clone())?;
+                resolutions_by_intervention
+                    .entry(payload.intervention_id.clone())
+                    .or_default()
+                    .push(TaskResolutionRecord {
+                        envelope: TaskProjectionEventEnvelope::from_event(event),
+                        resolution_id: payload.intervention_resolution_id,
+                        outcome: payload.outcome,
+                    });
+            }
+            _ => {}
+        }
+    }
+
+    let mut records = Vec::with_capacity(request_views.len());
+    for view in request_views {
+        let resolutions = resolutions_by_intervention
+            .remove(&view.intervention_id)
+            .unwrap_or_default();
+        records.push(TaskInterventionRecord { view, resolutions });
+    }
+    Ok(records)
+}
+
+fn freshness_for_task_target(
+    view: &TaskInterventionView,
+    latest_checkpoint: Option<&CheckpointId>,
+) -> FreshnessBasis {
+    match &view.target {
+        TargetRef::Task(TaskTargetRef::TaskAttempt) => {
+            FreshnessBasis::TaskAttemptNoFingerprintCheck
+        }
+        TargetRef::Task(TaskTargetRef::Checkpoint { checkpoint_id }) => match latest_checkpoint {
+            Some(latest) if latest == checkpoint_id => FreshnessBasis::CheckpointMatchesLatest,
+            Some(_) => FreshnessBasis::CheckpointStaleNewerExists,
+            None => FreshnessBasis::CheckpointWithoutAttemptCheckpoint,
+        },
+        TargetRef::Review(_) => FreshnessBasis::TaskAttemptNoFingerprintCheck,
+    }
+}
+
+fn resolution_writer_role_is_binding(role: &crate::session::event::WriterRole) -> bool {
+    matches!(role, crate::session::event::WriterRole::User)
 }
 
 #[cfg(test)]
@@ -1285,5 +1692,426 @@ mod tests {
         assert!(ids.contains(&a), "first intervention should be present");
         assert!(ids.contains(&b), "second intervention should be present");
         assert_eq!(ids.len(), 2, "no collapse by target");
+    }
+
+    // -- Task 5.3: agent_resumption ----------------------------------------
+
+    #[allow(clippy::too_many_arguments)]
+    fn task_intervention_event_with_target(
+        task_attempt_id: &WorkObjectId,
+        session_id: &SessionId,
+        intervention_id: &InterventionId,
+        source_key: &str,
+        occurred_at: &str,
+        subject: TargetRef,
+        title: &str,
+    ) -> ShoreEvent {
+        let mut target = EventTarget::for_work_object(
+            session_id.clone(),
+            task_attempt_id.clone(),
+            WorkObjectType::TaskAttempt,
+        );
+        target.subject = Some(subject);
+        let payload = InterventionRequestedPayload {
+            intervention_id: intervention_id.clone(),
+            target: ReviewTargetRef::ReviewUnit {
+                review_unit_id: ReviewUnitId::new("review-unit:placeholder"),
+            },
+            mode: InterventionMode::Blocking,
+            reason_code: InterventionReasonCode::ManualDecisionRequired,
+            title: title.to_owned(),
+            body: None,
+            body_artifact_path: None,
+            body_byte_size: None,
+            body_content_hash: None,
+        };
+        let idempotency_key = InterventionRequestedPayload::idempotency_key_for_work_object(
+            task_attempt_id,
+            WorkObjectType::TaskAttempt,
+            source_key,
+        );
+        let mut event = ShoreEvent::new(
+            EventType::InterventionRequested,
+            idempotency_key,
+            target,
+            Writer::shore_local_reviewer("test"),
+            payload,
+            occurred_at,
+        )
+        .unwrap();
+        event.source_ref = Some(SourceRef::new("claude_code", source_key));
+        event.assertion_mode = AssertionMode::Advisory;
+        event
+    }
+
+    fn user_resolution_event(
+        intervention_id: &InterventionId,
+        resolution_id: &InterventionResolutionId,
+        outcome: InterventionResolutionOutcome,
+        assertion_mode: AssertionMode,
+        writer_role: WriterRole,
+        occurred_at: &str,
+    ) -> ShoreEvent {
+        let target = EventTarget::for_work_object(
+            SessionId::new("session:claude:uuid-1"),
+            WorkObjectId::new("task-attempt:sha256:ta"),
+            WorkObjectType::TaskAttempt,
+        );
+        let payload = InterventionResolvedPayload {
+            intervention_resolution_id: resolution_id.clone(),
+            intervention_id: intervention_id.clone(),
+            outcome,
+            reason: None,
+            reason_artifact_path: None,
+            reason_byte_size: None,
+            reason_content_hash: None,
+        };
+        let idempotency_key =
+            InterventionResolvedPayload::idempotency_key(intervention_id, resolution_id.as_str());
+        let writer = Writer {
+            actor_id: ActorId::new("actor:claude_code:user"),
+            role: writer_role,
+            tool: WriterTool {
+                name: "claude_code".to_owned(),
+                version: String::new(),
+            },
+        };
+        let mut event = ShoreEvent::new(
+            EventType::InterventionResolved,
+            idempotency_key,
+            target,
+            writer,
+            payload,
+            occurred_at,
+        )
+        .unwrap();
+        event.assertion_mode = assertion_mode;
+        event.source_ref = Some(SourceRef::new("claude_code", resolution_id.as_str()));
+        event
+    }
+
+    fn attempt_with_checkpoints(
+        task_attempt_id: &WorkObjectId,
+        session_id: &SessionId,
+        checkpoints: &[(&CheckpointId, &str, &str)],
+    ) -> Vec<ShoreEvent> {
+        let mut events = vec![task_attempt_event(
+            task_attempt_id,
+            session_id,
+            "uuid-1",
+            "2026-05-18T00:00:00Z",
+        )];
+        for (checkpoint_id, message_id, occurred_at) in checkpoints {
+            events.push(checkpoint_event(
+                task_attempt_id,
+                session_id,
+                checkpoint_id,
+                message_id,
+                vec![],
+                occurred_at,
+            ));
+        }
+        events
+    }
+
+    #[test]
+    fn agent_resumption_allows_resume_when_no_task_interventions_exist() {
+        let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
+        let session_id = SessionId::new("session:claude:uuid-1");
+        let checkpoint = CheckpointId::new("checkpoint:sha256:cp");
+
+        let events = attempt_with_checkpoints(
+            &task_attempt_id,
+            &session_id,
+            &[(&checkpoint, "msg_1", "2026-05-18T00:00:01Z")],
+        );
+
+        let projection =
+            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+
+        assert!(projection.may_resume);
+        assert_eq!(projection.state, AgentResumptionState::Ready);
+        assert_eq!(projection.latest_checkpoint, Some(checkpoint));
+        assert!(projection.selected_intervention.is_none());
+        assert!(projection.selected_resolution.is_none());
+    }
+
+    #[test]
+    fn agent_resumption_pauses_for_open_task_intervention() {
+        let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
+        let session_id = SessionId::new("session:claude:uuid-1");
+        let checkpoint = CheckpointId::new("checkpoint:sha256:cp");
+        let intervention_id = InterventionId::new("intervention:sha256:1");
+
+        let mut events = attempt_with_checkpoints(
+            &task_attempt_id,
+            &session_id,
+            &[(&checkpoint, "msg_1", "2026-05-18T00:00:01Z")],
+        );
+        events.push(task_intervention_event_with_target(
+            &task_attempt_id,
+            &session_id,
+            &intervention_id,
+            "source:open",
+            "2026-05-18T00:00:02Z",
+            TargetRef::Task(TaskTargetRef::TaskAttempt),
+            "open call",
+        ));
+
+        let projection =
+            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+
+        assert!(!projection.may_resume);
+        assert_eq!(projection.state, AgentResumptionState::Blocked);
+        let selected = projection
+            .selected_intervention
+            .as_ref()
+            .expect("selected intervention");
+        assert_eq!(selected.intervention_id, intervention_id);
+        assert!(projection.selected_resolution.is_none());
+        assert!(
+            projection
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "agent_resumption_open_task_intervention"),
+            "diagnostic explains the open intervention"
+        );
+    }
+
+    #[test]
+    fn agent_resumption_allows_fresh_operative_user_approval() {
+        let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
+        let session_id = SessionId::new("session:claude:uuid-1");
+        let checkpoint = CheckpointId::new("checkpoint:sha256:cp");
+        let intervention_id = InterventionId::new("intervention:sha256:1");
+        let resolution_id = InterventionResolutionId::new("intervention-resolution:sha256:r");
+
+        let mut events = attempt_with_checkpoints(
+            &task_attempt_id,
+            &session_id,
+            &[(&checkpoint, "msg_1", "2026-05-18T00:00:01Z")],
+        );
+        events.push(task_intervention_event_with_target(
+            &task_attempt_id,
+            &session_id,
+            &intervention_id,
+            "source:approve",
+            "2026-05-18T00:00:02Z",
+            TargetRef::Task(TaskTargetRef::Checkpoint {
+                checkpoint_id: checkpoint.clone(),
+            }),
+            "needs approval",
+        ));
+        events.push(user_resolution_event(
+            &intervention_id,
+            &resolution_id,
+            InterventionResolutionOutcome::Approved,
+            AssertionMode::Operative,
+            WriterRole::User,
+            "2026-05-18T00:00:03Z",
+        ));
+
+        let projection =
+            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+
+        assert!(projection.may_resume);
+        assert_eq!(projection.state, AgentResumptionState::Ready);
+        assert!(projection.treated_as_operative);
+        let resolution_view = projection
+            .selected_resolution
+            .as_ref()
+            .expect("selected resolution");
+        assert_eq!(resolution_view.resolution_id, resolution_id);
+        assert_eq!(
+            resolution_view.outcome,
+            InterventionResolutionOutcome::Approved
+        );
+        assert!(resolution_view.writer_role_treated_as_binding);
+        assert!(resolution_view.fresh_for_target);
+        assert!(resolution_view.operative_reason.is_some());
+        assert_eq!(
+            projection.freshness,
+            Some(FreshnessBasis::CheckpointMatchesLatest)
+        );
+    }
+
+    #[test]
+    fn agent_resumption_fails_closed_for_advisory_resolution() {
+        let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
+        let session_id = SessionId::new("session:claude:uuid-1");
+        let intervention_id = InterventionId::new("intervention:sha256:1");
+        let resolution_id = InterventionResolutionId::new("intervention-resolution:sha256:r");
+
+        let mut events = attempt_with_checkpoints(&task_attempt_id, &session_id, &[]);
+        events.push(task_intervention_event_with_target(
+            &task_attempt_id,
+            &session_id,
+            &intervention_id,
+            "source:adv",
+            "2026-05-18T00:00:02Z",
+            TargetRef::Task(TaskTargetRef::TaskAttempt),
+            "needs approval",
+        ));
+        events.push(user_resolution_event(
+            &intervention_id,
+            &resolution_id,
+            InterventionResolutionOutcome::Approved,
+            AssertionMode::Advisory,
+            WriterRole::User,
+            "2026-05-18T00:00:03Z",
+        ));
+
+        let projection =
+            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        assert!(!projection.may_resume);
+        assert_eq!(projection.state, AgentResumptionState::Blocked);
+        assert!(!projection.treated_as_operative);
+    }
+
+    #[test]
+    fn agent_resumption_fails_closed_for_agent_written_resolution() {
+        let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
+        let session_id = SessionId::new("session:claude:uuid-1");
+        let intervention_id = InterventionId::new("intervention:sha256:1");
+        let resolution_id = InterventionResolutionId::new("intervention-resolution:sha256:r");
+
+        let mut events = attempt_with_checkpoints(&task_attempt_id, &session_id, &[]);
+        events.push(task_intervention_event_with_target(
+            &task_attempt_id,
+            &session_id,
+            &intervention_id,
+            "source:agent",
+            "2026-05-18T00:00:02Z",
+            TargetRef::Task(TaskTargetRef::TaskAttempt),
+            "needs approval",
+        ));
+        events.push(user_resolution_event(
+            &intervention_id,
+            &resolution_id,
+            InterventionResolutionOutcome::Approved,
+            AssertionMode::Operative,
+            WriterRole::Agent,
+            "2026-05-18T00:00:03Z",
+        ));
+
+        let projection =
+            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        assert!(!projection.may_resume);
+        assert_eq!(projection.state, AgentResumptionState::Blocked);
+        assert!(!projection.treated_as_operative);
+    }
+
+    #[test]
+    fn agent_resumption_fails_closed_for_ambiguous_resolutions() {
+        let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
+        let session_id = SessionId::new("session:claude:uuid-1");
+        let intervention_id = InterventionId::new("intervention:sha256:1");
+        let r1 = InterventionResolutionId::new("intervention-resolution:sha256:r1");
+        let r2 = InterventionResolutionId::new("intervention-resolution:sha256:r2");
+
+        let mut events = attempt_with_checkpoints(&task_attempt_id, &session_id, &[]);
+        events.push(task_intervention_event_with_target(
+            &task_attempt_id,
+            &session_id,
+            &intervention_id,
+            "source:ambig",
+            "2026-05-18T00:00:02Z",
+            TargetRef::Task(TaskTargetRef::TaskAttempt),
+            "needs approval",
+        ));
+        events.push(user_resolution_event(
+            &intervention_id,
+            &r1,
+            InterventionResolutionOutcome::Approved,
+            AssertionMode::Operative,
+            WriterRole::User,
+            "2026-05-18T00:00:03Z",
+        ));
+        events.push(user_resolution_event(
+            &intervention_id,
+            &r2,
+            InterventionResolutionOutcome::Rejected,
+            AssertionMode::Operative,
+            WriterRole::User,
+            "2026-05-18T00:00:04Z",
+        ));
+
+        let projection =
+            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+
+        assert!(!projection.may_resume);
+        assert_eq!(projection.state, AgentResumptionState::Ambiguous);
+        assert!(
+            projection
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "agent_resumption_ambiguous_resolutions"),
+            "diagnostic explains the ambiguity"
+        );
+        assert!(projection.selected_resolution.is_none());
+    }
+
+    #[test]
+    fn agent_resumption_marks_checkpoint_resolution_stale_when_newer_checkpoint_exists() {
+        let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
+        let session_id = SessionId::new("session:claude:uuid-1");
+        let cp_a = CheckpointId::new("checkpoint:sha256:cp-a");
+        let cp_b = CheckpointId::new("checkpoint:sha256:cp-b");
+        let intervention_id = InterventionId::new("intervention:sha256:1");
+        let resolution_id = InterventionResolutionId::new("intervention-resolution:sha256:r");
+
+        let mut events = attempt_with_checkpoints(
+            &task_attempt_id,
+            &session_id,
+            &[
+                (&cp_a, "msg_a", "2026-05-18T00:00:01Z"),
+                (&cp_b, "msg_b", "2026-05-18T00:00:05Z"),
+            ],
+        );
+        events.push(task_intervention_event_with_target(
+            &task_attempt_id,
+            &session_id,
+            &intervention_id,
+            "source:stale",
+            "2026-05-18T00:00:02Z",
+            TargetRef::Task(TaskTargetRef::Checkpoint {
+                checkpoint_id: cp_a.clone(),
+            }),
+            "needs approval at checkpoint a",
+        ));
+        events.push(user_resolution_event(
+            &intervention_id,
+            &resolution_id,
+            InterventionResolutionOutcome::Approved,
+            AssertionMode::Operative,
+            WriterRole::User,
+            "2026-05-18T00:00:03Z",
+        ));
+
+        let projection =
+            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        assert!(!projection.may_resume);
+        assert_eq!(projection.state, AgentResumptionState::Stale);
+        assert!(!projection.treated_as_operative);
+        assert_eq!(
+            projection.freshness,
+            Some(FreshnessBasis::CheckpointStaleNewerExists)
+        );
+    }
+
+    #[test]
+    fn agent_resumption_fails_closed_when_task_attempt_absent() {
+        let task_attempt_id = WorkObjectId::new("task-attempt:sha256:missing");
+        let projection =
+            agent_resumption_from_events(&[], &task_attempt_id, &reader_actor()).unwrap();
+        assert!(!projection.may_resume);
+        assert_eq!(projection.state, AgentResumptionState::NoAttempt);
+        assert!(
+            projection
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "agent_resumption_no_task_attempt"),
+            "diagnostic explains the missing attempt"
+        );
     }
 }
