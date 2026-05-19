@@ -6,6 +6,7 @@ pub enum EventType {
     ReviewInitialized,
     ReviewUnitCaptured,
     ReviewObservationRecorded,
+    ReviewAssessmentRecorded,
     ReviewDispositionRecorded,
     InterventionRequested,
     InterventionResolved,
@@ -54,6 +55,7 @@ mod tests {
             EventType::ReviewInitialized,
             EventType::ReviewUnitCaptured,
             EventType::ReviewObservationRecorded,
+            EventType::ReviewAssessmentRecorded,
             EventType::ReviewDispositionRecorded,
             EventType::InterventionRequested,
             EventType::InterventionResolved,
@@ -79,16 +81,30 @@ mod tests {
 
     #[test]
     fn deferred_event_types_are_not_present() {
-        let assessment: Result<EventType, _> = serde_json::from_str("\"task_assessment_recorded\"");
-        assert!(
-            assessment.is_err(),
-            "task_assessment_recorded must not decode (Codex Q6 deferral)"
-        );
+        for candidate in [
+            "task_assessment_recorded",
+            "source_artifact_imported",
+            "review_relation_changed",
+            "review_state_change_observed",
+            "review_assessment_superseded",
+        ] {
+            let result: Result<EventType, _> = serde_json::from_str(&format!("\"{candidate}\""));
+            assert!(
+                result.is_err(),
+                "{candidate} must not decode as an event type"
+            );
+        }
+    }
 
-        let artifact: Result<EventType, _> = serde_json::from_str("\"source_artifact_imported\"");
+    // Pinned for the legacy-removal slice. The ignored tests become normal
+    // tests when ReviewDispositionRecorded is removed from EventType.
+    #[test]
+    #[ignore = "legacy disposition event type is removed in the legacy-removal slice"]
+    fn legacy_review_disposition_recorded_event_type_fails_to_decode_after_split() {
+        let result: Result<EventType, _> = serde_json::from_str("\"review_disposition_recorded\"");
         assert!(
-            artifact.is_err(),
-            "source_artifact_imported must not decode (proposal §4.3 deferral)"
+            result.is_err(),
+            "review_disposition_recorded must not decode after the assessment split"
         );
     }
 }

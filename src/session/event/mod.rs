@@ -5,6 +5,7 @@ use crate::error::{Result, ShoreError};
 use crate::model::EventId;
 
 mod assertion;
+mod assessment;
 mod disposition;
 mod intervention;
 mod kind;
@@ -17,6 +18,7 @@ mod task;
 mod writer;
 
 pub use assertion::AssertionMode;
+pub use assessment::{ReviewAssessment, ReviewAssessmentRecordedPayload};
 pub use disposition::{ReviewDisposition, ReviewDispositionRecordedPayload};
 pub use intervention::{
     InterventionMode, InterventionReasonCode, InterventionRequestedPayload,

@@ -33,18 +33,20 @@ pub fn review_history(options: ReviewHistoryOptions) -> Result<ReviewHistoryResu
 #[cfg(test)]
 mod tests {
     use super::projection::{history_entry_from_event, history_from_events};
+    use super::summary::ReviewHistorySummary;
     use super::*;
     use crate::model::{
-        DispositionId, EventId, InterventionId, InterventionResolutionId, ObservationId,
-        ReviewEndpoint, ReviewTargetRef, ReviewUnitId, ReviewUnitSource, RevisionId, SessionId,
-        Side, SnapshotId, TargetRef, TrackId, WorkUnitId, WorktreeCaptureMode,
+        AssessmentId, DispositionId, EventId, InterventionId, InterventionResolutionId,
+        ObservationId, ReviewEndpoint, ReviewTargetRef, ReviewUnitId, ReviewUnitSource, RevisionId,
+        SessionId, Side, SnapshotId, TargetRef, TrackId, WorkUnitId, WorktreeCaptureMode,
     };
     use crate::session::event::{
         AssertionMode, EventTarget, EventType, ImportedNoteTarget, InterventionMode,
         InterventionReasonCode, InterventionRequestedPayload, InterventionResolutionOutcome,
-        InterventionResolvedPayload, ReviewDisposition, ReviewDispositionRecordedPayload,
-        ReviewInitializedPayload, ReviewNoteImportedPayload, ReviewObservationRecordedPayload,
-        ReviewUnitCapturedPayload, ShoreEvent, SidecarSource, Writer,
+        InterventionResolvedPayload, ReviewAssessment, ReviewAssessmentRecordedPayload,
+        ReviewDisposition, ReviewDispositionRecordedPayload, ReviewInitializedPayload,
+        ReviewNoteImportedPayload, ReviewObservationRecordedPayload, ReviewUnitCapturedPayload,
+        ShoreEvent, SidecarSource, Writer,
     };
     use crate::session::state::DUPLICATE_SEMANTIC_OBSERVATION_EVENT_CODE;
 
@@ -98,6 +100,11 @@ mod tests {
                 "review_observation_recorded",
             ),
             (
+                assessment_event(),
+                EventType::ReviewAssessmentRecorded,
+                "review_assessment_recorded",
+            ),
+            (
                 intervention_requested_event(),
                 EventType::InterventionRequested,
                 "intervention_requested",
@@ -125,6 +132,25 @@ mod tests {
 
             assert_eq!(entry.event_type, event_type);
             assert_eq!(summary_json["kind"], summary_kind);
+        }
+    }
+
+    #[test]
+    fn history_entry_preserves_assessment_target_for_assessment_event() {
+        let target = ReviewTargetRef::Assessment {
+            review_unit_id: review_unit_id("one"),
+            assessment_id: AssessmentId::new("assess:sha256:prior"),
+        };
+        let event = assessment_event_with_target(target.clone());
+
+        let entry = history_entry_from_event(&event, false, None).unwrap();
+
+        match entry.summary {
+            ReviewHistorySummary::ReviewAssessmentRecorded {
+                target: summary_target,
+                ..
+            } => assert_eq!(summary_target, target),
+            other => panic!("expected assessment summary, got {other:?}"),
         }
     }
 
@@ -558,6 +584,34 @@ mod tests {
             "agent:codex",
             payload,
             "2026-05-13T10:00:01Z",
+        )
+    }
+
+    fn assessment_event() -> ShoreEvent {
+        assessment_event_with_target(ReviewTargetRef::ReviewUnit {
+            review_unit_id: review_unit_id("one"),
+        })
+    }
+
+    fn assessment_event_with_target(target: ReviewTargetRef) -> ShoreEvent {
+        let payload = ReviewAssessmentRecordedPayload {
+            assessment_id: AssessmentId::new("assess:sha256:one"),
+            target,
+            assessment: ReviewAssessment::Accepted,
+            summary: Some("ship it".to_owned()),
+            summary_artifact_path: None,
+            summary_byte_size: Some(7),
+            summary_content_hash: Some("sha256:summary".to_owned()),
+            replaces_assessment_ids: vec![],
+            related_observation_ids: vec![ObservationId::new("obs:sha256:one")],
+            related_intervention_ids: vec![InterventionId::new("intervention:sha256:one")],
+        };
+        tracked_event(
+            EventType::ReviewAssessmentRecorded,
+            "assessment:one",
+            "human:kevin",
+            payload,
+            "2026-05-13T10:00:02Z",
         )
     }
 

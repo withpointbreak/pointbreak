@@ -352,6 +352,7 @@ pub(super) fn target_paths(target: &ReviewTargetRef) -> (Option<String>, Option<
         | ReviewTargetRef::Observation { .. }
         | ReviewTargetRef::Intervention { .. }
         | ReviewTargetRef::Disposition { .. }
+        | ReviewTargetRef::Assessment { .. }
         | ReviewTargetRef::Event { .. } => (None, None),
     }
 }

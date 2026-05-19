@@ -174,6 +174,7 @@ impl StateReducer {
             EventType::ReviewInitialized => {}
             EventType::ReviewUnitCaptured => self.apply_review_unit_captured(event)?,
             EventType::ReviewObservationRecorded => self.apply_observation_recorded(event)?,
+            EventType::ReviewAssessmentRecorded => {}
             EventType::ReviewDispositionRecorded => self.apply_disposition_recorded(event)?,
             EventType::InterventionRequested => self.apply_intervention_requested(event)?,
             EventType::InterventionResolved => self.apply_intervention_resolved(event)?,
@@ -376,10 +377,13 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::model::{ReviewEndpoint, ReviewTargetRef, ReviewUnitSource, WorktreeCaptureMode};
+    use crate::model::{
+        AssessmentId, ReviewEndpoint, ReviewTargetRef, ReviewUnitSource, WorktreeCaptureMode,
+    };
     use crate::session::EventWriteOutcome;
     use crate::session::event::{
-        AssertionMode, EventTarget, ReviewObservationRecordedPayload, Writer,
+        AssertionMode, EventTarget, ReviewAssessment, ReviewAssessmentRecordedPayload,
+        ReviewObservationRecordedPayload, Writer,
     };
 
     #[test]
@@ -627,6 +631,26 @@ mod tests {
     }
 
     #[test]
+    fn session_state_reducer_ignores_assessment_recorded_until_additive_reducer_lands() {
+        let events = vec![
+            review_unit_captured_event("review-unit:sha256:one", "rev:one", "snap:one"),
+            assessment_event("assess:sha256:one"),
+        ];
+
+        let state = SessionState::from_events(&events).unwrap();
+
+        assert_eq!(state.event_count, 2);
+        assert_eq!(state.review_unit_count, 1);
+        assert_eq!(state.note_count, 0);
+        assert_eq!(state.observation_count, 0);
+        assert_eq!(state.disposition_count, 0);
+        assert_eq!(state.intervention_count, 0);
+        assert_eq!(state.open_intervention_count, 0);
+        assert_eq!(state.open_blocking_intervention_count, 0);
+        assert!(state.diagnostics.is_empty());
+    }
+
+    #[test]
     fn duplicate_semantic_observation_events_are_counted_once_with_diagnostic() {
         let events = vec![
             observation_event("retry-a", "obs:sha256:same"),
@@ -745,6 +769,36 @@ mod tests {
                 supersedes_observation_ids: Vec::new(),
             },
             "2026-05-10T00:00:00Z",
+        )
+        .unwrap()
+    }
+
+    fn assessment_event(assessment_id: &str) -> ShoreEvent {
+        ShoreEvent::new(
+            EventType::ReviewAssessmentRecorded,
+            format!("review_assessment_recorded:{assessment_id}"),
+            EventTarget::for_review_unit(
+                SessionId::new("session:default"),
+                ReviewUnitId::new("review-unit:sha256:one"),
+                RevisionId::new("rev:one"),
+                SnapshotId::new("snap:one"),
+            ),
+            Writer::shore_local_reviewer("0.1.0"),
+            ReviewAssessmentRecordedPayload {
+                assessment_id: AssessmentId::new(assessment_id),
+                target: ReviewTargetRef::ReviewUnit {
+                    review_unit_id: ReviewUnitId::new("review-unit:sha256:one"),
+                },
+                assessment: ReviewAssessment::Accepted,
+                summary: None,
+                summary_artifact_path: None,
+                summary_byte_size: None,
+                summary_content_hash: None,
+                replaces_assessment_ids: Vec::new(),
+                related_observation_ids: Vec::new(),
+                related_intervention_ids: Vec::new(),
+            },
+            "2026-05-10T00:00:01Z",
         )
         .unwrap()
     }

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use super::{DispositionId, EventId, InterventionId, ObservationId, ReviewUnitId, Side};
+use super::{
+    AssessmentId, DispositionId, EventId, InterventionId, ObservationId, ReviewUnitId, Side,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(
@@ -69,6 +71,10 @@ pub enum ReviewTargetRef {
     Disposition {
         review_unit_id: ReviewUnitId,
         disposition_id: DispositionId,
+    },
+    Assessment {
+        review_unit_id: ReviewUnitId,
+        assessment_id: AssessmentId,
     },
     Event {
         review_unit_id: ReviewUnitId,
@@ -189,5 +195,39 @@ mod tests {
         assert_eq!(json["kind"], "disposition");
         assert_eq!(json["reviewUnitId"], "review-unit:sha256:one");
         assert_eq!(json["dispositionId"], "disp:sha256:one");
+    }
+
+    #[test]
+    fn review_target_ref_assessment_variant_wire_shape_is_kind_assessment_with_assessment_id() {
+        let target = ReviewTargetRef::Assessment {
+            review_unit_id: ReviewUnitId::new("review-unit:sha256:one"),
+            assessment_id: AssessmentId::new("assess:sha256:one"),
+        };
+
+        let json = serde_json::to_value(&target).unwrap();
+
+        assert_eq!(json["kind"], "assessment");
+        assert_eq!(json["reviewUnitId"], "review-unit:sha256:one");
+        assert_eq!(json["assessmentId"], "assess:sha256:one");
+
+        let round_tripped: ReviewTargetRef = serde_json::from_value(json).unwrap();
+        assert_eq!(round_tripped, target);
+    }
+
+    #[test]
+    fn review_target_ref_assessment_and_disposition_variants_have_distinct_wire_kinds() {
+        let assessment = ReviewTargetRef::Assessment {
+            review_unit_id: ReviewUnitId::new("review-unit:sha256:one"),
+            assessment_id: AssessmentId::new("assess:sha256:one"),
+        };
+        let disposition = ReviewTargetRef::Disposition {
+            review_unit_id: ReviewUnitId::new("review-unit:sha256:one"),
+            disposition_id: DispositionId::new("disp:sha256:one"),
+        };
+
+        assert_ne!(
+            serde_json::to_value(&assessment).unwrap()["kind"],
+            serde_json::to_value(&disposition).unwrap()["kind"],
+        );
     }
 }

@@ -149,6 +149,7 @@ pub(crate) fn target_matches_file(target: &ReviewTargetRef, file: &str) -> bool 
         | ReviewTargetRef::Observation { .. }
         | ReviewTargetRef::Intervention { .. }
         | ReviewTargetRef::Disposition { .. }
+        | ReviewTargetRef::Assessment { .. }
         | ReviewTargetRef::Event { .. } => false,
     }
 }

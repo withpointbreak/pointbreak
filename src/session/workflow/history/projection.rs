@@ -8,8 +8,9 @@ use crate::model::TargetRef;
 use crate::session::body_artifact::load_body_artifact;
 use crate::session::event::{
     EventType, InterventionRequestedPayload, InterventionResolvedPayload,
-    ReviewDispositionRecordedPayload, ReviewInitializedPayload, ReviewNoteImportedPayload,
-    ReviewObservationRecordedPayload, ReviewUnitCapturedPayload, ShoreEvent,
+    ReviewAssessmentRecordedPayload, ReviewDispositionRecordedPayload, ReviewInitializedPayload,
+    ReviewNoteImportedPayload, ReviewObservationRecordedPayload, ReviewUnitCapturedPayload,
+    ShoreEvent,
 };
 use crate::session::state::SessionState;
 
@@ -84,6 +85,26 @@ pub(super) fn history_entry_from_event(
                 tags: payload.tags,
                 confidence: payload.confidence,
                 supersedes: payload.supersedes_observation_ids,
+            }
+        }
+        EventType::ReviewAssessmentRecorded => {
+            let payload: ReviewAssessmentRecordedPayload =
+                serde_json::from_value(event.payload.clone())?;
+            ReviewHistorySummary::ReviewAssessmentRecorded {
+                assessment_id: payload.assessment_id,
+                target: payload.target,
+                assessment: payload.assessment,
+                summary: optional_text(
+                    shore_dir,
+                    include_body,
+                    payload.summary,
+                    payload.summary_artifact_path.as_deref(),
+                )?,
+                summary_byte_size: payload.summary_byte_size,
+                summary_content_hash: payload.summary_content_hash,
+                replaces: payload.replaces_assessment_ids,
+                related_observations: payload.related_observation_ids,
+                related_interventions: payload.related_intervention_ids,
             }
         }
         EventType::InterventionRequested => {
