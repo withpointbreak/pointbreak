@@ -76,6 +76,12 @@ The headless model should own file identity, file order, hunk identity, row geom
 navigation cursors, and serializable review/session state. The TUI should be a projection of that
 model, not the authoritative owner of review semantics.
 
+Shore's internal architecture language treats review units, task attempts, and similar subjects as
+software work objects coordinated through an append-only event log and purpose-built projections.
+Read `docs/substrate-language.md`, `docs/substrate-thesis-summary.md`, and
+`docs/adr/adr-0003-agent-resource-claims-advisory-first.md` before substrate-shaped refactors.
+Substrate vocabulary is internal; user-facing commands and JSON documents should stay domain-named.
+
 ## Testing
 
 Start with headless tests before TUI tests. Useful fixtures include multi-file diffs with sidecar
