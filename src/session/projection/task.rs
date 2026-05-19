@@ -1,6 +1,6 @@
 //! Sibling task-domain projection over `ShoreEvent`s.
 //!
-//! Phase 5 reads already-written task-domain events into a per-attempt summary.
+//! Reads already-written task-domain events into a per-attempt summary.
 //! `SessionState` remains review-domain; `review_history` filters task events
 //! out unconditionally. This module is the sibling task entry point.
 
@@ -396,8 +396,8 @@ fn envelope_targets_task_attempt(target: &EventTarget, task_attempt_id: &WorkObj
         && target.work_object_type == Some(WorkObjectType::TaskAttempt)
 }
 
-/// Phase 5 agent-resumption state. Diagnostic-rich rather than scalar so the
-/// caller can present the reason the projection blocked.
+/// Agent-resumption state. Diagnostic-rich rather than scalar so the caller
+/// can present the reason the projection blocked.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AgentResumptionState {
     NoAttempt,
@@ -408,8 +408,8 @@ pub(crate) enum AgentResumptionState {
 }
 
 /// Why a task-targeted intervention is considered fresh (or not) for the
-/// resumption rule. Phase 5 only inspects checkpoint identity; Phase 6 will
-/// strengthen this to a fingerprint fixture.
+/// resumption rule. The V1 rule only inspects checkpoint identity; a later
+/// fingerprint-fixture rule can strengthen this without changing the enum.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FreshnessBasis {
     /// No fingerprint check applies because the intervention targets the
@@ -440,6 +440,13 @@ pub(crate) struct AgentResolutionPolicyView {
     pub writer_role_treated_as_binding: bool,
     pub fresh_for_target: bool,
     pub operative_reason: Option<String>,
+    /// Free-text resolver justification carried verbatim from the
+    /// `InterventionResolvedPayload`. Preserved here so the projection does
+    /// not lose the resolver's stated reason.
+    pub reason: Option<String>,
+    pub reason_artifact_path: Option<String>,
+    pub reason_byte_size: Option<u64>,
+    pub reason_content_hash: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -592,6 +599,10 @@ pub(crate) fn agent_resumption_from_events(
             writer_role_treated_as_binding: writer_role_binding,
             fresh_for_target: freshness.is_fresh(),
             operative_reason,
+            reason: resolution.reason.clone(),
+            reason_artifact_path: resolution.reason_artifact_path.clone(),
+            reason_byte_size: resolution.reason_byte_size,
+            reason_content_hash: resolution.reason_content_hash.clone(),
         };
 
         let stale = matches!(
@@ -647,7 +658,7 @@ pub(crate) fn agent_resumption_from_events(
                 diagnostics.push(TaskProjectionDiagnostic {
                     code: "agent_resumption_resolution_writer_role_not_binding".to_owned(),
                     message: format!(
-                        "resolution writer role {:?} does not bind; only User binds in Phase 5",
+                        "resolution writer role {:?} does not bind; only User binds at this revision",
                         resolution.envelope.writer.role
                     ),
                     event_id: Some(resolution.envelope.event_id.clone()),
@@ -716,6 +727,10 @@ struct TaskResolutionRecord {
     envelope: TaskProjectionEventEnvelope,
     resolution_id: InterventionResolutionId,
     outcome: InterventionResolutionOutcome,
+    reason: Option<String>,
+    reason_artifact_path: Option<String>,
+    reason_byte_size: Option<u64>,
+    reason_content_hash: Option<String>,
 }
 
 fn collect_task_intervention_records(
@@ -723,8 +738,17 @@ fn collect_task_intervention_records(
     task_attempt_id: &WorkObjectId,
 ) -> Result<Vec<TaskInterventionRecord>> {
     let mut request_views: Vec<TaskInterventionView> = Vec::new();
-    let mut resolutions_by_intervention: BTreeMap<InterventionId, Vec<TaskResolutionRecord>> =
-        BTreeMap::new();
+    // Collapse duplicate semantic resolution facts by
+    // `intervention_resolution_id`: two events with the same resolution id
+    // are retry duplicates, not distinct resolutions. This mirrors the
+    // representative-selection convention in
+    // `src/session/workflow/intervention/view.rs:256`. The map value carries
+    // the owning `intervention_id` so the rollup below does not need a
+    // second pass over `events`.
+    let mut resolution_representatives: BTreeMap<
+        InterventionResolutionId,
+        (InterventionId, TaskResolutionRecord),
+    > = BTreeMap::new();
 
     for event in events {
         event.validate_schema_version()?;
@@ -759,17 +783,37 @@ fn collect_task_intervention_records(
             EventType::InterventionResolved => {
                 let payload: InterventionResolvedPayload =
                     serde_json::from_value(event.payload.clone())?;
-                resolutions_by_intervention
-                    .entry(payload.intervention_id.clone())
-                    .or_default()
-                    .push(TaskResolutionRecord {
-                        envelope: TaskProjectionEventEnvelope::from_event(event),
-                        resolution_id: payload.intervention_resolution_id,
-                        outcome: payload.outcome,
-                    });
+                let intervention_id = payload.intervention_id.clone();
+                let resolution_id = payload.intervention_resolution_id.clone();
+                let record = TaskResolutionRecord {
+                    envelope: TaskProjectionEventEnvelope::from_event(event),
+                    resolution_id: resolution_id.clone(),
+                    outcome: payload.outcome,
+                    reason: payload.reason,
+                    reason_artifact_path: payload.reason_artifact_path,
+                    reason_byte_size: payload.reason_byte_size,
+                    reason_content_hash: payload.reason_content_hash,
+                };
+                resolution_representatives
+                    .entry(resolution_id)
+                    .and_modify(|(_, existing)| {
+                        if record.envelope.event_id.as_str() < existing.envelope.event_id.as_str() {
+                            *existing = record.clone();
+                        }
+                    })
+                    .or_insert((intervention_id, record));
             }
             _ => {}
         }
+    }
+
+    let mut resolutions_by_intervention: BTreeMap<InterventionId, Vec<TaskResolutionRecord>> =
+        BTreeMap::new();
+    for (intervention_id, resolution) in resolution_representatives.into_values() {
+        resolutions_by_intervention
+            .entry(intervention_id)
+            .or_default()
+            .push(resolution);
     }
 
     let mut records = Vec::with_capacity(request_views.len());
@@ -1311,7 +1355,7 @@ mod tests {
         assert!(summary.is_none());
     }
 
-    // -- Task 5.2: open_task_interventions ---------------------------------
+    // -- open_task_interventions -------------------------------------------
 
     use crate::model::{
         InterventionId, InterventionResolutionId, ReviewTargetRef, ReviewUnitId, TrackId,
@@ -1694,7 +1738,7 @@ mod tests {
         assert_eq!(ids.len(), 2, "no collapse by target");
     }
 
-    // -- Task 5.3: agent_resumption ----------------------------------------
+    // -- agent_resumption --------------------------------------------------
 
     #[allow(clippy::too_many_arguments)]
     fn task_intervention_event_with_target(
@@ -2099,10 +2143,10 @@ mod tests {
         );
     }
 
-    // -- Task 5.4: Phase 5 no-information-loss validation ------------------
+    // -- no-information-loss validation across the three sibling views ----
 
     #[test]
-    fn phase_5_projection_no_information_loss_across_three_views() {
+    fn task_projections_preserve_envelope_payload_and_semantic_ids_across_three_views() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
         let session_id = SessionId::new("session:claude:uuid-1");
         let cp_a = CheckpointId::new("checkpoint:sha256:cp-a");
@@ -2159,13 +2203,17 @@ mod tests {
             }),
             "needs approval",
         );
-        let resolution = user_resolution_event(
+        let resolution = user_resolution_event_with_reason(
             &intervention_id,
             &resolution_id,
             InterventionResolutionOutcome::Approved,
             AssertionMode::Operative,
             WriterRole::User,
             "2026-05-18T00:00:06Z",
+            Some("approved by reviewer".to_owned()),
+            Some("artifacts/resolutions/r.txt".to_owned()),
+            Some(19),
+            Some("sha256:reason".to_owned()),
         );
 
         let events = vec![
@@ -2304,6 +2352,21 @@ mod tests {
             InterventionReasonCode::ManualDecisionRequired
         );
 
+        // Resolution payload reason fields must survive into the policy view.
+        assert_eq!(
+            selected_resolution.reason.as_deref(),
+            Some("approved by reviewer")
+        );
+        assert_eq!(
+            selected_resolution.reason_artifact_path.as_deref(),
+            Some("artifacts/resolutions/r.txt")
+        );
+        assert_eq!(selected_resolution.reason_byte_size, Some(19));
+        assert_eq!(
+            selected_resolution.reason_content_hash.as_deref(),
+            Some("sha256:reason")
+        );
+
         // The payload's review-shaped `target` field is preserved as
         // diagnostic evidence by `open_task_interventions` when the
         // intervention is still open. Re-run without the resolution to
@@ -2356,5 +2419,221 @@ mod tests {
                 .any(|d| d.code == "agent_resumption_no_task_attempt"),
             "diagnostic explains the missing attempt"
         );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn user_resolution_event_with_reason(
+        intervention_id: &InterventionId,
+        resolution_id: &InterventionResolutionId,
+        outcome: InterventionResolutionOutcome,
+        assertion_mode: AssertionMode,
+        writer_role: WriterRole,
+        occurred_at: &str,
+        reason: Option<String>,
+        reason_artifact_path: Option<String>,
+        reason_byte_size: Option<u64>,
+        reason_content_hash: Option<String>,
+    ) -> ShoreEvent {
+        let target = EventTarget::for_work_object(
+            SessionId::new("session:claude:uuid-1"),
+            WorkObjectId::new("task-attempt:sha256:ta"),
+            WorkObjectType::TaskAttempt,
+        );
+        let payload = InterventionResolvedPayload {
+            intervention_resolution_id: resolution_id.clone(),
+            intervention_id: intervention_id.clone(),
+            outcome,
+            reason,
+            reason_artifact_path,
+            reason_byte_size,
+            reason_content_hash,
+        };
+        let idempotency_key =
+            InterventionResolvedPayload::idempotency_key(intervention_id, resolution_id.as_str());
+        let writer = Writer {
+            actor_id: ActorId::new("actor:claude_code:user"),
+            role: writer_role,
+            tool: WriterTool {
+                name: "claude_code".to_owned(),
+                version: String::new(),
+            },
+        };
+        let mut event = ShoreEvent::new(
+            EventType::InterventionResolved,
+            idempotency_key,
+            target,
+            writer,
+            payload,
+            occurred_at,
+        )
+        .unwrap();
+        event.assertion_mode = assertion_mode;
+        event.source_ref = Some(SourceRef::new("claude_code", resolution_id.as_str()));
+        event
+    }
+
+    #[test]
+    fn agent_resumption_preserves_resolution_reason_payload_fields() {
+        let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
+        let session_id = SessionId::new("session:claude:uuid-1");
+        let intervention_id = InterventionId::new("intervention:sha256:1");
+        let resolution_id = InterventionResolutionId::new("intervention-resolution:sha256:r");
+
+        let mut events = attempt_with_checkpoints(&task_attempt_id, &session_id, &[]);
+        events.push(task_intervention_event_with_target(
+            &task_attempt_id,
+            &session_id,
+            &intervention_id,
+            "source:reason",
+            "2026-05-18T00:00:02Z",
+            TargetRef::Task(TaskTargetRef::TaskAttempt),
+            "needs approval",
+        ));
+        events.push(user_resolution_event_with_reason(
+            &intervention_id,
+            &resolution_id,
+            InterventionResolutionOutcome::Approved,
+            AssertionMode::Operative,
+            WriterRole::User,
+            "2026-05-18T00:00:03Z",
+            Some("inlined justification".to_owned()),
+            Some("artifacts/resolutions/r.txt".to_owned()),
+            Some(42),
+            Some("sha256:reason-hash".to_owned()),
+        ));
+
+        let projection =
+            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+
+        let view = projection
+            .selected_resolution
+            .as_ref()
+            .expect("resolution surfaced");
+        assert_eq!(view.reason.as_deref(), Some("inlined justification"));
+        assert_eq!(
+            view.reason_artifact_path.as_deref(),
+            Some("artifacts/resolutions/r.txt"),
+        );
+        assert_eq!(view.reason_byte_size, Some(42));
+        assert_eq!(
+            view.reason_content_hash.as_deref(),
+            Some("sha256:reason-hash"),
+        );
+    }
+
+    #[test]
+    fn agent_resumption_collapses_duplicate_resolution_facts_instead_of_ambiguous() {
+        // Two `InterventionResolved` events with the same
+        // `intervention_resolution_id` are a retry duplicate, not two distinct
+        // resolutions. The projection must collapse them and still treat the
+        // intervention as cleanly resolved.
+        let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
+        let session_id = SessionId::new("session:claude:uuid-1");
+        let intervention_id = InterventionId::new("intervention:sha256:1");
+        let resolution_id = InterventionResolutionId::new("intervention-resolution:sha256:r");
+
+        let mut events = attempt_with_checkpoints(&task_attempt_id, &session_id, &[]);
+        events.push(task_intervention_event_with_target(
+            &task_attempt_id,
+            &session_id,
+            &intervention_id,
+            "source:dup",
+            "2026-05-18T00:00:02Z",
+            TargetRef::Task(TaskTargetRef::TaskAttempt),
+            "needs approval",
+        ));
+        let first = user_resolution_event(
+            &intervention_id,
+            &resolution_id,
+            InterventionResolutionOutcome::Approved,
+            AssertionMode::Operative,
+            WriterRole::User,
+            "2026-05-18T00:00:03Z",
+        );
+        let retry = user_resolution_event(
+            &intervention_id,
+            &resolution_id,
+            InterventionResolutionOutcome::Approved,
+            AssertionMode::Operative,
+            WriterRole::User,
+            "2026-05-18T00:00:03Z",
+        );
+        // Confirm the duplicate construction would emit identical events
+        // (same idempotency key, therefore same event_id) before asserting
+        // the projection treats them as one.
+        assert_eq!(first.event_id, retry.event_id);
+        events.push(first);
+        events.push(retry);
+
+        let projection =
+            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+
+        assert!(projection.may_resume);
+        assert_eq!(projection.state, AgentResumptionState::Ready);
+        assert_ne!(projection.state, AgentResumptionState::Ambiguous);
+    }
+
+    #[test]
+    fn agent_resumption_collapses_distinct_event_ids_for_same_resolution_id() {
+        // Same `intervention_resolution_id` but distinct envelope event ids
+        // (e.g., a writer mistakenly emits the same semantic resolution with
+        // two different idempotency keys). The projection still collapses by
+        // resolution id and avoids a false Ambiguous classification.
+        let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
+        let session_id = SessionId::new("session:claude:uuid-1");
+        let intervention_id = InterventionId::new("intervention:sha256:1");
+        let resolution_id = InterventionResolutionId::new("intervention-resolution:sha256:r");
+
+        let mut events = attempt_with_checkpoints(&task_attempt_id, &session_id, &[]);
+        events.push(task_intervention_event_with_target(
+            &task_attempt_id,
+            &session_id,
+            &intervention_id,
+            "source:dup-ids",
+            "2026-05-18T00:00:02Z",
+            TargetRef::Task(TaskTargetRef::TaskAttempt),
+            "needs approval",
+        ));
+
+        // Two semantically-equal resolution events with distinct event ids
+        // (constructed by mutating the idempotency key directly so the
+        // derived event_id differs).
+        let mut first = user_resolution_event(
+            &intervention_id,
+            &resolution_id,
+            InterventionResolutionOutcome::Approved,
+            AssertionMode::Operative,
+            WriterRole::User,
+            "2026-05-18T00:00:03Z",
+        );
+        let mut second = user_resolution_event(
+            &intervention_id,
+            &resolution_id,
+            InterventionResolutionOutcome::Approved,
+            AssertionMode::Operative,
+            WriterRole::User,
+            "2026-05-18T00:00:04Z",
+        );
+        first.idempotency_key = "duplicate-a".to_owned();
+        first.event_id = crate::model::EventId::new("evt:sha256:duplicate-a");
+        second.idempotency_key = "duplicate-b".to_owned();
+        second.event_id = crate::model::EventId::new("evt:sha256:duplicate-b");
+        assert_ne!(first.event_id, second.event_id);
+
+        events.push(first);
+        events.push(second);
+
+        let projection =
+            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+
+        assert!(projection.may_resume);
+        assert_eq!(projection.state, AgentResumptionState::Ready);
+        assert_ne!(projection.state, AgentResumptionState::Ambiguous);
+        let view = projection
+            .selected_resolution
+            .as_ref()
+            .expect("resolution surfaced");
+        // Representative selection is by lexicographically lowest event_id.
+        assert_eq!(view.envelope.event_id.as_str(), "evt:sha256:duplicate-a");
     }
 }
