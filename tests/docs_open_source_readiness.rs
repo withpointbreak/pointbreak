@@ -24,3 +24,25 @@ fn cli_reference_exists_and_covers_current_commands() {
     assert!(cli.contains("eventSetHash"));
     assert!(!cli.contains("Gumbo"));
 }
+
+#[test]
+fn getting_started_walks_through_first_review() {
+    let guide = std::fs::read_to_string("docs/getting-started.md").expect("read getting started");
+
+    for required in [
+        "cargo install shoreline",
+        "shore review capture",
+        "shore review unit show",
+        "shore review observation add",
+        "shore review input-request open",
+        "shore review assessment add",
+        ".shore/",
+    ] {
+        assert!(
+            guide.contains(required),
+            "missing getting-started step: {required}"
+        );
+    }
+
+    assert!(!guide.contains("Gumbo"));
+}
