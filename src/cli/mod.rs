@@ -15,7 +15,12 @@ mod review;
 mod show;
 
 #[derive(Debug, Parser)]
-#[command(name = "shore", version, about = "Inspect review streams")]
+#[command(
+    name = "shore",
+    bin_name = "shore",
+    version,
+    about = "Inspect review streams"
+)]
 struct Cli {
     #[command(flatten)]
     tracing: TracingArgs,
