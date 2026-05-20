@@ -84,7 +84,7 @@ mod tests {
         let state = SessionState::from_events(&events).unwrap();
         assert_eq!(state.input_request_count, 1);
         assert_eq!(state.open_input_request_count, 1);
-        assert_eq!(state.open_blocking_input_request_count, 1);
+        assert_eq!(state.open_operative_input_request_count, 1);
     }
 
     #[test]
@@ -978,7 +978,7 @@ mod tests {
         .unwrap();
         assert_eq!(state.input_request_count, 1);
         assert_eq!(state.open_input_request_count, 0);
-        assert_eq!(state.open_blocking_input_request_count, 0);
+        assert_eq!(state.open_operative_input_request_count, 0);
     }
 
     #[test]

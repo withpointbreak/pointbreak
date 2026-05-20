@@ -52,7 +52,7 @@ pub struct SessionState {
     #[serde(default)]
     pub open_input_request_count: usize,
     #[serde(default)]
-    pub open_blocking_input_request_count: usize,
+    pub open_operative_input_request_count: usize,
     pub diagnostics: Vec<ProjectionDiagnostic>,
 }
 
@@ -280,7 +280,7 @@ impl StateReducer {
                 !self.responded_input_request_ids.contains(*input_request_id)
             })
             .count();
-        let open_blocking_input_request_count = self
+        let open_operative_input_request_count = self
             .input_request_modes
             .iter()
             .filter(|(input_request_id, mode)| {
@@ -337,7 +337,7 @@ impl StateReducer {
             assessment_count: self.assessment_events.len(),
             input_request_count: self.input_request_modes.len(),
             open_input_request_count,
-            open_blocking_input_request_count,
+            open_operative_input_request_count,
             diagnostics,
         })
     }
@@ -624,7 +624,7 @@ mod tests {
         assert_eq!(state.assessment_count, 0);
         assert_eq!(state.input_request_count, 0);
         assert_eq!(state.open_input_request_count, 0);
-        assert_eq!(state.open_blocking_input_request_count, 0);
+        assert_eq!(state.open_operative_input_request_count, 0);
         assert!(state.current_review_unit_id.is_none());
         assert!(state.current_revision_id.is_none());
         assert!(state.current_snapshot_id.is_none());
@@ -662,7 +662,7 @@ mod tests {
         assert_eq!(state.assessment_count, 1);
         assert_eq!(state.input_request_count, 0);
         assert_eq!(state.open_input_request_count, 0);
-        assert_eq!(state.open_blocking_input_request_count, 0);
+        assert_eq!(state.open_operative_input_request_count, 0);
         assert!(state.diagnostics.is_empty());
     }
 
@@ -702,7 +702,7 @@ mod tests {
 
     #[test]
     fn session_state_serializes_input_request_counts_not_intervention_counts() {
-        let events = vec![input_request_opened_event(
+        let events = vec![input_request_opened_event_with_assertion_mode(
             "retry-a",
             "input-request:sha256:one",
             AssertionMode::Operative,
@@ -713,19 +713,44 @@ mod tests {
 
         assert_eq!(state.input_request_count, 1);
         assert_eq!(state.open_input_request_count, 1);
-        assert_eq!(state.open_blocking_input_request_count, 1);
+        assert_eq!(state.open_operative_input_request_count, 1);
         assert_eq!(json["inputRequestCount"], 1);
         assert_eq!(json["openInputRequestCount"], 1);
-        assert_eq!(json["openBlockingInputRequestCount"], 1);
+        assert_eq!(json["openOperativeInputRequestCount"], 1);
         assert!(json.get("interventionCount").is_none());
         assert!(json.get("openInterventionCount").is_none());
         assert!(json.get("openBlockingInterventionCount").is_none());
     }
 
     #[test]
+    fn session_state_counts_open_operative_input_requests() {
+        let events = vec![
+            input_request_opened_event_with_assertion_mode(
+                "retry-a",
+                "input-request:sha256:operative",
+                AssertionMode::Operative,
+            ),
+            input_request_opened_event_with_assertion_mode(
+                "retry-b",
+                "input-request:sha256:advisory",
+                AssertionMode::Advisory,
+            ),
+        ];
+
+        let state = SessionState::from_events(&events).unwrap();
+        let json = serde_json::to_value(&state).unwrap();
+
+        assert_eq!(state.input_request_count, 2);
+        assert_eq!(state.open_input_request_count, 2);
+        assert_eq!(state.open_operative_input_request_count, 1);
+        assert_eq!(json["openOperativeInputRequestCount"], 1);
+        assert!(json.get("openBlockingInputRequestCount").is_none());
+    }
+
+    #[test]
     fn input_request_response_closes_open_state_count() {
         let events = vec![
-            input_request_opened_event(
+            input_request_opened_event_with_assertion_mode(
                 "retry-a",
                 "input-request:sha256:one",
                 AssertionMode::Operative,
@@ -741,18 +766,39 @@ mod tests {
 
         assert_eq!(state.input_request_count, 1);
         assert_eq!(state.open_input_request_count, 0);
-        assert_eq!(state.open_blocking_input_request_count, 0);
+        assert_eq!(state.open_operative_input_request_count, 0);
+    }
+
+    #[test]
+    fn input_request_response_closes_open_operative_state_count() {
+        let events = vec![
+            input_request_opened_event_with_assertion_mode(
+                "retry-a",
+                "input-request:sha256:one",
+                AssertionMode::Operative,
+            ),
+            input_request_responded_event(
+                "retry-r",
+                "input-request-response:sha256:one",
+                "input-request:sha256:one",
+            ),
+        ];
+
+        let state = SessionState::from_events(&events).unwrap();
+
+        assert_eq!(state.open_input_request_count, 0);
+        assert_eq!(state.open_operative_input_request_count, 0);
     }
 
     #[test]
     fn duplicate_semantic_input_request_events_use_input_request_diagnostic_codes() {
         let events = vec![
-            input_request_opened_event(
+            input_request_opened_event_with_assertion_mode(
                 "retry-a",
                 "input-request:sha256:same",
                 AssertionMode::Operative,
             ),
-            input_request_opened_event(
+            input_request_opened_event_with_assertion_mode(
                 "retry-b",
                 "input-request:sha256:same",
                 AssertionMode::Operative,
@@ -942,10 +988,10 @@ mod tests {
         .unwrap()
     }
 
-    fn input_request_opened_event(
+    fn input_request_opened_event_with_assertion_mode(
         source_key: &str,
         input_request_id: &str,
-        mode: AssertionMode,
+        assertion_mode: AssertionMode,
     ) -> ShoreEvent {
         let mut target = EventTarget::for_review_unit(
             SessionId::new("session:default"),
@@ -975,7 +1021,7 @@ mod tests {
             "2026-05-10T00:00:02Z",
         )
         .unwrap()
-        .with_assertion_mode(mode)
+        .with_assertion_mode(assertion_mode)
     }
 
     fn input_request_responded_event(
