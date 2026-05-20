@@ -1,7 +1,9 @@
 use std::io::Write;
 
 use clap::{Args, Subcommand};
-use shore::session::{ImportNotesOptions, ImportNotesResult, ProjectionDiagnostic, import_notes};
+use shoreline::session::{
+    ImportNotesOptions, ImportNotesResult, ProjectionDiagnostic, import_notes,
+};
 
 use crate::cli::input::ReviewInputArgs;
 use crate::cli::json;

@@ -1,4 +1,4 @@
-use shore::model::{ReviewRowKind, ReviewStream};
+use shoreline::model::{ReviewRowKind, ReviewStream};
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct StreamSummary {
@@ -45,7 +45,7 @@ pub fn normalize_path(path: impl AsRef<std::path::Path>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use shore::model::{
+    use shoreline::model::{
         FileId, FileStatus, LineRange, ResolutionStatus, ReviewId, ReviewNoteId, ReviewRow,
         ReviewRowKind, ReviewStream, RowId, SnapshotId,
     };

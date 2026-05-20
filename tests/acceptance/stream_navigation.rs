@@ -1,13 +1,13 @@
-use shore::model::{
+use shoreline::model::{
     Anchor, DiffFile, DiffRow, DiffRowKind, DiffSnapshot, FileId, FileMetadataKind,
     FileMetadataRow, FileStatus, HunkId, LineRange, ResolutionStatus, ReviewHunk, ReviewId,
     ReviewNote, ReviewNoteId, ReviewNoteSource, ReviewRow, ReviewRowKind, ReviewStream, RowId,
     Side, SnapshotId,
 };
-use shore::sidecar::{
+use shoreline::sidecar::{
     DiagnosticLevel, ReviewNotesDiagnosticCode, ReviewNotesFile, ReviewNotesSidecar,
 };
-use shore::stream::{NavigationCommand, RevealTarget};
+use shoreline::stream::{NavigationCommand, RevealTarget};
 
 #[test]
 fn review_stream_emits_deterministic_rows_for_diff_metadata_and_notes() {
@@ -194,12 +194,12 @@ fn navigation_moves_between_full_hunk_headers_and_clamps_at_edges() {
     let stream = navigation_stream();
 
     let next = stream.navigate(
-        &shore::model::CursorState::at_row(RowId::new("row:0001")),
+        &shoreline::model::CursorState::at_row(RowId::new("row:0001")),
         NavigationCommand::NextHunk,
     );
     assert_eq!(
         next.cursor,
-        shore::model::CursorState::at_row(RowId::new("row:0005"))
+        shoreline::model::CursorState::at_row(RowId::new("row:0005"))
     );
     assert_eq!(
         next.reveal,
@@ -212,7 +212,7 @@ fn navigation_moves_between_full_hunk_headers_and_clamps_at_edges() {
     let previous = stream.navigate(&next.cursor, NavigationCommand::PreviousHunk);
     assert_eq!(
         previous.cursor,
-        shore::model::CursorState::at_row(RowId::new("row:0001"))
+        shoreline::model::CursorState::at_row(RowId::new("row:0001"))
     );
     assert_eq!(
         previous.reveal,
@@ -227,12 +227,12 @@ fn navigation_moves_between_full_hunk_headers_and_clamps_at_edges() {
     assert!(clamped_previous.clamped);
 
     let clamped_next = stream.navigate(
-        &shore::model::CursorState::at_row(RowId::new("row:0012")),
+        &shoreline::model::CursorState::at_row(RowId::new("row:0012")),
         NavigationCommand::NextHunk,
     );
     assert_eq!(
         clamped_next.cursor,
-        shore::model::CursorState::at_row(RowId::new("row:0012"))
+        shoreline::model::CursorState::at_row(RowId::new("row:0012"))
     );
     assert!(clamped_next.clamped);
 }
@@ -242,12 +242,12 @@ fn note_navigation_targets_note_rows_from_unnoted_hunks() {
     let stream = navigation_stream();
 
     let next = stream.navigate(
-        &shore::model::CursorState::at_row(RowId::new("row:0007")),
+        &shoreline::model::CursorState::at_row(RowId::new("row:0007")),
         NavigationCommand::NextNoteHunk,
     );
     assert_eq!(
         next.cursor,
-        shore::model::CursorState::at_row(RowId::new("row:0011"))
+        shoreline::model::CursorState::at_row(RowId::new("row:0011"))
     );
     assert_eq!(
         next.reveal,
@@ -259,12 +259,12 @@ fn note_navigation_targets_note_rows_from_unnoted_hunks() {
     assert!(!next.clamped);
 
     let previous = stream.navigate(
-        &shore::model::CursorState::at_row(RowId::new("row:0007")),
+        &shoreline::model::CursorState::at_row(RowId::new("row:0007")),
         NavigationCommand::PreviousNoteHunk,
     );
     assert_eq!(
         previous.cursor,
-        shore::model::CursorState::at_row(RowId::new("row:0004"))
+        shoreline::model::CursorState::at_row(RowId::new("row:0004"))
     );
     assert!(is_note_row(row_by_id(&stream, "row:0004")));
     assert!(!previous.clamped);
@@ -275,22 +275,22 @@ fn note_navigation_clamps_to_last_note_when_current_hunk_is_past_it() {
     let stream = navigation_stream();
 
     let before_first_note = stream.navigate(
-        &shore::model::CursorState::at_row(RowId::new("row:0001")),
+        &shoreline::model::CursorState::at_row(RowId::new("row:0001")),
         NavigationCommand::PreviousNoteHunk,
     );
     assert_eq!(
         before_first_note.cursor,
-        shore::model::CursorState::at_row(RowId::new("row:0004"))
+        shoreline::model::CursorState::at_row(RowId::new("row:0004"))
     );
     assert!(before_first_note.clamped);
 
     let from_unnoted_tail = stream.navigate(
-        &shore::model::CursorState::at_row(RowId::new("row:0012")),
+        &shoreline::model::CursorState::at_row(RowId::new("row:0012")),
         NavigationCommand::NextNoteHunk,
     );
     assert_eq!(
         from_unnoted_tail.cursor,
-        shore::model::CursorState::at_row(RowId::new("row:0011"))
+        shoreline::model::CursorState::at_row(RowId::new("row:0011"))
     );
     assert!(from_unnoted_tail.clamped);
 
@@ -303,10 +303,10 @@ fn note_navigation_clamps_to_last_note_when_current_hunk_is_past_it() {
 
 #[test]
 fn cursor_state_round_trips_through_json() {
-    let cursor = shore::model::CursorState::at_row(RowId::new("row:0011"));
+    let cursor = shoreline::model::CursorState::at_row(RowId::new("row:0011"));
 
     let json = serde_json::to_string(&cursor).expect("cursor serializes");
-    let decoded: shore::model::CursorState =
+    let decoded: shoreline::model::CursorState =
         serde_json::from_str(&json).expect("cursor deserializes");
 
     assert_eq!(decoded, cursor);

@@ -10,9 +10,9 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use shore::dump::DumpDocument;
-use shore::session::reload_session;
-use shore::stream::ViewportSpec;
+use shoreline::dump::DumpDocument;
+use shoreline::session::reload_session;
+use shoreline::stream::ViewportSpec;
 
 use crate::tui::app::{TuiAction, TuiApp};
 use crate::tui::render::render;
@@ -33,7 +33,7 @@ impl From<TuiAction> for TerminalAction {
 
 pub(crate) fn run<F>(mut app: TuiApp, repo: &Path, load_document: F) -> TerminalResult<()>
 where
-    F: Fn() -> shore::error::Result<DumpDocument>,
+    F: Fn() -> shoreline::error::Result<DumpDocument>,
 {
     let _guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(stdout());
@@ -217,7 +217,7 @@ mod tests {
             run(
                 app,
                 repo,
-                || -> shore::error::Result<shore::dump::DumpDocument> {
+                || -> shoreline::error::Result<shoreline::dump::DumpDocument> {
                     unreachable!("compile-only smoke")
                 },
             )

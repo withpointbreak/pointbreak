@@ -1,9 +1,11 @@
 // Shared view-document mappers used by review unit show and the leaf read commands.
-use shore::model::ReviewTargetRef;
-use shore::session::event::{
+use shoreline::model::ReviewTargetRef;
+use shoreline::session::event::{
     AssertionMode, InputRequestReasonCode, InputRequestResponseOutcome, ReviewAssessment, Writer,
 };
-use shore::session::{AssessmentView, CurrentAssessmentStatus, InputRequestView, ObservationView};
+use shoreline::session::{
+    AssessmentView, CurrentAssessmentStatus, InputRequestView, ObservationView,
+};
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,7 +20,7 @@ pub(super) struct ObservationViewDocument {
     tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     confidence: Option<String>,
-    status: shore::session::ObservationStatus,
+    status: shoreline::session::ObservationStatus,
     supersedes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     body_content_hash: Option<String>,
@@ -156,8 +158,8 @@ impl From<AssertionMode> for InputRequestAssertionModeDocument {
     }
 }
 
-impl From<shore::session::InputRequestResponseView> for InputRequestResponseViewDocument {
-    fn from(view: shore::session::InputRequestResponseView) -> Self {
+impl From<shoreline::session::InputRequestResponseView> for InputRequestResponseViewDocument {
+    fn from(view: shoreline::session::InputRequestResponseView) -> Self {
         Self {
             id: view.id.as_str().to_owned(),
             event_id: view.event_id.as_str().to_owned(),
@@ -170,8 +172,8 @@ impl From<shore::session::InputRequestResponseView> for InputRequestResponseView
     }
 }
 
-impl From<shore::session::CurrentAssessmentView> for CurrentAssessmentDocument {
-    fn from(current: shore::session::CurrentAssessmentView) -> Self {
+impl From<shoreline::session::CurrentAssessmentView> for CurrentAssessmentDocument {
+    fn from(current: shoreline::session::CurrentAssessmentView) -> Self {
         let status = current.status;
         let mut records = current.records.into_iter();
         match status {

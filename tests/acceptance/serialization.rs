@@ -1,11 +1,11 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use shore::model::{
+use shoreline::model::{
     Anchor, CursorState, DiffFile, DiffRow, DiffRowKind, DiffSnapshot, FileId, FileMetadataKind,
     FileMetadataRow, FileStatus, HunkId, LineRange, ResolutionStatus, Review, ReviewHunk, ReviewId,
     ReviewNote, ReviewNoteId, ReviewNoteSource, ReviewStream, RowId, Side, SnapshotId,
 };
-use shore::stream::{LayoutSnapshot, ViewportSpec};
+use shoreline::stream::{LayoutSnapshot, ViewportSpec};
 
 #[test]
 fn top_level_review_models_round_trip_through_json() {
@@ -142,7 +142,7 @@ fn core_review_state_round_trips_with_notes_cursor_and_layout() {
         .find(|row| {
             matches!(
                 row.kind,
-                shore::model::ReviewRowKind::Note {
+                shoreline::model::ReviewRowKind::Note {
                     ref title,
                     ..
                 } if title == "check new call"
@@ -181,7 +181,7 @@ fn core_review_state_round_trips_with_notes_cursor_and_layout() {
 
 #[test]
 fn malformed_model_json_returns_shore_error() {
-    let error = shore::model::decode_json::<ReviewStream>("{\"review_id\":")
+    let error = shoreline::model::decode_json::<ReviewStream>("{\"review_id\":")
         .expect_err("malformed JSON should fail");
 
     assert!(error.to_string().contains("json parse failed"));

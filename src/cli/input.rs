@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Args;
-use shore::dump::{DumpDocument, DumpOptions};
+use shoreline::dump::{DumpDocument, DumpOptions};
 
 use crate::cli_tracing::TracingArgs;
 
@@ -17,7 +17,7 @@ pub(super) struct ReviewInputArgs {
 pub(super) fn load_dump_document(
     args: &ReviewInputArgs,
     options: DumpOptions,
-) -> shore::error::Result<DumpDocument> {
+) -> shoreline::error::Result<DumpDocument> {
     let document = match &args.review_notes {
         Some(review_notes) => {
             DumpDocument::from_review_notes_file_with_options(&args.repo, review_notes, options)?

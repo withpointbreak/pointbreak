@@ -3,9 +3,9 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
-use shore::dump::{DumpDocument, DumpInputSource};
-use shore::model::{LineRange, ResolutionStatus, ReviewNoteId, ReviewRow, ReviewRowKind};
-use shore::sidecar::ReviewNotesDiagnosticCode;
+use shoreline::dump::{DumpDocument, DumpInputSource};
+use shoreline::model::{LineRange, ResolutionStatus, ReviewNoteId, ReviewRow, ReviewRowKind};
+use shoreline::sidecar::ReviewNotesDiagnosticCode;
 
 use crate::tui::app::TuiApp;
 use crate::tui::view::{DisplayRow, DisplayRowKind};
@@ -264,14 +264,14 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
     use ratatui::style::Color;
-    use shore::dump::{DumpDocument, DumpInputSource, DumpInputSummary};
-    use shore::model::{
+    use shoreline::dump::{DumpDocument, DumpInputSource, DumpInputSummary};
+    use shoreline::model::{
         Anchor, DiffFile, DiffRow, DiffRowKind, DiffSnapshot, FileId, FileStatus, HunkId,
         LineRange, ResolutionStatus, ReviewHunk, ReviewId, ReviewNote, ReviewNoteId,
         ReviewNoteSource, ReviewRow, ReviewRowKind, ReviewStream, RowId, Side, SnapshotId,
     };
-    use shore::sidecar::{DiagnosticLevel, ReviewNotesDiagnostic, ReviewNotesDiagnosticCode};
-    use shore::stream::ViewportSpec;
+    use shoreline::sidecar::{DiagnosticLevel, ReviewNotesDiagnostic, ReviewNotesDiagnosticCode};
+    use shoreline::stream::ViewportSpec;
 
     use super::render;
     use crate::tui::app::{TuiAction, TuiApp};

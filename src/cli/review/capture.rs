@@ -2,8 +2,8 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use clap::Args;
-use shore::model::ReviewEndpoint;
-use shore::session::{CaptureOptions, CaptureResult, capture_worktree_review};
+use shoreline::model::ReviewEndpoint;
+use shoreline::session::{CaptureOptions, CaptureResult, capture_worktree_review};
 
 use crate::cli::json;
 use crate::cli_tracing::TracingArgs;

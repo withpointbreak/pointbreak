@@ -1,5 +1,5 @@
-use shore::git::{IngestOptions, ingest_tracked_diff, ingest_tracked_diff_with_options};
-use shore::model::{DiffFile, DiffRowKind, FileMetadataKind, FileStatus};
+use shoreline::git::{IngestOptions, ingest_tracked_diff, ingest_tracked_diff_with_options};
+use shoreline::model::{DiffFile, DiffRowKind, FileMetadataKind, FileStatus};
 
 use crate::support::git_repo::GitRepo;
 use crate::support::snapshots::normalize_path;
@@ -193,11 +193,11 @@ fn file_level_git_entries_are_preserved_as_metadata_rows() {
     assert!(submodule.hunks.is_empty());
 }
 
-fn variant_is_v1(kind: &shore::model::FileMetadataKind) -> bool {
+fn variant_is_v1(kind: &shoreline::model::FileMetadataKind) -> bool {
     // Exhaustive match — NO wildcard arm. Adding a new FileMetadataKind variant
     // will fail to compile here, and that compile error is the tripwire. ADR-0002
     // ratifies these four as the V1 set; any new variant is itself a V2 decision.
-    use shore::model::FileMetadataKind::*;
+    use shoreline::model::FileMetadataKind::*;
     match kind {
         BinarySummary | ModeChange | RenameSummary | SubmoduleSummary => true,
     }

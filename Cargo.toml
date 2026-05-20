@@ -1,7 +1,15 @@
 [package]
-name = "shore"
+name = "shoreline"
 version = "0.1.0"
 edition = "2024"
+
+[lib]
+name = "shoreline"
+path = "src/lib.rs"
+
+[[bin]]
+name = "shore"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

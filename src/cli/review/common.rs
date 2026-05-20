@@ -2,7 +2,7 @@ use std::io::Read;
 use std::path::Path;
 
 use clap::ValueEnum;
-use shore::model::Side;
+use shoreline::model::Side;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 #[value(rename_all = "kebab-case")]

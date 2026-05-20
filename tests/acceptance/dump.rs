@@ -1,11 +1,11 @@
 use serde_json::Value;
-use shore::dump::{DumpDocument, DumpInputSource, DumpInputSummary};
-use shore::model::{
+use shoreline::dump::{DumpDocument, DumpInputSource, DumpInputSummary};
+use shoreline::model::{
     Anchor, DiffFile, DiffRow, DiffRowKind, DiffSnapshot, FileId, FileStatus, HunkId, LineRange,
     ResolutionStatus, ReviewHunk, ReviewId, ReviewNote, ReviewNoteId, ReviewNoteSource, ReviewRow,
     ReviewRowKind, ReviewStream, RowId, Side, SnapshotId,
 };
-use shore::sidecar::{
+use shoreline::sidecar::{
     DiagnosticLevel, ParsedReviewNotes, ReviewNoteEntry, ReviewNoteTarget, ReviewNotesDiagnostic,
     ReviewNotesDiagnosticCode, ReviewNotesFile, ReviewNotesSidecar,
 };
@@ -487,7 +487,7 @@ fn dump_input_source_durable_serializes_as_snake_case() {
 
 #[test]
 fn from_repo_with_options_uses_durable_notes_when_present() {
-    use shore::session::{ImportNotesOptions, import_notes};
+    use shoreline::session::{ImportNotesOptions, import_notes};
 
     use crate::support::git_repo::GitRepo;
 
@@ -529,7 +529,7 @@ fn from_repo_with_options_uses_durable_notes_when_present() {
 
 #[test]
 fn from_repo_with_options_durable_preserves_snapshot_file_order() {
-    use shore::session::{ImportNotesOptions, import_notes};
+    use shoreline::session::{ImportNotesOptions, import_notes};
 
     use crate::support::git_repo::GitRepo;
 

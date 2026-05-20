@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use clap::Args;
-use shore::dump::DumpDocument;
+use shoreline::dump::DumpDocument;
 
 use crate::cli::input::{self, ReviewInputArgs};
 use crate::cli::json;
@@ -33,7 +33,7 @@ pub(super) fn run(
 pub(super) fn document_for_dump(
     args: &DumpArgs,
     tracing: &TracingArgs,
-) -> shore::error::Result<DumpDocument> {
+) -> shoreline::error::Result<DumpDocument> {
     input::load_dump_document(&args.input, input::dump_options(&args.input, tracing))
 }
 

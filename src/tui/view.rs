@@ -1,7 +1,7 @@
-use shore::model::{
+use shoreline::model::{
     DiffRow, DiffRowKind, FileStatus, LineRange, ResolutionStatus, ReviewRow, ReviewRowKind, RowId,
 };
-use shore::stream::ORPHAN_SECTION_PATH;
+use shoreline::stream::ORPHAN_SECTION_PATH;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DisplayRowKind {
@@ -118,11 +118,11 @@ fn display_resolution_status(status: &ResolutionStatus) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use shore::model::{
+    use shoreline::model::{
         DiffRow, DiffRowKind, FileMetadataKind, FileMetadataRow, FileStatus, LineRange,
         ResolutionStatus, ReviewNoteId, ReviewRow, ReviewRowKind, RowId,
     };
-    use shore::stream::ORPHAN_SECTION_PATH;
+    use shoreline::stream::ORPHAN_SECTION_PATH;
 
     use super::{DisplayRow, DisplayRowKind};
 

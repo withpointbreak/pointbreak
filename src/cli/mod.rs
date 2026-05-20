@@ -115,8 +115,8 @@ mod tests {
     use std::path::Path;
     use std::process::{Command, ExitCode};
 
-    use shore::dump::DumpInputSource;
-    use shore::session::ImportNotesOptions;
+    use shoreline::dump::DumpInputSource;
+    use shoreline::session::ImportNotesOptions;
 
     use super::dump::{DumpArgs, document_for_dump};
     use super::input::ReviewInputArgs;
@@ -224,7 +224,7 @@ mod tests {
         let sidecar_dir = tempfile::tempdir().expect("create durable tempdir");
         let sidecar_path = sidecar_dir.path().join("review-notes.json");
         fs::write(&sidecar_path, native_review_notes_json()).expect("write review notes");
-        shore::session::import_notes(
+        shoreline::session::import_notes(
             ImportNotesOptions::new(repo.path()).with_review_notes(&sidecar_path),
         )
         .expect("notes import succeeds");
@@ -317,7 +317,7 @@ mod tests {
     fn dump_and_show_prefer_explicit_review_notes_over_durable_notes() {
         let repo = dump_repo();
         let durable_sidecar = write_native_review_notes(&repo);
-        shore::session::import_notes(
+        shoreline::session::import_notes(
             ImportNotesOptions::new(repo.path()).with_review_notes(&durable_sidecar),
         )
         .unwrap();

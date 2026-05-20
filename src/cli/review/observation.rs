@@ -2,8 +2,8 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
-use shore::model::{ObservationId, ReviewTargetRef, ReviewUnitId};
-use shore::session::{
+use shoreline::model::{ObservationId, ReviewTargetRef, ReviewUnitId};
+use shoreline::session::{
     ObservationAddOptions, ObservationAddResult, ObservationListOptions, ObservationListResult,
     ObservationTargetSelector, list_observations, record_observation,
 };

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use clap::{Args, ValueEnum};
-use shore::perf::{self, PERF_TARGET, PerfLayer};
+use shoreline::perf::{self, PERF_TARGET, PerfLayer};
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;

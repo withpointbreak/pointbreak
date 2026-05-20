@@ -2,8 +2,8 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
-use shore::model::{ReviewTargetRef, ReviewUnitId, Side};
-use shore::session::{
+use shoreline::model::{ReviewTargetRef, ReviewUnitId, Side};
+use shoreline::session::{
     AdapterNoteView, ReviewUnitListEntry, ReviewUnitListOptions, ReviewUnitListResult,
     ReviewUnitProjectionIdentity, ReviewUnitProjectionRow, ReviewUnitProjectionSummary,
     ReviewUnitShowFilters, ReviewUnitShowOptions, ReviewUnitShowResult, list_review_units,
@@ -93,9 +93,9 @@ struct UnitReviewUnitDocument {
     session_id: String,
     revision_id: String,
     snapshot_id: String,
-    source: shore::model::ReviewUnitSource,
-    base: shore::model::ReviewEndpoint,
-    target: shore::model::ReviewEndpoint,
+    source: shoreline::model::ReviewUnitSource,
+    base: shoreline::model::ReviewEndpoint,
+    target: shoreline::model::ReviewEndpoint,
     snapshot_artifact_content_hash: String,
 }
 
@@ -364,8 +364,8 @@ impl From<AdapterNoteView> for AdapterNoteDocument {
     }
 }
 
-impl From<shore::session::event::ImportedNoteTarget> for AdapterNoteTargetDocument {
-    fn from(target: shore::session::event::ImportedNoteTarget) -> Self {
+impl From<shoreline::session::event::ImportedNoteTarget> for AdapterNoteTargetDocument {
+    fn from(target: shoreline::session::event::ImportedNoteTarget) -> Self {
         Self {
             side: target.side,
             start_line: target.start_line,
@@ -405,8 +405,8 @@ impl From<ReviewUnitProjectionRow> for UnitProjectionRowDocument {
     }
 }
 
-impl From<shore::session::SnapshotOrder> for SnapshotOrderDocument {
-    fn from(order: shore::session::SnapshotOrder) -> Self {
+impl From<shoreline::session::SnapshotOrder> for SnapshotOrderDocument {
+    fn from(order: shoreline::session::SnapshotOrder) -> Self {
         Self {
             file_index: order.file_index,
             metadata_index: order.metadata_index,

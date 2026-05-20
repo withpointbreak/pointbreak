@@ -1,8 +1,8 @@
-use shore::model::{
+use shoreline::model::{
     DiffFile, DiffRow, DiffRowKind, FileId, FileStatus, HunkId, LineRange, ResolutionStatus,
     ReviewHunk, ReviewNoteSource, Side,
 };
-use shore::sidecar::{
+use shoreline::sidecar::{
     DiagnosticLevel, ReviewNoteEntry, ReviewNoteTarget, ReviewNotesDiagnosticCode, ReviewNotesFile,
     ReviewNotesSidecar, apply_file_order, parse_review_notes_sidecar, resolve_notes,
 };
@@ -181,7 +181,7 @@ fn native_review_notes_apply_order_and_resolve_to_minimal_anchors() {
 }
 
 fn assert_note(
-    note: &shore::model::ReviewNote,
+    note: &shoreline::model::ReviewNote,
     side: Side,
     line_range: LineRange,
     target_text_hash: &str,
@@ -199,9 +199,9 @@ fn assert_note(
 }
 
 fn note_by_title<'a>(
-    notes: &'a [shore::model::ReviewNote],
+    notes: &'a [shoreline::model::ReviewNote],
     title: &str,
-) -> &'a shore::model::ReviewNote {
+) -> &'a shoreline::model::ReviewNote {
     notes
         .iter()
         .find(|note| note.title == title)

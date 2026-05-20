@@ -2,9 +2,11 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
-use shore::model::{InputRequestId, ObservationId, ReviewTargetRef, ReviewUnitId};
-use shore::session::event::{AssertionMode, InputRequestReasonCode, InputRequestResponseOutcome};
-use shore::session::{
+use shoreline::model::{InputRequestId, ObservationId, ReviewTargetRef, ReviewUnitId};
+use shoreline::session::event::{
+    AssertionMode, InputRequestReasonCode, InputRequestResponseOutcome,
+};
+use shoreline::session::{
     InputRequestFetchOptions, InputRequestFetchResult, InputRequestListOptions,
     InputRequestListResult, InputRequestOpenOptions, InputRequestOpenResult,
     InputRequestRespondOptions, InputRequestRespondResult, InputRequestStatusFilter,

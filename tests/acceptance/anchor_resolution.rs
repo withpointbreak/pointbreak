@@ -1,9 +1,9 @@
-use shore::git::ingest_tracked_diff;
-use shore::model::{
+use shoreline::git::ingest_tracked_diff;
+use shoreline::model::{
     DiffFile, DiffRow, DiffRowKind, FileId, FileStatus, HunkId, ResolutionStatus, ReviewHunk,
     ReviewNote, Side, re_resolve_review_notes,
 };
-use shore::sidecar::{
+use shoreline::sidecar::{
     ReviewNoteEntry, ReviewNoteTarget, ReviewNotesFile, ReviewNotesSidecar, resolve_notes,
 };
 

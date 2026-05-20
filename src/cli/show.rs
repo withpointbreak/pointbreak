@@ -1,6 +1,6 @@
 use clap::Args;
-use shore::dump::DumpDocument;
-use shore::stream::ViewportSpec;
+use shoreline::dump::DumpDocument;
+use shoreline::stream::ViewportSpec;
 
 use crate::cli::input::{self, ReviewInputArgs};
 use crate::cli_tracing::TracingArgs;
@@ -29,7 +29,7 @@ pub(super) fn run(args: ShowArgs, tracing: &TracingArgs) -> Result<(), Box<dyn s
 pub(super) fn document_for_show(
     args: &ShowArgs,
     tracing: &TracingArgs,
-) -> shore::error::Result<DumpDocument> {
+) -> shoreline::error::Result<DumpDocument> {
     let span = tracing::info_span!("shore.show.load");
     let _entered = span.enter();
     input::load_dump_document(&args.input, input::dump_options(&args.input, tracing))

@@ -1,6 +1,6 @@
-use shore::dump::DumpDocument;
-use shore::model::{CursorState, FileId, HunkId, ReviewRow, RowId};
-use shore::stream::{LayoutSnapshot, NavigationCommand, RevealTarget, ViewportSpec};
+use shoreline::dump::DumpDocument;
+use shoreline::model::{CursorState, FileId, HunkId, ReviewRow, RowId};
+use shoreline::stream::{LayoutSnapshot, NavigationCommand, RevealTarget, ViewportSpec};
 
 pub(crate) struct TuiApp {
     document: DumpDocument,
@@ -230,13 +230,13 @@ impl TuiApp {
 
 #[cfg(test)]
 mod tests {
-    use shore::dump::{DumpDocument, DumpInputSource, DumpInputSummary};
-    use shore::model::{
+    use shoreline::dump::{DumpDocument, DumpInputSource, DumpInputSummary};
+    use shoreline::model::{
         Anchor, CursorState, DiffFile, DiffRow, DiffRowKind, DiffSnapshot, FileId, FileStatus,
         HunkId, LineRange, ResolutionStatus, ReviewHunk, ReviewId, ReviewNote, ReviewNoteId,
         ReviewNoteSource, ReviewRow, ReviewRowKind, ReviewStream, RowId, Side, SnapshotId,
     };
-    use shore::stream::ViewportSpec;
+    use shoreline::stream::ViewportSpec;
 
     use super::{TuiAction, TuiApp};
 

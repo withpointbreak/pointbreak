@@ -2,9 +2,9 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
-use shore::model::ReviewUnitId;
-use shore::session::event::EventType;
-use shore::session::{
+use shoreline::model::ReviewUnitId;
+use shoreline::session::event::EventType;
+use shoreline::session::{
     ReviewHistoryEntry, ReviewHistoryFilters, ReviewHistoryOptions, ReviewHistoryResult,
     review_history,
 };

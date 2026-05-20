@@ -885,7 +885,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "shore"
+name = "shoreline"
 version = "0.1.0"
 dependencies = [
  "clap",

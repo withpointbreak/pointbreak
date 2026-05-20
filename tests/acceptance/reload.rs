@@ -1,10 +1,10 @@
-use shore::dump::{DumpDocument, DumpInputSource};
-use shore::model::{ResolutionStatus, ReviewRowKind};
-use shore::session::{
+use shoreline::dump::{DumpDocument, DumpInputSource};
+use shoreline::model::{ResolutionStatus, ReviewRowKind};
+use shoreline::session::{
     CaptureOptions, ImportNotesOptions, ReloadDiagnosticCode, capture_worktree_review,
     import_notes, reload_session,
 };
-use shore::stream::ORPHAN_SECTION_PATH;
+use shoreline::stream::ORPHAN_SECTION_PATH;
 
 use crate::support::dump_repo;
 

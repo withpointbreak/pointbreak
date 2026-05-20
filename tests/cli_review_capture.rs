@@ -87,7 +87,7 @@ fn capture_preserves_inline_rows_for_normal_added_file() {
     let _capture =
         parse_json(&shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]).stdout);
 
-    let snapshots_dir = shore::session::shore_dir_for_repo(repo.path())
+    let snapshots_dir = shoreline::session::shore_dir_for_repo(repo.path())
         .expect("shore dir resolves")
         .join("artifacts/snapshots");
     let artifact_path = std::fs::read_dir(&snapshots_dir)

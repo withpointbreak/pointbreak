@@ -1,10 +1,10 @@
-use shore::git::ingest_tracked_diff;
-use shore::model::{CursorState, DiffSnapshot, ReviewNote, ReviewRowKind, ReviewStream, RowId};
-use shore::sidecar::{
+use shoreline::git::ingest_tracked_diff;
+use shoreline::model::{CursorState, DiffSnapshot, ReviewNote, ReviewRowKind, ReviewStream, RowId};
+use shoreline::sidecar::{
     ReviewNoteEntry, ReviewNoteTarget, ReviewNotesFile, ReviewNotesSidecar, apply_file_order,
     resolve_notes,
 };
-use shore::stream::{LayoutSnapshot, NavigationCommand, ViewportSpec};
+use shoreline::stream::{LayoutSnapshot, NavigationCommand, ViewportSpec};
 
 use crate::support::git_repo::GitRepo;
 use crate::support::snapshots::{StreamSummary, stream_summary};
@@ -69,16 +69,16 @@ fn bounded_large_changeset_exercises_full_read_only_pipeline() {
 
     let stream_json = serde_json::to_string(&built.stream).expect("stream serializes");
     let decoded_stream: ReviewStream =
-        shore::model::decode_json(&stream_json).expect("stream deserializes");
+        shoreline::model::decode_json(&stream_json).expect("stream deserializes");
     assert_eq!(decoded_stream, built.stream);
 
     let snapshot_json =
         serde_json::to_string(&ordered_snapshot).expect("ordered snapshot serializes");
     let decoded_snapshot: DiffSnapshot =
-        shore::model::decode_json(&snapshot_json).expect("ordered snapshot deserializes");
+        shoreline::model::decode_json(&snapshot_json).expect("ordered snapshot deserializes");
     let notes_json = serde_json::to_string(&resolved.notes).expect("notes serialize");
     let decoded_notes: Vec<ReviewNote> =
-        shore::model::decode_json(&notes_json).expect("notes deserialize");
+        shoreline::model::decode_json(&notes_json).expect("notes deserialize");
     let rebuilt_stream =
         ReviewStream::from_snapshot_with_resolved_notes(&decoded_snapshot, &decoded_notes);
 
@@ -140,7 +140,7 @@ fn sidecar_file(path: &str, notes: &[(&str, u32)]) -> ReviewNotesFile {
                 title: Some((*title).to_owned()),
                 body: None,
                 target: Some(ReviewNoteTarget {
-                    side: shore::model::Side::New,
+                    side: shoreline::model::Side::New,
                     start_line: *line,
                     end_line: *line,
                 }),

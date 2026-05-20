@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 
-use shore::session::ProjectionDiagnostic;
+use shoreline::session::ProjectionDiagnostic;
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]

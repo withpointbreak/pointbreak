@@ -1,7 +1,7 @@
-use shore::model::{
+use shoreline::model::{
     DiffRow, DiffRowKind, ReviewId, ReviewRow, ReviewRowKind, ReviewStream, RowId, SnapshotId,
 };
-use shore::stream::{LayoutSnapshot, ViewportSpec};
+use shoreline::stream::{LayoutSnapshot, ViewportSpec};
 
 #[test]
 fn no_wrapping_geometry_assigns_one_visual_row_per_stream_row() {

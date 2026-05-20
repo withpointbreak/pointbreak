@@ -2,9 +2,11 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
-use shore::model::{AssessmentId, InputRequestId, ObservationId, ReviewTargetRef, ReviewUnitId};
-use shore::session::event::ReviewAssessment;
-use shore::session::{
+use shoreline::model::{
+    AssessmentId, InputRequestId, ObservationId, ReviewTargetRef, ReviewUnitId,
+};
+use shoreline::session::event::ReviewAssessment;
+use shoreline::session::{
     AssessmentAddOptions, AssessmentAddResult, AssessmentShowFilters, AssessmentShowOptions,
     AssessmentShowResult, AssessmentTargetSelector, record_assessment, show_assessments,
 };
