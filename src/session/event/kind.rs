@@ -7,8 +7,8 @@ pub enum EventType {
     ReviewUnitCaptured,
     ReviewObservationRecorded,
     ReviewAssessmentRecorded,
-    InterventionRequested,
-    InterventionResolved,
+    InputRequestOpened,
+    InputRequestResponded,
     ReviewNoteImported,
     TaskAttemptCaptured,
     TaskCheckpointCaptured,
@@ -55,8 +55,8 @@ mod tests {
             EventType::ReviewUnitCaptured,
             EventType::ReviewObservationRecorded,
             EventType::ReviewAssessmentRecorded,
-            EventType::InterventionRequested,
-            EventType::InterventionResolved,
+            EventType::InputRequestOpened,
+            EventType::InputRequestResponded,
             EventType::ReviewNoteImported,
         ];
         let task_domain = [
@@ -100,6 +100,29 @@ mod tests {
         assert!(
             result.is_err(),
             "review_disposition_recorded must not decode after the assessment split"
+        );
+    }
+
+    #[test]
+    fn legacy_intervention_event_types_fail_to_decode_after_input_request_rename() {
+        for event_type in ["intervention_requested", "intervention_resolved"] {
+            let result: Result<EventType, _> = serde_json::from_str(&format!("\"{event_type}\""));
+            assert!(
+                result.is_err(),
+                "{event_type} must not decode after the input request rename"
+            );
+        }
+    }
+
+    #[test]
+    fn input_request_event_type_wire_strings_are_stable() {
+        assert_eq!(
+            serde_json::to_string(&EventType::InputRequestOpened).unwrap(),
+            "\"input_request_opened\""
+        );
+        assert_eq!(
+            serde_json::to_string(&EventType::InputRequestResponded).unwrap(),
+            "\"input_request_responded\""
         );
     }
 }

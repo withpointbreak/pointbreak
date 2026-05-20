@@ -8,13 +8,13 @@ use std::collections::BTreeMap;
 
 use crate::error::Result;
 use crate::model::{
-    ActorId, CheckpointId, EventId, InterventionId, InterventionResolutionId, ObservationId,
+    ActorId, CheckpointId, EventId, InputRequestId, InputRequestResponseId, ObservationId,
     ReviewTargetRef, TargetRef, TaskTargetRef, WorkObjectId, WorkObjectType,
 };
 use crate::session::event::{
-    AssertionMode, EventTarget, EventType, InterventionMode, InterventionReasonCode,
-    InterventionRequestedPayload, InterventionResolutionOutcome, InterventionResolvedPayload,
-    ShoreEvent, SourceRef, TaskAttemptCapturedPayload, TaskCheckpointCapturedPayload,
+    AssertionMode, EventTarget, EventType, InputRequestMode, InputRequestOpenedPayload,
+    InputRequestReasonCode, InputRequestRespondedPayload, InputRequestResponseOutcome, ShoreEvent,
+    SourceRef, TaskAttemptCapturedPayload, TaskCheckpointCapturedPayload,
     TaskObservationRecordedPayload, Writer,
 };
 
@@ -284,12 +284,12 @@ fn sort_observations_recent_first(observations: &mut [TaskObservationSummary]) {
 /// current shape mismatch without losing data.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TaskInterventionView {
-    pub intervention_id: InterventionId,
+    pub input_request_id: InputRequestId,
     pub envelope: TaskProjectionEventEnvelope,
     pub target: TargetRef,
     pub payload_review_target: ReviewTargetRef,
-    pub mode: InterventionMode,
-    pub reason_code: InterventionReasonCode,
+    pub mode: InputRequestMode,
+    pub reason_code: InputRequestReasonCode,
     pub title: String,
     pub body: Option<String>,
     pub body_artifact_path: Option<String>,
@@ -297,7 +297,7 @@ pub(crate) struct TaskInterventionView {
     pub body_content_hash: Option<String>,
     /// Opaque fingerprint the requester observed when raising the
     /// intervention, preserved verbatim from
-    /// `InterventionRequestedPayload`.
+    /// `InputRequestOpenedPayload`.
     pub target_fingerprint: Option<String>,
 }
 
@@ -311,7 +311,7 @@ pub(crate) struct TaskInterventionsProjection {
 
 /// Project the unresolved `InterventionRequested` events whose durable envelope
 /// targets the given `TaskAttempt`. Resolved interventions (matched by
-/// `intervention_id`) are excluded.
+/// `input_request_id`) are excluded.
 #[allow(dead_code)]
 pub(crate) fn open_task_interventions_from_events(
     events: &[ShoreEvent],
@@ -320,17 +320,17 @@ pub(crate) fn open_task_interventions_from_events(
 ) -> Result<TaskInterventionsProjection> {
     let mut requests: Vec<(
         TaskProjectionEventEnvelope,
-        InterventionRequestedPayload,
+        InputRequestOpenedPayload,
         TargetRef,
     )> = Vec::new();
-    let mut resolved: std::collections::BTreeSet<InterventionId> =
+    let mut resolved: std::collections::BTreeSet<InputRequestId> =
         std::collections::BTreeSet::new();
 
     for event in events {
         event.validate_schema_version()?;
 
         match event.event_type {
-            EventType::InterventionRequested => {
+            EventType::InputRequestOpened => {
                 if !envelope_targets_task_attempt(&event.target, task_attempt_id) {
                     continue;
                 }
@@ -340,7 +340,7 @@ pub(crate) fn open_task_interventions_from_events(
                 if !matches!(subject, TargetRef::Task(_)) {
                     continue;
                 }
-                let payload: InterventionRequestedPayload =
+                let payload: InputRequestOpenedPayload =
                     serde_json::from_value(event.payload.clone())?;
                 requests.push((
                     TaskProjectionEventEnvelope::from_event(event),
@@ -348,10 +348,10 @@ pub(crate) fn open_task_interventions_from_events(
                     subject,
                 ));
             }
-            EventType::InterventionResolved => {
-                let payload: InterventionResolvedPayload =
+            EventType::InputRequestResponded => {
+                let payload: InputRequestRespondedPayload =
                     serde_json::from_value(event.payload.clone())?;
-                resolved.insert(payload.intervention_id);
+                resolved.insert(payload.input_request_id);
             }
             _ => {}
         }
@@ -361,7 +361,7 @@ pub(crate) fn open_task_interventions_from_events(
     let mut open_interventions: Vec<TaskInterventionView> = Vec::new();
 
     for (envelope, payload, subject) in requests {
-        if resolved.contains(&payload.intervention_id) {
+        if resolved.contains(&payload.input_request_id) {
             continue;
         }
 
@@ -373,13 +373,13 @@ pub(crate) fn open_task_interventions_from_events(
             message: format!(
                 "intervention {} targets a TaskAttempt via the envelope but its \
                  payload `target` is still a ReviewTargetRef",
-                payload.intervention_id.as_str()
+                payload.input_request_id.as_str()
             ),
             event_id: Some(envelope.event_id.clone()),
         });
 
         open_interventions.push(TaskInterventionView {
-            intervention_id: payload.intervention_id,
+            input_request_id: payload.input_request_id,
             envelope,
             target: subject,
             payload_review_target: payload.target,
@@ -461,20 +461,20 @@ impl FreshnessBasis {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AgentResolutionPolicyView {
     pub envelope: TaskProjectionEventEnvelope,
-    pub resolution_id: InterventionResolutionId,
-    pub outcome: InterventionResolutionOutcome,
+    pub resolution_id: InputRequestResponseId,
+    pub outcome: InputRequestResponseOutcome,
     pub writer_role_treated_as_binding: bool,
     pub fresh_for_target: bool,
     pub operative_reason: Option<String>,
     /// Free-text resolver justification carried verbatim from the
-    /// `InterventionResolvedPayload`. Preserved here so the projection does
+    /// `InputRequestRespondedPayload`. Preserved here so the projection does
     /// not lose the resolver's stated reason.
     pub reason: Option<String>,
     pub reason_artifact_path: Option<String>,
     pub reason_byte_size: Option<u64>,
     pub reason_content_hash: Option<String>,
     /// Opaque fingerprint the resolver acted on, preserved verbatim from the
-    /// `InterventionResolvedPayload`. The freshness rule compares this to the
+    /// `InputRequestRespondedPayload`. The freshness rule compares this to the
     /// latest checkpoint's `checkpoint_fingerprint`.
     pub target_fingerprint: Option<String>,
 }
@@ -564,7 +564,7 @@ pub(crate) fn agent_resumption_from_events(
                 code: "agent_resumption_open_task_intervention".to_owned(),
                 message: format!(
                     "task intervention {} is unresolved",
-                    open.view.intervention_id.as_str()
+                    open.view.input_request_id.as_str()
                 ),
                 event_id: Some(open.view.envelope.event_id.clone()),
             }],
@@ -593,7 +593,7 @@ pub(crate) fn agent_resumption_from_events(
                 code: "agent_resumption_ambiguous_resolutions".to_owned(),
                 message: format!(
                     "task intervention {} has {} representative resolutions; projection refuses to pick a winner",
-                    ambiguous.view.intervention_id.as_str(),
+                    ambiguous.view.input_request_id.as_str(),
                     ambiguous.resolutions.len()
                 ),
                 event_id: Some(ambiguous.view.envelope.event_id.clone()),
@@ -622,7 +622,7 @@ pub(crate) fn agent_resumption_from_events(
         );
         let writer_role_binding =
             resolution_writer_role_is_binding(&resolution.envelope.writer.role);
-        let outcome_allows = matches!(resolution.outcome, InterventionResolutionOutcome::Approved);
+        let outcome_allows = matches!(resolution.outcome, InputRequestResponseOutcome::Approved);
         let operative = resolution.envelope.assertion_mode == AssertionMode::Operative;
 
         let operative_reason = if writer_role_binding && operative && outcome_allows {
@@ -658,7 +658,7 @@ pub(crate) fn agent_resumption_from_events(
                     code: "agent_resumption_resolution_target_fingerprint_mismatch".to_owned(),
                     message: format!(
                         "task intervention {} resolved against a code state whose fingerprint disagrees with the latest checkpoint on this attempt",
-                        record.view.intervention_id.as_str()
+                        record.view.input_request_id.as_str()
                     ),
                     event_id: Some(resolution.envelope.event_id.clone()),
                 },
@@ -666,7 +666,7 @@ pub(crate) fn agent_resumption_from_events(
                     code: "agent_resumption_resolution_targets_stale_checkpoint".to_owned(),
                     message: format!(
                         "task intervention {} resolved against an older checkpoint than the latest checkpoint on this attempt",
-                        record.view.intervention_id.as_str()
+                        record.view.input_request_id.as_str()
                     ),
                     event_id: Some(resolution.envelope.event_id.clone()),
                 },
@@ -777,8 +777,8 @@ struct TaskInterventionRecord {
 #[derive(Clone, Debug)]
 struct TaskResolutionRecord {
     envelope: TaskProjectionEventEnvelope,
-    resolution_id: InterventionResolutionId,
-    outcome: InterventionResolutionOutcome,
+    resolution_id: InputRequestResponseId,
+    outcome: InputRequestResponseOutcome,
     reason: Option<String>,
     reason_artifact_path: Option<String>,
     reason_byte_size: Option<u64>,
@@ -792,22 +792,22 @@ fn collect_task_intervention_records(
 ) -> Result<Vec<TaskInterventionRecord>> {
     let mut request_views: Vec<TaskInterventionView> = Vec::new();
     // Collapse duplicate semantic resolution facts by
-    // `intervention_resolution_id`: two events with the same resolution id
+    // `input_request_response_id`: two events with the same resolution id
     // are retry duplicates, not distinct resolutions. This mirrors the
     // representative-selection convention in
     // `src/session/workflow/intervention/view.rs:256`. The map value carries
-    // the owning `intervention_id` so the rollup below does not need a
+    // the owning `input_request_id` so the rollup below does not need a
     // second pass over `events`.
     let mut resolution_representatives: BTreeMap<
-        InterventionResolutionId,
-        (InterventionId, TaskResolutionRecord),
+        InputRequestResponseId,
+        (InputRequestId, TaskResolutionRecord),
     > = BTreeMap::new();
 
     for event in events {
         event.validate_schema_version()?;
 
         match event.event_type {
-            EventType::InterventionRequested => {
+            EventType::InputRequestOpened => {
                 if !envelope_targets_task_attempt(&event.target, task_attempt_id) {
                     continue;
                 }
@@ -817,10 +817,10 @@ fn collect_task_intervention_records(
                 if !matches!(subject, TargetRef::Task(_)) {
                     continue;
                 }
-                let payload: InterventionRequestedPayload =
+                let payload: InputRequestOpenedPayload =
                     serde_json::from_value(event.payload.clone())?;
                 request_views.push(TaskInterventionView {
-                    intervention_id: payload.intervention_id,
+                    input_request_id: payload.input_request_id,
                     envelope: TaskProjectionEventEnvelope::from_event(event),
                     target: subject,
                     payload_review_target: payload.target,
@@ -834,11 +834,11 @@ fn collect_task_intervention_records(
                     target_fingerprint: payload.target_fingerprint,
                 });
             }
-            EventType::InterventionResolved => {
-                let payload: InterventionResolvedPayload =
+            EventType::InputRequestResponded => {
+                let payload: InputRequestRespondedPayload =
                     serde_json::from_value(event.payload.clone())?;
-                let intervention_id = payload.intervention_id.clone();
-                let resolution_id = payload.intervention_resolution_id.clone();
+                let input_request_id = payload.input_request_id.clone();
+                let resolution_id = payload.input_request_response_id.clone();
                 let record = TaskResolutionRecord {
                     envelope: TaskProjectionEventEnvelope::from_event(event),
                     resolution_id: resolution_id.clone(),
@@ -856,17 +856,17 @@ fn collect_task_intervention_records(
                             *existing = record.clone();
                         }
                     })
-                    .or_insert((intervention_id, record));
+                    .or_insert((input_request_id, record));
             }
             _ => {}
         }
     }
 
-    let mut resolutions_by_intervention: BTreeMap<InterventionId, Vec<TaskResolutionRecord>> =
+    let mut resolutions_by_intervention: BTreeMap<InputRequestId, Vec<TaskResolutionRecord>> =
         BTreeMap::new();
-    for (intervention_id, resolution) in resolution_representatives.into_values() {
+    for (input_request_id, resolution) in resolution_representatives.into_values() {
         resolutions_by_intervention
-            .entry(intervention_id)
+            .entry(input_request_id)
             .or_default()
             .push(resolution);
     }
@@ -874,7 +874,7 @@ fn collect_task_intervention_records(
     let mut records = Vec::with_capacity(request_views.len());
     for view in request_views {
         let resolutions = resolutions_by_intervention
-            .remove(&view.intervention_id)
+            .remove(&view.input_request_id)
             .unwrap_or_default();
         records.push(TaskInterventionRecord { view, resolutions });
     }
@@ -1432,22 +1432,22 @@ mod tests {
     // -- open_task_interventions -------------------------------------------
 
     use crate::model::{
-        InterventionId, InterventionResolutionId, ReviewTargetRef, ReviewUnitId, TrackId,
+        InputRequestId, InputRequestResponseId, ReviewTargetRef, ReviewUnitId, TrackId,
     };
     use crate::session::event::{
-        InterventionMode, InterventionReasonCode, InterventionRequestedPayload,
-        InterventionResolutionOutcome, InterventionResolvedPayload,
+        InputRequestMode, InputRequestOpenedPayload, InputRequestReasonCode,
+        InputRequestRespondedPayload, InputRequestResponseOutcome,
     };
 
     #[allow(clippy::too_many_arguments)]
     fn task_intervention_event(
         task_attempt_id: &WorkObjectId,
         session_id: &SessionId,
-        intervention_id: &InterventionId,
+        input_request_id: &InputRequestId,
         source_key: &str,
         occurred_at: &str,
-        mode: InterventionMode,
-        reason_code: InterventionReasonCode,
+        mode: InputRequestMode,
+        reason_code: InputRequestReasonCode,
         title: &str,
     ) -> ShoreEvent {
         let mut target = EventTarget::for_work_object(
@@ -1456,11 +1456,11 @@ mod tests {
             WorkObjectType::TaskAttempt,
         );
         target.subject = Some(TargetRef::Task(TaskTargetRef::TaskAttempt));
-        // Current `InterventionRequestedPayload.target` is review-shaped. The
+        // Current `InputRequestOpenedPayload.target` is review-shaped. The
         // task envelope is authoritative; this placeholder is preserved by the
         // projection only as diagnostic evidence.
-        let payload = InterventionRequestedPayload {
-            intervention_id: intervention_id.clone(),
+        let payload = InputRequestOpenedPayload {
+            input_request_id: input_request_id.clone(),
             target: ReviewTargetRef::ReviewUnit {
                 review_unit_id: ReviewUnitId::new("review-unit:placeholder"),
             },
@@ -1473,13 +1473,13 @@ mod tests {
             body_content_hash: None,
             target_fingerprint: None,
         };
-        let idempotency_key = InterventionRequestedPayload::idempotency_key_for_work_object(
+        let idempotency_key = InputRequestOpenedPayload::idempotency_key_for_work_object(
             task_attempt_id,
             WorkObjectType::TaskAttempt,
             source_key,
         );
         let mut event = ShoreEvent::new(
-            EventType::InterventionRequested,
+            EventType::InputRequestOpened,
             idempotency_key,
             target,
             Writer::shore_local_reviewer("test"),
@@ -1495,8 +1495,8 @@ mod tests {
     fn task_intervention_resolved_event(
         task_attempt_id: &WorkObjectId,
         session_id: &SessionId,
-        intervention_id: &InterventionId,
-        resolution_id: &InterventionResolutionId,
+        input_request_id: &InputRequestId,
+        resolution_id: &InputRequestResponseId,
         occurred_at: &str,
     ) -> ShoreEvent {
         let target = EventTarget::for_work_object(
@@ -1504,10 +1504,10 @@ mod tests {
             task_attempt_id.clone(),
             WorkObjectType::TaskAttempt,
         );
-        let payload = InterventionResolvedPayload {
-            intervention_resolution_id: resolution_id.clone(),
-            intervention_id: intervention_id.clone(),
-            outcome: InterventionResolutionOutcome::Approved,
+        let payload = InputRequestRespondedPayload {
+            input_request_response_id: resolution_id.clone(),
+            input_request_id: input_request_id.clone(),
+            outcome: InputRequestResponseOutcome::Approved,
             reason: None,
             reason_artifact_path: None,
             reason_byte_size: None,
@@ -1515,9 +1515,9 @@ mod tests {
             target_fingerprint: None,
         };
         let idempotency_key =
-            InterventionResolvedPayload::idempotency_key(intervention_id, resolution_id.as_str());
+            InputRequestRespondedPayload::idempotency_key(input_request_id, resolution_id.as_str());
         ShoreEvent::new(
-            EventType::InterventionResolved,
+            EventType::InputRequestResponded,
             idempotency_key,
             target,
             Writer::shore_local_reviewer("test"),
@@ -1530,7 +1530,7 @@ mod tests {
     fn review_intervention_event(
         review_unit_id: &ReviewUnitId,
         track_id: &TrackId,
-        intervention_id: &InterventionId,
+        input_request_id: &InputRequestId,
         source_key: &str,
         occurred_at: &str,
     ) -> ShoreEvent {
@@ -1547,13 +1547,13 @@ mod tests {
                 review_unit_id: review_unit_id.clone(),
             })),
         };
-        let payload = InterventionRequestedPayload {
-            intervention_id: intervention_id.clone(),
+        let payload = InputRequestOpenedPayload {
+            input_request_id: input_request_id.clone(),
             target: ReviewTargetRef::ReviewUnit {
                 review_unit_id: review_unit_id.clone(),
             },
-            mode: InterventionMode::Blocking,
-            reason_code: InterventionReasonCode::ManualDecisionRequired,
+            mode: InputRequestMode::Blocking,
+            reason_code: InputRequestReasonCode::ManualDecisionRequired,
             title: "review-domain".to_owned(),
             body: None,
             body_artifact_path: None,
@@ -1562,9 +1562,9 @@ mod tests {
             target_fingerprint: None,
         };
         let idempotency_key =
-            InterventionRequestedPayload::idempotency_key(review_unit_id, track_id, source_key);
+            InputRequestOpenedPayload::idempotency_key(review_unit_id, track_id, source_key);
         ShoreEvent::new(
-            EventType::InterventionRequested,
+            EventType::InputRequestOpened,
             idempotency_key,
             target,
             Writer::shore_local_reviewer("test"),
@@ -1578,16 +1578,16 @@ mod tests {
     fn open_task_interventions_returns_task_targeted_unresolved_requests() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
         let session_id = SessionId::new("session:claude:uuid-1");
-        let intervention_id = InterventionId::new("intervention:sha256:1");
+        let input_request_id = InputRequestId::new("input-request:sha256:1");
 
         let events = vec![task_intervention_event(
             &task_attempt_id,
             &session_id,
-            &intervention_id,
+            &input_request_id,
             "source:1",
             "2026-05-18T00:00:00Z",
-            InterventionMode::Blocking,
-            InterventionReasonCode::ManualDecisionRequired,
+            InputRequestMode::Blocking,
+            InputRequestReasonCode::ManualDecisionRequired,
             "Need a call",
         )];
 
@@ -1599,7 +1599,7 @@ mod tests {
         assert_eq!(projection.reader_actor_id, reader_actor());
         assert_eq!(projection.open_interventions.len(), 1);
         let view = &projection.open_interventions[0];
-        assert_eq!(view.intervention_id, intervention_id);
+        assert_eq!(view.input_request_id, input_request_id);
         assert_eq!(
             view.target,
             TargetRef::Task(TaskTargetRef::TaskAttempt),
@@ -1618,24 +1618,24 @@ mod tests {
     fn open_task_interventions_excludes_resolved_intervention_ids() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
         let session_id = SessionId::new("session:claude:uuid-1");
-        let intervention_id = InterventionId::new("intervention:sha256:1");
-        let resolution_id = InterventionResolutionId::new("intervention-resolution:sha256:r1");
+        let input_request_id = InputRequestId::new("input-request:sha256:1");
+        let resolution_id = InputRequestResponseId::new("input-request-response:sha256:r1");
 
         let events = vec![
             task_intervention_event(
                 &task_attempt_id,
                 &session_id,
-                &intervention_id,
+                &input_request_id,
                 "source:1",
                 "2026-05-18T00:00:00Z",
-                InterventionMode::Blocking,
-                InterventionReasonCode::ManualDecisionRequired,
+                InputRequestMode::Blocking,
+                InputRequestReasonCode::ManualDecisionRequired,
                 "Need a call",
             ),
             task_intervention_resolved_event(
                 &task_attempt_id,
                 &session_id,
-                &intervention_id,
+                &input_request_id,
                 &resolution_id,
                 "2026-05-18T00:00:01Z",
             ),
@@ -1657,8 +1657,8 @@ mod tests {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
         let review_unit_id = ReviewUnitId::new("review-unit:sha256:u");
         let track_id = TrackId::new("agent:codex");
-        let task_intervention_id = InterventionId::new("intervention:sha256:task");
-        let review_intervention_id = InterventionId::new("intervention:sha256:review");
+        let task_intervention_id = InputRequestId::new("input-request:sha256:task");
+        let review_intervention_id = InputRequestId::new("input-request:sha256:review");
 
         let events = vec![
             task_intervention_event(
@@ -1667,8 +1667,8 @@ mod tests {
                 &task_intervention_id,
                 "source:task",
                 "2026-05-18T00:00:00Z",
-                InterventionMode::Advisory,
-                InterventionReasonCode::FailedGate,
+                InputRequestMode::Advisory,
+                InputRequestReasonCode::FailedGate,
                 "task-domain",
             ),
             review_intervention_event(
@@ -1686,11 +1686,11 @@ mod tests {
 
         assert_eq!(projection.open_interventions.len(), 1);
         assert_eq!(
-            projection.open_interventions[0].intervention_id,
+            projection.open_interventions[0].input_request_id,
             task_intervention_id
         );
         for view in &projection.open_interventions {
-            assert_ne!(view.intervention_id, review_intervention_id);
+            assert_ne!(view.input_request_id, review_intervention_id);
         }
     }
 
@@ -1698,16 +1698,16 @@ mod tests {
     fn open_task_interventions_preserves_payload_target_mismatch_as_diagnostic() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
         let session_id = SessionId::new("session:claude:uuid-1");
-        let intervention_id = InterventionId::new("intervention:sha256:1");
+        let input_request_id = InputRequestId::new("input-request:sha256:1");
 
         let events = vec![task_intervention_event(
             &task_attempt_id,
             &session_id,
-            &intervention_id,
+            &input_request_id,
             "source:1",
             "2026-05-18T00:00:00Z",
-            InterventionMode::Blocking,
-            InterventionReasonCode::ManualDecisionRequired,
+            InputRequestMode::Blocking,
+            InputRequestReasonCode::ManualDecisionRequired,
             "Need a call",
         )];
 
@@ -1731,16 +1731,16 @@ mod tests {
     fn open_task_interventions_preserves_envelope_policy_fields() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
         let session_id = SessionId::new("session:claude:uuid-1");
-        let intervention_id = InterventionId::new("intervention:sha256:1");
+        let input_request_id = InputRequestId::new("input-request:sha256:1");
 
         let request_event = task_intervention_event(
             &task_attempt_id,
             &session_id,
-            &intervention_id,
+            &input_request_id,
             "source:1",
             "2026-05-18T00:00:00Z",
-            InterventionMode::Blocking,
-            InterventionReasonCode::ManualDecisionRequired,
+            InputRequestMode::Blocking,
+            InputRequestReasonCode::ManualDecisionRequired,
             "Need a call",
         );
 
@@ -1752,17 +1752,17 @@ mod tests {
 
         let view = &projection.open_interventions[0];
         assert_eq!(view.envelope.event_id, request_event.event_id);
-        assert_eq!(view.envelope.event_type, EventType::InterventionRequested);
+        assert_eq!(view.envelope.event_type, EventType::InputRequestOpened);
         assert_eq!(view.envelope.occurred_at, request_event.occurred_at);
         assert_eq!(view.envelope.payload_hash, request_event.payload_hash);
         assert_eq!(view.envelope.writer, request_event.writer);
         assert_eq!(view.envelope.assertion_mode, AssertionMode::Advisory);
         assert_eq!(view.envelope.source_ref, request_event.source_ref);
         assert_eq!(view.envelope.target, request_event.target);
-        assert_eq!(view.mode, InterventionMode::Blocking);
+        assert_eq!(view.mode, InputRequestMode::Blocking);
         assert_eq!(
             view.reason_code,
-            InterventionReasonCode::ManualDecisionRequired
+            InputRequestReasonCode::ManualDecisionRequired
         );
         assert_eq!(view.title, "Need a call");
         assert_eq!(view.body, None);
@@ -1775,8 +1775,8 @@ mod tests {
     fn open_task_interventions_separates_multiple_open_requests() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
         let session_id = SessionId::new("session:claude:uuid-1");
-        let a = InterventionId::new("intervention:sha256:a");
-        let b = InterventionId::new("intervention:sha256:b");
+        let a = InputRequestId::new("input-request:sha256:a");
+        let b = InputRequestId::new("input-request:sha256:b");
 
         let events = vec![
             task_intervention_event(
@@ -1785,8 +1785,8 @@ mod tests {
                 &a,
                 "source:a",
                 "2026-05-18T00:00:00Z",
-                InterventionMode::Advisory,
-                InterventionReasonCode::FailedGate,
+                InputRequestMode::Advisory,
+                InputRequestReasonCode::FailedGate,
                 "first",
             ),
             task_intervention_event(
@@ -1795,8 +1795,8 @@ mod tests {
                 &b,
                 "source:b",
                 "2026-05-18T00:00:01Z",
-                InterventionMode::Blocking,
-                InterventionReasonCode::ManualDecisionRequired,
+                InputRequestMode::Blocking,
+                InputRequestReasonCode::ManualDecisionRequired,
                 "second",
             ),
         ];
@@ -1805,10 +1805,10 @@ mod tests {
             open_task_interventions_from_events(&events, &task_attempt_id, &reader_actor())
                 .unwrap();
 
-        let ids: Vec<InterventionId> = projection
+        let ids: Vec<InputRequestId> = projection
             .open_interventions
             .iter()
-            .map(|view| view.intervention_id.clone())
+            .map(|view| view.input_request_id.clone())
             .collect();
         assert!(ids.contains(&a), "first intervention should be present");
         assert!(ids.contains(&b), "second intervention should be present");
@@ -1821,7 +1821,7 @@ mod tests {
     fn task_intervention_event_with_target(
         task_attempt_id: &WorkObjectId,
         session_id: &SessionId,
-        intervention_id: &InterventionId,
+        input_request_id: &InputRequestId,
         source_key: &str,
         occurred_at: &str,
         subject: TargetRef,
@@ -1833,13 +1833,13 @@ mod tests {
             WorkObjectType::TaskAttempt,
         );
         target.subject = Some(subject);
-        let payload = InterventionRequestedPayload {
-            intervention_id: intervention_id.clone(),
+        let payload = InputRequestOpenedPayload {
+            input_request_id: input_request_id.clone(),
             target: ReviewTargetRef::ReviewUnit {
                 review_unit_id: ReviewUnitId::new("review-unit:placeholder"),
             },
-            mode: InterventionMode::Blocking,
-            reason_code: InterventionReasonCode::ManualDecisionRequired,
+            mode: InputRequestMode::Blocking,
+            reason_code: InputRequestReasonCode::ManualDecisionRequired,
             title: title.to_owned(),
             body: None,
             body_artifact_path: None,
@@ -1847,13 +1847,13 @@ mod tests {
             body_content_hash: None,
             target_fingerprint: None,
         };
-        let idempotency_key = InterventionRequestedPayload::idempotency_key_for_work_object(
+        let idempotency_key = InputRequestOpenedPayload::idempotency_key_for_work_object(
             task_attempt_id,
             WorkObjectType::TaskAttempt,
             source_key,
         );
         let mut event = ShoreEvent::new(
-            EventType::InterventionRequested,
+            EventType::InputRequestOpened,
             idempotency_key,
             target,
             Writer::shore_local_reviewer("test"),
@@ -1867,9 +1867,9 @@ mod tests {
     }
 
     fn user_resolution_event(
-        intervention_id: &InterventionId,
-        resolution_id: &InterventionResolutionId,
-        outcome: InterventionResolutionOutcome,
+        input_request_id: &InputRequestId,
+        resolution_id: &InputRequestResponseId,
+        outcome: InputRequestResponseOutcome,
         assertion_mode: AssertionMode,
         writer_role: WriterRole,
         occurred_at: &str,
@@ -1879,9 +1879,9 @@ mod tests {
             WorkObjectId::new("task-attempt:sha256:ta"),
             WorkObjectType::TaskAttempt,
         );
-        let payload = InterventionResolvedPayload {
-            intervention_resolution_id: resolution_id.clone(),
-            intervention_id: intervention_id.clone(),
+        let payload = InputRequestRespondedPayload {
+            input_request_response_id: resolution_id.clone(),
+            input_request_id: input_request_id.clone(),
             outcome,
             reason: None,
             reason_artifact_path: None,
@@ -1890,7 +1890,7 @@ mod tests {
             target_fingerprint: None,
         };
         let idempotency_key =
-            InterventionResolvedPayload::idempotency_key(intervention_id, resolution_id.as_str());
+            InputRequestRespondedPayload::idempotency_key(input_request_id, resolution_id.as_str());
         let writer = Writer {
             actor_id: ActorId::new("actor:claude_code:user"),
             role: writer_role,
@@ -1900,7 +1900,7 @@ mod tests {
             },
         };
         let mut event = ShoreEvent::new(
-            EventType::InterventionResolved,
+            EventType::InputRequestResponded,
             idempotency_key,
             target,
             writer,
@@ -1964,7 +1964,7 @@ mod tests {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
         let session_id = SessionId::new("session:claude:uuid-1");
         let checkpoint = CheckpointId::new("checkpoint:sha256:cp");
-        let intervention_id = InterventionId::new("intervention:sha256:1");
+        let input_request_id = InputRequestId::new("input-request:sha256:1");
 
         let mut events = attempt_with_checkpoints(
             &task_attempt_id,
@@ -1974,7 +1974,7 @@ mod tests {
         events.push(task_intervention_event_with_target(
             &task_attempt_id,
             &session_id,
-            &intervention_id,
+            &input_request_id,
             "source:open",
             "2026-05-18T00:00:02Z",
             TargetRef::Task(TaskTargetRef::TaskAttempt),
@@ -1990,7 +1990,7 @@ mod tests {
             .selected_intervention
             .as_ref()
             .expect("selected intervention");
-        assert_eq!(selected.intervention_id, intervention_id);
+        assert_eq!(selected.input_request_id, input_request_id);
         assert!(projection.selected_resolution.is_none());
         assert!(
             projection
@@ -2006,8 +2006,8 @@ mod tests {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
         let session_id = SessionId::new("session:claude:uuid-1");
         let checkpoint = CheckpointId::new("checkpoint:sha256:cp");
-        let intervention_id = InterventionId::new("intervention:sha256:1");
-        let resolution_id = InterventionResolutionId::new("intervention-resolution:sha256:r");
+        let input_request_id = InputRequestId::new("input-request:sha256:1");
+        let resolution_id = InputRequestResponseId::new("input-request-response:sha256:r");
 
         let mut events = attempt_with_checkpoints(
             &task_attempt_id,
@@ -2017,7 +2017,7 @@ mod tests {
         events.push(task_intervention_event_with_target(
             &task_attempt_id,
             &session_id,
-            &intervention_id,
+            &input_request_id,
             "source:approve",
             "2026-05-18T00:00:02Z",
             TargetRef::Task(TaskTargetRef::Checkpoint {
@@ -2026,9 +2026,9 @@ mod tests {
             "needs approval",
         ));
         events.push(user_resolution_event(
-            &intervention_id,
+            &input_request_id,
             &resolution_id,
-            InterventionResolutionOutcome::Approved,
+            InputRequestResponseOutcome::Approved,
             AssertionMode::Operative,
             WriterRole::User,
             "2026-05-18T00:00:03Z",
@@ -2047,7 +2047,7 @@ mod tests {
         assert_eq!(resolution_view.resolution_id, resolution_id);
         assert_eq!(
             resolution_view.outcome,
-            InterventionResolutionOutcome::Approved
+            InputRequestResponseOutcome::Approved
         );
         assert!(resolution_view.writer_role_treated_as_binding);
         assert!(resolution_view.fresh_for_target);
@@ -2062,23 +2062,23 @@ mod tests {
     fn agent_resumption_fails_closed_for_advisory_resolution() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
         let session_id = SessionId::new("session:claude:uuid-1");
-        let intervention_id = InterventionId::new("intervention:sha256:1");
-        let resolution_id = InterventionResolutionId::new("intervention-resolution:sha256:r");
+        let input_request_id = InputRequestId::new("input-request:sha256:1");
+        let resolution_id = InputRequestResponseId::new("input-request-response:sha256:r");
 
         let mut events = attempt_with_checkpoints(&task_attempt_id, &session_id, &[]);
         events.push(task_intervention_event_with_target(
             &task_attempt_id,
             &session_id,
-            &intervention_id,
+            &input_request_id,
             "source:adv",
             "2026-05-18T00:00:02Z",
             TargetRef::Task(TaskTargetRef::TaskAttempt),
             "needs approval",
         ));
         events.push(user_resolution_event(
-            &intervention_id,
+            &input_request_id,
             &resolution_id,
-            InterventionResolutionOutcome::Approved,
+            InputRequestResponseOutcome::Approved,
             AssertionMode::Advisory,
             WriterRole::User,
             "2026-05-18T00:00:03Z",
@@ -2095,23 +2095,23 @@ mod tests {
     fn agent_resumption_fails_closed_for_agent_written_resolution() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
         let session_id = SessionId::new("session:claude:uuid-1");
-        let intervention_id = InterventionId::new("intervention:sha256:1");
-        let resolution_id = InterventionResolutionId::new("intervention-resolution:sha256:r");
+        let input_request_id = InputRequestId::new("input-request:sha256:1");
+        let resolution_id = InputRequestResponseId::new("input-request-response:sha256:r");
 
         let mut events = attempt_with_checkpoints(&task_attempt_id, &session_id, &[]);
         events.push(task_intervention_event_with_target(
             &task_attempt_id,
             &session_id,
-            &intervention_id,
+            &input_request_id,
             "source:agent",
             "2026-05-18T00:00:02Z",
             TargetRef::Task(TaskTargetRef::TaskAttempt),
             "needs approval",
         ));
         events.push(user_resolution_event(
-            &intervention_id,
+            &input_request_id,
             &resolution_id,
-            InterventionResolutionOutcome::Approved,
+            InputRequestResponseOutcome::Approved,
             AssertionMode::Operative,
             WriterRole::Agent,
             "2026-05-18T00:00:03Z",
@@ -2128,32 +2128,32 @@ mod tests {
     fn agent_resumption_fails_closed_for_ambiguous_resolutions() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
         let session_id = SessionId::new("session:claude:uuid-1");
-        let intervention_id = InterventionId::new("intervention:sha256:1");
-        let r1 = InterventionResolutionId::new("intervention-resolution:sha256:r1");
-        let r2 = InterventionResolutionId::new("intervention-resolution:sha256:r2");
+        let input_request_id = InputRequestId::new("input-request:sha256:1");
+        let r1 = InputRequestResponseId::new("input-request-response:sha256:r1");
+        let r2 = InputRequestResponseId::new("input-request-response:sha256:r2");
 
         let mut events = attempt_with_checkpoints(&task_attempt_id, &session_id, &[]);
         events.push(task_intervention_event_with_target(
             &task_attempt_id,
             &session_id,
-            &intervention_id,
+            &input_request_id,
             "source:ambig",
             "2026-05-18T00:00:02Z",
             TargetRef::Task(TaskTargetRef::TaskAttempt),
             "needs approval",
         ));
         events.push(user_resolution_event(
-            &intervention_id,
+            &input_request_id,
             &r1,
-            InterventionResolutionOutcome::Approved,
+            InputRequestResponseOutcome::Approved,
             AssertionMode::Operative,
             WriterRole::User,
             "2026-05-18T00:00:03Z",
         ));
         events.push(user_resolution_event(
-            &intervention_id,
+            &input_request_id,
             &r2,
-            InterventionResolutionOutcome::Rejected,
+            InputRequestResponseOutcome::Rejected,
             AssertionMode::Operative,
             WriterRole::User,
             "2026-05-18T00:00:04Z",
@@ -2180,8 +2180,8 @@ mod tests {
         let session_id = SessionId::new("session:claude:uuid-1");
         let cp_a = CheckpointId::new("checkpoint:sha256:cp-a");
         let cp_b = CheckpointId::new("checkpoint:sha256:cp-b");
-        let intervention_id = InterventionId::new("intervention:sha256:1");
-        let resolution_id = InterventionResolutionId::new("intervention-resolution:sha256:r");
+        let input_request_id = InputRequestId::new("input-request:sha256:1");
+        let resolution_id = InputRequestResponseId::new("input-request-response:sha256:r");
 
         let mut events = attempt_with_checkpoints(
             &task_attempt_id,
@@ -2194,7 +2194,7 @@ mod tests {
         events.push(task_intervention_event_with_target(
             &task_attempt_id,
             &session_id,
-            &intervention_id,
+            &input_request_id,
             "source:stale",
             "2026-05-18T00:00:02Z",
             TargetRef::Task(TaskTargetRef::Checkpoint {
@@ -2203,9 +2203,9 @@ mod tests {
             "needs approval at checkpoint a",
         ));
         events.push(user_resolution_event(
-            &intervention_id,
+            &input_request_id,
             &resolution_id,
-            InterventionResolutionOutcome::Approved,
+            InputRequestResponseOutcome::Approved,
             AssertionMode::Operative,
             WriterRole::User,
             "2026-05-18T00:00:03Z",
@@ -2230,8 +2230,8 @@ mod tests {
         let session_id = SessionId::new("session:claude:uuid-1");
         let cp_a = CheckpointId::new("checkpoint:sha256:cp-a");
         let cp_b = CheckpointId::new("checkpoint:sha256:cp-b");
-        let intervention_id = InterventionId::new("intervention:sha256:1");
-        let resolution_id = InterventionResolutionId::new("intervention-resolution:sha256:r");
+        let input_request_id = InputRequestId::new("input-request:sha256:1");
+        let resolution_id = InputRequestResponseId::new("input-request-response:sha256:r");
 
         let attempt = task_attempt_event(
             &task_attempt_id,
@@ -2274,7 +2274,7 @@ mod tests {
         let request = task_intervention_event_with_target(
             &task_attempt_id,
             &session_id,
-            &intervention_id,
+            &input_request_id,
             "source:approve",
             "2026-05-18T00:00:05Z",
             TargetRef::Task(TaskTargetRef::Checkpoint {
@@ -2283,9 +2283,9 @@ mod tests {
             "needs approval",
         );
         let resolution = user_resolution_event_with_reason(
-            &intervention_id,
+            &input_request_id,
             &resolution_id,
-            InterventionResolutionOutcome::Approved,
+            InputRequestResponseOutcome::Approved,
             AssertionMode::Operative,
             WriterRole::User,
             "2026-05-18T00:00:06Z",
@@ -2379,7 +2379,7 @@ mod tests {
         assert!(surfaced_observation_ids.contains(&obs_a_payload.observation_id));
         assert!(surfaced_observation_ids.contains(&obs_b_payload.observation_id));
 
-        assert_eq!(selected_intervention.intervention_id, intervention_id);
+        assert_eq!(selected_intervention.input_request_id, input_request_id);
         assert_eq!(selected_resolution.resolution_id, resolution_id);
 
         let latest = summary
@@ -2425,10 +2425,10 @@ mod tests {
         }
 
         assert_eq!(selected_intervention.title, "needs approval");
-        assert_eq!(selected_intervention.mode, InterventionMode::Blocking);
+        assert_eq!(selected_intervention.mode, InputRequestMode::Blocking);
         assert_eq!(
             selected_intervention.reason_code,
-            InterventionReasonCode::ManualDecisionRequired
+            InputRequestReasonCode::ManualDecisionRequired
         );
 
         // Resolution payload reason fields must survive into the policy view.
@@ -2502,9 +2502,9 @@ mod tests {
 
     #[allow(clippy::too_many_arguments)]
     fn user_resolution_event_with_reason(
-        intervention_id: &InterventionId,
-        resolution_id: &InterventionResolutionId,
-        outcome: InterventionResolutionOutcome,
+        input_request_id: &InputRequestId,
+        resolution_id: &InputRequestResponseId,
+        outcome: InputRequestResponseOutcome,
         assertion_mode: AssertionMode,
         writer_role: WriterRole,
         occurred_at: &str,
@@ -2518,9 +2518,9 @@ mod tests {
             WorkObjectId::new("task-attempt:sha256:ta"),
             WorkObjectType::TaskAttempt,
         );
-        let payload = InterventionResolvedPayload {
-            intervention_resolution_id: resolution_id.clone(),
-            intervention_id: intervention_id.clone(),
+        let payload = InputRequestRespondedPayload {
+            input_request_response_id: resolution_id.clone(),
+            input_request_id: input_request_id.clone(),
             outcome,
             reason,
             reason_artifact_path,
@@ -2529,7 +2529,7 @@ mod tests {
             target_fingerprint: None,
         };
         let idempotency_key =
-            InterventionResolvedPayload::idempotency_key(intervention_id, resolution_id.as_str());
+            InputRequestRespondedPayload::idempotency_key(input_request_id, resolution_id.as_str());
         let writer = Writer {
             actor_id: ActorId::new("actor:claude_code:user"),
             role: writer_role,
@@ -2539,7 +2539,7 @@ mod tests {
             },
         };
         let mut event = ShoreEvent::new(
-            EventType::InterventionResolved,
+            EventType::InputRequestResponded,
             idempotency_key,
             target,
             writer,
@@ -2556,23 +2556,23 @@ mod tests {
     fn agent_resumption_preserves_resolution_reason_payload_fields() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
         let session_id = SessionId::new("session:claude:uuid-1");
-        let intervention_id = InterventionId::new("intervention:sha256:1");
-        let resolution_id = InterventionResolutionId::new("intervention-resolution:sha256:r");
+        let input_request_id = InputRequestId::new("input-request:sha256:1");
+        let resolution_id = InputRequestResponseId::new("input-request-response:sha256:r");
 
         let mut events = attempt_with_checkpoints(&task_attempt_id, &session_id, &[]);
         events.push(task_intervention_event_with_target(
             &task_attempt_id,
             &session_id,
-            &intervention_id,
+            &input_request_id,
             "source:reason",
             "2026-05-18T00:00:02Z",
             TargetRef::Task(TaskTargetRef::TaskAttempt),
             "needs approval",
         ));
         events.push(user_resolution_event_with_reason(
-            &intervention_id,
+            &input_request_id,
             &resolution_id,
-            InterventionResolutionOutcome::Approved,
+            InputRequestResponseOutcome::Approved,
             AssertionMode::Operative,
             WriterRole::User,
             "2026-05-18T00:00:03Z",
@@ -2604,36 +2604,36 @@ mod tests {
     #[test]
     fn agent_resumption_collapses_duplicate_resolution_facts_instead_of_ambiguous() {
         // Two `InterventionResolved` events with the same
-        // `intervention_resolution_id` are a retry duplicate, not two distinct
+        // `input_request_response_id` are a retry duplicate, not two distinct
         // resolutions. The projection must collapse them and still treat the
         // intervention as cleanly resolved.
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
         let session_id = SessionId::new("session:claude:uuid-1");
-        let intervention_id = InterventionId::new("intervention:sha256:1");
-        let resolution_id = InterventionResolutionId::new("intervention-resolution:sha256:r");
+        let input_request_id = InputRequestId::new("input-request:sha256:1");
+        let resolution_id = InputRequestResponseId::new("input-request-response:sha256:r");
 
         let mut events = attempt_with_checkpoints(&task_attempt_id, &session_id, &[]);
         events.push(task_intervention_event_with_target(
             &task_attempt_id,
             &session_id,
-            &intervention_id,
+            &input_request_id,
             "source:dup",
             "2026-05-18T00:00:02Z",
             TargetRef::Task(TaskTargetRef::TaskAttempt),
             "needs approval",
         ));
         let first = user_resolution_event(
-            &intervention_id,
+            &input_request_id,
             &resolution_id,
-            InterventionResolutionOutcome::Approved,
+            InputRequestResponseOutcome::Approved,
             AssertionMode::Operative,
             WriterRole::User,
             "2026-05-18T00:00:03Z",
         );
         let retry = user_resolution_event(
-            &intervention_id,
+            &input_request_id,
             &resolution_id,
-            InterventionResolutionOutcome::Approved,
+            InputRequestResponseOutcome::Approved,
             AssertionMode::Operative,
             WriterRole::User,
             "2026-05-18T00:00:03Z",
@@ -2655,20 +2655,20 @@ mod tests {
 
     #[test]
     fn agent_resumption_collapses_distinct_event_ids_for_same_resolution_id() {
-        // Same `intervention_resolution_id` but distinct envelope event ids
+        // Same `input_request_response_id` but distinct envelope event ids
         // (e.g., a writer mistakenly emits the same semantic resolution with
         // two different idempotency keys). The projection still collapses by
         // resolution id and avoids a false Ambiguous classification.
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
         let session_id = SessionId::new("session:claude:uuid-1");
-        let intervention_id = InterventionId::new("intervention:sha256:1");
-        let resolution_id = InterventionResolutionId::new("intervention-resolution:sha256:r");
+        let input_request_id = InputRequestId::new("input-request:sha256:1");
+        let resolution_id = InputRequestResponseId::new("input-request-response:sha256:r");
 
         let mut events = attempt_with_checkpoints(&task_attempt_id, &session_id, &[]);
         events.push(task_intervention_event_with_target(
             &task_attempt_id,
             &session_id,
-            &intervention_id,
+            &input_request_id,
             "source:dup-ids",
             "2026-05-18T00:00:02Z",
             TargetRef::Task(TaskTargetRef::TaskAttempt),
@@ -2679,17 +2679,17 @@ mod tests {
         // (constructed by mutating the idempotency key directly so the
         // derived event_id differs).
         let mut first = user_resolution_event(
-            &intervention_id,
+            &input_request_id,
             &resolution_id,
-            InterventionResolutionOutcome::Approved,
+            InputRequestResponseOutcome::Approved,
             AssertionMode::Operative,
             WriterRole::User,
             "2026-05-18T00:00:03Z",
         );
         let mut second = user_resolution_event(
-            &intervention_id,
+            &input_request_id,
             &resolution_id,
-            InterventionResolutionOutcome::Approved,
+            InputRequestResponseOutcome::Approved,
             AssertionMode::Operative,
             WriterRole::User,
             "2026-05-18T00:00:04Z",
@@ -2776,7 +2776,7 @@ mod tests {
     fn task_intervention_event_with_target_and_fingerprint(
         task_attempt_id: &WorkObjectId,
         session_id: &SessionId,
-        intervention_id: &InterventionId,
+        input_request_id: &InputRequestId,
         source_key: &str,
         occurred_at: &str,
         subject: TargetRef,
@@ -2789,13 +2789,13 @@ mod tests {
             WorkObjectType::TaskAttempt,
         );
         target.subject = Some(subject);
-        let payload = InterventionRequestedPayload {
-            intervention_id: intervention_id.clone(),
+        let payload = InputRequestOpenedPayload {
+            input_request_id: input_request_id.clone(),
             target: ReviewTargetRef::ReviewUnit {
                 review_unit_id: ReviewUnitId::new("review-unit:placeholder"),
             },
-            mode: InterventionMode::Blocking,
-            reason_code: InterventionReasonCode::ManualDecisionRequired,
+            mode: InputRequestMode::Blocking,
+            reason_code: InputRequestReasonCode::ManualDecisionRequired,
             title: title.to_owned(),
             body: None,
             body_artifact_path: None,
@@ -2803,13 +2803,13 @@ mod tests {
             body_content_hash: None,
             target_fingerprint: target_fingerprint.map(str::to_owned),
         };
-        let idempotency_key = InterventionRequestedPayload::idempotency_key_for_work_object(
+        let idempotency_key = InputRequestOpenedPayload::idempotency_key_for_work_object(
             task_attempt_id,
             WorkObjectType::TaskAttempt,
             source_key,
         );
         let mut event = ShoreEvent::new(
-            EventType::InterventionRequested,
+            EventType::InputRequestOpened,
             idempotency_key,
             target,
             Writer::shore_local_reviewer("test"),
@@ -2824,9 +2824,9 @@ mod tests {
 
     #[allow(clippy::too_many_arguments)]
     fn user_resolution_event_with_fingerprint(
-        intervention_id: &InterventionId,
-        resolution_id: &InterventionResolutionId,
-        outcome: InterventionResolutionOutcome,
+        input_request_id: &InputRequestId,
+        resolution_id: &InputRequestResponseId,
+        outcome: InputRequestResponseOutcome,
         assertion_mode: AssertionMode,
         writer_role: WriterRole,
         occurred_at: &str,
@@ -2837,9 +2837,9 @@ mod tests {
             WorkObjectId::new("task-attempt:sha256:ta"),
             WorkObjectType::TaskAttempt,
         );
-        let payload = InterventionResolvedPayload {
-            intervention_resolution_id: resolution_id.clone(),
-            intervention_id: intervention_id.clone(),
+        let payload = InputRequestRespondedPayload {
+            input_request_response_id: resolution_id.clone(),
+            input_request_id: input_request_id.clone(),
             outcome,
             reason: None,
             reason_artifact_path: None,
@@ -2848,7 +2848,7 @@ mod tests {
             target_fingerprint: target_fingerprint.map(str::to_owned),
         };
         let idempotency_key =
-            InterventionResolvedPayload::idempotency_key(intervention_id, resolution_id.as_str());
+            InputRequestRespondedPayload::idempotency_key(input_request_id, resolution_id.as_str());
         let writer = Writer {
             actor_id: ActorId::new("actor:claude_code:user"),
             role: writer_role,
@@ -2858,7 +2858,7 @@ mod tests {
             },
         };
         let mut event = ShoreEvent::new(
-            EventType::InterventionResolved,
+            EventType::InputRequestResponded,
             idempotency_key,
             target,
             writer,
@@ -2882,8 +2882,8 @@ mod tests {
         let session_id = SessionId::new("session:claude:uuid-1");
         let cp_a = CheckpointId::new("checkpoint:sha256:cp-a");
         let cp_b = CheckpointId::new("checkpoint:sha256:cp-b");
-        let intervention_id = InterventionId::new("intervention:sha256:1");
-        let resolution_id = InterventionResolutionId::new("intervention-resolution:sha256:r");
+        let input_request_id = InputRequestId::new("input-request:sha256:1");
+        let resolution_id = InputRequestResponseId::new("input-request-response:sha256:r");
 
         let mut events = vec![task_attempt_event(
             &task_attempt_id,
@@ -2903,7 +2903,7 @@ mod tests {
         events.push(task_intervention_event_with_target_and_fingerprint(
             &task_attempt_id,
             &session_id,
-            &intervention_id,
+            &input_request_id,
             "source:stale-fp",
             "2026-05-18T00:00:02Z",
             TargetRef::Task(TaskTargetRef::Checkpoint {
@@ -2922,9 +2922,9 @@ mod tests {
             Some(FP_B),
         ));
         events.push(user_resolution_event_with_fingerprint(
-            &intervention_id,
+            &input_request_id,
             &resolution_id,
-            InterventionResolutionOutcome::Approved,
+            InputRequestResponseOutcome::Approved,
             AssertionMode::Operative,
             WriterRole::User,
             "2026-05-18T00:00:04Z",
@@ -2970,8 +2970,8 @@ mod tests {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
         let session_id = SessionId::new("session:claude:uuid-1");
         let cp_a = CheckpointId::new("checkpoint:sha256:cp-a");
-        let intervention_id = InterventionId::new("intervention:sha256:1");
-        let resolution_id = InterventionResolutionId::new("intervention-resolution:sha256:r");
+        let input_request_id = InputRequestId::new("input-request:sha256:1");
+        let resolution_id = InputRequestResponseId::new("input-request-response:sha256:r");
 
         let mut events = vec![task_attempt_event(
             &task_attempt_id,
@@ -2991,7 +2991,7 @@ mod tests {
         events.push(task_intervention_event_with_target_and_fingerprint(
             &task_attempt_id,
             &session_id,
-            &intervention_id,
+            &input_request_id,
             "source:fresh-fp",
             "2026-05-18T00:00:02Z",
             TargetRef::Task(TaskTargetRef::Checkpoint {
@@ -3001,9 +3001,9 @@ mod tests {
             Some(FP_A),
         ));
         events.push(user_resolution_event_with_fingerprint(
-            &intervention_id,
+            &input_request_id,
             &resolution_id,
-            InterventionResolutionOutcome::Approved,
+            InputRequestResponseOutcome::Approved,
             AssertionMode::Operative,
             WriterRole::User,
             "2026-05-18T00:00:03Z",
@@ -3032,7 +3032,7 @@ mod tests {
     #[test]
     fn agent_resumption_holds_ambiguous_when_two_distinct_resolution_facts_carry_different_target_fingerprints()
      {
-        // Two distinct resolution facts (different `intervention_resolution_id`
+        // Two distinct resolution facts (different `input_request_response_id`
         // values) on the same intervention. The two also disagree on
         // `target_fingerprint`. The Ambiguous discipline must win before any
         // freshness check fires; introducing fingerprint comparison must not
@@ -3041,9 +3041,9 @@ mod tests {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
         let session_id = SessionId::new("session:claude:uuid-1");
         let cp_a = CheckpointId::new("checkpoint:sha256:cp-a");
-        let intervention_id = InterventionId::new("intervention:sha256:1");
-        let r1 = InterventionResolutionId::new("intervention-resolution:sha256:r1");
-        let r2 = InterventionResolutionId::new("intervention-resolution:sha256:r2");
+        let input_request_id = InputRequestId::new("input-request:sha256:1");
+        let r1 = InputRequestResponseId::new("input-request-response:sha256:r1");
+        let r2 = InputRequestResponseId::new("input-request-response:sha256:r2");
 
         let mut events = vec![task_attempt_event(
             &task_attempt_id,
@@ -3063,7 +3063,7 @@ mod tests {
         events.push(task_intervention_event_with_target_and_fingerprint(
             &task_attempt_id,
             &session_id,
-            &intervention_id,
+            &input_request_id,
             "source:ambig-fp",
             "2026-05-18T00:00:02Z",
             TargetRef::Task(TaskTargetRef::Checkpoint {
@@ -3076,18 +3076,18 @@ mod tests {
         // `target_fingerprint`. Both are by the same User role at Operative
         // mode -- the disagreement is on the fingerprint, not the writer.
         events.push(user_resolution_event_with_fingerprint(
-            &intervention_id,
+            &input_request_id,
             &r1,
-            InterventionResolutionOutcome::Approved,
+            InputRequestResponseOutcome::Approved,
             AssertionMode::Operative,
             WriterRole::User,
             "2026-05-18T00:00:03Z",
             Some(FP_B),
         ));
         events.push(user_resolution_event_with_fingerprint(
-            &intervention_id,
+            &input_request_id,
             &r2,
-            InterventionResolutionOutcome::Approved,
+            InputRequestResponseOutcome::Approved,
             AssertionMode::Operative,
             WriterRole::User,
             "2026-05-18T00:00:04Z",
@@ -3127,8 +3127,8 @@ mod tests {
         let session_id = SessionId::new("session:claude:uuid-1");
         let cp_older = CheckpointId::new("checkpoint:sha256:cp-older");
         let cp_latest = CheckpointId::new("checkpoint:sha256:cp-latest");
-        let intervention_id = InterventionId::new("intervention:sha256:1");
-        let resolution_id = InterventionResolutionId::new("intervention-resolution:sha256:r");
+        let input_request_id = InputRequestId::new("input-request:sha256:1");
+        let resolution_id = InputRequestResponseId::new("input-request-response:sha256:r");
 
         let mut events = vec![task_attempt_event(
             &task_attempt_id,
@@ -3148,7 +3148,7 @@ mod tests {
         events.push(task_intervention_event_with_target_and_fingerprint(
             &task_attempt_id,
             &session_id,
-            &intervention_id,
+            &input_request_id,
             "source:fp-eq",
             "2026-05-18T00:00:02Z",
             TargetRef::Task(TaskTargetRef::Checkpoint {
@@ -3167,9 +3167,9 @@ mod tests {
             Some(FP_A),
         ));
         events.push(user_resolution_event_with_fingerprint(
-            &intervention_id,
+            &input_request_id,
             &resolution_id,
-            InterventionResolutionOutcome::Approved,
+            InputRequestResponseOutcome::Approved,
             AssertionMode::Operative,
             WriterRole::User,
             "2026-05-18T00:00:04Z",
@@ -3209,7 +3209,7 @@ mod tests {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
         let session_id = SessionId::new("session:claude:uuid-1");
         let cp_a = CheckpointId::new("checkpoint:sha256:cp-a");
-        let intervention_id = InterventionId::new("intervention:sha256:1");
+        let input_request_id = InputRequestId::new("input-request:sha256:1");
 
         let attempt = task_attempt_event_with_base_snapshot_fingerprint(
             &task_attempt_id,
@@ -3230,7 +3230,7 @@ mod tests {
         let request = task_intervention_event_with_target_and_fingerprint(
             &task_attempt_id,
             &session_id,
-            &intervention_id,
+            &input_request_id,
             "source:p2",
             "2026-05-18T00:00:02Z",
             TargetRef::Task(TaskTargetRef::Checkpoint {

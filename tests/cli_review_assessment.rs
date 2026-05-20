@@ -208,7 +208,7 @@ fn shore_review_assessment_add_records_related_facts_and_replacement() {
         "--related-observation",
         observation["observationId"].as_str().unwrap(),
         "--related-intervention",
-        intervention["interventionId"].as_str().unwrap(),
+        intervention["inputRequestId"].as_str().unwrap(),
     ]);
     assert!(
         second.status.success(),
@@ -238,7 +238,7 @@ fn shore_review_assessment_add_records_related_facts_and_replacement() {
     );
     assert_eq!(
         current["relatedInterventions"][0],
-        intervention["interventionId"]
+        intervention["inputRequestId"]
     );
 }
 

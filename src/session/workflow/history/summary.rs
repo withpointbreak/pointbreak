@@ -1,12 +1,12 @@
 use serde::Serialize;
 
 use crate::model::{
-    AssessmentId, EventId, InterventionId, InterventionResolutionId, ObservationId, ReviewEndpoint,
+    AssessmentId, EventId, InputRequestId, InputRequestResponseId, ObservationId, ReviewEndpoint,
     ReviewTargetRef, ReviewUnitId, ReviewUnitSource, RevisionId, SessionId, SnapshotId, TrackId,
 };
 use crate::session::event::{
-    EventType, ImportedNoteTarget, InterventionMode, InterventionReasonCode,
-    InterventionResolutionOutcome, ReviewAssessment, SidecarSource, Writer,
+    EventType, ImportedNoteTarget, InputRequestMode, InputRequestReasonCode,
+    InputRequestResponseOutcome, ReviewAssessment, SidecarSource, Writer,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -65,11 +65,11 @@ pub enum ReviewHistorySummary {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         supersedes: Vec<ObservationId>,
     },
-    InterventionRequested {
-        intervention_id: InterventionId,
+    InputRequestOpened {
+        input_request_id: InputRequestId,
         target: ReviewTargetRef,
-        mode: InterventionMode,
-        reason_code: InterventionReasonCode,
+        mode: InputRequestMode,
+        reason_code: InputRequestReasonCode,
         title: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         body: Option<String>,
@@ -78,10 +78,10 @@ pub enum ReviewHistorySummary {
         #[serde(skip_serializing_if = "Option::is_none")]
         body_content_hash: Option<String>,
     },
-    InterventionResolved {
-        intervention_resolution_id: InterventionResolutionId,
-        intervention_id: InterventionId,
-        outcome: InterventionResolutionOutcome,
+    InputRequestResponded {
+        input_request_response_id: InputRequestResponseId,
+        input_request_id: InputRequestId,
+        outcome: InputRequestResponseOutcome,
         #[serde(skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -104,7 +104,7 @@ pub enum ReviewHistorySummary {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         related_observations: Vec<ObservationId>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
-        related_interventions: Vec<InterventionId>,
+        related_interventions: Vec<InputRequestId>,
     },
     ReviewNoteImported {
         sidecar_source: SidecarSource,

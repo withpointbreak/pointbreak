@@ -133,7 +133,7 @@ mod tests {
         CheckpointId, ObservationId, ReviewUnitId, SessionId, TrackId, WorkObjectId, WorkObjectType,
     };
     use crate::session::event::{
-        AssertionMode, EventPayload, EventTarget, EventType, InterventionRequestedPayload,
+        AssertionMode, EventPayload, EventTarget, EventType, InputRequestOpenedPayload,
         ReviewObservationRecordedPayload, ShoreEvent, Writer,
     };
 
@@ -209,7 +209,7 @@ mod tests {
             WorkObjectType::TaskAttempt,
             "source-1",
         );
-        let intervention_key = InterventionRequestedPayload::idempotency_key_for_work_object(
+        let intervention_key = InputRequestOpenedPayload::idempotency_key_for_work_object(
             &WorkObjectId::new("shared"),
             WorkObjectType::TaskAttempt,
             "source-1",

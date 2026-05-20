@@ -2,7 +2,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
-use shore::model::{AssessmentId, InterventionId, ObservationId, ReviewTargetRef, ReviewUnitId};
+use shore::model::{AssessmentId, InputRequestId, ObservationId, ReviewTargetRef, ReviewUnitId};
 use shore::session::event::ReviewAssessment;
 use shore::session::{
     AssessmentAddOptions, AssessmentAddResult, AssessmentShowFilters, AssessmentShowOptions,
@@ -286,8 +286,8 @@ pub(super) fn assessment_add_options(
     for observation_id in args.related_observations {
         options = options.related_observation(ObservationId::new(observation_id));
     }
-    for intervention_id in args.related_interventions {
-        options = options.related_intervention(InterventionId::new(intervention_id));
+    for input_request_id in args.related_interventions {
+        options = options.related_intervention(InputRequestId::new(input_request_id));
     }
     if let Some(idempotency_key) = args.idempotency_key {
         options = options.with_idempotency_key(idempotency_key);
@@ -331,9 +331,9 @@ pub(super) fn assessment_target(
             observation_id.clone(),
         )));
     }
-    if let Some(intervention_id) = intervention {
-        return Ok(AssessmentTargetSelector::intervention(InterventionId::new(
-            intervention_id.clone(),
+    if let Some(input_request_id) = intervention {
+        return Ok(AssessmentTargetSelector::intervention(InputRequestId::new(
+            input_request_id.clone(),
         )));
     }
     if let Some(assessment_id) = target_assessment {

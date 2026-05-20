@@ -127,7 +127,7 @@ mod tests {
     use crate::canonical_hash::sha256_json_prefixed;
     use crate::model::{DiffSnapshot, ReviewId, ReviewUnitId, SnapshotId};
     use crate::session::event::{
-        InterventionReasonCode, InterventionResolutionOutcome, ReviewAssessment,
+        InputRequestReasonCode, InputRequestResponseOutcome, ReviewAssessment,
     };
     use crate::session::{
         AssessmentAddOptions, AssessmentShowOptions, CaptureOptions, CurrentAssessmentStatus,
@@ -371,12 +371,12 @@ mod tests {
             InterventionRequestOptions::new(repo.path())
                 .with_track("agent:codex")
                 .with_title("Need decision")
-                .with_reason_code(InterventionReasonCode::ManualDecisionRequired),
+                .with_reason_code(InputRequestReasonCode::ManualDecisionRequired),
         )
         .unwrap();
         resolve_intervention(
-            InterventionResolveOptions::new(repo.path(), request.intervention_id.clone())
-                .with_outcome(InterventionResolutionOutcome::Approved)
+            InterventionResolveOptions::new(repo.path(), request.input_request_id.clone())
+                .with_outcome(InputRequestResponseOutcome::Approved)
                 .with_reason("ok"),
         )
         .unwrap();
@@ -384,7 +384,7 @@ mod tests {
         let unit = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
 
         assert_eq!(unit.interventions.len(), 1);
-        assert_eq!(unit.interventions[0].id, request.intervention_id);
+        assert_eq!(unit.interventions[0].id, request.input_request_id);
         assert_eq!(unit.interventions[0].status, InterventionStatus::Resolved);
         assert_eq!(unit.summary.intervention_count, 1);
         assert!(
@@ -728,7 +728,7 @@ mod tests {
                 .with_track("agent:codex")
                 .with_title("Same decision")
                 .with_body("same body")
-                .with_reason_code(InterventionReasonCode::ManualDecisionRequired)
+                .with_reason_code(InputRequestReasonCode::ManualDecisionRequired)
                 .with_idempotency_key("intervention-retry-a"),
         )
         .unwrap();
@@ -737,12 +737,12 @@ mod tests {
                 .with_track("agent:codex")
                 .with_title("Same decision")
                 .with_body("same body")
-                .with_reason_code(InterventionReasonCode::ManualDecisionRequired)
+                .with_reason_code(InputRequestReasonCode::ManualDecisionRequired)
                 .with_idempotency_key("intervention-retry-b"),
         )
         .unwrap();
 
-        assert_eq!(first.intervention_id, second.intervention_id);
+        assert_eq!(first.input_request_id, second.input_request_id);
     }
 
     fn add_ambiguous_intervention_resolutions(repo: &TestRepo) {
@@ -750,17 +750,17 @@ mod tests {
             InterventionRequestOptions::new(repo.path())
                 .with_track("agent:codex")
                 .with_title("Ambiguous")
-                .with_reason_code(InterventionReasonCode::ManualDecisionRequired),
+                .with_reason_code(InputRequestReasonCode::ManualDecisionRequired),
         )
         .unwrap();
         resolve_intervention(
-            InterventionResolveOptions::new(repo.path(), request.intervention_id.clone())
-                .with_outcome(InterventionResolutionOutcome::Approved),
+            InterventionResolveOptions::new(repo.path(), request.input_request_id.clone())
+                .with_outcome(InputRequestResponseOutcome::Approved),
         )
         .unwrap();
         resolve_intervention(
-            InterventionResolveOptions::new(repo.path(), request.intervention_id)
-                .with_outcome(InterventionResolutionOutcome::Rejected),
+            InterventionResolveOptions::new(repo.path(), request.input_request_id)
+                .with_outcome(InputRequestResponseOutcome::Rejected),
         )
         .unwrap();
     }

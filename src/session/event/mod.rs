@@ -6,7 +6,7 @@ use crate::model::EventId;
 
 mod assertion;
 mod assessment;
-mod intervention;
+mod input_request;
 mod kind;
 mod observation;
 mod payload;
@@ -18,9 +18,9 @@ mod writer;
 
 pub use assertion::AssertionMode;
 pub use assessment::{ReviewAssessment, ReviewAssessmentRecordedPayload};
-pub use intervention::{
-    InterventionMode, InterventionReasonCode, InterventionRequestedPayload,
-    InterventionResolutionOutcome, InterventionResolvedPayload,
+pub use input_request::{
+    InputRequestMode, InputRequestOpenedPayload, InputRequestReasonCode,
+    InputRequestRespondedPayload, InputRequestResponseOutcome,
 };
 pub use kind::EventType;
 pub use observation::ReviewObservationRecordedPayload;
@@ -159,7 +159,7 @@ mod tests {
     use super::*;
     use crate::error::ShoreError;
     use crate::model::{
-        AssessmentId, InterventionId, InterventionResolutionId, ObservationId, ReviewEndpoint,
+        AssessmentId, InputRequestId, InputRequestResponseId, ObservationId, ReviewEndpoint,
         ReviewTargetRef, ReviewUnitId, ReviewUnitSource, RevisionId, SessionId, Side, SnapshotId,
         TargetRef, TrackId, WorkUnitId, WorktreeCaptureMode,
     };
@@ -329,26 +329,26 @@ mod tests {
     }
 
     #[test]
-    fn intervention_event_types_serialize_as_snake_case() {
+    fn input_request_event_types_serialize_as_snake_case() {
         assert_eq!(
-            serde_json::to_string(&EventType::InterventionRequested).unwrap(),
-            "\"intervention_requested\""
+            serde_json::to_string(&EventType::InputRequestOpened).unwrap(),
+            "\"input_request_opened\""
         );
         assert_eq!(
-            serde_json::to_string(&EventType::InterventionResolved).unwrap(),
-            "\"intervention_resolved\""
+            serde_json::to_string(&EventType::InputRequestResponded).unwrap(),
+            "\"input_request_responded\""
         );
     }
 
     #[test]
-    fn intervention_requested_payload_round_trips_and_has_stable_key() {
-        let payload = InterventionRequestedPayload {
-            intervention_id: InterventionId::new("intervention:sha256:abc"),
+    fn input_request_opened_payload_round_trips_and_has_stable_key() {
+        let payload = InputRequestOpenedPayload {
+            input_request_id: InputRequestId::new("input-request:sha256:abc"),
             target: ReviewTargetRef::ReviewUnit {
                 review_unit_id: ReviewUnitId::new("review-unit:sha256:unit"),
             },
-            mode: InterventionMode::Blocking,
-            reason_code: InterventionReasonCode::ManualDecisionRequired,
+            mode: InputRequestMode::Blocking,
+            reason_code: InputRequestReasonCode::ManualDecisionRequired,
             title: "Need a decision".to_owned(),
             body: Some("Which path should win?".to_owned()),
             body_artifact_path: None,
@@ -358,27 +358,27 @@ mod tests {
         };
 
         let json = serde_json::to_value(&payload).unwrap();
-        let round: InterventionRequestedPayload = serde_json::from_value(json).unwrap();
+        let round: InputRequestOpenedPayload = serde_json::from_value(json).unwrap();
 
-        assert_eq!(round.mode, InterventionMode::Blocking);
+        assert_eq!(round.mode, InputRequestMode::Blocking);
         assert_eq!(
-            InterventionRequestedPayload::idempotency_key(
+            InputRequestOpenedPayload::idempotency_key(
                 &ReviewUnitId::new("review-unit:sha256:unit"),
                 &TrackId::new("agent:codex"),
-                "intervention:sha256:abc"
+                "input-request:sha256:abc"
             ),
-            "intervention_requested:review-unit:sha256:unit:agent:codex:intervention:sha256:abc"
+            "input_request_opened:review-unit:sha256:unit:agent:codex:input-request:sha256:abc"
         );
     }
 
     #[test]
-    fn intervention_resolved_payload_round_trips_and_has_stable_key() {
-        let payload = InterventionResolvedPayload {
-            intervention_resolution_id: InterventionResolutionId::new(
-                "intervention-resolution:sha256:def",
+    fn input_request_responded_payload_round_trips_and_has_stable_key() {
+        let payload = InputRequestRespondedPayload {
+            input_request_response_id: InputRequestResponseId::new(
+                "input-request-response:sha256:def",
             ),
-            intervention_id: InterventionId::new("intervention:sha256:abc"),
-            outcome: InterventionResolutionOutcome::Approved,
+            input_request_id: InputRequestId::new("input-request:sha256:abc"),
+            outcome: InputRequestResponseOutcome::Approved,
             reason: Some("Approved locally".to_owned()),
             reason_artifact_path: None,
             reason_byte_size: Some(16),
@@ -387,16 +387,42 @@ mod tests {
         };
 
         let json = serde_json::to_value(&payload).unwrap();
-        let round: InterventionResolvedPayload = serde_json::from_value(json).unwrap();
+        let round: InputRequestRespondedPayload = serde_json::from_value(json).unwrap();
 
-        assert_eq!(round.outcome, InterventionResolutionOutcome::Approved);
+        assert_eq!(round.outcome, InputRequestResponseOutcome::Approved);
         assert_eq!(
-            InterventionResolvedPayload::idempotency_key(
-                &InterventionId::new("intervention:sha256:abc"),
-                "intervention-resolution:sha256:def"
+            InputRequestRespondedPayload::idempotency_key(
+                &InputRequestId::new("input-request:sha256:abc"),
+                "input-request-response:sha256:def"
             ),
-            "intervention_resolved:intervention:sha256:abc:intervention-resolution:sha256:def"
+            "input_request_responded:input-request:sha256:abc:input-request-response:sha256:def"
         );
+    }
+
+    #[test]
+    fn input_request_opened_payload_uses_expected_wire_keys() {
+        let payload = InputRequestOpenedPayload {
+            input_request_id: InputRequestId::new("input-request:sha256:abc"),
+            target: ReviewTargetRef::ReviewUnit {
+                review_unit_id: ReviewUnitId::new("review-unit:sha256:unit"),
+            },
+            mode: InputRequestMode::Blocking,
+            reason_code: InputRequestReasonCode::ManualDecisionRequired,
+            title: "Need a decision".to_owned(),
+            body: Some("Which path should win?".to_owned()),
+            body_artifact_path: None,
+            body_byte_size: Some(22),
+            body_content_hash: Some("sha256:body".to_owned()),
+            target_fingerprint: None,
+        };
+
+        let json = serde_json::to_value(&payload).unwrap();
+
+        assert_eq!(json["inputRequestId"], "input-request:sha256:abc");
+        assert_eq!(json["target"]["kind"], "review_unit");
+        assert_eq!(json["mode"], "blocking");
+        assert_eq!(json["reasonCode"], "manual_decision_required");
+        assert!(json.get("interventionId").is_none());
     }
 
     fn review_unit_captured_event_with_artifact_hash(

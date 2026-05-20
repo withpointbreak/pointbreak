@@ -6,9 +6,9 @@ use serde_json::json;
 use super::target::{InterventionTargetSelector, resolve_intervention_target};
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::error::{Result, ShoreError};
-use crate::model::{EventId, InterventionId, ReviewTargetRef, ReviewUnitId, TargetRef, TrackId};
+use crate::model::{EventId, InputRequestId, ReviewTargetRef, ReviewUnitId, TargetRef, TrackId};
 use crate::session::event::{
-    EventTarget, EventType, InterventionMode, InterventionReasonCode, InterventionRequestedPayload,
+    EventTarget, EventType, InputRequestMode, InputRequestOpenedPayload, InputRequestReasonCode,
     ShoreEvent,
 };
 use crate::session::observation::{
@@ -27,8 +27,8 @@ pub struct InterventionRequestOptions {
     title: Option<String>,
     body: Option<String>,
     target: InterventionTargetSelector,
-    mode: InterventionMode,
-    reason_code: Option<InterventionReasonCode>,
+    mode: InputRequestMode,
+    reason_code: Option<InputRequestReasonCode>,
     idempotency_key: Option<String>,
 }
 
@@ -41,7 +41,7 @@ impl InterventionRequestOptions {
             title: None,
             body: None,
             target: InterventionTargetSelector::review_unit(),
-            mode: InterventionMode::Blocking,
+            mode: InputRequestMode::Blocking,
             reason_code: None,
             idempotency_key: None,
         }
@@ -72,12 +72,12 @@ impl InterventionRequestOptions {
         self
     }
 
-    pub fn with_mode(mut self, mode: InterventionMode) -> Self {
+    pub fn with_mode(mut self, mode: InputRequestMode) -> Self {
         self.mode = mode;
         self
     }
 
-    pub fn with_reason_code(mut self, reason_code: InterventionReasonCode) -> Self {
+    pub fn with_reason_code(mut self, reason_code: InputRequestReasonCode) -> Self {
         self.reason_code = Some(reason_code);
         self
     }
@@ -91,12 +91,12 @@ impl InterventionRequestOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InterventionRequestResult {
     pub review_unit_id: ReviewUnitId,
-    pub intervention_id: InterventionId,
+    pub input_request_id: InputRequestId,
     pub event_id: EventId,
     pub track_id: TrackId,
     pub target: ReviewTargetRef,
-    pub mode: InterventionMode,
-    pub reason_code: InterventionReasonCode,
+    pub mode: InputRequestMode,
+    pub reason_code: InputRequestReasonCode,
     pub body_content_hash: Option<String>,
     pub events_created: usize,
     pub events_existing: usize,
@@ -135,7 +135,7 @@ pub fn request_intervention(
         .map(|body| format!("sha256:{}", sha256_bytes_hex(body.as_bytes())));
     let (body, body_artifact_path, body_artifact_bytes, body_byte_size) =
         staged_body(options.body.as_deref())?;
-    let intervention_id = build_intervention_id(InterventionIdMaterial {
+    let input_request_id = build_intervention_id(InputRequestIdMaterial {
         review_unit_id: &resolved.review_unit_id,
         track_id: &track_id,
         target: &target,
@@ -148,12 +148,9 @@ pub fn request_intervention(
     let source_key = options
         .idempotency_key
         .as_deref()
-        .unwrap_or_else(|| intervention_id.as_str());
-    let idempotency_key = InterventionRequestedPayload::idempotency_key(
-        &resolved.review_unit_id,
-        &track_id,
-        source_key,
-    );
+        .unwrap_or_else(|| input_request_id.as_str());
+    let idempotency_key =
+        InputRequestOpenedPayload::idempotency_key(&resolved.review_unit_id, &track_id, source_key);
 
     if !event_store.event_exists(&idempotency_key)?
         && let (Some(artifact_path), Some(bytes)) =
@@ -165,7 +162,7 @@ pub fn request_intervention(
     }
 
     let event = ShoreEvent::new(
-        EventType::InterventionRequested,
+        EventType::InputRequestOpened,
         idempotency_key,
         EventTarget {
             session_id: resolved.session_id,
@@ -179,8 +176,8 @@ pub fn request_intervention(
             subject: Some(TargetRef::Review(target.clone())),
         },
         writer,
-        InterventionRequestedPayload {
-            intervention_id: intervention_id.clone(),
+        InputRequestOpenedPayload {
+            input_request_id: input_request_id.clone(),
             target: target.clone(),
             mode: options.mode,
             reason_code,
@@ -199,7 +196,7 @@ pub fn request_intervention(
     let outcome = event_store.record_event_once(&event)?;
     let (events_created, events_existing) = match outcome {
         EventWriteOutcome::Created => {
-            events_created_by_type.insert("intervention_requested".to_owned(), 1);
+            events_created_by_type.insert("input_request_opened".to_owned(), 1);
             (1, 0)
         }
         EventWriteOutcome::Existing => (0, 1),
@@ -210,7 +207,7 @@ pub fn request_intervention(
 
     Ok(InterventionRequestResult {
         review_unit_id: resolved.review_unit_id,
-        intervention_id,
+        input_request_id,
         event_id,
         track_id,
         target,
@@ -224,18 +221,18 @@ pub fn request_intervention(
     })
 }
 
-struct InterventionIdMaterial<'a> {
+struct InputRequestIdMaterial<'a> {
     review_unit_id: &'a ReviewUnitId,
     track_id: &'a TrackId,
     target: &'a ReviewTargetRef,
-    mode: InterventionMode,
-    reason_code: InterventionReasonCode,
+    mode: InputRequestMode,
+    reason_code: InputRequestReasonCode,
     title: &'a str,
     body_content_hash: Option<&'a str>,
     writer_actor_id: &'a str,
 }
 
-fn build_intervention_id(material: InterventionIdMaterial<'_>) -> Result<InterventionId> {
+fn build_intervention_id(material: InputRequestIdMaterial<'_>) -> Result<InputRequestId> {
     let digest = sha256_json_prefixed(&json!({
         "reviewUnitId": material.review_unit_id.as_str(),
         "trackId": material.track_id.as_str(),
@@ -246,5 +243,5 @@ fn build_intervention_id(material: InterventionIdMaterial<'_>) -> Result<Interve
         "bodyContentHash": material.body_content_hash,
         "writerActorId": material.writer_actor_id,
     }))?;
-    Ok(InterventionId::new(format!("intervention:{digest}")))
+    Ok(InputRequestId::new(format!("input-request:{digest}")))
 }

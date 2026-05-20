@@ -36,14 +36,14 @@ mod tests {
     use super::summary::ReviewHistorySummary;
     use super::*;
     use crate::model::{
-        AssessmentId, EventId, InterventionId, InterventionResolutionId, ObservationId,
+        AssessmentId, EventId, InputRequestId, InputRequestResponseId, ObservationId,
         ReviewEndpoint, ReviewTargetRef, ReviewUnitId, ReviewUnitSource, RevisionId, SessionId,
         Side, SnapshotId, TargetRef, TrackId, WorkUnitId, WorktreeCaptureMode,
     };
     use crate::session::event::{
-        AssertionMode, EventTarget, EventType, ImportedNoteTarget, InterventionMode,
-        InterventionReasonCode, InterventionRequestedPayload, InterventionResolutionOutcome,
-        InterventionResolvedPayload, ReviewAssessment, ReviewAssessmentRecordedPayload,
+        AssertionMode, EventTarget, EventType, ImportedNoteTarget, InputRequestMode,
+        InputRequestOpenedPayload, InputRequestReasonCode, InputRequestRespondedPayload,
+        InputRequestResponseOutcome, ReviewAssessment, ReviewAssessmentRecordedPayload,
         ReviewInitializedPayload, ReviewNoteImportedPayload, ReviewObservationRecordedPayload,
         ReviewUnitCapturedPayload, ShoreEvent, SidecarSource, Writer,
     };
@@ -105,13 +105,13 @@ mod tests {
             ),
             (
                 intervention_requested_event(),
-                EventType::InterventionRequested,
-                "intervention_requested",
+                EventType::InputRequestOpened,
+                "input_request_opened",
             ),
             (
                 intervention_resolved_event(),
-                EventType::InterventionResolved,
-                "intervention_resolved",
+                EventType::InputRequestResponded,
+                "input_request_responded",
             ),
             (
                 review_note_imported_event(),
@@ -381,11 +381,10 @@ mod tests {
                 && entry["summary"]["summary"] == "ship it"
         }));
         assert!(entries.iter().any(|entry| {
-            entry["summary"]["kind"] == "intervention_requested"
-                && entry["summary"]["body"] == "body"
+            entry["summary"]["kind"] == "input_request_opened" && entry["summary"]["body"] == "body"
         }));
         assert!(entries.iter().any(|entry| {
-            entry["summary"]["kind"] == "intervention_resolved"
+            entry["summary"]["kind"] == "input_request_responded"
                 && entry["summary"]["reason"] == "approved"
         }));
         assert!(entries.iter().any(|entry| {
@@ -612,7 +611,7 @@ mod tests {
             summary_content_hash: Some("sha256:summary".to_owned()),
             replaces_assessment_ids: vec![],
             related_observation_ids: vec![ObservationId::new("obs:sha256:one")],
-            related_intervention_ids: vec![InterventionId::new("intervention:sha256:one")],
+            related_intervention_ids: vec![InputRequestId::new("input-request:sha256:one")],
         };
         tracked_event(
             EventType::ReviewAssessmentRecorded,
@@ -651,13 +650,13 @@ mod tests {
     }
 
     fn intervention_requested_event() -> ShoreEvent {
-        let payload = InterventionRequestedPayload {
-            intervention_id: InterventionId::new("intervention:sha256:one"),
+        let payload = InputRequestOpenedPayload {
+            input_request_id: InputRequestId::new("input-request:sha256:one"),
             target: ReviewTargetRef::ReviewUnit {
                 review_unit_id: review_unit_id("one"),
             },
-            mode: InterventionMode::Blocking,
-            reason_code: InterventionReasonCode::ManualDecisionRequired,
+            mode: InputRequestMode::Blocking,
+            reason_code: InputRequestReasonCode::ManualDecisionRequired,
             title: "Need decision".to_owned(),
             body: Some("body".to_owned()),
             body_artifact_path: None,
@@ -666,7 +665,7 @@ mod tests {
             target_fingerprint: None,
         };
         tracked_event(
-            EventType::InterventionRequested,
+            EventType::InputRequestOpened,
             "intervention:request",
             "human:kevin",
             payload,
@@ -675,12 +674,12 @@ mod tests {
     }
 
     fn intervention_resolved_event() -> ShoreEvent {
-        let payload = InterventionResolvedPayload {
-            intervention_resolution_id: InterventionResolutionId::new(
-                "intervention-resolution:sha256:one",
+        let payload = InputRequestRespondedPayload {
+            input_request_response_id: InputRequestResponseId::new(
+                "input-request-response:sha256:one",
             ),
-            intervention_id: InterventionId::new("intervention:sha256:one"),
-            outcome: InterventionResolutionOutcome::Approved,
+            input_request_id: InputRequestId::new("input-request:sha256:one"),
+            outcome: InputRequestResponseOutcome::Approved,
             reason: Some("approved".to_owned()),
             reason_artifact_path: None,
             reason_byte_size: Some(8),
@@ -688,7 +687,7 @@ mod tests {
             target_fingerprint: None,
         };
         tracked_event(
-            EventType::InterventionResolved,
+            EventType::InputRequestResponded,
             "intervention:resolved",
             "human:kevin",
             payload,

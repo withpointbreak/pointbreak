@@ -76,12 +76,10 @@ impl EventStore {
             event_type: &'a str,
         }
         let probe: EventTypeProbe<'_> = serde_json::from_slice(&bytes)?;
-        if probe.event_type == "review_disposition_recorded" {
+        if let Some(migration_hint) = legacy_event_migration_hint(probe.event_type) {
             return Err(ShoreError::UnsupportedEventType {
                 event_type: probe.event_type.to_owned(),
-                migration_hint:
-                    "review_disposition_recorded is no longer supported; see docs/assessment-model.md#legacy-disposition-events"
-                        .to_owned(),
+                migration_hint: migration_hint.to_owned(),
             });
         }
         let event: ShoreEvent = serde_json::from_slice(&bytes)?;
@@ -165,6 +163,18 @@ fn is_event_file(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.len() == 69 && name.ends_with(".json"))
+}
+
+fn legacy_event_migration_hint(event_type: &str) -> Option<&'static str> {
+    match event_type {
+        "review_disposition_recorded" => Some(
+            "review_disposition_recorded is no longer supported; see docs/assessment-model.md#legacy-disposition-events",
+        ),
+        "intervention_requested" | "intervention_resolved" => Some(
+            "legacy intervention events are no longer supported; see docs/input-request-model.md#legacy-intervention-events",
+        ),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -282,6 +292,20 @@ mod tests {
     }
 
     #[test]
+    fn legacy_intervention_events_return_typed_unsupported_error_after_input_request_rename() {
+        for legacy_event_type in ["intervention_requested", "intervention_resolved"] {
+            let err =
+                read_legacy_event(legacy_event_type).expect_err("legacy event must be rejected");
+
+            assert!(matches!(
+                err,
+                ShoreError::UnsupportedEventType { ref event_type, .. }
+                    if event_type == legacy_event_type
+            ));
+        }
+    }
+
+    #[test]
     fn read_event_rejects_payload_hash_mismatch() {
         let (_root, store) = temp_event_store();
         let event = review_initialized_event();
@@ -351,6 +375,19 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = EventStore::open(root.path().join(".shore"));
         (root, store)
+    }
+
+    fn read_legacy_event(event_type: &str) -> Result<ShoreEvent> {
+        let (_root, store) = temp_event_store();
+        let event = review_initialized_event();
+        let path = store.event_path_for_idempotency_key(&event.idempotency_key);
+        fs::create_dir_all(store.events_dir()).unwrap();
+
+        let mut json = serde_json::to_value(event)?;
+        json["eventType"] = serde_json::json!(event_type);
+        fs::write(&path, serde_json::to_vec(&json)?).unwrap();
+
+        store.read_event(&path)
     }
 
     fn review_initialized_event() -> ShoreEvent {

@@ -4,7 +4,7 @@ use std::path::Path;
 use super::util::sorted_unique;
 use crate::error::{Result, ShoreError};
 use crate::model::{
-    AssessmentId, EventId, InterventionId, ObservationId, ReviewTargetRef, TrackId,
+    AssessmentId, EventId, InputRequestId, ObservationId, ReviewTargetRef, TrackId,
 };
 use crate::session::body_artifact::load_body_artifact;
 use crate::session::event::{
@@ -73,7 +73,7 @@ pub struct AssessmentView {
     pub status: AssessmentRecordStatus,
     pub replaces: Vec<AssessmentId>,
     pub related_observations: Vec<ObservationId>,
-    pub related_interventions: Vec<InterventionId>,
+    pub related_interventions: Vec<InputRequestId>,
     pub created_at: String,
     pub writer: Writer,
 }

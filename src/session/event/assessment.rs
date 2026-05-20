@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::kind::EventType;
 use super::payload::EventPayload;
 use crate::model::{
-    AssessmentId, InterventionId, ObservationId, ReviewTargetRef, ReviewUnitId, TrackId,
+    AssessmentId, InputRequestId, ObservationId, ReviewTargetRef, ReviewUnitId, TrackId,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -34,7 +34,7 @@ pub struct ReviewAssessmentRecordedPayload {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub related_observation_ids: Vec<ObservationId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub related_intervention_ids: Vec<InterventionId>,
+    pub related_intervention_ids: Vec<InputRequestId>,
 }
 
 impl ReviewAssessmentRecordedPayload {

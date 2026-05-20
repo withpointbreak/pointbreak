@@ -5,12 +5,12 @@ use serde::{Deserialize, Serialize};
 use super::freshness::event_set_hash_for_events;
 use crate::error::{Result, ShoreError};
 use crate::model::{
-    AssessmentId, EventId, InterventionId, InterventionResolutionId, ObservationId, ReviewUnitId,
+    AssessmentId, EventId, InputRequestId, InputRequestResponseId, ObservationId, ReviewUnitId,
     RevisionId, SessionId, SnapshotId, WorkUnitId,
 };
 use crate::session::EventWriteOutcome;
 use crate::session::event::{
-    EventType, InterventionMode, InterventionRequestedPayload, InterventionResolvedPayload,
+    EventType, InputRequestMode, InputRequestOpenedPayload, InputRequestRespondedPayload,
     ReviewAssessmentRecordedPayload, ReviewObservationRecordedPayload, ReviewUnitCapturedPayload,
     ShoreEvent,
 };
@@ -133,10 +133,10 @@ struct StateReducer {
     note_count: usize,
     observation_events: BTreeMap<ObservationId, BTreeSet<EventId>>,
     assessment_events: BTreeMap<AssessmentId, BTreeSet<EventId>>,
-    intervention_modes: BTreeMap<InterventionId, InterventionMode>,
-    intervention_request_events: BTreeMap<InterventionId, BTreeSet<EventId>>,
-    intervention_resolution_events: BTreeMap<InterventionResolutionId, BTreeSet<EventId>>,
-    resolved_intervention_ids: BTreeSet<InterventionId>,
+    intervention_modes: BTreeMap<InputRequestId, InputRequestMode>,
+    intervention_request_events: BTreeMap<InputRequestId, BTreeSet<EventId>>,
+    intervention_resolution_events: BTreeMap<InputRequestResponseId, BTreeSet<EventId>>,
+    resolved_intervention_ids: BTreeSet<InputRequestId>,
 }
 
 impl Default for StateReducer {
@@ -175,8 +175,8 @@ impl StateReducer {
             EventType::ReviewUnitCaptured => self.apply_review_unit_captured(event)?,
             EventType::ReviewObservationRecorded => self.apply_observation_recorded(event)?,
             EventType::ReviewAssessmentRecorded => self.apply_assessment_recorded(event)?,
-            EventType::InterventionRequested => self.apply_intervention_requested(event)?,
-            EventType::InterventionResolved => self.apply_intervention_resolved(event)?,
+            EventType::InputRequestOpened => self.apply_intervention_requested(event)?,
+            EventType::InputRequestResponded => self.apply_intervention_resolved(event)?,
             EventType::ReviewNoteImported => {
                 self.note_count += 1;
             }
@@ -231,26 +231,26 @@ impl StateReducer {
     }
 
     fn apply_intervention_requested(&mut self, event: &ShoreEvent) -> Result<()> {
-        let payload: InterventionRequestedPayload = serde_json::from_value(event.payload.clone())?;
-        let intervention_id = payload.intervention_id;
+        let payload: InputRequestOpenedPayload = serde_json::from_value(event.payload.clone())?;
+        let input_request_id = payload.input_request_id;
         self.intervention_request_events
-            .entry(intervention_id.clone())
+            .entry(input_request_id.clone())
             .or_default()
             .insert(event.event_id.clone());
         self.intervention_modes
-            .entry(intervention_id)
+            .entry(input_request_id)
             .or_insert(payload.mode);
         Ok(())
     }
 
     fn apply_intervention_resolved(&mut self, event: &ShoreEvent) -> Result<()> {
-        let payload: InterventionResolvedPayload = serde_json::from_value(event.payload.clone())?;
+        let payload: InputRequestRespondedPayload = serde_json::from_value(event.payload.clone())?;
         self.intervention_resolution_events
-            .entry(payload.intervention_resolution_id)
+            .entry(payload.input_request_response_id)
             .or_default()
             .insert(event.event_id.clone());
         self.resolved_intervention_ids
-            .insert(payload.intervention_id);
+            .insert(payload.input_request_id);
         Ok(())
     }
 
@@ -276,14 +276,14 @@ impl StateReducer {
         let open_intervention_count = self
             .intervention_modes
             .keys()
-            .filter(|intervention_id| !self.resolved_intervention_ids.contains(*intervention_id))
+            .filter(|input_request_id| !self.resolved_intervention_ids.contains(*input_request_id))
             .count();
         let open_blocking_intervention_count = self
             .intervention_modes
             .iter()
-            .filter(|(intervention_id, mode)| {
-                **mode == InterventionMode::Blocking
-                    && !self.resolved_intervention_ids.contains(*intervention_id)
+            .filter(|(input_request_id, mode)| {
+                **mode == InputRequestMode::Blocking
+                    && !self.resolved_intervention_ids.contains(*input_request_id)
             })
             .count();
 
@@ -301,7 +301,7 @@ impl StateReducer {
             "intervention request",
             self.intervention_request_events
                 .iter()
-                .map(|(intervention_id, event_ids)| (intervention_id.as_str(), event_ids)),
+                .map(|(input_request_id, event_ids)| (input_request_id.as_str(), event_ids)),
         );
         append_duplicate_semantic_diagnostics(
             &mut diagnostics,

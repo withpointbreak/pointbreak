@@ -6,9 +6,9 @@ use serde_json::json;
 use super::view::{InterventionProjectionRecords, collect_intervention_projection_records};
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::error::{Result, ShoreError};
-use crate::model::{EventId, InterventionId, InterventionResolutionId, ReviewTargetRef, TargetRef};
+use crate::model::{EventId, InputRequestId, InputRequestResponseId, ReviewTargetRef, TargetRef};
 use crate::session::event::{
-    EventTarget, EventType, InterventionResolutionOutcome, InterventionResolvedPayload, ShoreEvent,
+    EventTarget, EventType, InputRequestRespondedPayload, InputRequestResponseOutcome, ShoreEvent,
 };
 use crate::session::observation::staged_body;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
@@ -19,24 +19,24 @@ use crate::storage::{Durability, LocalStorage};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InterventionResolveOptions {
     repo: PathBuf,
-    intervention_id: InterventionId,
-    outcome: Option<InterventionResolutionOutcome>,
+    input_request_id: InputRequestId,
+    outcome: Option<InputRequestResponseOutcome>,
     reason: Option<String>,
     idempotency_key: Option<String>,
 }
 
 impl InterventionResolveOptions {
-    pub fn new(repo: impl AsRef<Path>, intervention_id: InterventionId) -> Self {
+    pub fn new(repo: impl AsRef<Path>, input_request_id: InputRequestId) -> Self {
         Self {
             repo: repo.as_ref().to_path_buf(),
-            intervention_id,
+            input_request_id,
             outcome: None,
             reason: None,
             idempotency_key: None,
         }
     }
 
-    pub fn with_outcome(mut self, outcome: InterventionResolutionOutcome) -> Self {
+    pub fn with_outcome(mut self, outcome: InputRequestResponseOutcome) -> Self {
         self.outcome = Some(outcome);
         self
     }
@@ -54,10 +54,10 @@ impl InterventionResolveOptions {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InterventionResolveResult {
-    pub intervention_id: InterventionId,
-    pub intervention_resolution_id: InterventionResolutionId,
+    pub input_request_id: InputRequestId,
+    pub input_request_response_id: InputRequestResponseId,
     pub event_id: EventId,
-    pub outcome: InterventionResolutionOutcome,
+    pub outcome: InputRequestResponseOutcome,
     pub reason_content_hash: Option<String>,
     pub events_created: usize,
     pub events_existing: usize,
@@ -81,11 +81,11 @@ pub fn resolve_intervention(
         ..
     } = collect_intervention_projection_records(&events)?;
     let request_record = request_records
-        .remove(&options.intervention_id)
+        .remove(&options.input_request_id)
         .ok_or_else(|| {
             ShoreError::Message(format!(
                 "unknown intervention: {}",
-                options.intervention_id.as_str()
+                options.input_request_id.as_str()
             ))
         })?;
     let request_event = request_record.event;
@@ -102,9 +102,9 @@ pub fn resolve_intervention(
         .map(|reason| format!("sha256:{}", sha256_bytes_hex(reason.as_bytes())));
     let (reason, reason_artifact_path, reason_artifact_bytes, reason_byte_size) =
         staged_body(options.reason.as_deref())?;
-    let intervention_resolution_id =
-        build_intervention_resolution_id(InterventionResolutionIdMaterial {
-            intervention_id: &request_payload.intervention_id,
+    let input_request_response_id =
+        build_intervention_resolution_id(InputRequestResponseIdMaterial {
+            input_request_id: &request_payload.input_request_id,
             outcome,
             reason_content_hash: reason_content_hash.as_deref(),
             writer_actor_id: writer.actor_id.as_str(),
@@ -112,9 +112,11 @@ pub fn resolve_intervention(
     let source_key = options
         .idempotency_key
         .as_deref()
-        .unwrap_or_else(|| intervention_resolution_id.as_str());
-    let idempotency_key =
-        InterventionResolvedPayload::idempotency_key(&request_payload.intervention_id, source_key);
+        .unwrap_or_else(|| input_request_response_id.as_str());
+    let idempotency_key = InputRequestRespondedPayload::idempotency_key(
+        &request_payload.input_request_id,
+        source_key,
+    );
 
     if !event_store.event_exists(&idempotency_key)?
         && let (Some(artifact_path), Some(bytes)) = (
@@ -132,7 +134,7 @@ pub fn resolve_intervention(
             ShoreError::Message("intervention event missing review unit".to_owned())
         })?;
     let event = ShoreEvent::new(
-        EventType::InterventionResolved,
+        EventType::InputRequestResponded,
         idempotency_key,
         EventTarget {
             session_id: request_event.target.session_id.clone(),
@@ -145,13 +147,13 @@ pub fn resolve_intervention(
             track_id: request_event.target.track_id.clone(),
             subject: Some(TargetRef::Review(ReviewTargetRef::Intervention {
                 review_unit_id,
-                intervention_id: request_payload.intervention_id.clone(),
+                input_request_id: request_payload.input_request_id.clone(),
             })),
         },
         writer,
-        InterventionResolvedPayload {
-            intervention_resolution_id: intervention_resolution_id.clone(),
-            intervention_id: request_payload.intervention_id.clone(),
+        InputRequestRespondedPayload {
+            input_request_response_id: input_request_response_id.clone(),
+            input_request_id: request_payload.input_request_id.clone(),
             outcome,
             reason,
             reason_artifact_path,
@@ -167,7 +169,7 @@ pub fn resolve_intervention(
     let write_outcome = event_store.record_event_once(&event)?;
     let (events_created, events_existing) = match write_outcome {
         EventWriteOutcome::Created => {
-            events_created_by_type.insert("intervention_resolved".to_owned(), 1);
+            events_created_by_type.insert("input_request_responded".to_owned(), 1);
             (1, 0)
         }
         EventWriteOutcome::Existing => (0, 1),
@@ -177,8 +179,8 @@ pub fn resolve_intervention(
     storage.write_json_atomic(&paths.state_path(), &state, Durability::Projection)?;
 
     Ok(InterventionResolveResult {
-        intervention_id: request_payload.intervention_id,
-        intervention_resolution_id,
+        input_request_id: request_payload.input_request_id,
+        input_request_response_id,
         event_id,
         outcome,
         reason_content_hash,
@@ -189,23 +191,23 @@ pub fn resolve_intervention(
     })
 }
 
-struct InterventionResolutionIdMaterial<'a> {
-    intervention_id: &'a InterventionId,
-    outcome: InterventionResolutionOutcome,
+struct InputRequestResponseIdMaterial<'a> {
+    input_request_id: &'a InputRequestId,
+    outcome: InputRequestResponseOutcome,
     reason_content_hash: Option<&'a str>,
     writer_actor_id: &'a str,
 }
 
 fn build_intervention_resolution_id(
-    material: InterventionResolutionIdMaterial<'_>,
-) -> Result<InterventionResolutionId> {
+    material: InputRequestResponseIdMaterial<'_>,
+) -> Result<InputRequestResponseId> {
     let digest = sha256_json_prefixed(&json!({
-        "interventionId": material.intervention_id.as_str(),
+        "inputRequestId": material.input_request_id.as_str(),
         "outcome": material.outcome,
         "reasonContentHash": material.reason_content_hash,
         "writerActorId": material.writer_actor_id,
     }))?;
-    Ok(InterventionResolutionId::new(format!(
-        "intervention-resolution:{digest}"
+    Ok(InputRequestResponseId::new(format!(
+        "input-request-response:{digest}"
     )))
 }

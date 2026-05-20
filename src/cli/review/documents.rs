@@ -1,8 +1,7 @@
 // Shared view-document mappers used by review unit show and the leaf read commands.
 use shore::model::ReviewTargetRef;
 use shore::session::event::{
-    InterventionMode, InterventionReasonCode, InterventionResolutionOutcome, ReviewAssessment,
-    Writer,
+    InputRequestMode, InputRequestReasonCode, InputRequestResponseOutcome, ReviewAssessment, Writer,
 };
 use shore::session::{AssessmentView, CurrentAssessmentStatus, InterventionView, ObservationView};
 
@@ -34,8 +33,8 @@ pub(super) struct InterventionViewDocument {
     event_id: String,
     track_id: String,
     target: ReviewTargetRef,
-    mode: InterventionMode,
-    reason_code: InterventionReasonCode,
+    mode: InputRequestMode,
+    reason_code: InputRequestReasonCode,
     title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     body: Option<String>,
@@ -52,7 +51,7 @@ pub(super) struct InterventionViewDocument {
 pub(super) struct InterventionResolutionViewDocument {
     id: String,
     event_id: String,
-    outcome: InterventionResolutionOutcome,
+    outcome: InputRequestResponseOutcome,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -211,7 +210,7 @@ impl From<AssessmentView> for AssessmentViewDocument {
             related_interventions: view
                 .related_interventions
                 .into_iter()
-                .map(|intervention_id| intervention_id.as_str().to_owned())
+                .map(|input_request_id| input_request_id.as_str().to_owned())
                 .collect(),
             created_at: view.created_at,
             writer: view.writer,

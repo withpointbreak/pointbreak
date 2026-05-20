@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{AssessmentId, EventId, InterventionId, ObservationId, ReviewUnitId, Side};
+use super::{AssessmentId, EventId, InputRequestId, ObservationId, ReviewUnitId, Side};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(
@@ -64,7 +64,7 @@ pub enum ReviewTargetRef {
     },
     Intervention {
         review_unit_id: ReviewUnitId,
-        intervention_id: InterventionId,
+        input_request_id: InputRequestId,
     },
     Assessment {
         review_unit_id: ReviewUnitId,
@@ -160,7 +160,7 @@ mod tests {
         };
         let intervention = ReviewTargetRef::Intervention {
             review_unit_id: ReviewUnitId::new("review-unit:sha256:abc"),
-            intervention_id: InterventionId::new("intervention:sha256:ghi"),
+            input_request_id: InputRequestId::new("input-request:sha256:ghi"),
         };
 
         let json = serde_json::json!({
@@ -172,8 +172,8 @@ mod tests {
         assert_eq!(json["observation"]["observationId"], "obs:sha256:def");
         assert_eq!(json["intervention"]["kind"], "intervention");
         assert_eq!(
-            json["intervention"]["interventionId"],
-            "intervention:sha256:ghi"
+            json["intervention"]["inputRequestId"],
+            "input-request:sha256:ghi"
         );
     }
 

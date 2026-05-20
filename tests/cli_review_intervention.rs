@@ -40,15 +40,15 @@ fn intervention_request_records_blocking_request_and_emits_v1_json() {
     assert_eq!(json["schema"], "shore.review-intervention-request");
     assert_eq!(json["version"], 1);
     assert!(
-        json["interventionId"]
+        json["inputRequestId"]
             .as_str()
             .unwrap()
-            .starts_with("intervention:sha256:")
+            .starts_with("input-request:sha256:")
     );
     assert_eq!(json["trackId"], "human:kevin");
     assert_eq!(json["mode"], "blocking");
     assert_eq!(json["reasonCode"], "manual_decision_required");
-    assert_eq!(json["eventsCreatedByType"]["intervention_requested"], 1);
+    assert_eq!(json["eventsCreatedByType"]["input_request_opened"], 1);
     assert!(json.get("bodyArtifactPath").is_none());
     assert!(repo.path().join(".shore/state.json").is_file());
 }
@@ -141,17 +141,17 @@ fn intervention_list_collapses_duplicate_request_events() {
     ]);
     let json = parse_json(&list.stdout);
     let diagnostic = diagnostic_with_code(&json, "duplicate_semantic_intervention_request_event");
-    let intervention_id = first["interventionId"].as_str().unwrap();
+    let input_request_id = first["inputRequestId"].as_str().unwrap();
 
-    assert_eq!(first["interventionId"], second["interventionId"]);
+    assert_eq!(first["inputRequestId"], second["inputRequestId"]);
     assert_eq!(json["interventions"].as_array().unwrap().len(), 1);
-    assert_eq!(json["interventions"][0]["id"], first["interventionId"]);
+    assert_eq!(json["interventions"][0]["id"], first["inputRequestId"]);
     assert_eq!(json["interventions"][0]["body"], "same body");
     assert!(
         diagnostic["message"]
             .as_str()
             .unwrap()
-            .contains(intervention_id)
+            .contains(input_request_id)
     );
 }
 
@@ -160,13 +160,13 @@ fn intervention_fetch_include_body_emits_v1_json_and_hydrates_body() {
     let repo = modified_repo();
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
     let requested = request_with_body(&repo, "Need details", "full request body");
-    let intervention_id = requested["interventionId"].as_str().unwrap();
+    let input_request_id = requested["inputRequestId"].as_str().unwrap();
 
     let output = shore([
         "review",
         "intervention",
         "fetch",
-        intervention_id,
+        input_request_id,
         "--repo",
         repo.path().to_str().unwrap(),
         "--include-body",
@@ -182,7 +182,7 @@ fn intervention_fetch_include_body_emits_v1_json_and_hydrates_body() {
 
     assert_eq!(json["schema"], "shore.review-intervention-fetch");
     assert_eq!(json["version"], 1);
-    assert_eq!(json["intervention"]["id"], intervention_id);
+    assert_eq!(json["intervention"]["id"], input_request_id);
     assert_eq!(json["intervention"]["body"], "full request body");
 }
 
@@ -191,13 +191,13 @@ fn intervention_resolve_records_resolution_and_emits_v1_json() {
     let repo = modified_repo();
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
     let requested = request(&repo, "Need approval");
-    let intervention_id = requested["interventionId"].as_str().unwrap();
+    let input_request_id = requested["inputRequestId"].as_str().unwrap();
 
     let output = shore([
         "review",
         "intervention",
         "resolve",
-        intervention_id,
+        input_request_id,
         "--repo",
         repo.path().to_str().unwrap(),
         "--outcome",
@@ -214,15 +214,15 @@ fn intervention_resolve_records_resolution_and_emits_v1_json() {
 
     assert_eq!(json["schema"], "shore.review-intervention-resolve");
     assert_eq!(json["version"], 1);
-    assert_eq!(json["interventionId"], intervention_id);
+    assert_eq!(json["inputRequestId"], input_request_id);
     assert!(
-        json["interventionResolutionId"]
+        json["inputRequestResponseId"]
             .as_str()
             .unwrap()
-            .starts_with("intervention-resolution:sha256:")
+            .starts_with("input-request-response:sha256:")
     );
     assert_eq!(json["outcome"], "approved");
-    assert_eq!(json["eventsCreatedByType"]["intervention_resolved"], 1);
+    assert_eq!(json["eventsCreatedByType"]["input_request_responded"], 1);
     assert!(json.get("reasonArtifactPath").is_none());
 }
 
@@ -231,14 +231,14 @@ fn intervention_fetch_collapses_duplicate_resolution_events() {
     let repo = modified_repo();
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
     let requested = request(&repo, "Need approval");
-    let intervention_id = requested["interventionId"].as_str().unwrap();
+    let input_request_id = requested["inputRequestId"].as_str().unwrap();
 
     let first = parse_json(
         &shore([
             "review",
             "intervention",
             "resolve",
-            intervention_id,
+            input_request_id,
             "--repo",
             repo.path().to_str().unwrap(),
             "--outcome",
@@ -255,7 +255,7 @@ fn intervention_fetch_collapses_duplicate_resolution_events() {
             "review",
             "intervention",
             "resolve",
-            intervention_id,
+            input_request_id,
             "--repo",
             repo.path().to_str().unwrap(),
             "--outcome",
@@ -272,18 +272,18 @@ fn intervention_fetch_collapses_duplicate_resolution_events() {
         "review",
         "intervention",
         "fetch",
-        intervention_id,
+        input_request_id,
         "--repo",
         repo.path().to_str().unwrap(),
     ]);
     let json = parse_json(&fetch.stdout);
     let diagnostic =
         diagnostic_with_code(&json, "duplicate_semantic_intervention_resolution_event");
-    let resolution_id = first["interventionResolutionId"].as_str().unwrap();
+    let resolution_id = first["inputRequestResponseId"].as_str().unwrap();
 
     assert_eq!(
-        first["interventionResolutionId"],
-        second["interventionResolutionId"]
+        first["inputRequestResponseId"],
+        second["inputRequestResponseId"]
     );
     assert_eq!(json["intervention"]["status"], "resolved");
     assert_eq!(
@@ -295,7 +295,7 @@ fn intervention_fetch_collapses_duplicate_resolution_events() {
     );
     assert_eq!(
         json["intervention"]["resolutions"][0]["id"],
-        first["interventionResolutionId"]
+        first["inputRequestResponseId"]
     );
     assert!(
         diagnostic["message"]
@@ -338,7 +338,7 @@ fn intervention_request_body_stdin_reads_from_stdin() {
         "review",
         "intervention",
         "fetch",
-        requested["interventionId"].as_str().unwrap(),
+        requested["inputRequestId"].as_str().unwrap(),
         "--repo",
         repo.path().to_str().unwrap(),
         "--include-body",
@@ -352,14 +352,14 @@ fn intervention_resolve_reason_stdin_reads_from_stdin() {
     let repo = modified_repo();
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
     let requested = request(&repo, "Need approval");
-    let intervention_id = requested["interventionId"].as_str().unwrap();
+    let input_request_id = requested["inputRequestId"].as_str().unwrap();
 
     let output = shore_with_stdin(
         [
             "review",
             "intervention",
             "resolve",
-            intervention_id,
+            input_request_id,
             "--repo",
             repo.path().to_str().unwrap(),
             "--outcome",
@@ -453,7 +453,7 @@ fn intervention_resolve_rejects_invalid_outcome() {
         "review",
         "intervention",
         "resolve",
-        requested["interventionId"].as_str().unwrap(),
+        requested["inputRequestId"].as_str().unwrap(),
         "--repo",
         repo.path().to_str().unwrap(),
         "--outcome",
@@ -548,7 +548,7 @@ fn intervention_resolve_reason_inputs_are_mutually_exclusive() {
         "review",
         "intervention",
         "resolve",
-        requested["interventionId"].as_str().unwrap(),
+        requested["inputRequestId"].as_str().unwrap(),
         "--repo",
         repo.path().to_str().unwrap(),
         "--outcome",

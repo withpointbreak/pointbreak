@@ -2,11 +2,11 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::error::{Result, ShoreError};
-use crate::model::{EventId, InterventionId, InterventionResolutionId, ReviewTargetRef, TrackId};
+use crate::model::{EventId, InputRequestId, InputRequestResponseId, ReviewTargetRef, TrackId};
 use crate::session::body_artifact::load_body_artifact;
 use crate::session::event::{
-    EventType, InterventionMode, InterventionReasonCode, InterventionRequestedPayload,
-    InterventionResolutionOutcome, InterventionResolvedPayload, ShoreEvent, Writer,
+    EventType, InputRequestMode, InputRequestOpenedPayload, InputRequestReasonCode,
+    InputRequestRespondedPayload, InputRequestResponseOutcome, ShoreEvent, Writer,
 };
 use crate::session::observation::{ResolvedReviewUnit, target_matches_file};
 
@@ -15,7 +15,7 @@ pub(crate) struct InterventionProjectionOptions<'a> {
     pub events: &'a [ShoreEvent],
     pub resolved: &'a ResolvedReviewUnit,
     pub track_filter: Option<TrackId>,
-    pub mode_filter: Option<InterventionMode>,
+    pub mode_filter: Option<InputRequestMode>,
     pub file_filter: Option<&'a str>,
     pub status_filter: InterventionStatusFilter,
     pub include_body: bool,
@@ -23,12 +23,12 @@ pub(crate) struct InterventionProjectionOptions<'a> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InterventionView {
-    pub id: InterventionId,
+    pub id: InputRequestId,
     pub event_id: EventId,
     pub track_id: TrackId,
     pub target: ReviewTargetRef,
-    pub mode: InterventionMode,
-    pub reason_code: InterventionReasonCode,
+    pub mode: InputRequestMode,
+    pub reason_code: InputRequestReasonCode,
     pub title: String,
     pub body: Option<String>,
     pub body_content_hash: Option<String>,
@@ -40,9 +40,9 @@ pub struct InterventionView {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InterventionResolutionView {
-    pub id: InterventionResolutionId,
+    pub id: InputRequestResponseId,
     pub event_id: EventId,
-    pub outcome: InterventionResolutionOutcome,
+    pub outcome: InputRequestResponseOutcome,
     pub reason: Option<String>,
     pub reason_content_hash: Option<String>,
     pub created_at: String,
@@ -129,9 +129,9 @@ pub(crate) fn project_interventions(
             continue;
         }
 
-        let intervention_id = record.payload.intervention_id.clone();
+        let input_request_id = record.payload.input_request_id.clone();
         let resolutions = resolutions
-            .get(&intervention_id)
+            .get(&input_request_id)
             .cloned()
             .unwrap_or_default();
         let view = intervention_view_from_event(
@@ -153,47 +153,45 @@ pub(crate) fn project_interventions(
 
 pub(super) struct InterventionRequestRecord<'a> {
     pub(super) event: &'a ShoreEvent,
-    pub(super) payload: InterventionRequestedPayload,
+    pub(super) payload: InputRequestOpenedPayload,
     pub(super) track_id: TrackId,
 }
 
 struct InterventionResolutionRecord<'a> {
     event: &'a ShoreEvent,
-    payload: InterventionResolvedPayload,
+    payload: InputRequestRespondedPayload,
 }
 
 pub(super) struct InterventionProjectionRecords<'a> {
-    pub(super) request_records: BTreeMap<InterventionId, InterventionRequestRecord<'a>>,
-    pub(super) resolutions: BTreeMap<InterventionId, Vec<InterventionResolutionView>>,
+    pub(super) request_records: BTreeMap<InputRequestId, InterventionRequestRecord<'a>>,
+    pub(super) resolutions: BTreeMap<InputRequestId, Vec<InterventionResolutionView>>,
 }
 
 pub(super) fn collect_intervention_projection_records<'a>(
     events: &'a [ShoreEvent],
 ) -> Result<InterventionProjectionRecords<'a>> {
-    let mut request_records: BTreeMap<InterventionId, InterventionRequestRecord<'a>> =
+    let mut request_records: BTreeMap<InputRequestId, InterventionRequestRecord<'a>> =
         BTreeMap::new();
-    let mut resolution_records: BTreeMap<
-        InterventionResolutionId,
-        InterventionResolutionRecord<'a>,
-    > = BTreeMap::new();
+    let mut resolution_records: BTreeMap<InputRequestResponseId, InterventionResolutionRecord<'a>> =
+        BTreeMap::new();
 
     for event in events {
         match event.event_type {
-            EventType::InterventionRequested => {
-                let payload: InterventionRequestedPayload =
+            EventType::InputRequestOpened => {
+                let payload: InputRequestOpenedPayload =
                     serde_json::from_value(event.payload.clone())?;
                 let track_id = event.target.track_id.clone().ok_or_else(|| {
                     ShoreError::Message("intervention event missing track id".to_owned())
                 })?;
-                let intervention_id = payload.intervention_id.clone();
+                let input_request_id = payload.input_request_id.clone();
                 if should_replace_representative(
                     request_records
-                        .get(&intervention_id)
+                        .get(&input_request_id)
                         .map(|record| record.event),
                     event,
                 ) {
                     request_records.insert(
-                        intervention_id,
+                        input_request_id,
                         InterventionRequestRecord {
                             event,
                             payload,
@@ -202,10 +200,10 @@ pub(super) fn collect_intervention_projection_records<'a>(
                     );
                 }
             }
-            EventType::InterventionResolved => {
-                let payload: InterventionResolvedPayload =
+            EventType::InputRequestResponded => {
+                let payload: InputRequestRespondedPayload =
                     serde_json::from_value(event.payload.clone())?;
-                let resolution_id = payload.intervention_resolution_id.clone();
+                let resolution_id = payload.input_request_response_id.clone();
                 if should_replace_representative(
                     resolution_records
                         .get(&resolution_id)
@@ -222,16 +220,16 @@ pub(super) fn collect_intervention_projection_records<'a>(
         }
     }
 
-    let mut resolutions: BTreeMap<InterventionId, Vec<InterventionResolutionView>> =
+    let mut resolutions: BTreeMap<InputRequestId, Vec<InterventionResolutionView>> =
         BTreeMap::new();
     for record in resolution_records.into_values() {
         let event = record.event;
         let payload = record.payload;
         resolutions
-            .entry(payload.intervention_id)
+            .entry(payload.input_request_id)
             .or_default()
             .push(InterventionResolutionView {
-                id: payload.intervention_resolution_id,
+                id: payload.input_request_response_id,
                 event_id: event.event_id.clone(),
                 outcome: payload.outcome,
                 reason: payload.reason,
@@ -260,7 +258,7 @@ fn should_replace_representative(current: Option<&ShoreEvent>, candidate: &Shore
 pub(super) fn intervention_view_from_event(
     shore_dir: &Path,
     event: &ShoreEvent,
-    payload: InterventionRequestedPayload,
+    payload: InputRequestOpenedPayload,
     track_id: TrackId,
     resolutions: Vec<InterventionResolutionView>,
     include_body: bool,
@@ -273,7 +271,7 @@ pub(super) fn intervention_view_from_event(
     let status = status_for_resolutions(&resolutions);
 
     Ok(InterventionView {
-        id: payload.intervention_id,
+        id: payload.input_request_id,
         event_id: event.event_id.clone(),
         track_id,
         target: payload.target,
@@ -291,7 +289,7 @@ pub(super) fn intervention_view_from_event(
 
 fn intervention_body(
     shore_dir: &Path,
-    payload: &InterventionRequestedPayload,
+    payload: &InputRequestOpenedPayload,
 ) -> Result<Option<String>> {
     if payload.body.is_some() {
         return Ok(payload.body.clone());

@@ -2,10 +2,10 @@ use std::path::Path;
 
 use crate::error::{Result, ShoreError};
 use crate::model::{
-    AssessmentId, InterventionId, ObservationId, ReviewTargetRef, ReviewUnitId, Side,
+    AssessmentId, InputRequestId, ObservationId, ReviewTargetRef, ReviewUnitId, Side,
 };
 use crate::session::event::{
-    EventType, InterventionRequestedPayload, ReviewAssessmentRecordedPayload,
+    EventType, InputRequestOpenedPayload, ReviewAssessmentRecordedPayload,
     ReviewObservationRecordedPayload, ShoreEvent,
 };
 use crate::session::observation::{
@@ -28,7 +28,7 @@ pub enum AssessmentTargetSelector {
         observation_id: ObservationId,
     },
     Intervention {
-        intervention_id: InterventionId,
+        input_request_id: InputRequestId,
     },
     Assessment {
         assessment_id: AssessmentId,
@@ -63,8 +63,8 @@ impl AssessmentTargetSelector {
         Self::Observation { observation_id }
     }
 
-    pub fn intervention(intervention_id: InterventionId) -> Self {
-        Self::Intervention { intervention_id }
+    pub fn intervention(input_request_id: InputRequestId) -> Self {
+        Self::Intervention { input_request_id }
     }
 
     pub fn assessment(assessment_id: AssessmentId) -> Self {
@@ -102,8 +102,8 @@ pub(crate) fn resolve_assessment_target(
         AssessmentTargetSelector::Observation { observation_id } => {
             resolve_observation_ref(events, resolved, observation_id)?
         }
-        AssessmentTargetSelector::Intervention { intervention_id } => {
-            resolve_intervention_ref(events, resolved, intervention_id)?
+        AssessmentTargetSelector::Intervention { input_request_id } => {
+            resolve_intervention_ref(events, resolved, input_request_id)?
         }
         AssessmentTargetSelector::Assessment { assessment_id } => {
             resolve_assessment_ref(events, resolved, assessment_id)?
@@ -159,28 +159,28 @@ fn resolve_observation_ref(
 fn resolve_intervention_ref(
     events: &[ShoreEvent],
     resolved: &ResolvedReviewUnit,
-    intervention_id: &InterventionId,
+    input_request_id: &InputRequestId,
 ) -> Result<ReviewTargetRef> {
     for event in events
         .iter()
-        .filter(|event| event.event_type == EventType::InterventionRequested)
+        .filter(|event| event.event_type == EventType::InputRequestOpened)
     {
         if event.target.review_unit_id.as_ref() != Some(&resolved.review_unit_id) {
             continue;
         }
 
-        let payload: InterventionRequestedPayload = serde_json::from_value(event.payload.clone())?;
-        if &payload.intervention_id == intervention_id {
+        let payload: InputRequestOpenedPayload = serde_json::from_value(event.payload.clone())?;
+        if &payload.input_request_id == input_request_id {
             return Ok(ReviewTargetRef::Intervention {
                 review_unit_id: resolved.review_unit_id.clone(),
-                intervention_id: intervention_id.clone(),
+                input_request_id: input_request_id.clone(),
             });
         }
     }
 
     Err(ShoreError::Message(format!(
         "unknown intervention target: {}",
-        intervention_id.as_str()
+        input_request_id.as_str()
     )))
 }
 

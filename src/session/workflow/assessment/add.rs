@@ -9,11 +9,11 @@ use super::util::sorted_unique;
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::error::{Result, ShoreError};
 use crate::model::{
-    AssessmentId, EventId, InterventionId, ObservationId, ReviewTargetRef, ReviewUnitId, TargetRef,
+    AssessmentId, EventId, InputRequestId, ObservationId, ReviewTargetRef, ReviewUnitId, TargetRef,
     TrackId,
 };
 use crate::session::event::{
-    EventTarget, EventType, InterventionRequestedPayload, ReviewAssessment,
+    EventTarget, EventType, InputRequestOpenedPayload, ReviewAssessment,
     ReviewAssessmentRecordedPayload, ReviewObservationRecordedPayload, ShoreEvent,
 };
 use crate::session::observation::{resolve_review_unit, staged_body, validated_track_id};
@@ -32,7 +32,7 @@ pub struct AssessmentAddOptions {
     target: AssessmentTargetSelector,
     replaces_assessment_ids: Vec<AssessmentId>,
     related_observation_ids: Vec<ObservationId>,
-    related_intervention_ids: Vec<InterventionId>,
+    related_intervention_ids: Vec<InputRequestId>,
     idempotency_key: Option<String>,
 }
 
@@ -92,8 +92,8 @@ impl AssessmentAddOptions {
         self
     }
 
-    pub fn related_intervention(mut self, intervention_id: InterventionId) -> Self {
-        self.related_intervention_ids.push(intervention_id);
+    pub fn related_intervention(mut self, input_request_id: InputRequestId) -> Self {
+        self.related_intervention_ids.push(input_request_id);
         self
     }
 
@@ -252,7 +252,7 @@ fn validate_assessment_relationships(
     review_unit_id: &ReviewUnitId,
     replaces_assessment_ids: &[AssessmentId],
     related_observation_ids: &[ObservationId],
-    related_intervention_ids: &[InterventionId],
+    related_intervention_ids: &[InputRequestId],
 ) -> Result<()> {
     for assessment_id in replaces_assessment_ids {
         if !has_assessment(events, review_unit_id, assessment_id)? {
@@ -270,11 +270,11 @@ fn validate_assessment_relationships(
             )));
         }
     }
-    for intervention_id in related_intervention_ids {
-        if !has_intervention(events, review_unit_id, intervention_id)? {
+    for input_request_id in related_intervention_ids {
+        if !has_intervention(events, review_unit_id, input_request_id)? {
             return Err(ShoreError::Message(format!(
                 "unknown intervention: {}",
-                intervention_id.as_str()
+                input_request_id.as_str()
             )));
         }
     }
@@ -326,17 +326,17 @@ fn has_observation(
 fn has_intervention(
     events: &[ShoreEvent],
     review_unit_id: &ReviewUnitId,
-    intervention_id: &InterventionId,
+    input_request_id: &InputRequestId,
 ) -> Result<bool> {
     for event in events
         .iter()
-        .filter(|event| event.event_type == EventType::InterventionRequested)
+        .filter(|event| event.event_type == EventType::InputRequestOpened)
     {
         if event.target.review_unit_id.as_ref() != Some(review_unit_id) {
             continue;
         }
-        let payload: InterventionRequestedPayload = serde_json::from_value(event.payload.clone())?;
-        if &payload.intervention_id == intervention_id {
+        let payload: InputRequestOpenedPayload = serde_json::from_value(event.payload.clone())?;
+        if &payload.input_request_id == input_request_id {
             return Ok(true);
         }
     }
@@ -351,7 +351,7 @@ struct AssessmentIdMaterial<'a> {
     summary_content_hash: Option<&'a str>,
     replaces_assessment_ids: &'a [AssessmentId],
     related_observation_ids: &'a [ObservationId],
-    related_intervention_ids: &'a [InterventionId],
+    related_intervention_ids: &'a [InputRequestId],
     writer_actor_id: &'a str,
 }
 
@@ -371,7 +371,7 @@ fn build_assessment_id(material: AssessmentIdMaterial<'_>) -> Result<AssessmentI
     let mut related_interventions = material
         .related_intervention_ids
         .iter()
-        .map(|intervention_id| intervention_id.as_str())
+        .map(|input_request_id| input_request_id.as_str())
         .collect::<Vec<_>>();
     related_interventions.sort();
 

@@ -7,7 +7,7 @@ use super::view::{
 use crate::error::Result;
 use crate::model::{ReviewUnitId, TrackId};
 use crate::session::EventStore;
-use crate::session::event::InterventionMode;
+use crate::session::event::InputRequestMode;
 use crate::session::observation::{resolve_review_unit, validated_track_id};
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store_init::ShoreStorePaths;
@@ -17,7 +17,7 @@ pub struct InterventionListOptions {
     repo: PathBuf,
     review_unit_id: Option<ReviewUnitId>,
     track: Option<String>,
-    mode: Option<InterventionMode>,
+    mode: Option<InputRequestMode>,
     file: Option<String>,
     status: InterventionStatusFilter,
     include_body: bool,
@@ -46,7 +46,7 @@ impl InterventionListOptions {
         self
     }
 
-    pub fn with_mode(mut self, mode: InterventionMode) -> Self {
+    pub fn with_mode(mut self, mode: InputRequestMode) -> Self {
         self.mode = Some(mode);
         self
     }
@@ -70,7 +70,7 @@ impl InterventionListOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InterventionListFilters {
     pub track_id: Option<TrackId>,
-    pub mode: Option<InterventionMode>,
+    pub mode: Option<InputRequestMode>,
     pub file: Option<String>,
     pub status: InterventionStatusFilter,
     pub include_body: bool,

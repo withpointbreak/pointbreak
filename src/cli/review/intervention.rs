@@ -2,9 +2,9 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
-use shore::model::{InterventionId, ObservationId, ReviewTargetRef, ReviewUnitId};
+use shore::model::{InputRequestId, ObservationId, ReviewTargetRef, ReviewUnitId};
 use shore::session::event::{
-    InterventionMode, InterventionReasonCode, InterventionResolutionOutcome,
+    InputRequestMode, InputRequestReasonCode, InputRequestResponseOutcome,
 };
 use shore::session::{
     InterventionFetchOptions, InterventionFetchResult, InterventionListOptions,
@@ -50,7 +50,7 @@ struct InterventionRequestArgs {
     reason: InterventionReasonArg,
 
     #[arg(long, value_enum, default_value = "blocking")]
-    mode: InterventionModeArg,
+    mode: InputRequestModeArg,
 
     #[arg(long, group = "intervention_body")]
     body: Option<String>,
@@ -92,7 +92,7 @@ struct InterventionListArgs {
     track: Option<String>,
 
     #[arg(long, value_enum)]
-    mode: Option<InterventionModeArg>,
+    mode: Option<InputRequestModeArg>,
 
     #[arg(long)]
     file: Option<String>,
@@ -112,7 +112,7 @@ struct InterventionListArgs {
 
 #[derive(Debug, Args)]
 struct InterventionFetchArgs {
-    intervention_id: String,
+    input_request_id: String,
 
     #[arg(long, default_value = ".")]
     repo: PathBuf,
@@ -129,7 +129,7 @@ struct InterventionFetchArgs {
 
 #[derive(Debug, Args)]
 struct InterventionResolveArgs {
-    intervention_id: String,
+    input_request_id: String,
 
     #[arg(long, default_value = ".")]
     repo: PathBuf,
@@ -154,12 +154,12 @@ struct InterventionResolveArgs {
 #[serde(rename_all = "camelCase")]
 struct InterventionRequestBody {
     review_unit_id: String,
-    intervention_id: String,
+    input_request_id: String,
     event_id: String,
     track_id: String,
     target: ReviewTargetRef,
-    mode: InterventionMode,
-    reason_code: InterventionReasonCode,
+    mode: InputRequestMode,
+    reason_code: InputRequestReasonCode,
     #[serde(skip_serializing_if = "Option::is_none")]
     body_content_hash: Option<String>,
 }
@@ -181,10 +181,10 @@ struct InterventionFetchBody {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct InterventionResolveBody {
-    intervention_id: String,
-    intervention_resolution_id: String,
+    input_request_id: String,
+    input_request_response_id: String,
     event_id: String,
-    outcome: InterventionResolutionOutcome,
+    outcome: InputRequestResponseOutcome,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason_content_hash: Option<String>,
 }
@@ -195,7 +195,7 @@ struct InterventionListFiltersDocument {
     #[serde(skip_serializing_if = "Option::is_none")]
     track_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    mode: Option<InterventionMode>,
+    mode: Option<InputRequestMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     file: Option<String>,
     status: &'static str,
@@ -204,7 +204,7 @@ struct InterventionListFiltersDocument {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 #[value(rename_all = "kebab-case")]
-enum InterventionModeArg {
+enum InputRequestModeArg {
     Blocking,
     Advisory,
 }
@@ -298,7 +298,7 @@ fn review_intervention_fetch(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let pretty = args.pretty && !args.compact;
     let result = fetch_intervention(
-        InterventionFetchOptions::new(&args.repo, InterventionId::new(args.intervention_id))
+        InterventionFetchOptions::new(&args.repo, InputRequestId::new(args.input_request_id))
             .with_include_body(args.include_body),
     );
     let document = intervention_fetch_document(result?);
@@ -371,7 +371,7 @@ fn intervention_resolve_options(
         args.reason_stdin,
     )?;
     let mut options =
-        InterventionResolveOptions::new(&args.repo, InterventionId::new(args.intervention_id))
+        InterventionResolveOptions::new(&args.repo, InputRequestId::new(args.input_request_id))
             .with_outcome(args.outcome.into());
     if let Some(reason) = reason {
         options = options.with_reason(reason);
@@ -422,7 +422,7 @@ fn intervention_request_document(
         "shore.review-intervention-request",
         InterventionRequestBody {
             review_unit_id: result.review_unit_id.as_str().to_owned(),
-            intervention_id: result.intervention_id.as_str().to_owned(),
+            input_request_id: result.input_request_id.as_str().to_owned(),
             event_id: result.event_id.as_str().to_owned(),
             track_id: result.track_id.as_str().to_owned(),
             target: result.target,
@@ -482,8 +482,8 @@ fn intervention_resolve_document(
     json::EventWriteDocument::new(
         "shore.review-intervention-resolve",
         InterventionResolveBody {
-            intervention_id: result.intervention_id.as_str().to_owned(),
-            intervention_resolution_id: result.intervention_resolution_id.as_str().to_owned(),
+            input_request_id: result.input_request_id.as_str().to_owned(),
+            input_request_response_id: result.input_request_response_id.as_str().to_owned(),
             event_id: result.event_id.as_str().to_owned(),
             outcome: result.outcome,
             reason_content_hash: result.reason_content_hash,
@@ -495,27 +495,27 @@ fn intervention_resolve_document(
     )
 }
 
-impl From<InterventionModeArg> for InterventionMode {
-    fn from(value: InterventionModeArg) -> Self {
+impl From<InputRequestModeArg> for InputRequestMode {
+    fn from(value: InputRequestModeArg) -> Self {
         match value {
-            InterventionModeArg::Blocking => InterventionMode::Blocking,
-            InterventionModeArg::Advisory => InterventionMode::Advisory,
+            InputRequestModeArg::Blocking => InputRequestMode::Blocking,
+            InputRequestModeArg::Advisory => InputRequestMode::Advisory,
         }
     }
 }
 
-impl From<InterventionReasonArg> for InterventionReasonCode {
+impl From<InterventionReasonArg> for InputRequestReasonCode {
     fn from(value: InterventionReasonArg) -> Self {
         match value {
-            InterventionReasonArg::AmbiguousState => InterventionReasonCode::AmbiguousState,
-            InterventionReasonArg::UnsafeAction => InterventionReasonCode::UnsafeAction,
-            InterventionReasonArg::StaleRevision => InterventionReasonCode::StaleRevision,
-            InterventionReasonArg::FailedGate => InterventionReasonCode::FailedGate,
-            InterventionReasonArg::ExternalSideEffect => InterventionReasonCode::ExternalSideEffect,
-            InterventionReasonArg::ConflictingEvent => InterventionReasonCode::ConflictingEvent,
-            InterventionReasonArg::MissingPermission => InterventionReasonCode::MissingPermission,
+            InterventionReasonArg::AmbiguousState => InputRequestReasonCode::AmbiguousState,
+            InterventionReasonArg::UnsafeAction => InputRequestReasonCode::UnsafeAction,
+            InterventionReasonArg::StaleRevision => InputRequestReasonCode::StaleRevision,
+            InterventionReasonArg::FailedGate => InputRequestReasonCode::FailedGate,
+            InterventionReasonArg::ExternalSideEffect => InputRequestReasonCode::ExternalSideEffect,
+            InterventionReasonArg::ConflictingEvent => InputRequestReasonCode::ConflictingEvent,
+            InterventionReasonArg::MissingPermission => InputRequestReasonCode::MissingPermission,
             InterventionReasonArg::ManualDecisionRequired => {
-                InterventionReasonCode::ManualDecisionRequired
+                InputRequestReasonCode::ManualDecisionRequired
             }
         }
     }
@@ -532,14 +532,14 @@ impl From<InterventionStatusArg> for InterventionStatusFilter {
     }
 }
 
-impl From<InterventionOutcomeArg> for InterventionResolutionOutcome {
+impl From<InterventionOutcomeArg> for InputRequestResponseOutcome {
     fn from(value: InterventionOutcomeArg) -> Self {
         match value {
-            InterventionOutcomeArg::Approved => InterventionResolutionOutcome::Approved,
-            InterventionOutcomeArg::Rejected => InterventionResolutionOutcome::Rejected,
-            InterventionOutcomeArg::Dismissed => InterventionResolutionOutcome::Dismissed,
-            InterventionOutcomeArg::Superseded => InterventionResolutionOutcome::Superseded,
-            InterventionOutcomeArg::Abandoned => InterventionResolutionOutcome::Abandoned,
+            InterventionOutcomeArg::Approved => InputRequestResponseOutcome::Approved,
+            InterventionOutcomeArg::Rejected => InputRequestResponseOutcome::Rejected,
+            InterventionOutcomeArg::Dismissed => InputRequestResponseOutcome::Dismissed,
+            InterventionOutcomeArg::Superseded => InputRequestResponseOutcome::Superseded,
+            InterventionOutcomeArg::Abandoned => InputRequestResponseOutcome::Abandoned,
         }
     }
 }

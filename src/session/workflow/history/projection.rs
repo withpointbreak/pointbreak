@@ -7,7 +7,7 @@ use crate::error::{Result, ShoreError};
 use crate::model::TargetRef;
 use crate::session::body_artifact::load_body_artifact;
 use crate::session::event::{
-    EventType, InterventionRequestedPayload, InterventionResolvedPayload,
+    EventType, InputRequestOpenedPayload, InputRequestRespondedPayload,
     ReviewAssessmentRecordedPayload, ReviewInitializedPayload, ReviewNoteImportedPayload,
     ReviewObservationRecordedPayload, ReviewUnitCapturedPayload, ShoreEvent,
 };
@@ -106,11 +106,10 @@ pub(super) fn history_entry_from_event(
                 related_interventions: payload.related_intervention_ids,
             }
         }
-        EventType::InterventionRequested => {
-            let payload: InterventionRequestedPayload =
-                serde_json::from_value(event.payload.clone())?;
-            ReviewHistorySummary::InterventionRequested {
-                intervention_id: payload.intervention_id,
+        EventType::InputRequestOpened => {
+            let payload: InputRequestOpenedPayload = serde_json::from_value(event.payload.clone())?;
+            ReviewHistorySummary::InputRequestOpened {
+                input_request_id: payload.input_request_id,
                 target: payload.target,
                 mode: payload.mode,
                 reason_code: payload.reason_code,
@@ -125,12 +124,12 @@ pub(super) fn history_entry_from_event(
                 body_content_hash: payload.body_content_hash,
             }
         }
-        EventType::InterventionResolved => {
-            let payload: InterventionResolvedPayload =
+        EventType::InputRequestResponded => {
+            let payload: InputRequestRespondedPayload =
                 serde_json::from_value(event.payload.clone())?;
-            ReviewHistorySummary::InterventionResolved {
-                intervention_resolution_id: payload.intervention_resolution_id,
-                intervention_id: payload.intervention_id,
+            ReviewHistorySummary::InputRequestResponded {
+                input_request_response_id: payload.input_request_response_id,
+                input_request_id: payload.input_request_id,
                 outcome: payload.outcome,
                 reason: optional_text(
                     shore_dir,

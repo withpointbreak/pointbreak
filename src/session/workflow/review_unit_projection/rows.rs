@@ -1,7 +1,7 @@
 use super::ReviewUnitProjectionSummary;
 use super::adapter_notes::AdapterNoteView;
 use crate::model::{
-    AssessmentId, DiffFile, DiffSnapshot, InterventionId, ObservationId, ReviewTargetRef,
+    AssessmentId, DiffFile, DiffSnapshot, InputRequestId, ObservationId, ReviewTargetRef,
     ReviewUnitId, RowId,
 };
 use crate::session::assessment::AssessmentView;
@@ -20,7 +20,7 @@ pub struct ReviewUnitProjectionRow {
     pub file_path: Option<String>,
     pub old_path: Option<String>,
     pub related_observation_ids: Vec<ObservationId>,
-    pub related_intervention_ids: Vec<InterventionId>,
+    pub related_intervention_ids: Vec<InputRequestId>,
     pub related_assessment_ids: Vec<AssessmentId>,
 }
 
