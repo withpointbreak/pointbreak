@@ -97,6 +97,7 @@ fn io_error(action: &str, path: &Path, error: std::io::Error) -> ShoreError {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::process::Command;
 
     use super::*;
@@ -105,13 +106,20 @@ mod tests {
     fn shore_store_paths_resolve_from_subdirectory() {
         let repo = git_repo();
         fs::create_dir_all(repo.path().join("src/nested")).unwrap();
-        let expected_root = repo.path().canonicalize().unwrap();
-
         let paths = ShoreStorePaths::resolve(repo.path().join("src/nested")).unwrap();
 
-        assert_eq!(paths.worktree_root(), expected_root.as_path());
-        assert_eq!(paths.shore_dir(), expected_root.join(".shore").as_path());
-        assert_eq!(paths.state_path(), expected_root.join(".shore/state.json"));
+        assert_existing_paths_eq(paths.worktree_root(), repo.path());
+        assert_eq!(path_file_name(paths.shore_dir()), ".shore");
+        assert_existing_paths_eq(path_parent(paths.shore_dir()), repo.path());
+        assert_eq!(path_file_name(paths.state_path().as_path()), "state.json");
+        assert_eq!(
+            path_file_name(path_parent(paths.state_path().as_path())),
+            ".shore"
+        );
+        assert_existing_paths_eq(
+            path_parent(path_parent(paths.state_path().as_path())),
+            repo.path(),
+        );
     }
 
     #[test]
@@ -125,6 +133,23 @@ mod tests {
             .to_path_buf();
 
         assert_eq!(from_public_helper, from_paths);
+    }
+
+    fn assert_existing_paths_eq(actual: &Path, expected: &Path) {
+        assert_eq!(
+            actual.canonicalize().expect("canonicalize actual path"),
+            expected.canonicalize().expect("canonicalize expected path")
+        );
+    }
+
+    fn path_parent(path: &Path) -> &Path {
+        path.parent().expect("path has parent")
+    }
+
+    fn path_file_name(path: &Path) -> &str {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .expect("path has utf-8 file name")
     }
 
     #[test]

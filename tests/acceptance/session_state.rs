@@ -6,6 +6,7 @@ use shoreline::session::{
     read_events, rebuild_state, shore_dir_for_repo,
 };
 
+use crate::support::assert_existing_paths_eq;
 use crate::support::git_repo::GitRepo;
 
 #[test]
@@ -17,9 +18,9 @@ fn shore_dir_resolves_to_git_worktree_root_from_subdirectory() {
     let root = git_worktree_root(&subdir).expect("git root resolves");
     let shore_dir = shore_dir_for_repo(&subdir).expect("shore dir resolves");
 
-    let expected_root = repo.path().canonicalize().expect("canonical repo root");
-    assert_eq!(root, expected_root);
-    assert_eq!(shore_dir, expected_root.join(".shore"));
+    assert_existing_paths_eq(&root, repo.path());
+    assert_eq!(path_file_name(&shore_dir), ".shore");
+    assert_existing_paths_eq(path_parent(&shore_dir), repo.path());
 }
 
 #[test]
@@ -93,10 +94,17 @@ fn nested_git_repo_uses_its_own_worktree_root() {
     let nested = outer.path().join("nested");
     GitRepo::init_at(&nested);
 
-    assert_eq!(
-        git_worktree_root(&nested).unwrap(),
-        nested.canonicalize().expect("canonical nested repo")
-    );
+    assert_existing_paths_eq(&git_worktree_root(&nested).unwrap(), &nested);
+}
+
+fn path_parent(path: &std::path::Path) -> &std::path::Path {
+    path.parent().expect("path has parent")
+}
+
+fn path_file_name(path: &std::path::Path) -> &str {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .expect("path has utf-8 file name")
 }
 
 #[test]

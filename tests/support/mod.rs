@@ -1,4 +1,5 @@
 use std::ffi::OsStr;
+use std::path::Path;
 use std::process::{Command, Output};
 
 #[allow(dead_code)]
@@ -27,4 +28,13 @@ pub fn dump_repo() -> git_repo::GitRepo {
     repo.commit_all("base");
     repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
     repo
+}
+
+#[track_caller]
+#[allow(dead_code)]
+pub fn assert_existing_paths_eq(actual: &Path, expected: &Path) {
+    assert_eq!(
+        actual.canonicalize().expect("canonicalize actual path"),
+        expected.canonicalize().expect("canonicalize expected path")
+    );
 }
