@@ -104,12 +104,12 @@ mod tests {
                 "review_assessment_recorded",
             ),
             (
-                intervention_requested_event(),
+                input_request_opened_event(),
                 EventType::InputRequestOpened,
                 "input_request_opened",
             ),
             (
-                intervention_resolved_event(),
+                input_request_responded_event(),
                 EventType::InputRequestResponded,
                 "input_request_responded",
             ),
@@ -138,6 +138,7 @@ mod tests {
         let event = assessment_event_with_target(target.clone());
 
         let entry = history_entry_from_event(&event, false, None).unwrap();
+        let json = serde_json::to_value(&entry).unwrap();
 
         match entry.summary {
             ReviewHistorySummary::ReviewAssessmentRecorded {
@@ -146,6 +147,11 @@ mod tests {
             } => assert_eq!(summary_target, target),
             other => panic!("expected assessment summary, got {other:?}"),
         }
+        assert_eq!(
+            json["summary"]["relatedInputRequests"],
+            serde_json::json!(["input-request:sha256:one"])
+        );
+        assert!(json["summary"].get("relatedInterventions").is_none());
     }
 
     #[test]
@@ -360,8 +366,8 @@ mod tests {
         let events = [
             observation_event_with_body("observation body"),
             assessment_event(),
-            intervention_requested_event(),
-            intervention_resolved_event(),
+            input_request_opened_event(),
+            input_request_responded_event(),
             review_note_imported_event(),
         ];
 
@@ -649,7 +655,7 @@ mod tests {
         )
     }
 
-    fn intervention_requested_event() -> ShoreEvent {
+    fn input_request_opened_event() -> ShoreEvent {
         let payload = InputRequestOpenedPayload {
             input_request_id: InputRequestId::new("input-request:sha256:one"),
             target: ReviewTargetRef::ReviewUnit {
@@ -666,14 +672,14 @@ mod tests {
         };
         tracked_event(
             EventType::InputRequestOpened,
-            "intervention:request",
+            "input-request:open",
             "human:kevin",
             payload,
             "2026-05-13T10:00:02Z",
         )
     }
 
-    fn intervention_resolved_event() -> ShoreEvent {
+    fn input_request_responded_event() -> ShoreEvent {
         let payload = InputRequestRespondedPayload {
             input_request_response_id: InputRequestResponseId::new(
                 "input-request-response:sha256:one",
@@ -688,7 +694,7 @@ mod tests {
         };
         tracked_event(
             EventType::InputRequestResponded,
-            "intervention:resolved",
+            "input-request:respond",
             "human:kevin",
             payload,
             "2026-05-13T10:00:03Z",

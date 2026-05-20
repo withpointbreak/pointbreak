@@ -104,7 +104,7 @@ pub enum ReviewHistorySummary {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         related_observations: Vec<ObservationId>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
-        related_interventions: Vec<InputRequestId>,
+        related_input_requests: Vec<InputRequestId>,
     },
     ReviewNoteImported {
         sidecar_source: SidecarSource,

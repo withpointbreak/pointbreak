@@ -62,41 +62,6 @@ pub(super) struct InputRequestResponseViewDocument {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct ReviewUnitInputRequestViewDocument {
-    id: String,
-    event_id: String,
-    track_id: String,
-    target: ReviewTargetRef,
-    mode: InputRequestMode,
-    reason_code: InputRequestReasonCode,
-    title: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    body: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    body_content_hash: Option<String>,
-    status: &'static str,
-    // ReviewUnit JSON keeps the existing field name until that public read surface moves.
-    resolutions: Vec<ReviewUnitInputRequestResponseViewDocument>,
-    created_at: String,
-    writer: Writer,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct ReviewUnitInputRequestResponseViewDocument {
-    id: String,
-    event_id: String,
-    outcome: InputRequestResponseOutcome,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason_content_hash: Option<String>,
-    created_at: String,
-    writer: Writer,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
 pub(super) struct CurrentAssessmentDocument {
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -176,44 +141,6 @@ impl From<InputRequestView> for InputRequestViewDocument {
 }
 
 impl From<shore::session::InputRequestResponseView> for InputRequestResponseViewDocument {
-    fn from(view: shore::session::InputRequestResponseView) -> Self {
-        Self {
-            id: view.id.as_str().to_owned(),
-            event_id: view.event_id.as_str().to_owned(),
-            outcome: view.outcome,
-            reason: view.reason,
-            reason_content_hash: view.reason_content_hash,
-            created_at: view.created_at,
-            writer: view.writer,
-        }
-    }
-}
-
-impl From<InputRequestView> for ReviewUnitInputRequestViewDocument {
-    fn from(view: InputRequestView) -> Self {
-        Self {
-            id: view.id.as_str().to_owned(),
-            event_id: view.event_id.as_str().to_owned(),
-            track_id: view.track_id.as_str().to_owned(),
-            target: view.target,
-            mode: view.mode,
-            reason_code: view.reason_code,
-            title: view.title,
-            body: view.body,
-            body_content_hash: view.body_content_hash,
-            status: view.status.as_str(),
-            resolutions: view
-                .responses
-                .into_iter()
-                .map(ReviewUnitInputRequestResponseViewDocument::from)
-                .collect(),
-            created_at: view.created_at,
-            writer: view.writer,
-        }
-    }
-}
-
-impl From<shore::session::InputRequestResponseView> for ReviewUnitInputRequestResponseViewDocument {
     fn from(view: shore::session::InputRequestResponseView) -> Self {
         Self {
             id: view.id.as_str().to_owned(),

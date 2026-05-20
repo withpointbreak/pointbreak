@@ -166,6 +166,50 @@ fn review_unit_show_include_body_hydrates_without_internal_paths() {
 }
 
 #[test]
+fn review_unit_show_includes_input_requests_and_omits_legacy_fields() {
+    let repo = modified_repo();
+    shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
+    let requested = add_input_request_with_body(&repo, "visible request body");
+    respond_to_input_request(
+        &repo,
+        requested["inputRequestId"].as_str().unwrap(),
+        "approved",
+    );
+
+    let output = shore([
+        "review",
+        "unit",
+        "show",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--include-body",
+    ]);
+    let json = parse_json(&output.stdout);
+    let input_request_id = requested["inputRequestId"].as_str().unwrap();
+
+    assert_eq!(json["inputRequests"].as_array().unwrap().len(), 1);
+    assert_eq!(json["inputRequests"][0]["id"], input_request_id);
+    assert_eq!(json["inputRequests"][0]["body"], "visible request body");
+    assert_eq!(
+        json["inputRequests"][0]["responses"][0]["reason"],
+        "approved"
+    );
+    assert_eq!(json["summary"]["inputRequestCount"], 1);
+    assert!(json.get("interventions").is_none());
+    assert!(json["summary"].get("interventionCount").is_none());
+    assert!(json["inputRequests"][0].get("resolutions").is_none());
+    assert!(json["rows"].as_array().unwrap().iter().any(|row| {
+        row["kind"] == "input_request"
+            && row["relatedInputRequestIds"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|id| id == input_request_id)
+            && row.get("relatedInterventionIds").is_none()
+    }));
+}
+
+#[test]
 fn review_unit_show_rows_are_narrative_first_and_snapshot_complete() {
     let repo = modified_repo();
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
@@ -378,6 +422,45 @@ fn add_assessment(repo: &GitRepo) -> Value {
             "accepted",
             "--summary",
             "ship it",
+        ])
+        .stdout,
+    )
+}
+
+fn add_input_request_with_body(repo: &GitRepo, body: &str) -> Value {
+    parse_json(
+        &shore([
+            "review",
+            "input-request",
+            "open",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "--track",
+            "agent:codex",
+            "--title",
+            "Need decision",
+            "--reason",
+            "manual-decision-required",
+            "--body",
+            body,
+        ])
+        .stdout,
+    )
+}
+
+fn respond_to_input_request(repo: &GitRepo, input_request_id: &str, reason: &str) -> Value {
+    parse_json(
+        &shore([
+            "review",
+            "input-request",
+            "respond",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            input_request_id,
+            "--outcome",
+            "approved",
+            "--reason",
+            reason,
         ])
         .stdout,
     )

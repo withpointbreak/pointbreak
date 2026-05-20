@@ -20,7 +20,7 @@ pub struct ReviewUnitProjectionRow {
     pub file_path: Option<String>,
     pub old_path: Option<String>,
     pub related_observation_ids: Vec<ObservationId>,
-    pub related_intervention_ids: Vec<InputRequestId>,
+    pub related_input_request_ids: Vec<InputRequestId>,
     pub related_assessment_ids: Vec<AssessmentId>,
 }
 
@@ -31,7 +31,7 @@ pub enum ReviewUnitProjectionRowKind {
     HunkHeader,
     Diff,
     Observation,
-    Intervention,
+    InputRequest,
     Assessment,
     AdapterNote,
     EmptyState,
@@ -45,7 +45,7 @@ impl ReviewUnitProjectionRowKind {
             Self::HunkHeader => "hunk_header",
             Self::Diff => "diff",
             Self::Observation => "observation",
-            Self::Intervention => "intervention",
+            Self::InputRequest => "input_request",
             Self::Assessment => "assessment",
             Self::AdapterNote => "adapter_note",
             Self::EmptyState => "empty_state",
@@ -215,33 +215,33 @@ pub(super) fn build_observation_rows(
                 file_path,
                 old_path,
                 related_observation_ids: vec![observation.id.clone()],
-                related_intervention_ids: Vec::new(),
+                related_input_request_ids: Vec::new(),
                 related_assessment_ids: Vec::new(),
             }
         })
         .collect()
 }
 
-pub(super) fn build_intervention_rows(
-    interventions: &[InputRequestView],
+pub(super) fn build_input_request_rows(
+    input_requests: &[InputRequestView],
 ) -> Vec<ReviewUnitProjectionRow> {
-    interventions
+    input_requests
         .iter()
         .enumerate()
-        .map(|(index, intervention)| {
-            let (file_path, old_path) = target_paths(&intervention.target);
+        .map(|(index, input_request)| {
+            let (file_path, old_path) = target_paths(&input_request.target);
             ReviewUnitProjectionRow {
                 id: RowId::new(format!("row:{index:06}")),
-                kind: ReviewUnitProjectionRowKind::Intervention,
+                kind: ReviewUnitProjectionRowKind::InputRequest,
                 projection_phase: ProjectionPhase::Narrative,
                 projection_order: index,
                 snapshot_order: None,
                 coverage: ProjectionCoverage::Reviewed,
-                target: Some(intervention.target.clone()),
+                target: Some(input_request.target.clone()),
                 file_path,
                 old_path,
                 related_observation_ids: Vec::new(),
-                related_intervention_ids: vec![intervention.id.clone()],
+                related_input_request_ids: vec![input_request.id.clone()],
                 related_assessment_ids: Vec::new(),
             }
         })
@@ -267,7 +267,7 @@ pub(super) fn build_assessment_rows(
                 file_path,
                 old_path,
                 related_observation_ids: assessment.related_observations.clone(),
-                related_intervention_ids: assessment.related_input_requests.clone(),
+                related_input_request_ids: assessment.related_input_requests.clone(),
                 related_assessment_ids: vec![assessment.id.clone()],
             }
         })
@@ -300,7 +300,7 @@ pub(super) fn build_adapter_note_rows(
                 file_path: Some(note.file_path.clone()),
                 old_path: note.file_old_path.clone(),
                 related_observation_ids: Vec::new(),
-                related_intervention_ids: Vec::new(),
+                related_input_request_ids: Vec::new(),
                 related_assessment_ids: Vec::new(),
             }
         })
@@ -327,7 +327,7 @@ pub(super) fn snapshot_row(
         file_path,
         old_path,
         related_observation_ids: Vec::new(),
-        related_intervention_ids: Vec::new(),
+        related_input_request_ids: Vec::new(),
         related_assessment_ids: Vec::new(),
     }
 }

@@ -103,7 +103,7 @@ pub(super) fn history_entry_from_event(
                 summary_content_hash: payload.summary_content_hash,
                 replaces: payload.replaces_assessment_ids,
                 related_observations: payload.related_observation_ids,
-                related_interventions: payload.related_input_request_ids,
+                related_input_requests: payload.related_input_request_ids,
             }
         }
         EventType::InputRequestOpened => {

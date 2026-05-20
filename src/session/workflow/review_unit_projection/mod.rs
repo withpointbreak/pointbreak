@@ -25,7 +25,7 @@ pub use self::identity::{
 use self::resolving::selected_review_unit_capture;
 pub use self::rows::{ReviewUnitProjectionRow, SnapshotOrder};
 use self::rows::{
-    build_adapter_note_rows, build_assessment_rows, build_intervention_rows,
+    build_adapter_note_rows, build_assessment_rows, build_input_request_rows,
     build_observation_rows, build_snapshot_rows, renumber_projection_rows,
 };
 use self::snapshot::load_bound_snapshot_artifact;
@@ -50,7 +50,7 @@ pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShow
         tag_filters: &[],
         include_body: options.include_body,
     })?;
-    let interventions = project_input_requests(InputRequestProjectionOptions {
+    let input_requests = project_input_requests(InputRequestProjectionOptions {
         shore_dir: paths.shore_dir(),
         events: &events,
         resolved: &resolved,
@@ -75,9 +75,9 @@ pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShow
     let observation_rows = build_observation_rows(&observations);
     summary.observation_count = observations.len();
     narrative_rows.extend(observation_rows);
-    let intervention_rows = build_intervention_rows(&interventions);
-    summary.intervention_count = interventions.len();
-    narrative_rows.extend(intervention_rows);
+    let input_request_rows = build_input_request_rows(&input_requests);
+    summary.input_request_count = input_requests.len();
+    narrative_rows.extend(input_request_rows);
     let assessment_rows = build_assessment_rows(&assessments);
     summary.assessment_count = assessments.len();
     narrative_rows.extend(assessment_rows);
@@ -108,7 +108,7 @@ pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShow
         summary,
         current_assessment,
         observations,
-        interventions,
+        input_requests,
         assessments,
         adapter_notes,
         rows,
@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[test]
-    fn show_review_unit_includes_open_and_resolved_interventions() {
+    fn show_review_unit_includes_open_and_responded_input_requests() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         let request = open_input_request(
@@ -383,23 +383,23 @@ mod tests {
 
         let unit = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
 
-        assert_eq!(unit.interventions.len(), 1);
-        assert_eq!(unit.interventions[0].id, request.input_request_id);
-        assert_eq!(unit.interventions[0].status, InputRequestStatus::Responded);
-        assert_eq!(unit.summary.intervention_count, 1);
+        assert_eq!(unit.input_requests.len(), 1);
+        assert_eq!(unit.input_requests[0].id, request.input_request_id);
+        assert_eq!(unit.input_requests[0].status, InputRequestStatus::Responded);
+        assert_eq!(unit.summary.input_request_count, 1);
         assert!(
             unit.rows
                 .iter()
-                .any(|row| row.kind.as_str() == "intervention")
+                .any(|row| row.kind.as_str() == "input_request")
         );
     }
 
     #[test]
-    fn show_review_unit_interventions_match_list_semantics() {
+    fn show_review_unit_input_requests_match_list_semantics() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
-        add_duplicate_intervention_requests(&repo);
-        add_ambiguous_intervention_resolutions(&repo);
+        add_duplicate_input_requests(&repo);
+        add_ambiguous_input_request_responses(&repo);
 
         let unit = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
         let list = list_input_requests(
@@ -407,7 +407,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(unit.interventions, list.input_requests);
+        assert_eq!(unit.input_requests, list.input_requests);
         assert_eq!(unit.diagnostics, list.diagnostics);
     }
 
@@ -722,14 +722,14 @@ mod tests {
         .unwrap();
     }
 
-    fn add_duplicate_intervention_requests(repo: &TestRepo) {
+    fn add_duplicate_input_requests(repo: &TestRepo) {
         let first = open_input_request(
             InputRequestOpenOptions::new(repo.path())
                 .with_track("agent:codex")
                 .with_title("Same decision")
                 .with_body("same body")
                 .with_reason_code(InputRequestReasonCode::ManualDecisionRequired)
-                .with_idempotency_key("intervention-retry-a"),
+                .with_idempotency_key("input-request-retry-a"),
         )
         .unwrap();
         let second = open_input_request(
@@ -738,14 +738,14 @@ mod tests {
                 .with_title("Same decision")
                 .with_body("same body")
                 .with_reason_code(InputRequestReasonCode::ManualDecisionRequired)
-                .with_idempotency_key("intervention-retry-b"),
+                .with_idempotency_key("input-request-retry-b"),
         )
         .unwrap();
 
         assert_eq!(first.input_request_id, second.input_request_id);
     }
 
-    fn add_ambiguous_intervention_resolutions(repo: &TestRepo) {
+    fn add_ambiguous_input_request_responses(repo: &TestRepo) {
         let request = open_input_request(
             InputRequestOpenOptions::new(repo.path())
                 .with_track("agent:codex")

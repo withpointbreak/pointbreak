@@ -102,6 +102,74 @@ fn review_history_include_body_hydrates_text_without_artifact_paths() {
 }
 
 #[test]
+fn review_history_filters_input_request_events_and_hydrates_text() {
+    let repo = modified_repo();
+    shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
+    let requested = add_input_request_with_body(&repo, "request details");
+    respond_to_input_request(
+        &repo,
+        requested["inputRequestId"].as_str().unwrap(),
+        "approved",
+    );
+
+    let output = shore([
+        "review",
+        "history",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--event-type",
+        "input-request-opened",
+        "--event-type",
+        "input-request-responded",
+        "--include-body",
+    ]);
+    let json = parse_json(&output.stdout);
+
+    assert_eq!(
+        json["filters"]["eventTypes"],
+        serde_json::json!(["input_request_opened", "input_request_responded"])
+    );
+    assert_eq!(json["entries"].as_array().unwrap().len(), 2);
+    assert!(json["entries"].as_array().unwrap().iter().any(|entry| {
+        entry["eventType"] == "input_request_opened"
+            && entry["summary"]["kind"] == "input_request_opened"
+            && entry["summary"]["inputRequestId"] == requested["inputRequestId"]
+            && entry["summary"]["body"] == "request details"
+    }));
+    assert!(json["entries"].as_array().unwrap().iter().any(|entry| {
+        entry["eventType"] == "input_request_responded"
+            && entry["summary"]["kind"] == "input_request_responded"
+            && entry["summary"]["inputRequestId"] == requested["inputRequestId"]
+            && entry["summary"]["reason"] == "approved"
+    }));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("artifacts/notes/"));
+}
+
+#[test]
+fn review_history_rejects_legacy_input_request_event_filter_names() {
+    let repo = modified_repo();
+    shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
+
+    for event_type in ["intervention-requested", "intervention-resolved"] {
+        let output = shore([
+            "review",
+            "history",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "--event-type",
+            event_type,
+        ]);
+
+        assert!(!output.status.success(), "{event_type} should be rejected");
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("invalid value"));
+        assert!(stderr.contains("input-request-opened"));
+        assert!(stderr.contains("input-request-responded"));
+    }
+}
+
+#[test]
 fn review_history_filters_by_review_unit() {
     let repo = modified_repo();
     let first =
@@ -266,6 +334,45 @@ fn add_observation_with_key(repo: &GitRepo, key: &str) -> Value {
             "same body",
             "--idempotency-key",
             key,
+        ])
+        .stdout,
+    )
+}
+
+fn add_input_request_with_body(repo: &GitRepo, body: &str) -> Value {
+    parse_json(
+        &shore([
+            "review",
+            "input-request",
+            "open",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "--track",
+            "agent:codex",
+            "--title",
+            "Need decision",
+            "--reason",
+            "manual-decision-required",
+            "--body",
+            body,
+        ])
+        .stdout,
+    )
+}
+
+fn respond_to_input_request(repo: &GitRepo, input_request_id: &str, reason: &str) -> Value {
+    parse_json(
+        &shore([
+            "review",
+            "input-request",
+            "respond",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            input_request_id,
+            "--outcome",
+            "approved",
+            "--reason",
+            reason,
         ])
         .stdout,
     )

@@ -59,8 +59,8 @@ enum HistoryEventTypeArg {
     ReviewUnitCaptured,
     ReviewObservationRecorded,
     ReviewAssessmentRecorded,
-    InterventionRequested,
-    InterventionResolved,
+    InputRequestOpened,
+    InputRequestResponded,
     ReviewNoteImported,
 }
 
@@ -113,8 +113,8 @@ impl From<HistoryEventTypeArg> for EventType {
             HistoryEventTypeArg::ReviewUnitCaptured => Self::ReviewUnitCaptured,
             HistoryEventTypeArg::ReviewObservationRecorded => Self::ReviewObservationRecorded,
             HistoryEventTypeArg::ReviewAssessmentRecorded => Self::ReviewAssessmentRecorded,
-            HistoryEventTypeArg::InterventionRequested => Self::InputRequestOpened,
-            HistoryEventTypeArg::InterventionResolved => Self::InputRequestResponded,
+            HistoryEventTypeArg::InputRequestOpened => Self::InputRequestOpened,
+            HistoryEventTypeArg::InputRequestResponded => Self::InputRequestResponded,
             HistoryEventTypeArg::ReviewNoteImported => Self::ReviewNoteImported,
         }
     }

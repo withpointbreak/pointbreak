@@ -54,7 +54,7 @@ pub struct ReviewUnitShowResult {
     pub summary: ReviewUnitProjectionSummary,
     pub current_assessment: CurrentAssessmentView,
     pub observations: Vec<ObservationView>,
-    pub interventions: Vec<InputRequestView>,
+    pub input_requests: Vec<InputRequestView>,
     pub assessments: Vec<AssessmentView>,
     pub adapter_notes: Vec<AdapterNoteView>,
     pub rows: Vec<ReviewUnitProjectionRow>,
@@ -88,7 +88,7 @@ pub struct ReviewUnitProjectionSummary {
     pub snapshot_row_count: usize,
     pub snapshot_remainder_row_count: usize,
     pub observation_count: usize,
-    pub intervention_count: usize,
+    pub input_request_count: usize,
     pub assessment_count: usize,
     pub adapter_note_count: usize,
 }

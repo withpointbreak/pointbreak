@@ -12,8 +12,8 @@ use shore::session::{
 
 use crate::cli::json;
 use crate::cli::review::documents::{
-    AssessmentViewDocument, CurrentAssessmentDocument, ObservationViewDocument,
-    ReviewUnitInputRequestViewDocument,
+    AssessmentViewDocument, CurrentAssessmentDocument, InputRequestViewDocument,
+    ObservationViewDocument,
 };
 
 #[derive(Debug, Args)]
@@ -80,7 +80,7 @@ struct UnitShowBody {
     summary: UnitShowSummaryDocument,
     current_assessment: CurrentAssessmentDocument,
     observations: Vec<ObservationViewDocument>,
-    interventions: Vec<ReviewUnitInputRequestViewDocument>,
+    input_requests: Vec<InputRequestViewDocument>,
     assessments: Vec<AssessmentViewDocument>,
     adapter_notes: Vec<AdapterNoteDocument>,
     rows: Vec<UnitProjectionRowDocument>,
@@ -117,7 +117,7 @@ struct UnitShowSummaryDocument {
     snapshot_row_count: usize,
     snapshot_remainder_row_count: usize,
     observation_count: usize,
-    intervention_count: usize,
+    input_request_count: usize,
     assessment_count: usize,
     adapter_note_count: usize,
 }
@@ -172,7 +172,7 @@ struct UnitProjectionRowDocument {
     #[serde(skip_serializing_if = "Option::is_none")]
     old_path: Option<String>,
     related_observation_ids: Vec<String>,
-    related_intervention_ids: Vec<String>,
+    related_input_request_ids: Vec<String>,
     related_assessment_ids: Vec<String>,
 }
 
@@ -276,10 +276,10 @@ fn unit_show_document(result: ReviewUnitShowResult) -> json::DiagnosticDocument<
                 .into_iter()
                 .map(ObservationViewDocument::from)
                 .collect(),
-            interventions: result
-                .interventions
+            input_requests: result
+                .input_requests
                 .into_iter()
-                .map(ReviewUnitInputRequestViewDocument::from)
+                .map(InputRequestViewDocument::from)
                 .collect(),
             assessments: result
                 .assessments
@@ -337,7 +337,7 @@ impl From<ReviewUnitProjectionSummary> for UnitShowSummaryDocument {
             snapshot_row_count: summary.snapshot_row_count,
             snapshot_remainder_row_count: summary.snapshot_remainder_row_count,
             observation_count: summary.observation_count,
-            intervention_count: summary.intervention_count,
+            input_request_count: summary.input_request_count,
             assessment_count: summary.assessment_count,
             adapter_note_count: summary.adapter_note_count,
         }
@@ -391,8 +391,8 @@ impl From<ReviewUnitProjectionRow> for UnitProjectionRowDocument {
                 .into_iter()
                 .map(|id| id.as_str().to_owned())
                 .collect(),
-            related_intervention_ids: row
-                .related_intervention_ids
+            related_input_request_ids: row
+                .related_input_request_ids
                 .into_iter()
                 .map(|id| id.as_str().to_owned())
                 .collect(),
