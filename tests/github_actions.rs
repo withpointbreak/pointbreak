@@ -39,6 +39,16 @@ fn release_workflows_target_single_shoreline_crate() {
 }
 
 #[test]
+fn changelog_has_cocogitto_insertion_separator() {
+    let changelog = std::fs::read_to_string("CHANGELOG.md").expect("read changelog");
+
+    assert!(
+        changelog.lines().any(|line| line == "- - -"),
+        "Cocogitto release bumps need the default insertion separator"
+    );
+}
+
+#[test]
 fn commit_check_workflow_reports_shore_examples() {
     let commit_check =
         std::fs::read_to_string(".github/workflows/commit-check.yml").expect("read commit check");
