@@ -33,7 +33,7 @@ pub(super) struct InputRequestViewDocument {
     event_id: String,
     track_id: String,
     target: ReviewTargetRef,
-    mode: InputRequestModeDocument,
+    mode: InputRequestAssertionModeDocument,
     reason_code: InputRequestReasonCode,
     title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -62,8 +62,8 @@ pub(super) struct InputRequestResponseViewDocument {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-enum InputRequestModeDocument {
-    Blocking,
+enum InputRequestAssertionModeDocument {
+    Operative,
     Advisory,
 }
 
@@ -147,10 +147,10 @@ impl From<InputRequestView> for InputRequestViewDocument {
     }
 }
 
-impl From<AssertionMode> for InputRequestModeDocument {
+impl From<AssertionMode> for InputRequestAssertionModeDocument {
     fn from(mode: AssertionMode) -> Self {
         match mode {
-            AssertionMode::Operative => Self::Blocking,
+            AssertionMode::Operative => Self::Operative,
             AssertionMode::Advisory => Self::Advisory,
         }
     }

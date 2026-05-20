@@ -47,8 +47,8 @@ struct InputRequestOpenArgs {
     #[arg(long, value_enum)]
     reason: InputRequestReasonArg,
 
-    #[arg(long, value_enum, default_value = "blocking")]
-    mode: InputRequestModeArg,
+    #[arg(long, value_enum, default_value = "operative")]
+    mode: InputRequestAssertionModeArg,
 
     #[arg(long, group = "input_request_body")]
     body: Option<String>,
@@ -90,7 +90,7 @@ struct InputRequestListArgs {
     track: Option<String>,
 
     #[arg(long, value_enum)]
-    mode: Option<InputRequestModeArg>,
+    mode: Option<InputRequestAssertionModeArg>,
 
     #[arg(long)]
     file: Option<String>,
@@ -156,7 +156,7 @@ struct InputRequestOpenBody {
     event_id: String,
     track_id: String,
     target: ReviewTargetRef,
-    mode: InputRequestModeDocument,
+    mode: InputRequestAssertionModeDocument,
     reason_code: InputRequestReasonCode,
     #[serde(skip_serializing_if = "Option::is_none")]
     body_content_hash: Option<String>,
@@ -193,7 +193,7 @@ struct InputRequestListFiltersDocument {
     #[serde(skip_serializing_if = "Option::is_none")]
     track_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    mode: Option<InputRequestModeDocument>,
+    mode: Option<InputRequestAssertionModeDocument>,
     #[serde(skip_serializing_if = "Option::is_none")]
     file: Option<String>,
     status: &'static str,
@@ -202,15 +202,15 @@ struct InputRequestListFiltersDocument {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 #[value(rename_all = "kebab-case")]
-enum InputRequestModeArg {
-    Blocking,
+enum InputRequestAssertionModeArg {
+    Operative,
     Advisory,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-enum InputRequestModeDocument {
-    Blocking,
+enum InputRequestAssertionModeDocument {
+    Operative,
     Advisory,
 }
 
@@ -454,7 +454,10 @@ fn input_request_list_document(
                     .filters
                     .track_id
                     .map(|track_id| track_id.as_str().to_owned()),
-                mode: result.filters.mode.map(InputRequestModeDocument::from),
+                mode: result
+                    .filters
+                    .mode
+                    .map(InputRequestAssertionModeDocument::from),
                 file: result.filters.file,
                 status: result.filters.status.as_str(),
                 include_body: result.filters.include_body,
@@ -500,19 +503,19 @@ fn input_request_respond_document(
     )
 }
 
-impl From<InputRequestModeArg> for AssertionMode {
-    fn from(value: InputRequestModeArg) -> Self {
+impl From<InputRequestAssertionModeArg> for AssertionMode {
+    fn from(value: InputRequestAssertionModeArg) -> Self {
         match value {
-            InputRequestModeArg::Blocking => AssertionMode::Operative,
-            InputRequestModeArg::Advisory => AssertionMode::Advisory,
+            InputRequestAssertionModeArg::Operative => AssertionMode::Operative,
+            InputRequestAssertionModeArg::Advisory => AssertionMode::Advisory,
         }
     }
 }
 
-impl From<AssertionMode> for InputRequestModeDocument {
+impl From<AssertionMode> for InputRequestAssertionModeDocument {
     fn from(value: AssertionMode) -> Self {
         match value {
-            AssertionMode::Operative => Self::Blocking,
+            AssertionMode::Operative => Self::Operative,
             AssertionMode::Advisory => Self::Advisory,
         }
     }

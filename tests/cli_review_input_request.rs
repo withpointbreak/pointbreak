@@ -9,7 +9,7 @@ use support::git_repo::GitRepo;
 use support::shore;
 
 #[test]
-fn input_request_open_records_blocking_request_and_emits_v1_json() {
+fn input_request_open_defaults_to_operative_mode_and_emits_v1_json() {
     let repo = modified_repo();
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
 
@@ -25,8 +25,6 @@ fn input_request_open_records_blocking_request_and_emits_v1_json() {
         "Need approval",
         "--reason",
         "manual-decision-required",
-        "--mode",
-        "blocking",
         "--body",
         "approve this path?",
     ]);
@@ -46,12 +44,59 @@ fn input_request_open_records_blocking_request_and_emits_v1_json() {
             .starts_with("input-request:sha256:")
     );
     assert_eq!(json["trackId"], "human:kevin");
-    assert_eq!(json["mode"], "blocking");
+    assert_eq!(json["mode"], "operative");
     assert_eq!(json["reasonCode"], "manual_decision_required");
     assert_eq!(json["eventsCreatedByType"]["input_request_opened"], 1);
     assert!(json.get("bodyArtifactPath").is_none());
     assert_has_no_legacy_public_input_request_shape(&json);
     assert!(repo.path().join(".shore/state.json").is_file());
+}
+
+#[test]
+fn input_request_open_accepts_advisory_and_rejects_blocking() {
+    let repo = modified_repo();
+    shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
+
+    let advisory = shore([
+        "review",
+        "input-request",
+        "open",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--track",
+        "human:kevin",
+        "--title",
+        "FYI",
+        "--reason",
+        "manual-decision-required",
+        "--mode",
+        "advisory",
+    ]);
+    assert!(
+        advisory.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&advisory.stderr)
+    );
+    let json = parse_json(&advisory.stdout);
+    assert_eq!(json["mode"], "advisory");
+
+    let blocking = shore([
+        "review",
+        "input-request",
+        "open",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--track",
+        "human:kevin",
+        "--title",
+        "Old mode",
+        "--reason",
+        "manual-decision-required",
+        "--mode",
+        "blocking",
+    ]);
+    assert!(!blocking.status.success());
+    assert!(String::from_utf8_lossy(&blocking.stderr).contains("invalid value"));
 }
 
 #[test]
@@ -81,8 +126,81 @@ fn input_request_list_emits_v1_json_and_pretty_prints() {
     assert_eq!(json["filters"]["status"], "open");
     assert_eq!(json["inputRequests"].as_array().unwrap().len(), 1);
     assert_eq!(json["inputRequests"][0]["title"], "First");
+    assert_eq!(json["inputRequests"][0]["mode"], "operative");
     assert_eq!(json["inputRequests"][0]["status"], "open");
     assert_has_no_legacy_public_input_request_shape(&json);
+}
+
+#[test]
+fn input_request_list_accepts_operative_and_advisory_mode_filters() {
+    let repo = modified_repo();
+    shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
+    request(&repo, "Default");
+    shore([
+        "review",
+        "input-request",
+        "open",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--track",
+        "human:kevin",
+        "--title",
+        "Advisory",
+        "--reason",
+        "manual-decision-required",
+        "--mode",
+        "advisory",
+    ]);
+
+    let operative = shore([
+        "review",
+        "input-request",
+        "list",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--mode",
+        "operative",
+    ]);
+    assert!(
+        operative.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&operative.stderr)
+    );
+    let operative_json = parse_json(&operative.stdout);
+    assert_eq!(operative_json["filters"]["mode"], "operative");
+    assert_eq!(operative_json["inputRequests"][0]["title"], "Default");
+    assert_eq!(operative_json["inputRequests"][0]["mode"], "operative");
+
+    let advisory = shore([
+        "review",
+        "input-request",
+        "list",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--mode",
+        "advisory",
+    ]);
+    assert!(
+        advisory.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&advisory.stderr)
+    );
+    let advisory_json = parse_json(&advisory.stdout);
+    assert_eq!(advisory_json["filters"]["mode"], "advisory");
+    assert_eq!(advisory_json["inputRequests"][0]["title"], "Advisory");
+    assert_eq!(advisory_json["inputRequests"][0]["mode"], "advisory");
+
+    let blocking = shore([
+        "review",
+        "input-request",
+        "list",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--mode",
+        "blocking",
+    ]);
+    assert!(!blocking.status.success());
+    assert!(String::from_utf8_lossy(&blocking.stderr).contains("invalid value"));
 }
 
 #[test]
