@@ -18,8 +18,16 @@ fn readme_has_release_badges_for_shoreline() {
     assert!(readme.contains("https://img.shields.io/crates/v/shoreline"));
     assert!(readme.contains("https://docs.rs/shoreline"));
     assert!(readme.contains("https://docs.rs/shoreline/badge.svg"));
-    assert!(readme.contains("https://github.com/kevinswiber/shore/actions/workflows/ci.yml"));
+    assert!(readme.contains("https://github.com/kevinswiber/shoreline/actions/workflows/ci.yml"));
     assert!(readme.contains("actions/workflows/ci.yml/badge.svg"));
+}
+
+#[test]
+fn cargo_metadata_points_to_shoreline_repository() {
+    let manifest = std::fs::read_to_string("Cargo.toml").expect("read Cargo manifest");
+
+    assert!(manifest.contains(r#"homepage = "https://github.com/kevinswiber/shoreline""#));
+    assert!(manifest.contains(r#"repository = "https://github.com/kevinswiber/shoreline""#));
 }
 
 #[test]

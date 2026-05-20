@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/shoreline.svg)](https://crates.io/crates/shoreline)
 [![Documentation](https://docs.rs/shoreline/badge.svg)](https://docs.rs/shoreline)
-[![CI](https://github.com/kevinswiber/shore/actions/workflows/ci.yml/badge.svg)](https://github.com/kevinswiber/shore/actions/workflows/ci.yml)
+[![CI](https://github.com/kevinswiber/shoreline/actions/workflows/ci.yml/badge.svg)](https://github.com/kevinswiber/shoreline/actions/workflows/ci.yml)
 
 Shoreline is terminal code review built for the human-agent loop — capture a change, record
 observations and interventions, resolve them asynchronously, and resume the review state across

@@ -45,7 +45,7 @@ if [ ${#VIEWER[@]} -eq 0 ]; then
   fi
 fi
 
-REPO="kevinswiber/shore"
+REPO="kevinswiber/shoreline"
 WORKFLOW="release-plan.yml"
 
 if [ -n "${RELEASE_PLAN_DIR:-}" ]; then

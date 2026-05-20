@@ -58,6 +58,9 @@ jobs:
           CURRENT_VERSION=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "shoreline") | .version')
           LATEST_TAG=$(git describe --tags --match "v[0-9]*" --abbrev=0 2>/dev/null || echo "")
+          RELEASE_COG_CONFIG="${RUNNER_TEMP}/cog-release.toml"
+          cp cog.toml "$RELEASE_COG_CONFIG"
+          perl -0pi -e 's/^scopes = \[\]/scopes = ["cli", "review"]/m' "$RELEASE_COG_CONFIG"
 
           {
             echo "# Release Plan"
@@ -73,8 +76,8 @@ jobs:
           } | out
 
           gh run list --branch "${BRANCH}" --limit 20 \
-            --json name,conclusion,headSha,status \
-            --jq '[group_by(.name)[] | sort_by(.headSha) | last] | sort_by(.name)[] | "| \(.name) | \(if .conclusion != "" and .conclusion != null then .conclusion else .status end) | `\(.headSha[0:7])` |"' \
+            --json name,conclusion,createdAt,headSha,status \
+            --jq '[group_by(.name)[] | sort_by(.createdAt) | last] | sort_by(.name)[] | "| \(.name) | \(if .conclusion != "" and .conclusion != null then .conclusion else .status end) | `\(.headSha[0:7])` |"' \
             | out
 
           {
@@ -103,9 +106,9 @@ jobs:
               echo ""
             } | out
             if [ -n "$LATEST_TAG" ]; then
-              changelog=$(cog changelog "${LATEST_TAG}..HEAD" 2>&1 || echo "(changelog generation failed)")
+              changelog=$(cog --config "$RELEASE_COG_CONFIG" changelog "${LATEST_TAG}..HEAD" 2>&1 || echo "(changelog generation failed)")
             else
-              changelog=$(cog changelog 2>&1 || echo "(changelog generation failed)")
+              changelog=$(cog --config "$RELEASE_COG_CONFIG" changelog 2>&1 || echo "(changelog generation failed)")
             fi
           elif [ -z "$LATEST_TAG" ]; then
             NEXT_VERSION="$CURRENT_VERSION"
@@ -118,7 +121,7 @@ jobs:
               echo "No prior \`v*\` release tag was found. The first automated release keeps the current crate version and creates \`v${NEXT_VERSION}\`; later releases can use Cocogitto's automatic bump calculation."
               echo ""
             } | out
-            changelog=$(cog changelog 2>&1 || echo "(changelog generation failed)")
+            changelog=$(cog --config "$RELEASE_COG_CONFIG" changelog 2>&1 || echo "(changelog generation failed)")
           else
             CURRENT_RELEASE="${LATEST_TAG#v}"
             if dry_output=$(cog bump --auto --dry-run --skip-untracked 2>&1); then
@@ -141,7 +144,7 @@ jobs:
                 echo "**Current release:** ${CURRENT_RELEASE} **-->** ${NEXT_VERSION}"
                 echo ""
               } | out
-              changelog=$(cog changelog "${LATEST_TAG}..HEAD" 2>&1 || echo "(changelog generation failed)")
+              changelog=$(cog --config "$RELEASE_COG_CONFIG" changelog "${LATEST_TAG}..HEAD" 2>&1 || echo "(changelog generation failed)")
             elif echo "$dry_output" | grep -q "No conventional commit found"; then
               {
                 echo "**Current release:** ${CURRENT_RELEASE}"
@@ -249,17 +252,20 @@ jobs:
           CURRENT_VERSION=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "shoreline") | .version')
           LATEST_TAG=$(git describe --tags --match "v[0-9]*" --abbrev=0 2>/dev/null || echo "")
+          RELEASE_COG_CONFIG="${RUNNER_TEMP}/cog-release.toml"
+          cp cog.toml "$RELEASE_COG_CONFIG"
+          perl -0pi -e 's/^scopes = \[\]/scopes = ["cli", "review"]/m' "$RELEASE_COG_CONFIG"
 
           if [ -n "$INPUT_VERSION" ]; then
             TARGET_VERSION="${INPUT_VERSION#v}"
-            cog bump --version "$TARGET_VERSION" --hook-profile ci
-            BUMP_COMMAND="cog bump --version ${TARGET_VERSION} --hook-profile ci"
+            cog --config "$RELEASE_COG_CONFIG" bump --version "$TARGET_VERSION" --hook-profile ci
+            BUMP_COMMAND="cog --config \"$RELEASE_COG_CONFIG\" bump --version ${TARGET_VERSION} --hook-profile ci"
           elif [ -z "$LATEST_TAG" ]; then
-            cog bump --version "$CURRENT_VERSION" --hook-profile ci
-            BUMP_COMMAND="cog bump --version ${CURRENT_VERSION} --hook-profile ci"
+            cog --config "$RELEASE_COG_CONFIG" bump --version "$CURRENT_VERSION" --hook-profile ci
+            BUMP_COMMAND="cog --config \"$RELEASE_COG_CONFIG\" bump --version ${CURRENT_VERSION} --hook-profile ci"
           else
-            cog bump --auto --hook-profile ci
-            BUMP_COMMAND="cog bump --auto --hook-profile ci"
+            cog --config "$RELEASE_COG_CONFIG" bump --auto --hook-profile ci
+            BUMP_COMMAND="cog --config \"$RELEASE_COG_CONFIG\" bump --auto --hook-profile ci"
           fi
 
           {

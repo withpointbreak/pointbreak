@@ -22,14 +22,20 @@ fn release_workflows_target_single_shoreline_crate() {
     let release_plan =
         std::fs::read_to_string(".github/workflows/release-plan.yml").expect("read release plan");
     let release = std::fs::read_to_string(".github/workflows/release.yml").expect("read release");
+    let release_script =
+        std::fs::read_to_string("scripts/run-release-plan.sh").expect("read release script");
     let cog = std::fs::read_to_string("cog.toml").expect("read cog config");
 
     assert!(release_plan.contains("select(.name == \"shoreline\")"));
+    assert!(release_plan.contains("sort_by(.createdAt)"));
+    assert!(release_plan.contains("RELEASE_COG_CONFIG"));
     assert!(release.contains("cargo publish -p shoreline --locked"));
     assert!(release.contains("https://crates.io/api/v1/crates/shoreline/${VERSION}"));
+    assert!(release_script.contains(r#"REPO="kevinswiber/shoreline""#));
     assert!(!release.contains("boardwalk"));
     assert!(cog.contains("git push origin v{{version}}"));
     assert!(cog.contains("gh workflow run release.yml -f tag=v{{version}}"));
+    assert!(cog.contains(r#"repository = "shoreline""#));
 }
 
 #[test]
