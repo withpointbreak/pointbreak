@@ -41,6 +41,14 @@ fmt-check:
 setup-hooks:
     cog install-hook --all --overwrite
 
+# Symlink repo Agent Skills into project-local or user-level agent skill directories.
+skills-link *args:
+    ./scripts/link-agent-skills.sh {{ args }}
+
+# Remove local symlinks for repo Agent Skills.
+skills-unlink *args:
+    ./scripts/link-agent-skills.sh unlink {{ args }}
+
 # Check commit messages on the current branch.
 commit-check range='origin/main..HEAD':
     cog check "{{ range }}"

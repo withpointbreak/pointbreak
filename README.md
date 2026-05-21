@@ -60,6 +60,14 @@ The current executable surfaces are:
 See [docs/cli-reference.md](docs/cli-reference.md) for command options, output documents, schema
 names, and V1 limitations.
 
+## Agent Skills
+
+Shoreline ships a portable author-handoff skill under [skills/](skills/README.md). Install it with:
+
+```bash
+npx skills add kevinswiber/shoreline
+```
+
 ## Documentation
 
 For users:
@@ -68,6 +76,9 @@ For users:
 - [CLI reference](docs/cli-reference.md) - commands, options, output JSON, and V1 boundaries.
 - [Review workflow](docs/review-workflow.md) - when to use capture, observations, input requests,
   assessments, history, and unit show.
+- [Agent authoring handoffs](docs/agent-authoring.md) - how a coding agent captures a durable
+  handoff record before declaring implementation work done.
+- [Agent skills](skills/README.md) - install the portable Shoreline author-handoff skill.
 
 For contributors and maintainers:
 

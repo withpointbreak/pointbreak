@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-05-15
-**Issue:** [#17](https://github.com/kevinswiber/shore/issues/17)
+**Issue:** [#17](https://github.com/kevinswiber/shoreline/issues/17)
 
 ## Context
 

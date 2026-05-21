@@ -3,7 +3,8 @@
 This document describes the intended end-to-end workflow for reviewing a
 tool-assisted change with Shoreline today. Command reference details live in the
 `README.md`; this is the narrative version that explains *when* to run each
-command and *why*.
+command and *why*. If the change was authored by a coding agent, start with
+[Agent authoring handoffs](agent-authoring.md) for the capture-at-end-of-work loop.
 
 ## What Shoreline reviews
 
@@ -69,6 +70,12 @@ it automatically. When multiple exist, list them with
 
 The snapshot is now frozen. Re-running `shore review capture` later creates a
 new ReviewUnit; it does not mutate the previous one.
+
+Write commands such as `shore review observation add`,
+`shore review input-request open`, and `shore review assessment add` accept
+`--review-unit <id>`. When more than one captured ReviewUnit is current, pass
+the ID from capture output or `shore review unit list`; otherwise writes fail
+with an ambiguity error.
 
 ## 3. Inspect what was captured
 

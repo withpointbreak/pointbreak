@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-05-15
-**Issue:** [#64](https://github.com/kevinswiber/shore/issues/64)
+**Issue:** [#64](https://github.com/kevinswiber/shoreline/issues/64)
 **See also:** [ADR-0001](./adr-0001-note-body-materialization.md) (note-body materialization, parallel decision)
 
 ## Context

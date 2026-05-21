@@ -97,7 +97,8 @@ or note mutation.
 ## `shore review observation`
 
 ```bash
-shore review observation add --track <track-id> --title <title> [target options]
+shore review observation add --track <track-id> --title <title> \
+  [--review-unit <review-unit-id>] [target options]
 shore review observation list [--review-unit <review-unit-id>] [--track <track-id>] \
   [--file <path>] [--tag <tag>] [--include-body] [--pretty|--compact]
 ```
@@ -105,6 +106,8 @@ shore review observation list [--review-unit <review-unit-id>] [--track <track-i
 Observations are append-only review notes for a captured ReviewUnit.
 
 - `observation add` requires `--track` and `--title`.
+- `--review-unit` pins the observation to one captured ReviewUnit; without it, the command defaults
+  to the single captured unit and errors if multiple captured ReviewUnits are current.
 - Tracks are review lanes, not actor or tool provenance.
 - Without `--file`, the observation targets the whole ReviewUnit.
 - With `--file <path>`, it targets a captured file.
@@ -125,7 +128,7 @@ default. `observation list` also accepts `--pretty` and `--compact`.
 
 ```bash
 shore review input-request open --track <track-id> --title <title> --reason <reason> \
-  [--mode operative|advisory]
+  [--review-unit <review-unit-id>] [--mode operative|advisory]
 shore review input-request list [--review-unit <review-unit-id>] [--track <track-id>] \
   [--mode operative|advisory] [--file <path>] [--status open|responded|ambiguous|all] \
   [--include-body] [--pretty|--compact]
@@ -136,6 +139,8 @@ shore review input-request respond <input-request-id> --outcome <outcome> [reaso
 Input requests are durable pause or decision requests for a captured ReviewUnit.
 
 - `input-request open` requires `--track`, `--title`, and `--reason`.
+- `--review-unit` pins the request to one captured ReviewUnit; without it, the command defaults to
+  the single captured unit and errors if multiple captured ReviewUnits are current.
 - `--mode` defaults to `operative`; `advisory` requests are durable and visible but do not imply a
   cooperative client must pause.
 - Targets mirror observations: review-wide by default, captured file, captured range, or an
@@ -161,7 +166,8 @@ notification transport, or cancellation/escalation event.
 ## `shore review assessment`
 
 ```bash
-shore review assessment add --track <track-id> --assessment <assessment> [target options]
+shore review assessment add --track <track-id> --assessment <assessment> \
+  [--review-unit <review-unit-id>] [target options]
 shore review assessment show [--review-unit <review-unit-id>] [--all] [--track <track-id>] \
   [--include-summary] [--pretty|--compact]
 ```
@@ -169,6 +175,8 @@ shore review assessment show [--review-unit <review-unit-id>] [--all] [--track <
 Assessments record review calls for a captured ReviewUnit.
 
 - `assessment add` requires `--track` and `--assessment`.
+- `--review-unit` pins the assessment to one captured ReviewUnit; without it, the command defaults
+  to the single captured unit and errors if multiple captured ReviewUnits are current.
 - V1 assessment values are `accepted`, `accepted-with-follow-up`, `needs-changes`, and
   `needs-clarification`.
 - Targets mirror the ReviewUnit ledger: review-wide by default, captured file, captured range,
