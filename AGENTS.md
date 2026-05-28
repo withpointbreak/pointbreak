@@ -17,12 +17,12 @@ than parallel sources of truth.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/), enforced
 by [cocogitto](https://docs.cocogitto.io/) via a `commit-msg` git hook.
 
-Format: `<type>(<optional scope>): <subject>`
+Format: `<type>: <subject>`
 
 Types: `feat`, `fix`, `perf`, `revert`, `docs`, `test`, `build`, `ci`, `refactor`, `chore`, `style`
 
-Suggested scopes: `cli`, `model`, `tui`, `git`, `review`, `fixtures`. Scopes are optional and not
-yet enforced.
+Use unscoped commits. The `cog.toml` scopes list is empty, so `cog check` rejects any scoped
+commit (for example `fix(review): ...`). Do not add a scope until that list is populated.
 
 Rules:
 
