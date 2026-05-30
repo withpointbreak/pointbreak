@@ -68,7 +68,10 @@ pub(super) fn serve(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let listener =
         TcpListener::bind(addr).map_err(|error| format!("could not bind {addr}: {error}"))?;
-    let url = format!("http://{addr}/");
+    // Resolve the actually-bound address so an ephemeral port (`--port 0`)
+    // is shown and opened correctly rather than `:0`.
+    let bound = listener.local_addr().unwrap_or(addr);
+    let url = format!("http://{bound}/");
 
     writeln!(stdout, "shore inspector")?;
     writeln!(stdout, "  store: {}", repo.display())?;

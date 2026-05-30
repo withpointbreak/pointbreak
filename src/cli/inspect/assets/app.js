@@ -17,6 +17,7 @@ const state = {
   units: null,
   view: "timeline",
   enabledTypes: new Set(TYPES.map((t) => t.id)),
+  seenTypes: new Set(TYPES.map((t) => t.id)),
   filterText: "",
   filterTrack: "",
   filterUnit: "",
@@ -145,10 +146,15 @@ function revealBy(predicate) {
 function revealEvent(eventId) {
   const e = (state.history?.entries || []).find((x) => x.eventId === eventId);
   if (!e) return;
+  // Clear every filter that could hide the target row, including the track
+  // filter (a cross-track chip, e.g. an assessment linking to another track's
+  // observation, would otherwise select a row that stays hidden).
   state.filterText = "";
   state.filterUnit = "";
+  state.filterTrack = "";
   $("#filter-text").value = "";
   $("#filter-unit").value = "";
+  $("#filter-track").value = "";
   state.enabledTypes.add(e.eventType);
   state.selectedEventId = eventId;
   switchView("timeline");
@@ -308,9 +314,11 @@ function renderTypeToggles() {
   const container = $("#filter-types");
   container.innerHTML = "";
   for (const id of presentTypes()) {
-    if (!state.enabledTypes.has(id)) {
-      // keep unknown/new types enabled by default
-      if (!TYPE_MAP[id]) state.enabledTypes.add(id);
+    // Default a newly-seen type (e.g. an unknown event type) to enabled once;
+    // after that the user's toggle sticks instead of being re-enabled here.
+    if (!state.seenTypes.has(id)) {
+      state.seenTypes.add(id);
+      state.enabledTypes.add(id);
     }
     const btn = document.createElement("button");
     btn.className = "type-toggle" + (state.enabledTypes.has(id) ? "" : " off");
