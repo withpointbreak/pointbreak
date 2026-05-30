@@ -220,24 +220,46 @@ main { flex: 1 1 auto; min-height: 0; display: flex; }
 .drow-meta { grid-template-columns: 1fr; padding: 4px 12px; color: var(--fg-dim); font-style: italic; }
 .drow-noted { box-shadow: inset 3px 0 0 #6dd28a; }
 
-/* Observation annotations on the diff */
+/* Review-fact annotations on the diff */
 .anno-summary { font-size: 12px; color: var(--fg-dim); margin-bottom: 10px; }
 .anno-group { margin-bottom: 14px; }
-.dfile-notes { margin-left: auto; font-family: var(--mono); font-size: 11px; color: #6dd28a; }
+.dfile-notes { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--fg-dim); }
 .anno {
-  border-left: 3px solid #3a7a52;
-  background: rgba(70, 170, 110, 0.08);
+  border-left: 3px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
   margin: 2px 0 6px 52px;
   padding: 6px 10px;
   border-radius: 0 6px 6px 0;
 }
+.anno-observation { border-left-color: #3a7a52; background: rgba(70, 170, 110, 0.08); }
+.anno-input-request { border-left-color: #7a5e2a; background: rgba(240, 183, 90, 0.08); }
+.anno-assessment { border-left-color: #5a3a7a; background: rgba(179, 136, 255, 0.08); }
 .anno-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font-size: 12px; }
-.anno-track { font-family: var(--mono); font-size: 11px; color: #6dd28a; }
+.anno-kind {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg-row);
+  color: var(--fg-dim);
+}
+.anno-kind-observation { color: #6dd28a; }
+.anno-kind-input-request { color: #f0b75a; }
+.anno-kind-assessment { color: #b388ff; }
+.anno-track { font-family: var(--mono); font-size: 11px; color: var(--fg-dim); }
 .anno-title { font-weight: 500; }
 .anno-loc { font-family: var(--mono); font-size: 11px; color: var(--fg-dim); }
 .anno-body { font-size: 12px; color: var(--fg); margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
 .anno-flash { animation: anno-flash 1.6s ease-out; }
 @keyframes anno-flash {
   0% { background: rgba(240, 183, 90, 0.5); }
-  100% { background: rgba(70, 170, 110, 0.08); }
+  100% { background: rgba(255, 255, 255, 0.03); }
 }
+
+/* Reference chips (truncated IDs) */
+.ref { font-family: var(--mono); }
+.ref[data-ref-kind] { color: var(--accent); cursor: pointer; border-bottom: 1px dotted color-mix(in srgb, var(--accent) 60%, transparent); }
+.ref[data-ref-kind]:hover { background: var(--bg-row); }
+.ref-commit, .ref-hash { color: var(--fg-dim); }

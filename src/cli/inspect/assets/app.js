@@ -40,6 +40,125 @@ function shortId(id) {
   return tail.length > 12 ? tail.slice(0, 12) : tail;
 }
 
+// Git-style short form for Shoreline IDs and hashes, keeping the meaningful
+// kind prefix: `review-unit:sha256:1ace…` -> `review-unit:1ace028b`.
+function shortRef(id) {
+  const s = String(id);
+  let m = s.match(/^([a-z][a-z-]*):(?:git:)?sha256:([0-9a-f]{6,})$/i);
+  if (m) return `${m[1]}:${m[2].slice(0, 8)}`;
+  m = s.match(/^sha256:([0-9a-f]{8,})$/i);
+  if (m) return `sha256:${m[1].slice(0, 8)}`;
+  if (/^[0-9a-f]{40}$/i.test(s)) return s.slice(0, 10);
+  return s;
+}
+
+// Classify a token as a navigable Shoreline reference, a non-navigable hash,
+// or a track lane. Returns null if it is not a recognized id.
+function refInfo(token) {
+  let m = token.match(/^([a-z][a-z-]*):(?:git:)?sha256:[0-9a-f]+$/i);
+  if (m) return { kind: m[1].toLowerCase(), clickable: true };
+  if (/^sha256:[0-9a-f]+$/i.test(token)) return { kind: "hash", clickable: false };
+  if (/^[0-9a-f]{40}$/i.test(token)) return { kind: "commit", clickable: false };
+  if (/^(agent|human):[a-z0-9][a-z0-9_-]*$/i.test(token)) return { kind: "track", clickable: true };
+  return null;
+}
+
+const REF_RE =
+  /\b(?:review-unit|input-request-response|input-request|obs|assess|snap|rev|evt|note):(?:git:)?sha256:[0-9a-f]{6,}\b|\bsha256:[0-9a-f]{16,}\b|\b[0-9a-f]{40}\b|\b(?:agent|human):[a-z0-9][a-z0-9_-]*\b/gi;
+
+// Escape text, then replace embedded IDs with truncated reference chips.
+// Navigable kinds carry data attributes that the delegated click handler
+// resolves; hashes/commits render as truncated text with the full value on
+// hover.
+function linkify(text) {
+  const escaped = escapeHtml(String(text ?? ""));
+  return escaped.replace(REF_RE, (token) => {
+    const info = refInfo(token);
+    if (!info) return token;
+    const display = escapeHtml(shortRef(token));
+    if (!info.clickable) {
+      return `<span class="ref ref-${info.kind}" title="${escapeHtml(token)}">${display}</span>`;
+    }
+    return `<span class="ref ref-${info.kind}" role="link" tabindex="0" data-ref-kind="${info.kind}" data-ref-id="${escapeHtml(token)}" title="${escapeHtml(token)}">${display}</span>`;
+  });
+}
+
+// Render a single id as a reference chip (for fields that are exactly one id).
+function refChip(id) {
+  return id ? linkify(id) : "—";
+}
+
+function resolveRef(kind, id) {
+  closeDiff();
+  switch (kind) {
+    case "review-unit":
+      navigateToUnit(id);
+      break;
+    case "track":
+      navigateToTrack(id);
+      break;
+    case "snap": {
+      const unit = (state.units?.entries || []).find((u) => u.snapshotId === id);
+      openDiff(id, unit ? shortId(unit.reviewUnitId) : "");
+      break;
+    }
+    case "obs":
+      revealBy((e) => (e.summary || {}).observationId === id);
+      break;
+    case "assess":
+      revealBy((e) => (e.summary || {}).assessmentId === id);
+      break;
+    case "input-request":
+      revealBy((e) => e.eventType === "input_request_opened" && (e.summary || {}).inputRequestId === id);
+      break;
+    case "rev":
+      revealBy((e) => e.revisionId === id);
+      break;
+    case "evt":
+      revealEvent(id);
+      break;
+    default:
+      break;
+  }
+}
+
+function navigateToUnit(id) {
+  state.filterUnit = id;
+  $("#filter-unit").value = id;
+  switchView("timeline");
+  renderTimeline();
+}
+
+function navigateToTrack(id) {
+  state.filterTrack = id;
+  $("#filter-track").value = id;
+  switchView("timeline");
+  renderTimeline();
+}
+
+function revealBy(predicate) {
+  const e = (state.history?.entries || []).find(predicate);
+  if (e) revealEvent(e.eventId);
+}
+
+// Make an event visible (clearing filters that would hide it) and select it.
+function revealEvent(eventId) {
+  const e = (state.history?.entries || []).find((x) => x.eventId === eventId);
+  if (!e) return;
+  state.filterText = "";
+  state.filterUnit = "";
+  $("#filter-text").value = "";
+  $("#filter-unit").value = "";
+  state.enabledTypes.add(e.eventType);
+  state.selectedEventId = eventId;
+  switchView("timeline");
+  renderTypeToggles();
+  renderTimeline();
+  renderDetail();
+  const row = $("#timeline").querySelector('.event[aria-selected="true"]');
+  if (row) row.scrollIntoView({ block: "center" });
+}
+
 function parseMs(occurredAt) {
   if (typeof occurredAt !== "string") return null;
   const m = occurredAt.match(/(\d+)\s*$/);
@@ -267,7 +386,7 @@ function renderTimeline() {
       <span class="time">${escapeHtml(fmtTime(e.occurredAt))}</span>
       <span class="rail" style="background:${typeColor(e.eventType)}"></span>
       <span class="body">
-        <span class="title">${escapeHtml(entryTitle(e))} ${tags}</span>
+        <span class="title">${linkify(entryTitle(e))} ${tags}</span>
         <span class="meta">
           <span class="type" style="color:${typeColor(e.eventType)}">${escapeHtml(typeLabel(e.eventType))}</span>
           ${entryTrack(e) ? `<span>${escapeHtml(entryTrack(e))}</span>` : ""}
@@ -275,7 +394,8 @@ function renderTimeline() {
           ${entryAnchor(e) ? `<span>${escapeHtml(entryAnchor(e))}</span>` : ""}
         </span>
       </span>`;
-    li.addEventListener("click", () => {
+    li.addEventListener("click", (ev) => {
+      if (ev.target.closest("[data-ref-kind]")) return; // let the ref handler navigate
       state.selectedEventId = e.eventId;
       list.querySelectorAll(".event[aria-selected]").forEach((n) => n.removeAttribute("aria-selected"));
       li.setAttribute("aria-selected", "true");
@@ -303,16 +423,28 @@ function renderDetail() {
     ["writer", e.writer ? `${e.writer.actorId || ""} ${e.writer.role ? "(" + e.writer.role + ")" : ""}` : "—"],
   ];
   const snapshotId = e.reviewUnitId ? snapshotIdForUnit(e.reviewUnitId) : null;
-  const focusObs = e.eventType === "review_observation_recorded" ? (e.summary || {}).observationId : null;
-  const btnLabel = focusObs ? "show this observation in the diff" : "view snapshot diff";
+  const s = e.summary || {};
+  let focusId = null;
+  let focusNoun = "";
+  if (e.eventType === "review_observation_recorded") {
+    focusId = s.observationId;
+    focusNoun = "observation";
+  } else if (e.eventType === "review_assessment_recorded") {
+    focusId = s.assessmentId;
+    focusNoun = "assessment";
+  } else if (e.eventType === "input_request_opened") {
+    focusId = s.inputRequestId;
+    focusNoun = "input request";
+  }
+  const btnLabel = focusId ? `show this ${focusNoun} in the diff` : "view snapshot diff";
   el.innerHTML = `
-    <h2>${escapeHtml(entryTitle(e))}</h2>
-    <dl class="kv">${kv.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(String(v))}</dd>`).join("")}</dl>
+    <h2>${linkify(entryTitle(e))}</h2>
+    <dl class="kv">${kv.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${linkify(String(v))}</dd>`).join("")}</dl>
     ${snapshotId ? `<button class="ghost diff-btn" id="detail-diff-btn">${escapeHtml(btnLabel)}</button>` : ""}
     <pre>${escapeHtml(JSON.stringify(e, null, 2))}</pre>`;
   if (snapshotId) {
     const btn = el.querySelector("#detail-diff-btn");
-    if (btn) btn.addEventListener("click", () => openDiff(snapshotId, shortId(e.reviewUnitId), focusObs));
+    if (btn) btn.addEventListener("click", () => openDiff(snapshotId, shortId(e.reviewUnitId), focusId));
   }
 }
 
@@ -321,33 +453,60 @@ function snapshotIdForUnit(reviewUnitId) {
   return unit ? unit.snapshotId : null;
 }
 
-function observationsForUnit(reviewUnitId) {
-  return (state.history?.entries || [])
-    .filter((e) => e.eventType === "review_observation_recorded" && e.reviewUnitId === reviewUnitId)
-    .map((e) => {
-      const s = e.summary || {};
-      return {
+// Gather the review facts on a ReviewUnit — observations, input requests, and
+// assessments — into one annotation list with a shared shape.
+function annotationsForUnit(reviewUnitId) {
+  const out = [];
+  for (const e of state.history?.entries || []) {
+    if (e.reviewUnitId !== reviewUnitId) continue;
+    const s = e.summary || {};
+    if (e.eventType === "review_observation_recorded") {
+      out.push({
+        kind: "observation",
         id: s.observationId || e.eventId,
         title: s.title || "(observation)",
         body: s.body || "",
         track: e.trackId || "",
         tags: Array.isArray(s.tags) ? s.tags : [],
         target: s.target || {},
-      };
-    });
+      });
+    } else if (e.eventType === "input_request_opened") {
+      const meta = [s.mode, s.reasonCode].filter(Boolean).join(" · ");
+      out.push({
+        kind: "input-request",
+        id: s.inputRequestId || e.eventId,
+        title: s.title || "(input request)",
+        body: s.body || "",
+        track: e.trackId || "",
+        tags: meta ? [meta] : [],
+        target: s.target || {},
+      });
+    } else if (e.eventType === "review_assessment_recorded") {
+      out.push({
+        kind: "assessment",
+        id: s.assessmentId || e.eventId,
+        title: `assessment: ${s.assessment || "?"}`,
+        body: s.summary || "",
+        track: e.trackId || "",
+        tags: [],
+        target: s.target || {},
+      });
+    }
+  }
+  return out;
 }
 
-async function openDiff(snapshotId, label, focusObsId) {
+async function openDiff(snapshotId, label, focusId) {
   const modal = $("#diff-modal");
   $("#diff-title").textContent = label ? `${label} · snapshot ${shortId(snapshotId)}` : shortId(snapshotId);
   $("#diff-body").innerHTML = `<p class="empty">loading snapshot…</p>`;
   modal.classList.remove("hidden");
   try {
     const artifact = await fetchJSON("/api/snapshot?id=" + encodeURIComponent(snapshotId));
-    const observations = observationsForUnit(artifact.reviewUnitId);
-    $("#diff-body").innerHTML = renderDiff(artifact, observations);
-    if (focusObsId) {
-      const target = $("#diff-body").querySelector(`[data-obs="${focusObsId}"]`);
+    const annotations = annotationsForUnit(artifact.reviewUnitId);
+    $("#diff-body").innerHTML = renderDiff(artifact, annotations);
+    if (focusId) {
+      const target = $("#diff-body").querySelector(`[data-anno="${focusId}"]`);
       if (target) {
         target.scrollIntoView({ block: "center" });
         target.classList.add("anno-flash");
@@ -362,27 +521,27 @@ function closeDiff() {
   $("#diff-modal").classList.add("hidden");
 }
 
-function lineMatch(observation, row) {
-  const t = observation.target || {};
+function lineMatch(fact, row) {
+  const t = fact.target || {};
   if (t.kind !== "range" || t.startLine == null) return false;
   const line = t.side === "old" ? row.old_line : row.new_line;
   return line != null && line >= t.startLine && line <= (t.endLine ?? t.startLine);
 }
 
-function renderObsAnnotation(observation, showLocation) {
-  const tags = (observation.tags || []).map((t) => `<span class="badge">${escapeHtml(t)}</span>`).join(" ");
-  const body = observation.body ? `<div class="anno-body">${escapeHtml(observation.body)}</div>` : "";
-  const t = observation.target || {};
+function renderAnnotation(a, showLocation) {
+  const tags = (a.tags || []).map((t) => `<span class="badge">${escapeHtml(t)}</span>`).join(" ");
+  const body = a.body ? `<div class="anno-body">${linkify(a.body)}</div>` : "";
+  const t = a.target || {};
   const loc =
     showLocation && t.filePath
       ? `<span class="anno-loc">${escapeHtml(t.filePath)}${t.startLine ? `:${t.startLine}-${t.endLine || t.startLine}` : ""}</span>`
       : "";
-  return `<div class="anno" data-obs="${escapeHtml(observation.id)}">
-    <div class="anno-head"><span class="anno-track">${escapeHtml(observation.track)}</span><span class="anno-title">${escapeHtml(observation.title)}</span> ${tags} ${loc}</div>${body}</div>`;
+  return `<div class="anno anno-${a.kind}" data-anno="${escapeHtml(a.id)}">
+    <div class="anno-head"><span class="anno-kind anno-kind-${a.kind}">${a.kind}</span><span class="anno-track">${escapeHtml(a.track)}</span><span class="anno-title">${linkify(a.title)}</span> ${tags} ${loc}</div>${body}</div>`;
 }
 
-function renderDiff(artifact, observations) {
-  observations = observations || [];
+function renderDiff(artifact, annotations) {
+  annotations = annotations || [];
   const files = (artifact.snapshot && artifact.snapshot.files) || [];
   const filePaths = new Set();
   for (const f of files) {
@@ -391,18 +550,21 @@ function renderDiff(artifact, observations) {
   }
   const anchored = [];
   const unanchored = [];
-  for (const o of observations) {
-    const t = o.target || {};
-    if ((t.kind === "range" || t.kind === "file") && t.filePath && filePaths.has(t.filePath)) anchored.push(o);
-    else unanchored.push(o);
+  for (const a of annotations) {
+    const t = a.target || {};
+    if ((t.kind === "range" || t.kind === "file") && t.filePath && filePaths.has(t.filePath)) anchored.push(a);
+    else unanchored.push(a);
   }
 
-  const count = observations.length;
-  let html = `<div class="anno-summary">${count} observation${count === 1 ? "" : "s"} on this ReviewUnit${
-    unanchored.length ? ` · ${unanchored.length} not anchored to a diff line` : ""
-  }</div>`;
+  const counts = annotations.reduce((acc, a) => ((acc[a.kind] = (acc[a.kind] || 0) + 1), acc), {});
+  const breakdown = Object.entries(counts)
+    .map(([k, n]) => `${n} ${k}${n === 1 ? "" : "s"}`)
+    .join(", ");
+  let html = `<div class="anno-summary">${annotations.length} review fact${annotations.length === 1 ? "" : "s"} on this ReviewUnit${
+    breakdown ? ` · ${breakdown}` : ""
+  }${unanchored.length ? ` · ${unanchored.length} not anchored to a diff line` : ""}</div>`;
   if (unanchored.length) {
-    html += `<div class="anno-group">${unanchored.map((o) => renderObsAnnotation(o, true)).join("")}</div>`;
+    html += `<div class="anno-group">${unanchored.map((a) => renderAnnotation(a, true)).join("")}</div>`;
   }
   if (!files.length) return html + `<p class="empty">No files captured in this snapshot.</p>`;
 
@@ -415,21 +577,21 @@ function renderDiffFile(f, anchored, emitted) {
   const oldp = f.old_path;
   const newp = f.new_path;
   const path = oldp && newp && oldp !== newp ? `${oldp} → ${newp}` : newp || oldp || "(unknown path)";
-  const fileObs = anchored.filter((o) => {
-    const p = (o.target || {}).filePath;
+  const fileFacts = anchored.filter((a) => {
+    const p = (a.target || {}).filePath;
     return p === newp || p === oldp;
   });
-  const rangeObs = fileObs.filter((o) => (o.target || {}).kind === "range");
-  const fileLevelObs = fileObs.filter((o) => (o.target || {}).kind === "file");
+  const rangeFacts = fileFacts.filter((a) => (a.target || {}).kind === "range");
+  const fileLevelFacts = fileFacts.filter((a) => (a.target || {}).kind === "file");
 
   let html = `<section class="dfile"><header class="dfile-head">
     <span class="dstatus s-${escapeHtml(f.status)}">${escapeHtml(f.status)}</span>
     <span class="dpath">${escapeHtml(path)}</span>
-    ${fileObs.length ? `<span class="dfile-notes">${fileObs.length} note${fileObs.length === 1 ? "" : "s"}</span>` : ""}</header>`;
+    ${fileFacts.length ? `<span class="dfile-notes">${fileFacts.length} note${fileFacts.length === 1 ? "" : "s"}</span>` : ""}</header>`;
 
-  for (const o of fileLevelObs) {
-    html += renderObsAnnotation(o, false);
-    emitted.add(o.id);
+  for (const a of fileLevelFacts) {
+    html += renderAnnotation(a, false);
+    emitted.add(a.id);
   }
   for (const m of f.metadata_rows || []) {
     html += `<div class="drow drow-meta"><span class="dtext">${escapeHtml(m.text)}</span></div>`;
@@ -439,28 +601,28 @@ function renderDiffFile(f, anchored, emitted) {
   for (const h of hunks) {
     html += `<div class="dhunk">${escapeHtml(h.header)}</div>`;
     for (const r of h.rows || []) {
-      const matching = rangeObs.filter((o) => lineMatch(o, r));
+      const matching = rangeFacts.filter((a) => lineMatch(a, r));
       const sign = r.kind === "added" ? "+" : r.kind === "removed" ? "-" : " ";
       html += `<div class="drow drow-${escapeHtml(r.kind)}${matching.length ? " drow-noted" : ""}">
         <span class="ln">${r.old_line ?? ""}</span>
         <span class="ln">${r.new_line ?? ""}</span>
         <span class="sign">${sign}</span>
         <span class="dtext">${escapeHtml(r.text)}</span></div>`;
-      for (const o of matching) {
-        if (!emitted.has(o.id)) {
-          html += renderObsAnnotation(o, false);
-          emitted.add(o.id);
+      for (const a of matching) {
+        if (!emitted.has(a.id)) {
+          html += renderAnnotation(a, false);
+          emitted.add(a.id);
         }
       }
     }
   }
 
-  // Range observations whose anchor line was not a captured row: surface them
-  // anyway so no review fact is silently dropped from the view.
-  for (const o of rangeObs) {
-    if (!emitted.has(o.id)) {
-      html += renderObsAnnotation(o, true);
-      emitted.add(o.id);
+  // Range facts whose anchor line was not a captured row: surface them anyway
+  // so no review fact is silently dropped from the view.
+  for (const a of rangeFacts) {
+    if (!emitted.has(a.id)) {
+      html += renderAnnotation(a, true);
+      emitted.add(a.id);
     }
   }
   if (!hunks.length && !(f.metadata_rows || []).length) {
@@ -562,6 +724,14 @@ function wireControls() {
   });
   document.addEventListener("keydown", (ev) => {
     if (ev.key === "Escape") closeDiff();
+  });
+  // Delegated handler: any reference chip anywhere (timeline, detail, diff)
+  // navigates to the resource it names.
+  document.addEventListener("click", (ev) => {
+    const ref = ev.target.closest("[data-ref-kind]");
+    if (!ref) return;
+    ev.preventDefault();
+    resolveRef(ref.dataset.refKind, ref.dataset.refId);
   });
 }
 
