@@ -10,14 +10,17 @@ pub(crate) use projection::state;
 pub use projection::{
     ProjectionDiagnostic, SessionState, load_durable_notes_for_repo, read_events, rebuild_state,
 };
+#[cfg(test)]
+pub(crate) use store::compute_review_unit_fingerprint;
 pub(crate) use store::{
     EventStore, EventWriteOutcome, ReviewUnitFingerprint, ShoreStorePaths, prepare_shore_writer,
     sweep_stale_temp_files, worktree_fingerprint_for_files,
 };
+pub use store::{
+    SnapshotArtifact, capture_worktree_fingerprint, ensure_shore_storage_excluded,
+    read_snapshot_artifact, shore_dir_for_repo,
+};
 pub(in crate::session) use store::{body_artifact, fingerprint, snapshot_artifact, store_init};
-pub use store::{capture_worktree_fingerprint, ensure_shore_storage_excluded, shore_dir_for_repo};
-#[cfg(test)]
-pub(crate) use store::{compute_review_unit_fingerprint, read_snapshot_artifact};
 pub use workflow::{
     AdapterNoteView, AssessmentAddOptions, AssessmentAddResult, AssessmentRecordStatus,
     AssessmentShowFilters, AssessmentShowOptions, AssessmentShowResult, AssessmentTargetSelector,

@@ -124,13 +124,13 @@ fn handle_connection(stream: TcpStream, repo: &Path) -> std::io::Result<()> {
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or_default();
     let target = parts.next().unwrap_or("/");
-    let path = target.split('?').next().unwrap_or("/");
+    let (path, query) = split_target(target);
 
-    let response = route(repo, method, path);
+    let response = route(repo, method, path, query);
     write_response(stream, &response)
 }
 
-fn route(repo: &Path, method: &str, path: &str) -> Response {
+fn route(repo: &Path, method: &str, path: &str, query: Option<&str>) -> Response {
     if method != "GET" {
         return Response::text("405 Method Not Allowed", "method not allowed");
     }
@@ -142,9 +142,64 @@ fn route(repo: &Path, method: &str, path: &str) -> Response {
         "/api/history" => api_response(api::history_json(repo)),
         "/api/units" => api_response(api::units_json(repo)),
         "/api/freshness" => api_response(api::freshness_json(repo)),
+        "/api/snapshot" => match query_param(query, "id") {
+            Some(id) if !id.is_empty() => api_response(api::snapshot_json(repo, &id)),
+            _ => Response::json_error("400 Bad Request", "missing ?id=<snapshotId>"),
+        },
         "/favicon.ico" => Response::new("204 No Content", "image/x-icon", Vec::new()),
         _ => Response::json_error("404 Not Found", "no such route"),
     }
+}
+
+fn split_target(target: &str) -> (&str, Option<&str>) {
+    match target.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (target, None),
+    }
+}
+
+fn query_param(query: Option<&str>, key: &str) -> Option<String> {
+    let query = query?;
+    for pair in query.split('&') {
+        let mut kv = pair.splitn(2, '=');
+        if kv.next() == Some(key) {
+            return Some(percent_decode(kv.next().unwrap_or("")));
+        }
+    }
+    None
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                match (hi, lo) {
+                    (Some(hi), Some(lo)) => {
+                        out.push((hi * 16 + lo) as u8);
+                        i += 3;
+                    }
+                    _ => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn api_response(result: Result<String, String>) -> Response {
@@ -186,9 +241,14 @@ mod tests {
     use super::*;
 
     fn route_for(method: &str, path: &str) -> Response {
-        // Static assets, 404, and 405 routing do not touch the store, so the
-        // repo path is never read for these cases.
-        route(Path::new("/inspect-routing-test-unused"), method, path)
+        // Static assets, 404, 405, and the missing-id snapshot case do not
+        // touch the store, so the repo path is never read for these cases.
+        route(
+            Path::new("/inspect-routing-test-unused"),
+            method,
+            path,
+            None,
+        )
     }
 
     #[test]
@@ -224,5 +284,30 @@ mod tests {
             route_for("POST", "/api/history").status,
             "405 Method Not Allowed"
         );
+    }
+
+    #[test]
+    fn snapshot_without_id_is_bad_request() {
+        assert_eq!(route_for("GET", "/api/snapshot").status, "400 Bad Request");
+    }
+
+    #[test]
+    fn query_param_reads_and_percent_decodes_values() {
+        let query = Some("id=snap%3Agit%3Asha256%3Aabc&other=1");
+        assert_eq!(
+            query_param(query, "id").as_deref(),
+            Some("snap:git:sha256:abc")
+        );
+        assert_eq!(query_param(query, "missing"), None);
+        assert_eq!(query_param(None, "id"), None);
+    }
+
+    #[test]
+    fn split_target_separates_path_and_query() {
+        assert_eq!(
+            split_target("/api/snapshot?id=x"),
+            ("/api/snapshot", Some("id=x"))
+        );
+        assert_eq!(split_target("/"), ("/", None));
     }
 }

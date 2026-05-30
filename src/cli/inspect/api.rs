@@ -9,9 +9,10 @@
 use std::path::Path;
 
 use serde::Serialize;
+use shoreline::model::SnapshotId;
 use shoreline::session::{
     ProjectionDiagnostic, ReviewHistoryEntry, ReviewHistoryOptions, ReviewUnitListEntry,
-    ReviewUnitListOptions, list_review_units, review_history,
+    ReviewUnitListOptions, list_review_units, read_snapshot_artifact, review_history,
 };
 
 #[derive(Serialize)]
@@ -74,6 +75,20 @@ pub(super) fn units_json(repo: &Path) -> Result<String, String> {
         diagnostics: result.diagnostics,
     };
     serde_json::to_string(&payload).map_err(|error| error.to_string())
+}
+
+/// The captured diff snapshot for one ReviewUnit, by snapshot id.
+///
+/// Reads the immutable snapshot artifact through the validated read path
+/// (`read_snapshot_artifact` recomputes and checks the content hash), so the
+/// inspector renders exactly the frozen diff that was reviewed.
+pub(super) fn snapshot_json(repo: &Path, snapshot_id: &str) -> Result<String, String> {
+    if snapshot_id.is_empty() {
+        return Err("missing snapshot id".to_owned());
+    }
+    let artifact = read_snapshot_artifact(repo, &SnapshotId::new(snapshot_id.to_owned()))
+        .map_err(|error| error.to_string())?;
+    serde_json::to_string(&artifact).map_err(|error| error.to_string())
 }
 
 /// Cheap freshness probe for client-side auto-refresh polling.

@@ -298,10 +298,73 @@ function renderDetail() {
     ["track", entryTrack(e) || "—"],
     ["writer", e.writer ? `${e.writer.actorId || ""} ${e.writer.role ? "(" + e.writer.role + ")" : ""}` : "—"],
   ];
+  const snapshotId = e.reviewUnitId ? snapshotIdForUnit(e.reviewUnitId) : null;
   el.innerHTML = `
     <h2>${escapeHtml(entryTitle(e))}</h2>
     <dl class="kv">${kv.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(String(v))}</dd>`).join("")}</dl>
+    ${snapshotId ? `<button class="ghost diff-btn" id="detail-diff-btn">view snapshot diff</button>` : ""}
     <pre>${escapeHtml(JSON.stringify(e, null, 2))}</pre>`;
+  if (snapshotId) {
+    const btn = el.querySelector("#detail-diff-btn");
+    if (btn) btn.addEventListener("click", () => openDiff(snapshotId, shortId(e.reviewUnitId)));
+  }
+}
+
+function snapshotIdForUnit(reviewUnitId) {
+  const unit = (state.units?.entries || []).find((u) => u.reviewUnitId === reviewUnitId);
+  return unit ? unit.snapshotId : null;
+}
+
+async function openDiff(snapshotId, label) {
+  const modal = $("#diff-modal");
+  $("#diff-title").textContent = label ? `${label} · snapshot ${shortId(snapshotId)}` : shortId(snapshotId);
+  $("#diff-body").innerHTML = `<p class="empty">loading snapshot…</p>`;
+  modal.classList.remove("hidden");
+  try {
+    const artifact = await fetchJSON("/api/snapshot?id=" + encodeURIComponent(snapshotId));
+    $("#diff-body").innerHTML = renderDiff(artifact);
+  } catch (err) {
+    $("#diff-body").innerHTML = `<p class="empty">error: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+function closeDiff() {
+  $("#diff-modal").classList.add("hidden");
+}
+
+function renderDiff(artifact) {
+  const files = (artifact.snapshot && artifact.snapshot.files) || [];
+  if (!files.length) return `<p class="empty">No files captured in this snapshot.</p>`;
+  return files.map(renderDiffFile).join("");
+}
+
+function renderDiffFile(f) {
+  const oldp = f.old_path;
+  const newp = f.new_path;
+  const path = oldp && newp && oldp !== newp ? `${oldp} → ${newp}` : newp || oldp || "(unknown path)";
+  let html = `<section class="dfile"><header class="dfile-head">
+    <span class="dstatus s-${escapeHtml(f.status)}">${escapeHtml(f.status)}</span>
+    <span class="dpath">${escapeHtml(path)}</span></header>`;
+  for (const m of f.metadata_rows || []) {
+    html += `<div class="drow drow-meta"><span class="dtext">${escapeHtml(m.text)}</span></div>`;
+  }
+  const hunks = f.hunks || [];
+  for (const h of hunks) {
+    html += `<div class="dhunk">${escapeHtml(h.header)}</div>`;
+    for (const r of h.rows || []) {
+      const sign = r.kind === "added" ? "+" : r.kind === "removed" ? "-" : " ";
+      html += `<div class="drow drow-${escapeHtml(r.kind)}">
+        <span class="ln">${r.old_line ?? ""}</span>
+        <span class="ln">${r.new_line ?? ""}</span>
+        <span class="sign">${sign}</span>
+        <span class="dtext">${escapeHtml(r.text)}</span></div>`;
+    }
+  }
+  if (!hunks.length && !(f.metadata_rows || []).length) {
+    const why = f.is_binary ? "binary" : f.is_mode_only ? "mode change only" : "no captured content";
+    html += `<div class="drow drow-meta"><span class="dtext">(${why})</span></div>`;
+  }
+  return html + `</section>`;
 }
 
 function renderUnits() {
@@ -334,6 +397,17 @@ function renderUnits() {
       switchView("timeline");
       renderTimeline();
     });
+    const actions = document.createElement("div");
+    actions.className = "actions";
+    const diffBtn = document.createElement("button");
+    diffBtn.className = "ghost diff-btn";
+    diffBtn.textContent = "view snapshot diff";
+    diffBtn.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      openDiff(u.snapshotId, shortId(u.reviewUnitId));
+    });
+    actions.appendChild(diffBtn);
+    card.appendChild(actions);
     el.appendChild(card);
   }
 }
@@ -373,6 +447,13 @@ function wireControls() {
     $("#filter-unit").value = "";
     renderTypeToggles();
     renderTimeline();
+  });
+  $("#diff-close").addEventListener("click", closeDiff);
+  $("#diff-modal").addEventListener("click", (ev) => {
+    if (ev.target === $("#diff-modal")) closeDiff();
+  });
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape") closeDiff();
   });
 }
 
