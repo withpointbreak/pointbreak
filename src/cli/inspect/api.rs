@@ -89,8 +89,14 @@ pub(super) fn snapshot_json(repo: &Path, snapshot_id: &str) -> Result<String, St
     if snapshot_id.is_empty() {
         return Err("missing snapshot id".to_owned());
     }
-    let artifact = read_snapshot_artifact(repo, &SnapshotId::new(snapshot_id.to_owned()))
-        .map_err(|error| error.to_string())?;
+    let artifact = read_snapshot_artifact(repo, &SnapshotId::new(snapshot_id.to_owned())).map_err(
+        |error| {
+            // Keep the full error (which may include the internal artifact path)
+            // in the server trace, but return a path-free message to the client.
+            tracing::debug!(error = %error, snapshot = snapshot_id, "inspect_snapshot_read_failed");
+            format!("snapshot not found or unreadable: {snapshot_id}")
+        },
+    )?;
     serde_json::to_string(&artifact).map_err(|error| error.to_string())
 }
 
@@ -110,7 +116,10 @@ pub(super) fn unit_json(repo: &Path, review_unit_id: &str) -> Result<String, Str
             .with_review_unit_id(ReviewUnitId::new(review_unit_id.to_owned()))
             .with_include_body(true),
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| {
+        tracing::debug!(error = %error, review_unit = review_unit_id, "inspect_unit_read_failed");
+        format!("review unit not found or unreadable: {review_unit_id}")
+    })?;
     let document = unit_show_document(result);
     serde_json::to_string(&document).map_err(|error| error.to_string())
 }

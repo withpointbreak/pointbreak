@@ -768,6 +768,7 @@ function factCard(kind, opts) {
       ${opts.status ? `<span class="fact-status ${escapeHtml(opts.status)}">${escapeHtml(opts.status)}</span>` : ""}
       ${opts.target ? `<span class="anno-loc">${opts.target}</span>` : ""}
       ${tags}
+      ${opts.createdAt ? `<span class="anno-time" title="${escapeHtml(opts.createdAt)}">${escapeHtml(fmtDateTime(opts.createdAt))}</span>` : ""}
     </div>
     ${body}
     ${opts.extra || ""}</div>`;
@@ -784,6 +785,7 @@ function renderObservationCard(o) {
     target: targetLabel(o.target),
     tags: o.tags,
     body: o.body,
+    createdAt: o.createdAt,
     extra,
   });
 }
@@ -799,6 +801,7 @@ function renderInputRequestCard(ir) {
     target: targetLabel(ir.target),
     tags: [ir.mode, ir.reasonCode],
     body: ir.body,
+    createdAt: ir.createdAt,
     extra: responses ? `<div class="fact-responses">${responses}</div>` : "",
   });
 }
@@ -814,6 +817,7 @@ function renderAssessmentCard(a) {
     status: a.status,
     target: targetLabel(a.target),
     body: a.summary,
+    createdAt: a.createdAt,
     extra: rel.length ? `<div class="fact-rel">${rel.join(" · ")}</div>` : "",
   });
 }
@@ -825,6 +829,7 @@ function renderAdapterNoteCard(n) {
     status: n.status,
     target: n.filePath ? escapeHtml(n.filePath) : "",
     body: n.body,
+    createdAt: n.createdAt,
   });
 }
 
