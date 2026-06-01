@@ -13,9 +13,10 @@ mod support;
 
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpStream;
+use std::net::{Shutdown, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 use serde_json::Value;
 use support::git_repo::GitRepo;
@@ -250,27 +251,50 @@ impl Inspector {
     }
 
     fn get_json(&self, path: &str) -> Value {
-        let mut stream = TcpStream::connect(&self.addr).expect("connect to inspector");
+        // The inspector is a blocking HTTP/1.1 server that closes each connection
+        // after responding. Under load (notably on Linux CI) the close can race
+        // ahead of the client's read and surface as a connection reset before the
+        // body is drained. GETs are idempotent, so retry a few times with a short
+        // backoff before giving up.
+        let mut last_error = String::new();
+        for attempt in 0..12 {
+            match self.try_get(path) {
+                Ok(value) => return value,
+                Err(error) => {
+                    last_error = error;
+                    std::thread::sleep(Duration::from_millis(20 * (attempt + 1)));
+                }
+            }
+        }
+        panic!("GET {path} failed after retries: {last_error}");
+    }
+
+    fn try_get(&self, path: &str) -> Result<Value, String> {
+        let mut stream = TcpStream::connect(&self.addr).map_err(|error| error.to_string())?;
         let request = format!(
             "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
             self.addr
         );
-        stream.write_all(request.as_bytes()).expect("write request");
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|error| error.to_string())?;
+        // Signal end-of-request so the server never waits for more input and can
+        // close its read side cleanly.
+        let _ = stream.shutdown(Shutdown::Write);
+
         let mut response = Vec::new();
         stream
             .read_to_end(&mut response)
-            .expect("read inspector response");
+            .map_err(|error| error.to_string())?;
 
         let text = String::from_utf8_lossy(&response);
         let (head, body) = text
             .split_once("\r\n\r\n")
-            .expect("split response headers from body");
-        assert!(
-            head.starts_with("HTTP/1.1 200"),
-            "unexpected status for {path}: {head}"
-        );
-        serde_json::from_str(body)
-            .unwrap_or_else(|error| panic!("parse {path} body: {error}\n{body}"))
+            .ok_or_else(|| "response had no header/body delimiter".to_owned())?;
+        if !head.starts_with("HTTP/1.1 200") {
+            return Err(format!("unexpected status for {path}: {head}"));
+        }
+        serde_json::from_str(body).map_err(|error| format!("parse {path} body: {error}\n{body}"))
     }
 }
 
