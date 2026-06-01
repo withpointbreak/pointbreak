@@ -38,6 +38,7 @@ fn store_link_imports_local_facts_into_clone_local_store_for_other_worktrees() {
     assert_eq!(link_json["mode"], "linked");
     assert_eq!(link_json["eventsCreated"], 1);
     assert_eq!(link_json["artifactsCreated"], 1);
+    assert_eq!(link_json["sensitivity"]["policyOutcome"], "allow");
     assert!(!link_stdout.contains(fixture.main.path().to_str().unwrap()));
     assert!(!link_stdout.contains(fixture.seed.to_str().unwrap()));
     assert!(!link_stdout.contains(".shore"));
@@ -91,7 +92,7 @@ fn store_link_imports_local_facts_into_clone_local_store_for_other_worktrees() {
 }
 
 #[test]
-fn store_link_refuses_blocked_sensitivity_findings_end_to_end() {
+fn store_link_reports_blocked_sensitivity_findings_and_continues_end_to_end() {
     let fixture = CloneWorktreeFixture::new();
     let secret = "sk-test-0123456789abcdef0123456789";
     fs::create_dir_all(fixture.seed.join("src")).unwrap();
@@ -103,13 +104,25 @@ fn store_link_refuses_blocked_sensitivity_findings_end_to_end() {
 
     let link = shore(["store", "link", "--repo", fixture.seed.to_str().unwrap()]);
 
-    assert!(!link.status.success(), "link unexpectedly succeeded");
-    let stderr = String::from_utf8(link.stderr).unwrap();
-    assert!(stderr.contains("sensitivity scan blocked clone-local store link"));
-    assert!(stderr.contains("known_token"));
-    assert!(!stderr.contains(secret));
-    assert!(!stderr.contains(fixture.seed.to_str().unwrap()));
-    assert!(!stderr.contains("src/token.txt"));
+    assert!(
+        link.status.success(),
+        "link stderr:\n{}",
+        String::from_utf8_lossy(&link.stderr)
+    );
+    let stdout = String::from_utf8(link.stdout).unwrap();
+    let json = parse_json(stdout.as_bytes());
+    assert_eq!(json["mode"], "linked");
+    assert_eq!(json["sensitivity"]["policyOutcome"], "block");
+    assert!(
+        json["sensitivity"]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| finding["kind"] == "known_token")
+    );
+    assert!(!stdout.contains(secret));
+    assert!(!stdout.contains(fixture.seed.to_str().unwrap()));
+    assert!(!stdout.contains("src/token.txt"));
 }
 
 struct CloneWorktreeFixture {

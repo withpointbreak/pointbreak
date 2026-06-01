@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::error::{Result, ShoreError};
+use crate::error::Result;
 use crate::git::git_worktree_list;
 use crate::session::store::bundle::{ImportBundleResult, import_store_bundle};
 use crate::session::store::resolution::{
@@ -8,6 +8,7 @@ use crate::session::store::resolution::{
 };
 use crate::session::store::sensitivity::scan_worktree_sensitivity;
 use crate::session::store::store_init::ShoreStorePaths;
+use crate::session::workflow::store_status::StoreStatusSensitivity;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoreLinkOptions {
@@ -32,24 +33,13 @@ pub struct StoreLinkResult {
     pub events_existing: usize,
     pub artifacts_created: usize,
     pub artifacts_existing: usize,
+    pub sensitivity: StoreStatusSensitivity,
 }
 
 pub fn link_clone_local_store(options: StoreLinkOptions) -> Result<StoreLinkResult> {
     let paths = ShoreStorePaths::resolve(&options.repo)?;
     let local_store_dir = paths.shore_dir().to_path_buf();
     let sensitivity = scan_worktree_sensitivity(paths.worktree_root())?;
-    if sensitivity.policy_outcome == "block" {
-        let blocking_kinds = sensitivity
-            .findings
-            .iter()
-            .filter(|finding| finding.policy_outcome == "block")
-            .map(|finding| finding.kind.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        return Err(ShoreError::Message(format!(
-            "sensitivity scan blocked clone-local store link: {blocking_kinds}"
-        )));
-    }
     let _worktrees = git_worktree_list(paths.worktree_root())?;
 
     register_clone_local_store(paths.worktree_root())?;
@@ -57,13 +47,18 @@ pub fn link_clone_local_store(options: StoreLinkOptions) -> Result<StoreLinkResu
     let resolution = resolve_store(paths.worktree_root())?;
     let imported = import_store_bundle(&local_store_dir, resolution.store_dir())?;
 
-    Ok(StoreLinkResult::from_import(registration, imported))
+    Ok(StoreLinkResult::from_import(
+        registration,
+        imported,
+        StoreStatusSensitivity::from(sensitivity),
+    ))
 }
 
 impl StoreLinkResult {
     fn from_import(
         registration: crate::session::store::resolution::StoreRegistration,
         imported: ImportBundleResult,
+        sensitivity: StoreStatusSensitivity,
     ) -> Self {
         Self {
             mode: "linked".to_owned(),
@@ -74,6 +69,7 @@ impl StoreLinkResult {
             events_existing: imported.events_existing,
             artifacts_created: imported.artifacts_created,
             artifacts_existing: imported.artifacts_existing,
+            sensitivity,
         }
     }
 }

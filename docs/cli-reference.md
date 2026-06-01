@@ -157,11 +157,14 @@ multi-repository store or remote sync service.
 `shore store link` registers the current worktree with the clone-local store and imports the
 worktree-local `.shore/` events and artifacts into that store. It emits `shore.store-link` JSON with
 the selected opaque refs and `eventsCreated`, `eventsExisting`, `artifactsCreated`, and
-`artifactsExisting` counters. The import is idempotent for already-present matching facts.
+`artifactsExisting` counters. It also includes the same redacted `sensitivity` object as
+`shore store status`. The import is idempotent for already-present matching facts.
 
-Sensitivity scanning happens before data movement. If the scan returns a blocking outcome,
-`shore store link` exits non-zero and names only the safe finding kinds, such as `known_token`,
-instead of printing the secret text or file path.
+Sensitivity scanning happens before data movement. For this clone-local release, findings are
+reported but do not abort `shore store link`; hard-blocking policy and explicit override controls are
+deferred until movement can target a wider user-level or remote store. Blocking findings still name
+only safe finding kinds, such as `known_token`, and command output does not print the secret text or
+file path.
 
 Linked capture is batch-only in this release: capture writes local facts first, emits the
 `clone_local_capture_batch_only` diagnostic when the worktree is linked, and `shore store link`

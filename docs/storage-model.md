@@ -255,9 +255,11 @@ or `state.json` layout.
 
 The current linked writer contract is batch-only. Review capture and native review write commands
 continue to write the worktree-local `.shore/` store. `shore store link` is the explicit movement
-step: it scans the worktree for sensitivity findings, refuses blocking findings before data
-movement, and then imports local events and artifacts into the clone-local store with strict
-content-hash validation.
+step: it scans the worktree for sensitivity findings before data movement, reports redacted findings
+in the command document, and then imports local events and artifacts into the clone-local store with
+strict content-hash validation. In this clone-local release, sensitivity findings warn rather than
+abort; hard-blocking policy and explicit override controls are deferred until movement can target a
+wider user-level or remote store.
 
 `shore store status` is the public health and inventory surface for the selected store. It reports
 event and artifact byte counts, total bytes, optional Git untracked bytes, largest artifact refs,
@@ -509,8 +511,9 @@ notifications yet.
 
 Clone-local linking does not change that direct-write contract. Shared clone-local writes are
 limited to the explicit `shore store link` batch import path, which performs sensitivity scanning
-before movement and imports artifacts before events. Direct shared capture remains unsupported until
-Shoreline has a storage-level serializer for multi-file publication.
+before movement, reports redacted findings, and imports artifacts before events. Direct shared
+capture remains unsupported until Shoreline has a storage-level serializer for multi-file
+publication.
 
 Event files remain the append-only authority. They are created with exclusive file creation:
 same-key and same-payload retries are idempotent, while same-key and different-payload attempts are

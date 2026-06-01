@@ -50,6 +50,7 @@ struct StoreLinkBody {
     events_existing: usize,
     artifacts_created: usize,
     artifacts_existing: usize,
+    sensitivity: StoreStatusSensitivity,
 }
 
 #[derive(serde::Serialize)]
@@ -110,6 +111,7 @@ impl From<StoreLinkResult> for StoreLinkBody {
             events_existing: result.events_existing,
             artifacts_created: result.artifacts_created,
             artifacts_existing: result.artifacts_existing,
+            sensitivity: result.sensitivity,
         }
     }
 }

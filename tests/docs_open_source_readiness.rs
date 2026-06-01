@@ -76,6 +76,7 @@ fn public_docs_cover_clone_local_store_behavior() {
             "shore.store-link",
             "policyOutcome",
             "file:sha256:",
+            "hard-blocking policy",
             "clone_local_capture_batch_only",
             "review unit list",
         ],
@@ -85,6 +86,7 @@ fn public_docs_cover_clone_local_store_behavior() {
         "clone-local store",
         "batch-only",
         "sensitivity scan",
+        "hard-blocking policy",
         "inventory",
         "opaque store, clone, and repository-family refs",
     ] {
