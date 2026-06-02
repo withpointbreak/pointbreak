@@ -19,3 +19,18 @@ final-status-level = "all"
 fail-fast = false
 status-level = "pass"
 final-status-level = "fail"
+
+# The inspector contract tests each spawn a real `shore inspect` server and bind
+# a socket. Serialize them so concurrent server processes do not contend for
+# resources under load — the source of intermittent connection resets/refusals
+# seen on constrained CI runners.
+[test-groups.inspect-server]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'binary(cli_inspect_target_display)'
+test-group = 'inspect-server'
+
+[[profile.ci.overrides]]
+filter = 'binary(cli_inspect_target_display)'
+test-group = 'inspect-server'

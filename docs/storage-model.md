@@ -78,6 +78,12 @@ ReviewUnit capture follows the same authority split:
 command reports ReviewUnit, revision, and snapshot IDs plus the snapshot artifact content hash,
 without making snapshot artifact paths a user-facing API.
 
+When the inspector lists captured ReviewUnits, it shows a derived label for each working-tree
+target — the worktree's name together with the short base commit — instead of a generic
+"working tree". This label is computed at read time from the capture's existing endpoint data; the
+captured record itself is unchanged, and the full worktree path is not shown. Opening the complete
+detail for a unit captured in a different worktree is future work.
+
 `SnapshotArtifact.contentHash` is a canonical hash of the artifact body excluding the
 self-referential `contentHash` field. Under V1 it covers the source, endpoints, ReviewUnit
 identity, and the **full captured row inventory** — every `DiffFile`, every `FileMetadataRow`,

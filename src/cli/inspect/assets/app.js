@@ -53,6 +53,26 @@ function shortRef(id) {
   return s;
 }
 
+// Path-private target label from the server-derived `targetDisplay`. Floors to
+// "working tree" for pre-upgrade payloads that lack the block. Returns escaped
+// HTML, so callers must not re-escape it. (Distinct from `targetLabel` below,
+// which renders ReviewTargetRef kinds for note/observation anchors.)
+function targetDisplayLabel(td) {
+  if (!td) return "working tree"; // floor fallback (pre-upgrade payloads)
+  return escapeHtml(td.label || "working tree");
+}
+
+// Ready-to-insert head badge (escaped, safe HTML) for the captured base commit,
+// or "" when no head is available. A live branch, if ever present, is shown as
+// a current/live qualifier — never as capture-time provenance.
+function targetHeadBadge(td) {
+  const head = td && td.head;
+  if (!head || !head.label) return "";
+  let inner = "@ " + escapeHtml(head.label);
+  if (head.liveBranch) inner += " · " + escapeHtml(head.liveBranch) + " (current)";
+  return ` <span class="badge">${inner}</span>`;
+}
+
 // Classify a token as a navigable Shoreline reference, a non-navigable hash,
 // or a track lane. Returns null if it is not a recognized id.
 function refInfo(token) {
@@ -656,19 +676,23 @@ function renderUnits() {
   el.innerHTML = "";
   for (const u of entries) {
     const base = u.base || {};
-    const target = u.target || {};
     const card = document.createElement("div");
     card.className = "unit-card";
     const rows = [
       ["captured", fmtDateTime(u.capturedAt)],
       ["base", base.commitOid ? shortId(base.commitOid) + " (" + (base.kind || "") + ")" : base.kind || "—"],
-      ["target", target.kind === "git_working_tree" ? "working tree" : target.kind || "—"],
+    ];
+    const tail = [
       ["snapshot", shortId(u.snapshotId)],
       ["session", shortId(u.sessionId)],
     ];
+    const kv = ([k, v]) => `<span>${escapeHtml(k)}</span><b>${escapeHtml(String(v))}</b>`;
+    // The target cell carries pre-escaped derived HTML (label + head badge), so
+    // it bypasses the generic escaping cell renderer rather than double-escaping.
+    const targetCell = `<span>target</span><b>${targetDisplayLabel(u.targetDisplay)}${targetHeadBadge(u.targetDisplay)}</b>`;
     card.innerHTML = `
       <h3>${escapeHtml(shortId(u.reviewUnitId))}</h3>
-      <div class="kv">${rows.map(([k, v]) => `<span>${escapeHtml(k)}</span><b>${escapeHtml(String(v))}</b>`).join("")}</div>`;
+      <div class="kv">${rows.map(kv).join("")}${targetCell}${tail.map(kv).join("")}</div>`;
     card.title = u.reviewUnitId + "\nclick to open the unit page";
     card.addEventListener("click", () => openUnit(u.reviewUnitId));
     const actions = document.createElement("div");
@@ -848,7 +872,6 @@ function factSection(title, items, render) {
 function renderUnitPage(d) {
   const ru = d.reviewUnit || {};
   const base = ru.base || {};
-  const target = ru.target || {};
   const s = d.summary || {};
   $("#unit-page-title").textContent = `${shortId(ru.id)}${base.commitOid ? " · base " + shortId(base.commitOid) : ""}`;
 
@@ -858,7 +881,9 @@ function renderUnitPage(d) {
   sections.push(`<section><h2>ReviewUnit</h2><dl class="up-identity">
     <dt>id</dt><dd>${linkify(ru.id)}</dd>
     <dt>base</dt><dd>${base.commitOid ? linkify(base.commitOid) : "—"} ${base.kind ? `<span class="fact-status">${escapeHtml(base.kind)}</span>` : ""}</dd>
-    <dt>target</dt><dd>${target.kind === "git_working_tree" ? "working tree" : escapeHtml(target.kind || "—")}</dd>
+    <dt>target</dt><dd>${targetDisplayLabel(ru.targetDisplay)}${targetHeadBadge(ru.targetDisplay)}</dd>
+    <dt>worktree</dt><dd>${escapeHtml(ru.targetDisplay?.label ?? "working tree")}</dd>
+    <dt>head</dt><dd>${escapeHtml(ru.targetDisplay?.head?.label ?? "—")}</dd>
     <dt>snapshot</dt><dd>${linkify(ru.snapshotId)}</dd>
   </dl></section>`);
 
