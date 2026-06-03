@@ -22,7 +22,6 @@ pub use history::{
     review_history,
 };
 pub use import::{ImportNotesOptions, ImportNotesResult, import_notes};
-#[cfg(test)]
 pub use input_request::InputRequestStatus;
 pub use input_request::{
     InputRequestFetchOptions, InputRequestFetchResult, InputRequestListOptions,
@@ -36,7 +35,6 @@ pub use observation::{
     ObservationStatus, ObservationTargetSelector, ObservationView, list_observations,
     record_observation,
 };
-#[cfg(test)]
 pub use reload::ReloadOutcome;
 pub(crate) use reload::reload_diagnostics_for_document;
 pub use reload::{ReloadDiagnostic, ReloadDiagnosticCode, reload_session};

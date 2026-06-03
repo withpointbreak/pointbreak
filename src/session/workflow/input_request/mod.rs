@@ -12,7 +12,6 @@ pub use self::respond::{
     InputRequestRespondOptions, InputRequestRespondResult, respond_input_request,
 };
 pub use self::target::InputRequestTargetSelector;
-#[cfg(test)]
 pub use self::view::InputRequestStatus;
 #[cfg(test)]
 use self::view::collect_input_request_projection_records;
@@ -45,6 +44,33 @@ mod tests {
         CaptureOptions, EventStore, ObservationAddOptions, SessionState, capture_worktree_review,
         record_observation,
     };
+
+    #[test]
+    fn input_request_status_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_value(InputRequestStatus::Open).unwrap(),
+            serde_json::json!("open")
+        );
+        assert_eq!(
+            serde_json::to_value(InputRequestStatus::Responded).unwrap(),
+            serde_json::json!("responded")
+        );
+        assert_eq!(
+            serde_json::to_value(InputRequestStatus::Ambiguous).unwrap(),
+            serde_json::json!("ambiguous")
+        );
+        // The Serialize output must match the as_str() contract.
+        for status in [
+            InputRequestStatus::Open,
+            InputRequestStatus::Responded,
+            InputRequestStatus::Ambiguous,
+        ] {
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                serde_json::json!(status.as_str())
+            );
+        }
+    }
 
     #[test]
     fn open_input_request_writes_event_and_updates_state() {

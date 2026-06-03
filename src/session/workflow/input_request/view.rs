@@ -50,7 +50,8 @@ pub struct InputRequestResponseView {
     pub writer: Writer,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum InputRequestStatus {
     Open,
     Responded,

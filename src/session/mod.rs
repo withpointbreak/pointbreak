@@ -42,9 +42,8 @@ pub use workflow::{
     open_input_request, record_assessment, record_observation, reload_session,
     respond_input_request, review_history, show_assessments, show_review_unit, store_status,
 };
-#[cfg(test)]
-pub(crate) use workflow::{InputRequestStatus, ReloadOutcome};
-pub(crate) use workflow::{ReloadDiagnostic, reload_diagnostics_for_document};
+pub use workflow::{InputRequestStatus, ReloadDiagnostic, ReloadOutcome};
+pub(crate) use workflow::reload_diagnostics_for_document;
 pub(in crate::session) use workflow::{assessment, input_request, observation};
 
 #[cfg(test)]
