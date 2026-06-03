@@ -105,9 +105,11 @@ mirror flow is:
 After events and artifacts are present, `show_review_unit` can load the bound snapshot artifact and
 `fetch_input_request(...with_include_body(true))` / include-body projections can hydrate large
 bodies. The store layout remains private; callers should keep and pass around `ArtifactRef` values
-rather than constructing paths. This byte-level transfer path complements `link_clone_local_store`:
-linked local clones can share one store, while remote or networked consumers can fetch and import
-the required blobs by content hash.
+rather than constructing paths. A remote bridge derives those refs from the forwarded events it
+already has, fetches bytes by `ArtifactRef::content_hash()`, and loops over `import_artifact`;
+callers do not construct refs from a raw hash alone. This byte-level transfer path complements
+`link_clone_local_store`: linked local clones can share one store, while remote or networked
+consumers can fetch and import the required blobs by content hash.
 
 ### Documents — `shoreline::documents`
 

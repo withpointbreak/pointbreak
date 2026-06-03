@@ -13,8 +13,7 @@ use crate::session::event::{
     ShoreEvent, TaskObservationRecordedPayload, decode_input_request_opened_payload,
 };
 use crate::session::snapshot_artifact::{
-    read_snapshot_artifact, read_snapshot_artifact_bytes, snapshot_artifact_path,
-    validate_snapshot_artifact_content_hash,
+    read_snapshot_artifact_bytes, snapshot_artifact_path, validate_snapshot_artifact_content_hash,
 };
 use crate::session::store::SnapshotArtifact;
 use crate::session::store_init::{ShoreStorePaths, prepare_shore_writer};
@@ -34,7 +33,10 @@ pub enum ArtifactKind {
 ///
 /// The stable surface exposes the artifact kind and content hash. Any locator
 /// needed to read or write Shoreline's current on-disk layout stays private and
-/// must be passed back to [`export_artifact`] / [`import_artifact`].
+/// must be passed back to [`export_artifact`] / [`import_artifact`]. Remote
+/// consumers derive these refs from forwarded events with
+/// [`referenced_artifacts`], fetch bytes by [`ArtifactRef::content_hash`], and
+/// pass the same refs to [`import_artifact`].
 #[derive(Clone, Eq, PartialEq)]
 pub struct ArtifactRef {
     locator: ArtifactLocator,
@@ -129,14 +131,16 @@ pub fn referenced_artifacts(events: &[ShoreEvent]) -> Result<Vec<ArtifactRef>> {
 pub fn export_artifact(repo: impl AsRef<Path>, artifact: &ArtifactRef) -> Result<Vec<u8>> {
     match &artifact.locator {
         ArtifactLocator::Snapshot { snapshot_id } => {
-            let stored = read_snapshot_artifact(repo.as_ref(), snapshot_id)?;
+            let bytes = read_snapshot_artifact_bytes(repo, snapshot_id)?;
+            let stored: SnapshotArtifact = serde_json::from_slice(&bytes)?;
+            validate_snapshot_artifact_content_hash(&stored)?;
             if stored.content_hash != artifact.content_hash {
                 return Err(ShoreError::Message(format!(
                     "snapshot artifact content hash mismatch for {}",
                     artifact.content_hash
                 )));
             }
-            read_snapshot_artifact_bytes(repo, snapshot_id)
+            Ok(bytes)
         }
         ArtifactLocator::Body { relative_path } => {
             let paths = ShoreStorePaths::resolve(repo.as_ref())?;
