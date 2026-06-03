@@ -6,7 +6,8 @@ mod store;
 mod workflow;
 
 pub(crate) use identity::{
-    current_timestamp, reviewer_from_options, writer_from_git_config, writer_from_options,
+    current_timestamp, is_valid_actor_id, reviewer_from_options, writer_from_git_config,
+    writer_from_options,
 };
 pub(crate) use projection::state;
 pub use projection::{
@@ -23,29 +24,30 @@ pub use store::{
     read_snapshot_artifact, shore_dir_for_repo,
 };
 pub(in crate::session) use store::{body_artifact, fingerprint, snapshot_artifact, store_init};
+pub(crate) use workflow::reload_diagnostics_for_document;
 pub use workflow::{
     AdapterNoteView, AssessmentAddOptions, AssessmentAddResult, AssessmentRecordStatus,
     AssessmentShowFilters, AssessmentShowOptions, AssessmentShowResult, AssessmentTargetSelector,
     AssessmentView, CaptureOptions, CaptureResult, CurrentAssessmentStatus, CurrentAssessmentView,
-    ImportNotesOptions, ImportNotesResult, InputRequestFetchOptions, InputRequestFetchResult,
-    InputRequestListOptions, InputRequestListResult, InputRequestOpenOptions,
-    InputRequestOpenResult, InputRequestRespondOptions, InputRequestRespondResult,
-    InputRequestResponseView, InputRequestStatusFilter, InputRequestTargetSelector,
-    InputRequestView, ObservationAddOptions, ObservationAddResult, ObservationListOptions,
-    ObservationListResult, ObservationStatus, ObservationTargetSelector, ObservationView,
-    ReloadDiagnosticCode, ReviewHistoryEntry, ReviewHistoryFilters, ReviewHistoryOptions,
-    ReviewHistoryResult, ReviewUnitListEntry, ReviewUnitListOptions, ReviewUnitListResult,
-    ReviewUnitProjectionIdentity, ReviewUnitProjectionRow, ReviewUnitProjectionSummary,
-    ReviewUnitShowFilters, ReviewUnitShowOptions, ReviewUnitShowResult, SnapshotOrder,
-    StoreLinkOptions, StoreLinkResult, StoreStatusArtifactInventory, StoreStatusInventory,
-    StoreStatusOptions, StoreStatusResult, StoreStatusReviewUnitSnapshot, StoreStatusSensitivity,
-    StoreStatusSensitivityFinding, capture_worktree_review, fetch_input_request, import_notes,
+    ImportEventOptions, ImportNotesOptions, ImportNotesResult, IngestEventsOptions,
+    IngestEventsResult, InputRequestFetchOptions, InputRequestFetchResult, InputRequestListOptions,
+    InputRequestListResult, InputRequestOpenOptions, InputRequestOpenResult,
+    InputRequestRespondOptions, InputRequestRespondResult, InputRequestResponseView,
+    InputRequestStatus, InputRequestStatusFilter, InputRequestTargetSelector, InputRequestView,
+    ObservationAddOptions, ObservationAddResult, ObservationListOptions, ObservationListResult,
+    ObservationStatus, ObservationTargetSelector, ObservationView, ReloadDiagnostic,
+    ReloadDiagnosticCode, ReloadOutcome, ReviewHistoryEntry, ReviewHistoryFilters,
+    ReviewHistoryOptions, ReviewHistoryResult, ReviewUnitListEntry, ReviewUnitListOptions,
+    ReviewUnitListResult, ReviewUnitProjectionIdentity, ReviewUnitProjectionRow,
+    ReviewUnitProjectionSummary, ReviewUnitShowFilters, ReviewUnitShowOptions,
+    ReviewUnitShowResult, SnapshotOrder, StoreLinkOptions, StoreLinkResult,
+    StoreStatusArtifactInventory, StoreStatusInventory, StoreStatusOptions, StoreStatusResult,
+    StoreStatusReviewUnitSnapshot, StoreStatusSensitivity, StoreStatusSensitivityFinding,
+    capture_worktree_review, fetch_input_request, import_event, import_notes, ingest_events,
     link_clone_local_store, list_input_requests, list_observations, list_review_units,
     open_input_request, record_assessment, record_observation, reload_session,
     respond_input_request, review_history, show_assessments, show_review_unit, store_status,
 };
-pub use workflow::{InputRequestStatus, ReloadDiagnostic, ReloadOutcome};
-pub(crate) use workflow::reload_diagnostics_for_document;
 pub(in crate::session) use workflow::{assessment, input_request, observation};
 
 #[cfg(test)]

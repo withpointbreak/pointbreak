@@ -15,9 +15,51 @@ pub enum EventType {
     TaskObservationRecorded,
 }
 
+impl EventType {
+    /// The snake_case wire string for this event type, matching the serde
+    /// representation. Used for per-type counts (e.g. `eventsCreatedByType`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReviewInitialized => "review_initialized",
+            Self::ReviewUnitCaptured => "review_unit_captured",
+            Self::ReviewObservationRecorded => "review_observation_recorded",
+            Self::ReviewAssessmentRecorded => "review_assessment_recorded",
+            Self::InputRequestOpened => "input_request_opened",
+            Self::InputRequestResponded => "input_request_responded",
+            Self::ReviewNoteImported => "review_note_imported",
+            Self::TaskAttemptCaptured => "task_attempt_captured",
+            Self::TaskCheckpointCaptured => "task_checkpoint_captured",
+            Self::TaskObservationRecorded => "task_observation_recorded",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn as_str_matches_serde_wire_string_for_every_variant() {
+        for variant in [
+            EventType::ReviewInitialized,
+            EventType::ReviewUnitCaptured,
+            EventType::ReviewObservationRecorded,
+            EventType::ReviewAssessmentRecorded,
+            EventType::InputRequestOpened,
+            EventType::InputRequestResponded,
+            EventType::ReviewNoteImported,
+            EventType::TaskAttemptCaptured,
+            EventType::TaskCheckpointCaptured,
+            EventType::TaskObservationRecorded,
+        ] {
+            let serde_wire = serde_json::to_value(variant).unwrap();
+            assert_eq!(
+                serde_wire,
+                serde_json::json!(variant.as_str()),
+                "as_str() must equal the serde wire string for {variant:?}"
+            );
+        }
+    }
 
     #[test]
     fn task_event_types_serialize_as_snake_case() {

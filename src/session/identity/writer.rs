@@ -58,12 +58,10 @@ fn actor_id_for_repo(explicit: Option<&str>, repo: &Path) -> ActorId {
 /// from Git config. Each candidate is validated independently, so a malformed
 /// override falls through to the env value (then Git) rather than being trusted.
 fn resolve_actor_id(explicit: Option<&str>, env: Option<&str>, repo: &Path) -> ActorId {
-    for candidate in [explicit, env] {
-        if let Some(value) = candidate {
-            let value = value.trim();
-            if is_valid_actor_id(value) {
-                return ActorId::new(value.to_owned());
-            }
+    for value in [explicit, env].into_iter().flatten() {
+        let value = value.trim();
+        if is_valid_actor_id(value) {
+            return ActorId::new(value.to_owned());
         }
     }
     actor_id_from_git_config(repo)
@@ -248,8 +246,11 @@ mod tests {
     #[test]
     fn invalid_explicit_actor_id_falls_through_to_valid_env() {
         let repo = git_repo_with_email("host@example.com");
-        let actor =
-            super::resolve_actor_id(Some("not-an-actor"), Some("actor:env:from-env"), repo.path());
+        let actor = super::resolve_actor_id(
+            Some("not-an-actor"),
+            Some("actor:env:from-env"),
+            repo.path(),
+        );
         assert_eq!(
             actor.as_str(),
             "actor:env:from-env",

@@ -2,6 +2,7 @@ pub(in crate::session) mod assessment;
 mod capture;
 mod history;
 mod import;
+mod ingest;
 mod reload;
 mod review_unit_list;
 mod review_unit_projection;
@@ -22,22 +23,23 @@ pub use history::{
     review_history,
 };
 pub use import::{ImportNotesOptions, ImportNotesResult, import_notes};
-pub use input_request::InputRequestStatus;
+pub use ingest::{
+    ImportEventOptions, IngestEventsOptions, IngestEventsResult, import_event, ingest_events,
+};
 pub use input_request::{
     InputRequestFetchOptions, InputRequestFetchResult, InputRequestListOptions,
     InputRequestListResult, InputRequestOpenOptions, InputRequestOpenResult,
     InputRequestRespondOptions, InputRequestRespondResult, InputRequestResponseView,
-    InputRequestStatusFilter, InputRequestTargetSelector, InputRequestView, fetch_input_request,
-    list_input_requests, open_input_request, respond_input_request,
+    InputRequestStatus, InputRequestStatusFilter, InputRequestTargetSelector, InputRequestView,
+    fetch_input_request, list_input_requests, open_input_request, respond_input_request,
 };
 pub use observation::{
     ObservationAddOptions, ObservationAddResult, ObservationListOptions, ObservationListResult,
     ObservationStatus, ObservationTargetSelector, ObservationView, list_observations,
     record_observation,
 };
-pub use reload::ReloadOutcome;
 pub(crate) use reload::reload_diagnostics_for_document;
-pub use reload::{ReloadDiagnostic, ReloadDiagnosticCode, reload_session};
+pub use reload::{ReloadDiagnostic, ReloadDiagnosticCode, ReloadOutcome, reload_session};
 pub use review_unit_list::{
     ReviewUnitListEntry, ReviewUnitListOptions, ReviewUnitListResult, list_review_units,
 };

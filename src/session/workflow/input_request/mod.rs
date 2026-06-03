@@ -12,13 +12,14 @@ pub use self::respond::{
     InputRequestRespondOptions, InputRequestRespondResult, respond_input_request,
 };
 pub use self::target::InputRequestTargetSelector;
-pub use self::view::InputRequestStatus;
 #[cfg(test)]
 use self::view::collect_input_request_projection_records;
 #[cfg(test)]
 use self::view::sort_input_request_views;
 pub(crate) use self::view::{InputRequestProjectionOptions, project_input_requests};
-pub use self::view::{InputRequestResponseView, InputRequestStatusFilter, InputRequestView};
+pub use self::view::{
+    InputRequestResponseView, InputRequestStatus, InputRequestStatusFilter, InputRequestView,
+};
 #[cfg(test)]
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 #[cfg(test)]
