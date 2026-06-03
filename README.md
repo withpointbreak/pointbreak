@@ -48,7 +48,8 @@ shore inspect --open
 
 Shoreline stores local review facts in `.shore/`. Command output JSON is the integration surface;
 raw event files, artifact paths, and `.shore/state.json` are internal storage details unless a
-command explicitly documents them.
+command explicitly documents them. Consumers that prefer to read and write those facts in process
+can use the supported library API instead of the CLI — see [docs/library-api.md](docs/library-api.md).
 
 ## Current Commands
 
@@ -87,6 +88,8 @@ For users:
 - [Agent authoring handoffs](docs/agent-authoring.md) - how a coding agent captures a durable
   handoff record before declaring implementation work done.
 - [Agent skills](skills/README.md) - install the portable Shoreline author-handoff skill.
+- [Library API](docs/library-api.md) - the supported in-process library surface (reads, attributed
+  writes, event ingest, documents) and its stability contract.
 
 For contributors and maintainers:
 
