@@ -186,6 +186,11 @@ pub(super) fn history_entry_from_event(
                 change_id: payload.change_id,
             }
         }
+        EventType::ValidationCheckRecorded => {
+            return Err(ShoreError::Message(
+                "review history validation summaries are not yet projected".to_owned(),
+            ));
+        }
         EventType::TaskAttemptCaptured
         | EventType::TaskCheckpointCaptured
         | EventType::TaskObservationRecorded => {

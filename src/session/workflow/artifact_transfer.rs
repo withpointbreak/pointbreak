@@ -231,6 +231,7 @@ fn referenced_artifacts_for_event(
         EventType::ReviewInitialized
         | EventType::ReviewUnitLineageDeclared
         | EventType::ReviewUnitLineageRoundRecorded
+        | EventType::ValidationCheckRecorded
         | EventType::TaskAttemptCaptured
         | EventType::TaskCheckpointCaptured => Ok(()),
     }

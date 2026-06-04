@@ -12,6 +12,7 @@ pub enum EventType {
     ReviewNoteImported,
     ReviewUnitLineageDeclared,
     ReviewUnitLineageRoundRecorded,
+    ValidationCheckRecorded,
     TaskAttemptCaptured,
     TaskCheckpointCaptured,
     TaskObservationRecorded,
@@ -31,6 +32,7 @@ impl EventType {
             Self::ReviewNoteImported => "review_note_imported",
             Self::ReviewUnitLineageDeclared => "review_unit_lineage_declared",
             Self::ReviewUnitLineageRoundRecorded => "review_unit_lineage_round_recorded",
+            Self::ValidationCheckRecorded => "validation_check_recorded",
             Self::TaskAttemptCaptured => "task_attempt_captured",
             Self::TaskCheckpointCaptured => "task_checkpoint_captured",
             Self::TaskObservationRecorded => "task_observation_recorded",
@@ -54,6 +56,7 @@ mod tests {
             EventType::ReviewNoteImported,
             EventType::ReviewUnitLineageDeclared,
             EventType::ReviewUnitLineageRoundRecorded,
+            EventType::ValidationCheckRecorded,
             EventType::TaskAttemptCaptured,
             EventType::TaskCheckpointCaptured,
             EventType::TaskObservationRecorded,
@@ -173,6 +176,18 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&EventType::InputRequestResponded).unwrap(),
             "\"input_request_responded\""
+        );
+    }
+
+    #[test]
+    fn validation_event_type_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&EventType::ValidationCheckRecorded).unwrap(),
+            "\"validation_check_recorded\""
+        );
+        assert_eq!(
+            EventType::ValidationCheckRecorded.as_str(),
+            "validation_check_recorded"
         );
     }
 

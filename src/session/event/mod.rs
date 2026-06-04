@@ -18,6 +18,7 @@ mod source;
 mod target;
 mod task;
 mod tbs;
+mod validation;
 mod writer;
 
 pub use assertion::AssertionMode;
@@ -45,6 +46,7 @@ pub use tbs::{
     EVENT_TO_BE_SIGNED_V1_PAYLOAD_TYPE, EventToBeSigned,
     event_signature_pre_authentication_encoding, event_to_be_signed, pre_authentication_encoding,
 };
+pub use validation::ValidationCheckRecordedPayload;
 pub use writer::{Writer, WriterRole, WriterTool};
 
 const EVENT_SCHEMA: &str = "shore.event";

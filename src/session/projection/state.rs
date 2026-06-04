@@ -182,6 +182,9 @@ impl StateReducer {
             EventType::ReviewUnitLineageDeclared | EventType::ReviewUnitLineageRoundRecorded => {
                 // Lineage projections are derived by the dedicated lineage reducer.
             }
+            EventType::ValidationCheckRecorded => {
+                // Validation evidence state lands in the dedicated validation reducer task.
+            }
             EventType::TaskAttemptCaptured
             | EventType::TaskCheckpointCaptured
             | EventType::TaskObservationRecorded => {
