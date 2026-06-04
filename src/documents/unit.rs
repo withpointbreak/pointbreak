@@ -1,7 +1,7 @@
 // Document builders for `shore review-unit show` and `list`.
 use crate::documents::{
     AssessmentViewDocument, CurrentAssessmentDocument, DiagnosticDocument,
-    InputRequestViewDocument, ObservationViewDocument,
+    InputRequestViewDocument, ObservationViewDocument, ValidationCheckViewDocument,
 };
 use crate::model::{ReviewTargetRef, Side};
 use crate::session::{
@@ -23,6 +23,7 @@ pub struct UnitShowBody {
     observations: Vec<ObservationViewDocument>,
     input_requests: Vec<InputRequestViewDocument>,
     assessments: Vec<AssessmentViewDocument>,
+    validation_checks: Vec<ValidationCheckViewDocument>,
     adapter_notes: Vec<AdapterNoteDocument>,
     rows: Vec<UnitProjectionRowDocument>,
 }
@@ -70,6 +71,7 @@ struct UnitShowSummaryDocument {
     observation_count: usize,
     input_request_count: usize,
     assessment_count: usize,
+    validation_check_count: usize,
     adapter_note_count: usize,
 }
 
@@ -125,6 +127,7 @@ struct UnitProjectionRowDocument {
     related_observation_ids: Vec<String>,
     related_input_request_ids: Vec<String>,
     related_assessment_ids: Vec<String>,
+    related_validation_check_ids: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -164,6 +167,11 @@ pub fn unit_show_document(result: ReviewUnitShowResult) -> DiagnosticDocument<Un
                 .assessments
                 .into_iter()
                 .map(AssessmentViewDocument::from)
+                .collect(),
+            validation_checks: result
+                .validation_checks
+                .into_iter()
+                .map(ValidationCheckViewDocument::from)
                 .collect(),
             adapter_notes: result
                 .adapter_notes
@@ -232,6 +240,7 @@ impl From<ReviewUnitProjectionSummary> for UnitShowSummaryDocument {
             observation_count: summary.observation_count,
             input_request_count: summary.input_request_count,
             assessment_count: summary.assessment_count,
+            validation_check_count: summary.validation_check_count,
             adapter_note_count: summary.adapter_note_count,
         }
     }
@@ -291,6 +300,11 @@ impl From<ReviewUnitProjectionRow> for UnitProjectionRowDocument {
                 .collect(),
             related_assessment_ids: row
                 .related_assessment_ids
+                .into_iter()
+                .map(|id| id.as_str().to_owned())
+                .collect(),
+            related_validation_check_ids: row
+                .related_validation_check_ids
                 .into_iter()
                 .map(|id| id.as_str().to_owned())
                 .collect(),

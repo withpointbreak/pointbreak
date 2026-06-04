@@ -1,9 +1,11 @@
 // Shared view-document mappers used by review unit show and the leaf read commands.
-use crate::model::ReviewTargetRef;
+use crate::model::{ReviewTargetRef, ValidationStatus, ValidationTarget, ValidationTrigger};
 use crate::session::event::{
     AssertionMode, InputRequestReasonCode, InputRequestResponseOutcome, ReviewAssessment, Writer,
 };
-use crate::session::{AssessmentView, CurrentAssessmentStatus, InputRequestView, ObservationView};
+use crate::session::{
+    AssessmentView, CurrentAssessmentStatus, InputRequestView, ObservationView, ValidationCheckView,
+};
 
 /// Documented per-item shape for one observation.
 #[derive(serde::Serialize)]
@@ -102,6 +104,39 @@ pub struct AssessmentViewDocument {
     replaces: Vec<String>,
     related_observations: Vec<String>,
     related_input_requests: Vec<String>,
+    created_at: String,
+    writer: Writer,
+}
+
+/// Documented per-item shape for one advisory validation check.
+///
+/// Validation evidence is informational review context and does not encode
+/// merge, gate, or acceptance authority.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidationCheckViewDocument {
+    id: String,
+    event_id: String,
+    track_id: String,
+    target: ValidationTarget,
+    check_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+    status: ValidationStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_code: Option<i64>,
+    trigger: ValidationTrigger,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    summary_content_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completed_at: Option<String>,
+    log_artifact_content_hashes: Vec<String>,
     created_at: String,
     writer: Writer,
 }
@@ -235,6 +270,30 @@ impl From<AssessmentView> for AssessmentViewDocument {
                 .into_iter()
                 .map(|input_request_id| input_request_id.as_str().to_owned())
                 .collect(),
+            created_at: view.created_at,
+            writer: view.writer,
+        }
+    }
+}
+
+impl From<ValidationCheckView> for ValidationCheckViewDocument {
+    fn from(view: ValidationCheckView) -> Self {
+        Self {
+            id: view.id.as_str().to_owned(),
+            event_id: view.event_id.as_str().to_owned(),
+            track_id: view.track_id.as_str().to_owned(),
+            target: view.target,
+            check_name: view.check_name,
+            command: view.command,
+            status: view.status,
+            exit_code: view.exit_code,
+            trigger: view.trigger,
+            source_fingerprint: view.source_fingerprint,
+            summary: view.summary,
+            summary_content_hash: view.summary_content_hash,
+            started_at: view.started_at,
+            completed_at: view.completed_at,
+            log_artifact_content_hashes: view.log_artifact_content_hashes,
             created_at: view.created_at,
             writer: view.writer,
         }

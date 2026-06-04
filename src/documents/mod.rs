@@ -25,6 +25,7 @@ mod input_request;
 mod lineage;
 mod observation;
 mod unit;
+mod validation;
 mod view;
 
 pub use assessment::{
@@ -46,9 +47,13 @@ pub use observation::{
     ObservationAddBody, ObservationListBody, observation_add_document, observation_list_document,
 };
 pub use unit::{UnitListBody, UnitShowBody, unit_list_document, unit_show_document};
+pub use validation::{
+    ValidationAddBody, ValidationListBody, validation_add_document, validation_list_document,
+};
 pub use view::{
     AssessmentViewDocument, CurrentAssessmentDocument, InputRequestAssertionModeDocument,
     InputRequestResponseViewDocument, InputRequestViewDocument, ObservationViewDocument,
+    ValidationCheckViewDocument,
 };
 
 /// Envelope for a read/diagnostic document: `{ schema, version, <flattened
@@ -115,6 +120,10 @@ impl<T> EventWriteDocument<T> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::ffi::OsStr;
+    use std::fs;
+    use std::path::Path;
+    use std::process::Command;
 
     fn write_compact<T: serde::Serialize>(document: &T) -> String {
         let mut buf = Vec::new();
@@ -254,5 +263,195 @@ mod tests {
         assert!(json.contains("\"schema\":\"shore.review-capture\""));
         assert!(json.contains("\"lineageAttach\""));
         assert!(json.contains("\"review_unit_lineage_round_recorded\":1"));
+    }
+
+    #[test]
+    fn validation_add_document_serializes_advisory_validation_add_schema() {
+        use crate::documents::validation_add_document;
+        use crate::model::{
+            EventId, ReviewUnitId, TrackId, ValidationCheckId, ValidationStatus, ValidationTarget,
+        };
+        use crate::session::ValidationAddResult;
+
+        let review_unit_id = ReviewUnitId::new("review-unit:sha256:one");
+        let doc = validation_add_document(ValidationAddResult {
+            review_unit_id: review_unit_id.clone(),
+            validation_check_id: ValidationCheckId::new("validation:sha256:one"),
+            event_id: EventId::new("evt:sha256:one"),
+            track_id: TrackId::new("agent:codex"),
+            target: ValidationTarget::ReviewUnit { review_unit_id },
+            status: ValidationStatus::Passed,
+            summary_content_hash: Some("sha256:summary".to_owned()),
+            events_created: 1,
+            events_existing: 0,
+            events_created_by_type: BTreeMap::from([("validation_check_recorded".to_owned(), 1)]),
+            diagnostics: Vec::new(),
+        });
+
+        let value = serde_json::to_value(&doc).unwrap();
+        assert_eq!(value["schema"], "shore.review-validation-add");
+        assert_eq!(value["status"], "passed");
+        assert_eq!(value["summaryContentHash"], "sha256:summary");
+        assert!(value.get("accepted").is_none());
+        assert!(value.get("gate").is_none());
+    }
+
+    #[test]
+    fn validation_view_document_has_expected_wire_keys() {
+        use crate::documents::ValidationCheckViewDocument;
+
+        let doc = ValidationCheckViewDocument::from(validation_view());
+        let value = serde_json::to_value(&doc).unwrap();
+
+        for key in [
+            "id",
+            "eventId",
+            "trackId",
+            "target",
+            "checkName",
+            "status",
+            "trigger",
+            "logArtifactContentHashes",
+            "createdAt",
+        ] {
+            assert!(value.get(key).is_some(), "missing {key}");
+        }
+        assert!(value.get("accepted").is_none());
+    }
+
+    #[test]
+    fn unit_show_document_includes_validation_checks_and_count() {
+        use crate::documents::unit_show_document;
+        use crate::model::ValidationStatus;
+        use crate::session::{
+            CaptureOptions, ReviewUnitShowOptions, ValidationAddOptions, capture_worktree_review,
+            record_validation_check, show_review_unit,
+        };
+
+        let repo = modified_repo();
+        let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        record_validation_check(
+            ValidationAddOptions::new(repo.path())
+                .with_review_unit_id(capture.review_unit_id.clone())
+                .with_track("agent:codex")
+                .with_check_name("cargo test")
+                .with_status(ValidationStatus::Passed),
+        )
+        .unwrap();
+
+        let result = show_review_unit(
+            ReviewUnitShowOptions::new(repo.path())
+                .with_review_unit_id(capture.review_unit_id)
+                .with_include_body(true),
+        )
+        .unwrap();
+        let value = serde_json::to_value(unit_show_document(result)).unwrap();
+
+        assert!(value["validationChecks"].is_array());
+        assert_eq!(value["summary"]["validationCheckCount"], 1);
+        let row = value["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["kind"] == "validation_evidence")
+            .expect("validation row");
+        assert_eq!(
+            row["relatedValidationCheckIds"].as_array().unwrap().len(),
+            1
+        );
+    }
+
+    fn validation_view() -> crate::session::ValidationCheckView {
+        use crate::model::{
+            EventId, ReviewUnitId, TrackId, ValidationCheckId, ValidationStatus, ValidationTarget,
+            ValidationTrigger,
+        };
+        use crate::session::event::Writer;
+
+        let review_unit_id = ReviewUnitId::new("review-unit:sha256:one");
+        crate::session::ValidationCheckView {
+            id: ValidationCheckId::new("validation:sha256:one"),
+            event_id: EventId::new("evt:sha256:one"),
+            track_id: TrackId::new("agent:codex"),
+            target: ValidationTarget::ReviewUnit { review_unit_id },
+            check_name: "cargo test".to_owned(),
+            command: Some("cargo test --all".to_owned()),
+            status: ValidationStatus::Passed,
+            exit_code: Some(0),
+            trigger: ValidationTrigger::Manual,
+            source_fingerprint: Some("rev:sha256:head".to_owned()),
+            summary: Some("tests passed".to_owned()),
+            summary_content_hash: Some("sha256:summary".to_owned()),
+            started_at: Some("2026-05-10T00:00:00Z".to_owned()),
+            completed_at: Some("2026-05-10T00:01:00Z".to_owned()),
+            log_artifact_content_hashes: vec!["sha256:log".to_owned()],
+            created_at: "2026-05-10T00:01:01Z".to_owned(),
+            writer: Writer::shore_local_reviewer(env!("CARGO_PKG_VERSION")),
+        }
+    }
+
+    fn modified_repo() -> TestRepo {
+        let repo = TestRepo::new();
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+        repo.commit_all("base");
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+        repo
+    }
+
+    struct TestRepo {
+        root: tempfile::TempDir,
+    }
+
+    impl TestRepo {
+        fn new() -> Self {
+            let root = tempfile::tempdir().expect("temp repo");
+            let repo = Self { root };
+            repo.git(["init"]);
+            repo.git(["config", "user.email", "agent@example.com"]);
+            repo.git(["config", "user.name", "Agent"]);
+            repo.git(["config", "commit.gpgsign", "false"]);
+            repo
+        }
+
+        fn path(&self) -> &Path {
+            self.root.path()
+        }
+
+        fn write(&self, path: &str, contents: &str) {
+            let path = self.root.path().join(path);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create parent directories");
+            }
+            fs::write(path, contents).expect("write test fixture");
+        }
+
+        fn commit_all(&self, message: &str) {
+            self.git(["add", "--all"]);
+            self.git(["commit", "-m", message]);
+        }
+
+        fn git<I, S>(&self, args: I)
+        where
+            I: IntoIterator<Item = S>,
+            S: AsRef<OsStr>,
+        {
+            let args = args
+                .into_iter()
+                .map(|arg| arg.as_ref().to_owned())
+                .collect::<Vec<_>>();
+            let output = Command::new("git")
+                .args(&args)
+                .current_dir(self.root.path())
+                .output()
+                .unwrap_or_else(|error| panic!("run git {:?}: {error}", args));
+
+            assert!(
+                output.status.success(),
+                "git {:?} failed\nstdout:\n{}\nstderr:\n{}",
+                args,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 }
