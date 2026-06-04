@@ -12,10 +12,10 @@ use serde::Serialize;
 use shoreline::documents::{lineage_show_document, unit_show_document};
 use shoreline::model::{ReviewEndpoint, ReviewUnitId, ReviewUnitLineageId, SnapshotId};
 use shoreline::session::{
-    LineageListEntry, LineageListOptions, LineageShowOptions, ProjectionDiagnostic,
-    ReviewHistoryEntry, ReviewHistoryOptions, ReviewUnitListEntry, ReviewUnitListOptions,
-    ReviewUnitShowOptions, list_lineages, list_review_units, read_snapshot_artifact,
-    review_history, show_lineage, show_review_unit,
+    LineageListEntry, LineageListOptions, LineageShowOptions, LineageShowResult,
+    ProjectionDiagnostic, ReviewHistoryEntry, ReviewHistoryOptions, ReviewUnitListEntry,
+    ReviewUnitListOptions, ReviewUnitShowOptions, list_lineages, list_review_units,
+    read_snapshot_artifact, review_history, show_lineage, show_review_unit,
 };
 
 #[derive(Serialize)]
@@ -57,7 +57,20 @@ struct LineageEntryDocument {
     lineage_id: String,
     head_review_unit_id: Option<String>,
     round_count: usize,
+    rounds: Vec<LineageRoundEntryDocument>,
     diagnostics: Vec<ProjectionDiagnostic>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LineageRoundEntryDocument {
+    lineage_id: String,
+    round_id: String,
+    review_unit_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    predecessor_review_unit_id: Option<String>,
+    round_index: Option<usize>,
+    is_head: bool,
 }
 
 /// One `/api/units` entry: the full `ReviewUnitListEntry` flattened verbatim,
@@ -206,15 +219,36 @@ fn to_unit_entry_documents(entries: Vec<ReviewUnitListEntry>) -> Vec<UnitEntryDo
         .collect()
 }
 
-impl From<LineageListEntry> for LineageEntryDocument {
-    fn from(entry: LineageListEntry) -> Self {
+impl From<LineageShowResult> for LineageEntryDocument {
+    fn from(result: LineageShowResult) -> Self {
+        let round_count = result.rounds.len();
         Self {
-            lineage_id: entry.lineage_id.as_str().to_owned(),
-            head_review_unit_id: entry
+            lineage_id: result.lineage_id.as_str().to_owned(),
+            head_review_unit_id: result
                 .head_review_unit_id
                 .map(|review_unit_id| review_unit_id.as_str().to_owned()),
-            round_count: entry.round_count,
-            diagnostics: entry.diagnostics,
+            round_count,
+            rounds: result
+                .rounds
+                .into_iter()
+                .map(LineageRoundEntryDocument::from)
+                .collect(),
+            diagnostics: result.diagnostics,
+        }
+    }
+}
+
+impl From<shoreline::session::LineageRoundView> for LineageRoundEntryDocument {
+    fn from(round: shoreline::session::LineageRoundView) -> Self {
+        Self {
+            lineage_id: round.lineage_id.as_str().to_owned(),
+            round_id: round.round_id.as_str().to_owned(),
+            review_unit_id: round.review_unit_id.as_str().to_owned(),
+            predecessor_review_unit_id: round
+                .predecessor_review_unit_id
+                .map(|review_unit_id| review_unit_id.as_str().to_owned()),
+            round_index: round.round_index,
+            is_head: round.is_head,
         }
     }
 }
@@ -253,16 +287,21 @@ pub(super) fn units_json(repo: &Path) -> Result<String, String> {
 /// ReviewUnit lineages summarized for the inspector sidebar/list view.
 pub(super) fn lineages_json(repo: &Path) -> Result<String, String> {
     let result = list_lineages(LineageListOptions::new(repo)).map_err(|error| error.to_string())?;
+    let entries = result
+        .entries
+        .into_iter()
+        .map(|entry: LineageListEntry| {
+            show_lineage(LineageShowOptions::new(repo, entry.lineage_id))
+                .map(LineageEntryDocument::from)
+                .map_err(|error| error.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let payload = LineagesPayload {
         schema: "shore.inspect-lineages",
         event_set_hash: result.event_set_hash,
         event_count: result.event_count,
         lineage_count: result.lineage_count,
-        entries: result
-            .entries
-            .into_iter()
-            .map(LineageEntryDocument::from)
-            .collect(),
+        entries,
         diagnostics: result.diagnostics,
     };
     serde_json::to_string(&payload).map_err(|error| error.to_string())

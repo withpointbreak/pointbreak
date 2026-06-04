@@ -252,14 +252,10 @@ fn round_indexes(
     rounds: &BTreeMap<ReviewUnitId, ReviewUnitLineageRoundRecordedPayload>,
     successors: &BTreeMap<ReviewUnitId, Vec<ReviewUnitId>>,
 ) -> BTreeMap<ReviewUnitId, usize> {
-    let predecessors = rounds
-        .values()
-        .filter_map(|round| round.predecessor_review_unit_id.clone())
-        .collect::<BTreeSet<_>>();
     let roots = rounds
-        .keys()
-        .filter(|review_unit_id| !predecessors.contains(*review_unit_id))
-        .cloned()
+        .values()
+        .filter(|round| round.predecessor_review_unit_id.is_none())
+        .map(|round| round.review_unit_id.clone())
         .collect::<Vec<_>>();
     let mut indexes = BTreeMap::new();
     for root in roots {
@@ -341,6 +337,8 @@ mod tests {
             lineage.head_review_unit_id.as_ref(),
             Some(&review_unit_id("two"))
         );
+        assert_eq!(lineage.rounds[0].round_index, Some(0));
+        assert_eq!(lineage.rounds[1].round_index, Some(1));
     }
 
     #[test]

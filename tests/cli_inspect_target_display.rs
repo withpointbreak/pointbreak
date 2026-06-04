@@ -197,6 +197,20 @@ fn api_lineages_lists_and_shows_review_unit_lineage() {
     assert_eq!(entry["headReviewUnitId"], second);
     assert_eq!(entry["roundCount"], 2);
     assert_eq!(entry["diagnostics"].as_array().unwrap().len(), 0);
+    assert_eq!(entry["rounds"].as_array().unwrap().len(), 2);
+    assert_eq!(entry["rounds"][0]["reviewUnitId"], first);
+    assert_eq!(entry["rounds"][0]["roundIndex"], 0);
+    assert_eq!(entry["rounds"][0]["isHead"], false);
+    assert_eq!(entry["rounds"][1]["reviewUnitId"], second);
+    assert_eq!(entry["rounds"][1]["predecessorReviewUnitId"], first);
+    assert_eq!(entry["rounds"][1]["roundIndex"], 1);
+    assert_eq!(entry["rounds"][1]["isHead"], true);
+
+    let lineages_json = lineages.to_string();
+    assert!(
+        !lineages_json.contains(&repo.path().to_string_lossy().to_string()),
+        "lineage list JSON must not expose raw repository paths"
+    );
 
     let lineage = inspector.get_json(&format!("/api/lineage?id={}", urlencode(lineage_id)));
     assert_eq!(lineage["schema"], "shore.review-lineage");

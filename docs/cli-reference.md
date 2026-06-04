@@ -86,11 +86,12 @@ per-command output.
 - `--open` launches the inspector in the default browser after the server starts.
 - The server runs until interrupted with Ctrl-C.
 
-The page provides a chronological event timeline (filterable by track, ReviewUnit, and event type,
-newest-first by default), a per-event detail view, a composite per-ReviewUnit page showing the
-current-assessment status plus grouped observations, input requests, and assessments, a ReviewUnit
-lineage list/detail view showing heads, rounds, and diagnostics, and the captured diff for a
-ReviewUnit annotated with the review facts anchored to each line. Long IDs render as truncated,
+The page provides a chronological event timeline (filterable by track, ReviewUnit, lineage, and
+event type, newest-first by default), a per-event detail view, a composite per-ReviewUnit page showing
+the current-assessment status plus grouped observations, input requests, assessments, and lineage/head
+badges, a ReviewUnit lineage list/detail view showing heads, threaded rounds, diagnostics, and stale
+older-round facts, and the captured diff for a ReviewUnit annotated with the review facts anchored to
+each line. Long IDs render as truncated,
 clickable references that navigate to the resource they name, and the page auto-refreshes when the
 store changes.
 

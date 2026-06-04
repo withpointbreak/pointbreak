@@ -24,6 +24,7 @@ const state = {
   filterText: "",
   filterTrack: "",
   filterUnit: "",
+  filterLineage: "",
   order: "desc", // "desc" = newest first (default), "asc" = chronological
   selectedEventId: null,
   lastHash: null,
@@ -93,6 +94,8 @@ function refInfo(token) {
 const REF_RE =
   /\b(?:review-unit-lineage-round|review-unit-lineage|review-unit|input-request-response|input-request|obs|assess|snap|rev|evt|note):(?:git:)?sha256:[0-9a-f]{6,}\b|\breview-unit-lineage:[a-z0-9][a-z0-9._:-]*\b|\bsha256:[0-9a-f]{16,}\b|\b[0-9a-f]{40}\b|\b(?:agent|human):[a-z0-9][a-z0-9_-]*\b/gi;
 
+const LINEAGE_FACT_TYPES = new Set(["review_observation_recorded", "review_assessment_recorded", "input_request_opened"]);
+
 // Escape text, then replace embedded IDs with truncated reference chips.
 // Navigable kinds carry data attributes that the delegated click handler
 // resolves; hashes/commits render as truncated text with the full value on
@@ -160,9 +163,11 @@ function navigateToUnit(id) {
   // no-match text or track filter would otherwise leave an empty timeline.
   state.filterText = "";
   state.filterTrack = "";
+  state.filterLineage = "";
   state.filterUnit = id;
   $("#filter-text").value = "";
   $("#filter-track").value = "";
+  $("#filter-lineage").value = "";
   $("#filter-unit").value = id;
   switchView("timeline");
   renderTimeline();
@@ -190,9 +195,11 @@ function revealEvent(eventId) {
   state.filterText = "";
   state.filterUnit = "";
   state.filterTrack = "";
+  state.filterLineage = "";
   $("#filter-text").value = "";
   $("#filter-unit").value = "";
   $("#filter-track").value = "";
+  $("#filter-lineage").value = "";
   state.enabledTypes.add(e.eventType);
   state.selectedEventId = eventId;
   switchView("timeline");
@@ -319,6 +326,7 @@ function renderAll() {
   renderTypeToggles();
   renderTrackOptions();
   renderUnitOptions();
+  renderLineageOptions();
   renderTimeline();
   renderUnits();
   renderLineages();
@@ -403,10 +411,73 @@ function renderUnitOptions() {
   state.filterUnit = fillSelect($("#filter-unit"), units, state.filterUnit);
 }
 
+function renderLineageOptions() {
+  const lineages = (state.lineages?.entries || []).map((l) => l.lineageId).filter(Boolean).sort();
+  state.filterLineage = fillSelect($("#filter-lineage"), lineages, state.filterLineage);
+}
+
+function lineageEntries() {
+  return state.lineages?.entries || [];
+}
+
+function lineageRound(lineageId, reviewUnitId) {
+  const lineage = lineageEntries().find((l) => l.lineageId === lineageId);
+  return (lineage?.rounds || []).find((r) => r.reviewUnitId === reviewUnitId) || null;
+}
+
+function lineageMembershipsForUnit(reviewUnitId) {
+  if (!reviewUnitId) return [];
+  const memberships = [];
+  for (const lineage of lineageEntries()) {
+    const round = (lineage.rounds || []).find((r) => r.reviewUnitId === reviewUnitId);
+    if (round) memberships.push({ lineage, lineageId: lineage.lineageId, round });
+  }
+  return memberships;
+}
+
+function eventLineageId(e) {
+  return (e.summary || {}).lineageId || "";
+}
+
+function eventMatchesLineage(e, lineageId) {
+  if (!lineageId) return true;
+  if (eventLineageId(e) === lineageId) return true;
+  return Boolean(e.reviewUnitId && lineageRound(lineageId, e.reviewUnitId));
+}
+
+function isLineageFact(e) {
+  return LINEAGE_FACT_TYPES.has(e.eventType);
+}
+
+function staleInLineage(e, lineageId) {
+  if (!lineageId || !e.reviewUnitId || !isLineageFact(e)) return false;
+  const lineage = lineageEntries().find((l) => l.lineageId === lineageId);
+  if (!lineage?.headReviewUnitId) return false;
+  return Boolean(lineageRound(lineageId, e.reviewUnitId) && e.reviewUnitId !== lineage.headReviewUnitId);
+}
+
+function lineageBadgesForUnit(reviewUnitId) {
+  const memberships = lineageMembershipsForUnit(reviewUnitId);
+  if (!memberships.length) return "";
+  return memberships
+    .map(({ lineageId, round }) => {
+      const labels = [shortRef(lineageId)];
+      if (round.isHead) labels.push("head");
+      else if (round.roundIndex != null) labels.push(`round ${round.roundIndex}`);
+      return `<span class="lineage-badge${round.isHead ? " lineage-head" : ""}" role="link" tabindex="0" data-ref-kind="review-unit-lineage" data-ref-id="${escapeHtml(lineageId)}" title="${escapeHtml(lineageId)}">${escapeHtml(labels.join(" · "))}</span>`;
+    })
+    .join(" ");
+}
+
+function lineageFactsForRound(lineageId, reviewUnitId) {
+  return (state.history?.entries || []).filter((e) => e.reviewUnitId === reviewUnitId && eventMatchesLineage(e, lineageId) && isLineageFact(e));
+}
+
 function matchesFilters(e) {
   if (!state.enabledTypes.has(e.eventType)) return false;
   if (state.filterTrack && entryTrack(e) !== state.filterTrack) return false;
   if (state.filterUnit && e.reviewUnitId !== state.filterUnit) return false;
+  if (state.filterLineage && !eventMatchesLineage(e, state.filterLineage)) return false;
   if (state.filterText) {
     const hay = JSON.stringify(e).toLowerCase();
     if (!hay.includes(state.filterText.toLowerCase())) return false;
@@ -436,11 +507,12 @@ function renderTimeline() {
     const tags = entryTags(e)
       .map((t) => `<span class="badge">${escapeHtml(t)}</span>`)
       .join(" ");
+    const lineageTags = state.filterLineage && staleInLineage(e, state.filterLineage) ? `<span class="badge stale">stale in lineage</span>` : "";
     li.innerHTML = `
       <span class="time">${escapeHtml(fmtTime(e.occurredAt))}</span>
       <span class="rail" style="background:${typeColor(e.eventType)}"></span>
       <span class="body">
-        <span class="title">${linkify(entryTitle(e))} ${tags}</span>
+        <span class="title">${linkify(entryTitle(e))} ${tags} ${lineageTags}</span>
         <span class="meta">
           <span class="type" style="color:${typeColor(e.eventType)}">${escapeHtml(typeLabel(e.eventType))}</span>
           ${entryTrack(e) ? `<span>${escapeHtml(entryTrack(e))}</span>` : ""}
@@ -698,6 +770,7 @@ function renderUnits() {
     const base = u.base || {};
     const card = document.createElement("div");
     card.className = "unit-card";
+    const lineageBadges = lineageBadgesForUnit(u.reviewUnitId);
     const rows = [
       ["captured", fmtDateTime(u.capturedAt)],
       ["base", base.commitOid ? shortId(base.commitOid) + " (" + (base.kind || "") + ")" : base.kind || "—"],
@@ -712,9 +785,13 @@ function renderUnits() {
     const targetCell = `<span>target</span><b>${targetDisplayLabel(u.targetDisplay)}${targetHeadBadge(u.targetDisplay)}</b>`;
     card.innerHTML = `
       <h3>${escapeHtml(shortId(u.reviewUnitId))}</h3>
+      ${lineageBadges ? `<div class="lineage-badges">${lineageBadges}</div>` : ""}
       <div class="kv">${rows.map(kv).join("")}${targetCell}${tail.map(kv).join("")}</div>`;
     card.title = u.reviewUnitId + "\nclick to open the unit page";
-    card.addEventListener("click", () => openUnit(u.reviewUnitId));
+    card.addEventListener("click", (ev) => {
+      if (ev.target.closest("[data-ref-kind]")) return;
+      openUnit(u.reviewUnitId);
+    });
     const actions = document.createElement("div");
     actions.className = "actions";
     const diffBtn = document.createElement("button");
@@ -749,7 +826,8 @@ function renderLineages() {
         <span>head</span><b>${head}</b>
         <span>rounds</span><b>${escapeHtml(String(l.roundCount ?? 0))}</b>
         <span>diagnostics</span><b>${escapeHtml(String(diagnosticCount))}</b>
-      </div>`;
+      </div>
+      ${renderMiniLineageStack(l)}`;
     card.title = l.lineageId + "\nclick to open the lineage page";
     card.addEventListener("click", (ev) => {
       if (ev.target.closest("[data-ref-kind]")) return;
@@ -757,6 +835,14 @@ function renderLineages() {
     });
     el.appendChild(card);
   }
+}
+
+function renderMiniLineageStack(lineage) {
+  const rounds = lineage.rounds || [];
+  if (!rounds.length) return "";
+  return `<div class="mini-stack">${rounds
+    .map((r) => `<span class="mini-round${r.isHead ? " head" : ""}" title="${escapeHtml(r.reviewUnitId)}">${escapeHtml(shortId(r.reviewUnitId))}</span>`)
+    .join("")}</div>`;
 }
 
 function switchView(view) {
@@ -817,6 +903,40 @@ function navigateToLineageRound(roundId) {
   revealBy((e) => e.eventType === "review_unit_lineage_round_recorded" && (e.summary || {}).roundId === roundId);
 }
 
+function navigateToLineageTimeline(lineageId) {
+  state.filterText = "";
+  state.filterTrack = "";
+  state.filterUnit = "";
+  state.filterLineage = lineageId;
+  $("#filter-text").value = "";
+  $("#filter-track").value = "";
+  $("#filter-unit").value = "";
+  $("#filter-lineage").value = lineageId;
+  switchView("timeline");
+  renderTimeline();
+}
+
+function renderLineageFact(e, stale) {
+  const s = e.summary || {};
+  const kind =
+    e.eventType === "review_assessment_recorded"
+      ? "assessment"
+      : e.eventType === "input_request_opened"
+        ? "input-request"
+        : "observation";
+  const title = s.title || s.assessment || s.reasonCode || typeLabel(e.eventType);
+  return factCard(kind, {
+    track: entryTrack(e),
+    title,
+    status: stale ? "stale" : "",
+    target: targetLabel(s.target),
+    tags: Array.isArray(s.tags) ? s.tags : [],
+    body: s.body || s.summary || "",
+    createdAt: e.occurredAt,
+    extra: `<div class="fact-rel">${linkify(e.eventId)}</div>`,
+  });
+}
+
 function renderLineagePage(d) {
   const rounds = d.rounds || [];
   $("#lineage-page-title").textContent = `${shortRef(d.lineageId)}${d.headReviewUnitId ? " · head " + shortId(d.headReviewUnitId) : ""}`;
@@ -832,6 +952,9 @@ function renderLineagePage(d) {
 
   sections.push(`<section><h2>Summary</h2><div class="up-stats">
     ${stat("rounds", rounds.length)}${stat("diagnostics", (d.diagnostics || []).length)}
+  </div>
+  <div style="margin-top:10px">
+    <button class="ghost" id="lineage-timeline-btn">filter timeline</button>
   </div></section>`);
 
   sections.push(`<section><h2>Diagnostics</h2>${diagnosticBlock(d.diagnostics)}</section>`);
@@ -840,12 +963,19 @@ function renderLineagePage(d) {
     ? rounds
         .map((r) => {
           const index = r.roundIndex == null ? "—" : String(r.roundIndex);
+          const facts = lineageFactsForRound(d.lineageId, r.reviewUnitId);
+          const stale = Boolean(d.headReviewUnitId && r.reviewUnitId !== d.headReviewUnitId);
           const headBadge = r.isHead ? `<span class="fact-status current">head</span>` : "";
+          const staleBadge = stale && facts.length ? `<span class="fact-status stale">stale facts</span>` : "";
           const predecessor = r.predecessorReviewUnitId ? linkify(r.predecessorReviewUnitId) : "—";
-          return `<div class="round-card">
+          const factList = facts.length
+            ? `<div class="lineage-facts">${facts.map((fact) => renderLineageFact(fact, stale)).join("")}</div>`
+            : "";
+          return `<div class="round-card${r.isHead ? " head-round" : ""}${stale ? " stale-round" : ""}">
             <div class="anno-head">
               <span class="anno-kind">round ${escapeHtml(index)}</span>
               ${headBadge}
+              ${staleBadge}
               <span class="anno-title">${linkify(r.reviewUnitId)}</span>
             </div>
             <dl class="up-identity round-identity">
@@ -856,11 +986,12 @@ function renderLineagePage(d) {
               <button class="ghost" data-open-unit="${escapeHtml(r.reviewUnitId)}">open unit</button>
               <button class="ghost" data-open-round="${escapeHtml(r.roundId)}">show round event</button>
             </div>
+            ${factList}
           </div>`;
         })
         .join("")
     : `<p class="up-empty">none</p>`;
-  sections.push(`<section><h2>Rounds (${rounds.length})</h2>${roundCards}</section>`);
+  sections.push(`<section><h2>Rounds (${rounds.length})</h2><div class="lineage-stack">${roundCards}</div></section>`);
 
   $("#lineage-page").innerHTML = sections.join("");
   $("#lineage-page").querySelectorAll("[data-open-unit]").forEach((btn) => {
@@ -869,6 +1000,8 @@ function renderLineagePage(d) {
   $("#lineage-page").querySelectorAll("[data-open-round]").forEach((btn) => {
     btn.addEventListener("click", () => navigateToLineageRound(btn.dataset.openRound));
   });
+  const timelineBtn = $("#lineage-timeline-btn");
+  if (timelineBtn) timelineBtn.addEventListener("click", () => navigateToLineageTimeline(d.lineageId));
 }
 
 function verdictBadge(ca) {
@@ -1008,6 +1141,7 @@ function renderUnitPage(d) {
   const ru = d.reviewUnit || {};
   const base = ru.base || {};
   const s = d.summary || {};
+  const lineageBadges = lineageBadgesForUnit(ru.id);
   $("#unit-page-title").textContent = `${shortId(ru.id)}${base.commitOid ? " · base " + shortId(base.commitOid) : ""}`;
 
   const stat = (label, n) => `<span class="up-stat"><b>${n ?? 0}</b> ${label}</span>`;
@@ -1019,6 +1153,7 @@ function renderUnitPage(d) {
     <dt>target</dt><dd>${targetDisplayLabel(ru.targetDisplay)}${targetHeadBadge(ru.targetDisplay)}</dd>
     <dt>worktree</dt><dd>${escapeHtml(ru.targetDisplay?.label ?? "working tree")}</dd>
     <dt>head</dt><dd>${escapeHtml(ru.targetDisplay?.head?.label ?? "—")}</dd>
+    <dt>lineage</dt><dd>${lineageBadges || "—"}</dd>
     <dt>snapshot</dt><dd>${linkify(ru.snapshotId)}</dd>
   </dl></section>`);
 
@@ -1063,14 +1198,20 @@ function wireControls() {
     state.filterUnit = ev.target.value;
     renderTimeline();
   });
+  $("#filter-lineage").addEventListener("change", (ev) => {
+    state.filterLineage = ev.target.value;
+    renderTimeline();
+  });
   $("#filter-clear").addEventListener("click", () => {
     state.filterText = "";
     state.filterTrack = "";
     state.filterUnit = "";
+    state.filterLineage = "";
     state.enabledTypes = new Set(presentTypes());
     $("#filter-text").value = "";
     $("#filter-track").value = "";
     $("#filter-unit").value = "";
+    $("#filter-lineage").value = "";
     renderTypeToggles();
     renderTimeline();
   });
