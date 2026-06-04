@@ -1,0 +1,51 @@
+{
+  "assertionMode": "advisory",
+  "eventId": "evt:sha256:c8c482c5babf434fed7858df6c26b9bd983015dca114f297febe62bfbc9f1de2",
+  "eventType": "review_observation_recorded",
+  "idempotencyKey": "review_observation_recorded:review-unit:sha256:1111111111111111111111111111111111111111111111111111111111111111:agent:vector:event-signature-golden-vector",
+  "occurredAt": "2026-06-04T00:00:00Z",
+  "payload": {
+    "body": "Pinned event signature vector.",
+    "bodyByteSize": 30,
+    "bodyContentHash": "sha256:bb72682d66f57b0ab76cf73dd0c1d4cabcc5d44266636dff3d90065492927dc8",
+    "observationId": "obs:sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "tags": [
+      "event-signature",
+      "golden-vector"
+    ],
+    "target": {
+      "kind": "review_unit",
+      "reviewUnitId": "review-unit:sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    "title": "Golden vector observation"
+  },
+  "payloadHash": "sha256:235d946d8c1f9fa521e1a8ac6e3d6df6b96051da42f68f545e92d19f34a8d9c0",
+  "schema": "shore.event",
+  "signature": {
+    "alg": "ed25519",
+    "sig": "YcYMWSJlVdnJXtsfnAEbQDNaTMuA22ORNxsQs6/nc6T7ubVF5Mhrv1WRVDBqnzQLD4aThwYimgx7woTAGGqFDQ==",
+    "sigVersion": 1
+  },
+  "signer": "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd",
+  "target": {
+    "reviewUnitId": "review-unit:sha256:1111111111111111111111111111111111111111111111111111111111111111",
+    "revisionId": "rev:sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "sessionId": "session:fixture:event-signatures",
+    "snapshotId": "snap:sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "subject": {
+      "review": {
+        "kind": "review_unit",
+        "reviewUnitId": "review-unit:sha256:1111111111111111111111111111111111111111111111111111111111111111"
+      }
+    }
+  },
+  "version": 1,
+  "writer": {
+    "actorId": "actor:git-email:alice@example.com",
+    "role": "reviewer",
+    "tool": {
+      "name": "shore",
+      "version": "0.1.0-test"
+    }
+  }
+}

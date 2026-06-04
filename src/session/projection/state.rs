@@ -71,14 +71,14 @@ impl SessionState {
     /// the event log. Produces the same value as
     /// `SessionState::from_events(&[prior + committed])` for
     /// `EventWriteOutcome::Created`, and the same value as
-    /// `SessionState::from_events(&prior)` for `EventWriteOutcome::Existing`
-    /// (the committed event is already represented in `prior_events`).
+    /// `SessionState::from_events(&prior)` for existing-event outcomes (the
+    /// committed event is already represented in `prior_events`).
     ///
     /// Assumes the V1 single-writer workflow contract: the `prior_events`
     /// slice was loaded by the same workflow that just called
     /// `record_event_once`, and no other writer mutated `.shore/events/`
-    /// in between. Under that contract, `EventWriteOutcome::Existing`
-    /// always means the matching event is already in `prior_events`.
+    /// in between. Under that contract, existing-event outcomes always mean the
+    /// matching event is already in `prior_events`.
     ///
     /// `.shore/events/` remains the canonical authority. Use `from_events`
     /// on read paths and for full rebuilds.
@@ -92,7 +92,7 @@ impl SessionState {
             reducer.apply(event)?;
         }
         let (event_count, event_set_hash) = match outcome {
-            EventWriteOutcome::Existing => {
+            EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => {
                 (prior_events.len(), event_set_hash_for_events(prior_events)?)
             }
             EventWriteOutcome::Created => {
@@ -616,6 +616,8 @@ mod tests {
             occurred_at: "2026-05-18T00:00:00Z".to_owned(),
             payload_hash: "sha256:placeholder".to_owned(),
             assertion_mode: AssertionMode::Advisory,
+            signer: None,
+            signature: None,
             source_ref: None,
             payload: serde_json::Value::Null,
         };

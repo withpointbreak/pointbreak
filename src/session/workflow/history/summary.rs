@@ -4,6 +4,7 @@ use crate::model::{
     AssessmentId, EventId, InputRequestId, InputRequestResponseId, ObservationId, ReviewEndpoint,
     ReviewTargetRef, ReviewUnitId, ReviewUnitSource, RevisionId, SessionId, SnapshotId, TrackId,
 };
+use crate::session::EventVerificationStatus;
 use crate::session::event::{
     AssertionMode, EventType, ImportedNoteTarget, InputRequestReasonCode,
     InputRequestResponseOutcome, ReviewAssessment, SidecarSource, Writer,
@@ -28,6 +29,8 @@ pub struct ReviewHistoryEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subject: Option<ReviewTargetRef>,
     pub writer: Writer,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_status: Option<EventVerificationStatus>,
     pub summary: ReviewHistorySummary,
 }
 

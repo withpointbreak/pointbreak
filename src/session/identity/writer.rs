@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::process::Command;
 
+use crate::crypto::SignerId;
 use crate::model::ActorId;
 use crate::session::event::{Writer, WriterRole, WriterTool};
 
@@ -67,15 +68,16 @@ fn resolve_actor_id(explicit: Option<&str>, env: Option<&str>, repo: &Path) -> A
     actor_id_from_git_config(repo)
 }
 
-/// A safe, fully-qualified actor id: an `actor:` prefix, a non-empty
-/// remainder, bounded length, and no whitespace or control characters. An
-/// invalid value is ignored rather than trusted, so a malformed override can
-/// never silently corrupt provenance.
+/// A safe, fully-qualified actor id: either an `actor:` prefix with a non-empty
+/// remainder, bounded length, and no whitespace or control characters, or a
+/// syntactically valid Ed25519 `did:key`. An invalid value is ignored rather
+/// than trusted, so a malformed override can never silently corrupt provenance.
 pub(crate) fn is_valid_actor_id(value: &str) -> bool {
-    value.len() <= 256
-        && value.strip_prefix("actor:").is_some_and(|rest| {
+    value.len() <= 256 && {
+        value.strip_prefix("actor:").is_some_and(|rest| {
             !rest.is_empty() && rest.chars().all(|c| !c.is_whitespace() && !c.is_control())
-        })
+        }) || SignerId::parse(value).is_ok()
+    }
 }
 
 fn shore_tool() -> WriterTool {
@@ -282,5 +284,19 @@ mod tests {
         let repo = git_repo_with_email("host@example.com");
         let actor = super::resolve_actor_id(None, None, repo.path());
         assert_eq!(actor.as_str(), "actor:git-email:host@example.com");
+    }
+
+    #[test]
+    fn actor_validation_accepts_actor_or_did_key_but_does_not_alias_them() {
+        let did_key = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
+
+        assert!(super::is_valid_actor_id(
+            "actor:git-email:alice@example.com"
+        ));
+        assert!(super::is_valid_actor_id(did_key));
+        assert_ne!(
+            crate::model::ActorId::new(did_key),
+            crate::model::ActorId::new("actor:git-email:alice@example.com")
+        );
     }
 }

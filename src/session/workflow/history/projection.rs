@@ -12,6 +12,7 @@ use crate::session::event::{
     ReviewUnitCapturedPayload, ShoreEvent, decode_input_request_opened_payload,
 };
 use crate::session::state::SessionState;
+use crate::session::verify_event_signature;
 
 pub(super) fn history_from_events(
     events: &[ShoreEvent],
@@ -26,7 +27,7 @@ pub(super) fn history_from_events(
     let mut entries = events
         .iter()
         .filter(|event| event_matches_filters(event, &filters))
-        .map(|event| history_entry_from_event(event, filters.include_body, shore_dir))
+        .map(|event| history_entry_from_event(event, &filters, shore_dir))
         .collect::<Result<Vec<_>>>()?;
 
     entries.sort_by(|left, right| {
@@ -46,7 +47,7 @@ pub(super) fn history_from_events(
 
 pub(super) fn history_entry_from_event(
     event: &ShoreEvent,
-    include_body: bool,
+    filters: &ResolvedHistoryFilters,
     shore_dir: Option<&Path>,
 ) -> Result<ReviewHistoryEntry> {
     let summary = match event.event_type {
@@ -75,7 +76,7 @@ pub(super) fn history_entry_from_event(
                 title: payload.title,
                 body: optional_text(
                     shore_dir,
-                    include_body,
+                    filters.include_body,
                     payload.body,
                     payload.body_artifact_path.as_deref(),
                 )?,
@@ -95,7 +96,7 @@ pub(super) fn history_entry_from_event(
                 assessment: payload.assessment,
                 summary: optional_text(
                     shore_dir,
-                    include_body,
+                    filters.include_body,
                     payload.summary,
                     payload.summary_artifact_path.as_deref(),
                 )?,
@@ -116,7 +117,7 @@ pub(super) fn history_entry_from_event(
                 title: payload.title,
                 body: optional_text(
                     shore_dir,
-                    include_body,
+                    filters.include_body,
                     payload.body,
                     payload.body_artifact_path.as_deref(),
                 )?,
@@ -133,7 +134,7 @@ pub(super) fn history_entry_from_event(
                 outcome: payload.outcome,
                 reason: optional_text(
                     shore_dir,
-                    include_body,
+                    filters.include_body,
                     payload.reason,
                     payload.reason_artifact_path.as_deref(),
                 )?,
@@ -152,7 +153,7 @@ pub(super) fn history_entry_from_event(
                 title: payload.title,
                 body: optional_text(
                     shore_dir,
-                    include_body,
+                    filters.include_body,
                     payload.body,
                     payload.body_artifact_path.as_deref(),
                 )?,
@@ -189,6 +190,10 @@ pub(super) fn history_entry_from_event(
             Some(TargetRef::Task(_)) | None => None,
         },
         writer: event.writer.clone(),
+        verification_status: filters
+            .verification_policy
+            .map(|_| verify_event_signature(event, &filters.trust_set))
+            .transpose()?,
         summary,
     })
 }

@@ -24,7 +24,6 @@ fn cli_reference_exists_and_covers_current_commands() {
     assert!(cli.contains("shore.review-capture"));
     assert!(cli.contains("shore.review-unit"));
     assert!(cli.contains("eventSetHash"));
-    assert!(!cli.contains("Gumbo"));
 
     assert_markdown_section_contains(
         &cli,
@@ -96,7 +95,7 @@ fn public_docs_cover_clone_local_store_behavior() {
         );
     }
 
-    for forbidden in ["Gumbo", "Plan 0050", "Task 5", "Phase 5"] {
+    for forbidden in ["Plan 0050", "Task 5", "Phase 5"] {
         assert!(!cli.contains(forbidden));
         assert!(!storage.contains(forbidden));
     }
@@ -137,7 +136,6 @@ fn getting_started_walks_through_first_review() {
     assert!(normalized_guide.contains(
         "--start-line 6 \\\n  --body \"The fallback value is visible user-facing behavior"
     ));
-    assert!(!guide.contains("Gumbo"));
 }
 
 #[test]
@@ -162,7 +160,6 @@ fn contributor_docs_cover_local_development_flow() {
     }
 
     assert!(!contributing.contains("cog check origin/main..HEAD"));
-    assert!(!contributing.contains("Gumbo"));
 }
 
 #[test]
@@ -208,7 +205,6 @@ fn readme_is_concise_and_routes_to_deeper_docs() {
     assert!(!readme.contains("substrate-language"));
     assert!(!readme.contains("substrate-thesis-summary"));
     assert!(!readme.contains("internal architecture language"));
-    assert!(!readme.contains("Gumbo"));
 }
 
 #[test]

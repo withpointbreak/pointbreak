@@ -33,6 +33,9 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
+base64 = "0.22"
+bs58 = "0.5"
+ed25519-dalek = "2"
 getrandom = "0.4"
 ratatui = { version = "0.30.0", default-features = false, features = ["std", "crossterm"] }
 serde = { version = "1", features = ["derive"] }

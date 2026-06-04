@@ -5,6 +5,7 @@ use serde_json::json;
 
 use super::view::{InputRequestProjectionRecords, collect_input_request_projection_records};
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
+use crate::crypto::EventSigner;
 use crate::error::{Result, ShoreError};
 use crate::model::{
     ActorId, EventId, InputRequestId, InputRequestResponseId, ReviewTargetRef, TargetRef,
@@ -15,7 +16,10 @@ use crate::session::event::{
 use crate::session::observation::staged_body;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store_init::{ShoreStorePaths, prepare_shore_writer};
-use crate::session::{EventStore, EventWriteOutcome, current_timestamp, reviewer_from_options};
+use crate::session::{
+    EventSigningOptions, EventStore, EventWriteOutcome, current_timestamp, reviewer_from_options,
+    sign_event_if_requested,
+};
 use crate::storage::{Durability, LocalStorage};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -26,6 +30,7 @@ pub struct InputRequestRespondOptions {
     reason: Option<String>,
     idempotency_key: Option<String>,
     actor_id: Option<ActorId>,
+    signing: EventSigningOptions,
 }
 
 impl InputRequestRespondOptions {
@@ -37,6 +42,7 @@ impl InputRequestRespondOptions {
             reason: None,
             idempotency_key: None,
             actor_id: None,
+            signing: EventSigningOptions::default(),
         }
     }
 
@@ -62,6 +68,14 @@ impl InputRequestRespondOptions {
 
     pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
         self.idempotency_key = Some(key.into());
+        self
+    }
+
+    pub fn sign_with<S>(mut self, signer: S) -> Self
+    where
+        S: EventSigner + Send + Sync + 'static,
+    {
+        self.signing = EventSigningOptions::sign_with(signer);
         self
     }
 }
@@ -147,7 +161,7 @@ pub fn respond_input_request(
         request_event.target.review_unit_id.clone().ok_or_else(|| {
             ShoreError::Message("input request event missing review unit".to_owned())
         })?;
-    let event = ShoreEvent::new(
+    let mut event = ShoreEvent::new(
         EventType::InputRequestResponded,
         idempotency_key,
         EventTarget {
@@ -177,6 +191,7 @@ pub fn respond_input_request(
         },
         current_timestamp(),
     )?;
+    sign_event_if_requested(&mut event, &options.signing)?;
     let event_id = event.event_id.clone();
 
     let mut events_created_by_type = BTreeMap::new();
@@ -186,7 +201,7 @@ pub fn respond_input_request(
             events_created_by_type.insert("input_request_responded".to_owned(), 1);
             (1, 0)
         }
-        EventWriteOutcome::Existing => (0, 1),
+        EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => (0, 1),
     };
 
     let state = SessionState::from_prior_events_and_committed(&events, &event, write_outcome)?;

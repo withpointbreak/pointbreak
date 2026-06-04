@@ -23,7 +23,7 @@ pub(crate) fn sha256_bytes_hex(bytes: &[u8]) -> String {
     hex_lower(hasher.finalize().as_slice())
 }
 
-fn canonical_json_bytes(value: &serde_json::Value) -> Result<Vec<u8>> {
+pub(crate) fn canonical_json_bytes(value: &serde_json::Value) -> Result<Vec<u8>> {
     let canonical = canonical_json_value(value);
     Ok(serde_json::to_vec(&canonical)?)
 }

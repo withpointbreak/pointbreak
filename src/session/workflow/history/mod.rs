@@ -25,6 +25,8 @@ pub fn review_history(options: ReviewHistoryOptions) -> Result<ReviewHistoryResu
         track_id,
         event_types: options.event_types,
         include_body: options.include_body,
+        verification_policy: options.verification_policy,
+        trust_set: options.trust_set,
     };
     let events = EventStore::open(paths.shore_dir()).list_events()?;
     history_from_events(&events, filters, Some(paths.shore_dir()))
@@ -121,7 +123,8 @@ mod tests {
         ];
 
         for (event, event_type, summary_kind) in cases {
-            let entry = history_entry_from_event(&event, false, None).unwrap();
+            let entry =
+                history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None).unwrap();
             let summary_json = serde_json::to_value(&entry.summary).unwrap();
 
             assert_eq!(entry.event_type, event_type);
@@ -137,7 +140,8 @@ mod tests {
         };
         let event = assessment_event_with_target(target.clone());
 
-        let entry = history_entry_from_event(&event, false, None).unwrap();
+        let entry =
+            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None).unwrap();
         let json = serde_json::to_value(&entry).unwrap();
 
         match entry.summary {
@@ -158,7 +162,8 @@ mod tests {
     fn history_entry_omits_internal_artifact_paths() {
         let event = observation_event_with_artifact_path("artifacts/notes/body.json");
 
-        let entry = history_entry_from_event(&event, false, None).unwrap();
+        let entry =
+            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None).unwrap();
         let json = serde_json::to_string(&entry).unwrap();
 
         assert!(!json.contains("bodyArtifactPath"));
@@ -197,7 +202,8 @@ mod tests {
     fn review_history_entry_subject_round_trips_review_target_ref_after_envelope_widening() {
         let event = observation_event("review-unit:sha256:one", "agent:codex", "Pinned");
 
-        let entry = history_entry_from_event(&event, false, None).unwrap();
+        let entry =
+            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None).unwrap();
 
         assert_eq!(
             entry.subject,
@@ -216,7 +222,8 @@ mod tests {
             checkpoint_id: CheckpointId::new("checkpoint:sha256:narrow"),
         }));
 
-        let entry = history_entry_from_event(&event, false, None).unwrap();
+        let entry =
+            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None).unwrap();
 
         assert!(entry.subject.is_none());
     }
@@ -238,6 +245,8 @@ mod tests {
             occurred_at: "2026-05-18T10:00:01Z".to_owned(),
             payload_hash: "sha256:placeholder".to_owned(),
             assertion_mode: AssertionMode::Advisory,
+            signer: None,
+            signature: None,
             source_ref: None,
             payload: serde_json::Value::Null,
         };
@@ -274,6 +283,8 @@ mod tests {
             occurred_at: format!("2026-05-18T10:00:0{}Z", idx + 1),
             payload_hash: "sha256:placeholder".to_owned(),
             assertion_mode: AssertionMode::Advisory,
+            signer: None,
+            signature: None,
             source_ref: None,
             payload: serde_json::Value::Null,
         });
@@ -303,11 +314,13 @@ mod tests {
             occurred_at: "2026-05-18T00:00:00Z".to_owned(),
             payload_hash: "sha256:placeholder".to_owned(),
             assertion_mode: AssertionMode::Advisory,
+            signer: None,
+            signature: None,
             source_ref: None,
             payload: serde_json::Value::Null,
         };
 
-        let error = history_entry_from_event(&event, false, None)
+        let error = history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None)
             .expect_err("task events must not project to review-history");
         let message = error.to_string();
 
@@ -329,6 +342,7 @@ mod tests {
             track_id: Some(TrackId::new("agent:codex")),
             event_types: vec![EventType::ReviewObservationRecorded],
             include_body: false,
+            ..ResolvedHistoryFilters::default()
         };
 
         let result =

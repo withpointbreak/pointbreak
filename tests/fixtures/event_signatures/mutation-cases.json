@@ -1,0 +1,34 @@
+{
+  "cases": [
+    {
+      "expected": "invalid",
+      "file": "payload-mutated-event.json",
+      "mutation": "payloadHash and payload body changed after signing"
+    },
+    {
+      "expected": "invalid",
+      "file": "actor-mutated-event.json",
+      "mutation": "writer.actorId changed after signing"
+    },
+    {
+      "expected": "invalid",
+      "file": "target-mutated-event.json",
+      "mutation": "target snapshotId changed after signing"
+    },
+    {
+      "expected": "invalid",
+      "file": "timestamp-mutated-event.json",
+      "mutation": "occurredAt changed after signing"
+    },
+    {
+      "expected": "invalid",
+      "file": "assertion-mode-mutated-event.json",
+      "mutation": "assertionMode changed after signing"
+    },
+    {
+      "expected": "untrusted_key",
+      "file": "unauthorized-signer-event.json",
+      "mutation": "signature verifies but signer is not allowed for actor"
+    }
+  ]
+}

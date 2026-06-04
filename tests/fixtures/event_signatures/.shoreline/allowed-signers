@@ -1,0 +1,7 @@
+{
+  "allowedSigners": {
+    "actor:git-email:alice@example.com": [
+      "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd"
+    ]
+  }
+}

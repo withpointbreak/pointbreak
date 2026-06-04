@@ -56,8 +56,16 @@ impl EventStore {
             CreateFileOutcome::AlreadyExists => {
                 let existing = self.read_event(&path)?;
                 if existing.payload_hash == event.payload_hash {
-                    tracing::debug!(path = %path.display(), "event_store_write_existing");
-                    Ok(EventWriteOutcome::Existing)
+                    if event_signature_binding_matches(&existing, event) {
+                        tracing::debug!(path = %path.display(), "event_store_write_existing");
+                        Ok(EventWriteOutcome::Existing)
+                    } else {
+                        tracing::debug!(
+                            path = %path.display(),
+                            "event_store_write_existing_divergent_signature"
+                        );
+                        Ok(EventWriteOutcome::ExistingDivergentSignature)
+                    }
                 } else {
                     Err(ShoreError::Message(format!(
                         "event conflict for idempotency key {}",
@@ -107,6 +115,11 @@ impl EventStore {
 pub enum EventWriteOutcome {
     Created,
     Existing,
+    ExistingDivergentSignature,
+}
+
+fn event_signature_binding_matches(existing: &ShoreEvent, candidate: &ShoreEvent) -> bool {
+    existing.signer == candidate.signer && existing.signature == candidate.signature
 }
 
 fn validate_event(event: &ShoreEvent, path: Option<&Path>) -> Result<()> {
@@ -182,13 +195,15 @@ mod tests {
     use std::fs;
 
     use super::*;
+    use crate::crypto::SignerId;
     use crate::model::{
         AssessmentId, ReviewTargetRef, ReviewUnitId, RevisionId, SessionId, SnapshotId, TargetRef,
         TrackId, WorkUnitId,
     };
     use crate::session::event::{
-        AssertionMode, EventTarget, EventType, ReviewAssessment, ReviewAssessmentRecordedPayload,
-        ReviewInitializedPayload, ReviewNoteImportedPayload, ShoreEvent, Writer,
+        AssertionMode, EventSignature, EventTarget, EventType, ReviewAssessment,
+        ReviewAssessmentRecordedPayload, ReviewInitializedPayload, ReviewNoteImportedPayload,
+        ShoreEvent, Writer,
     };
 
     #[test]
@@ -234,6 +249,29 @@ mod tests {
         assert_eq!(
             store.record_event_once(&retry).unwrap(),
             EventWriteOutcome::Existing
+        );
+        assert_eq!(store.list_events().unwrap(), vec![first]);
+    }
+
+    #[test]
+    fn same_payload_hash_but_different_signature_returns_existing_divergent_signature() {
+        let (_root, store) = temp_event_store();
+        let first = signed_review_initialized_event(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+        );
+        let second = signed_review_initialized_event(
+            "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB==",
+        );
+        assert_eq!(first.idempotency_key, second.idempotency_key);
+        assert_eq!(first.payload_hash, second.payload_hash);
+
+        assert_eq!(
+            store.record_event_once(&first).unwrap(),
+            EventWriteOutcome::Created
+        );
+        assert_eq!(
+            store.record_event_once(&second).unwrap(),
+            EventWriteOutcome::ExistingDivergentSignature
         );
         assert_eq!(store.list_events().unwrap(), vec![first]);
     }
@@ -407,6 +445,15 @@ mod tests {
             occurred_at,
         )
         .expect("event builds")
+    }
+
+    fn signed_review_initialized_event(signature: &str) -> ShoreEvent {
+        let mut event = review_initialized_event();
+        event.signer = Some(
+            SignerId::parse("did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd").unwrap(),
+        );
+        event.signature = Some(EventSignature::new_ed25519_v1(signature).unwrap());
+        event
     }
 
     fn review_assessment_recorded_event() -> ShoreEvent {

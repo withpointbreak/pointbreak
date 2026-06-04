@@ -79,7 +79,9 @@ pub fn import_notes(options: ImportNotesOptions) -> Result<ImportNotesResult> {
         ReviewInitializedPayload {},
         occurred_at.clone(),
     )?)? {
-        EventWriteOutcome::Created | EventWriteOutcome::Existing => {}
+        EventWriteOutcome::Created
+        | EventWriteOutcome::Existing
+        | EventWriteOutcome::ExistingDivergentSignature => {}
     }
 
     let records = extract_note_import_records(
@@ -112,7 +114,9 @@ pub fn import_notes(options: ImportNotesOptions) -> Result<ImportNotesResult> {
 
         match event_store.record_event_once(&event)? {
             EventWriteOutcome::Created => notes_created += 1,
-            EventWriteOutcome::Existing => notes_existing += 1,
+            EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => {
+                notes_existing += 1
+            }
         }
     }
 

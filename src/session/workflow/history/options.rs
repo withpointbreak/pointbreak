@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use crate::model::{ReviewUnitId, TrackId};
 use crate::session::event::EventType;
+use crate::session::{EventVerificationPolicy, TrustSet};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewHistoryOptions {
@@ -12,6 +13,8 @@ pub struct ReviewHistoryOptions {
     pub(super) track: Option<String>,
     pub(super) event_types: Vec<EventType>,
     pub(super) include_body: bool,
+    pub(super) verification_policy: Option<EventVerificationPolicy>,
+    pub(super) trust_set: TrustSet,
 }
 
 impl ReviewHistoryOptions {
@@ -22,6 +25,8 @@ impl ReviewHistoryOptions {
             track: None,
             event_types: Vec::new(),
             include_body: false,
+            verification_policy: None,
+            trust_set: TrustSet::default(),
         }
     }
 
@@ -44,6 +49,16 @@ impl ReviewHistoryOptions {
         self.include_body = include_body;
         self
     }
+
+    pub fn with_verification_policy(mut self, policy: EventVerificationPolicy) -> Self {
+        self.verification_policy = Some(policy);
+        self
+    }
+
+    pub fn with_trust_set(mut self, trust_set: TrustSet) -> Self {
+        self.trust_set = trust_set;
+        self
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -64,6 +79,8 @@ pub(super) struct ResolvedHistoryFilters {
     pub(super) track_id: Option<TrackId>,
     pub(super) event_types: Vec<EventType>,
     pub(super) include_body: bool,
+    pub(super) verification_policy: Option<EventVerificationPolicy>,
+    pub(super) trust_set: TrustSet,
 }
 
 impl From<ResolvedHistoryFilters> for ReviewHistoryFilters {

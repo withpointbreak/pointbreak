@@ -5,10 +5,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::error::{Result, ShoreError};
-use crate::session::SessionState;
 use crate::session::event::{EventType, ShoreEvent};
 use crate::session::store::body_artifact::NoteBodyEnvelope;
 use crate::session::store::{EventStore, SnapshotArtifact};
+use crate::session::{
+    EventVerificationPolicy, IngestEventVerification, SessionState, TrustSet,
+    verify_events_for_ingest,
+};
 use crate::storage::{CreateFileOutcome, Durability, LocalStorage};
 
 const EXPORT_MANIFEST_SCHEMA: &str = "shore.store-export-manifest";
@@ -77,6 +80,7 @@ pub(crate) struct ImportBundleResult {
     pub events_existing: usize,
     pub artifacts_created: usize,
     pub artifacts_existing: usize,
+    pub verification: Vec<IngestEventVerification>,
     pub commit_order: Vec<ImportCommitStep>,
 }
 
@@ -158,6 +162,20 @@ pub(crate) fn import_store_bundle(
     source_store_dir: impl AsRef<Path>,
     target_store_dir: impl AsRef<Path>,
 ) -> Result<ImportBundleResult> {
+    import_store_bundle_with_verification(
+        source_store_dir,
+        target_store_dir,
+        EventVerificationPolicy::advisory(),
+        TrustSet::default(),
+    )
+}
+
+pub(crate) fn import_store_bundle_with_verification(
+    source_store_dir: impl AsRef<Path>,
+    target_store_dir: impl AsRef<Path>,
+    verification_policy: EventVerificationPolicy,
+    trust_set: TrustSet,
+) -> Result<ImportBundleResult> {
     let source_store_dir = source_store_dir.as_ref();
     let target_store_dir = target_store_dir.as_ref();
     let manifest = build_export_manifest(source_store_dir)?;
@@ -168,6 +186,11 @@ pub(crate) fn import_store_bundle(
     }
 
     let events = read_source_events(source_store_dir)?;
+    let source_events = events
+        .iter()
+        .map(|source| source.event.clone())
+        .collect::<Vec<_>>();
+    let verification = verify_events_for_ingest(&source_events, verification_policy, &trust_set)?;
     let artifacts = read_source_artifacts(source_store_dir, &manifest)?;
     let target_event_store = EventStore::open(target_store_dir);
     preflight_event_conflicts(&target_event_store, &events)?;
@@ -181,6 +204,7 @@ pub(crate) fn import_store_bundle(
         events_existing,
         artifacts_created,
         artifacts_existing,
+        verification,
         commit_order: vec![
             ImportCommitStep::Artifacts,
             ImportCommitStep::Events,
@@ -349,7 +373,8 @@ fn commit_events(target_store: &EventStore, events: &[SourceEvent]) -> Result<(u
     for source in events {
         match target_store.record_event_once(&source.event)? {
             crate::session::EventWriteOutcome::Created => created += 1,
-            crate::session::EventWriteOutcome::Existing => existing += 1,
+            crate::session::EventWriteOutcome::Existing
+            | crate::session::EventWriteOutcome::ExistingDivergentSignature => existing += 1,
         }
     }
 
@@ -686,12 +711,15 @@ mod tests {
 
     use super::*;
     use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
+    use crate::crypto::{EventVerificationStatus, SignerId};
     use crate::model::{EventId, SessionId, WorkUnitId};
     use crate::session::body_artifact::BODY_INLINE_LIMIT;
-    use crate::session::event::{AssertionMode, EventTarget, EventType, ShoreEvent, Writer};
+    use crate::session::event::{
+        AssertionMode, EventSignature, EventTarget, EventType, ShoreEvent, Writer,
+    };
     use crate::session::{
-        CaptureOptions, EventStore, ObservationAddOptions, capture_worktree_review,
-        record_observation,
+        CaptureOptions, EventStore, EventVerificationPolicy, ObservationAddOptions, TrustSet,
+        capture_worktree_review, record_observation,
     };
 
     #[test]
@@ -858,6 +886,54 @@ mod tests {
     }
 
     #[test]
+    fn bundle_import_uses_verification_policy_before_event_commit() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let source_store_dir = source.path().join(".shore");
+        let target_store_dir = target.path().join(".shore");
+        write_event_to_store(
+            &source_store_dir,
+            invalid_signed_review_initialized_event("signed-invalid"),
+        );
+
+        let advisory = import_store_bundle_with_verification(
+            &source_store_dir,
+            &target_store_dir,
+            EventVerificationPolicy::advisory(),
+            TrustSet::default(),
+        )
+        .unwrap();
+
+        assert_eq!(advisory.events_created, 1);
+        assert_eq!(
+            advisory.verification[0].status,
+            EventVerificationStatus::Invalid
+        );
+
+        let strict_target = tempfile::tempdir().unwrap();
+        let strict_target_store_dir = strict_target.path().join(".shore");
+        let error = import_store_bundle_with_verification(
+            &source_store_dir,
+            &strict_target_store_dir,
+            EventVerificationPolicy::integrity_strict(),
+            TrustSet::default(),
+        )
+        .expect_err("integrity-strict rejects invalid signature");
+
+        assert!(
+            error.to_string().contains("invalid"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !strict_target_store_dir.join("events").exists()
+                || EventStore::open(&strict_target_store_dir)
+                    .list_events()
+                    .unwrap()
+                    .is_empty()
+        );
+    }
+
+    #[test]
     fn strict_import_rejects_same_idempotency_key_with_different_payload() {
         let source_one = tempfile::tempdir().unwrap();
         let source_two = tempfile::tempdir().unwrap();
@@ -960,9 +1036,25 @@ mod tests {
             occurred_at: "2026-05-30T00:00:00Z".to_owned(),
             payload_hash: sha256_json_prefixed(&payload).unwrap(),
             assertion_mode: AssertionMode::Advisory,
+            signer: None,
+            signature: None,
             source_ref: None,
             payload,
         }
+    }
+
+    fn invalid_signed_review_initialized_event(idempotency_key: &str) -> ShoreEvent {
+        let mut event = review_initialized_event(idempotency_key, 1);
+        event.signer = Some(
+            SignerId::parse("did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd").unwrap(),
+        );
+        event.signature = Some(
+            EventSignature::new_ed25519_v1(
+                "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            )
+            .unwrap(),
+        );
+        event
     }
 
     fn write_event_to_store(store_dir: &Path, event: ShoreEvent) {

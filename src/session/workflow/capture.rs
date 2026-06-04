@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::crypto::EventSigner;
 use crate::error::Result;
 use crate::git::{IngestOptions, ingest_tracked_diff_with_options};
 use crate::model::{
@@ -10,8 +11,9 @@ use crate::model::{
 use crate::session::event::{EventTarget, EventType, ReviewUnitCapturedPayload, ShoreEvent};
 use crate::session::store::resolution::{StoreResolutionMode, resolve_store};
 use crate::session::{
-    EventStore, EventWriteOutcome, ProjectionDiagnostic, SessionState, ShoreStorePaths,
-    current_timestamp, prepare_shore_writer, writer_from_options,
+    EventSigningOptions, EventStore, EventWriteOutcome, ProjectionDiagnostic, SessionState,
+    ShoreStorePaths, current_timestamp, prepare_shore_writer, sign_event_if_requested,
+    writer_from_options,
 };
 use crate::storage::{Durability, LocalStorage};
 
@@ -22,6 +24,7 @@ pub struct CaptureOptions {
     repo: PathBuf,
     excluded_helper_paths: Vec<PathBuf>,
     actor_id: Option<ActorId>,
+    signing: EventSigningOptions,
 }
 
 impl CaptureOptions {
@@ -30,6 +33,7 @@ impl CaptureOptions {
             repo: repo.as_ref().to_path_buf(),
             excluded_helper_paths: Vec::new(),
             actor_id: None,
+            signing: EventSigningOptions::default(),
         }
     }
 
@@ -50,6 +54,14 @@ impl CaptureOptions {
     /// caller chooses to exclude them.
     pub fn with_excluded_helper_path(mut self, path: impl AsRef<Path>) -> Self {
         self.excluded_helper_paths.push(path.as_ref().to_path_buf());
+        self
+    }
+
+    pub fn sign_with<S>(mut self, signer: S) -> Self
+    where
+        S: EventSigner + Send + Sync + 'static,
+    {
+        self.signing = EventSigningOptions::sign_with(signer);
         self
     }
 }
@@ -100,30 +112,29 @@ pub fn capture_worktree_review(options: CaptureOptions) -> Result<CaptureResult>
     let mut recorder = CaptureRecorder::default();
     let writer = writer_from_options(worktree_root, options.actor_id.as_ref());
     let occurred_at = current_timestamp();
-    recorder.record(
-        &event_store,
-        ShoreEvent::new(
-            EventType::ReviewUnitCaptured,
-            review_unit_captured_idempotency_key(&fingerprint.review_unit_id),
-            EventTarget::for_review_unit(
-                session_id.clone(),
-                fingerprint.review_unit_id.clone(),
-                fingerprint.revision_id.clone(),
-                fingerprint.snapshot_id.clone(),
-            ),
-            writer,
-            ReviewUnitCapturedPayload {
-                review_unit_id: fingerprint.review_unit_id.clone(),
-                source: fingerprint.source.clone(),
-                base: fingerprint.base.clone(),
-                target: fingerprint.target.clone(),
-                revision_id: fingerprint.revision_id.clone(),
-                snapshot_id: fingerprint.snapshot_id.clone(),
-                snapshot_artifact_content_hash: artifact.content_hash.clone(),
-            },
-            occurred_at,
-        )?,
+    let mut event = ShoreEvent::new(
+        EventType::ReviewUnitCaptured,
+        review_unit_captured_idempotency_key(&fingerprint.review_unit_id),
+        EventTarget::for_review_unit(
+            session_id.clone(),
+            fingerprint.review_unit_id.clone(),
+            fingerprint.revision_id.clone(),
+            fingerprint.snapshot_id.clone(),
+        ),
+        writer,
+        ReviewUnitCapturedPayload {
+            review_unit_id: fingerprint.review_unit_id.clone(),
+            source: fingerprint.source.clone(),
+            base: fingerprint.base.clone(),
+            target: fingerprint.target.clone(),
+            revision_id: fingerprint.revision_id.clone(),
+            snapshot_id: fingerprint.snapshot_id.clone(),
+            snapshot_artifact_content_hash: artifact.content_hash.clone(),
+        },
+        occurred_at,
     )?;
+    sign_event_if_requested(&mut event, &options.signing)?;
+    recorder.record(&event_store, event)?;
 
     let state = SessionState::from_events(&event_store.list_events()?)?;
     storage.write_json_atomic(&paths.state_path(), &state, Durability::Projection)?;
@@ -183,7 +194,7 @@ impl CaptureRecorder {
                     .entry("review_unit_captured".to_owned())
                     .or_default() += 1;
             }
-            EventWriteOutcome::Existing => {
+            EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => {
                 self.events_existing += 1;
             }
         }

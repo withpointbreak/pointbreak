@@ -5,8 +5,13 @@ use crate::error::{Result, ShoreError};
 use crate::session::event::ShoreEvent;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store_init::{ShoreStorePaths, prepare_shore_writer};
-use crate::session::{EventStore, EventWriteOutcome, is_valid_actor_id};
+use crate::session::{
+    EventStore, EventVerificationPolicy, EventWriteOutcome, IngestEventVerification, TrustSet,
+    is_valid_actor_id, verify_events_for_ingest,
+};
 use crate::storage::{Durability, LocalStorage};
+
+const DIVERGENT_SIGNATURE_EXISTING_EVENT_CODE: &str = "divergent_signature_existing_event";
 
 /// Options for ingesting one or more pre-formed events into a repo's `.shore`
 /// store — for example events produced on another machine and forwarded over a
@@ -15,6 +20,8 @@ use crate::storage::{Durability, LocalStorage};
 pub struct IngestEventsOptions {
     repo: PathBuf,
     events: Vec<ShoreEvent>,
+    verification_policy: EventVerificationPolicy,
+    trust_set: TrustSet,
 }
 
 impl IngestEventsOptions {
@@ -22,7 +29,19 @@ impl IngestEventsOptions {
         Self {
             repo: repo.as_ref().to_path_buf(),
             events,
+            verification_policy: EventVerificationPolicy::advisory(),
+            trust_set: TrustSet::default(),
         }
+    }
+
+    pub fn with_verification_policy(mut self, policy: EventVerificationPolicy) -> Self {
+        self.verification_policy = policy;
+        self
+    }
+
+    pub fn with_trust_set(mut self, trust_set: TrustSet) -> Self {
+        self.trust_set = trust_set;
+        self
     }
 }
 
@@ -32,6 +51,8 @@ impl IngestEventsOptions {
 pub struct ImportEventOptions {
     repo: PathBuf,
     event: ShoreEvent,
+    verification_policy: EventVerificationPolicy,
+    trust_set: TrustSet,
 }
 
 impl ImportEventOptions {
@@ -39,7 +60,19 @@ impl ImportEventOptions {
         Self {
             repo: repo.as_ref().to_path_buf(),
             event,
+            verification_policy: EventVerificationPolicy::advisory(),
+            trust_set: TrustSet::default(),
         }
+    }
+
+    pub fn with_verification_policy(mut self, policy: EventVerificationPolicy) -> Self {
+        self.verification_policy = policy;
+        self
+    }
+
+    pub fn with_trust_set(mut self, trust_set: TrustSet) -> Self {
+        self.trust_set = trust_set;
+        self
     }
 }
 
@@ -51,12 +84,17 @@ pub struct IngestEventsResult {
     pub events_created: usize,
     pub events_existing: usize,
     pub events_created_by_type: BTreeMap<String, usize>,
+    pub verification: Vec<IngestEventVerification>,
     pub diagnostics: Vec<ProjectionDiagnostic>,
 }
 
 /// Ingest a single pre-formed event. See [`ingest_events`].
 pub fn import_event(options: ImportEventOptions) -> Result<IngestEventsResult> {
-    ingest_events(IngestEventsOptions::new(options.repo, vec![options.event]))
+    ingest_events(
+        IngestEventsOptions::new(options.repo, vec![options.event])
+            .with_verification_policy(options.verification_policy)
+            .with_trust_set(options.trust_set),
+    )
 }
 
 /// Ingest pre-formed events into the repo's durable store, preserving the
@@ -95,10 +133,17 @@ pub fn ingest_events(options: IngestEventsOptions) -> Result<IngestEventsResult>
         }
     }
 
+    let verification = verify_events_for_ingest(
+        &options.events,
+        options.verification_policy,
+        &options.trust_set,
+    )?;
+
     let event_store = EventStore::open(shore_dir);
     let mut events_created = 0usize;
     let mut events_existing = 0usize;
     let mut events_created_by_type: BTreeMap<String, usize> = BTreeMap::new();
+    let mut ingest_diagnostics = Vec::new();
     let mut write_error = None;
 
     for event in &options.events {
@@ -110,6 +155,17 @@ pub fn ingest_events(options: IngestEventsOptions) -> Result<IngestEventsResult>
                     .or_default() += 1;
             }
             Ok(EventWriteOutcome::Existing) => events_existing += 1,
+            Ok(EventWriteOutcome::ExistingDivergentSignature) => {
+                events_existing += 1;
+                ingest_diagnostics.push(ProjectionDiagnostic {
+                    code: DIVERGENT_SIGNATURE_EXISTING_EVENT_CODE.to_owned(),
+                    message: format!(
+                        "ingested event {} matched existing idempotency key {} and payload hash, but signer or signature differed; kept the first stored event",
+                        event.event_id.as_str(),
+                        event.idempotency_key.as_str()
+                    ),
+                });
+            }
             Err(err) => {
                 write_error = Some(err);
                 break;
@@ -122,6 +178,8 @@ pub fn ingest_events(options: IngestEventsOptions) -> Result<IngestEventsResult>
     let events = event_store.list_events()?;
     let state = SessionState::from_events(&events)?;
     storage.write_json_atomic(&paths.state_path(), &state, Durability::Projection)?;
+    let mut diagnostics = state.diagnostics;
+    diagnostics.extend(ingest_diagnostics);
 
     if let Some(err) = write_error {
         return Err(err);
@@ -131,7 +189,8 @@ pub fn ingest_events(options: IngestEventsOptions) -> Result<IngestEventsResult>
         events_created,
         events_existing,
         events_created_by_type,
-        diagnostics: state.diagnostics,
+        verification,
+        diagnostics,
     })
 }
 
@@ -140,13 +199,21 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
+    use ed25519_dalek::{Signer as _, SigningKey};
+    use serde_json::json;
+
     use super::*;
+    use crate::canonical_hash::sha256_json_prefixed;
+    use crate::crypto::{EventSignatureBytes, EventSigner, EventVerificationStatus, SignerId};
     use crate::model::ActorId;
-    use crate::session::event::{EventType, InputRequestReasonCode, InputRequestResponseOutcome};
+    use crate::session::event::{
+        EventSignature, EventType, InputRequestReasonCode, InputRequestResponseOutcome,
+    };
     use crate::session::{
-        CaptureOptions, InputRequestListOptions, InputRequestOpenOptions,
-        InputRequestRespondOptions, InputRequestStatus, InputRequestStatusFilter,
-        capture_worktree_review, list_input_requests, open_input_request, respond_input_request,
+        CaptureOptions, EventVerificationPolicy, InputRequestListOptions, InputRequestOpenOptions,
+        InputRequestRespondOptions, InputRequestStatus, InputRequestStatusFilter, TrustSet,
+        capture_worktree_review, event_signature_trust_set, list_input_requests,
+        open_input_request, respond_input_request,
     };
 
     struct TestRepo {
@@ -238,6 +305,301 @@ mod tests {
     fn replayed_state(repo: &Path) -> serde_json::Value {
         let events = EventStore::open(repo.join(".shore")).list_events().unwrap();
         serde_json::to_value(SessionState::from_events(&events).unwrap()).unwrap()
+    }
+
+    #[derive(Clone)]
+    struct DeterministicSigner {
+        signer_id: SignerId,
+        signing_key: SigningKey,
+    }
+
+    impl DeterministicSigner {
+        fn fixture() -> Self {
+            let signing_key = SigningKey::from_bytes(&[
+                0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d,
+                0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b,
+                0x1c, 0x1d, 0x1e, 0x1f,
+            ]);
+            let signer_id =
+                SignerId::from_ed25519_public_key(signing_key.verifying_key().to_bytes());
+
+            Self {
+                signer_id,
+                signing_key,
+            }
+        }
+    }
+
+    impl EventSigner for DeterministicSigner {
+        fn signer_id(&self) -> &SignerId {
+            &self.signer_id
+        }
+
+        fn sign_event_message(&self, message: &[u8]) -> Result<EventSignatureBytes> {
+            let signature = self.signing_key.sign(message);
+            Ok(EventSignatureBytes::from_bytes(&signature.to_bytes()))
+        }
+    }
+
+    fn trust_for_actor(actor: &ActorId, signer: &DeterministicSigner) -> TrustSet {
+        event_signature_trust_set(json!({
+            "allowedSigners": {
+                actor.as_str(): [signer.signer_id().as_str()]
+            }
+        }))
+        .unwrap()
+    }
+
+    fn signed_captured_event() -> (ShoreEvent, DeterministicSigner, ActorId) {
+        let repo = modified_repo();
+        let signer = DeterministicSigner::fixture();
+        let actor = ActorId::new("actor:git-email:alice@example.com");
+        capture_worktree_review(
+            CaptureOptions::new(repo.path())
+                .with_actor_id(actor.clone())
+                .sign_with(signer.clone()),
+        )
+        .unwrap();
+        let event = EventStore::open(repo.path().join(".shore"))
+            .list_events()
+            .unwrap()
+            .into_iter()
+            .find(|event| event.event_type == EventType::ReviewUnitCaptured)
+            .unwrap();
+
+        (event, signer, actor)
+    }
+
+    fn invalid_signed_event() -> (ShoreEvent, TrustSet) {
+        let (mut event, signer, actor) = signed_captured_event();
+        event.payload["tamperedAfterSigning"] = json!(true);
+        event.payload_hash = sha256_json_prefixed(&event.payload).unwrap();
+        let trust = trust_for_actor(&actor, &signer);
+
+        (event, trust)
+    }
+
+    fn unsigned_event() -> ShoreEvent {
+        let (_origin, events) = origin_events();
+        events
+            .into_iter()
+            .find(|event| event.event_type == EventType::ReviewUnitCaptured)
+            .unwrap()
+    }
+
+    fn stored_event_count(repo: &Path) -> usize {
+        let events_dir = repo.join(".shore/events");
+        if !events_dir.exists() {
+            return 0;
+        }
+
+        EventStore::open(repo.join(".shore"))
+            .list_events()
+            .unwrap()
+            .len()
+    }
+
+    fn signed_replay_event(signature: &str) -> ShoreEvent {
+        let mut event = unsigned_event();
+        event.signer = Some(
+            SignerId::parse("did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd").unwrap(),
+        );
+        event.signature = Some(EventSignature::new_ed25519_v1(signature).unwrap());
+        event
+    }
+
+    #[test]
+    fn advisory_ingest_accepts_invalid_signature_and_reports_status() {
+        let (event, trust) = invalid_signed_event();
+        let dest = dest_repo();
+
+        let result = ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![event.clone()])
+                .with_verification_policy(EventVerificationPolicy::advisory())
+                .with_trust_set(trust),
+        )
+        .unwrap();
+
+        assert_eq!(result.events_created, 1);
+        assert_eq!(result.verification.len(), 1);
+        assert_eq!(result.verification[0].event_id, event.event_id);
+        assert_eq!(
+            result.verification[0].status,
+            EventVerificationStatus::Invalid
+        );
+
+        let (untrusted, _signer, _actor) = signed_captured_event();
+        let untrusted_dest = dest_repo();
+        let untrusted_result = ingest_events(
+            IngestEventsOptions::new(untrusted_dest.path(), vec![untrusted])
+                .with_verification_policy(EventVerificationPolicy::advisory()),
+        )
+        .unwrap();
+        assert_eq!(untrusted_result.events_created, 1);
+        assert_eq!(
+            untrusted_result.verification[0].status,
+            EventVerificationStatus::UntrustedKey
+        );
+
+        let unsigned = unsigned_event();
+        let unsigned_dest = dest_repo();
+        let unsigned_result = ingest_events(
+            IngestEventsOptions::new(unsigned_dest.path(), vec![unsigned])
+                .with_verification_policy(EventVerificationPolicy::advisory()),
+        )
+        .unwrap();
+        assert_eq!(unsigned_result.events_created, 1);
+        assert_eq!(
+            unsigned_result.verification[0].status,
+            EventVerificationStatus::Unsigned
+        );
+    }
+
+    #[test]
+    fn integrity_strict_rejects_invalid_but_accepts_unsigned() {
+        let (invalid, trust) = invalid_signed_event();
+        let rejected_dest = dest_repo();
+
+        let error = ingest_events(
+            IngestEventsOptions::new(rejected_dest.path(), vec![invalid])
+                .with_verification_policy(EventVerificationPolicy::integrity_strict())
+                .with_trust_set(trust),
+        )
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("invalid"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(stored_event_count(rejected_dest.path()), 0);
+
+        let unsigned = unsigned_event();
+        let accepted_dest = dest_repo();
+        let result = ingest_events(
+            IngestEventsOptions::new(accepted_dest.path(), vec![unsigned])
+                .with_verification_policy(EventVerificationPolicy::integrity_strict()),
+        )
+        .unwrap();
+
+        assert_eq!(result.events_created, 1);
+        assert_eq!(
+            result.verification[0].status,
+            EventVerificationStatus::Unsigned
+        );
+    }
+
+    #[test]
+    fn trusted_strict_rejects_untrusted_and_unsigned_unless_allowed() {
+        let (untrusted, _signer, _actor) = signed_captured_event();
+        let untrusted_dest = dest_repo();
+
+        let untrusted_error = ingest_events(
+            IngestEventsOptions::new(untrusted_dest.path(), vec![untrusted])
+                .with_verification_policy(EventVerificationPolicy::trusted_strict())
+                .with_trust_set(TrustSet::default()),
+        )
+        .unwrap_err();
+
+        assert!(
+            untrusted_error.to_string().contains("untrusted_key"),
+            "unexpected error: {untrusted_error}"
+        );
+        assert_eq!(stored_event_count(untrusted_dest.path()), 0);
+
+        let unsigned = unsigned_event();
+        let unsigned_dest = dest_repo();
+        let unsigned_error = ingest_events(
+            IngestEventsOptions::new(unsigned_dest.path(), vec![unsigned.clone()])
+                .with_verification_policy(EventVerificationPolicy::trusted_strict()),
+        )
+        .unwrap_err();
+
+        assert!(
+            unsigned_error.to_string().contains("unsigned"),
+            "unexpected error: {unsigned_error}"
+        );
+        assert_eq!(stored_event_count(unsigned_dest.path()), 0);
+
+        let allowed_unsigned_dest = dest_repo();
+        let result = ingest_events(
+            IngestEventsOptions::new(allowed_unsigned_dest.path(), vec![unsigned])
+                .with_verification_policy(
+                    EventVerificationPolicy::trusted_strict().with_allow_unsigned(true),
+                ),
+        )
+        .unwrap();
+
+        assert_eq!(result.events_created, 1);
+        assert_eq!(
+            result.verification[0].status,
+            EventVerificationStatus::Unsigned
+        );
+    }
+
+    #[test]
+    fn ingest_reports_divergent_signature_existing_event_diagnostic() {
+        let first = signed_replay_event(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+        );
+        let mut second = first.clone();
+        second.signature = Some(
+            EventSignature::new_ed25519_v1(
+                "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB==",
+            )
+            .unwrap(),
+        );
+        let dest = dest_repo();
+
+        let first_result =
+            ingest_events(IngestEventsOptions::new(dest.path(), vec![first.clone()])).unwrap();
+        assert_eq!(first_result.events_created, 1);
+
+        let second_result =
+            ingest_events(IngestEventsOptions::new(dest.path(), vec![second.clone()])).unwrap();
+
+        assert_eq!(second_result.events_created, 0);
+        assert_eq!(second_result.events_existing, 1);
+        assert!(second_result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "divergent_signature_existing_event"
+                && diagnostic.message.contains(second.event_id.as_str())
+                && diagnostic.message.contains(second.idempotency_key.as_str())
+        }));
+        assert_eq!(
+            EventStore::open(dest.path().join(".shore"))
+                .list_events()
+                .unwrap(),
+            vec![first]
+        );
+    }
+
+    #[test]
+    fn ingest_treats_timestamp_only_unsigned_replay_as_existing_without_signature_diagnostic() {
+        let first = unsigned_event();
+        let mut second = first.clone();
+        second.occurred_at = "2026-06-04T00:00:00Z".to_owned();
+        let dest = dest_repo();
+
+        let first_result =
+            ingest_events(IngestEventsOptions::new(dest.path(), vec![first.clone()])).unwrap();
+        assert_eq!(first_result.events_created, 1);
+
+        let second_result =
+            ingest_events(IngestEventsOptions::new(dest.path(), vec![second])).unwrap();
+
+        assert_eq!(second_result.events_created, 0);
+        assert_eq!(second_result.events_existing, 1);
+        assert!(
+            second_result
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code != "divergent_signature_existing_event")
+        );
+        assert_eq!(
+            EventStore::open(dest.path().join(".shore"))
+                .list_events()
+                .unwrap(),
+            vec![first]
+        );
     }
 
     #[test]

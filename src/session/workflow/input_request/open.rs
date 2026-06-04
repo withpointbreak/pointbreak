@@ -5,6 +5,7 @@ use serde_json::json;
 
 use super::target::{InputRequestTargetSelector, resolve_input_request_target};
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
+use crate::crypto::EventSigner;
 use crate::error::{Result, ShoreError};
 use crate::model::{
     ActorId, EventId, InputRequestId, ReviewTargetRef, ReviewUnitId, TargetRef, TrackId,
@@ -18,7 +19,10 @@ use crate::session::observation::{
 };
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store_init::{ShoreStorePaths, prepare_shore_writer};
-use crate::session::{EventStore, EventWriteOutcome, current_timestamp, reviewer_from_options};
+use crate::session::{
+    EventSigningOptions, EventStore, EventWriteOutcome, current_timestamp, reviewer_from_options,
+    sign_event_if_requested,
+};
 use crate::storage::{Durability, LocalStorage};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -33,6 +37,7 @@ pub struct InputRequestOpenOptions {
     reason_code: Option<InputRequestReasonCode>,
     idempotency_key: Option<String>,
     actor_id: Option<ActorId>,
+    signing: EventSigningOptions,
 }
 
 impl InputRequestOpenOptions {
@@ -48,6 +53,7 @@ impl InputRequestOpenOptions {
             reason_code: None,
             idempotency_key: None,
             actor_id: None,
+            signing: EventSigningOptions::default(),
         }
     }
 
@@ -98,6 +104,14 @@ impl InputRequestOpenOptions {
 
     pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
         self.idempotency_key = Some(key.into());
+        self
+    }
+
+    pub fn sign_with<S>(mut self, signer: S) -> Self
+    where
+        S: EventSigner + Send + Sync + 'static,
+    {
+        self.signing = EventSigningOptions::sign_with(signer);
         self
     }
 }
@@ -173,7 +187,7 @@ pub fn open_input_request(options: InputRequestOpenOptions) -> Result<InputReque
         storage.write_bytes_atomic(Path::new(artifact_path), bytes, Durability::Durable)?;
     }
 
-    let event = ShoreEvent::new(
+    let mut event = ShoreEvent::new(
         EventType::InputRequestOpened,
         idempotency_key,
         EventTarget {
@@ -202,6 +216,7 @@ pub fn open_input_request(options: InputRequestOpenOptions) -> Result<InputReque
         current_timestamp(),
     )?
     .with_assertion_mode(options.assertion_mode);
+    sign_event_if_requested(&mut event, &options.signing)?;
     let event_id = event.event_id.clone();
 
     let mut events_created_by_type = BTreeMap::new();
@@ -211,7 +226,7 @@ pub fn open_input_request(options: InputRequestOpenOptions) -> Result<InputReque
             events_created_by_type.insert("input_request_opened".to_owned(), 1);
             (1, 0)
         }
-        EventWriteOutcome::Existing => (0, 1),
+        EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => (0, 1),
     };
 
     let state = SessionState::from_prior_events_and_committed(&events, &event, outcome)?;

@@ -1,3 +1,4 @@
+pub mod crypto;
 pub mod documents;
 pub mod dump;
 pub mod error;

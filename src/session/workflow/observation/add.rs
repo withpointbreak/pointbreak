@@ -6,6 +6,7 @@ use serde_json::json;
 use super::target::{ObservationTargetSelector, resolve_observation_target, resolve_review_unit};
 use super::util::{required_title, staged_body, validated_track_id};
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
+use crate::crypto::EventSigner;
 use crate::error::{Result, ShoreError};
 use crate::model::{
     ActorId, EventId, ObservationId, ReviewTargetRef, ReviewUnitId, TargetRef, TrackId,
@@ -13,7 +14,10 @@ use crate::model::{
 use crate::session::event::{EventTarget, EventType, ReviewObservationRecordedPayload, ShoreEvent};
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store_init::{ShoreStorePaths, prepare_shore_writer};
-use crate::session::{EventStore, EventWriteOutcome, current_timestamp, reviewer_from_options};
+use crate::session::{
+    EventSigningOptions, EventStore, EventWriteOutcome, current_timestamp, reviewer_from_options,
+    sign_event_if_requested,
+};
 use crate::storage::{Durability, LocalStorage};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -29,6 +33,7 @@ pub struct ObservationAddOptions {
     supersedes_observation_ids: Vec<ObservationId>,
     idempotency_key: Option<String>,
     actor_id: Option<ActorId>,
+    signing: EventSigningOptions,
 }
 
 impl ObservationAddOptions {
@@ -45,6 +50,7 @@ impl ObservationAddOptions {
             supersedes_observation_ids: Vec::new(),
             idempotency_key: None,
             actor_id: None,
+            signing: EventSigningOptions::default(),
         }
     }
 
@@ -102,6 +108,14 @@ impl ObservationAddOptions {
         self.idempotency_key = Some(key.into());
         self
     }
+
+    pub fn sign_with<S>(mut self, signer: S) -> Self
+    where
+        S: EventSigner + Send + Sync + 'static,
+    {
+        self.signing = EventSigningOptions::sign_with(signer);
+        self
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -141,6 +155,7 @@ pub fn record_observation(options: ObservationAddOptions) -> Result<ObservationA
         supersedes_observation_ids: options.supersedes_observation_ids,
         idempotency_key: options.idempotency_key,
         actor_id: options.actor_id,
+        signing: options.signing,
     })
 }
 
@@ -156,6 +171,7 @@ struct ObservationWriteInput {
     supersedes_observation_ids: Vec<ObservationId>,
     idempotency_key: Option<String>,
     actor_id: Option<ActorId>,
+    signing: EventSigningOptions,
 }
 
 fn write_observation_event(input: ObservationWriteInput) -> Result<ObservationAddResult> {
@@ -208,7 +224,7 @@ fn write_observation_event(input: ObservationWriteInput) -> Result<ObservationAd
         storage.write_bytes_atomic(Path::new(artifact_path), bytes, Durability::Durable)?;
     }
 
-    let event = ShoreEvent::new(
+    let mut event = ShoreEvent::new(
         EventType::ReviewObservationRecorded,
         idempotency_key,
         EventTarget {
@@ -237,6 +253,7 @@ fn write_observation_event(input: ObservationWriteInput) -> Result<ObservationAd
         },
         current_timestamp(),
     )?;
+    sign_event_if_requested(&mut event, &input.signing)?;
     let event_id = event.event_id.clone();
 
     let mut events_created_by_type = BTreeMap::new();
@@ -246,7 +263,7 @@ fn write_observation_event(input: ObservationWriteInput) -> Result<ObservationAd
             events_created_by_type.insert("review_observation_recorded".to_owned(), 1);
             (1, 0)
         }
-        EventWriteOutcome::Existing => (0, 1),
+        EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => (0, 1),
     };
 
     let state = SessionState::from_prior_events_and_committed(&events, &event, outcome)?;

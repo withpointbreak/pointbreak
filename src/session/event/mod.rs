@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
+use crate::crypto::SignerId;
 use crate::error::{Result, ShoreError};
 use crate::model::EventId;
 
@@ -11,9 +12,11 @@ mod kind;
 mod observation;
 mod payload;
 mod review;
+mod signature;
 mod source;
 mod target;
 mod task;
+mod tbs;
 mod writer;
 
 pub use assertion::AssertionMode;
@@ -30,10 +33,15 @@ pub use review::{
     ImportedNoteTarget, ReviewInitializedPayload, ReviewNoteImportedPayload,
     ReviewUnitCapturedPayload, SidecarSource,
 };
+pub use signature::{EffectiveSignerError, EventSignature, resolve_effective_signer};
 pub use source::SourceRef;
 pub use target::EventTarget;
 pub use task::{
     TaskAttemptCapturedPayload, TaskCheckpointCapturedPayload, TaskObservationRecordedPayload,
+};
+pub use tbs::{
+    EVENT_TO_BE_SIGNED_V1_PAYLOAD_TYPE, EventToBeSigned,
+    event_signature_pre_authentication_encoding, event_to_be_signed, pre_authentication_encoding,
 };
 pub use writer::{Writer, WriterRole, WriterTool};
 
@@ -62,6 +70,10 @@ pub struct ShoreEvent {
     pub payload_hash: String,
     #[serde(default, skip_serializing_if = "assertion::is_default_advisory")]
     pub assertion_mode: AssertionMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer: Option<SignerId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<EventSignature>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ref: Option<SourceRef>,
     pub payload: serde_json::Value,
@@ -114,6 +126,8 @@ impl ShoreEvent {
             occurred_at: occurred_at.into(),
             payload_hash,
             assertion_mode: default_assertion_mode(event_type),
+            signer: None,
+            signature: None,
             source_ref: None,
             payload,
         })
@@ -771,6 +785,41 @@ mod tests {
             "default None must skip-serialize, got {}",
             json
         );
+    }
+
+    #[test]
+    fn unsigned_event_serialization_omits_signature_fields() {
+        let event = valid_review_unit_captured_event();
+
+        let json = serde_json::to_value(&event).unwrap();
+
+        assert!(json.get("signer").is_none());
+        assert!(json.get("signature").is_none());
+        assert!(json.get("signatures").is_none());
+    }
+
+    #[test]
+    fn signed_event_round_trips_top_level_signer_and_signature() {
+        const FRIENDLY_SIGNER: &str = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
+        const FIXTURE_SIG: &str = "EzOVlqmX/g3nHametOmU067NsuvweZEwo73/cOypvT2KfCtNK6BfxsWJQ7Ox9E/MtunGEkJGEMSfn/qdmKSFAg==";
+
+        let mut event = valid_review_unit_captured_event();
+        event.signer = Some(crate::crypto::SignerId::parse(FRIENDLY_SIGNER).unwrap());
+        event.signature = Some(EventSignature::new_ed25519_v1(FIXTURE_SIG).unwrap());
+
+        let json = serde_json::to_value(&event).unwrap();
+
+        assert_eq!(json["signer"], FRIENDLY_SIGNER);
+        assert_eq!(json["signature"]["alg"], "ed25519");
+        assert_eq!(json["signature"]["sigVersion"], 1);
+        assert_eq!(json["signature"]["sig"], FIXTURE_SIG);
+        assert!(json["signature"].get("publicKey").is_none());
+        assert!(json["signature"].get("keyId").is_none());
+        assert!(json.get("signatures").is_none());
+
+        let round: ShoreEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(round.signer, event.signer);
+        assert_eq!(round.signature, event.signature);
     }
 
     #[test]

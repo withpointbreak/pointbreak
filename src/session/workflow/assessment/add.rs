@@ -7,6 +7,7 @@ use super::AssessmentTargetSelector;
 use super::target::resolve_assessment_target;
 use super::util::sorted_unique;
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
+use crate::crypto::EventSigner;
 use crate::error::{Result, ShoreError};
 use crate::model::{
     ActorId, AssessmentId, EventId, InputRequestId, ObservationId, ReviewTargetRef, ReviewUnitId,
@@ -19,7 +20,10 @@ use crate::session::event::{
 use crate::session::observation::{resolve_review_unit, staged_body, validated_track_id};
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store_init::{ShoreStorePaths, prepare_shore_writer};
-use crate::session::{EventStore, EventWriteOutcome, current_timestamp, reviewer_from_options};
+use crate::session::{
+    EventSigningOptions, EventStore, EventWriteOutcome, current_timestamp, reviewer_from_options,
+    sign_event_if_requested,
+};
 use crate::storage::{Durability, LocalStorage};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -35,6 +39,7 @@ pub struct AssessmentAddOptions {
     related_input_request_ids: Vec<InputRequestId>,
     idempotency_key: Option<String>,
     actor_id: Option<ActorId>,
+    signing: EventSigningOptions,
 }
 
 impl AssessmentAddOptions {
@@ -51,6 +56,7 @@ impl AssessmentAddOptions {
             related_input_request_ids: Vec::new(),
             idempotency_key: None,
             actor_id: None,
+            signing: EventSigningOptions::default(),
         }
     }
 
@@ -111,6 +117,14 @@ impl AssessmentAddOptions {
 
     pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
         self.idempotency_key = Some(key.into());
+        self
+    }
+
+    pub fn sign_with<S>(mut self, signer: S) -> Self
+    where
+        S: EventSigner + Send + Sync + 'static,
+    {
+        self.signing = EventSigningOptions::sign_with(signer);
         self
     }
 }
@@ -200,7 +214,7 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
         storage.write_bytes_atomic(Path::new(artifact_path), bytes, Durability::Durable)?;
     }
 
-    let event = ShoreEvent::new(
+    let mut event = ShoreEvent::new(
         EventType::ReviewAssessmentRecorded,
         idempotency_key,
         EventTarget {
@@ -229,6 +243,7 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
         },
         current_timestamp(),
     )?;
+    sign_event_if_requested(&mut event, &options.signing)?;
     let event_id = event.event_id.clone();
 
     let mut events_created_by_type = BTreeMap::new();
@@ -238,7 +253,7 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
             events_created_by_type.insert("review_assessment_recorded".to_owned(), 1);
             (1, 0)
         }
-        EventWriteOutcome::Existing => (0, 1),
+        EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => (0, 1),
     };
 
     let state = SessionState::from_prior_events_and_committed(&events, &event, outcome)?;

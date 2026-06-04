@@ -66,6 +66,72 @@ correct actor without mutating the process-global `SHORE_ACTOR_ID` (which is `un
 edition 2024). The chosen actor is part of a fact's content-addressed identity, so distinct actors
 produce distinct facts.
 
+### Event signatures — `shoreline::session` / `shoreline::crypto`
+
+Per-event Ed25519 signatures are optional. Unsigned events remain valid and continue to omit
+`signer` and `signature`; all event-producing write options (`CaptureOptions`,
+`InputRequestOpenOptions`, `InputRequestRespondOptions`, `ObservationAddOptions`, and
+`AssessmentAddOptions`) expose `sign_with(...)` for callers that want the event signed at write
+time.
+
+| Item | Purpose |
+| ---- | ------- |
+| `EventSignature` | The event envelope signature object: `{ alg: "ed25519", sigVersion: 1, sig: "..." }`. |
+| `EventSigner` / `EventSignatureBytes` / `SignerId` | Implement signer integrations and carry base64 Ed25519 signature bytes plus `did:key` signer identity. |
+| `event_to_be_signed` / `EventToBeSigned` | Build the canonical to-be-signed producer-fact view for a signed event. |
+| `event_signature_pre_authentication_encoding` | Build the Dead Simple Signing Envelope (DSSE) pre-authentication encoding bytes that Ed25519 signs. |
+| `verify_event_signature` | Verify one event against a `TrustSet` and return an `EventVerificationStatus`. |
+| `EventVerificationPolicy` | Choose advisory, integrity-strict, or trusted-strict ingest/read policy. |
+| `EventVerificationStatus` | The public status enum: `valid`, `invalid`, `untrusted_key`, or `unsigned`. |
+| `TrustSet` / `event_signature_trust_set` | Authorize friendly `actor:*` identities to one or more `did:key` signers. |
+| `EventVerificationView` / `ArtifactAvailability` / `verification_view` | Combine authenticity status with artifact availability without conflating them. |
+
+Signed friendly-actor events carry both `writer.actorId` and top-level `signer`:
+
+```text
+writer.actorId = actor:git-email:alice@example.com
+signer         = did:key:z6Mk...
+signature      = { alg: "ed25519", sigVersion: 1, sig: "base64-ed25519-signature" }
+```
+
+Self-certifying events may use a `did:key` actor id directly and omit the top-level `signer`:
+
+```text
+writer.actorId = did:key:z6Mk...
+signature      = { alg: "ed25519", sigVersion: 1, sig: "base64-ed25519-signature" }
+```
+
+These forms are not aliases. `writer.actorId = did:key:z6Mk...` and
+`writer.actorId = actor:git-email:alice@example.com` signed by `did:key:z6Mk...` are different
+claims and remain different events.
+
+`EventToBeSigned` is not "the whole event minus `signature`." It is the canonical producer-fact
+view described by [ADR-0004](adr/adr-0004-event-signatures.md): schema, version, event type, event
+id, payload hash, target, writer actor id, writer role, effective signer, occurrence timestamp, and
+assertion mode. `sourceRef` is unsigned hop metadata; bridges may add or change it without changing
+the producer signature. The protocol media type still contains `event-tbs.v1` for
+"event to be signed" compatibility, but public Rust names spell out `EventToBeSigned`.
+
+Verification is advisory by default. Callers can select:
+
+- `EventVerificationPolicy::advisory()` — report status and accept `invalid`, `untrusted_key`, and
+  `unsigned`;
+- `EventVerificationPolicy::integrity_strict()` — reject `invalid`, accept `untrusted_key` and
+  `unsigned`;
+- `EventVerificationPolicy::trusted_strict()` — reject `invalid`, `untrusted_key`, and `unsigned`
+  unless `with_allow_unsigned(true)` is set.
+
+`IngestEventsOptions`, `ImportEventOptions`, and `ReviewHistoryOptions` can carry a verification
+policy and trust set. Ingest evaluates the policy before committing any event in the batch. Read
+surfaces such as `review_history` report verification status only when requested; they do not
+persist that status into event files or `state.json`.
+
+An idempotent re-ingest keeps the first stored event. If a later event has the same idempotency key
+and payload hash but a different signer or signature, Shoreline reports the
+`divergent_signature_existing_event` diagnostic and keeps the first stored event. Other metadata
+differences with the same payload hash remain an idempotent existing event. Signatures authenticate
+the producer facts; they do not choose an automatic conflict winner.
+
 ### Event ingest — `shoreline::session`
 
 | Item | Purpose |
@@ -74,12 +140,19 @@ produce distinct facts.
 | `import_event` + `ImportEventOptions` | Single-event convenience over `ingest_events`. |
 | `shoreline::session::event::ShoreEvent` (+ `EventType`, `Writer`, payload types) | The event envelope; `Serialize` + `Deserialize`, so events can be forwarded as JSON. |
 
-Ingest validates each envelope (`eventId`/`payloadHash`/schema) and rejects events whose
-`writer.actor_id` is not a well-formed `actor:` id, validating the whole batch's attribution before
-any write. It validates internal consistency and attribution shape, not authenticity: there are no
-signatures, and Shoreline does not prove the writer actually controlled the named actor.
-That advisory-first boundary is intentional (see
-[ADR-0003](adr/adr-0003-agent-resource-claims-advisory-first.md)). A re-ingest of an
+Ingest validates each envelope (`eventId`/`payloadHash`/schema) and validates the whole batch's
+attribution before any write. Per-event Ed25519 signatures are optional and additive: signed events
+carry top-level `signer` and `signature = { alg, sigVersion, sig }` fields, while unsigned historical
+events remain valid. The signed bytes use `application/vnd.shore.event-tbs.v1+json` with literal
+Dead Simple Signing Envelope (DSSE) pre-authentication encoding over canonical `EventToBeSigned`
+to-be-signed bytes, as defined in [ADR-0004](adr/adr-0004-event-signatures.md).
+
+Signature verification is advisory by default, preserving the reader-owned policy boundary from
+[ADR-0003](adr/adr-0003-agent-resource-claims-advisory-first.md). Verification reports
+`valid`, `invalid`, `untrusted_key`, or `unsigned`; policy presets named `advisory`,
+`integrity-strict`, and `trusted-strict` let callers choose whether invalid signatures, untrusted
+keys, or unsigned events should remain diagnostics or reject ingest. Read surfaces expose requested
+verification status without changing the stored event or projection. A re-ingest of an
 already-present event is a no-op; a conflicting payload under the same idempotency key is rejected.
 The projection (`state.json`) is rebuilt once after the batch.
 
@@ -110,6 +183,11 @@ already has, fetches bytes by `ArtifactRef::content_hash()`, and loops over `imp
 callers do not construct refs from a raw hash alone. This byte-level transfer path complements
 `link_clone_local_store`: linked local clones can share one store, while remote or networked
 consumers can fetch and import the required blobs by content hash.
+
+Signature validity does not imply artifact availability. A signed event can be `valid` while its
+referenced snapshot or note-body artifact is unavailable, and an available artifact can be attached
+to an unsigned event. Consumers that need a full-fidelity mirror should verify both event signatures
+and artifact transfer separately.
 
 ### Documents — `shoreline::documents`
 

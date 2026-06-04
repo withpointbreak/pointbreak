@@ -2,9 +2,11 @@ pub mod adapter;
 pub mod event;
 mod identity;
 mod projection;
+mod signing;
 mod store;
 mod workflow;
 
+pub use event::{event_signature_pre_authentication_encoding, event_to_be_signed};
 pub(crate) use identity::{
     current_timestamp, is_valid_actor_id, reviewer_from_options, writer_from_git_config,
     writer_from_options,
@@ -13,6 +15,12 @@ pub(crate) use projection::state;
 pub use projection::{
     ProjectionDiagnostic, SessionState, load_durable_notes_for_repo, read_events, rebuild_state,
 };
+pub use signing::{
+    ArtifactAvailability, EventSigningOptions, EventVerificationPolicy, EventVerificationView,
+    IngestEventVerification, TrustSet, event_signature_trust_set, verification_view,
+    verify_event_signature,
+};
+pub(crate) use signing::{sign_event_if_requested, verify_events_for_ingest};
 #[cfg(test)]
 pub(crate) use store::compute_review_unit_fingerprint;
 pub(crate) use store::{
@@ -51,6 +59,8 @@ pub use workflow::{
     show_review_unit, store_status,
 };
 pub(in crate::session) use workflow::{assessment, input_request, observation};
+
+pub use crate::crypto::EventVerificationStatus;
 
 #[cfg(test)]
 mod tests {
