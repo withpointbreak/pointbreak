@@ -10,6 +10,7 @@ mod review_unit_list;
 mod review_unit_projection;
 mod store_link;
 mod store_status;
+mod validation;
 
 pub(in crate::session) mod input_request;
 pub(in crate::session) mod observation;
@@ -64,4 +65,7 @@ pub use store_status::{
     StoreStatusArtifactInventory, StoreStatusInventory, StoreStatusOptions, StoreStatusResult,
     StoreStatusReviewUnitSnapshot, StoreStatusSensitivity, StoreStatusSensitivityFinding,
     store_status,
+};
+pub use validation::{
+    ValidationCheckProjectionOptions, ValidationCheckView, project_validation_checks,
 };
