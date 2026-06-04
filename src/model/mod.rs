@@ -7,6 +7,7 @@ mod review;
 mod review_note;
 mod review_unit;
 mod row;
+mod validation;
 mod work_object;
 
 pub fn decode_json<T>(json: &str) -> crate::error::Result<T>
@@ -23,7 +24,7 @@ pub use ids::{
     ActorId, AssessmentId, CheckpointId, EventId, FileId, HunkId, InputRequestId,
     InputRequestResponseId, ObservationId, ReviewId, ReviewNoteId, ReviewUnitId,
     ReviewUnitLineageId, ReviewUnitLineageRoundId, RevisionId, RowId, SessionId, SnapshotId,
-    TrackId, WorkObjectId, WorkUnitId,
+    TrackId, ValidationCheckId, WorkObjectId, WorkUnitId,
 };
 pub use lineage::ReviewUnitLineageBasisV1;
 pub use review::{DiffSnapshot, Review, ReviewStream};
@@ -34,4 +35,5 @@ pub use review_note::{
 pub(crate) use review_note::{hash_normalized_lines, rows_for_line_range};
 pub use review_unit::{ReviewEndpoint, ReviewTargetRef, ReviewUnitSource, WorktreeCaptureMode};
 pub use row::{DiffRow, DiffRowKind, FileMetadataKind, FileMetadataRow, ReviewRow, ReviewRowKind};
+pub use validation::{ValidationStatus, ValidationTarget, ValidationTrigger};
 pub use work_object::{TargetRef, TaskTargetRef, WorkObjectType};

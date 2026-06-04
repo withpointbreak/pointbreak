@@ -39,6 +39,7 @@ id_type!(InputRequestResponseId);
 id_type!(AssessmentId);
 id_type!(WorkObjectId);
 id_type!(CheckpointId);
+id_type!(ValidationCheckId);
 
 #[cfg(test)]
 mod tests {
@@ -126,6 +127,25 @@ mod tests {
         assert_eq!(json, "\"checkpoint:sha256:abc\"");
         assert_eq!(parsed, id);
         assert_eq!(parsed.as_str(), "checkpoint:sha256:abc");
+    }
+
+    #[test]
+    fn validation_check_id_round_trips_through_serde_and_string() {
+        let id = ValidationCheckId::new("validation:sha256:abc".to_string());
+        assert_eq!(id.as_str(), "validation:sha256:abc");
+
+        let json = serde_json::to_string(&id).unwrap();
+        assert_eq!(json, "\"validation:sha256:abc\"");
+
+        let back: ValidationCheckId = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, id);
+    }
+
+    #[test]
+    fn validation_check_id_prefix_is_validation() {
+        let id = ValidationCheckId::new("validation:sha256:deadbeef".to_string());
+
+        assert!(id.as_str().starts_with("validation:sha256:"));
     }
 
     #[test]
