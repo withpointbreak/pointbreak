@@ -88,16 +88,18 @@ per-command output.
 
 The page provides a chronological event timeline (filterable by track, ReviewUnit, and event type,
 newest-first by default), a per-event detail view, a composite per-ReviewUnit page showing the
-current-assessment status plus grouped observations, input requests, and assessments, and the
-captured diff for a ReviewUnit annotated with the review facts anchored to each line. Long IDs render
-as truncated, clickable references that navigate to the resource they name, and the page
-auto-refreshes when the store changes.
+current-assessment status plus grouped observations, input requests, and assessments, a ReviewUnit
+lineage list/detail view showing heads, rounds, and diagnostics, and the captured diff for a
+ReviewUnit annotated with the review facts anchored to each line. Long IDs render as truncated,
+clickable references that navigate to the resource they name, and the page auto-refreshes when the
+store changes.
 
 The inspector is a read-only, single-store, localhost developer tool. It reads through the same
 validated projections as `shore review history` and `shore review unit show` rather than parsing raw
 storage, and it serves over a synchronous, dependency-free HTTP server with no async runtime. The
-small JSON API the page consumes (`/api/history`, `/api/units`, `/api/unit`, `/api/snapshot`,
-`/api/freshness`) is an internal surface for the bundled page, not a stable contract.
+small JSON API the page consumes (`/api/history`, `/api/units`, `/api/unit`, `/api/lineages`,
+`/api/lineage`, `/api/snapshot`, `/api/freshness`) is an internal surface for the bundled page, not
+a stable contract.
 
 ## `shore review capture`
 

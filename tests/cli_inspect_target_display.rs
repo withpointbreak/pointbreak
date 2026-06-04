@@ -171,6 +171,44 @@ fn api_units_label_survives_deleted_worktree() {
     );
 }
 
+#[test]
+fn api_lineages_lists_and_shows_review_unit_lineage() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    let lineage_id = "review-unit-lineage:random:inspect";
+
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    let first = capture_lineage_round(repo.path(), lineage_id, None);
+
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    let second = capture_lineage_round(repo.path(), lineage_id, Some(&first));
+
+    let inspector = Inspector::spawn(repo.path());
+
+    let lineages = inspector.get_json("/api/lineages");
+    assert_eq!(lineages["schema"], "shore.inspect-lineages");
+    assert_eq!(lineages["lineageCount"], 1);
+    assert_eq!(lineages["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(lineages["diagnostics"].as_array().unwrap().len(), 0);
+
+    let entry = &lineages["entries"][0];
+    assert_eq!(entry["lineageId"], lineage_id);
+    assert_eq!(entry["headReviewUnitId"], second);
+    assert_eq!(entry["roundCount"], 2);
+    assert_eq!(entry["diagnostics"].as_array().unwrap().len(), 0);
+
+    let lineage = inspector.get_json(&format!("/api/lineage?id={}", urlencode(lineage_id)));
+    assert_eq!(lineage["schema"], "shore.review-lineage");
+    assert_eq!(lineage["lineageId"], lineage_id);
+    assert_eq!(lineage["headReviewUnitId"], second);
+    assert_eq!(lineage["rounds"].as_array().unwrap().len(), 2);
+    assert_eq!(lineage["rounds"][0]["reviewUnitId"], first);
+    assert_eq!(lineage["rounds"][1]["reviewUnitId"], second);
+    assert_eq!(lineage["rounds"][1]["predecessorReviewUnitId"], first);
+    assert_eq!(lineage["diagnostics"].as_array().unwrap().len(), 0);
+}
+
 // --- fixtures and HTTP harness ------------------------------------------------
 
 /// A repository plus a worktree on a fresh branch with one captured ReviewUnit.
@@ -383,6 +421,34 @@ fn capture(repo: &Path) -> String {
     json["reviewUnit"]["id"]
         .as_str()
         .expect("capture returns a ReviewUnit id")
+        .to_owned()
+}
+
+fn capture_lineage_round(repo: &Path, lineage_id: &str, predecessor: Option<&str>) -> String {
+    let mut args = vec![
+        "review".to_owned(),
+        "capture".to_owned(),
+        "--repo".to_owned(),
+        repo.to_str().unwrap().to_owned(),
+        "--lineage".to_owned(),
+        lineage_id.to_owned(),
+    ];
+    if let Some(predecessor) = predecessor {
+        args.push("--predecessor".to_owned());
+        args.push(predecessor.to_owned());
+    }
+
+    let output = shore(args);
+    assert!(
+        output.status.success(),
+        "capture with lineage stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value =
+        serde_json::from_slice(&output.stdout).expect("parse capture with lineage JSON");
+    json["reviewUnit"]["id"]
+        .as_str()
+        .expect("capture with lineage returns a ReviewUnit id")
         .to_owned()
 }
 

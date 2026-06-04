@@ -9,12 +9,13 @@
 use std::path::Path;
 
 use serde::Serialize;
-use shoreline::documents::unit_show_document;
-use shoreline::model::{ReviewEndpoint, ReviewUnitId, SnapshotId};
+use shoreline::documents::{lineage_show_document, unit_show_document};
+use shoreline::model::{ReviewEndpoint, ReviewUnitId, ReviewUnitLineageId, SnapshotId};
 use shoreline::session::{
-    ProjectionDiagnostic, ReviewHistoryEntry, ReviewHistoryOptions, ReviewUnitListEntry,
-    ReviewUnitListOptions, ReviewUnitShowOptions, list_review_units, read_snapshot_artifact,
-    review_history, show_review_unit,
+    LineageListEntry, LineageListOptions, LineageShowOptions, ProjectionDiagnostic,
+    ReviewHistoryEntry, ReviewHistoryOptions, ReviewUnitListEntry, ReviewUnitListOptions,
+    ReviewUnitShowOptions, list_lineages, list_review_units, read_snapshot_artifact,
+    review_history, show_lineage, show_review_unit,
 };
 
 #[derive(Serialize)]
@@ -36,6 +37,26 @@ struct UnitsPayload {
     event_count: usize,
     review_unit_count: usize,
     entries: Vec<UnitEntryDocument>,
+    diagnostics: Vec<ProjectionDiagnostic>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LineagesPayload {
+    schema: &'static str,
+    event_set_hash: String,
+    event_count: usize,
+    lineage_count: usize,
+    entries: Vec<LineageEntryDocument>,
+    diagnostics: Vec<ProjectionDiagnostic>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LineageEntryDocument {
+    lineage_id: String,
+    head_review_unit_id: Option<String>,
+    round_count: usize,
     diagnostics: Vec<ProjectionDiagnostic>,
 }
 
@@ -185,6 +206,19 @@ fn to_unit_entry_documents(entries: Vec<ReviewUnitListEntry>) -> Vec<UnitEntryDo
         .collect()
 }
 
+impl From<LineageListEntry> for LineageEntryDocument {
+    fn from(entry: LineageListEntry) -> Self {
+        Self {
+            lineage_id: entry.lineage_id.as_str().to_owned(),
+            head_review_unit_id: entry
+                .head_review_unit_id
+                .map(|review_unit_id| review_unit_id.as_str().to_owned()),
+            round_count: entry.round_count,
+            diagnostics: entry.diagnostics,
+        }
+    }
+}
+
 /// Full chronological event timeline with hydrated bodies.
 pub(super) fn history_json(repo: &Path) -> Result<String, String> {
     let result = review_history(ReviewHistoryOptions::new(repo).with_include_body(true))
@@ -214,6 +248,41 @@ pub(super) fn units_json(repo: &Path) -> Result<String, String> {
         diagnostics: result.diagnostics,
     };
     serde_json::to_string(&payload).map_err(|error| error.to_string())
+}
+
+/// ReviewUnit lineages summarized for the inspector sidebar/list view.
+pub(super) fn lineages_json(repo: &Path) -> Result<String, String> {
+    let result = list_lineages(LineageListOptions::new(repo)).map_err(|error| error.to_string())?;
+    let payload = LineagesPayload {
+        schema: "shore.inspect-lineages",
+        event_set_hash: result.event_set_hash,
+        event_count: result.event_count,
+        lineage_count: result.lineage_count,
+        entries: result
+            .entries
+            .into_iter()
+            .map(LineageEntryDocument::from)
+            .collect(),
+        diagnostics: result.diagnostics,
+    };
+    serde_json::to_string(&payload).map_err(|error| error.to_string())
+}
+
+/// The read-only lineage projection for one ReviewUnit lineage.
+pub(super) fn lineage_json(repo: &Path, lineage_id: &str) -> Result<String, String> {
+    if lineage_id.is_empty() {
+        return Err("missing lineage id".to_owned());
+    }
+    let result = show_lineage(LineageShowOptions::new(
+        repo,
+        ReviewUnitLineageId::new(lineage_id.to_owned()),
+    ))
+    .map_err(|error| {
+        tracing::debug!(error = %error, lineage = lineage_id, "inspect_lineage_read_failed");
+        format!("lineage not found or unreadable: {lineage_id}")
+    })?;
+    let document = lineage_show_document(result);
+    serde_json::to_string(&document).map_err(|error| error.to_string())
 }
 
 /// The captured diff snapshot for one ReviewUnit, by snapshot id.

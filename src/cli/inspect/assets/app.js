@@ -9,12 +9,15 @@ const TYPES = [
   { id: "input_request_opened", label: "request", color: "#f0b75a" },
   { id: "input_request_responded", label: "response", color: "#4fd0c0" },
   { id: "review_note_imported", label: "note", color: "#9aa7b5" },
+  { id: "review_unit_lineage_declared", label: "lineage", color: "#ff8f70" },
+  { id: "review_unit_lineage_round_recorded", label: "round", color: "#d2a86d" },
 ];
 const TYPE_MAP = Object.fromEntries(TYPES.map((t) => [t.id, t]));
 
 const state = {
   history: null,
   units: null,
+  lineages: null,
   view: "timeline",
   enabledTypes: new Set(TYPES.map((t) => t.id)),
   seenTypes: new Set(TYPES.map((t) => t.id)),
@@ -78,6 +81,9 @@ function targetHeadBadge(td) {
 function refInfo(token) {
   let m = token.match(/^([a-z][a-z-]*):(?:git:)?sha256:[0-9a-f]+$/i);
   if (m) return { kind: m[1].toLowerCase(), clickable: true };
+  if (/^review-unit-lineage:[a-z0-9][a-z0-9._:-]*$/i.test(token)) {
+    return { kind: "review-unit-lineage", clickable: true };
+  }
   if (/^sha256:[0-9a-f]+$/i.test(token)) return { kind: "hash", clickable: false };
   if (/^[0-9a-f]{40}$/i.test(token)) return { kind: "commit", clickable: false };
   if (/^(agent|human):[a-z0-9][a-z0-9_-]*$/i.test(token)) return { kind: "track", clickable: true };
@@ -85,7 +91,7 @@ function refInfo(token) {
 }
 
 const REF_RE =
-  /\b(?:review-unit|input-request-response|input-request|obs|assess|snap|rev|evt|note):(?:git:)?sha256:[0-9a-f]{6,}\b|\bsha256:[0-9a-f]{16,}\b|\b[0-9a-f]{40}\b|\b(?:agent|human):[a-z0-9][a-z0-9_-]*\b/gi;
+  /\b(?:review-unit-lineage-round|review-unit-lineage|review-unit|input-request-response|input-request|obs|assess|snap|rev|evt|note):(?:git:)?sha256:[0-9a-f]{6,}\b|\breview-unit-lineage:[a-z0-9][a-z0-9._:-]*\b|\bsha256:[0-9a-f]{16,}\b|\b[0-9a-f]{40}\b|\b(?:agent|human):[a-z0-9][a-z0-9_-]*\b/gi;
 
 // Escape text, then replace embedded IDs with truncated reference chips.
 // Navigable kinds carry data attributes that the delegated click handler
@@ -114,6 +120,12 @@ function resolveRef(kind, id) {
   switch (kind) {
     case "review-unit":
       openUnit(id);
+      break;
+    case "review-unit-lineage":
+      openLineage(id);
+      break;
+    case "review-unit-lineage-round":
+      revealBy((e) => e.eventType === "review_unit_lineage_round_recorded" && (e.summary || {}).roundId === id);
       break;
     case "track":
       navigateToTrack(id);
@@ -265,9 +277,14 @@ function showError(message) {
 
 async function load() {
   try {
-    const [history, units] = await Promise.all([fetchJSON("/api/history"), fetchJSON("/api/units")]);
+    const [history, units, lineages] = await Promise.all([
+      fetchJSON("/api/history"),
+      fetchJSON("/api/units"),
+      fetchJSON("/api/lineages"),
+    ]);
     state.history = history;
     state.units = units;
+    state.lineages = lineages;
     state.lastHash = history.eventSetHash;
     showError(null);
     renderAll();
@@ -304,14 +321,17 @@ function renderAll() {
   renderUnitOptions();
   renderTimeline();
   renderUnits();
+  renderLineages();
   renderDetail();
 }
 
 function renderStats() {
   const h = state.history || {};
   const u = state.units || {};
+  const l = state.lineages || {};
   $("#stat-events").textContent = `${h.eventCount ?? "—"} events`;
   $("#stat-units").textContent = `${u.reviewUnitCount ?? "—"} units`;
+  $("#stat-lineages").textContent = `${l.lineageCount ?? "—"} lineages`;
   $("#stat-hash").textContent = shortId(h.eventSetHash);
 }
 
@@ -710,18 +730,53 @@ function renderUnits() {
   }
 }
 
+function renderLineages() {
+  const el = $("#lineages");
+  const entries = state.lineages?.entries || [];
+  if (!entries.length) {
+    el.innerHTML = `<p class="empty" style="color:var(--fg-dim)">No ReviewUnit lineages in this store.</p>`;
+    return;
+  }
+  el.innerHTML = "";
+  for (const l of entries) {
+    const card = document.createElement("div");
+    card.className = "unit-card lineage-card";
+    const diagnosticCount = (l.diagnostics || []).length;
+    const head = l.headReviewUnitId ? refChip(l.headReviewUnitId) : "—";
+    card.innerHTML = `
+      <h3>${linkify(l.lineageId)}</h3>
+      <div class="kv">
+        <span>head</span><b>${head}</b>
+        <span>rounds</span><b>${escapeHtml(String(l.roundCount ?? 0))}</b>
+        <span>diagnostics</span><b>${escapeHtml(String(diagnosticCount))}</b>
+      </div>`;
+    card.title = l.lineageId + "\nclick to open the lineage page";
+    card.addEventListener("click", (ev) => {
+      if (ev.target.closest("[data-ref-kind]")) return;
+      openLineage(l.lineageId);
+    });
+    el.appendChild(card);
+  }
+}
+
 function switchView(view) {
   state.view = view;
-  // The single-unit page is a drill-in under Units, so keep the Units tab lit.
+  // Drill-in pages stay under their parent tabs.
   document.querySelectorAll(".tab").forEach((t) =>
     t.setAttribute(
       "aria-selected",
-      String(t.dataset.view === view || (view === "unit" && t.dataset.view === "units")),
+      String(
+        t.dataset.view === view ||
+          (view === "unit" && t.dataset.view === "units") ||
+          (view === "lineage" && t.dataset.view === "lineages"),
+      ),
     ),
   );
   $("#view-timeline").classList.toggle("hidden", view !== "timeline");
   $("#view-units").classList.toggle("hidden", view !== "units");
+  $("#view-lineages").classList.toggle("hidden", view !== "lineages");
   $("#view-unit").classList.toggle("hidden", view !== "unit");
+  $("#view-lineage").classList.toggle("hidden", view !== "lineage");
 }
 
 async function openUnit(reviewUnitId) {
@@ -734,6 +789,86 @@ async function openUnit(reviewUnitId) {
   } catch (err) {
     $("#unit-page").innerHTML = `<p class="up-empty">error: ${escapeHtml(err.message)}</p>`;
   }
+}
+
+async function openLineage(lineageId) {
+  switchView("lineage");
+  $("#lineage-page-title").textContent = shortRef(lineageId);
+  $("#lineage-page").innerHTML = `<p class="up-empty">loading…</p>`;
+  try {
+    const d = await fetchJSON("/api/lineage?id=" + encodeURIComponent(lineageId));
+    renderLineagePage(d);
+  } catch (err) {
+    $("#lineage-page").innerHTML = `<p class="up-empty">error: ${escapeHtml(err.message)}</p>`;
+  }
+}
+
+function diagnosticBlock(diagnostics) {
+  diagnostics = diagnostics || [];
+  if (!diagnostics.length) return `<p class="up-empty">none</p>`;
+  return diagnostics
+    .map(
+      (d) => `<div class="diagnostic-card"><span class="code">${escapeHtml(d.code || "diagnostic")}</span>${linkify(d.message || "")}</div>`,
+    )
+    .join("");
+}
+
+function navigateToLineageRound(roundId) {
+  revealBy((e) => e.eventType === "review_unit_lineage_round_recorded" && (e.summary || {}).roundId === roundId);
+}
+
+function renderLineagePage(d) {
+  const rounds = d.rounds || [];
+  $("#lineage-page-title").textContent = `${shortRef(d.lineageId)}${d.headReviewUnitId ? " · head " + shortId(d.headReviewUnitId) : ""}`;
+
+  const stat = (label, n) => `<span class="up-stat"><b>${n ?? 0}</b> ${label}</span>`;
+  const sections = [];
+  sections.push(`<section><h2>Lineage</h2><dl class="up-identity">
+    <dt>id</dt><dd>${linkify(d.lineageId)}</dd>
+    <dt>head</dt><dd>${d.headReviewUnitId ? linkify(d.headReviewUnitId) : "—"}</dd>
+    <dt>events</dt><dd>${escapeHtml(String(d.eventCount ?? 0))}</dd>
+    <dt>event set</dt><dd>${linkify(d.eventSetHash || "—")}</dd>
+  </dl></section>`);
+
+  sections.push(`<section><h2>Summary</h2><div class="up-stats">
+    ${stat("rounds", rounds.length)}${stat("diagnostics", (d.diagnostics || []).length)}
+  </div></section>`);
+
+  sections.push(`<section><h2>Diagnostics</h2>${diagnosticBlock(d.diagnostics)}</section>`);
+
+  const roundCards = rounds.length
+    ? rounds
+        .map((r) => {
+          const index = r.roundIndex == null ? "—" : String(r.roundIndex);
+          const headBadge = r.isHead ? `<span class="fact-status current">head</span>` : "";
+          const predecessor = r.predecessorReviewUnitId ? linkify(r.predecessorReviewUnitId) : "—";
+          return `<div class="round-card">
+            <div class="anno-head">
+              <span class="anno-kind">round ${escapeHtml(index)}</span>
+              ${headBadge}
+              <span class="anno-title">${linkify(r.reviewUnitId)}</span>
+            </div>
+            <dl class="up-identity round-identity">
+              <dt>round</dt><dd>${linkify(r.roundId)}</dd>
+              <dt>predecessor</dt><dd>${predecessor}</dd>
+            </dl>
+            <div class="actions">
+              <button class="ghost" data-open-unit="${escapeHtml(r.reviewUnitId)}">open unit</button>
+              <button class="ghost" data-open-round="${escapeHtml(r.roundId)}">show round event</button>
+            </div>
+          </div>`;
+        })
+        .join("")
+    : `<p class="up-empty">none</p>`;
+  sections.push(`<section><h2>Rounds (${rounds.length})</h2>${roundCards}</section>`);
+
+  $("#lineage-page").innerHTML = sections.join("");
+  $("#lineage-page").querySelectorAll("[data-open-unit]").forEach((btn) => {
+    btn.addEventListener("click", () => openUnit(btn.dataset.openUnit));
+  });
+  $("#lineage-page").querySelectorAll("[data-open-round]").forEach((btn) => {
+    btn.addEventListener("click", () => navigateToLineageRound(btn.dataset.openRound));
+  });
 }
 
 function verdictBadge(ca) {
@@ -940,6 +1075,7 @@ function wireControls() {
     renderTimeline();
   });
   $("#unit-back").addEventListener("click", () => switchView("units"));
+  $("#lineage-back").addEventListener("click", () => switchView("lineages"));
   $("#order-toggle").addEventListener("click", () => {
     state.order = state.order === "desc" ? "asc" : "desc";
     $("#order-toggle").textContent = state.order === "desc" ? "newest first" : "oldest first";

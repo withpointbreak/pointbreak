@@ -12,10 +12,12 @@
       <nav id="tabs">
         <button class="tab" data-view="timeline" aria-selected="true">Timeline</button>
         <button class="tab" data-view="units">Units</button>
+        <button class="tab" data-view="lineages">Lineages</button>
       </nav>
       <div class="stats">
         <span id="stat-events" class="stat" title="durable events in the store">— events</span>
         <span id="stat-units" class="stat" title="captured ReviewUnits">— units</span>
+        <span id="stat-lineages" class="stat" title="ReviewUnit lineages">— lineages</span>
         <span id="stat-hash" class="stat mono" title="eventSetHash (freshness)">—</span>
         <span id="refresh" class="stat" title="auto-refresh status">idle</span>
       </div>
@@ -47,6 +49,11 @@
         <div id="units" class="units"></div>
       </section>
 
+      <!-- Lineages view -->
+      <section id="view-lineages" class="view hidden">
+        <div id="lineages" class="units"></div>
+      </section>
+
       <!-- Single-unit composite view -->
       <section id="view-unit" class="view hidden">
         <div class="unit-page-bar">
@@ -54,6 +61,15 @@
           <span id="unit-page-title" class="mono"></span>
         </div>
         <div id="unit-page" class="unit-page"></div>
+      </section>
+
+      <!-- Single-lineage composite view -->
+      <section id="view-lineage" class="view hidden">
+        <div class="unit-page-bar">
+          <button id="lineage-back" class="ghost">← lineages</button>
+          <span id="lineage-page-title" class="mono"></span>
+        </div>
+        <div id="lineage-page" class="unit-page"></div>
       </section>
     </main>
 

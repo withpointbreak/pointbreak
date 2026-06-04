@@ -40,8 +40,9 @@ pub use input_request::{
     fetch_input_request, list_input_requests, open_input_request, respond_input_request,
 };
 pub use lineage::{
-    LineageAttachOptions, LineageAttachResult, LineageRoundView, LineageShowOptions,
-    LineageShowResult, attach_review_unit_to_lineage, show_lineage,
+    LineageAttachOptions, LineageAttachResult, LineageListEntry, LineageListOptions,
+    LineageListResult, LineageRoundView, LineageShowOptions, LineageShowResult,
+    attach_review_unit_to_lineage, list_lineages, show_lineage,
 };
 pub use observation::{
     ObservationAddOptions, ObservationAddResult, ObservationListOptions, ObservationListResult,

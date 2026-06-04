@@ -117,8 +117,9 @@ shore review history       # chronological raw event listing
 ```
 
 For a visual, cross-linked view of the whole store — an event timeline, composite per-ReviewUnit
-pages, and captured diffs annotated with their review facts — run `shore inspect` to open a local
-web UI (see the [CLI reference](cli-reference.md)). The commands below remain the scriptable surface.
+pages, ReviewUnit lineage pages, and captured diffs annotated with their review facts — run
+`shore inspect` to open a local web UI (see the [CLI reference](cli-reference.md)). The commands
+below remain the scriptable surface.
 
 ### `shore review unit list`
 
