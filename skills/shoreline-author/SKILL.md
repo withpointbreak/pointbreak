@@ -90,6 +90,12 @@ shore review observation add \
   --track "$track" \
   --title "Verification covered the changed parser and full suite" \
   --body "Ran the targeted parser test and the repository test suite after the final edit. No generated artifacts were changed."
+
+shore review observation add \
+  --review-unit "$review_unit_id" \
+  --track "$track" \
+  --title "Targeted parser test was red first" \
+  --body "The targeted parser test failed before the implementation change, confirming it covered the old behavior. That pre-change failure did not run against the captured ReviewUnit, so it is recorded as context rather than validation evidence."
 ```
 
 Good observation titles are short and specific. The body should explain why the fact matters for the
@@ -107,20 +113,20 @@ assessment.
 shore review validation add \
   --review-unit "$review_unit_id" \
   --track "$track" \
+  --check-name "targeted parser test" \
+  --status passed \
+  --command "cargo +stable nextest run -p shoreline --test parser" \
+  --exit-code 0 \
+  --summary "Passed after the final edit against the captured ReviewUnit."
+
+shore review validation add \
+  --review-unit "$review_unit_id" \
+  --track "$track" \
   --check-name "just check" \
   --status passed \
   --command "just check" \
   --exit-code 0 \
   --summary "Completed after the final edit. This covered commit checks, build, lint, and tests."
-
-shore review validation add \
-  --review-unit "$review_unit_id" \
-  --track "$track" \
-  --check-name "targeted parser test" \
-  --status failed \
-  --command "cargo +stable nextest run -p shoreline --test parser" \
-  --exit-code 1 \
-  --summary "Initial red run failed before the parser change, confirming the test covered the old behavior."
 ```
 
 Validation checks target the whole captured ReviewUnit. Do not add file, range, or path targets; if
