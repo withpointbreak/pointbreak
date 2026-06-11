@@ -48,7 +48,7 @@ pub use tbs::{
     event_signature_pre_authentication_encoding, event_to_be_signed, pre_authentication_encoding,
 };
 pub use validation::ValidationCheckRecordedPayload;
-pub use writer::{Writer, WriterRole, WriterTool};
+pub use writer::{Writer, WriterTool};
 
 const EVENT_SCHEMA: &str = "shore.event";
 const EVENT_VERSION: u32 = 1;
@@ -258,10 +258,10 @@ mod tests {
     }
 
     #[test]
-    fn writer_shore_local_reviewer_stamps_reviewer_role() {
+    fn writer_shore_local_reviewer_stamps_shore_tool() {
         let writer = Writer::shore_local_reviewer("0.0.1");
 
-        assert_eq!(writer.role, WriterRole::Reviewer);
+        assert_eq!(writer.actor_id.as_str(), "actor:local");
         assert_eq!(writer.tool.name, "shore");
         assert_eq!(writer.tool.version, "0.0.1");
     }

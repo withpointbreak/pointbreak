@@ -17,7 +17,6 @@
     }
   },
   "actorId": "actor:git-email:alice@example.com",
-  "role": "reviewer",
   "signer": "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd",
   "occurredAt": "2026-06-03T23:59:00Z",
   "assertionMode": "advisory"

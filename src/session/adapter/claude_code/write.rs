@@ -214,14 +214,12 @@ mod tests {
     };
     use crate::session::EventStore;
     use crate::session::event::{
-        AssertionMode, EventType, ShoreEvent, SourceRef, SourceSpeaker, Writer, WriterRole,
-        WriterTool,
+        AssertionMode, EventType, ShoreEvent, SourceRef, SourceSpeaker, Writer, WriterTool,
     };
 
     fn writer_user_for_test() -> Writer {
         Writer {
             actor_id: ActorId::new("actor:claude_code:user"),
-            role: WriterRole::User,
             tool: WriterTool {
                 name: "claude_code".to_owned(),
                 version: String::new(),
@@ -309,7 +307,7 @@ mod tests {
             event.source_ref,
             Some(SourceRef::new("claude_code", "uuid-1"))
         );
-        assert_eq!(event.writer.role, WriterRole::User);
+        assert_eq!(event.writer.actor_id.as_str(), "actor:claude_code:user");
     }
 
     #[test]

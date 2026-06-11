@@ -9,9 +9,7 @@
 use super::parse::{AssistantMessage, ParsedMessage, ParsedSession, ToolUse, UserMessage};
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::model::{ActorId, CheckpointId, SessionId, TargetRef, TaskTargetRef, WorkObjectId};
-use crate::session::event::{
-    AssertionMode, SourceRef, SourceSpeaker, Writer, WriterRole, WriterTool,
-};
+use crate::session::event::{AssertionMode, SourceRef, SourceSpeaker, Writer, WriterTool};
 
 const SOURCE_SYSTEM_CLAUDE_CODE: &str = "claude_code";
 
@@ -239,13 +237,11 @@ fn content_carries_hook_output(content: &str) -> bool {
     content.contains("<system-reminder>")
 }
 
-// The speaker fact these writers encode as a role also rides in the task
-// payloads as `sourceSpeaker` (ADR-0007); the role stamping here is removed
-// once `writer.role` is dropped from the envelope.
+// The speaker fact rides in the task payloads as `sourceSpeaker` (ADR-0007);
+// these writers differ only by the synthetic actor id attributing the write.
 fn writer_user() -> Writer {
     Writer {
         actor_id: ActorId::new("actor:claude_code:user"),
-        role: WriterRole::User,
         tool: WriterTool {
             name: "claude_code".to_owned(),
             version: String::new(),
@@ -256,7 +252,6 @@ fn writer_user() -> Writer {
 fn writer_agent() -> Writer {
     Writer {
         actor_id: ActorId::new("actor:claude_code:assistant"),
-        role: WriterRole::Agent,
         tool: WriterTool {
             name: "claude_code".to_owned(),
             version: String::new(),
@@ -536,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn translate_attaches_writer_role_and_actor_to_each_intent() {
+    fn translate_attaches_distinct_writer_actors_to_each_intent() {
         let parsed = parse_session(&fixture_path()).expect("parses");
         let intents = translate_session(&parsed);
 
@@ -552,8 +547,11 @@ mod tests {
             })
             .expect("at least one CheckpointCaptured intent");
 
-        assert_eq!(task_writer.role, WriterRole::User);
-        assert_eq!(assistant_writer.role, WriterRole::Agent);
+        assert_eq!(task_writer.actor_id.as_str(), "actor:claude_code:user");
+        assert_eq!(
+            assistant_writer.actor_id.as_str(),
+            "actor:claude_code:assistant"
+        );
         assert_ne!(task_writer.actor_id, assistant_writer.actor_id);
     }
 

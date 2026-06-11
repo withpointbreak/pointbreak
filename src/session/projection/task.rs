@@ -943,14 +943,12 @@ mod tests {
     };
     use crate::session::event::{
         AssertionMode, EventTarget, EventType, ShoreEvent, SourceRef, TaskAttemptCapturedPayload,
-        TaskCheckpointCapturedPayload, TaskObservationRecordedPayload, Writer, WriterRole,
-        WriterTool,
+        TaskCheckpointCapturedPayload, TaskObservationRecordedPayload, Writer, WriterTool,
     };
 
     fn writer_user() -> Writer {
         Writer {
             actor_id: ActorId::new("actor:claude_code:user"),
-            role: WriterRole::User,
             tool: WriterTool {
                 name: "claude_code".to_owned(),
                 version: String::new(),
@@ -1978,7 +1976,6 @@ mod tests {
             InputRequestRespondedPayload::idempotency_key(input_request_id, response_id.as_str());
         let writer = Writer {
             actor_id: ActorId::new("actor:claude_code:user"),
-            role: WriterRole::User,
             tool: WriterTool {
                 name: "claude_code".to_owned(),
                 version: String::new(),
@@ -2757,7 +2754,6 @@ mod tests {
             InputRequestRespondedPayload::idempotency_key(input_request_id, response_id.as_str());
         let writer = Writer {
             actor_id: ActorId::new("actor:claude_code:user"),
-            role: WriterRole::User,
             tool: WriterTool {
                 name: "claude_code".to_owned(),
                 version: String::new(),
@@ -3128,7 +3124,6 @@ mod tests {
             InputRequestRespondedPayload::idempotency_key(input_request_id, response_id.as_str());
         let writer = Writer {
             actor_id: ActorId::new("actor:claude_code:user"),
-            role: WriterRole::User,
             tool: WriterTool {
                 name: "claude_code".to_owned(),
                 version: String::new(),
