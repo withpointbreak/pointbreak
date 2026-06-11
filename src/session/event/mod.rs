@@ -210,7 +210,7 @@ mod tests {
                 SessionId::new("session:default"),
                 WorkUnitId::new("work:default"),
             ),
-            Writer::shore_local_author("0.1.0"),
+            Writer::shore_local("0.1.0"),
             ReviewInitializedPayload {},
             FixedClock::at("2026-05-09T20:42:45Z"),
         )
@@ -258,8 +258,8 @@ mod tests {
     }
 
     #[test]
-    fn writer_shore_local_reviewer_stamps_shore_tool() {
-        let writer = Writer::shore_local_reviewer("0.0.1");
+    fn writer_shore_local_stamps_shore_tool() {
+        let writer = Writer::shore_local("0.0.1");
 
         assert_eq!(writer.actor_id.as_str(), "actor:local");
         assert_eq!(writer.tool.name, "shore");
@@ -317,7 +317,7 @@ mod tests {
             EventType::ReviewUnitCaptured,
             "review_unit_captured:review-unit:sha256:abc",
             target,
-            Writer::shore_local_author("test"),
+            Writer::shore_local("test"),
             payload,
             FixedClock::at("2026-05-12T00:00:00Z"),
         )
@@ -455,7 +455,7 @@ mod tests {
                 RevisionId::new("rev:git:sha256:def"),
                 SnapshotId::new("snap:git:sha256:ghi"),
             ),
-            Writer::shore_local_author("test"),
+            Writer::shore_local("test"),
             ReviewUnitCapturedPayload {
                 review_unit_id: ReviewUnitId::new("review-unit:sha256:abc"),
                 source: ReviewUnitSource::GitWorktree {
@@ -504,7 +504,7 @@ mod tests {
             EventType::ReviewObservationRecorded,
             "review_observation_recorded:review-unit:sha256:abc:agent:codex:obs:sha256:one",
             target,
-            Writer::shore_local_reviewer("test"),
+            Writer::shore_local("test"),
             ReviewObservationRecordedPayload {
                 observation_id: ObservationId::new("obs:sha256:one"),
                 target: target_ref,
@@ -562,7 +562,7 @@ mod tests {
                 track_id: Some(TrackId::new("agent:codex")),
                 subject: Some(TargetRef::Review(target_ref.clone())),
             },
-            Writer::shore_local_reviewer("test"),
+            Writer::shore_local("test"),
             ReviewObservationRecordedPayload {
                 observation_id: ObservationId::new("obs:sha256:abc"),
                 target: target_ref,
@@ -606,7 +606,7 @@ mod tests {
                 track_id: Some(track_id),
                 subject: Some(TargetRef::Review(target_ref.clone())),
             },
-            Writer::shore_local_reviewer("test"),
+            Writer::shore_local("test"),
             ReviewAssessmentRecordedPayload {
                 assessment_id,
                 target: target_ref,
@@ -633,7 +633,7 @@ mod tests {
                 SessionId::new("session:default"),
                 WorkUnitId::new("work:default"),
             ),
-            Writer::shore_local_author("0.1.0"),
+            Writer::shore_local("0.1.0"),
             ReviewNoteImportedPayload {
                 sidecar_source: SidecarSource::ReviewNotes,
                 note_id: "note:abc".to_owned(),
@@ -675,7 +675,7 @@ mod tests {
                 SessionId::new("session:default"),
                 WorkUnitId::new("work:default"),
             ),
-            Writer::shore_local_author("0.1.0"),
+            Writer::shore_local("0.1.0"),
             ReviewNoteImportedPayload {
                 sidecar_source: SidecarSource::ReviewNotes,
                 note_id: "note:abc".to_owned(),
@@ -877,7 +877,7 @@ mod tests {
                 RevisionId::new("rev:git:sha256:def"),
                 SnapshotId::new("snap:git:sha256:ghi"),
             ),
-            Writer::shore_local_author("0.1.0"),
+            Writer::shore_local("0.1.0"),
             ReviewUnitCapturedPayload {
                 review_unit_id: ReviewUnitId::new("review-unit:sha256:abc"),
                 source: ReviewUnitSource::GitWorktree {

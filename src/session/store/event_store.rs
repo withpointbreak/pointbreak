@@ -440,7 +440,7 @@ mod tests {
                 SessionId::new("session:default"),
                 WorkUnitId::new("work:default"),
             ),
-            Writer::shore_local_author("0.1.0"),
+            Writer::shore_local("0.1.0"),
             ReviewInitializedPayload {},
             occurred_at,
         )
@@ -482,7 +482,7 @@ mod tests {
                 track_id: Some(track_id),
                 subject: Some(TargetRef::Review(target_ref.clone())),
             },
-            Writer::shore_local_reviewer("test"),
+            Writer::shore_local("test"),
             ReviewAssessmentRecordedPayload {
                 assessment_id,
                 target: target_ref,

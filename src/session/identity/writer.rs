@@ -17,7 +17,7 @@ pub(crate) fn writer_from_git_config(repo: &Path) -> Writer {
     writer_from_options(repo, None)
 }
 
-/// Build an author `Writer`, honoring an optional per-call actor override.
+/// Build the local `Writer`, honoring an optional per-call actor override.
 ///
 /// Precedence: an explicit override wins, then the `SHORE_ACTOR_ID` env var,
 /// then the local Git identity. A malformed override (or env value) is ignored
@@ -25,17 +25,6 @@ pub(crate) fn writer_from_git_config(repo: &Path) -> Writer {
 /// corrupt provenance. `None` reproduces the prior env-then-Git behavior
 /// exactly.
 pub(crate) fn writer_from_options(repo: &Path, explicit: Option<&ActorId>) -> Writer {
-    Writer {
-        actor_id: actor_id_for_repo(explicit.map(ActorId::as_str), repo),
-        tool: shore_tool(),
-    }
-}
-
-/// Build a reviewer `Writer`, honoring an optional per-call actor override.
-///
-/// Same precedence as [`writer_from_options`]: explicit override >
-/// `SHORE_ACTOR_ID` > Git identity.
-pub(crate) fn reviewer_from_options(repo: &Path, explicit: Option<&ActorId>) -> Writer {
     Writer {
         actor_id: actor_id_for_repo(explicit.map(ActorId::as_str), repo),
         tool: shore_tool(),
@@ -138,7 +127,7 @@ mod tests {
     }
 
     #[test]
-    fn reviewer_from_git_config_uses_email_then_name_then_actor_local() {
+    fn writer_from_options_uses_email_then_name_then_actor_local() {
         let email_repo = tempfile::tempdir().unwrap();
         Command::new("git")
             .args(["init"])
@@ -150,7 +139,7 @@ mod tests {
             .current_dir(email_repo.path())
             .output()
             .unwrap();
-        let email_writer = super::reviewer_from_options(email_repo.path(), None);
+        let email_writer = super::writer_from_options(email_repo.path(), None);
         assert_eq!(
             email_writer.actor_id.as_str(),
             "actor:git-email:reviewer@example.com"
@@ -172,7 +161,7 @@ mod tests {
             .current_dir(name_repo.path())
             .output()
             .unwrap();
-        let name_writer = super::reviewer_from_options(name_repo.path(), None);
+        let name_writer = super::writer_from_options(name_repo.path(), None);
         assert_eq!(
             name_writer.actor_id.as_str(),
             "actor:git-name:reviewer-name"
@@ -194,7 +183,7 @@ mod tests {
             .current_dir(local_repo.path())
             .output()
             .unwrap();
-        let local_writer = super::reviewer_from_options(local_repo.path(), None);
+        let local_writer = super::writer_from_options(local_repo.path(), None);
         assert_eq!(local_writer.actor_id.as_str(), "actor:local");
     }
 

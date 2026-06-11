@@ -1032,7 +1032,7 @@ mod tests {
             EventType::TaskCheckpointCaptured,
             idempotency_key,
             target,
-            Writer::shore_local_reviewer("test"),
+            Writer::shore_local("test"),
             payload,
             occurred_at,
         )
@@ -1087,7 +1087,7 @@ mod tests {
             EventType::TaskObservationRecorded,
             idempotency_key,
             target,
-            Writer::shore_local_reviewer("test"),
+            Writer::shore_local("test"),
             payload,
             occurred_at,
         )
@@ -1497,7 +1497,7 @@ mod tests {
             EventType::InputRequestOpened,
             idempotency_key,
             target,
-            Writer::shore_local_reviewer("test"),
+            Writer::shore_local("test"),
             payload,
             occurred_at,
         )
@@ -1535,7 +1535,7 @@ mod tests {
             EventType::InputRequestResponded,
             idempotency_key,
             target,
-            Writer::shore_local_reviewer("test"),
+            Writer::shore_local("test"),
             payload,
             occurred_at,
         )
@@ -1581,7 +1581,7 @@ mod tests {
             EventType::InputRequestOpened,
             idempotency_key,
             target,
-            Writer::shore_local_reviewer("test"),
+            Writer::shore_local("test"),
             payload,
             occurred_at,
         )
@@ -1916,7 +1916,7 @@ mod tests {
             EventType::InputRequestOpened,
             idempotency_key,
             target,
-            Writer::shore_local_reviewer("test"),
+            Writer::shore_local("test"),
             payload,
             occurred_at,
         )
@@ -3034,7 +3034,7 @@ mod tests {
             EventType::TaskCheckpointCaptured,
             idempotency_key,
             target,
-            Writer::shore_local_reviewer("test"),
+            Writer::shore_local("test"),
             payload,
             occurred_at,
         )
@@ -3086,7 +3086,7 @@ mod tests {
             EventType::InputRequestOpened,
             idempotency_key,
             target,
-            Writer::shore_local_reviewer("test"),
+            Writer::shore_local("test"),
             payload,
             occurred_at,
         )

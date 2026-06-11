@@ -260,7 +260,7 @@ mod tests {
             EventType::TaskAttemptCaptured,
             idempotency_key,
             target,
-            Writer::shore_local_author("test"),
+            Writer::shore_local("test"),
             sample_payload(),
             "2026-05-18T00:00:00Z",
         )
@@ -396,7 +396,7 @@ mod tests {
             EventType::TaskCheckpointCaptured,
             idempotency_key,
             target,
-            Writer::shore_local_author("test"),
+            Writer::shore_local("test"),
             sample_checkpoint_payload(),
             "2026-05-18T00:00:00Z",
         )
@@ -587,7 +587,7 @@ mod tests {
             EventType::TaskObservationRecorded,
             idempotency_key,
             target,
-            Writer::shore_local_author("test"),
+            Writer::shore_local("test"),
             sample_observation_payload(),
             "2026-05-18T00:00:00Z",
         )
