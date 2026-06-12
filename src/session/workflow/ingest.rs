@@ -210,10 +210,20 @@ mod tests {
     use super::*;
     use crate::canonical_hash::sha256_json_prefixed;
     use crate::crypto::{EventVerificationStatus, SignerId};
-    use crate::model::ActorId;
+    use crate::model::{
+        ActorId, InputRequestId, InputRequestResponseId, SessionId, TargetRef, TaskTargetRef,
+        WorkObjectId,
+    };
     use crate::session::event::{
-        EventSignature, EventType, IngestProvenance, IngestVia, InputRequestReasonCode,
-        InputRequestResponseOutcome,
+        AssertionMode, EventSignature, EventType, IngestProvenance, IngestVia,
+        InputRequestReasonCode, InputRequestResponseOutcome,
+    };
+    use crate::session::projection::task::{
+        AgentResumptionProjection, AgentResumptionState, ResumptionBindingPolicy,
+        agent_resumption_from_events,
+    };
+    use crate::session::projection::test_support::{
+        reader_actor, task_attempt_event, task_input_request_event_with_target, user_response_event,
     };
     use crate::session::signing::test_support::{DeterministicSigner, trust_for_actor};
     use crate::session::{
@@ -799,5 +809,280 @@ mod tests {
 
         // The good events are durable and the projection matches the event log on disk.
         assert_eq!(on_disk_state(dest.path()), replayed_state(dest.path()));
+    }
+
+    // -- end-to-end: ingest/bundle -> resumption binding (ADR-0009) ----------
+    //
+    // The relay consequence is implicit throughout: a relay that strips
+    // signatures converts a bindable response into ingested_unsigned.
+
+    /// Task-shaped origin event set: attempt + operative task-targeted input
+    /// request + operative Approved response (last element).
+    fn task_resumption_events() -> (Vec<ShoreEvent>, WorkObjectId) {
+        let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
+        let session_id = SessionId::new("session:claude:uuid-1");
+        let input_request_id = InputRequestId::new("input-request:sha256:1");
+        let response_id = InputRequestResponseId::new("input-request-response:sha256:r");
+
+        let events = vec![
+            task_attempt_event(
+                &task_attempt_id,
+                &session_id,
+                "uuid-1",
+                "2026-05-18T00:00:00Z",
+            ),
+            task_input_request_event_with_target(
+                &task_attempt_id,
+                &session_id,
+                &input_request_id,
+                "source:approve",
+                "2026-05-18T00:00:02Z",
+                TargetRef::Task(TaskTargetRef::TaskAttempt),
+                "needs approval",
+            ),
+            user_response_event(
+                &input_request_id,
+                &response_id,
+                InputRequestResponseOutcome::Approved,
+                AssertionMode::Operative,
+                "2026-05-18T00:00:03Z",
+            ),
+        ];
+        (events, task_attempt_id)
+    }
+
+    /// Writes the events as local-authored facts — the same store primitive
+    /// the domain workflows and the adapter write path use; no seam, no stamp.
+    fn local_authored_store(events: &[ShoreEvent]) -> (tempfile::TempDir, EventStore) {
+        let root = tempfile::tempdir().unwrap();
+        let store = EventStore::open(root.path().join(".shore"));
+        for event in events {
+            store.record_event_once(event).unwrap();
+        }
+        (root, store)
+    }
+
+    fn resumption_projection(
+        stored: &[ShoreEvent],
+        task_attempt_id: &WorkObjectId,
+        trust: &TrustSet,
+        policy: ResumptionBindingPolicy,
+    ) -> AgentResumptionProjection {
+        agent_resumption_from_events(stored, task_attempt_id, &reader_actor(), trust, policy)
+            .unwrap()
+    }
+
+    fn identity_reason(projection: &AgentResumptionProjection) -> Option<String> {
+        projection
+            .diagnostics
+            .iter()
+            .find(|d| d.code == "agent_resumption_response_identity_not_binding")
+            .and_then(|d| d.reason.clone())
+    }
+
+    #[test]
+    fn local_unsigned_response_binds_in_its_own_store_zero_config() {
+        // Possession is the trust root: a human responding in their own
+        // worktree binds with zero keys, zero configuration.
+        let (events, task_attempt_id) = task_resumption_events();
+        let (_root, store) = local_authored_store(&events);
+
+        let stored = store.list_events().unwrap();
+        assert!(stored.iter().all(|event| event.ingest.is_none()));
+        let projection = resumption_projection(
+            &stored,
+            &task_attempt_id,
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        );
+
+        assert!(projection.may_resume);
+        assert_eq!(projection.state, AgentResumptionState::Ready);
+    }
+
+    #[test]
+    fn ingested_unsigned_response_is_blocked_ingested_unsigned_in_destination() {
+        let (events, task_attempt_id) = task_resumption_events();
+        let dest = dest_repo();
+
+        ingest_events(IngestEventsOptions::new(dest.path(), events)).unwrap();
+
+        let stored = EventStore::open(dest.path().join(".shore"))
+            .list_events()
+            .unwrap();
+        let projection = resumption_projection(
+            &stored,
+            &task_attempt_id,
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        );
+
+        assert!(!projection.may_resume);
+        assert_eq!(projection.state, AgentResumptionState::Blocked);
+        assert_eq!(
+            identity_reason(&projection).as_deref(),
+            Some("ingested_unsigned")
+        );
+        // The forwarded claimed actorId is preserved as a reported fact but
+        // does not bind.
+        let response_view = projection.selected_response.as_ref().unwrap();
+        assert_eq!(
+            response_view.envelope.writer.actor_id.as_str(),
+            "actor:claude_code:user"
+        );
+        assert!(!response_view.identity_treated_as_binding);
+    }
+
+    #[test]
+    fn ingested_reviewer_signed_response_binds_via_verified_signer_arm() {
+        // The reviewer holds the key end-to-end: the response is signed
+        // before it ever leaves the origin.
+        let (mut events, task_attempt_id) = task_resumption_events();
+        let signer = DeterministicSigner::fixture();
+        crate::session::sign_event_if_requested(
+            events.last_mut().expect("response event"),
+            &crate::session::EventSigningOptions::sign_with(signer.clone()),
+        )
+        .unwrap();
+        let trust = trust_for_actor(&ActorId::new("actor:claude_code:user"), &signer);
+        let dest = dest_repo();
+
+        ingest_events(IngestEventsOptions::new(dest.path(), events).with_trust_set(trust.clone()))
+            .unwrap();
+
+        let stored = EventStore::open(dest.path().join(".shore"))
+            .list_events()
+            .unwrap();
+        let response = stored
+            .iter()
+            .find(|event| event.event_type == EventType::InputRequestResponded)
+            .unwrap();
+        assert!(response.ingest.is_some(), "seam stamped the stored copy");
+        let projection = resumption_projection(
+            &stored,
+            &task_attempt_id,
+            &trust,
+            ResumptionBindingPolicy::default(),
+        );
+
+        assert!(projection.may_resume);
+        assert_eq!(projection.state, AgentResumptionState::Ready);
+    }
+
+    #[test]
+    fn signature_stripped_in_transit_response_is_blocked_ingested_unsigned() {
+        // The relay consequence: a hop that strips signatures converts a
+        // bindable response into ingested_unsigned.
+        let (mut events, task_attempt_id) = task_resumption_events();
+        let signer = DeterministicSigner::fixture();
+        let response = events.last_mut().expect("response event");
+        crate::session::sign_event_if_requested(
+            response,
+            &crate::session::EventSigningOptions::sign_with(signer.clone()),
+        )
+        .unwrap();
+        response.signer = None;
+        response.signature = None;
+        let trust = trust_for_actor(&ActorId::new("actor:claude_code:user"), &signer);
+        let dest = dest_repo();
+
+        ingest_events(IngestEventsOptions::new(dest.path(), events).with_trust_set(trust.clone()))
+            .unwrap();
+
+        let stored = EventStore::open(dest.path().join(".shore"))
+            .list_events()
+            .unwrap();
+        let projection = resumption_projection(
+            &stored,
+            &task_attempt_id,
+            &trust,
+            ResumptionBindingPolicy::default(),
+        );
+
+        assert!(!projection.may_resume);
+        assert_eq!(
+            identity_reason(&projection).as_deref(),
+            Some("ingested_unsigned")
+        );
+    }
+
+    #[test]
+    fn bundle_applied_response_has_parity_with_ingest() {
+        use crate::session::store::bundle::import_store_bundle;
+
+        // Unsigned: bundle apply stamps, so the response stops binding.
+        let (events, task_attempt_id) = task_resumption_events();
+        let (_source_root, _source_store) = local_authored_store(&events);
+        let target = tempfile::tempdir().unwrap();
+        import_store_bundle(
+            _source_root.path().join(".shore"),
+            target.path().join(".shore"),
+        )
+        .unwrap();
+        let stored = EventStore::open(target.path().join(".shore"))
+            .list_events()
+            .unwrap();
+        let projection = resumption_projection(
+            &stored,
+            &task_attempt_id,
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        );
+        assert!(!projection.may_resume);
+        assert_eq!(
+            identity_reason(&projection).as_deref(),
+            Some("ingested_unsigned")
+        );
+
+        // Signed + authorized: binds via arm (b) through bundle apply too.
+        let (mut signed_events, task_attempt_id) = task_resumption_events();
+        let signer = DeterministicSigner::fixture();
+        crate::session::sign_event_if_requested(
+            signed_events.last_mut().expect("response event"),
+            &crate::session::EventSigningOptions::sign_with(signer.clone()),
+        )
+        .unwrap();
+        let trust = trust_for_actor(&ActorId::new("actor:claude_code:user"), &signer);
+        let (signed_source_root, _signed_source_store) = local_authored_store(&signed_events);
+        let signed_target = tempfile::tempdir().unwrap();
+        import_store_bundle(
+            signed_source_root.path().join(".shore"),
+            signed_target.path().join(".shore"),
+        )
+        .unwrap();
+        let stored = EventStore::open(signed_target.path().join(".shore"))
+            .list_events()
+            .unwrap();
+        let projection = resumption_projection(
+            &stored,
+            &task_attempt_id,
+            &trust,
+            ResumptionBindingPolicy::default(),
+        );
+        assert!(projection.may_resume);
+        assert_eq!(projection.state, AgentResumptionState::Ready);
+    }
+
+    #[test]
+    fn verified_only_store_blocks_even_its_own_unsigned_response() {
+        // Choosing verified-only is choosing that nothing binds without a
+        // key — including the store's own unsigned responses.
+        let (events, task_attempt_id) = task_resumption_events();
+        let (_root, store) = local_authored_store(&events);
+
+        let stored = store.list_events().unwrap();
+        let projection = resumption_projection(
+            &stored,
+            &task_attempt_id,
+            &TrustSet::default(),
+            ResumptionBindingPolicy::VerifiedOnly,
+        );
+
+        assert!(!projection.may_resume);
+        assert_eq!(projection.state, AgentResumptionState::Blocked);
+        assert_eq!(
+            identity_reason(&projection).as_deref(),
+            Some("policy_excludes_local")
+        );
     }
 }
