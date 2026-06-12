@@ -366,12 +366,6 @@ pub(super) fn unit_json(repo: &Path, review_unit_id: &str) -> Result<String, Str
     })?;
     // Thread the typed endpoints out before `unit_show_document` consumes `result`,
     // then splice the additive `targetDisplay` into the serialized document.
-    //
-    // Known limitation: `/api/unit` goes through `show_review_unit`, which resolves
-    // the worktree-local store (unlike the store-aware `/api/units` path). So this
-    // only enriches units already readable from the current repo; clicking into a
-    // linked-only unit still does not resolve. Migrating the single-unit read path
-    // to the store-aware resolver is a separate, deferred follow-up.
     let target_display =
         derive_target_display(&result.review_unit.target, &result.review_unit.base);
     let document = unit_show_document(result);

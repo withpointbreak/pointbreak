@@ -9,7 +9,8 @@ use crate::session::observation::{
     validated_track_id,
 };
 use crate::session::state::SessionState;
-use crate::session::store_init::ShoreStorePaths;
+use crate::session::store::resolution::resolve_read_store;
+use crate::session::workflow::read_store::divergence_diagnostics;
 use crate::session::workflow::{ValidationCheckProjectionOptions, project_validation_checks};
 
 mod adapter_notes;
@@ -33,13 +34,13 @@ use self::rows::{
 use self::snapshot::load_bound_snapshot_artifact;
 
 pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShowResult> {
-    let paths = ShoreStorePaths::resolve(&options.repo)?;
+    let read_store = resolve_read_store(&options.repo)?;
     let track_id = options
         .track
         .as_deref()
         .map(validated_track_id)
         .transpose()?;
-    let events = EventStore::open(paths.shore_dir()).list_events()?;
+    let events = EventStore::open(read_store.store_dir()).list_events()?;
     let resolved = resolve_review_unit(
         &events,
         ReviewUnitSelection::from_review_unit_or_lineage(
@@ -48,9 +49,9 @@ pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShow
         )?,
     )?;
     let review_unit = selected_review_unit_capture(&events, &resolved)?;
-    let snapshot = load_bound_snapshot_artifact(paths.worktree_root(), &review_unit)?;
+    let snapshot = load_bound_snapshot_artifact(&options.repo, &review_unit)?;
     let observations = project_observations(ObservationProjectionOptions {
-        shore_dir: paths.shore_dir(),
+        shore_dir: read_store.store_dir(),
         events: &events,
         resolved: &resolved,
         track_filter: track_id.clone(),
@@ -59,7 +60,7 @@ pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShow
         include_body: options.include_body,
     })?;
     let input_requests = project_input_requests(InputRequestProjectionOptions {
-        shore_dir: paths.shore_dir(),
+        shore_dir: read_store.store_dir(),
         events: &events,
         resolved: &resolved,
         track_filter: track_id.clone(),
@@ -69,7 +70,7 @@ pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShow
         include_body: options.include_body,
     })?;
     let (current_assessment, assessments) = project_assessments(AssessmentProjectionOptions {
-        shore_dir: paths.shore_dir(),
+        shore_dir: read_store.store_dir(),
         events: &events,
         resolved: &resolved,
         track_filter: track_id.clone(),
@@ -77,15 +78,19 @@ pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShow
         include_all: true,
     })?;
     let validation_checks = project_validation_checks(ValidationCheckProjectionOptions {
-        shore_dir: paths.shore_dir(),
+        shore_dir: read_store.store_dir(),
         events: &events,
         review_unit_id: &resolved.review_unit_id,
         track_filter: track_id.clone(),
         status_filter: None,
         include_body: options.include_body,
     })?;
-    let adapter_notes =
-        project_adapter_notes(&events, paths.shore_dir(), &snapshot, options.include_body)?;
+    let adapter_notes = project_adapter_notes(
+        &events,
+        read_store.store_dir(),
+        &snapshot,
+        options.include_body,
+    )?;
     let (snapshot_rows, mut summary) = build_snapshot_rows(&snapshot, &review_unit.id);
     let mut narrative_rows = Vec::new();
     let observation_rows = build_observation_rows(&observations);
@@ -113,6 +118,8 @@ pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShow
         .event_set_hash
         .clone()
         .expect("SessionState::from_events sets event_set_hash");
+    let mut diagnostics = state.diagnostics;
+    diagnostics.extend(divergence_diagnostics(&read_store));
 
     Ok(ReviewUnitShowResult {
         event_set_hash,
@@ -132,7 +139,7 @@ pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShow
         validation_checks,
         adapter_notes,
         rows,
-        diagnostics: state.diagnostics,
+        diagnostics,
     })
 }
 

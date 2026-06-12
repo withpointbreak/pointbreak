@@ -24,6 +24,7 @@ struct LinkedFixture {
     reader: PathBuf,
     seed_review_unit_id: String,
     seed_snapshot_id: String,
+    seed_snapshot_artifact_content_hash: String,
 }
 
 impl LinkedFixture {
@@ -45,6 +46,7 @@ impl LinkedFixture {
             reader,
             seed_review_unit_id: String::new(),
             seed_snapshot_id: String::new(),
+            seed_snapshot_artifact_content_hash: String::new(),
         };
         fs::write(fixture.seed.join("README.md"), "changed in seed\n").unwrap();
         let capture = fixture.capture(&fixture.seed);
@@ -55,6 +57,11 @@ impl LinkedFixture {
         fixture.seed_snapshot_id = capture["reviewUnit"]["snapshotId"]
             .as_str()
             .expect("capture has snapshot id")
+            .to_owned();
+        fixture.seed_snapshot_artifact_content_hash = capture["reviewUnit"]
+            ["snapshotArtifactContentHash"]
+            .as_str()
+            .expect("capture has snapshot artifact content hash")
             .to_owned();
         fixture.link(&fixture.seed);
         fixture.link(&fixture.reader);
@@ -97,6 +104,66 @@ impl LinkedFixture {
             args.push("--include-body");
         }
         run_shore_json(&args)
+    }
+
+    fn unit_show_json(&self, worktree: &Path, review_unit_id: &str) -> Value {
+        run_shore_json(&[
+            "review",
+            "unit",
+            "show",
+            "--repo",
+            worktree.to_str().unwrap(),
+            "--review-unit",
+            review_unit_id,
+            "--include-body",
+        ])
+    }
+
+    /// Record one of each reviewer-facing fact on the seed's review unit.
+    fn seed_full_facts(&self, body: &str) {
+        self.observation_add(&self.seed, &self.seed_review_unit_id, body);
+        let seed = self.seed.to_str().unwrap();
+        run_shore_json(&[
+            "review",
+            "input-request",
+            "open",
+            "--repo",
+            seed,
+            "--track",
+            "agent:test-fixture",
+            "--title",
+            "Need approval",
+            "--reason",
+            "manual-decision-required",
+            "--body",
+            "approve this path?",
+        ]);
+        run_shore_json(&[
+            "review",
+            "assessment",
+            "add",
+            "--repo",
+            seed,
+            "--track",
+            "human:kevin",
+            "--assessment",
+            "accepted",
+            "--summary",
+            "ship it",
+        ]);
+        run_shore_json(&[
+            "review",
+            "validation",
+            "add",
+            "--repo",
+            seed,
+            "--track",
+            "agent:test-fixture",
+            "--check-name",
+            "cargo test",
+            "--status",
+            "passed",
+        ]);
     }
 
     fn unit_list_json(&self, worktree: &Path) -> Value {
@@ -272,6 +339,61 @@ fn linked_history_emits_divergence_diagnostic_with_local_only_events() {
     // Store-only: the reader's unsynced local capture is not in the timeline.
     assert_eq!(json["eventCount"], 1);
     assert!(!json["entries"].to_string().contains(local_unit_id));
+}
+
+#[test]
+fn linked_unit_show_resolves_linked_only_unit() {
+    let fixture = LinkedFixture::new();
+    let body = "o".repeat(5000);
+    fixture.seed_full_facts(&body);
+    fixture.link(&fixture.seed);
+
+    let json = fixture.unit_show_json(&fixture.reader, &fixture.seed_review_unit_id);
+
+    assert_eq!(
+        json["reviewUnit"]["id"],
+        Value::String(fixture.seed_review_unit_id.clone())
+    );
+    assert_eq!(json["summary"]["observationCount"], 1);
+    assert_eq!(json["summary"]["inputRequestCount"], 1);
+    assert_eq!(json["summary"]["assessmentCount"], 1);
+    assert_eq!(json["summary"]["validationCheckCount"], 1);
+    assert_eq!(
+        json["observations"][0]["body"],
+        Value::String(body),
+        "observation body hydrates from the linked store"
+    );
+}
+
+#[test]
+fn linked_unit_show_loads_bound_snapshot_from_linked_store() {
+    let fixture = LinkedFixture::new();
+
+    let json = fixture.unit_show_json(&fixture.reader, &fixture.seed_review_unit_id);
+
+    assert_eq!(
+        json["reviewUnit"]["snapshotArtifactContentHash"],
+        Value::String(fixture.seed_snapshot_artifact_content_hash.clone())
+    );
+    assert!(
+        json["summary"]["snapshotRowCount"].as_u64().unwrap() > 0,
+        "bound snapshot rows project from the linked artifact"
+    );
+}
+
+#[test]
+fn linked_unit_show_emits_divergence_diagnostic_with_local_only_events() {
+    let fixture = LinkedFixture::new();
+    fs::write(fixture.reader.join("README.md"), "changed in reader\n").unwrap();
+    fixture.capture(&fixture.reader);
+
+    let json = fixture.unit_show_json(&fixture.reader, &fixture.seed_review_unit_id);
+
+    assert!(
+        diagnostic_codes(&json).contains(&"clone_local_unsynced_local_events"),
+        "diagnostics: {}",
+        json["diagnostics"]
+    );
 }
 
 #[test]
