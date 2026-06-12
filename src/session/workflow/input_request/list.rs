@@ -10,7 +10,8 @@ use crate::session::EventStore;
 use crate::session::event::AssertionMode;
 use crate::session::observation::{ReviewUnitSelection, resolve_review_unit, validated_track_id};
 use crate::session::state::{ProjectionDiagnostic, SessionState};
-use crate::session::store_init::ShoreStorePaths;
+use crate::session::store::resolution::resolve_read_store;
+use crate::session::workflow::read_store::divergence_diagnostics;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InputRequestListOptions {
@@ -92,8 +93,8 @@ pub struct InputRequestListResult {
 }
 
 pub fn list_input_requests(options: InputRequestListOptions) -> Result<InputRequestListResult> {
-    let paths = ShoreStorePaths::resolve(&options.repo)?;
-    let shore_dir = paths.shore_dir();
+    let read_store = resolve_read_store(&options.repo)?;
+    let shore_dir = read_store.store_dir();
     let event_store = EventStore::open(shore_dir);
     let events = event_store.list_events()?;
     let resolved = resolve_review_unit(
@@ -118,7 +119,8 @@ pub fn list_input_requests(options: InputRequestListOptions) -> Result<InputRequ
         status_filter: options.status,
         include_body: options.include_body,
     })?;
-    let diagnostics = SessionState::from_events(&events)?.diagnostics;
+    let mut diagnostics = SessionState::from_events(&events)?.diagnostics;
+    diagnostics.extend(divergence_diagnostics(&read_store));
 
     Ok(InputRequestListResult {
         review_unit_id: resolved.review_unit_id,

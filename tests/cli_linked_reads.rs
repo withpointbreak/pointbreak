@@ -397,6 +397,130 @@ fn linked_unit_show_emits_divergence_diagnostic_with_local_only_events() {
 }
 
 #[test]
+fn linked_observation_list_resolves_linked_unit() {
+    let fixture = LinkedFixture::new();
+    let body = "b".repeat(5000);
+    fixture.seed_full_facts(&body);
+    fixture.link(&fixture.seed);
+
+    let json = run_shore_json(&[
+        "review",
+        "observation",
+        "list",
+        "--repo",
+        fixture.reader.to_str().unwrap(),
+        "--review-unit",
+        &fixture.seed_review_unit_id,
+        "--include-body",
+    ]);
+
+    assert_eq!(
+        json["reviewUnitId"],
+        Value::String(fixture.seed_review_unit_id.clone())
+    );
+    assert_eq!(json["observations"].as_array().unwrap().len(), 1);
+    assert_eq!(json["observations"][0]["body"], Value::String(body));
+}
+
+#[test]
+fn linked_observation_list_emits_divergence_diagnostic_with_local_only_events() {
+    let fixture = LinkedFixture::new();
+    let body = "c".repeat(64);
+    fixture.seed_full_facts(&body);
+    fixture.link(&fixture.seed);
+    fs::write(fixture.reader.join("README.md"), "changed in reader\n").unwrap();
+    fixture.capture(&fixture.reader);
+
+    let json = run_shore_json(&[
+        "review",
+        "observation",
+        "list",
+        "--repo",
+        fixture.reader.to_str().unwrap(),
+        "--review-unit",
+        &fixture.seed_review_unit_id,
+    ]);
+
+    assert!(
+        diagnostic_codes(&json).contains(&"clone_local_unsynced_local_events"),
+        "diagnostics: {}",
+        json["diagnostics"]
+    );
+}
+
+#[test]
+fn linked_input_request_list_resolves_linked_unit() {
+    let fixture = LinkedFixture::new();
+    fixture.seed_full_facts("short body");
+    fixture.link(&fixture.seed);
+
+    let json = run_shore_json(&[
+        "review",
+        "input-request",
+        "list",
+        "--repo",
+        fixture.reader.to_str().unwrap(),
+        "--review-unit",
+        &fixture.seed_review_unit_id,
+    ]);
+
+    assert_eq!(
+        json["reviewUnitId"],
+        Value::String(fixture.seed_review_unit_id.clone())
+    );
+    assert_eq!(json["inputRequests"].as_array().unwrap().len(), 1);
+    assert_eq!(json["inputRequests"][0]["title"], "Need approval");
+}
+
+#[test]
+fn linked_assessment_show_resolves_linked_unit() {
+    let fixture = LinkedFixture::new();
+    fixture.seed_full_facts("short body");
+    fixture.link(&fixture.seed);
+
+    let json = run_shore_json(&[
+        "review",
+        "assessment",
+        "show",
+        "--repo",
+        fixture.reader.to_str().unwrap(),
+        "--review-unit",
+        &fixture.seed_review_unit_id,
+    ]);
+
+    assert_eq!(
+        json["reviewUnitId"],
+        Value::String(fixture.seed_review_unit_id.clone())
+    );
+    assert_eq!(json["assessments"].as_array().unwrap().len(), 1);
+    assert_eq!(json["assessments"][0]["assessment"], "accepted");
+}
+
+#[test]
+fn linked_validation_list_resolves_linked_unit() {
+    let fixture = LinkedFixture::new();
+    fixture.seed_full_facts("short body");
+    fixture.link(&fixture.seed);
+
+    let json = run_shore_json(&[
+        "review",
+        "validation",
+        "list",
+        "--repo",
+        fixture.reader.to_str().unwrap(),
+        "--review-unit",
+        &fixture.seed_review_unit_id,
+    ]);
+
+    assert_eq!(
+        json["reviewUnitId"],
+        Value::String(fixture.seed_review_unit_id.clone())
+    );
+    assert_eq!(json["validationChecks"].as_array().unwrap().len(), 1);
+    assert_eq!(json["validationChecks"][0]["checkName"], "cargo test");
+}
+
+#[test]
 fn snapshot_artifact_reads_from_linked_store() {
     let fixture = LinkedFixture::new();
     let snapshot_id = SnapshotId::new(fixture.seed_snapshot_id.clone());
