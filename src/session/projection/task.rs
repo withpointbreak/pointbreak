@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::crypto::EventVerificationStatus;
 use crate::error::Result;
 use crate::model::{
     ActorId, CheckpointId, EventId, InputRequestId, InputRequestResponseId, ObservationId,
@@ -17,6 +18,7 @@ use crate::session::event::{
     TaskAttemptCapturedPayload, TaskCheckpointCapturedPayload, TaskObservationRecordedPayload,
     Writer, decode_input_request_opened_payload,
 };
+use crate::session::{TrustSet, verify_event_signature};
 
 /// Envelope-level fields preserved on every projected event, so the projection
 /// does not silently lose envelope identity / authorship / source provenance.
@@ -492,6 +494,40 @@ pub(crate) struct AgentResumptionProjection {
     pub diagnostics: Vec<TaskProjectionDiagnostic>,
 }
 
+/// ADR-0009: the named reader-side projection policy for resumption binding.
+/// This is ADR-0003's "a specific projection policy treats them as operative"
+/// given a name. It is not the store's `EventVerificationPolicy` — acceptance
+/// and bindingness are separate questions.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum ResumptionBindingPolicy {
+    /// Arm (a) local possession and arm (b) verified signer both bind.
+    #[default]
+    LocalAndVerified,
+    /// Only arm (b) binds: nothing binds without a key — including the
+    /// store's own unsigned responses. For stores whose possession does not
+    /// imply authorship (shared checkouts, cp -r copies).
+    VerifiedOnly,
+}
+
+impl ResumptionBindingPolicy {
+    fn permits_local_possession(self) -> bool {
+        matches!(self, ResumptionBindingPolicy::LocalAndVerified)
+    }
+}
+
+/// The per-response binding evidence: verification status (arm b) and
+/// ingest-stamp presence (arm a). Computed where the full `ShoreEvent` is in
+/// hand; the predicate never reads a self-asserted field.
+fn response_binding_evidence(
+    event: &ShoreEvent,
+    trust_set: &TrustSet,
+) -> Result<(EventVerificationStatus, bool)> {
+    Ok((
+        verify_event_signature(event, trust_set)?,
+        event.ingest.is_some(),
+    ))
+}
+
 /// Read-side projection that answers: may this agent resume the named
 /// `TaskAttempt`? The output is intentionally diagnostic-rich; the policy
 /// never relies on a scheduler, lease, write gate, or global "current task".
@@ -500,7 +536,12 @@ pub(crate) fn agent_resumption_from_events(
     events: &[ShoreEvent],
     task_attempt_id: &WorkObjectId,
     reader_actor_id: &ActorId,
+    trust_set: &TrustSet,
+    binding_policy: ResumptionBindingPolicy,
 ) -> Result<AgentResumptionProjection> {
+    // Held for the two-arm predicate slice (Task 2.2); the predicate is still
+    // constant false here, so the policy has no observable effect yet.
+    let _ = binding_policy.permits_local_possession();
     let attempt_summary =
         task_attempt_summary_from_events(events, task_attempt_id, reader_actor_id)?;
 
@@ -535,7 +576,8 @@ pub(crate) fn agent_resumption_from_events(
         .as_ref()
         .and_then(|cp| cp.checkpoint_fingerprint.clone());
 
-    let input_request_records = collect_task_input_request_records(events, task_attempt_id)?;
+    let input_request_records =
+        collect_task_input_request_records(events, task_attempt_id, trust_set)?;
     let operative_input_request_records = input_request_records
         .iter()
         .filter(|record| record.view.mode == AssertionMode::Operative)
@@ -791,11 +833,18 @@ struct TaskInputRequestResponseRecord {
     reason_byte_size: Option<u64>,
     reason_content_hash: Option<String>,
     target_fingerprint: Option<String>,
+    /// Binding evidence (ADR-0009), computed at collection where the full
+    /// `ShoreEvent` is in hand. Consumed by the two-arm predicate (Task 2.2).
+    #[allow(dead_code)]
+    verification: EventVerificationStatus,
+    #[allow(dead_code)]
+    ingested: bool,
 }
 
 fn collect_task_input_request_records(
     events: &[ShoreEvent],
     task_attempt_id: &WorkObjectId,
+    trust_set: &TrustSet,
 ) -> Result<Vec<TaskInputRequestRecord>> {
     let mut request_views: Vec<TaskInputRequestView> = Vec::new();
     // Collapse duplicate semantic response facts by
@@ -845,6 +894,7 @@ fn collect_task_input_request_records(
                     serde_json::from_value(event.payload.clone())?;
                 let input_request_id = payload.input_request_id.clone();
                 let response_id = payload.input_request_response_id.clone();
+                let (verification, ingested) = response_binding_evidence(event, trust_set)?;
                 let record = TaskInputRequestResponseRecord {
                     envelope: TaskProjectionEventEnvelope::from_event(event),
                     response_id: response_id.clone(),
@@ -854,6 +904,8 @@ fn collect_task_input_request_records(
                     reason_byte_size: payload.reason_byte_size,
                     reason_content_hash: payload.reason_content_hash,
                     target_fingerprint: payload.target_fingerprint,
+                    verification,
+                    ingested,
                 };
                 response_representatives
                     .entry(response_id)
@@ -937,14 +989,16 @@ fn response_identity_is_binding(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::canonical_hash::sha256_bytes_hex;
+    use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
     use crate::model::{
         ActorId, CheckpointId, ObservationId, SessionId, TargetRef, TaskTargetRef, WorkObjectId,
     };
     use crate::session::event::{
-        AssertionMode, EventTarget, EventType, ShoreEvent, SourceRef, TaskAttemptCapturedPayload,
-        TaskCheckpointCapturedPayload, TaskObservationRecordedPayload, Writer, WriterTool,
+        AssertionMode, EventTarget, EventType, IngestProvenance, IngestVia, ShoreEvent, SourceRef,
+        TaskAttemptCapturedPayload, TaskCheckpointCapturedPayload, TaskObservationRecordedPayload,
+        Writer, WriterTool,
     };
+    use crate::session::event_signature_trust_set;
 
     fn writer_user() -> Writer {
         Writer {
@@ -2031,8 +2085,14 @@ mod tests {
             &[(&checkpoint, "msg_1", "2026-05-18T00:00:01Z")],
         );
 
-        let projection =
-            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        let projection = agent_resumption_from_events(
+            &events,
+            &task_attempt_id,
+            &reader_actor(),
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        )
+        .unwrap();
 
         assert!(projection.may_resume);
         assert_eq!(projection.state, AgentResumptionState::Ready);
@@ -2058,8 +2118,14 @@ mod tests {
             AssertionMode::Advisory,
         ));
 
-        let projection =
-            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        let projection = agent_resumption_from_events(
+            &events,
+            &task_attempt_id,
+            &reader_actor(),
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        )
+        .unwrap();
 
         assert!(projection.may_resume);
         assert_eq!(projection.state, AgentResumptionState::Ready);
@@ -2100,8 +2166,14 @@ mod tests {
             "2026-05-18T00:00:04Z",
         ));
 
-        let projection =
-            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        let projection = agent_resumption_from_events(
+            &events,
+            &task_attempt_id,
+            &reader_actor(),
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        )
+        .unwrap();
 
         assert!(projection.may_resume);
         assert_eq!(projection.state, AgentResumptionState::Ready);
@@ -2146,8 +2218,14 @@ mod tests {
             "2026-05-18T00:00:03Z",
         ));
 
-        let projection =
-            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        let projection = agent_resumption_from_events(
+            &events,
+            &task_attempt_id,
+            &reader_actor(),
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        )
+        .unwrap();
 
         assert!(projection.may_resume);
         assert_eq!(projection.state, AgentResumptionState::Ready);
@@ -2172,8 +2250,14 @@ mod tests {
             AssertionMode::Operative,
         ));
 
-        let projection =
-            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        let projection = agent_resumption_from_events(
+            &events,
+            &task_attempt_id,
+            &reader_actor(),
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        )
+        .unwrap();
 
         assert!(!projection.may_resume);
         assert_eq!(projection.state, AgentResumptionState::Blocked);
@@ -2207,8 +2291,14 @@ mod tests {
             "open call",
         ));
 
-        let projection =
-            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        let projection = agent_resumption_from_events(
+            &events,
+            &task_attempt_id,
+            &reader_actor(),
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        )
+        .unwrap();
 
         assert!(!projection.may_resume);
         assert_eq!(projection.state, AgentResumptionState::Blocked);
@@ -2262,8 +2352,14 @@ mod tests {
             "2026-05-18T00:00:03Z",
         ));
 
-        let projection =
-            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        let projection = agent_resumption_from_events(
+            &events,
+            &task_attempt_id,
+            &reader_actor(),
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        )
+        .unwrap();
 
         assert!(!projection.may_resume);
         assert_eq!(projection.state, AgentResumptionState::Blocked);
@@ -2311,8 +2407,14 @@ mod tests {
         response.payload["sourceSpeaker"] = serde_json::json!("user");
         events.push(response);
 
-        let projection =
-            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        let projection = agent_resumption_from_events(
+            &events,
+            &task_attempt_id,
+            &reader_actor(),
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        )
+        .unwrap();
 
         assert!(!projection.may_resume);
         assert_eq!(projection.state, AgentResumptionState::Blocked);
@@ -2321,6 +2423,84 @@ mod tests {
             .as_ref()
             .expect("selected response");
         assert!(!response_view.identity_treated_as_binding);
+    }
+
+    #[test]
+    fn resumption_binding_policy_default_is_local_and_verified() {
+        assert_eq!(
+            ResumptionBindingPolicy::default(),
+            ResumptionBindingPolicy::LocalAndVerified
+        );
+        assert!(ResumptionBindingPolicy::LocalAndVerified.permits_local_possession());
+        assert!(!ResumptionBindingPolicy::VerifiedOnly.permits_local_possession());
+    }
+
+    #[test]
+    fn response_binding_evidence_reports_verification_and_ingest_presence() {
+        let input_request_id = InputRequestId::new("input-request:sha256:1");
+        let response_id = InputRequestResponseId::new("input-request-response:sha256:r");
+        let unsigned = user_response_event(
+            &input_request_id,
+            &response_id,
+            InputRequestResponseOutcome::Approved,
+            AssertionMode::Operative,
+            "2026-05-18T00:00:03Z",
+        );
+
+        // Unsigned local event -> (Unsigned, ingested: false)
+        assert_eq!(
+            response_binding_evidence(&unsigned, &TrustSet::default()).unwrap(),
+            (EventVerificationStatus::Unsigned, false)
+        );
+
+        // Unsigned event with an ingest stamp -> (Unsigned, ingested: true)
+        let mut stamped = unsigned.clone();
+        stamped.ingest = Some(IngestProvenance {
+            via: IngestVia::IngestEvents,
+            received_at: "unix-ms:1".to_owned(),
+        });
+        assert_eq!(
+            response_binding_evidence(&stamped, &TrustSet::default()).unwrap(),
+            (EventVerificationStatus::Unsigned, true)
+        );
+
+        // Signed fixture event + authorizing trust set -> Valid.
+        let signed: ShoreEvent = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/event_signatures/friendly-valid-event.json"
+        ))
+        .unwrap();
+        let fixture_trust = event_signature_trust_set(
+            serde_json::from_str(include_str!(
+                "../../../tests/fixtures/event_signatures/did-key-ed25519.json"
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            response_binding_evidence(&signed, &fixture_trust)
+                .unwrap()
+                .0,
+            EventVerificationStatus::Valid
+        );
+
+        // Signed event + empty trust set (non-did:key actor) -> UntrustedKey.
+        assert_eq!(
+            response_binding_evidence(&signed, &TrustSet::default())
+                .unwrap()
+                .0,
+            EventVerificationStatus::UntrustedKey
+        );
+
+        // Tampered signed event -> Invalid.
+        let mut tampered = signed.clone();
+        tampered.payload["tamperedAfterSigning"] = serde_json::json!(true);
+        tampered.payload_hash = sha256_json_prefixed(&tampered.payload).unwrap();
+        assert_eq!(
+            response_binding_evidence(&tampered, &fixture_trust)
+                .unwrap()
+                .0,
+            EventVerificationStatus::Invalid
+        );
     }
 
     #[test]
@@ -2348,8 +2528,14 @@ mod tests {
             "2026-05-18T00:00:03Z",
         ));
 
-        let projection =
-            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        let projection = agent_resumption_from_events(
+            &events,
+            &task_attempt_id,
+            &reader_actor(),
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        )
+        .unwrap();
         assert!(!projection.may_resume);
         assert_eq!(projection.state, AgentResumptionState::Blocked);
         assert!(!projection.treated_as_operative);
@@ -2388,8 +2574,14 @@ mod tests {
             "2026-05-18T00:00:04Z",
         ));
 
-        let projection =
-            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        let projection = agent_resumption_from_events(
+            &events,
+            &task_attempt_id,
+            &reader_actor(),
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        )
+        .unwrap();
 
         assert!(!projection.may_resume);
         assert_eq!(projection.state, AgentResumptionState::Ambiguous);
@@ -2439,8 +2631,14 @@ mod tests {
             "2026-05-18T00:00:03Z",
         ));
 
-        let projection =
-            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        let projection = agent_resumption_from_events(
+            &events,
+            &task_attempt_id,
+            &reader_actor(),
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        )
+        .unwrap();
         assert!(!projection.may_resume);
         assert_eq!(projection.state, AgentResumptionState::Stale);
         assert!(!projection.treated_as_operative);
@@ -2538,8 +2736,14 @@ mod tests {
         let input_requests =
             open_task_input_requests_from_events(&events, &task_attempt_id, &reader_actor())
                 .unwrap();
-        let resumption =
-            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        let resumption = agent_resumption_from_events(
+            &events,
+            &task_attempt_id,
+            &reader_actor(),
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        )
+        .unwrap();
 
         let task_event_ids: Vec<&str> = [
             attempt.event_id.as_str(),
@@ -2710,8 +2914,14 @@ mod tests {
     #[test]
     fn agent_resumption_fails_closed_when_task_attempt_absent() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:missing");
-        let projection =
-            agent_resumption_from_events(&[], &task_attempt_id, &reader_actor()).unwrap();
+        let projection = agent_resumption_from_events(
+            &[],
+            &task_attempt_id,
+            &reader_actor(),
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        )
+        .unwrap();
         assert!(!projection.may_resume);
         assert_eq!(projection.state, AgentResumptionState::NoAttempt);
         assert!(
@@ -2803,8 +3013,14 @@ mod tests {
             Some("sha256:reason".to_owned()),
         ));
 
-        let projection =
-            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        let projection = agent_resumption_from_events(
+            &events,
+            &task_attempt_id,
+            &reader_actor(),
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        )
+        .unwrap();
 
         let selected = projection.selected_input_request.expect("request surfaced");
         assert_eq!(
@@ -2853,8 +3069,14 @@ mod tests {
             Some("sha256:reason-hash".to_owned()),
         ));
 
-        let projection =
-            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        let projection = agent_resumption_from_events(
+            &events,
+            &task_attempt_id,
+            &reader_actor(),
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        )
+        .unwrap();
 
         let view = projection
             .selected_response
@@ -2914,8 +3136,14 @@ mod tests {
         events.push(first);
         events.push(retry);
 
-        let projection =
-            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        let projection = agent_resumption_from_events(
+            &events,
+            &task_attempt_id,
+            &reader_actor(),
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        )
+        .unwrap();
 
         // The retry pair collapses to one representative response (not
         // Ambiguous); identity-based binding then blocks resumption because
@@ -2976,8 +3204,14 @@ mod tests {
         events.push(first);
         events.push(second);
 
-        let projection =
-            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        let projection = agent_resumption_from_events(
+            &events,
+            &task_attempt_id,
+            &reader_actor(),
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        )
+        .unwrap();
 
         // Collapsed to one representative (not Ambiguous); identity-based
         // binding then blocks resumption — no binding trust source exists.
@@ -3202,8 +3436,14 @@ mod tests {
             Some(FP_A),
         ));
 
-        let projection =
-            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        let projection = agent_resumption_from_events(
+            &events,
+            &task_attempt_id,
+            &reader_actor(),
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        )
+        .unwrap();
 
         assert!(!projection.may_resume);
         assert_eq!(projection.state, AgentResumptionState::Stale);
@@ -3279,8 +3519,14 @@ mod tests {
             Some(FP_A),
         ));
 
-        let projection =
-            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        let projection = agent_resumption_from_events(
+            &events,
+            &task_attempt_id,
+            &reader_actor(),
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        )
+        .unwrap();
 
         // Freshness pin: agreement on the opaque fingerprint is the signal.
         // Resumption itself stays blocked — identity-based binding has no
@@ -3362,8 +3608,14 @@ mod tests {
             Some(FP_C),
         ));
 
-        let projection =
-            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        let projection = agent_resumption_from_events(
+            &events,
+            &task_attempt_id,
+            &reader_actor(),
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        )
+        .unwrap();
 
         assert!(!projection.may_resume);
         assert_eq!(
@@ -3443,8 +3695,14 @@ mod tests {
             Some(FP_A),
         ));
 
-        let projection =
-            agent_resumption_from_events(&events, &task_attempt_id, &reader_actor()).unwrap();
+        let projection = agent_resumption_from_events(
+            &events,
+            &task_attempt_id,
+            &reader_actor(),
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        )
+        .unwrap();
 
         assert_ne!(
             projection.state,
