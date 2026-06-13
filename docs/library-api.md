@@ -54,7 +54,9 @@ Shoreline does not introduce async traits or a runtime of its own.
 
 | Item | Purpose |
 | ---- | ------- |
-| `capture_worktree_review` + `CaptureOptions` | Capture a Git working tree into a ReviewUnit. |
+| `capture_review` + `CaptureOptions` | Canonical capture entry point; dispatches on the options' source spec (worktree by default, or a commit range via `CaptureOptions::with_commit_range`). |
+| `CommitRangeSpec` | Commit-range capture input: a base rev and an optional target rev (default `HEAD`), resolved to commit endpoints at capture time. |
+| `capture_worktree_review` + `CaptureOptions` | Worktree-source convenience entry point; delegates to `capture_review`. |
 | `open_input_request` / `respond_input_request` (+ options/results) | Open and operatively respond to input requests. |
 | `record_observation` / `record_assessment` / `record_validation_check` (+ options/results) | Record observations, the review assessment, and advisory validation evidence. |
 

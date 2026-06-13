@@ -9,8 +9,11 @@ command and *why*. If the change was authored by a coding agent, start with
 ## What Shoreline reviews
 
 Shoreline reviews a **ReviewUnit**: the base endpoint, the target endpoint, and a
-captured diff snapshot taken at a single moment. V1 captures the local Git
-worktree from `HEAD` to the working tree, including untracked files.
+captured diff snapshot taken at a single moment. V1 captures one of two shapes:
+the local Git worktree from `HEAD` to the working tree, including untracked files
+(the default); or, with `shore review capture --base <rev>`, the committed range
+between two resolved commits (`<rev>..--target`, target defaulting to `HEAD`),
+read as a tree diff with no working-tree involvement.
 
 Each ReviewUnit gets its own immutable snapshot artifact. Anything you record
 afterwards — observations, input requests, assessments — attaches to that
@@ -38,11 +41,14 @@ The rest of this document walks through each step.
 
 ## 1. Start in a worktree with the change
 
-Shoreline expects to run inside a Git worktree where the working tree differs from
-`HEAD`. The change can come from anywhere — a coding agent, a teammate's WIP
-branch, your own edits — but it must be present in the working tree before
-capture. Shoreline reads the diff from `git`; it does not summarize prior commits
-on its own.
+Shoreline runs inside a Git worktree. For the default capture the working tree
+must differ from `HEAD`; the change can come from anywhere — a coding agent, a
+teammate's WIP branch, your own edits — but it must be present in the working
+tree before capture. Shoreline reads the diff from `git`; it does not summarize
+prior commits on its own. If the change is already committed, capture the
+committed range directly with `shore review capture --base <rev>` (see
+[section 2](#2-capture-a-reviewunit)) instead of recreating it in the working
+tree.
 
 ```bash
 cd path/to/worktree
@@ -79,6 +85,29 @@ scope.
 
 The snapshot is now frozen. Re-running `shore review capture` later creates a
 new ReviewUnit; it does not mutate the previous one.
+
+### Capturing a committed range
+
+When the change is already committed and the working tree is clean, capture the
+landed range instead of recreating a working-tree diff:
+
+```bash
+shore review capture --base <commit-before-the-change>   # target defaults to HEAD
+shore review capture --base <rev> --target <rev>         # explicit range
+```
+
+`--base`/`--target` resolve any rev (a branch, tag, `HEAD~N`, or commit OID) to a
+commit; annotated tags peel, and a non-commit or unknown rev is rejected with an
+honest error. The capture is the `base..target` tree diff — both endpoints are
+`git_commit`, no working-tree or untracked state is read, and no worktree path
+appears in the output. This is the supported way to review after landing: never
+rewrite history (for example `git reset --soft`) to manufacture a worktree diff.
+
+A post-landing range capture is a second current ReviewUnit alongside any
+worktree capture, so disambiguate later reads and writes with `--review-unit
+<id>` (or a lineage scope), exactly as for any multi-capture store. Recording the
+landed commit, choosing a canonical capture, and ReviewUnit lifecycle remain open
+follow-ups.
 
 Lineage-aware command paths attach immutable captures with
 `review_unit_lineage_round_recorded` facts:

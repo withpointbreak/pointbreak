@@ -10,19 +10,21 @@ human says "done" or "hand off", or when the agent is about to switch to unrelat
 per meaningful change, not after every file edit.
 
 The authoring skill is reactive: it triggers at the end of a work session, so install it in the
-agent environment before that session begins. If the skill is added only afterward, the change may
-already be committed, which leaves only the degraded post-commit path: v0.1.0 `shore review capture`
-reads `HEAD` to the working tree, so a clean post-commit working tree has nothing useful left to
-capture.
+agent environment before that session begins. Capturing before any commit keeps the whole change in
+the working tree, the simplest shape to hand off. If the skill is added only afterward and the change
+is already committed, capture the landed range with `shore review capture --base <rev>` instead of
+recreating a worktree diff.
 
 ## The Capture Moment
 
 `shore review capture` freezes the current Git worktree diff from `HEAD` to the working tree,
-including untracked files. That timing matters. If the agent commits part of the task first, a later
-capture only sees the remaining uncommitted diff; if it commits everything and leaves a clean working
-tree, there is no task diff left for Shoreline to capture. For an agent-authored change, the expected
-order is: finish the implementation, run the relevant checks, capture the ReviewUnit while the full
-change is still in the worktree, record the handoff facts, then stop.
+including untracked files. That timing matters for the default capture: if the agent commits part of
+the task first, a later worktree capture only sees the remaining uncommitted diff. The preferred
+order is to finish the implementation, run the relevant checks, capture the ReviewUnit while the full
+change is still in the worktree, record the handoff facts, then stop. If the change is already
+committed and the working tree is clean, capture the committed range instead with
+`shore review capture --base <commit-before-the-change>` (target defaults to `HEAD`) — never rewrite
+history to manufacture a worktree diff.
 
 Humans set up the loop by making the expectation explicit: when the agent reaches the end of a task,
 it should run Shoreline before declaring the task complete. Agents execute the loop from inside the

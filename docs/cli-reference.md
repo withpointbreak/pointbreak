@@ -113,14 +113,24 @@ unchanged, so re-validating the hash means fetching the artifact, not hashing th
 ## `shore review capture`
 
 ```bash
-shore review capture [--repo <path>] [--lineage <lineage-id>] [--predecessor <review-unit-id>] \
-  [--change-id <change-id>]
+shore review capture [--repo <path>] [--base <rev> [--target <rev>]] \
+  [--lineage <lineage-id>] [--predecessor <review-unit-id>] [--change-id <change-id>]
 ```
 
 `shore review capture` records the current V1 ReviewUnit: the base endpoint, target endpoint, and
-captured diff snapshot. V1 captures the local Git worktree from `HEAD` to the working tree,
-including untracked files.
+captured diff snapshot. By default V1 captures the local Git worktree from `HEAD` to the working
+tree, including untracked files (source `git_worktree`).
 
+- With `--base <rev>`, capture instead records the committed range from `<rev>` to `--target`
+  (default `HEAD`) as a `git_commit_range` source. Both revs are resolved with `git rev-parse` to
+  commit OIDs at capture time: annotated tags peel to their commit, and a rev that does not exist or
+  does not name a commit (a blob or tree) is rejected with an error that names the rev. The snapshot
+  is the `base..target` tree diff with no working-tree, index, or untracked involvement, so both
+  endpoints serialize as `git_commit` and no worktree path appears in the output. `--target`
+  requires `--base`. Re-capturing the same range is idempotent and reports `eventsExisting`, and an
+  equivalent rev spelling (`HEAD~1` versus the resolved OID) captures the same ReviewUnit because
+  rev spellings are never stored. The `clone_local_capture_batch_only` diagnostic applies the same
+  as for worktree capture.
 - Durable state is created at the Git worktree root under `.shore/`.
 - The command registers `.shore/` in the repository-local `.git/info/exclude`
   when it is not already ignored, so it never modifies a tracked `.gitignore` or
