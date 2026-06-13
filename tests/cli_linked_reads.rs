@@ -670,6 +670,74 @@ fn linked_local_capture_file_target_observation_resolves_artifact() {
     assert_eq!(json["target"]["reviewUnitId"], Value::String(local_unit_id));
 }
 
+#[test]
+fn linked_reader_attaches_observation_to_linked_only_unit() {
+    let fixture = LinkedFixture::new();
+
+    // The reader attaches an observation to the seed's linked-only unit. Before
+    // the migration this is RED: record_observation validates against the
+    // reader's empty worktree-local store and fails with "unknown review unit".
+    let result = fixture.observation_add(
+        &fixture.reader,
+        &fixture.seed_review_unit_id,
+        "cross-worktree note",
+    );
+
+    assert_eq!(result["eventsCreated"], 1);
+    assert!(
+        result["observationId"].as_str().is_some(),
+        "result carries an observation id: {result}"
+    );
+}
+
+#[test]
+fn linked_reader_observation_result_carries_fact_batch_only_diagnostic() {
+    let fixture = LinkedFixture::new();
+
+    let result = fixture.observation_add(&fixture.reader, &fixture.seed_review_unit_id, "note");
+
+    assert!(
+        diagnostic_codes(&result).contains(&"clone_local_fact_batch_only"),
+        "diagnostics: {}",
+        result["diagnostics"]
+    );
+}
+
+#[test]
+fn worktree_local_observation_add_has_no_fact_batch_only_diagnostic() {
+    // Unlinked repo: the batch-only diagnostic is linked-mode only, so it must
+    // be ABSENT here (additive contract).
+    let repo = GitRepo::new();
+    repo.write("README.md", "base\n");
+    repo.commit_all("base");
+    repo.write("README.md", "changed locally\n");
+    let capture = run_shore_json(&["review", "capture", "--repo", repo.path().to_str().unwrap()]);
+    let unit_id = capture["reviewUnit"]["id"].as_str().unwrap().to_owned();
+
+    let result = run_shore_json(&[
+        "review",
+        "observation",
+        "add",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--review-unit",
+        &unit_id,
+        "--track",
+        "agent:test-fixture",
+        "--title",
+        "local note",
+        "--body",
+        "body",
+    ]);
+
+    assert_eq!(result["eventsCreated"], 1);
+    assert!(
+        !diagnostic_codes(&result).contains(&"clone_local_fact_batch_only"),
+        "diagnostics: {}",
+        result["diagnostics"]
+    );
+}
+
 fn event_set_hash(json: &Value) -> &str {
     json["eventSetHash"].as_str().expect("eventSetHash present")
 }

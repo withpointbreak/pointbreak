@@ -152,7 +152,7 @@ pub(crate) fn resolve_read_store(repo: impl AsRef<Path>) -> Result<ReadStore> {
 /// against everything the writer can see — the linked store ∪ worktree-local
 /// events not yet copied by `store link`. The write itself still resolves
 /// `ShoreStorePaths::resolve` and stays worktree-local per the batch-only
-/// contract (plan 0064).
+/// contract.
 ///
 /// Three seams, deliberately distinct:
 /// - [`resolve_read_store`] — read surfaces; store-only, unsynced local events
@@ -161,18 +161,12 @@ pub(crate) fn resolve_read_store(repo: impl AsRef<Path>) -> Result<ReadStore> {
 ///   reads; the writer-visible **union** (this type).
 /// - [`ShoreStorePaths::resolve`] — the local write landing where events,
 ///   artifacts, and `state.json` are written.
-//
-// `dead_code` allow is transient: the seam ships in plan 0064 task 1.1 ahead of
-// its first write-path consumer (task 2.1 migrates `record_observation`). Remove
-// the allow when the first migration wires `resolve_write_validation_store` in.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct WriteValidationStore {
     read_store: ReadStore,
     worktree_shore_dir: PathBuf,
 }
 
-#[allow(dead_code)]
 impl WriteValidationStore {
     /// The writer-visible union, deduplicated by event id and sorted ascending
     /// by event id. In WorktreeLocal mode this reduces to the plain local event
@@ -191,9 +185,15 @@ impl WriteValidationStore {
         merged.dedup_by(|a, b| a.event_id == b.event_id);
         Ok(merged)
     }
+
+    /// The underlying store-resolution view, for the batch-only diagnostic
+    /// adapter (`fact_batch_only_diagnostics`): it reads `resolution.mode` to
+    /// decide whether the fact landed local-only in a linked checkout.
+    pub(crate) fn read_store(&self) -> &ReadStore {
+        &self.read_store
+    }
 }
 
-#[allow(dead_code)] // Transient: first consumer lands in plan 0064 task 2.1.
 pub(crate) fn resolve_write_validation_store(
     repo: impl AsRef<Path>,
 ) -> Result<WriteValidationStore> {
