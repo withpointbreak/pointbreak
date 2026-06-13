@@ -1234,4 +1234,149 @@ mod tests {
             Some("ingested_unsigned")
         );
     }
+
+    // -- write-side companion: cross-worktree-AUTHORED response ----------------
+    //
+    // The cross-worktree READ of a response is covered elsewhere; this covers a
+    // response *authored* in a sibling worktree against a linked-only request.
+    // The resumption-binding predicate is store-agnostic, so a response authored
+    // in the reader's worktree-local store and copied by `store link` is
+    // bundle-stamped exactly like any ingested event: it stops binding by
+    // possession and becomes ingested_unsigned unless signed.
+    //
+    // The task attempt and its input request live in the linked store (seed
+    // authored, linked); the reader — already linked — authors only the response
+    // locally.
+
+    fn cross_worktree_response_pair(
+        origin_events: &[ShoreEvent],
+        response_event: &ShoreEvent,
+    ) -> (
+        TestRepo,
+        tempfile::TempDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+    ) {
+        let main = TestRepo::new();
+        main.write("README.md", "base\n");
+        main.commit_all("base");
+
+        let parent = tempfile::tempdir().unwrap();
+        let seed = parent.path().join("seed");
+        let reader = parent.path().join("reader");
+        main.git(["worktree", "add", "-b", "seed", seed.to_str().unwrap()]);
+        main.git(["worktree", "add", "-b", "reader", reader.to_str().unwrap()]);
+
+        // The seed authors the task attempt + input request and links them into
+        // the clone-local store.
+        let seed_store = EventStore::open(seed.join(".shore"));
+        for event in origin_events {
+            seed_store.record_event_once(event).unwrap();
+        }
+        link(&seed);
+        // The reader registers (so its write validation can see the linked-only
+        // request), then authors the response in its own worktree-local store —
+        // unsynced until it links again.
+        link(&reader);
+        EventStore::open(reader.join(".shore"))
+            .record_event_once(response_event)
+            .unwrap();
+        (main, parent, seed, reader)
+    }
+
+    #[test]
+    fn cross_worktree_unsigned_response_is_non_binding_ingested_unsigned_after_link() {
+        let (events, task_attempt_id) = task_resumption_events();
+        let response = events.last().expect("response event").clone();
+        let origin = &events[..events.len() - 1];
+        let (_main, _parent, _seed, reader) = cross_worktree_response_pair(origin, &response);
+
+        // The reader links: its unsigned response is copied into the linked store
+        // and bundle-stamped.
+        link(&reader);
+        let stored = linked_store_events(&reader);
+        assert!(stored.iter().all(|event| event.ingest.is_some()));
+
+        let projection = resumption_projection(
+            &stored,
+            &task_attempt_id,
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        );
+
+        assert!(!projection.may_resume);
+        assert_eq!(projection.state, AgentResumptionState::Blocked);
+        assert_eq!(
+            identity_reason(&projection).as_deref(),
+            Some("ingested_unsigned")
+        );
+    }
+
+    #[test]
+    fn cross_worktree_signed_authorized_response_binds_after_link() {
+        let (mut events, task_attempt_id) = task_resumption_events();
+        let signer = DeterministicSigner::fixture();
+        crate::session::sign_event_if_requested(
+            events.last_mut().expect("response event"),
+            &crate::session::EventSigningOptions::sign_with(signer.clone()),
+        )
+        .unwrap();
+        let trust = trust_for_actor(&ActorId::new("actor:claude_code:user"), &signer);
+        let response = events.last().expect("response event").clone();
+        let origin = &events[..events.len() - 1];
+        let (_main, _parent, _seed, reader) = cross_worktree_response_pair(origin, &response);
+
+        link(&reader);
+        let stored = linked_store_events(&reader);
+
+        let projection = resumption_projection(
+            &stored,
+            &task_attempt_id,
+            &trust,
+            ResumptionBindingPolicy::default(),
+        );
+
+        // Arm (b) verified-signer binds identically from any store.
+        assert!(projection.may_resume);
+        assert_eq!(projection.state, AgentResumptionState::Ready);
+    }
+
+    #[test]
+    fn cross_worktree_unsigned_response_binds_locally_before_link_baseline() {
+        let (events, task_attempt_id) = task_resumption_events();
+        let response = events.last().expect("response event").clone();
+        let origin = &events[..events.len() - 1];
+        let (_main, _parent, _seed, reader) = cross_worktree_response_pair(origin, &response);
+
+        // Before the reader links the response, its writer-visible union is the
+        // linked store's request plus its OWN unstamped local response.
+        let mut union = linked_store_events(&reader);
+        union.extend(
+            EventStore::open(reader.join(".shore"))
+                .list_events()
+                .unwrap(),
+        );
+        assert!(
+            union
+                .iter()
+                .find(|event| event.event_type == EventType::InputRequestResponded)
+                .expect("the local response is in the union")
+                .ingest
+                .is_none(),
+            "the reader's own response is unstamped before it links"
+        );
+
+        let projection = resumption_projection(
+            &union,
+            &task_attempt_id,
+            &TrustSet::default(),
+            ResumptionBindingPolicy::default(),
+        );
+
+        // The author's own unstamped response binds via arm (a) possession; the
+        // flip to ingested_unsigned is a function of which store the response is
+        // read from, not of this slice's write path.
+        assert!(projection.may_resume);
+        assert_eq!(projection.state, AgentResumptionState::Ready);
+    }
 }
