@@ -12,6 +12,7 @@ use crate::model::{
 };
 use crate::session::event::{
     EventTarget, EventType, InputRequestRespondedPayload, InputRequestResponseOutcome, ShoreEvent,
+    decode_input_request_opened_payload,
 };
 use crate::session::observation::staged_body;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
@@ -113,6 +114,13 @@ pub fn respond_input_request(
     // resolves the writer-visible union.
     let validation_store = resolve_write_validation_store(&options.repo)?;
     let validation_events = validation_store.validation_events()?;
+
+    // A task-attempt input request belongs to the agent-resumption domain
+    // (authored by the agent session / relay): it carries no review unit and no
+    // track, so the review-shaped projection below would otherwise fail deep with
+    // a confusing "missing track id". Detect it up front and name the boundary.
+    reject_task_attempt_input_request(&validation_events, &options.input_request_id)?;
+
     let InputRequestProjectionRecords {
         mut request_records,
         ..
@@ -233,6 +241,38 @@ pub fn respond_input_request(
     Ok(result)
 }
 
+/// Error if `input_request_id` names a task-attempt input request. Those belong
+/// to the agent-resumption domain — authored by the agent session / relay, not
+/// by `shore review input-request open` — and are not answerable through this
+/// review-fact command. A task-attempt request has a work object but no review
+/// unit, so the generic review-shaped lookup would otherwise reject it deep in
+/// the projection on a missing track id.
+fn reject_task_attempt_input_request(
+    events: &[ShoreEvent],
+    input_request_id: &InputRequestId,
+) -> Result<()> {
+    for event in events
+        .iter()
+        .filter(|event| event.event_type == EventType::InputRequestOpened)
+    {
+        let payload = decode_input_request_opened_payload(event.payload.clone())?;
+        if &payload.input_request_id == input_request_id
+            && event.target.review_unit_id.is_none()
+            && event.target.work_object_id.is_some()
+        {
+            return Err(ShoreError::WorkflowInputInvalid {
+                reason: format!(
+                    "input request {} targets a task attempt, not a review unit; \
+                     task-attempt input requests are answered by the agent session that owns \
+                     them, not by shore review input-request respond",
+                    input_request_id.as_str()
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 struct InputRequestResponseIdMaterial<'a> {
     input_request_id: &'a InputRequestId,
     outcome: InputRequestResponseOutcome,
@@ -252,4 +292,93 @@ fn build_input_request_response_id(
     Ok(InputRequestResponseId::new(format!(
         "input-request-response:{digest}"
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+    use std::process::Command;
+
+    use super::*;
+    use crate::model::{SessionId, TaskTargetRef, WorkObjectId};
+    use crate::session::projection::test_support::task_input_request_event_with_target;
+
+    #[test]
+    fn respond_to_task_attempt_request_explains_the_domain_boundary() {
+        let repo = TestRepo::new();
+        // A task-attempt input request — the agent-resumption domain, authored by
+        // the relay/adapter, not by `shore review input-request open`.
+        let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
+        let session_id = SessionId::new("session:demo");
+        let input_request_id = InputRequestId::new("input-request:sha256:taskreq");
+        let request = task_input_request_event_with_target(
+            &task_attempt_id,
+            &session_id,
+            &input_request_id,
+            "source:approve",
+            "2026-06-13T00:00:00Z",
+            TargetRef::Task(TaskTargetRef::TaskAttempt),
+            "approve?",
+        );
+        EventStore::open(repo.path().join(".shore"))
+            .record_event_once(&request)
+            .unwrap();
+
+        let error = respond_input_request(
+            InputRequestRespondOptions::new(repo.path(), input_request_id.clone())
+                .with_outcome(InputRequestResponseOutcome::Approved),
+        )
+        .expect_err("a task-attempt request is not answerable via this command");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("task attempt"),
+            "the error names the domain boundary; got: {message}"
+        );
+        assert!(
+            message.contains("shore review input-request respond"),
+            "the error points at the command that does not apply; got: {message}"
+        );
+        assert!(
+            !message.contains("missing review unit"),
+            "the cryptic message is replaced; got: {message}"
+        );
+    }
+
+    struct TestRepo {
+        root: tempfile::TempDir,
+    }
+
+    impl TestRepo {
+        fn new() -> Self {
+            let root = tempfile::tempdir().expect("create temp git repository directory");
+            let repo = Self { root };
+            repo.git(["init"]);
+            repo.git(["config", "user.name", "Shore Tests"]);
+            repo.git(["config", "user.email", "shore-tests@example.com"]);
+            repo.git(["config", "commit.gpgsign", "false"]);
+            repo
+        }
+
+        fn path(&self) -> &Path {
+            self.root.path()
+        }
+
+        fn git<I, S>(&self, args: I)
+        where
+            I: IntoIterator<Item = S>,
+            S: AsRef<OsStr>,
+        {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(self.root.path())
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
 }

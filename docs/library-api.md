@@ -84,6 +84,13 @@ write itself stays worktree-local and batch-syncs via `link_clone_local_store`; 
 result diagnostics include `clone_local_fact_batch_only`. The unlinked path is unchanged: the union
 reduces to the local event list and no diagnostic is added.
 
+`respond_input_request` answers **review-unit** input requests (the reviewer-to-author loop). Agent
+**task-attempt** input requests — the resumption domain that feeds ADR-0009 binding — are a separate
+input-request flavour, authored and answered by the agent session / relay rather than by this
+review-fact command; passing a task-attempt request id to `respond_input_request` is rejected with a
+domain-boundary error. A future task-attempt response writer that wants cross-worktree validation can
+route through the same `resolve_write_validation_store` seam — the union is domain-agnostic.
+
 ### Event signatures — `shoreline::session` / `shoreline::crypto`
 
 Per-event Ed25519 signatures are optional. Unsigned events remain valid and continue to omit
