@@ -1087,6 +1087,183 @@ fn linked_reader_lineage_result_projection_uses_union_for_head() {
     );
 }
 
+#[test]
+fn linked_fact_writes_land_in_worktree_local_store_not_linked_store() {
+    let fixture = LinkedFixture::new();
+    // Seed an input request so the reader has one to respond to, and link so the
+    // baseline captures everything the seed has published.
+    let request_id = fixture.seed_full_facts("seed body");
+    fixture.link(&fixture.seed);
+    let linked_before = event_file_names(&fixture.linked_store_dir());
+
+    // One of each migrated fact on the reader against the seed's linked-only unit.
+    let reader = fixture.reader.to_str().unwrap();
+    let unit = fixture.seed_review_unit_id.as_str();
+    fixture.observation_add(&fixture.reader, unit, "cross-worktree note");
+    run_shore_json(&[
+        "review",
+        "input-request",
+        "open",
+        "--repo",
+        reader,
+        "--review-unit",
+        unit,
+        "--track",
+        "agent:test-fixture",
+        "--title",
+        "q",
+        "--reason",
+        "manual-decision-required",
+        "--body",
+        "?",
+    ]);
+    run_shore_json(&[
+        "review",
+        "assessment",
+        "add",
+        "--repo",
+        reader,
+        "--review-unit",
+        unit,
+        "--track",
+        "human:kevin",
+        "--assessment",
+        "accepted",
+        "--summary",
+        "ok",
+    ]);
+    run_shore_json(&[
+        "review",
+        "validation",
+        "add",
+        "--repo",
+        reader,
+        "--review-unit",
+        unit,
+        "--track",
+        "agent:test-fixture",
+        "--check-name",
+        "cargo test",
+        "--status",
+        "passed",
+    ]);
+    fixture.respond_input_request(&fixture.reader, &request_id);
+    fixture.lineage_attach(
+        &fixture.reader,
+        "review-unit-lineage:random:wv-locality",
+        unit,
+    );
+
+    // The linked store gained NO event files — every migrated write is local-only.
+    let linked_after = event_file_names(&fixture.linked_store_dir());
+    assert_eq!(
+        linked_before, linked_after,
+        "linked store must be unchanged by worktree-local writes"
+    );
+    // The reader's worktree-local .shore did gain the fact events.
+    assert!(
+        !event_file_names(&fixture.reader.join(".shore")).is_empty(),
+        "reader local store gained the fact events"
+    );
+}
+
+#[test]
+fn linked_fact_write_state_json_is_local_and_orphan_free() {
+    let fixture = LinkedFixture::new();
+    fixture.observation_add(
+        &fixture.reader,
+        &fixture.seed_review_unit_id,
+        "cross-worktree note",
+    );
+
+    // The reader's worktree-local state.json counts the fact even though the
+    // capture lives only in the linked store: the StateReducer does not
+    // cross-check facts against captures, so there is no orphan diagnostic.
+    let state = read_local_state_json(&fixture.reader);
+    assert_eq!(state["observationCount"], 1);
+    assert!(
+        !state_diagnostic_codes(&state)
+            .iter()
+            .any(|code| code.contains("orphan")),
+        "diagnostics: {}",
+        state["diagnostics"]
+    );
+}
+
+#[test]
+fn linked_fact_write_does_not_copy_snapshot_artifacts_to_linked_store() {
+    let fixture = LinkedFixture::new();
+    // Reader captures locally: its snapshot artifact lands in the reader's .shore.
+    fs::write(fixture.reader.join("README.md"), "changed in reader\n").unwrap();
+    let capture = fixture.capture(&fixture.reader);
+    let local_unit = capture["reviewUnit"]["id"].as_str().unwrap().to_owned();
+
+    let snapshots_before = snapshot_artifact_names(&fixture.linked_store_dir());
+    // File-targeted observation against the locally captured unit (the task 1.2
+    // fallback path). The write must not push the snapshot artifact to the linked
+    // store — only `store link` copies artifacts.
+    run_shore_json(&[
+        "review",
+        "observation",
+        "add",
+        "--repo",
+        fixture.reader.to_str().unwrap(),
+        "--review-unit",
+        &local_unit,
+        "--track",
+        "agent:test-fixture",
+        "--title",
+        "t",
+        "--file",
+        "README.md",
+    ]);
+    let snapshots_after = snapshot_artifact_names(&fixture.linked_store_dir());
+
+    assert_eq!(
+        snapshots_before, snapshots_after,
+        "no snapshot artifacts copied to the linked store by a write"
+    );
+}
+
+fn event_file_names(shore_dir: &Path) -> Vec<String> {
+    json_file_names(&shore_dir.join("events"))
+}
+
+fn snapshot_artifact_names(shore_dir: &Path) -> Vec<String> {
+    json_file_names(&shore_dir.join("artifacts/snapshots"))
+}
+
+fn json_file_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = match fs::read_dir(dir) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| name.ends_with(".json"))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    names.sort();
+    names
+}
+
+fn read_local_state_json(worktree: &Path) -> Value {
+    let bytes =
+        fs::read(worktree.join(".shore/state.json")).expect("read worktree-local state.json");
+    serde_json::from_slice(&bytes).expect("state.json is json")
+}
+
+fn state_diagnostic_codes(state: &Value) -> Vec<String> {
+    state["diagnostics"]
+        .as_array()
+        .map(|diagnostics| {
+            diagnostics
+                .iter()
+                .filter_map(|diagnostic| diagnostic["code"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn event_set_hash(json: &Value) -> &str {
     json["eventSetHash"].as_str().expect("eventSetHash present")
 }
