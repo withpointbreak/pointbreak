@@ -8,8 +8,10 @@ use std::process::Command;
 use serde_json::Value;
 use shoreline::model::SnapshotId;
 use shoreline::session::{
-    ArtifactKind, ArtifactRef, ImportArtifactOptions, LineageListOptions, export_artifact,
-    import_artifact, list_lineages, read_events, read_snapshot_artifact, referenced_artifacts,
+    ArtifactKind, ArtifactRef, ImportArtifactOptions, LineageListOptions, ReviewHistoryOptions,
+    ReviewUnitListOptions, ReviewUnitShowOptions, export_artifact, import_artifact, list_lineages,
+    list_review_units, read_events, read_snapshot_artifact, referenced_artifacts, review_history,
+    show_review_unit,
 };
 use support::git_repo::GitRepo;
 use support::shore;
@@ -478,6 +480,155 @@ fn divergence_diagnostic_appears_then_clears_after_store_link() {
     let advanced_hash = event_set_hash(&units);
     assert_ne!(advanced_hash, synced_hash);
     assert_eq!(event_set_hash(&history), advanced_hash);
+}
+
+/// Research-0008 Q5's lock-free claim, made executable: a reader racing a
+/// `store link` import may see fewer events, never a broken set. Per-event
+/// exclusive-create writes and artifact-before-event publication mean every
+/// intermediate read parses, hydrates every surfaced body, and resolves every
+/// listed unit's bound snapshot.
+#[test]
+fn reads_racing_store_link_always_see_consistent_event_sets() {
+    let main = GitRepo::new();
+    main.write("README.md", "base\n");
+    main.commit_all("base");
+
+    let parent = tempfile::tempdir().expect("worktree parent");
+    let seed = parent.path().join("seed");
+    add_worktree(main.path(), &seed, "seed");
+    let reader = parent.path().join("reader");
+    add_worktree(main.path(), &reader, "reader");
+
+    // The reader registers first, so its reads resolve the still-empty
+    // clone-local family store while the seed's record is unlinked.
+    run_shore_json(&["store", "link", "--repo", reader.to_str().unwrap()]);
+
+    // A meaty unlinked event set: two captures with snapshot artifacts plus a
+    // spread of facts, most with distinct body artifacts.
+    let seed_arg = seed.to_str().unwrap().to_owned();
+    fs::write(seed.join("README.md"), "changed in seed\n").unwrap();
+    let first_capture = run_shore_json(&["review", "capture", "--repo", &seed_arg]);
+    let unit_a = first_capture["reviewUnit"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for index in 0..12 {
+        let title = format!("observation {index}");
+        let body = format!("{}{index}", "r".repeat(5000));
+        run_shore_json(&[
+            "review",
+            "observation",
+            "add",
+            "--repo",
+            &seed_arg,
+            "--review-unit",
+            &unit_a,
+            "--track",
+            "agent:racer",
+            "--title",
+            &title,
+            "--body",
+            &body,
+        ]);
+    }
+    for index in 0..6 {
+        let title = format!("input request {index}");
+        run_shore_json(&[
+            "review",
+            "input-request",
+            "open",
+            "--repo",
+            &seed_arg,
+            "--track",
+            "agent:racer",
+            "--title",
+            &title,
+            "--reason",
+            "manual-decision-required",
+            "--body",
+            "answer?",
+        ]);
+    }
+    for track in ["human:kevin", "human:other"] {
+        run_shore_json(&[
+            "review",
+            "assessment",
+            "add",
+            "--repo",
+            &seed_arg,
+            "--track",
+            track,
+            "--assessment",
+            "accepted",
+            "--summary",
+            "ship it",
+        ]);
+    }
+    for index in 0..6 {
+        let check_name = format!("check {index}");
+        run_shore_json(&[
+            "review",
+            "validation",
+            "add",
+            "--repo",
+            &seed_arg,
+            "--track",
+            "agent:racer",
+            "--check-name",
+            &check_name,
+            "--status",
+            "passed",
+        ]);
+    }
+    fs::write(seed.join("README.md"), "changed in seed again\n").unwrap();
+    run_shore_json(&["review", "capture", "--repo", &seed_arg]);
+
+    let seed_before_link = list_review_units(ReviewUnitListOptions::new(&seed)).unwrap();
+    let expected_count = seed_before_link.event_count;
+    assert!(expected_count >= 20, "meaty seed set: {expected_count}");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_shore"))
+        .args(["store", "link", "--repo", &seed_arg])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn shore store link");
+
+    let mut last_count = 0usize;
+    let mut iterations = 0usize;
+    let link_status = loop {
+        iterations += 1;
+        let list =
+            list_review_units(ReviewUnitListOptions::new(&reader)).expect("unit list during race");
+        review_history(ReviewHistoryOptions::new(&reader).with_include_body(true))
+            .expect("history with bodies during race");
+        assert!(
+            list.event_count >= last_count,
+            "event count regressed: {last_count} -> {}",
+            list.event_count
+        );
+        last_count = list.event_count;
+        for entry in &list.entries {
+            let show = show_review_unit(
+                ReviewUnitShowOptions::new(&reader)
+                    .with_review_unit_id(entry.review_unit_id.clone())
+                    .with_include_body(true),
+            )
+            .expect("listed unit resolves its bound snapshot during race");
+            assert_eq!(show.review_unit.id, entry.review_unit_id);
+        }
+        if let Some(status) = child.try_wait().expect("poll store link subprocess") {
+            break status;
+        }
+        assert!(iterations < 5000, "store link subprocess did not finish");
+    };
+    assert!(link_status.success(), "store link failed during race");
+
+    let final_list = list_review_units(ReviewUnitListOptions::new(&reader)).unwrap();
+    assert_eq!(final_list.event_count, expected_count);
+    assert_eq!(final_list.review_unit_count, 2);
+    let seed_after_link = list_review_units(ReviewUnitListOptions::new(&seed)).unwrap();
+    assert_eq!(final_list.event_set_hash, seed_after_link.event_set_hash);
 }
 
 fn event_set_hash(json: &Value) -> &str {
