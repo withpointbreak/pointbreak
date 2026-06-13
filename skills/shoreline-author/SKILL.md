@@ -15,8 +15,8 @@ work, you turn the handoff into self-grading and pollute the review surface the 
 ## Workflow at a glance
 
 ```text
-1. Confirm the full task diff you intend to hand off is still in the worktree.
-2. Capture the current ReviewUnit with `shore review capture`.
+1. Confirm the full task change you intend to hand off — uncommitted in the worktree, or landed in commits.
+2. Capture the ReviewUnit: `shore review capture`, or `shore review capture --base <rev>` for a landed range.
 3. Choose one author track for this handoff.
 4. Add observations on that track for what changed, why, and review risks.
 5. Record validation evidence on that track for checks you actually ran.
@@ -31,23 +31,40 @@ once per coherent change, not once per edit.
 
 ## Capture first
 
-Shoreline v0.1.0 captures the Git worktree diff from `HEAD` to the working tree, including untracked
-files. If you commit part of the task first, a later capture only sees the remaining uncommitted
-diff. If you commit everything and leave a clean working tree, there may be nothing useful left to
-capture.
+Capture before you commit when you can. Plain `shore review capture` records the Git worktree diff
+from `HEAD` to the working tree, including untracked files, so an uncommitted change is captured
+whole.
+
+If the task is already committed and the working tree is clean, capture the landed range instead with
+`shore review capture --base <rev>`. That captures the tree diff from `<rev>` to `--target` (default
+`HEAD`) without reading the working tree or untracked files. `--base` resolves any rev — a branch,
+tag, `HEAD~N`, or commit OID — so point it at the commit the task started from.
 
 ```bash
 git status --short
+
+# Preferred: the task is still uncommitted in the worktree.
 capture_file=$(mktemp)
 shore review capture | tee "$capture_file" | jq .
 review_unit_id=$(jq -r '.reviewUnit.id' "$capture_file")
 rm "$capture_file"
+
+# Already committed (clean tree): capture the landed range from the task's starting commit.
+capture_file=$(mktemp)
+shore review capture --base <commit-before-task> | tee "$capture_file" | jq .
+review_unit_id=$(jq -r '.reviewUnit.id' "$capture_file")
+rm "$capture_file"
 ```
 
-If `git status --short` is empty, do not invent a handoff. Tell the user there is no working-tree
-diff for Shoreline to capture. If you already committed part of the current task, do not present a
-later capture as the full task handoff; tell the user Shoreline can only capture the remaining
-worktree diff unless they choose another review shape.
+Find the starting commit from the task's own history — for example `git log` to locate the commit
+before your first task commit, or the branch point. Never rewrite history to manufacture a
+capturable diff: do not `git reset --soft` back to the base just to fake a worktree change. Use
+`--base` instead.
+
+If `git status --short` is empty and no commits belong to this task, there is nothing to hand off:
+tell the user there is no change for Shoreline to capture. If you committed only part of the task and
+left the rest uncommitted, plain `shore review capture` sees only the uncommitted remainder; capture
+the whole change with `--base` from the task's starting commit instead.
 
 Use the captured ReviewUnit ID for every write. If `jq` is unavailable, copy `reviewUnit.id` from the
 compact JSON output and use it in place of `$review_unit_id`.
@@ -199,8 +216,9 @@ capture a separate handoff when that task reaches its own end.
 
 ## Common errors
 
-- **Capturing after a commit.** `shore review capture` records the working-tree diff. Capture while
-  the full current-task change is still uncommitted in the worktree.
+- **Faking a worktree diff after a commit.** Committing first is not an error: capture the landed
+  change with `shore review capture --base <commit-before-task>`. The error is rewriting history —
+  for example `git reset --soft` — to manufacture a worktree diff. Never do that; use `--base`.
 - **Claiming verification you did not run.** Record only checks you actually performed, including
   failures or skipped checks when they matter.
 - **Putting check results only in observations.** Record concrete command results with
