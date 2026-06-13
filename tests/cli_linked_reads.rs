@@ -986,6 +986,36 @@ fn linked_reader_assessment_replaces_linked_only_assessment() {
     assert_eq!(result["eventsCreated"], 1);
 }
 
+#[test]
+fn linked_reader_records_validation_on_linked_only_unit() {
+    let fixture = LinkedFixture::new();
+
+    // RED today: record_validation_check validates against the reader's empty
+    // local store and fails with "unknown review unit".
+    let result = run_shore_json(&[
+        "review",
+        "validation",
+        "add",
+        "--repo",
+        fixture.reader.to_str().unwrap(),
+        "--review-unit",
+        &fixture.seed_review_unit_id,
+        "--track",
+        "agent:test-fixture",
+        "--check-name",
+        "cargo test",
+        "--status",
+        "passed",
+    ]);
+
+    assert_eq!(result["eventsCreated"], 1);
+    assert!(
+        diagnostic_codes(&result).contains(&"clone_local_fact_batch_only"),
+        "diagnostics: {}",
+        result["diagnostics"]
+    );
+}
+
 fn event_set_hash(json: &Value) -> &str {
     json["eventSetHash"].as_str().expect("eventSetHash present")
 }

@@ -15,7 +15,9 @@ use crate::model::{
 };
 use crate::session::event::{EventTarget, EventType, ShoreEvent, ValidationCheckRecordedPayload};
 use crate::session::state::{ProjectionDiagnostic, SessionState};
+use crate::session::store::resolution::resolve_write_validation_store;
 use crate::session::store_init::{ShoreStorePaths, prepare_shore_writer};
+use crate::session::workflow::write_store::fact_batch_only_diagnostics;
 use crate::session::{
     EventSigningOptions, EventStore, EventWriteOutcome, current_timestamp, sign_event_if_requested,
     writer_from_options,
@@ -166,10 +168,10 @@ pub struct ValidationAddResult {
 }
 
 pub fn record_validation_check(options: ValidationAddOptions) -> Result<ValidationAddResult> {
-    let paths = ShoreStorePaths::resolve(&options.repo)?;
-    let shore_dir = paths.shore_dir();
-    let event_store = EventStore::open(shore_dir);
-    let events = event_store.list_events()?;
+    // Unit existence resolves the writer-visible union so validation evidence
+    // attaches to a linked-only unit; the write half stays worktree-local.
+    let validation_store = resolve_write_validation_store(&options.repo)?;
+    let events = validation_store.validation_events()?;
     let resolved = resolve_review_unit(
         &events,
         ReviewUnitSelection::from_review_unit_or_lineage(
@@ -184,7 +186,7 @@ pub fn record_validation_check(options: ValidationAddOptions) -> Result<Validati
             reason: "status is required".to_owned(),
         })?;
 
-    write_validation_check_event(ValidationWriteInput {
+    let mut result = write_validation_check_event(ValidationWriteInput {
         repo: options.repo,
         resolved,
         track: options.track,
@@ -201,7 +203,11 @@ pub fn record_validation_check(options: ValidationAddOptions) -> Result<Validati
         idempotency_key: options.idempotency_key,
         actor_id: options.actor_id,
         signing: options.signing,
-    })
+    })?;
+    result
+        .diagnostics
+        .extend(fact_batch_only_diagnostics(&validation_store));
+    Ok(result)
 }
 
 struct ValidationWriteInput {
