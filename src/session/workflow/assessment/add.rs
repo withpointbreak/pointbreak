@@ -21,7 +21,9 @@ use crate::session::observation::{
     ReviewUnitSelection, resolve_review_unit, staged_body, validated_track_id,
 };
 use crate::session::state::{ProjectionDiagnostic, SessionState};
+use crate::session::store::resolution::resolve_write_validation_store;
 use crate::session::store_init::{ShoreStorePaths, prepare_shore_writer};
+use crate::session::workflow::write_store::fact_batch_only_diagnostics;
 use crate::session::{
     EventSigningOptions, EventStore, EventWriteOutcome, current_timestamp, sign_event_if_requested,
     writer_from_options,
@@ -160,16 +162,29 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
     let storage = LocalStorage::new(shore_dir);
     prepare_shore_writer(&paths, &storage)?;
 
+    // The write half keeps the LOCAL prior batch for the single-writer state.json.
     let event_store = EventStore::open(shore_dir);
     let events = event_store.list_events()?;
+
+    // Validation/derivation reads resolve the writer-visible union so the unit,
+    // the target, and every relationship reference (`--replaces`,
+    // `--related-observation`, `--related-input-request`) validate against
+    // everything the writer can see, including linked-only facts.
+    let validation_store = resolve_write_validation_store(&options.repo)?;
+    let validation_events = validation_store.validation_events()?;
     let resolved = resolve_review_unit(
-        &events,
+        &validation_events,
         ReviewUnitSelection::from_review_unit_or_lineage(
             options.review_unit_id.as_ref(),
             options.lineage_id.as_ref(),
         )?,
     )?;
-    let target = resolve_assessment_target(worktree_root, &events, &resolved, &options.target)?;
+    let target = resolve_assessment_target(
+        worktree_root,
+        &validation_events,
+        &resolved,
+        &options.target,
+    )?;
     let track_id = validated_track_id(options.track.as_deref().ok_or_else(|| {
         ShoreError::WorkflowInputInvalid {
             reason: "track is required".to_owned(),
@@ -182,7 +197,7 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
         })?;
 
     validate_assessment_relationships(
-        &events,
+        &validation_events,
         &resolved.review_unit_id,
         &options.replaces_assessment_ids,
         &options.related_observation_ids,
@@ -274,7 +289,7 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
     let state = SessionState::from_prior_events_and_committed(&events, &event, outcome)?;
     storage.write_json_atomic(&paths.state_path(), &state, Durability::Projection)?;
 
-    Ok(AssessmentAddResult {
+    let mut result = AssessmentAddResult {
         review_unit_id: resolved.review_unit_id,
         assessment_id,
         event_id,
@@ -286,7 +301,11 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
         events_existing,
         events_created_by_type,
         diagnostics: state.diagnostics,
-    })
+    };
+    result
+        .diagnostics
+        .extend(fact_batch_only_diagnostics(&validation_store));
+    Ok(result)
 }
 
 fn validate_assessment_relationships(

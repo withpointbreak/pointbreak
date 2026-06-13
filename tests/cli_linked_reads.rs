@@ -871,6 +871,121 @@ fn linked_reader_respond_copies_request_event_target_fields() {
     );
 }
 
+#[test]
+fn linked_reader_records_assessment_on_linked_only_unit() {
+    let fixture = LinkedFixture::new();
+
+    // RED today: record_assessment validates against the reader's empty local
+    // store and fails with "unknown review unit".
+    let result = run_shore_json(&[
+        "review",
+        "assessment",
+        "add",
+        "--repo",
+        fixture.reader.to_str().unwrap(),
+        "--review-unit",
+        &fixture.seed_review_unit_id,
+        "--track",
+        "human:kevin",
+        "--assessment",
+        "accepted",
+        "--summary",
+        "ship it",
+    ]);
+
+    assert_eq!(result["eventsCreated"], 1);
+    assert!(result["assessmentId"].as_str().is_some());
+    assert!(
+        diagnostic_codes(&result).contains(&"clone_local_fact_batch_only"),
+        "diagnostics: {}",
+        result["diagnostics"]
+    );
+}
+
+#[test]
+fn linked_reader_assessment_relates_linked_only_observation() {
+    let fixture = LinkedFixture::new();
+    let observation = fixture.observation_add(
+        &fixture.seed,
+        &fixture.seed_review_unit_id,
+        "observation to relate",
+    );
+    let observation_id = observation["observationId"]
+        .as_str()
+        .expect("seed observation id")
+        .to_owned();
+    fixture.link(&fixture.seed);
+
+    // RED today: relationship validation reads the reader's local store and
+    // fails with "unknown observation".
+    let result = run_shore_json(&[
+        "review",
+        "assessment",
+        "add",
+        "--repo",
+        fixture.reader.to_str().unwrap(),
+        "--review-unit",
+        &fixture.seed_review_unit_id,
+        "--track",
+        "human:kevin",
+        "--assessment",
+        "accepted",
+        "--summary",
+        "looks good",
+        "--related-observation",
+        &observation_id,
+    ]);
+
+    assert_eq!(result["eventsCreated"], 1);
+}
+
+#[test]
+fn linked_reader_assessment_replaces_linked_only_assessment() {
+    let fixture = LinkedFixture::new();
+    let seed_assessment = run_shore_json(&[
+        "review",
+        "assessment",
+        "add",
+        "--repo",
+        fixture.seed.to_str().unwrap(),
+        "--review-unit",
+        &fixture.seed_review_unit_id,
+        "--track",
+        "human:kevin",
+        "--assessment",
+        "accepted",
+        "--summary",
+        "first pass",
+    ]);
+    let assessment_id = seed_assessment["assessmentId"]
+        .as_str()
+        .expect("seed assessment id")
+        .to_owned();
+    fixture.link(&fixture.seed);
+
+    // RED today: --replaces validation reads the reader's local store and fails
+    // with "unknown assessment".
+    let result = run_shore_json(&[
+        "review",
+        "assessment",
+        "add",
+        "--repo",
+        fixture.reader.to_str().unwrap(),
+        "--review-unit",
+        &fixture.seed_review_unit_id,
+        "--track",
+        "human:kevin",
+        "--assessment",
+        "needs-changes",
+        "--summary",
+        "second pass",
+        "--replaces",
+        &assessment_id,
+    ]);
+
+    assert_eq!(result["eventsCreated"], 1);
+}
+
 fn event_set_hash(json: &Value) -> &str {
     json["eventSetHash"].as_str().expect("eventSetHash present")
 }
