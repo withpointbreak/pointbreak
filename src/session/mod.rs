@@ -37,7 +37,7 @@ pub(crate) use workflow::reload_diagnostics_for_document;
 pub use workflow::{
     AdapterNoteView, ArtifactKind, ArtifactRef, AssessmentAddOptions, AssessmentAddResult,
     AssessmentRecordStatus, AssessmentShowFilters, AssessmentShowOptions, AssessmentShowResult,
-    AssessmentTargetSelector, AssessmentView, CaptureOptions, CaptureResult,
+    AssessmentTargetSelector, AssessmentView, CaptureOptions, CaptureResult, CommitRangeSpec,
     CurrentAssessmentStatus, CurrentAssessmentView, ImportArtifactOptions, ImportArtifactOutcome,
     ImportArtifactResult, ImportEventOptions, ImportNotesOptions, ImportNotesResult,
     IngestEventsOptions, IngestEventsResult, InputRequestFetchOptions, InputRequestFetchResult,
@@ -57,13 +57,13 @@ pub use workflow::{
     StoreStatusReviewUnitSnapshot, StoreStatusSensitivity, StoreStatusSensitivityFinding,
     ValidationAddOptions, ValidationAddResult, ValidationCheckProjectionOptions,
     ValidationCheckView, ValidationListFilters, ValidationListOptions, ValidationListResult,
-    attach_review_unit_to_lineage, capture_worktree_review, export_artifact, fetch_input_request,
-    import_artifact, import_event, import_notes, ingest_events, link_clone_local_store,
-    list_input_requests, list_lineages, list_observations, list_review_units,
-    list_validation_checks, open_input_request, project_validation_checks, record_assessment,
-    record_observation, record_validation_check, referenced_artifacts, reload_session,
-    respond_input_request, review_history, show_assessments, show_lineage, show_review_unit,
-    store_status,
+    attach_review_unit_to_lineage, capture_review, capture_worktree_review, export_artifact,
+    fetch_input_request, import_artifact, import_event, import_notes, ingest_events,
+    link_clone_local_store, list_input_requests, list_lineages, list_observations,
+    list_review_units, list_validation_checks, open_input_request, project_validation_checks,
+    record_assessment, record_observation, record_validation_check, referenced_artifacts,
+    reload_session, respond_input_request, review_history, show_assessments, show_lineage,
+    show_review_unit, store_status,
 };
 pub(in crate::session) use workflow::{assessment, input_request, observation};
 

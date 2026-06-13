@@ -25,7 +25,9 @@ pub use assessment::{
     AssessmentShowOptions, AssessmentShowResult, AssessmentTargetSelector, AssessmentView,
     CurrentAssessmentStatus, CurrentAssessmentView, record_assessment, show_assessments,
 };
-pub use capture::{CaptureOptions, CaptureResult, capture_worktree_review};
+pub use capture::{
+    CaptureOptions, CaptureResult, CommitRangeSpec, capture_review, capture_worktree_review,
+};
 pub use history::{
     ReviewHistoryEntry, ReviewHistoryFilters, ReviewHistoryOptions, ReviewHistoryResult,
     review_history,
