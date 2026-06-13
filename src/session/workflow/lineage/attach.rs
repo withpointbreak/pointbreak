@@ -9,7 +9,9 @@ use crate::session::event::{
 };
 use crate::session::projection::lineage::ReviewUnitLineageProjection;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
+use crate::session::store::resolution::resolve_write_validation_store;
 use crate::session::store_init::{ShoreStorePaths, prepare_shore_writer};
+use crate::session::workflow::write_store::fact_batch_only_diagnostics;
 use crate::session::{EventStore, EventWriteOutcome, current_timestamp, writer_from_options};
 use crate::storage::{Durability, LocalStorage};
 
@@ -72,25 +74,28 @@ pub fn attach_review_unit_to_lineage(options: LineageAttachOptions) -> Result<Li
             .ok_or_else(|| ShoreError::WorkflowInputInvalid {
                 reason: "review unit is required".to_owned(),
             })?;
-    let event_store = EventStore::open(shore_dir);
-    let events = event_store.list_events()?;
-    let capture = stored_capture_payload(&events, &review_unit_id)?;
+    // Pre-write validation/derivation reads resolve the writer-visible union:
+    // the attached unit and its predecessor may exist only in the linked store.
+    let validation_store = resolve_write_validation_store(&options.repo)?;
+    let validation_events = validation_store.validation_events()?;
+    let capture = stored_capture_payload(&validation_events, &review_unit_id)?;
     if let Some(predecessor) = options.predecessor_review_unit_id.as_ref() {
-        stored_capture_payload(&events, predecessor)?;
+        stored_capture_payload(&validation_events, predecessor)?;
     }
+    // The session id is baked into both lineage events; compute it once from the
+    // union rather than re-reading per event.
+    let session_id = capture_session_id(&validation_events, &review_unit_id)?;
 
     let lineage_id = options.lineage_id.clone();
     let basis = ReviewUnitLineageBasisV1::from_capture_parts(&capture.source, &capture.base)?;
     let writer = writer_from_options(worktree_root, None);
     let occurred_at = current_timestamp();
+    let event_store = EventStore::open(shore_dir);
     let mut recorder = LineageRecorder::default();
     let declaration = ShoreEvent::new(
         EventType::ReviewUnitLineageDeclared,
         ReviewUnitLineageDeclaredPayload::idempotency_key(&lineage_id),
-        EventTarget::for_review_unit_lineage(
-            capture_session_id(&events, &review_unit_id)?,
-            lineage_id.clone(),
-        ),
+        EventTarget::for_review_unit_lineage(session_id.clone(), lineage_id.clone()),
         writer.clone(),
         ReviewUnitLineageDeclaredPayload {
             lineage_id: lineage_id.clone(),
@@ -107,10 +112,7 @@ pub fn attach_review_unit_to_lineage(options: LineageAttachOptions) -> Result<Li
     let round = ShoreEvent::new(
         EventType::ReviewUnitLineageRoundRecorded,
         ReviewUnitLineageRoundRecordedPayload::idempotency_key(&lineage_id, &review_unit_id),
-        EventTarget::for_review_unit_lineage(
-            capture_session_id(&events, &review_unit_id)?,
-            lineage_id.clone(),
-        ),
+        EventTarget::for_review_unit_lineage(session_id, lineage_id.clone()),
         writer,
         ReviewUnitLineageRoundRecordedPayload {
             lineage_id: lineage_id.clone(),
@@ -123,10 +125,19 @@ pub fn attach_review_unit_to_lineage(options: LineageAttachOptions) -> Result<Li
     )?;
     recorder.record(&event_store, round)?;
 
+    // The single-writer state.json projects the LOCAL store's events.
     let events_after = event_store.list_events()?;
     let state = SessionState::from_events(&events_after)?;
     storage.write_json_atomic(&paths.state_path(), &state, Durability::Projection)?;
-    let projection = ReviewUnitLineageProjection::from_events(&events_after)?;
+
+    // The reported head and fork diagnostics must reflect the writer-visible
+    // lineage: a cross-worktree predecessor's prior rounds live in the linked
+    // store. Re-resolve the store AFTER the writes so its local-only difference
+    // now includes the two freshly written lineage events; the union then spans
+    // the linked rounds plus the new local ones.
+    let projection_store = resolve_write_validation_store(&options.repo)?;
+    let projection_events = projection_store.validation_events()?;
+    let projection = ReviewUnitLineageProjection::from_events(&projection_events)?;
     let lineage = projection.lineage(&lineage_id).ok_or_else(|| {
         ShoreError::Message(format!(
             "lineage projection missing lineage {} after attach",
@@ -134,14 +145,18 @@ pub fn attach_review_unit_to_lineage(options: LineageAttachOptions) -> Result<Li
         ))
     })?;
 
-    Ok(LineageAttachResult {
+    let mut result = LineageAttachResult {
         lineage_id,
         head_review_unit_id: lineage.head_review_unit_id.clone(),
         events_created: recorder.events_created,
         events_existing: recorder.events_existing,
         events_created_by_type: recorder.events_created_by_type,
         diagnostics: lineage.diagnostics.clone(),
-    })
+    };
+    result
+        .diagnostics
+        .extend(fact_batch_only_diagnostics(&validation_store));
+    Ok(result)
 }
 
 fn stored_capture_payload(

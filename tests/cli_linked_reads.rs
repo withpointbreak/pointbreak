@@ -1016,6 +1016,77 @@ fn linked_reader_records_validation_on_linked_only_unit() {
     );
 }
 
+#[test]
+fn linked_reader_attaches_linked_only_unit_to_lineage() {
+    let fixture = LinkedFixture::new();
+
+    // RED today: stored_capture_payload reads the reader's empty local store and
+    // fails with "unknown review unit".
+    let result = fixture.lineage_attach(
+        &fixture.reader,
+        "review-unit-lineage:random:wv-attach",
+        &fixture.seed_review_unit_id,
+    );
+
+    assert_eq!(
+        result["headReviewUnitId"],
+        Value::String(fixture.seed_review_unit_id.clone())
+    );
+    assert_eq!(result["eventsCreated"], 2);
+    assert!(
+        diagnostic_codes(&result).contains(&"clone_local_fact_batch_only"),
+        "diagnostics: {}",
+        result["diagnostics"]
+    );
+}
+
+#[test]
+fn linked_reader_lineage_result_projection_uses_union_for_head() {
+    let fixture = LinkedFixture::new();
+    let lineage_id = "review-unit-lineage:random:wv-union-head";
+    let unit_a = fixture.seed_review_unit_id.clone();
+
+    // The seed attaches A to the lineage, then captures a successor B; linking
+    // puts A, B, and A's lineage round in the linked store.
+    fixture.lineage_attach(&fixture.seed, lineage_id, &unit_a);
+    fs::write(fixture.seed.join("README.md"), "changed in seed again\n").unwrap();
+    let capture_b = fixture.capture(&fixture.seed);
+    let unit_b = capture_b["reviewUnit"]["id"]
+        .as_str()
+        .expect("successor capture id")
+        .to_owned();
+    fixture.link(&fixture.seed);
+
+    // The reader attaches B with predecessor A — a clean extension. The result
+    // projection must see A's prior round (linked) plus the two new local events,
+    // so B is a clean head, not a spurious fork.
+    let result = run_shore_json(&[
+        "review",
+        "lineage",
+        "attach",
+        "--repo",
+        fixture.reader.to_str().unwrap(),
+        "--lineage",
+        lineage_id,
+        "--review-unit",
+        &unit_b,
+        "--predecessor",
+        &unit_a,
+    ]);
+
+    assert_eq!(result["headReviewUnitId"], Value::String(unit_b));
+    assert!(
+        !diagnostic_codes(&result).contains(&"lineage_forked_successor"),
+        "spurious fork diagnostic: {}",
+        result["diagnostics"]
+    );
+    assert!(
+        !diagnostic_codes(&result).contains(&"lineage_multiple_heads"),
+        "spurious multiple-heads diagnostic: {}",
+        result["diagnostics"]
+    );
+}
+
 fn event_set_hash(json: &Value) -> &str {
     json["eventSetHash"].as_str().expect("eventSetHash present")
 }
