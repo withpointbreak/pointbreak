@@ -1056,7 +1056,7 @@ mod tests {
     use crate::session::event::{
         AssertionMode, EventTarget, EventType, IngestProvenance, IngestVia, ShoreEvent, SourceRef,
         TaskAttemptCapturedPayload, TaskCheckpointCapturedPayload, TaskObservationRecordedPayload,
-        Writer, WriterTool,
+        Writer, WriterProducer,
     };
     use crate::session::event_signature_trust_set;
     use crate::session::projection::test_support::{
@@ -3342,7 +3342,7 @@ mod tests {
             InputRequestRespondedPayload::idempotency_key(input_request_id, response_id.as_str());
         let writer = Writer {
             actor_id: ActorId::new("actor:claude_code:user"),
-            tool: WriterTool {
+            producer: WriterProducer {
                 name: "claude_code".to_owned(),
                 version: String::new(),
             },
@@ -3735,7 +3735,7 @@ mod tests {
             InputRequestRespondedPayload::idempotency_key(input_request_id, response_id.as_str());
         let writer = Writer {
             actor_id: ActorId::new("actor:claude_code:user"),
-            tool: WriterTool {
+            producer: WriterProducer {
                 name: "claude_code".to_owned(),
                 version: String::new(),
             },

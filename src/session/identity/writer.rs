@@ -3,7 +3,7 @@ use std::process::Command;
 
 use crate::crypto::SignerId;
 use crate::model::ActorId;
-use crate::session::event::{Writer, WriterTool};
+use crate::session::event::{Writer, WriterProducer};
 
 /// Environment variable that pins the writing actor to an explicit, fully
 /// qualified `actor:<scheme>:<id>` identity, taking precedence over the local
@@ -27,7 +27,7 @@ pub(crate) fn writer_from_git_config(repo: &Path) -> Writer {
 pub(crate) fn writer_from_options(repo: &Path, explicit: Option<&ActorId>) -> Writer {
     Writer {
         actor_id: actor_id_for_repo(explicit.map(ActorId::as_str), repo),
-        tool: shore_tool(),
+        producer: shore_producer(),
     }
 }
 
@@ -67,8 +67,8 @@ pub(crate) fn is_valid_actor_id(value: &str) -> bool {
     }
 }
 
-fn shore_tool() -> WriterTool {
-    WriterTool {
+fn shore_producer() -> WriterProducer {
+    WriterProducer {
         name: "shore".to_owned(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
     }
@@ -104,7 +104,7 @@ mod tests {
     use std::process::Command;
 
     #[test]
-    fn writer_from_git_config_uses_git_identity_and_shore_tool() {
+    fn writer_from_git_config_uses_git_identity_and_shore_producer() {
         let repo = tempfile::tempdir().unwrap();
         Command::new("git")
             .args(["init"])
@@ -123,7 +123,7 @@ mod tests {
             writer.actor_id.as_str(),
             "actor:git-email:author@example.com"
         );
-        assert_eq!(writer.tool.name, "shore");
+        assert_eq!(writer.producer.name, "shore");
     }
 
     #[test]
