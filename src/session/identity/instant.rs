@@ -1,8 +1,8 @@
 //! Minimal instant handling for delegation windows. The crate carries no time
 //! dependency, so this hand-rolls an RFC 3339 UTC (`Z`-offset only) parser to
-//! epoch milliseconds. Task 2.2 extends this module with `occurredAt`
-//! normalization (the `unix-ms:` form the local clock mints alongside the RFC
-//! 3339 instants adapters ingest) and the windowed-resolution lookup.
+//! epoch milliseconds, plus `parse_event_instant`, which normalizes both
+//! `occurredAt` forms the store mints — `unix-ms:<millis>` from the local clock
+//! and the RFC 3339 instants adapters ingest — to one comparable instant.
 
 /// Normalize an event `occurredAt` to epoch milliseconds. The store mints two
 /// forms in practice — `unix-ms:<millis>` (the local clock) and RFC 3339 UTC

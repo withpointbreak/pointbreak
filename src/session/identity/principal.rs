@@ -72,8 +72,8 @@ pub fn principal_view_for(
             status: PrincipalStatus::Resolved,
             source: PrincipalSource::Delegates,
         },
-        // The unresolved reason rides the diagnostics channel (Phase 3/4), not
-        // the three-field principal object.
+        // The unresolved reason rides the diagnostics channel, not the
+        // three-field principal object.
         PrincipalResolution::None(_) => PrincipalView {
             actor_id: Option::None,
             status: PrincipalStatus::None,

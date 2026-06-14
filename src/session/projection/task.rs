@@ -2665,7 +2665,7 @@ mod tests {
         }
     }
 
-    // ADR-0010 principal-sufficiency composition (Task 4.2).
+    // ADR-0010 principal-sufficiency composition tests.
 
     fn agent_response_events() -> (Vec<ShoreEvent>, WorkObjectId) {
         let (mut events, task_attempt_id) = approved_local_response_events();
