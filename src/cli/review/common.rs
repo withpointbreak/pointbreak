@@ -7,7 +7,7 @@ use shoreline::keys::{
     load_signer_in,
 };
 use shoreline::model::{ActorId, Side};
-use shoreline::session::{DelegationMap, is_agent_actor_id, resolve_writer_actor_id};
+use shoreline::session::{DelegationMap, TrustSet, is_agent_actor_id, resolve_writer_actor_id};
 
 /// Discover the layered delegation map under `<worktree-root>/.shore/`.
 ///
@@ -53,6 +53,40 @@ fn load_optional_delegates(path: &Path) -> Option<DelegationMap> {
     }
     match DelegationMap::from_delegates_file(path) {
         Ok(map) => Some(map),
+        Err(error) => {
+            eprintln!("warning: ignoring {}: {error}", path.display());
+            None
+        }
+    }
+}
+
+/// Discover the committed signature allow-list under `<worktree-root>/.shore/`.
+///
+/// Symmetric to [`discover_delegation_map`]: `repo` may be the worktree root or
+/// any path inside it, so discovery resolves the worktree root first (a non-git
+/// context falls back to `repo` as given), then loads `.shore/allowed-signers.json`
+/// — the custom Shoreline JSON allow-list (`{"allowedSigners": {...}}`), not the
+/// OpenSSH `allowed_signers` format. An absent file yields the empty
+/// `TrustSet::default()` (zero-setup stores see no change); a malformed file is
+/// advisory — a one-line stderr warning, then the empty default (a bad allow-list
+/// never aborts a read). Shared by the verifying read commands so an enrolled
+/// signer's events render `valid` rather than `untrusted_key`. This is
+/// reader-supplied trust config, never store content.
+pub(crate) fn discover_trust_set(repo: &Path) -> TrustSet {
+    let worktree_root =
+        shoreline::git::git_worktree_root(repo).unwrap_or_else(|_| repo.to_path_buf());
+    load_optional_trust_set(&worktree_root.join(".shore/allowed-signers.json")).unwrap_or_default()
+}
+
+/// Load the allow-list if present; a malformed file is advisory — warn once to
+/// stderr and treat it as absent (returns `None`, so the caller uses the empty
+/// default).
+fn load_optional_trust_set(path: &Path) -> Option<TrustSet> {
+    if !path.exists() {
+        return None;
+    }
+    match TrustSet::from_allowed_signers_file(path) {
+        Ok(trust) => Some(trust),
         Err(error) => {
             eprintln!("warning: ignoring {}: {error}", path.display());
             None
@@ -442,6 +476,38 @@ mod tests {
     fn neither_file_present_returns_none() {
         let repo = git_repo();
         assert!(super::discover_delegation_map(repo.path()).is_none());
+    }
+
+    const ALLOWED: &str = r#"{"allowedSigners":{
+      "actor:git-email:alice@example.com":["did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd"]}}"#;
+
+    #[test]
+    fn discover_trust_set_loads_committed_allowed_signers() {
+        use shoreline::crypto::SignerId;
+
+        let repo = git_repo();
+        write(&repo, ".shore/allowed-signers.json", ALLOWED);
+        let trust = super::discover_trust_set(repo.path());
+        let actor = ActorId::new("actor:git-email:alice@example.com");
+        let signer =
+            SignerId::parse("did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd").unwrap();
+        assert!(trust.authorizes(&actor, &signer, "2026-06-16T00:00:00Z"));
+    }
+
+    #[test]
+    fn discover_trust_set_absent_file_is_empty_default_without_error() {
+        let repo = git_repo();
+        let trust = super::discover_trust_set(repo.path());
+        assert_eq!(trust, shoreline::session::TrustSet::default());
+    }
+
+    #[test]
+    fn discover_trust_set_malformed_is_advisory_and_falls_back_to_default() {
+        let repo = git_repo();
+        write(&repo, ".shore/allowed-signers.json", "{ not json");
+        // Malformed is advisory: a one-line warning, then the empty default.
+        let trust = super::discover_trust_set(repo.path());
+        assert_eq!(trust, shoreline::session::TrustSet::default());
     }
 
     #[test]

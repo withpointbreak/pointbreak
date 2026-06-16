@@ -82,6 +82,7 @@ fn history_options(args: &HistoryArgs) -> ReviewHistoryOptions {
     if let Some(map) = super::common::discover_delegation_map(&args.repo) {
         options = options.with_delegation_map(map);
     }
+    options = options.with_trust_set(super::common::discover_trust_set(&args.repo));
     options
 }
 
