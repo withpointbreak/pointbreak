@@ -765,14 +765,48 @@ writing a store, run any `shore` write once or add the `.git/info/exclude` line 
 not show up in `git status`.
 
 In this release, delegation entries are created by editing `.shore/delegates.json` directly (or by
-an agent proposing a working-tree edit); the human's review-and-commit is the authorization. A
-`shore keys`-staged enrollment flow is a separate, later key-custody plan; this release documents
-no unshipped commands.
+an agent proposing a working-tree edit); the human's review-and-commit is the authorization. The
+symmetric signature trust set `.shore/allowed-signers.json` is staged the same possession-style way —
+by `shore keys enroll` or a hand edit — and documented in the next section.
 
 Pre-cutover honesty: agent events written before the `actor:agent:` cutover carry the human's
 git-email id and remain exactly what they claimed at write time. The `agent:*` *track* name is a
 heuristic ("written on an agent track"), never re-attribution; recapture is the hard-break escape
 hatch.
+
+## Signature Allow-List and Key Home
+
+The committed signature trust set lives at `.shore/allowed-signers.json`, a sibling of
+`.shore/delegates.json`. It is a **custom Shoreline JSON document** — **not the OpenSSH**
+`allowed_signers` line format despite the filename echo — mapping each actor to the `did:key`s
+authorized to sign on its behalf:
+
+```json
+{
+  "allowedSigners": {
+    "actor:git-email:alice@example.com": [
+      "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd"
+    ],
+    "actor:agent:claude-code": [
+      "did:key:z6MkpTHR8VNsBxYAAWHut2Geadd9jSwuBV8xRoAnwWsdvktH"
+    ]
+  }
+}
+```
+
+Like the delegation map, it is **reader-supplied trust config**, never store content: a consumer
+without the file — a mirror, an exported bundle — renders a signed event as `untrusted_key`, never a
+wrong `valid`. Entries are staged possession-style (`shore keys enroll` writes the working-tree
+file; the human's commit is the authorization) and the file is deliberately tracked in Git.
+
+Private **keys never live in the repo `.shore/` or the store** — both are copyable, linkable, or
+mirrored surfaces and would ship the private key. They live in a user-level **key home**,
+`~/.shore/keys/`, resolved as `SHORE_HOME` (verbatim override, mainly for tests/CI), then
+`$XDG_DATA_HOME/shore`, then `$HOME/.shore` on Unix or `%APPDATA%\shore` on Windows. On Unix the key
+home is created `0700` and each private-key file `0600`; on Windows mode bits are advisory and the
+directory inherits the parent ACL (documented caveat). A private-key file is a minimal
+Shoreline-native JSON document carrying the raw 32-byte Ed25519 seed (`{ "version", "alg", "seed" }`,
+base64); a `<name>.pub` sidecar records the derived `did:key`.
 
 ## Projection Ordering
 

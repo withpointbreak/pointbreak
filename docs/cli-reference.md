@@ -44,6 +44,25 @@ rendering it beside the writer as `claude-code (for kevin@swiber.dev)`. Discover
 the read proceeds with no resolution (advisory, never blocking). The file format is documented in
 [storage-model.md](./storage-model.md).
 
+### Signing
+
+Every write may carry an Ed25519 signature. Which key signs (if any) follows this precedence:
+
+1. `--sign-key <name|path>` on the write subcommand (a keystore key name or a path to a key file)
+2. `SHORE_SIGNING_KEY` (same shape: a key name or a path)
+3. agent-context auto-keygen — under an `actor:agent:*` id, a passphrase-less per-machine key is
+   generated on first write (see [agent-authoring.md](./agent-authoring.md))
+4. the user-default keystore key named `default`
+5. none — the write proceeds unsigned
+
+`SHORE_SIGNING=off` (case-insensitive) disables signing entirely; `SHORE_SIGNING=auto` (the default)
+resolves a signer where possible. `SHORE_HOME` overrides the user-level key home (mainly for
+tests/CI). **Signing never gates a write:** any resolution failure (no key, an unreadable key home,
+an unsupported algorithm, a malformed configured key, `SHORE_SIGNING=off`) degrades to an unsigned
+write at exit 0 with a one-line advisory diagnostic on stderr — it never blocks. See
+[signing-ux.md](./signing-ux.md) for the human / agent / CI flows and the
+`unsigned → untrusted_key → valid` ladder.
+
 ## `shore show`
 
 ```bash
@@ -244,6 +263,41 @@ siblings.
 
 Command output is the stable integration surface. Raw clone-local store paths, event files, artifact
 paths, `.git` paths, `.shore/data` paths, and `state.json` remain internal storage details.
+
+## `shore keys`
+
+Manage the user-level signing keystore and stage signer enrollment. Keys live in `~/.shore/keys/`
+(honoring `$XDG_DATA_HOME` on Unix and `%APPDATA%\shore` on Windows; `SHORE_HOME` overrides) — never
+in the repo `.shore/` or the store. See [storage-model.md](./storage-model.md) for the key home and
+allowed-signers format.
+
+```bash
+# Generate a human signing key and print its did:key (shore.keys-init).
+shore keys init --name default
+
+# List local keys with enrollment status and which is the default (shore.keys-list).
+shore keys list --repo .
+
+# Print a key's did:key and/or raw public key (shore.keys-show).
+shore keys show default --did
+shore keys show default --pubkey
+
+# Stage an allow-list entry binding a key's did:key to an actor (shore.keys-enroll).
+# Possession-style: this stages the working-tree .shore/allowed-signers.json edit only;
+# review and commit it to authorize the binding.
+shore keys enroll default --actor actor:agent:claude-code --repo .
+```
+
+`init` refuses to overwrite an existing named key. `list`/`enroll` take `--repo` (default `.`) to
+resolve the committed `.shore/allowed-signers.json`; every subcommand accepts `--pretty`. Enrollment
+never commits — the human's commit is the authorization.
+
+Each **write** subcommand (`review capture`, `review observation add`, `review assessment add`,
+`review validation add`, `review input-request open`/`respond`) accepts `--sign-key <name|path>` to
+sign that write with a specific key (highest precedence; overrides `SHORE_SIGNING_KEY`). A key that
+cannot be loaded leaves the write unsigned at exit 0 with an advisory diagnostic — signing never
+blocks. Only shipped subcommands are listed; `keys use-ssh`, `rotate`, and `revoke` are named
+follow-ons, not yet available.
 
 ## `shore review observation`
 

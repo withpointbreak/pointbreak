@@ -90,6 +90,8 @@ For users:
 - [Agent skills](skills/README.md) - install the portable Shoreline author-handoff skill.
 - [Library API](docs/library-api.md) - the supported in-process library surface (reads, attributed
   writes, event ingest, documents) and its stability contract.
+- [Signing UX](docs/signing-ux.md) - human, agent, and CI signing flows and the
+  unsigned/untrusted_key/valid verification ladder.
 
 For contributors and maintainers:
 

@@ -302,6 +302,74 @@ fn docs_cover_actor_identity_and_delegation() {
     );
 }
 
+#[test]
+fn docs_cover_key_custody_and_signing_ux() {
+    let cli = std::fs::read_to_string("docs/cli-reference.md").expect("read CLI reference");
+    let storage = std::fs::read_to_string("docs/storage-model.md").expect("read storage model");
+    let library_api = std::fs::read_to_string("docs/library-api.md").expect("read library API");
+    let agent_authoring =
+        std::fs::read_to_string("docs/agent-authoring.md").expect("read agent authoring");
+
+    // CLI: the keys family, the sign-key flag, and the new env vars.
+    assert_markdown_section_contains(
+        &cli,
+        "## `shore keys`",
+        &[
+            "shore keys init",
+            "shore keys list",
+            "shore keys show",
+            "shore keys enroll",
+            "shore.keys-init",
+            "--sign-key",
+        ],
+    );
+    for token in ["SHORE_SIGNING", "SHORE_SIGNING_KEY", "SHORE_HOME"] {
+        assert!(cli.contains(token), "cli-reference documents {token}");
+    }
+
+    // Storage: the allowed-signers format (NOT OpenSSH) and the user-level key home.
+    for token in [
+        ".shore/allowed-signers.json",
+        "\"allowedSigners\"",
+        "not the OpenSSH",
+        "~/.shore/keys/",
+    ] {
+        assert!(storage.contains(token), "storage-model documents {token}");
+    }
+    // Keys never live in the repo .shore/ or the store.
+    assert!(storage.contains("never") && storage.contains("key home"));
+
+    // Library API: the production signer, CLI-layer resolution, never-gates.
+    for token in ["FileEd25519Signer", "signing never gates"] {
+        assert!(library_api.contains(token), "library-api documents {token}");
+    }
+
+    // Agent-authoring: auto-keygen + enrollment.
+    assert!(
+        agent_authoring.contains("shore keys enroll"),
+        "agent-authoring documents the enrollment pointer"
+    );
+
+    // Signing-UX page exists and carries the ladder.
+    let signing_ux = std::fs::read_to_string("docs/signing-ux.md").expect("read signing UX");
+    for rung in ["unsigned", "untrusted_key", "valid"] {
+        assert!(
+            signing_ux.contains(rung),
+            "signing-ux documents the {rung} rung"
+        );
+    }
+
+    // No private plan labels in any touched doc.
+    for doc in [&cli, &storage, &library_api, &agent_authoring, &signing_ux] {
+        for forbidden in ["Phase 5", "Task 5.2", "plan 0066", "0066"] {
+            assert!(
+                !doc.contains(forbidden),
+                "no private plan label {forbidden} in docs"
+            );
+        }
+    }
+}
+
 fn assert_markdown_section_contains(markdown: &str, heading: &str, required: &[&str]) {
     let start = markdown
         .find(heading)

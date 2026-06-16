@@ -157,6 +157,16 @@ and payload hash but a different signer or signature, Shoreline reports the
 differences with the same payload hash remain an idempotent existing event. Signatures authenticate
 the producer facts; they do not choose an automatic conflict winner.
 
+`FileEd25519Signer` (`shoreline::keys`) is the production `EventSigner`: an Ed25519 key loaded from
+the user-level keystore (`shoreline::keys::{generate_key, load_signer, list_keys}`). Signing over a
+loaded key is infallible — the only fallible work (resolving the key home, reading and decoding the
+key file) happens at load time, before the signer exists. **Signer resolution lives in the CLI
+layer, not the library**: the library seam `sign_event_if_requested` returns `Result` and propagates
+errors via `?`, so all fallible resolve/load/validate work happens CLI-side *before* `.sign_with(...)`
+and the workflow only ever signs with a known-good signer. That placement is why **signing never
+gates a write** — every resolution failure degrades to an unsigned write at exit 0 with a named
+diagnostic. The library seam is unchanged; there is no library entry point for resolution.
+
 ### Actor identity and delegation — `shoreline::session`
 
 Verification answers "is this event authentic?"; delegation answers the orthogonal question "whose
