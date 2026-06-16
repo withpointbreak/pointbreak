@@ -11,6 +11,7 @@ mod dump;
 mod input;
 mod inspect;
 mod json;
+mod keys;
 mod notes;
 mod review;
 mod show;
@@ -35,6 +36,7 @@ struct Cli {
 enum Command {
     Dump(dump::DumpArgs),
     Inspect(inspect::InspectArgs),
+    Keys(keys::KeysArgs),
     Notes(notes::NotesArgs),
     // Boxed because the review subcommands carry much larger argument structs
     // than the other top-level commands.
@@ -109,6 +111,7 @@ fn run_cli(cli: Cli, stdout: &mut dyn Write) -> Result<(), Box<dyn std::error::E
             dump::run(args, &cli.tracing, stdout)
         }
         Command::Inspect(args) => inspect::run(args, stdout),
+        Command::Keys(args) => keys::run(args, stdout),
         Command::Notes(args) => notes::run(args, stdout),
         Command::Review(args) => review::run(*args, &cli.tracing, stdout),
         Command::Show(args) => {
