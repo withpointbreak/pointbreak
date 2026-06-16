@@ -10,7 +10,9 @@
 
 mod support;
 
-use support::inspect::{Inspector, representative_store, urlencode};
+use support::git_repo::GitRepo;
+use support::inspect::{Inspector, capture_lineage_round, representative_store, urlencode};
+use support::shore;
 
 /// Spawn the inspector against a representative store and return the served
 /// `/app.js` bytes. `app.js` has no JS execution harness (issue #130), so the
@@ -60,6 +62,104 @@ fn served_app_js_registers_validation_timeline_type() {
         entry_title.contains("checkName"),
         "entryTitle must read the validation checkName"
     );
+}
+
+#[test]
+fn served_app_js_includes_validation_in_lineage_facts() {
+    let app_js = spawn_and_get_app_js();
+
+    let line = app_js
+        .lines()
+        .find(|l| l.contains("LINEAGE_FACT_TYPES"))
+        .expect("LINEAGE_FACT_TYPES line");
+    assert!(
+        line.contains("validation_check_recorded"),
+        "validation must be a lineage fact type"
+    );
+
+    // renderLineageFact derives a validation kind, title, and status tag.
+    let render = slice_between(
+        &app_js,
+        "function renderLineageFact(e, stale)",
+        "function renderLineagePage",
+    );
+    assert!(
+        render.contains("validation"),
+        "renderLineageFact needs a validation arm"
+    );
+    assert!(
+        render.contains("checkName"),
+        "validation card title reads checkName"
+    );
+    assert!(
+        render.contains("s.status"),
+        "validation card tags carry the status"
+    );
+}
+
+#[test]
+fn lineage_round_join_keys_exist_for_validation_entries() {
+    // A two-round lineage with a validation check recorded on the FIRST (now
+    // stale) round's unit. This pins the data contract behind the client-side
+    // lineageFactsForRound join (reviewUnitId on both sides + isHead on rounds).
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    let lineage_id = "review-unit-lineage:random:validation-join";
+
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    let first = capture_lineage_round(repo.path(), lineage_id, None);
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    let second = capture_lineage_round(repo.path(), lineage_id, Some(&first));
+
+    // Record the validation against the first round's unit specifically.
+    let added = shore([
+        "review",
+        "validation",
+        "add",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--review-unit",
+        &first,
+        "--track",
+        "agent:codex",
+        "--check-name",
+        "cargo test",
+        "--status",
+        "passed",
+    ]);
+    assert!(
+        added.status.success(),
+        "validation add stderr:\n{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+
+    let inspector = Inspector::spawn(repo.path());
+
+    // Join side A: rounds carry reviewUnitId + isHead.
+    let lineages = inspector.get_json("/api/lineages");
+    let rounds = lineages["entries"][0]["rounds"].as_array().unwrap();
+    assert_eq!(rounds.len(), 2);
+    let first_round = rounds
+        .iter()
+        .find(|r| r["reviewUnitId"] == first.as_str())
+        .unwrap();
+    let second_round = rounds
+        .iter()
+        .find(|r| r["reviewUnitId"] == second.as_str())
+        .unwrap();
+    assert_eq!(first_round["isHead"], false);
+    assert_eq!(second_round["isHead"], true);
+
+    // Join side B: the validation history entry carries reviewUnitId == first.
+    let history = inspector.get_json("/api/history");
+    let validation = history["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["eventType"] == "validation_check_recorded")
+        .expect("validation entry present");
+    assert_eq!(validation["reviewUnitId"], first.as_str());
 }
 
 #[test]

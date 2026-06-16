@@ -101,7 +101,7 @@ function refInfo(token) {
 const REF_RE =
   /\b(?:review-unit-lineage-round|review-unit-lineage|review-unit|input-request-response|input-request|obs|assess|snap|rev|evt|note|validation):(?:git:)?sha256:[0-9a-f]{6,}\b|\breview-unit-lineage:[a-z0-9][a-z0-9._:-]*\b|\bsha256:[0-9a-f]{16,}\b|\b[0-9a-f]{40}\b|\b(?:agent|human):[a-z0-9][a-z0-9_-]*\b/gi;
 
-const LINEAGE_FACT_TYPES = new Set(["review_observation_recorded", "review_assessment_recorded", "input_request_opened"]);
+const LINEAGE_FACT_TYPES = new Set(["review_observation_recorded", "review_assessment_recorded", "input_request_opened", "validation_check_recorded"]);
 
 // Escape text, then replace embedded IDs with truncated reference chips.
 // Navigable kinds carry data attributes that the delegated click handler
@@ -963,14 +963,20 @@ function renderLineageFact(e, stale) {
       ? "assessment"
       : e.eventType === "input_request_opened"
         ? "input-request"
-        : "observation";
-  const title = s.title || s.assessment || s.reasonCode || typeLabel(e.eventType);
+        : e.eventType === "validation_check_recorded"
+          ? "validation"
+          : "observation";
+  const title = s.title || s.assessment || s.reasonCode || s.checkName || typeLabel(e.eventType);
+  // Reserve the card status slot for the lineage stale marker; carry the
+  // validation check status as a tag instead so it never displaces "stale".
+  const tags = Array.isArray(s.tags) ? s.tags.slice() : [];
+  if (e.eventType === "validation_check_recorded" && s.status) tags.push(s.status);
   return factCard(kind, {
     track: entryTrack(e),
     title,
     status: stale ? "stale" : "",
     target: targetLabel(s.target),
-    tags: Array.isArray(s.tags) ? s.tags : [],
+    tags,
     body: s.body || s.summary || "",
     createdAt: e.occurredAt,
     extra: `<div class="fact-rel">${linkify(e.eventId)}</div>`,
