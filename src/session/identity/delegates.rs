@@ -1,4 +1,6 @@
-//! The delegation map: a sibling checked-in file (`.shoreline/delegates`) that
+//! The delegation map: a sibling checked-in file (`.shore/delegates.json`, with
+//! an optional locally-excluded `.shore/delegates.local.json` override layered
+//! over it by the CLI discovery helper) that
 //! records which human principal an agent actor writes on behalf of, scoped to
 //! validity windows. It is deliberately separate from the allowed-signers trust
 //! set — keys answer "who signed this", delegation answers "whose
