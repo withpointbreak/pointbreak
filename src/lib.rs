@@ -3,6 +3,7 @@ pub mod documents;
 pub mod dump;
 pub mod error;
 pub mod git;
+pub mod keys;
 pub mod model;
 pub mod perf;
 pub mod session;
