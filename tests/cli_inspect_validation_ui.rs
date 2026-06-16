@@ -63,6 +63,35 @@ fn served_app_js_registers_validation_timeline_type() {
 }
 
 #[test]
+fn served_app_js_poller_is_diagnostic_aware() {
+    let app_js = spawn_and_get_app_js();
+
+    // The freshness poller reloads on a diagnosticCount change, not only on an
+    // eventSetHash change (#142). The JSON half — /api/freshness carries
+    // diagnosticCount — is locked in cli_inspect_endpoints.rs.
+    let poll = slice_between(
+        &app_js,
+        "async function pollFreshness()",
+        "function renderAll",
+    );
+    assert!(
+        poll.contains("diagnosticCount"),
+        "pollFreshness must consider diagnosticCount"
+    );
+
+    // The last-seen diagnostic count is seeded in load(), like lastHash.
+    let load = slice_between(
+        &app_js,
+        "async function load()",
+        "async function pollFreshness",
+    );
+    assert!(
+        load.contains("lastDiagnosticCount"),
+        "load() must seed state.lastDiagnosticCount"
+    );
+}
+
+#[test]
 fn served_app_js_handles_validation_in_detail_view() {
     let app_js = spawn_and_get_app_js();
 

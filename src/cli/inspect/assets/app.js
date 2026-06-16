@@ -29,6 +29,7 @@ const state = {
   order: "desc", // "desc" = newest first (default), "asc" = chronological
   selectedEventId: null,
   lastHash: null,
+  lastDiagnosticCount: null,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -314,6 +315,10 @@ async function load() {
     state.units = units;
     state.lineages = lineages;
     state.lastHash = history.eventSetHash;
+    // Seed the diagnostic count alongside the hash so the poller can detect a
+    // divergence appearing/clearing without a new event (#142). The history
+    // payload carries the same diagnostics set the freshness probe counts.
+    state.lastDiagnosticCount = (history.diagnostics || []).length;
     showError(null);
     renderAll();
   } catch (err) {
@@ -325,7 +330,13 @@ async function pollFreshness() {
   try {
     const f = await fetchJSON("/api/freshness");
     const refresh = $("#refresh");
-    if (f.eventSetHash !== state.lastHash) {
+    // Reload when the event set OR the diagnostic count changed. A divergence
+    // diagnostic (clone_local_unsynced_local_events / clone_local_fact_batch_only)
+    // can appear or clear without a new event; compare the count only, since
+    // either source can drive it.
+    const hashChanged = f.eventSetHash !== state.lastHash;
+    const diagChanged = (f.diagnosticCount ?? 0) !== (state.lastDiagnosticCount ?? 0);
+    if (hashChanged || diagChanged) {
       refresh.textContent = "updated";
       refresh.classList.add("live");
       await load();
