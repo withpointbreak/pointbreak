@@ -2,7 +2,10 @@ use std::io::Read;
 use std::path::Path;
 
 use clap::ValueEnum;
-use shoreline::keys::{FileEd25519Signer, load_signer, load_signer_in};
+use shoreline::keys::{
+    FileEd25519Signer, KeyHandle, KeyName, generate_key, generate_key_in, load_signer,
+    load_signer_in,
+};
 use shoreline::model::{ActorId, Side};
 use shoreline::session::{DelegationMap, is_agent_actor_id};
 
@@ -68,6 +71,7 @@ const SHORE_SIGNING_KEY_ENV: &str = "SHORE_SIGNING_KEY";
 // token so callers can assert on `.contains("<code>")`.
 const SIGNING_KEY_UNREADABLE: &str = "signing_key_unreadable";
 const SIGNING_KEY_UNSUPPORTED_ALGORITHM: &str = "signing_key_unsupported_algorithm";
+const SIGNING_KEY_HOME_UNREADABLE: &str = "signing_key_home_unreadable";
 const SIGNING_MODE_UNRECOGNIZED: &str = "signing_mode_unrecognized";
 
 /// What [`resolve_signer`] decided: an optional already-loaded production signer
@@ -216,16 +220,101 @@ fn load_default_signer(keys_root: Option<&Path>) -> Option<FileEd25519Signer> {
     }
 }
 
-/// Hook for agent-context auto-keygen. The keygen behavior is implemented in the
-/// auto-keygen task; here it resolves to nothing so the ladder falls through to
-/// the user-default rung. Threads `keys_root` so the auto-keygen task can test
-/// keygen against an injected root without mutating `SHORE_HOME`.
+/// Agent-context auto-keygen: when an agent actor has no signer resolved through
+/// the explicit-key rungs, load (or on first write, silently generate) a
+/// passphrase-less per-machine key named from the actor slug and return it as the
+/// signer. A freshly generated key carries a one-line enrollment notice (the
+/// write path prints it to stderr); a reused key is silent. Any keygen/load
+/// failure degrades to no signer plus an advisory diagnostic — never an error —
+/// keeping the write unsigned and exit 0. Threads `keys_root` so tests inject a
+/// root (None = production `keys_dir()`).
 fn resolve_agent_signer(
     _repo: &Path,
-    _actor: &ActorId,
-    _keys_root: Option<&Path>,
+    actor: &ActorId,
+    keys_root: Option<&Path>,
 ) -> Option<SignerResolution> {
-    None
+    let name = agent_key_name(actor.as_str());
+
+    // Reuse an existing per-machine key without re-minting or re-notifying.
+    if let Ok(signer) = load_agent_key(keys_root, &name) {
+        return Some(SignerResolution {
+            signer: Some(signer),
+            diagnostic: None,
+        });
+    }
+
+    // First write for this agent: mint silently, then load.
+    match generate_agent_key(keys_root, &name) {
+        Ok(handle) => {
+            let did = handle.signer_id().as_str().to_owned();
+            match load_agent_key(keys_root, &name) {
+                Ok(signer) => Some(SignerResolution {
+                    signer: Some(signer),
+                    // The write path surfaces this as the one-line stderr notice.
+                    diagnostic: Some(format!(
+                        "shore: generated signing key for {} ({did}); \
+                         run `shore keys enroll` to stage trust",
+                        actor.as_str()
+                    )),
+                }),
+                Err(_) => Some(SignerResolution {
+                    signer: None,
+                    diagnostic: Some(SIGNING_KEY_HOME_UNREADABLE.to_owned()),
+                }),
+            }
+        }
+        // Read-only / unresolvable key home, or any I/O error: unsigned, never an error.
+        Err(_) => Some(SignerResolution {
+            signer: None,
+            diagnostic: Some(SIGNING_KEY_HOME_UNREADABLE.to_owned()),
+        }),
+    }
+}
+
+/// Derive a stable, filesystem-safe per-machine key name from an agent actor id.
+/// `actor:agent:claude-code` -> `agent-claude-code`. Non-`[a-z0-9_]` runs collapse
+/// to a single `-` and edges are trimmed, so the name can never escape the
+/// keystore directory.
+fn agent_key_name(actor: &str) -> String {
+    let slug = actor.strip_prefix("actor:agent:").unwrap_or(actor);
+    let mut safe = String::with_capacity(slug.len());
+    let mut last_dash = false;
+    for character in slug.chars() {
+        if character.is_ascii_alphanumeric() || character == '_' {
+            safe.push(character);
+            last_dash = false;
+        } else if !last_dash {
+            safe.push('-');
+            last_dash = true;
+        }
+    }
+    format!("agent-{}", safe.trim_matches('-'))
+}
+
+/// Load an agent key honoring an injected root (None = production `keys_dir()`).
+fn load_agent_key(
+    keys_root: Option<&Path>,
+    name: &str,
+) -> std::result::Result<FileEd25519Signer, String> {
+    let loaded = match keys_root {
+        Some(root) => load_signer_in(root, name),
+        None => load_signer(name),
+    };
+    loaded.map_err(|error| error.to_string())
+}
+
+/// Generate an agent key honoring an injected root. `agent_key_name` already
+/// produced a safe slug; `KeyName::parse` re-validates it.
+fn generate_agent_key(
+    keys_root: Option<&Path>,
+    name: &str,
+) -> std::result::Result<KeyHandle, String> {
+    let key_name = KeyName::parse(name).map_err(|error| error.to_string())?;
+    let generated = match keys_root {
+        Some(root) => generate_key_in(root, &key_name),
+        None => generate_key(name),
+    };
+    generated.map_err(|error| error.to_string())
 }
 
 /// An unrecognized `SHORE_SIGNING` value is advisory, never an error: it is
@@ -580,11 +669,118 @@ mod resolve_signer_tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
-    fn agent_rung_is_a_no_op_hook_until_auto_keygen_lands() {
+    fn agent_actor_with_no_key_generates_a_0600_key_and_signs() {
+        use std::os::unix::fs::PermissionsExt as _;
+
         let root = tempfile::tempdir().unwrap();
         let resolution =
             resolve_signer_with_env(repo(), &agent_actor(), None, None, None, Some(root.path()));
+
+        let signer = resolution
+            .signer
+            .expect("agent actor auto-keygens and signs");
+        assert!(!signer.signer_id().as_str().is_empty());
+
+        let key_path = root.path().join("agent-claude-code");
+        assert!(key_path.exists(), "the agent key file was generated");
+        let mode = std::fs::metadata(&key_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "auto-keygen key is private");
+    }
+
+    #[test]
+    fn agent_keygen_emits_enrollment_notice_on_first_write_only() {
+        let root = tempfile::tempdir().unwrap();
+        let first =
+            resolve_signer_with_env(repo(), &agent_actor(), None, None, None, Some(root.path()));
+        let notice = first
+            .diagnostic
+            .expect("first write carries the enrollment notice");
+        assert!(notice.contains("generated signing key"));
+        assert!(notice.contains("shore keys enroll"));
+
+        let second =
+            resolve_signer_with_env(repo(), &agent_actor(), None, None, None, Some(root.path()));
+        assert!(
+            second.diagnostic.is_none(),
+            "the reused key emits no fresh notice"
+        );
+    }
+
+    #[test]
+    fn agent_key_is_reused_on_the_next_write_no_second_keygen() {
+        let root = tempfile::tempdir().unwrap();
+        let first =
+            resolve_signer_with_env(repo(), &agent_actor(), None, None, None, Some(root.path()));
+        let first_did = first
+            .signer
+            .expect("first keygen")
+            .signer_id()
+            .as_str()
+            .to_owned();
+
+        let second =
+            resolve_signer_with_env(repo(), &agent_actor(), None, None, None, Some(root.path()));
+        let second_did = second
+            .signer
+            .expect("reuse")
+            .signer_id()
+            .as_str()
+            .to_owned();
+
+        assert_eq!(first_did, second_did, "the same per-machine key is reused");
+    }
+
+    #[test]
+    fn human_actor_with_no_key_does_not_auto_keygen_and_stays_unsigned() {
+        let root = tempfile::tempdir().unwrap();
+        let resolution =
+            resolve_signer_with_env(repo(), &human_actor(), None, None, None, Some(root.path()));
         assert!(resolution.signer.is_none());
+        // No key file was created under the injected root.
+        let entries = std::fs::read_dir(root.path())
+            .map(|dir| dir.count())
+            .unwrap_or(0);
+        assert_eq!(entries, 0, "a human actor never auto-keygens");
+    }
+
+    #[test]
+    fn agent_keygen_failure_degrades_to_none_never_an_error() {
+        // A keys_root that is actually a file, so the key cannot be written.
+        let file_root = tempfile::NamedTempFile::new().unwrap();
+        let resolution = resolve_signer_with_env(
+            repo(),
+            &agent_actor(),
+            None,
+            None,
+            None,
+            Some(file_root.path()),
+        );
+        assert!(
+            resolution.signer.is_none(),
+            "keygen failure must not yield a signer"
+        );
+        // Structurally there is no Err — SignerResolution is returned by value.
+    }
+
+    #[test]
+    fn actor_slug_maps_to_a_filesystem_safe_key_name() {
+        use shoreline::keys::KeyName;
+
+        assert_eq!(
+            super::agent_key_name("actor:agent:claude-code"),
+            "agent-claude-code"
+        );
+        assert_eq!(
+            super::agent_key_name("actor:agent:weird/../name"),
+            "agent-weird-name"
+        );
+        // Every derived name is a valid, path-safe keystore key name.
+        for actor in ["actor:agent:claude-code", "actor:agent:weird/../name"] {
+            let name = super::agent_key_name(actor);
+            assert!(!name.contains('/'), "{name} has no path separator");
+            assert!(KeyName::parse(&name).is_ok(), "{name} is a valid key name");
+        }
     }
 }
