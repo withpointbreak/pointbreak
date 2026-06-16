@@ -1,5 +1,7 @@
 mod support;
 
+use std::process::Command;
+
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde_json::Value;
@@ -221,4 +223,148 @@ fn keys_show_missing_name_is_a_clean_error_not_a_panic() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("panicked"), "no panic: {stderr}");
     assert!(!stderr.is_empty());
+}
+
+#[test]
+fn keys_enroll_stages_working_tree_file_and_reports_actor_and_did() {
+    let home = tempfile::tempdir().expect("create keystore home");
+    let home_str = home.path().to_str().unwrap();
+    let init = shore_env(
+        ["keys", "init", "--name", "default"],
+        &[("SHORE_HOME", home_str)],
+    );
+    let did = serde_json::from_slice::<Value>(&init.stdout).unwrap()["didKey"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let repo = support::git_repo::GitRepo::new();
+    let out = shore_env(
+        ["keys", "enroll", "--repo", repo.path().to_str().unwrap()],
+        &[
+            ("SHORE_HOME", home_str),
+            ("SHORE_ACTOR_ID", "actor:agent:claude-code"),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "enroll stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["schema"], "shore.keys-enroll");
+    assert_eq!(doc["actorId"], "actor:agent:claude-code");
+    assert_eq!(doc["signerId"], did);
+    assert_eq!(doc["added"], true);
+
+    // The working-tree file exists and the existing reader loads the entry.
+    let path = repo.path().join(".shore/allowed-signers.json");
+    assert!(path.exists(), "enroll stages the working-tree file");
+    let trust = shoreline::session::TrustSet::from_allowed_signers_file(&path).unwrap();
+    let actor = shoreline::model::ActorId::new("actor:agent:claude-code");
+    let signer = shoreline::crypto::SignerId::parse(&did).unwrap();
+    assert!(trust.authorizes(&actor, &signer, "2026-06-16T00:00:00Z"));
+}
+
+#[test]
+fn keys_enroll_re_enroll_reports_already_present_and_is_a_noop() {
+    let home = tempfile::tempdir().expect("create keystore home");
+    let home_str = home.path().to_str().unwrap();
+    let _ = shore_env(
+        ["keys", "init", "--name", "default"],
+        &[("SHORE_HOME", home_str)],
+    );
+    let repo = support::git_repo::GitRepo::new();
+    let env = [
+        ("SHORE_HOME", home_str),
+        ("SHORE_ACTOR_ID", "actor:agent:claude-code"),
+    ];
+
+    let first = shore_env(
+        ["keys", "enroll", "--repo", repo.path().to_str().unwrap()],
+        &env,
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&first.stdout).unwrap()["added"],
+        true
+    );
+    let path = repo.path().join(".shore/allowed-signers.json");
+    let before = std::fs::read(&path).unwrap();
+
+    let second = shore_env(
+        ["keys", "enroll", "--repo", repo.path().to_str().unwrap()],
+        &env,
+    );
+    let doc: Value = serde_json::from_slice(&second.stdout).unwrap();
+    assert_eq!(doc["added"], false, "second enroll reports already present");
+    let after = std::fs::read(&path).unwrap();
+    assert_eq!(before, after, "re-enroll leaves the file byte-identical");
+}
+
+#[test]
+fn keys_enroll_does_not_commit_or_stage_to_git() {
+    let home = tempfile::tempdir().expect("create keystore home");
+    let home_str = home.path().to_str().unwrap();
+    let _ = shore_env(
+        ["keys", "init", "--name", "default"],
+        &[("SHORE_HOME", home_str)],
+    );
+    let repo = support::git_repo::GitRepo::new();
+    let _ = shore_env(
+        ["keys", "enroll", "--repo", repo.path().to_str().unwrap()],
+        &[
+            ("SHORE_HOME", home_str),
+            ("SHORE_ACTOR_ID", "actor:agent:claude-code"),
+        ],
+    );
+
+    // The staged file is a pending working-tree change, never a commit.
+    let status = Command::new("git")
+        .args(["status", "--porcelain", "-uall"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        out.contains(".shore/allowed-signers.json"),
+        "the enrolled file is a pending working-tree change: {out}"
+    );
+    let log = Command::new("git")
+        .args(["rev-list", "--count", "--all"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&log.stdout).trim(),
+        "0",
+        "enroll never commits"
+    );
+}
+
+#[test]
+fn keys_enroll_explicit_actor_flag_overrides_resolution() {
+    let home = tempfile::tempdir().expect("create keystore home");
+    let home_str = home.path().to_str().unwrap();
+    let _ = shore_env(
+        ["keys", "init", "--name", "default"],
+        &[("SHORE_HOME", home_str)],
+    );
+    let repo = support::git_repo::GitRepo::new();
+
+    let out = shore_env(
+        [
+            "keys",
+            "enroll",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "--actor",
+            "actor:agent:explicit-override",
+        ],
+        &[
+            ("SHORE_HOME", home_str),
+            ("SHORE_ACTOR_ID", "actor:git-email:resolved@example.com"),
+        ],
+    );
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["actorId"], "actor:agent:explicit-override");
 }

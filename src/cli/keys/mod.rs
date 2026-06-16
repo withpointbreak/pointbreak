@@ -2,10 +2,12 @@ use std::io::Write;
 
 use clap::{Args, Subcommand};
 
+mod enroll;
 mod init;
 mod list;
 mod show;
 
+use enroll::EnrollArgs;
 use init::InitArgs;
 use list::ListArgs;
 use show::ShowArgs;
@@ -24,8 +26,10 @@ enum KeysCommand {
     List(ListArgs),
     /// Print a key's did:key and/or raw public key.
     Show(ShowArgs),
-    // A later subcommand for enrollment slots in here without reshaping the
-    // enum; the dispatcher's match gains one arm.
+    /// Stage an allow-list entry binding a local key's did:key to an actor.
+    /// Possession-style: this stages the working-tree `.shore/allowed-signers.json`
+    /// edit only; commit it to authorize the binding.
+    Enroll(EnrollArgs),
 }
 
 pub(super) fn run(
@@ -44,6 +48,10 @@ pub(super) fn run(
         KeysCommand::Show(args) => {
             tracing::debug!(command = "keys.show", "command_start");
             show::run(args, stdout)
+        }
+        KeysCommand::Enroll(args) => {
+            tracing::debug!(command = "keys.enroll", "command_start");
+            enroll::run(args, stdout)
         }
     }
 }
