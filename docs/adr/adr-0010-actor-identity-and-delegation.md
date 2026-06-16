@@ -380,3 +380,52 @@ Reopen this decision if one of these occurs:
 - The possession-based enrollment root proves too weak in practice — a real multi-human store
   where `verified-only`-style policy plus `ambiguous` diagnostics are too coarse — before signed
   delegation records land.
+
+## Amendment: Key Custody Landing
+
+This amendment records the as-built key-custody and signing-UX work that landed as a follow-up
+key-custody effort. The original decisions stand — **Status:** stays Accepted; this is a landing
+record that corrects paths and documents placement and sequencing as built, not a re-decision.
+
+- **Paths (single-`.shore/` layout).** The committed config siblings are `.shore/delegates.json` and
+  `.shore/allowed-signers.json`; the store lives at `.shore/data/`, clone-local at `.git/shore`.
+  These supersede the older `.shoreline/`-style path references in the body above.
+- **User-level key home.** Private keys live in a user-level key home `~/.shore/keys/` (honoring
+  `$XDG_DATA_HOME` on Unix, `%APPDATA%\shore` on Windows; a `SHORE_HOME` override exists mainly for
+  hermetic tests/CI). Keys **never** live in the repo `.shore/` (copyable/linkable) or the store
+  (mirrored/exported) — either would ship a private key. Private-key files are `0600` and the key
+  home `0700` on Unix; on Windows mode bits are advisory and the directory inherits the parent ACL.
+- **Signing never gates — CLI-layer placement.** Signer resolution lives in the **CLI layer**, not
+  the library, because the library signing seam (`sign_event_if_requested`) returns `Result` and
+  propagates errors. All fallible resolve/load/validate work happens CLI-side *before* the signing
+  call, so the workflow only ever signs with a known-good signer (Ed25519 signing over a loaded key
+  is itself infallible). Every resolution failure — no key, an unreadable key home, an unsupported
+  algorithm, `SHORE_SIGNING=off`, a malformed configured key — degrades to an unsigned write, exit 0,
+  with a named diagnostic. Keeping resolution upstream of the signing call is the reason
+  signing never gates a write (the contract this places in the CLI layer). The library seam is
+  **unchanged**.
+- **Provisioning split.** File-based `shore keys init`/`list`/`show`/`enroll` shipped first. ssh-agent
+  reuse (`shore keys use-ssh`, signing Shoreline's DSSE PAE bytes through the agent at the unchanged
+  `sign_event_message(&[u8])` seam) is a named fast-follow, deferred to keep this release off the
+  ssh-agent-client dependency and the Windows named-pipe portability hazard.
+- **Deferred (a separate "validation over time" effort).** Rotation, revocation, and
+  transparency/signed-heads are not built — no `rotate`/`revoke` subcommand, no placeholder code.
+  `did:key` has no supersession link, the `TrustSet` stays a static allow-list whose `authorizes`
+  still ignores `occurred_at` (no validity windows), and `eventSetRoot` / signed inclusion proofs
+  stay reserved. These tie to the **Revisit Triggers** above (trust-set validity windows; signed
+  delegation records).
+- **Allowed-signers format.** `.shore/allowed-signers.json` is custom Shoreline JSON
+  (`{"allowedSigners": {"actor:…": ["did:key:…"]}}`) — explicitly **not the OpenSSH**
+  `allowed_signers` line format despite the filename. It is reader-supplied trust config, like the
+  delegation map: a consumer without it renders a signed event `untrusted_key`, never a wrong
+  `valid`.
+- **Carry-forwards from the identity-half landing.** Delegation **principals** use
+  `is_valid_principal_actor_id` (allows internal whitespace — e.g. a multi-word git name
+  `actor:git-name:Kevin Swiber` — forbids control chars, 256-char bound), **distinct** from the
+  whitespace-strict `is_valid_actor_id` that gates the `SHORE_ACTOR_ID` override; conflating the two
+  would re-break multi-word git-name principals. The `require-resolvable-principal` formula keeps a
+  defensive non-agent re-check (`!is_agent_actor_id(principal)`) that is **unreachable via the v1
+  parser** (which rejects agent-scheme principals at load) — kept as documented defense-in-depth, not
+  a coverage gap. `PrincipalStatus::Disavowed` stays **wire-reserved**: v1 emits only
+  `resolved`/`none`/`ambiguous`, and disavowal manifests as `none` plus a diagnostic reason, so no
+  schema change is needed when a future positive-disavowal source lands.

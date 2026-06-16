@@ -303,6 +303,46 @@ fn docs_cover_actor_identity_and_delegation() {
 }
 
 #[test]
+fn adr_0010_amendment_records_key_custody_landing() {
+    let adr = std::fs::read_to_string("docs/adr/adr-0010-actor-identity-and-delegation.md")
+        .expect("read ADR-0010");
+
+    // Status is unchanged — the amendment is a landing record, not a re-decision.
+    assert!(adr.contains("**Status:** Accepted"));
+
+    // The amendment section is present.
+    assert!(
+        adr.contains("## Amendment: Key Custody Landing"),
+        "ADR-0010 records the key-custody landing amendment"
+    );
+
+    // As-built decisions captured (feature language, no plan numbers).
+    for token in [
+        ".shore/allowed-signers.json",
+        "~/.shore/keys/",
+        "signing never gates",
+        "use-ssh",                     // ssh-agent fast-follow named
+        "is_valid_principal_actor_id", // principal-validator distinction
+    ] {
+        assert!(adr.contains(token), "ADR-0010 amendment records {token}");
+    }
+
+    // The allowed-signers-is-not-OpenSSH note is present.
+    assert!(adr.contains("not the OpenSSH") || adr.contains("not OpenSSH"));
+
+    // No private plan labels leak into the public ADR.
+    for forbidden in ["Phase 5", "Task 5.3", "plan 0066", "0066"] {
+        assert!(
+            !adr.contains(forbidden),
+            "no private plan label {forbidden} in ADR-0010"
+        );
+    }
+    // The existing private-pointer pins still hold.
+    assert!(!adr.contains("research 0009"));
+    assert!(!adr.contains("implementation plan"));
+}
+
+#[test]
 fn docs_cover_key_custody_and_signing_ux() {
     let cli = std::fs::read_to_string("docs/cli-reference.md").expect("read CLI reference");
     let storage = std::fs::read_to_string("docs/storage-model.md").expect("read storage model");
