@@ -81,6 +81,11 @@ function targetHeadBadge(td) {
 // Classify a token as a navigable Shoreline reference, a non-navigable hash,
 // or a track lane. Returns null if it is not a recognized id.
 function refInfo(token) {
+  // Validation check ids have no resolver, so they render as a non-clickable
+  // chip rather than dead navigation. Classify before the generic match.
+  if (/^validation:(?:git:)?sha256:[0-9a-f]+$/i.test(token)) {
+    return { kind: "validation", clickable: false };
+  }
   let m = token.match(/^([a-z][a-z-]*):(?:git:)?sha256:[0-9a-f]+$/i);
   if (m) return { kind: m[1].toLowerCase(), clickable: true };
   if (/^review-unit-lineage:[a-z0-9][a-z0-9._:-]*$/i.test(token)) {
@@ -93,7 +98,7 @@ function refInfo(token) {
 }
 
 const REF_RE =
-  /\b(?:review-unit-lineage-round|review-unit-lineage|review-unit|input-request-response|input-request|obs|assess|snap|rev|evt|note):(?:git:)?sha256:[0-9a-f]{6,}\b|\breview-unit-lineage:[a-z0-9][a-z0-9._:-]*\b|\bsha256:[0-9a-f]{16,}\b|\b[0-9a-f]{40}\b|\b(?:agent|human):[a-z0-9][a-z0-9_-]*\b/gi;
+  /\b(?:review-unit-lineage-round|review-unit-lineage|review-unit|input-request-response|input-request|obs|assess|snap|rev|evt|note|validation):(?:git:)?sha256:[0-9a-f]{6,}\b|\breview-unit-lineage:[a-z0-9][a-z0-9._:-]*\b|\bsha256:[0-9a-f]{16,}\b|\b[0-9a-f]{40}\b|\b(?:agent|human):[a-z0-9][a-z0-9_-]*\b/gi;
 
 const LINEAGE_FACT_TYPES = new Set(["review_observation_recorded", "review_assessment_recorded", "input_request_opened"]);
 
@@ -566,6 +571,14 @@ function renderDetail() {
   ];
   const snapshotId = e.reviewUnitId ? snapshotIdForUnit(e.reviewUnitId) : null;
   const s = e.summary || {};
+  if (e.eventType === "validation_check_recorded") {
+    kv.push(["check", s.checkName || "—"]);
+    kv.push(["status", s.status || "—"]);
+    kv.push(["trigger", s.trigger || "—"]);
+    if (s.exitCode != null) kv.push(["exit code", String(s.exitCode)]);
+    if (s.command) kv.push(["command", s.command]);
+    kv.push(["validationCheckId", s.validationCheckId || "—"]);
+  }
   let focusId = null;
   let focusNoun = "";
   if (e.eventType === "review_observation_recorded") {

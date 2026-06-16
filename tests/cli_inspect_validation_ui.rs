@@ -63,6 +63,35 @@ fn served_app_js_registers_validation_timeline_type() {
 }
 
 #[test]
+fn served_app_js_handles_validation_in_detail_view() {
+    let app_js = spawn_and_get_app_js();
+
+    // renderDetail surfaces the validation fields as labeled kv rows.
+    let detail = slice_between(
+        &app_js,
+        "function renderDetail()",
+        "function snapshotIdForUnit",
+    );
+    assert!(detail.contains("validation_check_recorded"));
+    assert!(detail.contains("s.checkName"));
+    assert!(detail.contains("s.trigger"));
+    assert!(detail.contains("s.exitCode"));
+    assert!(detail.contains("validationCheckId"));
+
+    // validation:sha256:… ids render as a non-clickable chip (resolveRef has no
+    // validation case, so they must never be wired as navigable).
+    assert!(
+        app_js.contains(r#"kind: "validation", clickable: false"#),
+        "refInfo must classify validation ids as non-clickable"
+    );
+    let ref_re = slice_between(&app_js, "const REF_RE =", ";");
+    assert!(
+        ref_re.contains("validation"),
+        "REF_RE must include the validation prefix so the id renders as a chip"
+    );
+}
+
+#[test]
 fn api_history_carries_typed_validation_summaries() {
     let store = representative_store();
     let inspector = Inspector::spawn(store.repo.path());
