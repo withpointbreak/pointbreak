@@ -69,5 +69,10 @@ commit-check range='origin/main..HEAD':
 run *args:
     cargo +stable run --bin shore -- {{ args }}
 
+# One-off: migrate a legacy flat .shore/ store to .shore/data/ and upgrade event
+# writer fields in place. Owner-run; not part of the shipped CLI.
+migrate-store repo=".":
+    cargo +stable run --example migrate-store -- {{ repo }}
+
 # Check commit messages, compile, lint, and tests.
 check: commit-check build lint test
