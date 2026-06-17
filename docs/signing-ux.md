@@ -60,7 +60,65 @@ Because `writer.actorId` is the signing key's `did:key`, the event omits the top
 verifies `valid` under an empty trust set — no allow-list entry required. The key is ephemeral to the
 CI run.
 
+## Reuse your SSH key (ssh-agent)
+
+Already sign your git commits with SSH? Sign your review facts the same way — the same move git made
+with `gpg.format=ssh` + `user.signingKey`. Adopt an existing Ed25519 SSH key as an agent-backed signer
+with no new key ceremony:
+
+```bash
+shore keys use-ssh ~/.ssh/id_ed25519.pub --name default   # adopt; print its did:key
+shore keys enroll default --actor actor:git-email:alice@example.com
+git add .shore/allowed-signers.json && git commit          # the commit is the authorization
+```
+
+The positional argument is either a path to a `*.pub` file or a `key::ssh-ed25519 AAAA…` literal (git's
+`user.signingKey` form). Here "agent" is the **ssh-agent** key custodian — distinct from a coding or
+reviewing agent (acting software).
+
+**ssh-agent custody.** The private key is **never read**: ssh-agent custodies it, and Shoreline only
+ever ships the DSSE pre-authentication bytes to the agent and unwraps the returned signature. Encrypted
+keys, 1Password, and hardware-backed agents all work for free.
+
+**Plain `ssh-ed25519` only.** Other key types are rejected with a clear diagnostic at `use-ssh` time:
+
+- `ed25519-sk` (FIDO/`-sk`) signs a hash + flags + counter construction, never the raw message, so a
+  signature from one can **never verify** under the strict Ed25519 path. Hard exclusion.
+- RSA and ECDSA are not Ed25519 — rejected, pointing at `shore keys init`.
+- **No SSHSIG wrapper.** The `DSSEv1 ` PAE prefix already supplies domain separation, so Shoreline sends
+  the bytes to the agent raw (sign flags = 0) and unwraps the SSH-wire `string "ssh-ed25519", string sig`
+  response to the 64-byte signature ADR-0004 wants. Cross-protocol confusion with the same key is
+  structurally excluded.
+
+**Never gates, even though the agent can fail.** A network-backed signer can fail where a local file
+key cannot, so signing-never-gates is kept true by two cooperating mechanisms: an **identities-only
+pre-flight** in the resolve layer (connect + confirm the key is loaded — it does **not** sign) and a
+**tightly-scoped sign-time degrade** in the write seam. Every failure mode leaves an **unsigned write at
+exit 0** with a named diagnostic:
+
+| Agent condition | Diagnostic | Outcome |
+| --------------- | ---------- | ------- |
+| Agent unavailable (no socket / no pipe / refused) — at pre-flight | `signing_agent_unavailable` | unsigned write, exit 0 |
+| Key not loaded / globally locked (lists zero identities) — at pre-flight | `signing_agent_key_absent` | unsigned write, exit 0 |
+| Agent refuses or fails the sign (confirmation deny, agent died) — at sign time | `signing_agent_sign_failed` | unsigned write, exit 0 |
+| Unsupported key algorithm (`-sk`/RSA/ECDSA) | `signing_key_unsupported_algorithm` | unsigned write, exit 0 |
+
+For an **explicitly selected** agent-backed key (`--sign-key` / `SHORE_SIGNING_KEY`), a pre-flight
+failure is terminal — it does not fall through to auto-keygen or the `default` key.
+
+**One prompt per write, not two.** Because the pre-flight is identities-only (it never signs), a
+confirmation-constrained or hardware agent (`ssh-add -c`, 1Password, YubiKey) is prompted exactly once
+per write — at the real sign. (A probe-sign pre-flight was rejected for exactly this reason: it would
+prompt twice.) The will-it-sign question is answered at the real sign, and the sign-time degrade closes
+the sub-second window where the agent dies or locks between pre-flight and sign (and a per-key
+confirmation deny): the event is left unsigned, still exit 0, with `signing_agent_sign_failed`. The
+file-signer path stays strict — its errors still propagate, so a real bug is never masked. There is no
+residual.
+
+**Cross-platform.** The transport is platform-abstracted: the `$SSH_AUTH_SOCK` Unix domain socket, and
+the Windows named pipe `\\.\pipe\openssh-ssh-agent`.
+
 ## Deferred
 
-`shore keys use-ssh` (reuse an existing SSH key through ssh-agent), key rotation, and revocation are
-named follow-ons, not yet shipped — only the flows above are available today.
+Key rotation and revocation are named follow-ons, not yet shipped — only the flows above are available
+today.

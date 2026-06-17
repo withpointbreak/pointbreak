@@ -54,6 +54,22 @@ fn agent_skills_document_automatic_signing_and_enrollment() {
     }
 }
 
+#[test]
+fn agent_skills_note_human_use_ssh_path() {
+    for skill in [
+        "skills/shoreline-author/SKILL.md",
+        "skills/shoreline-reviewer/SKILL.md",
+        "skills/shoreline-author-response/SKILL.md",
+    ] {
+        // Humans can reuse an existing SSH key; agents still auto-keygen (note stays).
+        assert_contains(skill, "shore keys use-ssh");
+        assert_contains(skill, "shore keys enroll");
+        // No private plan labels leak into shipped skills.
+        assert_not_contains(skill, "0067");
+        assert_not_contains(skill, "0066");
+    }
+}
+
 fn assert_not_contains(relative_path: &str, needle: &str) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
     let contents = std::fs::read_to_string(&path)

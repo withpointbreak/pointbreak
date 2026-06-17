@@ -167,6 +167,13 @@ and the workflow only ever signs with a known-good signer. That placement is why
 gates a write** — every resolution failure degrades to an unsigned write at exit 0 with a named
 diagnostic. The library seam is unchanged; there is no library entry point for resolution.
 
+`SshAgentSigner` (`shoreline::keys`) is the **second** production `EventSigner`: it signs by shipping
+the DSSE PAE bytes to ssh-agent, so its `sign_event_message` is the **fallible** (network) one, unlike
+the file signer's infallible local sign. `sign_with` and the `EventSigner` trait are **unchanged** —
+the CLI resolution layer carries either signer as a boxed `dyn EventSigner` (a blanket impl lets the
+unchanged generic `sign_with` accept it), and a tightly-scoped sign-time degrade keeps never-gates true
+for the network signer. See [ADR-0010](./adr/adr-0010-actor-identity-and-delegation.md).
+
 ### Actor identity and delegation — `shoreline::session`
 
 Verification answers "is this event authentic?"; delegation answers the orthogonal question "whose

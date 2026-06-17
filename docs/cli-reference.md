@@ -282,22 +282,34 @@ shore keys list --repo .
 shore keys show default --did
 shore keys show default --pubkey
 
+# Adopt an existing SSH Ed25519 key as an agent-backed signer (shore.keys-use-ssh).
+# Reuses ssh-agent custody — no new key material. Parallel to `init`.
+shore keys use-ssh ~/.ssh/id_ed25519.pub --name default
+shore keys use-ssh 'key::ssh-ed25519 AAAA…'   # git user.signingKey literal form
+
 # Stage an allow-list entry binding a key's did:key to an actor (shore.keys-enroll).
 # Possession-style: this stages the working-tree .shore/allowed-signers.json edit only;
 # review and commit it to authorize the binding.
 shore keys enroll default --actor actor:agent:claude-code --repo .
 ```
 
-`init` refuses to overwrite an existing named key. `list`/`enroll` take `--repo` (default `.`) to
-resolve the committed `.shore/allowed-signers.json`; every subcommand accepts `--pretty`. Enrollment
-never commits — the human's commit is the authorization.
+`init` refuses to overwrite an existing named key. `use-ssh` adopts an existing SSH **public** key as an
+agent-backed `default` signer: it accepts a `*.pub` path or a `key::ssh-ed25519 AAAA…` literal, emits a
+`shore.keys-use-ssh` document with the derived `did:key` (the same `.didKey` field `shore keys show
+--did` prints) plus an enrollment hint, and (like `init`) refuses to overwrite. Only plain `ssh-ed25519`
+keys are accepted; `ed25519-sk`/RSA/ECDSA are rejected with a clear error pointing at `shore keys init`.
+`list`/`enroll` take `--repo` (default `.`) to resolve the committed `.shore/allowed-signers.json`;
+every subcommand accepts `--pretty`. Enrollment never commits — the human's commit is the authorization.
 
 Each **write** subcommand (`review capture`, `review observation add`, `review assessment add`,
 `review validation add`, `review input-request open`/`respond`) accepts `--sign-key <name|path>` to
 sign that write with a specific key (highest precedence; overrides `SHORE_SIGNING_KEY`). A key that
 cannot be loaded leaves the write unsigned at exit 0 with an advisory diagnostic — signing never
-blocks. Only shipped subcommands are listed; `keys use-ssh`, `rotate`, and `revoke` are named
-follow-ons, not yet available.
+blocks. An agent-backed key resolves through an identities-only ssh-agent pre-flight; if the agent is
+unavailable (`signing_agent_unavailable`), does not hold the key (`signing_agent_key_absent`), or fails
+the real sign (`signing_agent_sign_failed`), the write is left unsigned at exit 0 — see
+[signing-ux.md](./signing-ux.md) for the full never-gates table. Only shipped subcommands are listed;
+`rotate` and `revoke` are named follow-ons, not yet available.
 
 ## `shore review observation`
 

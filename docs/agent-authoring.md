@@ -72,8 +72,9 @@ agent to the committed `.shore/allowed-signers.json` allow-list. The agent propo
 edit; the human's commit is the authorization (possession-style, like delegation). Until enrolled, a
 signed event verifies `untrusted_key` — tamper-evident and strictly better than unsigned; once
 enrolled it verifies `valid` and binds. Signing never gates: if no key can be made the write still
-succeeds, unsigned, at exit 0. `SHORE_SIGNING=off` disables signing. See
-[signing-ux.md](./signing-ux.md).
+succeeds, unsigned, at exit 0. `SHORE_SIGNING=off` disables signing. (A **human** can instead reuse an
+existing SSH key via `shore keys use-ssh` rather than `shore keys init`; agents still auto-keygen,
+unchanged.) See [signing-ux.md](./signing-ux.md).
 
 Observations explain what changed and why. They should call out the design choices, risk areas,
 follow-up edges, and files or line ranges a reviewer should inspect first. A useful observation is

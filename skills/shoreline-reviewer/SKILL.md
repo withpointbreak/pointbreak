@@ -108,7 +108,8 @@ passphrase-less per-machine key and signs the event; it prints a one-line notice
 and `shore keys enroll` so a human can add you to the committed allow-list. Your signed response is
 the event that closes the binding loop — once enrolled, it verifies and binds. Signing never blocks
 a write — if no key can be made the write still succeeds, unsigned. Set `SHORE_SIGNING=off` to
-disable signing.
+disable signing. A human can instead reuse an existing SSH key via `shore keys use-ssh` (agents still
+auto-keygen, unchanged).
 
 ## Review independently
 

@@ -98,7 +98,8 @@ hyphenated, like the track rule; `/` inside the agent segment is reserved.
 passphrase-less per-machine key and signs the event; it prints a one-line notice with your `did:key`
 and `shore keys enroll` so a human can add you to the committed allow-list (once enrolled, your
 signed events verify and bind). Signing never blocks a write — if no key can be made the write still
-succeeds, unsigned. Set `SHORE_SIGNING=off` to disable signing.
+succeeds, unsigned. Set `SHORE_SIGNING=off` to disable signing. A human can instead reuse an existing
+SSH key via `shore keys use-ssh` (agents still auto-keygen, unchanged).
 
 ## Record observations
 

@@ -808,6 +808,16 @@ directory inherits the parent ACL (documented caveat). A private-key file is a m
 Shoreline-native JSON document carrying the raw 32-byte Ed25519 seed (`{ "version", "alg", "seed" }`,
 base64); a `<name>.pub` sidecar records the derived `did:key`.
 
+A key may instead be **agent-backed**: a custody-tagged reference adopted with `shore keys use-ssh`,
+where ssh-agent custodies the private key and the keystore stores only the **public** key — no seed.
+Its on-disk document is `{ "version", "alg", "custody": "agent", "publicKey" }` (the public key
+base64); it lives at the same `~/.shore/keys/<name>` with the same `<name>.pub` did:key sidecar, never
+in the repo `.shore/` or the store. The change is additive — an existing `{ version, alg, seed }` file
+still loads as file custody. Because the reference carries the public key, it is not secret, so the
+`0600` mode is not applied (the no-clobber-on-create policy still is); and its `did:key` derives from
+the stored public material with **no agent and no private key**, so `enroll` / `list` / `show` work
+offline.
+
 ## Projection Ordering
 
 Event filenames are derived from idempotency-key hashes. Listing event files therefore does not imply
