@@ -12,7 +12,12 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use shoreline::session::event::{IngestProvenance, IngestVia, ShoreEvent};
+use shoreline::crypto::SignerId;
+use shoreline::model::{EventId, SessionId};
+use shoreline::session::event::{
+    EventSignature, EventSignatureRecordedPayload, EventTarget, EventType, IngestProvenance,
+    IngestVia, ShoreEvent, Writer,
+};
 use shoreline::session::{
     EventVerificationStatus, event_signature_pre_authentication_encoding,
     event_signature_trust_set, event_to_be_signed, verify_event_signature,
@@ -45,6 +50,84 @@ fn fixture_json(name: &str) -> Value {
 
 fn fixture_event(name: &str) -> ShoreEvent {
     serde_json::from_value(fixture_json(name)).expect("fixture event decodes")
+}
+
+const FRIENDLY_SIGNER: &str = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
+
+fn carrier_event(idempotency_key: &str, payload: EventSignatureRecordedPayload) -> ShoreEvent {
+    ShoreEvent::new(
+        EventType::EventSignatureRecorded,
+        idempotency_key,
+        EventTarget::for_event_signature(
+            SessionId::new("session:fixture"),
+            EventId::new("evt:sha256:target"),
+        ),
+        Writer::shore_local("test"),
+        payload,
+        "2026-06-04T00:00:00Z",
+    )
+    .expect("carrier builds")
+}
+
+fn carrier_payload(signer: &SignerId, sig: &str) -> EventSignatureRecordedPayload {
+    EventSignatureRecordedPayload {
+        target_event_id: EventId::new("evt:sha256:target"),
+        target_event_record_hash: "sha256:rec".to_owned(),
+        attesting_signer: signer.clone(),
+        attestation: EventSignature::new_ed25519_v1(sig).unwrap(),
+        inclusion_proof: None,
+    }
+}
+
+/// Cross-store determinism lock: the carrier `idempotencyKey` (hence its `eventId`)
+/// derives from the full attestation triple `(targetEventRecordHash, attestingSigner,
+/// signature)`. Two distinct signatures by one signer are two distinct members; an
+/// identical triple is idempotent. Keying on `(target, signer)` would fail the
+/// distinct-signature case (signer-slot poisoning).
+#[test]
+fn golden_cosignature_idempotency_key_derives_from_full_triple() {
+    let signer = SignerId::parse(FRIENDLY_SIGNER).unwrap();
+
+    let key = EventSignatureRecordedPayload::idempotency_key("sha256:rec", &signer, "SIG_BASE64");
+    assert_eq!(
+        key,
+        "event_signature_recorded:sha256:rec:did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd:SIG_BASE64"
+    );
+
+    let key_a = EventSignatureRecordedPayload::idempotency_key("sha256:rec", &signer, "SIGAAA");
+    let key_b = EventSignatureRecordedPayload::idempotency_key("sha256:rec", &signer, "SIGBBB");
+    let event_a = carrier_event(&key_a, carrier_payload(&signer, "SIGAAA"));
+    let event_b = carrier_event(&key_b, carrier_payload(&signer, "SIGBBB"));
+    assert_ne!(
+        event_a.event_id, event_b.event_id,
+        "two distinct signatures by one signer are two distinct members"
+    );
+
+    let again = carrier_event(&key_a, carrier_payload(&signer, "SIGAAA"));
+    assert_eq!(
+        event_a.event_id, again.event_id,
+        "an identical triple is idempotent"
+    );
+}
+
+/// `eventRecordHash` signature-blindness at the public-API boundary: a signed and an
+/// unsigned copy of one fact share it. The pinned literal is the cross-store
+/// regression lock; the in-crate unit golden
+/// (`session::event::record_hash::tests::event_record_hash_golden_vector`) covers the
+/// same fixture, so this asserts the public surface, not a second contract.
+#[test]
+fn golden_event_record_hash_is_signature_blind() {
+    let signed = fixture_event("friendly-valid-event.json");
+    let mut unsigned = signed.clone();
+    unsigned.signer = None;
+    unsigned.signature = None;
+
+    let signed_hash = signed.event_record_hash().unwrap();
+    assert_eq!(signed_hash, unsigned.event_record_hash().unwrap());
+    assert_eq!(
+        signed_hash,
+        "sha256:95c0b027e6d9ad502cc7c5a1d784b519d2d7bc1c6b6881b52c7a7e4678e87a0d"
+    );
 }
 
 #[test]

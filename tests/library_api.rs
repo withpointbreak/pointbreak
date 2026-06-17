@@ -573,8 +573,26 @@ fn event_signature_contract_docs_exist_and_reserve_deferred_surfaces() {
         std::fs::read_to_string("docs/adr/adr-0004-event-signatures.md").expect("ADR-0004 exists");
     assert!(adr.contains("application/vnd.shore.event-tbs.v1+json"));
     assert!(adr.contains("valid / invalid / untrusted_key / unsigned"));
+    // `eventSetRoot` stays reserved/unimplemented (out of scope); the assertion stays.
     assert!(adr.contains("eventSetRoot"));
     assert!(adr.contains("relay_attestation"));
+
+    // The detached co-signature amendment landed (plan 0068). `eventRecordHash` is
+    // now implemented and documented as signature-exclusive; the carrier binds
+    // `targetEventRecordHash` (not `targetPayloadHash`) with no new `sigVersion`.
+    assert!(adr.contains("## Amendment: Detached Co-Signature Event Family"));
+    assert!(adr.contains("targetEventRecordHash"));
+    assert!(adr.contains("eventRecordHash"));
+    assert!(adr.contains("signature-exclusive"));
+    assert!(adr.contains("no new `sigVersion`"));
+
+    // STOP E2 resolved Branch B (fold): ADR-0008 is in-repo, and its `eventRecordHash`
+    // exclusion prose names `ingest` (the owner-ratified hop-exclusion correction).
+    let adr_0008 = std::fs::read_to_string("docs/adr/adr-0008-cross-peer-conflict-policy.md")
+        .expect("ADR-0008 exists in-repo");
+    assert!(adr_0008.contains("eventRecordHash"));
+    assert!(adr_0008.contains("signature-exclusive"));
+    assert!(adr_0008.contains("ingest"));
 
     let api = std::fs::read_to_string("docs/library-api.md").expect("read library API docs");
     assert!(api.contains("advisory"));

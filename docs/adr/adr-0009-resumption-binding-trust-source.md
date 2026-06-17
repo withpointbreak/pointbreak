@@ -302,3 +302,130 @@ Reopen this decision if one of these occurs:
   ADR completes.
 - Relay ADR-0001 (shoreline-relay repo) — peer-to-actor binding at the gateway; the transport
   complement that never reaches the durable store.
+
+## Amendment: Binding Over a Signature Set
+
+This amendment generalizes the binding predicate's verified-signer arm from a single signer to
+**any-of a `valid` attestation over the co-signature set** introduced by the
+[ADR-0004 detached co-signature amendment](./adr-0004-event-signatures.md) (its dependency). The
+original decisions stand — **Status:** stays Accepted; this is a landing record that generalizes one
+clause, not a re-decision. **Neither arm's trust basis, the ingest provenance marker, the policy
+presets, nor the diagnostic vocabulary change** except for the set generalization stated here, and it
+**composes under** [ADR-0010](./adr-0010-actor-identity-and-delegation.md)'s principal policy
+unchanged. It lands via shoreline plan 0068 (owner-approved 2026-06-17), bundled with the family the
+predicate reads, the same `## Amendment` mechanism plan 0066 used for ADR-0010.
+
+### Context recap
+
+ADR-0009's predicate was written when an event had at most one signature; its arm (b) reads *the*
+signer:
+
+```text
+binding(event, policy) :=
+     verification(event, trustSet) == valid                      # arm (b): verified signer
+  or (    policy permits local-possession binding
+      and event carries no ingest provenance
+      and verification(event, trustSet) != invalid )             # arm (a): local possession
+```
+
+Under the co-signature amendment an event carries a **set** of attestations (the inline author
+signature plus zero or more detached co-signature events), so "the event's verification" is no longer
+a single status — it is a per-member multiset. Binding must ask its question over the set, and the
+natural generalization is **any-of**.
+
+### The generalized predicate
+
+```text
+cosignatures(event) := { event's inline attestation, if present }
+                     ∪ { detached co-signature events targeting event.eventId }
+
+binding(event, policy) :=
+     (∃ a ∈ cosignatures(event) : verification(a, trustSet) == valid)     # arm (b'): any verified co-signer
+  or (    policy permits local-possession binding
+      and event carries no ingest provenance
+      and inlineAttestationStatus(event) != invalid )                     # arm (a): local possession
+```
+
+### Arm (b') — any verified co-signer (the generalization)
+
+Binds iff **at least one** member of the set verifies `valid`. ADR-0004 `valid` already means "the
+signature verifies **and** the signer is authorized for the claimed `writer.actorId` under the store's
+allowed-signers trust set" — so any-of is **intrinsically scoped to the event's own actor**. No
+separate "the responder's own signature must be present" rule is needed: a co-signature only counts
+toward binding if it is authorized for *this* event's actor. Threshold-of-N bound co-signers
+(`require-k-cosigners`) is a named **deferred** policy tier — the same posture ADR-0010 used for its
+deferred presets — not the v1 floor; v1 is any-of, matching ADR-0009's original "only `valid` binds."
+
+### Arm (a) — local possession (refined, not changed)
+
+Arm (a) is unchanged in basis: an event with **no ingest provenance** was produced by this store's own
+writer; possession is the trust root. The one refinement is *which* attestation's `invalid` status
+defeats it: `inlineAttestationStatus(event)` is the status of the event's **own inline attestation**. A
+present-but-`invalid` inline signature still defeats arm (a) (tampering is not shrugged). Detached
+co-signatures **cannot defeat arm (a) at all** — closed twice over: per ADR-0004 amendment D5 a
+cryptographically `invalid` detached attestation is rejected before storage and never becomes a member,
+and even if one were present, arm (a) reads only the inline attestation. Arm (a) therefore reads
+exactly one status — the inline one — exactly as it did before the set existed.
+
+### Diagnostics (generalized, same vocabulary)
+
+The diagnostic code stays `agent_resumption_response_identity_not_binding`; its bounded `reason` detail
+generalizes over the set, **first match wins**:
+
+- `signature_invalid` — the event's **inline** attestation is `invalid`; tampering or corruption,
+  defeats arm (a) and never binds. (Detached attestations cannot produce this reason — an invalid one
+  is never a member.)
+- `signer_not_authorized` — **no** member is `valid` and arm (a) is unavailable; at least one
+  attestation verifies but every member is `untrusted_key`. Fix: authorize a present signer, or add a
+  co-signature from an already-trusted signer.
+- `ingested_unsigned` — the event carries ingest provenance and the set is empty; a bound signer must
+  co-sign for this response to ever bind.
+- `policy_excludes_local` — a local event whose set has no `valid` member under `verified-only`.
+
+### Presets (unchanged)
+
+| Preset | Arm (a) local possession | Arm (b') any verified co-signer |
+| ------ | ------------------------ | ------------------------------- |
+| `local-and-verified` (default) | yes | yes |
+| `verified-only` | no | yes |
+
+Zero configuration is still `local-and-verified`. Ingested events still bind only via arm (b') — every
+import seam stamps ingest provenance, so arm (a) never fires for them — but now an ingested event binds
+if **any** member of its set is `valid`. That is the federated improvement: a reviewer's response that
+arrives with a divergent inline signature still binds as long as a bound signer's attestation is
+somewhere in the set.
+
+### Composition with ADR-0010 principal policy
+
+Unchanged and still conjunctive — ADR-0010's `principal_sufficient` refinement composes *over* this
+generalized `binding`:
+
+```text
+binding'(event, bindingPolicy, principalPolicy) :=
+      binding(event, bindingPolicy)                 # this amendment's any-of generalization
+  and principal_sufficient(event, principalPolicy)  # ADR-0010, verbatim
+```
+
+The any-of generalization can only widen what `binding` admits; `principal_sufficient` can only narrow
+it. ADR-0010 is **not** reopened: principal resolution keys on `writer.actorId` and the human-committed
+delegates map, neither of which the co-signature set touches.
+
+### Consequences
+
+#### Accepted
+
+- A fact's bindingness is **robust to a single bad or revoked co-signer**: as long as one bound
+  signer's attestation is `valid`, the response binds.
+- The federated loop improves: a reviewer response that diverged on inline signature across stores
+  still binds wherever the set contains one authorized attestation, instead of failing closed.
+- No arm's trust basis changes; the ingest marker, presets, and diagnostic vocabulary are preserved.
+- The v1 single-signer predicate is the one-member-set special case, so single-signed and unsigned
+  events are unchanged.
+
+#### Rejected
+
+- **Threshold-of-N as the v1 default** — a deferred policy tier (`require-k-cosigners`), not the floor.
+- **Defeating arm (a) on any invalid set member** — would hand a peer a denial-of-binding primitive;
+  closed twice over (D5 pre-store rejection + arm (a) reads only the inline attestation).
+- **Requiring the responder's own signature specifically** — redundant; ADR-0004 `valid` already binds
+  every attestation to the claimed actor, so any-of is actor-scoped without a position rule.

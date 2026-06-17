@@ -238,3 +238,172 @@ Per-event signatures do not prove:
 Future review lineage and event-sync ADRs should cross-reference this ADR. New event families should
 remain signable under the generic `EventToBeSigned` contract unless they intentionally introduce a
 new `sigVersion` and payload type.
+
+## Amendment: Detached Co-Signature Event Family
+
+This amendment extends ADR-0004's deferred "Multi-Signature Envelopes" section and activates the
+reserved `eventRecordHash` name into a concrete, **back-compatible** contract: signatures over a
+Shoreline event form a **set of attestations** keyed to the event's signature-exclusive identity, and
+multiple signatures over one fact are **co-signers, not a conflict**. The original decisions stand —
+**Status:** stays Accepted; this is a landing record, not a re-decision. It introduces **no new
+`sigVersion`** and **migrates no stored bytes**. It lands via shoreline plan 0068 (owner-approved
+2026-06-17), the same `## Amendment` mechanism plan 0066 used for ADR-0010's "Key Custody Landing".
+The governing definition of `eventRecordHash` lives in
+[ADR-0008](./adr-0008-cross-peer-conflict-policy.md); the binding generalization it enables is the
+amendment to [ADR-0009](./adr-0009-resumption-binding-trust-source.md); it composes under
+[ADR-0010](./adr-0010-actor-identity-and-delegation.md) unchanged.
+
+### Context
+
+ADR-0004 v1 ships a **single** inline producer `signature` and explicitly defers multi-signature
+envelopes ("If a future design adopts `signatures: []`, signer identity belongs per signature entry
+rather than as a single top-level `signer`"). The field's settled cross-industry answer — DSSE
+`signatures[]`, JWS, CMS SignerInfos, PGP, cosign + Rekor, Certificate Transparency — is uniform:
+**identity is the content; signatures are a set of attestations attached to it.** The cautionary
+tales (Bitcoin `txid` malleability; git's signature-in-the-SHA) are exactly why this amendment keeps
+signatures *out* of the identity hash.
+
+Shoreline's store is **append-only and content-addressed**: an event's stored bytes are immutable and
+`eventId = sha256(idempotencyKey)` is already signature-exclusive, so you **cannot** grow an inline
+`signatures: []` array on a stored event without rewriting its bytes. Co-signatures are therefore
+forced into the only shape the substrate allows — **detached, append-only attestation records keyed
+by content identity** — which is also the cosign/Rekor/PGP/git-notes pattern. And it is on-brand: *a
+co-signature is itself an event.*
+
+### Decision
+
+#### D1 — The inline `signer`/`signature` is attestation #1
+
+The v1 envelope `signer`/`signature` pair is reinterpreted, with **no byte change**, as the **first
+member** of the event's co-signature set. An unsigned event has an empty set; a v1 single-signed event
+has a one-member set. Nothing about already-stored events changes — a reinterpretation of existing
+bytes, not a migration.
+
+#### D2 — Additional attestations are a detached co-signature event family
+
+Every attestation beyond the inline author signature is recorded as a member of a new **append-only
+co-signature event family** (`event_signature`). A co-signature event is an ordinary `shore.event`: it
+has its own `eventId`, `writer`, `occurredAt`, and replicates over the same event-sync plane as every
+other event; it **references the target by its signature-exclusive content identity** —
+`targetEventId` **and `targetEventRecordHash`** (the ADR-0008 signature-exclusive hash), **not**
+`targetPayloadHash`; and its own `eventId`/idempotency key **derives from the full attestation
+`(targetEventRecordHash, attestingSigner, signature)`**, so the member identity is the *whole triple*
+(see D3), re-submitting the identical attestation is idempotent, and two distinct signatures by one
+signer are two distinct members — never two claimants to one slot. Signer identity belongs per
+attestation, never as a single top-level field.
+
+#### D3 — Signatures do not enter event identity; the set converges by union
+
+The target event's `eventId` and signature-exclusive `eventRecordHash` (ADR-0008) remain
+**signature-exclusive**. The co-signature set is a **grow-only set (G-Set / join-semilattice)** whose
+**member identity is the full attestation triple `(targetEventRecordHash, attestingSigner,
+signature)`** — *not* `(targetEventRecordHash, signer)`. Keying on the full triple closes a
+**signer-slot-poisoning** hazard: if member identity were `(target, signer)`, a malformed or
+adversarial attestation occupying that slot first would, under first-wins idempotency, block the
+signer's later valid attestation. With the full attestation in the identity, a valid attestation is a
+*distinct* member from a bad one by the same signer; merge is set-union; identical triples dedup;
+union is commutative, associative, and idempotent, so two stores holding different subsets of one
+event's attestations **converge to the union with no winner-selection and no conflict**.
+
+Because each co-signature is itself an *event*, **signature-set convergence is subsumed by event-set
+convergence**: a store missing an attestation is missing that event and backfills it on the next sync.
+Co-signature events carry their own `eventId`/`payloadHash` and are covered by the shipped
+signature-blind `eventSetHash` and the reserved `eventSetRoot` like any event, while the *target's*
+`eventRecordHash` stays signature-exclusive so a divergent inline author-signature never breaks root
+convergence. There is **no separate signature-reconciliation channel** to build.
+
+#### D4 — A co-signature attests the target's `EventToBeSigned` view (no new `sigVersion`)
+
+The attestation in a co-signature event is an Ed25519 signature over the **target event's
+`EventToBeSigned` view with `signer` set to the attesting signer** — the existing v1 message,
+`application/vnd.shore.event-tbs.v1+json`, with the same DSSE pre-authentication encoding. **No new
+`sigVersion`, no new payload type.** This is load-bearing twice: the inline author signature is
+co-signature #1 **with no transformation** (D1), and a co-signature is verifiable with the unchanged
+ADR-0004 verifier (strict Ed25519, allowed-signers authorization, the `valid / invalid /
+untrusted_key / unsigned` status vocabulary, per attestation).
+
+Two digests of the target are in play and **must never be confused**. The attestation signs the
+**signer-inclusive** `EventToBeSigned` view (so each signer signs a view naming themselves and neither
+attestation is replayable as the other), while the carrier binds the **signer-exclusive**
+`targetEventRecordHash` — the convergent content-identity. These are **different digests over
+different field sets** (the TBS view includes `signer`/`actorId` but not `payload`/`idempotencyKey`;
+`eventRecordHash` includes `payload`/`idempotencyKey` but excludes `signer`/`signature`); they are
+*not* interchangeable. A verifier reconstructs `EventToBeSigned` for the target with `signer` set to
+the attestation's signer (all other fields from the target the carrier's `targetEventRecordHash`
+resolves to) and checks the Ed25519 signature, so the co-signature is tied to exactly the
+content-identity that converges across mirrors. The carrier event's own envelope provenance (who
+*recorded* it, its ingest stamp) is **orthogonal** to the attestation's trust: a co-signature's trust
+rests entirely on its embedded signature verifying against the trust set.
+
+#### D5 — Verification is per-member; detached attestations verify before they store
+
+The set's verification is the **multiset of per-attestation statuses**, and no member's status changes
+another's — a `valid` attestation stands whatever else is in the set, which is what makes a fact's
+trust robust to a single bad or revoked co-signer. A detached co-signature event **verifies
+cryptographically before it is stored**: a structurally `invalid` one (the ADR-0004 `invalid` set) is
+**rejected, not stored** (reader-independent noise), while `untrusted_key` is **kept** (reader-relative;
+may become `valid` on a trust-set update). So the stored set contains only `valid` and `untrusted_key`
+members. The **one** attestation that may be `invalid` in a stored event is the **inline** one — part
+of the event's own bytes, kept per ADR-0004's "keep the event, surface `invalid`" rule and read only
+by ADR-0009 arm (a).
+
+#### D6 — Class-(b) divergence is reconciled by transcription, not reported as a conflict
+
+When ingest offers an event whose `eventId`, `payloadHash`, **and signature-exclusive
+`eventRecordHash`** match a stored event but whose inline attestation differs, the store keeps its
+first-stored copy **and records the incoming inline attestation as a co-signature event** (D2),
+converging the set to both signatures. The matching `eventRecordHash` is the precise predicate for
+"this is the *same fact*, differently signed"; were `eventRecordHash` to differ, the copies are not the
+same record and it is not a co-signature case. Because the incoming attestation is a real signature the
+importer *received and can verify* over the target's TBS view, this is **transcription, not minting** —
+the importer never needs the co-signer's private key and never forges anything (the relay never signs
+as the reviewer); per D5 it transcribes only `valid`/`untrusted_key`, never `invalid`. The legacy
+`divergent_signature_existing_event` signal is retired as a *divergence* report; a diagnostic now fires
+only when the newly merged co-signer is **untrusted for the claimed actor**, not for divergence per se.
+
+### Resolved design questions
+
+| # | Question | Resolution |
+| - | -------- | ---------- |
+| 1 | Binding over a set: any-of vs threshold vs "responder's own signature present" | **Any-of a `valid` attestation.** ADR-0004 `valid` already means "verifies *and* signer authorized for the claimed `writer.actorId`," so any-of is intrinsically actor-scoped. Threshold-of-N (`require-k-cosigners`) is a named **deferred** policy tier. Detailed in the ADR-0009 amendment. |
+| 2 | Storage shape; merge key; dedup | **New event family** (D2), not a sidecar. Merge is G-Set union with **member identity = the full attestation triple `(targetEventRecordHash, attestingSigner, signature)`** (D3); full-attestation keying + verify-before-store (D5) closes signer-slot poisoning. |
+| 3 | Backward compatibility | **Inline `signer`/`signature` = attestation #1; no historical byte migration** (D1). Signature-exclusive identity is what makes this free. |
+| 4 | Interaction with the trust lifecycle | Revoking one co-signer's key distrusts one *attestation*, never the fact's identity; a fact co-signed by A and B survives A's revocation on B's attestation (D5). Revocation/rotation/transparency over set members is designed separately. |
+| 5 | `eventSetHash` / `eventSetRoot` | **Co-signature events are ordinary records in the set**, so `eventSetHash` (shipped, signature-blind) and the reserved `eventSetRoot` converge them as events; the *target's* `eventRecordHash` stays **signature-exclusive**. Signature-set reconciliation is therefore **not** a separate sync channel — it is event-set convergence. |
+
+### Backward Compatibility
+
+- **Already-stored single-signature events** are valid as written: their inline attestation is member
+  #1 of a now-explicit set. No re-signing, no `eventId` change, no `sigVersion` change, golden vectors
+  untouched.
+- **Unsigned events** have an empty co-signature set and behave exactly as ADR-0004 specifies.
+- **Mixed stores** are internally consistent; a reader without the co-signature events sees a smaller
+  set and converges on backfill.
+- **The v1 single-signer verifier** is a strict special case of the per-member verifier (a one-member
+  set).
+
+### Consequences
+
+#### Accepted
+
+- Multiple signatures over one fact are **co-signers, not a conflict**.
+- Signatures are decoupled from identity: rotation is "co-sign with the new key," and a fact's trust is
+  robust to single-key revocation.
+- Conflict class (b) dissolves (ADR-0008); the relay's divergent-signature *report* becomes expected
+  *reconciliation*.
+- Binding generalizes to any-of a bound signer over the set (ADR-0009 amendment) without reopening
+  either arm's trust basis.
+- No `sigVersion` bump, no payload-type change, no historical byte migration.
+
+#### Rejected
+
+- **An inline `signatures: []` array on the event envelope** — impossible on a content-addressed,
+  append-only store without rewriting stored bytes and breaking `eventId`.
+- **A `.sig` sidecar** — splits the event's forwarding unit; detached *events* keep one forwarding unit
+  and converge over the event plane.
+- **Folding signatures into `eventId` / `eventRecordHash`** — re-affirmed rejected; it is what makes the
+  divergent-signature conflict class exist in the first place.
+- **The importer minting a co-signature on a reviewer's behalf** — transcription re-homes a received,
+  verifiable signature; it never synthesizes one.
+- **A dedicated co-signature payload type / new `sigVersion`** — breaks lossless transcription of a
+  divergent inline attestation (D6) and adds a payload type for no convergence benefit.
