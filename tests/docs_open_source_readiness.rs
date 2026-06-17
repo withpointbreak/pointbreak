@@ -459,6 +459,54 @@ fn docs_cover_ssh_agent_use_ssh_signing() {
     }
 }
 
+#[test]
+fn adr_0010_second_amendment_records_ssh_agent_custody() {
+    let adr = std::fs::read_to_string("docs/adr/adr-0010-actor-identity-and-delegation.md")
+        .expect("read ADR-0010");
+
+    // Status is unchanged — this is a landing record, not a re-decision.
+    assert!(adr.contains("**Status:** Accepted"));
+
+    // BOTH amendments are present (the first stays; this one is appended).
+    assert!(
+        adr.contains("## Amendment: Key Custody Landing"),
+        "the first (key-custody) amendment stays present"
+    );
+    assert!(
+        adr.contains("## Amendment: ssh-agent Custody Landing"),
+        "ADR-0010 records the ssh-agent custody landing amendment"
+    );
+
+    // As-built decisions captured (feature language, no plan numbers).
+    for token in [
+        "shore keys use-ssh",
+        "ssh-agent",
+        "ssh-ed25519",
+        "ed25519-sk",
+        "signing_agent_unavailable",
+        "signing_agent_sign_failed",
+        "Box<dyn EventSigner",
+        "pre-flight",
+        "sign_event_if_requested",
+        "openssh-ssh-agent",
+    ] {
+        assert!(adr.contains(token), "ADR-0010 second amendment records {token}");
+    }
+
+    // The resolve→sign window is recorded as closed by the sign-time degrade.
+    assert!(
+        adr.contains("TOCTOU") || adr.contains("resolve-to-sign") || adr.contains("resolve→sign"),
+        "the resolve→sign window and its sign-time-degrade closure are documented"
+    );
+
+    // No private plan labels leak into the public ADR.
+    for forbidden in ["Phase 5", "Task 5.2", "plan 0067", "0067", "plan 0066", "0066"] {
+        assert!(!adr.contains(forbidden), "no private plan label {forbidden} in ADR-0010");
+    }
+    assert!(!adr.contains("research 0009"));
+    assert!(!adr.contains("implementation plan"));
+}
+
 fn assert_markdown_section_contains(markdown: &str, heading: &str, required: &[&str]) {
     let start = markdown
         .find(heading)

@@ -429,3 +429,70 @@ record that corrects paths and documents placement and sequencing as built, not 
   a coverage gap. `PrincipalStatus::Disavowed` stays **wire-reserved**: v1 emits only
   `resolved`/`none`/`ambiguous`, and disavowal manifests as `none` plus a diagnostic reason, so no
   schema change is needed when a future positive-disavowal source lands.
+
+## Amendment: ssh-agent Custody Landing
+
+This amendment records the ssh-agent fast-follow the previous amendment named — as built. The original
+decisions and the key-custody amendment stand; **Status:** stays Accepted; this is a landing record of
+the mechanism and the polymorphic seam, not a re-decision. Throughout, "ssh-agent" is the **key
+custodian** (the OpenSSH agent), distinct from a coding or reviewing **agent** (acting software).
+
+- **ssh-agent custody path.** `shore keys use-ssh <pubkey-path | key::literal> [--name]` adopts an
+  existing Ed25519 SSH key as an agent-backed default signer. The **ssh-agent holds the private key** —
+  Shoreline ships the ADR-0004 DSSE pre-authentication bytes to the agent **raw** (sign flags = 0) and
+  **unwraps** the SSH-wire signature (`string "ssh-ed25519", string sig`) to the 64 raw bytes the
+  envelope's `sig` field wants. There is **no SSHSIG wrapper**: the `DSSEv1 ` PAE prefix already
+  supplies domain separation, so cross-protocol confusion with the same key is structurally excluded.
+  Only plain `ssh-ed25519` keys are usable — `ed25519-sk` (FIDO; signs a hash + flags + counter
+  construction that can never verify under `verify_ed25519_strict`), RSA, and ECDSA are rejected with a
+  diagnostic. The `EventSigner::sign_event_message(&[u8])` seam and ADR-0004's envelope are
+  **unchanged**.
+- **Polymorphic signer resolution.** `resolve_signer` still returns a `SignerResolution` **by value,
+  never a `Result`**, but its `signer` field widened from a concrete file signer to
+  `Option<Box<dyn EventSigner + Send + Sync>>` so it can carry either a file-backed signer or the
+  agent-backed `SshAgentSigner`. A blanket `impl EventSigner for Box<dyn EventSigner + Send + Sync>`
+  (forwarding to the inner value) lets the existing generic `sign_with` accept the boxed value with **no
+  change to `sign_with` or the `EventSigner` trait**. (A closed enum over signer *types* was considered
+  and rejected — the boxed trait object is more extensible.) Because the boxed signer is type-erased,
+  the resolution carries a signing mode beside it so the write builders pick strict vs best-effort
+  signing — see the next point.
+- **Two-part never-gates for a network-backed signer.** The key-custody amendment recorded that signing
+  never gates because a resolved `FileEd25519Signer`'s `sign_event_message` is **infallible** (local
+  crypto over a loaded key). `SshAgentSigner`'s `sign_event_message` does a **network round-trip that
+  can fail**, so never-gates is kept true by **two cooperating mechanisms**:
+  - **(a) An identities-only pre-flight** in the CLI resolve layer: connect to the agent and confirm the
+    target key is loaded (identities list) **before** returning the signer. It does **not** probe-sign —
+    a probe-sign was considered and **rejected** because it would make a confirmation-constrained or
+    hardware agent (`ssh-add -c`, 1Password, YubiKey) prompt the user twice per write. Any pre-flight
+    failure → `None` + a named diagnostic (`signing_agent_unavailable`; `signing_agent_key_absent`, which
+    also covers a globally-locked agent that lists zero identities; or `signing_key_unsupported_algorithm`)
+    → an unsigned write, exit 0.
+  - **(b) A tightly-scoped, diagnostic-bearing sign-time degrade** in the library write seam
+    `sign_event_if_requested`: because the pre-flight does not sign, the will-it-actually-sign question is
+    answered at the real sign — a best-effort (agent) signer's `sign_event_message` failure leaves the
+    event **unsigned, exit 0**, with a `signing_agent_sign_failed` diagnostic. This is scoped to
+    best-effort signers only; the file-signer path stays **strict** (its errors still propagate, so a real
+    bug is never masked).
+
+  Mechanism (b) closes the resolve-to-sign TOCTOU window structurally — the sub-second window where the
+  agent dies or locks between a passed pre-flight and the real sign, plus a per-key confirmation deny — so
+  there is **no documented residual**; the contained change to `sign_event_if_requested` is part of this
+  landing, not a deferred residual.
+- **3-OS transport (hand-rolled, zero new dependency).** The agent client is the ~3-message protocol
+  subset (request identities, sign request, parse the SSH-wire signature) over length-prefixed string
+  framing; it performs **no cryptography** (the agent signs). The transport is platform-abstracted: a
+  Unix domain socket via `$SSH_AUTH_SOCK`, and the Windows named pipe `\\.\pipe\openssh-ssh-agent` opened
+  via `std::fs` — full 3-OS parity, no new dependency. A Windows `windows-sys` `CreateFileW` escalation
+  hatch was reserved behind owner sign-off as a contingency if the `std::fs` pipe proved
+  byte/message-mode-flaky in CI; **as built, it was not taken** — the zero-dependency `std::fs` path
+  holds.
+- **Deferred on-disk private-key parsing — correction.** Both the hand-rolled ssh-agent client and the
+  Windows named-pipe transport **shipped here** (zero-dependency), which corrects the previous
+  amendment's deferral note. What remains deferred is narrower: only SSH **public**-key parsing ships
+  (trivial, no decryption); on-disk **private**-key file parsing stays deferred because the agent holds
+  the private key and Shoreline never reads it — an agent-less encrypted-key path is an unsigned-write
+  diagnostic, not a prompt. The rotation / revocation / transparency boundary is **unchanged** — still
+  the separate "validation over time" effort; the `TrustSet` stays a static allow-list whose
+  `authorizes` ignores `occurred_at` (tie to the **Revisit Triggers** above).
+
+*Landed 2026-06-16.*
