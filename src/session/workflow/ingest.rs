@@ -5,7 +5,8 @@ use super::event_signature::assemble_and_record_cosignature;
 use crate::crypto::EventVerificationStatus;
 use crate::error::{Result, ShoreError};
 use crate::session::event::{
-    EventSignatureRecordedPayload, EventType, IngestVia, ShoreEvent, stamp_ingest_provenance,
+    EventSignatureRecordedPayload, EventType, IngestVia, ShoreEvent, resolve_effective_signer,
+    stamp_ingest_provenance,
 };
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store_init::{ShoreStorePaths, prepare_shore_writer};
@@ -358,12 +359,22 @@ fn transcribe_divergent_signature(
     // it is the kept first-stored copy and shares the incoming event's eventRecordHash.
     let stored_target = event_store
         .read_event(&event_store.event_path_for_idempotency_key(&event.idempotency_key))?;
-    let attesting_signer = event.signer.clone().ok_or_else(|| {
-        ShoreError::Message("divergent signature outcome without an inline signer".to_owned())
-    })?;
-    let attestation = event.signature.clone().ok_or_else(|| {
-        ShoreError::Message("divergent signature outcome without an inline signature".to_owned())
-    })?;
+    // An incoming duplicate with no inline attestation carries nothing to transcribe
+    // (e.g. a signed local event vs. an unsigned peer duplicate — divergent binding,
+    // matching eventRecordHash). The stored copy is kept; the set is unchanged. This
+    // is a clean no-op, never a batch-failing error.
+    let Some(attestation) = event.signature.clone() else {
+        return Ok((0, 0));
+    };
+    // The attesting signer is the incoming event's EFFECTIVE signer: its top-level
+    // `signer`, or the did:key from a self-certifying actor_id (where `signer` is
+    // intentionally omitted). Reading `event.signer` directly would drop a
+    // self-certifying attestation. A signed-but-unresolvable signer is a malformed
+    // event with no verifiable attestation to transcribe — also a no-op.
+    let attesting_signer = match resolve_effective_signer(event) {
+        Ok(signer) => signer,
+        Err(_) => return Ok((0, 0)),
+    };
 
     // The carrier is authored by the importer; its envelope writer is the local
     // identity, orthogonal to the embedded attestation.
@@ -1025,6 +1036,82 @@ mod tests {
             .filter(|event| event.event_type == EventType::EventSignatureRecorded)
             .count();
         assert_eq!(carriers, 0, "the set stays single-member");
+    }
+
+    #[test]
+    fn signed_local_then_unsigned_peer_duplicate_neither_errors_nor_transcribes() {
+        // A signed local event and an unsigned peer duplicate of the same fact have
+        // matching eventRecordHash but a divergent binding — so the divergent arm
+        // fires. The unsigned duplicate carries no attestation to transcribe, so it
+        // must be a clean no-op, never an error that fails the whole ingest batch.
+        let (base, _fixture, actor) = signed_captured_event();
+        let signer_a = DeterministicSigner::from_seed([60u8; 32]);
+        let trust = trust_for_actor(&actor, &signer_a);
+        let dest = dest_repo();
+
+        ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![signed_copy(&base, &signer_a)])
+                .with_trust_set(trust.clone()),
+        )
+        .unwrap();
+
+        let mut unsigned = base.clone();
+        unsigned.signer = None;
+        unsigned.signature = None;
+        unsigned.ingest = None;
+        let result = ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![unsigned]).with_trust_set(trust),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.events_created, 0,
+            "an unsigned duplicate adds no co-signature"
+        );
+        let carriers = EventStore::open(dest.path().join(".shore/data"))
+            .list_events()
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_type == EventType::EventSignatureRecorded)
+            .count();
+        assert_eq!(carriers, 0);
+    }
+
+    #[test]
+    fn self_certifying_divergent_signature_transcribes_via_effective_signer() {
+        // A self-certifying signed event omits the top-level `signer` (its signer is
+        // the did:key in actor_id). Transcription must resolve the EFFECTIVE signer,
+        // not read `event.signer` directly, or the attestation is dropped.
+        let (base, _fixture, _actor) = signed_captured_event();
+        let signer = DeterministicSigner::from_seed([63u8; 32]);
+        let did_key = signer.signer_id().clone();
+
+        let mut signed = base.clone();
+        signed.writer.actor_id = ActorId::new(did_key.as_str());
+        signed.signer = None;
+        signed.signature = None;
+        let tbs = EventToBeSigned::from_event(&signed, &did_key).unwrap();
+        let pae = event_signature_pre_authentication_encoding(&tbs).unwrap();
+        signed.signature = Some(EventSignature::ed25519_v1(
+            signer.sign_event_message(&pae).unwrap(),
+        ));
+
+        // The stored copy is the same fact, unsigned (same actor → same eventRecordHash).
+        let mut unsigned = signed.clone();
+        unsigned.signature = None;
+
+        let dest = dest_repo();
+        ingest_events(IngestEventsOptions::new(dest.path(), vec![unsigned])).unwrap();
+        let result = ingest_events(IngestEventsOptions::new(dest.path(), vec![signed])).unwrap();
+
+        assert_eq!(
+            result.events_created, 1,
+            "the self-certifying attestation transcribes via the effective signer"
+        );
+        assert_eq!(
+            carrier_payload(&carrier_in(dest.path())).attesting_signer,
+            did_key
+        );
     }
 
     #[test]
