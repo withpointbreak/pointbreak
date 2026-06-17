@@ -92,14 +92,14 @@ pub fn verify_ed25519_strict(
 }
 
 #[cfg(test)]
-struct TestEd25519Signer {
+pub(crate) struct TestEd25519Signer {
     signer_id: SignerId,
     signing_key: SigningKey,
 }
 
 #[cfg(test)]
 impl TestEd25519Signer {
-    fn from_seed(seed: [u8; 32]) -> Self {
+    pub(crate) fn from_seed(seed: [u8; 32]) -> Self {
         let signing_key = SigningKey::from_bytes(&seed);
         let signer_id = SignerId::from_ed25519_public_key(signing_key.verifying_key().to_bytes());
 

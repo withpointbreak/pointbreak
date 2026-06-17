@@ -193,6 +193,10 @@ impl StateReducer {
             | EventType::TaskObservationRecorded => {
                 // Task-domain events do not contribute to review-session state.
             }
+            EventType::EventSignatureRecorded => {
+                // Detached co-signatures are read through the dedicated
+                // co-signature-set projection; they do not change session state.
+            }
         }
 
         Ok(())

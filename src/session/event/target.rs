@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    ReviewTargetRef, ReviewUnitId, ReviewUnitLineageId, RevisionId, SessionId, SnapshotId,
+    EventId, ReviewTargetRef, ReviewUnitId, ReviewUnitLineageId, RevisionId, SessionId, SnapshotId,
     TargetRef, TrackId, WorkObjectId, WorkObjectType, WorkUnitId,
 };
 
@@ -90,6 +90,25 @@ impl EventTarget {
         }
     }
 
+    /// Constructor for the detached co-signature carrier. The carrier addresses
+    /// the co-signed event by content identity through its payload
+    /// (`target_event_id` + `target_event_record_hash`), so the envelope target
+    /// carries only `session_id` — keeping the carrier filed into the same
+    /// session store as its target without duplicating the binding key.
+    pub fn for_event_signature(session_id: SessionId, _target_event_id: EventId) -> Self {
+        Self {
+            session_id,
+            work_unit_id: None,
+            work_object_id: None,
+            work_object_type: None,
+            review_unit_id: None,
+            revision_id: None,
+            snapshot_id: None,
+            track_id: None,
+            subject: None,
+        }
+    }
+
     pub fn for_review_unit_lineage(
         session_id: SessionId,
         review_unit_lineage_id: ReviewUnitLineageId,
@@ -113,6 +132,24 @@ impl EventTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn event_target_for_event_signature_populates_session_and_round_trips() {
+        let target = EventTarget::for_event_signature(
+            SessionId::new("session:fixture"),
+            EventId::new("evt:sha256:target"),
+        );
+
+        assert_eq!(target.session_id, SessionId::new("session:fixture"));
+
+        let json = serde_json::to_string(&target).unwrap();
+        let parsed: EventTarget = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, target);
+
+        // Path-free: the carrier files into the session store by identity, not path.
+        assert!(!json.contains("/Users/"));
+        assert!(!json.contains("worktreeRoot"));
+    }
 
     #[test]
     fn event_target_for_review_unit_still_serializes_with_session_id() {

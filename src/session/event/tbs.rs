@@ -274,6 +274,7 @@ mod tests {
             EventType::TaskAttemptCaptured,
             EventType::TaskCheckpointCaptured,
             EventType::TaskObservationRecorded,
+            EventType::EventSignatureRecorded,
         ]
         .into_iter()
         .enumerate()

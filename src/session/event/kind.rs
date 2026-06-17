@@ -16,6 +16,7 @@ pub enum EventType {
     TaskAttemptCaptured,
     TaskCheckpointCaptured,
     TaskObservationRecorded,
+    EventSignatureRecorded,
 }
 
 impl EventType {
@@ -36,6 +37,7 @@ impl EventType {
             Self::TaskAttemptCaptured => "task_attempt_captured",
             Self::TaskCheckpointCaptured => "task_checkpoint_captured",
             Self::TaskObservationRecorded => "task_observation_recorded",
+            Self::EventSignatureRecorded => "event_signature_recorded",
         }
     }
 }
@@ -60,6 +62,7 @@ mod tests {
             EventType::TaskAttemptCaptured,
             EventType::TaskCheckpointCaptured,
             EventType::TaskObservationRecorded,
+            EventType::EventSignatureRecorded,
         ] {
             let serde_wire = serde_json::to_value(variant).unwrap();
             assert_eq!(
@@ -68,6 +71,18 @@ mod tests {
                 "as_str() must equal the serde wire string for {variant:?}"
             );
         }
+    }
+
+    #[test]
+    fn event_signature_event_type_serializes_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&EventType::EventSignatureRecorded).unwrap(),
+            "\"event_signature_recorded\""
+        );
+        assert_eq!(
+            EventType::EventSignatureRecorded.as_str(),
+            "event_signature_recorded"
+        );
     }
 
     #[test]

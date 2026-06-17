@@ -213,9 +213,10 @@ pub(super) fn history_entry_from_event(
         }
         EventType::TaskAttemptCaptured
         | EventType::TaskCheckpointCaptured
-        | EventType::TaskObservationRecorded => {
+        | EventType::TaskObservationRecorded
+        | EventType::EventSignatureRecorded => {
             return Err(ShoreError::Message(
-                "review history projects review-domain events only; task event reached this match arm — upstream filter missing".to_owned(),
+                "review history projects review-domain content events only; a task or co-signature event reached this match arm — upstream filter missing".to_owned(),
             ));
         }
     };
@@ -274,13 +275,15 @@ fn optional_text(
 }
 
 fn event_matches_filters(event: &ShoreEvent, filters: &ResolvedHistoryFilters) -> bool {
-    // Review history is a review-domain projection by name and contract; task-domain events
-    // are not summarized here. A sibling task-history projection is a Phase 5 concern.
+    // Review history is a review-domain content projection by name and contract. Task-domain
+    // events have a sibling projection; detached co-signatures are read through the dedicated
+    // co-signature-set projection. Neither is summarized in this content stream.
     if matches!(
         event.event_type,
         EventType::TaskAttemptCaptured
             | EventType::TaskCheckpointCaptured
             | EventType::TaskObservationRecorded
+            | EventType::EventSignatureRecorded
     ) {
         return false;
     }

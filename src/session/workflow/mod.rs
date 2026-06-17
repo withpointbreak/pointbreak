@@ -1,6 +1,7 @@
 mod artifact_transfer;
 pub(in crate::session) mod assessment;
 mod capture;
+mod event_signature;
 mod history;
 mod import;
 mod ingest;
@@ -29,6 +30,9 @@ pub use assessment::{
 };
 pub use capture::{
     CaptureOptions, CaptureResult, CommitRangeSpec, capture_review, capture_worktree_review,
+};
+pub use event_signature::{
+    EventSignatureRecordOptions, EventSignatureRecordResult, record_event_signature,
 };
 pub use history::{
     ReviewHistoryEntry, ReviewHistoryFilters, ReviewHistoryOptions, ReviewHistoryResult,

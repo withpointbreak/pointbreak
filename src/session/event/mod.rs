@@ -7,6 +7,7 @@ use crate::model::EventId;
 
 mod assertion;
 mod assessment;
+mod event_signature;
 mod input_request;
 mod kind;
 mod lineage;
@@ -25,6 +26,7 @@ mod writer;
 
 pub use assertion::AssertionMode;
 pub use assessment::{ReviewAssessment, ReviewAssessmentRecordedPayload};
+pub use event_signature::{EventSignatureRecordedPayload, InclusionProof};
 pub(crate) use input_request::decode_input_request_opened_payload;
 pub use input_request::{
     InputRequestOpenedPayload, InputRequestReasonCode, InputRequestRespondedPayload,
