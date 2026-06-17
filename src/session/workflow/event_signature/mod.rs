@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::crypto::{EventSigner, EventVerificationStatus, SignerId, verify_ed25519_strict};
+use crate::crypto::{EventSigner, SignerId};
 use crate::error::{Result, ShoreError};
 use crate::model::{ActorId, EventId};
 use crate::session::event::{
@@ -34,11 +34,11 @@ use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::resolution::resolve_write_validation_store;
 use crate::session::store_init::{ShoreStorePaths, prepare_shore_writer};
 use crate::session::workflow::write_store::fact_batch_only_diagnostics;
-use crate::session::{EventStore, EventWriteOutcome, current_timestamp, writer_from_options};
+use crate::session::{
+    EventStore, EventWriteOutcome, TrustSet, current_timestamp, gate_cosignature_for_store,
+    writer_from_options,
+};
 use crate::storage::{Durability, LocalStorage};
-
-const ED25519_SIGNATURE_ALG: &str = "ed25519";
-const EVENT_SIGNATURE_VERSION_V1: u32 = 1;
 
 /// Options for recording a detached co-signature over an existing target event.
 ///
@@ -167,17 +167,19 @@ pub fn record_event_signature(
         current_timestamp(),
     )?;
 
-    // Verify-before-store: a structurally invalid attestation is reader-independent
-    // noise and is refused, never stored. A locally-constructed carrier always
-    // verifies, so this is a self-check here; it is load-bearing on the ingest path.
+    // Verify-before-store via the shared gate (the same rule the ingest path runs).
+    // The target is always present here, so `TargetPending` cannot occur; an
+    // `invalid` attestation or a binding mismatch is reader-independent noise and is
+    // refused, while `untrusted_key` is kept. Trust does not gate storage, so an
+    // empty trust set is correct.
     let carrier_payload: EventSignatureRecordedPayload =
         serde_json::from_value(carrier.payload.clone())?;
-    if cosignature_attestation_crypto_status(&target, &carrier_payload)?
-        != EventVerificationStatus::Valid
-    {
-        return Err(ShoreError::Message(
-            "refusing to store an invalid co-signature attestation".to_owned(),
-        ));
+    let decision =
+        gate_cosignature_for_store(&carrier_payload, Some(&target), &TrustSet::default())?;
+    if let Some(code) = decision.drop_diagnostic_code() {
+        return Err(ShoreError::Message(format!(
+            "refusing to store co-signature carrier ({code})"
+        )));
     }
 
     let event_id = carrier.event_id.clone();
@@ -209,44 +211,10 @@ pub fn record_event_signature(
     })
 }
 
-/// Crypto-only verify-before-store status for a co-signature attestation: reject
-/// when the algorithm/version is unsupported, the recomputed `targetEventRecordHash`
-/// does not match the carrier's binding, the signer-inclusive target TBS cannot be
-/// reconstructed, or the Ed25519 signature does not verify. This is the
-/// reader-independent `invalid` set; trust classification (valid vs untrusted_key)
-/// is reader-relative and does not gate storage. The shared ingest-path verifier
-/// generalizes this with a trust set.
-fn cosignature_attestation_crypto_status(
-    target: &ShoreEvent,
-    payload: &EventSignatureRecordedPayload,
-) -> Result<EventVerificationStatus> {
-    if payload.attestation.alg != ED25519_SIGNATURE_ALG
-        || payload.attestation.sig_version != EVENT_SIGNATURE_VERSION_V1
-    {
-        return Ok(EventVerificationStatus::Invalid);
-    }
-    if target.event_record_hash()? != payload.target_event_record_hash {
-        return Ok(EventVerificationStatus::Invalid);
-    }
-    let tbs = match EventToBeSigned::from_event(target, &payload.attesting_signer) {
-        Ok(tbs) => tbs,
-        Err(_) => return Ok(EventVerificationStatus::Invalid),
-    };
-    let message = match event_signature_pre_authentication_encoding(&tbs) {
-        Ok(message) => message,
-        Err(_) => return Ok(EventVerificationStatus::Invalid),
-    };
-    verify_ed25519_strict(
-        &payload.attesting_signer,
-        &message,
-        payload.attestation.sig.as_str(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::TestEd25519Signer;
+    use crate::crypto::{EventVerificationStatus, TestEd25519Signer, verify_ed25519_strict};
     use crate::model::ActorId;
     use crate::session::event::EventSignatureRecordedPayload;
     use crate::session::{CaptureOptions, EventStore, capture_worktree_review};
