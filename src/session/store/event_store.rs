@@ -59,12 +59,21 @@ impl EventStore {
                     if event_signature_binding_matches(&existing, event) {
                         tracing::debug!(path = %path.display(), "event_store_write_existing");
                         Ok(EventWriteOutcome::Existing)
-                    } else {
+                    } else if existing.event_record_hash()? == event.event_record_hash()? {
+                        // Same content record (signer-exclusive eventRecordHash matches),
+                        // differently signed: a transcription-eligible co-signature, not a
+                        // conflict.
                         tracing::debug!(
                             path = %path.display(),
                             "event_store_write_existing_divergent_signature"
                         );
                         Ok(EventWriteOutcome::ExistingDivergentSignature)
+                    } else {
+                        // Same idempotencyKey and payloadHash but a different record
+                        // (eventRecordHash differs) — an eventId collision without content
+                        // identity, not a co-signature. Keep the first-stored copy.
+                        tracing::debug!(path = %path.display(), "event_store_write_existing");
+                        Ok(EventWriteOutcome::Existing)
                     }
                 } else {
                     Err(ShoreError::Message(format!(
@@ -330,6 +339,34 @@ mod tests {
             EventWriteOutcome::ExistingDivergentSignature
         );
         assert_eq!(store.list_events().unwrap(), vec![first]);
+    }
+
+    #[test]
+    fn divergent_signature_with_differing_event_record_hash_is_plain_existing() {
+        // Same idempotencyKey and payloadHash but a different occurredAt diverges the
+        // signer-exclusive eventRecordHash: not the same content record, so not a
+        // transcription-eligible co-signature. First-stored wins as plain Existing.
+        let (_root, store) = temp_event_store();
+        let first = signed_review_initialized_event(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+        );
+        let mut second = signed_review_initialized_event(
+            "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB==",
+        );
+        second.occurred_at = "2026-06-04T00:00:00Z".to_owned();
+
+        assert_eq!(first.idempotency_key, second.idempotency_key);
+        assert_eq!(first.payload_hash, second.payload_hash);
+        assert_ne!(
+            first.event_record_hash().unwrap(),
+            second.event_record_hash().unwrap()
+        );
+
+        store.record_event_once(&first).unwrap();
+        assert_eq!(
+            store.record_event_once(&second).unwrap(),
+            EventWriteOutcome::Existing
+        );
     }
 
     #[test]

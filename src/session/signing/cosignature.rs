@@ -123,6 +123,11 @@ pub const COSIGNATURE_TARGET_PENDING_CODE: &str = "cosignature_target_pending";
 /// `targetEventRecordHash` does not match the present target's recomputed hash —
 /// the carrier is a co-signature of a different record, not a bad signature.
 pub const COSIGNATURE_BINDING_MISMATCH_CODE: &str = "cosignature_binding_mismatch";
+/// Diagnostic code for a stored co-signature whose merged signer is not authorized
+/// for the claimed actor in this reader's trust set (`untrusted_key`). This is an
+/// authorization observation, never a divergence report: the signature is real and
+/// the set unioned cleanly; the signer is merely not (yet) trusted here.
+pub const COSIGNATURE_UNTRUSTED_SIGNER_CODE: &str = "cosignature_untrusted_signer";
 
 /// What the verify-before-store gate decides for one detached co-signature carrier.
 ///

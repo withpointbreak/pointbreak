@@ -10,8 +10,8 @@ mod write;
 
 pub use cosignature::{
     COSIGNATURE_BINDING_MISMATCH_CODE, COSIGNATURE_INVALID_CODE, COSIGNATURE_TARGET_PENDING_CODE,
-    CosignatureGateDecision, CosignatureVerification, gate_cosignature_for_store,
-    verify_cosignature,
+    COSIGNATURE_UNTRUSTED_SIGNER_CODE, CosignatureGateDecision, CosignatureVerification,
+    gate_cosignature_for_store, verify_cosignature,
 };
 pub use enroll::{
     ALLOWED_SIGNERS_REL_PATH, EnrollmentDiff, enroll_signer, stage_enrollment, trust_set_to_value,

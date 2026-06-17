@@ -25,11 +25,11 @@ pub use projection::{
 pub use signing::{
     ALLOWED_SIGNERS_REL_PATH, ArtifactAvailability, BestEffortSkipSink,
     COSIGNATURE_BINDING_MISMATCH_CODE, COSIGNATURE_INVALID_CODE, COSIGNATURE_TARGET_PENDING_CODE,
-    CosignatureGateDecision, CosignatureVerification, EnrollmentDiff, EventSigningOptions,
-    EventVerificationPolicy, EventVerificationView, IngestEventVerification, PrincipalPolicy,
-    TrustSet, enroll_signer, event_signature_trust_set, gate_cosignature_for_store,
-    principal_sufficient, stage_enrollment, trust_set_to_value, verification_view,
-    verify_cosignature, verify_event_signature,
+    COSIGNATURE_UNTRUSTED_SIGNER_CODE, CosignatureGateDecision, CosignatureVerification,
+    EnrollmentDiff, EventSigningOptions, EventVerificationPolicy, EventVerificationView,
+    IngestEventVerification, PrincipalPolicy, TrustSet, enroll_signer, event_signature_trust_set,
+    gate_cosignature_for_store, principal_sufficient, stage_enrollment, trust_set_to_value,
+    verification_view, verify_cosignature, verify_event_signature,
 };
 pub(crate) use signing::{sign_event_if_requested, verify_events_for_ingest};
 #[cfg(test)]

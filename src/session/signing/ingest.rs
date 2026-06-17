@@ -2,7 +2,7 @@ use super::{EventVerificationPolicy, TrustSet, verify_event_signature};
 use crate::crypto::EventVerificationStatus;
 use crate::error::{Result, ShoreError};
 use crate::model::EventId;
-use crate::session::event::ShoreEvent;
+use crate::session::event::{EventType, ShoreEvent};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IngestEventVerification {
@@ -19,6 +19,14 @@ pub(crate) fn verify_events_for_ingest(
     let mut verification = Vec::with_capacity(events.len());
 
     for event in events {
+        // Detached co-signature carriers are classified by the co-signature gate
+        // (against the embedded attestation), not by the inline envelope verifier:
+        // a v1 carrier envelope is unsigned, so `verify_event_signature` would read
+        // it as `Unsigned` and a strict policy would wrongly reject the carrier. The
+        // gate in `ingest_events` owns the family's per-member status.
+        if event.event_type == EventType::EventSignatureRecorded {
+            continue;
+        }
         let status = verify_event_signature(event, trust_set)?;
         let report = IngestEventVerification {
             event_id: event.event_id.clone(),

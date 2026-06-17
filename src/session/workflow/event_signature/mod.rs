@@ -28,15 +28,15 @@ use crate::error::{Result, ShoreError};
 use crate::model::{ActorId, EventId};
 use crate::session::event::{
     EventSignature, EventSignatureRecordedPayload, EventTarget, EventToBeSigned, EventType,
-    ShoreEvent, event_signature_pre_authentication_encoding,
+    ShoreEvent, Writer, event_signature_pre_authentication_encoding,
 };
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::resolution::resolve_write_validation_store;
 use crate::session::store_init::{ShoreStorePaths, prepare_shore_writer};
 use crate::session::workflow::write_store::fact_batch_only_diagnostics;
 use crate::session::{
-    EventStore, EventWriteOutcome, TrustSet, current_timestamp, gate_cosignature_for_store,
-    writer_from_options,
+    CosignatureGateDecision, EventStore, EventWriteOutcome, TrustSet, current_timestamp,
+    gate_cosignature_for_store, writer_from_options,
 };
 use crate::storage::{Durability, LocalStorage};
 
@@ -51,7 +51,6 @@ pub struct EventSignatureRecordOptions {
     target_event_id: EventId,
     attesting_signer: Arc<dyn EventSigner + Send + Sync>,
     actor_id: Option<ActorId>,
-    idempotency_key: Option<String>,
 }
 
 impl EventSignatureRecordOptions {
@@ -64,7 +63,6 @@ impl EventSignatureRecordOptions {
             target_event_id,
             attesting_signer: Arc::new(attesting_signer),
             actor_id: None,
-            idempotency_key: None,
         }
     }
 
@@ -72,11 +70,6 @@ impl EventSignatureRecordOptions {
     /// recorder identity, independent of the attesting signer.
     pub fn with_actor_id(mut self, actor_id: ActorId) -> Self {
         self.actor_id = Some(actor_id);
-        self
-    }
-
-    pub fn with_idempotency_key(mut self, key: impl Into<String>) -> Self {
-        self.idempotency_key = Some(key.into());
         self
     }
 }
@@ -139,61 +132,40 @@ pub fn record_event_signature(
     let sig_bytes = signer.sign_event_message(&pae)?;
     let attestation = EventSignature::ed25519_v1(sig_bytes);
 
-    let payload = EventSignatureRecordedPayload {
-        target_event_id: target.event_id.clone(),
-        target_event_record_hash: target_event_record_hash.clone(),
-        attesting_signer: attesting_signer.clone(),
-        attestation,
-        inclusion_proof: None,
-    };
-
-    let idempotency_key = options.idempotency_key.clone().unwrap_or_else(|| {
-        EventSignatureRecordedPayload::idempotency_key(
-            &target_event_record_hash,
-            &attesting_signer,
-            payload.attestation.sig.as_str(),
-        )
-    });
-
     let writer = writer_from_options(worktree_root, options.actor_id.as_ref());
-    // v1: the carrier is NOT inline-signed; the co-signature lives entirely in the
-    // payload `attestation`, never in the carrier envelope (D4 orthogonality).
-    let carrier = ShoreEvent::new(
-        EventType::EventSignatureRecorded,
-        idempotency_key,
-        EventTarget::for_event_signature(target.target.session_id.clone(), target.event_id.clone()),
+    // Build, gate, and record the carrier through the shared assembly path. Trust
+    // does not gate storage, so an empty trust set is correct here; the target is
+    // always present, so only `DropInvalid`/`BindingMismatch` can refuse a
+    // locally-constructed carrier (both indicate a broken signer — surface loudly).
+    let record = assemble_and_record_cosignature(
+        &event_store,
+        &target,
+        &attesting_signer,
+        &attestation,
         writer,
-        payload,
+        &TrustSet::default(),
         current_timestamp(),
     )?;
-
-    // Verify-before-store via the shared gate (the same rule the ingest path runs).
-    // The target is always present here, so `TargetPending` cannot occur; an
-    // `invalid` attestation or a binding mismatch is reader-independent noise and is
-    // refused, while `untrusted_key` is kept. Trust does not gate storage, so an
-    // empty trust set is correct.
-    let carrier_payload: EventSignatureRecordedPayload =
-        serde_json::from_value(carrier.payload.clone())?;
-    let decision =
-        gate_cosignature_for_store(&carrier_payload, Some(&target), &TrustSet::default())?;
-    if let Some(code) = decision.drop_diagnostic_code() {
+    if let Some(code) = record.decision.drop_diagnostic_code() {
         return Err(ShoreError::Message(format!(
             "refusing to store co-signature carrier ({code})"
         )));
     }
 
-    let event_id = carrier.event_id.clone();
+    let outcome = record
+        .write_outcome
+        .expect("a stored decision yields a write outcome");
+    let event_id = record.carrier.event_id.clone();
     let mut events_created_by_type = BTreeMap::new();
-    let outcome = event_store.record_event_once(&carrier)?;
     let (events_created, events_existing) = match outcome {
         EventWriteOutcome::Created => {
-            events_created_by_type.insert("event_signature_recorded".to_owned(), 1);
+            events_created_by_type.insert(EventType::EventSignatureRecorded.as_str().to_owned(), 1);
             (1, 0)
         }
         EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => (0, 1),
     };
 
-    let state = SessionState::from_prior_events_and_committed(&events, &carrier, outcome)?;
+    let state = SessionState::from_prior_events_and_committed(&events, &record.carrier, outcome)?;
     storage.write_json_atomic(&paths.state_path(), &state, Durability::Projection)?;
 
     let mut diagnostics = state.diagnostics;
@@ -208,6 +180,69 @@ pub fn record_event_signature(
         events_existing,
         events_created_by_type,
         diagnostics,
+    })
+}
+
+/// The result of assembling and gating one co-signature carrier: the built carrier,
+/// the verify-before-store gate decision, and the store outcome (`Some` only when
+/// the gate permitted storage, `None` on any drop decision).
+pub(crate) struct CosignatureRecord {
+    pub carrier: ShoreEvent,
+    pub decision: CosignatureGateDecision,
+    pub write_outcome: Option<EventWriteOutcome>,
+}
+
+/// Assemble a co-signature carrier over `target` from an attestation already in
+/// hand, run it through the shared verify-before-store gate, and record it when the
+/// gate permits. This is the one assembly path shared by local construction (which
+/// supplies a freshly-signed attestation) and ingest transcription (which supplies
+/// an attestation it received and can verify — transcription, never minting). The
+/// carrier's `idempotencyKey` is the full attestation triple, so an identical triple
+/// always reduces to the same member.
+pub(crate) fn assemble_and_record_cosignature(
+    event_store: &EventStore,
+    target: &ShoreEvent,
+    attesting_signer: &SignerId,
+    attestation: &EventSignature,
+    writer: Writer,
+    trust: &TrustSet,
+    occurred_at: String,
+) -> Result<CosignatureRecord> {
+    let target_event_record_hash = target.event_record_hash()?;
+    let payload = EventSignatureRecordedPayload {
+        target_event_id: target.event_id.clone(),
+        target_event_record_hash: target_event_record_hash.clone(),
+        attesting_signer: attesting_signer.clone(),
+        attestation: attestation.clone(),
+        inclusion_proof: None,
+    };
+    let idempotency_key = EventSignatureRecordedPayload::idempotency_key(
+        &target_event_record_hash,
+        attesting_signer,
+        attestation.sig.as_str(),
+    );
+    // v1: the carrier is NOT inline-signed; the co-signature lives entirely in the
+    // payload `attestation`, never in the carrier envelope (D4 orthogonality).
+    let carrier = ShoreEvent::new(
+        EventType::EventSignatureRecorded,
+        idempotency_key,
+        EventTarget::for_event_signature(target.target.session_id.clone(), target.event_id.clone()),
+        writer,
+        payload.clone(),
+        occurred_at,
+    )?;
+
+    let decision = gate_cosignature_for_store(&payload, Some(target), trust)?;
+    let write_outcome = if decision.stores() {
+        Some(event_store.record_event_once(&carrier)?)
+    } else {
+        None
+    };
+
+    Ok(CosignatureRecord {
+        carrier,
+        decision,
+        write_outcome,
     })
 }
 

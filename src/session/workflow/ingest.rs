@@ -1,17 +1,22 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use super::event_signature::assemble_and_record_cosignature;
+use crate::crypto::EventVerificationStatus;
 use crate::error::{Result, ShoreError};
-use crate::session::event::{IngestVia, ShoreEvent, stamp_ingest_provenance};
+use crate::session::event::{
+    EventSignatureRecordedPayload, EventType, IngestVia, ShoreEvent, stamp_ingest_provenance,
+};
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store_init::{ShoreStorePaths, prepare_shore_writer};
 use crate::session::{
-    EventStore, EventVerificationPolicy, EventWriteOutcome, IngestEventVerification, TrustSet,
-    current_timestamp, is_valid_actor_id, verify_events_for_ingest,
+    COSIGNATURE_BINDING_MISMATCH_CODE, COSIGNATURE_INVALID_CODE, COSIGNATURE_TARGET_PENDING_CODE,
+    COSIGNATURE_UNTRUSTED_SIGNER_CODE, CosignatureGateDecision, EventStore,
+    EventVerificationPolicy, EventWriteOutcome, IngestEventVerification, TrustSet,
+    current_timestamp, gate_cosignature_for_store, is_valid_actor_id, verify_events_for_ingest,
+    writer_from_options,
 };
 use crate::storage::{Durability, LocalStorage};
-
-const DIVERGENT_SIGNATURE_EXISTING_EVENT_CODE: &str = "divergent_signature_existing_event";
 
 /// Options for ingesting one or more pre-formed events into a repo's `.shore/data`
 /// store — for example events produced on another machine and forwarded over a
@@ -133,7 +138,7 @@ pub fn ingest_events(options: IngestEventsOptions) -> Result<IngestEventsResult>
         }
     }
 
-    let verification = verify_events_for_ingest(
+    let mut verification = verify_events_for_ingest(
         &options.events,
         options.verification_policy,
         &options.trust_set,
@@ -146,6 +151,7 @@ pub fn ingest_events(options: IngestEventsOptions) -> Result<IngestEventsResult>
     );
 
     let event_store = EventStore::open(store_dir);
+    let worktree_root = paths.worktree_root();
     let mut events_created = 0usize;
     let mut events_existing = 0usize;
     let mut events_created_by_type: BTreeMap<String, usize> = BTreeMap::new();
@@ -153,6 +159,35 @@ pub fn ingest_events(options: IngestEventsOptions) -> Result<IngestEventsResult>
     let mut write_error = None;
 
     for event in &stamped {
+        // A standalone detached co-signature carrier from a peer flows through the
+        // family verify-before-store gate, NOT the plain record path: the gate is
+        // the always-on family rule (reject `invalid`, keep `untrusted_key`/`valid`,
+        // drop on absent target), independent of `EventVerificationPolicy`.
+        if event.event_type == EventType::EventSignatureRecorded {
+            match ingest_detached_cosignature(
+                &event_store,
+                event,
+                &options.trust_set,
+                &mut verification,
+                &mut ingest_diagnostics,
+            ) {
+                Ok((created, existing)) => {
+                    events_created += created;
+                    events_existing += existing;
+                    if created > 0 {
+                        *events_created_by_type
+                            .entry(event.event_type.as_str().to_owned())
+                            .or_default() += 1;
+                    }
+                }
+                Err(err) => {
+                    write_error = Some(err);
+                    break;
+                }
+            }
+            continue;
+        }
+
         match event_store.record_event_once(event) {
             Ok(EventWriteOutcome::Created) => {
                 events_created += 1;
@@ -162,15 +197,32 @@ pub fn ingest_events(options: IngestEventsOptions) -> Result<IngestEventsResult>
             }
             Ok(EventWriteOutcome::Existing) => events_existing += 1,
             Ok(EventWriteOutcome::ExistingDivergentSignature) => {
+                // Class-(b) dissolution: a divergent inline signature over the same
+                // content record is not a conflict — the store keeps its first-stored
+                // copy and transcribes the incoming attestation into a co-signature
+                // carrier, converging the set to both signers with no winner-selection.
                 events_existing += 1;
-                ingest_diagnostics.push(ProjectionDiagnostic {
-                    code: DIVERGENT_SIGNATURE_EXISTING_EVENT_CODE.to_owned(),
-                    message: format!(
-                        "ingested event {} matched existing idempotency key {} and payload hash, but signer or signature differed; kept the first stored event",
-                        event.event_id.as_str(),
-                        event.idempotency_key.as_str()
-                    ),
-                });
+                match transcribe_divergent_signature(
+                    &event_store,
+                    event,
+                    worktree_root,
+                    &options.trust_set,
+                    &mut ingest_diagnostics,
+                ) {
+                    Ok((created, existing)) => {
+                        events_existing += existing;
+                        if created > 0 {
+                            events_created += created;
+                            *events_created_by_type
+                                .entry(EventType::EventSignatureRecorded.as_str().to_owned())
+                                .or_default() += 1;
+                        }
+                    }
+                    Err(err) => {
+                        write_error = Some(err);
+                        break;
+                    }
+                }
             }
             Err(err) => {
                 write_error = Some(err);
@@ -200,6 +252,202 @@ pub fn ingest_events(options: IngestEventsOptions) -> Result<IngestEventsResult>
     })
 }
 
+/// Ingest a standalone detached co-signature carrier from a peer through the shared
+/// verify-before-store gate. Returns `(events_created, events_existing)` for the
+/// carrier, pushing the carrier's embedded-attestation status to `verification` and
+/// any drop/authorization diagnostics. A carrier is an ordinary event: when stored
+/// it rides the same event-set machinery as every event, with no separate channel.
+fn ingest_detached_cosignature(
+    event_store: &EventStore,
+    event: &ShoreEvent,
+    trust: &TrustSet,
+    verification: &mut Vec<IngestEventVerification>,
+    diagnostics: &mut Vec<ProjectionDiagnostic>,
+) -> Result<(usize, usize)> {
+    let payload: EventSignatureRecordedPayload = serde_json::from_value(event.payload.clone())?;
+    // Resolve the target by content identity. The store keys on the idempotency-key,
+    // so there is no eventId path lookup; scan the event set for the named target.
+    let stored = event_store.list_events()?;
+    let target = stored
+        .iter()
+        .find(|stored_event| stored_event.event_id == payload.target_event_id);
+
+    match gate_cosignature_for_store(&payload, target, trust)? {
+        CosignatureGateDecision::Store(status) => {
+            let outcome = event_store.record_event_once(event)?;
+            let counts = match outcome {
+                EventWriteOutcome::Created => (1, 0),
+                // A carrier's identity is the full attestation triple, so a divergent
+                // carrier would be a distinct member (a different eventId), never a
+                // divergent signature of the same carrier.
+                EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => {
+                    (0, 1)
+                }
+            };
+            // Report the carrier's EMBEDDED-attestation status (not its unsigned
+            // envelope) in the verification vector.
+            verification.push(IngestEventVerification {
+                event_id: event.event_id.clone(),
+                status,
+                message: cosignature_verification_message(status),
+            });
+            if status == EventVerificationStatus::UntrustedKey
+                && outcome == EventWriteOutcome::Created
+                && let Some(target) = target
+            {
+                diagnostics.push(cosignature_untrusted_signer_diagnostic(
+                    event.event_id.as_str(),
+                    payload.target_event_id.as_str(),
+                    payload.attesting_signer.as_str(),
+                    target.writer.actor_id.as_str(),
+                ));
+            }
+            Ok(counts)
+        }
+        CosignatureGateDecision::DropInvalid => {
+            diagnostics.push(drop_diagnostic(
+                COSIGNATURE_INVALID_CODE,
+                format!(
+                    "detached co-signature {} over event {} has an invalid attestation and was not stored",
+                    event.event_id.as_str(),
+                    payload.target_event_id.as_str()
+                ),
+            ));
+            Ok((0, 0))
+        }
+        CosignatureGateDecision::TargetPending => {
+            // No replay here: the carrier leaves no trace and is re-offered by the
+            // sync cursor once its target arrives.
+            diagnostics.push(drop_diagnostic(
+                COSIGNATURE_TARGET_PENDING_CODE,
+                format!(
+                    "detached co-signature {} targets event {}, which is not present; not stored",
+                    event.event_id.as_str(),
+                    payload.target_event_id.as_str()
+                ),
+            ));
+            Ok((0, 0))
+        }
+        CosignatureGateDecision::BindingMismatch => {
+            diagnostics.push(drop_diagnostic(
+                COSIGNATURE_BINDING_MISMATCH_CODE,
+                format!(
+                    "detached co-signature {} binds an eventRecordHash that does not match its target {}; not stored",
+                    event.event_id.as_str(),
+                    payload.target_event_id.as_str()
+                ),
+            ));
+            Ok((0, 0))
+        }
+    }
+}
+
+/// Transcribe an incoming divergent inline attestation into a co-signature carrier.
+/// The incoming attestation is a real signature the importer RECEIVED and can
+/// verify — re-homing it is transcription, never minting; the co-signer's private
+/// key is never required (the relay never signs as the reviewer). Returns
+/// `(events_created, events_existing)` for the transcribed carrier.
+fn transcribe_divergent_signature(
+    event_store: &EventStore,
+    event: &ShoreEvent,
+    worktree_root: &Path,
+    trust: &TrustSet,
+    diagnostics: &mut Vec<ProjectionDiagnostic>,
+) -> Result<(usize, usize)> {
+    // The divergent outcome required a stored event under the same idempotencyKey;
+    // it is the kept first-stored copy and shares the incoming event's eventRecordHash.
+    let stored_target = event_store
+        .read_event(&event_store.event_path_for_idempotency_key(&event.idempotency_key))?;
+    let attesting_signer = event.signer.clone().ok_or_else(|| {
+        ShoreError::Message("divergent signature outcome without an inline signer".to_owned())
+    })?;
+    let attestation = event.signature.clone().ok_or_else(|| {
+        ShoreError::Message("divergent signature outcome without an inline signature".to_owned())
+    })?;
+
+    // The carrier is authored by the importer; its envelope writer is the local
+    // identity, orthogonal to the embedded attestation.
+    let writer = writer_from_options(worktree_root, None);
+    let record = assemble_and_record_cosignature(
+        event_store,
+        &stored_target,
+        &attesting_signer,
+        &attestation,
+        writer,
+        trust,
+        current_timestamp(),
+    )?;
+
+    match record.decision {
+        CosignatureGateDecision::Store(status) => {
+            let outcome = record
+                .write_outcome
+                .expect("a stored decision yields a write outcome");
+            let counts = match outcome {
+                EventWriteOutcome::Created => (1, 0),
+                EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => {
+                    (0, 1)
+                }
+            };
+            if status == EventVerificationStatus::UntrustedKey
+                && outcome == EventWriteOutcome::Created
+            {
+                diagnostics.push(cosignature_untrusted_signer_diagnostic(
+                    record.carrier.event_id.as_str(),
+                    stored_target.event_id.as_str(),
+                    attesting_signer.as_str(),
+                    stored_target.writer.actor_id.as_str(),
+                ));
+            }
+            Ok(counts)
+        }
+        // An invalid incoming inline attestation is reader-independent noise and is
+        // never transcribed. BindingMismatch/TargetPending are impossible here (the
+        // sharpened predicate guaranteed a present target with a matching hash).
+        CosignatureGateDecision::DropInvalid
+        | CosignatureGateDecision::BindingMismatch
+        | CosignatureGateDecision::TargetPending => Ok((0, 0)),
+    }
+}
+
+fn drop_diagnostic(code: &str, message: String) -> ProjectionDiagnostic {
+    ProjectionDiagnostic {
+        code: code.to_owned(),
+        message,
+    }
+}
+
+/// An authorization observation (never a divergence report): the merged co-signature
+/// is real and the set unioned cleanly, but its signer is not authorized for the
+/// claimed actor in this reader's trust set.
+fn cosignature_untrusted_signer_diagnostic(
+    carrier_event_id: &str,
+    target_event_id: &str,
+    attesting_signer: &str,
+    claimed_actor: &str,
+) -> ProjectionDiagnostic {
+    ProjectionDiagnostic {
+        code: COSIGNATURE_UNTRUSTED_SIGNER_CODE.to_owned(),
+        message: format!(
+            "merged co-signature {carrier_event_id} over event {target_event_id} is signed by \
+             {attesting_signer}, which is not authorized for actor {claimed_actor} in this trust set"
+        ),
+    }
+}
+
+fn cosignature_verification_message(status: EventVerificationStatus) -> Option<String> {
+    match status {
+        EventVerificationStatus::Valid => None,
+        EventVerificationStatus::UntrustedKey => {
+            Some("co-signature signer is not authorized by the trust set".to_owned())
+        }
+        EventVerificationStatus::Invalid => Some("co-signature attestation is invalid".to_owned()),
+        EventVerificationStatus::Unsigned => {
+            Some("co-signature carrier has no attestation".to_owned())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -209,15 +457,17 @@ mod tests {
 
     use super::*;
     use crate::canonical_hash::sha256_json_prefixed;
-    use crate::crypto::{EventVerificationStatus, SignerId};
+    use crate::crypto::{EventSignatureBytes, EventSigner, EventVerificationStatus};
     use crate::model::{
         ActorId, InputRequestId, InputRequestResponseId, SessionId, TargetRef, TaskTargetRef,
         WorkObjectId,
     };
     use crate::session::event::{
-        AssertionMode, EventSignature, EventType, IngestProvenance, IngestVia,
-        InputRequestReasonCode, InputRequestResponseOutcome,
+        AssertionMode, EventSignature, EventSignatureRecordedPayload, EventToBeSigned, EventType,
+        IngestProvenance, IngestVia, InputRequestReasonCode, InputRequestResponseOutcome,
+        event_signature_pre_authentication_encoding,
     };
+    use crate::session::projection::freshness::event_set_hash_for_events;
     use crate::session::projection::task::{
         AgentResumptionProjection, AgentResumptionState, ResumptionBindingPolicy,
         agent_resumption_from_events,
@@ -227,10 +477,11 @@ mod tests {
     };
     use crate::session::signing::test_support::{DeterministicSigner, trust_for_actor};
     use crate::session::{
-        CaptureOptions, EventVerificationPolicy, InputRequestListOptions, InputRequestOpenOptions,
-        InputRequestRespondOptions, InputRequestStatus, InputRequestStatusFilter, TrustSet,
-        capture_worktree_review, list_input_requests, open_input_request, respond_input_request,
-        verify_event_signature,
+        CaptureOptions, EventSignatureRecordOptions, EventVerificationPolicy,
+        InputRequestListOptions, InputRequestOpenOptions, InputRequestRespondOptions,
+        InputRequestStatus, InputRequestStatusFilter, TrustSet, capture_worktree_review,
+        event_signature_trust_set, list_input_requests, open_input_request, record_event_signature,
+        respond_input_request, verify_event_signature,
     };
 
     struct TestRepo {
@@ -375,15 +626,6 @@ mod tests {
             .len()
     }
 
-    fn signed_replay_event(signature: &str) -> ShoreEvent {
-        let mut event = unsigned_event();
-        event.signer = Some(
-            SignerId::parse("did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd").unwrap(),
-        );
-        event.signature = Some(EventSignature::new_ed25519_v1(signature).unwrap());
-        event
-    }
-
     #[test]
     fn advisory_ingest_accepts_invalid_signature_and_reports_status() {
         let (event, trust) = invalid_signed_event();
@@ -512,44 +754,530 @@ mod tests {
         );
     }
 
+    /// Re-sign a copy of `event` with `signer` over the target's signer-inclusive
+    /// TBS view, producing a genuine, verifiable inline attestation.
+    fn signed_copy(event: &ShoreEvent, signer: &DeterministicSigner) -> ShoreEvent {
+        let mut copy = event.clone();
+        copy.signer = None;
+        copy.signature = None;
+        copy.ingest = None;
+        let tbs = EventToBeSigned::from_event(&copy, signer.signer_id()).unwrap();
+        let pae = event_signature_pre_authentication_encoding(&tbs).unwrap();
+        let sig = signer.sign_event_message(&pae).unwrap();
+        copy.signer = Some(signer.signer_id().clone());
+        copy.signature = Some(EventSignature::ed25519_v1(sig));
+        copy
+    }
+
+    fn two_signer_trust(
+        actor: &ActorId,
+        a: &DeterministicSigner,
+        b: &DeterministicSigner,
+    ) -> TrustSet {
+        event_signature_trust_set(json!({
+            "allowedSigners": {
+                actor.as_str(): [a.signer_id().as_str(), b.signer_id().as_str()],
+            }
+        }))
+        .unwrap()
+    }
+
+    fn carrier_in(repo: &Path) -> ShoreEvent {
+        EventStore::open(repo.join(".shore/data"))
+            .list_events()
+            .unwrap()
+            .into_iter()
+            .find(|event| event.event_type == EventType::EventSignatureRecorded)
+            .expect("a transcribed/ingested carrier is present")
+    }
+
+    fn carrier_payload(carrier: &ShoreEvent) -> EventSignatureRecordedPayload {
+        serde_json::from_value(carrier.payload.clone()).unwrap()
+    }
+
+    /// Build a peer store that captured + signed a target and authored a detached
+    /// co-signature carrier over it, returning `(target, carrier)`.
+    fn peer_target_and_carrier(
+        signer: &DeterministicSigner,
+        actor: &ActorId,
+    ) -> (ShoreEvent, ShoreEvent) {
+        let repo = modified_repo();
+        capture_worktree_review(
+            CaptureOptions::new(repo.path())
+                .with_actor_id(actor.clone())
+                .sign_with(signer.clone()),
+        )
+        .unwrap();
+        let target = EventStore::open(repo.path().join(".shore/data"))
+            .list_events()
+            .unwrap()
+            .into_iter()
+            .find(|event| event.event_type == EventType::ReviewUnitCaptured)
+            .unwrap();
+        record_event_signature(EventSignatureRecordOptions::new(
+            repo.path(),
+            target.event_id.clone(),
+            signer.clone(),
+        ))
+        .unwrap();
+        let carrier = carrier_in(repo.path());
+        (target, carrier)
+    }
+
     #[test]
-    fn ingest_reports_divergent_signature_existing_event_diagnostic() {
-        let first = signed_replay_event(
-            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
-        );
-        let mut second = first.clone();
-        second.signature = Some(
-            EventSignature::new_ed25519_v1(
-                "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB==",
-            )
-            .unwrap(),
-        );
+    fn divergent_signature_ingest_transcribes_incoming_attestation_to_a_cosignature() {
+        let (base, _fixture, actor) = signed_captured_event();
+        let signer_a = DeterministicSigner::from_seed([41u8; 32]);
+        let signer_b = DeterministicSigner::from_seed([42u8; 32]);
+        let copy_a = signed_copy(&base, &signer_a);
+        let copy_b = signed_copy(&base, &signer_b);
+        let trust = two_signer_trust(&actor, &signer_a, &signer_b);
         let dest = dest_repo();
 
-        let first_result =
-            ingest_events(IngestEventsOptions::new(dest.path(), vec![first.clone()])).unwrap();
-        assert_eq!(first_result.events_created, 1);
+        ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![copy_a.clone()])
+                .with_trust_set(trust.clone()),
+        )
+        .unwrap();
+        // The ingest path holds NO signer for B — transcription works purely from
+        // the received inline signature (transcription, never minting).
+        let result = ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![copy_b.clone()]).with_trust_set(trust),
+        )
+        .unwrap();
 
-        let second_result =
-            ingest_events(IngestEventsOptions::new(dest.path(), vec![second.clone()])).unwrap();
+        assert_eq!(result.events_created, 1, "the transcribed carrier");
+        assert_eq!(result.events_existing, 1, "the divergent original kept");
+        assert_eq!(result.events_created_by_type["event_signature_recorded"], 1);
 
-        assert_eq!(second_result.events_created, 0);
-        assert_eq!(second_result.events_existing, 1);
-        assert!(second_result.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "divergent_signature_existing_event"
-                && diagnostic.message.contains(second.event_id.as_str())
-                && diagnostic.message.contains(second.idempotency_key.as_str())
-        }));
-        let mut stored = EventStore::open(dest.path().join(".shore/data"))
+        let carrier = carrier_in(dest.path());
+        let payload = carrier_payload(&carrier);
+        assert_eq!(payload.attesting_signer, *signer_b.signer_id());
+        assert_eq!(
+            payload.attestation.sig.as_str(),
+            copy_b.signature.as_ref().unwrap().sig.as_str(),
+            "the carrier transcribes the received signature byte-for-byte, never re-signs"
+        );
+
+        // The first-stored A-signed event is kept as the stored target.
+        let stored = EventStore::open(dest.path().join(".shore/data"))
             .list_events()
             .unwrap();
-        assert_eq!(stored.len(), 1);
-        assert_eq!(
-            stored[0].ingest.as_ref().unwrap().via,
-            IngestVia::IngestEvents
+        let stored_target = stored
+            .iter()
+            .find(|event| event.event_type == EventType::ReviewUnitCaptured)
+            .unwrap();
+        assert_eq!(stored_target.signer.as_ref().unwrap(), signer_a.signer_id());
+    }
+
+    #[test]
+    fn divergent_signature_ingest_emits_no_divergence_diagnostic() {
+        let (base, _fixture, actor) = signed_captured_event();
+        let signer_a = DeterministicSigner::from_seed([43u8; 32]);
+        let signer_b = DeterministicSigner::from_seed([44u8; 32]);
+        let trust = two_signer_trust(&actor, &signer_a, &signer_b);
+        let dest = dest_repo();
+
+        ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![signed_copy(&base, &signer_a)])
+                .with_trust_set(trust.clone()),
+        )
+        .unwrap();
+        let result = ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![signed_copy(&base, &signer_b)])
+                .with_trust_set(trust),
+        )
+        .unwrap();
+
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code != "divergent_signature_existing_event"),
+            "the divergence signal is retired"
         );
-        stored[0].ingest = None;
-        assert_eq!(stored, vec![first]);
+        // Both signers trusted → a silent reconciliation, no seam diagnostic at all.
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code != "cosignature_untrusted_signer")
+        );
+        assert_eq!(
+            carrier_payload(&carrier_in(dest.path())).attesting_signer,
+            *signer_b.signer_id()
+        );
+    }
+
+    #[test]
+    fn untrusted_merged_cosigner_yields_exactly_one_authorization_diagnostic() {
+        let (base, _fixture, actor) = signed_captured_event();
+        let signer_a = DeterministicSigner::from_seed([45u8; 32]);
+        let signer_b = DeterministicSigner::from_seed([46u8; 32]);
+        // Only A is trusted; B's merged co-signature is real but unauthorized here.
+        let trust = trust_for_actor(&actor, &signer_a);
+        let dest = dest_repo();
+
+        ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![signed_copy(&base, &signer_a)])
+                .with_trust_set(trust.clone()),
+        )
+        .unwrap();
+        let result = ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![signed_copy(&base, &signer_b)])
+                .with_trust_set(trust),
+        )
+        .unwrap();
+
+        let authorization: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "cosignature_untrusted_signer")
+            .collect();
+        assert_eq!(authorization.len(), 1);
+        let message = &authorization[0].message;
+        assert!(message.contains(signer_b.signer_id().as_str()));
+        assert!(message.contains(actor.as_str()));
+        assert!(!message.contains("disagree"));
+        assert!(!message.contains("kept the first stored"));
+        // The untrusted_key carrier is still stored (kept, not dropped).
+        assert_eq!(result.events_created, 1);
+        assert_eq!(
+            carrier_payload(&carrier_in(dest.path())).attesting_signer,
+            *signer_b.signer_id()
+        );
+    }
+
+    #[test]
+    fn reingest_divergent_signature_is_idempotent_no_repeat_diagnostic() {
+        let (base, _fixture, actor) = signed_captured_event();
+        let signer_a = DeterministicSigner::from_seed([47u8; 32]);
+        let signer_b = DeterministicSigner::from_seed([48u8; 32]);
+        let trust = trust_for_actor(&actor, &signer_a); // B stays untrusted
+        let copy_b = signed_copy(&base, &signer_b);
+        let dest = dest_repo();
+
+        ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![signed_copy(&base, &signer_a)])
+                .with_trust_set(trust.clone()),
+        )
+        .unwrap();
+        ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![copy_b.clone()])
+                .with_trust_set(trust.clone()),
+        )
+        .unwrap();
+        // Second pass of the same divergent event: no new merge.
+        let again = ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![copy_b]).with_trust_set(trust),
+        )
+        .unwrap();
+
+        assert_eq!(again.events_created, 0, "no new carrier on re-ingest");
+        assert!(
+            again
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code != "cosignature_untrusted_signer"),
+            "the authorization observation describes a merge that did not recur"
+        );
+        let carriers = EventStore::open(dest.path().join(".shore/data"))
+            .list_events()
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_type == EventType::EventSignatureRecorded)
+            .count();
+        assert_eq!(carriers, 1, "exactly one transcribed carrier");
+    }
+
+    #[test]
+    fn invalid_incoming_inline_attestation_is_not_transcribed() {
+        let (base, _fixture, actor) = signed_captured_event();
+        let signer_a = DeterministicSigner::from_seed([49u8; 32]);
+        let signer_b = DeterministicSigner::from_seed([50u8; 32]);
+        let trust = two_signer_trust(&actor, &signer_a, &signer_b);
+        let dest = dest_repo();
+
+        ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![signed_copy(&base, &signer_a)])
+                .with_trust_set(trust.clone()),
+        )
+        .unwrap();
+
+        // A divergent event whose inline attestation is cryptographically invalid.
+        let mut invalid = signed_copy(&base, &signer_b);
+        invalid.signature = Some(EventSignature::ed25519_v1(EventSignatureBytes::from_bytes(
+            &[0u8; 64],
+        )));
+        let result = ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![invalid]).with_trust_set(trust),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.events_created, 0,
+            "invalid inline sig is not transcribed"
+        );
+        let carriers = EventStore::open(dest.path().join(".shore/data"))
+            .list_events()
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_type == EventType::EventSignatureRecorded)
+            .count();
+        assert_eq!(carriers, 0, "the set stays single-member");
+    }
+
+    #[test]
+    fn two_mirrors_converge_to_the_same_cosignature_signer_set() {
+        let (base, _fixture, actor) = signed_captured_event();
+        let signer_a = DeterministicSigner::from_seed([51u8; 32]);
+        let signer_b = DeterministicSigner::from_seed([52u8; 32]);
+        let trust = two_signer_trust(&actor, &signer_a, &signer_b);
+        let copy_a = signed_copy(&base, &signer_a);
+        let copy_b = signed_copy(&base, &signer_b);
+
+        let cosigner_set = |repo: &Path| {
+            let stored = EventStore::open(repo.join(".shore/data"))
+                .list_events()
+                .unwrap();
+            let mut signers: Vec<String> = Vec::new();
+            for event in &stored {
+                if event.event_type == EventType::ReviewUnitCaptured
+                    && let Some(signer) = &event.signer
+                {
+                    signers.push(signer.as_str().to_owned());
+                }
+                if event.event_type == EventType::EventSignatureRecorded {
+                    signers.push(carrier_payload(event).attesting_signer.as_str().to_owned());
+                }
+            }
+            signers.sort();
+            signers
+        };
+
+        // Mirror 1: first-stored A, then ingested B.
+        let mirror1 = dest_repo();
+        ingest_events(
+            IngestEventsOptions::new(mirror1.path(), vec![copy_a.clone()])
+                .with_trust_set(trust.clone()),
+        )
+        .unwrap();
+        ingest_events(
+            IngestEventsOptions::new(mirror1.path(), vec![copy_b.clone()])
+                .with_trust_set(trust.clone()),
+        )
+        .unwrap();
+
+        // Mirror 2: first-stored B, then ingested A.
+        let mirror2 = dest_repo();
+        ingest_events(
+            IngestEventsOptions::new(mirror2.path(), vec![copy_b]).with_trust_set(trust.clone()),
+        )
+        .unwrap();
+        ingest_events(IngestEventsOptions::new(mirror2.path(), vec![copy_a]).with_trust_set(trust))
+            .unwrap();
+
+        let expected = {
+            let mut both = vec![
+                signer_a.signer_id().as_str().to_owned(),
+                signer_b.signer_id().as_str().to_owned(),
+            ];
+            both.sort();
+            both
+        };
+        assert_eq!(cosigner_set(mirror1.path()), expected);
+        assert_eq!(
+            cosigner_set(mirror2.path()),
+            expected,
+            "no winner-selection"
+        );
+    }
+
+    #[test]
+    fn peer_valid_detached_carrier_ingests_and_joins_the_set() {
+        let signer = DeterministicSigner::from_seed([53u8; 32]);
+        let actor = ActorId::new("actor:git-email:alice@example.com");
+        let (target, carrier) = peer_target_and_carrier(&signer, &actor);
+        let trust = trust_for_actor(&actor, &signer);
+        let dest = dest_repo();
+
+        ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![target]).with_trust_set(trust.clone()),
+        )
+        .unwrap();
+        let before = EventStore::open(dest.path().join(".shore/data"))
+            .list_events()
+            .unwrap();
+        let before_hash = event_set_hash_for_events(&before).unwrap();
+
+        let result = ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![carrier.clone()]).with_trust_set(trust),
+        )
+        .unwrap();
+
+        assert_eq!(result.events_created, 1);
+        assert_eq!(result.events_created_by_type["event_signature_recorded"], 1);
+        let verification = result
+            .verification
+            .iter()
+            .find(|entry| entry.event_id == carrier.event_id)
+            .expect("the carrier's embedded-attestation status is reported");
+        assert_eq!(verification.status, EventVerificationStatus::Valid);
+
+        // The carrier rides the ordinary, signature-blind event-set machinery.
+        let after = EventStore::open(dest.path().join(".shore/data"))
+            .list_events()
+            .unwrap();
+        assert_ne!(before_hash, event_set_hash_for_events(&after).unwrap());
+        assert!(after.iter().any(|event| event.event_id == carrier.event_id));
+    }
+
+    #[test]
+    fn peer_untrusted_detached_carrier_is_stored_and_flagged() {
+        let signer = DeterministicSigner::from_seed([54u8; 32]);
+        let actor = ActorId::new("actor:git-email:alice@example.com");
+        let (target, carrier) = peer_target_and_carrier(&signer, &actor);
+        let dest = dest_repo();
+
+        // Target ingested with no trust set; the carrier's signer is untrusted here.
+        ingest_events(IngestEventsOptions::new(dest.path(), vec![target])).unwrap();
+        let result =
+            ingest_events(IngestEventsOptions::new(dest.path(), vec![carrier.clone()])).unwrap();
+
+        assert_eq!(
+            result.events_created, 1,
+            "untrusted_key is kept, not dropped"
+        );
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "cosignature_untrusted_signer")
+        );
+        assert!(
+            EventStore::open(dest.path().join(".shore/data"))
+                .list_events()
+                .unwrap()
+                .iter()
+                .any(|event| event.event_id == carrier.event_id)
+        );
+    }
+
+    #[test]
+    fn peer_invalid_detached_carrier_is_dropped_even_under_advisory_policy() {
+        let signer = DeterministicSigner::from_seed([55u8; 32]);
+        let actor = ActorId::new("actor:git-email:alice@example.com");
+        let (target, carrier) = peer_target_and_carrier(&signer, &actor);
+        let trust = trust_for_actor(&actor, &signer);
+        let dest = dest_repo();
+
+        ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![target]).with_trust_set(trust.clone()),
+        )
+        .unwrap();
+
+        let mut tampered = carrier.clone();
+        tampered.payload["attestation"]["sig"] =
+            json!(EventSignatureBytes::from_bytes(&[0u8; 64]).as_str());
+        tampered.payload_hash = sha256_json_prefixed(&tampered.payload).unwrap();
+
+        // Even the advisory policy (which keeps an invalid INLINE signature) must
+        // drop an invalid DETACHED carrier — the family rule overrides it.
+        let result = ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![tampered.clone()])
+                .with_verification_policy(EventVerificationPolicy::advisory())
+                .with_trust_set(trust),
+        )
+        .unwrap();
+
+        assert_eq!(result.events_created, 0);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "cosignature_invalid")
+        );
+        assert!(
+            EventStore::open(dest.path().join(".shore/data"))
+                .list_events()
+                .unwrap()
+                .iter()
+                .all(|event| event.event_id != tampered.event_id),
+            "the invalid carrier was not stored"
+        );
+    }
+
+    #[test]
+    fn target_absent_detached_carrier_pends_then_stores_after_backfill() {
+        let signer = DeterministicSigner::from_seed([56u8; 32]);
+        let actor = ActorId::new("actor:git-email:alice@example.com");
+        let (target, carrier) = peer_target_and_carrier(&signer, &actor);
+        let trust = trust_for_actor(&actor, &signer);
+        let dest = dest_repo();
+
+        // Carrier arrives before its target: rejected, no trace.
+        let pending = ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![carrier.clone()])
+                .with_trust_set(trust.clone()),
+        )
+        .unwrap();
+        assert_eq!(pending.events_created, 0);
+        assert!(pending.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "cosignature_target_pending"
+                && diagnostic
+                    .message
+                    .contains(carrier_payload(&carrier).target_event_id.as_str())
+        }));
+        assert_eq!(
+            stored_event_count(dest.path()),
+            0,
+            "no marker, no queue, no trace"
+        );
+
+        // Backfill the target, then re-offer the SAME carrier: it stores cleanly,
+        // proving the reject left no poisoning trace (replay-safe, no scheduler).
+        ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![target]).with_trust_set(trust.clone()),
+        )
+        .unwrap();
+        let replayed = ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![carrier.clone()]).with_trust_set(trust),
+        )
+        .unwrap();
+        assert_eq!(replayed.events_created, 1);
+        assert!(
+            EventStore::open(dest.path().join(".shore/data"))
+                .list_events()
+                .unwrap()
+                .iter()
+                .any(|event| event.event_id == carrier.event_id)
+        );
+    }
+
+    #[test]
+    fn idempotent_reingest_of_detached_carrier_is_existing() {
+        let signer = DeterministicSigner::from_seed([57u8; 32]);
+        let actor = ActorId::new("actor:git-email:alice@example.com");
+        let (target, carrier) = peer_target_and_carrier(&signer, &actor);
+        let trust = trust_for_actor(&actor, &signer);
+        let dest = dest_repo();
+
+        ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![target]).with_trust_set(trust.clone()),
+        )
+        .unwrap();
+        ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![carrier.clone()])
+                .with_trust_set(trust.clone()),
+        )
+        .unwrap();
+        let again = ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![carrier]).with_trust_set(trust),
+        )
+        .unwrap();
+
+        assert_eq!(again.events_created, 0);
+        assert_eq!(again.events_existing, 1);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-mod freshness;
+pub(crate) mod freshness;
 pub(crate) mod lineage;
 mod read;
 pub mod state;
