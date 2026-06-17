@@ -1,6 +1,7 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
+use super::protocol::read_ssh_string;
 use crate::crypto::SignerId;
 use crate::error::{Result, ShoreError};
 
@@ -69,13 +70,15 @@ fn reject_unsupported_type(type_tag: &str) -> Result<()> {
 /// (a blob that disagrees with the line prefix is rejected).
 fn recover_ed25519_public_key(blob: &[u8]) -> Result<[u8; ED25519_PUBLIC_KEY_LEN]> {
     let mut cursor = blob;
-    let inner_type = read_ssh_string(&mut cursor)?;
+    let inner_type =
+        read_ssh_string(&mut cursor).ok_or_else(|| invalid("SSH key blob is truncated"))?;
     if inner_type != SSH_ED25519_TYPE.as_bytes() {
         return Err(invalid(
             "SSH key blob's inner type does not match ssh-ed25519",
         ));
     }
-    let key = read_ssh_string(&mut cursor)?;
+    let key = read_ssh_string(&mut cursor)
+        .ok_or_else(|| invalid("SSH key blob is missing its public-key field"))?;
     let key: [u8; ED25519_PUBLIC_KEY_LEN] = key
         .try_into()
         .map_err(|_| invalid("ssh-ed25519 public key is not 32 bytes"))?;
@@ -85,22 +88,6 @@ fn recover_ed25519_public_key(blob: &[u8]) -> Result<[u8; ED25519_PUBLIC_KEY_LEN
         ));
     }
     Ok(key)
-}
-
-/// Read one SSH-wire `string`: a `u32` big-endian length prefix then that many
-/// bytes. Advances `cursor` past the field. Rejects a truncated frame.
-fn read_ssh_string<'a>(cursor: &mut &'a [u8]) -> Result<&'a [u8]> {
-    if cursor.len() < 4 {
-        return Err(invalid("SSH wire string is truncated (no length prefix)"));
-    }
-    let (len_bytes, rest) = cursor.split_at(4);
-    let len = u32::from_be_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]) as usize;
-    if rest.len() < len {
-        return Err(invalid("SSH wire string is truncated (short payload)"));
-    }
-    let (value, rest) = rest.split_at(len);
-    *cursor = rest;
-    Ok(value)
 }
 
 fn invalid(message: impl Into<String>) -> ShoreError {
