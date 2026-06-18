@@ -7,9 +7,10 @@ use crate::documents::{
 };
 use crate::model::{EventId, ReviewTargetRef, Side};
 use crate::session::{
-    AdapterNoteView, EventVerificationStatus, MemberReadback, ReviewUnitListEntry,
-    ReviewUnitListResult, ReviewUnitProjectionIdentity, ReviewUnitProjectionRow,
-    ReviewUnitProjectionSummary, ReviewUnitShowFilters, ReviewUnitShowResult,
+    AdapterNoteView, EndorsementReadback, EventVerificationStatus, MemberReadback,
+    ReviewUnitListEntry, ReviewUnitListResult, ReviewUnitProjectionIdentity,
+    ReviewUnitProjectionRow, ReviewUnitProjectionSummary, ReviewUnitShowFilters,
+    ReviewUnitShowResult,
 };
 
 /// Documented body for `shore.review-unit`.
@@ -57,6 +58,8 @@ struct UnitReviewUnitDocument {
     capture_event_id: EventId,
     #[serde(skip_serializing_if = "Option::is_none")]
     verification_status: Option<EventVerificationStatus>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    endorsements: Vec<EndorsementReadback>,
 }
 
 #[derive(serde::Serialize)]
@@ -227,6 +230,7 @@ impl From<ReviewUnitProjectionIdentity> for UnitReviewUnitDocument {
             snapshot_artifact_content_hash: identity.snapshot_artifact_content_hash,
             capture_event_id: identity.capture_event_id,
             verification_status: None,
+            endorsements: Vec::new(),
         }
     }
 }
@@ -237,6 +241,7 @@ impl UnitReviewUnitDocument {
     fn with_readback(mut self, table: &BTreeMap<EventId, MemberReadback>) -> Self {
         if let Some(readback) = table.get(&self.capture_event_id) {
             self.verification_status = readback.verification_status;
+            self.endorsements = readback.endorsements.clone();
         }
         self
     }

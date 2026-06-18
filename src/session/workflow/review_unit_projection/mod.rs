@@ -11,6 +11,9 @@ use crate::session::observation::{
     ObservationProjectionOptions, ReviewUnitSelection, project_observations, resolve_review_unit,
     validated_track_id,
 };
+use crate::session::projection::cosignature::{
+    CosignatureIndex, endorsement_readbacks, enrich_endorser_attributes,
+};
 use crate::session::state::SessionState;
 use crate::session::store::resolution::resolve_read_store;
 use crate::session::workflow::read_store::divergence_diagnostics;
@@ -158,13 +161,18 @@ pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShow
     if options.verification_policy.is_some() {
         let by_id: HashMap<&str, &ShoreEvent> =
             events.iter().map(|e| (e.event_id.as_str(), e)).collect();
+        let cosig_index = CosignatureIndex::build(&events)?; // ONCE per call (INV-5)
         let mut record = |event_id: &EventId| -> Result<()> {
             if let Some(event) = by_id.get(event_id.as_str()) {
-                let status = verify_event_signature(event, &options.trust_set)?;
-                member_readbacks
-                    .entry(event_id.clone())
-                    .or_default()
-                    .verification_status = Some(status);
+                let entry = member_readbacks.entry(event_id.clone()).or_default();
+                entry.verification_status =
+                    Some(verify_event_signature(event, &options.trust_set)?);
+                // Trust-only classification, then sibling enrichment (INV-2).
+                let mut readbacks = endorsement_readbacks(
+                    &cosig_index.cosignatures_for_target(event, &options.trust_set)?,
+                );
+                enrich_endorser_attributes(&mut readbacks, options.actor_attributes.as_ref());
+                entry.endorsements = readbacks;
             }
             Ok(())
         };

@@ -8,9 +8,9 @@ use crate::session::event::{
     AssertionMode, InputRequestReasonCode, InputRequestResponseOutcome, ReviewAssessment, Writer,
 };
 use crate::session::{
-    AssessmentView, CurrentAssessmentStatus, DelegationMap, EventVerificationStatus,
-    InputRequestView, MemberReadback, ObservationView, PrincipalView, ValidationCheckView,
-    principal_view_for,
+    AssessmentView, CurrentAssessmentStatus, DelegationMap, EndorsementReadback,
+    EventVerificationStatus, InputRequestView, MemberReadback, ObservationView, PrincipalView,
+    ValidationCheckView, principal_view_for,
 };
 
 /// Look up the reader-relative readback for a document's event id. The side table
@@ -61,6 +61,8 @@ pub struct ObservationViewDocument {
     principal: Option<PrincipalView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     verification_status: Option<EventVerificationStatus>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    endorsements: Vec<EndorsementReadback>,
 }
 
 /// Documented per-item shape for one input request and its responses.
@@ -86,6 +88,8 @@ pub struct InputRequestViewDocument {
     principal: Option<PrincipalView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     verification_status: Option<EventVerificationStatus>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    endorsements: Vec<EndorsementReadback>,
 }
 
 /// Documented per-item shape for one input-request response.
@@ -105,6 +109,8 @@ pub struct InputRequestResponseViewDocument {
     principal: Option<PrincipalView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     verification_status: Option<EventVerificationStatus>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    endorsements: Vec<EndorsementReadback>,
 }
 
 /// Documented snake_case assertion mode for input requests, shared by the
@@ -152,6 +158,8 @@ pub struct AssessmentViewDocument {
     principal: Option<PrincipalView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     verification_status: Option<EventVerificationStatus>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    endorsements: Vec<EndorsementReadback>,
 }
 
 /// Documented per-item shape for one advisory validation check.
@@ -189,6 +197,8 @@ pub struct ValidationCheckViewDocument {
     principal: Option<PrincipalView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     verification_status: Option<EventVerificationStatus>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    endorsements: Vec<EndorsementReadback>,
 }
 
 impl From<ObservationView> for ObservationViewDocument {
@@ -213,6 +223,7 @@ impl From<ObservationView> for ObservationViewDocument {
             writer: view.writer,
             principal: None,
             verification_status: None,
+            endorsements: Vec::new(),
         }
     }
 }
@@ -239,6 +250,7 @@ impl From<InputRequestView> for InputRequestViewDocument {
             writer: view.writer,
             principal: None,
             verification_status: None,
+            endorsements: Vec::new(),
         }
     }
 }
@@ -264,6 +276,7 @@ impl From<crate::session::InputRequestResponseView> for InputRequestResponseView
             writer: view.writer,
             principal: None,
             verification_status: None,
+            endorsements: Vec::new(),
         }
     }
 }
@@ -330,6 +343,7 @@ impl From<AssessmentView> for AssessmentViewDocument {
             writer: view.writer,
             principal: None,
             verification_status: None,
+            endorsements: Vec::new(),
         }
     }
 }
@@ -356,6 +370,7 @@ impl From<ValidationCheckView> for ValidationCheckViewDocument {
             writer: view.writer,
             principal: None,
             verification_status: None,
+            endorsements: Vec::new(),
         }
     }
 }
@@ -374,6 +389,7 @@ impl ObservationViewDocument {
     pub fn with_readback(mut self, table: &BTreeMap<EventId, MemberReadback>) -> Self {
         if let Some(readback) = readback_for(table, &self.event_id) {
             self.verification_status = readback.verification_status;
+            self.endorsements = readback.endorsements.clone();
         }
         self
     }
@@ -397,6 +413,7 @@ impl InputRequestViewDocument {
     pub fn with_readback(mut self, table: &BTreeMap<EventId, MemberReadback>) -> Self {
         if let Some(readback) = readback_for(table, &self.event_id) {
             self.verification_status = readback.verification_status;
+            self.endorsements = readback.endorsements.clone();
         }
         self.responses = self
             .responses
@@ -416,6 +433,7 @@ impl InputRequestResponseViewDocument {
     pub fn with_readback(mut self, table: &BTreeMap<EventId, MemberReadback>) -> Self {
         if let Some(readback) = readback_for(table, &self.event_id) {
             self.verification_status = readback.verification_status;
+            self.endorsements = readback.endorsements.clone();
         }
         self
     }
@@ -430,6 +448,7 @@ impl AssessmentViewDocument {
     pub fn with_readback(mut self, table: &BTreeMap<EventId, MemberReadback>) -> Self {
         if let Some(readback) = readback_for(table, &self.event_id) {
             self.verification_status = readback.verification_status;
+            self.endorsements = readback.endorsements.clone();
         }
         self
     }
@@ -457,6 +476,7 @@ impl ValidationCheckViewDocument {
     pub fn with_readback(mut self, table: &BTreeMap<EventId, MemberReadback>) -> Self {
         if let Some(readback) = readback_for(table, &self.event_id) {
             self.verification_status = readback.verification_status;
+            self.endorsements = readback.endorsements.clone();
         }
         self
     }

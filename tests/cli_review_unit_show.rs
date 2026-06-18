@@ -509,6 +509,98 @@ fn unit_show_renders_verification_status_on_members_and_capture() {
     );
 }
 
+#[test]
+fn unit_show_renders_endorsement_on_capture_identity() {
+    let home = tempfile::tempdir().unwrap();
+    let env_home = home.path().to_str().unwrap();
+    let env: [(&str, &str); 1] = [("SHORE_HOME", env_home)];
+    assert!(
+        shore_env(["keys", "init", "--name", "default"], &env)
+            .status
+            .success()
+    );
+    let repo = modified_repo();
+    let repo_arg = repo.path().to_str().unwrap();
+    // Enroll the default key under kevin + attest kind/roles (reader config).
+    assert!(
+        shore_env(
+            [
+                "keys",
+                "enroll",
+                "default",
+                "--actor",
+                "actor:git-email:kevin@swiber.dev",
+                "--repo",
+                repo_arg,
+            ],
+            &env,
+        )
+        .status
+        .success()
+    );
+    assert!(
+        shore_env(
+            [
+                "identity",
+                "attest",
+                "actor:git-email:kevin@swiber.dev",
+                "--kind",
+                "human",
+                "--role",
+                "reviewer",
+                "--repo",
+                repo_arg,
+            ],
+            &[],
+        )
+        .status
+        .success()
+    );
+    // Capture UNSIGNED so the detached endorsement carrier is not deduped.
+    assert!(
+        shore_env(
+            ["review", "capture", "--repo", repo_arg],
+            &[("SHORE_HOME", env_home), ("SHORE_SIGNING", "off")],
+        )
+        .status
+        .success()
+    );
+    let target = captured_event_id(repo.path());
+    assert!(
+        shore_env(
+            ["review", "endorse", &target, "--repo", repo_arg],
+            &[
+                ("SHORE_HOME", env_home),
+                ("SHORE_ACTOR_ID", "actor:git-email:kevin@swiber.dev"),
+            ],
+        )
+        .status
+        .success()
+    );
+
+    let out = shore_env(
+        ["review", "unit", "show", "--repo", repo_arg],
+        &[("SHORE_HOME", env_home)],
+    );
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let endorsement = &doc["reviewUnit"]["endorsements"][0];
+    assert_eq!(endorsement["classification"], "endorsement-trusted");
+    assert_eq!(endorsement["endorser"], "actor:git-email:kevin@swiber.dev");
+    assert_eq!(endorsement["endorserAttributes"]["kind"], "human");
+}
+
+/// Find the captured ReviewUnit event id via the public read path (`read_events`).
+fn captured_event_id(repo_path: &std::path::Path) -> String {
+    shoreline::session::read_events(repo_path)
+        .unwrap()
+        .iter()
+        .find(|e| e.event_type == shoreline::session::event::EventType::ReviewUnitCaptured)
+        .expect("a captured review unit event")
+        .event_id
+        .as_str()
+        .to_owned()
+}
+
 fn modified_repo() -> GitRepo {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");

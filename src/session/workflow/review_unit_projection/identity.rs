@@ -12,8 +12,8 @@ use crate::session::observation::ObservationView;
 use crate::session::state::ProjectionDiagnostic;
 use crate::session::workflow::ValidationCheckView;
 use crate::session::{
-    DelegationMap, EventVerificationPolicy, EventVerificationStatus, PrincipalResolution, TrustSet,
-    principal_resolution_for_writer,
+    ActorAttributesMap, DelegationMap, EndorsementReadback, EventVerificationPolicy,
+    EventVerificationStatus, PrincipalResolution, TrustSet, principal_resolution_for_writer,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -25,6 +25,7 @@ pub struct ReviewUnitShowOptions {
     pub(super) include_body: bool,
     pub(super) verification_policy: Option<EventVerificationPolicy>,
     pub(super) trust_set: TrustSet,
+    pub(super) actor_attributes: Option<ActorAttributesMap>,
     pub(super) delegation_map: Option<DelegationMap>,
 }
 
@@ -38,6 +39,7 @@ impl ReviewUnitShowOptions {
             include_body: false,
             verification_policy: None,
             trust_set: TrustSet::default(),
+            actor_attributes: None,
             delegation_map: None,
         }
     }
@@ -74,6 +76,13 @@ impl ReviewUnitShowOptions {
     /// `untrusted_key` / `unknown_endorser`.
     pub fn with_trust_set(mut self, trust_set: TrustSet) -> Self {
         self.trust_set = trust_set;
+        self
+    }
+
+    /// Supply the reader's actor-attributes map. Sibling enrichment for endorsement
+    /// readbacks (the endorser's attested kind/roles) — never a classifier input (INV-2).
+    pub fn with_actor_attributes(mut self, actor_attributes: Option<ActorAttributesMap>) -> Self {
+        self.actor_attributes = actor_attributes;
         self
     }
 
@@ -128,10 +137,12 @@ pub(super) fn principal_diagnostics<'a>(
 
 /// Reader-relative readback for one event, attached to unit-show documents by
 /// event id. `verification_status` is the per-event signature ladder under the
-/// reader's trust set; both fields render only when a verification policy is set.
+/// reader's trust set; `endorsements` are its endorsement readbacks (with sibling
+/// enrichment). Both render only when a verification policy is set.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MemberReadback {
     pub verification_status: Option<EventVerificationStatus>,
+    pub endorsements: Vec<EndorsementReadback>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

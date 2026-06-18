@@ -123,10 +123,11 @@ fn review_unit_show_options(args: &UnitShowArgs) -> ReviewUnitShowOptions {
     if let Some(map) = super::common::discover_delegation_map(&args.repo) {
         options = options.with_delegation_map(map);
     }
-    // Advisory policy + reader trust: enable the per-event verificationStatus
-    // readback, reader-relative; render-only, never a gate (INV-3).
+    // Advisory policy + reader trust: enable the per-event verificationStatus +
+    // endorsement readback, reader-relative; render-only, never a gate (INV-3).
     options = options
         .with_trust_set(super::common::discover_trust_set(&args.repo))
-        .with_verification_policy(EventVerificationPolicy::advisory());
+        .with_verification_policy(EventVerificationPolicy::advisory())
+        .with_actor_attributes(super::common::discover_actor_attributes(&args.repo));
     options
 }
