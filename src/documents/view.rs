@@ -1,12 +1,30 @@
 // Shared view-document mappers used by review unit show and the leaf read commands.
-use crate::model::{ReviewTargetRef, ValidationStatus, ValidationTarget, ValidationTrigger};
+use std::collections::BTreeMap;
+
+use crate::model::{
+    EventId, ReviewTargetRef, ValidationStatus, ValidationTarget, ValidationTrigger,
+};
 use crate::session::event::{
     AssertionMode, InputRequestReasonCode, InputRequestResponseOutcome, ReviewAssessment, Writer,
 };
 use crate::session::{
-    AssessmentView, CurrentAssessmentStatus, DelegationMap, InputRequestView, ObservationView,
-    PrincipalView, ValidationCheckView, principal_view_for,
+    AssessmentView, CurrentAssessmentStatus, DelegationMap, EventVerificationStatus,
+    InputRequestView, MemberReadback, ObservationView, PrincipalView, ValidationCheckView,
+    principal_view_for,
 };
+
+/// Look up the reader-relative readback for a document's event id. The side table
+/// is keyed by `EventId`; the documents hold the id as a `String`, so compare by
+/// `as_str()`. Shared by every `with_readback` builder.
+fn readback_for<'a>(
+    table: &'a BTreeMap<EventId, MemberReadback>,
+    event_id: &str,
+) -> Option<&'a MemberReadback> {
+    table
+        .iter()
+        .find(|(key, _)| key.as_str() == event_id)
+        .map(|(_, readback)| readback)
+}
 
 /// Resolve the principal object for a document built from `writer` at
 /// `created_at`. `None` for non-agent writers; the mirror posture (`status:
@@ -41,6 +59,8 @@ pub struct ObservationViewDocument {
     writer: Writer,
     #[serde(skip_serializing_if = "Option::is_none")]
     principal: Option<PrincipalView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification_status: Option<EventVerificationStatus>,
 }
 
 /// Documented per-item shape for one input request and its responses.
@@ -64,6 +84,8 @@ pub struct InputRequestViewDocument {
     writer: Writer,
     #[serde(skip_serializing_if = "Option::is_none")]
     principal: Option<PrincipalView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification_status: Option<EventVerificationStatus>,
 }
 
 /// Documented per-item shape for one input-request response.
@@ -81,6 +103,8 @@ pub struct InputRequestResponseViewDocument {
     writer: Writer,
     #[serde(skip_serializing_if = "Option::is_none")]
     principal: Option<PrincipalView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification_status: Option<EventVerificationStatus>,
 }
 
 /// Documented snake_case assertion mode for input requests, shared by the
@@ -126,6 +150,8 @@ pub struct AssessmentViewDocument {
     writer: Writer,
     #[serde(skip_serializing_if = "Option::is_none")]
     principal: Option<PrincipalView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification_status: Option<EventVerificationStatus>,
 }
 
 /// Documented per-item shape for one advisory validation check.
@@ -161,6 +187,8 @@ pub struct ValidationCheckViewDocument {
     writer: Writer,
     #[serde(skip_serializing_if = "Option::is_none")]
     principal: Option<PrincipalView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification_status: Option<EventVerificationStatus>,
 }
 
 impl From<ObservationView> for ObservationViewDocument {
@@ -184,6 +212,7 @@ impl From<ObservationView> for ObservationViewDocument {
             created_at: view.created_at,
             writer: view.writer,
             principal: None,
+            verification_status: None,
         }
     }
 }
@@ -209,6 +238,7 @@ impl From<InputRequestView> for InputRequestViewDocument {
             created_at: view.created_at,
             writer: view.writer,
             principal: None,
+            verification_status: None,
         }
     }
 }
@@ -233,6 +263,7 @@ impl From<crate::session::InputRequestResponseView> for InputRequestResponseView
             created_at: view.created_at,
             writer: view.writer,
             principal: None,
+            verification_status: None,
         }
     }
 }
@@ -298,6 +329,7 @@ impl From<AssessmentView> for AssessmentViewDocument {
             created_at: view.created_at,
             writer: view.writer,
             principal: None,
+            verification_status: None,
         }
     }
 }
@@ -323,6 +355,7 @@ impl From<ValidationCheckView> for ValidationCheckViewDocument {
             created_at: view.created_at,
             writer: view.writer,
             principal: None,
+            verification_status: None,
         }
     }
 }
@@ -333,6 +366,15 @@ impl ObservationViewDocument {
     /// add paths keep the plain `From` (no principal).
     pub fn with_resolved_principal(mut self, map: Option<&DelegationMap>) -> Self {
         self.principal = resolve_document_principal(&self.writer, &self.created_at, map);
+        self
+    }
+
+    /// Attach the reader-relative readback (verification status) for this
+    /// document's event id, looked up in the unit-show side table.
+    pub fn with_readback(mut self, table: &BTreeMap<EventId, MemberReadback>) -> Self {
+        if let Some(readback) = readback_for(table, &self.event_id) {
+            self.verification_status = readback.verification_status;
+        }
         self
     }
 }
@@ -349,6 +391,20 @@ impl InputRequestViewDocument {
             .collect();
         self
     }
+
+    /// Attach the readback to the request and to each of its responses (every
+    /// response is a separate event with its own status).
+    pub fn with_readback(mut self, table: &BTreeMap<EventId, MemberReadback>) -> Self {
+        if let Some(readback) = readback_for(table, &self.event_id) {
+            self.verification_status = readback.verification_status;
+        }
+        self.responses = self
+            .responses
+            .into_iter()
+            .map(|response| response.with_readback(table))
+            .collect();
+        self
+    }
 }
 
 impl InputRequestResponseViewDocument {
@@ -356,11 +412,25 @@ impl InputRequestResponseViewDocument {
         self.principal = resolve_document_principal(&self.writer, &self.created_at, map);
         self
     }
+
+    pub fn with_readback(mut self, table: &BTreeMap<EventId, MemberReadback>) -> Self {
+        if let Some(readback) = readback_for(table, &self.event_id) {
+            self.verification_status = readback.verification_status;
+        }
+        self
+    }
 }
 
 impl AssessmentViewDocument {
     pub fn with_resolved_principal(mut self, map: Option<&DelegationMap>) -> Self {
         self.principal = resolve_document_principal(&self.writer, &self.created_at, map);
+        self
+    }
+
+    pub fn with_readback(mut self, table: &BTreeMap<EventId, MemberReadback>) -> Self {
+        if let Some(readback) = readback_for(table, &self.event_id) {
+            self.verification_status = readback.verification_status;
+        }
         self
     }
 }
@@ -381,6 +451,13 @@ impl CurrentAssessmentDocument {
 impl ValidationCheckViewDocument {
     pub fn with_resolved_principal(mut self, map: Option<&DelegationMap>) -> Self {
         self.principal = resolve_document_principal(&self.writer, &self.created_at, map);
+        self
+    }
+
+    pub fn with_readback(mut self, table: &BTreeMap<EventId, MemberReadback>) -> Self {
+        if let Some(readback) = readback_for(table, &self.event_id) {
+            self.verification_status = readback.verification_status;
+        }
         self
     }
 }

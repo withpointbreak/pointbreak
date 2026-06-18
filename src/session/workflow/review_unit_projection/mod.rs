@@ -1,6 +1,9 @@
+use std::collections::{BTreeMap, HashMap};
+
 use crate::error::Result;
-use crate::session::EventStore;
+use crate::model::EventId;
 use crate::session::assessment::{AssessmentProjectionOptions, project_assessments};
+use crate::session::event::ShoreEvent;
 use crate::session::input_request::{
     InputRequestProjectionOptions, InputRequestStatusFilter, project_input_requests,
 };
@@ -12,6 +15,7 @@ use crate::session::state::SessionState;
 use crate::session::store::resolution::resolve_read_store;
 use crate::session::workflow::read_store::divergence_diagnostics;
 use crate::session::workflow::{ValidationCheckProjectionOptions, project_validation_checks};
+use crate::session::{EventStore, verify_event_signature};
 
 mod adapter_notes;
 mod identity;
@@ -23,8 +27,8 @@ pub use self::adapter_notes::AdapterNoteView;
 use self::adapter_notes::project_adapter_notes;
 use self::identity::principal_diagnostics;
 pub use self::identity::{
-    ReviewUnitProjectionIdentity, ReviewUnitProjectionSummary, ReviewUnitShowFilters,
-    ReviewUnitShowOptions, ReviewUnitShowResult,
+    MemberReadback, ReviewUnitProjectionIdentity, ReviewUnitProjectionSummary,
+    ReviewUnitShowFilters, ReviewUnitShowOptions, ReviewUnitShowResult,
 };
 use self::resolving::selected_review_unit_capture;
 pub use self::rows::{ReviewUnitProjectionRow, SnapshotOrder};
@@ -147,6 +151,41 @@ pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShow
         diagnostics.extend(principal_diagnostics(members, map));
     }
 
+    // Reader-relative readback, keyed by event id and computed once over the events
+    // already in scope. Presence of a verification policy enables it; advisory render
+    // only, never a gate (INV-3). The document layer attaches it by event id (INV-8).
+    let mut member_readbacks: BTreeMap<EventId, MemberReadback> = BTreeMap::new();
+    if options.verification_policy.is_some() {
+        let by_id: HashMap<&str, &ShoreEvent> =
+            events.iter().map(|e| (e.event_id.as_str(), e)).collect();
+        let mut record = |event_id: &EventId| -> Result<()> {
+            if let Some(event) = by_id.get(event_id.as_str()) {
+                let status = verify_event_signature(event, &options.trust_set)?;
+                member_readbacks
+                    .entry(event_id.clone())
+                    .or_default()
+                    .verification_status = Some(status);
+            }
+            Ok(())
+        };
+        record(&review_unit.capture_event_id)?;
+        for view in &observations {
+            record(&view.event_id)?;
+        }
+        for request in &input_requests {
+            record(&request.event_id)?;
+            for response in &request.responses {
+                record(&response.event_id)?;
+            }
+        }
+        for view in &assessments {
+            record(&view.event_id)?;
+        }
+        for view in &validation_checks {
+            record(&view.event_id)?;
+        }
+    }
+
     Ok(ReviewUnitShowResult {
         event_set_hash,
         event_count: events.len(),
@@ -165,6 +204,7 @@ pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShow
         validation_checks,
         adapter_notes,
         rows,
+        member_readbacks,
         diagnostics,
     })
 }

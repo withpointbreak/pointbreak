@@ -5,7 +5,8 @@ use clap::{Args, Subcommand};
 use shoreline::documents::{unit_list_document, unit_show_document};
 use shoreline::model::{ReviewUnitId, ReviewUnitLineageId};
 use shoreline::session::{
-    ReviewUnitListOptions, ReviewUnitShowOptions, list_review_units, show_review_unit,
+    EventVerificationPolicy, ReviewUnitListOptions, ReviewUnitShowOptions, list_review_units,
+    show_review_unit,
 };
 
 use crate::cli::json;
@@ -122,5 +123,10 @@ fn review_unit_show_options(args: &UnitShowArgs) -> ReviewUnitShowOptions {
     if let Some(map) = super::common::discover_delegation_map(&args.repo) {
         options = options.with_delegation_map(map);
     }
+    // Advisory policy + reader trust: enable the per-event verificationStatus
+    // readback, reader-relative; render-only, never a gate (INV-3).
+    options = options
+        .with_trust_set(super::common::discover_trust_set(&args.repo))
+        .with_verification_policy(EventVerificationPolicy::advisory());
     options
 }

@@ -1,16 +1,20 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::{AdapterNoteView, ReviewUnitProjectionRow};
 use crate::model::{
-    ActorId, DiffSnapshot, ReviewEndpoint, ReviewUnitId, ReviewUnitLineageId, ReviewUnitSource,
-    RevisionId, SessionId, SnapshotId, TrackId,
+    ActorId, DiffSnapshot, EventId, ReviewEndpoint, ReviewUnitId, ReviewUnitLineageId,
+    ReviewUnitSource, RevisionId, SessionId, SnapshotId, TrackId,
 };
 use crate::session::assessment::{AssessmentView, CurrentAssessmentView};
 use crate::session::input_request::InputRequestView;
 use crate::session::observation::ObservationView;
 use crate::session::state::ProjectionDiagnostic;
 use crate::session::workflow::ValidationCheckView;
-use crate::session::{DelegationMap, PrincipalResolution, principal_resolution_for_writer};
+use crate::session::{
+    DelegationMap, EventVerificationPolicy, EventVerificationStatus, PrincipalResolution, TrustSet,
+    principal_resolution_for_writer,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewUnitShowOptions {
@@ -19,6 +23,8 @@ pub struct ReviewUnitShowOptions {
     pub(super) lineage_id: Option<ReviewUnitLineageId>,
     pub(super) track: Option<String>,
     pub(super) include_body: bool,
+    pub(super) verification_policy: Option<EventVerificationPolicy>,
+    pub(super) trust_set: TrustSet,
     pub(super) delegation_map: Option<DelegationMap>,
 }
 
@@ -30,6 +36,8 @@ impl ReviewUnitShowOptions {
             lineage_id: None,
             track: None,
             include_body: false,
+            verification_policy: None,
+            trust_set: TrustSet::default(),
             delegation_map: None,
         }
     }
@@ -51,6 +59,21 @@ impl ReviewUnitShowOptions {
 
     pub fn with_include_body(mut self, include_body: bool) -> Self {
         self.include_body = include_body;
+        self
+    }
+
+    /// Supply the verification policy. Advisory (render-only): its presence enables
+    /// the per-event `verificationStatus` readback; it never gates a write (INV-3).
+    pub fn with_verification_policy(mut self, policy: EventVerificationPolicy) -> Self {
+        self.verification_policy = Some(policy);
+        self
+    }
+
+    /// Supply the reader's trust set. Status and endorsement classification resolve
+    /// against it (reader-relativity); the empty default reads every signer as
+    /// `untrusted_key` / `unknown_endorser`.
+    pub fn with_trust_set(mut self, trust_set: TrustSet) -> Self {
+        self.trust_set = trust_set;
         self
     }
 
@@ -103,6 +126,14 @@ pub(super) fn principal_diagnostics<'a>(
     diagnostics
 }
 
+/// Reader-relative readback for one event, attached to unit-show documents by
+/// event id. `verification_status` is the per-event signature ladder under the
+/// reader's trust set; both fields render only when a verification policy is set.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MemberReadback {
+    pub verification_status: Option<EventVerificationStatus>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewUnitShowResult {
     pub event_set_hash: String,
@@ -118,6 +149,10 @@ pub struct ReviewUnitShowResult {
     pub validation_checks: Vec<ValidationCheckView>,
     pub adapter_notes: Vec<AdapterNoteView>,
     pub rows: Vec<ReviewUnitProjectionRow>,
+    /// Reader-relative readback keyed by event id, covering the capture event and
+    /// every narrative member. Attached at the document layer (INV-8); empty when
+    /// no verification policy is set.
+    pub member_readbacks: BTreeMap<EventId, MemberReadback>,
     pub diagnostics: Vec<ProjectionDiagnostic>,
 }
 
@@ -131,6 +166,9 @@ pub struct ReviewUnitProjectionIdentity {
     pub revision_id: RevisionId,
     pub snapshot_id: SnapshotId,
     pub snapshot_artifact_content_hash: String,
+    /// The capture event's id, so the document layer can key the readback side
+    /// table for the review-unit identity (the capture has no `eventId` of its own).
+    pub capture_event_id: EventId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -65,7 +65,7 @@ pub use review_unit_list::{
     ReviewUnitListEntry, ReviewUnitListOptions, ReviewUnitListResult, list_review_units,
 };
 pub use review_unit_projection::{
-    AdapterNoteView, ReviewUnitProjectionIdentity, ReviewUnitProjectionRow,
+    AdapterNoteView, MemberReadback, ReviewUnitProjectionIdentity, ReviewUnitProjectionRow,
     ReviewUnitProjectionSummary, ReviewUnitShowFilters, ReviewUnitShowOptions,
     ReviewUnitShowResult, SnapshotOrder, show_review_unit,
 };

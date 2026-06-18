@@ -1,13 +1,15 @@
 // Document builders for `shore review-unit show` and `list`.
+use std::collections::BTreeMap;
+
 use crate::documents::{
     AssessmentViewDocument, CurrentAssessmentDocument, DiagnosticDocument,
     InputRequestViewDocument, ObservationViewDocument, ValidationCheckViewDocument,
 };
-use crate::model::{ReviewTargetRef, Side};
+use crate::model::{EventId, ReviewTargetRef, Side};
 use crate::session::{
-    AdapterNoteView, ReviewUnitListEntry, ReviewUnitListResult, ReviewUnitProjectionIdentity,
-    ReviewUnitProjectionRow, ReviewUnitProjectionSummary, ReviewUnitShowFilters,
-    ReviewUnitShowResult,
+    AdapterNoteView, EventVerificationStatus, MemberReadback, ReviewUnitListEntry,
+    ReviewUnitListResult, ReviewUnitProjectionIdentity, ReviewUnitProjectionRow,
+    ReviewUnitProjectionSummary, ReviewUnitShowFilters, ReviewUnitShowResult,
 };
 
 /// Documented body for `shore.review-unit`.
@@ -49,6 +51,12 @@ struct UnitReviewUnitDocument {
     base: crate::model::ReviewEndpoint,
     target: crate::model::ReviewEndpoint,
     snapshot_artifact_content_hash: String,
+    /// The capture event id, kept only to key the readback side table; never
+    /// serialized (the identity renders no `eventId` of its own).
+    #[serde(skip)]
+    capture_event_id: EventId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification_status: Option<EventVerificationStatus>,
 }
 
 #[derive(serde::Serialize)]
@@ -143,35 +151,39 @@ struct SnapshotOrderDocument {
 }
 
 /// Build the `shore.review-unit` composite document from a show result.
-pub fn unit_show_document(result: ReviewUnitShowResult) -> DiagnosticDocument<UnitShowBody> {
+pub fn unit_show_document(mut result: ReviewUnitShowResult) -> DiagnosticDocument<UnitShowBody> {
+    // The readback side table is keyed by event id; attach it to each member and to
+    // the capture identity at the document layer (INV-8). Take it out before the
+    // by-value moves below.
+    let readbacks = std::mem::take(&mut result.member_readbacks);
     DiagnosticDocument::new(
         "shore.review-unit",
         UnitShowBody {
             event_set_hash: result.event_set_hash,
             event_count: result.event_count,
-            review_unit: UnitReviewUnitDocument::from(result.review_unit),
+            review_unit: UnitReviewUnitDocument::from(result.review_unit).with_readback(&readbacks),
             filters: UnitShowFiltersDocument::from(result.filters),
             summary: UnitShowSummaryDocument::from(result.summary),
             current_assessment: CurrentAssessmentDocument::from(result.current_assessment),
             observations: result
                 .observations
                 .into_iter()
-                .map(ObservationViewDocument::from)
+                .map(|view| ObservationViewDocument::from(view).with_readback(&readbacks))
                 .collect(),
             input_requests: result
                 .input_requests
                 .into_iter()
-                .map(InputRequestViewDocument::from)
+                .map(|view| InputRequestViewDocument::from(view).with_readback(&readbacks))
                 .collect(),
             assessments: result
                 .assessments
                 .into_iter()
-                .map(AssessmentViewDocument::from)
+                .map(|view| AssessmentViewDocument::from(view).with_readback(&readbacks))
                 .collect(),
             validation_checks: result
                 .validation_checks
                 .into_iter()
-                .map(ValidationCheckViewDocument::from)
+                .map(|view| ValidationCheckViewDocument::from(view).with_readback(&readbacks))
                 .collect(),
             adapter_notes: result
                 .adapter_notes
@@ -213,7 +225,20 @@ impl From<ReviewUnitProjectionIdentity> for UnitReviewUnitDocument {
             base: identity.base,
             target: identity.target,
             snapshot_artifact_content_hash: identity.snapshot_artifact_content_hash,
+            capture_event_id: identity.capture_event_id,
+            verification_status: None,
         }
+    }
+}
+
+impl UnitReviewUnitDocument {
+    /// Attach the reader-relative readback for the capture event. The identity has
+    /// no `eventId` of its own, so it keys the side table on `capture_event_id`.
+    fn with_readback(mut self, table: &BTreeMap<EventId, MemberReadback>) -> Self {
+        if let Some(readback) = table.get(&self.capture_event_id) {
+            self.verification_status = readback.verification_status;
+        }
+        self
     }
 }
 

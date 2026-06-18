@@ -2,7 +2,7 @@ mod support;
 
 use serde_json::Value;
 use support::git_repo::GitRepo;
-use support::shore;
+use support::{shore, shore_env};
 
 #[test]
 fn review_unit_help_lists_show() {
@@ -451,6 +451,62 @@ fn unit_show_disambiguates_worktree_and_range_units() {
     );
     assert_eq!(json["reviewUnit"]["id"], range["reviewUnit"]["id"]);
     assert_eq!(json["reviewUnit"]["source"]["kind"], "git_commit_range");
+}
+
+#[test]
+fn unit_show_renders_verification_status_on_members_and_capture() {
+    let home = tempfile::tempdir().unwrap();
+    let env_home = home.path().to_str().unwrap();
+    let env: [(&str, &str); 1] = [("SHORE_HOME", env_home)];
+    // A present-but-unenrolled key → signs, verifies untrusted_key under the empty trust set.
+    assert!(
+        shore_env(["keys", "init", "--name", "default"], &env)
+            .status
+            .success()
+    );
+
+    let repo = modified_repo();
+    let repo_arg = repo.path().to_str().unwrap();
+    assert!(
+        shore_env(["review", "capture", "--repo", repo_arg], &env)
+            .status
+            .success()
+    );
+    assert!(
+        shore_env(
+            [
+                "review",
+                "observation",
+                "add",
+                "--repo",
+                repo_arg,
+                "--track",
+                "agent:codex",
+                "--title",
+                "t",
+                "--body",
+                "b",
+            ],
+            &env,
+        )
+        .status
+        .success()
+    );
+
+    let out = shore_env(["review", "unit", "show", "--repo", repo_arg], &env);
+    assert!(
+        out.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    // The capture identity (the captured event) carries the status.
+    assert_eq!(doc["reviewUnit"]["verificationStatus"], "untrusted_key");
+    // Each narrative member carries the status of its own event.
+    assert_eq!(
+        doc["observations"][0]["verificationStatus"],
+        "untrusted_key"
+    );
 }
 
 fn modified_repo() -> GitRepo {

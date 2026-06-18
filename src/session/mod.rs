@@ -61,7 +61,7 @@ pub use workflow::{
     InputRequestRespondOptions, InputRequestRespondResult, InputRequestResponseView,
     InputRequestStatus, InputRequestStatusFilter, InputRequestTargetSelector, InputRequestView,
     LineageAttachOptions, LineageAttachResult, LineageListEntry, LineageListOptions,
-    LineageListResult, LineageRoundView, LineageShowOptions, LineageShowResult,
+    LineageListResult, LineageRoundView, LineageShowOptions, LineageShowResult, MemberReadback,
     MigrateStoreOptions, ObservationAddOptions, ObservationAddResult, ObservationListOptions,
     ObservationListResult, ObservationStatus, ObservationTargetSelector, ObservationView,
     ReloadDiagnostic, ReloadDiagnosticCode, ReloadOutcome, ReviewHistoryEntry,

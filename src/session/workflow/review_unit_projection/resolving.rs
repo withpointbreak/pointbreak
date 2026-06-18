@@ -22,6 +22,7 @@ pub(super) fn selected_review_unit_capture(
                 revision_id: payload.revision_id,
                 snapshot_id: payload.snapshot_id,
                 snapshot_artifact_content_hash: payload.snapshot_artifact_content_hash,
+                capture_event_id: event.event_id.clone(),
             });
         }
     }
