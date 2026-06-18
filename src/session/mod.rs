@@ -10,10 +10,14 @@ pub use event::{
     IngestProvenance, IngestVia, event_signature_pre_authentication_encoding, event_to_be_signed,
 };
 pub use identity::{
-    ActorAttributes, ActorAttributesMap, DelegationMap, DelegationRecord, PrincipalResolution,
-    PrincipalSource, PrincipalStatus, PrincipalView, UnresolvedReason, actor_attributes_from_value,
-    delegation_map_from_value, is_agent_actor_id, principal_display_label,
-    principal_resolution_for_writer, principal_view_for, resolve_writer_actor_id,
+    ACTOR_ATTRIBUTES_LOCAL_REL_PATH, ACTOR_ATTRIBUTES_REL_PATH, ActorAttributes,
+    ActorAttributesMap, ActorAttributesStageOutcome, ActorAttributesWriteRecord,
+    DELEGATES_LOCAL_REL_PATH, DELEGATES_REL_PATH, DelegationMap, DelegationRecord,
+    DelegationStageOutcome, DelegationWriteRecord, PrincipalResolution, PrincipalSource,
+    PrincipalStatus, PrincipalView, UnresolvedReason, actor_attributes_from_value,
+    delegation_map_from_value, format_rfc3339_utc_millis, is_agent_actor_id, now_rfc3339_utc,
+    principal_display_label, principal_resolution_for_writer, principal_view_for,
+    resolve_writer_actor_id, stage_actor_attributes, stage_delegation,
 };
 pub(crate) use identity::{
     current_timestamp, is_valid_actor_id, writer_from_git_config, writer_from_options,
@@ -39,8 +43,9 @@ pub(crate) use store::{
     sweep_stale_temp_files, worktree_fingerprint_for_files,
 };
 pub use store::{
-    SnapshotArtifact, capture_worktree_fingerprint, ensure_shore_storage_excluded,
-    read_snapshot_artifact, store_dir_for_repo,
+    SnapshotArtifact, capture_worktree_fingerprint, ensure_local_actor_attributes_excluded,
+    ensure_local_delegates_excluded, ensure_shore_storage_excluded, read_snapshot_artifact,
+    store_dir_for_repo,
 };
 pub(in crate::session) use store::{body_artifact, fingerprint, snapshot_artifact, store_init};
 pub(crate) use workflow::reload_diagnostics_for_document;

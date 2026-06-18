@@ -5,12 +5,19 @@ mod instant;
 mod principal;
 mod writer;
 
-pub use actor_attributes::{ActorAttributes, ActorAttributesMap, actor_attributes_from_value};
-pub(crate) use clock::current_timestamp;
-pub use delegates::{
-    DelegationMap, DelegationRecord, PrincipalResolution, UnresolvedReason,
-    delegation_map_from_value,
+pub use actor_attributes::{
+    ACTOR_ATTRIBUTES_LOCAL_REL_PATH, ACTOR_ATTRIBUTES_REL_PATH, ActorAttributes,
+    ActorAttributesMap, ActorAttributesStageOutcome, ActorAttributesWriteRecord,
+    actor_attributes_from_value, stage_actor_attributes,
 };
+pub(crate) use clock::current_timestamp;
+pub use clock::now_rfc3339_utc;
+pub use delegates::{
+    DELEGATES_LOCAL_REL_PATH, DELEGATES_REL_PATH, DelegationMap, DelegationRecord,
+    DelegationStageOutcome, DelegationWriteRecord, PrincipalResolution, UnresolvedReason,
+    delegation_map_from_value, stage_delegation,
+};
+pub use instant::format_rfc3339_utc_millis;
 pub use principal::{
     PrincipalSource, PrincipalStatus, PrincipalView, principal_display_label,
     principal_resolution_for_writer, principal_view_for,

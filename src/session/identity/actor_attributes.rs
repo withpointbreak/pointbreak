@@ -29,7 +29,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::writer::is_valid_principal_actor_id;
 use crate::error::{Result, ShoreError};
@@ -201,6 +201,145 @@ fn invalid(reason: impl Into<String>) -> ShoreError {
     }
 }
 
+/// Repo-relative paths to the actor-attributes config. Mirrors `DELEGATES_REL_PATH`.
+pub const ACTOR_ATTRIBUTES_REL_PATH: &str = ".shore/actor-attributes.json";
+pub const ACTOR_ATTRIBUTES_LOCAL_REL_PATH: &str = ".shore/actor-attributes.local.json";
+
+/// The schema tag the writer emits. The reader ignores top-level `schema` (unknown
+/// top-level keys are forward-compatible) but the canonical file declares it.
+const ACTOR_ATTRIBUTES_SCHEMA: &str = "shore.actor-attributes.v1";
+
+/// Outcome of staging one actor's attributes: whether the actor's entry changed
+/// (`true`) or was byte-identical already (`false`, a no-op).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ActorAttributesStageOutcome {
+    pub changed: bool,
+}
+
+/// A write-oriented actor-attributes entry. `kind` is required (ADR-0012: exactly
+/// one kind per actor); `roles` is an open set; `comment` is optional audit text the
+/// reader does not interpret but the writer preserves.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActorAttributesWriteRecord {
+    kind: String,
+    roles: Vec<String>,
+    comment: Option<String>,
+}
+
+impl ActorAttributesWriteRecord {
+    pub fn new(kind: String) -> Self {
+        Self {
+            kind,
+            roles: Vec::new(),
+            comment: None,
+        }
+    }
+
+    pub fn with_roles(mut self, roles: Vec<String>) -> Self {
+        self.roles = roles;
+        self
+    }
+
+    pub fn with_comment(mut self, comment: Option<String>) -> Self {
+        self.comment = comment;
+        self
+    }
+}
+
+/// Read-or-init `path`, set/replace `actor`'s attributes entry, write it back
+/// byte-stably. Pure (no git, no clock). Normalizes + validates tokens to the SAME
+/// grammar `parse_attributes` enforces (lowercase-kebab `[a-z0-9-]+`; roles are
+/// deduped and sorted), so a staged file always re-reads (INV-B). A byte-identical
+/// entry is a no-op (`changed: false`). Per-actor REPLACE: an actor has one entry.
+pub fn stage_actor_attributes(
+    path: &Path,
+    actor: &ActorId,
+    attrs: &ActorAttributesWriteRecord,
+) -> Result<ActorAttributesStageOutcome> {
+    if !is_valid_principal_actor_id(actor.as_str()) {
+        return Err(invalid(format!(
+            "actor key {} is not a valid actor id",
+            actor.as_str()
+        )));
+    }
+    // Normalize + validate via the reader's own grammar: `normalize_token` is private
+    // to this module, so the writer reuses it directly — one grammar, reader and writer
+    // can never drift.
+    let kind = normalize_token(actor.as_str(), "kind", &attrs.kind)?;
+    let mut roles_set = BTreeSet::new();
+    for role in &attrs.roles {
+        roles_set.insert(normalize_token(actor.as_str(), "role", role)?);
+    }
+
+    let mut root: Value = if path.exists() {
+        serde_json::from_slice(
+            &std::fs::read(path)
+                .map_err(|e| ShoreError::Message(format!("read {}: {e}", path.display())))?,
+        )?
+    } else {
+        let mut init = Map::new();
+        init.insert(
+            "schema".to_owned(),
+            Value::String(ACTOR_ATTRIBUTES_SCHEMA.to_owned()),
+        );
+        init.insert("actors".to_owned(), Value::Object(Map::new()));
+        Value::Object(init)
+    };
+    let root_obj = root
+        .as_object_mut()
+        .ok_or_else(|| invalid("attributes file is not an object"))?;
+    // Keep/refresh the schema tag.
+    root_obj.insert(
+        "schema".to_owned(),
+        Value::String(ACTOR_ATTRIBUTES_SCHEMA.to_owned()),
+    );
+    let actors = root_obj
+        .entry("actors".to_owned())
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| invalid("actors is not an object"))?;
+
+    // `changed` compares the NORMALIZED entry against what is on disk, so re-attesting
+    // with differently-cased-but-equivalent tokens is correctly a no-op.
+    let new_entry = actor_attributes_entry_value(&kind, &roles_set, attrs.comment.as_deref());
+    let changed = actors.get(actor.as_str()) != Some(&new_entry);
+    actors.insert(actor.as_str().to_owned(), new_entry);
+
+    // INV-B: re-validate the ENTIRE post-mutation document with the reader's own
+    // parser before writing — guarantees the staged file always re-reads, and refuses
+    // to write when a PRE-EXISTING sibling entry is malformed (e.g. a missing/null
+    // kind the raw Value parse does not catch) rather than producing a file
+    // `from_attributes_file` would reject.
+    actor_attributes_from_value(root.clone())?;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| ShoreError::Message(format!("create {}: {e}", parent.display())))?;
+    }
+    let mut bytes = serde_json::to_vec_pretty(&root)?;
+    bytes.push(b'\n');
+    std::fs::write(path, &bytes)
+        .map_err(|e| ShoreError::Message(format!("write {}: {e}", path.display())))?;
+    Ok(ActorAttributesStageOutcome { changed })
+}
+
+fn actor_attributes_entry_value(
+    kind: &str,
+    roles: &BTreeSet<String>,
+    comment: Option<&str>,
+) -> Value {
+    let mut obj = Map::new();
+    obj.insert("kind".to_owned(), Value::String(kind.to_owned()));
+    obj.insert(
+        "roles".to_owned(),
+        Value::Array(roles.iter().map(|r| Value::String(r.clone())).collect()),
+    );
+    if let Some(comment) = comment {
+        obj.insert("comment".to_owned(), Value::String(comment.to_owned()));
+    }
+    Value::Object(obj)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -356,5 +495,164 @@ mod tests {
         );
         assert!(!future.is_kind("human"));
         assert!(!future.is_kind("service"));
+    }
+
+    #[test]
+    fn stage_actor_attributes_round_trips_through_the_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".shore/actor-attributes.json");
+        let actor = ActorId::new("actor:git-email:kevin@swiber.dev");
+        let attrs = ActorAttributesWriteRecord::new("human".to_owned())
+            .with_roles(vec!["reviewer".to_owned(), "author".to_owned()])
+            .with_comment(Some("me".to_owned()));
+
+        let outcome = stage_actor_attributes(&path, &actor, &attrs).unwrap();
+        assert!(outcome.changed);
+
+        let map = ActorAttributesMap::from_attributes_file(&path).unwrap();
+        let resolved = map.resolve(&actor);
+        assert_eq!(resolved.kind(), Some("human"));
+        // roles deduped + sorted (BTreeSet semantics, matching the reader).
+        assert_eq!(
+            resolved.roles().iter().cloned().collect::<Vec<_>>(),
+            vec!["author", "reviewer"]
+        );
+    }
+
+    #[test]
+    fn stage_actor_attributes_normalizes_tokens_lowercase_kebab() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".shore/actor-attributes.json");
+        let actor = ActorId::new("actor:agent:review-bot");
+        // Mixed case + duplicate roles → normalized, deduped, sorted.
+        let attrs = ActorAttributesWriteRecord::new("Reviewer-Model".to_owned()).with_roles(vec![
+            "Reviewer".to_owned(),
+            "reviewer".to_owned(),
+            "CI".to_owned(),
+        ]);
+        stage_actor_attributes(&path, &actor, &attrs).unwrap();
+        let map = ActorAttributesMap::from_attributes_file(&path).unwrap();
+        let r = map.resolve(&actor);
+        assert_eq!(r.kind(), Some("reviewer-model"));
+        assert_eq!(
+            r.roles().iter().cloned().collect::<Vec<_>>(),
+            vec!["ci", "reviewer"]
+        );
+    }
+
+    #[test]
+    fn stage_actor_attributes_replaces_per_actor_and_is_byte_stable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".shore/actor-attributes.json");
+        let actor = ActorId::new("actor:git-email:kevin@swiber.dev");
+        let attrs = ActorAttributesWriteRecord::new("human".to_owned())
+            .with_roles(vec!["author".to_owned()]);
+
+        let first = stage_actor_attributes(&path, &actor, &attrs).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let second = stage_actor_attributes(&path, &actor, &attrs).unwrap();
+        let after = std::fs::read(&path).unwrap();
+        assert!(
+            first.changed && !second.changed,
+            "identical re-attest is a no-op"
+        );
+        assert_eq!(before, after, "re-attest leaves the file byte-identical");
+        assert!(before.ends_with(b"\n"));
+
+        // Re-attest with a different kind REPLACES the actor's entry (set-per-actor).
+        let changed = stage_actor_attributes(
+            &path,
+            &actor,
+            &ActorAttributesWriteRecord::new("service".to_owned()),
+        )
+        .unwrap();
+        assert!(changed.changed);
+        assert_eq!(
+            ActorAttributesMap::from_attributes_file(&path)
+                .unwrap()
+                .resolve(&actor)
+                .kind(),
+            Some("service")
+        );
+    }
+
+    #[test]
+    fn stage_actor_attributes_preserves_other_actors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".shore/actor-attributes.json");
+        stage_actor_attributes(
+            &path,
+            &ActorId::new("actor:git-email:kevin@swiber.dev"),
+            &ActorAttributesWriteRecord::new("human".to_owned()),
+        )
+        .unwrap();
+        stage_actor_attributes(
+            &path,
+            &ActorId::new("actor:agent:review-bot"),
+            &ActorAttributesWriteRecord::new("reviewer-model".to_owned()),
+        )
+        .unwrap();
+        let map = ActorAttributesMap::from_attributes_file(&path).unwrap();
+        assert_eq!(
+            map.resolve(&ActorId::new("actor:git-email:kevin@swiber.dev"))
+                .kind(),
+            Some("human")
+        );
+        assert_eq!(
+            map.resolve(&ActorId::new("actor:agent:review-bot")).kind(),
+            Some("reviewer-model")
+        );
+    }
+
+    #[test]
+    fn stage_actor_attributes_refuses_when_an_existing_sibling_is_malformed() {
+        // INV-B: a pre-existing malformed sibling (here, an entry with no kind — valid JSON,
+        // invalid schema) must make the stage FAIL, not write a file the reader rejects.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".shore/actor-attributes.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, br#"{"schema":"shore.actor-attributes.v1","actors":{"actor:agent:bad":{"roles":["reviewer"]}}}"#).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let result = stage_actor_attributes(
+            &path,
+            &ActorId::new("actor:git-email:kevin@swiber.dev"),
+            &ActorAttributesWriteRecord::new("human".to_owned()),
+        );
+        assert!(
+            result.is_err(),
+            "a malformed existing sibling must make the stage fail"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "a failed stage writes nothing"
+        );
+    }
+
+    #[test]
+    fn stage_actor_attributes_rejects_bad_key_and_bad_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".shore/actor-attributes.json");
+        // Invalid actor key.
+        assert!(
+            stage_actor_attributes(
+                &path,
+                &ActorId::new("not-an-actor"),
+                &ActorAttributesWriteRecord::new("human".to_owned())
+            )
+            .is_err()
+        );
+        // Non-kebab role token (contains a space) — must be rejected by the same grammar the reader uses.
+        assert!(
+            stage_actor_attributes(
+                &path,
+                &ActorId::new("actor:agent:x"),
+                &ActorAttributesWriteRecord::new("agent".to_owned())
+                    .with_roles(vec!["Has Space".to_owned()])
+            )
+            .is_err()
+        );
+        assert!(!path.exists(), "a rejected attest writes nothing");
     }
 }

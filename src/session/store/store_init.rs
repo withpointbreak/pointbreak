@@ -173,7 +173,11 @@ pub fn ensure_shore_storage_excluded(worktree_root: &Path) -> Result<()> {
 /// Only the `.local.json` override is excluded — the committed
 /// `.shore/delegates.json` and `.shore/allowed-signers.json` are deliberately
 /// tracked and never excluded.
-pub(crate) fn ensure_local_delegates_excluded(worktree_root: &Path) -> Result<()> {
+///
+/// `pub` so the possession-based `--local` identity CLIs (`enroll`/`attest`) can
+/// call it before any store write — that path may run before `prepare_shore_writer`
+/// (which also calls it) ever does.
+pub fn ensure_local_delegates_excluded(worktree_root: &Path) -> Result<()> {
     if git_path_is_ignored(worktree_root, ".shore/delegates.local.json")? {
         return Ok(());
     }
@@ -184,7 +188,9 @@ pub(crate) fn ensure_local_delegates_excluded(worktree_root: &Path) -> Result<()
 /// [`ensure_local_delegates_excluded`]: a no-op if already ignored, else appends
 /// to the repository-local `.git/info/exclude`. Only the `.local.json` override
 /// is excluded — the committed `.shore/actor-attributes.json` is tracked.
-pub(crate) fn ensure_local_actor_attributes_excluded(worktree_root: &Path) -> Result<()> {
+/// `pub` for the same reason as [`ensure_local_delegates_excluded`]: the `--local`
+/// `attest` CLI calls it before staging the override.
+pub fn ensure_local_actor_attributes_excluded(worktree_root: &Path) -> Result<()> {
     if git_path_is_ignored(worktree_root, ".shore/actor-attributes.local.json")? {
         return Ok(());
     }

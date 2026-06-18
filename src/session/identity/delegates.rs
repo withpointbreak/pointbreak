@@ -33,7 +33,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::instant::{parse_event_instant, parse_rfc3339_utc_millis};
 use super::writer::{is_agent_actor_id, is_valid_principal_actor_id};
@@ -150,6 +150,13 @@ impl DelegationMap {
         self.delegates.get(actor).map(Vec::as_slice).unwrap_or(&[])
     }
 
+    /// Number of delegation records held for `actor` (0 when absent). Public so the
+    /// possession-based `enroll --local` command can report how many committed
+    /// records a local override will shadow (the git-config full-replace caveat).
+    pub fn record_count_for(&self, actor: &ActorId) -> usize {
+        self.records_for(actor).len()
+    }
+
     /// Resolve the principal an agent actor wrote on behalf of at `occurred_at`.
     /// Projection-time, replay-stable, git-free: it reads only the parsed map and
     /// the event timestamp. Ambiguity (more than one distinct covering principal)
@@ -207,6 +214,176 @@ pub fn delegation_map_from_value(value: Value) -> Result<DelegationMap> {
     }
 
     Ok(DelegationMap { delegates: parsed })
+}
+
+/// Repo-relative paths to the delegates config. Mirrors `ALLOWED_SIGNERS_REL_PATH`.
+pub const DELEGATES_REL_PATH: &str = ".shore/delegates.json";
+pub const DELEGATES_LOCAL_REL_PATH: &str = ".shore/delegates.local.json";
+
+/// Outcome of staging one delegation record: whether it was newly added (`true`)
+/// or already present (`false`, a byte-stable no-op).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DelegationStageOutcome {
+    pub added: bool,
+}
+
+/// A write-oriented delegation record that RETAINS the raw `validFrom`/`validUntil`
+/// strings and `comment` for faithful round-trip writing — the read-path
+/// `DelegationRecord` keeps only the parsed window, so it cannot serialize them back.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegationWriteRecord {
+    principal: ActorId,
+    valid_from: String,
+    valid_until: Option<String>,
+    comment: Option<String>,
+}
+
+impl DelegationWriteRecord {
+    /// `principal` is the responsible non-agent actor; `valid_from` is RFC 3339 UTC
+    /// (the CLI defaults it to `now_rfc3339_utc()`). Open window + no comment by default.
+    pub fn new(principal: ActorId, valid_from: String) -> Self {
+        Self {
+            principal,
+            valid_from,
+            valid_until: None,
+            comment: None,
+        }
+    }
+
+    pub fn with_valid_until(mut self, until: Option<String>) -> Self {
+        self.valid_until = until;
+        self
+    }
+
+    pub fn with_comment(mut self, comment: Option<String>) -> Self {
+        self.comment = comment;
+        self
+    }
+}
+
+/// Read-or-init `path`, append `record` to `agent`'s delegation array, and write it
+/// back byte-stably. Pure (no git, no clock). Validates to the SAME rules
+/// `DelegationMap::from_delegates_file` enforces, so a staged file always re-reads
+/// (INV-B). An identical record already present is a no-op (`added: false`).
+pub fn stage_delegation(
+    path: &Path,
+    agent: &ActorId,
+    record: &DelegationWriteRecord,
+) -> Result<DelegationStageOutcome> {
+    // Validate exactly as parse_record does at load. The targeted checks here give
+    // precise errors on the NEW input; the whole-document re-validation below is the
+    // round-trip guarantee.
+    if !is_agent_actor_id(agent.as_str()) {
+        return Err(invalid_delegation_map(format!(
+            "delegate key {} must be an actor:agent:<name> id",
+            agent.as_str()
+        )));
+    }
+    if !is_valid_principal_actor_id(record.principal.as_str()) {
+        return Err(invalid_delegation_map(format!(
+            "principal {} is not a valid actor id",
+            record.principal.as_str()
+        )));
+    }
+    if is_agent_actor_id(record.principal.as_str()) {
+        return Err(invalid_delegation_map(format!(
+            "principal {} must be a non-agent actor id in v1",
+            record.principal.as_str()
+        )));
+    }
+    if parse_rfc3339_utc_millis(&record.valid_from).is_none() {
+        return Err(invalid_delegation_map(format!(
+            "validFrom {} is not an RFC 3339 UTC instant",
+            record.valid_from
+        )));
+    }
+    if let Some(until) = &record.valid_until
+        && parse_rfc3339_utc_millis(until).is_none()
+    {
+        return Err(invalid_delegation_map(format!(
+            "validUntil {until} is not an RFC 3339 UTC instant"
+        )));
+    }
+
+    // Read-or-init at the Value level so existing records (and any unknown fields)
+    // are preserved; serde_json's Map is BTreeMap-backed → sorted keys → byte-stable.
+    let mut root: Value = if path.exists() {
+        serde_json::from_slice(
+            &std::fs::read(path)
+                .map_err(|e| ShoreError::Message(format!("read {}: {e}", path.display())))?,
+        )?
+    } else {
+        Value::Object(Map::new())
+    };
+    let root_obj = root
+        .as_object_mut()
+        .ok_or_else(|| invalid_delegation_map("delegates file is not an object"))?;
+    let delegates = root_obj
+        .entry("delegates".to_owned())
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| invalid_delegation_map("delegates is not an object"))?;
+    let array = delegates
+        .entry(agent.as_str().to_owned())
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| invalid_delegation_map("agent records must be an array"))?;
+
+    // Dedup compares whole record `Value`s: identity is the FULL record object, so a
+    // second window with a different `validFrom` is correctly a distinct (appended)
+    // record, while a byte-identical re-stage is a no-op.
+    let new_record = delegation_record_value(record);
+    let added = !array.iter().any(|existing| existing == &new_record);
+    if added {
+        array.push(new_record);
+    }
+
+    // INV-B: re-validate the ENTIRE post-mutation document with the reader's own
+    // parser before writing. This (a) guarantees the staged file always re-reads,
+    // and (b) refuses to write when a PRE-EXISTING sibling record is malformed
+    // (a structurally-valid-JSON-but-schema-invalid record the raw Value parse above
+    // does not catch) rather than producing a file `from_delegates_file` would reject.
+    delegation_map_from_value(root.clone())?;
+
+    // Already-present still rewrites canonically (sorted keys, trailing newline): a
+    // hand-edited non-canonical file converges to canonical bytes on the first stage,
+    // then stays byte-stable — the same posture as `stage_enrollment`.
+    write_delegates(path, &root)?;
+    Ok(DelegationStageOutcome { added })
+}
+
+fn delegation_record_value(record: &DelegationWriteRecord) -> Value {
+    let mut obj = Map::new();
+    obj.insert(
+        "principal".to_owned(),
+        Value::String(record.principal.as_str().to_owned()),
+    );
+    obj.insert(
+        "validFrom".to_owned(),
+        Value::String(record.valid_from.clone()),
+    );
+    obj.insert(
+        "validUntil".to_owned(),
+        match &record.valid_until {
+            Some(s) => Value::String(s.clone()),
+            None => Value::Null,
+        },
+    );
+    if let Some(comment) = &record.comment {
+        obj.insert("comment".to_owned(), Value::String(comment.clone()));
+    }
+    Value::Object(obj)
+}
+
+fn write_delegates(path: &Path, root: &Value) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| ShoreError::Message(format!("create {}: {e}", parent.display())))?;
+    }
+    let mut bytes = serde_json::to_vec_pretty(root)?;
+    bytes.push(b'\n');
+    std::fs::write(path, &bytes)
+        .map_err(|e| ShoreError::Message(format!("write {}: {e}", path.display())))
 }
 
 /// Validate and build one delegation record. Errors name the offending agent
@@ -691,5 +868,165 @@ mod tests {
             merged.resolve(&actor(AGENT), "2026-06-12T00:00:00Z"),
             PrincipalResolution::None(UnresolvedReason::NoDelegationRecord)
         );
+    }
+
+    #[test]
+    fn stage_delegation_round_trips_through_the_reader() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".shore/delegates.json");
+        let agent = ActorId::new("actor:agent:claude-code");
+        let record = DelegationWriteRecord::new(
+            ActorId::new("actor:git-email:kevin@swiber.dev"),
+            "2026-06-10T00:00:00Z".to_owned(),
+        )
+        .with_comment(Some("enrolled by Kevin".to_owned()));
+
+        let outcome = stage_delegation(&path, &agent, &record).unwrap();
+        assert!(outcome.added);
+
+        // The landed reader loads the staged file and resolves the principal in-window.
+        let map = DelegationMap::from_delegates_file(&path).unwrap();
+        assert_eq!(
+            map.resolve(&agent, "2026-06-11T00:00:00Z"),
+            PrincipalResolution::Resolved(ActorId::new("actor:git-email:kevin@swiber.dev"))
+        );
+    }
+
+    #[test]
+    fn stage_delegation_is_byte_stable_on_identical_restage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".shore/delegates.json");
+        let agent = ActorId::new("actor:agent:claude-code");
+        let record = DelegationWriteRecord::new(
+            ActorId::new("actor:git-email:kevin@swiber.dev"),
+            "2026-06-10T00:00:00Z".to_owned(),
+        );
+
+        let first = stage_delegation(&path, &agent, &record).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let second = stage_delegation(&path, &agent, &record).unwrap();
+        let after = std::fs::read(&path).unwrap();
+
+        assert!(
+            first.added && !second.added,
+            "identical re-stage is a no-op"
+        );
+        assert_eq!(before, after, "re-stage leaves the file byte-identical");
+        assert!(
+            before.ends_with(b"\n"),
+            "trailing newline like stage_enrollment"
+        );
+    }
+
+    #[test]
+    fn stage_delegation_appends_a_second_record_for_the_same_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".shore/delegates.json");
+        let agent = ActorId::new("actor:agent:claude-code");
+        stage_delegation(
+            &path,
+            &agent,
+            &DelegationWriteRecord::new(
+                ActorId::new("actor:git-email:kevin@swiber.dev"),
+                "2026-06-10T00:00:00Z".to_owned(),
+            ),
+        )
+        .unwrap();
+        let second = stage_delegation(
+            &path,
+            &agent,
+            &DelegationWriteRecord::new(
+                ActorId::new("actor:git-email:alice@example.com"),
+                "2026-06-12T00:00:00Z".to_owned(),
+            ),
+        )
+        .unwrap();
+        assert!(second.added);
+        let map = DelegationMap::from_delegates_file(&path).unwrap();
+        // Both windows cover 2026-06-13 → ambiguous (two distinct principals), proving both records persisted.
+        assert!(matches!(
+            map.resolve(&agent, "2026-06-13T00:00:00Z"),
+            PrincipalResolution::Ambiguous(_)
+        ));
+    }
+
+    #[test]
+    fn stage_delegation_rejects_agent_principal_depth0_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".shore/delegates.json");
+        let agent = ActorId::new("actor:agent:claude-code");
+        // A principal that is itself an agent violates the v1 depth-0 rule.
+        let bad = DelegationWriteRecord::new(
+            ActorId::new("actor:agent:subagent"),
+            "2026-06-10T00:00:00Z".to_owned(),
+        );
+        assert!(stage_delegation(&path, &agent, &bad).is_err());
+        assert!(!path.exists(), "a rejected record writes nothing");
+    }
+
+    #[test]
+    fn stage_delegation_refuses_when_an_existing_sibling_is_malformed() {
+        // INV-B: a pre-existing malformed sibling (here, an agent-scheme principal — valid
+        // JSON, invalid schema) must make the stage FAIL, not write a file the reader rejects.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".shore/delegates.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, br#"{"delegates":{"actor:agent:claude-code":[{"principal":"actor:agent:bad","validFrom":"2026-06-10T00:00:00Z","validUntil":null}]}}"#).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let result = stage_delegation(
+            &path,
+            &ActorId::new("actor:agent:claude-code"),
+            &DelegationWriteRecord::new(
+                ActorId::new("actor:git-email:kevin@swiber.dev"),
+                "2026-06-10T00:00:00Z".to_owned(),
+            ),
+        );
+        assert!(
+            result.is_err(),
+            "a malformed existing sibling must make the stage fail"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "a failed stage writes nothing"
+        );
+    }
+
+    #[test]
+    fn stage_delegation_rejects_non_agent_key_and_non_rfc3339_instants() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".shore/delegates.json");
+        let principal = ActorId::new("actor:git-email:kevin@swiber.dev");
+        // Non-agent map key.
+        assert!(
+            stage_delegation(
+                &path,
+                &ActorId::new("actor:git-email:not-an-agent"),
+                &DelegationWriteRecord::new(principal.clone(), "2026-06-10T00:00:00Z".to_owned())
+            )
+            .is_err()
+        );
+        // Non-RFC-3339 validFrom.
+        assert!(
+            stage_delegation(
+                &path,
+                &ActorId::new("actor:agent:claude-code"),
+                &DelegationWriteRecord::new(principal, "yesterday".to_owned())
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn record_count_for_returns_array_length() {
+        let agent = actor(AGENT);
+        assert_eq!(DelegationMap::default().record_count_for(&agent), 0);
+        let map = map_with(serde_json::json!([
+            { "principal": KEVIN, "validFrom": "2026-06-10T00:00:00Z", "validUntil": null },
+            { "principal": ALICE, "validFrom": "2026-06-15T00:00:00Z", "validUntil": null }
+        ]));
+        assert_eq!(map.record_count_for(&agent), 2);
+        assert_eq!(map.record_count_for(&actor("actor:agent:absent")), 0);
     }
 }

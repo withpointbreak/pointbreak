@@ -59,6 +59,36 @@ pub(crate) fn parse_rfc3339_utc_millis(value: &str) -> Option<i64> {
     Some(seconds * 1_000 + fraction_millis)
 }
 
+/// Format epoch milliseconds as an RFC 3339 UTC instant `YYYY-MM-DDTHH:MM:SSZ`
+/// (whole-second precision; the exact inverse of `parse_rfc3339_utc_millis`). The
+/// crate carries no time dependency, so this hand-rolls the civil-date math,
+/// symmetric to the parser above.
+pub fn format_rfc3339_utc_millis(millis: i64) -> String {
+    let total_seconds = millis.div_euclid(1000);
+    let days = total_seconds.div_euclid(86_400);
+    let secs_of_day = total_seconds.rem_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    let hour = secs_of_day / 3_600;
+    let minute = (secs_of_day % 3_600) / 60;
+    let second = secs_of_day % 60;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+/// Inverse of `days_from_civil`: epoch-day count → (year, month, day). Hinnant's
+/// algorithm, valid for the proleptic Gregorian calendar.
+fn civil_from_days(z: i64) -> (i64, i64, i64) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 /// Parse exactly `width` ASCII digits to a non-negative integer.
 fn parse_fixed_digits(value: &str, width: usize) -> Option<i64> {
     if value.len() != width || !value.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -117,6 +147,33 @@ mod tests {
             parse_rfc3339_utc_millis("2026-06-10T00:00:00Z"),
             Some(1_781_049_600_000)
         );
+    }
+
+    #[test]
+    fn formats_epoch_millis_as_rfc3339_utc() {
+        // 2026-06-10T00:00:00Z — a value used throughout the delegates fixtures.
+        let millis = parse_rfc3339_utc_millis("2026-06-10T00:00:00Z").unwrap();
+        assert_eq!(format_rfc3339_utc_millis(millis), "2026-06-10T00:00:00Z");
+    }
+
+    #[test]
+    fn format_then_parse_round_trips_at_second_precision() {
+        for s in [
+            "1970-01-01T00:00:00Z",
+            "2000-02-29T12:34:56Z", // leap-year day
+            "2026-06-18T06:09:41Z",
+            "2099-12-31T23:59:59Z",
+        ] {
+            let millis = parse_rfc3339_utc_millis(s).unwrap();
+            // Truncate to whole seconds: the formatter emits no fractional part.
+            let secs_millis = (millis / 1000) * 1000;
+            assert_eq!(format_rfc3339_utc_millis(secs_millis), s);
+            // And the emitted string re-parses to the same instant.
+            assert_eq!(
+                parse_rfc3339_utc_millis(&format_rfc3339_utc_millis(secs_millis)),
+                Some(secs_millis)
+            );
+        }
     }
 
     #[test]
