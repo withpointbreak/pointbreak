@@ -49,14 +49,40 @@ pub struct ActorAttributes {
 }
 
 impl ActorAttributes {
-    /// The declared kind token, if any. (Predicate `is_kind` is added in a later task.)
+    /// The declared kind token, if any. Round-trips any stored kind (including an
+    /// unrecognized one); use `is_kind` for a reserved-and-exact predicate.
     pub fn kind(&self) -> Option<&str> {
         self.kind.as_deref()
     }
-    /// The declared roles (deduped, sorted). (Predicate `has_role` is added in a later task.)
+    /// The declared roles (deduped, sorted).
     pub fn roles(&self) -> &BTreeSet<String> {
         &self.roles
     }
+
+    /// True iff this actor's **declared** kind is a **reserved** kind exactly equal to `kind`.
+    /// Two reasons this can be false even with a declared kind:
+    ///  - the actor is unattributed (`kind == None`) — the hard split; the actor-id scheme is
+    ///    NEVER consulted here, and
+    ///  - the declared kind is unrecognized (not reserved) — ADR-0012: "an unrecognized kind
+    ///    does not satisfy any kind= predicate" (forward-compat; it still round-trips via `kind()`).
+    pub fn is_kind(&self, kind: &str) -> bool {
+        matches!(self.kind.as_deref(), Some(k) if is_reserved_kind(k) && k == kind)
+    }
+
+    /// True iff this actor has the declared `role`. An unattributed actor (empty roles)
+    /// satisfies NO `role=` predicate. (`roles` is an open set — no reserved-set filter.)
+    pub fn has_role(&self, role: &str) -> bool {
+        self.roles.contains(role)
+    }
+}
+
+/// The reserved well-known kinds (ADR-0012). `kind` is reserved-but-OPEN: the parser
+/// stores any lowercase-kebab token (so unknown kinds round-trip via `ActorAttributes::kind`),
+/// but only a reserved kind is matchable by the `is_kind` predicate.
+pub(crate) const RESERVED_KINDS: &[&str] = &["human", "agent", "service", "reviewer-model"];
+
+fn is_reserved_kind(kind: &str) -> bool {
+    RESERVED_KINDS.contains(&kind)
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -283,5 +309,52 @@ mod tests {
                 .kind(),
             Some("human")
         );
+    }
+
+    #[test]
+    fn declared_predicates_match_exactly() {
+        let map = actor_attributes_from_value(serde_json::json!({
+            "schema": "shore.actor-attributes.v1",
+            "actors": { "actor:git-email:kevin@swiber.dev": { "kind": "human", "roles": ["reviewer"] } }
+        }))
+        .unwrap();
+        let kevin = map.resolve(&ActorId::new("actor:git-email:kevin@swiber.dev"));
+        assert!(kevin.is_kind("human"));
+        assert!(!kevin.is_kind("agent"));
+        assert!(kevin.has_role("reviewer"));
+        assert!(!kevin.has_role("author"));
+    }
+
+    #[test]
+    fn hard_split_absent_agent_scheme_satisfies_no_kind_or_role_predicate() {
+        // An actor:agent:* id ABSENT from the map is unattributed. The scheme must NOT leak
+        // into any kind/role predicate (INV-5) — not even kind=agent.
+        let map = ActorAttributesMap::default();
+        let agent = map.resolve(&ActorId::new("actor:agent:claude-code"));
+        assert_eq!(agent.kind(), None);
+        assert!(!agent.is_kind("agent"));
+        assert!(!agent.is_kind("human"));
+        assert!(!agent.has_role("reviewer"));
+        assert!(agent.roles().is_empty());
+    }
+
+    #[test]
+    fn hard_split_unrecognized_kind_round_trips_but_satisfies_no_predicate() {
+        let map = actor_attributes_from_value(serde_json::json!({
+            "schema": "shore.actor-attributes.v1",
+            "actors": { "actor:agent:future": { "kind": "quorum-service" } }
+        }))
+        .unwrap();
+        let future = map.resolve(&ActorId::new("actor:agent:future"));
+        // It round-trips via kind() (reserved-but-OPEN: an unknown kind is still stored/displayed)...
+        assert_eq!(future.kind(), Some("quorum-service"));
+        // ...but ADR-0012: "an unrecognized kind does not satisfy any kind= predicate" — including a
+        // query for its own value. `is_kind` matches only RESERVED kinds.
+        assert!(
+            !future.is_kind("quorum-service"),
+            "unrecognized kind satisfies no kind= predicate"
+        );
+        assert!(!future.is_kind("human"));
+        assert!(!future.is_kind("service"));
     }
 }

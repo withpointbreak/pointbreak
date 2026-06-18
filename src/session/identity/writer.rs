@@ -96,10 +96,13 @@ pub(crate) fn is_valid_principal_actor_id(value: &str) -> bool {
 }
 
 /// True when `value` is an `actor:agent:<name>` identity with a non-empty agent
-/// segment. The agent scheme names acting software whose durable writes resolve
-/// to a human principal through the delegation map; non-agent actors (git
-/// identities, `did:key`s) are their own principal and carry no delegation
-/// record. This is a scheme test only — it does not validate the rest of the id
+/// segment. This is a **scheme test only** — a derivation-namespace check, NOT a
+/// statement of the actor's *kind*. Per ADR-0012 it may feed genuine scheme / depth-0
+/// accountability decisions (delegation keys, principal validation) and a **display-only**
+/// "looks like an agent" hint, but it MUST NOT be used as a `kind=`/`role=` predicate —
+/// kind/role authority is the human-committed actor-attributes map
+/// (`ActorAttributes::is_kind` / `has_role`), where an absent attribute satisfies no
+/// predicate (the hard split). It does not validate the rest of the id
 /// (`is_valid_actor_id` does that).
 pub fn is_agent_actor_id(value: &str) -> bool {
     value
