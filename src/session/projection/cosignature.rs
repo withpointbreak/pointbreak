@@ -19,6 +19,8 @@
 
 use std::collections::BTreeMap;
 
+use serde::Serialize;
+
 use crate::crypto::{EventVerificationStatus, SignerId};
 use crate::error::Result;
 use crate::model::ActorId;
@@ -362,6 +364,78 @@ pub(crate) fn classify_cosignature_member(
     }
 }
 
+/// Reader-relative endorsement classification, projected from a co-signature member
+/// for rendering. The `pub(crate)` `CosignatureClassification` is never exposed (INV-1).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndorsementClassification {
+    #[serde(rename = "endorsement-trusted")]
+    EndorsementTrusted,
+    UnknownEndorser,
+    AmbiguousEndorser,
+}
+
+/// One endorsement of a target event, as one reader sees it (ADR-0013, advisory).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndorsementReadback {
+    pub classification: EndorsementClassification,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endorser: Option<ActorId>,
+    /// Reserved for a future explanatory string; always `None` in this surface.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Sibling enrichment (kind/roles); filled by `enrich_endorser_attributes`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endorser_attributes: Option<EndorserAttributesView>,
+}
+
+/// The endorser's attested kind/roles, surfaced beside the classification. Sibling
+/// enrichment — never a classifier input (INV-2).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndorserAttributesView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<String>,
+}
+
+/// Lower a co-signature set's endorsement members to readbacks (trust-only — INV-2).
+/// Authoring members are not endorsements and are not surfaced. Enrichment is applied
+/// separately by `enrich_endorser_attributes`.
+pub(crate) fn endorsement_readbacks(set: &CosignatureSet) -> Vec<EndorsementReadback> {
+    set.members
+        .iter()
+        .filter_map(|member| match &member.classification {
+            CosignatureClassification::EndorsementTrusted { endorser } => {
+                Some(EndorsementReadback {
+                    classification: EndorsementClassification::EndorsementTrusted,
+                    endorser: Some(endorser.clone()),
+                    reason: None,
+                    endorser_attributes: None,
+                })
+            }
+            CosignatureClassification::EndorsementUntrusted { reason } => {
+                Some(EndorsementReadback {
+                    classification: match reason {
+                        EndorsementUntrustedReason::UnknownEndorser => {
+                            EndorsementClassification::UnknownEndorser
+                        }
+                        EndorsementUntrustedReason::AmbiguousEndorser => {
+                            EndorsementClassification::AmbiguousEndorser
+                        }
+                    },
+                    endorser: None,
+                    reason: None,
+                    endorser_attributes: None,
+                })
+            }
+            CosignatureClassification::Authoring { .. } => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -468,6 +542,64 @@ mod tests {
                 target.event_id.as_str()
             );
         }
+    }
+
+    #[test]
+    fn endorsement_readbacks_lowers_trusted_and_untrusted_members() {
+        // A set with an inline (Authoring) member, a detached EndorsementTrusted member
+        // (signer_b enrolled under a distinct actor), and a detached EndorsementUntrusted
+        // {UnknownEndorser} member (signer_c enrolled under nobody).
+        let signer_a = DeterministicSigner::from_seed(SIGNER_A_SEED);
+        let signer_b = DeterministicSigner::from_seed(SIGNER_B_SEED);
+        let signer_c = DeterministicSigner::from_seed([63u8; 32]);
+        let target = inline_signed(&signer_a);
+        let carrier_trusted = detached_carrier(&target, &signer_b);
+        let carrier_unknown = detached_carrier(&target, &signer_c);
+        let endorser = crate::model::ActorId::new("actor:git-email:a@example.com");
+        let trust = crate::session::event_signature_trust_set(serde_json::json!({
+            "allowedSigners": {
+                target.writer.actor_id.as_str(): [signer_a.signer_id().as_str()],
+                endorser.as_str(): [signer_b.signer_id().as_str()]
+            }
+        }))
+        .unwrap();
+        let events = vec![target.clone(), carrier_trusted, carrier_unknown];
+        let set = cosignatures_for_event(&events, target.event_id.as_str(), &trust).unwrap();
+
+        let readbacks = endorsement_readbacks(&set);
+        // Authoring (the inline member) is NOT surfaced; the two endorsements are.
+        assert_eq!(readbacks.len(), 2);
+        let trusted = readbacks
+            .iter()
+            .find(|r| r.classification == EndorsementClassification::EndorsementTrusted)
+            .expect("a trusted endorsement");
+        assert_eq!(
+            trusted.endorser.as_ref().map(|a| a.as_str()),
+            Some("actor:git-email:a@example.com")
+        );
+        let unknown = readbacks
+            .iter()
+            .find(|r| r.classification == EndorsementClassification::UnknownEndorser)
+            .expect("an unknown endorsement");
+        assert!(unknown.endorser.is_none());
+        // No enrichment in this task.
+        assert!(readbacks.iter().all(|r| r.endorser_attributes.is_none()));
+    }
+
+    #[test]
+    fn endorsement_classification_serializes_kebab_and_snake() {
+        assert_eq!(
+            serde_json::to_value(EndorsementClassification::EndorsementTrusted).unwrap(),
+            serde_json::json!("endorsement-trusted")
+        );
+        assert_eq!(
+            serde_json::to_value(EndorsementClassification::UnknownEndorser).unwrap(),
+            serde_json::json!("unknown_endorser")
+        );
+        assert_eq!(
+            serde_json::to_value(EndorsementClassification::AmbiguousEndorser).unwrap(),
+            serde_json::json!("ambiguous_endorser")
+        );
     }
 
     #[test]

@@ -136,7 +136,8 @@ mod tests {
 
         for (event, event_type, summary_kind) in cases {
             let entry =
-                history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None).unwrap();
+                history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None)
+                    .unwrap();
             let summary_json = serde_json::to_value(&entry.summary).unwrap();
 
             assert_eq!(entry.event_type, event_type);
@@ -153,7 +154,8 @@ mod tests {
         let event = assessment_event_with_target(target.clone());
 
         let entry =
-            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None).unwrap();
+            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None)
+                .unwrap();
         let json = serde_json::to_value(&entry).unwrap();
 
         match entry.summary {
@@ -175,7 +177,8 @@ mod tests {
         let event = validation_check_recorded_event();
 
         let entry =
-            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None).unwrap();
+            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None)
+                .unwrap();
         let json = serde_json::to_value(&entry.summary).unwrap();
 
         assert_eq!(json["kind"], "validation_check_recorded");
@@ -189,7 +192,8 @@ mod tests {
         let event = observation_event_with_artifact_path("artifacts/notes/body.json");
 
         let entry =
-            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None).unwrap();
+            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None)
+                .unwrap();
         let json = serde_json::to_string(&entry).unwrap();
 
         assert!(!json.contains("bodyArtifactPath"));
@@ -229,7 +233,8 @@ mod tests {
         let event = observation_event("review-unit:sha256:one", "agent:codex", "Pinned");
 
         let entry =
-            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None).unwrap();
+            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None)
+                .unwrap();
 
         assert_eq!(
             entry.subject,
@@ -249,7 +254,8 @@ mod tests {
         }));
 
         let entry =
-            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None).unwrap();
+            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None)
+                .unwrap();
 
         assert!(entry.subject.is_none());
     }
@@ -349,8 +355,9 @@ mod tests {
             payload: serde_json::Value::Null,
         };
 
-        let error = history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None)
-            .expect_err("task events must not project to review-history");
+        let error =
+            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None)
+                .expect_err("task events must not project to review-history");
         let message = error.to_string();
 
         assert!(

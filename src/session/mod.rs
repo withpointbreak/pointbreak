@@ -22,6 +22,9 @@ pub use identity::{
 pub(crate) use identity::{
     current_timestamp, is_valid_actor_id, writer_from_git_config, writer_from_options,
 };
+pub use projection::cosignature::{
+    EndorsementClassification, EndorsementReadback, EndorserAttributesView,
+};
 pub(crate) use projection::state;
 pub use projection::{
     ProjectionDiagnostic, SessionState, load_durable_notes_for_repo, read_events, rebuild_state,

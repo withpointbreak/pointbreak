@@ -10,7 +10,7 @@ use crate::session::event::{
     AssertionMode, EventType, ImportedNoteTarget, InputRequestReasonCode,
     InputRequestResponseOutcome, ReviewAssessment, SidecarSource, Writer,
 };
-use crate::session::{EventVerificationStatus, PrincipalView};
+use crate::session::{EndorsementReadback, EventVerificationStatus, PrincipalView};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +33,10 @@ pub struct ReviewHistoryEntry {
     pub writer: Writer,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification_status: Option<EventVerificationStatus>,
+    /// Reader-relative endorsement readback. Plural — a target may carry endorsements
+    /// from several distinct signers; surfacing only one would be a silent cap.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub endorsements: Vec<EndorsementReadback>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub principal: Option<PrincipalView>,
     pub summary: ReviewHistorySummary,

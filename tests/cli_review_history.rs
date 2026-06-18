@@ -408,6 +408,73 @@ fn history_renders_verification_status_for_a_signed_capture() {
     assert_eq!(captured["verificationStatus"], "untrusted_key");
 }
 
+#[test]
+fn history_renders_endorsement_for_an_endorsed_capture() {
+    let home = tempfile::tempdir().unwrap();
+    let env_home = home.path().to_str().unwrap();
+    assert!(
+        shore_env(
+            ["keys", "init", "--name", "default"],
+            &[("SHORE_HOME", env_home)]
+        )
+        .status
+        .success()
+    );
+    let repo = modified_repo();
+    let repo_arg = repo.path().to_str().unwrap();
+    // Capture UNSIGNED so the detached endorsement carrier is never deduped against an
+    // inline member; endorse by a DISTINCT actor (kevin) with the minted key.
+    assert!(
+        shore_env(
+            ["review", "capture", "--repo", repo_arg],
+            &[("SHORE_HOME", env_home), ("SHORE_SIGNING", "off")],
+        )
+        .status
+        .success()
+    );
+    let target = captured_event_id(repo.path());
+    assert!(
+        shore_env(
+            ["review", "endorse", &target, "--repo", repo_arg],
+            &[
+                ("SHORE_HOME", env_home),
+                ("SHORE_ACTOR_ID", "actor:git-email:kevin@swiber.dev"),
+            ],
+        )
+        .status
+        .success()
+    );
+
+    let out = shore_env(
+        ["review", "history", "--repo", repo_arg],
+        &[("SHORE_HOME", env_home)],
+    );
+    let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let captured = doc["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["eventId"] == target)
+        .expect("the endorsed entry");
+    // No allowed-signers staged → the endorser is unenrolled → unknown_endorser.
+    assert_eq!(
+        captured["endorsements"][0]["classification"],
+        "unknown_endorser"
+    );
+}
+
+/// Find the captured ReviewUnit event id via the public read path (`read_events`).
+fn captured_event_id(repo_path: &std::path::Path) -> String {
+    shoreline::session::read_events(repo_path)
+        .unwrap()
+        .iter()
+        .find(|e| e.event_type == shoreline::session::event::EventType::ReviewUnitCaptured)
+        .expect("a captured review unit event")
+        .event_id
+        .as_str()
+        .to_owned()
+}
+
 fn parse_json(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes).expect("parse CLI JSON")
 }

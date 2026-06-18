@@ -13,6 +13,7 @@ use crate::session::event::{
     ReviewUnitLineageRoundRecordedPayload, ShoreEvent, ValidationCheckRecordedPayload,
     decode_input_request_opened_payload,
 };
+use crate::session::projection::cosignature::{CosignatureIndex, endorsement_readbacks};
 use crate::session::state::SessionState;
 use crate::session::{principal_view_for, verify_event_signature};
 
@@ -26,10 +27,17 @@ pub(super) fn history_from_events(
         .event_set_hash
         .clone()
         .expect("SessionState::from_events sets event_set_hash");
+    // Build the co-signature index once per document (INV-5), only when a policy is
+    // set — the zero-policy path stays free of cost and output.
+    let cosig_index = filters
+        .verification_policy
+        .is_some()
+        .then(|| CosignatureIndex::build(events))
+        .transpose()?;
     let mut entries = events
         .iter()
         .filter(|event| event_matches_filters(event, &filters))
-        .map(|event| history_entry_from_event(event, &filters, store_dir))
+        .map(|event| history_entry_from_event(event, &filters, cosig_index.as_ref(), store_dir))
         .collect::<Result<Vec<_>>>()?;
 
     entries.sort_by(|left, right| {
@@ -50,6 +58,7 @@ pub(super) fn history_from_events(
 pub(super) fn history_entry_from_event(
     event: &ShoreEvent,
     filters: &ResolvedHistoryFilters,
+    cosig_index: Option<&CosignatureIndex<'_>>,
     store_dir: Option<&Path>,
 ) -> Result<ReviewHistoryEntry> {
     let summary = match event.event_type {
@@ -240,6 +249,12 @@ pub(super) fn history_entry_from_event(
             .verification_policy
             .map(|_| verify_event_signature(event, &filters.trust_set))
             .transpose()?,
+        endorsements: match cosig_index {
+            Some(index) => {
+                endorsement_readbacks(&index.cosignatures_for_target(event, &filters.trust_set)?)
+            }
+            None => Vec::new(),
+        },
         principal: principal_view_for(
             &event.writer.actor_id,
             filters.delegation_map.as_ref(),
