@@ -60,9 +60,11 @@ Every write may carry an Ed25519 signature. Which key signs (if any) follows thi
 
 `SHORE_SIGNING=off` (case-insensitive) disables signing entirely; `SHORE_SIGNING=auto` (the default)
 resolves a signer where possible. `SHORE_HOME` overrides the user-level key home (mainly for
-tests/CI). **Signing never gates a write:** any resolution failure (no key, an unreadable key home,
-an unsupported algorithm, a malformed configured key, `SHORE_SIGNING=off`) degrades to an unsigned
-write at exit 0 with a one-line advisory diagnostic on stderr — it never blocks. See
+tests/CI). **Signing never gates a write** (with one exception, below): any resolution failure (no key,
+an unreadable key home, an unsupported algorithm, a malformed configured key, `SHORE_SIGNING=off`)
+degrades to an unsigned write at exit 0 with a one-line advisory diagnostic on stderr — it never blocks.
+The sole exception is `shore review endorse` (below), where unsigned is a hard error because the
+signature *is* the endorsement's content. See
 [signing-ux.md](./signing-ux.md) for the human / agent / CI flows and the
 `unsigned → untrusted_key → valid` ladder.
 
@@ -351,7 +353,9 @@ cannot be loaded leaves the write unsigned at exit 0 with an advisory diagnostic
 blocks. An agent-backed key resolves through an identities-only ssh-agent pre-flight; if the agent is
 unavailable (`signing_agent_unavailable`), does not hold the key (`signing_agent_key_absent`), or fails
 the real sign (`signing_agent_sign_failed`), the write is left unsigned at exit 0 — see
-[signing-ux.md](./signing-ux.md) for the full never-gates table. Only shipped subcommands are listed;
+[signing-ux.md](./signing-ux.md) for the full never-gates table. This never-gates behavior covers the
+ordinary signed review writes listed above; `shore review endorse` is the exception, where an
+unresolved signer is a hard error rather than an unsigned write. Only shipped subcommands are listed;
 `rotate` and `revoke` are named follow-ons, not yet available.
 
 ## `shore review observation`
