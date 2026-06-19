@@ -1,0 +1,248 @@
+# ADR-0014: ReviewUnit Commit-Range Lifecycle — Ref/Commit Association Events
+
+**Status:** Accepted (owner-approved 2026-06-19); landed via the ReviewUnit commit-range lifecycle
+implementation plan.
+**Date:** 2026-06-19
+**See also:** [ADR-0004](./adr-0004-event-signatures.md) (generic `EventToBeSigned` — consumed unchanged,
+no new `sigVersion`), [ADR-0005](./adr-0005-review-unit-lineage.md) (lineage supersession — kept
+distinct), [ADR-0008](./adr-0008-cross-peer-conflict-policy.md) (cross-peer conflict policy — first
+consumer of the reserved class-(c) codes), ADR-0015 (single-common-dir store/topology — independent axis,
+draft; this family supplies the reachability projection its §5 names).
+
+## Context
+
+A ReviewUnit's relationship to the commit graph is fixed at capture and cannot evolve afterward. A
+**worktree capture** is born *floating*: its `target` is `ReviewEndpoint::GitWorkingTree { worktree_root }`
+with **no commit OID**, while a **commit-range capture** carries two `GitCommit` endpoints. So a worktree
+capture cannot be placed on the commit graph by reachability, cannot get a structural merge-status, and
+cannot be branch-filtered by liveness — only by a stored label, which does not exist today. There is **no
+structured commit-association event** (the only workaround is freeform observation prose, which a
+deterministic projection cannot read), and there are **no git reachability wrappers** (`merge-base
+--is-ancestor`, `branch/for-each-ref --contains`) in `src/git/`.
+
+Three substrate facts constrain the design:
+
+- **Capture is immutable and keyed by id only.** `review_unit_captured_idempotency_key` is
+  `review_unit_captured:<review_unit_id>`; `event_id` derives from the idempotency key **alone**;
+  `record_event_once` **hard-conflicts** on same-key/different-`payloadHash`. Therefore any capture-context
+  or commit relationship **must be a separate event**, never a field grafted onto
+  `ReviewUnitCapturedPayload` (B1).
+- **Convergence is over `{event_id, payload_hash}`.** `eventSetHash` is computed over
+  `{event_id, payload_hash}`; load-bearing meaning must live in the identity/idempotency key, never an
+  excluded-from-identity payload field (ADR-0004 convergence invariant).
+- **Vocabulary is collision-checked**: `associate`/`associated` is clean; rejected as already-loaded —
+  `finaliz*` (closure connotation), `anchor*` (the note/diff `Anchor` struct), `abandoned`
+  (`InputRequestResponseOutcome::Abandoned`), bare `withdrawn`/`retract*` (substrate retraction,
+  `docs/substrate-language.md`). `orphaned` (`ResolutionStatus::Orphaned`) is reused **only** as a derived
+  graph condition.
+
+## Decision
+
+### 1. A symmetric four-event family on two axes
+
+Add four append-only events (house style `ReviewUnit<Thing><PastVerb>` → snake_case wire, registered in
+`src/session/event/kind.rs` with the `as_str()` mirror and the all-variants round-trip test):
+
+| variant | wire | axis |
+|---|---|---|
+| `ReviewUnitRefAssociated` | `review_unit_ref_associated` | ref / provenance |
+| `ReviewUnitRefWithdrawn` | `review_unit_ref_withdrawn` | ref / provenance |
+| `ReviewUnitCommitAssociated` | `review_unit_commit_associated` | commit graph |
+| `ReviewUnitCommitWithdrawn` | `review_unit_commit_withdrawn` | commit graph |
+
+Payloads (new module `src/session/event/association.rs`, each referencing the unit via
+`EventTarget.review_unit_id` + `target: ReviewTargetRef::ReviewUnit{…}`, no new `ReviewTargetRef` variant):
+
+- **`ReviewUnitRefAssociatedPayload`** — `{ ref_association_id, target, ref_name, head_oid }`. Stores
+  **both** the ref name (humans query by it) and the head OID (ref names are mutable/reusable).
+- **`ReviewUnitCommitAssociatedPayload`** — `{ commit_association_id, target, commit: ReviewEndpoint }`,
+  reusing `ReviewEndpoint::GitCommit { commit_oid, tree_oid }` verbatim. A born-floating worktree capture
+  **acquires** its target commit via this event ("the work landed as commit X").
+- **`ReviewUnitRefWithdrawnPayload`** / **`ReviewUnitCommitWithdrawnPayload`** —
+  `{ <axis>_withdrawal_id, target, <axis>_association_id }`, naming the association they retract.
+
+### 2. B1-safe idempotency keys; the distinguisher is in the key; writer and track are excluded
+
+- Associations follow the house key shape with the **edge distinguisher in the key**:
+  `review_unit_<axis>_associated:<review_unit_id>:<source_key>`, where `source_key` is the edge
+  distinguisher — `commit_oid` (commit axis) or `ref_name@head_oid` (ref axis). Distinct edges → distinct
+  keys → distinct `event_id`; a true re-record hits the same key and `payloadHash` → `Existing`. **`track`
+  is resolved out of the key and the id** (envelope-only, recorded for provenance): an association is one
+  shared edge fact that must converge across independently-authored copies, so — exactly like the writer —
+  the track never enters identity.
+- Withdrawals key on the **association id** they retract (the `input_request_responded:<id>:…` precedent),
+  so a withdrawal is a separable, idempotent member that content-references its association.
+- Each `*_association_id` is a sha256 over `{ review_unit_id, edge distinguisher }` and **EXCLUDES the
+  writer** (unlike `build_assessment_id`, which folds writer). Rationale: an association is a *structural
+  edge* that must converge across independently-authored copies — two writers recording the same edge must
+  compute the same `event_id` and `payloadHash` (ADR-0004 convergence invariant). The writer remains
+  envelope-only.
+
+### 3. Withdraw-only — no supersession-by-reference
+
+There is **no `replaces_*_ids` machinery** on this family. An association is a content-idempotent
+structural claim, not a competing judgement, so it has no "which-of-two-current-judgements wins" problem
+for supersession to solve (contrast assessment `replaces_assessment_ids`, which disambiguates judgements).
+A **correction** is `Withdrawn(old) + Associated(new)` — two append-only facts whose `associated −
+withdrawn` fold equals a supersession link with less machinery. A withdrawal **records unconditionally** (no
+write-time referent check; a missing referent is the expected cross-peer case, handled by the projection
+diagnostic in §7, not by rejecting the write — which `validate_assessment_relationships` does and which is
+federation-wrong). Withdrawal is **terminal**: a later identical `Associated` returns `Existing` and does
+**not** revive a withdrawn edge (set-subtraction, no timestamp ordering — ADR-0008 forbids timestamp
+arbitration); reviving requires a genuinely new edge.
+
+### 4. Every status is derived; nothing is stored
+
+The recorded events of this family are **exactly** the four above; no lifecycle status is stored. The
+projection folds `ReviewUnitCaptured` (to seed capture-time endpoints) **plus** the four association
+events. The *current commit set* per unit is the **captured target commit** (for commit-range captures,
+whose `GitCommit` target is already in `ReviewUnitCapturedPayload`) **∪** `associated − withdrawn` (the
+`open_input_request_count` positive-minus-negative fold). From it:
+
+- `anchored` ≡ the current commit set is non-empty — i.e. a **commit-range capture is born `anchored`**
+  from its captured `GitCommit` target (no auto-association), and a **worktree capture starts `floating`**
+  until a `ReviewUnitCommitAssociated` lands. `floating`/`anchored` are **events-only, no git**.
+- `merged` / `live` / `orphaned` — derived from the current commit set **plus** git reachability and a
+  **read-time integration ref** (a parameter/config, **not** stored — `merged` is relative to which ref
+  you ask about and would go stale if persisted). The breadth of `merged` is **broad-by-default,
+  narrow-when-configured** (see Resolved in implementation).
+
+No status is persisted; a canonical/derived value is **withheld** under ambiguity (the lineage-head
+discipline). The read surface presents the **full per-OID matrix** plus a headline that is withheld under
+ambiguity (see Resolved in implementation).
+
+### 5. A dedicated, git-free projection + a read-time reachability enrichment
+
+Add `ReviewUnitCommitRangeProjection::from_events` in a new `src/session/projection/commit_range.rs`,
+modeled on `ReviewUnitLineageProjection::from_events`: a pure, deterministic single-pass fold, **never
+touching git**, into a `BTreeMap<ReviewUnitId, …>`. Its inputs are `ReviewUnitCaptured` (seeding
+capture-time endpoints — so commit-range captures seed `anchored`) plus the four association events; all
+other event types are no-ops. The four events are also **no-ops in `SessionState`** (the existing lineage
+no-op dispatch precedent), so `SessionState` stays status-free. The per-unit view carries the current
+ref/commit sets, `anchored`/`floating`, the withdrawn-edge history, and per-unit `diagnostics`; any
+canonical/derived value is **withheld under ambiguity**.
+
+Reachability (`merged`/`live`/`orphaned`) is a **separate read-time enrichment** (`enrich_liveness(view,
+repo, integration_ref)`) the read surface invokes when a repo is in hand — it never enters the pure fold.
+The graph condition is a **new `CommitGraphCondition::Orphaned` enum**, distinct from the note-anchor
+`ResolutionStatus::Orphaned`.
+
+### 6. Net-new git reachability plumbing
+
+Add to `src/git/command.rs` (status-tolerant, mirroring `git_path_is_ignored`'s `[0,1]` probe):
+
+- `git_is_ancestor(repo, ancestor, descendant) -> Ancestry { Ancestor, NotAncestor, MissingObject }` over
+  `merge-base --is-ancestor` (exit 128 / bad object → `MissingObject`).
+- `git_for_each_ref(repo, patterns) -> Vec<RefEntry>` to enumerate live-ref tips.
+- `git_object_exists(repo, oid)` over `cat-file -e` for a precise orphan reason.
+
+Reuse `git_worktree_list` for worktree HEADs. **Default live-ref scope** = local branches (matched by the
+`refs/heads/` prefix so nested names are included) + all linked-worktree HEADs + remote-tracking refs
+(`refs/remotes/`) **when present**. A **missing/gc'd/rebased object degrades to `orphaned`, never an
+error**; an unavailable repo yields "reachability unknown" (omit the merged/live fields). Compute batched
+per repo, deduped by OID, in an in-process ancestry cache; **never persist** reachability.
+
+### 7. Conflict diagnostics realize ADR-0008's reserved class-(c) codes
+
+This family is the **first consumer** of ADR-0008's reserved `ambiguous_supersession` /
+`retraction_target_missing`. Both are **shoreline projection diagnostics** (computable from the unioned
+event set), surfaced never persisted, self-healing on backfill, with **no timestamp arbitration**:
+
+- **`divergent_commit_association`** — the concrete code realizing the reserved `ambiguous_supersession`:
+  two un-withdrawn commit associations for the same unit with different OIDs. Surface **both**, withhold the
+  headline condition, pick no winner (the `lineage_forked_successor` / `append_duplicate_semantic_diagnostics`
+  surface-all posture).
+- **`retraction_target_missing`** — a withdrawal whose named association has not backfilled; the withdrawal
+  has no effect yet and the diagnostic vanishes when the association arrives.
+
+### 8. Signing & convergence — unchanged contracts
+
+All four events sign under ADR-0004's generic `EventToBeSigned::from_event` (fully generic over
+`event_type`) with **no new `sigVersion`**, and converge under the existing `record_event_once` /
+`eventSetHash` machinery. No amendment to ADR-0004/0005/0008 is required.
+
+### 9. CLI surface & worktree-only auto-record
+
+The CLI provides these capabilities:
+
+- **Record and withdraw** a commit association (by commit rev, resolved to a `GitCommit` endpoint) and a
+  ref association (by ref name + head OID), each reusing the write house shape
+  (`--repo`/`--review-unit`|`--lineage`/`--track`/`--sign-key`, JSON out) — **but no `--idempotency-key`**:
+  the association/withdrawal key is the canonical, **non-overridable** edge key (an arbitrary override
+  would defeat cross-writer convergence). A reader lists current/all associations per axis. **No
+  `--replaces`** — corrections are withdraw-then-re-associate (§3).
+- **Auto-record `ReviewUnitRefAssociated`** (current ref name + head OID) inside `capture_review` on the
+  **worktree arm only**, after the capture event; **skip on detached HEAD**, best-effort, never blocking
+  capture. Commit-range captures get no auto-association.
+- **Branch-filtered history** ("history for `feat/X`") as a read-side filter selecting units by ref
+  association, with a **label-vs-liveness** selector (label = recorded ref association, offline; liveness =
+  reachability), and the four events filterable in `review history`. This **supersedes** held plan-0072
+  Facet-2's `worktree_root` scoping proxy.
+
+The landed spelling is a `shore review association` noun with flat verbs `associate-commit` /
+`withdraw-commit` / `associate-ref` / `withdraw-ref` / `list`; `--ref` (alias `--branch`) + `--by
+{label,liveness}` on `review history` / `review unit list`.
+
+### 10. Distinct from ADR-0005 lineage
+
+A commit association is the *same* unit's work landing as commit X; lineage supersession is a *new* unit
+replacing an *old* one as a thread head. The association family must never set or move a lineage head, and
+does not touch the `review_unit_lineage_*` events.
+
+## Consequences
+
+### Accepted
+
+- Worktree captures bridge onto the commit graph after the fact (structural merge-status, branch-by-
+  liveness), and "review history for `feat/X`" becomes answerable by recorded label and by reachability.
+- The recorded vocabulary stays minimal (four events, zero stored statuses), and the design is
+  federation-correct: same edge converges across writers; missing referents self-heal; no winner-picking.
+- Net-new cost is bounded: the pure fold is O(events) like the existing reducers; reachability is a
+  batched, cached, read-time enrichment paid only when liveness is requested.
+- Lands **independent of and before** the ADR-0015 topology collapse (no topology dependency, no new
+  `sigVersion`, no ADR amendment); resolves research 0011's B1 and supplies ADR-0015 §5's reachability
+  projection.
+
+### Rejected
+
+- **A "finalization" event / `finalized`/`abandoned` statuses** — "finalize" implies closure, contradicting
+  append-only/never-closes; the terms also collide (`abandoned` = an input-request outcome). Replaced by
+  the association/withdrawal framing.
+- **Supersession-by-reference (`replaces_*_ids`) for this family** — an association has no competing-
+  judgement to disambiguate; write-time referent validation is federation-wrong. Withdraw-only is simpler
+  and ADR-0008-aligned (§3).
+- **Storing any lifecycle status** — re-introduces stale-persisted-status and breaks convergence (load-
+  bearing meaning outside the identity key). All statuses derived (§4).
+- **Folding `writer` or `track` into the association id** — would prevent the same edge from converging
+  across writers. Both are envelope-only (§2).
+- **Folding this into ADR-0015** — topology (where the store lives) and lifecycle (how a unit relates to the
+  commit graph) are independent axes; folding would couple a ratify-ready, parallel-safe decision to a draft
+  blocked on three unrelated preconditions (B2/privacy/SF2). They are siblings with a consumer/supplier
+  cross-reference.
+- **Auto-recording a commit association at capture** — a worktree capture is born floating; its target
+  commit does not exist yet. Only `ReviewUnitRefAssociated` is auto-recorded (§9).
+
+## Revisit Triggers
+
+- A real **revive-the-same-edge** use case emerges (would reopen the terminal-withdrawal / no-revival rule).
+- **Substrate retraction** lands (re-evaluate the domain-scoped withdrawal against the generic primitive).
+- **ADR-0015 topology** ratifies (confirm the reachability-projection consumer seam still holds).
+
+## Resolved in implementation
+
+The open questions the draft carried were resolved as follows:
+
+- **Track scope → track-free.** Association/withdrawal keys and ids fold neither writer nor track; an
+  association is one shared structural edge, and a track in the key would split it per-track and defeat
+  cross-writer convergence. `--track` is still accepted on the write verbs and recorded envelope-only.
+- **Headline vs matrix → per-OID matrix; headline withheld under ambiguity.** Liveness enrichment returns a
+  per-`commit_oid` `CommitGraphCondition` vector plus a headline that is `Some` only when all current OIDs
+  agree and no diagnostic fired, else `None`.
+- **`merged` breadth → broad-by-default, narrow-when-configured.** With no integration ref, `merged` means
+  "ancestor of any live-ref tip other than its own tip"; an optional integration ref narrows it to
+  "ancestor of that ref."
+- **Detached-worktree-HEAD `live_branch` label → `(detached @ <short-oid>)`.** Honest; never fabricates a
+  branch name from the worktree basename. Named branches render as their short ref name.
+- **CLI surface → the `shore review association` noun** with flat verbs `associate-commit` /
+  `withdraw-commit` / `associate-ref` / `withdraw-ref` / `list`; `--ref` (alias `--branch`) + `--by
+  {label,liveness}` on `review history` and `review unit list`.
