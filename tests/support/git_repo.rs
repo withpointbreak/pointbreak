@@ -22,6 +22,11 @@ impl GitRepo {
         let repo = Self { root };
 
         repo.git(["init"]);
+        // Force a deterministic default branch so a capture (and the auto-recorded
+        // capture-time ref name that now appears in documents) does not depend on
+        // the host's init.defaultBranch, which differs between developer machines
+        // (main) and CI (master).
+        repo.git(["symbolic-ref", "HEAD", "refs/heads/main"]);
         repo.git(["config", "user.name", "Shore Tests"]);
         repo.git(["config", "user.email", "shore-tests@example.com"]);
         repo.git(["config", "commit.gpgsign", "false"]);
@@ -37,6 +42,7 @@ impl GitRepo {
         let path = path.as_ref();
         fs::create_dir_all(path).expect("create nested git repository directory");
         run_git(path, ["init"]);
+        run_git(path, ["symbolic-ref", "HEAD", "refs/heads/main"]);
         run_git(path, ["config", "user.name", "Shore Tests"]);
         run_git(path, ["config", "user.email", "shore-tests@example.com"]);
         run_git(path, ["config", "commit.gpgsign", "false"]);
