@@ -201,8 +201,10 @@ tree, including untracked files (source `git_worktree`).
 - With `--lineage`, capture immediately records lineage declaration/round facts for the newly
   captured ReviewUnit. `--predecessor` is allowed only with `--lineage`.
 
-V1 `.shore/data/` storage is local and synchronous. It assumes one active Shoreline writer per `.shore/data/`
-directory and does not add a daemon, delivery queue, approval flow, async storage, remote storage,
+V1 storage is local and synchronous. The worktree-local `.shore/data/` store has a single active
+writer — its own worktree — while the shared clone-local store may take concurrent writes from
+multiple linked worktrees, kept safe by content-addressed writes and a regenerable projection rather
+than a lock. V1 does not add a daemon, delivery queue, approval flow, async storage, remote storage,
 or note mutation.
 
 When a worktree is linked to a clone-local store, `shore review capture` writes the capture **through

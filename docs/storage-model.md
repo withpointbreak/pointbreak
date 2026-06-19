@@ -660,15 +660,23 @@ are explicit and tested.
 
 ## V1 Writer Contract
 
-V1 uses a single-writer workflow contract: one active Shoreline writer per `.shore/data/` directory at a
-time. Shoreline does not coordinate writers with lockfiles, leases, a daemon, IPC, or filesystem
-notifications yet.
+V1 has no store-directory lock: Shoreline does not coordinate writers with lockfiles, leases, a
+daemon, IPC, or filesystem notifications. Concurrency safety rests on the store primitives instead.
+Events and snapshot artifacts are written with content-addressed exclusive file creation, note-body
+artifacts are content-addressed by body hash, and `state.json` is a regenerable projection written by
+atomic rename. So concurrent writers to one store directory cannot corrupt each other: identical
+events converge (already-exists with a matching payload), different events never collide, and
+conflicting events under one idempotency key fail loud. A stale `state.json` is never read as
+authority because reads rebuild from the event log.
 
-Clone-local linking does not change that direct-write contract. Shared clone-local writes are
-limited to the explicit `shore store link` batch import path, which performs sensitivity scanning
-before movement, reports redacted findings, and imports artifacts before events. Direct shared
-capture remains unsupported until Shoreline has a storage-level serializer for multi-file
-publication.
+Write-through depends on this directly. In a registered (linked) checkout, capture and every native
+review write land in the shared clone-local store — the same store reads resolve — so multiple linked
+worktrees may write that one store directory concurrently, and the content-addressed/regenerable
+primitives above keep that safe without a lock. `shore store link` is no longer the only path to the
+shared store; it remains the batch import that adopts any residual pre-link worktree-local history,
+performing sensitivity scanning before movement, reporting redacted findings, and importing artifacts
+before events. Any store-directory lock added later must be scoped to the store directory, never "one
+clone, one writer", so a future cross-clone store inherits it.
 
 Event files remain the append-only authority. They are created with exclusive file creation:
 same-key and same-payload retries are idempotent, while same-key and different-payload attempts are
