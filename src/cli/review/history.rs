@@ -1,12 +1,14 @@
 use std::io::Write;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::{Args, ValueEnum};
 use shoreline::documents::history_document;
 use shoreline::model::ReviewUnitId;
 use shoreline::session::event::EventType;
 use shoreline::session::{
-    EventVerificationPolicy, RefFilterMode, ReviewHistoryOptions, review_history,
+    EventVerificationPolicy, LivenessToken, RefFilterMode, ReviewHistoryOptions, read_events,
+    review_history,
 };
 
 use crate::cli::json;
@@ -50,6 +52,15 @@ pub(super) struct HistoryArgs {
     /// Emit compact JSON explicitly.
     #[arg(long)]
     compact: bool,
+
+    /// Re-render whenever the store's liveness changes, polling client-side.
+    /// Pull-only: no daemon and no filesystem watch. Cancel with Ctrl-C.
+    #[arg(long)]
+    watch: bool,
+
+    /// Poll interval in milliseconds for `--watch`.
+    #[arg(long, default_value_t = 3000)]
+    poll_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -95,10 +106,37 @@ pub(super) fn run(
     let span = tracing::info_span!("shore.review.history");
     let _entered = span.enter();
     tracing::debug!(command = "review.history", "command_start");
-    let pretty = args.pretty;
-    let result = review_history(history_options(&args));
+    if args.watch {
+        return watch(&args, stdout);
+    }
+    render_once(&args, stdout)
+}
+
+fn render_once(
+    args: &HistoryArgs,
+    stdout: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let result = review_history(history_options(args));
     let document = history_document(result?);
-    json::write_json(stdout, &document, pretty)
+    json::write_json(stdout, &document, args.pretty)
+}
+
+/// Client-side liveness poll: re-render only when the store's `event_set_hash`
+/// moves, never on a bare tick. The core emits the change fact through the
+/// liveness token but never delivers it, so this loop owns delivery — a pure
+/// pull with no daemon and no filesystem watch. Cancel with Ctrl-C.
+fn watch(args: &HistoryArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::error::Error>> {
+    let interval = Duration::from_millis(args.poll_ms);
+    let mut last_seen: Option<String> = None;
+    loop {
+        let token = LivenessToken::for_ledger(&read_events(&args.repo)?)?;
+        if last_seen.as_deref() != Some(token.event_set_hash.as_str()) {
+            render_once(args, stdout)?;
+            stdout.flush()?;
+            last_seen = Some(token.event_set_hash);
+        }
+        std::thread::sleep(interval);
+    }
 }
 
 fn history_options(args: &HistoryArgs) -> ReviewHistoryOptions {

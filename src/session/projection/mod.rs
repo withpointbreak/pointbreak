@@ -4,6 +4,7 @@ pub(crate) mod commit_range;
 pub(crate) mod cosignature;
 pub(crate) mod freshness;
 pub(crate) mod lineage;
+pub(crate) mod liveness;
 mod read;
 pub mod state;
 pub(crate) mod task;
@@ -17,5 +18,6 @@ pub use commit_range::{
     ReviewUnitCommitRangeProjection, ReviewUnitCommitRangeView, WithdrawnCommitAssociation,
     WithdrawnRefAssociation,
 };
+pub use liveness::{LivenessScope, LivenessToken};
 pub use read::{load_durable_notes_for_repo, read_events, rebuild_state};
 pub use state::{ProjectionDiagnostic, SessionState};
