@@ -412,6 +412,37 @@ the resolved store.
 A future delivery queue is a separate subsystem. Queue concepts such as `pending/`, `failed/`,
 retry counts, backoff, and circuit breakers do not belong in the store's `events/`.
 
+## Content Removal and Compaction
+
+Because the shared common-dir store persists captured bytes that a removed worktree would once have
+discarded, the store has an explicit, never-automatic content-removal path. It is content-targeted:
+the durable fact is an `ArtifactRemoved { content_hash }` event keyed solely on the content hash, so
+two peers removing the same content converge on one byte-identical fact and the same shared blob is
+removed for every review unit that references it (snapshot artifacts dedup on content, so one blob is
+shared by many units; targeting content rather than a unit is the only coherent granularity). The
+event is session-anchored — it carries no review-unit target — and the event log stays immutable: the
+removal event never rewrites or tombstones the capture event. Read projections join the capture event
+with any `ArtifactRemoved` over its content hash and render an explained **"content removed"** in place
+of the missing bytes, distinguishing a removed artifact from one that is merely not-yet-synced or
+corrupt. See [ADR-0016](./adr/adr-0016-content-targeted-artifact-removal-and-compaction.md) for the
+decision.
+
+Removal is two-phase. `shore store remove` appends the removal event (cheap, convergent, auditable);
+the marked bytes survive on disk until `shore store gc` / `shore store compact` runs a local,
+non-event maintenance sweep that physically deletes the removed and unreferenced blobs. Because a
+removed content hash has no live referrer by construction, the sweep needs no reference-count wait and
+is re-derivable from the event log. **Compaction — not removal — is the point of no return:** removal
+is one-way (there is no append-only un-remove), and once bytes are compacted they cannot be recovered
+by an event, only re-captured or re-imported. The operator rule for sensitive data is therefore
+**remove, then compact**.
+
+This is complete only **before** the artifact is pushed or mirrored. The removal event converges to
+peers (they learn the content is removed and may collect their own copy), but **bytes already
+mirrored to another store cannot be un-sent** — privacy is something you secure before push, and the
+already-mirrored case is a documented limitation, not something removal can repair. GC is deliberately
+not an event: "I deleted my local bytes" is a local maintenance fact, not a shared review fact, so it
+is never converged to peers.
+
 ## Event Files
 
 Every durable event must carry a non-null `idempotencyKey`. The key should be derived from canonical

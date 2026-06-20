@@ -288,6 +288,40 @@ fn adr_0010_is_landed_and_accepted() {
 }
 
 #[test]
+fn adr_0015_and_0016_are_landed_and_accepted() {
+    let adr_0015 = std::fs::read_to_string("docs/adr/adr-0015-single-common-dir-store.md")
+        .expect("ADR-0015 is landed in docs/adr/");
+    let adr_0016 = std::fs::read_to_string(
+        "docs/adr/adr-0016-content-targeted-artifact-removal-and-compaction.md",
+    )
+    .expect("ADR-0016 is landed in docs/adr/");
+
+    for adr in [&adr_0015, &adr_0016] {
+        assert!(adr.contains("**Status:** Accepted"));
+        // No private plan/research labels leak into the public ADRs.
+        for forbidden in [
+            "0075",
+            "research 0011",
+            "implementation plan",
+            "Facet",
+            "B2",
+            "SF1",
+            "SF2",
+            "~0075",
+        ] {
+            assert!(
+                !adr.contains(forbidden),
+                "no private label {forbidden} in the landed store-topology ADRs"
+            );
+        }
+    }
+
+    // The two ADRs cross-reference each other as landed in-repo neighbors.
+    assert!(adr_0015.contains("./adr-0016-content-targeted-artifact-removal-and-compaction.md"));
+    assert!(adr_0016.contains("./adr-0015-single-common-dir-store.md"));
+}
+
+#[test]
 fn docs_cover_actor_identity_and_delegation() {
     let storage = std::fs::read_to_string("docs/storage-model.md").expect("read storage model");
     assert!(
