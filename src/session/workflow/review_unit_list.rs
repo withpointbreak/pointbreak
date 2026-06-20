@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -16,7 +16,10 @@ use crate::session::workflow::observation::{
     CurrentReviewUnitContext, review_unit_ids_in_worktree,
 };
 use crate::session::workflow::read_store::divergence_diagnostics;
-use crate::session::{EventStore, ReviewUnitCommitRangeProjection, ReviewUnitCommitRangeView};
+use crate::session::{
+    CommitOidGroupingProjection, EventStore, ReviewUnitCommitRangeProjection,
+    ReviewUnitCommitRangeView,
+};
 
 /// How a `--ref` read filter matches: by the recorded label (offline, answerable
 /// even after the branch is deleted) or by reachability from the ref's live tip.
@@ -118,6 +121,12 @@ pub struct ReviewUnitListEntry {
     /// unknown`. `unknown` covers floating units, disagreeing per-commit
     /// conditions, and a repo error (which degrades gracefully, never an error).
     pub merge_status: String,
+    /// The review units this entry stands for. Singleton (`[review_unit_id]`) for an
+    /// ungrouped unit; for a unit whose current commit OID is shared by sibling
+    /// captures (e.g. the same range captured in two worktrees, which mint distinct
+    /// ids), this lists every member. The representative `review_unit_id` is the
+    /// lexicographically smallest member, so the choice is deterministic and re-ID-free.
+    pub grouped_review_unit_ids: Vec<ReviewUnitId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -159,6 +168,16 @@ pub fn list_review_units(options: ReviewUnitListOptions) -> Result<ReviewUnitLis
     }
 
     apply_orphan_visibility(&mut result, &options.repo, options.orphan_visibility);
+
+    // Canonical read-surface order: build entries → `--ref` retain → `--worktree`
+    // identity retain → orphan-visibility retain → grouping → recompute count →
+    // merge-status attach → divergence diagnostics. Grouping runs after every retain
+    // (a `--ref`/`--worktree`/orphan filter that drops a member shrinks its group; a
+    // group whose only surviving member matched still surfaces via that member), and
+    // before merge-status, which is attached over the grouped entries.
+    let grouping = CommitOidGroupingProjection::from_events(&events)?;
+    result.entries = group_entries(result.entries, &grouping);
+    result.review_unit_count = result.entries.len();
 
     attach_merge_status(
         &mut result,
@@ -250,6 +269,109 @@ fn is_hidden_orphan(view: &ReviewUnitCommitRangeView, repo: &Path) -> bool {
     }
 }
 
+/// Collapse capture entries that share a current commit OID into one entry per
+/// group. Two worktree captures of the same range mint distinct review_unit_ids
+/// (the identity fold is per-worktree, in `fingerprint.rs` — deliberately NOT
+/// changed), but converge on a shared OID; this presents them as one row exposing
+/// both ids. Floating captures and captures whose OID no sibling shares pass through
+/// unchanged (singleton member set). No re-identification: the representative is just
+/// the smallest member id, chosen for a deterministic row.
+///
+/// The representative entry's scalar fields (`snapshot_artifact_content_hash`,
+/// `target`, …) come from the smallest-id member. Same-range captures already share
+/// one content-addressed snapshot artifact (the body is decoupled from the identity
+/// fields), so the artifact hash is identical across members — collapsing is honest,
+/// not lossy.
+fn group_entries(
+    entries: Vec<ReviewUnitListEntry>,
+    grouping: &CommitOidGroupingProjection,
+) -> Vec<ReviewUnitListEntry> {
+    let by_id: BTreeMap<ReviewUnitId, ReviewUnitListEntry> = entries
+        .into_iter()
+        .map(|entry| (entry.review_unit_id.clone(), entry))
+        .collect();
+
+    let mut grouped: Vec<ReviewUnitListEntry> = Vec::new();
+    for members in connected_components(&by_id, grouping) {
+        // `members` is a non-empty ordered set; the representative is the smallest id,
+        // so the row is stable across runs.
+        let representative = members
+            .iter()
+            .next()
+            .expect("a component has at least one member")
+            .clone();
+        let mut entry = by_id
+            .get(&representative)
+            .expect("representative is a known entry")
+            .clone();
+        entry.grouped_review_unit_ids = members.into_iter().collect();
+        debug_assert!(
+            entry
+                .grouped_review_unit_ids
+                .contains(&entry.review_unit_id),
+            "the member set always contains the representative id"
+        );
+        grouped.push(entry);
+    }
+
+    grouped.sort_by(|left, right| {
+        left.captured_at.cmp(&right.captured_at).then_with(|| {
+            left.review_unit_id
+                .as_str()
+                .cmp(right.review_unit_id.as_str())
+        })
+    });
+    grouped
+}
+
+/// Partition the known entry ids into connected components over the "shares any
+/// current commit OID" relation. Each entry seeds its own component; for every
+/// grouping bucket (`commit_oid → member ids`) that names two or more known
+/// entries, those entries' components are unioned. A unit with multiple current
+/// OIDs chains its buckets into one component (transitive closure). Ids the
+/// grouping names that are not entries in this view (filtered out upstream) are
+/// ignored — a group whose only surviving member matched collapses to a singleton.
+fn connected_components(
+    by_id: &BTreeMap<ReviewUnitId, ReviewUnitListEntry>,
+    grouping: &CommitOidGroupingProjection,
+) -> Vec<BTreeSet<ReviewUnitId>> {
+    // id → component index, seeded one-per-entry.
+    let mut component_of: BTreeMap<ReviewUnitId, usize> = by_id
+        .keys()
+        .cloned()
+        .enumerate()
+        .map(|(index, id)| (id, index))
+        .collect();
+
+    for members in grouping.groups.values() {
+        let known: Vec<ReviewUnitId> = members
+            .iter()
+            .filter(|id| component_of.contains_key(*id))
+            .cloned()
+            .collect();
+        let mut known = known.into_iter();
+        if let Some(first) = known.next() {
+            let target = component_of[&first];
+            for other in known {
+                let source = component_of[&other];
+                if source != target {
+                    for value in component_of.values_mut() {
+                        if *value == source {
+                            *value = target;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut buckets: BTreeMap<usize, BTreeSet<ReviewUnitId>> = BTreeMap::new();
+    for (id, index) in component_of {
+        buckets.entry(index).or_default().insert(id);
+    }
+    buckets.into_values().collect()
+}
+
 /// Convenience entry point for "which units are associated with this ref?".
 /// Delegates to [`list_review_units`] with a `--ref` filter applied.
 pub fn list_units_for_ref(
@@ -337,8 +459,9 @@ fn entry_from_event(
         .unit(&payload.review_unit_id)
         .cloned()
         .unwrap_or_else(|| empty_view(payload.review_unit_id.clone()));
+    let review_unit_id = payload.review_unit_id;
     Ok(ReviewUnitListEntry {
-        review_unit_id: payload.review_unit_id,
+        review_unit_id: review_unit_id.clone(),
         session_id: event.target.session_id.clone(),
         captured_at: event.occurred_at.clone(),
         revision_id: payload.revision_id,
@@ -350,6 +473,9 @@ fn entry_from_event(
         commit_range,
         // Filled by `attach_merge_status` after the visibility filter.
         merge_status: String::new(),
+        // Every entry starts standing only for itself; the grouping pass rewrites this
+        // for entries whose current commit OID is shared by sibling captures.
+        grouped_review_unit_ids: vec![review_unit_id],
     })
 }
 
@@ -867,5 +993,139 @@ mod tests {
         let json = serde_json::to_string(&result.entries[0]).unwrap();
         assert!(json.contains("\"mergeStatus\""));
         assert!(json.contains("\"open\""));
+    }
+
+    /// A worktree capture (floating until a commit is associated) for an explicit id,
+    /// so tests can mint the distinct ids two worktrees would produce for one range.
+    fn worktree_capture_for(unit: &ReviewUnitId, occurred_at: &str) -> ShoreEvent {
+        let revision_id = RevisionId::new(format!("rev:{}", unit.as_str()));
+        let snapshot_id = SnapshotId::new(format!("snap:{}", unit.as_str()));
+        let payload = ReviewUnitCapturedPayload {
+            review_unit_id: unit.clone(),
+            source: ReviewUnitSource::GitWorktree {
+                mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
+                include_untracked: true,
+            },
+            base: ReviewEndpoint::GitCommit {
+                commit_oid: format!("base:{}", unit.as_str()),
+                tree_oid: format!("base-tree:{}", unit.as_str()),
+            },
+            target: ReviewEndpoint::GitWorkingTree {
+                worktree_root: "/repo".to_owned(),
+            },
+            revision_id: revision_id.clone(),
+            snapshot_id: snapshot_id.clone(),
+            snapshot_artifact_content_hash: format!("sha256:artifact:{}", unit.as_str()),
+        };
+        ShoreEvent::new(
+            EventType::ReviewUnitCaptured,
+            format!("capture:{}", unit.as_str()),
+            EventTarget::for_review_unit(
+                SessionId::new("session:default"),
+                unit.clone(),
+                revision_id,
+                snapshot_id,
+            ),
+            Writer::shore_local("test"),
+            payload,
+            occurred_at,
+        )
+        .unwrap()
+    }
+
+    /// Associate `commit_oid` onto an existing unit (adds it to the unit's current set).
+    fn commit_associated_for(unit: &ReviewUnitId, commit_oid: &str) -> ShoreEvent {
+        let payload = ReviewUnitCommitAssociatedPayload {
+            commit_association_id: CommitAssociationId::new(format!(
+                "commit-association:sha256:{}:{commit_oid}",
+                unit.as_str()
+            )),
+            target: ReviewTargetRef::ReviewUnit {
+                review_unit_id: unit.clone(),
+            },
+            commit: ReviewEndpoint::GitCommit {
+                commit_oid: commit_oid.to_owned(),
+                tree_oid: format!("{commit_oid}-tree"),
+            },
+        };
+        ShoreEvent::new(
+            EventType::ReviewUnitCommitAssociated,
+            ReviewUnitCommitAssociatedPayload::idempotency_key(unit, commit_oid),
+            EventTarget::for_review_unit(
+                SessionId::new("session:default"),
+                unit.clone(),
+                RevisionId::new(format!("rev:{}", unit.as_str())),
+                SnapshotId::new(format!("snap:{}", unit.as_str())),
+            ),
+            Writer::shore_local("test"),
+            payload,
+            "2026-06-19T00:00:09Z",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn cross_worktree_same_range_captures_present_as_one_grouped_entry() {
+        // Two captures (distinct review_unit_ids, as two worktrees would mint) whose
+        // current commit sets both contain the same OID collapse into ONE list entry
+        // that exposes BOTH ids in its grouped-member set. One shared artifact, two
+        // capture events — no re-ID.
+        let unit_a = ReviewUnitId::new("review-unit:sha256:a");
+        let unit_b = ReviewUnitId::new("review-unit:sha256:b");
+        let events = [
+            worktree_capture_for(&unit_a, "2026-06-19T00:00:00Z"),
+            commit_associated_for(&unit_a, "shared"),
+            worktree_capture_for(&unit_b, "2026-06-19T00:00:01Z"),
+            commit_associated_for(&unit_b, "shared"),
+        ];
+        let projection = ReviewUnitCommitRangeProjection::from_events(&events).unwrap();
+        let grouping = CommitOidGroupingProjection::from_events(&events).unwrap();
+        let base = list_from_events(&events, &projection).unwrap();
+
+        let grouped = group_entries(base.entries, &grouping);
+
+        assert_eq!(
+            grouped.len(),
+            1,
+            "two same-range captures collapse to one entry"
+        );
+        let members = &grouped[0].grouped_review_unit_ids;
+        assert_eq!(members.len(), 2);
+        assert!(members.contains(&unit_a));
+        assert!(members.contains(&unit_b));
+    }
+
+    #[test]
+    fn ungrouped_units_are_unaffected() {
+        // Two captures on DIFFERENT oids (and one floating) each stay their own entry,
+        // with a single-member grouped set (the entry's own id).
+        let unit_a = ReviewUnitId::new("review-unit:sha256:a");
+        let unit_b = ReviewUnitId::new("review-unit:sha256:b");
+        let unit_floating = ReviewUnitId::new("review-unit:sha256:f");
+        let events = [
+            worktree_capture_for(&unit_a, "2026-06-19T00:00:00Z"),
+            commit_associated_for(&unit_a, "oidA"),
+            worktree_capture_for(&unit_b, "2026-06-19T00:00:01Z"),
+            commit_associated_for(&unit_b, "oidB"),
+            worktree_capture_for(&unit_floating, "2026-06-19T00:00:02Z"),
+        ];
+        let projection = ReviewUnitCommitRangeProjection::from_events(&events).unwrap();
+        let grouping = CommitOidGroupingProjection::from_events(&events).unwrap();
+        let base = list_from_events(&events, &projection).unwrap();
+
+        let grouped = group_entries(base.entries, &grouping);
+
+        assert_eq!(
+            grouped.len(),
+            3,
+            "no two share an OID; all three stay separate"
+        );
+        for entry in &grouped {
+            assert_eq!(
+                entry.grouped_review_unit_ids,
+                vec![entry.review_unit_id.clone()],
+                "an ungrouped entry's member set is just its own id"
+            );
+        }
     }
 }

@@ -684,6 +684,7 @@ mod tests {
                 diagnostics: Vec::new(),
             },
             merge_status: "unknown".to_owned(),
+            grouped_review_unit_ids: vec![ReviewUnitId::new("review-unit:sha256:abc")],
         }
     }
 
