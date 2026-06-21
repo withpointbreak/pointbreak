@@ -5,26 +5,26 @@ use serde_json::json;
 
 use super::AssessmentTargetSelector;
 use super::target::resolve_assessment_target;
-use super::util::sorted_unique;
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::crypto::EventSigner;
 use crate::error::{Result, ShoreError};
 use crate::model::{
-    ActorId, AssessmentId, EventId, InputRequestId, ObservationId, ReviewTargetRef,
-    ReviewUnitLineageId, RevisionId, TargetRef, TrackId,
+    ActorId, AssessmentId, EventId, InputRequestId, ObservationId, ReviewTargetRef, RevisionId,
+    TargetRef, TrackId,
 };
 use crate::session::event::{
     EventTarget, EventType, ReviewAssessment, ReviewAssessmentRecordedPayload,
     ReviewObservationRecordedPayload, ShoreEvent, decode_input_request_opened_payload,
 };
 use crate::session::observation::{
-    CurrentReviewUnitContext, ReviewUnitScope, ReviewUnitSelection, resolve_review_unit,
-    staged_body, validated_track_id,
+    CurrentReviewUnitContext, ReviewUnitScope, RevisionSelection, resolve_revision, staged_body,
+    validated_track_id,
 };
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::resolution::{
     prepare_write_landing, resolve_write_store, resolve_write_validation_store,
 };
+use crate::session::workflow::util::sorted_unique;
 use crate::session::{
     BestEffortSkipSink, EventSigningOptions, EventStore, EventWriteOutcome, current_timestamp,
     sign_event_if_requested, writer_from_options,
@@ -35,7 +35,6 @@ use crate::storage::{Durability, LocalStorage};
 pub struct AssessmentAddOptions {
     repo: PathBuf,
     review_unit_id: Option<RevisionId>,
-    lineage_id: Option<ReviewUnitLineageId>,
     track: Option<String>,
     assessment: Option<ReviewAssessment>,
     summary: Option<String>,
@@ -53,7 +52,6 @@ impl AssessmentAddOptions {
         Self {
             repo: repo.as_ref().to_path_buf(),
             review_unit_id: None,
-            lineage_id: None,
             track: None,
             assessment: None,
             summary: None,
@@ -81,12 +79,6 @@ impl AssessmentAddOptions {
         self.review_unit_id = Some(id);
         self
     }
-
-    pub fn with_lineage_id(mut self, id: ReviewUnitLineageId) -> Self {
-        self.lineage_id = Some(id);
-        self
-    }
-
     pub fn with_track(mut self, track: impl Into<String>) -> Self {
         self.track = Some(track.into());
         self
@@ -181,12 +173,9 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
     // everything the writer can see, including linked-only facts.
     let validation_store = resolve_write_validation_store(&options.repo)?;
     let validation_events = validation_store.validation_events()?;
-    let resolved = resolve_review_unit(
+    let resolved = resolve_revision(
         &validation_events,
-        ReviewUnitSelection::from_review_unit_or_lineage(
-            options.review_unit_id.as_ref(),
-            options.lineage_id.as_ref(),
-        )?,
+        RevisionSelection::from_revision_seed(options.review_unit_id.as_ref()),
         &CurrentReviewUnitContext::for_repo(&options.repo)?,
         ReviewUnitScope::default(),
     )?;

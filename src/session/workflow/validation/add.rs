@@ -4,15 +4,15 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use super::super::observation::{
-    CurrentReviewUnitContext, ReviewUnitScope, ReviewUnitSelection, resolve_review_unit,
-    staged_body, validated_track_id,
+    CurrentReviewUnitContext, ReviewUnitScope, RevisionSelection, resolve_revision, staged_body,
+    validated_track_id,
 };
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::crypto::EventSigner;
 use crate::error::{Result, ShoreError};
 use crate::model::{
-    ActorId, EventId, ReviewTargetRef, ReviewUnitLineageId, RevisionId, TargetRef, TrackId,
-    ValidationCheckId, ValidationStatus, ValidationTarget, ValidationTrigger,
+    ActorId, EventId, ReviewTargetRef, RevisionId, TargetRef, TrackId, ValidationCheckId,
+    ValidationStatus, ValidationTarget, ValidationTrigger,
 };
 use crate::session::event::{EventTarget, EventType, ShoreEvent, ValidationCheckRecordedPayload};
 use crate::session::state::{ProjectionDiagnostic, SessionState};
@@ -29,7 +29,6 @@ use crate::storage::{Durability, LocalStorage};
 pub struct ValidationAddOptions {
     repo: PathBuf,
     review_unit_id: Option<RevisionId>,
-    lineage_id: Option<ReviewUnitLineageId>,
     track: Option<String>,
     check_name: Option<String>,
     command: Option<String>,
@@ -51,7 +50,6 @@ impl ValidationAddOptions {
         Self {
             repo: repo.as_ref().to_path_buf(),
             review_unit_id: None,
-            lineage_id: None,
             track: None,
             check_name: None,
             command: None,
@@ -78,12 +76,6 @@ impl ValidationAddOptions {
         self.review_unit_id = Some(id);
         self
     }
-
-    pub fn with_lineage_id(mut self, id: ReviewUnitLineageId) -> Self {
-        self.lineage_id = Some(id);
-        self
-    }
-
     pub fn with_track(mut self, track: impl Into<String>) -> Self {
         self.track = Some(track.into());
         self
@@ -182,12 +174,9 @@ pub fn record_validation_check(options: ValidationAddOptions) -> Result<Validati
     // store (the clone-local store in linked mode).
     let validation_store = resolve_write_validation_store(&options.repo)?;
     let events = validation_store.validation_events()?;
-    let resolved = resolve_review_unit(
+    let resolved = resolve_revision(
         &events,
-        ReviewUnitSelection::from_review_unit_or_lineage(
-            options.review_unit_id.as_ref(),
-            options.lineage_id.as_ref(),
-        )?,
+        RevisionSelection::from_revision_seed(options.review_unit_id.as_ref()),
         &CurrentReviewUnitContext::for_repo(&options.repo)?,
         ReviewUnitScope::default(),
     )?;

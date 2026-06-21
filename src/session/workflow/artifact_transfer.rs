@@ -202,6 +202,7 @@ fn referenced_artifacts_for_event(
                 WorkObjectProposal::Revision {
                     revision,
                     snapshot_artifact_content_hash,
+                    ..
                 } => insert_artifact_ref(
                     refs,
                     format!("snapshot:{}", revision.object_id.as_str()),
@@ -250,8 +251,6 @@ fn referenced_artifacts_for_event(
             insert_body_ref(refs, payload.body_artifact_path.as_deref())
         }
         EventType::ReviewInitialized
-        | EventType::ReviewUnitLineageDeclared
-        | EventType::ReviewUnitLineageRoundRecorded
         | EventType::ReviewUnitRefAssociated
         | EventType::ReviewUnitRefWithdrawn
         | EventType::ReviewUnitCommitAssociated

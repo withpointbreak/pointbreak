@@ -755,7 +755,7 @@ fn input_request_open_requires_review_unit_when_current_is_ambiguous() {
         "manual-decision-required",
     ]);
     assert!(!ambiguous.status.success());
-    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("multiple captured review units"));
+    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("multiple captured revisions"));
 
     let explicit = shore([
         "review",
@@ -763,7 +763,7 @@ fn input_request_open_requires_review_unit_when_current_is_ambiguous() {
         "open",
         "--repo",
         repo.path().to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         first["reviewUnit"]["id"].as_str().unwrap(),
         "--track",
         "human:kevin",

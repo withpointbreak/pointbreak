@@ -11,9 +11,9 @@ pub(super) mod common;
 pub(super) mod endorse;
 pub(super) mod history;
 pub(super) mod input_request;
-pub(super) mod lineage;
 pub(super) mod observation;
-pub(super) mod unit;
+pub(super) mod revisions;
+pub(super) mod show;
 pub(super) mod validation;
 
 #[derive(Debug, Args)]
@@ -30,9 +30,9 @@ enum ReviewCommand {
     Endorse(endorse::EndorseArgs),
     History(history::HistoryArgs),
     InputRequest(input_request::InputRequestArgs),
-    Lineage(lineage::LineageArgs),
     Observation(observation::ObservationArgs),
-    Unit(unit::UnitArgs),
+    Revisions(revisions::RevisionsArgs),
+    Show(show::ShowArgs),
     Validation(validation::ValidationArgs),
 }
 
@@ -49,9 +49,9 @@ pub(super) fn run(
         ReviewCommand::Endorse(args) => endorse::run(args, stdout, stderr),
         ReviewCommand::History(args) => history::run(args, stdout),
         ReviewCommand::InputRequest(args) => input_request::run(args, stdout, stderr),
-        ReviewCommand::Lineage(args) => lineage::run(args, stdout),
         ReviewCommand::Observation(args) => observation::run(args, stdout, stderr),
-        ReviewCommand::Unit(args) => unit::run(args, stdout),
+        ReviewCommand::Revisions(args) => revisions::run(args, stdout),
+        ReviewCommand::Show(args) => show::run(args, stdout),
         ReviewCommand::Validation(args) => validation::run(args, stdout, stderr),
     }
 }

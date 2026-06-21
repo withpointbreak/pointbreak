@@ -12,7 +12,6 @@ mod association;
 mod event_signature;
 mod input_request;
 mod kind;
-mod lineage;
 mod observation;
 mod payload;
 mod provenance;
@@ -45,7 +44,6 @@ pub use input_request::{
     InputRequestResponseOutcome,
 };
 pub use kind::EventType;
-pub use lineage::{ReviewUnitLineageDeclaredPayload, ReviewUnitLineageRoundRecordedPayload};
 pub use observation::ReviewObservationRecordedPayload;
 pub use payload::EventPayload;
 pub(crate) use provenance::stamp_ingest_provenance;
@@ -346,6 +344,7 @@ mod tests {
                     }),
                 },
                 snapshot_artifact_content_hash: "sha256:artifact".to_owned(),
+                supersedes: vec![],
             },
         };
 
@@ -536,6 +535,7 @@ mod tests {
                         }),
                     },
                     snapshot_artifact_content_hash: snapshot_artifact_content_hash.to_owned(),
+                    supersedes: vec![],
                 },
             },
             FixedClock::at("2026-05-12T00:00:00Z"),
@@ -1002,6 +1002,7 @@ mod tests {
                         }),
                     },
                     snapshot_artifact_content_hash: snapshot_artifact_content_hash.to_owned(),
+                    supersedes: vec![],
                 },
             },
             FixedClock::at("2026-05-09T20:42:45Z"),

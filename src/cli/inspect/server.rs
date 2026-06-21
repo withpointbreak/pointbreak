@@ -144,7 +144,7 @@ fn route(repo: &Path, method: &str, path: &str, query: Option<&str>) -> Response
         "/app.js" => Response::asset("application/javascript; charset=utf-8", APP_JS),
         "/api/history" => api_response(api::history_json(repo)),
         "/api/units" => api_response(api::units_json(repo)),
-        "/api/lineages" => api_response(api::lineages_json(repo)),
+        "/api/objects" => api_response(api::objects_json(repo)),
         "/api/freshness" => api_response(api::freshness_json(repo)),
         "/api/snapshot" => match query_param(query, "id") {
             Some(id) if !id.is_empty() => api_response(api::snapshot_json(repo, &id)),
@@ -153,10 +153,6 @@ fn route(repo: &Path, method: &str, path: &str, query: Option<&str>) -> Response
         "/api/unit" => match query_param(query, "id") {
             Some(id) if !id.is_empty() => api_response(api::unit_json(repo, &id)),
             _ => Response::json_error("400 Bad Request", "missing ?id=<reviewUnitId>"),
-        },
-        "/api/lineage" => match query_param(query, "id") {
-            Some(id) if !id.is_empty() => api_response(api::lineage_json(repo, &id)),
-            _ => Response::json_error("400 Bad Request", "missing ?id=<lineageId>"),
         },
         "/favicon.ico" => Response::new("204 No Content", "image/x-icon", Vec::new()),
         _ => Response::json_error("404 Not Found", "no such route"),
@@ -397,8 +393,9 @@ mod tests {
     }
 
     #[test]
-    fn lineage_without_id_is_bad_request() {
-        assert_eq!(route_for("GET", "/api/lineage").status, "400 Bad Request");
+    fn retired_lineage_routes_are_not_found() {
+        assert_eq!(route_for("GET", "/api/lineages").status, "404 Not Found");
+        assert_eq!(route_for("GET", "/api/lineage").status, "404 Not Found");
     }
 
     #[test]

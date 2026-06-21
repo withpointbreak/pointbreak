@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use super::util::sorted_unique;
 use crate::error::{Result, ShoreError};
 use crate::model::{
     AssessmentId, EventId, InputRequestId, ObservationId, ReviewTargetRef, TrackId,
@@ -11,6 +10,7 @@ use crate::session::event::{
     EventType, ReviewAssessment, ReviewAssessmentRecordedPayload, ShoreEvent, Writer,
 };
 use crate::session::observation::ResolvedReviewUnit;
+use crate::session::workflow::util::sorted_unique;
 
 pub(crate) struct AssessmentProjectionOptions<'a> {
     pub store_dir: &'a Path,

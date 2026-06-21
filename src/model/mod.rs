@@ -2,7 +2,6 @@ mod cursor;
 mod file;
 mod hunk;
 mod ids;
-mod lineage;
 mod review;
 mod review_note;
 mod review_unit;
@@ -23,11 +22,9 @@ pub use hunk::ReviewHunk;
 pub use ids::{
     ActorId, AssessmentId, CheckpointId, CommitAssociationId, CommitWithdrawalId, EngagementId,
     EventId, FileId, HunkId, InputRequestId, InputRequestResponseId, LedgerId, ObjectId,
-    ObservationId, RefAssociationId, RefWithdrawalId, ReviewId, ReviewNoteId, ReviewUnitLineageId,
-    ReviewUnitLineageRoundId, RevisionId, RowId, TrackId, ValidationCheckId, WorkObjectId,
-    WorkUnitId,
+    ObservationId, RefAssociationId, RefWithdrawalId, ReviewId, ReviewNoteId, RevisionId, RowId,
+    TrackId, ValidationCheckId, WorkObjectId, WorkUnitId,
 };
-pub use lineage::ReviewUnitLineageBasisV1;
 pub use review::{DiffSnapshot, Review, ReviewStream};
 pub use review_note::{
     Anchor, AnchorResolution, AnchorResolutionReason, LineRange, ResolutionStatus, ReviewNote,

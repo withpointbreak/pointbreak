@@ -59,7 +59,7 @@ where
     S: Into<OsString>,
 {
     let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
-    let removed_input_request_command = invokes_removed_input_request_command(&args);
+    let removed_command_hint = removed_review_command_hint(&args);
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(error) => {
@@ -71,11 +71,10 @@ where
                 ExitCode::SUCCESS
             } else {
                 let _ = writeln!(stderr, "{error}");
-                if error.kind() == ErrorKind::InvalidSubcommand && removed_input_request_command {
-                    let _ = writeln!(
-                        stderr,
-                        "\nUse `shore review input-request` instead of `shore review intervention`."
-                    );
+                if error.kind() == ErrorKind::InvalidSubcommand
+                    && let Some(hint) = removed_command_hint
+                {
+                    let _ = writeln!(stderr, "\n{hint}");
                 }
                 ExitCode::FAILURE
             };
@@ -92,9 +91,26 @@ where
     }
 }
 
-fn invokes_removed_input_request_command(args: &[OsString]) -> bool {
-    args.windows(2)
-        .any(|pair| pair[0].to_str() == Some("review") && pair[1].to_str() == Some("intervention"))
+/// A hint for a removed `shore review <sub>` command, surfaced after clap's
+/// invalid-subcommand error so a stale invocation points at its replacement.
+fn removed_review_command_hint(args: &[OsString]) -> Option<&'static str> {
+    let invokes = |name: &str| {
+        args.windows(2)
+            .any(|pair| pair[0].to_str() == Some("review") && pair[1].to_str() == Some(name))
+    };
+    if invokes("intervention") {
+        Some("Use `shore review input-request` instead of `shore review intervention`.")
+    } else if invokes("lineage") {
+        Some(
+            "`shore review lineage` is removed; record supersession on `shore review capture --supersedes <revision>` and read it with `shore review revisions`.",
+        )
+    } else if invokes("unit") {
+        Some(
+            "`shore review unit` is removed; list with `shore review revisions` and show one with `shore review show --revision <id>`.",
+        )
+    } else {
+        None
+    }
 }
 
 fn run_cli(

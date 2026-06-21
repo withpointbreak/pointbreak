@@ -17,8 +17,7 @@ fn review_unit_list_emits_v1_json_with_freshness_metadata() {
 
     let output = shore([
         "review",
-        "unit",
-        "list",
+        "revisions",
         "--repo",
         repo.path().to_str().unwrap(),
     ]);
@@ -64,8 +63,7 @@ fn review_unit_list_does_not_expose_storage_paths() {
 
     let output = shore([
         "review",
-        "unit",
-        "list",
+        "revisions",
         "--repo",
         repo.path().to_str().unwrap(),
     ]);
@@ -86,8 +84,7 @@ fn review_unit_list_pretty_prints() {
 
     let output = shore([
         "review",
-        "unit",
-        "list",
+        "revisions",
         "--repo",
         repo.path().to_str().unwrap(),
         "--pretty",
@@ -107,8 +104,7 @@ fn review_unit_list_returns_multiple_entries_in_capture_order() {
 
     let output = shore([
         "review",
-        "unit",
-        "list",
+        "revisions",
         "--repo",
         repo.path().to_str().unwrap(),
     ]);
@@ -135,8 +131,7 @@ fn review_unit_list_succeeds_without_events() {
 
     let output = shore([
         "review",
-        "unit",
-        "list",
+        "revisions",
         "--repo",
         repo.path().to_str().unwrap(),
     ]);
@@ -176,7 +171,7 @@ fn review_unit_list_reads_capture_from_the_shared_store_after_seed_worktree_remo
     let reader = fixture.add_worktree("reader");
     assert!(!reader.join(".shore/data/events").exists());
 
-    let output = shore(["review", "unit", "list", "--repo", reader.to_str().unwrap()]);
+    let output = shore(["review", "revisions", "--repo", reader.to_str().unwrap()]);
     assert!(
         output.status.success(),
         "list stderr:\n{}",
@@ -224,7 +219,7 @@ fn review_unit_list_omits_ambient_ambiguous_current_diagnostic_from_shared_store
     // sees them with no `store link` step.
     let reader = fixture.add_worktree("reader");
 
-    let output = shore(["review", "unit", "list", "--repo", reader.to_str().unwrap()]);
+    let output = shore(["review", "revisions", "--repo", reader.to_str().unwrap()]);
     assert!(
         output.status.success(),
         "list stderr:\n{}",
@@ -269,8 +264,7 @@ fn unit_list_renders_commit_range_source_without_paths() {
 
     let output = shore([
         "review",
-        "unit",
-        "list",
+        "revisions",
         "--repo",
         repo.path().to_str().unwrap(),
     ]);
@@ -369,7 +363,7 @@ fn unit_list_attaches_merge_status_and_accepts_integration_and_worktree_flags() 
     let worktree_id = worktree["reviewUnit"]["id"].as_str().unwrap().to_owned();
 
     // Default list: each entry carries a structural merge-status.
-    let default = parse_json(&shore(["review", "unit", "list", "--repo", repo_arg]).stdout);
+    let default = parse_json(&shore(["review", "revisions", "--repo", repo_arg]).stdout);
     let status_for = |id: &str| -> String {
         default["entries"]
             .as_array()
@@ -388,8 +382,7 @@ fn unit_list_attaches_merge_status_and_accepts_integration_and_worktree_flags() 
     // the worktree capture.
     let scoped = shore([
         "review",
-        "unit",
-        "list",
+        "revisions",
         "--repo",
         repo_arg,
         "--integration-ref",
@@ -415,8 +408,7 @@ fn unit_list_attaches_merge_status_and_accepts_integration_and_worktree_flags() 
 fn unit_list_ids(repo: &GitRepo, extra: &[&str]) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "review".to_owned(),
-        "unit".to_owned(),
-        "list".to_owned(),
+        "revisions".to_owned(),
         "--repo".to_owned(),
         repo.path().to_str().unwrap().to_owned(),
     ];

@@ -88,7 +88,6 @@ pub fn subject_revision_id(subject: &TargetRef) -> Option<&RevisionId> {
             | ReviewTargetRef::InputRequest { revision_id, .. }
             | ReviewTargetRef::Assessment { revision_id, .. }
             | ReviewTargetRef::Event { revision_id, .. } => Some(revision_id),
-            ReviewTargetRef::Lineage { .. } => None,
         },
         TargetRef::Task(_) | TargetRef::Ledger => None,
     }

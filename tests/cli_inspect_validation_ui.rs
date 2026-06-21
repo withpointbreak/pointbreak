@@ -11,7 +11,7 @@
 mod support;
 
 use support::git_repo::GitRepo;
-use support::inspect::{Inspector, capture_lineage_round, representative_store, urlencode};
+use support::inspect::{Inspector, capture_supersession_round, representative_store, urlencode};
 use support::shore;
 
 /// Spawn the inspector against a representative store and return the served
@@ -98,29 +98,28 @@ fn served_app_js_includes_validation_in_lineage_facts() {
 }
 
 #[test]
-fn lineage_round_join_keys_exist_for_validation_entries() {
-    // A two-round lineage with a validation check recorded on the FIRST (now
-    // stale) round's unit. This pins the data contract behind the client-side
-    // lineageFactsForRound join (the round's reviewUnitId joins the validation
-    // entry's subject revision id, plus isHead on rounds).
+fn supersession_thread_join_keys_exist_for_validation_entries() {
+    // A two-revision supersession thread with a validation check recorded on the
+    // FIRST (now superseded) revision. This pins the data contract behind the
+    // client-side fact join: the validation entry's subject revision id joins the
+    // superseded revision in the thread, while the second revision is the head.
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
     repo.commit_all("base");
-    let lineage_id = "review-unit-lineage:random:validation-join";
 
     repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
-    let first = capture_lineage_round(repo.path(), lineage_id, None);
-    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
-    let second = capture_lineage_round(repo.path(), lineage_id, Some(&first));
+    let first = capture_supersession_round(repo.path(), None);
 
-    // Record the validation against the first round's unit specifically.
+    // Record the validation against the first revision while it is still the sole
+    // head, so the fact stays anchored to `first` after it is superseded. (Passing
+    // `--revision <superseded>` later would resolve forward to the current head.)
     let added = shore([
         "review",
         "validation",
         "add",
         "--repo",
         repo.path().to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         &first,
         "--track",
         "agent:codex",
@@ -135,24 +134,19 @@ fn lineage_round_join_keys_exist_for_validation_entries() {
         String::from_utf8_lossy(&added.stderr)
     );
 
+    let second = capture_supersession_round(repo.path(), Some(&first));
+
     let inspector = Inspector::spawn(repo.path());
 
-    // Join side A: rounds carry reviewUnitId + isHead.
-    let lineages = inspector.get_json("/api/lineages");
-    let rounds = lineages["entries"][0]["rounds"].as_array().unwrap();
-    assert_eq!(rounds.len(), 2);
-    let first_round = rounds
-        .iter()
-        .find(|r| r["reviewUnitId"] == first.as_str())
-        .unwrap();
-    let second_round = rounds
-        .iter()
-        .find(|r| r["reviewUnitId"] == second.as_str())
-        .unwrap();
-    assert_eq!(first_round["isHead"], false);
-    assert_eq!(second_round["isHead"], true);
+    // Join side A: the supersession thread carries heads + superseded revisions.
+    let objects = inspector.get_json("/api/objects");
+    let thread = &objects["threads"][0];
+    assert_eq!(thread["competing"], false);
+    assert_eq!(thread["heads"].as_array().unwrap().len(), 1);
+    assert_eq!(thread["heads"][0], second.as_str());
+    assert_eq!(thread["superseded"][0], first.as_str());
 
-    // Join side B: the validation history entry's subject names the first round.
+    // Join side B: the validation history entry's subject names the first revision.
     let history = inspector.get_json("/api/history");
     let validation = history["entries"]
         .as_array()

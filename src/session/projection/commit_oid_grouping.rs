@@ -98,6 +98,7 @@ mod tests {
                         }),
                     },
                     snapshot_artifact_content_hash: "sha256:artifact".to_owned(),
+                    supersedes: vec![],
                 },
             },
             "2026-06-19T00:00:00Z",

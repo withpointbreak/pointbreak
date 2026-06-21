@@ -366,6 +366,7 @@ mod tests {
                         }),
                     },
                     snapshot_artifact_content_hash: capture.snapshot_artifact_content_hash.clone(),
+                    supersedes: vec![],
                 },
             },
             "2026-01-01T00:00:00Z",

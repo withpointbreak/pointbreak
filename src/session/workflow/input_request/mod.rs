@@ -419,7 +419,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("no captured review unit"));
+        assert!(error.to_string().contains("no captured revision"));
     }
 
     #[test]
@@ -439,7 +439,7 @@ mod tests {
         assert!(
             ambiguous
                 .to_string()
-                .contains("multiple captured review units")
+                .contains("multiple captured revisions")
         );
 
         let explicit = open_input_request(

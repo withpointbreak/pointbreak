@@ -9,14 +9,13 @@
 use std::path::Path;
 
 use serde::Serialize;
-use shoreline::documents::{lineage_show_document, unit_show_document};
-use shoreline::model::{ObjectId, ReviewEndpoint, ReviewUnitLineageId, RevisionId};
+use shoreline::documents::unit_show_document;
+use shoreline::model::{ObjectId, ReviewEndpoint, RevisionId};
 use shoreline::session::{
-    EventVerificationPolicy, LineageListEntry, LineageListOptions, LineageShowOptions,
-    LineageShowResult, LivenessEnrichment, ProjectionDiagnostic, ReviewHistoryEntry,
+    EventVerificationPolicy, LivenessEnrichment, ProjectionDiagnostic, ReviewHistoryEntry,
     ReviewHistoryOptions, ReviewUnitListEntry, ReviewUnitListOptions, ReviewUnitShowOptions,
-    enrich_liveness, list_lineages, list_review_units, read_snapshot_artifact, review_history,
-    show_lineage, show_review_unit,
+    SessionState, SupersessionView, enrich_liveness, list_review_units, read_events,
+    read_snapshot_artifact, review_history, show_review_unit,
 };
 
 #[derive(Serialize)]
@@ -43,35 +42,26 @@ struct UnitsPayload {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct LineagesPayload {
+struct ObjectsPayload {
     schema: &'static str,
     event_set_hash: String,
     event_count: usize,
-    lineage_count: usize,
-    entries: Vec<LineageEntryDocument>,
+    thread_count: usize,
+    threads: Vec<ThreadDocument>,
     diagnostics: Vec<ProjectionDiagnostic>,
 }
 
+/// One supersession thread (the connected component of the supersession graph —
+/// the engagement, labeled domain-side). Fork-tolerant: `heads` carries every
+/// competing head, never a null head.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct LineageEntryDocument {
-    lineage_id: String,
-    head_review_unit_id: Option<String>,
-    round_count: usize,
-    rounds: Vec<LineageRoundEntryDocument>,
-    diagnostics: Vec<ProjectionDiagnostic>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LineageRoundEntryDocument {
-    lineage_id: String,
-    round_id: String,
-    review_unit_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    predecessor_review_unit_id: Option<String>,
-    round_index: Option<usize>,
-    is_head: bool,
+struct ThreadDocument {
+    revisions: Vec<String>,
+    heads: Vec<String>,
+    superseded: Vec<String>,
+    /// `true` when the thread has more than one current head (a fork).
+    competing: bool,
 }
 
 /// One `/api/units` entry: the full `ReviewUnitListEntry` flattened verbatim,
@@ -229,40 +219,6 @@ fn to_unit_entry_documents(entries: Vec<ReviewUnitListEntry>) -> Vec<UnitEntryDo
         .collect()
 }
 
-impl From<LineageShowResult> for LineageEntryDocument {
-    fn from(result: LineageShowResult) -> Self {
-        let round_count = result.rounds.len();
-        Self {
-            lineage_id: result.lineage_id.as_str().to_owned(),
-            head_review_unit_id: result
-                .head_review_unit_id
-                .map(|review_unit_id| review_unit_id.as_str().to_owned()),
-            round_count,
-            rounds: result
-                .rounds
-                .into_iter()
-                .map(LineageRoundEntryDocument::from)
-                .collect(),
-            diagnostics: result.diagnostics,
-        }
-    }
-}
-
-impl From<shoreline::session::LineageRoundView> for LineageRoundEntryDocument {
-    fn from(round: shoreline::session::LineageRoundView) -> Self {
-        Self {
-            lineage_id: round.lineage_id.as_str().to_owned(),
-            round_id: round.round_id.as_str().to_owned(),
-            review_unit_id: round.review_unit_id.as_str().to_owned(),
-            predecessor_review_unit_id: round
-                .predecessor_review_unit_id
-                .map(|review_unit_id| review_unit_id.as_str().to_owned()),
-            round_index: round.round_index,
-            is_head: round.is_head,
-        }
-    }
-}
-
 /// Full chronological event timeline with hydrated bodies.
 pub(super) fn history_json(repo: &Path) -> Result<String, String> {
     let mut options = ReviewHistoryOptions::new(repo)
@@ -301,44 +257,47 @@ pub(super) fn units_json(repo: &Path) -> Result<String, String> {
     serde_json::to_string(&payload).map_err(|error| error.to_string())
 }
 
-/// ReviewUnit lineages summarized for the inspector sidebar/list view.
-pub(super) fn lineages_json(repo: &Path) -> Result<String, String> {
-    let result = list_lineages(LineageListOptions::new(repo)).map_err(|error| error.to_string())?;
-    let entries = result
-        .entries
-        .into_iter()
-        .map(|entry: LineageListEntry| {
-            show_lineage(LineageShowOptions::new(repo, entry.lineage_id))
-                .map(LineageEntryDocument::from)
-                .map_err(|error| error.to_string())
+/// The supersession-DAG threads (the connected components of the supersession
+/// graph, labeled domain-side), each with its competing heads and superseded
+/// revisions. Fork-tolerant: never a null head, never a "malformed" error.
+pub(super) fn objects_json(repo: &Path) -> Result<String, String> {
+    let events = read_events(repo).map_err(|error| error.to_string())?;
+    let state = SessionState::from_events(&events).map_err(|error| error.to_string())?;
+    let view = SupersessionView::from_events(&events).map_err(|error| error.to_string())?;
+
+    let threads = view
+        .components
+        .iter()
+        .map(|component| {
+            let heads: Vec<String> = component
+                .intersection(&view.heads)
+                .map(|revision| revision.as_str().to_owned())
+                .collect();
+            let superseded: Vec<String> = component
+                .intersection(&view.superseded)
+                .map(|revision| revision.as_str().to_owned())
+                .collect();
+            ThreadDocument {
+                revisions: component
+                    .iter()
+                    .map(|revision| revision.as_str().to_owned())
+                    .collect(),
+                competing: heads.len() > 1,
+                heads,
+                superseded,
+            }
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    let payload = LineagesPayload {
-        schema: "shore.inspect-lineages",
-        event_set_hash: result.event_set_hash,
-        event_count: result.event_count,
-        lineage_count: result.lineage_count,
-        entries,
-        diagnostics: result.diagnostics,
+        .collect::<Vec<_>>();
+
+    let payload = ObjectsPayload {
+        schema: "shore.inspect-objects",
+        event_set_hash: state.event_set_hash.unwrap_or_default(),
+        event_count: state.event_count,
+        thread_count: threads.len(),
+        threads,
+        diagnostics: view.diagnostics,
     };
     serde_json::to_string(&payload).map_err(|error| error.to_string())
-}
-
-/// The read-only lineage projection for one ReviewUnit lineage.
-pub(super) fn lineage_json(repo: &Path, lineage_id: &str) -> Result<String, String> {
-    if lineage_id.is_empty() {
-        return Err("missing lineage id".to_owned());
-    }
-    let result = show_lineage(LineageShowOptions::new(
-        repo,
-        ReviewUnitLineageId::new(lineage_id.to_owned()),
-    ))
-    .map_err(|error| {
-        tracing::debug!(error = %error, lineage = lineage_id, "inspect_lineage_read_failed");
-        format!("lineage not found or unreadable: {lineage_id}")
-    })?;
-    let document = lineage_show_document(result);
-    serde_json::to_string(&document).map_err(|error| error.to_string())
 }
 
 /// The captured diff snapshot for one ReviewUnit, by snapshot id.
@@ -802,6 +761,7 @@ mod tests {
                     }),
                 },
                 snapshot_artifact_content_hash: "sha256:artifact:legacy".to_owned(),
+                supersedes: vec![],
             },
         };
 

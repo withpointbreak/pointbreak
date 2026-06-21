@@ -30,7 +30,7 @@ fn repo_with_agent_observation() -> GitRepo {
             "add",
             "--repo",
             &path,
-            "--review-unit",
+            "--revision",
             &review_unit_id,
             "--track",
             "agent:claude-code",

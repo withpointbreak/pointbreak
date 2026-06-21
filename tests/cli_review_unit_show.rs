@@ -5,8 +5,8 @@ use support::git_repo::GitRepo;
 use support::{shore, shore_env};
 
 #[test]
-fn review_unit_help_lists_show() {
-    let output = shore(["review", "unit", "--help"]);
+fn review_help_lists_show() {
+    let output = shore(["review", "--help"]);
 
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("show"));
@@ -17,13 +17,7 @@ fn review_unit_show_emits_v1_json() {
     let repo = modified_repo();
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
 
-    let output = shore([
-        "review",
-        "unit",
-        "show",
-        "--repo",
-        repo.path().to_str().unwrap(),
-    ]);
+    let output = shore(["review", "show", "--repo", repo.path().to_str().unwrap()]);
 
     assert!(
         output.status.success(),
@@ -55,7 +49,6 @@ fn review_unit_show_rejects_invalid_track_before_json_output() {
 
     let output = shore([
         "review",
-        "unit",
         "show",
         "--repo",
         repo.path().to_str().unwrap(),
@@ -75,7 +68,6 @@ fn review_unit_show_pretty_prints() {
 
     let output = shore([
         "review",
-        "unit",
         "show",
         "--repo",
         repo.path().to_str().unwrap(),
@@ -92,7 +84,6 @@ fn review_unit_show_rejects_pretty_and_compact_together() {
 
     let output = shore([
         "review",
-        "unit",
         "show",
         "--repo",
         repo.path().to_str().unwrap(),
@@ -114,23 +105,16 @@ fn review_unit_show_supports_explicit_review_unit_when_ambiguous() {
     let second =
         parse_json(&shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]).stdout);
 
-    let ambiguous = shore([
-        "review",
-        "unit",
-        "show",
-        "--repo",
-        repo.path().to_str().unwrap(),
-    ]);
+    let ambiguous = shore(["review", "show", "--repo", repo.path().to_str().unwrap()]);
     assert!(!ambiguous.status.success());
-    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("multiple captured review units"));
+    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("multiple captured revisions"));
 
     let explicit = shore([
         "review",
-        "unit",
         "show",
         "--repo",
         repo.path().to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         first["reviewUnit"]["id"].as_str().unwrap(),
     ]);
     let json = parse_json(&explicit.stdout);
@@ -147,7 +131,6 @@ fn review_unit_show_include_body_hydrates_without_internal_paths() {
 
     let output = shore([
         "review",
-        "unit",
         "show",
         "--repo",
         repo.path().to_str().unwrap(),
@@ -178,7 +161,6 @@ fn review_unit_show_includes_input_requests_and_omits_legacy_fields() {
 
     let output = shore([
         "review",
-        "unit",
         "show",
         "--repo",
         repo.path().to_str().unwrap(),
@@ -221,16 +203,8 @@ fn review_unit_show_rows_are_narrative_first_and_snapshot_complete() {
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
     add_observation(&repo, "agent:codex", "Narrative");
 
-    let json = parse_json(
-        &shore([
-            "review",
-            "unit",
-            "show",
-            "--repo",
-            repo.path().to_str().unwrap(),
-        ])
-        .stdout,
-    );
+    let json =
+        parse_json(&shore(["review", "show", "--repo", repo.path().to_str().unwrap()]).stdout);
 
     let rows = json["rows"].as_array().unwrap();
     let first_remainder = rows
@@ -264,20 +238,11 @@ fn review_unit_show_track_filter_echoes_and_narrows_narrative_only() {
     add_observation(&repo, "agent:codex", "Codex");
     add_observation(&repo, "agent:claude", "Claude");
 
-    let all = parse_json(
-        &shore([
-            "review",
-            "unit",
-            "show",
-            "--repo",
-            repo.path().to_str().unwrap(),
-        ])
-        .stdout,
-    );
+    let all =
+        parse_json(&shore(["review", "show", "--repo", repo.path().to_str().unwrap()]).stdout);
     let codex = parse_json(
         &shore([
             "review",
-            "unit",
             "show",
             "--repo",
             repo.path().to_str().unwrap(),
@@ -306,16 +271,8 @@ fn review_unit_show_includes_current_assessment_status() {
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
     add_assessment(&repo);
 
-    let json = parse_json(
-        &shore([
-            "review",
-            "unit",
-            "show",
-            "--repo",
-            repo.path().to_str().unwrap(),
-        ])
-        .stdout,
-    );
+    let json =
+        parse_json(&shore(["review", "show", "--repo", repo.path().to_str().unwrap()]).stdout);
 
     assert_eq!(json["currentAssessment"]["status"], "resolved");
     assert_eq!(json["currentAssessment"]["assessment"], "accepted");
@@ -336,13 +293,7 @@ fn review_unit_show_includes_adapter_notes_without_storage_paths() {
         review_notes.to_str().unwrap(),
     ]);
 
-    let output = shore([
-        "review",
-        "unit",
-        "show",
-        "--repo",
-        repo.path().to_str().unwrap(),
-    ]);
+    let output = shore(["review", "show", "--repo", repo.path().to_str().unwrap()]);
     let json = parse_json(&output.stdout);
     let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -378,11 +329,10 @@ fn unit_show_projects_range_capture_with_bound_snapshot() {
 
     let output = shore([
         "review",
-        "unit",
         "show",
         "--repo",
         repo.path().to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         review_unit_id,
     ]);
 
@@ -423,16 +373,10 @@ fn unit_show_disambiguates_worktree_and_range_units() {
         .stdout,
     );
 
-    let ambiguous = shore([
-        "review",
-        "unit",
-        "show",
-        "--repo",
-        repo.path().to_str().unwrap(),
-    ]);
+    let ambiguous = shore(["review", "show", "--repo", repo.path().to_str().unwrap()]);
     assert!(!ambiguous.status.success());
     assert!(
-        String::from_utf8_lossy(&ambiguous.stderr).contains("multiple captured review units"),
+        String::from_utf8_lossy(&ambiguous.stderr).contains("multiple captured revisions"),
         "stderr:\n{}",
         String::from_utf8_lossy(&ambiguous.stderr)
     );
@@ -440,11 +384,10 @@ fn unit_show_disambiguates_worktree_and_range_units() {
     let json = parse_json(
         &shore([
             "review",
-            "unit",
             "show",
             "--repo",
             repo.path().to_str().unwrap(),
-            "--review-unit",
+            "--revision",
             range["reviewUnit"]["id"].as_str().unwrap(),
         ])
         .stdout,
@@ -493,7 +436,7 @@ fn unit_show_renders_verification_status_on_members_and_capture() {
         .success()
     );
 
-    let out = shore_env(["review", "unit", "show", "--repo", repo_arg], &env);
+    let out = shore_env(["review", "show", "--repo", repo_arg], &env);
     assert!(
         out.status.success(),
         "stderr:\n{}",
@@ -579,7 +522,7 @@ fn unit_show_renders_endorsement_on_capture_identity() {
     );
 
     let out = shore_env(
-        ["review", "unit", "show", "--repo", repo_arg],
+        ["review", "show", "--repo", repo_arg],
         &[("SHORE_HOME", env_home)],
     );
     let doc: Value = serde_json::from_slice(&out.stdout).unwrap();

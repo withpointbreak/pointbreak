@@ -2,15 +2,13 @@ use std::path::Path;
 
 use crate::error::{Result, ShoreError};
 use crate::git::git_head_ref;
-use crate::model::{
-    LedgerId, ObjectId, ReviewEndpoint, ReviewTargetRef, ReviewUnitLineageId, RevisionId, Side,
-};
+use crate::model::{LedgerId, ObjectId, ReviewEndpoint, ReviewTargetRef, RevisionId, Side};
 use crate::session::event::{
     EventType, ReviewUnitRefAssociatedPayload, Revision, ShoreEvent, WorkObjectProposal,
     WorkObjectProposedPayload,
 };
 use crate::session::projection::commit_range::review_unit_of;
-use crate::session::projection::lineage::ReviewUnitLineageProjection;
+use crate::session::projection::supersession::SupersessionView;
 use crate::session::snapshot_artifact::read_snapshot_artifact_for_write_validation;
 use crate::session::store::fingerprint::normalized_worktree_root;
 
@@ -22,29 +20,28 @@ pub(crate) struct ResolvedReviewUnit {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ReviewUnitSelection<'a> {
+pub(crate) enum RevisionSelection<'a> {
     Current,
+    /// Resolve a revision id directly (no head resolution).
     Exact(&'a RevisionId),
-    LineageHead(&'a ReviewUnitLineageId),
+    /// The `--revision` head seed: if the id is itself a current head it resolves
+    /// exactly; otherwise it resolves the current head of the id's thread,
+    /// force-disambiguating when that thread has competing heads.
+    Head(&'a RevisionId),
 }
 
-impl<'a> ReviewUnitSelection<'a> {
-    pub(crate) fn from_review_unit_or_lineage(
-        review_unit_id: Option<&'a RevisionId>,
-        lineage_id: Option<&'a ReviewUnitLineageId>,
-    ) -> Result<Self> {
-        match (review_unit_id, lineage_id) {
-            (Some(_), Some(_)) => Err(ShoreError::WorkflowInputInvalid {
-                reason: "cannot combine --review-unit and --lineage".to_owned(),
-            }),
-            (Some(review_unit_id), None) => Ok(Self::Exact(review_unit_id)),
-            (None, Some(lineage_id)) => Ok(Self::LineageHead(lineage_id)),
-            (None, None) => Ok(Self::Current),
+impl<'a> RevisionSelection<'a> {
+    /// Build the selection from an optional `--revision` seed: a present seed is a
+    /// head seed (`Head`), an absent one defaults to the current capture.
+    pub(crate) fn from_revision_seed(seed: Option<&'a RevisionId>) -> Self {
+        match seed {
+            Some(seed) => Self::Head(seed),
+            None => Self::Current,
         }
     }
 }
 
-/// The caller's current git context for scoping [`ReviewUnitSelection::Current`].
+/// The caller's current git context for scoping [`RevisionSelection::Current`].
 /// `worktree_root` is the canonical root from [`normalized_worktree_root`];
 /// `head_ref` is the full ref of HEAD (`refs/heads/...`), `None` on detached HEAD.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -122,33 +119,20 @@ impl ObservationTargetSelector {
     }
 }
 
-pub(crate) fn resolve_review_unit(
+pub(crate) fn resolve_revision(
     events: &[ShoreEvent],
-    selection: ReviewUnitSelection<'_>,
+    selection: RevisionSelection<'_>,
     context: &CurrentReviewUnitContext,
     scope: ReviewUnitScope,
 ) -> Result<ResolvedReviewUnit> {
-    if let ReviewUnitSelection::LineageHead(lineage_id) = selection {
-        let projection = ReviewUnitLineageProjection::from_events(events)?;
-        let lineage = projection.lineage(lineage_id).ok_or_else(|| {
-            ShoreError::Message(format!(
-                "unknown ReviewUnit lineage: {}",
-                lineage_id.as_str()
-            ))
-        })?;
-        if !lineage.diagnostics.is_empty() {
-            return Err(ShoreError::Message(format!(
-                "ReviewUnit lineage {} is malformed",
-                lineage_id.as_str()
-            )));
-        }
-        let head = lineage.head_review_unit_id.as_ref().ok_or_else(|| {
-            ShoreError::Message(format!(
-                "ReviewUnit lineage {} has no current head",
-                lineage_id.as_str()
-            ))
-        })?;
-        return resolve_review_unit(events, ReviewUnitSelection::Exact(head), context, scope);
+    if let RevisionSelection::Head(seed) = selection {
+        let resolved_id = resolve_head_seed(events, seed)?;
+        return resolve_revision(
+            events,
+            RevisionSelection::Exact(&resolved_id),
+            context,
+            scope,
+        );
     }
 
     // `Current` under a worktree scope (current or named) only considers captures
@@ -172,11 +156,11 @@ pub(crate) fn resolve_review_unit(
             revision_id: revision.id.clone(),
             object_id: revision.object_id.clone(),
         };
-        if matches!(selection, ReviewUnitSelection::Exact(requested) if requested == &resolved.revision_id)
+        if matches!(selection, RevisionSelection::Exact(requested) if requested == &resolved.revision_id)
         {
             return Ok(resolved);
         }
-        if matches!(selection, ReviewUnitSelection::Current)
+        if matches!(selection, RevisionSelection::Current)
             && scoped
             && !capture_matches_current_worktree(events, event, &revision, context)?
         {
@@ -185,19 +169,51 @@ pub(crate) fn resolve_review_unit(
         captured.push(resolved);
     }
 
-    if let ReviewUnitSelection::Exact(requested) = selection {
+    if let RevisionSelection::Exact(requested) = selection {
         return Err(ShoreError::Message(format!(
-            "unknown review unit: {}",
+            "unknown revision: {}",
             requested.as_str()
         )));
     }
 
     match captured.as_slice() {
-        [] => Err(ShoreError::Message("no captured review unit".to_owned())),
+        [] => Err(ShoreError::Message("no captured revision".to_owned())),
         [resolved] => Ok(resolved.clone()),
         _ => Err(ShoreError::Message(
-            "multiple captured review units; pass --review-unit".to_owned(),
+            "multiple captured revisions; pass --revision".to_owned(),
         )),
+    }
+}
+
+/// Resolve a `--revision` head seed to a concrete revision id over the
+/// supersession graph (fork-tolerant): if the seed is itself a current head it
+/// resolves exactly (the escape from a fork — never loops); otherwise it resolves
+/// the single current head of the seed's thread, force-disambiguating when that
+/// thread has competing heads. Thread-scoped — unrelated threads' heads never
+/// leak in.
+fn resolve_head_seed(events: &[ShoreEvent], seed: &RevisionId) -> Result<RevisionId> {
+    let view = SupersessionView::from_events(events)?;
+    if view.heads.contains(seed) {
+        return Ok(seed.clone());
+    }
+    let heads = view.heads_for(seed);
+    match heads.len() {
+        0 => Err(ShoreError::Message(format!(
+            "unknown revision: {}",
+            seed.as_str()
+        ))),
+        1 => Ok(heads.into_iter().next().expect("one head")),
+        _ => {
+            let listed = heads
+                .iter()
+                .map(RevisionId::as_str)
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(ShoreError::Message(format!(
+                "revision {} has competing heads; pass one as --revision: {listed}",
+                seed.as_str()
+            )))
+        }
     }
 }
 
@@ -430,6 +446,7 @@ mod scope_tests {
                         }),
                     },
                     snapshot_artifact_content_hash: "sha256:artifact".to_owned(),
+                    supersedes: vec![],
                 },
             },
             "2026-05-12T00:00:00Z",
@@ -502,7 +519,7 @@ mod scope_tests {
         context: &CurrentReviewUnitContext,
         scope: ReviewUnitScope,
     ) -> Result<ResolvedReviewUnit> {
-        resolve_review_unit(events, ReviewUnitSelection::Current, context, scope)
+        resolve_revision(events, RevisionSelection::Current, context, scope)
     }
 
     #[test]
@@ -546,7 +563,7 @@ mod scope_tests {
         assert!(
             error
                 .to_string()
-                .contains("multiple captured review units; pass --review-unit")
+                .contains("multiple captured revisions; pass --revision")
         );
     }
 
@@ -584,7 +601,7 @@ mod scope_tests {
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("no captured review unit"));
+        assert!(error.to_string().contains("no captured revision"));
     }
 
     #[test]
@@ -598,9 +615,9 @@ mod scope_tests {
         ];
         let requested = RevisionId::new("review-unit:sha256:b");
 
-        let resolved = resolve_review_unit(
+        let resolved = resolve_revision(
             &events,
-            ReviewUnitSelection::Exact(&requested),
+            RevisionSelection::Exact(&requested),
             &ctx("/wt/a", None),
             ReviewUnitScope::CurrentWorktree,
         )
@@ -620,7 +637,7 @@ mod scope_tests {
             worktree_capture("c", "/wt/c"),
         ];
         let error = current(&two, &ctx("/wt/a", None), ReviewUnitScope::All).unwrap_err();
-        assert!(error.to_string().contains("multiple captured review units"));
+        assert!(error.to_string().contains("multiple captured revisions"));
     }
 
     #[test]
@@ -672,7 +689,7 @@ mod scope_tests {
             ReviewUnitScope::CurrentWorktree,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("multiple captured review units"));
+        assert!(error.to_string().contains("multiple captured revisions"));
     }
 
     #[test]
@@ -706,7 +723,7 @@ mod scope_tests {
             ReviewUnitScope::CurrentWorktree,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("multiple captured review units"));
+        assert!(error.to_string().contains("multiple captured revisions"));
     }
 
     #[test]

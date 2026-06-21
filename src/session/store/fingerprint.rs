@@ -214,6 +214,21 @@ pub(in crate::session) fn engagement_id_from_root(revision_id: &RevisionId) -> E
     EngagementId::new(format!("engagement:sha256:{hash}"))
 }
 
+/// Derive a provisional engagement hint for a generative move whose superseded
+/// targets are all not-yet-present (dangling). It seeds deterministically from
+/// the sorted target ids, so the move groups stably until a target backfills and
+/// the read projection self-heals the grouping. `supersedes` must be sorted and
+/// deduped by the caller.
+pub(in crate::session) fn engagement_id_provisional(supersedes: &[RevisionId]) -> EngagementId {
+    let joined = supersedes
+        .iter()
+        .map(RevisionId::as_str)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let hash = crate::canonical_hash::sha256_bytes_hex(joined.as_bytes());
+    EngagementId::new(format!("engagement:sha256:{hash}"))
+}
+
 #[cfg(test)]
 fn exclude_shore_storage_files(files: Vec<DiffFile>) -> Vec<DiffFile> {
     files

@@ -17,6 +17,7 @@ pub(super) fn selected_review_unit_capture(
         let WorkObjectProposal::Revision {
             revision,
             snapshot_artifact_content_hash,
+            ..
         } = payload.work_object
         else {
             continue;

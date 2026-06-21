@@ -3,8 +3,7 @@ use serde::Serialize;
 use crate::model::{
     AssessmentId, CommitAssociationId, CommitWithdrawalId, EngagementId, EventId, InputRequestId,
     InputRequestResponseId, LedgerId, ObjectId, ObservationId, RefAssociationId, RefWithdrawalId,
-    ReviewEndpoint, ReviewTargetRef, ReviewUnitLineageBasisV1, ReviewUnitLineageId,
-    ReviewUnitLineageRoundId, ReviewUnitSource, RevisionId, TrackId, ValidationCheckId,
+    ReviewEndpoint, ReviewTargetRef, ReviewUnitSource, RevisionId, TrackId, ValidationCheckId,
     ValidationStatus, ValidationTarget, ValidationTrigger,
 };
 use crate::session::event::{
@@ -142,19 +141,6 @@ pub enum ReviewHistorySummary {
         #[serde(skip_serializing_if = "Option::is_none")]
         created_at: Option<String>,
         sidecar_content_hash: String,
-    },
-    ReviewUnitLineageDeclared {
-        lineage_id: ReviewUnitLineageId,
-        basis: ReviewUnitLineageBasisV1,
-    },
-    ReviewUnitLineageRoundRecorded {
-        lineage_id: ReviewUnitLineageId,
-        round_id: ReviewUnitLineageRoundId,
-        review_unit_id: RevisionId,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        predecessor_review_unit_id: Option<RevisionId>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        change_id: Option<String>,
     },
     ValidationCheckRecorded {
         validation_check_id: ValidationCheckId,

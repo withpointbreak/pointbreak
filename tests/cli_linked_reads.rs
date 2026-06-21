@@ -8,8 +8,8 @@ use std::process::Command;
 use serde_json::Value;
 use shoreline::model::ObjectId;
 use shoreline::session::{
-    ArtifactKind, ArtifactRef, ImportArtifactOptions, LineageListOptions, export_artifact,
-    import_artifact, list_lineages, read_snapshot_artifact, referenced_artifacts,
+    ArtifactKind, ArtifactRef, ImportArtifactOptions, export_artifact, import_artifact,
+    read_snapshot_artifact, referenced_artifacts,
 };
 use support::git_repo::GitRepo;
 use support::shore;
@@ -78,7 +78,7 @@ impl LinkedFixture {
             "add",
             "--repo",
             worktree.to_str().unwrap(),
-            "--review-unit",
+            "--revision",
             review_unit_id,
             "--track",
             "agent:test-fixture",
@@ -93,20 +93,6 @@ impl LinkedFixture {
         self.main.path().join(".git/shore")
     }
 
-    fn lineage_attach(&self, worktree: &Path, lineage_id: &str, review_unit_id: &str) -> Value {
-        run_shore_json(&[
-            "review",
-            "lineage",
-            "attach",
-            "--repo",
-            worktree.to_str().unwrap(),
-            "--lineage",
-            lineage_id,
-            "--review-unit",
-            review_unit_id,
-        ])
-    }
-
     fn history_json(&self, worktree: &Path, include_body: bool) -> Value {
         let mut args = vec!["review", "history", "--repo", worktree.to_str().unwrap()];
         if include_body {
@@ -118,11 +104,10 @@ impl LinkedFixture {
     fn unit_show_json(&self, worktree: &Path, review_unit_id: &str) -> Value {
         run_shore_json(&[
             "review",
-            "unit",
             "show",
             "--repo",
             worktree.to_str().unwrap(),
-            "--review-unit",
+            "--revision",
             review_unit_id,
             "--include-body",
         ])
@@ -211,24 +196,17 @@ impl LinkedFixture {
     }
 
     fn unit_list_json(&self, worktree: &Path) -> Value {
-        run_shore_json(&[
-            "review",
-            "unit",
-            "list",
-            "--repo",
-            worktree.to_str().unwrap(),
-        ])
+        run_shore_json(&["review", "revisions", "--repo", worktree.to_str().unwrap()])
     }
 }
 
-/// One fully populated seed unit (every fact kind + response + lineage) written
-/// through to the shared common-dir store, with the seed worktree force-removed.
-/// The shared arrangement for the deleted-source-worktree matrix.
-fn populated_fixture_with_deleted_seed(body: &str, lineage_id: &str) -> (LinkedFixture, String) {
+/// One fully populated seed unit (every fact kind + response) written through to
+/// the shared common-dir store, with the seed worktree force-removed. The shared
+/// arrangement for the deleted-source-worktree matrix.
+fn populated_fixture_with_deleted_seed(body: &str) -> (LinkedFixture, String) {
     let fixture = LinkedFixture::new();
     let input_request_id = fixture.seed_full_facts(body);
     fixture.respond_input_request(&fixture.seed, &input_request_id);
-    fixture.lineage_attach(&fixture.seed, lineage_id, &fixture.seed_review_unit_id);
     fixture.remove_seed();
     (fixture, input_request_id)
 }
@@ -243,7 +221,7 @@ fn assert_no_deleted_path_in_diagnostics(fixture: &LinkedFixture, json: &Value) 
 
 #[test]
 fn deleted_worktree_unit_list_lists_unit() {
-    let (fixture, _) = populated_fixture_with_deleted_seed("m1", "review-unit-lineage:random:m1");
+    let (fixture, _) = populated_fixture_with_deleted_seed("m1");
 
     let json = fixture.unit_list_json(&fixture.reader);
 
@@ -258,7 +236,7 @@ fn deleted_worktree_unit_list_lists_unit() {
 #[test]
 fn deleted_worktree_unit_show_renders_composite_with_snapshot() {
     let body = "m".repeat(5000);
-    let (fixture, _) = populated_fixture_with_deleted_seed(&body, "review-unit-lineage:random:m2");
+    let (fixture, _) = populated_fixture_with_deleted_seed(&body);
 
     let json = fixture.unit_show_json(&fixture.reader, &fixture.seed_review_unit_id);
 
@@ -274,7 +252,7 @@ fn deleted_worktree_unit_show_renders_composite_with_snapshot() {
 #[test]
 fn deleted_worktree_history_renders_timeline_with_bodies() {
     let body = "n".repeat(5000);
-    let (fixture, _) = populated_fixture_with_deleted_seed(&body, "review-unit-lineage:random:m3");
+    let (fixture, _) = populated_fixture_with_deleted_seed(&body);
 
     let json = fixture.history_json(&fixture.reader, true);
 
@@ -289,7 +267,7 @@ fn deleted_worktree_history_renders_timeline_with_bodies() {
 #[test]
 fn deleted_worktree_observation_list_renders_with_hydrated_body() {
     let body = "p".repeat(5000);
-    let (fixture, _) = populated_fixture_with_deleted_seed(&body, "review-unit-lineage:random:m4");
+    let (fixture, _) = populated_fixture_with_deleted_seed(&body);
 
     let json = run_shore_json(&[
         "review",
@@ -297,7 +275,7 @@ fn deleted_worktree_observation_list_renders_with_hydrated_body() {
         "list",
         "--repo",
         fixture.reader.to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         &fixture.seed_review_unit_id,
         "--include-body",
     ]);
@@ -309,8 +287,7 @@ fn deleted_worktree_observation_list_renders_with_hydrated_body() {
 
 #[test]
 fn deleted_worktree_input_request_list_renders_with_response() {
-    let (fixture, input_request_id) =
-        populated_fixture_with_deleted_seed("m5", "review-unit-lineage:random:m5");
+    let (fixture, input_request_id) = populated_fixture_with_deleted_seed("m5");
 
     let json = run_shore_json(&[
         "review",
@@ -318,7 +295,7 @@ fn deleted_worktree_input_request_list_renders_with_response() {
         "list",
         "--repo",
         fixture.reader.to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         &fixture.seed_review_unit_id,
         "--status",
         "all",
@@ -341,7 +318,7 @@ fn deleted_worktree_input_request_list_renders_with_response() {
 
 #[test]
 fn deleted_worktree_assessment_show_renders() {
-    let (fixture, _) = populated_fixture_with_deleted_seed("m6", "review-unit-lineage:random:m6");
+    let (fixture, _) = populated_fixture_with_deleted_seed("m6");
 
     let json = run_shore_json(&[
         "review",
@@ -349,7 +326,7 @@ fn deleted_worktree_assessment_show_renders() {
         "show",
         "--repo",
         fixture.reader.to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         &fixture.seed_review_unit_id,
     ]);
 
@@ -360,7 +337,7 @@ fn deleted_worktree_assessment_show_renders() {
 
 #[test]
 fn deleted_worktree_validation_list_renders() {
-    let (fixture, _) = populated_fixture_with_deleted_seed("m7", "review-unit-lineage:random:m7");
+    let (fixture, _) = populated_fixture_with_deleted_seed("m7");
 
     let json = run_shore_json(&[
         "review",
@@ -368,38 +345,12 @@ fn deleted_worktree_validation_list_renders() {
         "list",
         "--repo",
         fixture.reader.to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         &fixture.seed_review_unit_id,
     ]);
 
     assert_eq!(json["validationChecks"].as_array().unwrap().len(), 1);
     assert_no_deleted_path_in_diagnostics(&fixture, &json);
-}
-
-#[test]
-fn deleted_worktree_lineage_list_and_show_render() {
-    let lineage_id = "review-unit-lineage:random:m8";
-    let (fixture, _) = populated_fixture_with_deleted_seed("m8", lineage_id);
-
-    let list = list_lineages(LineageListOptions::new(&fixture.reader)).unwrap();
-    assert_eq!(list.lineage_count, 1);
-    assert_eq!(list.entries[0].lineage_id.as_str(), lineage_id);
-
-    let show = run_shore_json(&[
-        "review",
-        "lineage",
-        "show",
-        "--repo",
-        fixture.reader.to_str().unwrap(),
-        "--lineage",
-        lineage_id,
-    ]);
-    assert_eq!(
-        show["headReviewUnitId"],
-        Value::String(fixture.seed_review_unit_id.clone())
-    );
-    assert_eq!(show["rounds"].as_array().unwrap().len(), 1);
-    assert_no_deleted_path_in_diagnostics(&fixture, &show);
 }
 
 #[test]
@@ -470,7 +421,7 @@ fn reader_capture_file_target_observation_resolves_artifact() {
         "add",
         "--repo",
         fixture.reader.to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         &local_unit_id,
         "--track",
         "agent:test-fixture",
@@ -517,7 +468,7 @@ fn linked_reader_opens_input_request_against_linked_only_unit() {
         "open",
         "--repo",
         fixture.reader.to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         &fixture.seed_review_unit_id,
         "--track",
         "agent:test-fixture",
@@ -557,7 +508,7 @@ fn linked_reader_opens_input_request_with_observation_ref_target() {
         "open",
         "--repo",
         fixture.reader.to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         &fixture.seed_review_unit_id,
         "--observation",
         &observation_id,
@@ -635,7 +586,7 @@ fn linked_reader_records_assessment_on_linked_only_unit() {
         "add",
         "--repo",
         fixture.reader.to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         &fixture.seed_review_unit_id,
         "--track",
         "human:kevin",
@@ -670,7 +621,7 @@ fn linked_reader_assessment_relates_linked_only_observation() {
         "add",
         "--repo",
         fixture.reader.to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         &fixture.seed_review_unit_id,
         "--track",
         "human:kevin",
@@ -694,7 +645,7 @@ fn linked_reader_assessment_replaces_linked_only_assessment() {
         "add",
         "--repo",
         fixture.seed.to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         &fixture.seed_review_unit_id,
         "--track",
         "human:kevin",
@@ -716,7 +667,7 @@ fn linked_reader_assessment_replaces_linked_only_assessment() {
         "add",
         "--repo",
         fixture.reader.to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         &fixture.seed_review_unit_id,
         "--track",
         "human:kevin",
@@ -743,7 +694,7 @@ fn linked_reader_records_validation_on_linked_only_unit() {
         "add",
         "--repo",
         fixture.reader.to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         &fixture.seed_review_unit_id,
         "--track",
         "agent:test-fixture",
@@ -754,71 +705,6 @@ fn linked_reader_records_validation_on_linked_only_unit() {
     ]);
 
     assert_eq!(result["eventsCreated"], 1);
-}
-
-#[test]
-fn linked_reader_attaches_linked_only_unit_to_lineage() {
-    let fixture = LinkedFixture::new();
-
-    // RED today: stored_capture_payload reads the reader's empty local store and
-    // fails with "unknown review unit".
-    let result = fixture.lineage_attach(
-        &fixture.reader,
-        "review-unit-lineage:random:wv-attach",
-        &fixture.seed_review_unit_id,
-    );
-
-    assert_eq!(
-        result["headReviewUnitId"],
-        Value::String(fixture.seed_review_unit_id.clone())
-    );
-    assert_eq!(result["eventsCreated"], 2);
-}
-
-#[test]
-fn linked_reader_lineage_result_projection_uses_union_for_head() {
-    let fixture = LinkedFixture::new();
-    let lineage_id = "review-unit-lineage:random:wv-union-head";
-    let unit_a = fixture.seed_review_unit_id.clone();
-
-    // The seed attaches A to the lineage, then captures a successor B; linking
-    // puts A, B, and A's lineage round in the linked store.
-    fixture.lineage_attach(&fixture.seed, lineage_id, &unit_a);
-    fs::write(fixture.seed.join("README.md"), "changed in seed again\n").unwrap();
-    let capture_b = fixture.capture(&fixture.seed);
-    let unit_b = capture_b["reviewUnit"]["id"]
-        .as_str()
-        .expect("successor capture id")
-        .to_owned();
-
-    // The reader attaches B with predecessor A — a clean extension. The result
-    // projection must see A's prior round (linked) plus the two new local events,
-    // so B is a clean head, not a spurious fork.
-    let result = run_shore_json(&[
-        "review",
-        "lineage",
-        "attach",
-        "--repo",
-        fixture.reader.to_str().unwrap(),
-        "--lineage",
-        lineage_id,
-        "--review-unit",
-        &unit_b,
-        "--predecessor",
-        &unit_a,
-    ]);
-
-    assert_eq!(result["headReviewUnitId"], Value::String(unit_b));
-    assert!(
-        !diagnostic_codes(&result).contains(&"lineage_forked_successor"),
-        "spurious fork diagnostic: {}",
-        result["diagnostics"]
-    );
-    assert!(
-        !diagnostic_codes(&result).contains(&"lineage_multiple_heads"),
-        "spurious multiple-heads diagnostic: {}",
-        result["diagnostics"]
-    );
 }
 
 #[test]
@@ -839,7 +725,7 @@ fn linked_fact_writes_land_in_linked_store_not_worktree_local() {
         "open",
         "--repo",
         reader,
-        "--review-unit",
+        "--revision",
         unit,
         "--track",
         "agent:test-fixture",
@@ -856,7 +742,7 @@ fn linked_fact_writes_land_in_linked_store_not_worktree_local() {
         "add",
         "--repo",
         reader,
-        "--review-unit",
+        "--revision",
         unit,
         "--track",
         "human:kevin",
@@ -871,7 +757,7 @@ fn linked_fact_writes_land_in_linked_store_not_worktree_local() {
         "add",
         "--repo",
         reader,
-        "--review-unit",
+        "--revision",
         unit,
         "--track",
         "agent:test-fixture",
@@ -881,11 +767,6 @@ fn linked_fact_writes_land_in_linked_store_not_worktree_local() {
         "passed",
     ]);
     fixture.respond_input_request(&fixture.reader, &request_id);
-    fixture.lineage_attach(
-        &fixture.reader,
-        "review-unit-lineage:random:wv-locality",
-        unit,
-    );
 
     // Every write-through fact landed in the clone-local store, not worktree-local.
     let linked_after = event_file_names(&fixture.linked_store_dir());
@@ -944,7 +825,7 @@ fn linked_fact_write_does_not_copy_snapshot_artifacts_to_linked_store() {
         "add",
         "--repo",
         fixture.reader.to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         &local_unit,
         "--track",
         "agent:test-fixture",
@@ -1046,7 +927,7 @@ fn file_targeted_cross_worktree_fact_is_immediately_readable() {
         "add",
         "--repo",
         fixture.reader.to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         &local_unit,
         "--track",
         "agent:test-fixture",
@@ -1066,7 +947,7 @@ fn file_targeted_cross_worktree_fact_is_immediately_readable() {
         "list",
         "--repo",
         fixture.seed.to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         &local_unit,
         "--include-body",
     ]);
@@ -1080,7 +961,7 @@ fn observation_list_json(worktree: &Path, review_unit_id: &str) -> Value {
         "list",
         "--repo",
         worktree.to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         review_unit_id,
     ])
 }
@@ -1106,18 +987,6 @@ fn run_shore_json(args: &[&str]) -> Value {
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("shore stdout is json")
-}
-
-fn diagnostic_codes(json: &Value) -> Vec<&str> {
-    json["diagnostics"]
-        .as_array()
-        .map(|diagnostics| {
-            diagnostics
-                .iter()
-                .filter_map(|diagnostic| diagnostic["code"].as_str())
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn add_worktree(repo: &Path, path: &Path, branch: &str) {
@@ -1251,7 +1120,7 @@ fn linked_observation_list_resolves_linked_unit() {
         "list",
         "--repo",
         fixture.reader.to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         &fixture.seed_review_unit_id,
         "--include-body",
     ]);
@@ -1275,7 +1144,7 @@ fn linked_input_request_list_resolves_linked_unit() {
         "list",
         "--repo",
         fixture.reader.to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         &fixture.seed_review_unit_id,
     ]);
 
@@ -1317,7 +1186,7 @@ fn linked_assessment_show_resolves_linked_unit() {
         "show",
         "--repo",
         fixture.reader.to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         &fixture.seed_review_unit_id,
     ]);
 
@@ -1340,7 +1209,7 @@ fn linked_validation_list_resolves_linked_unit() {
         "list",
         "--repo",
         fixture.reader.to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         &fixture.seed_review_unit_id,
     ]);
 
@@ -1350,55 +1219,6 @@ fn linked_validation_list_resolves_linked_unit() {
     );
     assert_eq!(json["validationChecks"].as_array().unwrap().len(), 1);
     assert_eq!(json["validationChecks"][0]["checkName"], "cargo test");
-}
-
-#[test]
-fn linked_lineage_list_sees_linked_lineage() {
-    let fixture = LinkedFixture::new();
-    let lineage_id = "review-unit-lineage:random:linked-test";
-    fixture.lineage_attach(&fixture.seed, lineage_id, &fixture.seed_review_unit_id);
-
-    let result = list_lineages(LineageListOptions::new(&fixture.reader)).unwrap();
-
-    assert_eq!(result.lineage_count, 1);
-    assert_eq!(result.entries[0].lineage_id.as_str(), lineage_id);
-    assert_eq!(
-        result.entries[0]
-            .head_review_unit_id
-            .as_ref()
-            .map(|id| id.as_str()),
-        Some(fixture.seed_review_unit_id.as_str())
-    );
-}
-
-#[test]
-fn linked_lineage_show_resolves_rounds_from_linked_store() {
-    let fixture = LinkedFixture::new();
-    let lineage_id = "review-unit-lineage:random:show-test";
-    fixture.lineage_attach(&fixture.seed, lineage_id, &fixture.seed_review_unit_id);
-
-    let json = run_shore_json(&[
-        "review",
-        "lineage",
-        "show",
-        "--repo",
-        fixture.reader.to_str().unwrap(),
-        "--lineage",
-        lineage_id,
-    ]);
-
-    assert_eq!(json["lineageId"], lineage_id);
-    assert_eq!(
-        json["headReviewUnitId"],
-        Value::String(fixture.seed_review_unit_id.clone())
-    );
-    let rounds = json["rounds"].as_array().unwrap();
-    assert_eq!(rounds.len(), 1);
-    assert_eq!(
-        rounds[0]["reviewUnitId"],
-        Value::String(fixture.seed_review_unit_id.clone())
-    );
-    assert_eq!(rounds[0]["isHead"], true);
 }
 
 #[test]
@@ -1485,8 +1305,7 @@ fn worktree_local_unit_list_is_unchanged() {
 
     let json = run_shore_json(&[
         "review",
-        "unit",
-        "list",
+        "revisions",
         "--repo",
         repo.path().to_str().unwrap(),
     ]);
@@ -1517,8 +1336,7 @@ fn main_worktree_of_a_clone_round_trips_a_capture_in_place() {
     // place (write-through landed it in the same `.git/shore` store reads use).
     let list = run_shore_json(&[
         "review",
-        "unit",
-        "list",
+        "revisions",
         "--repo",
         main.path().to_str().unwrap(),
     ]);
@@ -1528,13 +1346,7 @@ fn main_worktree_of_a_clone_round_trips_a_capture_in_place() {
         Value::String(unit_id.clone())
     );
 
-    let show = run_shore_json(&[
-        "review",
-        "unit",
-        "show",
-        "--repo",
-        main.path().to_str().unwrap(),
-    ]);
+    let show = run_shore_json(&["review", "show", "--repo", main.path().to_str().unwrap()]);
     assert_eq!(show["reviewUnit"]["id"], Value::String(unit_id.clone()));
 
     let history = run_shore_json(&["review", "history", "--repo", main.path().to_str().unwrap()]);
@@ -1566,8 +1378,7 @@ fn fresh_single_worktree_has_clean_own_only_reads() {
 
     let list = run_shore_json(&[
         "review",
-        "unit",
-        "list",
+        "revisions",
         "--repo",
         repo.path().to_str().unwrap(),
     ]);

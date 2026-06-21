@@ -8,8 +8,8 @@ use crate::session::input_request::{
     InputRequestProjectionOptions, InputRequestStatusFilter, project_input_requests,
 };
 use crate::session::observation::{
-    CurrentReviewUnitContext, ObservationProjectionOptions, ReviewUnitScope, ReviewUnitSelection,
-    project_observations, resolve_review_unit, validated_track_id,
+    CurrentReviewUnitContext, ObservationProjectionOptions, ReviewUnitScope, RevisionSelection,
+    project_observations, resolve_revision, validated_track_id,
 };
 use crate::session::projection::ArtifactRemovalProjection;
 use crate::session::projection::cosignature::{
@@ -51,12 +51,9 @@ pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShow
         .map(validated_track_id)
         .transpose()?;
     let events = EventStore::open(read_store.store_dir()).list_events()?;
-    let resolved = resolve_review_unit(
+    let resolved = resolve_revision(
         &events,
-        ReviewUnitSelection::from_review_unit_or_lineage(
-            options.review_unit_id.as_ref(),
-            options.lineage_id.as_ref(),
-        )?,
+        RevisionSelection::from_revision_seed(options.review_unit_id.as_ref()),
         &CurrentReviewUnitContext::for_repo(&options.repo)?,
         ReviewUnitScope::default(),
     )?;
@@ -302,7 +299,7 @@ mod tests {
         let error = show_review_unit(ReviewUnitShowOptions::new(repo.path()))
             .expect_err("no captured ReviewUnit should fail");
 
-        assert!(error.to_string().contains("no captured review unit"));
+        assert!(error.to_string().contains("no captured revision"));
     }
 
     #[test]
@@ -477,7 +474,7 @@ mod tests {
 
         let error = show_review_unit(ReviewUnitShowOptions::new(repo.path()))
             .expect_err("multiple captures should be ambiguous");
-        assert!(error.to_string().contains("multiple captured review units"));
+        assert!(error.to_string().contains("multiple captured revisions"));
 
         let explicit = show_review_unit(
             ReviewUnitShowOptions::new(repo.path()).with_review_unit_id(first.revision_id.clone()),

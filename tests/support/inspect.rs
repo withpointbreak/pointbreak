@@ -459,31 +459,42 @@ fn run_shore_json(args: &[&str]) -> Value {
         .unwrap_or_else(|error| panic!("parse shore {args:?} JSON: {error}"))
 }
 
-pub fn capture_lineage_round(repo: &Path, lineage_id: &str, predecessor: Option<&str>) -> String {
+/// Capture a revision in a supersession thread. With no `predecessor`, captures
+/// the current worktree as a fresh revision. With a `predecessor`, mutates a
+/// tracked file first (so the snapshot id differs) and records the new revision
+/// as superseding the predecessor. Returns the captured revision id.
+pub fn capture_supersession_round(repo: &Path, predecessor: Option<&str>) -> String {
     let mut args = vec![
         "review".to_owned(),
         "capture".to_owned(),
         "--repo".to_owned(),
         repo.to_str().unwrap().to_owned(),
-        "--lineage".to_owned(),
-        lineage_id.to_owned(),
     ];
     if let Some(predecessor) = predecessor {
-        args.push("--predecessor".to_owned());
+        // A successor must carry different content, or it would collapse to the
+        // same snapshot id. Append a unique line to a tracked file.
+        let target = repo.join("src/lib.rs");
+        let mut contents = std::fs::read_to_string(&target).unwrap_or_default();
+        contents.push_str(&format!(
+            "\n// supersedes {}\n",
+            predecessor.replace(':', "_")
+        ));
+        std::fs::write(&target, contents).expect("write successor content");
+        args.push("--supersedes".to_owned());
         args.push(predecessor.to_owned());
     }
 
     let output = shore(args);
     assert!(
         output.status.success(),
-        "capture with lineage stderr:\n{}",
+        "capture supersession round stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
     let json: Value =
-        serde_json::from_slice(&output.stdout).expect("parse capture with lineage JSON");
+        serde_json::from_slice(&output.stdout).expect("parse supersession capture JSON");
     json["reviewUnit"]["id"]
         .as_str()
-        .expect("capture with lineage returns a ReviewUnit id")
+        .expect("supersession capture returns a ReviewUnit id")
         .to_owned()
 }
 

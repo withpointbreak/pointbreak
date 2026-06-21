@@ -386,7 +386,6 @@ pub(super) fn target_paths(target: &ReviewTargetRef) -> (Option<String>, Option<
             (Some(file_path.clone()), None)
         }
         ReviewTargetRef::Revision { .. }
-        | ReviewTargetRef::Lineage { .. }
         | ReviewTargetRef::Observation { .. }
         | ReviewTargetRef::InputRequest { .. }
         | ReviewTargetRef::Assessment { .. }

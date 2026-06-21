@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use super::{AdapterNoteView, ReviewUnitProjectionRow};
 use crate::model::{
-    ActorId, DiffSnapshot, EventId, LedgerId, ObjectId, ReviewEndpoint, ReviewUnitLineageId,
-    ReviewUnitSource, RevisionId, TrackId,
+    ActorId, DiffSnapshot, EventId, LedgerId, ObjectId, ReviewEndpoint, ReviewUnitSource,
+    RevisionId, TrackId,
 };
 use crate::session::assessment::{AssessmentView, CurrentAssessmentView};
 use crate::session::input_request::InputRequestView;
@@ -21,7 +21,6 @@ use crate::session::{
 pub struct ReviewUnitShowOptions {
     pub(super) repo: PathBuf,
     pub(super) review_unit_id: Option<RevisionId>,
-    pub(super) lineage_id: Option<ReviewUnitLineageId>,
     pub(super) track: Option<String>,
     pub(super) include_body: bool,
     pub(super) verification_policy: Option<EventVerificationPolicy>,
@@ -35,7 +34,6 @@ impl ReviewUnitShowOptions {
         Self {
             repo: repo.as_ref().to_path_buf(),
             review_unit_id: None,
-            lineage_id: None,
             track: None,
             include_body: false,
             verification_policy: None,
@@ -49,12 +47,6 @@ impl ReviewUnitShowOptions {
         self.review_unit_id = Some(review_unit_id);
         self
     }
-
-    pub fn with_lineage_id(mut self, lineage_id: ReviewUnitLineageId) -> Self {
-        self.lineage_id = Some(lineage_id);
-        self
-    }
-
     pub fn with_track(mut self, track: impl Into<String>) -> Self {
         self.track = Some(track.into());
         self

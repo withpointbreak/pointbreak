@@ -8,8 +8,8 @@ pub use self::add::{ObservationAddOptions, ObservationAddResult, record_observat
 pub use self::list::{ObservationListOptions, ObservationListResult, list_observations};
 pub use self::target::ObservationTargetSelector;
 pub(crate) use self::target::{
-    CurrentReviewUnitContext, ResolvedReviewUnit, ReviewUnitScope, ReviewUnitSelection,
-    resolve_observation_target, resolve_review_unit, review_unit_ids_in_worktree,
+    CurrentReviewUnitContext, ResolvedReviewUnit, ReviewUnitScope, RevisionSelection,
+    resolve_observation_target, resolve_revision, review_unit_ids_in_worktree,
 };
 pub(crate) use self::util::{required_title, staged_body, validated_track_id};
 #[cfg(test)]
@@ -27,12 +27,10 @@ mod tests {
     use super::*;
     use crate::model::{
         EngagementId, EventId, LedgerId, ObjectId, ReviewEndpoint, ReviewTargetRef,
-        ReviewUnitLineageBasisV1, ReviewUnitLineageId, ReviewUnitLineageRoundId, ReviewUnitSource,
-        RevisionId, Side, TrackId, WorktreeCaptureMode,
+        ReviewUnitSource, RevisionId, Side, TrackId, WorktreeCaptureMode,
     };
     use crate::session::event::{
-        EventTarget, EventType, GitProvenance, ReviewUnitLineageDeclaredPayload,
-        ReviewUnitLineageRoundRecordedPayload, Revision, ShoreEvent, WorkObjectProposal,
+        EventTarget, EventType, GitProvenance, Revision, ShoreEvent, WorkObjectProposal,
         WorkObjectProposedPayload, Writer,
     };
     use crate::session::{
@@ -86,9 +84,9 @@ mod tests {
         let events = event_store.list_events().unwrap();
 
         let context = CurrentReviewUnitContext::for_repo(repo.path()).unwrap();
-        let resolved = resolve_review_unit(
+        let resolved = resolve_revision(
             &events,
-            ReviewUnitSelection::Current,
+            RevisionSelection::Current,
             &context,
             ReviewUnitScope::CurrentWorktree,
         )
@@ -102,15 +100,15 @@ mod tests {
     fn resolving_current_review_unit_errors_when_none_captured() {
         let events = Vec::new();
 
-        let error = resolve_review_unit(
+        let error = resolve_revision(
             &events,
-            ReviewUnitSelection::Current,
+            RevisionSelection::Current,
             &any_context(),
             ReviewUnitScope::All,
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("no captured review unit"));
+        assert!(error.to_string().contains("no captured revision"));
     }
 
     #[test]
@@ -120,106 +118,100 @@ mod tests {
             review_unit_captured_event_with_ids("review-unit:sha256:two", "rev:two", "snap:two"),
         ];
 
-        let error = resolve_review_unit(
+        let error = resolve_revision(
             &events,
-            ReviewUnitSelection::Current,
+            RevisionSelection::Current,
             &any_context(),
             ReviewUnitScope::All,
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("multiple captured review units"));
+        assert!(error.to_string().contains("multiple captured revisions"));
     }
 
     #[test]
-    fn explicit_unknown_review_unit_is_rejected() {
+    fn explicit_unknown_revision_is_rejected() {
         let events = vec![review_unit_captured_event_with_ids(
             "review-unit:sha256:known",
             "rev:one",
             "snap:one",
         )];
 
-        let error = resolve_review_unit(
+        let error = resolve_revision(
             &events,
-            ReviewUnitSelection::Exact(&RevisionId::new("review-unit:sha256:missing")),
+            RevisionSelection::Exact(&RevisionId::new("review-unit:sha256:missing")),
             &any_context(),
             ReviewUnitScope::All,
         )
         .unwrap_err();
 
-        assert!(error.to_string().contains("unknown review unit"));
+        assert!(error.to_string().contains("unknown revision"));
     }
 
     #[test]
-    fn resolving_current_with_lineage_uses_lineage_head_even_when_global_is_ambiguous() {
-        let events = two_captures_same_lineage();
+    fn head_seed_that_is_a_current_head_resolves_exactly() {
+        // A <- B (B supersedes A): B is the head; seeding B resolves B.
+        let events = vec![revision_event("a", &[]), revision_event("b", &["a"])];
 
-        let resolved = resolve_review_unit(
+        let resolved = resolve_revision(
             &events,
-            ReviewUnitSelection::LineageHead(&review_unit_lineage_id("lineage-a")),
+            RevisionSelection::Head(&rev("b")),
             &any_context(),
             ReviewUnitScope::All,
         )
         .unwrap();
 
-        assert_eq!(resolved.revision_id, review_unit_id("two"));
+        assert_eq!(resolved.revision_id, rev("b"));
     }
 
     #[test]
-    fn explicit_review_unit_still_selects_exact_old_round() {
-        let events = two_captures_same_lineage();
+    fn head_seed_on_a_superseded_revision_resolves_its_thread_head() {
+        // Seeding the superseded A resolves to its thread's current head, B.
+        let events = vec![revision_event("a", &[]), revision_event("b", &["a"])];
 
-        let resolved = resolve_review_unit(
+        let resolved = resolve_revision(
             &events,
-            ReviewUnitSelection::Exact(&review_unit_id("one")),
+            RevisionSelection::Head(&rev("a")),
             &any_context(),
             ReviewUnitScope::All,
         )
         .unwrap();
 
-        assert_eq!(resolved.revision_id, review_unit_id("one"));
+        assert_eq!(resolved.revision_id, rev("b"));
     }
 
     #[test]
-    fn resolving_current_with_missing_lineage_fails_closed() {
-        let events = two_captures_same_lineage();
-
-        let error = resolve_review_unit(
-            &events,
-            ReviewUnitSelection::LineageHead(&review_unit_lineage_id("missing")),
-            &any_context(),
-            ReviewUnitScope::All,
-        )
-        .unwrap_err();
-
-        assert!(error.to_string().contains("unknown ReviewUnit lineage"));
-    }
-
-    #[test]
-    fn resolving_current_with_malformed_lineage_fails_closed() {
+    fn head_seed_under_a_fork_force_disambiguates_thread_scoped() {
+        // A <- {B, C} (competing heads) plus an unrelated thread Z. A non-head seed
+        // lists the thread's competing heads (B, C), never the unrelated head Z.
         let events = vec![
-            review_unit_captured_event_with_ids("review-unit:sha256:one", "rev:one", "snap:one"),
-            review_unit_captured_event_with_ids("review-unit:sha256:two", "rev:two", "snap:two"),
-            review_unit_captured_event_with_ids(
-                "review-unit:sha256:three",
-                "rev:three",
-                "snap:three",
-            ),
-            lineage_declared("lineage-a"),
-            lineage_round("lineage-a", "one", None),
-            lineage_round("lineage-a", "two", Some("one")),
-            lineage_round("lineage-a", "three", Some("one")),
+            revision_event("a", &[]),
+            revision_event("b", &["a"]),
+            revision_event("c", &["a"]),
+            revision_event("z", &[]),
         ];
 
-        let error = resolve_review_unit(
+        let error = resolve_revision(
             &events,
-            ReviewUnitSelection::LineageHead(&review_unit_lineage_id("lineage-a")),
+            RevisionSelection::Head(&rev("a")),
             &any_context(),
             ReviewUnitScope::All,
         )
         .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("rev:sha256:b"));
+        assert!(message.contains("rev:sha256:c"));
+        assert!(!message.contains("rev:sha256:z"));
 
-        assert!(error.to_string().contains("is malformed"));
+        // A head seed escapes the fork by resolving to itself exactly.
+        let resolved = resolve_revision(
+            &events,
+            RevisionSelection::Head(&rev("b")),
+            &any_context(),
+            ReviewUnitScope::All,
+        )
+        .unwrap();
+        assert_eq!(resolved.revision_id, rev("b"));
     }
 
     #[test]
@@ -799,6 +791,7 @@ mod tests {
                         }),
                     },
                     snapshot_artifact_content_hash: "sha256:artifact".to_owned(),
+                    supersedes: vec![],
                 },
             },
             "2026-05-12T00:00:00Z",
@@ -806,79 +799,46 @@ mod tests {
         .unwrap()
     }
 
-    fn two_captures_same_lineage() -> Vec<ShoreEvent> {
-        vec![
-            review_unit_captured_event_with_ids("review-unit:sha256:one", "rev:one", "snap:one"),
-            review_unit_captured_event_with_ids("review-unit:sha256:two", "rev:two", "snap:two"),
-            lineage_declared("lineage-a"),
-            lineage_round("lineage-a", "one", None),
-            lineage_round("lineage-a", "two", Some("one")),
-        ]
+    fn rev(suffix: &str) -> RevisionId {
+        RevisionId::new(format!("rev:sha256:{suffix}"))
     }
 
-    fn lineage_declared(suffix: &str) -> ShoreEvent {
-        let lineage_id = review_unit_lineage_id(suffix);
+    /// A review-domain generative move proposing a revision that supersedes the
+    /// given predecessors (by suffix). Feeds the supersession head-selection.
+    fn revision_event(suffix: &str, supersedes: &[&str]) -> ShoreEvent {
+        let revision_id = rev(suffix);
         ShoreEvent::new(
-            EventType::ReviewUnitLineageDeclared,
-            ReviewUnitLineageDeclaredPayload::idempotency_key(&lineage_id),
-            EventTarget::for_review_unit_lineage(
-                LedgerId::new("session:default"),
-                lineage_id.clone(),
-            ),
+            EventType::WorkObjectProposed,
+            format!("work_object_proposed:{}", revision_id.as_str()),
+            EventTarget::for_revision(LedgerId::new("ledger:default"), revision_id.clone(), None),
             Writer::shore_local("0.1.0"),
-            ReviewUnitLineageDeclaredPayload {
-                lineage_id,
-                basis: ReviewUnitLineageBasisV1::new(
-                    ReviewUnitSource::GitWorktree {
-                        mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
-                        include_untracked: true,
+            WorkObjectProposedPayload {
+                engagement_id: EngagementId::new(format!("engagement:sha256:{suffix}")),
+                work_object: WorkObjectProposal::Revision {
+                    revision: Revision {
+                        id: revision_id,
+                        object_id: ObjectId::new(format!("obj:sha256:{suffix}")),
+                        git_provenance: Some(GitProvenance {
+                            source: ReviewUnitSource::GitWorktree {
+                                mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
+                                include_untracked: true,
+                            },
+                            base: ReviewEndpoint::GitCommit {
+                                commit_oid: "abc".to_owned(),
+                                tree_oid: "def".to_owned(),
+                            },
+                            target: ReviewEndpoint::GitWorkingTree {
+                                worktree_root: "/repo".to_owned(),
+                            },
+                        }),
                     },
-                    ReviewEndpoint::GitCommit {
-                        commit_oid: "abc".to_owned(),
-                        tree_oid: "def".to_owned(),
-                    },
-                ),
+                    snapshot_artifact_content_hash: "sha256:artifact".to_owned(),
+                    supersedes: supersedes.iter().map(|s| rev(s)).collect(),
+                },
             },
             "2026-05-12T00:00:00Z",
         )
         .unwrap()
-    }
-
-    fn lineage_round(
-        lineage_suffix: &str,
-        review_unit_suffix: &str,
-        predecessor_suffix: Option<&str>,
-    ) -> ShoreEvent {
-        let lineage_id = review_unit_lineage_id(lineage_suffix);
-        let unit_id = review_unit_id(review_unit_suffix);
-        ShoreEvent::new(
-            EventType::ReviewUnitLineageRoundRecorded,
-            ReviewUnitLineageRoundRecordedPayload::idempotency_key(&lineage_id, &unit_id),
-            EventTarget::for_review_unit_lineage(
-                LedgerId::new("session:default"),
-                lineage_id.clone(),
-            ),
-            Writer::shore_local("0.1.0"),
-            ReviewUnitLineageRoundRecordedPayload {
-                lineage_id,
-                round_id: ReviewUnitLineageRoundId::new(format!(
-                    "review-unit-lineage-round:sha256:{review_unit_suffix}"
-                )),
-                review_unit_id: unit_id,
-                predecessor_review_unit_id: predecessor_suffix.map(review_unit_id),
-                change_id: None,
-            },
-            "2026-05-12T00:00:00Z",
-        )
-        .unwrap()
-    }
-
-    fn review_unit_id(suffix: &str) -> RevisionId {
-        RevisionId::new(format!("review-unit:sha256:{suffix}"))
-    }
-
-    fn review_unit_lineage_id(suffix: &str) -> ReviewUnitLineageId {
-        ReviewUnitLineageId::new(format!("review-unit-lineage:sha256:{suffix}"))
     }
 
     fn observation_view_for_sort(

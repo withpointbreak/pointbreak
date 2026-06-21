@@ -487,7 +487,7 @@ fn observation_add_errors_when_no_review_unit_has_been_captured() {
     ]);
 
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("no captured review unit"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no captured revision"));
 }
 
 #[test]
@@ -529,7 +529,7 @@ fn observation_add_with_explicit_review_unit_succeeds_when_current_is_ambiguous(
         "add",
         "--repo",
         repo.path().to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         first["reviewUnit"]["id"].as_str().unwrap(),
         "--track",
         "agent:codex",
@@ -566,7 +566,7 @@ fn observation_add_errors_when_current_review_unit_is_ambiguous_without_explicit
     ]);
 
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("multiple captured review units"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("multiple captured revisions"));
 }
 
 fn shore_with_stdin<I, S>(args: I, stdin: &str) -> Output
@@ -619,7 +619,7 @@ fn observation_add_and_list_work_against_range_captured_unit() {
             "add",
             "--repo",
             repo.path().to_str().unwrap(),
-            "--review-unit",
+            "--revision",
             review_unit_id,
             "--track",
             "agent:codex",
@@ -638,7 +638,7 @@ fn observation_add_and_list_work_against_range_captured_unit() {
             "list",
             "--repo",
             repo.path().to_str().unwrap(),
-            "--review-unit",
+            "--revision",
             review_unit_id,
         ])
         .stdout,

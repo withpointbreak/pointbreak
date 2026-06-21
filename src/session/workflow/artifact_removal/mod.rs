@@ -314,6 +314,7 @@ fn capture_bound_to_snapshot(
         let WorkObjectProposal::Revision {
             revision,
             snapshot_artifact_content_hash,
+            ..
         } = payload.work_object
         else {
             continue;
@@ -522,6 +523,7 @@ fn snapshot_content_hash_by_file_stem(events: &[ShoreEvent]) -> Result<BTreeMap<
         let WorkObjectProposal::Revision {
             revision,
             snapshot_artifact_content_hash,
+            ..
         } = payload.work_object
         else {
             continue;
@@ -675,6 +677,7 @@ mod tests {
                         }),
                     },
                     snapshot_artifact_content_hash: original.snapshot_artifact_content_hash.clone(),
+                    supersedes: vec![],
                 },
             },
             "2026-06-19T00:00:00Z",

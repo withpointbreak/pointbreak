@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, ShoreError};
 use crate::model::{
-    EngagementType, LedgerId, ReviewTargetRef, ReviewUnitLineageId, RevisionId, TargetRef, TrackId,
+    EngagementType, LedgerId, ReviewTargetRef, RevisionId, TargetRef, TrackId,
     engagement_type_of_subject,
 };
 
@@ -78,22 +78,6 @@ impl EventTarget {
             ledger_id,
             TargetRef::Review(ReviewTargetRef::Revision { revision_id }),
             track_id,
-        )
-    }
-
-    /// Convenience for the lineage carrier: addresses a review-domain lineage
-    /// subject. The lineage sub-model is derived; this constructor is retired
-    /// when the lineage variant is removed.
-    pub fn for_review_unit_lineage(
-        ledger_id: LedgerId,
-        review_unit_lineage_id: ReviewUnitLineageId,
-    ) -> Self {
-        Self::for_subject(
-            ledger_id,
-            TargetRef::Review(ReviewTargetRef::Lineage {
-                review_unit_lineage_id,
-            }),
-            None,
         )
     }
 }

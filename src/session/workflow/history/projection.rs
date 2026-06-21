@@ -10,7 +10,6 @@ use crate::session::event::{
     EventType, InputRequestRespondedPayload, ReviewAssessmentRecordedPayload,
     ReviewInitializedPayload, ReviewNoteImportedPayload, ReviewObservationRecordedPayload,
     ReviewUnitCommitAssociatedPayload, ReviewUnitCommitWithdrawnPayload,
-    ReviewUnitLineageDeclaredPayload, ReviewUnitLineageRoundRecordedPayload,
     ReviewUnitRefAssociatedPayload, ReviewUnitRefWithdrawnPayload, ShoreEvent,
     ValidationCheckRecordedPayload, WorkObjectProposal, WorkObjectProposedPayload,
     decode_input_request_opened_payload,
@@ -76,6 +75,7 @@ pub(super) fn history_entry_from_event(
                 WorkObjectProposal::Revision {
                     revision,
                     snapshot_artifact_content_hash,
+                    ..
                 } => {
                     let (source, base, target) = match revision.git_provenance {
                         Some(provenance) => (
@@ -201,25 +201,6 @@ pub(super) fn history_entry_from_event(
                 author: payload.author,
                 created_at: payload.created_at,
                 sidecar_content_hash: payload.sidecar_content_hash,
-            }
-        }
-        EventType::ReviewUnitLineageDeclared => {
-            let payload: ReviewUnitLineageDeclaredPayload =
-                serde_json::from_value(event.payload.clone())?;
-            ReviewHistorySummary::ReviewUnitLineageDeclared {
-                lineage_id: payload.lineage_id,
-                basis: payload.basis,
-            }
-        }
-        EventType::ReviewUnitLineageRoundRecorded => {
-            let payload: ReviewUnitLineageRoundRecordedPayload =
-                serde_json::from_value(event.payload.clone())?;
-            ReviewHistorySummary::ReviewUnitLineageRoundRecorded {
-                lineage_id: payload.lineage_id,
-                round_id: payload.round_id,
-                review_unit_id: payload.review_unit_id,
-                predecessor_review_unit_id: payload.predecessor_review_unit_id,
-                change_id: payload.change_id,
             }
         }
         EventType::ValidationCheckRecorded => {
@@ -418,7 +399,6 @@ fn subject_revision_id(subject: &TargetRef) -> Option<&RevisionId> {
             | ReviewTargetRef::InputRequest { revision_id, .. }
             | ReviewTargetRef::Assessment { revision_id, .. }
             | ReviewTargetRef::Event { revision_id, .. } => Some(revision_id),
-            ReviewTargetRef::Lineage { .. } => None,
         },
         TargetRef::Task(_) | TargetRef::Ledger => None,
     }

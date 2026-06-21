@@ -6,7 +6,7 @@ use shoreline::documents::{
     associate_commit_document, associate_ref_document, list_associations_document,
     withdraw_commit_document, withdraw_ref_document,
 };
-use shoreline::model::{CommitAssociationId, RefAssociationId, ReviewUnitLineageId, RevisionId};
+use shoreline::model::{CommitAssociationId, RefAssociationId, RevisionId};
 use shoreline::session::{
     AssociateCommitOptions, AssociateRefOptions, AssociationAxis, ListAssociationsOptions,
     WithdrawCommitOptions, WithdrawRefOptions, associate_commit, associate_ref, list_associations,
@@ -37,10 +37,7 @@ struct AssociateCommitArgs {
     repo: PathBuf,
 
     #[arg(long)]
-    review_unit: Option<String>,
-
-    #[arg(long)]
-    lineage: Option<String>,
+    revision: Option<String>,
 
     #[arg(long)]
     track: String,
@@ -63,10 +60,7 @@ struct WithdrawCommitArgs {
     repo: PathBuf,
 
     #[arg(long)]
-    review_unit: Option<String>,
-
-    #[arg(long)]
-    lineage: Option<String>,
+    revision: Option<String>,
 
     #[arg(long)]
     track: String,
@@ -85,10 +79,7 @@ struct AssociateRefArgs {
     repo: PathBuf,
 
     #[arg(long)]
-    review_unit: Option<String>,
-
-    #[arg(long)]
-    lineage: Option<String>,
+    revision: Option<String>,
 
     #[arg(long)]
     track: String,
@@ -111,10 +102,7 @@ struct WithdrawRefArgs {
     repo: PathBuf,
 
     #[arg(long)]
-    review_unit: Option<String>,
-
-    #[arg(long)]
-    lineage: Option<String>,
+    revision: Option<String>,
 
     #[arg(long)]
     track: String,
@@ -133,10 +121,7 @@ struct ListArgs {
     repo: PathBuf,
 
     #[arg(long)]
-    review_unit: Option<String>,
-
-    #[arg(long)]
-    lineage: Option<String>,
+    revision: Option<String>,
 
     /// Restrict to one axis; omit to list both.
     #[arg(long, value_enum)]
@@ -209,7 +194,7 @@ fn associate_commit_run(
     stderr: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut options = AssociateCommitOptions::new(&args.repo, args.commit).with_track(args.track);
-    options = with_selection(options, args.review_unit, args.lineage);
+    options = with_selection(options, args.revision);
     let (options, skip) = apply_signer(options, &args.repo, args.sign_key.as_deref(), stderr);
     let result = associate_commit(options)?;
     super::common::surface_best_effort_skip(&skip, stderr);
@@ -224,7 +209,7 @@ fn withdraw_commit_run(
     let mut options =
         WithdrawCommitOptions::new(&args.repo, CommitAssociationId::new(args.withdraws))
             .with_track(args.track);
-    options = with_selection(options, args.review_unit, args.lineage);
+    options = with_selection(options, args.revision);
     let (options, skip) = apply_signer(options, &args.repo, args.sign_key.as_deref(), stderr);
     let result = withdraw_commit(options)?;
     super::common::surface_best_effort_skip(&skip, stderr);
@@ -238,7 +223,7 @@ fn associate_ref_run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut options =
         AssociateRefOptions::new(&args.repo, args.ref_name, args.head).with_track(args.track);
-    options = with_selection(options, args.review_unit, args.lineage);
+    options = with_selection(options, args.revision);
     let (options, skip) = apply_signer(options, &args.repo, args.sign_key.as_deref(), stderr);
     let result = associate_ref(options)?;
     super::common::surface_best_effort_skip(&skip, stderr);
@@ -252,7 +237,7 @@ fn withdraw_ref_run(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut options = WithdrawRefOptions::new(&args.repo, RefAssociationId::new(args.withdraws))
         .with_track(args.track);
-    options = with_selection(options, args.review_unit, args.lineage);
+    options = with_selection(options, args.revision);
     let (options, skip) = apply_signer(options, &args.repo, args.sign_key.as_deref(), stderr);
     let result = withdraw_ref(options)?;
     super::common::surface_best_effort_skip(&skip, stderr);
@@ -262,11 +247,8 @@ fn withdraw_ref_run(
 fn list_run(args: ListArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::error::Error>> {
     let pretty = args.pretty && !args.compact;
     let mut options = ListAssociationsOptions::new(&args.repo).current_only(args.current);
-    if let Some(review_unit) = args.review_unit {
-        options = options.with_review_unit_id(RevisionId::new(review_unit));
-    }
-    if let Some(lineage) = args.lineage {
-        options = options.with_lineage_id(ReviewUnitLineageId::new(lineage));
+    if let Some(revision) = args.revision {
+        options = options.with_review_unit_id(RevisionId::new(revision));
     }
     if let Some(axis) = args.axis {
         options = options.with_axis(axis.into());
@@ -275,19 +257,12 @@ fn list_run(args: ListArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::e
     json::write_json(stdout, &list_associations_document(result), pretty)
 }
 
-/// Apply the `--review-unit` / `--lineage` selection shared by the write verbs.
-/// The four write-options builders share these method names, so this is generic
-/// over a small local trait.
-fn with_selection<O: AssociationSelection>(
-    mut options: O,
-    review_unit: Option<String>,
-    lineage: Option<String>,
-) -> O {
-    if let Some(review_unit) = review_unit {
-        options = options.with_review_unit_id(RevisionId::new(review_unit));
-    }
-    if let Some(lineage) = lineage {
-        options = options.with_lineage_id(ReviewUnitLineageId::new(lineage));
+/// Apply the `--revision` selection shared by the write verbs. The four
+/// write-options builders share the method name, so this is generic over a small
+/// local trait.
+fn with_selection<O: AssociationSelection>(mut options: O, revision: Option<String>) -> O {
+    if let Some(revision) = revision {
+        options = options.with_review_unit_id(RevisionId::new(revision));
     }
     options
 }
@@ -309,7 +284,6 @@ fn apply_signer<O: SignableOptions>(
 
 trait AssociationSelection {
     fn with_review_unit_id(self, id: RevisionId) -> Self;
-    fn with_lineage_id(self, id: ReviewUnitLineageId) -> Self;
 }
 
 macro_rules! impl_association_selection {
@@ -317,9 +291,6 @@ macro_rules! impl_association_selection {
         impl AssociationSelection for $ty {
             fn with_review_unit_id(self, id: RevisionId) -> Self {
                 <$ty>::with_review_unit_id(self, id)
-            }
-            fn with_lineage_id(self, id: ReviewUnitLineageId) -> Self {
-                <$ty>::with_lineage_id(self, id)
             }
         }
     )+};

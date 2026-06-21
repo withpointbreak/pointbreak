@@ -14,8 +14,12 @@ use crate::model::{
 use crate::session::event::{
     EventTarget, EventType, Revision, ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload,
 };
-use crate::session::fingerprint::{ResolvedCommitEndpoint, ReviewUnitFingerprint};
+use crate::session::fingerprint::{
+    ResolvedCommitEndpoint, ReviewUnitFingerprint, engagement_id_from_root,
+    engagement_id_provisional,
+};
 use crate::session::store::resolution::{prepare_write_landing, resolve_write_store};
+use crate::session::workflow::util::sorted_unique;
 use crate::session::{
     BestEffortSkipSink, EventSigningOptions, EventStore, EventWriteOutcome, ProjectionDiagnostic,
     SessionState, current_timestamp, sign_event_if_requested, writer_from_options,
@@ -71,6 +75,7 @@ pub struct CaptureOptions {
     source: CaptureSourceSpec,
     excluded_helper_paths: Vec<PathBuf>,
     actor_id: Option<ActorId>,
+    supersedes: Vec<RevisionId>,
     signing: EventSigningOptions,
 }
 
@@ -81,6 +86,7 @@ impl CaptureOptions {
             source: CaptureSourceSpec::Worktree,
             excluded_helper_paths: Vec::new(),
             actor_id: None,
+            supersedes: Vec::new(),
             signing: EventSigningOptions::default(),
         }
     }
@@ -101,6 +107,17 @@ impl CaptureOptions {
     /// snapshot content, so the override changes attribution only, not identity.
     pub fn with_actor_id(mut self, actor_id: ActorId) -> Self {
         self.actor_id = Some(actor_id);
+        self
+    }
+
+    /// Record this capture as superseding one or more earlier revisions (an
+    /// evolution forward-pointer). The ids are sorted and deduped before hashing,
+    /// so equivalent sets converge to one payload; an empty set (the default)
+    /// leaves a root capture's payload unchanged. Supersession references a
+    /// revision position, never its content object, and never gates the write — a
+    /// not-yet-present target is resolved later by the read projections.
+    pub fn with_supersedes(mut self, supersedes: Vec<RevisionId>) -> Self {
+        self.supersedes = supersedes;
         self
     }
 
@@ -188,6 +205,17 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
     let mut recorder = CaptureRecorder::default();
     let writer = writer_from_options(&worktree_root, options.actor_id.as_ref());
     let occurred_at = current_timestamp();
+    // Canonicalize the supersession set so equivalent inputs converge to one
+    // payload, then derive the engagement grouping hint over the existing log: a
+    // root (empty supersedes) seeds from its own revision; a present predecessor
+    // lends its engagement; an all-dangling set takes a deterministic provisional
+    // id. The hint never gates the write — the read projections own grouping.
+    let supersedes = sorted_unique(options.supersedes.clone());
+    let engagement_id = derive_engagement_id(
+        &event_store.list_events()?,
+        &fingerprint.revision_id,
+        &supersedes,
+    )?;
     // The generative move is an advisory proposal of a revision over a
     // content-only object, with its derived engagement grouping hint. The
     // subject addresses the revision through the checked review-domain
@@ -203,7 +231,7 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
         target,
         writer,
         WorkObjectProposedPayload {
-            engagement_id: fingerprint.engagement_id.clone(),
+            engagement_id: engagement_id.clone(),
             work_object: WorkObjectProposal::Revision {
                 revision: Revision {
                     id: fingerprint.revision_id.clone(),
@@ -211,6 +239,7 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
                     git_provenance: Some(fingerprint.git_provenance()),
                 },
                 snapshot_artifact_content_hash: artifact.content_hash.clone(),
+                supersedes,
             },
         },
         occurred_at,
@@ -266,7 +295,7 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
         ledger_id,
         revision_id: fingerprint.revision_id,
         object_id: fingerprint.snapshot_id,
-        engagement_id: fingerprint.engagement_id,
+        engagement_id,
         source: fingerprint.source,
         base: fingerprint.base,
         target: fingerprint.target,
@@ -385,6 +414,48 @@ fn work_object_proposed_idempotency_key(revision_id: &RevisionId) -> String {
     format!("work_object_proposed:{}", revision_id.as_str())
 }
 
+/// Derive the engagement grouping hint for a generative move over the existing
+/// log. A root (empty `supersedes`) seeds from its own revision; otherwise the
+/// first present predecessor (the lowest superseded revision id, since the set is
+/// sorted) lends its engagement so a whole thread shares one grouping; an
+/// all-dangling set takes a deterministic provisional id. The hint never gates
+/// the write — a dangling or cross-engagement target is reconciled later by the
+/// read projections.
+fn derive_engagement_id(
+    events: &[ShoreEvent],
+    revision_id: &RevisionId,
+    supersedes: &[RevisionId],
+) -> Result<EngagementId> {
+    if supersedes.is_empty() {
+        return Ok(engagement_id_from_root(revision_id));
+    }
+    let hints = revision_engagement_hints(events)?;
+    for predecessor in supersedes {
+        if let Some(engagement_id) = hints.get(predecessor) {
+            return Ok(engagement_id.clone());
+        }
+    }
+    Ok(engagement_id_provisional(supersedes))
+}
+
+/// Map each captured revision to its stored engagement hint, discriminating the
+/// generative arm: only a review-domain revision carries an engagement to
+/// inherit; a task-attempt proposal in a mixed log is skipped, never decoded as
+/// a revision.
+fn revision_engagement_hints(events: &[ShoreEvent]) -> Result<BTreeMap<RevisionId, EngagementId>> {
+    let mut hints = BTreeMap::new();
+    for event in events
+        .iter()
+        .filter(|event| event.event_type == EventType::WorkObjectProposed)
+    {
+        let payload: WorkObjectProposedPayload = serde_json::from_value(event.payload.clone())?;
+        if let WorkObjectProposal::Revision { revision, .. } = payload.work_object {
+            hints.insert(revision.id, payload.engagement_id);
+        }
+    }
+    Ok(hints)
+}
+
 #[derive(Default)]
 struct CaptureRecorder {
     events_created: usize,
@@ -420,16 +491,13 @@ mod tests {
 
     use crate::canonical_hash::sha256_json_prefixed;
     use crate::git::git_common_dir;
-    use crate::model::{
-        CommitRangeCaptureMode, ObjectId, ReviewEndpoint, ReviewUnitLineageId, ReviewUnitSource,
-    };
+    use crate::model::{CommitRangeCaptureMode, ObjectId, ReviewEndpoint, ReviewUnitSource};
     use crate::session::event::EventType;
     use crate::session::{
         ArtifactKind, CaptureOptions, CaptureResult, CommitRangeSpec, EventStore,
-        ImportArtifactOptions, ImportArtifactOutcome, LineageAttachOptions, ReviewUnitShowOptions,
-        ShoreStorePaths, attach_review_unit_to_lineage, capture_review, capture_worktree_review,
-        export_artifact, import_artifact, read_snapshot_artifact, referenced_artifacts,
-        show_review_unit,
+        ImportArtifactOptions, ImportArtifactOutcome, ReviewUnitShowOptions, ShoreStorePaths,
+        capture_review, capture_worktree_review, export_artifact, import_artifact,
+        read_snapshot_artifact, referenced_artifacts, show_review_unit,
     };
 
     #[test]
@@ -461,6 +529,60 @@ mod tests {
         }
         assert!(result.revision_id.as_str().starts_with("rev:sha256:"));
         assert_eq!(result.events_created_by_type["work_object_proposed"], 1);
+    }
+
+    #[test]
+    fn capture_with_supersedes_inherits_the_engagement_and_supersedes_the_predecessor() {
+        let repo = committed_repo();
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+        let root = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 4 }\n");
+        let successor = capture_worktree_review(
+            CaptureOptions::new(repo.path())
+                // A duplicated predecessor is deduped before hashing.
+                .with_supersedes(vec![root.revision_id.clone(), root.revision_id.clone()]),
+        )
+        .unwrap();
+
+        // A present predecessor lends its engagement, so the thread shares one
+        // grouping; the successor's own revision id is distinct.
+        assert_eq!(successor.engagement_id, root.engagement_id);
+        assert_ne!(successor.revision_id, root.revision_id);
+
+        let events = EventStore::open(resolved_store_dir(repo.path()))
+            .list_events()
+            .unwrap();
+
+        // The stored generative move carries the deduped supersession pointer.
+        let stored = events
+            .iter()
+            .find_map(|event| {
+                let payload: crate::session::event::WorkObjectProposedPayload =
+                    serde_json::from_value(event.payload.clone()).ok()?;
+                match payload.work_object {
+                    crate::session::event::WorkObjectProposal::Revision {
+                        revision,
+                        supersedes,
+                        ..
+                    } if revision.id == successor.revision_id => Some(supersedes),
+                    _ => None,
+                }
+            })
+            .expect("successor generative move present");
+        assert_eq!(stored, vec![root.revision_id.clone()]);
+
+        // The supersession projection resolves the predecessor as superseded and
+        // the successor as the lone head.
+        let view = crate::session::SupersessionView::from_events(&events).unwrap();
+        assert_eq!(
+            view.heads,
+            [successor.revision_id.clone()].into_iter().collect()
+        );
+        assert_eq!(
+            view.superseded,
+            [root.revision_id.clone()].into_iter().collect()
+        );
     }
 
     #[test]
@@ -808,35 +930,6 @@ mod tests {
             .filter(|event| event.event_type == EventType::WorkObjectProposed)
             .count();
         assert_eq!(captured, 2);
-    }
-
-    #[test]
-    fn range_capture_attaches_to_lineage_with_commit_range_basis() {
-        let repo = committed_repo();
-        let result = capture_review(
-            CaptureOptions::new(repo.path()).with_commit_range(CommitRangeSpec::new("HEAD~1")),
-        )
-        .unwrap();
-
-        let lineage_id = ReviewUnitLineageId::new("review-unit-lineage:random:test");
-        attach_review_unit_to_lineage(
-            LineageAttachOptions::new(repo.path(), lineage_id)
-                .with_review_unit_id(result.revision_id.clone()),
-        )
-        .unwrap();
-
-        let events = EventStore::open(resolved_store_dir(repo.path()))
-            .list_events()
-            .unwrap();
-        let declared = events
-            .iter()
-            .find(|event| event.event_type == EventType::ReviewUnitLineageDeclared)
-            .unwrap();
-        assert_eq!(
-            declared.payload["basis"]["source"]["kind"],
-            "git_commit_range"
-        );
-        assert_eq!(declared.payload["basis"]["base"]["kind"], "git_commit");
     }
 
     #[test]

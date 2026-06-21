@@ -101,7 +101,7 @@ fn main_worktree_capture_round_trips_through_the_common_dir_store() {
     );
     assert!(!repo.path().join(".shore/data/events").exists());
 
-    let list = run_json(&["review", "unit", "list", "--repo", repo_arg]);
+    let list = run_json(&["review", "revisions", "--repo", repo_arg]);
     assert_eq!(list["reviewUnitCount"], 1);
     assert_eq!(
         list["entries"][0]["reviewUnitId"],
@@ -109,7 +109,7 @@ fn main_worktree_capture_round_trips_through_the_common_dir_store() {
     );
     assert_no_storage_path_leak(&list);
 
-    let show = run_json(&["review", "unit", "show", "--repo", repo_arg]);
+    let show = run_json(&["review", "show", "--repo", repo_arg]);
     assert_eq!(show["reviewUnit"]["id"], Value::String(unit_id.clone()));
     assert_no_storage_path_leak(&show);
 
@@ -144,7 +144,7 @@ fn capture_is_visible_from_a_sibling_worktree_without_a_link() {
     let unit_id = capture["reviewUnit"]["id"].as_str().unwrap().to_owned();
 
     // The sibling reader sees the seed's unit through the shared store, no link.
-    let list = run_json(&["review", "unit", "list", "--repo", reader.to_str().unwrap()]);
+    let list = run_json(&["review", "revisions", "--repo", reader.to_str().unwrap()]);
     let ids: Vec<&str> = list["entries"]
         .as_array()
         .unwrap()
@@ -189,8 +189,7 @@ fn ephemeral_worktree_keeps_its_capture_out_of_the_shared_store() {
     // A sibling main-clone worktree does not see the ephemeral unit.
     let list = run_json(&[
         "review",
-        "unit",
-        "list",
+        "revisions",
         "--repo",
         main.path().to_str().unwrap(),
     ]);
@@ -243,7 +242,7 @@ fn legacy_worktree_local_store_errors_until_migrated() {
     assert!(repo.path().join(".shore/data/events").is_dir());
 
     // Any read now errors, naming both the legacy path and the migrate command.
-    let read = shore(["review", "unit", "list", "--repo", repo_arg]);
+    let read = shore(["review", "revisions", "--repo", repo_arg]);
     assert!(!read.status.success(), "a legacy store must fail the read");
     let stderr = String::from_utf8_lossy(&read.stderr);
     assert!(
@@ -269,7 +268,7 @@ fn legacy_worktree_local_store_errors_until_migrated() {
     // shared store. (Clearing the source is the operator's step after migrating;
     // migration never deletes it.)
     std::fs::remove_dir_all(repo.path().join(".shore/data")).unwrap();
-    let list = run_json(&["review", "unit", "list", "--repo", repo_arg]);
+    let list = run_json(&["review", "revisions", "--repo", repo_arg]);
     let ids: Vec<&str> = list["entries"]
         .as_array()
         .unwrap()
@@ -318,14 +317,14 @@ fn each_worktree_unit_show_resolves_its_own_capture() {
 
     // Both units live in the one shared store, yet each worktree's own
     // `unit show` (no `--review-unit`) resolves its OWN capture.
-    let alpha_show = run_json(&["review", "unit", "show", "--repo", alpha.to_str().unwrap()]);
+    let alpha_show = run_json(&["review", "show", "--repo", alpha.to_str().unwrap()]);
     assert_eq!(
         alpha_show["reviewUnit"]["id"],
         Value::String(alpha_id.clone())
     );
     assert_no_storage_path_leak(&alpha_show);
 
-    let beta_show = run_json(&["review", "unit", "show", "--repo", beta.to_str().unwrap()]);
+    let beta_show = run_json(&["review", "show", "--repo", beta.to_str().unwrap()]);
     assert_eq!(
         beta_show["reviewUnit"]["id"],
         Value::String(beta_id.clone())
@@ -394,8 +393,7 @@ fn two_worktrees_capturing_the_same_range_group_into_one_unit() {
     // The read surface groups them into ONE entry exposing both ids.
     let list = run_json(&[
         "review",
-        "unit",
-        "list",
+        "revisions",
         "--repo",
         main.path().to_str().unwrap(),
     ]);

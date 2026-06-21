@@ -268,8 +268,6 @@ mod tests {
             EventType::InputRequestOpened,
             EventType::InputRequestResponded,
             EventType::ReviewNoteImported,
-            EventType::ReviewUnitLineageDeclared,
-            EventType::ReviewUnitLineageRoundRecorded,
             EventType::ReviewUnitRefAssociated,
             EventType::ReviewUnitRefWithdrawn,
             EventType::ReviewUnitCommitAssociated,

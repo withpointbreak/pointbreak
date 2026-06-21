@@ -399,11 +399,10 @@ fn review_documents_are_byte_stable() {
         &repo,
         &[
             "review",
-            "unit",
             "show",
             "--repo",
             &repo_path,
-            "--review-unit",
+            "--revision",
             &unit,
             "--include-body",
         ],
@@ -411,7 +410,7 @@ fn review_documents_are_byte_stable() {
     assert_snapshot("unit_show", &unit_show);
 
     // 11. review unit list
-    let unit_list = run_command(&repo, &["review", "unit", "list", "--repo", &repo_path]);
+    let unit_list = run_command(&repo, &["review", "revisions", "--repo", &repo_path]);
     assert_snapshot("unit_list", &unit_list);
 
     // 12. review history

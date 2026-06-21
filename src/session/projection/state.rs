@@ -146,9 +146,6 @@ impl StateReducer {
             EventType::ReviewNoteImported => {
                 self.note_count += 1;
             }
-            EventType::ReviewUnitLineageDeclared | EventType::ReviewUnitLineageRoundRecorded => {
-                // Lineage projections are derived by the dedicated lineage reducer.
-            }
             EventType::ReviewUnitRefAssociated
             | EventType::ReviewUnitRefWithdrawn
             | EventType::ReviewUnitCommitAssociated
@@ -854,6 +851,7 @@ mod tests {
                         }),
                     },
                     snapshot_artifact_content_hash: "sha256:artifact".to_owned(),
+                    supersedes: vec![],
                 },
             },
             "2026-05-10T00:00:00Z",

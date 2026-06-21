@@ -74,8 +74,6 @@ enum HistoryEventTypeArg {
     InputRequestOpened,
     InputRequestResponded,
     ReviewNoteImported,
-    ReviewUnitLineageDeclared,
-    ReviewUnitLineageRoundRecorded,
     ReviewUnitRefAssociated,
     ReviewUnitRefWithdrawn,
     ReviewUnitCommitAssociated,
@@ -175,10 +173,6 @@ impl From<HistoryEventTypeArg> for EventType {
             HistoryEventTypeArg::InputRequestOpened => Self::InputRequestOpened,
             HistoryEventTypeArg::InputRequestResponded => Self::InputRequestResponded,
             HistoryEventTypeArg::ReviewNoteImported => Self::ReviewNoteImported,
-            HistoryEventTypeArg::ReviewUnitLineageDeclared => Self::ReviewUnitLineageDeclared,
-            HistoryEventTypeArg::ReviewUnitLineageRoundRecorded => {
-                Self::ReviewUnitLineageRoundRecorded
-            }
             HistoryEventTypeArg::ReviewUnitRefAssociated => Self::ReviewUnitRefAssociated,
             HistoryEventTypeArg::ReviewUnitRefWithdrawn => Self::ReviewUnitRefWithdrawn,
             HistoryEventTypeArg::ReviewUnitCommitAssociated => Self::ReviewUnitCommitAssociated,

@@ -17,7 +17,8 @@ use std::path::Path;
 use serde_json::Value;
 use support::git_repo::GitRepo;
 use support::inspect::{
-    Inspector, WorktreeCapture, add_worktree, capture, capture_lineage_round, run_git, urlencode,
+    Inspector, WorktreeCapture, add_worktree, capture, capture_supersession_round, run_git,
+    urlencode,
 };
 use support::shore;
 
@@ -211,55 +212,54 @@ fn api_units_label_survives_deleted_worktree() {
 }
 
 #[test]
-fn api_lineages_lists_and_shows_review_unit_lineage() {
+fn api_objects_threads_a_supersession_chain() {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
     repo.commit_all("base");
-    let lineage_id = "review-unit-lineage:random:inspect";
 
     repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
-    let first = capture_lineage_round(repo.path(), lineage_id, None);
+    let first = capture_supersession_round(repo.path(), None);
 
-    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
-    let second = capture_lineage_round(repo.path(), lineage_id, Some(&first));
+    let second = capture_supersession_round(repo.path(), Some(&first));
 
     let inspector = Inspector::spawn(repo.path());
 
-    let lineages = inspector.get_json("/api/lineages");
-    assert_eq!(lineages["schema"], "shore.inspect-lineages");
-    assert_eq!(lineages["lineageCount"], 1);
-    assert_eq!(lineages["entries"].as_array().unwrap().len(), 1);
-    assert_eq!(lineages["diagnostics"].as_array().unwrap().len(), 0);
+    let objects = inspector.get_json("/api/objects");
+    assert_eq!(objects["schema"], "shore.inspect-objects");
+    assert!(objects["eventCount"].as_u64().unwrap() > 0);
+    assert_eq!(objects["threadCount"], 1);
+    assert_eq!(objects["diagnostics"].as_array().unwrap().len(), 0);
 
-    let entry = &lineages["entries"][0];
-    assert_eq!(entry["lineageId"], lineage_id);
-    assert_eq!(entry["headReviewUnitId"], second);
-    assert_eq!(entry["roundCount"], 2);
-    assert_eq!(entry["diagnostics"].as_array().unwrap().len(), 0);
-    assert_eq!(entry["rounds"].as_array().unwrap().len(), 2);
-    assert_eq!(entry["rounds"][0]["reviewUnitId"], first);
-    assert_eq!(entry["rounds"][0]["roundIndex"], 0);
-    assert_eq!(entry["rounds"][0]["isHead"], false);
-    assert_eq!(entry["rounds"][1]["reviewUnitId"], second);
-    assert_eq!(entry["rounds"][1]["predecessorReviewUnitId"], first);
-    assert_eq!(entry["rounds"][1]["roundIndex"], 1);
-    assert_eq!(entry["rounds"][1]["isHead"], true);
+    let threads = objects["threads"].as_array().unwrap();
+    assert_eq!(threads.len(), 1);
+    let thread = &threads[0];
+    assert_eq!(thread["competing"], false);
 
-    let lineages_json = lineages.to_string();
+    let revisions = thread["revisions"].as_array().unwrap();
+    assert_eq!(revisions.len(), 2);
+    let revision_ids: Vec<&str> = revisions.iter().map(|r| r.as_str().unwrap()).collect();
+    assert!(revision_ids.contains(&first.as_str()));
+    assert!(revision_ids.contains(&second.as_str()));
+
+    let heads = thread["heads"].as_array().unwrap();
+    assert_eq!(heads.len(), 1);
+    assert_eq!(heads[0], second);
+
+    let superseded = thread["superseded"].as_array().unwrap();
+    assert_eq!(superseded.len(), 1);
+    assert_eq!(superseded[0], first);
+
+    let objects_json = objects.to_string();
     assert!(
-        !lineages_json.contains(&repo.path().to_string_lossy().to_string()),
-        "lineage list JSON must not expose raw repository paths"
+        !objects_json.contains(&repo.path().to_string_lossy().to_string()),
+        "objects JSON must not expose raw repository paths"
     );
 
-    let lineage = inspector.get_json(&format!("/api/lineage?id={}", urlencode(lineage_id)));
-    assert_eq!(lineage["schema"], "shore.review-lineage");
-    assert_eq!(lineage["lineageId"], lineage_id);
-    assert_eq!(lineage["headReviewUnitId"], second);
-    assert_eq!(lineage["rounds"].as_array().unwrap().len(), 2);
-    assert_eq!(lineage["rounds"][0]["reviewUnitId"], first);
-    assert_eq!(lineage["rounds"][1]["reviewUnitId"], second);
-    assert_eq!(lineage["rounds"][1]["predecessorReviewUnitId"], first);
-    assert_eq!(lineage["diagnostics"].as_array().unwrap().len(), 0);
+    // The removed lineage routes 404.
+    let (status, _) = inspector.get_error("/api/lineages");
+    assert!(status.contains("404"), "status: {status}");
+    let (status, _) = inspector.get_error(&format!("/api/lineage?id={}", urlencode("anything")));
+    assert!(status.contains("404"), "status: {status}");
 }
 
 /// The issue-140 user story over a real socket: a linked reader (whose source
@@ -276,8 +276,7 @@ fn linked_inspector_drill_in_survives_deleted_source_worktree() {
     let gone = parent.path().join("gone");
     add_worktree(main.path(), &gone, "gone");
     std::fs::write(gone.join("README.md"), "changed in gone\n").unwrap();
-    let lineage_id = "review-unit-lineage:random:linked-http";
-    let capture = capture_json_with_lineage(&gone, lineage_id);
+    let capture = capture_json(&gone);
     let unit_id = capture["reviewUnit"]["id"].as_str().unwrap().to_owned();
     let snapshot_id = capture["reviewUnit"]["snapshotId"]
         .as_str()
@@ -333,10 +332,12 @@ fn linked_inspector_drill_in_survives_deleted_source_worktree() {
     let freshness = inspector.get_json("/api/freshness");
     assert_eq!(freshness["eventSetHash"], history["eventSetHash"]);
 
-    let lineages = inspector.get_json("/api/lineages");
-    assert_eq!(lineages["lineageCount"], 1);
-    assert_eq!(lineages["entries"][0]["lineageId"], lineage_id);
-    assert_eq!(lineages["entries"][0]["roundCount"], 1);
+    let objects = inspector.get_json("/api/objects");
+    assert_eq!(objects["threadCount"], 1);
+    let thread = &objects["threads"][0];
+    assert_eq!(thread["competing"], false);
+    assert_eq!(thread["revisions"].as_array().unwrap().len(), 1);
+    assert_eq!(thread["heads"][0], unit_id.as_str());
 }
 
 #[test]
@@ -366,19 +367,12 @@ fn linked_inspector_unit_error_message_stays_path_free_for_unknown_unit() {
 
 // --- fixture-specific helpers (shared harness lives in `support::inspect`) ----
 
-/// Capture with a lineage attached, returning the full capture document.
-fn capture_json_with_lineage(repo: &Path, lineage_id: &str) -> Value {
-    let output = shore([
-        "review",
-        "capture",
-        "--repo",
-        repo.to_str().unwrap(),
-        "--lineage",
-        lineage_id,
-    ]);
+/// Capture the repo, returning the full capture document.
+fn capture_json(repo: &Path) -> Value {
+    let output = shore(["review", "capture", "--repo", repo.to_str().unwrap()]);
     assert!(
         output.status.success(),
-        "capture with lineage stderr:\n{}",
+        "capture stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
     serde_json::from_slice(&output.stdout).expect("parse capture JSON")

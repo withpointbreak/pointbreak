@@ -451,6 +451,7 @@ fn entry_from_event(
     let WorkObjectProposal::Revision {
         revision,
         snapshot_artifact_content_hash,
+        ..
     } = payload.work_object
     else {
         // A generative move proposing a task attempt is not a review revision;
@@ -610,6 +611,7 @@ mod tests {
                     }),
                 },
                 snapshot_artifact_content_hash: format!("sha256:artifact:{suffix}"),
+                supersedes: vec![],
             },
         };
         ShoreEvent::new(
@@ -799,6 +801,7 @@ mod tests {
                     }),
                 },
                 snapshot_artifact_content_hash: format!("sha256:artifact:{suffix}"),
+                supersedes: vec![],
             },
         };
         ShoreEvent::new(
@@ -1090,6 +1093,7 @@ mod tests {
                     }),
                 },
                 snapshot_artifact_content_hash: format!("sha256:artifact:{}", unit.as_str()),
+                supersedes: vec![],
             },
         };
         ShoreEvent::new(

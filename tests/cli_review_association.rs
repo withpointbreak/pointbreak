@@ -312,7 +312,14 @@ fn unit_list_ref_label_filter_matches_normalized_short_branch() {
     // A short branch name is normalized to the stored full ref.
     let matched = parse_json(
         &shore([
-            "review", "unit", "list", "--repo", repo_path, "--branch", "feat/x", "--by", "label",
+            "review",
+            "revisions",
+            "--repo",
+            repo_path,
+            "--branch",
+            "feat/x",
+            "--by",
+            "label",
         ])
         .stdout,
     );
@@ -325,8 +332,7 @@ fn unit_list_ref_label_filter_matches_normalized_short_branch() {
     let unmatched = parse_json(
         &shore([
             "review",
-            "unit",
-            "list",
+            "revisions",
             "--repo",
             repo_path,
             "--ref",
@@ -354,8 +360,7 @@ fn unit_list_ref_liveness_filter_matches_reachable_commit() {
     let json = parse_json(
         &shore([
             "review",
-            "unit",
-            "list",
+            "revisions",
             "--repo",
             repo_path,
             "--ref",
@@ -390,7 +395,7 @@ fn unit_show_includes_commit_range_and_liveness_block() {
         "HEAD",
     ]);
 
-    let json = parse_json(&shore(["review", "unit", "show", "--repo", repo_path]).stdout);
+    let json = parse_json(&shore(["review", "show", "--repo", repo_path]).stdout);
     let commit_range = &json["commitRange"];
     assert_eq!(commit_range["anchored"], true);
     assert_eq!(commit_range["currentCommits"].as_array().unwrap().len(), 1);

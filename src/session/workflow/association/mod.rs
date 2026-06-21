@@ -15,7 +15,7 @@ use crate::error::{Result, ShoreError};
 use crate::git::{git_commit_tree_oid, git_rev_parse_commit_oid};
 use crate::model::{
     ActorId, CommitAssociationId, EventId, RefAssociationId, ReviewEndpoint, ReviewTargetRef,
-    ReviewUnitLineageId, RevisionId, TargetRef,
+    RevisionId, TargetRef,
 };
 use crate::session::event::{
     EventPayload, EventTarget, EventType, ReviewUnitCommitAssociatedPayload,
@@ -24,7 +24,7 @@ use crate::session::event::{
     build_commit_withdrawal_id, build_ref_association_id, build_ref_withdrawal_id,
 };
 use crate::session::observation::{
-    CurrentReviewUnitContext, ReviewUnitScope, ReviewUnitSelection, resolve_review_unit,
+    CurrentReviewUnitContext, ReviewUnitScope, RevisionSelection, resolve_revision,
     validated_track_id,
 };
 use crate::session::state::{ProjectionDiagnostic, SessionState};
@@ -53,12 +53,6 @@ macro_rules! association_write_builders {
                 self.review_unit_id = Some(id);
                 self
             }
-
-            pub fn with_lineage_id(mut self, id: ReviewUnitLineageId) -> Self {
-                self.lineage_id = Some(id);
-                self
-            }
-
             pub fn with_track(mut self, track: impl Into<String>) -> Self {
                 self.track = Some(track.into());
                 self
@@ -96,7 +90,6 @@ macro_rules! association_write_builders {
 pub struct AssociateCommitOptions {
     repo: PathBuf,
     review_unit_id: Option<RevisionId>,
-    lineage_id: Option<ReviewUnitLineageId>,
     track: Option<String>,
     actor_id: Option<ActorId>,
     signing: EventSigningOptions,
@@ -107,7 +100,6 @@ pub struct AssociateCommitOptions {
 pub struct WithdrawCommitOptions {
     repo: PathBuf,
     review_unit_id: Option<RevisionId>,
-    lineage_id: Option<ReviewUnitLineageId>,
     track: Option<String>,
     actor_id: Option<ActorId>,
     signing: EventSigningOptions,
@@ -118,7 +110,6 @@ pub struct WithdrawCommitOptions {
 pub struct AssociateRefOptions {
     repo: PathBuf,
     review_unit_id: Option<RevisionId>,
-    lineage_id: Option<ReviewUnitLineageId>,
     track: Option<String>,
     actor_id: Option<ActorId>,
     signing: EventSigningOptions,
@@ -130,7 +121,6 @@ pub struct AssociateRefOptions {
 pub struct WithdrawRefOptions {
     repo: PathBuf,
     review_unit_id: Option<RevisionId>,
-    lineage_id: Option<ReviewUnitLineageId>,
     track: Option<String>,
     actor_id: Option<ActorId>,
     signing: EventSigningOptions,
@@ -142,7 +132,6 @@ impl AssociateCommitOptions {
         Self {
             repo: repo.as_ref().to_path_buf(),
             review_unit_id: None,
-            lineage_id: None,
             track: None,
             actor_id: None,
             signing: EventSigningOptions::default(),
@@ -210,7 +199,6 @@ pub struct WithdrawRefResult {
 pub struct ListAssociationsOptions {
     repo: PathBuf,
     review_unit_id: Option<RevisionId>,
-    lineage_id: Option<ReviewUnitLineageId>,
     axis: Option<AssociationAxis>,
     current_only: bool,
 }
@@ -220,7 +208,6 @@ impl ListAssociationsOptions {
         Self {
             repo: repo.as_ref().to_path_buf(),
             review_unit_id: None,
-            lineage_id: None,
             axis: None,
             current_only: false,
         }
@@ -230,12 +217,6 @@ impl ListAssociationsOptions {
         self.review_unit_id = Some(id);
         self
     }
-
-    pub fn with_lineage_id(mut self, id: ReviewUnitLineageId) -> Self {
-        self.lineage_id = Some(id);
-        self
-    }
-
     pub fn with_axis(mut self, axis: AssociationAxis) -> Self {
         self.axis = Some(axis);
         self
@@ -263,7 +244,6 @@ impl WithdrawCommitOptions {
         Self {
             repo: repo.as_ref().to_path_buf(),
             review_unit_id: None,
-            lineage_id: None,
             track: None,
             actor_id: None,
             signing: EventSigningOptions::default(),
@@ -281,7 +261,6 @@ impl AssociateRefOptions {
         Self {
             repo: repo.as_ref().to_path_buf(),
             review_unit_id: None,
-            lineage_id: None,
             track: None,
             actor_id: None,
             signing: EventSigningOptions::default(),
@@ -296,7 +275,6 @@ impl WithdrawRefOptions {
         Self {
             repo: repo.as_ref().to_path_buf(),
             review_unit_id: None,
-            lineage_id: None,
             track: None,
             actor_id: None,
             signing: EventSigningOptions::default(),
@@ -363,7 +341,6 @@ pub fn associate_commit(options: AssociateCommitOptions) -> Result<AssociateComm
     let outcome = record_association(
         &options.repo,
         options.review_unit_id.as_ref(),
-        options.lineage_id.as_ref(),
         options.track.as_deref(),
         options.actor_id.as_ref(),
         &options.signing,
@@ -407,7 +384,6 @@ pub fn withdraw_commit(options: WithdrawCommitOptions) -> Result<WithdrawCommitR
     let outcome = record_association(
         &options.repo,
         options.review_unit_id.as_ref(),
-        options.lineage_id.as_ref(),
         options.track.as_deref(),
         options.actor_id.as_ref(),
         &options.signing,
@@ -445,7 +421,6 @@ pub fn associate_ref(options: AssociateRefOptions) -> Result<AssociateRefResult>
     let outcome = record_association(
         &options.repo,
         options.review_unit_id.as_ref(),
-        options.lineage_id.as_ref(),
         options.track.as_deref(),
         options.actor_id.as_ref(),
         &options.signing,
@@ -487,7 +462,6 @@ pub fn withdraw_ref(options: WithdrawRefOptions) -> Result<WithdrawRefResult> {
     let outcome = record_association(
         &options.repo,
         options.review_unit_id.as_ref(),
-        options.lineage_id.as_ref(),
         options.track.as_deref(),
         options.actor_id.as_ref(),
         &options.signing,
@@ -521,12 +495,9 @@ pub fn withdraw_ref(options: WithdrawRefOptions) -> Result<WithdrawRefResult> {
 pub fn list_associations(options: ListAssociationsOptions) -> Result<ListAssociationsResult> {
     let read_store = resolve_read_store(&options.repo)?;
     let events = EventStore::open(read_store.store_dir()).list_events()?;
-    let resolved = resolve_review_unit(
+    let resolved = resolve_revision(
         &events,
-        ReviewUnitSelection::from_review_unit_or_lineage(
-            options.review_unit_id.as_ref(),
-            options.lineage_id.as_ref(),
-        )?,
+        RevisionSelection::from_revision_seed(options.review_unit_id.as_ref()),
         &CurrentReviewUnitContext::for_repo(&options.repo)?,
         ReviewUnitScope::default(),
     )?;
@@ -594,7 +565,6 @@ struct AssociationWriteOutcome {
 fn record_association<P, F>(
     repo: &Path,
     review_unit_id: Option<&RevisionId>,
-    lineage_id: Option<&ReviewUnitLineageId>,
     track: Option<&str>,
     actor_id: Option<&ActorId>,
     signing: &EventSigningOptions,
@@ -614,9 +584,9 @@ where
 
     let validation_store = resolve_write_validation_store(repo)?;
     let validation_events = validation_store.validation_events()?;
-    let resolved = resolve_review_unit(
+    let resolved = resolve_revision(
         &validation_events,
-        ReviewUnitSelection::from_review_unit_or_lineage(review_unit_id, lineage_id)?,
+        RevisionSelection::from_revision_seed(review_unit_id),
         &CurrentReviewUnitContext::for_repo(repo)?,
         ReviewUnitScope::default(),
     )?;

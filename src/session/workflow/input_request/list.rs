@@ -5,11 +5,11 @@ use super::view::{
     project_input_requests,
 };
 use crate::error::Result;
-use crate::model::{ReviewUnitLineageId, RevisionId, TrackId};
+use crate::model::{RevisionId, TrackId};
 use crate::session::EventStore;
 use crate::session::event::AssertionMode;
 use crate::session::observation::{
-    CurrentReviewUnitContext, ReviewUnitScope, ReviewUnitSelection, resolve_review_unit,
+    CurrentReviewUnitContext, ReviewUnitScope, RevisionSelection, resolve_revision,
     validated_track_id,
 };
 use crate::session::state::{ProjectionDiagnostic, SessionState};
@@ -19,7 +19,6 @@ use crate::session::store::resolution::resolve_read_store;
 pub struct InputRequestListOptions {
     repo: PathBuf,
     review_unit_id: Option<RevisionId>,
-    lineage_id: Option<ReviewUnitLineageId>,
     track: Option<String>,
     mode: Option<AssertionMode>,
     file: Option<String>,
@@ -32,7 +31,6 @@ impl InputRequestListOptions {
         Self {
             repo: repo.as_ref().to_path_buf(),
             review_unit_id: None,
-            lineage_id: None,
             track: None,
             mode: None,
             file: None,
@@ -45,12 +43,6 @@ impl InputRequestListOptions {
         self.review_unit_id = Some(id);
         self
     }
-
-    pub fn with_lineage_id(mut self, id: ReviewUnitLineageId) -> Self {
-        self.lineage_id = Some(id);
-        self
-    }
-
     pub fn with_track(mut self, track: impl Into<String>) -> Self {
         self.track = Some(track.into());
         self
@@ -99,12 +91,9 @@ pub fn list_input_requests(options: InputRequestListOptions) -> Result<InputRequ
     let store_dir = read_store.store_dir();
     let event_store = EventStore::open(store_dir);
     let events = event_store.list_events()?;
-    let resolved = resolve_review_unit(
+    let resolved = resolve_revision(
         &events,
-        ReviewUnitSelection::from_review_unit_or_lineage(
-            options.review_unit_id.as_ref(),
-            options.lineage_id.as_ref(),
-        )?,
+        RevisionSelection::from_revision_seed(options.review_unit_id.as_ref()),
         &CurrentReviewUnitContext::for_repo(&options.repo)?,
         ReviewUnitScope::default(),
     )?;

@@ -4,10 +4,10 @@ use super::{
     AssessmentProjectionOptions, AssessmentView, CurrentAssessmentView, project_assessments,
 };
 use crate::error::Result;
-use crate::model::{ReviewUnitLineageId, RevisionId, TrackId};
+use crate::model::{RevisionId, TrackId};
 use crate::session::EventStore;
 use crate::session::observation::{
-    CurrentReviewUnitContext, ReviewUnitScope, ReviewUnitSelection, resolve_review_unit,
+    CurrentReviewUnitContext, ReviewUnitScope, RevisionSelection, resolve_revision,
     validated_track_id,
 };
 use crate::session::state::{ProjectionDiagnostic, SessionState};
@@ -17,7 +17,6 @@ use crate::session::store::resolution::resolve_read_store;
 pub struct AssessmentShowOptions {
     pub(super) repo: PathBuf,
     pub(super) review_unit_id: Option<RevisionId>,
-    pub(super) lineage_id: Option<ReviewUnitLineageId>,
     pub(super) track: Option<String>,
     pub(super) include_summary: bool,
     pub(super) include_all: bool,
@@ -28,7 +27,6 @@ impl AssessmentShowOptions {
         Self {
             repo: repo.as_ref().to_path_buf(),
             review_unit_id: None,
-            lineage_id: None,
             track: None,
             include_summary: false,
             include_all: false,
@@ -39,12 +37,6 @@ impl AssessmentShowOptions {
         self.review_unit_id = Some(id);
         self
     }
-
-    pub fn with_lineage_id(mut self, id: ReviewUnitLineageId) -> Self {
-        self.lineage_id = Some(id);
-        self
-    }
-
     pub fn with_track(mut self, track: impl Into<String>) -> Self {
         self.track = Some(track.into());
         self
@@ -81,12 +73,9 @@ pub fn show_assessments(options: AssessmentShowOptions) -> Result<AssessmentShow
     let read_store = resolve_read_store(&options.repo)?;
     let store_dir = read_store.store_dir();
     let events = EventStore::open(store_dir).list_events()?;
-    let resolved = resolve_review_unit(
+    let resolved = resolve_revision(
         &events,
-        ReviewUnitSelection::from_review_unit_or_lineage(
-            options.review_unit_id.as_ref(),
-            options.lineage_id.as_ref(),
-        )?,
+        RevisionSelection::from_revision_seed(options.review_unit_id.as_ref()),
         &CurrentReviewUnitContext::for_repo(&options.repo)?,
         ReviewUnitScope::default(),
     )?;

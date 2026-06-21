@@ -313,47 +313,55 @@ fn capture_without_base_keeps_worktree_behavior() {
     let repo = modified_repo();
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
 
-    let show = parse_json(
-        &shore([
-            "review",
-            "unit",
-            "show",
-            "--repo",
-            repo.path().to_str().unwrap(),
-        ])
-        .stdout,
-    );
+    let show =
+        parse_json(&shore(["review", "show", "--repo", repo.path().to_str().unwrap()]).stdout);
 
     assert_eq!(show["reviewUnit"]["source"]["kind"], "git_worktree");
     assert_eq!(show["reviewUnit"]["target"]["kind"], "git_working_tree");
 }
 
 #[test]
-fn capture_with_base_and_lineage_attaches_round() {
-    let repo = committed_repo();
+fn capture_accepts_supersedes_and_records_no_lineage_attach() {
+    let repo = modified_repo();
 
-    let json = parse_json(
+    // The first revision (no predecessors).
+    let first =
+        parse_json(&shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]).stdout);
+    let first_id = first["reviewUnit"]["id"].as_str().unwrap().to_owned();
+    // A capture never attaches lineage now.
+    assert!(first.get("lineageAttach").is_none());
+
+    // A changed file yields a distinct revision that supersedes the first.
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    let second = parse_json(
         &shore([
             "review",
             "capture",
             "--repo",
             repo.path().to_str().unwrap(),
-            "--base",
-            "HEAD~1",
-            "--lineage",
-            "review-unit-lineage:random:test",
+            "--supersedes",
+            &first_id,
         ])
         .stdout,
     );
+    let second_id = second["reviewUnit"]["id"].as_str().unwrap().to_owned();
+    assert_ne!(first_id, second_id);
+    assert!(second.get("lineageAttach").is_none());
 
-    assert_eq!(
-        json["lineageAttach"]["eventsCreatedByType"]["review_unit_lineage_declared"],
-        1
+    // The supersession is readable: --revision on the superseded id resolves to
+    // the single current head (the second revision).
+    let resolved = parse_json(
+        &shore([
+            "review",
+            "show",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "--revision",
+            &first_id,
+        ])
+        .stdout,
     );
-    assert_eq!(
-        json["lineageAttach"]["eventsCreatedByType"]["review_unit_lineage_round_recorded"],
-        1
-    );
+    assert_eq!(resolved["reviewUnit"]["id"], second_id.as_str());
 }
 
 #[test]

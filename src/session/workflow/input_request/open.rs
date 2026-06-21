@@ -8,16 +8,15 @@ use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::crypto::EventSigner;
 use crate::error::{Result, ShoreError};
 use crate::model::{
-    ActorId, EventId, InputRequestId, ReviewTargetRef, ReviewUnitLineageId, RevisionId, TargetRef,
-    TrackId,
+    ActorId, EventId, InputRequestId, ReviewTargetRef, RevisionId, TargetRef, TrackId,
 };
 use crate::session::event::{
     AssertionMode, EventTarget, EventType, InputRequestOpenedPayload, InputRequestReasonCode,
     ShoreEvent,
 };
 use crate::session::observation::{
-    CurrentReviewUnitContext, ReviewUnitScope, ReviewUnitSelection, required_title,
-    resolve_review_unit, staged_body, validated_track_id,
+    CurrentReviewUnitContext, ReviewUnitScope, RevisionSelection, required_title, resolve_revision,
+    staged_body, validated_track_id,
 };
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::resolution::{
@@ -33,7 +32,6 @@ use crate::storage::{Durability, LocalStorage};
 pub struct InputRequestOpenOptions {
     repo: PathBuf,
     review_unit_id: Option<RevisionId>,
-    lineage_id: Option<ReviewUnitLineageId>,
     track: Option<String>,
     title: Option<String>,
     body: Option<String>,
@@ -50,7 +48,6 @@ impl InputRequestOpenOptions {
         Self {
             repo: repo.as_ref().to_path_buf(),
             review_unit_id: None,
-            lineage_id: None,
             track: None,
             title: None,
             body: None,
@@ -77,12 +74,6 @@ impl InputRequestOpenOptions {
         self.review_unit_id = Some(id);
         self
     }
-
-    pub fn with_lineage_id(mut self, id: ReviewUnitLineageId) -> Self {
-        self.lineage_id = Some(id);
-        self
-    }
-
     pub fn with_track(mut self, track: impl Into<String>) -> Self {
         self.track = Some(track.into());
         self
@@ -163,12 +154,9 @@ pub fn open_input_request(options: InputRequestOpenOptions) -> Result<InputReque
     // its unit and observation-ref/file targets against everything the writer sees.
     let validation_store = resolve_write_validation_store(&options.repo)?;
     let validation_events = validation_store.validation_events()?;
-    let resolved = resolve_review_unit(
+    let resolved = resolve_revision(
         &validation_events,
-        ReviewUnitSelection::from_review_unit_or_lineage(
-            options.review_unit_id.as_ref(),
-            options.lineage_id.as_ref(),
-        )?,
+        RevisionSelection::from_revision_seed(options.review_unit_id.as_ref()),
         &CurrentReviewUnitContext::for_repo(&options.repo)?,
         ReviewUnitScope::default(),
     )?;

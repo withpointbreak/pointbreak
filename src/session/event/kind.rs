@@ -10,8 +10,6 @@ pub enum EventType {
     InputRequestOpened,
     InputRequestResponded,
     ReviewNoteImported,
-    ReviewUnitLineageDeclared,
-    ReviewUnitLineageRoundRecorded,
     ReviewUnitRefAssociated,
     ReviewUnitRefWithdrawn,
     ReviewUnitCommitAssociated,
@@ -35,8 +33,6 @@ impl EventType {
             Self::InputRequestOpened => "input_request_opened",
             Self::InputRequestResponded => "input_request_responded",
             Self::ReviewNoteImported => "review_note_imported",
-            Self::ReviewUnitLineageDeclared => "review_unit_lineage_declared",
-            Self::ReviewUnitLineageRoundRecorded => "review_unit_lineage_round_recorded",
             Self::ReviewUnitRefAssociated => "review_unit_ref_associated",
             Self::ReviewUnitRefWithdrawn => "review_unit_ref_withdrawn",
             Self::ReviewUnitCommitAssociated => "review_unit_commit_associated",
@@ -64,8 +60,6 @@ mod tests {
             EventType::InputRequestOpened,
             EventType::InputRequestResponded,
             EventType::ReviewNoteImported,
-            EventType::ReviewUnitLineageDeclared,
-            EventType::ReviewUnitLineageRoundRecorded,
             EventType::ReviewUnitRefAssociated,
             EventType::ReviewUnitRefWithdrawn,
             EventType::ReviewUnitCommitAssociated,
@@ -170,8 +164,6 @@ mod tests {
             EventType::InputRequestOpened,
             EventType::InputRequestResponded,
             EventType::ReviewNoteImported,
-            EventType::ReviewUnitLineageDeclared,
-            EventType::ReviewUnitLineageRoundRecorded,
         ];
         let task_domain = [
             EventType::TaskCheckpointCaptured,
@@ -275,14 +267,16 @@ mod tests {
     }
 
     #[test]
-    fn lineage_event_types_serialize_as_snake_case() {
-        assert_eq!(
-            serde_json::to_string(&EventType::ReviewUnitLineageDeclared).unwrap(),
-            "\"review_unit_lineage_declared\""
-        );
-        assert_eq!(
-            serde_json::to_string(&EventType::ReviewUnitLineageRoundRecorded).unwrap(),
-            "\"review_unit_lineage_round_recorded\""
-        );
+    fn retired_lineage_event_types_no_longer_decode() {
+        for retired in [
+            "review_unit_lineage_declared",
+            "review_unit_lineage_round_recorded",
+        ] {
+            let result: Result<EventType, _> = serde_json::from_str(&format!("\"{retired}\""));
+            assert!(
+                result.is_err(),
+                "{retired} must not decode after lineage is retired for supersession"
+            );
+        }
     }
 }

@@ -50,6 +50,13 @@ pub enum WorkObjectProposal {
         /// revision identity); the artifact-transfer layer resolves the
         /// snapshot artifact by it.
         snapshot_artifact_content_hash: String,
+        /// The revisions this one supersedes (an evolution forward-pointer). Sorted
+        /// and deduped before hashing, so set-equal inputs converge byte-for-byte;
+        /// empty (a root revision) serializes to nothing, leaving an existing root
+        /// capture's payload hash unchanged. References a revision position, never
+        /// the revision's content object.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        supersedes: Vec<RevisionId>,
     },
     TaskAttempt {
         task_attempt_id: WorkObjectId,
@@ -85,7 +92,7 @@ impl EventPayload for WorkObjectProposedPayload {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{CommitRangeCaptureMode, WorktreeCaptureMode};
+    use crate::model::{CommitRangeCaptureMode, LedgerId, WorktreeCaptureMode};
 
     fn git_provenance() -> GitProvenance {
         GitProvenance {
@@ -113,6 +120,7 @@ mod tests {
                     git_provenance: Some(git_provenance()),
                 },
                 snapshot_artifact_content_hash: "sha256:artifact".to_owned(),
+                supersedes: vec![],
             },
         }
     }
@@ -150,6 +158,7 @@ mod tests {
                     git_provenance: None,
                 },
                 snapshot_artifact_content_hash: "sha256:artifact".to_owned(),
+                supersedes: vec![],
             },
         };
         let json = serde_json::to_value(&payload).unwrap();
@@ -200,5 +209,84 @@ mod tests {
             revision_payload().event_type(),
             EventType::WorkObjectProposed
         );
+    }
+
+    #[test]
+    fn empty_supersedes_is_omitted_from_serialization() {
+        // A root revision (no supersedes) serializes with no `supersedes` key, so
+        // an existing root capture's payload hash is unchanged by the new field.
+        let payload = revision_payload();
+        let json = serde_json::to_value(&payload).unwrap();
+        assert!(json["workObject"].get("supersedes").is_none());
+    }
+
+    #[test]
+    fn non_empty_supersedes_round_trips_as_an_array() {
+        let payload = WorkObjectProposedPayload {
+            engagement_id: EngagementId::new("engagement:sha256:e"),
+            work_object: WorkObjectProposal::Revision {
+                revision: Revision {
+                    id: RevisionId::new("rev:sha256:r"),
+                    object_id: ObjectId::new("obj:sha256:o"),
+                    git_provenance: None,
+                },
+                snapshot_artifact_content_hash: "sha256:artifact".to_owned(),
+                supersedes: vec![
+                    RevisionId::new("rev:sha256:a"),
+                    RevisionId::new("rev:sha256:b"),
+                ],
+            },
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["workObject"]["supersedes"][0], "rev:sha256:a");
+        assert_eq!(json["workObject"]["supersedes"][1], "rev:sha256:b");
+
+        let parsed: WorkObjectProposedPayload = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed, payload);
+    }
+
+    #[test]
+    fn set_equal_supersedes_converge_to_one_payload_hash() {
+        use crate::session::event::{EventTarget, ShoreEvent, Writer};
+        use crate::session::workflow::util::sorted_unique;
+
+        fn event_with_supersedes(supersedes: Vec<RevisionId>) -> ShoreEvent {
+            let revision_id = RevisionId::new("rev:sha256:x");
+            ShoreEvent::new(
+                EventType::WorkObjectProposed,
+                format!("work_object_proposed:{}", revision_id.as_str()),
+                EventTarget::for_revision(
+                    LedgerId::new("ledger:default"),
+                    revision_id.clone(),
+                    None,
+                ),
+                Writer::shore_local("test"),
+                WorkObjectProposedPayload {
+                    engagement_id: EngagementId::new("engagement:sha256:e"),
+                    work_object: WorkObjectProposal::Revision {
+                        revision: Revision {
+                            id: revision_id,
+                            object_id: ObjectId::new("obj:sha256:o"),
+                            git_provenance: None,
+                        },
+                        snapshot_artifact_content_hash: "sha256:artifact".to_owned(),
+                        supersedes,
+                    },
+                },
+                "2026-06-04T00:00:00Z",
+            )
+            .unwrap()
+        }
+
+        let a = event_with_supersedes(sorted_unique(vec![
+            RevisionId::new("rev:sha256:b"),
+            RevisionId::new("rev:sha256:a"),
+            RevisionId::new("rev:sha256:b"),
+        ]));
+        let b = event_with_supersedes(sorted_unique(vec![
+            RevisionId::new("rev:sha256:a"),
+            RevisionId::new("rev:sha256:b"),
+        ]));
+        assert_eq!(a.payload_hash, b.payload_hash);
     }
 }

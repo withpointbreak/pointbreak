@@ -62,9 +62,6 @@ pub enum ReviewTargetRef {
     Revision {
         revision_id: RevisionId,
     },
-    Lineage {
-        review_unit_lineage_id: super::ReviewUnitLineageId,
-    },
     File {
         revision_id: RevisionId,
         file_path: String,

@@ -1,14 +1,14 @@
 use std::path::{Path, PathBuf};
 
 use super::super::observation::{
-    CurrentReviewUnitContext, ReviewUnitScope, ReviewUnitSelection, resolve_review_unit,
+    CurrentReviewUnitContext, ReviewUnitScope, RevisionSelection, resolve_revision,
     validated_track_id,
 };
 use super::view::{
     ValidationCheckProjectionOptions, ValidationCheckView, project_validation_checks,
 };
 use crate::error::Result;
-use crate::model::{ReviewUnitLineageId, RevisionId, TrackId, ValidationStatus};
+use crate::model::{RevisionId, TrackId, ValidationStatus};
 use crate::session::EventStore;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::resolution::resolve_read_store;
@@ -17,7 +17,6 @@ use crate::session::store::resolution::resolve_read_store;
 pub struct ValidationListOptions {
     repo: PathBuf,
     review_unit_id: Option<RevisionId>,
-    lineage_id: Option<ReviewUnitLineageId>,
     track: Option<String>,
     status: Option<ValidationStatus>,
     include_body: bool,
@@ -28,7 +27,6 @@ impl ValidationListOptions {
         Self {
             repo: repo.as_ref().to_path_buf(),
             review_unit_id: None,
-            lineage_id: None,
             track: None,
             status: None,
             include_body: false,
@@ -39,12 +37,6 @@ impl ValidationListOptions {
         self.review_unit_id = Some(id);
         self
     }
-
-    pub fn with_lineage_id(mut self, id: ReviewUnitLineageId) -> Self {
-        self.lineage_id = Some(id);
-        self
-    }
-
     pub fn with_track(mut self, track: impl Into<String>) -> Self {
         self.track = Some(track.into());
         self
@@ -81,12 +73,9 @@ pub fn list_validation_checks(options: ValidationListOptions) -> Result<Validati
     let store_dir = read_store.store_dir();
     let event_store = EventStore::open(store_dir);
     let events = event_store.list_events()?;
-    let resolved = resolve_review_unit(
+    let resolved = resolve_revision(
         &events,
-        ReviewUnitSelection::from_review_unit_or_lineage(
-            options.review_unit_id.as_ref(),
-            options.lineage_id.as_ref(),
-        )?,
+        RevisionSelection::from_revision_seed(options.review_unit_id.as_ref()),
         &CurrentReviewUnitContext::for_repo(&options.repo)?,
         ReviewUnitScope::default(),
     )?;

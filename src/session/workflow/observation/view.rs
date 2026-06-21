@@ -156,7 +156,6 @@ pub(crate) fn target_matches_file(target: &ReviewTargetRef, file: &str) -> bool 
             file_path == file
         }
         ReviewTargetRef::Revision { .. }
-        | ReviewTargetRef::Lineage { .. }
         | ReviewTargetRef::Observation { .. }
         | ReviewTargetRef::InputRequest { .. }
         | ReviewTargetRef::Assessment { .. }

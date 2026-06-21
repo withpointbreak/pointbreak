@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Subcommand, ValueEnum};
 use shoreline::documents::{validation_add_document, validation_list_document};
-use shoreline::model::{ReviewUnitLineageId, RevisionId, ValidationStatus, ValidationTrigger};
+use shoreline::model::{RevisionId, ValidationStatus, ValidationTrigger};
 use shoreline::session::{
     ValidationAddOptions, ValidationListOptions, list_validation_checks, record_validation_check,
 };
@@ -29,10 +29,7 @@ struct ValidationAddArgs {
     repo: PathBuf,
 
     #[arg(long)]
-    review_unit: Option<String>,
-
-    #[arg(long)]
-    lineage: Option<String>,
+    revision: Option<String>,
 
     #[arg(long)]
     track: String,
@@ -90,10 +87,7 @@ struct ValidationListArgs {
     repo: PathBuf,
 
     #[arg(long)]
-    review_unit: Option<String>,
-
-    #[arg(long)]
-    lineage: Option<String>,
+    revision: Option<String>,
 
     #[arg(long)]
     track: Option<String>,
@@ -188,11 +182,8 @@ fn validation_add_options(
         .with_status(args.status.into())
         .with_trigger(args.trigger.into());
 
-    if let Some(review_unit) = args.review_unit {
-        options = options.with_review_unit_id(RevisionId::new(review_unit));
-    }
-    if let Some(lineage) = args.lineage {
-        options = options.with_lineage_id(ReviewUnitLineageId::new(lineage));
+    if let Some(revision) = args.revision {
+        options = options.with_review_unit_id(RevisionId::new(revision));
     }
     if let Some(command) = args.command {
         options = options.with_command(command);
@@ -232,11 +223,8 @@ fn validation_add_options(
 
 fn validation_list_options(args: ValidationListArgs) -> ValidationListOptions {
     let mut options = ValidationListOptions::new(&args.repo).with_include_body(args.include_body);
-    if let Some(review_unit) = args.review_unit {
-        options = options.with_review_unit_id(RevisionId::new(review_unit));
-    }
-    if let Some(lineage) = args.lineage {
-        options = options.with_lineage_id(ReviewUnitLineageId::new(lineage));
+    if let Some(revision) = args.revision {
+        options = options.with_review_unit_id(RevisionId::new(revision));
     }
     if let Some(track) = args.track {
         options = options.with_track(track);

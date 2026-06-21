@@ -1,7 +1,6 @@
 mod add;
 mod show;
 mod target;
-mod util;
 mod view;
 
 pub use self::add::{AssessmentAddOptions, AssessmentAddResult, record_assessment};
