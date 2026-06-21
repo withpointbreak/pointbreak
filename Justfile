@@ -81,5 +81,11 @@ migrate-store-common-dir repo="." include-ephemeral="false":
     cargo +stable run --bin shore -- store migrate --repo {{ repo }} \
         {{ if include-ephemeral == "true" { "--include-ephemeral" } else { "" } }}
 
+# One-shot: lift a legacy flat-v1 store into the reshaped envelope, writing a
+# fresh store. Re-signs inline signatures and re-attests held-key co-signatures
+# from the keystore. Owner-run, run-once, throwaway; not part of the shipped CLI.
+migrate-substrate source target keystore=(home_dir() / ".shore/keys"):
+    cargo +stable run --example migrate-substrate -- {{ source }} {{ target }} {{ keystore }}
+
 # Check commit messages, compile, lint, and tests.
 check: commit-check build lint test

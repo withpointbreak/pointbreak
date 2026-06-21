@@ -14,15 +14,14 @@ const SNAPSHOT_ARTIFACT_VERSION: u32 = 2;
 
 /// The snapshot-scoped v2 artifact body (#146). It carries only namespace-
 /// independent content, so two worktrees capturing the same `snapshot_id`
-/// produce **byte-identical** artifacts that dedup. ReviewUnit identity and
-/// endpoints (`review_unit_id`/`source`/`base`/`target`) live in the
+/// produce **byte-identical** artifacts that dedup. Revision identity and
+/// endpoints (`revision_id`/`source`/`base`/`target`) live in the
 /// `WorkObjectProposed` event/projection, never here (INV-1/INV-3).
 ///
-/// New writes are v2. Pre-existing v1 artifacts — whose body also embedded the
-/// identity/endpoint fields — stay readable via [`decode_and_validate_snapshot_artifact`]
-/// (the dual-read escape hatch); their extra fields are ignored on deserialize
-/// and their `content_hash` is validated over the stored body, so a v1 artifact's
-/// hash still matches the capture event that bound it.
+/// All writes and reads are v2. The legacy dual-read that also accepted
+/// identity-bearing v1 bodies has been removed: [`decode_and_validate_snapshot_artifact`]
+/// now rejects any non-v2 body, and the one-shot store migrator re-emits every
+/// artifact as a clean v2 body, so no v1 artifact survives to be read.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SnapshotArtifact {
@@ -60,14 +59,11 @@ pub(crate) fn write_snapshot_artifact_to(
     match storage.create_file_exclusive(&path, &bytes, Durability::Durable)? {
         CreateFileOutcome::Created => Ok(artifact),
         CreateFileOutcome::AlreadyExists => {
-            // Dedup on snapshot-content match, regardless of version (INV-7,
-            // dual-read): the path is keyed by `snapshot_id`, so an existing valid
-            // artifact whose `snapshot` equals ours holds the same content. Two
-            // fresh worktrees write byte-identical v2 artifacts; a new v2 capture
-            // over a pre-existing v1 artifact dedups against the (untouched) v1
-            // body — #146 is fixed without rewriting any signed history. We return
-            // the existing artifact (whatever version), so the capture event binds
-            // to the hash actually on disk.
+            // Dedup on snapshot-content match (INV-7): the path is keyed by
+            // `snapshot_id`, so an existing valid artifact whose `snapshot` equals
+            // ours holds the same content. Two fresh worktrees write byte-identical
+            // v2 artifacts and dedup against each other — #146 is fixed. We return
+            // the existing artifact, so the capture event binds to the hash on disk.
             let existing_bytes = std::fs::read(&path).map_err(|error| {
                 missing_artifact_or_io(error, &artifact.snapshot.snapshot_id, &path)
             })?;
@@ -175,59 +171,28 @@ fn missing_artifact_or_io(
     ShoreError::Message(format!("read file {}: {error}", path.display()))
 }
 
-/// The one decode path for stored snapshot-artifact bytes (INV-6). Validates the
-/// `contentHash` over the **raw stored body minus `contentHash`**, then
-/// deserializes into the v2-shaped struct. The raw validation is version-agnostic
-/// — each version's writer hashed its own present body minus `contentHash` (v1:
-/// the full body including the identity/endpoint fields; v2: the snapshot-scoped
-/// body) — so this accepts and validates **both** v1 and v2 (the dual-read escape
-/// hatch). A v1 artifact's extra identity fields are ignored on deserialize, and
-/// the returned struct's `content_hash` is whatever was stored, so the
-/// `WorkObjectProposed` event that bound it still matches (INV-3).
-///
-/// TODO(remove-dual-read): once every affected repo has converged to v2 (no v1
-/// artifacts remain), drop the raw/version-agnostic branch and restore a strict
-/// v2-only decode (reject `version != 2`, hash over the typed struct). See plan
-/// 0074 `findings/todo-remove-dual-read-after-fleet-migration.md`.
+/// The one decode path for stored snapshot-artifact bytes. Strict v2-only:
+/// rejects any `version` other than v2 (the snapshot-scoped body), then validates
+/// the `contentHash` over the typed v2 struct. The legacy dual-read that also
+/// accepted identity-bearing v1 bodies is gone — the one-shot migrator re-emits
+/// every artifact as v2, so a v1 body in a migrated store is a stray and is
+/// loudly rejected rather than silently accepted.
 pub(crate) fn decode_and_validate_snapshot_artifact(bytes: &[u8]) -> Result<SnapshotArtifact> {
-    let value: serde_json::Value = serde_json::from_slice(bytes)?;
-    validate_raw_artifact_content_hash(&value)?;
-    let artifact: SnapshotArtifact = serde_json::from_value(value)?;
-    Ok(artifact)
-}
-
-/// Validate a stored artifact's `contentHash` over its raw JSON body minus
-/// `contentHash`. Version-agnostic by construction (it hashes whatever body is
-/// present), so it covers both v1 and v2 stored shapes — the dual-read decode and
-/// any caller validating raw artifact bytes share this single hash scope.
-fn validate_raw_artifact_content_hash(value: &serde_json::Value) -> Result<()> {
-    let mut material = value.clone();
-    let Some(object) = material.as_object_mut() else {
-        return Err(ShoreError::Message(
-            "snapshot artifact hash material must be an object".to_owned(),
-        ));
-    };
-    let Some(stored) = object
-        .remove("contentHash")
-        .and_then(|value| value.as_str().map(str::to_owned))
-    else {
-        return Err(ShoreError::Message(
-            "snapshot artifact hash material is missing contentHash".to_owned(),
-        ));
-    };
-
-    if sha256_json_prefixed(&material)? == stored {
-        return Ok(());
+    let artifact: SnapshotArtifact = serde_json::from_slice(bytes)?;
+    if artifact.version != SNAPSHOT_ARTIFACT_VERSION {
+        return Err(ShoreError::Message(format!(
+            "unsupported snapshot artifact version {}; only v{SNAPSHOT_ARTIFACT_VERSION} (snapshot-scoped) is supported",
+            artifact.version
+        )));
     }
-
-    let snapshot_id = value
-        .get("snapshot")
-        .and_then(|snapshot| snapshot.get("snapshot_id"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("<unknown>");
-    Err(ShoreError::Message(format!(
-        "snapshot artifact content hash mismatch for {snapshot_id}"
-    )))
+    let expected = snapshot_artifact_content_hash(&artifact)?;
+    if artifact.content_hash != expected {
+        return Err(ShoreError::Message(format!(
+            "snapshot artifact content hash mismatch for {}",
+            artifact.snapshot.snapshot_id.as_str()
+        )));
+    }
+    Ok(artifact)
 }
 
 /// Hash a v2 artifact's body minus `contentHash` (the value [`build_snapshot_artifact_v2`]
@@ -344,10 +309,11 @@ mod tests {
     }
 
     #[test]
-    fn decode_accepts_a_v1_artifact_and_keeps_its_stored_hash() {
-        // Dual-read (INV-6): a pre-existing v1 artifact stays readable; its extra
-        // identity fields are ignored and its stored v1 hash is preserved so the
-        // capture event that bound it still matches.
+    fn v1_snapshot_body_is_rejected_after_the_break() {
+        // The dual-read is gone: an identity-bearing v1 body no longer decodes;
+        // only the snapshot-scoped v2 body does. A clean store carries only v2
+        // artifacts (the one-shot migrator re-emits them), so a stray v1 body is a
+        // loud rejection, not a silently-accepted legacy shape.
         let repo = modified_repo();
         let artifact = write_current_snapshot_artifact(&repo);
         let path = snapshot_artifact_path(
@@ -356,18 +322,31 @@ mod tests {
         );
         let v1_bytes = rewrite_as_v1(&fs::read(&path).unwrap());
 
-        let decoded = decode_and_validate_snapshot_artifact(&v1_bytes).unwrap();
-        assert_eq!(decoded.version, 1);
-        assert_eq!(decoded.snapshot.snapshot_id, artifact.snapshot.snapshot_id);
-        // The struct preserves the stored v1 content hash, not a recomputed v2 one.
-        let v1_hash: serde_json::Value =
-            serde_json::from_slice::<serde_json::Value>(&v1_bytes).unwrap()["contentHash"].clone();
-        assert_eq!(decoded.content_hash, v1_hash.as_str().unwrap());
-        assert_ne!(decoded.content_hash, artifact.content_hash);
+        let error = decode_and_validate_snapshot_artifact(&v1_bytes)
+            .expect_err("a v1 body must be rejected after the break");
+        assert!(
+            error.to_string().contains("v2"),
+            "rejection must name the supported v2 shape, got: {error}"
+        );
     }
 
     #[test]
-    fn decode_rejects_a_tampered_v1_artifact() {
+    fn v2_snapshot_body_decodes_cleanly() {
+        let repo = modified_repo();
+        let artifact = write_current_snapshot_artifact(&repo);
+        let path = snapshot_artifact_path(
+            &resolved_store_dir(repo.path()),
+            &artifact.snapshot.snapshot_id,
+        );
+        let v2_bytes = fs::read(&path).unwrap();
+
+        let decoded = decode_and_validate_snapshot_artifact(&v2_bytes).unwrap();
+        assert_eq!(decoded.version, 2);
+        assert_eq!(decoded, artifact);
+    }
+
+    #[test]
+    fn decode_rejects_a_tampered_v2_artifact() {
         let repo = modified_repo();
         let artifact = write_current_snapshot_artifact(&repo);
         let path = snapshot_artifact_path(
@@ -375,21 +354,20 @@ mod tests {
             &artifact.snapshot.snapshot_id,
         );
         let mut value: serde_json::Value =
-            serde_json::from_slice(&rewrite_as_v1(&fs::read(&path).unwrap())).unwrap();
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         // Mutate a body field without re-stamping the hash.
-        value["target"]["worktreeRoot"] = serde_json::json!("/evil");
+        value["snapshot"]["files"][0]["new_path"] = serde_json::json!("/evil");
 
         let error = decode_and_validate_snapshot_artifact(&serde_json::to_vec(&value).unwrap())
-            .expect_err("tampered v1 artifact is rejected");
+            .expect_err("tampered v2 artifact is rejected");
         assert!(error.to_string().contains("content hash"));
     }
 
     #[test]
-    fn write_dedups_against_a_pre_existing_v1_artifact() {
-        // The dual-read #146 fix within a store: a snapshot path already holding a
-        // v1 artifact accepts a new v2 write of the same snapshot without conflict,
-        // returns the (untouched) v1 artifact, and never rewrites it — so a signed
-        // v1 capture that bound the v1 hash keeps validating.
+    fn write_dedups_against_a_pre_existing_v2_artifact() {
+        // Within a store, a snapshot path already holding a v2 artifact accepts a
+        // second write of the same snapshot without conflict and returns the
+        // existing artifact, never rewriting it.
         let repo = modified_repo();
         let files = capture_worktree_diff_files(repo.path()).unwrap();
         let fingerprint = compute_review_unit_fingerprint(repo.path()).unwrap();
@@ -403,22 +381,14 @@ mod tests {
             .store_dir()
             .to_path_buf();
 
-        // First write lands a native v2 artifact; downgrade it to a v1 body, as an
-        // old binary would have written it.
-        let v2 = write_snapshot_artifact_to(&store_dir, &fingerprint, snapshot.clone()).unwrap();
-        assert_eq!(v2.version, 2);
+        let first = write_snapshot_artifact_to(&store_dir, &fingerprint, snapshot.clone()).unwrap();
+        assert_eq!(first.version, 2);
         let path = snapshot_artifact_path(&store_dir, &fingerprint.snapshot_id);
-        let v1_bytes = rewrite_as_v1(&fs::read(&path).unwrap());
-        fs::write(&path, &v1_bytes).unwrap();
+        let on_disk = fs::read(&path).unwrap();
 
-        // Second write of the same snapshot dedups against the v1 body.
         let deduped = write_snapshot_artifact_to(&store_dir, &fingerprint, snapshot).unwrap();
-        assert_eq!(deduped.version, 1, "dedup returns the existing v1 artifact");
-        assert_eq!(
-            fs::read(&path).unwrap(),
-            v1_bytes,
-            "v1 artifact left untouched"
-        );
+        assert_eq!(deduped, first, "dedup returns the existing v2 artifact");
+        assert_eq!(fs::read(&path).unwrap(), on_disk, "artifact left untouched");
     }
 
     #[test]

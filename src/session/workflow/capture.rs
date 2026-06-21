@@ -489,15 +489,14 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    use crate::canonical_hash::sha256_json_prefixed;
     use crate::git::git_common_dir;
-    use crate::model::{CommitRangeCaptureMode, ObjectId, ReviewEndpoint, ReviewUnitSource};
+    use crate::model::{CommitRangeCaptureMode, ReviewEndpoint, ReviewUnitSource};
     use crate::session::event::EventType;
     use crate::session::{
-        ArtifactKind, CaptureOptions, CaptureResult, CommitRangeSpec, EventStore,
-        ImportArtifactOptions, ImportArtifactOutcome, ReviewUnitShowOptions, ShoreStorePaths,
-        capture_review, capture_worktree_review, export_artifact, import_artifact,
-        read_snapshot_artifact, referenced_artifacts, show_review_unit,
+        ArtifactKind, CaptureOptions, CommitRangeSpec, EventStore, ImportArtifactOptions,
+        ImportArtifactOutcome, ReviewUnitShowOptions, ShoreStorePaths, capture_review,
+        capture_worktree_review, export_artifact, import_artifact, read_snapshot_artifact,
+        referenced_artifacts, show_review_unit,
     };
 
     #[test]
@@ -1150,54 +1149,6 @@ mod tests {
     }
 
     #[test]
-    fn linked_capture_dedups_against_pre_existing_v1_and_both_units_render() {
-        // The dual-read mixed case end to end: worktree A is captured by an "old"
-        // binary (v1 artifact + v1-bound event), then worktree B captures the same
-        // range with the v2 binary. The two range captures converge to one revision,
-        // so B dedups against the untouched v1 artifact, A's signed-shaped v1 binding
-        // stays valid, and the converged unit renders.
-        let fixture = SharedRangeCapture::new();
-        let a = capture_review(
-            CaptureOptions::new(&fixture.worktree_a)
-                .with_commit_range(CommitRangeSpec::new("HEAD~1")),
-        )
-        .unwrap();
-        let clone_local = fixture.clone_local_store_dir();
-        let v1_hash = downgrade_capture_to_v1(&clone_local, &a.object_id, &a);
-        assert_ne!(
-            v1_hash, a.snapshot_artifact_content_hash,
-            "the v1 body hash differs from the original v2 hash"
-        );
-
-        // Worktree B captures the same range: write dedups against the v1 body.
-        let b = capture_review(
-            CaptureOptions::new(&fixture.worktree_b)
-                .with_commit_range(CommitRangeSpec::new("HEAD~1")),
-        )
-        .unwrap();
-        assert_eq!(a.object_id, b.object_id);
-        assert_eq!(a.revision_id, b.revision_id);
-        // B bound to the on-disk (v1) hash it deduped against.
-        assert_eq!(b.snapshot_artifact_content_hash, v1_hash);
-
-        // The shared artifact is still the untouched v1 body, and both units render.
-        let stored = read_snapshot_artifact(&fixture.worktree_a, &a.object_id).unwrap();
-        assert_eq!(stored.version, 1);
-        let snapshot_files = fs::read_dir(clone_local.join("artifacts/snapshots"))
-            .unwrap()
-            .count();
-        assert_eq!(snapshot_files, 1);
-        for review_unit_id in [&a.revision_id, &b.revision_id] {
-            let shown = show_review_unit(
-                ReviewUnitShowOptions::new(&fixture.worktree_b)
-                    .with_review_unit_id(review_unit_id.clone()),
-            )
-            .unwrap();
-            assert!(!shown.snapshot.files.is_empty());
-        }
-    }
-
-    #[test]
     fn independent_worktree_snapshot_artifacts_dedup_on_import() {
         // Two independent stores capture the same range (byte-identical v2
         // artifacts). Importing one's artifact into the other is a no-op Existing,
@@ -1281,75 +1232,6 @@ mod tests {
         fn clone_local_store_dir(&self) -> std::path::PathBuf {
             git_common_dir(&self.worktree_a).unwrap().join("shore")
         }
-    }
-
-    /// Rewrite a landed capture into a faithful v1 store: downgrade the snapshot
-    /// artifact to a full v1 body (re-adding the identity/endpoint fields and a v1
-    /// `contentHash`) and re-point its capture event's `snapshotArtifactContentHash`
-    /// + `payloadHash` to the v1 hash, so the store looks as an old binary wrote it.
-    fn downgrade_capture_to_v1(
-        store_dir: &Path,
-        snapshot_id: &ObjectId,
-        capture: &CaptureResult,
-    ) -> String {
-        let artifact_path = find_store_file(&store_dir.join("artifacts/snapshots"), |json| {
-            json["snapshot"]["snapshot_id"] == snapshot_id.as_str()
-        });
-        let mut value: serde_json::Value =
-            serde_json::from_slice(&fs::read(&artifact_path).unwrap()).unwrap();
-        let object = value.as_object_mut().unwrap();
-        object.insert("version".to_owned(), serde_json::json!(1));
-        object.insert(
-            "reviewUnitId".to_owned(),
-            serde_json::json!(capture.revision_id.as_str()),
-        );
-        object.insert(
-            "source".to_owned(),
-            serde_json::json!({ "kind": "git_working_tree" }),
-        );
-        object.insert(
-            "base".to_owned(),
-            serde_json::json!({ "kind": "git_working_tree", "worktreeRoot": "/legacy" }),
-        );
-        object.insert(
-            "target".to_owned(),
-            serde_json::json!({ "kind": "git_working_tree", "worktreeRoot": "/legacy" }),
-        );
-        object.remove("contentHash");
-        let v1_hash = sha256_json_prefixed(&value).unwrap();
-        value
-            .as_object_mut()
-            .unwrap()
-            .insert("contentHash".to_owned(), serde_json::json!(v1_hash.clone()));
-        fs::write(&artifact_path, serde_json::to_vec(&value).unwrap()).unwrap();
-
-        let event_path = find_store_file(&store_dir.join("events"), |json| {
-            json["eventType"] == "work_object_proposed"
-                && json["payload"]["workObject"]["revision"]["id"] == capture.revision_id.as_str()
-        });
-        let mut event: serde_json::Value =
-            serde_json::from_slice(&fs::read(&event_path).unwrap()).unwrap();
-        event["payload"]["workObject"]["snapshotArtifactContentHash"] = serde_json::json!(v1_hash);
-        event["payloadHash"] = serde_json::json!(sha256_json_prefixed(&event["payload"]).unwrap());
-        fs::write(&event_path, serde_json::to_vec(&event).unwrap()).unwrap();
-
-        v1_hash
-    }
-
-    fn find_store_file(
-        dir: &Path,
-        matches: impl Fn(&serde_json::Value) -> bool,
-    ) -> std::path::PathBuf {
-        fs::read_dir(dir)
-            .expect("read store directory")
-            .map(|entry| entry.expect("read dir entry").path())
-            .find(|path| {
-                fs::read(path)
-                    .ok()
-                    .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                    .is_some_and(|json| matches(&json))
-            })
-            .expect("matching store file")
     }
 
     fn clone_repo(source: &TestRepo) -> TestRepo {
