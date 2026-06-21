@@ -33,16 +33,17 @@ use crate::crypto::EventSigner;
 use crate::error::{Result, ShoreError};
 use crate::keys::{FileEd25519Signer, KeyCustody, list_keys_in, load_signer_in};
 use crate::model::{
-    DiffSnapshot, EngagementId, LedgerId, ObjectId, ReviewEndpoint, ReviewUnitSource, RevisionId,
-    TargetRef, TaskTargetRef, TrackId, WorkObjectId,
+    DiffSnapshot, EngagementId, EventId, LedgerId, ObjectId, ReviewEndpoint, ReviewUnitSource,
+    RevisionId, TargetRef, TaskTargetRef, TrackId, ValidationTarget, WorkObjectId,
 };
 use crate::session::event::{
     AssertionMode, EventSignature, EventSignatureRecordedPayload, EventTarget, EventToBeSigned,
     EventType, GitProvenance, IngestProvenance, Revision, ShoreEvent, SourceRef, SourceSpeaker,
-    WorkObjectProposal, WorkObjectProposedPayload, Writer,
+    ValidationCheckRecordedPayload, WorkObjectProposal, WorkObjectProposedPayload, Writer,
     event_signature_pre_authentication_encoding,
 };
 use crate::session::workflow::util::sorted_unique;
+use crate::session::workflow::{ValidationCheckIdMaterial, build_validation_check_id};
 use crate::session::{EventSigningOptions, sign_event_if_requested};
 
 /// Inputs for one migration pass. Generic: all three locations are parameters,
@@ -159,21 +160,24 @@ pub fn migrate_substrate_store(options: MigrateOptions) -> Result<MigrateSummary
         {
             continue; // folded into supersedes; the carriers are not re-emitted
         }
-        if event_type == "event_signature_recorded" && !is_legacy(value) {
-            // An already-reshaped co-signature passes through verbatim.
-            let event = passthrough_event(value)?;
-            record_into(&target, &event)?;
-            old_to_new.insert(event_id_of(value)?, event);
-            summary.events_migrated += 1;
+        if event_type == "event_signature_recorded" {
+            // Every co-signature is re-homed in the third pass, after the full
+            // old->new event-id map is built. A current-envelope carrier cannot be
+            // passed through here because its target may still be re-keyed below
+            // (a current-envelope association event left with the stale event type).
             continue;
         }
-        if event_type == "event_signature_recorded" {
-            continue; // re-attested in the third pass
-        }
 
-        if !is_legacy(value) {
-            // An already-reshaped event passes through verbatim (provenance + mode
-            // are already on it).
+        if !is_legacy(value)
+            && reshaped_event_type(event_type) == event_type
+            && !carries_stale_review_unit_wire(value)
+        {
+            // A fully reshaped event passes through verbatim (provenance + mode are
+            // already on it). A current-envelope event can still carry the old
+            // `review_unit` spelling and is re-keyed below: an association/withdrawal
+            // event keeps the old event type (the `reshaped_event_type` guard), and a
+            // validation event keeps the old `kind: review_unit` payload target until
+            // the ValidationTarget rename (the stale-wire guard).
             let event = passthrough_event(value)?;
             record_into(&target, &event)?;
             old_to_new.insert(event_id_of(value)?, event);
@@ -185,6 +189,8 @@ pub fn migrate_substrate_store(options: MigrateOptions) -> Result<MigrateSummary
             transform_review_capture(value, &capture_plans)?
         } else if event_type == "task_attempt_captured" {
             transform_task_capture(value)?
+        } else if event_type == "validation_check_recorded" {
+            transform_validation_check(value, &review_remap)?
         } else {
             transform_generic(value, &review_remap)?
         };
@@ -199,13 +205,16 @@ pub fn migrate_substrate_store(options: MigrateOptions) -> Result<MigrateSummary
         summary.events_migrated += 1;
     }
 
-    // Third pass: re-attest detached co-signatures over their now-reshaped
-    // targets, in dependency order (targets are all written above).
+    // Third pass: re-home detached co-signatures, in dependency order (every
+    // target is written above). A current-envelope carrier whose target was left
+    // untouched is preserved verbatim; any carrier whose target was re-keyed (every
+    // legacy target, and a current-envelope association left with the stale type) is
+    // re-attested over the reshaped target or dropped.
     for value in &raw {
-        if value["eventType"] != "event_signature_recorded" || !is_legacy(value) {
+        if value["eventType"] != "event_signature_recorded" {
             continue;
         }
-        reattest_cosignature(
+        rehome_cosignature(
             value,
             &target,
             &old_to_new,
@@ -555,12 +564,23 @@ fn transform_generic(value: &Value, remap: &BTreeMap<String, String>) -> Result<
     let mut payload = value["payload"].clone();
     remap_review_unit_ids(&mut payload, remap);
 
-    let idempotency_key = remap_idempotency_key(
-        value["idempotencyKey"]
-            .as_str()
-            .ok_or_else(|| migrate_error("event is missing idempotencyKey"))?,
-        remap,
-    );
+    // The association/withdrawal events serialize the old `review_unit_*` spelling
+    // in their event type and lead their idempotency key with the same token. The
+    // bodies already reshape through `remap_review_unit_ids`, so rewrite the event
+    // type and the key prefix to `revision_*` and re-derive the id from the
+    // reshaped key, matching what a native write produces.
+    let legacy_event_type = value["eventType"]
+        .as_str()
+        .ok_or_else(|| migrate_error("event is missing eventType"))?;
+    let event_type = reshaped_event_type(legacy_event_type);
+    let legacy_key = value["idempotencyKey"]
+        .as_str()
+        .ok_or_else(|| migrate_error("event is missing idempotencyKey"))?;
+    let reprefixed_key = match legacy_key.strip_prefix(legacy_event_type) {
+        Some(rest) if event_type != legacy_event_type => format!("{event_type}{rest}"),
+        _ => legacy_key.to_owned(),
+    };
+    let idempotency_key = remap_idempotency_key(&reprefixed_key, remap);
     let event_id = format!(
         "evt:sha256:{}",
         sha256_bytes_hex(idempotency_key.as_bytes())
@@ -571,7 +591,7 @@ fn transform_generic(value: &Value, remap: &BTreeMap<String, String>) -> Result<
     new_event.insert("schema".to_owned(), Value::String("shore.event".to_owned()));
     new_event.insert("version".to_owned(), Value::from(1));
     new_event.insert("eventId".to_owned(), Value::String(event_id));
-    new_event.insert("eventType".to_owned(), value["eventType"].clone());
+    new_event.insert("eventType".to_owned(), Value::String(event_type.to_owned()));
     new_event.insert("idempotencyKey".to_owned(), Value::String(idempotency_key));
     new_event.insert("target".to_owned(), Value::Object(new_target));
     new_event.insert("writer".to_owned(), value["writer"].clone());
@@ -582,6 +602,76 @@ fn transform_generic(value: &Value, remap: &BTreeMap<String, String>) -> Result<
     new_event.insert("payload".to_owned(), payload);
 
     Ok(serde_json::from_value(Value::Object(new_event))?)
+}
+
+/// Reshape a legacy `validation_check_recorded` event, then re-mint its
+/// `validationCheckId` over the now-`revision` target so a migrated check is
+/// byte-equivalent to a native post-rename write (re-validation dedupes rather
+/// than duplicating). When the idempotency key was derived from the check id (the
+/// default), re-derive the key, event id, and payload hash from the re-minted id;
+/// a caller-supplied custom key is left untouched.
+fn transform_validation_check(
+    value: &Value,
+    remap: &BTreeMap<String, String>,
+) -> Result<ShoreEvent> {
+    let mut event = transform_generic(value, remap)?;
+
+    let mut payload: ValidationCheckRecordedPayload =
+        serde_json::from_value(event.payload.clone())?;
+    let ValidationTarget::Revision { revision_id } = payload.target.clone();
+    let track_id = event
+        .target
+        .track_id
+        .clone()
+        .ok_or_else(|| migrate_error("validation event is missing a track"))?;
+    let old_check_id = payload.validation_check_id.clone();
+
+    let new_check_id = build_validation_check_id(ValidationCheckIdMaterial {
+        review_unit_id: &revision_id,
+        track_id: &track_id,
+        target: &payload.target,
+        check_name: &payload.check_name,
+        command: payload.command.as_deref(),
+        status: payload.status,
+        exit_code: payload.exit_code,
+        trigger: payload.trigger,
+        source_fingerprint: payload.source_fingerprint.as_deref(),
+        summary_content_hash: payload.summary_content_hash.as_deref(),
+        started_at: payload.started_at.as_deref(),
+        completed_at: payload.completed_at.as_deref(),
+        log_artifact_content_hashes: &payload.log_artifact_content_hashes,
+        writer_actor_id: event.writer.actor_id.as_str(),
+    })?;
+
+    if new_check_id == old_check_id {
+        return Ok(event);
+    }
+
+    // The default key carries the check id as its source key; re-derive it (and the
+    // event id) so the migrated event keys exactly as a native write. A custom key
+    // does not embed the check id and stays as the generic remap left it.
+    let default_old_key = ValidationCheckRecordedPayload::idempotency_key(
+        &revision_id,
+        &track_id,
+        old_check_id.as_str(),
+    );
+    if event.idempotency_key == default_old_key {
+        event.idempotency_key = ValidationCheckRecordedPayload::idempotency_key(
+            &revision_id,
+            &track_id,
+            new_check_id.as_str(),
+        );
+        event.event_id = EventId::new(format!(
+            "evt:sha256:{}",
+            sha256_bytes_hex(event.idempotency_key.as_bytes())
+        ));
+    }
+
+    payload.validation_check_id = new_check_id;
+    event.payload = serde_json::to_value(&payload)?;
+    event.payload_hash = sha256_json_prefixed(&event.payload)?;
+
+    Ok(event)
 }
 
 /// Deserialize an already-reshaped event verbatim.
@@ -618,6 +708,41 @@ fn remap_review_unit_ids(value: &mut Value, remap: &BTreeMap<String, String>) {
             }
         }
         _ => {}
+    }
+}
+
+/// Whether a current-envelope event still carries a stale `review_unit` wire
+/// marker — a `kind: review_unit` value or a `reviewUnitId` key — in its target or
+/// payload. Phase-3 renamed the review-target wire, but a validation event written
+/// before the ValidationTarget rename keeps the stale spelling under a current
+/// envelope, so it must be reshaped rather than passed through. Matches only
+/// structural markers, never free-text bodies that mention "review_unit".
+fn carries_stale_review_unit_wire(value: &Value) -> bool {
+    fn walk(value: &Value) -> bool {
+        match value {
+            Value::Object(map) => {
+                map.get("kind").and_then(Value::as_str) == Some("review_unit")
+                    || map.contains_key("reviewUnitId")
+                    || map.values().any(walk)
+            }
+            Value::Array(items) => items.iter().any(walk),
+            _ => false,
+        }
+    }
+    walk(&value["target"]) || walk(&value["payload"])
+}
+
+/// Map a legacy association/withdrawal `eventType` value to its reshaped
+/// `revision_*` spelling. The idempotency key for these events leads with the
+/// same token, so the one mapping rewrites both. Every other event type passes
+/// through unchanged.
+fn reshaped_event_type(event_type: &str) -> &str {
+    match event_type {
+        "review_unit_ref_associated" => "revision_ref_associated",
+        "review_unit_ref_withdrawn" => "revision_ref_withdrawn",
+        "review_unit_commit_associated" => "revision_commit_associated",
+        "review_unit_commit_withdrawn" => "revision_commit_withdrawn",
+        other => other,
     }
 }
 
@@ -659,8 +784,10 @@ fn resign_if_signed(
     Ok(event)
 }
 
-/// Re-attest a detached co-signature over its reshaped target, or drop it.
-fn reattest_cosignature(
+/// Re-home a detached co-signature: preserve a current-envelope carrier whose
+/// target the reshape left untouched, otherwise re-attest it over the reshaped
+/// target (held attester key) or drop it.
+fn rehome_cosignature(
     value: &Value,
     target_store: &EventStore,
     old_to_new: &BTreeMap<String, ShoreEvent>,
@@ -682,6 +809,17 @@ fn reattest_cosignature(
         summary.cosignatures_dropped += 1;
         return Ok(());
     };
+
+    // A current-envelope carrier whose target kept its event id is already valid
+    // and binds the unchanged record hash; preserve it verbatim even if the
+    // attester key is not held. Only a re-keyed target (every legacy event, and a
+    // current-envelope association left with the stale type) needs re-attestation.
+    if !is_legacy(value) && new_target.event_id.as_str() == old_target_event_id {
+        let event = passthrough_event(value)?;
+        record_into(target_store, &event)?;
+        summary.events_migrated += 1;
+        return Ok(());
+    }
     let Some(signer) = held_signer(keystore, options, attester_did)? else {
         eprintln!(
             "warning: co-signature attester {attester_did} is not held; dropping the carrier"
@@ -1001,6 +1139,426 @@ mod tests {
                 "targetEventRecordHash": "sha256:legacyrecord"
             }
         })
+    }
+
+    /// A legacy association/withdrawal or validation event carrying the old
+    /// `review_unit` spelling. `event_type` is the legacy wire string and the
+    /// idempotency key leads with it, mirroring a real pre-rename store.
+    fn legacy_event(
+        event_type: &str,
+        idempotency_key: &str,
+        stem_seed: char,
+        payload: Value,
+    ) -> Value {
+        serde_json::json!({
+            "schema": "shore.event",
+            "version": 1,
+            "eventId": format!("evt:sha256:{}", stem_seed.to_string().repeat(64)),
+            "eventType": event_type,
+            "idempotencyKey": idempotency_key,
+            "target": {
+                "sessionId": "session:default",
+                "reviewUnitId": "review-unit:sha256:aaaa",
+                "trackId": "agent:codex",
+                "subject": { "review": { "kind": "review_unit", "reviewUnitId": "review-unit:sha256:aaaa" } }
+            },
+            "writer": { "actorId": "actor:agent:claude-code", "producer": { "name": "shore", "version": "0.1.0" } },
+            "occurredAt": "unix-ms:1781808954400",
+            "payloadHash": "sha256:legacy",
+            "payload": payload,
+        })
+    }
+
+    #[test]
+    fn reshapes_legacy_review_unit_wire_surfaces_to_revision() {
+        let fx = fixture();
+        let review_unit = "review-unit:sha256:aaaa";
+        let snapshot = "snap:git:sha256:aaaa";
+        fx.write_snapshot_artifact(snapshot, diff_files("pub fn value() -> u32 { 2 }"));
+        fx.write_event(&legacy_capture(review_unit, snapshot, None));
+
+        fx.write_event(&legacy_event(
+            "review_unit_commit_associated",
+            &format!("review_unit_commit_associated:{review_unit}:oidcommit"),
+            '3',
+            serde_json::json!({
+                "commitAssociationId": "assoc-commit:sha256:cccc",
+                "target": { "kind": "review_unit", "reviewUnitId": review_unit },
+                "commit": { "kind": "git_commit", "commitOid": "oidcommit", "treeOid": "treeoid" }
+            }),
+        ));
+        fx.write_event(&legacy_event(
+            "review_unit_ref_associated",
+            &format!("review_unit_ref_associated:{review_unit}:refs/heads/main@oidhead"),
+            '4',
+            serde_json::json!({
+                "refAssociationId": "assoc-ref:sha256:rrrr",
+                "target": { "kind": "review_unit", "reviewUnitId": review_unit },
+                "refName": "refs/heads/main",
+                "headOid": "oidhead"
+            }),
+        ));
+        fx.write_event(&legacy_event(
+            "review_unit_commit_withdrawn",
+            "review_unit_commit_withdrawn:assoc-commit:sha256:cccc",
+            '5',
+            serde_json::json!({
+                "commitWithdrawalId": "withdraw-commit:sha256:wwww",
+                "target": { "kind": "review_unit", "reviewUnitId": review_unit },
+                "commitAssociationId": "assoc-commit:sha256:cccc"
+            }),
+        ));
+        fx.write_event(&legacy_event(
+            "review_unit_ref_withdrawn",
+            "review_unit_ref_withdrawn:assoc-ref:sha256:rrrr",
+            '6',
+            serde_json::json!({
+                "refWithdrawalId": "withdraw-ref:sha256:vvvv",
+                "target": { "kind": "review_unit", "reviewUnitId": review_unit },
+                "refAssociationId": "assoc-ref:sha256:rrrr"
+            }),
+        ));
+        fx.write_event(&legacy_event(
+            "validation_check_recorded",
+            &format!("validation_check_recorded:{review_unit}:agent:codex:validation:sha256:vvvv"),
+            '7',
+            serde_json::json!({
+                "validationCheckId": "validation:sha256:vvvv",
+                "target": { "kind": "review_unit", "reviewUnitId": review_unit },
+                "checkName": "cargo test",
+                "status": "passed",
+                "trigger": "manual",
+                "logArtifactContentHashes": []
+            }),
+        ));
+
+        let summary = migrate_substrate_store(fx.options()).unwrap();
+        assert!(summary.self_check_passed);
+
+        let events = EventStore::open(&fx.target).list_events().unwrap();
+
+        // Each association/withdrawal event reshapes to its revision_* event type
+        // with a matching idempotency-key prefix.
+        for (event_type, prefix) in [
+            (
+                EventType::RevisionCommitAssociated,
+                "revision_commit_associated:",
+            ),
+            (EventType::RevisionRefAssociated, "revision_ref_associated:"),
+            (
+                EventType::RevisionCommitWithdrawn,
+                "revision_commit_withdrawn:",
+            ),
+            (EventType::RevisionRefWithdrawn, "revision_ref_withdrawn:"),
+        ] {
+            let event = events
+                .iter()
+                .find(|event| event.event_type == event_type)
+                .unwrap_or_else(|| panic!("{event_type:?} is present after migration"));
+            assert!(
+                event.idempotency_key.starts_with(prefix),
+                "{:?} idempotency key {} should lead with {prefix}",
+                event_type,
+                event.idempotency_key
+            );
+        }
+
+        // The validation event's target reshapes from review_unit to a revision
+        // pointer whose id was re-minted by the capture reshape.
+        let validation = events
+            .iter()
+            .find(|event| event.event_type == EventType::ValidationCheckRecorded)
+            .expect("the validation event is present");
+        assert_eq!(validation.payload["target"]["kind"], "revision");
+        assert!(
+            validation.payload["target"]["revisionId"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("rev:")),
+            "validation target should bind a reshaped revision id, got {:?}",
+            validation.payload["target"]
+        );
+
+        // No `review_unit` spelling survives anywhere in the reshaped store.
+        for event in &events {
+            let json = serde_json::to_string(event).unwrap();
+            assert!(
+                !json.contains("review_unit") && !json.contains("reviewUnit"),
+                "reshaped event still carries the review_unit spelling: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn re_mints_validation_check_id_over_the_reshaped_target() {
+        let fx = fixture();
+        let review_unit = "review-unit:sha256:aaaa";
+        let snapshot = "snap:git:sha256:aaaa";
+        fx.write_snapshot_artifact(snapshot, diff_files("pub fn value() -> u32 { 2 }"));
+        fx.write_event(&legacy_capture(review_unit, snapshot, None));
+        fx.write_event(&legacy_event(
+            "validation_check_recorded",
+            &format!("validation_check_recorded:{review_unit}:agent:codex:validation:sha256:old"),
+            '7',
+            serde_json::json!({
+                "validationCheckId": "validation:sha256:old",
+                "target": { "kind": "review_unit", "reviewUnitId": review_unit },
+                "checkName": "cargo test",
+                "status": "passed",
+                "trigger": "manual",
+                "logArtifactContentHashes": []
+            }),
+        ));
+
+        let summary = migrate_substrate_store(fx.options()).unwrap();
+        assert!(summary.self_check_passed);
+
+        let events = EventStore::open(&fx.target).list_events().unwrap();
+        let validation = events
+            .iter()
+            .find(|event| event.event_type == EventType::ValidationCheckRecorded)
+            .expect("the validation event is present");
+        let payload: ValidationCheckRecordedPayload =
+            serde_json::from_value(validation.payload.clone()).unwrap();
+
+        // The migrated id is re-minted, not the legacy carry-over.
+        assert_ne!(
+            payload.validation_check_id.as_str(),
+            "validation:sha256:old"
+        );
+
+        // It equals what a native write over the reshaped target produces.
+        let ValidationTarget::Revision { revision_id } = &payload.target;
+        let track_id = validation
+            .target
+            .track_id
+            .clone()
+            .expect("a validation event carries a track");
+        let expected = build_validation_check_id(ValidationCheckIdMaterial {
+            review_unit_id: revision_id,
+            track_id: &track_id,
+            target: &payload.target,
+            check_name: &payload.check_name,
+            command: payload.command.as_deref(),
+            status: payload.status,
+            exit_code: payload.exit_code,
+            trigger: payload.trigger,
+            source_fingerprint: payload.source_fingerprint.as_deref(),
+            summary_content_hash: payload.summary_content_hash.as_deref(),
+            started_at: payload.started_at.as_deref(),
+            completed_at: payload.completed_at.as_deref(),
+            log_artifact_content_hashes: &payload.log_artifact_content_hashes,
+            writer_actor_id: validation.writer.actor_id.as_str(),
+        })
+        .unwrap();
+        assert_eq!(payload.validation_check_id, expected);
+
+        // The default-derived idempotency key (and its event id) track the re-minted id.
+        assert_eq!(
+            validation.idempotency_key,
+            ValidationCheckRecordedPayload::idempotency_key(
+                revision_id,
+                &track_id,
+                expected.as_str()
+            )
+        );
+        assert_eq!(
+            validation.event_id.as_str(),
+            format!(
+                "evt:sha256:{}",
+                sha256_bytes_hex(validation.idempotency_key.as_bytes())
+            )
+        );
+    }
+
+    #[test]
+    fn reshapes_a_current_validation_event_left_stale_by_the_target_rename() {
+        // A validation event written after the envelope reshape but before the
+        // ValidationTarget rename: a current envelope (ledgerId) yet a stale
+        // { kind: review_unit } payload target. It must be reshaped and re-minted,
+        // not passed through — the new reader rejects the stale target.
+        let fx = fixture();
+        let revision = "rev:sha256:already";
+        let vcheck_key =
+            format!("validation_check_recorded:{revision}:agent:codex:validation:sha256:stale");
+        let payload = serde_json::json!({
+            "validationCheckId": "validation:sha256:stale",
+            "target": { "kind": "review_unit", "reviewUnitId": revision },
+            "checkName": "cargo test",
+            "status": "passed",
+            "trigger": "manual",
+            "logArtifactContentHashes": []
+        });
+        let payload_hash = sha256_json_prefixed(&payload).unwrap();
+        fx.write_event(&serde_json::json!({
+            "schema": "shore.event",
+            "version": 1,
+            "eventId": format!("evt:sha256:{}", sha256_bytes_hex(vcheck_key.as_bytes())),
+            "eventType": "validation_check_recorded",
+            "idempotencyKey": vcheck_key,
+            "target": {
+                "ledgerId": "ledger:default",
+                "trackId": "agent:codex",
+                "subject": { "review": { "kind": "revision", "revisionId": revision } }
+            },
+            "writer": { "actorId": "actor:agent:claude-code", "producer": { "name": "shore", "version": "0.1.0" } },
+            "occurredAt": "unix-ms:1781808954600",
+            "payloadHash": payload_hash,
+            "payload": payload
+        }));
+
+        let summary = migrate_substrate_store(fx.options()).unwrap();
+        assert!(summary.self_check_passed);
+
+        let events = EventStore::open(&fx.target).list_events().unwrap();
+        let validation = events
+            .iter()
+            .find(|event| event.event_type == EventType::ValidationCheckRecorded)
+            .expect("the validation event is present");
+        let parsed: ValidationCheckRecordedPayload =
+            serde_json::from_value(validation.payload.clone()).unwrap();
+        assert!(matches!(parsed.target, ValidationTarget::Revision { .. }));
+        assert_ne!(
+            parsed.validation_check_id.as_str(),
+            "validation:sha256:stale"
+        );
+        let json = serde_json::to_string(validation).unwrap();
+        assert!(
+            !json.contains("review_unit") && !json.contains("reviewUnit"),
+            "reshaped validation event still carries the review_unit spelling: {json}"
+        );
+    }
+
+    #[test]
+    fn reshapes_an_association_event_left_stale_by_the_envelope_reshape() {
+        // An association event written after the envelope reshape but before the
+        // event-type rename: a current envelope (ledgerId) and revision subject,
+        // but still the old `review_unit_ref_associated` event type and key prefix.
+        // It is not legacy, so it must not pass through verbatim.
+        let fx = fixture();
+        let revision = "rev:sha256:already";
+        fx.write_event(&serde_json::json!({
+            "schema": "shore.event",
+            "version": 1,
+            "eventId": format!("evt:sha256:{}", "9".repeat(64)),
+            "eventType": "review_unit_ref_associated",
+            "idempotencyKey": format!("review_unit_ref_associated:{revision}:refs/heads/main@oidhead"),
+            "target": {
+                "ledgerId": "ledger:default",
+                "subject": { "review": { "kind": "revision", "revisionId": revision } }
+            },
+            "writer": { "actorId": "actor:agent:claude-code", "producer": { "name": "shore", "version": "0.1.0" } },
+            "occurredAt": "unix-ms:1781808954500",
+            "payloadHash": "sha256:legacy",
+            "payload": {
+                "refAssociationId": "assoc-ref:sha256:stale",
+                "target": { "kind": "revision", "revisionId": revision },
+                "refName": "refs/heads/main",
+                "headOid": "oidhead"
+            }
+        }));
+
+        let summary = migrate_substrate_store(fx.options()).unwrap();
+        assert!(summary.self_check_passed);
+        assert_eq!(summary.events_migrated, 1);
+
+        let events = EventStore::open(&fx.target).list_events().unwrap();
+        let assoc = events
+            .iter()
+            .find(|event| event.event_type == EventType::RevisionRefAssociated)
+            .expect("the stale association event reshaped to the revision wire");
+        assert!(
+            assoc
+                .idempotency_key
+                .starts_with("revision_ref_associated:")
+        );
+        // The event id is re-derived from the reshaped idempotency key.
+        assert_eq!(
+            assoc.event_id.as_str(),
+            format!(
+                "evt:sha256:{}",
+                sha256_bytes_hex(assoc.idempotency_key.as_bytes())
+            )
+        );
+    }
+
+    #[test]
+    fn re_homes_a_current_cosignature_when_its_association_target_is_re_keyed() {
+        // A current-envelope detached co-signature attesting a current-envelope
+        // association event that still carries the stale review_unit_ref_associated
+        // type. Migrating re-keys the association (new event id), so the carrier must
+        // be re-homed onto the new id, never passed through still pointing at the
+        // vanished old id.
+        let fx = fixture();
+        let revision = "rev:sha256:already";
+        let assoc_old_id = format!("evt:sha256:{}", "8".repeat(64));
+        fx.write_event(&serde_json::json!({
+            "schema": "shore.event",
+            "version": 1,
+            "eventId": assoc_old_id,
+            "eventType": "review_unit_ref_associated",
+            "idempotencyKey": format!("review_unit_ref_associated:{revision}:refs/heads/main@oidhead"),
+            "target": {
+                "ledgerId": "ledger:default",
+                "subject": { "review": { "kind": "revision", "revisionId": revision } }
+            },
+            "writer": { "actorId": "actor:agent:claude-code", "producer": { "name": "shore", "version": "0.1.0" } },
+            "occurredAt": "unix-ms:1781808954500",
+            "payloadHash": "sha256:legacy",
+            "payload": {
+                "refAssociationId": "assoc-ref:sha256:stale",
+                "target": { "kind": "revision", "revisionId": revision },
+                "refName": "refs/heads/main",
+                "headOid": "oidhead"
+            }
+        }));
+        let cosig_key = format!(
+            "event_signature_recorded:sha256:oldrecord:{}:ZZZZ",
+            fx.attester_did
+        );
+        let cosig_id = format!("evt:sha256:{}", sha256_bytes_hex(cosig_key.as_bytes()));
+        let cosig_payload = serde_json::json!({
+            "attestation": { "alg": "ed25519", "sigVersion": 1, "sig": "ZZZZ" },
+            "attestingSigner": fx.attester_did.as_str(),
+            "targetEventId": assoc_old_id,
+            "targetEventRecordHash": "sha256:oldrecord"
+        });
+        let cosig_payload_hash = sha256_json_prefixed(&cosig_payload).unwrap();
+        fx.write_event(&serde_json::json!({
+            "schema": "shore.event",
+            "version": 1,
+            "eventId": cosig_id,
+            "eventType": "event_signature_recorded",
+            "idempotencyKey": cosig_key,
+            "target": { "ledgerId": "ledger:default", "subject": "ledger" },
+            "writer": { "actorId": "actor:git-email:reviewer@example.com", "producer": { "name": "shore", "version": "0.1.0" } },
+            "occurredAt": "unix-ms:1781821504936",
+            "payloadHash": cosig_payload_hash,
+            "payload": cosig_payload
+        }));
+
+        let summary = migrate_substrate_store(fx.options()).unwrap();
+        assert!(summary.self_check_passed);
+        assert_eq!(summary.cosignatures_reattested, 1);
+        assert_eq!(summary.cosignatures_dropped, 0);
+
+        // No detached co-signature dangles: every carrier's targetEventId resolves to
+        // a migrated event, and the re-keyed association is its new home.
+        let events = EventStore::open(&fx.target).list_events().unwrap();
+        let ids: std::collections::BTreeSet<&str> =
+            events.iter().map(|event| event.event_id.as_str()).collect();
+        for event in &events {
+            if event.event_type == EventType::EventSignatureRecorded {
+                let target_id = event.payload["targetEventId"].as_str().unwrap();
+                assert!(
+                    ids.contains(target_id),
+                    "co-signature targetEventId {target_id} dangles"
+                );
+                assert_ne!(
+                    target_id, assoc_old_id,
+                    "carrier still points at the pre-reshape id"
+                );
+            }
+        }
     }
 
     #[test]

@@ -357,7 +357,7 @@ fn write_validation_check_event(input: ValidationWriteInput) -> Result<Validatio
     })
 }
 
-pub(super) struct ValidationCheckIdMaterial<'a> {
+pub(in crate::session) struct ValidationCheckIdMaterial<'a> {
     pub review_unit_id: &'a RevisionId,
     pub track_id: &'a TrackId,
     pub target: &'a ValidationTarget,
@@ -374,7 +374,7 @@ pub(super) struct ValidationCheckIdMaterial<'a> {
     pub writer_actor_id: &'a str,
 }
 
-pub(super) fn build_validation_check_id(
+pub(in crate::session) fn build_validation_check_id(
     material: ValidationCheckIdMaterial<'_>,
 ) -> Result<ValidationCheckId> {
     let mut log_hashes = material.log_artifact_content_hashes.to_vec();

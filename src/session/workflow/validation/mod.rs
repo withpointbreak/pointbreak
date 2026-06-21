@@ -3,6 +3,9 @@ mod list;
 mod view;
 
 pub use self::add::{ValidationAddOptions, ValidationAddResult, record_validation_check};
+// Reused by the one-shot substrate migrator to re-mint validationCheckId over the
+// reshaped target so a migrated check matches a native write (removed with the migrator).
+pub(in crate::session) use self::add::{ValidationCheckIdMaterial, build_validation_check_id};
 pub use self::list::{
     ValidationListFilters, ValidationListOptions, ValidationListResult, list_validation_checks,
 };

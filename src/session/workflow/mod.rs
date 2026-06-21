@@ -93,3 +93,6 @@ pub use validation::{
     ValidationCheckView, ValidationListFilters, ValidationListOptions, ValidationListResult,
     list_validation_checks, project_validation_checks, record_validation_check,
 };
+// Reused by the one-shot substrate migrator to re-mint validationCheckId over the
+// reshaped target so a migrated check matches a native write (removed with the migrator).
+pub(in crate::session) use validation::{ValidationCheckIdMaterial, build_validation_check_id};
