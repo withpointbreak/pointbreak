@@ -236,7 +236,7 @@ mod tests {
     use super::*;
     use crate::canonical_hash::sha256_json_prefixed;
     use crate::git::capture_worktree_diff_files;
-    use crate::model::{DiffSnapshot, ReviewId};
+    use crate::model::{DiffSnapshot, ObjectId, ReviewId};
     use crate::session::store::resolution::resolve_store;
     use crate::session::{
         CaptureOptions, CommitRangeSpec, capture_review, compute_review_unit_fingerprint,
@@ -249,6 +249,33 @@ mod tests {
         // these constants (see docs/adr/adr-0002-large-snapshot-artifact-policy.md).
         assert_eq!(super::SNAPSHOT_ARTIFACT_SCHEMA, "shore.snapshot");
         assert_eq!(super::SNAPSHOT_ARTIFACT_VERSION, 2);
+    }
+
+    #[test]
+    fn snapshot_artifact_body_uses_object_id_wire_key() {
+        // The stored artifact body finishes Snapshot->Object on the wire: the
+        // content-only id serializes under `object_id` (value already `obj:`),
+        // not the legacy `snapshot_id` field name.
+        let snapshot = DiffSnapshot::new(
+            ReviewId::new("review:default"),
+            ObjectId::new("obj:sha256:abc"),
+            Vec::new(),
+        );
+        let artifact = build_snapshot_artifact_v2(snapshot).unwrap();
+
+        let json = serde_json::to_value(&artifact.snapshot).unwrap();
+        assert!(
+            json.get("object_id").is_some(),
+            "artifact snapshot body must serialize the object id under `object_id`"
+        );
+        assert!(
+            json.get("snapshot_id").is_none(),
+            "the legacy `snapshot_id` wire key must be gone"
+        );
+        assert!(
+            json["object_id"].as_str().unwrap().starts_with("obj:"),
+            "the object id value is unchanged (already `obj:`)"
+        );
     }
 
     #[test]

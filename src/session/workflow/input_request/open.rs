@@ -218,7 +218,7 @@ pub fn open_input_request(options: InputRequestOpenOptions) -> Result<InputReque
         EventType::InputRequestOpened,
         idempotency_key,
         EventTarget::for_subject(
-            resolved.ledger_id,
+            resolved.journal_id,
             TargetRef::Review(target.clone()),
             Some(track_id.clone()),
         ),

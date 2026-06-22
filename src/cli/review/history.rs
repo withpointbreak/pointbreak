@@ -127,7 +127,7 @@ fn watch(args: &HistoryArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::
     let interval = Duration::from_millis(args.poll_ms);
     let mut last_seen: Option<String> = None;
     loop {
-        let token = LivenessToken::for_ledger(&read_events(&args.repo)?)?;
+        let token = LivenessToken::for_journal(&read_events(&args.repo)?)?;
         if last_seen.as_deref() != Some(token.event_set_hash.as_str()) {
             render_once(args, stdout)?;
             stdout.flush()?;

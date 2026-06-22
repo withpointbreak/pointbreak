@@ -248,7 +248,7 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
         EventType::ReviewAssessmentRecorded,
         idempotency_key,
         EventTarget::for_subject(
-            resolved.ledger_id,
+            resolved.journal_id,
             TargetRef::Review(target.clone()),
             Some(track_id.clone()),
         ),

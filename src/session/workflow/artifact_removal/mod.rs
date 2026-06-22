@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::error::{Result, ShoreError};
 use crate::git::{git_rev_list_range, git_rev_parse_commit_oid};
-use crate::model::{ActorId, LedgerId, ObjectId, RevisionId};
+use crate::model::{ActorId, JournalId, ObjectId, RevisionId};
 use crate::session::body_artifact::note_body_content_hash_from_path;
 use crate::session::event::{
     ArtifactRemovedPayload, EventTarget, EventType, ShoreEvent, WorkObjectProposal,
@@ -138,7 +138,7 @@ pub fn remove_content(options: RemoveOptions) -> Result<RemoveResult> {
     let resolved = resolve_selector(&options.selector, &events, &options.repo, &index)?;
 
     // One ArtifactRemoved per resolved hash, session-anchored and idempotent.
-    let session_id = LedgerId::new("session:default");
+    let session_id = JournalId::new("journal:default");
     let writer = writer_from_options(&worktree_root, options.actor_id.as_ref());
 
     let mut removed = Vec::new();
@@ -148,7 +148,7 @@ pub fn remove_content(options: RemoveOptions) -> Result<RemoveResult> {
         let mut event = ShoreEvent::new(
             EventType::ArtifactRemoved,
             ArtifactRemovedPayload::idempotency_key(content_hash),
-            EventTarget::for_ledger(session_id.clone()),
+            EventTarget::for_journal(session_id.clone()),
             writer.clone(),
             ArtifactRemovedPayload {
                 content_hash: content_hash.clone(),
@@ -651,7 +651,7 @@ mod tests {
         let event = ShoreEvent::new(
             EventType::WorkObjectProposed,
             format!("work_object_proposed:{}", sibling_unit.as_str()),
-            EventTarget::for_revision(original.ledger_id.clone(), sibling_unit.clone(), None),
+            EventTarget::for_revision(original.journal_id.clone(), sibling_unit.clone(), None),
             Writer {
                 actor_id: ActorId::new("actor:sibling"),
                 producer: WriterProducer {
@@ -922,12 +922,12 @@ mod tests {
             .map(String::as_str)
             .collect();
         assert_eq!(keys, vec!["contentHash"]);
-        // The envelope is ledger-only: no review unit, no snapshot binding — it
-        // rides the subject-less ledger carrier.
+        // The envelope is journal-only: no review unit, no snapshot binding — it
+        // rides the subject-less journal carrier.
         assert!(crate::model::subject_revision_id(&event.target.subject).is_none());
         assert!(matches!(
             event.target.subject,
-            crate::model::TargetRef::Ledger
+            crate::model::TargetRef::Journal
         ));
     }
 

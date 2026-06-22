@@ -56,7 +56,7 @@ impl CommitOidGroupingProjection {
 mod tests {
     use super::*;
     use crate::model::{
-        CommitRangeCaptureMode, EngagementId, LedgerId, ObjectId, ReviewEndpoint, ReviewTargetRef,
+        CommitRangeCaptureMode, EngagementId, JournalId, ObjectId, ReviewEndpoint, ReviewTargetRef,
         ReviewUnitSource, RevisionId, WorktreeCaptureMode,
     };
     use crate::session::event::{
@@ -66,7 +66,7 @@ mod tests {
     };
 
     fn envelope(unit: &RevisionId) -> EventTarget {
-        EventTarget::for_revision(LedgerId::new("session:default"), unit.clone(), None)
+        EventTarget::for_revision(JournalId::new("journal:default"), unit.clone(), None)
     }
 
     fn capture_for(

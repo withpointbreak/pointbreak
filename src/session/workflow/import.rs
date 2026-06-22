@@ -4,7 +4,7 @@ use serde_json::json;
 
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::error::{Result, ShoreError};
-use crate::model::LedgerId;
+use crate::model::JournalId;
 use crate::session::body_artifact::{BodyArtifactOutcome, stage_body_artifact};
 use crate::session::event::{
     EventTarget, EventType, ImportedNoteTarget, ReviewInitializedPayload,
@@ -66,14 +66,14 @@ pub fn import_notes(options: ImportNotesOptions) -> Result<ImportNotesResult> {
     let event_store = EventStore::open(store_dir);
     let existing_state = SessionState::from_events(&event_store.list_events()?)?;
 
-    let ledger_id = existing_state.ledger_id.clone();
-    let target = EventTarget::for_ledger(ledger_id.clone());
+    let journal_id = existing_state.journal_id.clone();
+    let target = EventTarget::for_journal(journal_id.clone());
     let writer = writer_from_git_config(worktree_root);
     let occurred_at = current_timestamp();
 
     match event_store.record_event_once(&ShoreEvent::new(
         EventType::ReviewInitialized,
-        ReviewInitializedPayload::idempotency_key(&ledger_id),
+        ReviewInitializedPayload::idempotency_key(&journal_id),
         target.clone(),
         writer.clone(),
         ReviewInitializedPayload {},
@@ -85,7 +85,7 @@ pub fn import_notes(options: ImportNotesOptions) -> Result<ImportNotesResult> {
     }
 
     let records =
-        extract_note_import_records(&sidecar, sidecar_source, &ledger_id, &sidecar_content_hash)?;
+        extract_note_import_records(&sidecar, sidecar_source, &journal_id, &sidecar_content_hash)?;
 
     let mut notes_created = 0;
     let mut notes_existing = 0;
@@ -132,7 +132,7 @@ pub fn import_notes(options: ImportNotesOptions) -> Result<ImportNotesResult> {
 pub(crate) fn extract_note_import_records(
     sidecar: &ReviewNotesSidecar,
     sidecar_source: SidecarSource,
-    ledger_id: &LedgerId,
+    journal_id: &JournalId,
     sidecar_content_hash: &str,
 ) -> Result<Vec<NoteImportRecord>> {
     let mut records = Vec::new();
@@ -182,7 +182,7 @@ pub(crate) fn extract_note_import_records(
                 idempotency_key: format!(
                     "review_note_imported:{}:{}:{}",
                     sidecar_source_key(sidecar_source),
-                    ledger_id.as_str(),
+                    journal_id.as_str(),
                     note_id
                 ),
                 payload,
@@ -264,7 +264,7 @@ mod tests {
         let records = extract_note_import_records(
             &sidecar,
             SidecarSource::ReviewNotes,
-            &LedgerId::new("work:default"),
+            &JournalId::new("work:default"),
             "sha256:sidecar",
         )
         .expect("records extract");
@@ -283,7 +283,7 @@ mod tests {
         let records = extract_note_import_records(
             &sidecar,
             SidecarSource::ReviewNotes,
-            &LedgerId::new("work:default"),
+            &JournalId::new("work:default"),
             "sha256:sidecar",
         )
         .expect("records extract");
@@ -306,7 +306,7 @@ mod tests {
         let records = extract_note_import_records(
             &sidecar,
             SidecarSource::ReviewNotes,
-            &LedgerId::new("work:default"),
+            &JournalId::new("work:default"),
             "sha256:sidecar",
         )
         .expect("records extract");
@@ -324,7 +324,7 @@ mod tests {
         let records = extract_note_import_records(
             &sidecar,
             SidecarSource::ReviewNotes,
-            &LedgerId::new("work:default"),
+            &JournalId::new("work:default"),
             "sha256:sidecar",
         )
         .expect("records extract");
@@ -340,7 +340,7 @@ mod tests {
         let records = extract_note_import_records(
             &sidecar,
             SidecarSource::ReviewNotes,
-            &LedgerId::new("work:default"),
+            &JournalId::new("work:default"),
             "sha256:sidecar",
         )
         .expect("records extract");
@@ -367,7 +367,7 @@ mod tests {
         let records = extract_note_import_records(
             &sidecar,
             SidecarSource::ReviewNotes,
-            &LedgerId::new("work:default"),
+            &JournalId::new("work:default"),
             "sha256:sidecar",
         )
         .expect("records extract");
@@ -385,7 +385,7 @@ mod tests {
         let records = extract_note_import_records(
             &sidecar,
             SidecarSource::ReviewNotes,
-            &LedgerId::new("work:default"),
+            &JournalId::new("work:default"),
             "sha256:sidecar",
         )
         .expect("records extract");

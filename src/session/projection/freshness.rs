@@ -45,7 +45,7 @@ pub(crate) fn event_set_hash_for_events<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::LedgerId;
+    use crate::model::JournalId;
     use crate::session::event::{
         EventTarget, EventType, ReviewInitializedPayload, ShoreEvent, Writer,
     };
@@ -97,11 +97,11 @@ mod tests {
     }
 
     fn event(suffix: &str) -> ShoreEvent {
-        let ledger_id = LedgerId::new(format!("ledger:{suffix}"));
+        let journal_id = JournalId::new(format!("journal:{suffix}"));
         ShoreEvent::new(
             EventType::ReviewInitialized,
-            ReviewInitializedPayload::idempotency_key(&ledger_id),
-            EventTarget::for_ledger(ledger_id),
+            ReviewInitializedPayload::idempotency_key(&journal_id),
+            EventTarget::for_journal(journal_id),
             Writer::shore_local("0.1.0"),
             ReviewInitializedPayload {},
             "2026-05-13T14:00:00Z",

@@ -285,11 +285,11 @@ pub(super) fn history_entry_from_event(
         event_type: event.event_type,
         occurred_at: event.occurred_at.clone(),
         payload_hash: event.payload_hash.clone(),
-        ledger_id: event.target.ledger_id.clone(),
+        journal_id: event.target.journal_id.clone(),
         track_id: event.target.track_id.clone(),
         subject: match &event.target.subject {
             TargetRef::Review(r) => Some(r.clone()),
-            TargetRef::Task(_) | TargetRef::Ledger => None,
+            TargetRef::Task(_) | TargetRef::Journal => None,
         },
         writer: event.writer.clone(),
         verification_status: filters
@@ -388,7 +388,7 @@ fn event_matches_filters(event: &ShoreEvent, filters: &ResolvedHistoryFilters) -
 }
 
 /// The revision a subject addresses, if any. Every review-domain variant keys on
-/// a `revision_id`; the ledger carrier and task subjects address no revision.
+/// a `revision_id`; the journal carrier and task subjects address no revision.
 fn subject_revision_id(subject: &TargetRef) -> Option<&RevisionId> {
     match subject {
         TargetRef::Review(review) => match review {
@@ -400,6 +400,6 @@ fn subject_revision_id(subject: &TargetRef) -> Option<&RevisionId> {
             | ReviewTargetRef::Assessment { revision_id, .. }
             | ReviewTargetRef::Event { revision_id, .. } => Some(revision_id),
         },
-        TargetRef::Task(_) | TargetRef::Ledger => None,
+        TargetRef::Task(_) | TargetRef::Journal => None,
     }
 }

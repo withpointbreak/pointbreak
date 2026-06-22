@@ -492,7 +492,7 @@ fn empty_view(revision_id: RevisionId) -> ReviewUnitCommitRangeView {
 mod tests {
     use super::*;
     use crate::model::{
-        EngagementId, LedgerId, ReviewEndpoint, ReviewUnitSource, TargetRef, TaskTargetRef,
+        EngagementId, JournalId, ReviewEndpoint, ReviewUnitSource, TargetRef, TaskTargetRef,
         WorkObjectId, WorktreeCaptureMode,
     };
     use crate::session::event::{EventTarget, GitProvenance, Revision, Writer};
@@ -608,7 +608,7 @@ mod tests {
         ShoreEvent::new(
             EventType::WorkObjectProposed,
             format!("capture:{suffix}"),
-            EventTarget::for_revision(LedgerId::new("session:default"), revision_id, None),
+            EventTarget::for_revision(JournalId::new("journal:default"), revision_id, None),
             Writer::shore_local("test"),
             payload,
             occurred_at,
@@ -636,7 +636,7 @@ mod tests {
             EventType::WorkObjectProposed,
             format!("task-capture:{suffix}"),
             EventTarget::for_subject(
-                LedgerId::new("ledger:default"),
+                JournalId::new("journal:default"),
                 TargetRef::Task(TaskTargetRef::TaskAttempt),
                 None,
             ),
@@ -798,7 +798,7 @@ mod tests {
         ShoreEvent::new(
             EventType::WorkObjectProposed,
             format!("capture:{suffix}"),
-            EventTarget::for_revision(LedgerId::new("session:default"), revision_id, None),
+            EventTarget::for_revision(JournalId::new("journal:default"), revision_id, None),
             Writer::shore_local("test"),
             payload,
             occurred_at,
@@ -824,7 +824,7 @@ mod tests {
         ShoreEvent::new(
             EventType::RevisionCommitAssociated,
             ReviewUnitCommitAssociatedPayload::idempotency_key(&revision_id, commit_oid),
-            EventTarget::for_revision(LedgerId::new("ledger:default"), revision_id, None),
+            EventTarget::for_revision(JournalId::new("journal:default"), revision_id, None),
             Writer::shore_local("test"),
             payload,
             "2026-05-13T10:00:09Z",
@@ -1090,7 +1090,7 @@ mod tests {
         ShoreEvent::new(
             EventType::WorkObjectProposed,
             format!("capture:{}", unit.as_str()),
-            EventTarget::for_revision(LedgerId::new("session:default"), unit.clone(), None),
+            EventTarget::for_revision(JournalId::new("journal:default"), unit.clone(), None),
             Writer::shore_local("test"),
             payload,
             occurred_at,
@@ -1116,7 +1116,7 @@ mod tests {
         ShoreEvent::new(
             EventType::RevisionCommitAssociated,
             ReviewUnitCommitAssociatedPayload::idempotency_key(unit, commit_oid),
-            EventTarget::for_revision(LedgerId::new("ledger:default"), unit.clone(), None),
+            EventTarget::for_revision(JournalId::new("journal:default"), unit.clone(), None),
             Writer::shore_local("test"),
             payload,
             "2026-06-19T00:00:09Z",

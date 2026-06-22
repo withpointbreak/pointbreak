@@ -291,7 +291,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::model::{EngagementId, LedgerId, RevisionId};
+    use crate::model::{EngagementId, JournalId, RevisionId};
     use crate::session::event::{
         EventTarget, EventType, GitProvenance, Revision, WorkObjectProposal,
         WorkObjectProposedPayload, Writer,
@@ -348,7 +348,7 @@ mod tests {
         let event = ShoreEvent::new(
             EventType::WorkObjectProposed,
             format!("work_object_proposed:{}", revision_id.as_str()),
-            EventTarget::for_revision(LedgerId::new("session:default"), revision_id.clone(), None),
+            EventTarget::for_revision(JournalId::new("journal:default"), revision_id.clone(), None),
             Writer::shore_local("0.1.0"),
             WorkObjectProposedPayload {
                 engagement_id: EngagementId::new(format!(

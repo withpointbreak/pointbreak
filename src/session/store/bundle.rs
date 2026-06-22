@@ -696,7 +696,7 @@ mod tests {
     use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
     use crate::crypto::{EventVerificationStatus, SignerId};
     use crate::model::{
-        EventId, LedgerId, RevisionId, TrackId, ValidationCheckId, ValidationStatus,
+        EventId, JournalId, RevisionId, TrackId, ValidationCheckId, ValidationStatus,
         ValidationTarget, ValidationTrigger,
     };
     use crate::session::body_artifact::BODY_INLINE_LIMIT;
@@ -1054,7 +1054,7 @@ mod tests {
         assert!(target_store_dir.join("events").is_dir());
         let rebuilt_state = fs::read_to_string(target_store_dir.join("state.json")).unwrap();
         assert!(!rebuilt_state.contains("must not be imported"));
-        assert!(rebuilt_state.contains("ledgerId"));
+        assert!(rebuilt_state.contains("journalId"));
     }
 
     #[test]
@@ -1219,7 +1219,7 @@ mod tests {
             )),
             event_type: EventType::ReviewInitialized,
             idempotency_key: idempotency_key.to_owned(),
-            target: EventTarget::for_ledger(LedgerId::new("ledger:default")),
+            target: EventTarget::for_journal(JournalId::new("journal:default")),
             writer: Writer::shore_local("test"),
             occurred_at: "2026-05-30T00:00:00Z".to_owned(),
             payload_hash: sha256_json_prefixed(&payload).unwrap(),
@@ -1254,7 +1254,7 @@ mod tests {
         let revision_id = RevisionId::new("review-unit:sha256:bundle");
         let track_id = TrackId::new("agent:codex");
         let mut target =
-            EventTarget::for_revision(LedgerId::new("session:default"), revision_id.clone(), None);
+            EventTarget::for_revision(JournalId::new("journal:default"), revision_id.clone(), None);
         target.track_id = Some(track_id.clone());
 
         ShoreEvent::new(

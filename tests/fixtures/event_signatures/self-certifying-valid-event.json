@@ -23,12 +23,12 @@
   "schema": "shore.event",
   "signature": {
     "alg": "ed25519",
-    "sig": "Xkuno98cx/huX4EIOyfDX0gn8dtBo1PSh/LDr9FTiztPVhrGbfbYlc6LpK5zi3b3UNhdWCtTSDAKDvVCR+0dCQ==",
+    "sig": "bkeDrVn3a20ty/BVzXqw+BL2fcKBQp7Mm7U1Sa/EFnLINPlSsC9MZtZFCuPTlw0OyuXUtU2o/EOQ9pMDf/B6BA==",
     "sigVersion": 1
   },
   "signer": null,
   "target": {
-    "ledgerId": "ledger:fixture:event-signatures",
+    "journalId": "journal:fixture:event-signatures",
     "subject": {
       "review": {
         "kind": "revision",

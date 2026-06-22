@@ -8,7 +8,7 @@ use crate::git::{
     git_head_ref, git_rev_parse_commit_oid, ingest_tracked_diff_with_options,
 };
 use crate::model::{
-    ActorId, DiffFile, DiffSnapshot, EngagementId, EngagementType, LedgerId, ObjectId,
+    ActorId, DiffFile, DiffSnapshot, EngagementId, EngagementType, JournalId, ObjectId,
     ReviewEndpoint, ReviewId, ReviewTargetRef, ReviewUnitSource, RevisionId, TargetRef,
 };
 use crate::session::event::{
@@ -150,7 +150,7 @@ impl CaptureOptions {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CaptureResult {
-    pub ledger_id: LedgerId,
+    pub journal_id: JournalId,
     pub revision_id: RevisionId,
     pub object_id: ObjectId,
     pub engagement_id: EngagementId,
@@ -193,7 +193,7 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
         }
     };
     let review_id = ReviewId::new("review:default");
-    let ledger_id = LedgerId::new("ledger:default");
+    let journal_id = JournalId::new("journal:default");
     let snapshot = DiffSnapshot::new(review_id, fingerprint.snapshot_id.clone(), files);
     let artifact = crate::session::snapshot_artifact::write_snapshot_artifact_to(
         &store_dir,
@@ -223,8 +223,12 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
     let subject = TargetRef::Review(ReviewTargetRef::Revision {
         revision_id: fingerprint.revision_id.clone(),
     });
-    let target =
-        EventTarget::for_generative_move(ledger_id.clone(), EngagementType::Review, subject, None)?;
+    let target = EventTarget::for_generative_move(
+        journal_id.clone(),
+        EngagementType::Review,
+        subject,
+        None,
+    )?;
     let mut event = ShoreEvent::new(
         EventType::WorkObjectProposed,
         work_object_proposed_idempotency_key(&fingerprint.revision_id),
@@ -269,7 +273,7 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
             &event_store,
             &mut recorder,
             &fingerprint,
-            &ledger_id,
+            &journal_id,
             &options,
         )
     {
@@ -292,7 +296,7 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
     diagnostics.extend(auto_record_diagnostics);
 
     Ok(CaptureResult {
-        ledger_id,
+        journal_id,
         revision_id: fingerprint.revision_id,
         object_id: fingerprint.snapshot_id,
         engagement_id,
@@ -324,7 +328,7 @@ fn auto_record_capture_ref_association(
     event_store: &EventStore,
     recorder: &mut CaptureRecorder,
     fingerprint: &ReviewUnitFingerprint,
-    ledger_id: &LedgerId,
+    journal_id: &JournalId,
     options: &CaptureOptions,
 ) -> Result<()> {
     let Some(ref_name) = git_head_ref(worktree_root)? else {
@@ -333,7 +337,7 @@ fn auto_record_capture_ref_association(
     let head_oid = git_head_oid(worktree_root)?;
     let writer = writer_from_options(worktree_root, options.actor_id.as_ref());
     let mut event = super::association::build_ref_association_event(
-        ledger_id,
+        journal_id,
         &fingerprint.revision_id,
         &ref_name,
         &head_oid,
@@ -528,6 +532,21 @@ mod tests {
         }
         assert!(result.revision_id.as_str().starts_with("rev:sha256:"));
         assert_eq!(result.events_created_by_type["work_object_proposed"], 1);
+    }
+
+    #[test]
+    fn native_capture_mints_a_journal_prefixed_container_id() {
+        // The dominant container value in the real review stores comes from the
+        // native capture path; it mints the `journal:`-prefixed default container.
+        let repo = committed_repo();
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+        let result = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+
+        assert!(
+            result.journal_id.as_str().starts_with("journal:"),
+            "container id must carry the journal: prefix, got {}",
+            result.journal_id.as_str()
+        );
     }
 
     #[test]

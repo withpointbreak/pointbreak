@@ -14,7 +14,7 @@ pub enum WorkObjectType {
     TaskAttempt,
 }
 
-/// The activity a ledger engagement carries. The single domain axis: a
+/// The activity a journal engagement carries. The single domain axis: a
 /// `Review` engagement addresses `Revision` work objects, a `Task` engagement
 /// addresses `TaskAttempt` work objects. The subject's domain is derived from /
 /// type-checked against this, never an independently asserted wire field.
@@ -44,39 +44,39 @@ pub enum TaskTargetRef {
 
 /// The single shared subject identity carried by every event envelope. The
 /// outer variant is the *domain* (= the engagement type); the inner is the
-/// *work object*. `Ledger` is the fieldless carrier for genuinely subject-less
+/// *work object*. `Journal` is the fieldless carrier for genuinely subject-less
 /// events (the detached co-signature carrier, content removal, and pre-revision
-/// ledger events), which address their real target by payload content.
+/// journal events), which address their real target by payload content.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TargetRef {
-    Ledger,
+    Journal,
     Review(ReviewTargetRef),
     Task(TaskTargetRef),
 }
 
 /// The engagement domain a subject belongs to, derived from its variant.
-/// `Ledger` carriers have no domain.
+/// `Journal` carriers have no domain.
 pub fn engagement_type_of_subject(subject: &TargetRef) -> Option<EngagementType> {
     match subject {
-        TargetRef::Ledger => None,
+        TargetRef::Journal => None,
         TargetRef::Review(_) => Some(EngagementType::Review),
         TargetRef::Task(_) => Some(EngagementType::Task),
     }
 }
 
-/// The work-object kind a subject addresses, derived from its variant. `Ledger`
+/// The work-object kind a subject addresses, derived from its variant. `Journal`
 /// carriers address no work object.
 pub fn work_object_type_of_subject(subject: &TargetRef) -> Option<WorkObjectType> {
     match subject {
-        TargetRef::Ledger => None,
+        TargetRef::Journal => None,
         TargetRef::Review(_) => Some(WorkObjectType::Revision),
         TargetRef::Task(_) => Some(WorkObjectType::TaskAttempt),
     }
 }
 
 /// The revision a subject addresses, if any. Every review-domain variant keys on
-/// a `revision_id`; the ledger carrier, task subjects, and the lineage variant
+/// a `revision_id`; the journal carrier, task subjects, and the lineage variant
 /// address no revision.
 pub fn subject_revision_id(subject: &TargetRef) -> Option<&RevisionId> {
     match subject {
@@ -89,7 +89,7 @@ pub fn subject_revision_id(subject: &TargetRef) -> Option<&RevisionId> {
             | ReviewTargetRef::Assessment { revision_id, .. }
             | ReviewTargetRef::Event { revision_id, .. } => Some(revision_id),
         },
-        TargetRef::Task(_) | TargetRef::Ledger => None,
+        TargetRef::Task(_) | TargetRef::Journal => None,
     }
 }
 
@@ -162,8 +162,8 @@ mod tests {
             work_object_type_of_subject(&task),
             Some(WorkObjectType::TaskAttempt)
         );
-        assert_eq!(engagement_type_of_subject(&TargetRef::Ledger), None);
-        assert_eq!(work_object_type_of_subject(&TargetRef::Ledger), None);
+        assert_eq!(engagement_type_of_subject(&TargetRef::Journal), None);
+        assert_eq!(work_object_type_of_subject(&TargetRef::Journal), None);
     }
 
     #[test]
@@ -223,14 +223,14 @@ mod tests {
     }
 
     #[test]
-    fn target_ref_ledger_carrier_serializes_as_a_bare_tag() {
-        let target = TargetRef::Ledger;
+    fn target_ref_journal_carrier_serializes_as_a_bare_tag() {
+        let target = TargetRef::Journal;
 
         let json = serde_json::to_value(&target).unwrap();
-        assert_eq!(json, serde_json::json!("ledger"));
+        assert_eq!(json, serde_json::json!("journal"));
 
         let parsed: TargetRef = serde_json::from_value(json).unwrap();
-        assert_eq!(parsed, TargetRef::Ledger);
+        assert_eq!(parsed, TargetRef::Journal);
     }
 
     #[test]

@@ -212,7 +212,7 @@ mod tests {
     use super::*;
     use crate::canonical_hash::sha256_bytes_hex;
     use crate::model::{
-        ActorId, CheckpointId, LedgerId, ReviewTargetRef, RevisionId, TargetRef, TaskTargetRef,
+        ActorId, CheckpointId, JournalId, ReviewTargetRef, RevisionId, TargetRef, TaskTargetRef,
         WorkObjectId,
     };
     use crate::session::EventStore;
@@ -239,7 +239,7 @@ mod tests {
     fn task_attempt_intent_basic() -> AdapterIntent {
         AdapterIntent::TaskAttemptCaptured {
             task_attempt_id: WorkObjectId::new("task-attempt:sha256:ta"),
-            session_id: LedgerId::new("session:claude:uuid-1"),
+            session_id: JournalId::new("journal:claude:uuid-1"),
             source_ref: Some(SourceRef::new("claude_code", "uuid-1")),
             assertion_mode: AssertionMode::Advisory,
             writer: writer_user_for_test(),
@@ -258,7 +258,7 @@ mod tests {
             checkpoint_id: checkpoint_id.clone(),
             parent_task_attempt_id: WorkObjectId::new("task-attempt:sha256:ta"),
             target: TargetRef::Task(TaskTargetRef::Checkpoint { checkpoint_id }),
-            session_id: LedgerId::new("session:claude:uuid-1"),
+            session_id: JournalId::new("journal:claude:uuid-1"),
             source_ref: Some(SourceRef::new("claude_code", "uuid-1#assistant:msg_1")),
             assertion_mode: AssertionMode::Advisory,
             writer: Writer::shore_local("test"),
@@ -274,7 +274,7 @@ mod tests {
         AdapterIntent::ObservationRecorded {
             parent_task_attempt_id: WorkObjectId::new("task-attempt:sha256:ta"),
             target: TargetRef::Task(TaskTargetRef::Checkpoint { checkpoint_id }),
-            session_id: LedgerId::new("session:claude:uuid-1"),
+            session_id: JournalId::new("journal:claude:uuid-1"),
             source_ref: Some(SourceRef::new("claude_code", "uuid-1#tool_result:tu_1")),
             assertion_mode: AssertionMode::Advisory,
             writer: Writer::shore_local("test"),
@@ -299,8 +299,8 @@ mod tests {
             TargetRef::Task(TaskTargetRef::TaskAttempt)
         );
         assert_eq!(
-            event.target.ledger_id,
-            LedgerId::new("session:claude:uuid-1")
+            event.target.journal_id,
+            JournalId::new("journal:claude:uuid-1")
         );
         assert_eq!(event.assertion_mode, AssertionMode::Advisory);
         assert_eq!(
@@ -324,8 +324,8 @@ mod tests {
         );
         // The parent task-attempt id is carried by the payload, not the envelope.
         assert_eq!(
-            event.target.ledger_id,
-            LedgerId::new("session:claude:uuid-1")
+            event.target.journal_id,
+            JournalId::new("journal:claude:uuid-1")
         );
 
         let json = serde_json::to_value(&event).unwrap();
@@ -387,7 +387,7 @@ mod tests {
     fn intent_to_event_propagates_operative_assertion_mode() {
         let intent = AdapterIntent::TaskAttemptCaptured {
             task_attempt_id: WorkObjectId::new("task-attempt:sha256:ta"),
-            session_id: LedgerId::new("session:claude:uuid-1"),
+            session_id: JournalId::new("journal:claude:uuid-1"),
             source_ref: Some(SourceRef::new("claude_code", "uuid-1")),
             assertion_mode: AssertionMode::Operative,
             writer: writer_user_for_test(),
@@ -424,7 +424,7 @@ mod tests {
             target: TargetRef::Task(TaskTargetRef::Checkpoint {
                 checkpoint_id: stale_checkpoint,
             }),
-            session_id: LedgerId::new("session:claude:uuid-1"),
+            session_id: JournalId::new("journal:claude:uuid-1"),
             source_ref: Some(SourceRef::new("claude_code", "uuid-1#assistant:msg_x")),
             assertion_mode: AssertionMode::Advisory,
             writer: Writer::shore_local("test"),
@@ -454,7 +454,7 @@ mod tests {
             target: TargetRef::Task(TaskTargetRef::Checkpoint {
                 checkpoint_id: CheckpointId::new("checkpoint:sha256:cp"),
             }),
-            session_id: LedgerId::new("session:claude:uuid-1"),
+            session_id: JournalId::new("journal:claude:uuid-1"),
             source_ref: None,
             assertion_mode: AssertionMode::Advisory,
             writer: Writer::shore_local("test"),

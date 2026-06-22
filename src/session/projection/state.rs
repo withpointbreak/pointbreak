@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::freshness::event_set_hash_for_events;
 use crate::error::{Result, ShoreError};
 use crate::model::{
-    AssessmentId, EventId, InputRequestId, InputRequestResponseId, LedgerId, ObjectId,
+    AssessmentId, EventId, InputRequestId, InputRequestResponseId, JournalId, ObjectId,
     ObservationId, RevisionId, ValidationCheckId,
 };
 use crate::session::event::{
@@ -30,7 +30,7 @@ const DUPLICATE_SEMANTIC_DIAGNOSTIC_EVENT_LIMIT: usize = 5;
 pub struct SessionState {
     pub schema: String,
     pub version: u32,
-    pub ledger_id: LedgerId,
+    pub journal_id: JournalId,
     pub current_revision_id: Option<RevisionId>,
     pub current_object_id: Option<ObjectId>,
     #[serde(default)]
@@ -94,7 +94,7 @@ pub struct ProjectionDiagnostic {
 
 #[derive(Debug)]
 struct StateReducer {
-    ledger_id: LedgerId,
+    journal_id: JournalId,
     captured_revisions: BTreeMap<RevisionId, ObjectId>,
     note_count: usize,
     observation_events: BTreeMap<ObservationId, BTreeSet<EventId>>,
@@ -109,7 +109,7 @@ struct StateReducer {
 impl Default for StateReducer {
     fn default() -> Self {
         Self {
-            ledger_id: LedgerId::new("ledger:default"),
+            journal_id: JournalId::new("journal:default"),
             captured_revisions: BTreeMap::new(),
             note_count: 0,
             observation_events: BTreeMap::new(),
@@ -128,7 +128,7 @@ impl StateReducer {
         event.validate_schema_version()?;
 
         if event.event_type == EventType::ReviewInitialized {
-            self.ledger_id = event.target.ledger_id.clone();
+            self.journal_id = event.target.journal_id.clone();
             return Ok(());
         }
 
@@ -169,8 +169,8 @@ impl StateReducer {
     }
 
     fn set_identity_from_event_if_default(&mut self, event: &ShoreEvent) {
-        if self.ledger_id.as_str() == "ledger:default" {
-            self.ledger_id = event.target.ledger_id.clone();
+        if self.journal_id.as_str() == "journal:default" {
+            self.journal_id = event.target.journal_id.clone();
         }
     }
 
@@ -305,7 +305,7 @@ impl StateReducer {
         Ok(SessionState {
             schema: STATE_SCHEMA.to_owned(),
             version: STATE_VERSION,
-            ledger_id: self.ledger_id,
+            journal_id: self.journal_id,
             current_revision_id,
             current_object_id,
             revision_count: self.captured_revisions.len(),
@@ -465,7 +465,7 @@ mod tests {
             EventType::WorkObjectProposed,
             "work_object_proposed:task-1",
             EventTarget::for_subject(
-                LedgerId::new("ledger:claude:abc"),
+                JournalId::new("journal:claude:abc"),
                 TargetRef::Task(TaskTargetRef::TaskAttempt),
                 None,
             ),
@@ -793,11 +793,11 @@ mod tests {
     }
 
     #[test]
-    fn state_deserializes_missing_additive_ledger_fields_as_defaults() {
+    fn state_deserializes_missing_additive_journal_fields_as_defaults() {
         let json = json!({
             "schema": "shore.state",
             "version": 1,
-            "ledgerId": "ledger:default",
+            "journalId": "journal:default",
             "currentRevisionId": null,
             "currentObjectId": null,
             "eventCount": 0,
@@ -822,7 +822,7 @@ mod tests {
             EventType::WorkObjectProposed,
             format!("work_object_proposed:{revision_id}"),
             EventTarget::for_revision(
-                LedgerId::new("ledger:default"),
+                JournalId::new("journal:default"),
                 RevisionId::new(revision_id),
                 None,
             ),
@@ -866,7 +866,7 @@ mod tests {
             EventType::ReviewObservationRecorded,
             format!("review_observation_recorded:{source_key}"),
             EventTarget::for_revision(
-                LedgerId::new("session:default"),
+                JournalId::new("journal:default"),
                 RevisionId::new("review-unit:sha256:one"),
                 None,
             ),
@@ -899,7 +899,7 @@ mod tests {
             EventType::ReviewAssessmentRecorded,
             format!("review_assessment_recorded:{source_key}"),
             EventTarget::for_revision(
-                LedgerId::new("session:default"),
+                JournalId::new("journal:default"),
                 RevisionId::new("review-unit:sha256:one"),
                 None,
             ),
@@ -928,7 +928,7 @@ mod tests {
             EventType::ValidationCheckRecorded,
             format!("validation_check_recorded:{source_key}"),
             EventTarget::for_revision(
-                LedgerId::new("session:default"),
+                JournalId::new("journal:default"),
                 RevisionId::new("review-unit:sha256:one"),
                 None,
             ),
@@ -963,7 +963,7 @@ mod tests {
         assertion_mode: AssertionMode,
     ) -> ShoreEvent {
         let mut target = EventTarget::for_revision(
-            LedgerId::new("session:default"),
+            JournalId::new("journal:default"),
             RevisionId::new("review-unit:sha256:one"),
             None,
         );
@@ -998,7 +998,7 @@ mod tests {
         input_request_id: &str,
     ) -> ShoreEvent {
         let mut target = EventTarget::for_revision(
-            LedgerId::new("session:default"),
+            JournalId::new("journal:default"),
             RevisionId::new("review-unit:sha256:one"),
             None,
         );

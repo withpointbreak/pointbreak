@@ -206,7 +206,7 @@ mod tests {
     use super::*;
     use crate::error::ShoreError;
     use crate::model::{
-        AssessmentId, EngagementId, InputRequestId, InputRequestResponseId, LedgerId, ObjectId,
+        AssessmentId, EngagementId, InputRequestId, InputRequestResponseId, JournalId, ObjectId,
         ObservationId, ReviewEndpoint, ReviewTargetRef, ReviewUnitSource, RevisionId, Side,
         TargetRef, TrackId, WorktreeCaptureMode,
     };
@@ -233,7 +233,7 @@ mod tests {
         let error = ShoreEvent::new(
             EventType::ReviewInitialized,
             "",
-            EventTarget::for_ledger(LedgerId::new("ledger:default")),
+            EventTarget::for_journal(JournalId::new("journal:default")),
             Writer::shore_local("0.1.0"),
             ReviewInitializedPayload {},
             FixedClock::at("2026-05-09T20:42:45Z"),
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn review_unit_captured_event_serializes_target_and_payload() {
         let target = EventTarget::for_revision(
-            LedgerId::new("session:default"),
+            JournalId::new("journal:default"),
             RevisionId::new("review-unit:sha256:abc"),
             None,
         );
@@ -360,7 +360,7 @@ mod tests {
 
         let json = serde_json::to_value(event).unwrap();
         assert_eq!(json["eventType"], "work_object_proposed");
-        assert_eq!(json["target"]["ledgerId"], "session:default");
+        assert_eq!(json["target"]["journalId"], "journal:default");
         assert_eq!(json["target"]["subject"]["review"]["kind"], "revision");
         assert_eq!(
             json["target"]["subject"]["review"]["revisionId"],
@@ -504,7 +504,7 @@ mod tests {
             EventType::WorkObjectProposed,
             format!("work_object_proposed:review-unit:sha256:abc:{snapshot_artifact_content_hash}"),
             EventTarget::for_revision(
-                LedgerId::new("session:default"),
+                JournalId::new("journal:default"),
                 RevisionId::new("review-unit:sha256:abc"),
                 None,
             ),
@@ -554,7 +554,7 @@ mod tests {
             end_line: 5,
         };
         let target = EventTarget::for_subject(
-            LedgerId::new("session:default"),
+            JournalId::new("journal:default"),
             TargetRef::Review(target_ref.clone()),
             Some(TrackId::new("agent:codex")),
         );
@@ -611,7 +611,7 @@ mod tests {
                 revision_id.as_str()
             ),
             EventTarget::for_subject(
-                LedgerId::new("session:default"),
+                JournalId::new("journal:default"),
                 TargetRef::Review(target_ref.clone()),
                 Some(TrackId::new("agent:codex")),
             ),
@@ -649,7 +649,7 @@ mod tests {
                 assessment_id.as_str(),
             ),
             EventTarget::for_subject(
-                LedgerId::new("session:default"),
+                JournalId::new("journal:default"),
                 TargetRef::Review(target_ref.clone()),
                 Some(track_id),
             ),
@@ -676,7 +676,7 @@ mod tests {
         let event = ShoreEvent::new(
             EventType::ReviewNoteImported,
             "review_note_imported:review_notes:work:default:note:abc",
-            EventTarget::for_ledger(LedgerId::new("ledger:default")),
+            EventTarget::for_journal(JournalId::new("journal:default")),
             Writer::shore_local("0.1.0"),
             ReviewNoteImportedPayload {
                 sidecar_source: SidecarSource::ReviewNotes,
@@ -715,7 +715,7 @@ mod tests {
         let event = ShoreEvent::new(
             EventType::ReviewNoteImported,
             "review_note_imported:review_notes:work:default:note:abc",
-            EventTarget::for_ledger(LedgerId::new("ledger:default")),
+            EventTarget::for_journal(JournalId::new("journal:default")),
             Writer::shore_local("0.1.0"),
             ReviewNoteImportedPayload {
                 sidecar_source: SidecarSource::ReviewNotes,
@@ -971,7 +971,7 @@ mod tests {
             EventType::WorkObjectProposed,
             idempotency_key,
             EventTarget::for_revision(
-                LedgerId::new("session:default"),
+                JournalId::new("journal:default"),
                 RevisionId::new("review-unit:sha256:abc"),
                 None,
             ),

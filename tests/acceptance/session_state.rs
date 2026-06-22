@@ -173,7 +173,7 @@ fn same_working_tree_diff_produces_same_revision_and_snapshot_ids() {
             .as_str()
             .starts_with("rev:worktree:sha256:")
     );
-    assert!(first.snapshot_id.as_str().starts_with("snap:git:sha256:"));
+    assert!(first.snapshot_id.as_str().starts_with("obj:git:sha256:"));
 }
 
 #[test]
@@ -474,8 +474,8 @@ fn reimporting_same_long_body_reuses_content_addressed_artifact_path() {
 }
 
 #[test]
-fn ledger_pipeline_records_capture_import_and_bounded_state() {
-    let repo = bounded_ledger_repo();
+fn journal_pipeline_records_capture_import_and_bounded_state() {
+    let repo = bounded_journal_repo();
     let state_json =
         std::fs::read_to_string(common_dir_store(repo.path()).join("state.json")).unwrap();
     let state: serde_json::Value = serde_json::from_str(&state_json).expect("state is json");
@@ -517,7 +517,7 @@ fn state_event_set_hash_changes_when_events_change() {
 
 #[test]
 fn state_can_be_deleted_and_rebuilt_from_events() {
-    let repo = bounded_ledger_repo();
+    let repo = bounded_journal_repo();
     let store = common_dir_store(repo.path());
     let original_state = std::fs::read_to_string(store.join("state.json")).unwrap();
     std::fs::remove_file(store.join("state.json")).unwrap();
@@ -534,7 +534,7 @@ fn state_can_be_deleted_and_rebuilt_from_events() {
 
 #[test]
 fn corrupt_state_json_is_ignored_and_rebuilt_from_events() {
-    let repo = bounded_ledger_repo();
+    let repo = bounded_journal_repo();
     let store = common_dir_store(repo.path());
     let original_state = std::fs::read_to_string(store.join("state.json")).unwrap();
     std::fs::write(store.join("state.json"), "{").unwrap();
@@ -550,7 +550,7 @@ fn corrupt_state_json_is_ignored_and_rebuilt_from_events() {
 
 #[test]
 fn event_store_detects_corrupted_event_payload_hash() {
-    let repo = bounded_ledger_repo();
+    let repo = bounded_journal_repo();
     corrupt_first_event_payload(&common_dir_store(repo.path()));
 
     let error = rebuild_state(repo.path()).expect_err("corrupt event is rejected");
@@ -676,7 +676,7 @@ fn modified_repo() -> GitRepo {
     repo
 }
 
-fn bounded_ledger_repo() -> GitRepo {
+fn bounded_journal_repo() -> GitRepo {
     let repo = modified_repo();
     capture_worktree_review(CaptureOptions::new(repo.path())).expect("capture succeeds");
     let sidecar = repo.write_fixture("review-notes.json", native_review_notes_json());

@@ -289,7 +289,7 @@ fn write_validation_check_event(input: ValidationWriteInput) -> Result<Validatio
     }
 
     let mut event_target = EventTarget::for_revision(
-        input.resolved.ledger_id,
+        input.resolved.journal_id,
         input.resolved.revision_id.clone(),
         None,
     );

@@ -93,7 +93,7 @@ pub(crate) fn worktree_fingerprint_for_files(
 
     Ok(WorktreeFingerprint {
         revision_id: RevisionId::new(format!("rev:worktree:sha256:{hash}")),
-        snapshot_id: ObjectId::new(format!("snap:git:sha256:{hash}")),
+        snapshot_id: ObjectId::new(format!("obj:git:sha256:{hash}")),
     })
 }
 

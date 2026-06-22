@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use shoreline::crypto::SignerId;
-use shoreline::model::{EventId, LedgerId};
+use shoreline::model::{EventId, JournalId};
 use shoreline::session::event::{
     EventSignature, EventSignatureRecordedPayload, EventTarget, EventType, IngestProvenance,
     IngestVia, ShoreEvent, Writer,
@@ -58,7 +58,7 @@ fn carrier_event(idempotency_key: &str, payload: EventSignatureRecordedPayload) 
     ShoreEvent::new(
         EventType::EventSignatureRecorded,
         idempotency_key,
-        EventTarget::for_ledger(LedgerId::new("ledger:fixture")),
+        EventTarget::for_journal(JournalId::new("journal:fixture")),
         Writer::shore_local("test"),
         payload,
         "2026-06-04T00:00:00Z",
@@ -123,7 +123,7 @@ fn golden_event_record_hash_is_signature_blind() {
     assert_eq!(signed_hash, unsigned.event_record_hash().unwrap());
     assert_eq!(
         signed_hash,
-        "sha256:e04fb798786f1babe03708637673c1bd0492d872108dfe363957b916130a028b"
+        "sha256:23933e6fe38b38b812f02cc3751a1c3117af0797d29b19b2b66ed8463dde323d"
     );
 }
 
@@ -306,8 +306,8 @@ fn producer_rename_left_signed_material_untouched() {
     // reproduce these bytes exactly; an unexpected change here is a
     // stop-the-line signal that an edit touched the signed material.
     const CANONICAL_TBS_SHA256: &str =
-        "7a0f9904caae98242ae46a3d9e7e51f329eda98372465c11f167cc3972d8a65d";
-    const PAE_SHA256: &str = "6de453dccddfce319d0e14097dead678bfd5b181e46cb04471f1d008269670d4";
+        "3b6fcea2e242327fa8066fc89bbce42538a73c89512949bd34d90ae6286e2163";
+    const PAE_SHA256: &str = "d5ef6ca53f999dbef4e04371e352792fa63aae72dea14e839898cb0ca5504a24";
 
     let canonical_tbs =
         std::fs::read(fixture_path("canonical-tbs-v1.bytes")).expect("read canonical tbs bytes");

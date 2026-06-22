@@ -432,7 +432,7 @@ mod tests {
         use super::super::*;
         use super::rev;
         use crate::model::{
-            EngagementId, LedgerId, ObjectId, ReviewEndpoint, ReviewUnitSource, TargetRef,
+            EngagementId, JournalId, ObjectId, ReviewEndpoint, ReviewUnitSource, TargetRef,
             TaskTargetRef, WorkObjectId, WorktreeCaptureMode,
         };
         use crate::session::event::{EventTarget, GitProvenance, Revision, Writer};
@@ -443,7 +443,7 @@ mod tests {
                 EventType::WorkObjectProposed,
                 format!("work_object_proposed:{}", revision_id.as_str()),
                 EventTarget::for_revision(
-                    LedgerId::new("ledger:default"),
+                    JournalId::new("journal:default"),
                     revision_id.clone(),
                     None,
                 ),
@@ -482,7 +482,7 @@ mod tests {
                 EventType::WorkObjectProposed,
                 format!("task-capture:{suffix}"),
                 EventTarget::for_subject(
-                    LedgerId::new("ledger:default"),
+                    JournalId::new("journal:default"),
                     TargetRef::Task(TaskTargetRef::TaskAttempt),
                     None,
                 ),

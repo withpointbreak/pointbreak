@@ -152,7 +152,7 @@ impl EventPayload for InputRequestRespondedPayload {
 mod tests {
     use super::*;
     use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
-    use crate::model::{LedgerId, WorkObjectId, WorkObjectType};
+    use crate::model::{JournalId, WorkObjectId, WorkObjectType};
     use crate::session::event::{EventTarget, ShoreEvent, Writer};
 
     #[test]
@@ -321,7 +321,7 @@ mod tests {
             EventType::InputRequestOpened,
             idempotency_key.clone(),
             EventTarget::for_revision(
-                LedgerId::new("ledger:default"),
+                JournalId::new("journal:default"),
                 revision_id.clone(),
                 Some(track_id.clone()),
             ),
@@ -391,7 +391,7 @@ mod tests {
             EventType::InputRequestResponded,
             idempotency_key.clone(),
             EventTarget::for_revision(
-                LedgerId::new("ledger:default"),
+                JournalId::new("journal:default"),
                 RevisionId::new("review-unit:sha256:unit"),
                 None,
             ),

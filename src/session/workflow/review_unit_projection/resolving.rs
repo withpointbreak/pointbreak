@@ -36,7 +36,7 @@ pub(super) fn selected_review_unit_capture(
             };
             return Ok(ReviewUnitProjectionIdentity {
                 id: revision.id.clone(),
-                session_id: event.target.ledger_id.clone(),
+                session_id: event.target.journal_id.clone(),
                 source,
                 base,
                 target,

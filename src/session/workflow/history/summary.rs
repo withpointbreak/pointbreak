@@ -2,7 +2,7 @@ use serde::Serialize;
 
 use crate::model::{
     AssessmentId, CommitAssociationId, CommitWithdrawalId, EngagementId, EventId, InputRequestId,
-    InputRequestResponseId, LedgerId, ObjectId, ObservationId, RefAssociationId, RefWithdrawalId,
+    InputRequestResponseId, JournalId, ObjectId, ObservationId, RefAssociationId, RefWithdrawalId,
     ReviewEndpoint, ReviewTargetRef, ReviewUnitSource, RevisionId, TrackId, ValidationCheckId,
     ValidationStatus, ValidationTarget, ValidationTrigger,
 };
@@ -19,7 +19,7 @@ pub struct ReviewHistoryEntry {
     pub event_type: EventType,
     pub occurred_at: String,
     pub payload_hash: String,
-    pub ledger_id: LedgerId,
+    pub journal_id: JournalId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub track_id: Option<TrackId>,
     #[serde(skip_serializing_if = "Option::is_none")]

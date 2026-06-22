@@ -26,7 +26,7 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        EngagementId, EventId, LedgerId, ObjectId, ReviewEndpoint, ReviewTargetRef,
+        EngagementId, EventId, JournalId, ObjectId, ReviewEndpoint, ReviewTargetRef,
         ReviewUnitSource, RevisionId, Side, TrackId, WorktreeCaptureMode,
     };
     use crate::session::event::{
@@ -728,7 +728,7 @@ mod tests {
 
     fn resolved_from_capture(capture: &CaptureResult) -> ResolvedReviewUnit {
         ResolvedReviewUnit {
-            ledger_id: capture.ledger_id.clone(),
+            journal_id: capture.journal_id.clone(),
             revision_id: capture.revision_id.clone(),
             object_id: capture.object_id.clone(),
         }
@@ -751,7 +751,7 @@ mod tests {
         ShoreEvent::new(
             EventType::WorkObjectProposed,
             format!("work_object_proposed:{}", revision_id.as_str()),
-            EventTarget::for_revision(LedgerId::new("ledger:default"), revision_id.clone(), None),
+            EventTarget::for_revision(JournalId::new("journal:default"), revision_id.clone(), None),
             Writer::shore_local("0.1.0"),
             WorkObjectProposedPayload {
                 engagement_id: EngagementId::new(format!(
@@ -796,7 +796,7 @@ mod tests {
         ShoreEvent::new(
             EventType::WorkObjectProposed,
             format!("work_object_proposed:{}", revision_id.as_str()),
-            EventTarget::for_revision(LedgerId::new("ledger:default"), revision_id.clone(), None),
+            EventTarget::for_revision(JournalId::new("journal:default"), revision_id.clone(), None),
             Writer::shore_local("0.1.0"),
             WorkObjectProposedPayload {
                 engagement_id: EngagementId::new(format!("engagement:sha256:{suffix}")),

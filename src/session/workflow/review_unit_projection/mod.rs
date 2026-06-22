@@ -955,7 +955,7 @@ mod tests {
         let commit_association_id =
             build_commit_association_id(&capture.revision_id, commit_oid).unwrap();
         let mut target = EventTarget::for_revision(
-            crate::model::LedgerId::new("session:default"),
+            crate::model::JournalId::new("journal:default"),
             capture.revision_id.clone(),
             None,
         );
@@ -994,7 +994,7 @@ mod tests {
 
     fn record_validation_event(repo: &Path, capture: &CaptureResult, validation_check_id: &str) {
         let mut target = EventTarget::for_revision(
-            crate::model::LedgerId::new("session:default"),
+            crate::model::JournalId::new("journal:default"),
             capture.revision_id.clone(),
             None,
         );
@@ -1370,7 +1370,7 @@ mod tests {
             serde_json::from_slice(&fs::read(&path).expect("read snapshot artifact"))
                 .expect("parse snapshot artifact json");
 
-        assert_eq!(json["snapshot"]["snapshot_id"], snapshot_id.as_str());
+        assert_eq!(json["snapshot"]["object_id"], snapshot_id.as_str());
         // Perturb a field inside the v2 content hash without re-stamping it.
         // `DiffFile` is snake_case, unlike the camelCase artifact wrapper.
         json["snapshot"]["files"][0]["new_path"] = "/evil".into();
@@ -1408,7 +1408,7 @@ mod tests {
         let event = ShoreEvent::new(
             EventType::ArtifactRemoved,
             ArtifactRemovedPayload::idempotency_key(content_hash),
-            EventTarget::for_ledger(crate::model::LedgerId::new("session:default")),
+            EventTarget::for_journal(crate::model::JournalId::new("journal:default")),
             Writer::shore_local("0.1.0"),
             ArtifactRemovedPayload {
                 content_hash: content_hash.to_owned(),
@@ -1476,7 +1476,7 @@ mod tests {
                 let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
                     return false;
                 };
-                json["snapshot"]["snapshot_id"] == snapshot_id.as_str()
+                json["snapshot"]["object_id"] == snapshot_id.as_str()
             })
             .expect("find snapshot artifact")
     }

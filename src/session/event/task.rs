@@ -105,7 +105,7 @@ impl EventPayload for TaskObservationRecordedPayload {
 mod tests {
     use super::*;
     use crate::model::{
-        CheckpointId, LedgerId, ObservationId, RevisionId, TargetRef, TaskTargetRef, TrackId,
+        CheckpointId, JournalId, ObservationId, RevisionId, TargetRef, TaskTargetRef, TrackId,
         WorkObjectId, WorkObjectType,
     };
     use crate::session::event::{
@@ -221,7 +221,7 @@ mod tests {
     #[test]
     fn task_checkpoint_captured_event_builds_with_envelope_checkpoint_target() {
         let target = EventTarget::for_subject(
-            LedgerId::new("ledger:claude:uuid-1"),
+            JournalId::new("journal:claude:uuid-1"),
             task_attempt_subject(),
             None,
         );
@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn task_observation_recorded_event_builds_through_shore_event_new() {
         let target = EventTarget::for_subject(
-            LedgerId::new("ledger:claude:uuid-1"),
+            JournalId::new("journal:claude:uuid-1"),
             task_attempt_subject(),
             None,
         );

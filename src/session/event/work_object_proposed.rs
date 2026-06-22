@@ -92,7 +92,7 @@ impl EventPayload for WorkObjectProposedPayload {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{CommitRangeCaptureMode, LedgerId, WorktreeCaptureMode};
+    use crate::model::{CommitRangeCaptureMode, JournalId, WorktreeCaptureMode};
 
     fn git_provenance() -> GitProvenance {
         GitProvenance {
@@ -256,7 +256,7 @@ mod tests {
                 EventType::WorkObjectProposed,
                 format!("work_object_proposed:{}", revision_id.as_str()),
                 EventTarget::for_revision(
-                    LedgerId::new("ledger:default"),
+                    JournalId::new("journal:default"),
                     revision_id.clone(),
                     None,
                 ),

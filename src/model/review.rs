@@ -10,6 +10,10 @@ pub struct Review {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DiffSnapshot {
     pub review_id: ReviewId,
+    // Wire key finishes Snapshot->Object: the stored artifact body serializes the
+    // content-only id as `object_id` (value already `obj:`). The Rust field name
+    // stays `snapshot_id` pending the broader snapshot/object terminology pass.
+    #[serde(rename = "object_id")]
     pub snapshot_id: ObjectId,
     pub files: Vec<DiffFile>,
 }

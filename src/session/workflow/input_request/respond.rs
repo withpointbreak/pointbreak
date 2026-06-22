@@ -189,7 +189,7 @@ pub fn respond_input_request(
         EventType::InputRequestResponded,
         idempotency_key,
         EventTarget::for_subject(
-            request_event.target.ledger_id.clone(),
+            request_event.target.journal_id.clone(),
             TargetRef::Review(ReviewTargetRef::InputRequest {
                 revision_id,
                 input_request_id: request_payload.input_request_id.clone(),
@@ -302,7 +302,7 @@ mod tests {
     use std::process::Command;
 
     use super::*;
-    use crate::model::{LedgerId, TaskTargetRef, WorkObjectId};
+    use crate::model::{JournalId, TaskTargetRef, WorkObjectId};
     use crate::session::projection::test_support::task_input_request_event_with_target;
 
     #[test]
@@ -311,7 +311,7 @@ mod tests {
         // A task-attempt input request — the agent-resumption domain, authored by
         // the relay/adapter, not by `shore review input-request open`.
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:demo");
+        let session_id = JournalId::new("journal:demo");
         let input_request_id = InputRequestId::new("input-request:sha256:taskreq");
         let request = task_input_request_event_with_target(
             &task_attempt_id,

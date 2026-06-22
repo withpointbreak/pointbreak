@@ -57,7 +57,7 @@ mod tests {
     use super::*;
     use crate::model::{
         ActorId, AssessmentId, EngagementId, EventId, InputRequestId, InputRequestResponseId,
-        LedgerId, ObjectId, ObservationId, ReviewEndpoint, ReviewTargetRef, ReviewUnitSource,
+        JournalId, ObjectId, ObservationId, ReviewEndpoint, ReviewTargetRef, ReviewUnitSource,
         RevisionId, Side, TargetRef, TrackId, ValidationCheckId, ValidationStatus,
         ValidationTarget, ValidationTrigger, WorktreeCaptureMode,
     };
@@ -282,7 +282,7 @@ mod tests {
             event_id: EventId::new("evt:sha256:task-checkpoint"),
             event_type: EventType::TaskCheckpointCaptured,
             idempotency_key: "task_checkpoint_captured:filter".to_owned(),
-            target: EventTarget::for_ledger(LedgerId::new("session:claude:abc")),
+            target: EventTarget::for_journal(JournalId::new("journal:claude:abc")),
             writer: Writer::shore_local("test"),
             occurred_at: "2026-05-18T10:00:01Z".to_owned(),
             payload_hash: "sha256:placeholder".to_owned(),
@@ -317,7 +317,7 @@ mod tests {
             event_id: EventId::new(format!("evt:sha256:task-{idx}")),
             event_type,
             idempotency_key: format!("task_kind_{idx}"),
-            target: EventTarget::for_ledger(LedgerId::new("session:claude:abc")),
+            target: EventTarget::for_journal(JournalId::new("journal:claude:abc")),
             writer: Writer::shore_local("test"),
             occurred_at: format!("2026-05-18T10:00:0{}Z", idx + 1),
             payload_hash: "sha256:placeholder".to_owned(),
@@ -360,7 +360,7 @@ mod tests {
             EventType::WorkObjectProposed,
             "task_attempt_proposal",
             EventTarget::for_subject(
-                LedgerId::new("ledger:claude:abc"),
+                JournalId::new("journal:claude:abc"),
                 TargetRef::Task(crate::model::TaskTargetRef::TaskAttempt),
                 None,
             ),
@@ -389,7 +389,7 @@ mod tests {
             event_id: EventId::new("evt:sha256:checkpoint-1"),
             event_type: EventType::TaskCheckpointCaptured,
             idempotency_key: "task_checkpoint_captured:cp-1".to_owned(),
-            target: EventTarget::for_ledger(LedgerId::new("session:claude:abc")),
+            target: EventTarget::for_journal(JournalId::new("journal:claude:abc")),
             writer: Writer::shore_local("test"),
             occurred_at: "2026-05-18T00:00:00Z".to_owned(),
             payload_hash: "sha256:placeholder".to_owned(),
@@ -677,11 +677,11 @@ mod tests {
     }
 
     fn review_initialized_event(key: &str) -> ShoreEvent {
-        let ledger_id = LedgerId::new("session:default");
+        let journal_id = JournalId::new("journal:default");
         ShoreEvent::new(
             EventType::ReviewInitialized,
-            ReviewInitializedPayload::idempotency_key(&ledger_id),
-            EventTarget::for_ledger(ledger_id),
+            ReviewInitializedPayload::idempotency_key(&journal_id),
+            EventTarget::for_journal(journal_id),
             Writer::shore_local("test"),
             ReviewInitializedPayload {},
             format!("2026-05-13T10:00:0{key}Z"),
@@ -729,7 +729,7 @@ mod tests {
         ShoreEvent::new(
             EventType::WorkObjectProposed,
             "capture:one",
-            EventTarget::for_revision(LedgerId::new("session:default"), revision_id, None),
+            EventTarget::for_revision(JournalId::new("journal:default"), revision_id, None),
             Writer::shore_local("test"),
             payload,
             "2026-05-13T10:00:00Z",
@@ -972,7 +972,7 @@ mod tests {
         ShoreEvent::new(
             EventType::ReviewNoteImported,
             "review-note:one",
-            EventTarget::for_ledger(LedgerId::new("session:default")),
+            EventTarget::for_journal(JournalId::new("journal:default")),
             Writer::shore_local("test"),
             payload,
             "2026-05-13T10:00:05Z",
@@ -1012,7 +1012,7 @@ mod tests {
         P: crate::session::event::EventPayload,
     {
         let mut target =
-            EventTarget::for_revision(LedgerId::new("session:default"), revision_id.clone(), None);
+            EventTarget::for_revision(JournalId::new("journal:default"), revision_id.clone(), None);
         target.track_id = Some(TrackId::new(track_id));
         target.subject = TargetRef::Review(ReviewTargetRef::Revision {
             revision_id: revision_id.clone(),

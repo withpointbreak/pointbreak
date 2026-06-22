@@ -4,7 +4,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::error::Result;
-use crate::model::{EngagementId, LedgerId, ObjectId, RevisionId};
+use crate::model::{EngagementId, JournalId, ObjectId, RevisionId};
 use crate::session::event::{
     EventType, ReviewAssessment, ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload,
 };
@@ -118,11 +118,11 @@ impl EngagementGrouping {
 
 struct RevisionCapture {
     object_id: ObjectId,
-    ledger_id: LedgerId,
+    journal_id: JournalId,
     engagement_hint: EngagementId,
 }
 
-/// Map each captured revision to its content object, ledger, and stored
+/// Map each captured revision to its content object, journal, and stored
 /// engagement hint, discriminating the generative arm: only a review-domain
 /// revision is grouped; a task-attempt proposal in a mixed log is skipped.
 fn revision_captures(events: &[ShoreEvent]) -> Result<BTreeMap<RevisionId, RevisionCapture>> {
@@ -137,7 +137,7 @@ fn revision_captures(events: &[ShoreEvent]) -> Result<BTreeMap<RevisionId, Revis
                 revision.id.clone(),
                 RevisionCapture {
                     object_id: revision.object_id,
-                    ledger_id: event.target.ledger_id.clone(),
+                    journal_id: event.target.journal_id.clone(),
                     engagement_hint: payload.engagement_id,
                 },
             );
@@ -165,7 +165,7 @@ fn engagement_lifecycle(
     };
 
     let resolved = ResolvedReviewUnit {
-        ledger_id: capture.ledger_id.clone(),
+        journal_id: capture.journal_id.clone(),
         revision_id: head.clone(),
         object_id: capture.object_id.clone(),
     };
@@ -191,7 +191,7 @@ fn engagement_lifecycle(
 mod tests {
     use super::*;
     use crate::model::{
-        AssessmentId, EngagementId, LedgerId, ObjectId, ReviewEndpoint, ReviewTargetRef,
+        AssessmentId, EngagementId, JournalId, ObjectId, ReviewEndpoint, ReviewTargetRef,
         ReviewUnitSource, RevisionId, TargetRef, TrackId, WorktreeCaptureMode,
     };
     use crate::session::event::{
@@ -216,7 +216,7 @@ mod tests {
         ShoreEvent::new(
             EventType::WorkObjectProposed,
             format!("work_object_proposed:{}", revision_id.as_str()),
-            EventTarget::for_revision(LedgerId::new("ledger:default"), revision_id.clone(), None),
+            EventTarget::for_revision(JournalId::new("journal:default"), revision_id.clone(), None),
             Writer::shore_local("test"),
             WorkObjectProposedPayload {
                 engagement_id: engagement(engagement_suffix),
@@ -262,7 +262,7 @@ mod tests {
                 assessment_id.as_str(),
             ),
             EventTarget::for_subject(
-                LedgerId::new("ledger:default"),
+                JournalId::new("journal:default"),
                 TargetRef::Review(target.clone()),
                 Some(track_id),
             ),

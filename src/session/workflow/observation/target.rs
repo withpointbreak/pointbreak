@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::error::{Result, ShoreError};
 use crate::git::git_head_ref;
-use crate::model::{LedgerId, ObjectId, ReviewEndpoint, ReviewTargetRef, RevisionId, Side};
+use crate::model::{JournalId, ObjectId, ReviewEndpoint, ReviewTargetRef, RevisionId, Side};
 use crate::session::event::{
     EventType, ReviewUnitRefAssociatedPayload, Revision, ShoreEvent, WorkObjectProposal,
     WorkObjectProposedPayload,
@@ -14,7 +14,7 @@ use crate::session::store::fingerprint::normalized_worktree_root;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedReviewUnit {
-    pub ledger_id: LedgerId,
+    pub journal_id: JournalId,
     pub revision_id: RevisionId,
     pub object_id: ObjectId,
 }
@@ -152,7 +152,7 @@ pub(crate) fn resolve_revision(
             continue;
         };
         let resolved = ResolvedReviewUnit {
-            ledger_id: event.target.ledger_id.clone(),
+            journal_id: event.target.journal_id.clone(),
             revision_id: revision.id.clone(),
             object_id: revision.object_id.clone(),
         };
@@ -414,8 +414,8 @@ mod scope_tests {
 
     use super::*;
     use crate::model::{
-        CommitRangeCaptureMode, EngagementId, LedgerId, ObjectId, ReviewEndpoint, ReviewUnitSource,
-        RevisionId, WorktreeCaptureMode,
+        CommitRangeCaptureMode, EngagementId, JournalId, ObjectId, ReviewEndpoint,
+        ReviewUnitSource, RevisionId, WorktreeCaptureMode,
     };
     use crate::session::event::{EventTarget, GitProvenance, IngestProvenance, IngestVia, Writer};
 
@@ -425,7 +425,7 @@ mod scope_tests {
         ShoreEvent::new(
             EventType::WorkObjectProposed,
             format!("work_object_proposed:{}", revision_id.as_str()),
-            EventTarget::for_revision(LedgerId::new("ledger:default"), revision_id.clone(), None),
+            EventTarget::for_revision(JournalId::new("journal:default"), revision_id.clone(), None),
             Writer::shore_local("test"),
             WorkObjectProposedPayload {
                 engagement_id: EngagementId::new(format!(
@@ -496,7 +496,7 @@ mod scope_tests {
     /// A capture-time branch ref association for a given unit + full ref.
     fn ref_association(unit_suffix: &str, ref_name: &str) -> ShoreEvent {
         crate::session::workflow::association::build_ref_association_event(
-            &LedgerId::new("ledger:default"),
+            &JournalId::new("journal:default"),
             &RevisionId::new(format!("review-unit:sha256:{unit_suffix}")),
             ref_name,
             &"0".repeat(40),

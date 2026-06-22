@@ -300,7 +300,7 @@ pub(crate) fn normalize_ref(name: &str) -> String {
 /// auto-record share it so they converge on one identity. `track_id` is
 /// envelope-only — the id/key fold neither track nor writer.
 pub(crate) fn build_ref_association_event(
-    ledger_id: &crate::model::LedgerId,
+    journal_id: &crate::model::JournalId,
     revision_id: &RevisionId,
     ref_name: &str,
     head_oid: &str,
@@ -323,7 +323,7 @@ pub(crate) fn build_ref_association_event(
         EventType::RevisionRefAssociated,
         key,
         EventTarget::for_subject(
-            ledger_id.clone(),
+            journal_id.clone(),
             TargetRef::Review(ReviewTargetRef::Revision {
                 revision_id: revision_id.clone(),
             }),
@@ -601,7 +601,7 @@ where
         event_type,
         idempotency_key,
         EventTarget::for_subject(
-            resolved.ledger_id,
+            resolved.journal_id,
             TargetRef::Review(ReviewTargetRef::Revision {
                 revision_id: revision_id.clone(),
             }),

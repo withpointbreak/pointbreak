@@ -3,7 +3,7 @@
 
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::model::{
-    ActorId, CheckpointId, EngagementId, InputRequestId, InputRequestResponseId, LedgerId,
+    ActorId, CheckpointId, EngagementId, InputRequestId, InputRequestResponseId, JournalId,
     ReviewTargetRef, RevisionId, TargetRef, TaskTargetRef, WorkObjectId, WorkObjectType,
 };
 use crate::session::event::{
@@ -40,7 +40,7 @@ pub(crate) fn reader_actor() -> ActorId {
 
 pub(crate) fn task_attempt_event(
     task_attempt_id: &WorkObjectId,
-    session_id: &LedgerId,
+    session_id: &JournalId,
     claude_session_uuid: &str,
     occurred_at: &str,
 ) -> ShoreEvent {
@@ -74,7 +74,7 @@ pub(crate) fn task_attempt_event(
 
 pub(crate) fn checkpoint_event(
     task_attempt_id: &WorkObjectId,
-    session_id: &LedgerId,
+    session_id: &JournalId,
     checkpoint_id: &CheckpointId,
     assistant_message_id: &str,
     tool_use_ids: Vec<String>,
@@ -117,7 +117,7 @@ pub(crate) fn checkpoint_event(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn task_input_request_event_with_target(
     task_attempt_id: &WorkObjectId,
-    session_id: &LedgerId,
+    session_id: &JournalId,
     input_request_id: &InputRequestId,
     source_key: &str,
     occurred_at: &str,
@@ -166,7 +166,7 @@ pub(crate) fn user_response_event(
     occurred_at: &str,
 ) -> ShoreEvent {
     let target = EventTarget::for_subject(
-        LedgerId::new("ledger:claude:uuid-1"),
+        JournalId::new("journal:claude:uuid-1"),
         task_attempt_subject(),
         None,
     );

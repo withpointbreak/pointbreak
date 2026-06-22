@@ -474,7 +474,7 @@ mod tests {
     use crate::canonical_hash::sha256_json_prefixed;
     use crate::crypto::{EventSignatureBytes, EventSigner, EventVerificationStatus};
     use crate::model::{
-        ActorId, InputRequestId, InputRequestResponseId, LedgerId, TargetRef, TaskTargetRef,
+        ActorId, InputRequestId, InputRequestResponseId, JournalId, TargetRef, TaskTargetRef,
         WorkObjectId,
     };
     use crate::session::event::{
@@ -1681,7 +1681,7 @@ mod tests {
     /// request + operative Approved response (last element).
     fn task_resumption_events() -> (Vec<ShoreEvent>, WorkObjectId) {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let input_request_id = InputRequestId::new("input-request:sha256:1");
         let response_id = InputRequestResponseId::new("input-request-response:sha256:r");
 

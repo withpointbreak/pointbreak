@@ -229,7 +229,7 @@ pub(crate) fn assemble_and_record_cosignature(
     let carrier = ShoreEvent::new(
         EventType::EventSignatureRecorded,
         idempotency_key,
-        EventTarget::for_ledger(target.target.ledger_id.clone()),
+        EventTarget::for_journal(target.target.journal_id.clone()),
         writer,
         payload.clone(),
         occurred_at,

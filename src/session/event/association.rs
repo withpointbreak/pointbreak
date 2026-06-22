@@ -340,7 +340,7 @@ mod tests {
 #[cfg(test)]
 mod convergence_tests {
     use super::*;
-    use crate::model::{ActorId, LedgerId, RevisionId, TrackId};
+    use crate::model::{ActorId, JournalId, RevisionId, TrackId};
     use crate::session::event::{EventTarget, ShoreEvent, Writer, WriterProducer};
     use crate::session::projection::freshness::event_set_hash_for_events;
     use crate::session::{EventStore, EventWriteOutcome};
@@ -351,7 +351,7 @@ mod convergence_tests {
 
     fn target_for(revision_id: &RevisionId, track: &str) -> EventTarget {
         let mut target =
-            EventTarget::for_revision(LedgerId::new("session:default"), revision_id.clone(), None);
+            EventTarget::for_revision(JournalId::new("journal:default"), revision_id.clone(), None);
         target.track_id = Some(TrackId::new(track));
         target
     }

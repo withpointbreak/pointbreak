@@ -251,7 +251,7 @@ fn write_observation_event(input: ObservationWriteInput) -> Result<ObservationAd
         EventType::ReviewObservationRecorded,
         idempotency_key,
         EventTarget::for_subject(
-            input.resolved.ledger_id,
+            input.resolved.journal_id,
             TargetRef::Review(input.target.clone()),
             Some(track_id.clone()),
         ),

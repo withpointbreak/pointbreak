@@ -2,15 +2,15 @@ use serde::{Deserialize, Serialize};
 
 use super::kind::EventType;
 use super::payload::EventPayload;
-use crate::model::{LedgerId, Side};
+use crate::model::{JournalId, Side};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewInitializedPayload {}
 
 impl ReviewInitializedPayload {
-    pub fn idempotency_key(ledger_id: &LedgerId) -> String {
-        format!("review_initialized:{}", ledger_id.as_str())
+    pub fn idempotency_key(journal_id: &JournalId) -> String {
+        format!("review_initialized:{}", journal_id.as_str())
     }
 }
 

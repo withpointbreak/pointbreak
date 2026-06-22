@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use super::{AdapterNoteView, ReviewUnitProjectionRow};
 use crate::model::{
-    ActorId, DiffSnapshot, EventId, LedgerId, ObjectId, ReviewEndpoint, ReviewUnitSource,
+    ActorId, DiffSnapshot, EventId, JournalId, ObjectId, ReviewEndpoint, ReviewUnitSource,
     RevisionId, TrackId,
 };
 use crate::session::assessment::{AssessmentView, CurrentAssessmentView};
@@ -180,7 +180,7 @@ impl ReviewUnitShowResult {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ReviewUnitProjectionIdentity {
     pub id: RevisionId,
-    pub session_id: LedgerId,
+    pub session_id: JournalId,
     pub source: ReviewUnitSource,
     pub base: ReviewEndpoint,
     pub target: ReviewEndpoint,

@@ -63,7 +63,7 @@ impl RevisionsByBase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{EngagementId, LedgerId, ObjectId, ReviewUnitSource, WorktreeCaptureMode};
+    use crate::model::{EngagementId, JournalId, ObjectId, ReviewUnitSource, WorktreeCaptureMode};
     use crate::session::event::{EventTarget, GitProvenance, Revision, Writer};
 
     fn rev(suffix: &str) -> RevisionId {
@@ -75,7 +75,7 @@ mod tests {
         ShoreEvent::new(
             EventType::WorkObjectProposed,
             format!("work_object_proposed:{}", revision_id.as_str()),
-            EventTarget::for_revision(LedgerId::new("ledger:default"), revision_id.clone(), None),
+            EventTarget::for_revision(JournalId::new("journal:default"), revision_id.clone(), None),
             Writer::shore_local("test"),
             WorkObjectProposedPayload {
                 engagement_id: EngagementId::new(format!("engagement:sha256:{suffix}")),

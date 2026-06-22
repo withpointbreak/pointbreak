@@ -19,7 +19,7 @@ macro_rules! id_type {
 }
 
 id_type!(ReviewId);
-id_type!(LedgerId);
+id_type!(JournalId);
 id_type!(EngagementId);
 id_type!(EventId);
 id_type!(FileId);

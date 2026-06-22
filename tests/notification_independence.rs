@@ -1,5 +1,5 @@
 //! The notification-independence invariant: a liveness read is never a
-//! precondition for, and never a side effect on, a write. The ledger an actor
+//! precondition for, and never a side effect on, a write. The journal an actor
 //! produces is byte-identical whether or not anyone reads its liveness, and a
 //! change signal that is computed and then dropped neither un-writes nor fails
 //! the durable write. This is the guarantee that keeps the attention layer from
@@ -34,8 +34,8 @@ fn event_fingerprints(repo: &Path) -> Vec<(String, String)> {
         .collect()
 }
 
-fn ledger_hash(repo: &Path) -> String {
-    LivenessToken::for_ledger(&read_events(repo).expect("read events"))
+fn journal_hash(repo: &Path) -> String {
+    LivenessToken::for_journal(&read_events(repo).expect("read events"))
         .expect("liveness token")
         .event_set_hash
 }
@@ -56,19 +56,19 @@ fn write_is_byte_identical_with_or_without_a_liveness_read() {
 
     // The log as written, before any liveness read touches it.
     let before = event_fingerprints(repo.path());
-    let hash_before = ledger_hash(repo.path());
+    let hash_before = journal_hash(repo.path());
     assert!(!before.is_empty(), "the capture wrote at least one event");
 
-    // Hammer the read side: ledger- and work-object-scoped tokens, repeatedly.
+    // Hammer the read side: journal- and work-object-scoped tokens, repeatedly.
     // A read changes when you look, never what is written.
     for _ in 0..16 {
         let events = read_events(repo.path()).expect("read events");
-        let _ = LivenessToken::for_ledger(&events).expect("ledger token");
+        let _ = LivenessToken::for_journal(&events).expect("journal token");
         let _ = LivenessToken::for_work_object(&events, &revision_id).expect("scoped token");
     }
 
     let after = event_fingerprints(repo.path());
-    let hash_after = ledger_hash(repo.path());
+    let hash_after = journal_hash(repo.path());
 
     assert_eq!(
         before, after,
@@ -91,7 +91,7 @@ fn dropped_change_signal_neither_unwrites_nor_fails_the_write() {
     // Simulate "publish failed": compute the change signal and discard it
     // without acting on it. There is no publish path in the core, so this pins
     // that a future relay drop cannot reach back into the log.
-    let token = LivenessToken::for_ledger(&read_events(repo.path()).expect("read events"))
+    let token = LivenessToken::for_journal(&read_events(repo.path()).expect("read events"))
         .expect("liveness token");
     drop(token);
 

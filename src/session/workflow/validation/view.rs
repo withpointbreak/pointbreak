@@ -176,7 +176,7 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        EventId, LedgerId, RevisionId, TrackId, ValidationCheckId, ValidationStatus,
+        EventId, JournalId, RevisionId, TrackId, ValidationCheckId, ValidationStatus,
         ValidationTarget, ValidationTrigger,
     };
     use crate::session::event::{
@@ -407,7 +407,7 @@ mod tests {
         occurred_at: &str,
     ) -> ShoreEvent {
         let mut target = EventTarget::for_revision(
-            LedgerId::new("session:default"),
+            JournalId::new("journal:default"),
             RevisionId::new(revision_id),
             None,
         );

@@ -132,7 +132,7 @@ mod tests {
             .expect("capture event");
         ReviewUnitProjectionIdentity {
             id: captured.revision_id.clone(),
-            session_id: captured.ledger_id.clone(),
+            session_id: captured.journal_id.clone(),
             source: captured.source.clone(),
             base: captured.base.clone(),
             target: captured.target.clone(),

@@ -21,7 +21,7 @@ pub use file::{DiffFile, FileStatus};
 pub use hunk::ReviewHunk;
 pub use ids::{
     ActorId, AssessmentId, CheckpointId, CommitAssociationId, CommitWithdrawalId, EngagementId,
-    EventId, FileId, HunkId, InputRequestId, InputRequestResponseId, LedgerId, ObjectId,
+    EventId, FileId, HunkId, InputRequestId, InputRequestResponseId, JournalId, ObjectId,
     ObservationId, RefAssociationId, RefWithdrawalId, ReviewId, ReviewNoteId, RevisionId, RowId,
     TrackId, ValidationCheckId, WorkObjectId, WorkUnitId,
 };

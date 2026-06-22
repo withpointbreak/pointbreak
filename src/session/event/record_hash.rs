@@ -147,7 +147,7 @@ mod tests {
         assert_ne!(occurred_at_mutated.event_record_hash().unwrap(), baseline);
 
         let mut target_mutated = fixture_event();
-        target_mutated.target.ledger_id = crate::model::LedgerId::new("session:fixture:mutated");
+        target_mutated.target.journal_id = crate::model::JournalId::new("journal:fixture:mutated");
         assert_ne!(target_mutated.event_record_hash().unwrap(), baseline);
     }
 
@@ -174,7 +174,7 @@ mod tests {
 
         assert_eq!(
             hash,
-            "sha256:e04fb798786f1babe03708637673c1bd0492d872108dfe363957b916130a028b",
+            "sha256:23933e6fe38b38b812f02cc3751a1c3117af0797d29b19b2b66ed8463dde323d",
         );
     }
 

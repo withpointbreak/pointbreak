@@ -281,7 +281,7 @@ fn base_event() -> Value {
         "signature": null,
         "signer": null,
         "target": {
-            "ledgerId": "ledger:fixture:event-signatures",
+            "journalId": "journal:fixture:event-signatures",
             "subject": {
                 "review": {
                     "kind": "revision",
@@ -336,7 +336,7 @@ fn task_event() -> Value {
         "signature": null,
         "signer": null,
         "target": {
-            "ledgerId": format!("ledger:claude:{claude_session_uuid}"),
+            "journalId": format!("journal:claude:{claude_session_uuid}"),
             "subject": {
                 "task": {
                     "kind": "task_attempt",

@@ -20,12 +20,12 @@
   "schema": "shore.event",
   "signature": {
     "alg": "ed25519",
-    "sig": "QPiELl8YcCpyRGfEWznDAOTBp1jxRK2BA2Q108Q/vq+320LT5a0fQbZiz1BApj05+45IaWHnoGy7SudgUV2eCA==",
+    "sig": "LPnShOJ/yytTHzgecxjJjx/nNFhiUrc2fJsAWlLdIIYQrmlWGajqwDDWZ4UlXkkI80logASfutcSegmWKYuBBg==",
     "sigVersion": 1
   },
   "signer": "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd",
   "target": {
-    "ledgerId": "ledger:claude:event-signature-task-vector",
+    "journalId": "journal:claude:event-signature-task-vector",
     "subject": {
       "task": {
         "kind": "task_attempt"

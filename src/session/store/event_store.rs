@@ -247,7 +247,7 @@ mod tests {
 
     use super::*;
     use crate::crypto::SignerId;
-    use crate::model::{AssessmentId, LedgerId, ReviewTargetRef, RevisionId, TargetRef, TrackId};
+    use crate::model::{AssessmentId, JournalId, ReviewTargetRef, RevisionId, TargetRef, TrackId};
     use crate::session::event::{
         AssertionMode, EventSignature, EventTarget, EventType, IngestProvenance, IngestVia,
         ReviewAssessment, ReviewAssessmentRecordedPayload, ReviewInitializedPayload,
@@ -519,10 +519,10 @@ mod tests {
             .expect_err("a pre-reshape target envelope must be rejected");
 
         // The decode fails on a missing non-optional field of the reshaped target
-        // (`ledgerId` / `subject`) — the old flat shape carries neither.
+        // (`journalId` / `subject`) — the old flat shape carries neither.
         let message = error.to_string();
         assert!(
-            message.contains("ledgerId") || message.contains("subject"),
+            message.contains("journalId") || message.contains("subject"),
             "rejection names a missing reshaped-target field; got: {error}"
         );
     }
@@ -704,7 +704,7 @@ mod tests {
         ShoreEvent::new(
             EventType::ReviewInitialized,
             "review_initialized:session:default:work:default",
-            EventTarget::for_ledger(LedgerId::new("session:default")),
+            EventTarget::for_journal(JournalId::new("journal:default")),
             Writer::shore_local("0.1.0"),
             ReviewInitializedPayload {},
             occurred_at,
@@ -737,7 +737,7 @@ mod tests {
                 assessment_id.as_str(),
             ),
             EventTarget::for_subject(
-                LedgerId::new("session:default"),
+                JournalId::new("journal:default"),
                 TargetRef::Review(target_ref.clone()),
                 Some(track_id),
             ),

@@ -13,7 +13,7 @@ use crate::session::event::ShoreEvent;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LivenessScope {
     /// Every event in the store.
-    Ledger,
+    Journal,
     /// Only the events that target this captured work object.
     WorkObject(RevisionId),
 }
@@ -36,8 +36,8 @@ pub struct LivenessToken {
 
 impl LivenessToken {
     /// Fingerprints the whole store's event set.
-    pub fn for_ledger(events: &[ShoreEvent]) -> Result<Self> {
-        Self::over(LivenessScope::Ledger, events)
+    pub fn for_journal(events: &[ShoreEvent]) -> Result<Self> {
+        Self::over(LivenessScope::Journal, events)
     }
 
     /// Fingerprints only the events that target `work_object`.
@@ -72,7 +72,7 @@ impl LivenessToken {
 mod tests {
     use super::*;
     use crate::model::{
-        EngagementId, LedgerId, ObjectId, ReviewEndpoint, ReviewUnitSource, RevisionId,
+        EngagementId, JournalId, ObjectId, ReviewEndpoint, ReviewUnitSource, RevisionId,
         WorktreeCaptureMode,
     };
     use crate::session::event::{
@@ -83,11 +83,11 @@ mod tests {
     #[test]
     fn liveness_token_is_order_independent_and_envelope_stable() {
         let events = sample_events();
-        let forward = LivenessToken::for_ledger(&events).unwrap();
+        let forward = LivenessToken::for_journal(&events).unwrap();
 
         let mut shuffled = events.clone();
         shuffled.reverse();
-        let reversed = LivenessToken::for_ledger(&shuffled).unwrap();
+        let reversed = LivenessToken::for_journal(&shuffled).unwrap();
 
         // Order-independent: the underlying freshness sort makes the hash a
         // property of the set, not the input order.
@@ -99,7 +99,7 @@ mod tests {
         // fingerprint untouched.
         let mut restamped = events.clone();
         restamped[0].occurred_at = "2026-05-13T15:00:00Z".to_owned();
-        let restamped_token = LivenessToken::for_ledger(&restamped).unwrap();
+        let restamped_token = LivenessToken::for_journal(&restamped).unwrap();
         assert_eq!(forward.event_set_hash, restamped_token.event_set_hash);
     }
 
@@ -107,7 +107,7 @@ mod tests {
     fn liveness_token_scopes_to_a_work_object() {
         let events = events_across_two_work_objects();
         let scoped = LivenessToken::for_work_object(&events, &work_object_a()).unwrap();
-        let whole = LivenessToken::for_ledger(&events).unwrap();
+        let whole = LivenessToken::for_journal(&events).unwrap();
 
         assert_ne!(scoped.event_set_hash, whole.event_set_hash);
         assert!(scoped.event_count < whole.event_count);
@@ -138,7 +138,7 @@ mod tests {
             EventType::WorkObjectProposed,
             format!("work_object_proposed:{revision_id}:{occurred_at}"),
             EventTarget::for_revision(
-                LedgerId::new("ledger:default"),
+                JournalId::new("journal:default"),
                 RevisionId::new(revision_id),
                 None,
             ),

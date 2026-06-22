@@ -24,7 +24,7 @@
   "signature": null,
   "signer": null,
   "target": {
-    "ledgerId": "ledger:fixture:event-signatures",
+    "journalId": "journal:fixture:event-signatures",
     "subject": {
       "review": {
         "kind": "revision",

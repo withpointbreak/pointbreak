@@ -32,14 +32,14 @@ impl ArtifactRemovalProjection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ActorId, LedgerId};
+    use crate::model::{ActorId, JournalId};
     use crate::session::event::{EventTarget, Writer, WriterProducer};
 
     fn removal_event(content_hash: &str) -> ShoreEvent {
         ShoreEvent::new(
             EventType::ArtifactRemoved,
             ArtifactRemovedPayload::idempotency_key(content_hash),
-            EventTarget::for_ledger(LedgerId::new("session:fixture")),
+            EventTarget::for_journal(JournalId::new("journal:fixture")),
             Writer {
                 actor_id: ActorId::new("actor:fixture"),
                 producer: WriterProducer {

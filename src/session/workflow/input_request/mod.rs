@@ -24,7 +24,7 @@ pub use self::view::{
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 #[cfg(test)]
 use crate::model::{
-    EventId, InputRequestId, InputRequestResponseId, LedgerId, RevisionId, TrackId,
+    EventId, InputRequestId, InputRequestResponseId, JournalId, RevisionId, TrackId,
 };
 #[cfg(test)]
 use crate::session::current_timestamp;
@@ -953,7 +953,7 @@ mod tests {
 
     #[test]
     fn collect_input_request_projection_records_is_order_independent_and_collapses_duplicates() {
-        let session_id = LedgerId::new("session:default");
+        let session_id = JournalId::new("journal:default");
         let revision_id = RevisionId::new("review-unit:sha256:test");
         let track_id = TrackId::new("human:kevin");
         let input_request_id = InputRequestId::new("input-request:sha256:alpha");
@@ -1272,7 +1272,7 @@ mod tests {
             EventType::InputRequestResponded,
             InputRequestRespondedPayload::idempotency_key(&requested.input_request_id, source_key),
             EventTarget::for_subject(
-                LedgerId::new("session:default"),
+                JournalId::new("journal:default"),
                 TargetRef::Review(ReviewTargetRef::InputRequest {
                     revision_id: requested.revision_id.clone(),
                     input_request_id: requested.input_request_id.clone(),
@@ -1316,7 +1316,7 @@ mod tests {
     }
 
     fn projection_request_event(
-        session_id: &LedgerId,
+        session_id: &JournalId,
         revision_id: &RevisionId,
         track_id: &TrackId,
         input_request_id: &InputRequestId,
@@ -1354,7 +1354,7 @@ mod tests {
     }
 
     fn projection_response_event(
-        session_id: &LedgerId,
+        session_id: &JournalId,
         revision_id: &RevisionId,
         track_id: &TrackId,
         input_request_id: &InputRequestId,

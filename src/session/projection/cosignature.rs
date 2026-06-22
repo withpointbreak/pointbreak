@@ -515,7 +515,7 @@ mod tests {
         crate::session::event::ShoreEvent::new(
             EventType::EventSignatureRecorded,
             key,
-            crate::session::event::EventTarget::for_ledger(target.target.ledger_id.clone()),
+            crate::session::event::EventTarget::for_journal(target.target.journal_id.clone()),
             crate::session::event::Writer::shore_local("test"),
             payload,
             "2026-06-04T00:00:00Z",
@@ -1173,7 +1173,7 @@ mod tests {
             ShoreEvent::new(
                 EventType::EventSignatureRecorded,
                 key.clone(),
-                EventTarget::for_ledger(target.target.ledger_id.clone()),
+                EventTarget::for_journal(target.target.journal_id.clone()),
                 Writer {
                     actor_id: crate::model::ActorId::new(actor),
                     producer: WriterProducer {

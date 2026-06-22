@@ -1167,7 +1167,7 @@ fn freshness_for_task_target(
         },
         // A non-checkpoint subject carries no checkpoint to compare against, so
         // there is no fingerprint freshness check to perform.
-        TargetRef::Review(_) | TargetRef::Ledger => FreshnessBasis::TaskAttemptNoFingerprintCheck,
+        TargetRef::Review(_) | TargetRef::Journal => FreshnessBasis::TaskAttemptNoFingerprintCheck,
     }
 }
 
@@ -1248,7 +1248,7 @@ mod tests {
     use super::*;
     use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
     use crate::model::{
-        ActorId, CheckpointId, LedgerId, ObservationId, TargetRef, TaskTargetRef, WorkObjectId,
+        ActorId, CheckpointId, JournalId, ObservationId, TargetRef, TaskTargetRef, WorkObjectId,
         WorkObjectType,
     };
     use crate::session::event::{
@@ -1304,7 +1304,7 @@ mod tests {
 
     fn observation_event(
         task_attempt_id: &WorkObjectId,
-        session_id: &LedgerId,
+        session_id: &JournalId,
         checkpoint_id: Option<&CheckpointId>,
         source_id: &str,
         title: &str,
@@ -1353,7 +1353,7 @@ mod tests {
     #[test]
     fn task_attempt_summary_rolls_up_one_attempt() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let checkpoint_a = CheckpointId::new("checkpoint:sha256:cp-a");
         let checkpoint_b = CheckpointId::new("checkpoint:sha256:cp-b");
 
@@ -1441,8 +1441,8 @@ mod tests {
     fn task_attempt_summary_ignores_other_task_attempts() {
         let attempt_a = WorkObjectId::new("task-attempt:sha256:a");
         let attempt_b = WorkObjectId::new("task-attempt:sha256:b");
-        let session_a = LedgerId::new("session:claude:uuid-a");
-        let session_b = LedgerId::new("session:claude:uuid-b");
+        let session_a = JournalId::new("journal:claude:uuid-a");
+        let session_b = JournalId::new("journal:claude:uuid-b");
         let checkpoint_a = CheckpointId::new("checkpoint:sha256:cp-a");
         let checkpoint_b = CheckpointId::new("checkpoint:sha256:cp-b");
 
@@ -1504,7 +1504,7 @@ mod tests {
     #[test]
     fn task_attempt_summary_preserves_envelope_and_payload_fields() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let checkpoint = CheckpointId::new("checkpoint:sha256:cp");
 
         let attempt = task_attempt_event(
@@ -1577,7 +1577,7 @@ mod tests {
     #[test]
     fn task_attempt_summary_orders_latest_checkpoint_and_recent_observations() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let cp_early = CheckpointId::new("checkpoint:sha256:cp-early");
         let cp_late = CheckpointId::new("checkpoint:sha256:cp-late");
 
@@ -1661,7 +1661,7 @@ mod tests {
         // Build inputs as already-written ShoreEvents only. This is a documentation
         // pin: the projection lives downstream of the write seam.
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
 
         let events = vec![task_attempt_event(
             &task_attempt_id,
@@ -1684,7 +1684,7 @@ mod tests {
     fn task_attempt_summary_returns_none_when_attempt_not_present() {
         let other_attempt = WorkObjectId::new("task-attempt:sha256:other");
         let queried_attempt = WorkObjectId::new("task-attempt:sha256:queried");
-        let session_id = LedgerId::new("session:claude:uuid-other");
+        let session_id = JournalId::new("journal:claude:uuid-other");
 
         let events = vec![task_attempt_event(
             &other_attempt,
@@ -1711,7 +1711,7 @@ mod tests {
     #[allow(clippy::too_many_arguments)]
     fn task_input_request_event(
         task_attempt_id: &WorkObjectId,
-        session_id: &LedgerId,
+        session_id: &JournalId,
         input_request_id: &InputRequestId,
         source_key: &str,
         occurred_at: &str,
@@ -1761,7 +1761,7 @@ mod tests {
 
     fn task_input_request_responded_event(
         _task_attempt_id: &WorkObjectId,
-        session_id: &LedgerId,
+        session_id: &JournalId,
         input_request_id: &InputRequestId,
         response_id: &InputRequestResponseId,
         occurred_at: &str,
@@ -1802,7 +1802,7 @@ mod tests {
         occurred_at: &str,
     ) -> ShoreEvent {
         let target = EventTarget::for_subject(
-            LedgerId::new("session:review"),
+            JournalId::new("journal:review"),
             TargetRef::Review(ReviewTargetRef::Revision {
                 revision_id: revision_id.clone(),
             }),
@@ -1838,7 +1838,7 @@ mod tests {
     #[test]
     fn open_task_input_requests_returns_task_targeted_unresponded_requests() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let input_request_id = InputRequestId::new("input-request:sha256:1");
 
         let events = vec![task_input_request_event(
@@ -1878,7 +1878,7 @@ mod tests {
     #[test]
     fn open_task_input_requests_excludes_responded_input_request_ids() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let input_request_id = InputRequestId::new("input-request:sha256:1");
         let response_id = InputRequestResponseId::new("input-request-response:sha256:r1");
 
@@ -1924,7 +1924,7 @@ mod tests {
         let events = vec![
             task_input_request_event(
                 &task_attempt_id,
-                &LedgerId::new("session:claude:uuid-1"),
+                &JournalId::new("journal:claude:uuid-1"),
                 &task_input_request_id,
                 "source:task",
                 "2026-05-18T00:00:00Z",
@@ -1958,7 +1958,7 @@ mod tests {
     #[test]
     fn open_task_input_requests_preserves_payload_target_mismatch_as_diagnostic() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let input_request_id = InputRequestId::new("input-request:sha256:1");
 
         let events = vec![task_input_request_event(
@@ -1991,7 +1991,7 @@ mod tests {
     #[test]
     fn open_task_input_requests_preserves_envelope_policy_fields() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let input_request_id = InputRequestId::new("input-request:sha256:1");
 
         let request_event = task_input_request_event(
@@ -2035,7 +2035,7 @@ mod tests {
     #[test]
     fn open_task_input_requests_separates_multiple_open_requests() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let a = InputRequestId::new("input-request:sha256:a");
         let b = InputRequestId::new("input-request:sha256:b");
 
@@ -2079,7 +2079,7 @@ mod tests {
     #[test]
     fn open_task_input_requests_derives_mode_from_envelope_assertion_mode() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let advisory_id = InputRequestId::new("input-request:sha256:adv");
         let operative_id = InputRequestId::new("input-request:sha256:op");
 
@@ -2127,7 +2127,7 @@ mod tests {
     #[allow(clippy::too_many_arguments)]
     fn task_input_request_event_with_target_and_assertion_mode(
         task_attempt_id: &WorkObjectId,
-        session_id: &LedgerId,
+        session_id: &JournalId,
         input_request_id: &InputRequestId,
         source_key: &str,
         occurred_at: &str,
@@ -2150,7 +2150,7 @@ mod tests {
 
     fn attempt_with_checkpoints(
         task_attempt_id: &WorkObjectId,
-        session_id: &LedgerId,
+        session_id: &JournalId,
         checkpoints: &[(&CheckpointId, &str, &str)],
     ) -> Vec<ShoreEvent> {
         let mut events = vec![task_attempt_event(
@@ -2175,7 +2175,7 @@ mod tests {
     #[test]
     fn agent_resumption_allows_resume_when_no_task_input_requests_exist() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let checkpoint = CheckpointId::new("checkpoint:sha256:cp");
 
         let events = attempt_with_checkpoints(
@@ -2203,7 +2203,7 @@ mod tests {
     #[test]
     fn agent_resumption_ignores_open_advisory_task_input_request() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let input_request_id = InputRequestId::new("input-request:sha256:adv");
         let mut events = attempt_with_checkpoints(&task_attempt_id, &session_id, &[]);
         events.push(task_input_request_event_with_target_and_assertion_mode(
@@ -2235,7 +2235,7 @@ mod tests {
     #[test]
     fn agent_resumption_ignores_ambiguous_advisory_task_input_request_responses() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let input_request_id = InputRequestId::new("input-request:sha256:adv");
         let r1 = InputRequestResponseId::new("input-request-response:sha256:r1");
         let r2 = InputRequestResponseId::new("input-request-response:sha256:r2");
@@ -2283,7 +2283,7 @@ mod tests {
     #[test]
     fn agent_resumption_ignores_stale_advisory_task_input_request_response() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let cp_a = CheckpointId::new("checkpoint:sha256:cp-a");
         let cp_b = CheckpointId::new("checkpoint:sha256:cp-b");
         let input_request_id = InputRequestId::new("input-request:sha256:adv");
@@ -2335,7 +2335,7 @@ mod tests {
     #[test]
     fn agent_resumption_still_blocks_for_open_operative_task_input_request() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let input_request_id = InputRequestId::new("input-request:sha256:op");
         let mut events = attempt_with_checkpoints(&task_attempt_id, &session_id, &[]);
         events.push(task_input_request_event_with_target_and_assertion_mode(
@@ -2371,7 +2371,7 @@ mod tests {
     #[test]
     fn agent_resumption_pauses_for_open_task_input_request() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let checkpoint = CheckpointId::new("checkpoint:sha256:cp");
         let input_request_id = InputRequestId::new("input-request:sha256:1");
 
@@ -2421,7 +2421,7 @@ mod tests {
     /// is the response, for tests that need to mutate it.
     fn approved_local_response_events() -> (Vec<ShoreEvent>, WorkObjectId) {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let checkpoint = CheckpointId::new("checkpoint:sha256:cp");
         let input_request_id = InputRequestId::new("input-request:sha256:1");
         let response_id = InputRequestResponseId::new("input-request-response:sha256:r");
@@ -3253,7 +3253,7 @@ mod tests {
         // binding in either direction; payload facts are writer-asserted, not
         // verified identity (preserved non-input pin from plan 0059).
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let input_request_id = InputRequestId::new("input-request:sha256:1");
         let response_id = InputRequestResponseId::new("input-request-response:sha256:r");
 
@@ -3408,7 +3408,7 @@ mod tests {
     #[test]
     fn agent_resumption_fails_closed_for_advisory_response() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let input_request_id = InputRequestId::new("input-request:sha256:1");
         let response_id = InputRequestResponseId::new("input-request-response:sha256:r");
 
@@ -3446,7 +3446,7 @@ mod tests {
     #[test]
     fn agent_resumption_fails_closed_for_ambiguous_responses() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let input_request_id = InputRequestId::new("input-request:sha256:1");
         let r1 = InputRequestResponseId::new("input-request-response:sha256:r1");
         let r2 = InputRequestResponseId::new("input-request-response:sha256:r2");
@@ -3500,7 +3500,7 @@ mod tests {
     #[test]
     fn agent_resumption_marks_checkpoint_response_stale_when_newer_checkpoint_exists() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let cp_a = CheckpointId::new("checkpoint:sha256:cp-a");
         let cp_b = CheckpointId::new("checkpoint:sha256:cp-b");
         let input_request_id = InputRequestId::new("input-request:sha256:1");
@@ -3555,7 +3555,7 @@ mod tests {
     #[test]
     fn task_projections_preserve_envelope_payload_and_semantic_ids_across_three_views() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let cp_a = CheckpointId::new("checkpoint:sha256:cp-a");
         let cp_b = CheckpointId::new("checkpoint:sha256:cp-b");
         let input_request_id = InputRequestId::new("input-request:sha256:1");
@@ -3848,7 +3848,7 @@ mod tests {
         reason_content_hash: Option<String>,
     ) -> ShoreEvent {
         let target = EventTarget::for_subject(
-            LedgerId::new("session:claude:uuid-1"),
+            JournalId::new("journal:claude:uuid-1"),
             TargetRef::Task(TaskTargetRef::TaskAttempt),
             None,
         );
@@ -3888,7 +3888,7 @@ mod tests {
     #[test]
     fn task_projections_preserve_input_request_fingerprint_and_response_reason_fields() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let input_request_id = InputRequestId::new("input-request:sha256:1");
         let response_id = InputRequestResponseId::new("input-request-response:sha256:r");
 
@@ -3945,7 +3945,7 @@ mod tests {
     #[test]
     fn agent_resumption_preserves_response_reason_payload_fields() {
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let input_request_id = InputRequestId::new("input-request:sha256:1");
         let response_id = InputRequestResponseId::new("input-request-response:sha256:r");
 
@@ -4003,7 +4003,7 @@ mod tests {
         // responses. The projection must collapse them and still treat the
         // input request as cleanly responded.
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let input_request_id = InputRequestId::new("input-request:sha256:1");
         let response_id = InputRequestResponseId::new("input-request-response:sha256:r");
 
@@ -4064,7 +4064,7 @@ mod tests {
         // two different idempotency keys). The projection still collapses by
         // response id and avoids a false Ambiguous classification.
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let input_request_id = InputRequestId::new("input-request:sha256:1");
         let response_id = InputRequestResponseId::new("input-request-response:sha256:r");
 
@@ -4137,7 +4137,7 @@ mod tests {
 
     fn checkpoint_event_with_fingerprint(
         task_attempt_id: &WorkObjectId,
-        session_id: &LedgerId,
+        session_id: &JournalId,
         checkpoint_id: &CheckpointId,
         assistant_message_id: &str,
         tool_use_ids: Vec<String>,
@@ -4184,7 +4184,7 @@ mod tests {
     #[allow(clippy::too_many_arguments)]
     fn task_input_request_event_with_target_and_fingerprint(
         task_attempt_id: &WorkObjectId,
-        session_id: &LedgerId,
+        session_id: &JournalId,
         input_request_id: &InputRequestId,
         source_key: &str,
         occurred_at: &str,
@@ -4235,7 +4235,7 @@ mod tests {
         target_fingerprint: Option<&str>,
     ) -> ShoreEvent {
         let target = EventTarget::for_subject(
-            LedgerId::new("session:claude:uuid-1"),
+            JournalId::new("journal:claude:uuid-1"),
             TargetRef::Task(TaskTargetRef::TaskAttempt),
             None,
         );
@@ -4280,7 +4280,7 @@ mod tests {
         // The projection must flag the response stale on the fingerprint
         // disagreement -- not on identity alone.
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let cp_a = CheckpointId::new("checkpoint:sha256:cp-a");
         let cp_b = CheckpointId::new("checkpoint:sha256:cp-b");
         let input_request_id = InputRequestId::new("input-request:sha256:1");
@@ -4373,7 +4373,7 @@ mod tests {
         // F1; the responder acts on the F1 state. Both identity and fingerprint
         // agree, so the response is fresh.
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let cp_a = CheckpointId::new("checkpoint:sha256:cp-a");
         let input_request_id = InputRequestId::new("input-request:sha256:1");
         let response_id = InputRequestResponseId::new("input-request-response:sha256:r");
@@ -4449,7 +4449,7 @@ mod tests {
         // accidentally let the projection pick one response and call the
         // other stale.
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let cp_a = CheckpointId::new("checkpoint:sha256:cp-a");
         let input_request_id = InputRequestId::new("input-request:sha256:1");
         let r1 = InputRequestResponseId::new("input-request-response:sha256:r1");
@@ -4538,7 +4538,7 @@ mod tests {
         // the projection would mis-read this as `CheckpointStaleNewerExists`
         // and block resumption.
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let cp_older = CheckpointId::new("checkpoint:sha256:cp-older");
         let cp_latest = CheckpointId::new("checkpoint:sha256:cp-latest");
         let input_request_id = InputRequestId::new("input-request:sha256:1");
@@ -4624,7 +4624,7 @@ mod tests {
         // fingerprint field to a distinct opaque string and confirm each
         // surfaces verbatim on its intended view.
         let task_attempt_id = WorkObjectId::new("task-attempt:sha256:ta");
-        let session_id = LedgerId::new("session:claude:uuid-1");
+        let session_id = JournalId::new("journal:claude:uuid-1");
         let cp_a = CheckpointId::new("checkpoint:sha256:cp-a");
         let input_request_id = InputRequestId::new("input-request:sha256:1");
 
@@ -4693,7 +4693,7 @@ mod tests {
 
     fn task_attempt_event_with_base_snapshot_fingerprint(
         task_attempt_id: &WorkObjectId,
-        session_id: &LedgerId,
+        session_id: &JournalId,
         claude_session_uuid: &str,
         occurred_at: &str,
         base_snapshot_fingerprint: Option<&str>,

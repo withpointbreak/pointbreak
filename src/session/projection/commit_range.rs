@@ -397,7 +397,7 @@ fn diagnostic(code: &str, message: String) -> ProjectionDiagnostic {
 mod tests {
     use super::*;
     use crate::model::{
-        EngagementId, LedgerId, ObjectId, ReviewEndpoint, ReviewTargetRef, ReviewUnitSource,
+        EngagementId, JournalId, ObjectId, ReviewEndpoint, ReviewTargetRef, ReviewUnitSource,
         RevisionId, WorktreeCaptureMode,
     };
     use crate::session::event::{
@@ -418,7 +418,7 @@ mod tests {
     }
 
     fn envelope() -> EventTarget {
-        EventTarget::for_revision(LedgerId::new("session:default"), revision_id(), None)
+        EventTarget::for_revision(JournalId::new("journal:default"), revision_id(), None)
     }
 
     fn capture(target_endpoint: ReviewEndpoint) -> ShoreEvent {
