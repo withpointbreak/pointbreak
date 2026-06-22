@@ -3,9 +3,7 @@ use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
 use shoreline::documents::unit_list_document;
-use shoreline::session::{
-    OrphanVisibility, RefFilterMode, ReviewUnitListOptions, list_review_units,
-};
+use shoreline::session::{OrphanVisibility, RefFilterMode, RevisionListOptions, list_revisions};
 
 use crate::cli::json;
 
@@ -83,7 +81,7 @@ pub(super) fn run(
     tracing::debug!(command = "review.revisions", "command_start");
 
     let pretty = args.pretty;
-    let mut options = ReviewUnitListOptions::new(&args.repo);
+    let mut options = RevisionListOptions::new(&args.repo);
     if let Some(ref_name) = args.ref_name {
         options = options.with_ref_filter(ref_name, args.by.into());
     }
@@ -101,7 +99,7 @@ pub(super) fn run(
     if let Some(worktree) = args.worktree {
         options = options.with_worktree_scope(worktree);
     }
-    let mut result = list_review_units(options)?;
+    let mut result = list_revisions(options)?;
 
     // `--object` is a listing lens: filter to revisions over the same content
     // object id (coincident content, which may span threads). It never resolves a

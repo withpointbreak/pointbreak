@@ -10,7 +10,7 @@ use support::git_repo::GitRepo;
 use support::shore;
 
 #[test]
-fn review_unit_list_emits_v1_json_with_freshness_metadata() {
+fn revision_list_emits_v1_json_with_freshness_metadata() {
     let repo = modified_repo();
     let capture =
         parse_json(&shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]).stdout);
@@ -57,7 +57,7 @@ fn review_unit_list_emits_v1_json_with_freshness_metadata() {
 }
 
 #[test]
-fn review_unit_list_does_not_expose_storage_paths() {
+fn revision_list_does_not_expose_storage_paths() {
     let repo = modified_repo();
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
 
@@ -78,7 +78,7 @@ fn review_unit_list_does_not_expose_storage_paths() {
 }
 
 #[test]
-fn review_unit_list_pretty_prints() {
+fn revision_list_pretty_prints() {
     let repo = modified_repo();
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
 
@@ -94,7 +94,7 @@ fn review_unit_list_pretty_prints() {
 }
 
 #[test]
-fn review_unit_list_returns_multiple_entries_in_capture_order() {
+fn revision_list_returns_multiple_entries_in_capture_order() {
     let repo = modified_repo();
     let first =
         parse_json(&shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]).stdout);
@@ -126,7 +126,7 @@ fn review_unit_list_returns_multiple_entries_in_capture_order() {
 }
 
 #[test]
-fn review_unit_list_succeeds_without_events() {
+fn revision_list_succeeds_without_events() {
     let repo = GitRepo::new();
 
     let output = shore([
@@ -144,7 +144,7 @@ fn review_unit_list_succeeds_without_events() {
 }
 
 #[test]
-fn review_unit_list_reads_capture_from_the_shared_store_after_seed_worktree_removed() {
+fn revision_list_reads_capture_from_the_shared_store_after_seed_worktree_removed() {
     let fixture = CloneWorktreeFixture::new();
     fs::write(fixture.seed.join("README.md"), "changed in seed\n").unwrap();
     let capture = parse_json(
@@ -189,7 +189,7 @@ fn review_unit_list_reads_capture_from_the_shared_store_after_seed_worktree_remo
 }
 
 #[test]
-fn review_unit_list_omits_ambient_ambiguous_current_diagnostic_from_shared_store() {
+fn revision_list_omits_ambient_ambiguous_current_diagnostic_from_shared_store() {
     let fixture = CloneWorktreeFixture::new();
     fs::write(fixture.seed.join("README.md"), "changed once\n").unwrap();
     let first = parse_json(
@@ -241,9 +241,9 @@ fn review_unit_list_omits_ambient_ambiguous_current_diagnostic_from_shared_store
             .unwrap()
             .iter()
             .any(|diagnostic| {
-                diagnostic["code"].as_str() == Some("ambiguous_current_review_unit")
+                diagnostic["code"].as_str() == Some("ambiguous_current_revision")
             }),
-        "routine ReviewUnit list should not emit ambient current ambiguity diagnostics"
+        "routine Revision list should not emit ambient current ambiguity diagnostics"
     );
 }
 

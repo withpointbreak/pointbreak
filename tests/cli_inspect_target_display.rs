@@ -75,18 +75,18 @@ fn api_unit_splices_target_display_for_locally_readable_unit() {
     let inspector = Inspector::spawn(&fixture.worktree);
 
     let unit = inspector.get_json(&format!("/api/unit?id={}", urlencode(&fixture.revision_id)));
-    let review_unit = &unit["revision"];
+    let revision = &unit["revision"];
 
-    assert_eq!(review_unit["targetDisplay"]["label"], "wt-bar");
-    assert!(review_unit["targetDisplay"]["head"]["commitOidShort"].is_string());
+    assert_eq!(revision["targetDisplay"]["label"], "wt-bar");
+    assert!(revision["targetDisplay"]["head"]["commitOidShort"].is_string());
     // The raw target endpoint is untouched by the splice.
     assert!(
-        review_unit["target"]["worktreeRoot"]
+        revision["target"]["worktreeRoot"]
             .as_str()
             .unwrap()
             .ends_with("wt-bar")
     );
-    assert_eq!(review_unit["target"]["kind"], "git_working_tree");
+    assert_eq!(revision["target"]["kind"], "git_working_tree");
 }
 
 /// A commit-range capture (`--base`) has a `git_commit` target, so the inspector
@@ -440,7 +440,7 @@ fn capture_json(repo: &Path) -> Value {
 }
 
 /// Record one observation, input request, assessment, and validation check
-/// against the repo's single captured ReviewUnit.
+/// against the repo's single captured Revision.
 fn record_review_facts(repo: &Path) {
     let repo_arg = repo.to_str().unwrap();
     for args in [

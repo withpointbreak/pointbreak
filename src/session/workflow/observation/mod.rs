@@ -8,7 +8,7 @@ pub use self::add::{ObservationAddOptions, ObservationAddResult, record_observat
 pub use self::list::{ObservationListOptions, ObservationListResult, list_observations};
 pub use self::target::ObservationTargetSelector;
 pub(crate) use self::target::{
-    CurrentReviewUnitContext, ResolvedReviewUnit, ReviewUnitScope, RevisionSelection,
+    CurrentRevisionContext, ResolvedRevision, RevisionScope, RevisionSelection,
     resolve_observation_target, resolve_revision, revision_ids_in_worktree,
 };
 pub(crate) use self::util::{required_title, staged_body, validated_track_id};
@@ -26,8 +26,8 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        EngagementId, EventId, JournalId, ObjectId, ReviewEndpoint, ReviewTargetRef,
-        ReviewUnitSource, RevisionId, Side, TrackId, WorktreeCaptureMode,
+        EngagementId, EventId, JournalId, ObjectId, ReviewEndpoint, ReviewTargetRef, RevisionId,
+        RevisionSource, Side, TrackId, WorktreeCaptureMode,
     };
     use crate::session::event::{
         EventTarget, EventType, GitProvenance, Revision, ShoreEvent, WorkObjectProposal,
@@ -77,18 +77,18 @@ mod tests {
     }
 
     #[test]
-    fn resolves_single_current_review_unit_when_not_explicit() {
+    fn resolves_single_current_revision_when_not_explicit() {
         let repo = modified_repo();
         let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         let event_store = EventStore::open(resolved_store_dir(repo.path()));
         let events = event_store.list_events().unwrap();
 
-        let context = CurrentReviewUnitContext::for_repo(repo.path()).unwrap();
+        let context = CurrentRevisionContext::for_repo(repo.path()).unwrap();
         let resolved = resolve_revision(
             &events,
             RevisionSelection::Current,
             &context,
-            ReviewUnitScope::CurrentWorktree,
+            RevisionScope::CurrentWorktree,
         )
         .unwrap();
 
@@ -97,14 +97,14 @@ mod tests {
     }
 
     #[test]
-    fn resolving_current_review_unit_errors_when_none_captured() {
+    fn resolving_current_revision_errors_when_none_captured() {
         let events = Vec::new();
 
         let error = resolve_revision(
             &events,
             RevisionSelection::Current,
             &any_context(),
-            ReviewUnitScope::All,
+            RevisionScope::All,
         )
         .unwrap_err();
 
@@ -112,17 +112,17 @@ mod tests {
     }
 
     #[test]
-    fn resolving_current_review_unit_errors_when_ambiguous() {
+    fn resolving_current_revision_errors_when_ambiguous() {
         let events = vec![
-            review_unit_captured_event_with_ids("rev:one", "snap:one"),
-            review_unit_captured_event_with_ids("rev:two", "snap:two"),
+            revision_captured_event_with_ids("rev:one", "snap:one"),
+            revision_captured_event_with_ids("rev:two", "snap:two"),
         ];
 
         let error = resolve_revision(
             &events,
             RevisionSelection::Current,
             &any_context(),
-            ReviewUnitScope::All,
+            RevisionScope::All,
         )
         .unwrap_err();
 
@@ -131,13 +131,13 @@ mod tests {
 
     #[test]
     fn explicit_unknown_revision_is_rejected() {
-        let events = vec![review_unit_captured_event_with_ids("rev:one", "snap:one")];
+        let events = vec![revision_captured_event_with_ids("rev:one", "snap:one")];
 
         let error = resolve_revision(
             &events,
             RevisionSelection::Exact(&RevisionId::new("review-unit:sha256:missing")),
             &any_context(),
-            ReviewUnitScope::All,
+            RevisionScope::All,
         )
         .unwrap_err();
 
@@ -153,7 +153,7 @@ mod tests {
             &events,
             RevisionSelection::Head(&rev("b")),
             &any_context(),
-            ReviewUnitScope::All,
+            RevisionScope::All,
         )
         .unwrap();
 
@@ -169,7 +169,7 @@ mod tests {
             &events,
             RevisionSelection::Head(&rev("a")),
             &any_context(),
-            ReviewUnitScope::All,
+            RevisionScope::All,
         )
         .unwrap();
 
@@ -191,7 +191,7 @@ mod tests {
             &events,
             RevisionSelection::Head(&rev("a")),
             &any_context(),
-            ReviewUnitScope::All,
+            RevisionScope::All,
         )
         .unwrap_err();
         let message = error.to_string();
@@ -204,7 +204,7 @@ mod tests {
             &events,
             RevisionSelection::Head(&rev("b")),
             &any_context(),
-            ReviewUnitScope::All,
+            RevisionScope::All,
         )
         .unwrap();
         assert_eq!(resolved.revision_id, rev("b"));
@@ -219,7 +219,7 @@ mod tests {
         let review_wide = resolve_observation_target(
             repo.path(),
             &resolved,
-            &ObservationTargetSelector::review_unit(),
+            &ObservationTargetSelector::revision(),
         )
         .unwrap();
         let file = resolve_observation_target(
@@ -393,7 +393,7 @@ mod tests {
             .with_track("agent:codex")
             .with_title("Same finding")
             .with_body("same body")
-            .with_target(ObservationTargetSelector::review_unit());
+            .with_target(ObservationTargetSelector::revision());
 
         let first = record_observation(options.clone()).unwrap();
         let second = record_observation(options).unwrap();
@@ -531,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn list_observations_returns_observations_for_current_review_unit() {
+    fn list_observations_returns_observations_for_current_revision() {
         let repo = modified_repo();
         let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         let first = record_observation(
@@ -726,8 +726,8 @@ mod tests {
         );
     }
 
-    fn resolved_from_capture(capture: &CaptureResult) -> ResolvedReviewUnit {
-        ResolvedReviewUnit {
+    fn resolved_from_capture(capture: &CaptureResult) -> ResolvedRevision {
+        ResolvedRevision {
             journal_id: capture.journal_id.clone(),
             revision_id: capture.revision_id.clone(),
             object_id: capture.object_id.clone(),
@@ -735,15 +735,15 @@ mod tests {
     }
 
     /// A context for selection tests that do not exercise worktree scoping (they
-    /// widen to `ReviewUnitScope::All` or resolve `Exact`/`LineageHead`).
-    fn any_context() -> CurrentReviewUnitContext {
-        CurrentReviewUnitContext {
+    /// widen to `RevisionScope::All` or resolve `Exact`/`LineageHead`).
+    fn any_context() -> CurrentRevisionContext {
+        CurrentRevisionContext {
             worktree_root: "/repo".to_owned(),
             head_ref: None,
         }
     }
 
-    fn review_unit_captured_event_with_ids(revision_id: &str, snapshot_id: &str) -> ShoreEvent {
+    fn revision_captured_event_with_ids(revision_id: &str, snapshot_id: &str) -> ShoreEvent {
         // The envelope subject and the payload revision address one and the same
         // revision, as a real capture stamps both from one minted id.
         let revision_id = RevisionId::new(revision_id);
@@ -763,7 +763,7 @@ mod tests {
                         id: revision_id.clone(),
                         object_id: snapshot_id.clone(),
                         git_provenance: Some(GitProvenance {
-                            source: ReviewUnitSource::GitWorktree {
+                            source: RevisionSource::GitWorktree {
                                 mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
                                 include_untracked: true,
                             },
@@ -805,7 +805,7 @@ mod tests {
                         id: revision_id,
                         object_id: ObjectId::new(format!("obj:sha256:{suffix}")),
                         git_provenance: Some(GitProvenance {
-                            source: ReviewUnitSource::GitWorktree {
+                            source: RevisionSource::GitWorktree {
                                 mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
                                 include_untracked: true,
                             },

@@ -63,7 +63,7 @@ impl RevisionsByBase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{EngagementId, JournalId, ObjectId, ReviewUnitSource, WorktreeCaptureMode};
+    use crate::model::{EngagementId, JournalId, ObjectId, RevisionSource, WorktreeCaptureMode};
     use crate::session::event::{EventTarget, GitProvenance, Revision, Writer};
 
     fn rev(suffix: &str) -> RevisionId {
@@ -96,7 +96,7 @@ mod tests {
 
     fn git_provenance_based_at(commit_oid: &str) -> GitProvenance {
         GitProvenance {
-            source: ReviewUnitSource::GitWorktree {
+            source: RevisionSource::GitWorktree {
                 mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
                 include_untracked: true,
             },

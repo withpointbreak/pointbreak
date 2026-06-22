@@ -5,7 +5,7 @@ use clap::Args;
 use shoreline::documents::unit_show_document;
 use shoreline::model::RevisionId;
 use shoreline::session::{
-    EventVerificationPolicy, ReviewUnitShowOptions, enrich_liveness, show_review_unit,
+    EventVerificationPolicy, RevisionShowOptions, enrich_liveness, show_revision,
 };
 
 use crate::cli::json;
@@ -48,7 +48,7 @@ pub(super) fn run(
     tracing::debug!(command = "review.show", "command_start");
 
     let pretty = args.pretty;
-    let result = show_review_unit(show_options(&args))?;
+    let result = show_revision(show_options(&args))?;
 
     // Liveness (merged/live/orphaned per OID + headline) is layered here, outside
     // the git-free document workflow: best-effort, omitted when reachability is
@@ -66,10 +66,10 @@ pub(super) fn run(
     json::write_json(stdout, &value, pretty)
 }
 
-fn show_options(args: &ShowArgs) -> ReviewUnitShowOptions {
-    let mut options = ReviewUnitShowOptions::new(&args.repo).with_include_body(args.include_body);
+fn show_options(args: &ShowArgs) -> RevisionShowOptions {
+    let mut options = RevisionShowOptions::new(&args.repo).with_include_body(args.include_body);
     if let Some(revision) = &args.revision {
-        options = options.with_review_unit_id(RevisionId::new(revision.clone()));
+        options = options.with_revision_id(RevisionId::new(revision.clone()));
     }
     if let Some(track) = &args.track {
         options = options.with_track(track.clone());

@@ -261,7 +261,7 @@ fn review_history_rejects_legacy_input_request_event_filter_names() {
 }
 
 #[test]
-fn review_history_filters_by_review_unit() {
+fn review_history_filters_by_revision() {
     let repo = modified_repo();
     let first =
         parse_json(&shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]).stdout);
@@ -274,7 +274,7 @@ fn review_history_filters_by_review_unit() {
         "history",
         "--repo",
         repo.path().to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         first["revision"]["id"].as_str().unwrap(),
         "--event-type",
         "revision-captured",
@@ -461,7 +461,7 @@ fn history_renders_endorsement_for_an_endorsed_capture() {
     );
 }
 
-/// Find the captured ReviewUnit event id via the public read path (`read_events`).
+/// Find the captured Revision event id via the public read path (`read_events`).
 fn captured_event_id(repo_path: &std::path::Path) -> String {
     shoreline::session::read_events(repo_path)
         .unwrap()

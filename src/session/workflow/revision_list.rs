@@ -4,16 +4,15 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::error::Result;
-use crate::model::{ObjectId, ReviewEndpoint, ReviewUnitSource, RevisionId};
+use crate::model::{ObjectId, ReviewEndpoint, RevisionId, RevisionSource};
 use crate::session::event::{EventType, ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload};
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::resolution::resolve_read_store;
 use crate::session::workflow::association::normalize_ref;
 use crate::session::workflow::commit_range_liveness::{CommitGraphCondition, enrich_liveness};
-use crate::session::workflow::observation::{CurrentReviewUnitContext, revision_ids_in_worktree};
+use crate::session::workflow::observation::{CurrentRevisionContext, revision_ids_in_worktree};
 use crate::session::{
-    CommitOidGroupingProjection, EventStore, ReviewUnitCommitRangeProjection,
-    ReviewUnitCommitRangeView,
+    CommitOidGroupingProjection, EventStore, RevisionCommitRangeProjection, RevisionCommitRangeView,
 };
 
 /// How a `--ref` read filter matches: by the recorded label (offline, answerable
@@ -46,7 +45,7 @@ struct RefFilter {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReviewUnitListOptions {
+pub struct RevisionListOptions {
     repo: PathBuf,
     ref_filter: Option<RefFilter>,
     orphan_visibility: OrphanVisibility,
@@ -54,7 +53,7 @@ pub struct ReviewUnitListOptions {
     worktree_scope: Option<PathBuf>,
 }
 
-impl ReviewUnitListOptions {
+impl RevisionListOptions {
     pub fn new(repo: impl AsRef<Path>) -> Self {
         Self {
             repo: repo.as_ref().to_path_buf(),
@@ -98,18 +97,18 @@ impl ReviewUnitListOptions {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReviewUnitListEntry {
+pub struct RevisionListEntry {
     pub captured_at: String,
     pub revision_id: RevisionId,
     pub snapshot_id: ObjectId,
-    pub source: ReviewUnitSource,
+    pub source: RevisionSource,
     pub base: ReviewEndpoint,
     pub target: ReviewEndpoint,
     pub snapshot_artifact_content_hash: String,
     /// Git-free commit-range lifecycle view for this unit (anchored/floating,
     /// current and withdrawn associations). Structural merge-status is attached
     /// separately in `merge_status`.
-    pub commit_range: ReviewUnitCommitRangeView,
+    pub commit_range: RevisionCommitRangeView,
     /// Structural merge-status from git reachability: `merged | open | orphaned |
     /// unknown`. `unknown` covers floating units, disagreeing per-commit
     /// conditions, and a repo error (which degrades gracefully, never an error).
@@ -124,22 +123,22 @@ pub struct ReviewUnitListEntry {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReviewUnitListResult {
+pub struct RevisionListResult {
     pub event_set_hash: String,
     pub event_count: usize,
     pub revision_count: usize,
-    pub entries: Vec<ReviewUnitListEntry>,
+    pub entries: Vec<RevisionListEntry>,
     pub diagnostics: Vec<ProjectionDiagnostic>,
 }
 
-pub fn list_review_units(options: ReviewUnitListOptions) -> Result<ReviewUnitListResult> {
+pub fn list_revisions(options: RevisionListOptions) -> Result<RevisionListResult> {
     let read_store = resolve_read_store(&options.repo)?;
     let events = EventStore::open(read_store.store_dir()).list_events()?;
-    let projection = ReviewUnitCommitRangeProjection::from_events(&events)?;
+    let projection = RevisionCommitRangeProjection::from_events(&events)?;
     let mut result = list_from_events(&events, &projection)?;
 
     if let Some(ref_filter) = &options.ref_filter {
-        let matching = review_units_matching_ref(
+        let matching = revisions_matching_ref(
             &projection,
             &ref_filter.name,
             ref_filter.mode,
@@ -152,7 +151,7 @@ pub fn list_review_units(options: ReviewUnitListOptions) -> Result<ReviewUnitLis
     }
 
     if let Some(worktree) = &options.worktree_scope {
-        let context = CurrentReviewUnitContext::for_repo(worktree)?;
+        let context = CurrentRevisionContext::for_repo(worktree)?;
         let in_scope = revision_ids_in_worktree(&events, &context)?;
         result
             .entries
@@ -185,7 +184,7 @@ pub fn list_review_units(options: ReviewUnitListOptions) -> Result<ReviewUnitLis
 /// visibility filter so hidden orphans are not classified twice. Reuses each
 /// entry's `commit_range` view against git reachability.
 fn attach_merge_status(
-    result: &mut ReviewUnitListResult,
+    result: &mut RevisionListResult,
     repo: &Path,
     integration_ref: Option<&str>,
 ) {
@@ -200,7 +199,7 @@ fn attach_merge_status(
 /// disagreeing per-commit conditions, a projection diagnostic, or an unavailable
 /// repo (graceful degradation — never an error).
 fn merge_status_for(
-    view: &ReviewUnitCommitRangeView,
+    view: &RevisionCommitRangeView,
     repo: &Path,
     integration_ref: Option<&str>,
 ) -> &'static str {
@@ -220,7 +219,7 @@ fn merge_status_for(
 /// shows everything; `OrphansOnly` keeps only the orphaned ones. Reuses each
 /// entry's `commit_range` view (no event re-list) against git reachability.
 fn apply_orphan_visibility(
-    result: &mut ReviewUnitListResult,
+    result: &mut RevisionListResult,
     repo: &Path,
     visibility: OrphanVisibility,
 ) {
@@ -246,7 +245,7 @@ fn apply_orphan_visibility(
 /// Floating units (no current commits) are never orphaned. A repo-unavailable
 /// git error degrades to "not a hidden orphan" — never hide what we cannot
 /// classify, and never error (graceful degradation).
-fn is_hidden_orphan(view: &ReviewUnitCommitRangeView, repo: &Path) -> bool {
+fn is_hidden_orphan(view: &RevisionCommitRangeView, repo: &Path) -> bool {
     if view.current_commits.is_empty() {
         return false;
     }
@@ -273,15 +272,15 @@ fn is_hidden_orphan(view: &ReviewUnitCommitRangeView, repo: &Path) -> bool {
 /// fields), so the artifact hash is identical across members — collapsing is honest,
 /// not lossy.
 fn group_entries(
-    entries: Vec<ReviewUnitListEntry>,
+    entries: Vec<RevisionListEntry>,
     grouping: &CommitOidGroupingProjection,
-) -> Vec<ReviewUnitListEntry> {
-    let by_id: BTreeMap<RevisionId, ReviewUnitListEntry> = entries
+) -> Vec<RevisionListEntry> {
+    let by_id: BTreeMap<RevisionId, RevisionListEntry> = entries
         .into_iter()
         .map(|entry| (entry.revision_id.clone(), entry))
         .collect();
 
-    let mut grouped: Vec<ReviewUnitListEntry> = Vec::new();
+    let mut grouped: Vec<RevisionListEntry> = Vec::new();
     for members in connected_components(&by_id, grouping) {
         // `members` is a non-empty ordered set; the representative is the smallest id,
         // so the row is stable across runs.
@@ -318,7 +317,7 @@ fn group_entries(
 /// grouping names that are not entries in this view (filtered out upstream) are
 /// ignored — a group whose only surviving member matched collapses to a singleton.
 fn connected_components(
-    by_id: &BTreeMap<RevisionId, ReviewUnitListEntry>,
+    by_id: &BTreeMap<RevisionId, RevisionListEntry>,
     grouping: &CommitOidGroupingProjection,
 ) -> Vec<BTreeSet<RevisionId>> {
     // id → component index, seeded one-per-entry.
@@ -359,21 +358,21 @@ fn connected_components(
 }
 
 /// Convenience entry point for "which units are associated with this ref?".
-/// Delegates to [`list_review_units`] with a `--ref` filter applied.
+/// Delegates to [`list_revisions`] with a `--ref` filter applied.
 pub fn list_units_for_ref(
     repo: impl AsRef<Path>,
     ref_name: impl Into<String>,
     mode: RefFilterMode,
-) -> Result<ReviewUnitListResult> {
-    list_review_units(ReviewUnitListOptions::new(repo).with_ref_filter(ref_name, mode))
+) -> Result<RevisionListResult> {
+    list_revisions(RevisionListOptions::new(repo).with_ref_filter(ref_name, mode))
 }
 
 /// The review-unit ids matching a ref under the chosen mode. The name is
 /// normalized to its full ref first. `Label` is fully offline (current ref
 /// labels); `Liveness` joins `enrich_liveness` against the ref's tip and keeps
 /// units with at least one reachable commit. Shared by `unit list` and history.
-pub(crate) fn review_units_matching_ref(
-    projection: &ReviewUnitCommitRangeProjection,
+pub(crate) fn revisions_matching_ref(
+    projection: &RevisionCommitRangeProjection,
     name: &str,
     mode: RefFilterMode,
     repo: &Path,
@@ -405,8 +404,8 @@ pub(crate) fn review_units_matching_ref(
 
 fn list_from_events(
     events: &[ShoreEvent],
-    projection: &ReviewUnitCommitRangeProjection,
-) -> Result<ReviewUnitListResult> {
+    projection: &RevisionCommitRangeProjection,
+) -> Result<RevisionListResult> {
     let state = SessionState::from_events(events)?;
     let event_set_hash = state
         .event_set_hash
@@ -425,7 +424,7 @@ fn list_from_events(
             .then_with(|| left.revision_id.as_str().cmp(right.revision_id.as_str()))
     });
 
-    Ok(ReviewUnitListResult {
+    Ok(RevisionListResult {
         event_set_hash,
         event_count: events.len(),
         revision_count: entries.len(),
@@ -436,8 +435,8 @@ fn list_from_events(
 
 fn entry_from_event(
     event: &ShoreEvent,
-    projection: &ReviewUnitCommitRangeProjection,
-) -> Result<Option<ReviewUnitListEntry>> {
+    projection: &RevisionCommitRangeProjection,
+) -> Result<Option<RevisionListEntry>> {
     let payload: WorkObjectProposedPayload = serde_json::from_value(event.payload.clone())?;
     let WorkObjectProposal::Revision {
         revision,
@@ -459,7 +458,7 @@ fn entry_from_event(
         .cloned()
         .unwrap_or_else(|| empty_view(revision.id.clone()));
     let revision_id = revision.id;
-    Ok(Some(ReviewUnitListEntry {
+    Ok(Some(RevisionListEntry {
         captured_at: event.occurred_at.clone(),
         revision_id: revision_id.clone(),
         snapshot_id: revision.object_id,
@@ -476,8 +475,8 @@ fn entry_from_event(
     }))
 }
 
-fn empty_view(revision_id: RevisionId) -> ReviewUnitCommitRangeView {
-    ReviewUnitCommitRangeView {
+fn empty_view(revision_id: RevisionId) -> RevisionCommitRangeView {
+    RevisionCommitRangeView {
         revision_id,
         anchored: false,
         current_commits: Vec::new(),
@@ -492,7 +491,7 @@ fn empty_view(revision_id: RevisionId) -> ReviewUnitCommitRangeView {
 mod tests {
     use super::*;
     use crate::model::{
-        EngagementId, JournalId, ReviewEndpoint, ReviewUnitSource, TargetRef, TaskTargetRef,
+        EngagementId, JournalId, ReviewEndpoint, RevisionSource, TargetRef, TaskTargetRef,
         WorkObjectId, WorktreeCaptureMode,
     };
     use crate::session::event::{EventTarget, GitProvenance, Revision, Writer};
@@ -501,7 +500,7 @@ mod tests {
     fn empty_event_set_returns_no_entries() {
         let result = list_from_events(
             &[],
-            &ReviewUnitCommitRangeProjection::from_events(&[]).unwrap(),
+            &RevisionCommitRangeProjection::from_events(&[]).unwrap(),
         )
         .unwrap();
 
@@ -512,10 +511,10 @@ mod tests {
     }
 
     #[test]
-    fn includes_only_review_unit_captured_events() {
+    fn includes_only_revision_captured_events() {
         let capture = captured_event("a", "2026-05-13T10:00:00Z");
         let events = [capture];
-        let projection = ReviewUnitCommitRangeProjection::from_events(&events).unwrap();
+        let projection = RevisionCommitRangeProjection::from_events(&events).unwrap();
         let result = list_from_events(&events, &projection).unwrap();
 
         assert_eq!(result.event_count, 1);
@@ -532,13 +531,13 @@ mod tests {
     }
 
     #[test]
-    fn sorts_entries_by_captured_at_then_review_unit_id() {
+    fn sorts_entries_by_captured_at_then_revision_id() {
         let later = captured_event("z-later", "2026-05-13T10:00:05Z");
         let tie_b = captured_event("b-tie", "2026-05-13T10:00:01Z");
         let tie_a = captured_event("a-tie", "2026-05-13T10:00:01Z");
 
         let events = [later, tie_b, tie_a];
-        let projection = ReviewUnitCommitRangeProjection::from_events(&events).unwrap();
+        let projection = RevisionCommitRangeProjection::from_events(&events).unwrap();
         let result = list_from_events(&events, &projection).unwrap();
 
         let order: Vec<&str> = result
@@ -559,7 +558,7 @@ mod tests {
     #[test]
     fn entry_serializes_with_camel_case_and_no_internal_paths() {
         let events = [captured_event("one", "2026-05-13T10:00:00Z")];
-        let projection = ReviewUnitCommitRangeProjection::from_events(&events).unwrap();
+        let projection = RevisionCommitRangeProjection::from_events(&events).unwrap();
         let result = list_from_events(&events, &projection).unwrap();
         let json = serde_json::to_string(&result.entries[0]).unwrap();
 
@@ -588,7 +587,7 @@ mod tests {
                     id: revision_id.clone(),
                     object_id: snapshot_id.clone(),
                     git_provenance: Some(GitProvenance {
-                        source: ReviewUnitSource::GitWorktree {
+                        source: RevisionSource::GitWorktree {
                             mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
                             include_untracked: true,
                         },
@@ -655,7 +654,7 @@ mod tests {
         let review = captured_event("rev", "2026-05-13T10:00:00Z");
         let task = task_attempt_event("task", "2026-05-13T10:00:01Z");
         let events = [review, task];
-        let projection = ReviewUnitCommitRangeProjection::from_events(&events).unwrap();
+        let projection = RevisionCommitRangeProjection::from_events(&events).unwrap();
 
         let result = list_from_events(&events, &projection).unwrap();
 
@@ -673,7 +672,7 @@ mod tests {
 
     use crate::git::{Ancestry, git_is_ancestor};
     use crate::model::{CommitAssociationId, CommitRangeCaptureMode, ReviewTargetRef};
-    use crate::session::event::ReviewUnitCommitAssociatedPayload;
+    use crate::session::event::RevisionCommitAssociatedPayload;
 
     /// A repo whose `main` is `base → mid → tip`, plus a dangling commit (child of
     /// tip whose branch was deleted) so it exists but no live ref reaches it.
@@ -778,7 +777,7 @@ mod tests {
                     id: revision_id.clone(),
                     object_id: snapshot_id.clone(),
                     git_provenance: Some(GitProvenance {
-                        source: ReviewUnitSource::GitCommitRange {
+                        source: RevisionSource::GitCommitRange {
                             mode: CommitRangeCaptureMode::BaseTreeToTargetTree,
                         },
                         base: ReviewEndpoint::GitCommit {
@@ -809,7 +808,7 @@ mod tests {
     /// Adds a second current commit to an existing unit via a commit association.
     fn commit_associated_event(suffix: &str, commit_oid: &str) -> ShoreEvent {
         let revision_id = RevisionId::new(format!("review-unit:sha256:{suffix}"));
-        let payload = ReviewUnitCommitAssociatedPayload {
+        let payload = RevisionCommitAssociatedPayload {
             commit_association_id: CommitAssociationId::new(format!(
                 "commit-association:sha256:{suffix}:{commit_oid}"
             )),
@@ -823,7 +822,7 @@ mod tests {
         };
         ShoreEvent::new(
             EventType::RevisionCommitAssociated,
-            ReviewUnitCommitAssociatedPayload::idempotency_key(&revision_id, commit_oid),
+            RevisionCommitAssociatedPayload::idempotency_key(&revision_id, commit_oid),
             EventTarget::for_revision(JournalId::new("journal:default"), revision_id, None),
             Writer::shore_local("test"),
             payload,
@@ -833,7 +832,7 @@ mod tests {
     }
 
     fn listed(events: &[ShoreEvent], visibility: OrphanVisibility, repo: &Path) -> Vec<String> {
-        let projection = ReviewUnitCommitRangeProjection::from_events(events).unwrap();
+        let projection = RevisionCommitRangeProjection::from_events(events).unwrap();
         let mut result = list_from_events(events, &projection).unwrap();
         apply_orphan_visibility(&mut result, repo, visibility);
         assert_eq!(result.revision_count, result.entries.len());
@@ -963,7 +962,7 @@ mod tests {
         repo: &Path,
         integration_ref: Option<&str>,
     ) -> Vec<(String, String)> {
-        let projection = ReviewUnitCommitRangeProjection::from_events(events).unwrap();
+        let projection = RevisionCommitRangeProjection::from_events(events).unwrap();
         let mut result = list_from_events(events, &projection).unwrap();
         apply_orphan_visibility(&mut result, repo, OrphanVisibility::All);
         attach_merge_status(&mut result, repo, integration_ref);
@@ -1044,7 +1043,7 @@ mod tests {
         let repo = OrphanRepo::new();
         let tip = repo.oid("main");
         let events = [range_captured_event("c", "2026-05-13T10:00:00Z", &tip)];
-        let projection = ReviewUnitCommitRangeProjection::from_events(&events).unwrap();
+        let projection = RevisionCommitRangeProjection::from_events(&events).unwrap();
         let mut result = list_from_events(&events, &projection).unwrap();
         attach_merge_status(&mut result, repo.path(), None);
 
@@ -1070,7 +1069,7 @@ mod tests {
                     id: revision_id.clone(),
                     object_id: snapshot_id.clone(),
                     git_provenance: Some(GitProvenance {
-                        source: ReviewUnitSource::GitWorktree {
+                        source: RevisionSource::GitWorktree {
                             mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
                             include_untracked: true,
                         },
@@ -1100,7 +1099,7 @@ mod tests {
 
     /// Associate `commit_oid` onto an existing unit (adds it to the unit's current set).
     fn commit_associated_for(unit: &RevisionId, commit_oid: &str) -> ShoreEvent {
-        let payload = ReviewUnitCommitAssociatedPayload {
+        let payload = RevisionCommitAssociatedPayload {
             commit_association_id: CommitAssociationId::new(format!(
                 "commit-association:sha256:{}:{commit_oid}",
                 unit.as_str()
@@ -1115,7 +1114,7 @@ mod tests {
         };
         ShoreEvent::new(
             EventType::RevisionCommitAssociated,
-            ReviewUnitCommitAssociatedPayload::idempotency_key(unit, commit_oid),
+            RevisionCommitAssociatedPayload::idempotency_key(unit, commit_oid),
             EventTarget::for_revision(JournalId::new("journal:default"), unit.clone(), None),
             Writer::shore_local("test"),
             payload,
@@ -1138,7 +1137,7 @@ mod tests {
             worktree_capture_for(&unit_b, "2026-06-19T00:00:01Z"),
             commit_associated_for(&unit_b, "shared"),
         ];
-        let projection = ReviewUnitCommitRangeProjection::from_events(&events).unwrap();
+        let projection = RevisionCommitRangeProjection::from_events(&events).unwrap();
         let grouping = CommitOidGroupingProjection::from_events(&events).unwrap();
         let base = list_from_events(&events, &projection).unwrap();
 
@@ -1169,7 +1168,7 @@ mod tests {
             commit_associated_for(&unit_b, "oidB"),
             worktree_capture_for(&unit_floating, "2026-06-19T00:00:02Z"),
         ];
-        let projection = ReviewUnitCommitRangeProjection::from_events(&events).unwrap();
+        let projection = RevisionCommitRangeProjection::from_events(&events).unwrap();
         let grouping = CommitOidGroupingProjection::from_events(&events).unwrap();
         let base = list_from_events(&events, &projection).unwrap();
 

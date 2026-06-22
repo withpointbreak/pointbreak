@@ -90,7 +90,7 @@ struct StoreRemoveArgs {
     snapshot: Option<String>,
     /// Remove every artifact a review unit references.
     #[arg(long, group = "selector")]
-    review_unit: Option<String>,
+    revision: Option<String>,
     /// Remove artifacts of units anchored on the commit this ref resolves to.
     #[arg(long, group = "selector")]
     r#ref: Option<String>,
@@ -304,8 +304,8 @@ fn selector_from_args(
 ) -> Result<RemoveSelector, Box<dyn std::error::Error>> {
     if let Some(id) = &args.snapshot {
         Ok(RemoveSelector::Snapshot(ObjectId::new(id.clone())))
-    } else if let Some(id) = &args.review_unit {
-        Ok(RemoveSelector::ReviewUnit(RevisionId::new(id.clone())))
+    } else if let Some(id) = &args.revision {
+        Ok(RemoveSelector::Revision(RevisionId::new(id.clone())))
     } else if let Some(reference) = &args.r#ref {
         Ok(RemoveSelector::Ref(reference.clone()))
     } else if let Some(range) = &args.range {
@@ -313,7 +313,7 @@ fn selector_from_args(
     } else if args.orphans {
         Ok(RemoveSelector::Orphans)
     } else {
-        Err("exactly one of --snapshot/--review-unit/--ref/--range/--orphans is required".into())
+        Err("exactly one of --snapshot/--revision/--ref/--range/--orphans is required".into())
     }
 }
 

@@ -9,12 +9,12 @@ use crate::session::event::{
     decode_input_request_opened_payload,
 };
 use crate::session::observation::{
-    ObservationTargetSelector, ResolvedReviewUnit, resolve_observation_target,
+    ObservationTargetSelector, ResolvedRevision, resolve_observation_target,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AssessmentTargetSelector {
-    ReviewUnit,
+    Revision,
     File {
         path: String,
     },
@@ -37,8 +37,8 @@ pub enum AssessmentTargetSelector {
 }
 
 impl AssessmentTargetSelector {
-    pub fn review_unit() -> Self {
-        Self::ReviewUnit
+    pub fn revision() -> Self {
+        Self::Revision
     }
 
     pub fn file(path: impl Into<String>) -> Self {
@@ -79,12 +79,12 @@ impl AssessmentTargetSelector {
 pub(crate) fn resolve_assessment_target(
     repo: &Path,
     events: &[ShoreEvent],
-    resolved: &ResolvedReviewUnit,
+    resolved: &ResolvedRevision,
     selector: &AssessmentTargetSelector,
 ) -> Result<ReviewTargetRef> {
     let target = match selector {
-        AssessmentTargetSelector::ReviewUnit => {
-            resolve_observation_target(repo, resolved, &ObservationTargetSelector::review_unit())?
+        AssessmentTargetSelector::Revision => {
+            resolve_observation_target(repo, resolved, &ObservationTargetSelector::revision())?
         }
         AssessmentTargetSelector::File { path } => {
             resolve_observation_target(repo, resolved, &ObservationTargetSelector::file(path))?
@@ -118,8 +118,8 @@ pub(crate) fn resolve_assessment_target(
 }
 
 fn validate_direct_target(revision_id: &RevisionId, target: &ReviewTargetRef) -> Result<()> {
-    let target_review_unit_id = review_unit_id_for_target(target);
-    if target_review_unit_id != revision_id {
+    let target_revision_id = revision_id_for_target(target);
+    if target_revision_id != revision_id {
         return Err(ShoreError::WorkflowInputInvalid {
             reason: "assessment target must belong to the selected review unit".to_owned(),
         });
@@ -129,7 +129,7 @@ fn validate_direct_target(revision_id: &RevisionId, target: &ReviewTargetRef) ->
 
 fn resolve_observation_ref(
     events: &[ShoreEvent],
-    resolved: &ResolvedReviewUnit,
+    resolved: &ResolvedRevision,
     observation_id: &ObservationId,
 ) -> Result<ReviewTargetRef> {
     for event in events
@@ -158,7 +158,7 @@ fn resolve_observation_ref(
 
 fn resolve_input_request_ref(
     events: &[ShoreEvent],
-    resolved: &ResolvedReviewUnit,
+    resolved: &ResolvedRevision,
     input_request_id: &InputRequestId,
 ) -> Result<ReviewTargetRef> {
     for event in events
@@ -186,7 +186,7 @@ fn resolve_input_request_ref(
 
 fn resolve_assessment_ref(
     events: &[ShoreEvent],
-    resolved: &ResolvedReviewUnit,
+    resolved: &ResolvedRevision,
     assessment_id: &AssessmentId,
 ) -> Result<ReviewTargetRef> {
     for event in events
@@ -213,7 +213,7 @@ fn resolve_assessment_ref(
     )))
 }
 
-pub(crate) fn review_unit_id_for_target(target: &ReviewTargetRef) -> &RevisionId {
+pub(crate) fn revision_id_for_target(target: &ReviewTargetRef) -> &RevisionId {
     match target {
         ReviewTargetRef::Revision { revision_id }
         | ReviewTargetRef::File { revision_id, .. }

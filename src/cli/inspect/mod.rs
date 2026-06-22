@@ -8,7 +8,7 @@ mod api;
 mod server;
 
 /// `shore inspect` starts a small local web server that visualizes a `.shore/data`
-/// store: the event timeline, captured ReviewUnits, and recorded outcomes.
+/// store: the event timeline, captured Revisions, and recorded outcomes.
 ///
 /// The server is intentionally synchronous (thread-per-connection, std only).
 /// It introduces no async runtime, matching the storage-model guidance, and

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use super::super::observation::{
-    CurrentReviewUnitContext, ReviewUnitScope, RevisionSelection, resolve_revision, staged_body,
+    CurrentRevisionContext, RevisionScope, RevisionSelection, resolve_revision, staged_body,
     validated_track_id,
 };
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
@@ -72,7 +72,7 @@ impl ValidationAddOptions {
         self
     }
 
-    pub fn with_review_unit_id(mut self, id: RevisionId) -> Self {
+    pub fn with_revision_id(mut self, id: RevisionId) -> Self {
         self.revision_id = Some(id);
         self
     }
@@ -177,8 +177,8 @@ pub fn record_validation_check(options: ValidationAddOptions) -> Result<Validati
     let resolved = resolve_revision(
         &events,
         RevisionSelection::from_revision_seed(options.revision_id.as_ref()),
-        &CurrentReviewUnitContext::for_repo(&options.repo)?,
-        ReviewUnitScope::default(),
+        &CurrentRevisionContext::for_repo(&options.repo)?,
+        RevisionScope::default(),
     )?;
     let check_name = required_check_name(options.check_name.as_deref())?;
     let status = options
@@ -210,7 +210,7 @@ pub fn record_validation_check(options: ValidationAddOptions) -> Result<Validati
 
 struct ValidationWriteInput {
     repo: PathBuf,
-    resolved: super::super::observation::ResolvedReviewUnit,
+    resolved: super::super::observation::ResolvedRevision,
     track: Option<String>,
     check_name: String,
     command: Option<String>,

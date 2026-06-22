@@ -4,16 +4,16 @@ use crate::error::{Result, ShoreError};
 use crate::git::git_head_ref;
 use crate::model::{JournalId, ObjectId, ReviewEndpoint, ReviewTargetRef, RevisionId, Side};
 use crate::session::event::{
-    EventType, ReviewUnitRefAssociatedPayload, Revision, ShoreEvent, WorkObjectProposal,
+    EventType, Revision, RevisionRefAssociatedPayload, ShoreEvent, WorkObjectProposal,
     WorkObjectProposedPayload,
 };
-use crate::session::projection::commit_range::review_unit_of;
+use crate::session::projection::commit_range::revision_of;
 use crate::session::projection::supersession::SupersessionView;
 use crate::session::snapshot_artifact::read_snapshot_artifact_for_write_validation;
 use crate::session::store::fingerprint::normalized_worktree_root;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ResolvedReviewUnit {
+pub(crate) struct ResolvedRevision {
     pub journal_id: JournalId,
     pub revision_id: RevisionId,
     pub object_id: ObjectId,
@@ -45,12 +45,12 @@ impl<'a> RevisionSelection<'a> {
 /// `worktree_root` is the canonical root from [`normalized_worktree_root`];
 /// `head_ref` is the full ref of HEAD (`refs/heads/...`), `None` on detached HEAD.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct CurrentReviewUnitContext {
+pub(crate) struct CurrentRevisionContext {
     pub worktree_root: String,
     pub head_ref: Option<String>,
 }
 
-impl CurrentReviewUnitContext {
+impl CurrentRevisionContext {
     /// Resolve the context from a repo path: the canonical worktree root plus
     /// HEAD's full ref. Used by the read/observation workflows before selection.
     pub(crate) fn for_repo(repo: &Path) -> Result<Self> {
@@ -66,7 +66,7 @@ impl CurrentReviewUnitContext {
 /// widening read selectors construct as they are wired onto the read surfaces.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[allow(dead_code)] // widening variants are constructed by the read selectors that surface them
-pub(crate) enum ReviewUnitScope {
+pub(crate) enum RevisionScope {
     /// Default: only captures belonging to the caller's current worktree context.
     #[default]
     CurrentWorktree,
@@ -86,7 +86,7 @@ pub struct ObservationTargetSelector {
 }
 
 impl ObservationTargetSelector {
-    pub fn review_unit() -> Self {
+    pub fn revision() -> Self {
         Self {
             file_path: None,
             side: Side::New,
@@ -122,9 +122,9 @@ impl ObservationTargetSelector {
 pub(crate) fn resolve_revision(
     events: &[ShoreEvent],
     selection: RevisionSelection<'_>,
-    context: &CurrentReviewUnitContext,
-    scope: ReviewUnitScope,
-) -> Result<ResolvedReviewUnit> {
+    context: &CurrentRevisionContext,
+    scope: RevisionScope,
+) -> Result<ResolvedRevision> {
     if let RevisionSelection::Head(seed) = selection {
         let resolved_id = resolve_head_seed(events, seed)?;
         return resolve_revision(
@@ -140,7 +140,7 @@ pub(crate) fn resolve_revision(
     // (handled inside the loop) is always context-independent.
     let scoped = matches!(
         scope,
-        ReviewUnitScope::CurrentWorktree | ReviewUnitScope::Worktree
+        RevisionScope::CurrentWorktree | RevisionScope::Worktree
     );
 
     let mut captured = Vec::new();
@@ -151,7 +151,7 @@ pub(crate) fn resolve_revision(
         let Some(revision) = revision_from_capture_event(event)? else {
             continue;
         };
-        let resolved = ResolvedReviewUnit {
+        let resolved = ResolvedRevision {
             journal_id: event.target.journal_id.clone(),
             revision_id: revision.id.clone(),
             object_id: revision.object_id.clone(),
@@ -219,7 +219,7 @@ fn resolve_head_seed(events: &[ShoreEvent], seed: &RevisionId) -> Result<Revisio
 
 /// Whether a capture belongs to the caller's current worktree context. A capture
 /// matches when **any** of: a positive worktree-identity match (its `GitWorkingTree`
-/// target equals the current worktree root, or a capture-time `ReviewUnitRefAssociated`
+/// target equals the current worktree root, or a capture-time `RevisionRefAssociated`
 /// names the current branch); or (fail-open) it carries no locally-meaningful
 /// worktree signal.
 ///
@@ -233,7 +233,7 @@ fn capture_matches_current_worktree(
     events: &[ShoreEvent],
     capture_event: &ShoreEvent,
     revision: &Revision,
-    context: &CurrentReviewUnitContext,
+    context: &CurrentRevisionContext,
 ) -> Result<bool> {
     if capture_has_worktree_identity_match(events, revision, context)? {
         return Ok(true);
@@ -261,13 +261,13 @@ fn revision_from_capture_event(event: &ShoreEvent) -> Result<Option<Revision>> {
 
 /// The positive worktree-identity half of [`capture_matches_current_worktree`]:
 /// a capture matches iff its `GitWorkingTree` target equals the context's worktree
-/// root, or it carries a capture-time `ReviewUnitRefAssociated` for the context's
+/// root, or it carries a capture-time `RevisionRefAssociated` for the context's
 /// branch. This is the strict identity match — without the fail-open net — that an
 /// explicit worktree read selector scopes by.
 pub(crate) fn capture_has_worktree_identity_match(
     events: &[ShoreEvent],
     revision: &Revision,
-    context: &CurrentReviewUnitContext,
+    context: &CurrentRevisionContext,
 ) -> Result<bool> {
     if let Some(ReviewEndpoint::GitWorkingTree { worktree_root }) =
         revision.git_provenance.as_ref().map(|p| &p.target)
@@ -290,7 +290,7 @@ pub(crate) fn capture_has_worktree_identity_match(
 /// selector on the list surfaces (the strict identity match, no fail-open).
 pub(crate) fn revision_ids_in_worktree(
     events: &[ShoreEvent],
-    context: &CurrentReviewUnitContext,
+    context: &CurrentRevisionContext,
 ) -> Result<std::collections::BTreeSet<RevisionId>> {
     let mut ids = std::collections::BTreeSet::new();
     for event in events
@@ -307,7 +307,7 @@ pub(crate) fn revision_ids_in_worktree(
     Ok(ids)
 }
 
-/// Whether the event set carries a `ReviewUnitRefAssociated` for `revision_id`
+/// Whether the event set carries a `RevisionRefAssociated` for `revision_id`
 /// naming `head_ref` (the full ref, matching `git_head_ref`'s spelling).
 fn capture_has_ref_association(
     events: &[ShoreEvent],
@@ -318,9 +318,8 @@ fn capture_has_ref_association(
         .iter()
         .filter(|event| event.event_type == EventType::RevisionRefAssociated)
     {
-        let payload: ReviewUnitRefAssociatedPayload =
-            serde_json::from_value(event.payload.clone())?;
-        if review_unit_of(&payload.target).as_ref() == Some(revision_id)
+        let payload: RevisionRefAssociatedPayload = serde_json::from_value(event.payload.clone())?;
+        if revision_of(&payload.target).as_ref() == Some(revision_id)
             && payload.ref_name == head_ref
         {
             return Ok(true);
@@ -329,7 +328,7 @@ fn capture_has_ref_association(
     Ok(false)
 }
 
-/// Whether the event set carries any `ReviewUnitRefAssociated` for
+/// Whether the event set carries any `RevisionRefAssociated` for
 /// `revision_id`, regardless of which ref it names.
 fn capture_has_any_ref_association(
     events: &[ShoreEvent],
@@ -339,9 +338,8 @@ fn capture_has_any_ref_association(
         .iter()
         .filter(|event| event.event_type == EventType::RevisionRefAssociated)
     {
-        let payload: ReviewUnitRefAssociatedPayload =
-            serde_json::from_value(event.payload.clone())?;
-        if review_unit_of(&payload.target).as_ref() == Some(revision_id) {
+        let payload: RevisionRefAssociatedPayload = serde_json::from_value(event.payload.clone())?;
+        if revision_of(&payload.target).as_ref() == Some(revision_id) {
             return Ok(true);
         }
     }
@@ -350,7 +348,7 @@ fn capture_has_any_ref_association(
 
 pub(crate) fn resolve_observation_target(
     repo: &Path,
-    resolved: &ResolvedReviewUnit,
+    resolved: &ResolvedRevision,
     selector: &ObservationTargetSelector,
 ) -> Result<ReviewTargetRef> {
     let Some(file_path) = selector.file_path.as_deref() else {
@@ -414,12 +412,12 @@ mod scope_tests {
 
     use super::*;
     use crate::model::{
-        CommitRangeCaptureMode, EngagementId, JournalId, ObjectId, ReviewEndpoint,
-        ReviewUnitSource, RevisionId, WorktreeCaptureMode,
+        CommitRangeCaptureMode, EngagementId, JournalId, ObjectId, ReviewEndpoint, RevisionId,
+        RevisionSource, WorktreeCaptureMode,
     };
     use crate::session::event::{EventTarget, GitProvenance, IngestProvenance, IngestVia, Writer};
 
-    fn capture_event(suffix: &str, source: ReviewUnitSource, target: ReviewEndpoint) -> ShoreEvent {
+    fn capture_event(suffix: &str, source: RevisionSource, target: ReviewEndpoint) -> ShoreEvent {
         let revision_id = RevisionId::new(format!("review-unit:sha256:{suffix}"));
         let object_id = ObjectId::new(format!("snap:{suffix}"));
         ShoreEvent::new(
@@ -458,7 +456,7 @@ mod scope_tests {
     fn worktree_capture(suffix: &str, worktree_root: &str) -> ShoreEvent {
         capture_event(
             suffix,
-            ReviewUnitSource::GitWorktree {
+            RevisionSource::GitWorktree {
                 mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
                 include_untracked: true,
             },
@@ -472,7 +470,7 @@ mod scope_tests {
     fn range_capture(suffix: &str) -> ShoreEvent {
         capture_event(
             suffix,
-            ReviewUnitSource::GitCommitRange {
+            RevisionSource::GitCommitRange {
                 mode: CommitRangeCaptureMode::BaseTreeToTargetTree,
             },
             ReviewEndpoint::GitCommit {
@@ -507,8 +505,8 @@ mod scope_tests {
         .unwrap()
     }
 
-    fn ctx(worktree_root: &str, head_ref: Option<&str>) -> CurrentReviewUnitContext {
-        CurrentReviewUnitContext {
+    fn ctx(worktree_root: &str, head_ref: Option<&str>) -> CurrentRevisionContext {
+        CurrentRevisionContext {
             worktree_root: worktree_root.to_owned(),
             head_ref: head_ref.map(str::to_owned),
         }
@@ -516,9 +514,9 @@ mod scope_tests {
 
     fn current(
         events: &[ShoreEvent],
-        context: &CurrentReviewUnitContext,
-        scope: ReviewUnitScope,
-    ) -> Result<ResolvedReviewUnit> {
+        context: &CurrentRevisionContext,
+        scope: RevisionScope,
+    ) -> Result<ResolvedRevision> {
         resolve_revision(events, RevisionSelection::Current, context, scope)
     }
 
@@ -529,20 +527,12 @@ mod scope_tests {
             worktree_capture("b", "/wt/b"),
         ];
 
-        let resolved_a = current(
-            &events,
-            &ctx("/wt/a", None),
-            ReviewUnitScope::CurrentWorktree,
-        )
-        .expect("worktree a resolves its own capture");
+        let resolved_a = current(&events, &ctx("/wt/a", None), RevisionScope::CurrentWorktree)
+            .expect("worktree a resolves its own capture");
         assert_eq!(resolved_a.revision_id.as_str(), "review-unit:sha256:a");
 
-        let resolved_b = current(
-            &events,
-            &ctx("/wt/b", None),
-            ReviewUnitScope::CurrentWorktree,
-        )
-        .expect("worktree b resolves its own capture");
+        let resolved_b = current(&events, &ctx("/wt/b", None), RevisionScope::CurrentWorktree)
+            .expect("worktree b resolves its own capture");
         assert_eq!(resolved_b.revision_id.as_str(), "review-unit:sha256:b");
     }
 
@@ -553,12 +543,8 @@ mod scope_tests {
             worktree_capture("a2", "/wt/a"),
         ];
 
-        let error = current(
-            &events,
-            &ctx("/wt/a", None),
-            ReviewUnitScope::CurrentWorktree,
-        )
-        .unwrap_err();
+        let error =
+            current(&events, &ctx("/wt/a", None), RevisionScope::CurrentWorktree).unwrap_err();
 
         assert!(
             error
@@ -579,14 +565,14 @@ mod scope_tests {
         let resolved = current(
             &events,
             &ctx("/some/other/root", Some("refs/heads/feat/x")),
-            ReviewUnitScope::CurrentWorktree,
+            RevisionScope::CurrentWorktree,
         )
         .expect("ref association scopes the range capture into the current branch context");
         assert_eq!(resolved.revision_id.as_str(), "review-unit:sha256:r");
     }
 
     #[test]
-    fn current_no_match_in_worktree_is_no_captured_review_unit_error() {
+    fn current_no_match_in_worktree_is_no_captured_revision_error() {
         // Both captures carry a worktree-path signal that does not match the
         // context, so the fail-open clause does not apply to either.
         let events = [
@@ -594,12 +580,8 @@ mod scope_tests {
             worktree_capture("c", "/wt/c"),
         ];
 
-        let error = current(
-            &events,
-            &ctx("/wt/a", None),
-            ReviewUnitScope::CurrentWorktree,
-        )
-        .unwrap_err();
+        let error =
+            current(&events, &ctx("/wt/a", None), RevisionScope::CurrentWorktree).unwrap_err();
 
         assert!(error.to_string().contains("no captured revision"));
     }
@@ -619,7 +601,7 @@ mod scope_tests {
             &events,
             RevisionSelection::Exact(&requested),
             &ctx("/wt/a", None),
-            ReviewUnitScope::CurrentWorktree,
+            RevisionScope::CurrentWorktree,
         )
         .expect("exact selection is context-independent");
         assert_eq!(resolved.revision_id.as_str(), "review-unit:sha256:b");
@@ -628,7 +610,7 @@ mod scope_tests {
     #[test]
     fn widen_to_all_resolves_single_cross_worktree_capture_but_still_errors_on_two() {
         let one = [worktree_capture("b", "/wt/b")];
-        let resolved = current(&one, &ctx("/wt/a", None), ReviewUnitScope::All)
+        let resolved = current(&one, &ctx("/wt/a", None), RevisionScope::All)
             .expect("widening to the whole store resolves a single capture");
         assert_eq!(resolved.revision_id.as_str(), "review-unit:sha256:b");
 
@@ -636,7 +618,7 @@ mod scope_tests {
             worktree_capture("b", "/wt/b"),
             worktree_capture("c", "/wt/c"),
         ];
-        let error = current(&two, &ctx("/wt/a", None), ReviewUnitScope::All).unwrap_err();
+        let error = current(&two, &ctx("/wt/a", None), RevisionScope::All).unwrap_err();
         assert!(error.to_string().contains("multiple captured revisions"));
     }
 
@@ -670,7 +652,7 @@ mod scope_tests {
         let resolved = current(
             &events,
             &ctx("/wt/a", Some("refs/heads/main")),
-            ReviewUnitScope::CurrentWorktree,
+            RevisionScope::CurrentWorktree,
         )
         .expect("a signal-less range capture fails open to the current worktree");
         assert_eq!(resolved.revision_id.as_str(), "review-unit:sha256:r");
@@ -683,12 +665,8 @@ mod scope_tests {
         // ambiguous rather than silently picking one.
         let events = [worktree_capture("w", "/wt/a"), range_capture("r")];
 
-        let error = current(
-            &events,
-            &ctx("/wt/a", None),
-            ReviewUnitScope::CurrentWorktree,
-        )
-        .unwrap_err();
+        let error =
+            current(&events, &ctx("/wt/a", None), RevisionScope::CurrentWorktree).unwrap_err();
         assert!(error.to_string().contains("multiple captured revisions"));
     }
 
@@ -701,7 +679,7 @@ mod scope_tests {
         let resolved = current(
             &events,
             &ctx("/dest/wt", None),
-            ReviewUnitScope::CurrentWorktree,
+            RevisionScope::CurrentWorktree,
         )
         .expect("an ingested capture fails open into the destination worktree");
         assert_eq!(resolved.revision_id.as_str(), "review-unit:sha256:i");
@@ -720,7 +698,7 @@ mod scope_tests {
         let error = current(
             &events,
             &ctx("/dest/wt", None),
-            ReviewUnitScope::CurrentWorktree,
+            RevisionScope::CurrentWorktree,
         )
         .unwrap_err();
         assert!(error.to_string().contains("multiple captured revisions"));

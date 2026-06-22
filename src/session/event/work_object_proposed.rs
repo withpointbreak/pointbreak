@@ -4,7 +4,7 @@ use super::kind::EventType;
 use super::payload::EventPayload;
 use super::task::SourceSpeaker;
 use crate::model::{
-    EngagementId, ObjectId, ReviewEndpoint, ReviewUnitSource, RevisionId, WorkObjectId,
+    EngagementId, ObjectId, ReviewEndpoint, RevisionId, RevisionSource, WorkObjectId,
 };
 
 /// The git provenance of a revision: the resolved source selector and endpoint
@@ -15,7 +15,7 @@ use crate::model::{
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GitProvenance {
-    pub source: ReviewUnitSource,
+    pub source: RevisionSource,
     pub base: ReviewEndpoint,
     pub target: ReviewEndpoint,
 }
@@ -96,7 +96,7 @@ mod tests {
 
     fn git_provenance() -> GitProvenance {
         GitProvenance {
-            source: ReviewUnitSource::GitWorktree {
+            source: RevisionSource::GitWorktree {
                 mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
                 include_untracked: true,
             },

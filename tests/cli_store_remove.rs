@@ -93,7 +93,7 @@ fn store_remove_by_snapshot_emits_removed_document() {
 }
 
 #[test]
-fn store_remove_by_review_unit_reports_co_referencing_units() {
+fn store_remove_by_revision_reports_co_referencing_units() {
     // Two worktrees capturing the SAME working-tree change share one snapshot
     // content hash under distinct review unit ids: the working-tree target carries
     // each worktree's own root, so the two captures stay distinct even though their
@@ -134,7 +134,7 @@ fn store_remove_by_review_unit_reports_co_referencing_units() {
         "remove",
         "--repo",
         wt1.to_str().unwrap(),
-        "--review-unit",
+        "--revision",
         unit1,
     ]);
     assert!(

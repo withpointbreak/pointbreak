@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use super::{AdapterNoteView, ReviewUnitProjectionRow};
+use super::{AdapterNoteView, RevisionProjectionRow};
 use crate::model::{
-    ActorId, DiffSnapshot, EventId, JournalId, ObjectId, ReviewEndpoint, ReviewUnitSource,
-    RevisionId, TrackId,
+    ActorId, DiffSnapshot, EventId, JournalId, ObjectId, ReviewEndpoint, RevisionId,
+    RevisionSource, TrackId,
 };
 use crate::session::assessment::{AssessmentView, CurrentAssessmentView};
 use crate::session::input_request::InputRequestView;
@@ -13,12 +13,12 @@ use crate::session::state::ProjectionDiagnostic;
 use crate::session::workflow::ValidationCheckView;
 use crate::session::{
     ActorAttributesMap, DelegationMap, EndorsementReadback, EventVerificationPolicy,
-    EventVerificationStatus, PrincipalResolution, ReviewUnitCommitRangeView, TrustSet,
+    EventVerificationStatus, PrincipalResolution, RevisionCommitRangeView, TrustSet,
     principal_resolution_for_writer,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReviewUnitShowOptions {
+pub struct RevisionShowOptions {
     pub(super) repo: PathBuf,
     pub(super) revision_id: Option<RevisionId>,
     pub(super) track: Option<String>,
@@ -29,7 +29,7 @@ pub struct ReviewUnitShowOptions {
     pub(super) delegation_map: Option<DelegationMap>,
 }
 
-impl ReviewUnitShowOptions {
+impl RevisionShowOptions {
     pub fn new(repo: impl AsRef<Path>) -> Self {
         Self {
             repo: repo.as_ref().to_path_buf(),
@@ -43,7 +43,7 @@ impl ReviewUnitShowOptions {
         }
     }
 
-    pub fn with_review_unit_id(mut self, revision_id: RevisionId) -> Self {
+    pub fn with_revision_id(mut self, revision_id: RevisionId) -> Self {
         self.revision_id = Some(revision_id);
         self
     }
@@ -139,28 +139,28 @@ pub struct MemberReadback {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReviewUnitShowResult {
+pub struct RevisionShowResult {
     pub event_set_hash: String,
     pub event_count: usize,
-    pub review_unit: ReviewUnitProjectionIdentity,
+    pub revision: RevisionProjectionIdentity,
     pub snapshot: DiffSnapshot,
     /// Set when the bound snapshot artifact has a recorded `ArtifactRemoved`
     /// fact: its content bytes are no longer stored, so `snapshot` is empty and
     /// this carries the removed content hash. `None` for a present snapshot.
     pub removed_snapshot_content_hash: Option<String>,
-    pub filters: ReviewUnitShowFilters,
-    pub summary: ReviewUnitProjectionSummary,
+    pub filters: RevisionShowFilters,
+    pub summary: RevisionProjectionSummary,
     pub current_assessment: CurrentAssessmentView,
     pub observations: Vec<ObservationView>,
     pub input_requests: Vec<InputRequestView>,
     pub assessments: Vec<AssessmentView>,
     pub validation_checks: Vec<ValidationCheckView>,
     pub adapter_notes: Vec<AdapterNoteView>,
-    pub rows: Vec<ReviewUnitProjectionRow>,
+    pub rows: Vec<RevisionProjectionRow>,
     /// Commit-range lifecycle view (floating/anchored, current and withdrawn
     /// commit/ref associations) derived git-free from the event set. Liveness
     /// (merged/live/orphaned) is layered separately by callers that hold a repo.
-    pub commit_range: ReviewUnitCommitRangeView,
+    pub commit_range: RevisionCommitRangeView,
     /// Reader-relative readback keyed by event id, covering the capture event and
     /// every narrative member. Attached at the document layer; empty when no
     /// verification policy is set.
@@ -168,7 +168,7 @@ pub struct ReviewUnitShowResult {
     pub diagnostics: Vec<ProjectionDiagnostic>,
 }
 
-impl ReviewUnitShowResult {
+impl RevisionShowResult {
     /// Whether the bound snapshot artifact's content was removed (an
     /// `ArtifactRemoved` fact exists for its content hash). When true, `snapshot`
     /// is empty and `removed_snapshot_content_hash` names the removed blob.
@@ -178,10 +178,10 @@ impl ReviewUnitShowResult {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReviewUnitProjectionIdentity {
+pub struct RevisionProjectionIdentity {
     pub id: RevisionId,
     pub session_id: JournalId,
-    pub source: ReviewUnitSource,
+    pub source: RevisionSource,
     pub base: ReviewEndpoint,
     pub target: ReviewEndpoint,
     pub revision_id: RevisionId,
@@ -193,14 +193,14 @@ pub struct ReviewUnitProjectionIdentity {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReviewUnitShowFilters {
+pub struct RevisionShowFilters {
     pub revision_id: RevisionId,
     pub track_id: Option<TrackId>,
     pub include_body: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct ReviewUnitProjectionSummary {
+pub struct RevisionProjectionSummary {
     pub file_count: usize,
     pub row_count: usize,
     pub narrative_row_count: usize,

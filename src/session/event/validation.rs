@@ -104,7 +104,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_idempotency_key_is_review_unit_track_and_source_scoped() {
+    fn validation_idempotency_key_is_revision_track_and_source_scoped() {
         let key = ValidationCheckRecordedPayload::idempotency_key(
             &RevisionId::new("review-unit:sha256:def"),
             &TrackId::new("agent:codex"),

@@ -1,8 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use super::super::observation::{
-    CurrentReviewUnitContext, ReviewUnitScope, RevisionSelection, resolve_revision,
-    validated_track_id,
+    CurrentRevisionContext, RevisionScope, RevisionSelection, resolve_revision, validated_track_id,
 };
 use super::view::{
     ValidationCheckProjectionOptions, ValidationCheckView, project_validation_checks,
@@ -33,7 +32,7 @@ impl ValidationListOptions {
         }
     }
 
-    pub fn with_review_unit_id(mut self, id: RevisionId) -> Self {
+    pub fn with_revision_id(mut self, id: RevisionId) -> Self {
         self.revision_id = Some(id);
         self
     }
@@ -76,8 +75,8 @@ pub fn list_validation_checks(options: ValidationListOptions) -> Result<Validati
     let resolved = resolve_revision(
         &events,
         RevisionSelection::from_revision_seed(options.revision_id.as_ref()),
-        &CurrentReviewUnitContext::for_repo(&options.repo)?,
-        ReviewUnitScope::default(),
+        &CurrentRevisionContext::for_repo(&options.repo)?,
+        RevisionScope::default(),
     )?;
     let track_filter = options
         .track

@@ -13,7 +13,7 @@ fn review_help_lists_show() {
 }
 
 #[test]
-fn review_unit_show_emits_v1_json() {
+fn revision_show_emits_v1_json() {
     let repo = modified_repo();
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
 
@@ -43,7 +43,7 @@ fn review_unit_show_emits_v1_json() {
 }
 
 #[test]
-fn review_unit_show_rejects_invalid_track_before_json_output() {
+fn revision_show_rejects_invalid_track_before_json_output() {
     let repo = modified_repo();
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
 
@@ -62,7 +62,7 @@ fn review_unit_show_rejects_invalid_track_before_json_output() {
 }
 
 #[test]
-fn review_unit_show_pretty_prints() {
+fn revision_show_pretty_prints() {
     let repo = modified_repo();
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
 
@@ -78,7 +78,7 @@ fn review_unit_show_pretty_prints() {
 }
 
 #[test]
-fn review_unit_show_rejects_pretty_and_compact_together() {
+fn revision_show_rejects_pretty_and_compact_together() {
     let repo = modified_repo();
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
 
@@ -97,7 +97,7 @@ fn review_unit_show_rejects_pretty_and_compact_together() {
 }
 
 #[test]
-fn review_unit_show_supports_explicit_review_unit_when_ambiguous() {
+fn revision_show_supports_explicit_revision_when_ambiguous() {
     let repo = modified_repo();
     let first =
         parse_json(&shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]).stdout);
@@ -124,7 +124,7 @@ fn review_unit_show_supports_explicit_review_unit_when_ambiguous() {
 }
 
 #[test]
-fn review_unit_show_include_body_hydrates_without_internal_paths() {
+fn revision_show_include_body_hydrates_without_internal_paths() {
     let repo = modified_repo();
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
     add_observation_with_body(&repo, "agent:codex", "Body", "visible body");
@@ -149,7 +149,7 @@ fn review_unit_show_include_body_hydrates_without_internal_paths() {
 }
 
 #[test]
-fn review_unit_show_includes_input_requests_and_omits_legacy_fields() {
+fn revision_show_includes_input_requests_and_omits_legacy_fields() {
     let repo = modified_repo();
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
     let requested = add_input_request_with_body(&repo, "visible request body");
@@ -198,7 +198,7 @@ fn review_unit_show_includes_input_requests_and_omits_legacy_fields() {
 }
 
 #[test]
-fn review_unit_show_rows_are_narrative_first_and_snapshot_complete() {
+fn revision_show_rows_are_narrative_first_and_snapshot_complete() {
     let repo = modified_repo();
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
     add_observation(&repo, "agent:codex", "Narrative");
@@ -232,7 +232,7 @@ fn review_unit_show_rows_are_narrative_first_and_snapshot_complete() {
 }
 
 #[test]
-fn review_unit_show_track_filter_echoes_and_narrows_narrative_only() {
+fn revision_show_track_filter_echoes_and_narrows_narrative_only() {
     let repo = multi_file_repo();
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
     add_observation(&repo, "agent:codex", "Codex");
@@ -266,7 +266,7 @@ fn review_unit_show_track_filter_echoes_and_narrows_narrative_only() {
 }
 
 #[test]
-fn review_unit_show_includes_current_assessment_status() {
+fn revision_show_includes_current_assessment_status() {
     let repo = modified_repo();
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
     add_assessment(&repo);
@@ -280,7 +280,7 @@ fn review_unit_show_includes_current_assessment_status() {
 }
 
 #[test]
-fn review_unit_show_includes_adapter_notes_without_storage_paths() {
+fn revision_show_includes_adapter_notes_without_storage_paths() {
     let repo = modified_repo();
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
     let review_notes = repo.write_fixture("review-notes.json", native_review_notes_json());
@@ -532,7 +532,7 @@ fn unit_show_renders_endorsement_on_capture_identity() {
     assert_eq!(endorsement["endorserAttributes"]["kind"], "human");
 }
 
-/// Find the captured ReviewUnit event id via the public read path (`read_events`).
+/// Find the captured Revision event id via the public read path (`read_events`).
 fn captured_event_id(repo_path: &std::path::Path) -> String {
     shoreline::session::read_events(repo_path)
         .unwrap()

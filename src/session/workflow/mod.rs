@@ -9,8 +9,8 @@ mod history;
 mod import;
 mod ingest;
 mod reload;
-mod review_unit_list;
-mod review_unit_projection;
+mod revision_list;
+mod revision_projection;
 mod store_migrate;
 mod store_migrate_common_dir;
 mod store_status;
@@ -70,14 +70,14 @@ pub use observation::{
 };
 pub(crate) use reload::reload_diagnostics_for_document;
 pub use reload::{ReloadDiagnostic, ReloadDiagnosticCode, ReloadOutcome, reload_session};
-pub use review_unit_list::{
-    OrphanVisibility, RefFilterMode, ReviewUnitListEntry, ReviewUnitListOptions,
-    ReviewUnitListResult, list_review_units, list_units_for_ref,
+pub use revision_list::{
+    OrphanVisibility, RefFilterMode, RevisionListEntry, RevisionListOptions, RevisionListResult,
+    list_revisions, list_units_for_ref,
 };
-pub use review_unit_projection::{
-    AdapterNoteView, MemberReadback, ReviewUnitProjectionIdentity, ReviewUnitProjectionRow,
-    ReviewUnitProjectionSummary, ReviewUnitShowFilters, ReviewUnitShowOptions,
-    ReviewUnitShowResult, SnapshotOrder, show_review_unit,
+pub use revision_projection::{
+    AdapterNoteView, MemberReadback, RevisionProjectionIdentity, RevisionProjectionRow,
+    RevisionProjectionSummary, RevisionShowFilters, RevisionShowOptions, RevisionShowResult,
+    SnapshotOrder, show_revision,
 };
 pub use store_migrate::{MigrateStoreOptions, StoreMigrateResult, migrate_store};
 pub use store_migrate_common_dir::{

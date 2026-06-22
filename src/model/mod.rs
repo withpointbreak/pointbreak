@@ -4,7 +4,7 @@ mod hunk;
 mod ids;
 mod review;
 mod review_note;
-mod review_unit;
+mod revision;
 mod row;
 mod validation;
 mod work_object;
@@ -31,8 +31,8 @@ pub use review_note::{
     ReviewNoteSource, Side, re_resolve_review_notes,
 };
 pub(crate) use review_note::{hash_normalized_lines, rows_for_line_range};
-pub use review_unit::{
-    CommitRangeCaptureMode, ReviewEndpoint, ReviewTargetRef, ReviewUnitSource, WorktreeCaptureMode,
+pub use revision::{
+    CommitRangeCaptureMode, ReviewEndpoint, ReviewTargetRef, RevisionSource, WorktreeCaptureMode,
 };
 pub use row::{DiffRow, DiffRowKind, FileMetadataKind, FileMetadataRow, ReviewRow, ReviewRowKind};
 pub use validation::{ValidationStatus, ValidationTarget, ValidationTrigger};

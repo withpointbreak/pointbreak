@@ -16,7 +16,7 @@ use crate::git::{
     Ancestry, git_for_each_ref, git_is_ancestor, git_object_exists, git_rev_parse_commit_oid,
     git_worktree_list,
 };
-use crate::session::ReviewUnitCommitRangeView;
+use crate::session::RevisionCommitRangeView;
 use crate::session::state::ProjectionDiagnostic;
 
 const SHORT_OID_LEN: usize = 12;
@@ -69,7 +69,7 @@ pub struct LivenessEnrichment {
 /// git error other than a missing object propagates, so the caller can render
 /// "reachability unknown".
 pub fn enrich_liveness(
-    view: &ReviewUnitCommitRangeView,
+    view: &RevisionCommitRangeView,
     repo: &Path,
     integration_ref: Option<&str>,
 ) -> Result<LivenessEnrichment> {
@@ -349,8 +349,8 @@ mod tests {
         }
     }
 
-    fn view_with(oids: &[&str]) -> ReviewUnitCommitRangeView {
-        ReviewUnitCommitRangeView {
+    fn view_with(oids: &[&str]) -> RevisionCommitRangeView {
+        RevisionCommitRangeView {
             revision_id: RevisionId::new("review-unit:sha256:test"),
             anchored: !oids.is_empty(),
             current_commits: oids

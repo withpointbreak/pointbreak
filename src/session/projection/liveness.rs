@@ -72,7 +72,7 @@ impl LivenessToken {
 mod tests {
     use super::*;
     use crate::model::{
-        EngagementId, JournalId, ObjectId, ReviewEndpoint, ReviewUnitSource, RevisionId,
+        EngagementId, JournalId, ObjectId, ReviewEndpoint, RevisionId, RevisionSource,
         WorktreeCaptureMode,
     };
     use crate::session::event::{
@@ -157,7 +157,7 @@ mod tests {
                         id: RevisionId::new(format!("rev:{revision_id}")),
                         object_id: ObjectId::new(format!("snap:{revision_id}")),
                         git_provenance: Some(GitProvenance {
-                            source: ReviewUnitSource::GitWorktree {
+                            source: RevisionSource::GitWorktree {
                                 mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
                                 include_untracked: true,
                             },

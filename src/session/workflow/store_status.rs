@@ -5,7 +5,7 @@ use serde::Serialize;
 use crate::error::Result;
 use crate::git::git_worktree_root;
 use crate::session::store::inventory::{
-    ArtifactInventoryEntry, ReviewUnitSnapshotInventory, StoreInventory, scan_store_inventory,
+    ArtifactInventoryEntry, RevisionSnapshotInventory, StoreInventory, scan_store_inventory,
 };
 use crate::session::store::resolution::resolve_store;
 use crate::session::store::sensitivity::{
@@ -135,8 +135,8 @@ impl From<ArtifactInventoryEntry> for StoreStatusArtifactInventory {
     }
 }
 
-impl From<ReviewUnitSnapshotInventory> for StoreStatusRevisionSnapshot {
-    fn from(snapshot: ReviewUnitSnapshotInventory) -> Self {
+impl From<RevisionSnapshotInventory> for StoreStatusRevisionSnapshot {
+    fn from(snapshot: RevisionSnapshotInventory) -> Self {
         Self {
             revision_ids: snapshot.revision_ids,
             snapshot_id: snapshot.snapshot_id,

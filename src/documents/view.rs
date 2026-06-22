@@ -122,7 +122,7 @@ pub enum InputRequestAssertionModeDocument {
     Advisory,
 }
 
-/// Documented current-assessment summary for a ReviewUnit.
+/// Documented current-assessment summary for a Revision.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CurrentAssessmentDocument {

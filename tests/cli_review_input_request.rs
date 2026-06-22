@@ -732,7 +732,7 @@ fn input_request_respond_reason_inputs_are_mutually_exclusive() {
 }
 
 #[test]
-fn input_request_open_requires_review_unit_when_current_is_ambiguous() {
+fn input_request_open_requires_revision_when_current_is_ambiguous() {
     let repo = modified_repo();
     let first =
         parse_json(&shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]).stdout);

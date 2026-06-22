@@ -248,7 +248,7 @@ fn list_run(args: ListArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::e
     let pretty = args.pretty && !args.compact;
     let mut options = ListAssociationsOptions::new(&args.repo).current_only(args.current);
     if let Some(revision) = args.revision {
-        options = options.with_review_unit_id(RevisionId::new(revision));
+        options = options.with_revision_id(RevisionId::new(revision));
     }
     if let Some(axis) = args.axis {
         options = options.with_axis(axis.into());
@@ -262,7 +262,7 @@ fn list_run(args: ListArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::e
 /// local trait.
 fn with_selection<O: AssociationSelection>(mut options: O, revision: Option<String>) -> O {
     if let Some(revision) = revision {
-        options = options.with_review_unit_id(RevisionId::new(revision));
+        options = options.with_revision_id(RevisionId::new(revision));
     }
     options
 }
@@ -283,14 +283,14 @@ fn apply_signer<O: SignableOptions>(
 }
 
 trait AssociationSelection {
-    fn with_review_unit_id(self, id: RevisionId) -> Self;
+    fn with_revision_id(self, id: RevisionId) -> Self;
 }
 
 macro_rules! impl_association_selection {
     ($($ty:ty),+ $(,)?) => {$(
         impl AssociationSelection for $ty {
-            fn with_review_unit_id(self, id: RevisionId) -> Self {
-                <$ty>::with_review_unit_id(self, id)
+            fn with_revision_id(self, id: RevisionId) -> Self {
+                <$ty>::with_revision_id(self, id)
             }
         }
     )+};

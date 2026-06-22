@@ -19,9 +19,9 @@ pub(super) struct HistoryArgs {
     #[arg(long, default_value = ".")]
     repo: PathBuf,
 
-    /// Filter to one captured ReviewUnit by id.
+    /// Filter to one captured Revision by id.
     #[arg(long)]
-    review_unit: Option<String>,
+    revision: Option<String>,
 
     /// Filter to one review track, such as agent:codex.
     #[arg(long)]
@@ -74,10 +74,10 @@ enum HistoryEventTypeArg {
     InputRequestOpened,
     InputRequestResponded,
     ReviewNoteImported,
-    ReviewUnitRefAssociated,
-    ReviewUnitRefWithdrawn,
-    ReviewUnitCommitAssociated,
-    ReviewUnitCommitWithdrawn,
+    RevisionRefAssociated,
+    RevisionRefWithdrawn,
+    RevisionCommitAssociated,
+    RevisionCommitWithdrawn,
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -139,8 +139,8 @@ fn watch(args: &HistoryArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::
 
 fn history_options(args: &HistoryArgs) -> ReviewHistoryOptions {
     let mut options = ReviewHistoryOptions::new(&args.repo).with_include_body(args.include_body);
-    if let Some(review_unit) = &args.review_unit {
-        options = options.with_review_unit_id(RevisionId::new(review_unit.clone()));
+    if let Some(revision) = &args.revision {
+        options = options.with_revision_id(RevisionId::new(revision.clone()));
     }
     if let Some(track) = &args.track {
         options = options.with_track(track.clone());
@@ -173,10 +173,10 @@ impl From<HistoryEventTypeArg> for EventType {
             HistoryEventTypeArg::InputRequestOpened => Self::InputRequestOpened,
             HistoryEventTypeArg::InputRequestResponded => Self::InputRequestResponded,
             HistoryEventTypeArg::ReviewNoteImported => Self::ReviewNoteImported,
-            HistoryEventTypeArg::ReviewUnitRefAssociated => Self::RevisionRefAssociated,
-            HistoryEventTypeArg::ReviewUnitRefWithdrawn => Self::RevisionRefWithdrawn,
-            HistoryEventTypeArg::ReviewUnitCommitAssociated => Self::RevisionCommitAssociated,
-            HistoryEventTypeArg::ReviewUnitCommitWithdrawn => Self::RevisionCommitWithdrawn,
+            HistoryEventTypeArg::RevisionRefAssociated => Self::RevisionRefAssociated,
+            HistoryEventTypeArg::RevisionRefWithdrawn => Self::RevisionRefWithdrawn,
+            HistoryEventTypeArg::RevisionCommitAssociated => Self::RevisionCommitAssociated,
+            HistoryEventTypeArg::RevisionCommitWithdrawn => Self::RevisionCommitWithdrawn,
         }
     }
 }

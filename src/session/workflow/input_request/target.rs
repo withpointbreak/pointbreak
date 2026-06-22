@@ -4,12 +4,12 @@ use crate::error::{Result, ShoreError};
 use crate::model::{ObservationId, ReviewTargetRef, Side};
 use crate::session::event::{EventType, ReviewObservationRecordedPayload, ShoreEvent};
 use crate::session::observation::{
-    ObservationTargetSelector, ResolvedReviewUnit, resolve_observation_target,
+    ObservationTargetSelector, ResolvedRevision, resolve_observation_target,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InputRequestTargetSelector {
-    ReviewUnit,
+    Revision,
     File {
         path: String,
     },
@@ -25,8 +25,8 @@ pub enum InputRequestTargetSelector {
 }
 
 impl InputRequestTargetSelector {
-    pub fn review_unit() -> Self {
-        Self::ReviewUnit
+    pub fn revision() -> Self {
+        Self::Revision
     }
 
     pub fn file(path: impl Into<String>) -> Self {
@@ -55,12 +55,12 @@ impl InputRequestTargetSelector {
 pub(super) fn resolve_input_request_target(
     repo: &Path,
     events: &[ShoreEvent],
-    resolved: &ResolvedReviewUnit,
+    resolved: &ResolvedRevision,
     selector: &InputRequestTargetSelector,
 ) -> Result<ReviewTargetRef> {
     match selector {
-        InputRequestTargetSelector::ReviewUnit => {
-            resolve_observation_target(repo, resolved, &ObservationTargetSelector::review_unit())
+        InputRequestTargetSelector::Revision => {
+            resolve_observation_target(repo, resolved, &ObservationTargetSelector::revision())
         }
         InputRequestTargetSelector::File { path } => {
             resolve_observation_target(repo, resolved, &ObservationTargetSelector::file(path))
@@ -83,7 +83,7 @@ pub(super) fn resolve_input_request_target(
 
 fn resolve_native_observation_target(
     events: &[ShoreEvent],
-    resolved: &ResolvedReviewUnit,
+    resolved: &ResolvedRevision,
     observation_id: &ObservationId,
 ) -> Result<ReviewTargetRef> {
     for event in events

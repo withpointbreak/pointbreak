@@ -9,7 +9,7 @@ mod git_repo;
 use git_repo::GitRepo;
 
 #[test]
-fn review_capture_creates_review_unit_from_subdir() {
+fn review_capture_creates_revision_from_subdir() {
     let repo = modified_repo();
     let subdir = repo.path().join("src");
 

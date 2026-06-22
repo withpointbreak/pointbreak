@@ -82,7 +82,7 @@ fn write_is_byte_identical_with_or_without_a_liveness_read() {
 
 #[test]
 fn dropped_change_signal_neither_unwrites_nor_fails_the_write() {
-    let (repo, _review_unit_id) = repo_with_one_capture();
+    let (repo, _revision_id) = repo_with_one_capture();
 
     // The durable write has already landed.
     let durable = event_fingerprints(repo.path());

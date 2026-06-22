@@ -20,7 +20,7 @@ pub(crate) struct StoreInventory {
     pub total_bytes: u64,
     pub untracked_bytes: Option<u64>,
     pub largest_artifacts: Vec<ArtifactInventoryEntry>,
-    pub revision_snapshots: Vec<ReviewUnitSnapshotInventory>,
+    pub revision_snapshots: Vec<RevisionSnapshotInventory>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -33,7 +33,7 @@ pub(crate) struct ArtifactInventoryEntry {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ReviewUnitSnapshotInventory {
+pub(crate) struct RevisionSnapshotInventory {
     /// The review units that captured this snapshot, sorted and deduped. Under
     /// the snapshot-scoped artifact one artifact may be shared by several units, so
     /// identity is joined from the capture events keyed by `snapshot_id`, never
@@ -108,7 +108,7 @@ fn scan_snapshot_artifacts(
     snapshots_dir: &Path,
     capture_owners: &BTreeMap<String, BTreeSet<String>>,
     artifacts: &mut Vec<ArtifactInventoryEntry>,
-    snapshots: &mut Vec<ReviewUnitSnapshotInventory>,
+    snapshots: &mut Vec<RevisionSnapshotInventory>,
 ) -> Result<(usize, u64)> {
     let mut count = 0;
     let mut bytes = 0;
@@ -135,7 +135,7 @@ fn scan_snapshot_artifacts(
             artifact_kind: "snapshot".to_owned(),
             byte_size,
         });
-        snapshots.push(ReviewUnitSnapshotInventory {
+        snapshots.push(RevisionSnapshotInventory {
             revision_ids,
             snapshot_id,
             artifact_ref,
@@ -303,7 +303,7 @@ mod tests {
     };
 
     #[test]
-    fn review_unit_snapshots_list_all_capturing_units_for_a_shared_snapshot() {
+    fn revision_snapshots_list_all_capturing_units_for_a_shared_snapshot() {
         let repo = TestRepo::new();
         repo.write("README.md", "base\n");
         repo.commit_all("base");

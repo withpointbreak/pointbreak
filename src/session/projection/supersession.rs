@@ -432,7 +432,7 @@ mod tests {
         use super::super::*;
         use super::rev;
         use crate::model::{
-            EngagementId, JournalId, ObjectId, ReviewEndpoint, ReviewUnitSource, TargetRef,
+            EngagementId, JournalId, ObjectId, ReviewEndpoint, RevisionSource, TargetRef,
             TaskTargetRef, WorkObjectId, WorktreeCaptureMode,
         };
         use crate::session::event::{EventTarget, GitProvenance, Revision, Writer};
@@ -455,7 +455,7 @@ mod tests {
                             id: revision_id,
                             object_id: ObjectId::new(format!("obj:sha256:{suffix}")),
                             git_provenance: Some(GitProvenance {
-                                source: ReviewUnitSource::GitWorktree {
+                                source: RevisionSource::GitWorktree {
                                     mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
                                     include_untracked: true,
                                 },

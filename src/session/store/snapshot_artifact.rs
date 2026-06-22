@@ -6,7 +6,7 @@ use crate::canonical_hash::sha256_json_prefixed;
 use crate::error::{Result, ShoreError};
 use crate::model::{DiffSnapshot, ObjectId};
 use crate::session::store::resolution::resolve_read_store;
-use crate::session::{ReviewUnitFingerprint, ShoreStorePaths};
+use crate::session::{RevisionFingerprint, ShoreStorePaths};
 use crate::storage::{CreateFileOutcome, Durability, LocalStorage};
 
 const SNAPSHOT_ARTIFACT_SCHEMA: &str = "shore.snapshot";
@@ -39,7 +39,7 @@ pub struct SnapshotArtifact {
 /// a loud conflict.
 pub(crate) fn write_snapshot_artifact_to(
     store_dir: &Path,
-    fingerprint: &ReviewUnitFingerprint,
+    fingerprint: &RevisionFingerprint,
     snapshot: DiffSnapshot,
 ) -> Result<SnapshotArtifact> {
     if snapshot.snapshot_id != fingerprint.snapshot_id {
@@ -239,7 +239,7 @@ mod tests {
     use crate::model::{DiffSnapshot, ObjectId, ReviewId};
     use crate::session::store::resolution::resolve_store;
     use crate::session::{
-        CaptureOptions, CommitRangeSpec, capture_review, compute_review_unit_fingerprint,
+        CaptureOptions, CommitRangeSpec, capture_review, compute_revision_fingerprint,
         read_snapshot_artifact,
     };
 
@@ -397,7 +397,7 @@ mod tests {
         // existing artifact, never rewriting it.
         let repo = modified_repo();
         let files = capture_worktree_diff_files(repo.path()).unwrap();
-        let fingerprint = compute_review_unit_fingerprint(repo.path()).unwrap();
+        let fingerprint = compute_revision_fingerprint(repo.path()).unwrap();
         let snapshot = DiffSnapshot::new(
             ReviewId::new("review:default"),
             fingerprint.snapshot_id.clone(),
@@ -428,7 +428,7 @@ mod tests {
         repo.write("docs/example.md", added);
 
         let files = capture_worktree_diff_files(repo.path()).unwrap();
-        let fingerprint = compute_review_unit_fingerprint(repo.path()).unwrap();
+        let fingerprint = compute_revision_fingerprint(repo.path()).unwrap();
         let snapshot = DiffSnapshot::new(
             ReviewId::new("review:default"),
             fingerprint.snapshot_id.clone(),
@@ -542,7 +542,7 @@ mod tests {
         let repo = modified_repo();
         fs::create_dir_all(repo.path().join("src")).unwrap();
         let files = capture_worktree_diff_files(repo.path()).unwrap();
-        let fingerprint = compute_review_unit_fingerprint(repo.path()).unwrap();
+        let fingerprint = compute_revision_fingerprint(repo.path()).unwrap();
         let snapshot = DiffSnapshot::new(
             ReviewId::new("review:default"),
             fingerprint.snapshot_id.clone(),
@@ -584,7 +584,7 @@ mod tests {
     #[test]
     fn write_validation_artifact_read_missing_everywhere_errors_clearly() {
         let repo = modified_repo();
-        let fingerprint = compute_review_unit_fingerprint(repo.path()).unwrap();
+        let fingerprint = compute_revision_fingerprint(repo.path()).unwrap();
 
         let error =
             read_snapshot_artifact_for_write_validation(repo.path(), &fingerprint.snapshot_id)
@@ -610,7 +610,7 @@ mod tests {
     /// production read surface on the same store.
     fn write_snapshot_artifact(
         repo: impl AsRef<Path>,
-        fingerprint: &ReviewUnitFingerprint,
+        fingerprint: &RevisionFingerprint,
         snapshot: DiffSnapshot,
     ) -> Result<SnapshotArtifact> {
         let store_dir = resolve_store(repo.as_ref())?.store_dir().to_path_buf();
@@ -619,7 +619,7 @@ mod tests {
 
     fn write_current_snapshot_artifact(repo: &TestRepo) -> SnapshotArtifact {
         let files = capture_worktree_diff_files(repo.path()).unwrap();
-        let fingerprint = compute_review_unit_fingerprint(repo.path()).unwrap();
+        let fingerprint = compute_revision_fingerprint(repo.path()).unwrap();
         let snapshot = DiffSnapshot::new(
             ReviewId::new("review:default"),
             fingerprint.snapshot_id.clone(),

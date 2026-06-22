@@ -184,7 +184,7 @@ mod tests {
     };
 
     #[test]
-    fn project_validation_checks_filters_by_review_unit() {
+    fn project_validation_checks_filters_by_revision() {
         let events = vec![
             validation_event(
                 "evt:sha256:0001",

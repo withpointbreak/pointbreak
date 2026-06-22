@@ -31,7 +31,7 @@ pub(super) struct AssessmentAddArgs {
     #[arg(long, default_value = ".")]
     repo: PathBuf,
 
-    /// Captured ReviewUnit to assess; defaults to the single captured unit.
+    /// Captured Revision to assess; defaults to the single captured unit.
     #[arg(long)]
     revision: Option<String>,
 
@@ -113,7 +113,7 @@ pub(super) struct AssessmentShowArgs {
     #[arg(long, default_value = ".")]
     repo: PathBuf,
 
-    /// Captured ReviewUnit to read; defaults to the single captured unit.
+    /// Captured Revision to read; defaults to the single captured unit.
     #[arg(long)]
     revision: Option<String>,
 
@@ -220,7 +220,7 @@ pub(super) fn assessment_add_options(
         .with_target_selector(target);
 
     if let Some(revision) = args.revision {
-        options = options.with_review_unit_id(RevisionId::new(revision));
+        options = options.with_revision_id(RevisionId::new(revision));
     }
     if let Some(summary) = summary {
         options = options.with_summary(summary);
@@ -254,7 +254,7 @@ pub(super) fn assessment_show_options(args: AssessmentShowArgs) -> AssessmentSho
         .with_all(args.all)
         .with_include_summary(args.include_summary);
     if let Some(revision) = args.revision {
-        options = options.with_review_unit_id(RevisionId::new(revision));
+        options = options.with_revision_id(RevisionId::new(revision));
     }
     if let Some(track) = args.track {
         options = options.with_track(track);
@@ -315,7 +315,7 @@ pub(super) fn assessment_target(
         )),
         (Some(file), None) => Ok(AssessmentTargetSelector::file(file.clone())),
         (None, Some(_)) => Err("file is required when selecting assessment lines".into()),
-        (None, None) => Ok(AssessmentTargetSelector::review_unit()),
+        (None, None) => Ok(AssessmentTargetSelector::revision()),
     }
 }
 

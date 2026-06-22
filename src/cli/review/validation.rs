@@ -183,7 +183,7 @@ fn validation_add_options(
         .with_trigger(args.trigger.into());
 
     if let Some(revision) = args.revision {
-        options = options.with_review_unit_id(RevisionId::new(revision));
+        options = options.with_revision_id(RevisionId::new(revision));
     }
     if let Some(command) = args.command {
         options = options.with_command(command);
@@ -224,7 +224,7 @@ fn validation_add_options(
 fn validation_list_options(args: ValidationListArgs) -> ValidationListOptions {
     let mut options = ValidationListOptions::new(&args.repo).with_include_body(args.include_body);
     if let Some(revision) = args.revision {
-        options = options.with_review_unit_id(RevisionId::new(revision));
+        options = options.with_revision_id(RevisionId::new(revision));
     }
     if let Some(track) = args.track {
         options = options.with_track(track);

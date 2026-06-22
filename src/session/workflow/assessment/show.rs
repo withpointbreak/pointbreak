@@ -7,8 +7,7 @@ use crate::error::Result;
 use crate::model::{RevisionId, TrackId};
 use crate::session::EventStore;
 use crate::session::observation::{
-    CurrentReviewUnitContext, ReviewUnitScope, RevisionSelection, resolve_revision,
-    validated_track_id,
+    CurrentRevisionContext, RevisionScope, RevisionSelection, resolve_revision, validated_track_id,
 };
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::resolution::resolve_read_store;
@@ -33,7 +32,7 @@ impl AssessmentShowOptions {
         }
     }
 
-    pub fn with_review_unit_id(mut self, id: RevisionId) -> Self {
+    pub fn with_revision_id(mut self, id: RevisionId) -> Self {
         self.revision_id = Some(id);
         self
     }
@@ -76,8 +75,8 @@ pub fn show_assessments(options: AssessmentShowOptions) -> Result<AssessmentShow
     let resolved = resolve_revision(
         &events,
         RevisionSelection::from_revision_seed(options.revision_id.as_ref()),
-        &CurrentReviewUnitContext::for_repo(&options.repo)?,
-        ReviewUnitScope::default(),
+        &CurrentRevisionContext::for_repo(&options.repo)?,
+        RevisionScope::default(),
     )?;
     let track_filter = options
         .track

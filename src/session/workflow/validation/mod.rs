@@ -25,7 +25,7 @@ mod tests {
     use crate::session::{CaptureOptions, EventStore, capture_worktree_review};
 
     #[test]
-    fn record_validation_check_writes_event_and_resolves_current_review_unit() {
+    fn record_validation_check_writes_event_and_resolves_current_revision() {
         let repo = modified_repo();
         let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
 
@@ -51,13 +51,13 @@ mod tests {
     }
 
     #[test]
-    fn record_validation_check_constructs_review_unit_validation_target() {
+    fn record_validation_check_constructs_revision_validation_target() {
         let repo = modified_repo();
         let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
 
         record_validation_check(
             ValidationAddOptions::new(repo.path())
-                .with_review_unit_id(capture.revision_id.clone())
+                .with_revision_id(capture.revision_id.clone())
                 .with_track("agent:codex")
                 .with_check_name("cargo test")
                 .with_status(ValidationStatus::Passed),

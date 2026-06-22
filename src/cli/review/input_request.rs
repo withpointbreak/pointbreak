@@ -305,7 +305,7 @@ fn input_request_open_options(
         .with_target(target);
 
     if let Some(revision) = args.revision {
-        options = options.with_review_unit_id(RevisionId::new(revision));
+        options = options.with_revision_id(RevisionId::new(revision));
     }
     if let Some(body) = body {
         options = options.with_body(body);
@@ -330,7 +330,7 @@ fn input_request_list_options(args: InputRequestListArgs) -> InputRequestListOpt
         .with_status(args.status.into())
         .with_include_body(args.include_body);
     if let Some(revision) = args.revision {
-        options = options.with_review_unit_id(RevisionId::new(revision));
+        options = options.with_revision_id(RevisionId::new(revision));
     }
     if let Some(track) = args.track {
         options = options.with_track(track);
@@ -402,7 +402,7 @@ fn input_request_target(
         )),
         (Some(file), None) => Ok(InputRequestTargetSelector::file(file.clone())),
         (None, Some(_)) => Err("file is required when selecting input request lines".into()),
-        (None, None) => Ok(InputRequestTargetSelector::review_unit()),
+        (None, None) => Ok(InputRequestTargetSelector::revision()),
     }
 }
 

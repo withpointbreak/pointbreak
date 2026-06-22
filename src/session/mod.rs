@@ -30,7 +30,7 @@ pub use projection::{
     ArtifactRemovalProjection, CommitEdgeSource, CommitOidGroupingProjection,
     CurrentCommitAssociation, CurrentRefAssociation, EngagementGrouping, EngagementLifecycle,
     EngagementView, LivenessScope, LivenessToken, ProjectionDiagnostic,
-    ReviewUnitCommitRangeProjection, ReviewUnitCommitRangeView, RevisionsByBase, SessionState,
+    RevisionCommitRangeProjection, RevisionCommitRangeView, RevisionsByBase, SessionState,
     SupersessionView, WithdrawnCommitAssociation, WithdrawnRefAssociation,
     load_durable_notes_for_repo, read_events, rebuild_state,
 };
@@ -45,9 +45,9 @@ pub use signing::{
 };
 pub(crate) use signing::{sign_event_if_requested, verify_events_for_ingest};
 #[cfg(test)]
-pub(crate) use store::compute_review_unit_fingerprint;
+pub(crate) use store::compute_revision_fingerprint;
 pub(crate) use store::{
-    EventStore, EventWriteOutcome, ReviewUnitFingerprint, ShoreStorePaths, sweep_stale_temp_files,
+    EventStore, EventWriteOutcome, RevisionFingerprint, ShoreStorePaths, sweep_stale_temp_files,
     worktree_fingerprint_for_files,
 };
 pub use store::{
@@ -77,23 +77,23 @@ pub use workflow::{
     ObservationStatus, ObservationTargetSelector, ObservationView, OrphanReason, OrphanVisibility,
     RefFilterMode, ReloadDiagnostic, ReloadDiagnosticCode, ReloadOutcome, RemoveOptions,
     RemoveResult, RemoveSelector, RemovedContent, ReviewHistoryEntry, ReviewHistoryFilters,
-    ReviewHistoryOptions, ReviewHistoryResult, ReviewUnitListEntry, ReviewUnitListOptions,
-    ReviewUnitListResult, ReviewUnitProjectionIdentity, ReviewUnitProjectionRow,
-    ReviewUnitProjectionSummary, ReviewUnitShowFilters, ReviewUnitShowOptions,
-    ReviewUnitShowResult, SnapshotOrder, StoreMigrateResult, StoreStatusArtifactInventory,
-    StoreStatusInventory, StoreStatusOptions, StoreStatusResult, StoreStatusRevisionSnapshot,
-    StoreStatusSensitivity, StoreStatusSensitivityFinding, SweepOutcome, SweptBlob,
-    ValidationAddOptions, ValidationAddResult, ValidationCheckProjectionOptions,
-    ValidationCheckView, ValidationListFilters, ValidationListOptions, ValidationListResult,
-    WithdrawCommitOptions, WithdrawCommitResult, WithdrawRefOptions, WithdrawRefResult,
-    associate_commit, associate_ref, capture_review, capture_worktree_review, compact_store,
-    enrich_liveness, export_artifact, fetch_input_request, import_artifact, import_event,
-    import_notes, ingest_events, list_associations, list_input_requests, list_observations,
-    list_review_units, list_units_for_ref, list_validation_checks, migrate_store,
-    migrate_store_to_common_dir, open_input_request, project_validation_checks, record_assessment,
-    record_event_signature, record_observation, record_validation_check, referenced_artifacts,
-    reload_session, remove_content, respond_input_request, review_history, show_assessments,
-    show_review_unit, store_status, withdraw_commit, withdraw_ref,
+    ReviewHistoryOptions, ReviewHistoryResult, RevisionListEntry, RevisionListOptions,
+    RevisionListResult, RevisionProjectionIdentity, RevisionProjectionRow,
+    RevisionProjectionSummary, RevisionShowFilters, RevisionShowOptions, RevisionShowResult,
+    SnapshotOrder, StoreMigrateResult, StoreStatusArtifactInventory, StoreStatusInventory,
+    StoreStatusOptions, StoreStatusResult, StoreStatusRevisionSnapshot, StoreStatusSensitivity,
+    StoreStatusSensitivityFinding, SweepOutcome, SweptBlob, ValidationAddOptions,
+    ValidationAddResult, ValidationCheckProjectionOptions, ValidationCheckView,
+    ValidationListFilters, ValidationListOptions, ValidationListResult, WithdrawCommitOptions,
+    WithdrawCommitResult, WithdrawRefOptions, WithdrawRefResult, associate_commit, associate_ref,
+    capture_review, capture_worktree_review, compact_store, enrich_liveness, export_artifact,
+    fetch_input_request, import_artifact, import_event, import_notes, ingest_events,
+    list_associations, list_input_requests, list_observations, list_revisions, list_units_for_ref,
+    list_validation_checks, migrate_store, migrate_store_to_common_dir, open_input_request,
+    project_validation_checks, record_assessment, record_event_signature, record_observation,
+    record_validation_check, referenced_artifacts, reload_session, remove_content,
+    respond_input_request, review_history, show_assessments, show_revision, store_status,
+    withdraw_commit, withdraw_ref,
 };
 pub(in crate::session) use workflow::{assessment, input_request, observation};
 

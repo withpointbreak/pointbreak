@@ -7,7 +7,7 @@ use crate::error::{Result, ShoreError};
 use crate::git::{capture_worktree_diff_files, git_head_oid, git_head_tree_oid, git_worktree_root};
 use crate::model::{
     CommitRangeCaptureMode, DiffFile, DiffRowKind, EngagementId, FileStatus, ObjectId,
-    ReviewEndpoint, ReviewUnitSource, RevisionId, WorktreeCaptureMode,
+    ReviewEndpoint, RevisionId, RevisionSource, WorktreeCaptureMode,
 };
 use crate::session::event::GitProvenance;
 
@@ -29,16 +29,16 @@ pub struct WorktreeFingerprint {
 /// storage key; the artifact subsystem retains its "snapshot" naming, only the
 /// id semantics are the content-only object.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReviewUnitFingerprint {
+pub struct RevisionFingerprint {
     pub revision_id: RevisionId,
     pub snapshot_id: ObjectId,
     pub engagement_id: EngagementId,
-    pub source: ReviewUnitSource,
+    pub source: RevisionSource,
     pub base: ReviewEndpoint,
     pub target: ReviewEndpoint,
 }
 
-impl ReviewUnitFingerprint {
+impl RevisionFingerprint {
     /// The git provenance the revision wraps: the resolved source selector and
     /// endpoint pair. Always present on the live git capture path.
     pub fn git_provenance(&self) -> GitProvenance {
@@ -51,8 +51,8 @@ impl ReviewUnitFingerprint {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ResolvedReviewUnitEndpoints {
-    pub source: ReviewUnitSource,
+pub(crate) struct ResolvedRevisionEndpoints {
+    pub source: RevisionSource,
     pub base: ReviewEndpoint,
     pub target: ReviewEndpoint,
 }
@@ -72,10 +72,10 @@ pub fn capture_worktree_fingerprint(repo: &Path) -> Result<WorktreeFingerprint> 
 }
 
 #[cfg(test)]
-pub fn compute_review_unit_fingerprint(repo: &Path) -> Result<ReviewUnitFingerprint> {
+pub fn compute_revision_fingerprint(repo: &Path) -> Result<RevisionFingerprint> {
     let files = capture_worktree_diff_files(repo)?;
     let files = exclude_shore_storage_files(files);
-    review_unit_fingerprint_for_files(repo, &files)
+    revision_fingerprint_for_files(repo, &files)
 }
 
 pub(crate) fn worktree_fingerprint_for_files(
@@ -99,9 +99,9 @@ pub(crate) fn worktree_fingerprint_for_files(
 
 pub(crate) fn resolve_combined_worktree_endpoints(
     repo: &Path,
-) -> Result<ResolvedReviewUnitEndpoints> {
-    Ok(ResolvedReviewUnitEndpoints {
-        source: ReviewUnitSource::GitWorktree {
+) -> Result<ResolvedRevisionEndpoints> {
+    Ok(ResolvedRevisionEndpoints {
+        source: RevisionSource::GitWorktree {
             mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
             include_untracked: true,
         },
@@ -121,9 +121,9 @@ pub(crate) fn resolve_combined_worktree_endpoints(
 pub(crate) fn resolve_commit_range_endpoints(
     base: &ResolvedCommitEndpoint,
     target: &ResolvedCommitEndpoint,
-) -> ResolvedReviewUnitEndpoints {
-    ResolvedReviewUnitEndpoints {
-        source: ReviewUnitSource::GitCommitRange {
+) -> ResolvedRevisionEndpoints {
+    ResolvedRevisionEndpoints {
+        source: RevisionSource::GitCommitRange {
             mode: CommitRangeCaptureMode::BaseTreeToTargetTree,
         },
         base: ReviewEndpoint::GitCommit {
@@ -137,27 +137,27 @@ pub(crate) fn resolve_commit_range_endpoints(
     }
 }
 
-pub(crate) fn review_unit_fingerprint_for_files(
+pub(crate) fn revision_fingerprint_for_files(
     repo: &Path,
     files: &[DiffFile],
-) -> Result<ReviewUnitFingerprint> {
+) -> Result<RevisionFingerprint> {
     let endpoints = resolve_combined_worktree_endpoints(repo)?;
-    review_unit_fingerprint_from_parts(endpoints, files)
+    revision_fingerprint_from_parts(endpoints, files)
 }
 
 /// Range fingerprint over the commit-range source and resolved endpoint pair.
 /// The content-only object id converges for identical content; the revision id
 /// distinguishes the range from a worktree capture of the same content via its
 /// git provenance.
-pub(crate) fn commit_range_review_unit_fingerprint_for_files(
+pub(crate) fn commit_range_revision_fingerprint_for_files(
     repo: &Path,
     base: &ResolvedCommitEndpoint,
     target: &ResolvedCommitEndpoint,
     files: &[DiffFile],
-) -> Result<ReviewUnitFingerprint> {
+) -> Result<RevisionFingerprint> {
     let _ = repo;
     let endpoints = resolve_commit_range_endpoints(base, target);
-    review_unit_fingerprint_from_parts(endpoints, files)
+    revision_fingerprint_from_parts(endpoints, files)
 }
 
 /// Shared identity tail for every source adapter. Mints the content-only object
@@ -166,10 +166,10 @@ pub(crate) fn commit_range_review_unit_fingerprint_for_files(
 /// engagement grouping hint from the revision (every capture is a root here, so
 /// it seeds from its own revision). The repo namespace and git OIDs stay out of
 /// the content object id; they live in the provenance the revision wraps.
-fn review_unit_fingerprint_from_parts(
-    endpoints: ResolvedReviewUnitEndpoints,
+fn revision_fingerprint_from_parts(
+    endpoints: ResolvedRevisionEndpoints,
     files: &[DiffFile],
-) -> Result<ReviewUnitFingerprint> {
+) -> Result<RevisionFingerprint> {
     let object_id = object_identity(files);
     let provenance = GitProvenance {
         source: endpoints.source.clone(),
@@ -179,7 +179,7 @@ fn review_unit_fingerprint_from_parts(
     let revision_id = revision_id_from(&object_id, Some(&provenance))?;
     let engagement_id = engagement_id_from_root(&revision_id);
 
-    Ok(ReviewUnitFingerprint {
+    Ok(RevisionFingerprint {
         revision_id,
         snapshot_id: object_id,
         engagement_id,
@@ -367,7 +367,7 @@ mod tests {
     };
     use crate::model::{
         CommitRangeCaptureMode, DiffFile, DiffRow, DiffRowKind, FileId, FileStatus, HunkId,
-        ReviewEndpoint, ReviewHunk, ReviewUnitSource,
+        ReviewEndpoint, ReviewHunk, RevisionSource,
     };
 
     fn content_diff_row(
@@ -565,7 +565,7 @@ mod tests {
 
         assert!(matches!(
             endpoints.source,
-            ReviewUnitSource::GitWorktree { .. }
+            RevisionSource::GitWorktree { .. }
         ));
         match endpoints.base {
             ReviewEndpoint::GitCommit {
@@ -592,8 +592,8 @@ mod tests {
     #[test]
     fn revision_id_is_stable_for_same_captured_snapshot() {
         let repo = modified_repo();
-        let first = compute_review_unit_fingerprint(repo.path()).unwrap();
-        let second = compute_review_unit_fingerprint(repo.path()).unwrap();
+        let first = compute_revision_fingerprint(repo.path()).unwrap();
+        let second = compute_revision_fingerprint(repo.path()).unwrap();
 
         assert_eq!(first.snapshot_id, second.snapshot_id);
         assert_eq!(first.revision_id, second.revision_id);
@@ -603,10 +603,10 @@ mod tests {
     #[test]
     fn tracked_or_untracked_content_changes_revision_id() {
         let repo = modified_repo();
-        let first = compute_review_unit_fingerprint(repo.path()).unwrap();
+        let first = compute_revision_fingerprint(repo.path()).unwrap();
 
         repo.write("new.txt", "new untracked file\n");
-        let second = compute_review_unit_fingerprint(repo.path()).unwrap();
+        let second = compute_revision_fingerprint(repo.path()).unwrap();
 
         assert_ne!(first.snapshot_id, second.snapshot_id);
         assert_ne!(first.revision_id, second.revision_id);
@@ -615,11 +615,11 @@ mod tests {
     #[test]
     fn shore_directory_is_excluded_from_revision_identity() {
         let repo = modified_repo();
-        let first = compute_review_unit_fingerprint(repo.path()).unwrap();
+        let first = compute_revision_fingerprint(repo.path()).unwrap();
 
         fs::create_dir_all(repo.path().join(".shore/data/events")).unwrap();
         fs::write(repo.path().join(".shore/data/events/noise.json"), "{}").unwrap();
-        let second = compute_review_unit_fingerprint(repo.path()).unwrap();
+        let second = compute_revision_fingerprint(repo.path()).unwrap();
 
         assert_eq!(first.revision_id, second.revision_id);
     }
@@ -648,8 +648,8 @@ mod tests {
         let repo_a = modified_repo();
         let repo_b = modified_repo();
 
-        let first = compute_review_unit_fingerprint(repo_a.path()).unwrap();
-        let second = compute_review_unit_fingerprint(repo_b.path()).unwrap();
+        let first = compute_revision_fingerprint(repo_a.path()).unwrap();
+        let second = compute_revision_fingerprint(repo_b.path()).unwrap();
 
         assert_ne!(
             repo_a.path().canonicalize().unwrap(),
@@ -677,7 +677,7 @@ mod tests {
 
         assert!(matches!(
             endpoints.source,
-            ReviewUnitSource::GitCommitRange {
+            RevisionSource::GitCommitRange {
                 mode: CommitRangeCaptureMode::BaseTreeToTargetTree
             }
         ));
@@ -702,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    fn commit_range_review_unit_id_is_stable_for_same_range() {
+    fn commit_range_revision_id_is_stable_for_same_range() {
         let repo = committed_repo();
         let base = resolved_endpoint(repo.path(), "HEAD~1");
         let target = resolved_endpoint(repo.path(), "HEAD");
@@ -711,10 +711,10 @@ mod tests {
                 .unwrap();
 
         let first =
-            commit_range_review_unit_fingerprint_for_files(repo.path(), &base, &target, &files)
+            commit_range_revision_fingerprint_for_files(repo.path(), &base, &target, &files)
                 .unwrap();
         let second =
-            commit_range_review_unit_fingerprint_for_files(repo.path(), &base, &target, &files)
+            commit_range_revision_fingerprint_for_files(repo.path(), &base, &target, &files)
                 .unwrap();
 
         assert_eq!(first.snapshot_id, second.snapshot_id);
@@ -733,9 +733,9 @@ mod tests {
             capture_commit_range_diff_files(repo.path(), &base.commit_oid, &target.commit_oid)
                 .unwrap();
 
-        let worktree = review_unit_fingerprint_for_files(repo.path(), &files).unwrap();
+        let worktree = revision_fingerprint_for_files(repo.path(), &files).unwrap();
         let range =
-            commit_range_review_unit_fingerprint_for_files(repo.path(), &base, &target, &files)
+            commit_range_revision_fingerprint_for_files(repo.path(), &base, &target, &files)
                 .unwrap();
 
         assert_eq!(worktree.snapshot_id, range.snapshot_id);
@@ -745,7 +745,7 @@ mod tests {
     }
 
     #[test]
-    fn commit_range_review_unit_id_scopes_to_local_repo_namespace() {
+    fn commit_range_revision_id_scopes_to_local_repo_namespace() {
         let repo_a = committed_repo();
         let base_a = resolved_endpoint(repo_a.path(), "HEAD~1");
         let target_a = resolved_endpoint(repo_a.path(), "HEAD");
@@ -755,7 +755,7 @@ mod tests {
             &target_a.commit_oid,
         )
         .unwrap();
-        let first = commit_range_review_unit_fingerprint_for_files(
+        let first = commit_range_revision_fingerprint_for_files(
             repo_a.path(),
             &base_a,
             &target_a,
@@ -774,7 +774,7 @@ mod tests {
             &target_b.commit_oid,
         )
         .unwrap();
-        let second = commit_range_review_unit_fingerprint_for_files(
+        let second = commit_range_revision_fingerprint_for_files(
             repo_b.path(),
             &base_b,
             &target_b,

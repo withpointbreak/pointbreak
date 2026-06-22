@@ -304,24 +304,24 @@ mod tests {
         use crate::documents::unit_show_document;
         use crate::model::ValidationStatus;
         use crate::session::{
-            CaptureOptions, ReviewUnitShowOptions, ValidationAddOptions, capture_worktree_review,
-            record_validation_check, show_review_unit,
+            CaptureOptions, RevisionShowOptions, ValidationAddOptions, capture_worktree_review,
+            record_validation_check, show_revision,
         };
 
         let repo = modified_repo();
         let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         record_validation_check(
             ValidationAddOptions::new(repo.path())
-                .with_review_unit_id(capture.revision_id.clone())
+                .with_revision_id(capture.revision_id.clone())
                 .with_track("agent:codex")
                 .with_check_name("cargo test")
                 .with_status(ValidationStatus::Passed),
         )
         .unwrap();
 
-        let result = show_review_unit(
-            ReviewUnitShowOptions::new(repo.path())
-                .with_review_unit_id(capture.revision_id)
+        let result = show_revision(
+            RevisionShowOptions::new(repo.path())
+                .with_revision_id(capture.revision_id)
                 .with_include_body(true),
         )
         .unwrap();

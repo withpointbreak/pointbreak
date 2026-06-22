@@ -172,7 +172,7 @@ pub(crate) fn prepare_store_writer_at(
 /// Shoreline registers `.shore/data/` in the repository-local
 /// `.git/info/exclude` rather than the worktree `.gitignore`, so initializing or
 /// writing review state never dirties the working tree and never leaks an
-/// ignore-file edit into a captured ReviewUnit. The entry is the narrow
+/// ignore-file edit into a captured Revision. The entry is the narrow
 /// `.shore/data/` (not a wholesale `.shore/`) so committed config siblings —
 /// `.shore/delegates.json`, `.shore/allowed-signers.json` — stay tracked. If
 /// `.shore/data/` is already ignored by any standard source — a project

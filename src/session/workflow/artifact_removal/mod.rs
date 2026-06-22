@@ -31,7 +31,7 @@ use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::resolution::{prepare_write_landing, resolve_write_store};
 use crate::session::{
     ArtifactRemovalProjection, CommitGraphCondition, EventSigningOptions, EventStore,
-    EventWriteOutcome, OrphanReason, ReviewUnitCommitRangeProjection, current_timestamp,
+    EventWriteOutcome, OrphanReason, RevisionCommitRangeProjection, current_timestamp,
     enrich_liveness, referenced_artifacts, sign_event_if_requested, writer_from_options,
 };
 use crate::storage::{Durability, LocalStorage, RemoveOutcome};
@@ -43,7 +43,7 @@ pub enum RemoveSelector {
     /// A single snapshot's bound artifact content hash.
     Snapshot(ObjectId),
     /// Every content hash a review unit references.
-    ReviewUnit(RevisionId),
+    Revision(RevisionId),
     /// Content hashes of units anchored on the commit a ref resolves to.
     Ref(String),
     /// Content hashes of units anchored on a commit in the `<a>..<b>` range.
@@ -261,7 +261,7 @@ fn resolve_selector(
                 targeted_units,
             })
         }
-        RemoveSelector::ReviewUnit(revision_id) => {
+        RemoveSelector::Revision(revision_id) => {
             let mut targeted_units = BTreeSet::new();
             targeted_units.insert(revision_id.clone());
             Ok(selection_for_units(targeted_units, index))
@@ -334,7 +334,7 @@ fn units_anchored_on_oids(
     events: &[ShoreEvent],
     oids: &BTreeSet<String>,
 ) -> Result<BTreeSet<RevisionId>> {
-    let projection = ReviewUnitCommitRangeProjection::from_events(events)?;
+    let projection = RevisionCommitRangeProjection::from_events(events)?;
     Ok(projection
         .units
         .into_iter()
@@ -352,7 +352,7 @@ fn units_anchored_on_oids(
 /// whose reachability cannot be determined (a git error) degrades to unknown and
 /// is skipped rather than removed.
 fn orphaned_anchored_units(events: &[ShoreEvent], repo: &Path) -> Result<BTreeSet<RevisionId>> {
-    let projection = ReviewUnitCommitRangeProjection::from_events(events)?;
+    let projection = RevisionCommitRangeProjection::from_events(events)?;
     let mut units = BTreeSet::new();
     for (id, view) in projection.units {
         if view.current_commits.is_empty() {
@@ -712,13 +712,13 @@ mod tests {
     }
 
     #[test]
-    fn remove_by_review_unit_resolves_all_referenced_hashes() {
+    fn remove_by_revision_resolves_all_referenced_hashes() {
         let repo = TestRepo::init();
         let capture = capture_worktree(&repo);
         let big_body = "x".repeat(5000);
         let observation = record_observation(
             ObservationAddOptions::new(repo.path())
-                .with_review_unit_id(capture.revision_id.clone())
+                .with_revision_id(capture.revision_id.clone())
                 .with_track("agent:tester")
                 .with_title("a large observation")
                 .with_body(big_body),
@@ -730,7 +730,7 @@ mod tests {
 
         let result = remove_content(RemoveOptions::new(
             repo.path(),
-            RemoveSelector::ReviewUnit(capture.revision_id.clone()),
+            RemoveSelector::Revision(capture.revision_id.clone()),
         ))
         .unwrap();
 
@@ -748,14 +748,14 @@ mod tests {
     }
 
     #[test]
-    fn remove_by_review_unit_reports_co_referencing_units() {
+    fn remove_by_revision_reports_co_referencing_units() {
         let repo = TestRepo::init();
         let capture = capture_worktree(&repo);
         let sibling = fabricate_sibling_capture(&repo, &capture);
 
         let result = remove_content(RemoveOptions::new(
             repo.path(),
-            RemoveSelector::ReviewUnit(capture.revision_id.clone()),
+            RemoveSelector::Revision(capture.revision_id.clone()),
         ))
         .unwrap();
 
@@ -1039,7 +1039,7 @@ mod tests {
         let big_body = "y".repeat(5000);
         let observation = record_observation(
             ObservationAddOptions::new(repo.path())
-                .with_review_unit_id(capture.revision_id.clone())
+                .with_revision_id(capture.revision_id.clone())
                 .with_track("agent:tester")
                 .with_title("a large observation")
                 .with_body(big_body),
@@ -1052,7 +1052,7 @@ mod tests {
 
         remove_content(RemoveOptions::new(
             repo.path(),
-            RemoveSelector::ReviewUnit(capture.revision_id.clone()),
+            RemoveSelector::Revision(capture.revision_id.clone()),
         ))
         .unwrap();
         let result = compact_store(CompactOptions::new(repo.path())).unwrap();

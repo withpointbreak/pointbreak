@@ -14,9 +14,9 @@ use shoreline::documents::unit_show_document;
 use shoreline::model::{ObjectId, ReviewEndpoint, RevisionId};
 use shoreline::session::{
     EventVerificationPolicy, LivenessEnrichment, ProjectionDiagnostic, ReviewHistoryEntry,
-    ReviewHistoryOptions, ReviewUnitListEntry, ReviewUnitListOptions, ReviewUnitShowOptions,
-    SessionState, SupersessionView, enrich_liveness, list_review_units, read_events,
-    read_snapshot_artifact, review_history, show_review_unit,
+    ReviewHistoryOptions, RevisionListEntry, RevisionListOptions, RevisionShowOptions,
+    SessionState, SupersessionView, enrich_liveness, list_revisions, read_events,
+    read_snapshot_artifact, review_history, show_revision,
 };
 
 #[derive(Serialize)]
@@ -73,14 +73,14 @@ struct ThreadDocument {
     competing: bool,
 }
 
-/// One `/api/units` entry: the full `ReviewUnitListEntry` flattened verbatim,
+/// One `/api/units` entry: the full `RevisionListEntry` flattened verbatim,
 /// plus an additive, path-private `targetDisplay`. `#[serde(flatten)]` keeps
 /// every existing field byte-present and unchanged.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UnitEntryDocument {
     #[serde(flatten)]
-    entry: ReviewUnitListEntry,
+    entry: RevisionListEntry,
     target_display: TargetDisplay,
 }
 
@@ -101,7 +101,7 @@ const GIT_COMMIT_FLOOR: &str = "git commit";
 /// Length of the git-style short commit OID used for head labels (git's default).
 const SHORT_OID_LEN: usize = 7;
 
-/// Path-private display view-model for a ReviewUnit target.
+/// Path-private display view-model for a Revision target.
 ///
 /// Derived at read time from fields already present in a captured unit. The raw
 /// worktree path never enters this block: only the final path component (a
@@ -215,7 +215,7 @@ fn splice_target_display(
 
 /// Wrap each list entry with its derived, path-private `targetDisplay`, leaving
 /// every existing field on the entry untouched.
-fn to_unit_entry_documents(entries: Vec<ReviewUnitListEntry>) -> Vec<UnitEntryDocument> {
+fn to_unit_entry_documents(entries: Vec<RevisionListEntry>) -> Vec<UnitEntryDocument> {
     entries
         .into_iter()
         .map(|entry| {
@@ -251,10 +251,10 @@ pub(super) fn history_json(repo: &Path) -> Result<String, String> {
     serde_json::to_string(&payload).map_err(|error| error.to_string())
 }
 
-/// Captured ReviewUnits with their base/target/snapshot identity.
+/// Captured Revisions with their base/target/snapshot identity.
 pub(super) fn units_json(repo: &Path) -> Result<String, String> {
     let result =
-        list_review_units(ReviewUnitListOptions::new(repo)).map_err(|error| error.to_string())?;
+        list_revisions(RevisionListOptions::new(repo)).map_err(|error| error.to_string())?;
     let payload = UnitsPayload {
         schema: "shore.inspect-units",
         event_set_hash: result.event_set_hash,
@@ -329,7 +329,7 @@ fn revision_edge_map(
         .collect()
 }
 
-/// The captured diff snapshot for one ReviewUnit, by snapshot id.
+/// The captured diff snapshot for one Revision, by snapshot id.
 ///
 /// Reads the immutable snapshot artifact through the validated read path
 /// (`read_snapshot_artifact` recomputes and checks the content hash), so the
@@ -366,7 +366,7 @@ pub(super) fn snapshot_json(repo: &Path, snapshot_id: &str) -> Result<String, St
     serde_json::to_string(&wire).map_err(|error| error.to_string())
 }
 
-/// The full composite projection for one ReviewUnit.
+/// The full composite projection for one Revision.
 ///
 /// Reuses the exact `shore.review-unit` document the `shore review unit show`
 /// command builds (`unit_show_document`), so the inspector renders the same
@@ -377,8 +377,8 @@ pub(super) fn unit_json(repo: &Path, revision_id: &str) -> Result<String, String
     if revision_id.is_empty() {
         return Err("missing review unit id".to_owned());
     }
-    let mut show_options = ReviewUnitShowOptions::new(repo)
-        .with_review_unit_id(RevisionId::new(revision_id.to_owned()))
+    let mut show_options = RevisionShowOptions::new(repo)
+        .with_revision_id(RevisionId::new(revision_id.to_owned()))
         .with_include_body(true)
         .with_verification_policy(EventVerificationPolicy::advisory())
         .with_trust_set(crate::cli::review::common::discover_trust_set(repo))
@@ -386,16 +386,15 @@ pub(super) fn unit_json(repo: &Path, revision_id: &str) -> Result<String, String
     if let Some(map) = crate::cli::review::common::discover_delegation_map(repo) {
         show_options = show_options.with_delegation_map(map);
     }
-    let result = show_review_unit(show_options).map_err(|error| {
-        tracing::debug!(error = %error, review_unit = revision_id, "inspect_unit_read_failed");
+    let result = show_revision(show_options).map_err(|error| {
+        tracing::debug!(error = %error, revision = revision_id, "inspect_unit_read_failed");
         format!("review unit not found or unreadable: {revision_id}")
     })?;
     // Thread the typed endpoints and the commit-range view out before
     // `unit_show_document` consumes `result`, then splice the additive
     // `targetDisplay` into the serialized document.
-    let target_display =
-        derive_target_display(&result.review_unit.target, &result.review_unit.base);
-    let head_oid = match &result.review_unit.base {
+    let target_display = derive_target_display(&result.revision.target, &result.revision.base);
+    let head_oid = match &result.revision.base {
         ReviewEndpoint::GitCommit { commit_oid, .. } => Some(commit_oid.clone()),
         ReviewEndpoint::GitWorkingTree { .. } => None,
     };
@@ -468,7 +467,7 @@ pub(super) fn freshness_json(repo: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use shoreline::model::{
-        EngagementId, ObjectId, ReviewEndpoint, ReviewUnitSource, RevisionId, WorktreeCaptureMode,
+        EngagementId, ObjectId, ReviewEndpoint, RevisionId, RevisionSource, WorktreeCaptureMode,
     };
     use shoreline::session::event::{
         GitProvenance, Revision, WorkObjectProposal, WorkObjectProposedPayload,
@@ -662,12 +661,12 @@ mod tests {
         assert!(!json.contains("worktreeRoot"));
     }
 
-    fn entry(worktree: &str, commit: &str) -> ReviewUnitListEntry {
-        ReviewUnitListEntry {
+    fn entry(worktree: &str, commit: &str) -> RevisionListEntry {
+        RevisionListEntry {
             captured_at: "2026-05-13T10:00:00Z".to_owned(),
             revision_id: RevisionId::new("rev:sha256:abc"),
             snapshot_id: ObjectId::new("snap:sha256:abc"),
-            source: ReviewUnitSource::GitWorktree {
+            source: RevisionSource::GitWorktree {
                 mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
                 include_untracked: true,
             },
@@ -679,7 +678,7 @@ mod tests {
                 worktree_root: worktree.to_owned(),
             },
             snapshot_artifact_content_hash: "sha256:artifact:abc".to_owned(),
-            commit_range: shoreline::session::ReviewUnitCommitRangeView {
+            commit_range: shoreline::session::RevisionCommitRangeView {
                 revision_id: RevisionId::new("review-unit:sha256:abc"),
                 anchored: false,
                 current_commits: Vec::new(),
@@ -765,7 +764,7 @@ mod tests {
     #[test]
     fn legacy_worktree_root_payload_derives_basename_without_touching_identity() {
         // A payload that only ever carried `worktreeRoot`. Deriving the display
-        // must be a pure read: it must not rewrite the ReviewUnit identity and
+        // must be a pure read: it must not rewrite the Revision identity and
         // must not leak the raw path into the derived block.
         let revision_id = RevisionId::new("rev:sha256:legacy");
         let payload = WorkObjectProposedPayload {
@@ -775,7 +774,7 @@ mod tests {
                     id: revision_id.clone(),
                     object_id: ObjectId::new("obj:sha256:legacy"),
                     git_provenance: Some(GitProvenance {
-                        source: ReviewUnitSource::GitWorktree {
+                        source: RevisionSource::GitWorktree {
                             mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
                             include_untracked: true,
                         },

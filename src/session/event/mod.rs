@@ -30,8 +30,8 @@ pub use artifact_removal::ArtifactRemovedPayload;
 pub use assertion::AssertionMode;
 pub use assessment::{ReviewAssessment, ReviewAssessmentRecordedPayload};
 pub use association::{
-    ReviewUnitCommitAssociatedPayload, ReviewUnitCommitWithdrawnPayload,
-    ReviewUnitRefAssociatedPayload, ReviewUnitRefWithdrawnPayload,
+    RevisionCommitAssociatedPayload, RevisionCommitWithdrawnPayload, RevisionRefAssociatedPayload,
+    RevisionRefWithdrawnPayload,
 };
 pub(crate) use association::{
     build_commit_association_id, build_commit_withdrawal_id, build_ref_association_id,
@@ -207,13 +207,13 @@ mod tests {
     use crate::error::ShoreError;
     use crate::model::{
         AssessmentId, EngagementId, InputRequestId, InputRequestResponseId, JournalId, ObjectId,
-        ObservationId, ReviewEndpoint, ReviewTargetRef, ReviewUnitSource, RevisionId, Side,
+        ObservationId, ReviewEndpoint, ReviewTargetRef, RevisionId, RevisionSource, Side,
         TargetRef, TrackId, WorktreeCaptureMode,
     };
 
     #[test]
     fn event_envelope_serializes_with_required_idempotency_key_and_payload_hash() {
-        let event = valid_review_unit_captured_event();
+        let event = valid_revision_captured_event();
 
         let json = serde_json::to_value(&event).expect("event serializes");
 
@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn event_envelope_rejects_empty_idempotency_key_on_decode() {
-        let mut json = serde_json::to_value(valid_review_unit_captured_event()).unwrap();
+        let mut json = serde_json::to_value(valid_revision_captured_event()).unwrap();
         json["idempotencyKey"] = json!("");
 
         let error = serde_json::from_value::<ShoreEvent>(json)
@@ -256,8 +256,8 @@ mod tests {
 
     #[test]
     fn event_id_is_deterministic_from_idempotency_key() {
-        let first = valid_review_unit_captured_event();
-        let second = review_unit_captured_event(
+        let first = valid_revision_captured_event();
+        let second = revision_captured_event(
             "sha256:different-artifact",
             "work_object_proposed:review-unit:sha256:abc",
         );
@@ -292,7 +292,7 @@ mod tests {
 
     #[test]
     fn event_envelope_allows_unknown_optional_fields_for_same_version() {
-        let mut json = serde_json::to_value(valid_review_unit_captured_event()).unwrap();
+        let mut json = serde_json::to_value(valid_revision_captured_event()).unwrap();
         json["futureOptionalField"] = json!("kept-compatible");
 
         let event: ShoreEvent =
@@ -303,7 +303,7 @@ mod tests {
 
     #[test]
     fn event_envelope_round_trips_through_serde() {
-        let event = valid_review_unit_captured_event();
+        let event = valid_revision_captured_event();
 
         let json = serde_json::to_string(&event).expect("event serializes");
         let decoded: ShoreEvent = serde_json::from_str(&json).expect("event deserializes");
@@ -312,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn review_unit_captured_event_serializes_target_and_payload() {
+    fn revision_captured_event_serializes_target_and_payload() {
         let target = EventTarget::for_revision(
             JournalId::new("journal:default"),
             RevisionId::new("review-unit:sha256:abc"),
@@ -330,7 +330,7 @@ mod tests {
                     id: RevisionId::new("rev:git:sha256:def"),
                     object_id: ObjectId::new("snap:git:sha256:ghi"),
                     git_provenance: Some(GitProvenance {
-                        source: ReviewUnitSource::GitWorktree {
+                        source: RevisionSource::GitWorktree {
                             mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
                             include_untracked: true,
                         },
@@ -395,9 +395,9 @@ mod tests {
     }
 
     #[test]
-    fn review_unit_captured_payload_hash_changes_with_artifact_binding() {
-        let first = review_unit_captured_event_with_artifact_hash("sha256:first");
-        let second = review_unit_captured_event_with_artifact_hash("sha256:second");
+    fn revision_captured_payload_hash_changes_with_artifact_binding() {
+        let first = revision_captured_event_with_artifact_hash("sha256:first");
+        let second = revision_captured_event_with_artifact_hash("sha256:second");
 
         assert_ne!(first.payload_hash, second.payload_hash);
     }
@@ -497,7 +497,7 @@ mod tests {
         assert!(json.get("interventionId").is_none());
     }
 
-    fn review_unit_captured_event_with_artifact_hash(
+    fn revision_captured_event_with_artifact_hash(
         snapshot_artifact_content_hash: &str,
     ) -> ShoreEvent {
         ShoreEvent::new(
@@ -521,7 +521,7 @@ mod tests {
                         id: RevisionId::new("rev:git:sha256:def"),
                         object_id: ObjectId::new("snap:git:sha256:ghi"),
                         git_provenance: Some(GitProvenance {
-                            source: ReviewUnitSource::GitWorktree {
+                            source: RevisionSource::GitWorktree {
                                 mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
                                 include_untracked: true,
                             },
@@ -750,7 +750,7 @@ mod tests {
 
     #[test]
     fn event_envelope_has_typed_unsupported_schema_version_validation() {
-        let mut event = valid_review_unit_captured_event();
+        let mut event = valid_revision_captured_event();
         event.schema = "shore.event".to_owned();
         event.version = 2;
 
@@ -766,7 +766,7 @@ mod tests {
 
     #[test]
     fn event_envelope_defaults_missing_assertion_mode_to_advisory() {
-        let mut json = serde_json::to_value(valid_review_unit_captured_event()).unwrap();
+        let mut json = serde_json::to_value(valid_revision_captured_event()).unwrap();
         json.as_object_mut().unwrap().remove("assertionMode");
 
         let event: ShoreEvent =
@@ -777,7 +777,7 @@ mod tests {
 
     #[test]
     fn event_envelope_skip_serializes_default_advisory_assertion_mode() {
-        let event = valid_review_unit_captured_event();
+        let event = valid_revision_captured_event();
         assert_eq!(event.assertion_mode, AssertionMode::Advisory);
 
         let json = serde_json::to_value(&event).unwrap();
@@ -791,7 +791,7 @@ mod tests {
 
     #[test]
     fn event_envelope_serializes_explicit_operative_assertion_mode() {
-        let mut event = valid_review_unit_captured_event();
+        let mut event = valid_revision_captured_event();
         event.assertion_mode = AssertionMode::Operative;
 
         let json = serde_json::to_value(&event).unwrap();
@@ -810,7 +810,7 @@ mod tests {
 
     #[test]
     fn event_envelope_defaults_missing_source_ref_to_none() {
-        let mut json = serde_json::to_value(valid_review_unit_captured_event()).unwrap();
+        let mut json = serde_json::to_value(valid_revision_captured_event()).unwrap();
         json.as_object_mut().unwrap().remove("sourceRef");
 
         let event: ShoreEvent =
@@ -821,7 +821,7 @@ mod tests {
 
     #[test]
     fn event_envelope_skip_serializes_absent_source_ref() {
-        let event = valid_review_unit_captured_event();
+        let event = valid_revision_captured_event();
         assert!(event.source_ref.is_none());
 
         let json = serde_json::to_value(&event).unwrap();
@@ -835,7 +835,7 @@ mod tests {
 
     #[test]
     fn unsigned_event_serialization_omits_signature_fields() {
-        let event = valid_review_unit_captured_event();
+        let event = valid_revision_captured_event();
 
         let json = serde_json::to_value(&event).unwrap();
 
@@ -849,7 +849,7 @@ mod tests {
         const FRIENDLY_SIGNER: &str = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
         const FIXTURE_SIG: &str = "EzOVlqmX/g3nHametOmU067NsuvweZEwo73/cOypvT2KfCtNK6BfxsWJQ7Ox9E/MtunGEkJGEMSfn/qdmKSFAg==";
 
-        let mut event = valid_review_unit_captured_event();
+        let mut event = valid_revision_captured_event();
         event.signer = Some(crate::crypto::SignerId::parse(FRIENDLY_SIGNER).unwrap());
         event.signature = Some(EventSignature::new_ed25519_v1(FIXTURE_SIG).unwrap());
 
@@ -870,7 +870,7 @@ mod tests {
 
     #[test]
     fn event_envelope_serializes_source_ref_with_system_and_id() {
-        let mut event = valid_review_unit_captured_event();
+        let mut event = valid_revision_captured_event();
         event.source_ref = Some(SourceRef::new("claude_code", "session:abc/tool_result:1"));
 
         let json = serde_json::to_value(&event).unwrap();
@@ -885,7 +885,7 @@ mod tests {
     fn source_ref_shape_does_not_duplicate_writer_tool() {
         // Pin the OQ-G decision: actor/tool identity stays in Writer; source_ref
         // carries only source_system and source_id.
-        let mut event = valid_review_unit_captured_event();
+        let mut event = valid_revision_captured_event();
         event.source_ref = Some(SourceRef::new("claude_code", "tool_result:7"));
 
         let json = serde_json::to_value(&event).unwrap();
@@ -900,7 +900,7 @@ mod tests {
 
     #[test]
     fn event_envelope_round_trips_ingest_provenance() {
-        let mut event = valid_review_unit_captured_event();
+        let mut event = valid_revision_captured_event();
         event.ingest = Some(IngestProvenance {
             via: IngestVia::IngestEvents,
             received_at: "unix-ms:1760000000000".to_owned(),
@@ -916,7 +916,7 @@ mod tests {
 
     #[test]
     fn event_envelope_skip_serializes_absent_ingest_and_defaults_missing_to_none() {
-        let event = valid_review_unit_captured_event();
+        let event = valid_revision_captured_event();
         assert!(event.ingest.is_none());
         let mut json = serde_json::to_value(&event).unwrap();
         assert!(
@@ -944,7 +944,7 @@ mod tests {
 
     #[test]
     fn ingest_stamp_does_not_change_event_id_or_payload_hash() {
-        let unstamped = valid_review_unit_captured_event();
+        let unstamped = valid_revision_captured_event();
         let mut stamped = unstamped.clone();
         stamped.ingest = Some(IngestProvenance {
             via: IngestVia::BundleApply,
@@ -956,14 +956,14 @@ mod tests {
         assert_eq!(stamped.idempotency_key, unstamped.idempotency_key);
     }
 
-    fn valid_review_unit_captured_event() -> ShoreEvent {
-        review_unit_captured_event(
+    fn valid_revision_captured_event() -> ShoreEvent {
+        revision_captured_event(
             "sha256:artifact",
             "work_object_proposed:review-unit:sha256:abc",
         )
     }
 
-    fn review_unit_captured_event(
+    fn revision_captured_event(
         snapshot_artifact_content_hash: &str,
         idempotency_key: &str,
     ) -> ShoreEvent {
@@ -988,7 +988,7 @@ mod tests {
                         id: RevisionId::new("rev:git:sha256:def"),
                         object_id: ObjectId::new("snap:git:sha256:ghi"),
                         git_provenance: Some(GitProvenance {
-                            source: ReviewUnitSource::GitWorktree {
+                            source: RevisionSource::GitWorktree {
                                 mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
                                 include_untracked: true,
                             },

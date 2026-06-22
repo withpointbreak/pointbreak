@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use super::target::ResolvedReviewUnit;
+use super::target::ResolvedRevision;
 use crate::error::{Result, ShoreError};
 use crate::model::{EventId, ObservationId, ReviewTargetRef, TrackId};
 use crate::session::body_artifact::load_body_artifact;
@@ -18,7 +18,7 @@ struct ObservationEventRecord<'a> {
 pub(crate) struct ObservationProjectionOptions<'a> {
     pub store_dir: &'a Path,
     pub events: &'a [ShoreEvent],
-    pub resolved: &'a ResolvedReviewUnit,
+    pub resolved: &'a ResolvedRevision,
     pub track_filter: Option<TrackId>,
     pub file_filter: Option<&'a str>,
     pub tag_filters: &'a [String],

@@ -46,7 +46,7 @@ impl ReviewHistoryOptions {
         self
     }
 
-    pub fn with_review_unit_id(mut self, revision_id: RevisionId) -> Self {
+    pub fn with_revision_id(mut self, revision_id: RevisionId) -> Self {
         self.revision_id = Some(revision_id);
         self
     }

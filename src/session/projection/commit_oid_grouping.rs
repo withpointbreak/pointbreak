@@ -16,7 +16,7 @@ use serde::Serialize;
 use crate::error::Result;
 use crate::model::RevisionId;
 use crate::session::event::ShoreEvent;
-use crate::session::projection::commit_range::ReviewUnitCommitRangeProjection;
+use crate::session::projection::commit_range::RevisionCommitRangeProjection;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,7 +30,7 @@ pub struct CommitOidGroupingProjection {
 
 impl CommitOidGroupingProjection {
     pub fn from_events(events: &[ShoreEvent]) -> Result<Self> {
-        let commit_range = ReviewUnitCommitRangeProjection::from_events(events)?;
+        let commit_range = RevisionCommitRangeProjection::from_events(events)?;
         let mut groups: BTreeMap<String, BTreeSet<RevisionId>> = BTreeMap::new();
         for (revision_id, view) in &commit_range.units {
             for current in &view.current_commits {
@@ -57,12 +57,12 @@ mod tests {
     use super::*;
     use crate::model::{
         CommitRangeCaptureMode, EngagementId, JournalId, ObjectId, ReviewEndpoint, ReviewTargetRef,
-        ReviewUnitSource, RevisionId, WorktreeCaptureMode,
+        RevisionId, RevisionSource, WorktreeCaptureMode,
     };
     use crate::session::event::{
-        EventTarget, EventType, GitProvenance, ReviewUnitCommitAssociatedPayload,
-        ReviewUnitCommitWithdrawnPayload, Revision, ShoreEvent, WorkObjectProposal,
-        WorkObjectProposedPayload, Writer, build_commit_association_id, build_commit_withdrawal_id,
+        EventTarget, EventType, GitProvenance, Revision, RevisionCommitAssociatedPayload,
+        RevisionCommitWithdrawnPayload, ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload,
+        Writer, build_commit_association_id, build_commit_withdrawal_id,
     };
 
     fn envelope(unit: &RevisionId) -> EventTarget {
@@ -72,7 +72,7 @@ mod tests {
     fn capture_for(
         unit: &RevisionId,
         target: ReviewEndpoint,
-        source: ReviewUnitSource,
+        source: RevisionSource,
     ) -> ShoreEvent {
         ShoreEvent::new(
             EventType::WorkObjectProposed,
@@ -112,7 +112,7 @@ mod tests {
             ReviewEndpoint::GitWorkingTree {
                 worktree_root: "/repo".to_owned(),
             },
-            ReviewUnitSource::GitWorktree {
+            RevisionSource::GitWorktree {
                 mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
                 include_untracked: true,
             },
@@ -126,7 +126,7 @@ mod tests {
                 commit_oid: commit_oid.to_owned(),
                 tree_oid: tree_oid.to_owned(),
             },
-            ReviewUnitSource::GitCommitRange {
+            RevisionSource::GitCommitRange {
                 mode: CommitRangeCaptureMode::BaseTreeToTargetTree,
             },
         )
@@ -136,10 +136,10 @@ mod tests {
         let cid = build_commit_association_id(unit, commit_oid).unwrap();
         ShoreEvent::new(
             EventType::RevisionCommitAssociated,
-            ReviewUnitCommitAssociatedPayload::idempotency_key(unit, commit_oid),
+            RevisionCommitAssociatedPayload::idempotency_key(unit, commit_oid),
             envelope(unit),
             Writer::shore_local("test"),
-            ReviewUnitCommitAssociatedPayload {
+            RevisionCommitAssociatedPayload {
                 commit_association_id: cid,
                 target: ReviewTargetRef::Revision {
                     revision_id: unit.clone(),
@@ -159,10 +159,10 @@ mod tests {
         let wid = build_commit_withdrawal_id(unit, &cid).unwrap();
         ShoreEvent::new(
             EventType::RevisionCommitWithdrawn,
-            ReviewUnitCommitWithdrawnPayload::idempotency_key(&cid),
+            RevisionCommitWithdrawnPayload::idempotency_key(&cid),
             envelope(unit),
             Writer::shore_local("test"),
-            ReviewUnitCommitWithdrawnPayload {
+            RevisionCommitWithdrawnPayload {
                 commit_withdrawal_id: wid,
                 target: ReviewTargetRef::Revision {
                     revision_id: unit.clone(),

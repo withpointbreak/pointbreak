@@ -471,7 +471,7 @@ fn observation_list_collapses_duplicate_semantic_events() {
 }
 
 #[test]
-fn observation_add_errors_when_no_review_unit_has_been_captured() {
+fn observation_add_errors_when_no_revision_has_been_captured() {
     let repo = modified_repo();
 
     let output = shore([
@@ -514,7 +514,7 @@ fn observation_add_rejects_unknown_file_target() {
 }
 
 #[test]
-fn observation_add_with_explicit_review_unit_succeeds_when_current_is_ambiguous() {
+fn observation_add_with_explicit_revision_succeeds_when_current_is_ambiguous() {
     let repo = modified_repo();
     let first =
         parse_json(&shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]).stdout);
@@ -547,7 +547,7 @@ fn observation_add_with_explicit_review_unit_succeeds_when_current_is_ambiguous(
 }
 
 #[test]
-fn observation_add_errors_when_current_review_unit_is_ambiguous_without_explicit_id() {
+fn observation_add_errors_when_current_revision_is_ambiguous_without_explicit_id() {
     let repo = modified_repo();
     shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
     repo.write("another.txt", "new untracked file\n");

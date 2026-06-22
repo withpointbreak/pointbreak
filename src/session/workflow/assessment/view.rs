@@ -9,13 +9,13 @@ use crate::session::body_artifact::load_body_artifact;
 use crate::session::event::{
     EventType, ReviewAssessment, ReviewAssessmentRecordedPayload, ShoreEvent, Writer,
 };
-use crate::session::observation::ResolvedReviewUnit;
+use crate::session::observation::ResolvedRevision;
 use crate::session::workflow::util::sorted_unique;
 
 pub(crate) struct AssessmentProjectionOptions<'a> {
     pub store_dir: &'a Path,
     pub events: &'a [ShoreEvent],
-    pub resolved: &'a ResolvedReviewUnit,
+    pub resolved: &'a ResolvedRevision,
     pub track_filter: Option<TrackId>,
     pub include_summary: bool,
     pub include_all: bool,
@@ -144,7 +144,7 @@ struct AssessmentEventRecord<'a> {
 
 fn collect_assessment_records<'a>(
     events: &'a [ShoreEvent],
-    resolved: &ResolvedReviewUnit,
+    resolved: &ResolvedRevision,
 ) -> Result<BTreeMap<AssessmentId, AssessmentEventRecord<'a>>> {
     let mut records: BTreeMap<AssessmentId, AssessmentEventRecord<'a>> = BTreeMap::new();
     for event in events

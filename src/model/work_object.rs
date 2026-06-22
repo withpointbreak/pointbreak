@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::review_unit::ReviewTargetRef;
+use super::revision::ReviewTargetRef;
 use super::{CheckpointId, RevisionId};
 
 /// The kind of work object a subject addresses, derived from the subject's

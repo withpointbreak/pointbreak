@@ -8,10 +8,10 @@ use crate::documents::{
 use crate::model::{EventId, ReviewTargetRef, Side};
 use crate::session::{
     AdapterNoteView, CurrentCommitAssociation, CurrentRefAssociation, EndorsementReadback,
-    EventVerificationStatus, MemberReadback, ReviewUnitCommitRangeView, ReviewUnitListEntry,
-    ReviewUnitListResult, ReviewUnitProjectionIdentity, ReviewUnitProjectionRow,
-    ReviewUnitProjectionSummary, ReviewUnitShowFilters, ReviewUnitShowResult,
-    WithdrawnCommitAssociation, WithdrawnRefAssociation,
+    EventVerificationStatus, MemberReadback, RevisionCommitRangeView, RevisionListEntry,
+    RevisionListResult, RevisionProjectionIdentity, RevisionProjectionRow,
+    RevisionProjectionSummary, RevisionShowFilters, RevisionShowResult, WithdrawnCommitAssociation,
+    WithdrawnRefAssociation,
 };
 
 /// Documented body for `shore.review-unit`.
@@ -40,7 +40,7 @@ pub struct UnitListBody {
     event_set_hash: String,
     event_count: usize,
     revision_count: usize,
-    entries: Vec<ReviewUnitListEntry>,
+    entries: Vec<RevisionListEntry>,
 }
 
 #[derive(serde::Serialize)]
@@ -50,7 +50,7 @@ struct UnitRevisionDocument {
     session_id: String,
     revision_id: String,
     snapshot_id: String,
-    source: crate::model::ReviewUnitSource,
+    source: crate::model::RevisionSource,
     base: crate::model::ReviewEndpoint,
     target: crate::model::ReviewEndpoint,
     snapshot_artifact_content_hash: String,
@@ -157,8 +157,8 @@ struct CommitRangeDocument {
     withdrawn_refs: Vec<WithdrawnRefAssociation>,
 }
 
-impl From<ReviewUnitCommitRangeView> for CommitRangeDocument {
-    fn from(view: ReviewUnitCommitRangeView) -> Self {
+impl From<RevisionCommitRangeView> for CommitRangeDocument {
+    fn from(view: RevisionCommitRangeView) -> Self {
         Self {
             anchored: view.anchored,
             current_commits: view.current_commits,
@@ -182,7 +182,7 @@ struct SnapshotOrderDocument {
 }
 
 /// Build the `shore.review-unit` composite document from a show result.
-pub fn unit_show_document(mut result: ReviewUnitShowResult) -> DiagnosticDocument<UnitShowBody> {
+pub fn unit_show_document(mut result: RevisionShowResult) -> DiagnosticDocument<UnitShowBody> {
     // The readback side table is keyed by event id; attach it to each member and to
     // the capture identity at the document layer. Take it out before the by-value
     // moves below.
@@ -192,7 +192,7 @@ pub fn unit_show_document(mut result: ReviewUnitShowResult) -> DiagnosticDocumen
         UnitShowBody {
             event_set_hash: result.event_set_hash,
             event_count: result.event_count,
-            revision: UnitRevisionDocument::from(result.review_unit).with_readback(&readbacks),
+            revision: UnitRevisionDocument::from(result.revision).with_readback(&readbacks),
             filters: UnitShowFiltersDocument::from(result.filters),
             summary: UnitShowSummaryDocument::from(result.summary),
             current_assessment: CurrentAssessmentDocument::from(result.current_assessment),
@@ -233,7 +233,7 @@ pub fn unit_show_document(mut result: ReviewUnitShowResult) -> DiagnosticDocumen
 }
 
 /// Build the `shore.review-unit-list` document from a list result.
-pub fn unit_list_document(result: ReviewUnitListResult) -> DiagnosticDocument<UnitListBody> {
+pub fn unit_list_document(result: RevisionListResult) -> DiagnosticDocument<UnitListBody> {
     DiagnosticDocument::new(
         "shore.review-unit-list",
         UnitListBody {
@@ -246,8 +246,8 @@ pub fn unit_list_document(result: ReviewUnitListResult) -> DiagnosticDocument<Un
     )
 }
 
-impl From<ReviewUnitProjectionIdentity> for UnitRevisionDocument {
-    fn from(identity: ReviewUnitProjectionIdentity) -> Self {
+impl From<RevisionProjectionIdentity> for UnitRevisionDocument {
+    fn from(identity: RevisionProjectionIdentity) -> Self {
         Self {
             id: identity.id.as_str().to_owned(),
             session_id: identity.session_id.as_str().to_owned(),
@@ -276,8 +276,8 @@ impl UnitRevisionDocument {
     }
 }
 
-impl From<ReviewUnitShowFilters> for UnitShowFiltersDocument {
-    fn from(filters: ReviewUnitShowFilters) -> Self {
+impl From<RevisionShowFilters> for UnitShowFiltersDocument {
+    fn from(filters: RevisionShowFilters) -> Self {
         Self {
             revision_id: filters.revision_id.as_str().to_owned(),
             track_id: filters
@@ -288,8 +288,8 @@ impl From<ReviewUnitShowFilters> for UnitShowFiltersDocument {
     }
 }
 
-impl From<ReviewUnitProjectionSummary> for UnitShowSummaryDocument {
-    fn from(summary: ReviewUnitProjectionSummary) -> Self {
+impl From<RevisionProjectionSummary> for UnitShowSummaryDocument {
+    fn from(summary: RevisionProjectionSummary) -> Self {
         Self {
             file_count: summary.file_count,
             row_count: summary.row_count,
@@ -335,8 +335,8 @@ impl From<crate::session::event::ImportedNoteTarget> for AdapterNoteTargetDocume
     }
 }
 
-impl From<ReviewUnitProjectionRow> for UnitProjectionRowDocument {
-    fn from(row: ReviewUnitProjectionRow) -> Self {
+impl From<RevisionProjectionRow> for UnitProjectionRowDocument {
+    fn from(row: RevisionProjectionRow) -> Self {
         Self {
             id: row.id.as_str().to_owned(),
             kind: row.kind.as_str(),

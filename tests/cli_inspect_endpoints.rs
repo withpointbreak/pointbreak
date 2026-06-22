@@ -10,7 +10,7 @@ use support::git_repo::GitRepo;
 use support::inspect::{Inspector, capture, representative_store, urlencode};
 use support::shore_env;
 
-/// Find the captured ReviewUnit event id via the public read path (`read_events`).
+/// Find the captured Revision event id via the public read path (`read_events`).
 fn captured_event_id(repo: &std::path::Path) -> String {
     shoreline::session::read_events(repo)
         .unwrap()

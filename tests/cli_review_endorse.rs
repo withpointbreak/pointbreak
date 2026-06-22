@@ -3,7 +3,7 @@ use serde_json::Value;
 use support::git_repo::GitRepo;
 use support::shore_env;
 
-/// Find the captured ReviewUnit event id from the store the CLI wrote, via the
+/// Find the captured Revision event id from the store the CLI wrote, via the
 /// PUBLIC read path (INV-F: `tests/` see only `pub` — `EventStore` is `pub(crate)`,
 /// so use `read_events`, which returns `Vec<ShoreEvent>` with public `event_id`/`event_type`).
 fn captured_event_id(repo_path: &std::path::Path) -> String {
@@ -64,7 +64,7 @@ fn endorse_help_states_unsigned_is_an_error() {
 }
 
 /// Capture a one-file change in a fresh repo (sharing `home_str`'s keystore) and
-/// return the captured ReviewUnit event id — the endorse-target boilerplate.
+/// return the captured Revision event id — the endorse-target boilerplate.
 fn capture_target(home_str: &str) -> (GitRepo, String) {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn v() -> u32 { 1 }\n");

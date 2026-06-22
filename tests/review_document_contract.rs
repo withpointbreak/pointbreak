@@ -205,7 +205,7 @@ fn assert_snapshot(name: &str, normalized: &str) {
     );
 }
 
-/// Build the deterministic fixture repo and capture a single ReviewUnit, returning
+/// Build the deterministic fixture repo and capture a single Revision, returning
 /// the captured review-unit id (already normalized in snapshots, used here only to
 /// pass back into commands as a literal argument).
 fn fixture_repo() -> (GitRepo, String) {
@@ -233,7 +233,7 @@ fn repo_arg(repo: &GitRepo) -> String {
 /// One test exercises the documented `shore review-*` commands against a
 /// single deterministic fixture, snapshotting the full normalized document for
 /// each. Driving them in sequence keeps content-addressed ids stable across
-/// commands (each new write references the same captured ReviewUnit).
+/// commands (each new write references the same captured Revision).
 #[test]
 fn review_documents_are_byte_stable() {
     // 1. review capture (re-run on a fresh repo to snapshot the capture document

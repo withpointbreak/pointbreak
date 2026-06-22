@@ -9,12 +9,12 @@ use crate::session::event::{
     InputRequestRespondedPayload, InputRequestResponseOutcome, ShoreEvent, Writer,
     decode_input_request_opened_payload,
 };
-use crate::session::observation::{ResolvedReviewUnit, target_matches_file};
+use crate::session::observation::{ResolvedRevision, target_matches_file};
 
 pub(crate) struct InputRequestProjectionOptions<'a> {
     pub store_dir: &'a Path,
     pub events: &'a [ShoreEvent],
-    pub resolved: &'a ResolvedReviewUnit,
+    pub resolved: &'a ResolvedRevision,
     pub track_filter: Option<TrackId>,
     pub mode_filter: Option<AssertionMode>,
     pub file_filter: Option<&'a str>,

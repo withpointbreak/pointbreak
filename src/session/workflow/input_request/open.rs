@@ -15,7 +15,7 @@ use crate::session::event::{
     ShoreEvent,
 };
 use crate::session::observation::{
-    CurrentReviewUnitContext, ReviewUnitScope, RevisionSelection, required_title, resolve_revision,
+    CurrentRevisionContext, RevisionScope, RevisionSelection, required_title, resolve_revision,
     staged_body, validated_track_id,
 };
 use crate::session::state::{ProjectionDiagnostic, SessionState};
@@ -51,7 +51,7 @@ impl InputRequestOpenOptions {
             track: None,
             title: None,
             body: None,
-            target: InputRequestTargetSelector::review_unit(),
+            target: InputRequestTargetSelector::revision(),
             assertion_mode: AssertionMode::Operative,
             reason_code: None,
             idempotency_key: None,
@@ -70,7 +70,7 @@ impl InputRequestOpenOptions {
         self
     }
 
-    pub fn with_review_unit_id(mut self, id: RevisionId) -> Self {
+    pub fn with_revision_id(mut self, id: RevisionId) -> Self {
         self.revision_id = Some(id);
         self
     }
@@ -157,8 +157,8 @@ pub fn open_input_request(options: InputRequestOpenOptions) -> Result<InputReque
     let resolved = resolve_revision(
         &validation_events,
         RevisionSelection::from_revision_seed(options.revision_id.as_ref()),
-        &CurrentReviewUnitContext::for_repo(&options.repo)?,
-        ReviewUnitScope::default(),
+        &CurrentRevisionContext::for_repo(&options.repo)?,
+        RevisionScope::default(),
     )?;
     let target = resolve_input_request_target(
         worktree_root,

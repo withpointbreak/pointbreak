@@ -17,7 +17,7 @@ pub use artifact_removal::ArtifactRemovalProjection;
 pub use commit_oid_grouping::CommitOidGroupingProjection;
 pub use commit_range::{
     CommitEdgeSource, CurrentCommitAssociation, CurrentRefAssociation,
-    ReviewUnitCommitRangeProjection, ReviewUnitCommitRangeView, WithdrawnCommitAssociation,
+    RevisionCommitRangeProjection, RevisionCommitRangeView, WithdrawnCommitAssociation,
     WithdrawnRefAssociation,
 };
 pub use engagement::{EngagementGrouping, EngagementLifecycle, EngagementView};

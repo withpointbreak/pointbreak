@@ -24,7 +24,7 @@ pub enum ReviewEndpoint {
     rename_all = "snake_case",
     rename_all_fields = "camelCase"
 )]
-pub enum ReviewUnitSource {
+pub enum RevisionSource {
     GitWorktree {
         mode: WorktreeCaptureMode,
         include_untracked: bool,
@@ -32,7 +32,7 @@ pub enum ReviewUnitSource {
     /// Commit-range source selector (research 0004 Q1): lowers to a
     /// `git_commit` base endpoint and a `git_commit` target endpoint. Carries
     /// no rev spellings: resolved OIDs live in the endpoints, and spellings
-    /// must not participate in ReviewUnit identity (storing `--base main` vs
+    /// must not participate in Revision identity (storing `--base main` vs
     /// `--base <oid>` would manufacture distinct units for identical content).
     GitCommitRange { mode: CommitRangeCaptureMode },
 }
@@ -96,8 +96,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn review_unit_source_and_endpoints_serialize_with_stable_shape() {
-        let source = ReviewUnitSource::GitWorktree {
+    fn revision_source_and_endpoints_serialize_with_stable_shape() {
+        let source = RevisionSource::GitWorktree {
             mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
             include_untracked: true,
         };
@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn commit_range_source_serializes_with_stable_shape() {
-        let source = ReviewUnitSource::GitCommitRange {
+        let source = RevisionSource::GitCommitRange {
             mode: CommitRangeCaptureMode::BaseTreeToTargetTree,
         };
 
@@ -138,7 +138,7 @@ mod tests {
         // Untracked files cannot participate in a tree diff; the field is absent, not false.
         assert!(json.get("includeUntracked").is_none());
 
-        let round_tripped: ReviewUnitSource = serde_json::from_value(json).unwrap();
+        let round_tripped: RevisionSource = serde_json::from_value(json).unwrap();
         assert_eq!(round_tripped, source);
     }
 
@@ -147,7 +147,7 @@ mod tests {
         // Source + commit/commit endpoint pair: the serialized capture identity surface
         // for a range capture must never contain a worktree path.
         let json = serde_json::json!({
-            "source": ReviewUnitSource::GitCommitRange {
+            "source": RevisionSource::GitCommitRange {
                 mode: CommitRangeCaptureMode::BaseTreeToTargetTree,
             },
             "base": ReviewEndpoint::GitCommit {

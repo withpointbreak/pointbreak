@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use super::identity::ReviewUnitProjectionIdentity;
+use super::identity::RevisionProjectionIdentity;
 use crate::error::{Result, ShoreError};
 use crate::model::DiffSnapshot;
 use crate::session::projection::ArtifactRemovalProjection;
@@ -22,38 +22,37 @@ pub(crate) enum SnapshotContent {
 /// reader's hard error (removed != not-yet-synced).
 pub(super) fn resolve_snapshot_content(
     repo: &Path,
-    review_unit: &ReviewUnitProjectionIdentity,
+    revision: &RevisionProjectionIdentity,
     removal: &ArtifactRemovalProjection,
 ) -> Result<SnapshotContent> {
-    if removal.is_removed(&review_unit.snapshot_artifact_content_hash) {
+    if removal.is_removed(&revision.snapshot_artifact_content_hash) {
         return Ok(SnapshotContent::Removed {
-            content_hash: review_unit.snapshot_artifact_content_hash.clone(),
+            content_hash: revision.snapshot_artifact_content_hash.clone(),
         });
     }
     Ok(SnapshotContent::Present(load_bound_snapshot_artifact(
-        repo,
-        review_unit,
+        repo, revision,
     )?))
 }
 
 pub(super) fn load_bound_snapshot_artifact(
     repo: &Path,
-    review_unit: &ReviewUnitProjectionIdentity,
+    revision: &RevisionProjectionIdentity,
 ) -> Result<DiffSnapshot> {
-    let artifact = read_snapshot_artifact(repo, &review_unit.snapshot_id)?;
+    let artifact = read_snapshot_artifact(repo, &revision.snapshot_id)?;
     // Bind via the namespace-independent snapshot_id + content_hash only. Identity
     // (revision_id/source/base/target) lives in the capture event/projection,
     // never the content-addressed artifact body.
-    if artifact.snapshot.snapshot_id != review_unit.snapshot_id {
+    if artifact.snapshot.snapshot_id != revision.snapshot_id {
         return Err(ShoreError::Message(format!(
             "snapshot artifact metadata mismatch for {}",
-            review_unit.id.as_str()
+            revision.id.as_str()
         )));
     }
-    if artifact.content_hash != review_unit.snapshot_artifact_content_hash {
+    if artifact.content_hash != revision.snapshot_artifact_content_hash {
         return Err(ShoreError::Message(format!(
             "snapshot artifact content hash mismatch for {}",
-            review_unit.id.as_str()
+            revision.id.as_str()
         )));
     }
 
@@ -87,7 +86,7 @@ mod tests {
         // A second identity over the SAME snapshot + content hash but a DIFFERENT
         // revision_id and a different worktree target also binds — identity is
         // not read from the artifact body (INV-3).
-        let other = ReviewUnitProjectionIdentity {
+        let other = RevisionProjectionIdentity {
             id: RevisionId::new("review-unit:sha256:other-worktree"),
             target: ReviewEndpoint::GitWorkingTree {
                 worktree_root: "/some/other/worktree".to_owned(),
@@ -115,10 +114,10 @@ mod tests {
         .unwrap()
     }
 
-    /// Build a `ReviewUnitProjectionIdentity` from a `CaptureResult` the way the
-    /// projection's `selected_review_unit_capture` would — sourcing every field
+    /// Build a `RevisionProjectionIdentity` from a `CaptureResult` the way the
+    /// projection's `selected_revision_capture` would — sourcing every field
     /// from the capture event/result, never from the artifact body.
-    fn identity_from(captured: &CaptureResult, repo: &Path) -> ReviewUnitProjectionIdentity {
+    fn identity_from(captured: &CaptureResult, repo: &Path) -> RevisionProjectionIdentity {
         let events = EventStore::open(resolved_store_dir(repo))
             .list_events()
             .unwrap();
@@ -130,7 +129,7 @@ mod tests {
                         == captured.revision_id.as_str()
             })
             .expect("capture event");
-        ReviewUnitProjectionIdentity {
+        RevisionProjectionIdentity {
             id: captured.revision_id.clone(),
             session_id: captured.journal_id.clone(),
             source: captured.source.clone(),

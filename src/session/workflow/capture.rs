@@ -9,14 +9,13 @@ use crate::git::{
 };
 use crate::model::{
     ActorId, DiffFile, DiffSnapshot, EngagementId, EngagementType, JournalId, ObjectId,
-    ReviewEndpoint, ReviewId, ReviewTargetRef, ReviewUnitSource, RevisionId, TargetRef,
+    ReviewEndpoint, ReviewId, ReviewTargetRef, RevisionId, RevisionSource, TargetRef,
 };
 use crate::session::event::{
     EventTarget, EventType, Revision, ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload,
 };
 use crate::session::fingerprint::{
-    ResolvedCommitEndpoint, ReviewUnitFingerprint, engagement_id_from_root,
-    engagement_id_provisional,
+    ResolvedCommitEndpoint, RevisionFingerprint, engagement_id_from_root, engagement_id_provisional,
 };
 use crate::session::store::resolution::{prepare_write_landing, resolve_write_store};
 use crate::session::workflow::util::sorted_unique;
@@ -29,7 +28,7 @@ use crate::storage::{Durability, LocalStorage};
 /// Commit-range capture input: a base rev and an optional target rev (defaults
 /// to `HEAD`). Revs are resolved to commit OIDs at capture time; the spellings
 /// are never stored, so equivalent spellings (`HEAD~1` vs the resolved OID)
-/// capture the same ReviewUnit.
+/// capture the same Revision.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommitRangeSpec {
     base_rev: String,
@@ -100,10 +99,10 @@ impl CaptureOptions {
         self
     }
 
-    /// Attribute the captured `review_unit_captured` event to an explicit
+    /// Attribute the captured `revision_captured` event to an explicit
     /// actor, overriding the `SHORE_ACTOR_ID` env var and the local Git
     /// identity. A malformed id is ignored (falls back to env, then Git);
-    /// `None` keeps the default resolution. The ReviewUnit id is derived from
+    /// `None` keeps the default resolution. The Revision id is derived from
     /// snapshot content, so the override changes attribution only, not identity.
     pub fn with_actor_id(mut self, actor_id: ActorId) -> Self {
         self.actor_id = Some(actor_id);
@@ -124,7 +123,7 @@ impl CaptureOptions {
     /// Excludes an explicit command-helper path from the captured snapshot.
     ///
     /// This is intentionally narrow CLI plumbing for files such as `--log-file`.
-    /// Other untracked agent/producer files remain part of the ReviewUnit unless the
+    /// Other untracked agent/producer files remain part of the Revision unless the
     /// caller chooses to exclude them.
     pub fn with_excluded_helper_path(mut self, path: impl AsRef<Path>) -> Self {
         self.excluded_helper_paths.push(path.as_ref().to_path_buf());
@@ -154,7 +153,7 @@ pub struct CaptureResult {
     pub revision_id: RevisionId,
     pub object_id: ObjectId,
     pub engagement_id: EngagementId,
-    pub source: ReviewUnitSource,
+    pub source: RevisionSource,
     pub base: ReviewEndpoint,
     pub target: ReviewEndpoint,
     pub snapshot_artifact_content_hash: String,
@@ -167,7 +166,7 @@ pub struct CaptureResult {
 /// Canonical capture entry point. Dispatches on the options' source spec to a
 /// source adapter (worktree by default, or a commit range), then runs the
 /// shared tail: write the snapshot artifact, record the idempotent
-/// `review_unit_captured` event, rebuild projection state, and surface the
+/// `revision_captured` event, rebuild projection state, and surface the
 /// clone-local diagnostic.
 pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
     let span = tracing::info_span!(
@@ -251,7 +250,7 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
     sign_event_if_requested(&mut event, &options.signing)?;
     recorder.record(&event_store, event)?;
 
-    // Record the capture-time branch ref as a best-effort `ReviewUnitRefAssociated`
+    // Record the capture-time branch ref as a best-effort `RevisionRefAssociated`
     // after the capture event, whenever the capture tips at the checked-out
     // branch: always for a worktree capture (its target is HEAD's working tree),
     // and for a commit-range capture only when its target endpoint is the current
@@ -327,7 +326,7 @@ fn auto_record_capture_ref_association(
     worktree_root: &Path,
     event_store: &EventStore,
     recorder: &mut CaptureRecorder,
-    fingerprint: &ReviewUnitFingerprint,
+    fingerprint: &RevisionFingerprint,
     journal_id: &JournalId,
     options: &CaptureOptions,
 ) -> Result<()> {
@@ -354,7 +353,7 @@ fn auto_record_capture_ref_association(
 /// The row inventory plus resolved identity an adapter hands to the shared tail.
 struct PreparedCapture {
     files: Vec<DiffFile>,
-    fingerprint: ReviewUnitFingerprint,
+    fingerprint: RevisionFingerprint,
 }
 
 /// Worktree adapter: ingest the `HEAD` -> working-tree diff (helper-path
@@ -367,7 +366,7 @@ fn prepare_worktree_capture(
         ingest_tracked_diff_with_options(worktree_root, capture_ingest_options(options))?;
     let files = snapshot.files;
     let fingerprint =
-        crate::session::fingerprint::review_unit_fingerprint_for_files(worktree_root, &files)?;
+        crate::session::fingerprint::revision_fingerprint_for_files(worktree_root, &files)?;
     Ok(PreparedCapture { files, fingerprint })
 }
 
@@ -383,7 +382,7 @@ fn prepare_commit_range_capture(
     let target = resolve_commit_endpoint(worktree_root, target_rev)?;
     let files =
         capture_commit_range_diff_files(worktree_root, &base.commit_oid, &target.commit_oid)?;
-    let fingerprint = crate::session::fingerprint::commit_range_review_unit_fingerprint_for_files(
+    let fingerprint = crate::session::fingerprint::commit_range_revision_fingerprint_for_files(
         worktree_root,
         &base,
         &target,
@@ -494,13 +493,13 @@ mod tests {
     use std::process::Command;
 
     use crate::git::git_common_dir;
-    use crate::model::{CommitRangeCaptureMode, ReviewEndpoint, ReviewUnitSource};
+    use crate::model::{CommitRangeCaptureMode, ReviewEndpoint, RevisionSource};
     use crate::session::event::EventType;
     use crate::session::{
         ArtifactKind, CaptureOptions, CommitRangeSpec, EventStore, ImportArtifactOptions,
-        ImportArtifactOutcome, ReviewUnitShowOptions, ShoreStorePaths, capture_review,
+        ImportArtifactOutcome, RevisionShowOptions, ShoreStorePaths, capture_review,
         capture_worktree_review, export_artifact, import_artifact, read_snapshot_artifact,
-        referenced_artifacts, show_review_unit,
+        referenced_artifacts, show_revision,
     };
 
     #[test]
@@ -515,7 +514,7 @@ mod tests {
 
         assert!(matches!(
             result.source,
-            ReviewUnitSource::GitCommitRange {
+            RevisionSource::GitCommitRange {
                 mode: CommitRangeCaptureMode::BaseTreeToTargetTree
             }
         ));
@@ -623,7 +622,7 @@ mod tests {
             .list_events()
             .unwrap();
         let projection =
-            crate::session::ReviewUnitCommitRangeProjection::from_events(&events).unwrap();
+            crate::session::RevisionCommitRangeProjection::from_events(&events).unwrap();
         let view = projection.unit(&capture.revision_id).unwrap();
         assert_eq!(view.current_refs.len(), 1);
         assert_eq!(view.current_refs[0].ref_name, "refs/heads/feat/x");
@@ -656,7 +655,7 @@ mod tests {
         );
 
         let projection =
-            crate::session::ReviewUnitCommitRangeProjection::from_events(&events).unwrap();
+            crate::session::RevisionCommitRangeProjection::from_events(&events).unwrap();
         let view = projection.unit(&capture.revision_id).unwrap();
         assert_eq!(view.current_refs.len(), 1);
         assert_eq!(view.current_refs[0].ref_name, "refs/heads/feat/range");
@@ -785,7 +784,7 @@ mod tests {
         // content hash (INV-3).
         assert!(matches!(
             result.source,
-            ReviewUnitSource::GitCommitRange { .. }
+            RevisionSource::GitCommitRange { .. }
         ));
         assert!(matches!(result.base, ReviewEndpoint::GitCommit { .. }));
         assert!(matches!(result.target, ReviewEndpoint::GitCommit { .. }));
@@ -985,7 +984,7 @@ mod tests {
             .find(|event| event.event_type == EventType::WorkObjectProposed)
             .unwrap();
 
-        // Attribution changes; the ReviewUnit id is derived from snapshot content, not the writer.
+        // Attribution changes; the Revision id is derived from snapshot content, not the writer.
         assert_eq!(event.writer.actor_id.as_str(), "actor:agent:capturer");
         assert!(result.revision_id.as_str().starts_with("rev:sha256:"));
     }
@@ -1153,11 +1152,10 @@ mod tests {
             "the two captures dedup to one shared artifact"
         );
 
-        // The converged ReviewUnit resolves + renders its snapshot through the binding.
+        // The converged Revision resolves + renders its snapshot through the binding.
         for revision_id in [&a.revision_id, &b.revision_id] {
-            let shown = show_review_unit(
-                ReviewUnitShowOptions::new(&fixture.worktree_a)
-                    .with_review_unit_id(revision_id.clone()),
+            let shown = show_revision(
+                RevisionShowOptions::new(&fixture.worktree_a).with_revision_id(revision_id.clone()),
             )
             .unwrap();
             assert!(!shown.snapshot.files.is_empty());

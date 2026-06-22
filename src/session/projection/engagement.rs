@@ -13,7 +13,7 @@ use crate::session::state::ProjectionDiagnostic;
 use crate::session::workflow::assessment::{
     AssessmentProjectionOptions, CurrentAssessmentStatus, project_assessments,
 };
-use crate::session::workflow::observation::ResolvedReviewUnit;
+use crate::session::workflow::observation::ResolvedRevision;
 
 /// A capture bridges two or more previously-separate engagements (its supersession
 /// targets carried different engagement hints). The grouping unifies the connected
@@ -164,7 +164,7 @@ fn engagement_lifecycle(
         return Ok(EngagementLifecycle::InProgress);
     };
 
-    let resolved = ResolvedReviewUnit {
+    let resolved = ResolvedRevision {
         journal_id: capture.journal_id.clone(),
         revision_id: head.clone(),
         object_id: capture.object_id.clone(),
@@ -192,7 +192,7 @@ mod tests {
     use super::*;
     use crate::model::{
         AssessmentId, EngagementId, JournalId, ObjectId, ReviewEndpoint, ReviewTargetRef,
-        ReviewUnitSource, RevisionId, TargetRef, TrackId, WorktreeCaptureMode,
+        RevisionId, RevisionSource, TargetRef, TrackId, WorktreeCaptureMode,
     };
     use crate::session::event::{
         EventTarget, EventType, GitProvenance, ReviewAssessment, ReviewAssessmentRecordedPayload,
@@ -225,7 +225,7 @@ mod tests {
                         id: revision_id,
                         object_id: ObjectId::new(format!("obj:sha256:{suffix}")),
                         git_provenance: Some(GitProvenance {
-                            source: ReviewUnitSource::GitWorktree {
+                            source: RevisionSource::GitWorktree {
                                 mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
                                 include_untracked: true,
                             },

@@ -1,4 +1,4 @@
-use super::ReviewUnitProjectionSummary;
+use super::RevisionProjectionSummary;
 use super::adapter_notes::AdapterNoteView;
 use crate::model::{
     AssessmentId, DiffFile, DiffSnapshot, InputRequestId, ObservationId, ReviewTargetRef,
@@ -10,9 +10,9 @@ use crate::session::observation::ObservationView;
 use crate::session::workflow::ValidationCheckView;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReviewUnitProjectionRow {
+pub struct RevisionProjectionRow {
     pub id: RowId,
-    pub kind: ReviewUnitProjectionRowKind,
+    pub kind: RevisionProjectionRowKind,
     pub projection_phase: ProjectionPhase,
     pub projection_order: usize,
     pub snapshot_order: Option<SnapshotOrder>,
@@ -27,7 +27,7 @@ pub struct ReviewUnitProjectionRow {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReviewUnitProjectionRowKind {
+pub enum RevisionProjectionRowKind {
     FileHeader,
     Metadata,
     HunkHeader,
@@ -40,7 +40,7 @@ pub enum ReviewUnitProjectionRowKind {
     EmptyState,
 }
 
-impl ReviewUnitProjectionRowKind {
+impl RevisionProjectionRowKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::FileHeader => "file_header",
@@ -100,13 +100,13 @@ pub struct SnapshotOrder {
 pub(super) fn build_snapshot_rows(
     snapshot: &DiffSnapshot,
     revision_id: &RevisionId,
-) -> (Vec<ReviewUnitProjectionRow>, ReviewUnitProjectionSummary) {
+) -> (Vec<RevisionProjectionRow>, RevisionProjectionSummary) {
     let mut rows = Vec::new();
 
     if snapshot.files.is_empty() {
         rows.push(snapshot_row(
             rows.len(),
-            ReviewUnitProjectionRowKind::EmptyState,
+            RevisionProjectionRowKind::EmptyState,
             None,
             ProjectionCoverage::Context,
             None,
@@ -124,7 +124,7 @@ pub(super) fn build_snapshot_rows(
         });
         rows.push(snapshot_row(
             rows.len(),
-            ReviewUnitProjectionRowKind::FileHeader,
+            RevisionProjectionRowKind::FileHeader,
             Some(SnapshotOrder {
                 file_index,
                 metadata_index: None,
@@ -140,7 +140,7 @@ pub(super) fn build_snapshot_rows(
         for (metadata_index, _) in file.metadata_rows.iter().enumerate() {
             rows.push(snapshot_row(
                 rows.len(),
-                ReviewUnitProjectionRowKind::Metadata,
+                RevisionProjectionRowKind::Metadata,
                 Some(SnapshotOrder {
                     file_index,
                     metadata_index: Some(metadata_index),
@@ -157,7 +157,7 @@ pub(super) fn build_snapshot_rows(
         for (hunk_index, hunk) in file.hunks.iter().enumerate() {
             rows.push(snapshot_row(
                 rows.len(),
-                ReviewUnitProjectionRowKind::HunkHeader,
+                RevisionProjectionRowKind::HunkHeader,
                 Some(SnapshotOrder {
                     file_index,
                     metadata_index: None,
@@ -173,7 +173,7 @@ pub(super) fn build_snapshot_rows(
             for (row_index, _) in hunk.rows.iter().enumerate() {
                 rows.push(snapshot_row(
                     rows.len(),
-                    ReviewUnitProjectionRowKind::Diff,
+                    RevisionProjectionRowKind::Diff,
                     Some(SnapshotOrder {
                         file_index,
                         metadata_index: None,
@@ -189,12 +189,12 @@ pub(super) fn build_snapshot_rows(
         }
     }
 
-    let summary = ReviewUnitProjectionSummary {
+    let summary = RevisionProjectionSummary {
         file_count: snapshot.files.len(),
         row_count: rows.len(),
         snapshot_row_count: rows.len(),
         snapshot_remainder_row_count: rows.len(),
-        ..ReviewUnitProjectionSummary::default()
+        ..RevisionProjectionSummary::default()
     };
 
     (rows, summary)
@@ -202,15 +202,15 @@ pub(super) fn build_snapshot_rows(
 
 pub(super) fn build_observation_rows(
     observations: &[ObservationView],
-) -> Vec<ReviewUnitProjectionRow> {
+) -> Vec<RevisionProjectionRow> {
     observations
         .iter()
         .enumerate()
         .map(|(index, observation)| {
             let (file_path, old_path) = target_paths(&observation.target);
-            ReviewUnitProjectionRow {
+            RevisionProjectionRow {
                 id: RowId::new(format!("row:{index:06}")),
-                kind: ReviewUnitProjectionRowKind::Observation,
+                kind: RevisionProjectionRowKind::Observation,
                 projection_phase: ProjectionPhase::Narrative,
                 projection_order: index,
                 snapshot_order: None,
@@ -229,15 +229,15 @@ pub(super) fn build_observation_rows(
 
 pub(super) fn build_input_request_rows(
     input_requests: &[InputRequestView],
-) -> Vec<ReviewUnitProjectionRow> {
+) -> Vec<RevisionProjectionRow> {
     input_requests
         .iter()
         .enumerate()
         .map(|(index, input_request)| {
             let (file_path, old_path) = target_paths(&input_request.target);
-            ReviewUnitProjectionRow {
+            RevisionProjectionRow {
                 id: RowId::new(format!("row:{index:06}")),
-                kind: ReviewUnitProjectionRowKind::InputRequest,
+                kind: RevisionProjectionRowKind::InputRequest,
                 projection_phase: ProjectionPhase::Narrative,
                 projection_order: index,
                 snapshot_order: None,
@@ -254,17 +254,15 @@ pub(super) fn build_input_request_rows(
         .collect()
 }
 
-pub(super) fn build_assessment_rows(
-    assessments: &[AssessmentView],
-) -> Vec<ReviewUnitProjectionRow> {
+pub(super) fn build_assessment_rows(assessments: &[AssessmentView]) -> Vec<RevisionProjectionRow> {
     assessments
         .iter()
         .enumerate()
         .map(|(index, assessment)| {
             let (file_path, old_path) = target_paths(&assessment.target);
-            ReviewUnitProjectionRow {
+            RevisionProjectionRow {
                 id: RowId::new(format!("row:{index:06}")),
-                kind: ReviewUnitProjectionRowKind::Assessment,
+                kind: RevisionProjectionRowKind::Assessment,
                 projection_phase: ProjectionPhase::Narrative,
                 projection_order: index,
                 snapshot_order: None,
@@ -283,16 +281,16 @@ pub(super) fn build_assessment_rows(
 
 pub(super) fn build_validation_rows(
     validations: &[ValidationCheckView],
-) -> Vec<ReviewUnitProjectionRow> {
+) -> Vec<RevisionProjectionRow> {
     validations
         .iter()
         .enumerate()
         .map(|(index, validation)| {
             let target = validation_target_to_review_target(&validation.target);
             let (file_path, old_path) = target_paths(&target);
-            ReviewUnitProjectionRow {
+            RevisionProjectionRow {
                 id: RowId::new(format!("row:{index:06}")),
-                kind: ReviewUnitProjectionRowKind::ValidationEvidence,
+                kind: RevisionProjectionRowKind::ValidationEvidence,
                 projection_phase: ProjectionPhase::Narrative,
                 projection_order: index,
                 snapshot_order: None,
@@ -312,7 +310,7 @@ pub(super) fn build_validation_rows(
 pub(super) fn build_adapter_note_rows(
     adapter_notes: &[AdapterNoteView],
     revision_id: &RevisionId,
-) -> Vec<ReviewUnitProjectionRow> {
+) -> Vec<RevisionProjectionRow> {
     adapter_notes
         .iter()
         .enumerate()
@@ -324,9 +322,9 @@ pub(super) fn build_adapter_note_rows(
                 start_line: target.start_line,
                 end_line: target.end_line,
             });
-            ReviewUnitProjectionRow {
+            RevisionProjectionRow {
                 id: RowId::new(format!("row:{index:06}")),
-                kind: ReviewUnitProjectionRowKind::AdapterNote,
+                kind: RevisionProjectionRowKind::AdapterNote,
                 projection_phase: ProjectionPhase::Narrative,
                 projection_order: index,
                 snapshot_order: None,
@@ -345,14 +343,14 @@ pub(super) fn build_adapter_note_rows(
 
 pub(super) fn snapshot_row(
     projection_order: usize,
-    kind: ReviewUnitProjectionRowKind,
+    kind: RevisionProjectionRowKind,
     snapshot_order: Option<SnapshotOrder>,
     coverage: ProjectionCoverage,
     target: Option<ReviewTargetRef>,
     file_path: Option<String>,
     old_path: Option<String>,
-) -> ReviewUnitProjectionRow {
-    ReviewUnitProjectionRow {
+) -> RevisionProjectionRow {
+    RevisionProjectionRow {
         id: RowId::new(format!("row:{projection_order:06}")),
         kind,
         projection_phase: ProjectionPhase::SnapshotRemainder,
@@ -369,7 +367,7 @@ pub(super) fn snapshot_row(
     }
 }
 
-pub(super) fn renumber_projection_rows(rows: &mut [ReviewUnitProjectionRow]) {
+pub(super) fn renumber_projection_rows(rows: &mut [RevisionProjectionRow]) {
     for (index, row) in rows.iter_mut().enumerate() {
         row.id = RowId::new(format!("row:{index:06}"));
         row.projection_order = index;
@@ -406,9 +404,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn review_unit_projection_row_kind_validation_evidence_wire_string() {
+    fn revision_projection_row_kind_validation_evidence_wire_string() {
         assert_eq!(
-            ReviewUnitProjectionRowKind::ValidationEvidence.as_str(),
+            RevisionProjectionRowKind::ValidationEvidence.as_str(),
             "validation_evidence"
         );
     }

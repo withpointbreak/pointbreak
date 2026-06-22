@@ -1,14 +1,14 @@
-use super::identity::ReviewUnitProjectionIdentity;
+use super::identity::RevisionProjectionIdentity;
 use crate::error::{Result, ShoreError};
 use crate::session::event::{
     EventType, GitProvenance, ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload,
 };
-use crate::session::observation::ResolvedReviewUnit;
+use crate::session::observation::ResolvedRevision;
 
-pub(super) fn selected_review_unit_capture(
+pub(super) fn selected_revision_capture(
     events: &[ShoreEvent],
-    resolved: &ResolvedReviewUnit,
-) -> Result<ReviewUnitProjectionIdentity> {
+    resolved: &ResolvedRevision,
+) -> Result<RevisionProjectionIdentity> {
     for event in events
         .iter()
         .filter(|event| event.event_type == EventType::WorkObjectProposed)
@@ -34,7 +34,7 @@ pub(super) fn selected_review_unit_capture(
                     revision.id.as_str()
                 )));
             };
-            return Ok(ReviewUnitProjectionIdentity {
+            return Ok(RevisionProjectionIdentity {
                 id: revision.id.clone(),
                 session_id: event.target.journal_id.clone(),
                 source,

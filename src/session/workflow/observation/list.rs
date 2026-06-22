@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use super::target::{
-    CurrentReviewUnitContext, ReviewUnitScope, RevisionSelection, resolve_revision,
-};
+use super::target::{CurrentRevisionContext, RevisionScope, RevisionSelection, resolve_revision};
 use super::util::validated_track_id;
 use super::view::{ObservationProjectionOptions, ObservationView, project_observations};
 use crate::error::Result;
@@ -33,7 +31,7 @@ impl ObservationListOptions {
         }
     }
 
-    pub fn with_review_unit_id(mut self, id: RevisionId) -> Self {
+    pub fn with_revision_id(mut self, id: RevisionId) -> Self {
         self.revision_id = Some(id);
         self
     }
@@ -82,8 +80,8 @@ pub fn list_observations(options: ObservationListOptions) -> Result<ObservationL
     let resolved = resolve_revision(
         &events,
         RevisionSelection::from_revision_seed(options.revision_id.as_ref()),
-        &CurrentReviewUnitContext::for_repo(&options.repo)?,
-        ReviewUnitScope::default(),
+        &CurrentRevisionContext::for_repo(&options.repo)?,
+        RevisionScope::default(),
     )?;
     let track_filter = options
         .track

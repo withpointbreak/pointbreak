@@ -267,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_review_unit_association_event_types_no_longer_decode() {
+    fn legacy_association_event_type_wire_strings_no_longer_decode() {
         for legacy in [
             "review_unit_ref_associated",
             "review_unit_ref_withdrawn",

@@ -17,7 +17,7 @@ use crate::session::event::{
     ReviewObservationRecordedPayload, ShoreEvent, decode_input_request_opened_payload,
 };
 use crate::session::observation::{
-    CurrentReviewUnitContext, ReviewUnitScope, RevisionSelection, resolve_revision, staged_body,
+    CurrentRevisionContext, RevisionScope, RevisionSelection, resolve_revision, staged_body,
     validated_track_id,
 };
 use crate::session::state::{ProjectionDiagnostic, SessionState};
@@ -55,7 +55,7 @@ impl AssessmentAddOptions {
             track: None,
             assessment: None,
             summary: None,
-            target: AssessmentTargetSelector::review_unit(),
+            target: AssessmentTargetSelector::revision(),
             replaces_assessment_ids: Vec::new(),
             related_observation_ids: Vec::new(),
             related_input_request_ids: Vec::new(),
@@ -75,7 +75,7 @@ impl AssessmentAddOptions {
         self
     }
 
-    pub fn with_review_unit_id(mut self, id: RevisionId) -> Self {
+    pub fn with_revision_id(mut self, id: RevisionId) -> Self {
         self.revision_id = Some(id);
         self
     }
@@ -176,8 +176,8 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
     let resolved = resolve_revision(
         &validation_events,
         RevisionSelection::from_revision_seed(options.revision_id.as_ref()),
-        &CurrentReviewUnitContext::for_repo(&options.repo)?,
-        ReviewUnitScope::default(),
+        &CurrentRevisionContext::for_repo(&options.repo)?,
+        RevisionScope::default(),
     )?;
     let target = resolve_assessment_target(
         worktree_root,

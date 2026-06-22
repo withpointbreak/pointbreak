@@ -8,7 +8,7 @@ use crate::session::input_request::{
     InputRequestProjectionOptions, InputRequestStatusFilter, project_input_requests,
 };
 use crate::session::observation::{
-    CurrentReviewUnitContext, ObservationProjectionOptions, ReviewUnitScope, RevisionSelection,
+    CurrentRevisionContext, ObservationProjectionOptions, RevisionScope, RevisionSelection,
     project_observations, resolve_revision, validated_track_id,
 };
 use crate::session::projection::ArtifactRemovalProjection;
@@ -19,7 +19,7 @@ use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::resolution::resolve_read_store;
 use crate::session::workflow::{ValidationCheckProjectionOptions, project_validation_checks};
 use crate::session::{
-    EventStore, ReviewUnitCommitRangeProjection, ReviewUnitCommitRangeView, verify_event_signature,
+    EventStore, RevisionCommitRangeProjection, RevisionCommitRangeView, verify_event_signature,
 };
 
 mod adapter_notes;
@@ -32,18 +32,18 @@ pub use self::adapter_notes::AdapterNoteView;
 use self::adapter_notes::project_adapter_notes;
 use self::identity::principal_diagnostics;
 pub use self::identity::{
-    MemberReadback, ReviewUnitProjectionIdentity, ReviewUnitProjectionSummary,
-    ReviewUnitShowFilters, ReviewUnitShowOptions, ReviewUnitShowResult,
+    MemberReadback, RevisionProjectionIdentity, RevisionProjectionSummary, RevisionShowFilters,
+    RevisionShowOptions, RevisionShowResult,
 };
-use self::resolving::selected_review_unit_capture;
-pub use self::rows::{ReviewUnitProjectionRow, SnapshotOrder};
+use self::resolving::selected_revision_capture;
+pub use self::rows::{RevisionProjectionRow, SnapshotOrder};
 use self::rows::{
     build_adapter_note_rows, build_assessment_rows, build_input_request_rows,
     build_observation_rows, build_snapshot_rows, build_validation_rows, renumber_projection_rows,
 };
 use self::snapshot::{SnapshotContent, resolve_snapshot_content};
 
-pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShowResult> {
+pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult> {
     let read_store = resolve_read_store(&options.repo)?;
     let track_id = options
         .track
@@ -54,18 +54,18 @@ pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShow
     let resolved = resolve_revision(
         &events,
         RevisionSelection::from_revision_seed(options.revision_id.as_ref()),
-        &CurrentReviewUnitContext::for_repo(&options.repo)?,
-        ReviewUnitScope::default(),
+        &CurrentRevisionContext::for_repo(&options.repo)?,
+        RevisionScope::default(),
     )?;
-    let review_unit = selected_review_unit_capture(&events, &resolved)?;
+    let revision = selected_revision_capture(&events, &resolved)?;
     let removal = ArtifactRemovalProjection::from_events(&events)?;
     let (snapshot, removed_snapshot_content_hash) =
-        match resolve_snapshot_content(&options.repo, &review_unit, &removal)? {
+        match resolve_snapshot_content(&options.repo, &revision, &removal)? {
             SnapshotContent::Present(snapshot) => (snapshot, None),
             SnapshotContent::Removed { content_hash } => (
                 DiffSnapshot::new(
-                    ReviewId::new(review_unit.session_id.as_str()),
-                    review_unit.snapshot_id.clone(),
+                    ReviewId::new(revision.session_id.as_str()),
+                    revision.snapshot_id.clone(),
                     Vec::new(),
                 ),
                 Some(content_hash),
@@ -116,9 +116,9 @@ pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShow
         // Removed content has no snapshot rows; the explained absence is carried
         // by the result field and the diagnostic below, not a misleading
         // empty-state row.
-        (Vec::new(), ReviewUnitProjectionSummary::default())
+        (Vec::new(), RevisionProjectionSummary::default())
     } else {
-        build_snapshot_rows(&snapshot, &review_unit.id)
+        build_snapshot_rows(&snapshot, &revision.id)
     };
     let mut narrative_rows = Vec::new();
     let observation_rows = build_observation_rows(&observations);
@@ -133,7 +133,7 @@ pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShow
     let validation_rows = build_validation_rows(&validation_checks);
     summary.validation_check_count = validation_checks.len();
     narrative_rows.extend(validation_rows);
-    let adapter_note_rows = build_adapter_note_rows(&adapter_notes, &review_unit.id);
+    let adapter_note_rows = build_adapter_note_rows(&adapter_notes, &revision.id);
     summary.adapter_note_count = adapter_notes.len();
     narrative_rows.extend(adapter_note_rows);
     summary.narrative_row_count = narrative_rows.len();
@@ -159,10 +159,10 @@ pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShow
     // Git-free commit-range lifecycle: fold the association events into the resolved
     // unit's view and surface its diagnostics. Liveness is layered by repo-holding
     // callers, never here.
-    let commit_range = ReviewUnitCommitRangeProjection::from_events(&events)?
+    let commit_range = RevisionCommitRangeProjection::from_events(&events)?
         .unit(&resolved.revision_id)
         .cloned()
-        .unwrap_or_else(|| ReviewUnitCommitRangeView {
+        .unwrap_or_else(|| RevisionCommitRangeView {
             revision_id: resolved.revision_id.clone(),
             anchored: false,
             current_commits: Vec::new(),
@@ -220,7 +220,7 @@ pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShow
             }
             Ok(())
         };
-        record(&review_unit.capture_event_id)?;
+        record(&revision.capture_event_id)?;
         for view in &observations {
             record(&view.event_id)?;
         }
@@ -238,13 +238,13 @@ pub fn show_review_unit(options: ReviewUnitShowOptions) -> Result<ReviewUnitShow
         }
     }
 
-    Ok(ReviewUnitShowResult {
+    Ok(RevisionShowResult {
         event_set_hash,
         event_count: events.len(),
-        review_unit,
+        revision,
         snapshot,
         removed_snapshot_content_hash,
-        filters: ReviewUnitShowFilters {
+        filters: RevisionShowFilters {
             revision_id: resolved.revision_id,
             track_id,
             include_body: options.include_body,
@@ -270,7 +270,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
-    use super::rows::ReviewUnitProjectionRowKind;
+    use super::rows::RevisionProjectionRowKind;
     use super::*;
     use crate::canonical_hash::sha256_json_prefixed;
     use crate::model::{
@@ -293,25 +293,25 @@ mod tests {
     };
 
     #[test]
-    fn show_review_unit_errors_when_no_review_unit_is_captured() {
+    fn show_revision_errors_when_no_revision_is_captured() {
         let repo = modified_repo();
 
-        let error = show_review_unit(ReviewUnitShowOptions::new(repo.path()))
-            .expect_err("no captured ReviewUnit should fail");
+        let error = show_revision(RevisionShowOptions::new(repo.path()))
+            .expect_err("no captured Revision should fail");
 
         assert!(error.to_string().contains("no captured revision"));
     }
 
     #[test]
-    fn show_review_unit_resolves_single_current_review_unit_and_freshness() {
+    fn show_revision_resolves_single_current_revision_and_freshness() {
         let repo = modified_repo();
         let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
 
-        let result = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
+        let result = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
 
-        assert_eq!(result.review_unit.id, capture.revision_id);
-        assert_eq!(result.review_unit.revision_id, capture.revision_id);
-        assert_eq!(result.review_unit.snapshot_id, capture.object_id);
+        assert_eq!(result.revision.id, capture.revision_id);
+        assert_eq!(result.revision.revision_id, capture.revision_id);
+        assert_eq!(result.revision.snapshot_id, capture.object_id);
         assert_eq!(result.filters.revision_id, capture.revision_id);
         // Capture event plus the auto-recorded capture-time ref association.
         assert_eq!(result.event_count, 2);
@@ -319,19 +319,19 @@ mod tests {
     }
 
     #[test]
-    fn show_review_unit_includes_validation_checks() {
+    fn show_revision_includes_validation_checks() {
         let repo = modified_repo();
         let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         record_validation_event(repo.path(), &capture, "validation:sha256:one");
 
-        let result = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
+        let result = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
 
         assert_eq!(result.validation_checks.len(), 1);
         assert_eq!(result.summary.validation_check_count, 1);
         let row = result
             .rows
             .iter()
-            .find(|row| row.kind == ReviewUnitProjectionRowKind::ValidationEvidence)
+            .find(|row| row.kind == RevisionProjectionRowKind::ValidationEvidence)
             .expect("validation evidence row");
         assert_eq!(
             row.related_validation_check_ids,
@@ -345,7 +345,7 @@ mod tests {
         let validation_row = result
             .rows
             .iter()
-            .position(|row| row.kind == ReviewUnitProjectionRowKind::ValidationEvidence)
+            .position(|row| row.kind == RevisionProjectionRowKind::ValidationEvidence)
             .unwrap();
         assert!(validation_row < first_snapshot_remainder);
     }
@@ -356,16 +356,16 @@ mod tests {
         let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         record_observation(
             ObservationAddOptions::new(repo.path())
-                .with_review_unit_id(capture.revision_id)
+                .with_revision_id(capture.revision_id)
                 .with_track("agent:codex")
                 .with_title("Observation"),
         )
         .unwrap();
 
-        let result = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
+        let result = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
 
         assert!(result.rows.iter().all(|row| {
-            row.kind == ReviewUnitProjectionRowKind::ValidationEvidence
+            row.kind == RevisionProjectionRowKind::ValidationEvidence
                 || row.related_validation_check_ids.is_empty()
         }));
     }
@@ -375,7 +375,7 @@ mod tests {
         let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         record_observation(
             ObservationAddOptions::new(repo.path())
-                .with_review_unit_id(capture.revision_id.clone())
+                .with_revision_id(capture.revision_id.clone())
                 .with_track("agent:claude-code")
                 .with_actor_id(crate::model::ActorId::new("actor:agent:claude-code"))
                 .with_title("Agent observation"),
@@ -393,9 +393,9 @@ mod tests {
         }))
         .unwrap();
 
-        let result = show_review_unit(
-            ReviewUnitShowOptions::new(repo.path())
-                .with_review_unit_id(revision_id)
+        let result = show_revision(
+            RevisionShowOptions::new(repo.path())
+                .with_revision_id(revision_id)
                 .with_delegation_map(map),
         )
         .unwrap();
@@ -425,9 +425,9 @@ mod tests {
         }))
         .unwrap();
 
-        let result = show_review_unit(
-            ReviewUnitShowOptions::new(repo.path())
-                .with_review_unit_id(revision_id)
+        let result = show_revision(
+            RevisionShowOptions::new(repo.path())
+                .with_revision_id(revision_id)
                 .with_delegation_map(map),
         )
         .unwrap();
@@ -452,10 +452,9 @@ mod tests {
     #[test]
     fn unit_show_without_map_emits_no_principal_diagnostics() {
         let (repo, revision_id) = capture_with_agent_observation();
-        let result = show_review_unit(
-            ReviewUnitShowOptions::new(repo.path()).with_review_unit_id(revision_id),
-        )
-        .unwrap();
+        let result =
+            show_revision(RevisionShowOptions::new(repo.path()).with_revision_id(revision_id))
+                .unwrap();
         assert!(
             result
                 .diagnostics
@@ -466,36 +465,36 @@ mod tests {
     }
 
     #[test]
-    fn show_review_unit_requires_explicit_id_when_current_is_ambiguous() {
+    fn show_revision_requires_explicit_id_when_current_is_ambiguous() {
         let repo = modified_repo();
         let first = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
         let second = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
 
-        let error = show_review_unit(ReviewUnitShowOptions::new(repo.path()))
+        let error = show_revision(RevisionShowOptions::new(repo.path()))
             .expect_err("multiple captures should be ambiguous");
         assert!(error.to_string().contains("multiple captured revisions"));
 
-        let explicit = show_review_unit(
-            ReviewUnitShowOptions::new(repo.path()).with_review_unit_id(first.revision_id.clone()),
+        let explicit = show_revision(
+            RevisionShowOptions::new(repo.path()).with_revision_id(first.revision_id.clone()),
         )
         .unwrap();
 
         assert_ne!(first.revision_id, second.revision_id);
-        assert_eq!(explicit.review_unit.id, first.revision_id);
+        assert_eq!(explicit.revision.id, first.revision_id);
         // Two worktree captures, each with its auto-recorded ref association.
         assert_eq!(explicit.event_count, 4);
     }
 
     #[test]
-    fn show_review_unit_uses_captured_snapshot_after_worktree_drift() {
+    fn show_revision_uses_captured_snapshot_after_worktree_drift() {
         let repo = modified_repo();
         let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         repo.write("src/lib.rs", "pub fn value() -> u32 { 99 }\n");
 
-        let result = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
+        let result = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
 
-        assert_eq!(result.review_unit.id, capture.revision_id);
+        assert_eq!(result.revision.id, capture.revision_id);
         assert_eq!(
             result.snapshot.files[0].new_path.as_deref(),
             Some("src/lib.rs")
@@ -505,19 +504,19 @@ mod tests {
     }
 
     #[test]
-    fn show_review_unit_rejects_snapshot_artifact_hash_mismatch() {
+    fn show_revision_rejects_snapshot_artifact_hash_mismatch() {
         let repo = modified_repo();
         let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         tamper_snapshot_artifact_snapshot_field(repo.path(), &capture.object_id);
 
-        let error = show_review_unit(ReviewUnitShowOptions::new(repo.path()))
+        let error = show_revision(RevisionShowOptions::new(repo.path()))
             .expect_err("tampered artifact should fail");
 
         assert!(error.to_string().contains("content hash"));
     }
 
     #[test]
-    fn show_review_unit_rejects_event_artifact_binding_mismatch() {
+    fn show_revision_rejects_event_artifact_binding_mismatch() {
         let repo = modified_repo();
         let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         rewrite_capture_event_snapshot_artifact_hash(
@@ -526,18 +525,18 @@ mod tests {
             "sha256:bad",
         );
 
-        let error = show_review_unit(ReviewUnitShowOptions::new(repo.path()))
+        let error = show_revision(RevisionShowOptions::new(repo.path()))
             .expect_err("event/artifact mismatch should fail");
 
         assert!(error.to_string().contains("snapshot artifact content hash"));
     }
 
     #[test]
-    fn show_review_unit_emits_snapshot_rows_in_captured_order() {
+    fn show_revision_emits_snapshot_rows_in_captured_order() {
         let repo = multi_file_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
 
-        let result = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
+        let result = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
 
         assert_eq!(result.rows[0].kind.as_str(), "file_header");
         assert_eq!(
@@ -554,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn show_review_unit_emits_empty_state_row_for_empty_snapshot() {
+    fn show_revision_emits_empty_state_row_for_empty_snapshot() {
         let (rows, summary) = build_snapshot_rows(
             &DiffSnapshot::new(
                 ReviewId::new("review:empty"),
@@ -570,11 +569,11 @@ mod tests {
     }
 
     #[test]
-    fn show_review_unit_rows_do_not_expose_storage_paths() {
+    fn show_revision_rows_do_not_expose_storage_paths() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
 
-        let result = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
+        let result = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
         let debug = format!("{result:?}");
 
         assert!(!debug.contains("artifacts/snapshots"));
@@ -582,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn show_review_unit_includes_active_observations() {
+    fn show_revision_includes_active_observations() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         record_observation(
@@ -593,7 +592,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
+        let result = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
 
         assert_eq!(result.observations.len(), 1);
         assert_eq!(result.observations[0].title, "Check this");
@@ -608,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn show_review_unit_hydrates_observation_bodies_when_requested() {
+    fn show_revision_hydrates_observation_bodies_when_requested() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         record_observation(
@@ -620,8 +619,7 @@ mod tests {
         .unwrap();
 
         let result =
-            show_review_unit(ReviewUnitShowOptions::new(repo.path()).with_include_body(true))
-                .unwrap();
+            show_revision(RevisionShowOptions::new(repo.path()).with_include_body(true)).unwrap();
 
         assert_eq!(
             result.observations[0].body.as_deref(),
@@ -631,13 +629,13 @@ mod tests {
     }
 
     #[test]
-    fn show_review_unit_observations_match_list_semantics_for_duplicates_and_supersession() {
+    fn show_revision_observations_match_list_semantics_for_duplicates_and_supersession() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         add_duplicate_observations_with_distinct_idempotency_keys(&repo);
         add_superseding_observation(&repo);
 
-        let unit = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
+        let unit = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
         let list = list_observations(ObservationListOptions::new(repo.path())).unwrap();
 
         assert_eq!(unit.observations, list.observations);
@@ -645,7 +643,7 @@ mod tests {
     }
 
     #[test]
-    fn show_review_unit_includes_open_and_responded_input_requests() {
+    fn show_revision_includes_open_and_responded_input_requests() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         let request = open_input_request(
@@ -662,7 +660,7 @@ mod tests {
         )
         .unwrap();
 
-        let unit = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
+        let unit = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
 
         assert_eq!(unit.input_requests.len(), 1);
         assert_eq!(unit.input_requests[0].id, request.input_request_id);
@@ -676,13 +674,13 @@ mod tests {
     }
 
     #[test]
-    fn show_review_unit_input_requests_match_list_semantics() {
+    fn show_revision_input_requests_match_list_semantics() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         add_duplicate_input_requests(&repo);
         add_ambiguous_input_request_responses(&repo);
 
-        let unit = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
+        let unit = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
         let list = list_input_requests(
             InputRequestListOptions::new(repo.path()).with_status(InputRequestStatusFilter::All),
         )
@@ -693,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn show_review_unit_includes_current_assessment() {
+    fn show_revision_includes_current_assessment() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         let assessment = record_assessment(
@@ -704,7 +702,7 @@ mod tests {
         )
         .unwrap();
 
-        let unit = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
+        let unit = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
 
         assert_eq!(
             unit.current_assessment.status,
@@ -721,14 +719,13 @@ mod tests {
     }
 
     #[test]
-    fn show_review_unit_assessments_match_show_semantics() {
+    fn show_revision_assessments_match_show_semantics() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         add_replaced_and_duplicate_assessments(&repo);
 
         let unit =
-            show_review_unit(ReviewUnitShowOptions::new(repo.path()).with_include_body(true))
-                .unwrap();
+            show_revision(RevisionShowOptions::new(repo.path()).with_include_body(true)).unwrap();
         let show = show_assessments(
             AssessmentShowOptions::new(repo.path())
                 .with_include_summary(true)
@@ -742,13 +739,13 @@ mod tests {
     }
 
     #[test]
-    fn show_review_unit_includes_imported_adapter_notes() {
+    fn show_revision_includes_imported_adapter_notes() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         let notes_path = repo.write_fixture("review-notes.json", native_review_notes_json());
         import_notes(ImportNotesOptions::new(repo.path()).with_review_notes(notes_path)).unwrap();
 
-        let result = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
+        let result = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
 
         assert_eq!(result.adapter_notes.len(), 1);
         assert_eq!(result.adapter_notes[0].title, "Imported note");
@@ -762,15 +759,14 @@ mod tests {
     }
 
     #[test]
-    fn show_review_unit_adapter_notes_hydrate_body_only_when_requested() {
+    fn show_revision_adapter_notes_hydrate_body_only_when_requested() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         import_large_review_note_body(&repo);
 
-        let compact = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
+        let compact = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
         let hydrated =
-            show_review_unit(ReviewUnitShowOptions::new(repo.path()).with_include_body(true))
-                .unwrap();
+            show_revision(RevisionShowOptions::new(repo.path()).with_include_body(true)).unwrap();
 
         assert_eq!(compact.adapter_notes[0].body, None);
         assert_eq!(
@@ -781,12 +777,12 @@ mod tests {
     }
 
     #[test]
-    fn show_review_unit_adapter_notes_surface_stale_and_orphan_status() {
+    fn show_revision_adapter_notes_surface_stale_and_orphan_status() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         import_stale_and_orphan_review_notes(&repo);
 
-        let result = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
+        let result = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
 
         assert!(
             result
@@ -833,7 +829,7 @@ mod tests {
     }
 
     #[test]
-    fn show_review_unit_places_reviewed_material_before_snapshot_remainder() {
+    fn show_revision_places_reviewed_material_before_snapshot_remainder() {
         let repo = multi_hunk_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         record_observation(
@@ -844,7 +840,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
+        let result = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
 
         let first_snapshot_remainder = result
             .rows
@@ -863,7 +859,7 @@ mod tests {
     }
 
     #[test]
-    fn show_review_unit_keeps_unreviewed_snapshot_rows_complete() {
+    fn show_revision_keeps_unreviewed_snapshot_rows_complete() {
         let repo = multi_file_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         record_observation(
@@ -873,7 +869,7 @@ mod tests {
         )
         .unwrap();
 
-        let result = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
+        let result = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
 
         let snapshot_row_count = result
             .rows
@@ -890,16 +886,15 @@ mod tests {
     }
 
     #[test]
-    fn show_review_unit_track_filter_narrows_narrative_without_mutating_snapshot_remainder() {
+    fn show_revision_track_filter_narrows_narrative_without_mutating_snapshot_remainder() {
         let repo = multi_file_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         add_observation(&repo, "agent:codex", "Codex");
         add_observation(&repo, "agent:claude", "Claude");
 
-        let all = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
+        let all = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
         let codex =
-            show_review_unit(ReviewUnitShowOptions::new(repo.path()).with_track("agent:codex"))
-                .unwrap();
+            show_revision(RevisionShowOptions::new(repo.path()).with_track("agent:codex")).unwrap();
 
         assert!(all.summary.narrative_row_count > codex.summary.narrative_row_count);
         assert_eq!(
@@ -915,30 +910,30 @@ mod tests {
     }
 
     #[test]
-    fn show_review_unit_surfaces_floating_then_anchored() {
+    fn show_revision_surfaces_floating_then_anchored() {
         let repo = modified_repo();
         let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
 
-        let floating = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
+        let floating = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
         assert!(!floating.commit_range.anchored);
         assert!(floating.commit_range.current_commits.is_empty());
 
         record_commit_association(repo.path(), &capture, "oidA");
 
-        let anchored = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
+        let anchored = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
         assert!(anchored.commit_range.anchored);
         assert_eq!(anchored.commit_range.current_commits.len(), 1);
         assert_eq!(anchored.commit_range.current_commits[0].commit_oid, "oidA");
     }
 
     #[test]
-    fn show_review_unit_extends_diagnostics_with_commit_range_diagnostics() {
+    fn show_revision_extends_diagnostics_with_commit_range_diagnostics() {
         let repo = modified_repo();
         let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         record_commit_association(repo.path(), &capture, "oidA");
         record_commit_association(repo.path(), &capture, "oidB");
 
-        let result = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
+        let result = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
 
         assert!(
             result
@@ -949,9 +944,7 @@ mod tests {
     }
 
     fn record_commit_association(repo: &Path, capture: &CaptureResult, commit_oid: &str) {
-        use crate::session::event::{
-            ReviewUnitCommitAssociatedPayload, build_commit_association_id,
-        };
+        use crate::session::event::{RevisionCommitAssociatedPayload, build_commit_association_id};
         let commit_association_id =
             build_commit_association_id(&capture.revision_id, commit_oid).unwrap();
         let mut target = EventTarget::for_revision(
@@ -962,10 +955,10 @@ mod tests {
         target.track_id = Some(crate::model::TrackId::new("agent:codex"));
         let event = ShoreEvent::new(
             EventType::RevisionCommitAssociated,
-            ReviewUnitCommitAssociatedPayload::idempotency_key(&capture.revision_id, commit_oid),
+            RevisionCommitAssociatedPayload::idempotency_key(&capture.revision_id, commit_oid),
             target,
             Writer::shore_local("0.1.0"),
-            ReviewUnitCommitAssociatedPayload {
+            RevisionCommitAssociatedPayload {
                 commit_association_id,
                 target: crate::model::ReviewTargetRef::Revision {
                     revision_id: capture.revision_id.clone(),
@@ -1433,7 +1426,7 @@ mod tests {
         record_artifact_removed(repo.path(), &capture.snapshot_artifact_content_hash);
         delete_snapshot_blob(repo.path(), &capture.object_id);
 
-        let result = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap();
+        let result = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
 
         assert!(result.snapshot_is_removed());
         assert_eq!(
@@ -1458,7 +1451,7 @@ mod tests {
         // Delete the blob WITHOUT a removal fact: not-yet-synced, not removed.
         delete_snapshot_blob(repo.path(), &capture.object_id);
 
-        let err = show_review_unit(ReviewUnitShowOptions::new(repo.path())).unwrap_err();
+        let err = show_revision(RevisionShowOptions::new(repo.path())).unwrap_err();
         assert!(
             err.to_string().contains("import referenced artifacts"),
             "expected the hard missing-artifact error, got: {err}"

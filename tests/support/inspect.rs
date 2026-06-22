@@ -22,7 +22,7 @@ use serde_json::Value;
 use super::git_repo::GitRepo;
 use super::shore;
 
-/// A repository plus a worktree on a fresh branch with one captured ReviewUnit.
+/// A repository plus a worktree on a fresh branch with one captured Revision.
 pub struct WorktreeCapture {
     pub _main: GitRepo,
     pub _parent: tempfile::TempDir,
@@ -272,7 +272,7 @@ fn drained(stderr: &Arc<Mutex<String>>) -> String {
     stderr.lock().map(|guard| guard.clone()).unwrap_or_default()
 }
 
-/// Run `shore review capture` against a repo, returning the captured ReviewUnit id.
+/// Run `shore review capture` against a repo, returning the captured Revision id.
 pub fn capture(repo: &Path) -> String {
     let output = shore(["review", "capture", "--repo", repo.to_str().unwrap()]);
     assert!(
@@ -283,12 +283,12 @@ pub fn capture(repo: &Path) -> String {
     let json: Value = serde_json::from_slice(&output.stdout).expect("parse capture JSON");
     json["revision"]["id"]
         .as_str()
-        .expect("capture returns a ReviewUnit id")
+        .expect("capture returns a Revision id")
         .to_owned()
 }
 
 /// A populated store assembled once through the `shore` CLI, reused by the
-/// endpoint-contract and validation read-surface suites: one captured ReviewUnit
+/// endpoint-contract and validation read-surface suites: one captured Revision
 /// carrying a range-targeted observation, an operative input request, a
 /// superseded + a superseding assessment (two tracks), and two validation checks
 /// (passed `cargo test` on the agent track, failed `cargo clippy` on the human
@@ -317,7 +317,7 @@ pub fn representative_store() -> RepresentativeStore {
     let capture = run_shore_json(&["review", "capture", "--repo", &repo_arg]);
     let revision_id = capture["revision"]["id"]
         .as_str()
-        .expect("capture returns a ReviewUnit id")
+        .expect("capture returns a Revision id")
         .to_owned();
     let snapshot_id = capture["revision"]["snapshotId"]
         .as_str()
@@ -494,7 +494,7 @@ pub fn capture_supersession_round(repo: &Path, predecessor: Option<&str>) -> Str
         serde_json::from_slice(&output.stdout).expect("parse supersession capture JSON");
     json["revision"]["id"]
         .as_str()
-        .expect("supersession capture returns a ReviewUnit id")
+        .expect("supersession capture returns a Revision id")
         .to_owned()
 }
 
@@ -528,7 +528,7 @@ where
     );
 }
 
-/// Minimal percent-encoding for the `:` characters in a ReviewUnit id query.
+/// Minimal percent-encoding for the `:` characters in a Revision id query.
 pub fn urlencode(value: &str) -> String {
     value.replace(':', "%3A")
 }

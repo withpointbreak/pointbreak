@@ -319,7 +319,7 @@ mod tests {
 
         // The advisory readback (#171) is rendered client-side from the fields the
         // API already serves — verificationStatus on the timeline/detail and per
-        // fact, endorsements on the detail and ReviewUnit page.
+        // fact, endorsements on the detail and Revision page.
         assert!(
             body.contains("function verificationChip"),
             "app.js renders the per-event verification status chip"
@@ -334,7 +334,7 @@ mod tests {
         );
         assert!(
             body.contains("o.verificationStatus") && body.contains("a.endorsements"),
-            "app.js consumes the readback fields off the ReviewUnit fact documents"
+            "app.js consumes the readback fields off the Revision fact documents"
         );
 
         // The contract is advisory and reader-relative: the rendered framing must

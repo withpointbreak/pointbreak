@@ -9,10 +9,9 @@ use crate::session::body_artifact::load_body_artifact;
 use crate::session::event::{
     EventType, InputRequestRespondedPayload, ReviewAssessmentRecordedPayload,
     ReviewInitializedPayload, ReviewNoteImportedPayload, ReviewObservationRecordedPayload,
-    ReviewUnitCommitAssociatedPayload, ReviewUnitCommitWithdrawnPayload,
-    ReviewUnitRefAssociatedPayload, ReviewUnitRefWithdrawnPayload, ShoreEvent,
-    ValidationCheckRecordedPayload, WorkObjectProposal, WorkObjectProposedPayload,
-    decode_input_request_opened_payload,
+    RevisionCommitAssociatedPayload, RevisionCommitWithdrawnPayload, RevisionRefAssociatedPayload,
+    RevisionRefWithdrawnPayload, ShoreEvent, ValidationCheckRecordedPayload, WorkObjectProposal,
+    WorkObjectProposedPayload, decode_input_request_opened_payload,
 };
 use crate::session::projection::cosignature::{
     CosignatureIndex, endorsement_readbacks, enrich_endorser_attributes,
@@ -228,7 +227,7 @@ pub(super) fn history_entry_from_event(
             }
         }
         EventType::RevisionRefAssociated => {
-            let payload: ReviewUnitRefAssociatedPayload =
+            let payload: RevisionRefAssociatedPayload =
                 serde_json::from_value(event.payload.clone())?;
             ReviewHistorySummary::RevisionRefAssociated {
                 ref_association_id: payload.ref_association_id,
@@ -237,7 +236,7 @@ pub(super) fn history_entry_from_event(
             }
         }
         EventType::RevisionRefWithdrawn => {
-            let payload: ReviewUnitRefWithdrawnPayload =
+            let payload: RevisionRefWithdrawnPayload =
                 serde_json::from_value(event.payload.clone())?;
             ReviewHistorySummary::RevisionRefWithdrawn {
                 ref_withdrawal_id: payload.ref_withdrawal_id,
@@ -245,7 +244,7 @@ pub(super) fn history_entry_from_event(
             }
         }
         EventType::RevisionCommitAssociated => {
-            let payload: ReviewUnitCommitAssociatedPayload =
+            let payload: RevisionCommitAssociatedPayload =
                 serde_json::from_value(event.payload.clone())?;
             let ReviewEndpoint::GitCommit {
                 commit_oid,
@@ -263,7 +262,7 @@ pub(super) fn history_entry_from_event(
             }
         }
         EventType::RevisionCommitWithdrawn => {
-            let payload: ReviewUnitCommitWithdrawnPayload =
+            let payload: RevisionCommitWithdrawnPayload =
                 serde_json::from_value(event.payload.clone())?;
             ReviewHistorySummary::RevisionCommitWithdrawn {
                 commit_withdrawal_id: payload.commit_withdrawal_id,

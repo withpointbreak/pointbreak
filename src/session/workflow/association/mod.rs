@@ -18,14 +18,13 @@ use crate::model::{
     RevisionId, TargetRef,
 };
 use crate::session::event::{
-    EventPayload, EventTarget, EventType, ReviewUnitCommitAssociatedPayload,
-    ReviewUnitCommitWithdrawnPayload, ReviewUnitRefAssociatedPayload,
-    ReviewUnitRefWithdrawnPayload, ShoreEvent, build_commit_association_id,
-    build_commit_withdrawal_id, build_ref_association_id, build_ref_withdrawal_id,
+    EventPayload, EventTarget, EventType, RevisionCommitAssociatedPayload,
+    RevisionCommitWithdrawnPayload, RevisionRefAssociatedPayload, RevisionRefWithdrawnPayload,
+    ShoreEvent, build_commit_association_id, build_commit_withdrawal_id, build_ref_association_id,
+    build_ref_withdrawal_id,
 };
 use crate::session::observation::{
-    CurrentReviewUnitContext, ReviewUnitScope, RevisionSelection, resolve_revision,
-    validated_track_id,
+    CurrentRevisionContext, RevisionScope, RevisionSelection, resolve_revision, validated_track_id,
 };
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::resolution::{
@@ -33,7 +32,7 @@ use crate::session::store::resolution::{
 };
 use crate::session::{
     BestEffortSkipSink, CurrentCommitAssociation, CurrentRefAssociation, EventSigningOptions,
-    EventStore, EventWriteOutcome, ReviewUnitCommitRangeProjection, ReviewUnitCommitRangeView,
+    EventStore, EventWriteOutcome, RevisionCommitRangeProjection, RevisionCommitRangeView,
     WithdrawnCommitAssociation, WithdrawnRefAssociation, current_timestamp,
     sign_event_if_requested, writer_from_options,
 };
@@ -49,7 +48,7 @@ pub enum AssociationAxis {
 macro_rules! association_write_builders {
     ($name:ident) => {
         impl $name {
-            pub fn with_review_unit_id(mut self, id: RevisionId) -> Self {
+            pub fn with_revision_id(mut self, id: RevisionId) -> Self {
                 self.revision_id = Some(id);
                 self
             }
@@ -213,7 +212,7 @@ impl ListAssociationsOptions {
         }
     }
 
-    pub fn with_review_unit_id(mut self, id: RevisionId) -> Self {
+    pub fn with_revision_id(mut self, id: RevisionId) -> Self {
         self.revision_id = Some(id);
         self
     }
@@ -295,7 +294,7 @@ pub(crate) fn normalize_ref(name: &str) -> String {
     }
 }
 
-/// Build a `ReviewUnitRefAssociated` event for a known review unit. The single
+/// Build a `RevisionRefAssociated` event for a known review unit. The single
 /// construction site for the ref-axis event: `associate_ref` and the capture-time
 /// auto-record share it so they converge on one identity. `track_id` is
 /// envelope-only — the id/key fold neither track nor writer.
@@ -310,8 +309,8 @@ pub(crate) fn build_ref_association_event(
 ) -> Result<ShoreEvent> {
     let full_ref = normalize_ref(ref_name);
     let ref_association_id = build_ref_association_id(revision_id, &full_ref, head_oid)?;
-    let key = ReviewUnitRefAssociatedPayload::idempotency_key(revision_id, &full_ref, head_oid);
-    let payload = ReviewUnitRefAssociatedPayload {
+    let key = RevisionRefAssociatedPayload::idempotency_key(revision_id, &full_ref, head_oid);
+    let payload = RevisionRefAssociatedPayload {
         ref_association_id,
         target: ReviewTargetRef::Revision {
             revision_id: revision_id.clone(),
@@ -348,8 +347,8 @@ pub fn associate_commit(options: AssociateCommitOptions) -> Result<AssociateComm
             let commit_oid = git_rev_parse_commit_oid(worktree_root, &options.commit)?;
             let tree_oid = git_commit_tree_oid(worktree_root, &commit_oid)?;
             let commit_association_id = build_commit_association_id(revision_id, &commit_oid)?;
-            let key = ReviewUnitCommitAssociatedPayload::idempotency_key(revision_id, &commit_oid);
-            let payload = ReviewUnitCommitAssociatedPayload {
+            let key = RevisionCommitAssociatedPayload::idempotency_key(revision_id, &commit_oid);
+            let payload = RevisionCommitAssociatedPayload {
                 commit_association_id: commit_association_id.clone(),
                 target: ReviewTargetRef::Revision {
                     revision_id: revision_id.clone(),
@@ -390,8 +389,8 @@ pub fn withdraw_commit(options: WithdrawCommitOptions) -> Result<WithdrawCommitR
             let commit_withdrawal_id =
                 build_commit_withdrawal_id(revision_id, &options.commit_association_id)?;
             let key =
-                ReviewUnitCommitWithdrawnPayload::idempotency_key(&options.commit_association_id);
-            let payload = ReviewUnitCommitWithdrawnPayload {
+                RevisionCommitWithdrawnPayload::idempotency_key(&options.commit_association_id);
+            let payload = RevisionCommitWithdrawnPayload {
                 commit_withdrawal_id: commit_withdrawal_id.clone(),
                 target: ReviewTargetRef::Revision {
                     revision_id: revision_id.clone(),
@@ -426,12 +425,12 @@ pub fn associate_ref(options: AssociateRefOptions) -> Result<AssociateRefResult>
         |revision_id, _worktree_root| {
             let ref_association_id =
                 build_ref_association_id(revision_id, &full_ref, &options.head_oid)?;
-            let key = ReviewUnitRefAssociatedPayload::idempotency_key(
+            let key = RevisionRefAssociatedPayload::idempotency_key(
                 revision_id,
                 &full_ref,
                 &options.head_oid,
             );
-            let payload = ReviewUnitRefAssociatedPayload {
+            let payload = RevisionRefAssociatedPayload {
                 ref_association_id: ref_association_id.clone(),
                 target: ReviewTargetRef::Revision {
                     revision_id: revision_id.clone(),
@@ -467,8 +466,8 @@ pub fn withdraw_ref(options: WithdrawRefOptions) -> Result<WithdrawRefResult> {
         |revision_id, _worktree_root| {
             let ref_withdrawal_id =
                 build_ref_withdrawal_id(revision_id, &options.ref_association_id)?;
-            let key = ReviewUnitRefWithdrawnPayload::idempotency_key(&options.ref_association_id);
-            let payload = ReviewUnitRefWithdrawnPayload {
+            let key = RevisionRefWithdrawnPayload::idempotency_key(&options.ref_association_id);
+            let payload = RevisionRefWithdrawnPayload {
                 ref_withdrawal_id: ref_withdrawal_id.clone(),
                 target: ReviewTargetRef::Revision {
                     revision_id: revision_id.clone(),
@@ -497,10 +496,10 @@ pub fn list_associations(options: ListAssociationsOptions) -> Result<ListAssocia
     let resolved = resolve_revision(
         &events,
         RevisionSelection::from_revision_seed(options.revision_id.as_ref()),
-        &CurrentReviewUnitContext::for_repo(&options.repo)?,
-        ReviewUnitScope::default(),
+        &CurrentRevisionContext::for_repo(&options.repo)?,
+        RevisionScope::default(),
     )?;
-    let view = ReviewUnitCommitRangeProjection::from_events(&events)?
+    let view = RevisionCommitRangeProjection::from_events(&events)?
         .unit(&resolved.revision_id)
         .cloned()
         .unwrap_or_else(|| empty_view(resolved.revision_id.clone()));
@@ -536,8 +535,8 @@ pub fn list_associations(options: ListAssociationsOptions) -> Result<ListAssocia
     })
 }
 
-fn empty_view(revision_id: RevisionId) -> ReviewUnitCommitRangeView {
-    ReviewUnitCommitRangeView {
+fn empty_view(revision_id: RevisionId) -> RevisionCommitRangeView {
+    RevisionCommitRangeView {
         revision_id,
         anchored: false,
         current_commits: Vec::new(),
@@ -586,8 +585,8 @@ where
     let resolved = resolve_revision(
         &validation_events,
         RevisionSelection::from_revision_seed(revision_id),
-        &CurrentReviewUnitContext::for_repo(repo)?,
-        ReviewUnitScope::default(),
+        &CurrentRevisionContext::for_repo(repo)?,
+        RevisionScope::default(),
     )?;
     let track_id = validated_track_id(track.ok_or_else(|| ShoreError::WorkflowInputInvalid {
         reason: "track is required".to_owned(),

@@ -186,7 +186,7 @@ mod tests {
                 .with_title("Need approval")
                 .with_reason_code(InputRequestReasonCode::ManualDecisionRequired)
                 .with_assertion_mode(AssertionMode::Operative)
-                .with_target(InputRequestTargetSelector::review_unit()),
+                .with_target(InputRequestTargetSelector::revision()),
         )
         .unwrap();
 
@@ -408,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn open_input_request_requires_a_captured_review_unit() {
+    fn open_input_request_requires_a_captured_revision() {
         let repo = modified_repo();
 
         let error = open_input_request(
@@ -423,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn open_input_request_requires_explicit_review_unit_when_current_is_ambiguous() {
+    fn open_input_request_requires_explicit_revision_when_current_is_ambiguous() {
         let repo = modified_repo();
         let first = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         repo.write("src/lib.rs", "pub fn value() -> u32 {\n    3\n}\n");
@@ -444,7 +444,7 @@ mod tests {
 
         let explicit = open_input_request(
             InputRequestOpenOptions::new(repo.path())
-                .with_review_unit_id(first.revision_id.clone())
+                .with_revision_id(first.revision_id.clone())
                 .with_track("human:kevin")
                 .with_title("Need approval")
                 .with_reason_code(InputRequestReasonCode::ManualDecisionRequired),

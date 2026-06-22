@@ -24,7 +24,7 @@ use crate::storage::{CreateFileOutcome, Durability, LocalStorage};
 /// The kind of content-addressed artifact an event references.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ArtifactKind {
-    /// A captured ReviewUnit snapshot artifact.
+    /// A captured Revision snapshot artifact.
     Snapshot,
     /// A large note-shaped body artifact.
     Body,

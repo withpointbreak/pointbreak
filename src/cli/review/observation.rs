@@ -175,7 +175,7 @@ fn observation_add_options(
         .with_target(target);
 
     if let Some(revision) = args.revision {
-        options = options.with_review_unit_id(RevisionId::new(revision));
+        options = options.with_revision_id(RevisionId::new(revision));
     }
     if let Some(body) = body {
         options = options.with_body(body);
@@ -207,7 +207,7 @@ fn observation_add_options(
 fn observation_list_options(args: ObservationListArgs) -> ObservationListOptions {
     let mut options = ObservationListOptions::new(&args.repo).with_include_body(args.include_body);
     if let Some(revision) = args.revision {
-        options = options.with_review_unit_id(RevisionId::new(revision));
+        options = options.with_revision_id(RevisionId::new(revision));
     }
     if let Some(track) = args.track {
         options = options.with_track(track);
@@ -230,7 +230,7 @@ fn observation_target(args: &ObservationAddArgs) -> ObservationTargetSelector {
             args.end_line,
         ),
         (Some(file), None) => ObservationTargetSelector::file(file.clone()),
-        (None, _) => ObservationTargetSelector::review_unit(),
+        (None, _) => ObservationTargetSelector::revision(),
     }
 }
 

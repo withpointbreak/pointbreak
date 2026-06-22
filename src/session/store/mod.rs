@@ -13,9 +13,9 @@ pub(in crate::session) mod store_init;
 pub(crate) use event_migrate::{EventMigrateOutcome, migrate_event_file};
 pub(crate) use event_store::{EventStore, EventWriteOutcome};
 #[cfg(test)]
-pub use fingerprint::compute_review_unit_fingerprint;
+pub use fingerprint::compute_revision_fingerprint;
 pub(crate) use fingerprint::worktree_fingerprint_for_files;
-pub use fingerprint::{ReviewUnitFingerprint, capture_worktree_fingerprint};
+pub use fingerprint::{RevisionFingerprint, capture_worktree_fingerprint};
 pub use snapshot_artifact::{SnapshotArtifact, read_snapshot_artifact};
 // `StoreMode` and the thin repo-level entry points re-export from `session::mod`
 // for the binary crate. The underlying read/write helpers stay crate-internal:

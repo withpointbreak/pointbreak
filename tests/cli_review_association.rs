@@ -286,7 +286,7 @@ fn history_filters_to_the_commit_associated_event_type() {
             "--repo",
             repo_path,
             "--event-type",
-            "review-unit-commit-associated",
+            "revision-commit-associated",
         ])
         .stdout,
     );

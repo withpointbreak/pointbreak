@@ -282,7 +282,7 @@ fn legacy_worktree_local_store_errors_until_migrated() {
     assert_no_storage_path_leak(&list);
 }
 
-// 5. Sibling captures: each worktree's `unit show` with NO `--review-unit`
+// 5. Sibling captures: each worktree's `unit show` with NO `--revision`
 //    resolves its OWN worktree's capture (worktree read scoping holds).
 #[test]
 fn each_worktree_unit_show_resolves_its_own_capture() {
@@ -310,7 +310,7 @@ fn each_worktree_unit_show_resolves_its_own_capture() {
     );
 
     // Both units live in the one shared store, yet each worktree's own
-    // `unit show` (no `--review-unit`) resolves its OWN capture.
+    // `unit show` (no `--revision`) resolves its OWN capture.
     let alpha_show = run_json(&["review", "show", "--repo", alpha.to_str().unwrap()]);
     assert_eq!(
         alpha_show["revision"]["id"],

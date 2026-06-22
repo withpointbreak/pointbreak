@@ -59,8 +59,7 @@ impl EventSignatureRecordedPayload {
     /// `event_signature_recorded:<targetEventRecordHash>:<attestingSigner>:<sig-encoding>`.
     ///
     /// Follows the established `<event_kind>:<work-object-identity>:<source_key>`
-    /// shape (cf. `ReviewAssessmentRecordedPayload::idempotency_key`,
-    /// `ReviewUnitLineageRoundRecordedPayload::idempotency_key`). The signature
+    /// shape (cf. `ReviewAssessmentRecordedPayload::idempotency_key`). The signature
     /// component carries the full `sig` bytes (`attestation.sig.as_str()`), so
     /// two DISTINCT signatures by one signer key to DISTINCT members — closing
     /// signer-slot poisoning. The `inclusion_proof` is NOT part of this key.

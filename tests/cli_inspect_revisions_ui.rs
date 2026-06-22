@@ -149,7 +149,7 @@ fn served_app_js_stale_badge_reads_supersession() {
 }
 
 #[test]
-fn served_documents_carry_no_review_unit_wire_key() {
+fn served_documents_carry_no_revision_wire_key() {
     // The output documents are renamed to the revision vocabulary: no camelCase
     // or snake review-unit wire key survives on any served contract. (Hyphenated
     // id *values* like `review-unit:sha256:…` are not keys and are intentionally

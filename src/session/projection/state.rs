@@ -357,7 +357,7 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        AssessmentId, EngagementId, ReviewEndpoint, ReviewTargetRef, ReviewUnitSource, TargetRef,
+        AssessmentId, EngagementId, ReviewEndpoint, ReviewTargetRef, RevisionSource, TargetRef,
         TaskTargetRef, ValidationCheckId, ValidationStatus, ValidationTarget, ValidationTrigger,
         WorkObjectId, WorktreeCaptureMode,
     };
@@ -394,7 +394,7 @@ mod tests {
 
     #[test]
     fn projection_event_set_hash_is_order_independent() {
-        let first = review_unit_captured_event("rev:one", "snap:one");
+        let first = revision_captured_event("rev:one", "snap:one");
         let second = observation_event("retry-a", "obs:sha256:one");
 
         let forward = SessionState::from_events(&[first.clone(), second.clone()]).unwrap();
@@ -407,8 +407,8 @@ mod tests {
 
     #[test]
     fn state_json_includes_event_set_hash_but_not_raw_events() {
-        let state = SessionState::from_events(&[review_unit_captured_event("rev:one", "snap:one")])
-            .unwrap();
+        let state =
+            SessionState::from_events(&[revision_captured_event("rev:one", "snap:one")]).unwrap();
 
         let json = serde_json::to_value(&state).unwrap();
 
@@ -422,8 +422,8 @@ mod tests {
     }
 
     #[test]
-    fn projection_tracks_current_review_unit_from_capture() {
-        let event = review_unit_captured_event("rev:one", "snap:one");
+    fn projection_tracks_current_revision_from_capture() {
+        let event = revision_captured_event("rev:one", "snap:one");
 
         let state = SessionState::from_events(&[event]).unwrap();
 
@@ -441,8 +441,8 @@ mod tests {
     #[test]
     fn projection_keeps_multi_capture_current_unset_without_ambient_diagnostic() {
         let events = vec![
-            review_unit_captured_event("rev:one", "snap:one"),
-            review_unit_captured_event("rev:two", "snap:two"),
+            revision_captured_event("rev:one", "snap:one"),
+            revision_captured_event("rev:two", "snap:two"),
         ];
 
         let state = SessionState::from_events(&events).unwrap();
@@ -453,7 +453,7 @@ mod tests {
             !state
                 .diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.code == "ambiguous_current_review_unit")
+                .any(|diagnostic| diagnostic.code == "ambiguous_current_revision")
         );
     }
 
@@ -518,7 +518,7 @@ mod tests {
     #[test]
     fn session_state_increments_assessment_count_for_review_assessment_recorded_event() {
         let events = vec![
-            review_unit_captured_event("rev:one", "snap:one"),
+            revision_captured_event("rev:one", "snap:one"),
             assessment_event("assess:sha256:one"),
         ];
 
@@ -538,7 +538,7 @@ mod tests {
     #[test]
     fn session_state_increments_validation_check_count_for_validation_check_recorded_event() {
         let events = vec![
-            review_unit_captured_event("rev:one", "snap:one"),
+            revision_captured_event("rev:one", "snap:one"),
             validation_event("retry-a", "validation:sha256:one"),
         ];
 
@@ -559,8 +559,8 @@ mod tests {
 
     #[test]
     fn projection_uses_revision_vocabulary_for_current_identity_and_count() {
-        let state = SessionState::from_events(&[review_unit_captured_event("rev:one", "snap:one")])
-            .unwrap();
+        let state =
+            SessionState::from_events(&[revision_captured_event("rev:one", "snap:one")]).unwrap();
         let json = serde_json::to_value(&state).unwrap();
 
         // The current-identity fields carry the revision/object vocabulary, and the
@@ -781,7 +781,7 @@ mod tests {
 
     #[test]
     fn state_json_no_longer_contains_legacy_verdict_fields() {
-        let events = vec![review_unit_captured_event("rev:one", "snap:one")];
+        let events = vec![revision_captured_event("rev:one", "snap:one")];
 
         let state = SessionState::from_events(&events).unwrap();
         let json = serde_json::to_value(&state).unwrap();
@@ -815,7 +815,7 @@ mod tests {
         assert_eq!(state.validation_check_count, 0);
     }
 
-    fn review_unit_captured_event(revision_id: &str, snapshot_id: &str) -> ShoreEvent {
+    fn revision_captured_event(revision_id: &str, snapshot_id: &str) -> ShoreEvent {
         // The envelope subject addresses the same revision the payload proposes,
         // mirroring how a real capture stamps both from one minted revision id.
         ShoreEvent::new(
@@ -839,7 +839,7 @@ mod tests {
                         id: RevisionId::new(revision_id),
                         object_id: ObjectId::new(snapshot_id),
                         git_provenance: Some(GitProvenance {
-                            source: ReviewUnitSource::GitWorktree {
+                            source: RevisionSource::GitWorktree {
                                 mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
                                 include_untracked: true,
                             },

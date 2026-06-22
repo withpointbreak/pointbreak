@@ -3,7 +3,7 @@ use serde::Serialize;
 use crate::model::{
     AssessmentId, CommitAssociationId, CommitWithdrawalId, EngagementId, EventId, InputRequestId,
     InputRequestResponseId, JournalId, ObjectId, ObservationId, RefAssociationId, RefWithdrawalId,
-    ReviewEndpoint, ReviewTargetRef, ReviewUnitSource, RevisionId, TrackId, ValidationCheckId,
+    ReviewEndpoint, ReviewTargetRef, RevisionId, RevisionSource, TrackId, ValidationCheckId,
     ValidationStatus, ValidationTarget, ValidationTrigger,
 };
 use crate::session::event::{
@@ -51,7 +51,7 @@ pub enum ReviewHistorySummary {
         object_id: ObjectId,
         engagement_id: EngagementId,
         #[serde(skip_serializing_if = "Option::is_none")]
-        source: Option<ReviewUnitSource>,
+        source: Option<RevisionSource>,
         #[serde(skip_serializing_if = "Option::is_none")]
         base: Option<ReviewEndpoint>,
         #[serde(skip_serializing_if = "Option::is_none")]

@@ -23,7 +23,7 @@ struct LinkedFixture {
     _worktree_parent: tempfile::TempDir,
     seed: PathBuf,
     reader: PathBuf,
-    seed_review_unit_id: String,
+    seed_revision_id: String,
     seed_snapshot_id: String,
     seed_snapshot_artifact_content_hash: String,
 }
@@ -45,13 +45,13 @@ impl LinkedFixture {
             _worktree_parent: worktree_parent,
             seed,
             reader,
-            seed_review_unit_id: String::new(),
+            seed_revision_id: String::new(),
             seed_snapshot_id: String::new(),
             seed_snapshot_artifact_content_hash: String::new(),
         };
         fs::write(fixture.seed.join("README.md"), "changed in seed\n").unwrap();
         let capture = fixture.capture(&fixture.seed);
-        fixture.seed_review_unit_id = capture["revision"]["id"]
+        fixture.seed_revision_id = capture["revision"]["id"]
             .as_str()
             .expect("capture has review unit id")
             .to_owned();
@@ -116,7 +116,7 @@ impl LinkedFixture {
     /// Record one of each reviewer-facing fact on the seed's review unit.
     /// Returns the opened input request's id.
     fn seed_full_facts(&self, body: &str) -> String {
-        self.observation_add(&self.seed, &self.seed_review_unit_id, body);
+        self.observation_add(&self.seed, &self.seed_revision_id, body);
         let seed = self.seed.to_str().unwrap();
         let opened = run_shore_json(&[
             "review",
@@ -228,7 +228,7 @@ fn deleted_worktree_unit_list_lists_unit() {
     assert_eq!(json["revisionCount"], 1);
     assert_eq!(
         json["entries"][0]["revisionId"],
-        Value::String(fixture.seed_review_unit_id.clone())
+        Value::String(fixture.seed_revision_id.clone())
     );
     assert_no_deleted_path_in_diagnostics(&fixture, &json);
 }
@@ -238,7 +238,7 @@ fn deleted_worktree_unit_show_renders_composite_with_snapshot() {
     let body = "m".repeat(5000);
     let (fixture, _) = populated_fixture_with_deleted_seed(&body);
 
-    let json = fixture.unit_show_json(&fixture.reader, &fixture.seed_review_unit_id);
+    let json = fixture.unit_show_json(&fixture.reader, &fixture.seed_revision_id);
 
     assert_eq!(json["summary"]["observationCount"], 1);
     assert_eq!(json["summary"]["inputRequestCount"], 1);
@@ -276,7 +276,7 @@ fn deleted_worktree_observation_list_renders_with_hydrated_body() {
         "--repo",
         fixture.reader.to_str().unwrap(),
         "--revision",
-        &fixture.seed_review_unit_id,
+        &fixture.seed_revision_id,
         "--include-body",
     ]);
 
@@ -296,7 +296,7 @@ fn deleted_worktree_input_request_list_renders_with_response() {
         "--repo",
         fixture.reader.to_str().unwrap(),
         "--revision",
-        &fixture.seed_review_unit_id,
+        &fixture.seed_revision_id,
         "--status",
         "all",
     ]);
@@ -327,7 +327,7 @@ fn deleted_worktree_assessment_show_renders() {
         "--repo",
         fixture.reader.to_str().unwrap(),
         "--revision",
-        &fixture.seed_review_unit_id,
+        &fixture.seed_revision_id,
     ]);
 
     assert_eq!(json["assessments"].as_array().unwrap().len(), 1);
@@ -346,7 +346,7 @@ fn deleted_worktree_validation_list_renders() {
         "--repo",
         fixture.reader.to_str().unwrap(),
         "--revision",
-        &fixture.seed_review_unit_id,
+        &fixture.seed_revision_id,
     ]);
 
     assert_eq!(json["validationChecks"].as_array().unwrap().len(), 1);
@@ -442,7 +442,7 @@ fn linked_reader_attaches_observation_to_linked_only_unit() {
     // reader's empty worktree-local store and fails with "unknown review unit".
     let result = fixture.observation_add(
         &fixture.reader,
-        &fixture.seed_review_unit_id,
+        &fixture.seed_revision_id,
         "cross-worktree note",
     );
 
@@ -466,7 +466,7 @@ fn linked_reader_opens_input_request_against_linked_only_unit() {
         "--repo",
         fixture.reader.to_str().unwrap(),
         "--revision",
-        &fixture.seed_review_unit_id,
+        &fixture.seed_revision_id,
         "--track",
         "agent:test-fixture",
         "--title",
@@ -489,7 +489,7 @@ fn linked_reader_opens_input_request_with_observation_ref_target() {
     // now lives only in the linked store.
     let observation = fixture.observation_add(
         &fixture.seed,
-        &fixture.seed_review_unit_id,
+        &fixture.seed_revision_id,
         "observation to reference",
     );
     let observation_id = observation["observationId"]
@@ -506,7 +506,7 @@ fn linked_reader_opens_input_request_with_observation_ref_target() {
         "--repo",
         fixture.reader.to_str().unwrap(),
         "--revision",
-        &fixture.seed_review_unit_id,
+        &fixture.seed_revision_id,
         "--observation",
         &observation_id,
         "--track",
@@ -563,7 +563,7 @@ fn linked_reader_respond_copies_request_event_target_fields() {
     // envelope), on the same track — copied verbatim from the union-read request.
     assert_eq!(
         shoreline::model::subject_revision_id(&response.target.subject).map(|id| id.as_str()),
-        Some(fixture.seed_review_unit_id.as_str())
+        Some(fixture.seed_revision_id.as_str())
     );
     assert_eq!(
         response.target.track_id.as_ref().map(|id| id.as_str()),
@@ -584,7 +584,7 @@ fn linked_reader_records_assessment_on_linked_only_unit() {
         "--repo",
         fixture.reader.to_str().unwrap(),
         "--revision",
-        &fixture.seed_review_unit_id,
+        &fixture.seed_revision_id,
         "--track",
         "human:kevin",
         "--assessment",
@@ -602,7 +602,7 @@ fn linked_reader_assessment_relates_linked_only_observation() {
     let fixture = LinkedFixture::new();
     let observation = fixture.observation_add(
         &fixture.seed,
-        &fixture.seed_review_unit_id,
+        &fixture.seed_revision_id,
         "observation to relate",
     );
     let observation_id = observation["observationId"]
@@ -619,7 +619,7 @@ fn linked_reader_assessment_relates_linked_only_observation() {
         "--repo",
         fixture.reader.to_str().unwrap(),
         "--revision",
-        &fixture.seed_review_unit_id,
+        &fixture.seed_revision_id,
         "--track",
         "human:kevin",
         "--assessment",
@@ -643,7 +643,7 @@ fn linked_reader_assessment_replaces_linked_only_assessment() {
         "--repo",
         fixture.seed.to_str().unwrap(),
         "--revision",
-        &fixture.seed_review_unit_id,
+        &fixture.seed_revision_id,
         "--track",
         "human:kevin",
         "--assessment",
@@ -665,7 +665,7 @@ fn linked_reader_assessment_replaces_linked_only_assessment() {
         "--repo",
         fixture.reader.to_str().unwrap(),
         "--revision",
-        &fixture.seed_review_unit_id,
+        &fixture.seed_revision_id,
         "--track",
         "human:kevin",
         "--assessment",
@@ -692,7 +692,7 @@ fn linked_reader_records_validation_on_linked_only_unit() {
         "--repo",
         fixture.reader.to_str().unwrap(),
         "--revision",
-        &fixture.seed_review_unit_id,
+        &fixture.seed_revision_id,
         "--track",
         "agent:test-fixture",
         "--check-name",
@@ -714,7 +714,7 @@ fn linked_fact_writes_land_in_linked_store_not_worktree_local() {
 
     // One of each migrated fact on the reader against the seed's linked-only unit.
     let reader = fixture.reader.to_str().unwrap();
-    let unit = fixture.seed_review_unit_id.as_str();
+    let unit = fixture.seed_revision_id.as_str();
     fixture.observation_add(&fixture.reader, unit, "cross-worktree note");
     run_shore_json(&[
         "review",
@@ -784,7 +784,7 @@ fn linked_fact_write_state_json_is_orphan_free() {
     let fixture = LinkedFixture::new();
     fixture.observation_add(
         &fixture.reader,
-        &fixture.seed_review_unit_id,
+        &fixture.seed_revision_id,
         "cross-worktree note",
     );
 
@@ -899,13 +899,12 @@ fn state_diagnostic_codes(state: &Value) -> Vec<String> {
 #[test]
 fn cross_worktree_fact_is_immediately_visible_via_write_through() {
     let fixture = LinkedFixture::new();
-    let added =
-        fixture.observation_add(&fixture.reader, &fixture.seed_review_unit_id, "cross note");
+    let added = fixture.observation_add(&fixture.reader, &fixture.seed_revision_id, "cross note");
     let observation_id = added["observationId"].as_str().unwrap().to_owned();
 
     // Write-through: the seed (a separate checkout reading the shared common-dir
     // store) sees the reader's observation immediately, with no `store link`.
-    let seen = observation_list_json(&fixture.seed, &fixture.seed_review_unit_id);
+    let seen = observation_list_json(&fixture.seed, &fixture.seed_revision_id);
     assert!(contains_observation(&seen, &observation_id));
 }
 
@@ -1027,7 +1026,7 @@ fn linked_unit_list_without_local_events_has_no_divergence_diagnostic() {
     assert_eq!(json["eventCount"], 2);
     assert_eq!(
         json["entries"][0]["revisionId"],
-        Value::String(fixture.seed_review_unit_id.clone())
+        Value::String(fixture.seed_revision_id.clone())
     );
     assert!(
         json["eventSetHash"]
@@ -1041,7 +1040,7 @@ fn linked_unit_list_without_local_events_has_no_divergence_diagnostic() {
 fn linked_history_reads_full_timeline_from_linked_store() {
     let fixture = LinkedFixture::new();
     let body = "h".repeat(5000);
-    fixture.observation_add(&fixture.seed, &fixture.seed_review_unit_id, &body);
+    fixture.observation_add(&fixture.seed, &fixture.seed_revision_id, &body);
 
     let json = fixture.history_json(&fixture.reader, true);
 
@@ -1072,11 +1071,11 @@ fn linked_unit_show_resolves_linked_only_unit() {
     let body = "o".repeat(5000);
     fixture.seed_full_facts(&body);
 
-    let json = fixture.unit_show_json(&fixture.reader, &fixture.seed_review_unit_id);
+    let json = fixture.unit_show_json(&fixture.reader, &fixture.seed_revision_id);
 
     assert_eq!(
         json["revision"]["id"],
-        Value::String(fixture.seed_review_unit_id.clone())
+        Value::String(fixture.seed_revision_id.clone())
     );
     assert_eq!(json["summary"]["observationCount"], 1);
     assert_eq!(json["summary"]["inputRequestCount"], 1);
@@ -1093,7 +1092,7 @@ fn linked_unit_show_resolves_linked_only_unit() {
 fn linked_unit_show_loads_bound_snapshot_from_linked_store() {
     let fixture = LinkedFixture::new();
 
-    let json = fixture.unit_show_json(&fixture.reader, &fixture.seed_review_unit_id);
+    let json = fixture.unit_show_json(&fixture.reader, &fixture.seed_revision_id);
 
     assert_eq!(
         json["revision"]["snapshotArtifactContentHash"],
@@ -1118,13 +1117,13 @@ fn linked_observation_list_resolves_linked_unit() {
         "--repo",
         fixture.reader.to_str().unwrap(),
         "--revision",
-        &fixture.seed_review_unit_id,
+        &fixture.seed_revision_id,
         "--include-body",
     ]);
 
     assert_eq!(
         json["revisionId"],
-        Value::String(fixture.seed_review_unit_id.clone())
+        Value::String(fixture.seed_revision_id.clone())
     );
     assert_eq!(json["observations"].as_array().unwrap().len(), 1);
     assert_eq!(json["observations"][0]["body"], Value::String(body));
@@ -1142,12 +1141,12 @@ fn linked_input_request_list_resolves_linked_unit() {
         "--repo",
         fixture.reader.to_str().unwrap(),
         "--revision",
-        &fixture.seed_review_unit_id,
+        &fixture.seed_revision_id,
     ]);
 
     assert_eq!(
         json["revisionId"],
-        Value::String(fixture.seed_review_unit_id.clone())
+        Value::String(fixture.seed_revision_id.clone())
     );
     assert_eq!(json["inputRequests"].as_array().unwrap().len(), 1);
     assert_eq!(json["inputRequests"][0]["title"], "Need approval");
@@ -1184,12 +1183,12 @@ fn linked_assessment_show_resolves_linked_unit() {
         "--repo",
         fixture.reader.to_str().unwrap(),
         "--revision",
-        &fixture.seed_review_unit_id,
+        &fixture.seed_revision_id,
     ]);
 
     assert_eq!(
         json["revisionId"],
-        Value::String(fixture.seed_review_unit_id.clone())
+        Value::String(fixture.seed_revision_id.clone())
     );
     assert_eq!(json["assessments"].as_array().unwrap().len(), 1);
     assert_eq!(json["assessments"][0]["assessment"], "accepted");
@@ -1207,12 +1206,12 @@ fn linked_validation_list_resolves_linked_unit() {
         "--repo",
         fixture.reader.to_str().unwrap(),
         "--revision",
-        &fixture.seed_review_unit_id,
+        &fixture.seed_revision_id,
     ]);
 
     assert_eq!(
         json["revisionId"],
-        Value::String(fixture.seed_review_unit_id.clone())
+        Value::String(fixture.seed_revision_id.clone())
     );
     assert_eq!(json["validationChecks"].as_array().unwrap().len(), 1);
     assert_eq!(json["validationChecks"][0]["checkName"], "cargo test");
@@ -1235,7 +1234,7 @@ fn snapshot_artifact_reads_from_linked_store() {
 fn export_artifact_body_reads_from_linked_store() {
     let fixture = LinkedFixture::new();
     let body = "x".repeat(5000);
-    fixture.observation_add(&fixture.seed, &fixture.seed_review_unit_id, &body);
+    fixture.observation_add(&fixture.seed, &fixture.seed_revision_id, &body);
 
     let body_ref = seed_body_artifact_ref(&fixture);
     let bytes = export_artifact(&fixture.reader, &body_ref)
@@ -1248,7 +1247,7 @@ fn export_artifact_body_reads_from_linked_store() {
 fn import_artifact_writes_through_to_linked_store() {
     let fixture = LinkedFixture::new();
     let body = "y".repeat(5000);
-    fixture.observation_add(&fixture.seed, &fixture.seed_review_unit_id, &body);
+    fixture.observation_add(&fixture.seed, &fixture.seed_revision_id, &body);
 
     let body_ref = seed_body_artifact_ref(&fixture);
     let artifact_relative_path = format!(
@@ -1317,7 +1316,7 @@ fn worktree_local_unit_list_is_unchanged() {
 fn main_worktree_of_a_clone_round_trips_a_capture_in_place() {
     // The headline acceptance test: in the MAIN worktree of a clone, a capture
     // round-trips in place — `unit list` / `unit show` / `history` resolve it with
-    // NO dedicated worktree, NO `store link`, and NO `--review-unit`. The shared
+    // NO dedicated worktree, NO `store link`, and NO `--revision`. The shared
     // common-dir store is the default for every worktree.
     let main = GitRepo::new();
     main.write("README.md", "base\n");
@@ -1329,7 +1328,7 @@ fn main_worktree_of_a_clone_round_trips_a_capture_in_place() {
     let capture = run_shore_json(&["review", "capture", "--repo", main.path().to_str().unwrap()]);
     let unit_id = capture["revision"]["id"].as_str().unwrap().to_owned();
 
-    // With NO --review-unit, the same worktree's reads resolve the capture in
+    // With NO --revision, the same worktree's reads resolve the capture in
     // place (write-through landed it in the same `.git/shore` store reads use).
     let list = run_shore_json(&[
         "review",

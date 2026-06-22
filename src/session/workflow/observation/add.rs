@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use super::target::{
-    CurrentReviewUnitContext, ObservationTargetSelector, ReviewUnitScope, RevisionSelection,
+    CurrentRevisionContext, ObservationTargetSelector, RevisionScope, RevisionSelection,
     resolve_observation_target, resolve_revision,
 };
 use super::util::{required_title, staged_body, validated_track_id};
@@ -50,7 +50,7 @@ impl ObservationAddOptions {
             track: None,
             title: None,
             body: None,
-            target: ObservationTargetSelector::review_unit(),
+            target: ObservationTargetSelector::revision(),
             tags: Vec::new(),
             confidence: None,
             supersedes_observation_ids: Vec::new(),
@@ -70,7 +70,7 @@ impl ObservationAddOptions {
         self
     }
 
-    pub fn with_review_unit_id(mut self, id: RevisionId) -> Self {
+    pub fn with_revision_id(mut self, id: RevisionId) -> Self {
         self.revision_id = Some(id);
         self
     }
@@ -160,8 +160,8 @@ pub fn record_observation(options: ObservationAddOptions) -> Result<ObservationA
     let resolved = resolve_revision(
         &events,
         RevisionSelection::from_revision_seed(options.revision_id.as_ref()),
-        &CurrentReviewUnitContext::for_repo(&options.repo)?,
-        ReviewUnitScope::default(),
+        &CurrentRevisionContext::for_repo(&options.repo)?,
+        RevisionScope::default(),
     )?;
     let target = resolve_observation_target(&worktree_root, &resolved, &options.target)?;
     let title = required_title(options.title.as_deref())?;
@@ -185,7 +185,7 @@ pub fn record_observation(options: ObservationAddOptions) -> Result<ObservationA
 
 struct ObservationWriteInput {
     repo: PathBuf,
-    resolved: super::ResolvedReviewUnit,
+    resolved: super::ResolvedRevision,
     target: ReviewTargetRef,
     track: Option<String>,
     title: String,

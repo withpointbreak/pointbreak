@@ -24,8 +24,8 @@ pub fn review_history(options: ReviewHistoryOptions) -> Result<ReviewHistoryResu
 
     let ref_matched_units = match &options.ref_filter {
         Some((name, mode)) => {
-            let projection = crate::session::ReviewUnitCommitRangeProjection::from_events(&events)?;
-            Some(super::review_unit_list::review_units_matching_ref(
+            let projection = crate::session::RevisionCommitRangeProjection::from_events(&events)?;
+            Some(super::revision_list::revisions_matching_ref(
                 &projection,
                 name,
                 *mode,
@@ -57,8 +57,8 @@ mod tests {
     use super::*;
     use crate::model::{
         ActorId, AssessmentId, EngagementId, EventId, InputRequestId, InputRequestResponseId,
-        JournalId, ObjectId, ObservationId, ReviewEndpoint, ReviewTargetRef, ReviewUnitSource,
-        RevisionId, Side, TargetRef, TrackId, ValidationCheckId, ValidationStatus,
+        JournalId, ObjectId, ObservationId, ReviewEndpoint, ReviewTargetRef, RevisionId,
+        RevisionSource, Side, TargetRef, TrackId, ValidationCheckId, ValidationStatus,
         ValidationTarget, ValidationTrigger, WorktreeCaptureMode,
     };
     use crate::session::event::{
@@ -111,7 +111,7 @@ mod tests {
                 "review_initialized",
             ),
             (
-                review_unit_captured_event(),
+                revision_captured_event(),
                 EventType::WorkObjectProposed,
                 "revision_captured",
             ),
@@ -413,11 +413,11 @@ mod tests {
     }
 
     #[test]
-    fn history_filters_by_review_unit_track_and_event_type() {
+    fn history_filters_by_revision_track_and_event_type() {
         let keep = observation_event("review-unit:sha256:one", "agent:codex", "Keep");
         let other_track = observation_event("review-unit:sha256:one", "agent:claude", "Drop track");
         let other_unit = observation_event("review-unit:sha256:two", "agent:codex", "Drop unit");
-        let capture = review_unit_captured_event_for("review-unit:sha256:one");
+        let capture = revision_captured_event_for("review-unit:sha256:one");
 
         let filters = ResolvedHistoryFilters {
             revision_id: Some(RevisionId::new("review-unit:sha256:one")),
@@ -689,11 +689,11 @@ mod tests {
         .unwrap()
     }
 
-    fn review_unit_captured_event() -> ShoreEvent {
-        review_unit_captured_event_for("review-unit:sha256:one")
+    fn revision_captured_event() -> ShoreEvent {
+        revision_captured_event_for("review-unit:sha256:one")
     }
 
-    fn review_unit_captured_event_for(revision_id: &str) -> ShoreEvent {
+    fn revision_captured_event_for(revision_id: &str) -> ShoreEvent {
         let revision_id = RevisionId::new(revision_id);
         let payload = WorkObjectProposedPayload {
             engagement_id: EngagementId::new(format!(
@@ -709,7 +709,7 @@ mod tests {
                     id: RevisionId::new(format!("rev:{}", revision_id.as_str())),
                     object_id: ObjectId::new(format!("snap:{}", revision_id.as_str())),
                     git_provenance: Some(GitProvenance {
-                        source: ReviewUnitSource::GitWorktree {
+                        source: RevisionSource::GitWorktree {
                             mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
                             include_untracked: true,
                         },

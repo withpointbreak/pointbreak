@@ -21,10 +21,10 @@ use shoreline::session::{
     IngestEventsOptions, InputRequestFetchOptions, InputRequestListOptions,
     InputRequestOpenOptions, InputRequestRespondOptions, InputRequestStatus,
     InputRequestStatusFilter, ObservationAddOptions, ReloadOutcome, ReviewHistoryOptions,
-    ReviewUnitShowOptions, TrustSet, capture_worktree_review, event_signature_trust_set,
+    RevisionShowOptions, TrustSet, capture_worktree_review, event_signature_trust_set,
     export_artifact, fetch_input_request, import_artifact, import_notes, ingest_events,
     list_input_requests, open_input_request, read_events, record_observation, referenced_artifacts,
-    respond_input_request, review_history, show_review_unit, verify_event_signature,
+    respond_input_request, review_history, show_revision, verify_event_signature,
 };
 use support::git_repo::GitRepo;
 
@@ -392,10 +392,10 @@ fn referenced_artifacts_enumerates_snapshot_and_body_refs() {
 }
 
 #[test]
-fn full_review_unit_mirror_imports_artifacts() {
+fn full_revision_mirror_imports_artifacts() {
     let origin = modified_repo();
     capture_worktree_review(CaptureOptions::new(origin.path())).unwrap();
-    let origin_show = show_review_unit(ReviewUnitShowOptions::new(origin.path())).unwrap();
+    let origin_show = show_revision(RevisionShowOptions::new(origin.path())).unwrap();
     let events = read_events(origin.path()).unwrap();
     let refs = referenced_artifacts(&events).unwrap();
     let artifacts = exported_artifacts(&origin, &refs);
@@ -403,7 +403,7 @@ fn full_review_unit_mirror_imports_artifacts() {
 
     ingest_events(IngestEventsOptions::new(dest.path(), events)).unwrap();
     import_all_artifacts(&dest, &artifacts);
-    let mirrored = show_review_unit(ReviewUnitShowOptions::new(dest.path())).unwrap();
+    let mirrored = show_revision(RevisionShowOptions::new(dest.path())).unwrap();
 
     assert_eq!(mirrored, origin_show);
 }
@@ -442,7 +442,7 @@ fn events_only_ingest_reports_missing_artifact() {
     let dest = modified_repo();
 
     ingest_events(IngestEventsOptions::new(dest.path(), events)).unwrap();
-    let error = show_review_unit(ReviewUnitShowOptions::new(dest.path()))
+    let error = show_revision(RevisionShowOptions::new(dest.path()))
         .expect_err("events-only mirror should be missing the snapshot artifact");
     let message = error.to_string();
 
@@ -601,7 +601,7 @@ fn event_signature_contract_docs_exist_and_reserve_deferred_surfaces() {
 }
 
 #[test]
-fn review_unit_lineage_contract_docs_exist() {
+fn revision_lineage_contract_docs_exist() {
     let adr = std::fs::read_to_string("docs/adr/adr-0005-review-unit-lineage.md")
         .expect("ADR-0005 exists");
     let storage = std::fs::read_to_string("docs/storage-model.md").expect("read storage model");
