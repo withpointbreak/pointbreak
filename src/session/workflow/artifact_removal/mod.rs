@@ -22,11 +22,14 @@ use crate::canonical_hash::sha256_bytes_hex;
 use crate::error::{Result, ShoreError};
 use crate::git::{git_rev_list_range, git_rev_parse_commit_oid};
 use crate::model::{ActorId, JournalId, ObjectId, RevisionId};
-use crate::session::body_artifact::note_body_content_hash_from_path;
+use crate::session::body_artifact::{
+    note_body_content_hash_from_path, validate_note_body_artifact_bytes,
+};
 use crate::session::event::{
     ArtifactRemovedPayload, EventTarget, EventType, ShoreEvent, WorkObjectProposal,
     WorkObjectProposedPayload,
 };
+use crate::session::object_artifact::decode_and_validate_object_artifact;
 use crate::session::projection::cosignature::CosignatureIndex;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::resolution::{prepare_write_landing, resolve_write_store};
@@ -436,6 +439,11 @@ pub struct SkippedRemoval {
 pub enum SweepOutcome {
     Removed,
     Missing,
+    /// The blob was erase-eligible but its on-disk bytes no longer hash to the
+    /// content hash the payload→file join claims, so the sweep refused to delete
+    /// it. The bytes survive; the drift is surfaced as a `compact_hash_mismatch`
+    /// diagnostic.
+    HashMismatchSkipped,
 }
 
 /// One blob the sweep attempted to reclaim.
@@ -502,6 +510,38 @@ pub fn compact_store(options: CompactOptions) -> Result<CompactResult> {
             });
             continue;
         }
+        // A third floor, on the irreversible delete path: re-read the blob and
+        // re-derive its content hash, refusing to delete bytes that have drifted
+        // from the hash the payload→file join claims (the analog of refusing to
+        // delete a chunk whose hash no longer verifies). The read's length feeds
+        // the byte accounting, so the delete path reads each file exactly once,
+        // and the same check runs under `dry_run` so a preview is honest about
+        // what it would skip.
+        let path = store_dir.join(&blob.relative_path);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Already gone (e.g. a prior sweep): nothing to reclaim.
+                swept.push(SweptBlob {
+                    content_hash: blob.content_hash,
+                    outcome: SweepOutcome::Missing,
+                });
+                continue;
+            }
+            Err(error) => {
+                return Err(ShoreError::Message(format!(
+                    "read blob {}: {error}",
+                    path.display()
+                )));
+            }
+        };
+        if !blob_content_matches_claim(&blob, &bytes) {
+            swept.push(SweptBlob {
+                content_hash: blob.content_hash,
+                outcome: SweepOutcome::HashMismatchSkipped,
+            });
+            continue;
+        }
         if options.dry_run {
             // Would-remove: list it, delete nothing, reclaim nothing.
             swept.push(SweptBlob {
@@ -510,9 +550,7 @@ pub fn compact_store(options: CompactOptions) -> Result<CompactResult> {
             });
             continue;
         }
-        let byte_size = std::fs::metadata(store_dir.join(&blob.relative_path))
-            .map(|meta| meta.len())
-            .unwrap_or(0);
+        let byte_size = bytes.len() as u64;
         let outcome = match storage.remove_file(&blob.relative_path)? {
             RemoveOutcome::Removed => {
                 bytes_reclaimed += byte_size;
@@ -532,6 +570,24 @@ pub fn compact_store(options: CompactOptions) -> Result<CompactResult> {
         dry_run: options.dry_run,
         skipped_ineligible,
     })
+}
+
+/// Re-derive an erase-eligible blob's content hash from its on-disk bytes and
+/// confirm it still equals the `content_hash` the payload→file join claims.
+/// Objects must decode to a self-consistent v2 artifact whose hash matches; note
+/// bodies must hash to their locator. Identity is over decoded content, not raw
+/// storage bytes, so a cosmetic re-encoding that decodes identically still
+/// matches. Any decode/parse failure counts as a mismatch — the sweep never
+/// deletes bytes it cannot prove still match their claimed identity.
+fn blob_content_matches_claim(blob: &OnDiskBlob, bytes: &[u8]) -> bool {
+    if blob.relative_path.starts_with("artifacts/objects/") {
+        matches!(
+            decode_and_validate_object_artifact(bytes),
+            Ok(artifact) if artifact.content_hash == blob.content_hash
+        )
+    } else {
+        validate_note_body_artifact_bytes(&blob.relative_path, &blob.content_hash, bytes).is_ok()
+    }
 }
 
 /// A content-addressed blob on disk, paired with the `content_hash` it carries.
@@ -1035,6 +1091,43 @@ mod tests {
     }
 
     #[test]
+    fn compact_skips_a_blob_whose_bytes_no_longer_match_its_hash() {
+        let repo = TestRepo::init();
+        let capture = capture_worktree(&repo);
+        assert_eq!(blob_count(&repo, "artifacts/objects"), 1);
+
+        remove_content(RemoveOptions::new(
+            repo.path(),
+            RemoveSelector::Snapshot(capture.object_id.clone()),
+        ))
+        .unwrap();
+
+        // Tamper the erase-eligible blob's bytes on disk so they no longer hash
+        // to the content hash the payload→file join claims.
+        let objects_dir = resolved_store_dir(repo.path()).join("artifacts/objects");
+        let blob_path = std::fs::read_dir(&objects_dir)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.path())
+            .next()
+            .expect("one object artifact file on disk");
+        std::fs::write(&blob_path, b"tampered: no longer a valid object artifact").unwrap();
+
+        let result = compact_store(CompactOptions::new(repo.path())).unwrap();
+
+        // The file SURVIVES: the sweep refuses to delete bytes that have drifted
+        // from their claimed hash, and reports the drift instead of deleting.
+        assert_eq!(blob_count(&repo, "artifacts/objects"), 1);
+        let swept = result
+            .swept
+            .iter()
+            .find(|blob| blob.content_hash == capture.object_artifact_content_hash)
+            .expect("the drifted blob is reported");
+        assert_eq!(swept.outcome, SweepOutcome::HashMismatchSkipped);
+        assert_eq!(result.bytes_reclaimed, 0);
+    }
+
+    #[test]
     fn compact_emits_no_event() {
         let repo = TestRepo::init();
         let capture = capture_worktree(&repo);
@@ -1135,6 +1228,56 @@ mod tests {
                 .iter()
                 .any(|blob| blob.content_hash == body_hash
                     && blob.outcome == SweepOutcome::Removed)
+        );
+    }
+
+    #[test]
+    fn compact_skips_a_note_body_blob_whose_bytes_no_longer_match_its_hash() {
+        let repo = TestRepo::init();
+        let capture = capture_worktree(&repo);
+        let observation = record_observation(
+            ObservationAddOptions::new(repo.path())
+                .with_revision_id(capture.revision_id.clone())
+                .with_track("agent:tester")
+                .with_title("a large observation")
+                .with_body("y".repeat(5000)),
+        )
+        .unwrap();
+        let body_hash = observation
+            .body_content_hash
+            .expect("a >4096-byte body is stored as a note artifact");
+
+        remove_content(RemoveOptions::new(
+            repo.path(),
+            RemoveSelector::Revision(capture.revision_id.clone()),
+        ))
+        .unwrap();
+
+        // Tamper the note body blob so it no longer decodes to a body that hashes
+        // to its locator — the note-path arm of the re-hash floor.
+        let notes_dir = resolved_store_dir(repo.path()).join("artifacts/notes");
+        let blob_path = std::fs::read_dir(&notes_dir)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.path())
+            .next()
+            .expect("one note body artifact file on disk");
+        std::fs::write(
+            &blob_path,
+            b"tampered: no longer a valid note body artifact",
+        )
+        .unwrap();
+
+        let result = compact_store(CompactOptions::new(repo.path())).unwrap();
+
+        // The note body survives and is reported as a hash mismatch.
+        assert_eq!(blob_count(&repo, "artifacts/notes"), 1);
+        assert!(
+            result
+                .swept
+                .iter()
+                .any(|blob| blob.content_hash == body_hash
+                    && blob.outcome == SweepOutcome::HashMismatchSkipped)
         );
     }
 

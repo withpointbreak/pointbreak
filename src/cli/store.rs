@@ -322,12 +322,18 @@ fn compact(
 
     let mut diagnostics = Vec::new();
     if !perform && !args.dry_run {
+        // Only blobs that would actually be erased count toward the consent
+        // prompt; a hash-mismatched blob is withheld, not erased.
+        let would_erase = result
+            .swept
+            .iter()
+            .filter(|blob| blob.outcome == SweepOutcome::Removed)
+            .count();
         diagnostics.push(ProjectionDiagnostic {
             code: "compact_consent_required".to_owned(),
             message: format!(
-                "{} blob(s) would be erased; re-run with --yes to erase, or --dry-run to preview. \
+                "{would_erase} blob(s) would be erased; re-run with --yes to erase, or --dry-run to preview. \
                  {} skipped (see skippedIneligible).",
-                result.swept.len(),
                 result.skipped_ineligible.len()
             ),
         });
@@ -341,6 +347,20 @@ fn compact(
                 skipped.content_hash
             ),
         });
+    }
+    // An erase-eligible blob whose on-disk bytes no longer hash to their claimed
+    // content hash is withheld (HashMismatchSkipped), never deleted; surface each
+    // drift as its own diagnostic.
+    for blob in &result.swept {
+        if blob.outcome == SweepOutcome::HashMismatchSkipped {
+            diagnostics.push(ProjectionDiagnostic {
+                code: "compact_hash_mismatch".to_owned(),
+                message: format!(
+                    "blob {} no longer matches its claimed content hash; it was withheld from erasure",
+                    blob.content_hash
+                ),
+            });
+        }
     }
 
     let document = json::DiagnosticDocument::new(
@@ -470,6 +490,7 @@ impl From<SweptBlob> for SweptBlobBody {
             outcome: match blob.outcome {
                 SweepOutcome::Removed => "removed",
                 SweepOutcome::Missing => "missing",
+                SweepOutcome::HashMismatchSkipped => "hash_mismatch_skipped",
             }
             .to_owned(),
         }

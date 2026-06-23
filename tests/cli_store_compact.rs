@@ -215,3 +215,56 @@ fn compact_skips_ingested_unsigned_and_reports_reason() {
             })
     );
 }
+
+#[test]
+fn compact_with_yes_skips_a_drifted_blob_and_reports_mismatch() {
+    let repo = modified_repo();
+    let captured = capture(repo.path());
+    let snapshot_id = captured["revision"]["objectId"].as_str().unwrap();
+    let content_hash = captured["revision"]["objectArtifactContentHash"]
+        .as_str()
+        .unwrap();
+    remove_snapshot(repo.path(), snapshot_id);
+
+    // Tamper the erase-eligible blob's bytes so they no longer hash to the
+    // content hash the payload->file join claims.
+    let objects_dir = support::common_dir_store(repo.path()).join("artifacts/objects");
+    let blob_path = fs::read_dir(&objects_dir)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .next()
+        .expect("one object artifact file");
+    fs::write(&blob_path, b"tampered: no longer a valid object artifact").unwrap();
+
+    let output = shore([
+        "store",
+        "compact",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--yes",
+    ]);
+
+    assert!(output.status.success());
+    let json = parse_json(&output.stdout);
+    // The blob survives and is reported as a hash mismatch, not erased.
+    assert_eq!(object_blob_count(repo.path()), 1, "drifted blob survives");
+    assert_eq!(json["bytesReclaimed"].as_u64().unwrap(), 0);
+    assert!(
+        json["swept"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|blob| blob["contentHash"] == content_hash
+                && blob["outcome"] == "hash_mismatch_skipped"),
+        "swept reports the drifted blob: {json}"
+    );
+    assert!(
+        json["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["code"] == "compact_hash_mismatch"),
+        "a compact_hash_mismatch diagnostic is surfaced: {json}"
+    );
+}
