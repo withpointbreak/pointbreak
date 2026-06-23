@@ -232,7 +232,15 @@ fn store_compact_deletes_removed_blob_and_emits_document() {
         "--snapshot",
         snapshot_id,
     ]);
-    let output = shore(["store", "compact", "--repo", repo.path().to_str().unwrap()]);
+    // Erasure is consent-gated: `--yes` performs the delete (a bare compact
+    // previews and refuses).
+    let output = shore([
+        "store",
+        "compact",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--yes",
+    ]);
 
     assert!(
         output.status.success(),
@@ -274,7 +282,14 @@ fn store_gc_is_alias_of_compact() {
         snapshot_id,
     ]);
 
-    let gc = shore(["store", "gc", "--repo", repo.path().to_str().unwrap()]);
+    // `gc` is an alias of `compact` and inherits the consent gate.
+    let gc = shore([
+        "store",
+        "gc",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--yes",
+    ]);
     assert!(
         gc.status.success(),
         "stderr:\n{}",
@@ -284,7 +299,13 @@ fn store_gc_is_alias_of_compact() {
     assert!(stdout.starts_with("{\"schema\":\"shore.store-compact\""));
 
     // A second sweep finds the blob already gone (idempotent).
-    let second = shore(["store", "gc", "--repo", repo.path().to_str().unwrap()]);
+    let second = shore([
+        "store",
+        "gc",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--yes",
+    ]);
     let json = parse_json(&second.stdout);
     assert!(
         json["swept"]

@@ -5,15 +5,17 @@ use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use shoreline::model::{ObjectId, RevisionId};
 use shoreline::session::{
     CompactOptions, CompactResult, MigrateToCommonDirOptions, MigrateToCommonDirResult,
-    RemoveOptions, RemoveResult, RemoveSelector, RemovedContent, StoreMode, StoreModeSource,
-    StoreStatusInventory, StoreStatusOptions, StoreStatusResult, StoreStatusSensitivity,
-    SweepOutcome, SweptBlob, compact_store, migrate_store_to_common_dir, remove_content,
-    resolve_store_mode_for_repo, set_store_mode_for_repo, store_status,
+    ProjectionDiagnostic, RemovalOperativeStatus, RemoveOptions, RemoveResult, RemoveSelector,
+    RemovedContent, SkippedRemoval, StoreMode, StoreModeSource, StoreStatusInventory,
+    StoreStatusOptions, StoreStatusResult, StoreStatusSensitivity, SweepOutcome, SweptBlob,
+    compact_store, migrate_store_to_common_dir, remove_content, resolve_store_mode_for_repo,
+    set_store_mode_for_repo, store_status,
 };
 
 use crate::cli::json;
 use crate::cli::review::common::{
-    SigningSkip, apply_resolved_signer, resolve_and_surface_signer, surface_best_effort_skip,
+    SigningSkip, apply_resolved_signer, discover_trust_set, resolve_and_surface_signer,
+    surface_best_effort_skip,
 };
 
 #[derive(Debug, Args)]
@@ -115,6 +117,15 @@ struct StoreCompactArgs {
     #[arg(long, default_value = ".")]
     repo: PathBuf,
 
+    /// Preview the erase set and skipped removals; delete nothing.
+    #[arg(long, conflicts_with = "yes")]
+    dry_run: bool,
+
+    /// Perform the erasure. Without it (and without `--dry-run`), compact
+    /// previews and refuses — physical erasure is the point of no return.
+    #[arg(long)]
+    yes: bool,
+
     #[arg(long)]
     pretty: bool,
 }
@@ -172,6 +183,8 @@ struct RemovedContentBody {
 struct StoreCompactBody {
     swept: Vec<SweptBlobBody>,
     bytes_reclaimed: u64,
+    dry_run: bool,
+    skipped_ineligible: Vec<SkippedRemovalBody>,
 }
 
 #[derive(serde::Serialize)]
@@ -179,6 +192,14 @@ struct StoreCompactBody {
 struct SweptBlobBody {
     content_hash: String,
     outcome: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkippedRemovalBody {
+    content_hash: String,
+    /// The `removal_claim_*` reason the blob was withheld from erasure.
+    reason: String,
 }
 
 pub(super) fn run(
@@ -287,13 +308,61 @@ fn compact(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let span = tracing::info_span!("shore.store.compact");
     let _entered = span.enter();
-    let result = compact_store(CompactOptions::new(args.repo))?;
+    // Resolve the reader's trust so the fixed erase-eligibility rule can lift a
+    // relayed removal via a trusted signer or endorsement.
+    let trust = discover_trust_set(&args.repo);
+    // The consent gate lives here, not in the library: erasure runs only with
+    // `--yes`; a bare invocation (and `--dry-run`) previews and deletes nothing.
+    let perform = args.yes && !args.dry_run;
+    let result = compact_store(
+        CompactOptions::new(args.repo)
+            .with_trust_set(trust)
+            .with_dry_run(!perform),
+    )?;
+
+    let mut diagnostics = Vec::new();
+    if !perform && !args.dry_run {
+        diagnostics.push(ProjectionDiagnostic {
+            code: "compact_consent_required".to_owned(),
+            message: format!(
+                "{} blob(s) would be erased; re-run with --yes to erase, or --dry-run to preview. \
+                 {} skipped (see skippedIneligible).",
+                result.swept.len(),
+                result.skipped_ineligible.len()
+            ),
+        });
+    }
+    for skipped in &result.skipped_ineligible {
+        let code = removal_claim_reason_code(skipped.reason);
+        diagnostics.push(ProjectionDiagnostic {
+            code: code.to_owned(),
+            message: format!(
+                "removal of {} is not erase-eligible ({code}); it was withheld from erasure",
+                skipped.content_hash
+            ),
+        });
+    }
+
     let document = json::DiagnosticDocument::new(
         "shore.store-compact",
         StoreCompactBody::from(result),
-        vec![],
+        diagnostics,
     );
     json::write_json(stdout, &document, args.pretty)
+}
+
+/// Map a skipped removal's reason to its public `removal_claim_*` code, matching
+/// the `shore.review-revision` claim-diagnostic spellings.
+fn removal_claim_reason_code(status: RemovalOperativeStatus) -> &'static str {
+    match status {
+        RemovalOperativeStatus::ClaimUnsigned => "removal_claim_unsigned",
+        RemovalOperativeStatus::ClaimUntrusted => "removal_claim_untrusted",
+        RemovalOperativeStatus::ClaimInvalid => "removal_claim_invalid",
+        // Operative/no-claim statuses are never withheld; fall back defensively.
+        RemovalOperativeStatus::NoClaim
+        | RemovalOperativeStatus::OperativePossession
+        | RemovalOperativeStatus::OperativeTrusted => "removal_claim_ineligible",
+    }
 }
 
 /// Decode the clap selector group (exactly one is required) into a workflow
@@ -375,6 +444,21 @@ impl From<CompactResult> for StoreCompactBody {
         Self {
             swept: result.swept.into_iter().map(SweptBlobBody::from).collect(),
             bytes_reclaimed: result.bytes_reclaimed,
+            dry_run: result.dry_run,
+            skipped_ineligible: result
+                .skipped_ineligible
+                .into_iter()
+                .map(SkippedRemovalBody::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<SkippedRemoval> for SkippedRemovalBody {
+    fn from(skipped: SkippedRemoval) -> Self {
+        Self {
+            reason: removal_claim_reason_code(skipped.reason).to_owned(),
+            content_hash: skipped.content_hash,
         }
     }
 }
