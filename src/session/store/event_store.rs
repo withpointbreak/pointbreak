@@ -133,6 +133,30 @@ impl EventStore {
             .collect()
     }
 
+    /// Read every event, partitioning the two recognized schema-break classes
+    /// (a retired event type, a retired envelope field) into `skipped` instead of
+    /// aborting the read. Any other failure — genuine corruption, IO, a hash or
+    /// id mismatch — still propagates, so nothing unexpected is papered over.
+    pub fn list_events_lenient(&self) -> Result<(Vec<ShoreEvent>, Vec<SkippedEvent>)> {
+        let mut events = Vec::new();
+        let mut skipped = Vec::new();
+        for name in self.list_event_file_names()? {
+            match self.read_event(&self.events_dir().join(name)) {
+                Ok(event) => events.push(event),
+                Err(ShoreError::UnsupportedEventType(record)) => skipped.push(SkippedEvent {
+                    code: "unsupported_event_type",
+                    record,
+                }),
+                Err(ShoreError::UnsupportedEventEnvelope(record)) => skipped.push(SkippedEvent {
+                    code: "unsupported_event_envelope",
+                    record,
+                }),
+                Err(other) => return Err(other),
+            }
+        }
+        Ok((events, skipped))
+    }
+
     /// Event file names in this store, with the same accept/skip rules as
     /// `list_events` but without parsing event JSON. Sorted; a missing events
     /// directory lists as empty.
@@ -162,6 +186,16 @@ pub enum EventWriteOutcome {
     Created,
     Existing,
     ExistingDivergentSignature,
+}
+
+/// A stored event that a lenient read recognized as a retired schema and skipped
+/// rather than decoded. `code` is the diagnostic class — set by which break the
+/// reader caught — and `record` carries the structured break detail.
+#[derive(Clone, Debug)]
+pub struct SkippedEvent {
+    /// "unsupported_event_type" | "unsupported_event_envelope".
+    pub code: &'static str,
+    pub record: SchemaBreakRecord,
 }
 
 fn event_signature_binding_matches(existing: &ShoreEvent, candidate: &ShoreEvent) -> bool {
@@ -713,6 +747,61 @@ mod tests {
             store_two.read_event(&path_two).unwrap().ingest,
             stamped.ingest
         );
+    }
+
+    #[test]
+    fn list_events_lenient_skips_retired_events_and_keeps_the_rest() {
+        let (_root, store) = temp_event_store();
+        let valid = review_initialized_event();
+        store.record_event_once(&valid).unwrap();
+
+        // A retired-type file and a writer.role file, written raw: the probe
+        // rejects them before full decode, so no valid signature/hash is needed.
+        let events_dir = store.events_dir();
+        write_raw_event(
+            &events_dir,
+            "b",
+            br#"{"eventType":"review_disposition_recorded"}"#,
+        );
+        write_raw_event(
+            &events_dir,
+            "c",
+            br#"{"eventType":"review_initialized","writer":{"role":"x"}}"#,
+        );
+
+        let (events, skipped) = store.list_events_lenient().unwrap();
+
+        assert_eq!(events.len(), 1, "the one valid event survives");
+        assert_eq!(skipped.len(), 2);
+        let codes: std::collections::BTreeSet<_> = skipped.iter().map(|s| s.code).collect();
+        assert!(codes.contains(&"unsupported_event_type"));
+        assert!(codes.contains(&"unsupported_event_envelope"));
+        assert!(
+            skipped
+                .iter()
+                .any(|s| s.record.retired == "review_disposition_recorded")
+        );
+        assert!(skipped.iter().any(|s| s.record.retired == "writer.role"));
+    }
+
+    #[test]
+    fn list_events_lenient_still_hard_errors_on_genuine_corruption() {
+        let (_root, store) = temp_event_store();
+        let events_dir = store.events_dir();
+        // Not a retired type / envelope — a malformed event that fails decode for
+        // another reason must NOT be silently skipped.
+        write_raw_event(&events_dir, "d", br#"{"eventType":"review_initialized"}"#);
+
+        assert!(store.list_events_lenient().is_err());
+    }
+
+    /// Write a raw event file under `events_dir` with a 69-char `<64-hex>.json`
+    /// name `is_event_file` accepts. `label` is a short hex stem, zero-padded to
+    /// 64 characters so each file is distinct.
+    fn write_raw_event(events_dir: &std::path::Path, label: &str, bytes: &[u8]) {
+        fs::create_dir_all(events_dir).unwrap();
+        let stem = format!("{label}{}", "0".repeat(64 - label.len()));
+        fs::write(events_dir.join(format!("{stem}.json")), bytes).unwrap();
     }
 
     fn temp_event_store() -> (tempfile::TempDir, EventStore) {

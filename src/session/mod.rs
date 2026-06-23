@@ -32,7 +32,7 @@ pub use projection::{
     EngagementView, LivenessScope, LivenessToken, ProjectionDiagnostic,
     RevisionCommitRangeProjection, RevisionCommitRangeView, RevisionsByBase, SessionState,
     SupersessionView, WithdrawnCommitAssociation, WithdrawnRefAssociation,
-    load_durable_notes_for_repo, read_events, rebuild_state,
+    load_durable_notes_for_repo, read_events, read_events_for_display, rebuild_state,
 };
 pub use signing::{
     ALLOWED_SIGNERS_REL_PATH, ArtifactAvailability, BestEffortSkipSink,
@@ -47,8 +47,8 @@ pub(crate) use signing::{sign_event_if_requested, verify_events_for_ingest};
 #[cfg(test)]
 pub(crate) use store::compute_revision_fingerprint;
 pub(crate) use store::{
-    EventStore, EventWriteOutcome, RevisionFingerprint, ShoreStorePaths, sweep_stale_temp_files,
-    worktree_fingerprint_for_files,
+    EventStore, EventWriteOutcome, RevisionFingerprint, ShoreStorePaths, SkippedEvent,
+    sweep_stale_temp_files, worktree_fingerprint_for_files,
 };
 pub use store::{
     ObjectArtifact, StoreMode, StoreModeOutcome, StoreModeSource, capture_worktree_fingerprint,

@@ -4,9 +4,9 @@ use std::path::Path;
 use crate::error::Result;
 use crate::session::body_artifact::load_body_artifact;
 use crate::session::event::{EventType, ReviewNoteImportedPayload, ShoreEvent};
-use crate::session::state::SessionState;
+use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::resolution::{resolve_read_store, resolve_write_store};
-use crate::session::{EventStore, sweep_stale_temp_files};
+use crate::session::{EventStore, SkippedEvent, sweep_stale_temp_files};
 use crate::sidecar::{
     ParsedReviewNotes, ReviewNoteEntry, ReviewNoteTarget, ReviewNotesFile, ReviewNotesSidecar,
 };
@@ -150,6 +150,31 @@ pub fn read_events(repo: impl AsRef<Path>) -> Result<Vec<ShoreEvent>> {
     EventStore::open(read_store.store_dir()).list_events()
 }
 
+/// Render each skipped retired event as a `ProjectionDiagnostic`, carrying the
+/// break record's canonical sentence as the message. The diagnostic class
+/// strings pass through unchanged.
+pub(crate) fn skipped_to_diagnostics(skipped: Vec<SkippedEvent>) -> Vec<ProjectionDiagnostic> {
+    skipped
+        .into_iter()
+        .map(|s| ProjectionDiagnostic {
+            code: s.code.to_owned(),
+            message: s.record.to_string(),
+        })
+        .collect()
+}
+
+/// A read for human-facing surfaces: a retired/unsupported event is skipped and
+/// surfaced as a `ProjectionDiagnostic` instead of aborting the whole read. The
+/// strict [`read_events`] is unchanged and remains the reader for every surface
+/// that must hard-fail on an unreadable event.
+pub fn read_events_for_display(
+    repo: impl AsRef<Path>,
+) -> Result<(Vec<ShoreEvent>, Vec<ProjectionDiagnostic>)> {
+    let read_store = resolve_read_store(repo.as_ref())?;
+    let (events, skipped) = EventStore::open(read_store.store_dir()).list_events_lenient()?;
+    Ok((events, skipped_to_diagnostics(skipped)))
+}
+
 fn list_events_if_store_exists(
     repo: impl AsRef<Path>,
 ) -> Result<Option<(std::path::PathBuf, Vec<ShoreEvent>)>> {
@@ -169,6 +194,7 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+    use crate::error::SchemaBreakRecord;
     use crate::model::{JournalId, Side};
     use crate::session::event::{
         EventTarget, ImportedNoteTarget, ReviewInitializedPayload, ShoreEvent, SidecarSource,
@@ -197,6 +223,25 @@ mod tests {
             created_at: Some("2026-05-10T00:00:00Z".to_owned()),
             sidecar_content_hash: "sha256:abc".to_owned(),
         }
+    }
+
+    #[test]
+    fn skipped_to_diagnostics_maps_code_and_message() {
+        let skipped = vec![SkippedEvent {
+            code: "unsupported_event_type",
+            record: SchemaBreakRecord {
+                retired: "review_disposition_recorded".to_owned(),
+                broken_at: "0.1".to_owned(),
+                anchor: "docs/assessment-model.md#legacy-disposition-events".to_owned(),
+            },
+        }];
+
+        let diags = skipped_to_diagnostics(skipped);
+
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, "unsupported_event_type");
+        assert!(diags[0].message.contains("review_disposition_recorded"));
+        assert!(diags[0].message.contains("#legacy-disposition-events"));
     }
 
     #[test]

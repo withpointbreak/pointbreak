@@ -11,10 +11,10 @@ use crate::session::observation::{
     CurrentRevisionContext, ObservationProjectionOptions, RevisionScope, RevisionSelection,
     project_observations, resolve_revision, validated_track_id,
 };
-use crate::session::projection::ArtifactRemovalProjection;
 use crate::session::projection::cosignature::{
     CosignatureIndex, endorsement_readbacks, enrich_endorser_attributes,
 };
+use crate::session::projection::{ArtifactRemovalProjection, skipped_to_diagnostics};
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::resolution::resolve_read_store;
 use crate::session::workflow::{ValidationCheckProjectionOptions, project_validation_checks};
@@ -50,7 +50,13 @@ pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult>
         .as_deref()
         .map(validated_track_id)
         .transpose()?;
-    let events = EventStore::open(read_store.store_dir()).list_events()?;
+    let store = EventStore::open(read_store.store_dir());
+    let (events, skip_diagnostics) = if options.read_for_display {
+        let (events, skipped) = store.list_events_lenient()?;
+        (events, skipped_to_diagnostics(skipped))
+    } else {
+        (store.list_events()?, Vec::new())
+    };
     let resolved = resolve_revision(
         &events,
         RevisionSelection::from_revision_seed(options.revision_id.as_ref()),
@@ -147,6 +153,7 @@ pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult>
         .clone()
         .expect("SessionState::from_events sets event_set_hash");
     let mut diagnostics = state.diagnostics;
+    diagnostics.extend(skip_diagnostics);
     if let Some(content_hash) = &removed_snapshot_content_hash {
         diagnostics.push(ProjectionDiagnostic {
             code: "snapshot_content_removed".to_owned(),
@@ -316,6 +323,37 @@ mod tests {
         // Capture event plus the auto-recorded capture-time ref association.
         assert_eq!(result.event_count, 2);
         assert!(result.event_set_hash.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn show_revision_strict_by_default_lenient_when_opted_in() {
+        let repo = modified_repo();
+        capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+
+        // A retired-type event in the store: the probe rejects it before decode.
+        let events_dir = resolve_read_store(repo.path())
+            .unwrap()
+            .store_dir()
+            .join("events");
+        fs::write(
+            events_dir.join(format!("{}.json", "a".repeat(64))),
+            br#"{"eventType":"review_disposition_recorded"}"#,
+        )
+        .unwrap();
+
+        // Default (the relay/strict case): a retired event hard-fails the read.
+        assert!(show_revision(RevisionShowOptions::new(repo.path())).is_err());
+
+        // Opted in (CLI/inspector): the retired event is skipped and surfaced.
+        let result =
+            show_revision(RevisionShowOptions::new(repo.path()).with_read_for_display(true))
+                .unwrap();
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "unsupported_event_type")
+        );
     }
 
     #[test]

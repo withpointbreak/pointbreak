@@ -6,6 +6,7 @@ use serde::Serialize;
 use crate::error::Result;
 use crate::model::{ObjectId, ReviewEndpoint, RevisionId, RevisionSource};
 use crate::session::event::{EventType, ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload};
+use crate::session::projection::skipped_to_diagnostics;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::resolution::resolve_read_store;
 use crate::session::workflow::association::normalize_ref;
@@ -51,6 +52,7 @@ pub struct RevisionListOptions {
     orphan_visibility: OrphanVisibility,
     integration_ref: Option<String>,
     worktree_scope: Option<PathBuf>,
+    read_for_display: bool,
 }
 
 impl RevisionListOptions {
@@ -61,6 +63,7 @@ impl RevisionListOptions {
             orphan_visibility: OrphanVisibility::default(),
             integration_ref: None,
             worktree_scope: None,
+            read_for_display: false,
         }
     }
 
@@ -91,6 +94,14 @@ impl RevisionListOptions {
     /// (its canonical root + HEAD), via the shared worktree-identity match.
     pub fn with_worktree_scope(mut self, path: impl AsRef<Path>) -> Self {
         self.worktree_scope = Some(path.as_ref().to_path_buf());
+        self
+    }
+
+    /// Read for a human-facing surface: skip a retired/unsupported event and
+    /// surface it as a diagnostic instead of hard-failing the read. Off by
+    /// default, so the relay and other strict callers keep the typed error.
+    pub fn with_read_for_display(mut self, value: bool) -> Self {
+        self.read_for_display = value;
         self
     }
 }
@@ -133,9 +144,16 @@ pub struct RevisionListResult {
 
 pub fn list_revisions(options: RevisionListOptions) -> Result<RevisionListResult> {
     let read_store = resolve_read_store(&options.repo)?;
-    let events = EventStore::open(read_store.store_dir()).list_events()?;
+    let store = EventStore::open(read_store.store_dir());
+    let (events, skip_diagnostics) = if options.read_for_display {
+        let (events, skipped) = store.list_events_lenient()?;
+        (events, skipped_to_diagnostics(skipped))
+    } else {
+        (store.list_events()?, Vec::new())
+    };
     let projection = RevisionCommitRangeProjection::from_events(&events)?;
     let mut result = list_from_events(&events, &projection)?;
+    result.diagnostics.extend(skip_diagnostics);
 
     if let Some(ref_filter) = &options.ref_filter {
         let matching = revisions_matching_ref(
@@ -508,6 +526,42 @@ mod tests {
         assert_eq!(result.revision_count, 0);
         assert!(result.entries.is_empty());
         assert!(result.event_set_hash.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn list_revisions_strict_by_default_lenient_when_opted_in() {
+        let repo = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+
+        // A retired-type event in the resolved store: the probe rejects it.
+        let events_dir = resolve_read_store(repo.path())
+            .unwrap()
+            .store_dir()
+            .join("events");
+        std::fs::create_dir_all(&events_dir).unwrap();
+        std::fs::write(
+            events_dir.join(format!("{}.json", "a".repeat(64))),
+            br#"{"eventType":"review_disposition_recorded"}"#,
+        )
+        .unwrap();
+
+        // Default (the relay/strict case): a retired event hard-fails the read.
+        assert!(list_revisions(RevisionListOptions::new(repo.path())).is_err());
+
+        // Opted in (CLI/inspector): the retired event is skipped and surfaced.
+        let result =
+            list_revisions(RevisionListOptions::new(repo.path()).with_read_for_display(true))
+                .unwrap();
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "unsupported_event_type")
+        );
     }
 
     #[test]

@@ -81,7 +81,7 @@ pub(super) fn run(
     tracing::debug!(command = "review.revisions", "command_start");
 
     let pretty = args.pretty;
-    let mut options = RevisionListOptions::new(&args.repo);
+    let mut options = RevisionListOptions::new(&args.repo).with_read_for_display(true);
     if let Some(ref_name) = args.ref_name {
         options = options.with_ref_filter(ref_name, args.by.into());
     }

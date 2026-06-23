@@ -27,6 +27,7 @@ pub struct RevisionShowOptions {
     pub(super) trust_set: TrustSet,
     pub(super) actor_attributes: Option<ActorAttributesMap>,
     pub(super) delegation_map: Option<DelegationMap>,
+    pub(super) read_for_display: bool,
 }
 
 impl RevisionShowOptions {
@@ -40,6 +41,7 @@ impl RevisionShowOptions {
             trust_set: TrustSet::default(),
             actor_attributes: None,
             delegation_map: None,
+            read_for_display: false,
         }
     }
 
@@ -85,6 +87,14 @@ impl RevisionShowOptions {
     /// principal diagnostics are emitted (the zero-setup floor stays silent).
     pub fn with_delegation_map(mut self, delegation_map: DelegationMap) -> Self {
         self.delegation_map = Some(delegation_map);
+        self
+    }
+
+    /// Read for a human-facing surface: skip a retired/unsupported event and
+    /// surface it as a diagnostic instead of hard-failing the read. Off by
+    /// default, so the relay and other strict callers keep the typed error.
+    pub fn with_read_for_display(mut self, value: bool) -> Self {
+        self.read_for_display = value;
         self
     }
 }

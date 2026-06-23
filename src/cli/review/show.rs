@@ -67,7 +67,9 @@ pub(super) fn run(
 }
 
 fn show_options(args: &ShowArgs) -> RevisionShowOptions {
-    let mut options = RevisionShowOptions::new(&args.repo).with_include_body(args.include_body);
+    let mut options = RevisionShowOptions::new(&args.repo)
+        .with_include_body(args.include_body)
+        .with_read_for_display(true);
     if let Some(revision) = &args.revision {
         options = options.with_revision_id(RevisionId::new(revision.clone()));
     }

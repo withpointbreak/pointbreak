@@ -7,8 +7,8 @@ use shoreline::documents::history_document;
 use shoreline::model::RevisionId;
 use shoreline::session::event::EventType;
 use shoreline::session::{
-    EventVerificationPolicy, LivenessToken, RefFilterMode, ReviewHistoryOptions, read_events,
-    review_history,
+    EventVerificationPolicy, LivenessToken, RefFilterMode, ReviewHistoryOptions,
+    read_events_for_display, review_history,
 };
 
 use crate::cli::json;
@@ -119,26 +119,42 @@ fn render_once(
     json::write_json(stdout, &document, args.pretty)
 }
 
-/// Client-side liveness poll: re-render only when the store's `event_set_hash`
-/// moves, never on a bare tick. The core emits the change fact through the
-/// liveness token but never delivers it, so this loop owns delivery — a pure
-/// pull with no daemon and no filesystem watch. Cancel with Ctrl-C.
+/// Client-side liveness poll: re-render only when the store's liveness moves —
+/// either its decodable `event_set_hash` changes or the number of skip
+/// diagnostics changes — never on a bare tick. The second trigger matters because
+/// a lone retired event is skipped from the event set, so it would leave the hash
+/// untouched; folding the diagnostic count in surfaces it. The core emits the
+/// change fact but never delivers it, so this loop owns delivery — a pure pull
+/// with no daemon and no filesystem watch. Cancel with Ctrl-C.
 fn watch(args: &HistoryArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::error::Error>> {
     let interval = Duration::from_millis(args.poll_ms);
-    let mut last_seen: Option<String> = None;
+    let mut last_seen: Option<(String, usize)> = None;
     loop {
-        let token = LivenessToken::for_journal(&read_events(&args.repo)?)?;
-        if last_seen.as_deref() != Some(token.event_set_hash.as_str()) {
+        let fingerprint = watch_fingerprint(&args.repo)?;
+        if last_seen.as_ref() != Some(&fingerprint) {
             render_once(args, stdout)?;
             stdout.flush()?;
-            last_seen = Some(token.event_set_hash);
+            last_seen = Some(fingerprint);
         }
         std::thread::sleep(interval);
     }
 }
 
+/// The poll fingerprint: the decodable-event-set hash paired with the
+/// skip-diagnostic count. Either component moving means the rendered history
+/// would change, so `--watch` re-renders when the pair does.
+fn watch_fingerprint(
+    repo: &std::path::Path,
+) -> Result<(String, usize), Box<dyn std::error::Error>> {
+    let (events, diagnostics) = read_events_for_display(repo)?;
+    let token = LivenessToken::for_journal(&events)?;
+    Ok((token.event_set_hash, diagnostics.len()))
+}
+
 fn history_options(args: &HistoryArgs) -> ReviewHistoryOptions {
-    let mut options = ReviewHistoryOptions::new(&args.repo).with_include_body(args.include_body);
+    let mut options = ReviewHistoryOptions::new(&args.repo)
+        .with_include_body(args.include_body)
+        .with_read_for_display(true);
     if let Some(revision) = &args.revision {
         options = options.with_revision_id(RevisionId::new(revision.clone()));
     }
@@ -178,5 +194,46 @@ impl From<HistoryEventTypeArg> for EventType {
             HistoryEventTypeArg::RevisionCommitAssociated => Self::RevisionCommitAssociated,
             HistoryEventTypeArg::RevisionCommitWithdrawn => Self::RevisionCommitWithdrawn,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watch_fingerprint_changes_when_only_a_retired_event_appears() {
+        let repo = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+
+        let before = watch_fingerprint(repo.path()).unwrap();
+
+        // Drop a raw retired-type event into the resolved store; no valid-event
+        // change, so only the skip-diagnostic count moves.
+        let events_dir = shoreline::session::store_dir_for_repo(repo.path())
+            .unwrap()
+            .join("events");
+        std::fs::create_dir_all(&events_dir).unwrap();
+        std::fs::write(
+            events_dir.join(format!("{}.json", "a".repeat(64))),
+            br#"{"eventType":"review_disposition_recorded"}"#,
+        )
+        .unwrap();
+
+        let after = watch_fingerprint(repo.path()).unwrap();
+
+        assert_ne!(
+            before, after,
+            "a new retired event must move the watch fingerprint"
+        );
+        assert_eq!(
+            after.1,
+            before.1 + 1,
+            "the skip-diagnostic count increments"
+        );
     }
 }

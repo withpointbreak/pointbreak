@@ -15,7 +15,7 @@ use shoreline::model::{ObjectId, ReviewEndpoint, RevisionId};
 use shoreline::session::{
     EventVerificationPolicy, LivenessEnrichment, ProjectionDiagnostic, ReviewHistoryEntry,
     ReviewHistoryOptions, RevisionListEntry, RevisionListOptions, RevisionShowOptions,
-    SessionState, SupersessionView, enrich_liveness, list_revisions, read_events,
+    SessionState, SupersessionView, enrich_liveness, list_revisions, read_events_for_display,
     read_object_artifact, review_history, show_revision,
 };
 
@@ -232,6 +232,7 @@ fn to_unit_entry_documents(entries: Vec<RevisionListEntry>) -> Vec<RevisionEntry
 pub(super) fn history_json(repo: &Path) -> Result<String, String> {
     let mut options = ReviewHistoryOptions::new(repo)
         .with_include_body(true)
+        .with_read_for_display(true)
         .with_verification_policy(EventVerificationPolicy::advisory())
         .with_trust_set(crate::cli::review::common::discover_trust_set(repo))
         .with_actor_attributes(crate::cli::review::common::discover_actor_attributes(repo));
@@ -253,8 +254,8 @@ pub(super) fn history_json(repo: &Path) -> Result<String, String> {
 
 /// Captured Revisions with their base/target/snapshot identity.
 pub(super) fn revisions_json(repo: &Path) -> Result<String, String> {
-    let result =
-        list_revisions(RevisionListOptions::new(repo)).map_err(|error| error.to_string())?;
+    let result = list_revisions(RevisionListOptions::new(repo).with_read_for_display(true))
+        .map_err(|error| error.to_string())?;
     let payload = RevisionsPayload {
         schema: "shore.inspect-revisions",
         event_set_hash: result.event_set_hash,
@@ -270,7 +271,8 @@ pub(super) fn revisions_json(repo: &Path) -> Result<String, String> {
 /// graph, labeled domain-side), each with its competing heads and superseded
 /// revisions. Fork-tolerant: never a null head, never a "malformed" error.
 pub(super) fn objects_json(repo: &Path) -> Result<String, String> {
-    let events = read_events(repo).map_err(|error| error.to_string())?;
+    let (events, display_diagnostics) =
+        read_events_for_display(repo).map_err(|error| error.to_string())?;
     let state = SessionState::from_events(&events).map_err(|error| error.to_string())?;
     let view = SupersessionView::from_events(&events).map_err(|error| error.to_string())?;
 
@@ -298,6 +300,8 @@ pub(super) fn objects_json(repo: &Path) -> Result<String, String> {
         })
         .collect::<Vec<_>>();
 
+    let mut diagnostics = view.diagnostics;
+    diagnostics.extend(display_diagnostics);
     let payload = ObjectsPayload {
         schema: "shore.inspect-objects",
         event_set_hash: state.event_set_hash.unwrap_or_default(),
@@ -306,7 +310,7 @@ pub(super) fn objects_json(repo: &Path) -> Result<String, String> {
         threads,
         supersedes: revision_edge_map(&view.supersedes),
         superseded_by: revision_edge_map(&view.superseded_by),
-        diagnostics: view.diagnostics,
+        diagnostics,
     };
     serde_json::to_string(&payload).map_err(|error| error.to_string())
 }
@@ -380,6 +384,7 @@ pub(super) fn revision_json(repo: &Path, revision_id: &str) -> Result<String, St
     let mut show_options = RevisionShowOptions::new(repo)
         .with_revision_id(RevisionId::new(revision_id.to_owned()))
         .with_include_body(true)
+        .with_read_for_display(true)
         .with_verification_policy(EventVerificationPolicy::advisory())
         .with_trust_set(crate::cli::review::common::discover_trust_set(repo))
         .with_actor_attributes(crate::cli::review::common::discover_actor_attributes(repo));
@@ -453,8 +458,12 @@ fn set_head_live_branch(document: &mut serde_json::Value, live_branch: String) {
 /// Computes `eventSetHash` from the live event set (without hydrating bodies)
 /// so the UI can detect store changes and re-fetch only when something moved.
 pub(super) fn freshness_json(repo: &Path) -> Result<String, String> {
-    let result = review_history(ReviewHistoryOptions::new(repo).with_include_body(false))
-        .map_err(|error| error.to_string())?;
+    let result = review_history(
+        ReviewHistoryOptions::new(repo)
+            .with_include_body(false)
+            .with_read_for_display(true),
+    )
+    .map_err(|error| error.to_string())?;
     let payload = FreshnessPayload {
         schema: "shore.inspect-freshness",
         event_set_hash: result.event_set_hash,

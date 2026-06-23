@@ -22,7 +22,8 @@ pub use commit_range::{
 };
 pub use engagement::{EngagementGrouping, EngagementLifecycle, EngagementView};
 pub use liveness::{LivenessScope, LivenessToken};
-pub use read::{load_durable_notes_for_repo, read_events, rebuild_state};
+pub(crate) use read::skipped_to_diagnostics;
+pub use read::{load_durable_notes_for_repo, read_events, read_events_for_display, rebuild_state};
 pub use revisions_by_base::RevisionsByBase;
 pub use state::{ProjectionDiagnostic, SessionState};
 pub use supersession::SupersessionView;

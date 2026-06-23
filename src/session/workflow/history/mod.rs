@@ -11,6 +11,7 @@ pub use self::summary::ReviewHistoryEntry;
 use crate::error::Result;
 use crate::session::EventStore;
 use crate::session::observation::validated_track_id;
+use crate::session::projection::skipped_to_diagnostics;
 use crate::session::store::resolution::resolve_read_store;
 
 pub fn review_history(options: ReviewHistoryOptions) -> Result<ReviewHistoryResult> {
@@ -20,7 +21,13 @@ pub fn review_history(options: ReviewHistoryOptions) -> Result<ReviewHistoryResu
         .as_deref()
         .map(validated_track_id)
         .transpose()?;
-    let events = EventStore::open(read_store.store_dir()).list_events()?;
+    let store = EventStore::open(read_store.store_dir());
+    let (events, skip_diagnostics) = if options.read_for_display {
+        let (events, skipped) = store.list_events_lenient()?;
+        (events, skipped_to_diagnostics(skipped))
+    } else {
+        (store.list_events()?, Vec::new())
+    };
 
     let ref_matched_units = match &options.ref_filter {
         Some((name, mode)) => {
@@ -46,7 +53,8 @@ pub fn review_history(options: ReviewHistoryOptions) -> Result<ReviewHistoryResu
         actor_attributes: options.actor_attributes,
         delegation_map: options.delegation_map,
     };
-    let result = history_from_events(&events, filters, Some(read_store.store_dir()))?;
+    let mut result = history_from_events(&events, filters, Some(read_store.store_dir()))?;
+    result.diagnostics.extend(skip_diagnostics);
     Ok(result)
 }
 
@@ -100,6 +108,42 @@ mod tests {
         assert_eq!(result.event_count, 2);
         assert_eq!(result.history_count(), 2);
         assert!(result.event_set_hash.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn review_history_strict_by_default_lenient_when_opted_in() {
+        let repo = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+
+        // A retired-type event in the resolved store: the probe rejects it.
+        let events_dir = resolve_read_store(repo.path())
+            .unwrap()
+            .store_dir()
+            .join("events");
+        std::fs::create_dir_all(&events_dir).unwrap();
+        std::fs::write(
+            events_dir.join(format!("{}.json", "a".repeat(64))),
+            br#"{"eventType":"review_disposition_recorded"}"#,
+        )
+        .unwrap();
+
+        // Default (the relay/strict case): a retired event hard-fails the read.
+        assert!(review_history(ReviewHistoryOptions::new(repo.path())).is_err());
+
+        // Opted in (CLI/inspector): the retired event is skipped and surfaced.
+        let result =
+            review_history(ReviewHistoryOptions::new(repo.path()).with_read_for_display(true))
+                .unwrap();
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "unsupported_event_type")
+        );
     }
 
     #[test]
