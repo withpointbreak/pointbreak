@@ -33,7 +33,7 @@ use self::adapter_notes::project_adapter_notes;
 use self::identity::principal_diagnostics;
 pub use self::identity::{
     MemberReadback, RevisionProjectionIdentity, RevisionProjectionSummary, RevisionShowFilters,
-    RevisionShowOptions, RevisionShowResult,
+    RevisionShowOptions, RevisionShowResult, SnapshotContentState,
 };
 use self::resolving::selected_revision_capture;
 pub use self::rows::{RevisionProjectionRow, SnapshotOrder};
@@ -42,6 +42,13 @@ use self::rows::{
     build_observation_rows, build_snapshot_rows, build_validation_rows, renumber_projection_rows,
 };
 use self::snapshot::{SnapshotContent, resolve_snapshot_content};
+
+/// A removal is recorded for the bound snapshot content, but its bytes are still
+/// stored: the suppression is reversible and a compact would reclaim them.
+const SNAPSHOT_CONTENT_SUPPRESSED_PRESENT: &str = "snapshot_content_suppressed_present";
+/// A removal is recorded for the bound snapshot content and its bytes have been
+/// swept from the store.
+const SNAPSHOT_CONTENT_PHYSICALLY_REMOVED: &str = "snapshot_content_physically_removed";
 
 pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult> {
     let read_store = resolve_read_store(&options.repo)?;
@@ -65,18 +72,20 @@ pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult>
     )?;
     let revision = selected_revision_capture(&events, &resolved)?;
     let removal = ArtifactRemovalProjection::from_events(&events)?;
-    let (snapshot, removed_snapshot_content_hash) =
-        match resolve_snapshot_content(&options.repo, &revision, &removal)? {
-            SnapshotContent::Present(snapshot) => (snapshot, None),
-            SnapshotContent::Removed { content_hash } => (
-                DiffSnapshot::new(
-                    ReviewId::new(revision.journal_id.as_str()),
-                    revision.object_id.clone(),
-                    Vec::new(),
-                ),
-                Some(content_hash),
+    let snapshot_content = resolve_snapshot_content(&options.repo, &revision, &removal)?;
+    let snapshot_content_state = SnapshotContentState::from(&snapshot_content);
+    let (snapshot, removed_snapshot_content_hash) = match snapshot_content {
+        SnapshotContent::Present(snapshot) => (snapshot, None),
+        SnapshotContent::SuppressedPresent { content_hash }
+        | SnapshotContent::PhysicallyRemoved { content_hash } => (
+            DiffSnapshot::new(
+                ReviewId::new(revision.journal_id.as_str()),
+                revision.object_id.clone(),
+                Vec::new(),
             ),
-        };
+            Some(content_hash),
+        ),
+    };
     let observations = project_observations(ObservationProjectionOptions {
         store_dir: read_store.store_dir(),
         events: &events,
@@ -155,12 +164,23 @@ pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult>
     let mut diagnostics = state.diagnostics;
     diagnostics.extend(skip_diagnostics);
     if let Some(content_hash) = &removed_snapshot_content_hash {
-        diagnostics.push(ProjectionDiagnostic {
-            code: "snapshot_content_removed".to_owned(),
-            message: format!(
-                "snapshot content removed ({content_hash}); the captured diff bytes are no longer stored"
-            ),
-        });
+        match snapshot_content_state {
+            SnapshotContentState::SuppressedPresent => diagnostics.push(ProjectionDiagnostic {
+                code: SNAPSHOT_CONTENT_SUPPRESSED_PRESENT.to_owned(),
+                message: format!(
+                    "snapshot content {content_hash} is suppressed by a recorded removal; the bytes \
+                     are still stored and a compact would reclaim them"
+                ),
+            }),
+            SnapshotContentState::PhysicallyRemoved => diagnostics.push(ProjectionDiagnostic {
+                code: SNAPSHOT_CONTENT_PHYSICALLY_REMOVED.to_owned(),
+                message: format!(
+                    "snapshot content {content_hash} was removed and its bytes have been swept from \
+                     the store"
+                ),
+            }),
+            SnapshotContentState::Present => {}
+        }
     }
 
     // Git-free commit-range lifecycle: fold the association events into the resolved
@@ -251,6 +271,7 @@ pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult>
         revision,
         snapshot,
         removed_snapshot_content_hash,
+        snapshot_content_state,
         filters: RevisionShowFilters {
             revision_id: resolved.revision_id,
             track_id,
@@ -1454,7 +1475,7 @@ mod tests {
     }
 
     #[test]
-    fn removed_snapshot_renders_content_removed_not_a_hard_error() {
+    fn removed_and_swept_snapshot_renders_physically_removed_not_a_hard_error() {
         let repo = modified_repo();
         let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         record_artifact_removed(repo.path(), &capture.object_artifact_content_hash);
@@ -1472,9 +1493,64 @@ mod tests {
             result
                 .diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.code == "snapshot_content_removed"),
-            "expected an explained content-removed diagnostic, got {:?}",
+                .any(|diagnostic| diagnostic.code == "snapshot_content_physically_removed"),
+            "expected a physically-removed diagnostic, got {:?}",
             result.diagnostics
+        );
+    }
+
+    #[test]
+    fn result_carries_snapshot_content_state() {
+        let repo = modified_repo();
+        let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+
+        // A present capture resolves to Present and is not removed.
+        let present = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
+        assert_eq!(
+            present.snapshot_content_state,
+            SnapshotContentState::Present
+        );
+        assert!(!present.snapshot_is_removed());
+
+        // A removal with the blob still on disk resolves to SuppressedPresent.
+        record_artifact_removed(repo.path(), &capture.object_artifact_content_hash);
+        let suppressed = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
+        assert_eq!(
+            suppressed.snapshot_content_state,
+            SnapshotContentState::SuppressedPresent
+        );
+        assert!(suppressed.snapshot_is_removed());
+
+        // Once the blob is swept, it resolves to PhysicallyRemoved.
+        delete_snapshot_blob(repo.path(), &capture.object_id);
+        let removed = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
+        assert_eq!(
+            removed.snapshot_content_state,
+            SnapshotContentState::PhysicallyRemoved
+        );
+        assert!(removed.snapshot_is_removed());
+    }
+
+    #[test]
+    fn suppressed_present_diagnostic_does_not_claim_bytes_are_gone() {
+        // A removal is recorded but the blob is NOT swept (no compact): the
+        // diagnostic must report suppression without claiming the bytes are gone.
+        let repo = modified_repo();
+        let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        record_artifact_removed(repo.path(), &capture.object_artifact_content_hash);
+
+        let result = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
+
+        assert!(result.snapshot_is_removed());
+        let diagnostic = result
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "snapshot_content_suppressed_present")
+            .expect("expected a suppressed-present diagnostic");
+        assert!(
+            !diagnostic.message.contains("no longer stored"),
+            "the suppressed-present message must not claim the bytes are gone: {}",
+            diagnostic.message
         );
     }
 

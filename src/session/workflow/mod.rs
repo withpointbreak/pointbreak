@@ -77,7 +77,7 @@ pub use revision_list::{
 pub use revision_projection::{
     AdapterNoteView, MemberReadback, RevisionProjectionIdentity, RevisionProjectionRow,
     RevisionProjectionSummary, RevisionShowFilters, RevisionShowOptions, RevisionShowResult,
-    SnapshotOrder, show_revision,
+    SnapshotContentState, SnapshotOrder, show_revision,
 };
 pub use store_migrate::{MigrateStoreOptions, StoreMigrateResult, migrate_store};
 pub use store_migrate_common_dir::{

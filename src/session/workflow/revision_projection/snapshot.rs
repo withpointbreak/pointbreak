@@ -1,23 +1,44 @@
 use std::path::Path;
 
-use super::identity::RevisionProjectionIdentity;
+use super::identity::{RevisionProjectionIdentity, SnapshotContentState};
 use crate::error::{Result, ShoreError};
-use crate::model::DiffSnapshot;
-use crate::session::object_artifact::read_object_artifact;
+use crate::model::{DiffSnapshot, ObjectId};
+use crate::session::object_artifact::{object_artifact_path, read_object_artifact};
 use crate::session::projection::ArtifactRemovalProjection;
+use crate::session::store::resolution::resolve_read_store;
 
-/// Whether a content-addressed snapshot resolved to bytes or to a recorded
-/// removal. The join layer returns this instead of erroring when the bound
-/// content hash has an `ArtifactRemoved` fact, so a removed-and-swept snapshot
-/// renders as an explained absence rather than a hard missing-artifact error.
+/// The resolved read state of a content-addressed snapshot. The join layer
+/// returns this instead of erroring when the bound content hash has an
+/// `ArtifactRemoved` fact, distinguishing a removal whose bytes are still stored
+/// (`SuppressedPresent`) from one whose bytes have been swept
+/// (`PhysicallyRemoved`) so the read surface never overstates what has happened.
 pub(crate) enum SnapshotContent {
     Present(DiffSnapshot),
-    Removed { content_hash: String },
+    /// A removal is recorded for the bound content, but its blob is still on disk
+    /// (the suppression is reversible until a `compact` reclaims the bytes).
+    SuppressedPresent {
+        content_hash: String,
+    },
+    /// A removal is recorded and the bound blob has been swept from the store.
+    PhysicallyRemoved {
+        content_hash: String,
+    },
 }
 
-/// Resolve the bound snapshot, mapping a recorded removal of its content hash to
-/// `Removed` before the byte read. The removed-vs-missing decision lives here, at
-/// the layer that holds the event set — the storage byte readers stay
+impl From<&SnapshotContent> for SnapshotContentState {
+    fn from(content: &SnapshotContent) -> Self {
+        match content {
+            SnapshotContent::Present(_) => SnapshotContentState::Present,
+            SnapshotContent::SuppressedPresent { .. } => SnapshotContentState::SuppressedPresent,
+            SnapshotContent::PhysicallyRemoved { .. } => SnapshotContentState::PhysicallyRemoved,
+        }
+    }
+}
+
+/// Resolve the bound snapshot, splitting a recorded removal of its content hash
+/// into `SuppressedPresent` (bytes still on disk) vs `PhysicallyRemoved` (bytes
+/// swept) by an on-disk presence check. The removed-vs-missing decision lives
+/// here, at the layer that holds the event set — the storage byte readers stay
 /// event-unaware. A still-missing, *not*-removed artifact falls through to the
 /// reader's hard error (removed != not-yet-synced).
 pub(super) fn resolve_snapshot_content(
@@ -26,13 +47,24 @@ pub(super) fn resolve_snapshot_content(
     removal: &ArtifactRemovalProjection,
 ) -> Result<SnapshotContent> {
     if removal.is_removed(&revision.object_artifact_content_hash) {
-        return Ok(SnapshotContent::Removed {
-            content_hash: revision.object_artifact_content_hash.clone(),
+        let content_hash = revision.object_artifact_content_hash.clone();
+        return Ok(if bound_blob_present(repo, &revision.object_id)? {
+            SnapshotContent::SuppressedPresent { content_hash }
+        } else {
+            SnapshotContent::PhysicallyRemoved { content_hash }
         });
     }
     Ok(SnapshotContent::Present(load_bound_object_artifact(
         repo, revision,
     )?))
+}
+
+/// Cheap read-path presence check: does the bound object artifact file exist? A
+/// stat, never a decode — the removed-vs-swept split must not pay a full read of
+/// every still-present blob.
+fn bound_blob_present(repo: &Path, object_id: &ObjectId) -> Result<bool> {
+    let store_dir = resolve_read_store(repo)?.store_dir().to_path_buf();
+    Ok(object_artifact_path(&store_dir, object_id).exists())
 }
 
 pub(super) fn load_bound_object_artifact(
@@ -105,6 +137,68 @@ mod tests {
         tampered.object_artifact_content_hash = "sha256:not-the-real-hash".to_owned();
         let err = load_bound_object_artifact(repo.path(), &tampered).unwrap_err();
         assert!(err.to_string().contains("content hash"));
+    }
+
+    #[test]
+    fn removed_but_unswept_content_is_suppressed_present() {
+        // Remove the bound content (an ArtifactRemoved fact exists) but do NOT
+        // compact: the blob is still on disk. The join must report
+        // SuppressedPresent, not an unconditional removed/swept state.
+        let repo = committed_repo();
+        let captured = capture_range(&repo);
+        let identity = identity_from(&captured, repo.path());
+        let removal = removal_for(&captured.object_artifact_content_hash);
+
+        let content = resolve_snapshot_content(repo.path(), &identity, &removal).unwrap();
+
+        assert!(matches!(
+            content,
+            SnapshotContent::SuppressedPresent { content_hash }
+                if content_hash == captured.object_artifact_content_hash
+        ));
+    }
+
+    #[test]
+    fn removed_and_swept_content_is_physically_removed() {
+        // Remove the bound content AND sweep its blob from disk: the join must
+        // report PhysicallyRemoved.
+        let repo = committed_repo();
+        let captured = capture_range(&repo);
+        let identity = identity_from(&captured, repo.path());
+        let removal = removal_for(&captured.object_artifact_content_hash);
+        delete_bound_blob(repo.path(), &captured.object_id);
+
+        let content = resolve_snapshot_content(repo.path(), &identity, &removal).unwrap();
+
+        assert!(matches!(
+            content,
+            SnapshotContent::PhysicallyRemoved { content_hash }
+                if content_hash == captured.object_artifact_content_hash
+        ));
+    }
+
+    /// A removal projection carrying a single `ArtifactRemoved` fact for `hash`.
+    fn removal_for(content_hash: &str) -> ArtifactRemovalProjection {
+        use crate::model::JournalId;
+        use crate::session::event::{ArtifactRemovedPayload, EventTarget, ShoreEvent, Writer};
+        let event = ShoreEvent::new(
+            EventType::ArtifactRemoved,
+            ArtifactRemovedPayload::idempotency_key(content_hash),
+            EventTarget::for_journal(JournalId::new("journal:fixture")),
+            Writer::shore_local("test"),
+            ArtifactRemovedPayload {
+                content_hash: content_hash.to_owned(),
+            },
+            "2026-06-19T00:00:00Z",
+        )
+        .unwrap();
+        ArtifactRemovalProjection::from_events(&[event]).unwrap()
+    }
+
+    fn delete_bound_blob(repo: &Path, object_id: &crate::model::ObjectId) {
+        let store_dir = resolved_store_dir(repo);
+        let path = crate::session::object_artifact::object_artifact_path(&store_dir, object_id);
+        fs::remove_file(path).expect("delete bound object artifact blob");
     }
 
     fn capture_range(repo: &TestRepo) -> CaptureResult {

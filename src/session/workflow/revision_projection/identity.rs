@@ -148,6 +148,19 @@ pub struct MemberReadback {
     pub endorsements: Vec<EndorsementReadback>,
 }
 
+/// The resolved read state of a revision's bound snapshot content. `Present`
+/// renders bytes; the two removed states distinguish a recorded removal whose
+/// blob is still on disk (`SuppressedPresent`, reversible until a compact
+/// reclaims the bytes) from one whose blob has been swept (`PhysicallyRemoved`),
+/// so the read surface never overstates what has happened.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SnapshotContentState {
+    #[default]
+    Present,
+    SuppressedPresent,
+    PhysicallyRemoved,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RevisionShowResult {
     pub event_set_hash: String,
@@ -155,9 +168,15 @@ pub struct RevisionShowResult {
     pub revision: RevisionProjectionIdentity,
     pub snapshot: DiffSnapshot,
     /// Set when the bound object artifact has a recorded `ArtifactRemoved`
-    /// fact: its content bytes are no longer stored, so `snapshot` is empty and
-    /// this carries the removed content hash. `None` for a present snapshot.
+    /// fact: `snapshot` is empty and this carries the removed content hash.
+    /// `None` for a present snapshot. Whether the bytes are still stored is
+    /// reported by `snapshot_content_state`.
     pub removed_snapshot_content_hash: Option<String>,
+    /// The resolved read state of the bound snapshot content (present, suppressed
+    /// but still stored, or physically swept). A library-API addition; not
+    /// serialized into the `shore.review-revision` document (the diagnostics carry
+    /// the public surface).
+    pub snapshot_content_state: SnapshotContentState,
     pub filters: RevisionShowFilters,
     pub summary: RevisionProjectionSummary,
     pub current_assessment: CurrentAssessmentView,
