@@ -30,6 +30,17 @@ path = "src/lib.rs"
 name = "shore"
 path = "src/main.rs"
 
+[[bench]]
+name = "store_backend"
+harness = false
+required-features = ["bench"]
+
+[features]
+# Exposes the developer-run `bench_support` harness to the `store_backend`
+# benchmark crate. Off by default and never enabled in a release build, so the
+# harness stays out of the published surface.
+bench = []
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
@@ -47,6 +58,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["a
 
 [dev-dependencies]
 base64 = "0.22"
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 ctor = "0.2"
 ed25519-dalek = "2"
 sha2 = "0.10"
