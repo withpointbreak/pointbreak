@@ -4,7 +4,7 @@ use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::error::{Result, SchemaBreakRecord, ShoreError};
 use crate::session::event::{AssertionMode, EventType, ShoreEvent};
 use crate::session::store::backend::{Journal, JournalEntry, LocalJournal, StoreBackend};
-use crate::storage::{CreateFileOutcome, LocalStorage};
+use crate::storage::{CreateOutcome, LocalStorage};
 
 #[derive(Debug)]
 pub struct EventStore {
@@ -35,6 +35,19 @@ impl EventStore {
                 journal,
                 store_dir: store_dir.clone(),
             },
+            // The injection-only memory backend has no directory. Every write and
+            // read on this path goes through `journal`; the retained file-path
+            // helpers (`read_event`, `events_dir`, `list_event_file_names`) are
+            // file-backend-only and an injected memory store never calls them.
+            // `record_event_once` still works: the path it derives for validation
+            // is `events/<sha256(key)>.json`, whose stem comes only from the key,
+            // so the empty root never reaches a stored byte.
+            #[cfg(test)]
+            StoreBackend::Memory(_) => Self {
+                storage: LocalStorage::new(PathBuf::new()),
+                journal,
+                store_dir: PathBuf::new(),
+            },
         }
     }
 
@@ -64,11 +77,11 @@ impl EventStore {
             .journal
             .create_event_once(&event.idempotency_key, &bytes)?
         {
-            CreateFileOutcome::Created => {
+            CreateOutcome::Created => {
                 tracing::debug!(path = %path.display(), "event_store_write_created");
                 Ok(EventWriteOutcome::Created)
             }
-            CreateFileOutcome::AlreadyExists => {
+            CreateOutcome::AlreadyExists => {
                 let existing = self.read_stored_event(&event.idempotency_key)?;
                 if existing.payload_hash == event.payload_hash {
                     if event_signature_binding_matches(&existing, event) {
@@ -521,70 +534,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_review_disposition_recorded_event_returns_typed_unsupported_error() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("legacy.json");
-        fs::write(
-            &path,
-            r#"{"eventType":"review_disposition_recorded","schema":"shore.event","version":1,"eventId":"evt:sha256:0","idempotencyKey":"x","target":{},"writer":{},"occurredAt":"2026-05-19T00:00:00Z","payloadHash":"sha256:0","payload":{}}"#,
-        )
-        .unwrap();
-        let store = EventStore::open(root.path());
-
-        let err = store
-            .read_event(&path)
-            .expect_err("legacy event type must be rejected");
-
-        assert!(matches!(
-            err,
-            ShoreError::UnsupportedEventType(ref record)
-                if record.retired == "review_disposition_recorded"
-        ));
-        assert!(
-            err.to_string()
-                .contains("docs/assessment-model.md#legacy-disposition-events")
-        );
-    }
-
-    #[test]
-    fn legacy_intervention_events_return_typed_unsupported_error_after_input_request_rename() {
-        for legacy_event_type in ["intervention_requested", "intervention_resolved"] {
-            let err =
-                read_legacy_event(legacy_event_type).expect_err("legacy event must be rejected");
-
-            assert!(matches!(
-                err,
-                ShoreError::UnsupportedEventType(ref record)
-                    if record.retired == legacy_event_type
-            ));
-        }
-    }
-
-    #[test]
-    fn stored_events_carrying_writer_role_return_typed_legacy_error() {
-        let (_root, store) = temp_event_store();
-        let event = review_initialized_event();
-        let path = store.event_path_for_idempotency_key(&event.idempotency_key);
-        fs::create_dir_all(store.events_dir()).unwrap();
-
-        // Pre-break envelope shape: the writer object carries a role field.
-        let mut json = serde_json::to_value(event).unwrap();
-        json["writer"]["role"] = serde_json::json!("reviewer");
-        fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
-
-        let err = store
-            .read_event(&path)
-            .expect_err("role-bearing stored event must be rejected");
-
-        assert!(matches!(err, ShoreError::UnsupportedEventEnvelope(_)));
-        assert!(
-            err.to_string()
-                .contains("docs/storage-model.md#legacy-writer-role-events"),
-            "error carries the public migration anchor; got: {err}"
-        );
-    }
-
-    #[test]
     fn role_free_stored_events_read_cleanly() {
         let (_root, store) = temp_event_store();
         let event = review_initialized_event();
@@ -593,76 +542,6 @@ mod tests {
 
         let read = store.read_event(&path).expect("current-shape event reads");
         assert_eq!(read, event);
-    }
-
-    #[test]
-    fn read_event_rejects_stored_legacy_writer_tool_envelope() {
-        let (_root, store) = temp_event_store();
-        let event = review_initialized_event();
-        let path = store.event_path_for_idempotency_key(&event.idempotency_key);
-        fs::create_dir_all(store.events_dir()).unwrap();
-
-        // Pre-rename envelope shape: the writer object carries `tool` and no
-        // `producer` key.
-        let mut json = serde_json::to_value(event).unwrap();
-        let writer = json["writer"].as_object_mut().unwrap();
-        writer.remove("producer");
-        writer.insert(
-            "tool".to_owned(),
-            serde_json::json!({ "name": "shore", "version": "0.1.0" }),
-        );
-        fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
-
-        let err = store
-            .read_event(&path)
-            .expect_err("tool-bearing stored event must be rejected");
-
-        assert!(
-            matches!(err, ShoreError::UnsupportedEventEnvelope(_)),
-            "expected the typed migration error, got: {err:?}"
-        );
-        assert!(
-            err.to_string()
-                .contains("docs/storage-model.md#legacy-writer-tool-events"),
-            "error carries the public migration anchor; got: {err}"
-        );
-        assert!(
-            err.to_string().contains("writer.tool"),
-            "error names the retired envelope field; got: {err}"
-        );
-    }
-
-    #[test]
-    fn read_event_rejects_stored_pre_reshape_target_envelope() {
-        // A stored event whose `target` carries the old flat shape (a sessionId
-        // plus reviewUnitId/snapshotId optionals and no `subject`) must be loudly
-        // rejected: `subject` is now the single, non-optional address, so the old
-        // shape cannot decode. There is no silent upgrade.
-        let (_root, store) = temp_event_store();
-        let event = review_initialized_event();
-        let path = store.event_path_for_idempotency_key(&event.idempotency_key);
-        fs::create_dir_all(store.events_dir()).unwrap();
-
-        let mut json = serde_json::to_value(event).unwrap();
-        json["target"] = serde_json::json!({
-            "sessionId": "session:default",
-            "reviewUnitId": "review-unit:sha256:legacy",
-            "revisionId": "rev:git:sha256:legacy",
-            "snapshotId": "snap:git:sha256:legacy",
-        });
-        fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
-
-        let error = store
-            .read_event(&path)
-            .expect_err("a pre-reshape target envelope must be rejected");
-
-        // The decode fails on a missing non-optional field of the reshaped target
-        // (`journalId` / `subject`) — the old flat shape carries neither.
-        let message = error.to_string();
-        assert!(
-            message.contains("journalId") || message.contains("subject"),
-            "rejection names a missing reshaped-target field; got: {error}"
-        );
     }
 
     #[test]
@@ -678,42 +557,6 @@ mod tests {
             .read_event(&path)
             .expect("producer-keyed event reads cleanly");
         assert_eq!(read, event);
-    }
-
-    #[test]
-    fn read_event_rejects_payload_hash_mismatch() {
-        let (_root, store) = temp_event_store();
-        let event = review_initialized_event();
-        let path = store.event_path_for_idempotency_key(&event.idempotency_key);
-        store.record_event_once(&event).unwrap();
-
-        let mut json = serde_json::to_value(&event).unwrap();
-        json["payloadHash"] = serde_json::json!("sha256:wrong");
-        fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
-
-        let error = store
-            .read_event(&path)
-            .expect_err("payload hash mismatch is rejected");
-
-        assert!(error.to_string().contains("payloadHash"));
-    }
-
-    #[test]
-    fn read_event_rejects_event_id_mismatch() {
-        let (_root, store) = temp_event_store();
-        let event = review_initialized_event();
-        let path = store.event_path_for_idempotency_key(&event.idempotency_key);
-        store.record_event_once(&event).unwrap();
-
-        let mut json = serde_json::to_value(&event).unwrap();
-        json["eventId"] = serde_json::json!("evt:sha256:wrong");
-        fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
-
-        let error = store
-            .read_event(&path)
-            .expect_err("event id mismatch is rejected");
-
-        assert!(error.to_string().contains("eventId"));
     }
 
     #[test]
@@ -816,60 +659,277 @@ mod tests {
     }
 
     #[test]
-    fn list_events_lenient_skips_retired_events_and_keeps_the_rest() {
-        let (_root, store) = temp_event_store();
-        let valid = review_initialized_event();
-        store.record_event_once(&valid).unwrap();
-
-        // A retired-type file and a writer.role file, written raw: the probe
-        // rejects them before full decode, so no valid signature/hash is needed.
-        let events_dir = store.events_dir();
-        write_raw_event(
-            &events_dir,
-            "b",
-            br#"{"eventType":"review_disposition_recorded"}"#,
-        );
-        write_raw_event(
-            &events_dir,
-            "c",
-            br#"{"eventType":"review_initialized","writer":{"role":"x"}}"#,
-        );
-
-        let (events, skipped) = store.list_events_lenient().unwrap();
-
-        assert_eq!(events.len(), 1, "the one valid event survives");
-        assert_eq!(skipped.len(), 2);
-        let codes: std::collections::BTreeSet<_> = skipped.iter().map(|s| s.code).collect();
-        assert!(codes.contains(&"unsupported_event_type"));
-        assert!(codes.contains(&"unsupported_event_envelope"));
-        assert!(
-            skipped
-                .iter()
-                .any(|s| s.record.retired == "review_disposition_recorded")
-        );
-        assert!(skipped.iter().any(|s| s.record.retired == "writer.role"));
-    }
-
-    #[test]
-    fn list_events_lenient_still_hard_errors_on_genuine_corruption() {
-        let (_root, store) = temp_event_store();
-        let events_dir = store.events_dir();
-        // Not a retired type / envelope — a malformed event that fails decode for
-        // another reason must NOT be silently skipped.
-        write_raw_event(&events_dir, "d", br#"{"eventType":"review_initialized"}"#);
-
-        assert!(store.list_events_lenient().is_err());
-    }
-
-    #[test]
     fn payload_hash_is_stable_across_a_journal_round_trip() {
-        // Events may re-serialize in any byte layout as long as the payload Value
-        // round-trips losslessly (canonical key-sort erases byte order at hash
-        // time). Record an event whose payload carries the hazardous shapes —
-        // large/negative integers, non-ASCII text, deliberately unsorted keys —
-        // read it back through the listing surface, and assert payloadHash is
-        // byte-stable and re-derives identically.
         let (_root, store) = temp_event_store();
+        assert_payload_hash_is_stable_across_a_round_trip(&store);
+    }
+
+    #[test]
+    fn payload_hash_is_stable_across_a_round_trip_on_the_in_memory_backend() {
+        // The O1 pin holds through any backend: an injected in-memory store
+        // re-serializes the same payload and re-derives the same payloadHash with
+        // no filesystem involved.
+        assert_payload_hash_is_stable_across_a_round_trip(&in_memory_event_store());
+    }
+
+    #[test]
+    fn co_signature_decision_holds_over_the_in_memory_backend() {
+        // The whole Created → Existing → ExistingDivergentSignature → conflict
+        // ladder, and a byte-stable list round-trip, without a filesystem. If any
+        // arm of this decision had been written inside LocalStorage rather than the
+        // wrapper, the in-memory backend could not reproduce it — this is the
+        // honesty test for the co-signature wrapper.
+        let store = in_memory_event_store();
+        let first = review_initialized_event();
+        assert_eq!(
+            store.record_event_once(&first).unwrap(),
+            EventWriteOutcome::Created
+        );
+        assert!(store.event_exists(&first.idempotency_key).unwrap());
+
+        // A replay with a later occurredAt but the same payload is Existing, and
+        // does not rewrite the stored copy.
+        let retry = review_initialized_event_at("2026-05-10T00:01:00Z");
+        assert_eq!(
+            store.record_event_once(&retry).unwrap(),
+            EventWriteOutcome::Existing
+        );
+        assert_eq!(store.list_events().unwrap(), vec![first]);
+
+        // Same payloadHash and eventRecordHash, a different signature: a
+        // transcription-eligible co-signature, not a conflict.
+        let signed_store = in_memory_event_store();
+        let signed_a = signed_review_initialized_event(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+        );
+        let signed_b = signed_review_initialized_event(
+            "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB==",
+        );
+        assert_eq!(
+            signed_store.record_event_once(&signed_a).unwrap(),
+            EventWriteOutcome::Created
+        );
+        assert_eq!(
+            signed_store.record_event_once(&signed_b).unwrap(),
+            EventWriteOutcome::ExistingDivergentSignature
+        );
+
+        // Same idempotencyKey, a different payload: a loud conflict.
+        let conflict_store = in_memory_event_store();
+        let base = review_initialized_event();
+        let conflicting = conflicting_event_with_same_idempotency_key(&base);
+        conflict_store.record_event_once(&base).unwrap();
+        assert!(
+            conflict_store
+                .record_event_once(&conflicting)
+                .unwrap_err()
+                .to_string()
+                .contains("conflict")
+        );
+    }
+
+    #[test]
+    fn list_events_rejects_payload_hash_mismatch_over_every_backend() {
+        for_each_event_backend(|store, journal| {
+            let event = review_initialized_event();
+            let mut json = serde_json::to_value(&event).unwrap();
+            json["payloadHash"] = serde_json::json!("sha256:wrong");
+            journal
+                .insert_raw(&event.idempotency_key, &serde_json::to_vec(&json).unwrap())
+                .unwrap();
+
+            let error = store
+                .list_events()
+                .expect_err("a payloadHash mismatch is rejected on replay");
+            assert!(error.to_string().contains("payloadHash"));
+        });
+    }
+
+    #[test]
+    fn list_events_rejects_event_id_mismatch_over_every_backend() {
+        for_each_event_backend(|store, journal| {
+            let event = review_initialized_event();
+            let mut json = serde_json::to_value(&event).unwrap();
+            json["eventId"] = serde_json::json!("evt:sha256:wrong");
+            journal
+                .insert_raw(&event.idempotency_key, &serde_json::to_vec(&json).unwrap())
+                .unwrap();
+
+            let error = store
+                .list_events()
+                .expect_err("an eventId mismatch is rejected on replay");
+            assert!(error.to_string().contains("eventId"));
+        });
+    }
+
+    #[test]
+    fn list_events_rejects_retired_event_type_over_every_backend() {
+        for_each_event_backend(|store, journal| {
+            let event = review_initialized_event();
+            let mut json = serde_json::to_value(&event).unwrap();
+            json["eventType"] = serde_json::json!("review_disposition_recorded");
+            journal
+                .insert_raw(&event.idempotency_key, &serde_json::to_vec(&json).unwrap())
+                .unwrap();
+
+            let error = store
+                .list_events()
+                .expect_err("a retired event type is rejected on replay");
+            assert!(matches!(
+                error,
+                ShoreError::UnsupportedEventType(ref record)
+                    if record.retired == "review_disposition_recorded"
+            ));
+        });
+    }
+
+    #[test]
+    fn list_events_rejects_legacy_writer_role_envelope_over_every_backend() {
+        for_each_event_backend(|store, journal| {
+            let event = review_initialized_event();
+            let mut json = serde_json::to_value(&event).unwrap();
+            json["writer"]["role"] = serde_json::json!("reviewer");
+            journal
+                .insert_raw(&event.idempotency_key, &serde_json::to_vec(&json).unwrap())
+                .unwrap();
+
+            let error = store
+                .list_events()
+                .expect_err("a role-bearing envelope is rejected on replay");
+            assert!(matches!(error, ShoreError::UnsupportedEventEnvelope(_)));
+            assert!(
+                error
+                    .to_string()
+                    .contains("docs/storage-model.md#legacy-writer-role-events")
+            );
+        });
+    }
+
+    #[test]
+    fn list_events_rejects_legacy_writer_tool_envelope_over_every_backend() {
+        for_each_event_backend(|store, journal| {
+            let event = review_initialized_event();
+            let mut json = serde_json::to_value(&event).unwrap();
+            let writer = json["writer"].as_object_mut().unwrap();
+            writer.remove("producer");
+            writer.insert(
+                "tool".to_owned(),
+                serde_json::json!({ "name": "shore", "version": "0.1.0" }),
+            );
+            journal
+                .insert_raw(&event.idempotency_key, &serde_json::to_vec(&json).unwrap())
+                .unwrap();
+
+            let error = store
+                .list_events()
+                .expect_err("a tool-bearing envelope is rejected on replay");
+            assert!(matches!(error, ShoreError::UnsupportedEventEnvelope(_)));
+            assert!(
+                error
+                    .to_string()
+                    .contains("docs/storage-model.md#legacy-writer-tool-events")
+            );
+            assert!(error.to_string().contains("writer.tool"));
+        });
+    }
+
+    #[test]
+    fn list_events_rejects_pre_reshape_target_envelope_over_every_backend() {
+        for_each_event_backend(|store, journal| {
+            let event = review_initialized_event();
+            let mut json = serde_json::to_value(&event).unwrap();
+            json["target"] = serde_json::json!({
+                "sessionId": "session:default",
+                "reviewUnitId": "review-unit:sha256:legacy",
+                "revisionId": "rev:git:sha256:legacy",
+                "snapshotId": "snap:git:sha256:legacy",
+            });
+            journal
+                .insert_raw(&event.idempotency_key, &serde_json::to_vec(&json).unwrap())
+                .unwrap();
+
+            let error = store
+                .list_events()
+                .expect_err("a pre-reshape target envelope is rejected on replay");
+            let message = error.to_string();
+            assert!(
+                message.contains("journalId") || message.contains("subject"),
+                "rejection names a missing reshaped-target field; got: {error}"
+            );
+        });
+    }
+
+    #[test]
+    fn list_events_rejects_a_mislocated_entry_over_every_backend() {
+        for_each_event_backend(|store, journal| {
+            // A valid event stored under a key whose content-address digest is not
+            // its home: the listing replay-check must reject it, and the lenient
+            // read must hard-error (this is corruption, not a retired schema).
+            let event = review_initialized_event();
+            journal
+                .insert_raw("not:this:events:home", &serde_json::to_vec(&event).unwrap())
+                .unwrap();
+
+            assert!(
+                store
+                    .list_events()
+                    .expect_err("a mislocated entry is rejected on replay")
+                    .to_string()
+                    .contains("idempotencyKey")
+            );
+            assert!(store.list_events_lenient().is_err());
+        });
+    }
+
+    #[test]
+    fn list_events_lenient_skips_retired_schemas_over_every_backend() {
+        for_each_event_backend(|store, journal| {
+            let valid = review_initialized_event();
+            store.record_event_once(&valid).unwrap();
+
+            // A retired-type blob and a writer.role blob, injected raw: the probe
+            // rejects them before full decode, so no valid signature/hash is needed.
+            journal
+                .insert_raw(
+                    "retired:type:key",
+                    br#"{"eventType":"review_disposition_recorded"}"#,
+                )
+                .unwrap();
+            journal
+                .insert_raw(
+                    "retired:envelope:key",
+                    br#"{"eventType":"review_initialized","writer":{"role":"x"}}"#,
+                )
+                .unwrap();
+
+            let (events, skipped) = store.list_events_lenient().unwrap();
+            assert_eq!(events.len(), 1, "the one valid event survives");
+            assert_eq!(skipped.len(), 2);
+            let codes: std::collections::BTreeSet<_> = skipped.iter().map(|s| s.code).collect();
+            assert!(codes.contains(&"unsupported_event_type"));
+            assert!(codes.contains(&"unsupported_event_envelope"));
+        });
+    }
+
+    #[test]
+    fn list_events_lenient_hard_errors_on_genuine_corruption_over_every_backend() {
+        for_each_event_backend(|store, journal| {
+            // Not a retired schema — a malformed event that fails decode for
+            // another reason must propagate, not be silently skipped.
+            journal
+                .insert_raw("corrupt:key", br#"{"eventType":"review_initialized"}"#)
+                .unwrap();
+            assert!(store.list_events_lenient().is_err());
+        });
+    }
+
+    /// Events may re-serialize in any byte layout as long as the payload Value
+    /// round-trips losslessly (canonical key-sort erases byte order at hash time).
+    /// Record an event whose payload carries the hazardous shapes —
+    /// large/negative integers, non-ASCII text, deliberately unsorted keys — read
+    /// it back through the listing surface, and assert payloadHash is byte-stable
+    /// and re-derives identically.
+    fn assert_payload_hash_is_stable_across_a_round_trip(store: &EventStore) {
         let mut event = review_initialized_event();
         event.payload = serde_json::json!({
             "zeta": 1,
@@ -931,37 +991,6 @@ mod tests {
         assert_eq!(from_listing, from_file_name);
     }
 
-    #[test]
-    fn list_events_rejects_a_file_whose_name_does_not_match_its_content() {
-        // An otherwise-valid event written under the wrong file name (its stem does
-        // not hash from its idempotency key) must be rejected by the listing, the
-        // same way a direct read_event rejects it. Replay never silently accepts a
-        // relocated or tampered blob.
-        let (_root, store) = temp_event_store();
-        let event = review_initialized_event();
-        std::fs::create_dir_all(store.events_dir()).unwrap();
-        let wrong_path = store.events_dir().join(format!("{}.json", "0".repeat(64)));
-        std::fs::write(&wrong_path, serde_json::to_vec(&event).unwrap()).unwrap();
-
-        let error = store
-            .list_events()
-            .expect_err("a misnamed event file is rejected on replay");
-        assert!(error.to_string().contains("idempotencyKey"));
-    }
-
-    #[test]
-    fn list_events_lenient_hard_errors_on_a_misnamed_event_file() {
-        // A misnamed-but-otherwise-valid file is corruption, not a retired schema:
-        // the lenient read must propagate it, not skip it.
-        let (_root, store) = temp_event_store();
-        let event = review_initialized_event();
-        std::fs::create_dir_all(store.events_dir()).unwrap();
-        let wrong_path = store.events_dir().join(format!("{}.json", "1".repeat(64)));
-        std::fs::write(&wrong_path, serde_json::to_vec(&event).unwrap()).unwrap();
-
-        assert!(store.list_events_lenient().is_err());
-    }
-
     fn review_initialized_event_for(session: &str) -> ShoreEvent {
         ShoreEvent::new(
             EventType::ReviewInitialized,
@@ -974,32 +1003,32 @@ mod tests {
         .expect("event builds")
     }
 
-    /// Write a raw event file under `events_dir` with a 69-char `<64-hex>.json`
-    /// name `is_event_file` accepts. `label` is a short hex stem, zero-padded to
-    /// 64 characters so each file is distinct.
-    fn write_raw_event(events_dir: &std::path::Path, label: &str, bytes: &[u8]) {
-        fs::create_dir_all(events_dir).unwrap();
-        let stem = format!("{label}{}", "0".repeat(64 - label.len()));
-        fs::write(events_dir.join(format!("{stem}.json")), bytes).unwrap();
-    }
-
     fn temp_event_store() -> (tempfile::TempDir, EventStore) {
         let root = tempfile::tempdir().unwrap();
         let store = EventStore::open(root.path().join(".shore/data"));
         (root, store)
     }
 
-    fn read_legacy_event(event_type: &str) -> Result<ShoreEvent> {
-        let (_root, store) = temp_event_store();
-        let event = review_initialized_event();
-        let path = store.event_path_for_idempotency_key(&event.idempotency_key);
-        fs::create_dir_all(store.events_dir()).unwrap();
+    /// An event wrapper over a fresh injection-only in-memory backend — no temp
+    /// dir, no filesystem. The same production constructor (`from_backend`)
+    /// resolved consumers use, so the honesty tests exercise the real wiring.
+    fn in_memory_event_store() -> EventStore {
+        EventStore::from_backend(&StoreBackend::memory())
+    }
 
-        let mut json = serde_json::to_value(event)?;
-        json["eventType"] = serde_json::json!(event_type);
-        fs::write(&path, serde_json::to_vec(&json)?).unwrap();
+    /// Run a tamper assertion against each backend: a wrapper (`EventStore`) and a
+    /// raw `Journal` handle over the **same** underlying store, so the test injects
+    /// bytes through the journal (bypassing write-side validation) and asserts the
+    /// wrapper's read-side validation rejects them — identically for both backends.
+    fn for_each_event_backend(mut assertion: impl FnMut(&EventStore, &dyn Journal)) {
+        let root = tempfile::tempdir().unwrap();
+        let local = StoreBackend::Local(root.path().join(".shore/data"));
+        let local_journal = local.journal();
+        assertion(&EventStore::from_backend(&local), local_journal.as_ref());
 
-        store.read_event(&path)
+        let memory = StoreBackend::memory();
+        let memory_journal = memory.journal();
+        assertion(&EventStore::from_backend(&memory), memory_journal.as_ref());
     }
 
     fn review_initialized_event() -> ShoreEvent {

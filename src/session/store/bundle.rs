@@ -13,7 +13,7 @@ use crate::session::{
     EventVerificationPolicy, IngestEventVerification, SessionState, TrustSet, current_timestamp,
     verify_events_for_ingest,
 };
-use crate::storage::{CreateFileOutcome, Durability, LocalStorage};
+use crate::storage::{CreateOutcome, Durability, LocalStorage};
 
 const EXPORT_MANIFEST_SCHEMA: &str = "shore.store-export-manifest";
 const EXPORT_MANIFEST_VERSION: u32 = 1;
@@ -341,8 +341,8 @@ fn commit_artifacts(
             &artifact.bytes,
             Durability::Durable,
         )? {
-            CreateFileOutcome::Created => created += 1,
-            CreateFileOutcome::AlreadyExists => {
+            CreateOutcome::Created => created += 1,
+            CreateOutcome::AlreadyExists => {
                 let existing_bytes = storage.read_bytes(&artifact.relative_path)?;
                 if existing_bytes != artifact.bytes {
                     return Err(ShoreError::Message(format!(

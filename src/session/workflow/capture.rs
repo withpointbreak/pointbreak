@@ -495,6 +495,7 @@ mod tests {
     use crate::git::git_common_dir;
     use crate::model::{CommitRangeCaptureMode, ReviewEndpoint, RevisionSource};
     use crate::session::event::EventType;
+    use crate::session::store::content::ContentArtifacts;
     use crate::session::{
         ArtifactKind, CaptureOptions, CommitRangeSpec, EventStore, ImportArtifactOptions,
         ImportArtifactOutcome, RevisionShowOptions, ShoreStorePaths, capture_review,
@@ -1144,9 +1145,10 @@ mod tests {
             .filter(|event| event.event_type == EventType::WorkObjectProposed)
             .collect();
         assert_eq!(captured.len(), 1);
-        let snapshot_files = fs::read_dir(clone_local.join("artifacts/objects"))
+        let snapshot_files = ContentArtifacts::local(&clone_local)
+            .list_refs("artifacts/objects")
             .unwrap()
-            .count();
+            .len();
         assert_eq!(
             snapshot_files, 1,
             "the two captures dedup to one shared artifact"

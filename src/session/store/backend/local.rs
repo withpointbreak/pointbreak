@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use super::{ContentStore, Journal, JournalEntry};
 use crate::error::{Result, ShoreError};
 use crate::session::store::event_store::{event_filename_stem, is_event_file};
-use crate::storage::{CreateFileOutcome, Durability, LocalStorage, RemoveOutcome};
+use crate::storage::{CreateOutcome, Durability, LocalStorage, RemoveOutcome};
 
 /// The file-backed [`Journal`]: events live at
 /// `events/<sha256(idempotency_key)>.json` under the store dir.
@@ -38,7 +38,7 @@ impl LocalJournal {
 }
 
 impl Journal for LocalJournal {
-    fn create_event_once(&self, idempotency_key: &str, bytes: &[u8]) -> Result<CreateFileOutcome> {
+    fn create_event_once(&self, idempotency_key: &str, bytes: &[u8]) -> Result<CreateOutcome> {
         self.storage.create_file_exclusive(
             &self.event_path(idempotency_key),
             bytes,
@@ -80,6 +80,17 @@ impl Journal for LocalJournal {
             })
             .collect()
     }
+
+    #[cfg(test)]
+    fn insert_raw(&self, idempotency_key: &str, bytes: &[u8]) -> Result<()> {
+        // A plain atomic write at the key's content-addressed path, overwriting
+        // any existing file — the create-if-absent dedup is deliberately skipped.
+        self.storage.write_bytes_atomic(
+            &self.event_path(idempotency_key),
+            bytes,
+            Durability::Durable,
+        )
+    }
 }
 
 /// The file-backed [`ContentStore`]: blobs live at their store-relative
@@ -98,7 +109,7 @@ impl LocalContentStore {
 }
 
 impl ContentStore for LocalContentStore {
-    fn put_once(&self, content_ref: &str, bytes: &[u8]) -> Result<CreateFileOutcome> {
+    fn put_once(&self, content_ref: &str, bytes: &[u8]) -> Result<CreateOutcome> {
         self.storage
             .create_file_exclusive(Path::new(content_ref), bytes, Durability::Durable)
     }
@@ -128,5 +139,13 @@ impl ContentStore for LocalContentStore {
                     .map(|name| format!("{prefix}/{name}"))
             })
             .collect())
+    }
+
+    #[cfg(test)]
+    fn put_raw(&self, content_ref: &str, bytes: &[u8]) -> Result<()> {
+        // A plain atomic write at the locator, overwriting any existing blob —
+        // the create-side validation the wrapper performs is deliberately skipped.
+        self.storage
+            .write_bytes_atomic(Path::new(content_ref), bytes, Durability::Durable)
     }
 }

@@ -536,6 +536,7 @@ mod tests {
     fn backend_dir(backend: &StoreBackend) -> &Path {
         match backend {
             StoreBackend::Local(dir) => dir.as_path(),
+            StoreBackend::Memory(_) => unreachable!("the selector never yields the memory backend"),
         }
     }
 

@@ -21,7 +21,7 @@ pub enum Durability {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CreateFileOutcome {
+pub enum CreateOutcome {
     Created,
     AlreadyExists,
 }
@@ -131,7 +131,7 @@ impl LocalStorage {
         path: &Path,
         bytes: &[u8],
         durability: Durability,
-    ) -> Result<CreateFileOutcome> {
+    ) -> Result<CreateOutcome> {
         let path = self.resolve(path);
         let parent = parent_dir(&path)?;
         fs::create_dir_all(parent).map_err(|error| io_error("create directory", parent, error))?;
@@ -139,7 +139,7 @@ impl LocalStorage {
         let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Ok(CreateFileOutcome::AlreadyExists);
+                return Ok(CreateOutcome::AlreadyExists);
             }
             Err(error) => return Err(io_error("create file exclusively", &path, error)),
         };
@@ -157,7 +157,7 @@ impl LocalStorage {
         }
 
         sync_parent_if_durable(parent, durability)?;
-        Ok(CreateFileOutcome::Created)
+        Ok(CreateOutcome::Created)
     }
 
     /// Durable, idempotent, store-scoped removal of a content-addressed file.
@@ -400,7 +400,7 @@ mod tests {
             .create_file_exclusive(&path, b"payload", Durability::Durable)
             .unwrap();
 
-        assert_eq!(outcome, CreateFileOutcome::Created);
+        assert_eq!(outcome, CreateOutcome::Created);
         assert_eq!(storage.read_bytes(&path).unwrap(), b"payload");
     }
 
@@ -481,13 +481,13 @@ mod tests {
             storage
                 .create_file_exclusive(&path, b"first", Durability::Durable)
                 .unwrap(),
-            CreateFileOutcome::Created
+            CreateOutcome::Created
         );
         assert_eq!(
             storage
                 .create_file_exclusive(&path, b"second", Durability::Durable)
                 .unwrap(),
-            CreateFileOutcome::AlreadyExists
+            CreateOutcome::AlreadyExists
         );
         assert_eq!(storage.read_bytes(&path).unwrap(), b"first");
         assert_eq!(
@@ -582,7 +582,7 @@ mod tests {
             .create_file_exclusive(&path, b"payload", Durability::Projection)
             .unwrap();
 
-        assert_eq!(outcome, CreateFileOutcome::Created);
+        assert_eq!(outcome, CreateOutcome::Created);
         assert_eq!(storage.read_bytes(&path).unwrap(), b"payload");
     }
 }

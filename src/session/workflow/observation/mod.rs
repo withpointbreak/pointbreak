@@ -33,6 +33,7 @@ mod tests {
         EventTarget, EventType, GitProvenance, Revision, ShoreEvent, WorkObjectProposal,
         WorkObjectProposedPayload, Writer,
     };
+    use crate::session::store::content::ContentArtifacts;
     use crate::session::{
         CaptureOptions, CaptureResult, EventStore, SessionState, capture_worktree_review,
     };
@@ -490,9 +491,9 @@ mod tests {
             "workflow result must not expose internal artifact paths"
         );
 
-        let artifacts = std::fs::read_dir(resolved_store_dir(repo.path()).join("artifacts/notes"))
-            .unwrap()
-            .collect::<Vec<_>>();
+        let artifacts = ContentArtifacts::local(&resolved_store_dir(repo.path()))
+            .list_refs("artifacts/notes")
+            .unwrap();
         assert_eq!(artifacts.len(), 1);
     }
 

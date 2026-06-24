@@ -19,7 +19,7 @@ use crate::session::object_artifact::{
 use crate::session::store::resolution::{
     prepare_write_landing, resolve_read_store, resolve_write_store,
 };
-use crate::storage::{CreateFileOutcome, Durability, LocalStorage};
+use crate::storage::{CreateOutcome, Durability, LocalStorage};
 
 /// The kind of content-addressed artifact an event references.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -340,8 +340,8 @@ fn import_object_artifact(
 
     let path = object_artifact_path(store_dir, object_id);
     match storage.create_file_exclusive(&path, bytes, Durability::Durable)? {
-        CreateFileOutcome::Created => Ok(ImportArtifactOutcome::Created),
-        CreateFileOutcome::AlreadyExists => {
+        CreateOutcome::Created => Ok(ImportArtifactOutcome::Created),
+        CreateOutcome::AlreadyExists => {
             let existing_bytes = std::fs::read(&path).map_err(|error| {
                 ShoreError::Message(format!("read file {}: {error}", path.display()))
             })?;
@@ -370,8 +370,8 @@ fn import_body_artifact(
     let artifact = validate_note_body_artifact_bytes(relative_path, expected_content_hash, bytes)?;
     let path = Path::new(relative_path);
     match storage.create_file_exclusive(path, bytes, Durability::Durable)? {
-        CreateFileOutcome::Created => Ok(ImportArtifactOutcome::Created),
-        CreateFileOutcome::AlreadyExists => {
+        CreateOutcome::Created => Ok(ImportArtifactOutcome::Created),
+        CreateOutcome::AlreadyExists => {
             let existing_bytes = storage.read_bytes(path)?;
             let existing = validate_note_body_artifact_bytes(
                 relative_path,

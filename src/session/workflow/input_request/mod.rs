@@ -41,6 +41,7 @@ mod tests {
 
     use super::*;
     use crate::model::{ObservationId, ReviewTargetRef, Side, TargetRef};
+    use crate::session::store::content::ContentArtifacts;
     use crate::session::{
         CaptureOptions, EventStore, ObservationAddOptions, SessionState, capture_worktree_review,
         record_observation,
@@ -593,9 +594,9 @@ mod tests {
             "workflow result must not expose internal artifact paths"
         );
 
-        let artifacts = std::fs::read_dir(resolved_store_dir(repo.path()).join("artifacts/notes"))
-            .unwrap()
-            .collect::<Vec<_>>();
+        let artifacts = ContentArtifacts::local(&resolved_store_dir(repo.path()))
+            .list_refs("artifacts/notes")
+            .unwrap();
         assert_eq!(artifacts.len(), 1);
     }
 
