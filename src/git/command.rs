@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 use crate::error::{Result, ShoreError};
 
@@ -43,23 +45,96 @@ where
     run_git_allowing_statuses(cwd, args, &[0])
 }
 
+/// Invariant repository facts that Git resolves from disk but that never change
+/// for a live repository within a single process: the worktree root, the common
+/// Git directory, and the path to `info/exclude`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum RepoFact {
+    WorktreeRoot,
+    CommonDir,
+    InfoExcludePath,
+}
+
+/// Memoizes [`RepoFact`] lookups keyed by the working directory passed to Git.
+///
+/// Shoreline re-derives these facts many times across one capture/ingest — store
+/// resolution alone resolves the worktree root ~10 times for a single repository
+/// — and each call previously spawned a fresh `git rev-parse`. Process spawning
+/// is the dominant cost in the `sys`-bound test suite and in every CLI
+/// invocation, so collapsing the repeats to one spawn per repository is a real
+/// latency win for both.
+///
+/// The memo is sound because these three facts are immutable for a given
+/// repository as long as it exists: Shoreline never relocates a repository
+/// mid-process, and the `info/exclude` *path* (not its mutable contents) is fixed
+/// by the layout. Only successful lookups are cached, so a transient failure is
+/// never memoized. Keys are canonicalized absolute paths (see [`repo_fact_key`]),
+/// so different spellings of one repository — a relative `.`, a symlinked
+/// temporary directory — collapse to a single entry and can never alias two
+/// distinct repositories. Concurrent first callers may each resolve once: the
+/// lock is released across the (subprocess) lookup rather than single-flighting
+/// it, which at worst duplicates a spawn and never returns a wrong value.
+fn repo_fact_cache() -> &'static Mutex<HashMap<(PathBuf, RepoFact), PathBuf>> {
+    static CACHE: OnceLock<Mutex<HashMap<(PathBuf, RepoFact), PathBuf>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Canonicalizes `repo` into a cache key so every spelling of one repository — a
+/// relative `.`, a symlinked temporary directory — maps to the same entry and two
+/// distinct repositories never collide. Falls back to the raw path when
+/// canonicalization fails (e.g. the directory does not exist yet), in which case
+/// the lookup fails and nothing is cached.
+fn repo_fact_key(repo: &Path, fact: RepoFact) -> (PathBuf, RepoFact) {
+    let path = std::fs::canonicalize(repo).unwrap_or_else(|_| repo.to_path_buf());
+    (path, fact)
+}
+
+fn cached_repo_fact(
+    repo: &Path,
+    fact: RepoFact,
+    resolve: impl FnOnce() -> Result<PathBuf>,
+) -> Result<PathBuf> {
+    let key = repo_fact_key(repo, fact);
+    {
+        let cache = repo_fact_cache()
+            .lock()
+            .expect("repo fact cache mutex is not poisoned");
+        if let Some(hit) = cache.get(&key) {
+            return Ok(hit.clone());
+        }
+    }
+
+    // Resolve outside the lock: the guard above is dropped with its block, so the
+    // (process-spawning) lookup never runs while holding the mutex.
+    let value = resolve()?;
+    repo_fact_cache()
+        .lock()
+        .expect("repo fact cache mutex is not poisoned")
+        .insert(key, value.clone());
+    Ok(value)
+}
+
 pub fn git_worktree_root(repo: &Path) -> Result<PathBuf> {
-    let output = run_git(repo, ["rev-parse", "--show-toplevel"])?;
-    git_stdout_path(repo, &output.stdout, "worktree root")
+    cached_repo_fact(repo, RepoFact::WorktreeRoot, || {
+        let output = run_git(repo, ["rev-parse", "--show-toplevel"])?;
+        git_stdout_path(repo, &output.stdout, "worktree root")
+    })
 }
 
 pub(crate) fn git_common_dir(repo: &Path) -> Result<PathBuf> {
-    let output = match run_git(
-        repo,
-        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    ) {
-        Ok(output) => output,
-        Err(error) if git_path_format_is_unsupported(&error) => {
-            return git_common_dir_without_path_format(repo);
-        }
-        Err(error) => return Err(error),
-    };
-    git_stdout_path(repo, &output.stdout, "git common-dir")
+    cached_repo_fact(repo, RepoFact::CommonDir, || {
+        let output = match run_git(
+            repo,
+            ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        ) {
+            Ok(output) => output,
+            Err(error) if git_path_format_is_unsupported(&error) => {
+                return git_common_dir_without_path_format(repo);
+            }
+            Err(error) => return Err(error),
+        };
+        git_stdout_path(repo, &output.stdout, "git common-dir")
+    })
 }
 
 fn git_common_dir_without_path_format(repo: &Path) -> Result<PathBuf> {
@@ -100,15 +175,17 @@ fn absolute_git_cwd_path(repo: &Path, path: PathBuf) -> Result<PathBuf> {
 }
 
 pub fn git_info_exclude_path(repo: &Path) -> Result<PathBuf> {
-    let output = run_git(repo, ["rev-parse", "--git-path", "info/exclude"])?;
-    let relative = git_stdout_path(repo, &output.stdout, "info/exclude path")?;
+    cached_repo_fact(repo, RepoFact::InfoExcludePath, || {
+        let output = run_git(repo, ["rev-parse", "--git-path", "info/exclude"])?;
+        let relative = git_stdout_path(repo, &output.stdout, "info/exclude path")?;
 
-    // `git rev-parse --git-path` resolves against the working directory we ran
-    // it from (the worktree root). Joining keeps relative results anchored to
-    // `repo` while preserving absolute results (linked worktrees share the
-    // common `info/exclude`), since `Path::join` discards the base for an
-    // absolute child.
-    Ok(repo.join(relative))
+        // `git rev-parse --git-path` resolves against the working directory we ran
+        // it from (the worktree root). Joining keeps relative results anchored to
+        // `repo` while preserving absolute results (linked worktrees share the
+        // common `info/exclude`), since `Path::join` discards the base for an
+        // absolute child.
+        Ok(repo.join(relative))
+    })
 }
 
 /// Reports whether `pathspec` is ignored by the standard Git exclude sources
@@ -711,6 +788,54 @@ mod tests {
                 linked_path,
             }
         }
+    }
+
+    fn repo_fact_is_cached(repo: &Path, fact: RepoFact) -> bool {
+        repo_fact_cache()
+            .lock()
+            .expect("repo fact cache mutex is not poisoned")
+            .contains_key(&repo_fact_key(repo, fact))
+    }
+
+    #[test]
+    fn invariant_repo_facts_are_resolved_once_and_memoized() {
+        let repo = TwoCommitRepo::new();
+
+        // A freshly created repository (unique temp dir) starts cold for every
+        // fact, so the first lookup is a genuine miss that spawns Git.
+        for fact in [
+            RepoFact::WorktreeRoot,
+            RepoFact::CommonDir,
+            RepoFact::InfoExcludePath,
+        ] {
+            assert!(
+                !repo_fact_is_cached(repo.path(), fact),
+                "{fact:?} must be cold before the first lookup"
+            );
+        }
+
+        let root_first = git_worktree_root(repo.path()).unwrap();
+        let common_first = git_common_dir(repo.path()).unwrap();
+        let exclude_first = git_info_exclude_path(repo.path()).unwrap();
+
+        // After one lookup each fact is memoized, so subsequent calls are served
+        // from the cache rather than spawning Git again.
+        for fact in [
+            RepoFact::WorktreeRoot,
+            RepoFact::CommonDir,
+            RepoFact::InfoExcludePath,
+        ] {
+            assert!(
+                repo_fact_is_cached(repo.path(), fact),
+                "{fact:?} must be memoized after the first lookup"
+            );
+        }
+
+        // The memoized value matches the freshly resolved one — caching changes
+        // cost, never the answer.
+        assert_eq!(git_worktree_root(repo.path()).unwrap(), root_first);
+        assert_eq!(git_common_dir(repo.path()).unwrap(), common_first);
+        assert_eq!(git_info_exclude_path(repo.path()).unwrap(), exclude_first);
     }
 
     fn git<I, S>(cwd: &Path, args: I)
