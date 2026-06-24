@@ -891,6 +891,16 @@ function revisionIdForObject(objectId) {
 // overlay does not re-fetch.
 let shownDiffObject = null;
 
+// Module-local render context for the open diff: the files + anchored facts the
+// delegated #diff-body / #diff-nav listeners read to lazily fill a collapsed
+// file body or expand-then-scroll to a fact. Set by renderDiff, cleared when the
+// overlay closes. NOT route state (state.diff stays the object-id string | null).
+let diffCtx = null;
+// Cursors for the diff-local jump keys (next/prev fact, next/prev change), reset
+// each time a new diff renders.
+let diffFactCursor = -1;
+let diffChangeCursor = -1;
+
 // Reconcile the diff modal DOM with `state.diff`/`state.focus`. Part of the
 // render path: it both opens (user action, deep link, Back/Forward) and closes.
 function renderDiffOverlay() {
@@ -898,6 +908,7 @@ function renderDiffOverlay() {
   if (!state.diff) {
     modal.classList.add("hidden");
     shownDiffObject = null;
+    diffCtx = null;
     return;
   }
   if (state.diff === shownDiffObject) {
@@ -912,6 +923,7 @@ function renderDiffOverlay() {
     ? `${label} · snapshot ${shortId(objectId)}`
     : shortId(objectId);
   $("#diff-body").innerHTML = `<p class="empty">loading snapshot…</p>`;
+  $("#diff-nav").innerHTML = "";
   modal.classList.remove("hidden");
   // The object endpoint is object-scoped (no revision id on the wire); the
   // revision id is recovered from the units list for annotation lookup.
@@ -921,6 +933,7 @@ function renderDiffOverlay() {
       if (state.diff !== objectId) return;
       const annotations = annotationsForUnit(revisionId);
       $("#diff-body").innerHTML = renderDiff(artifact, annotations);
+      $("#diff-nav").innerHTML = renderDiffNav();
       applyDiffFocus();
     })
     .catch((err) => {
@@ -931,19 +944,134 @@ function renderDiffOverlay() {
 
 function applyDiffFocus() {
   const focusId = state.focus && state.focus[0];
-  if (!focusId) return;
-  const target = $("#diff-body").querySelector(`[data-anno="${focusId}"]`);
+  if (focusId) scrollToAnno(focusId);
+}
+
+// Scroll a review fact's annotation into view and flash it, expanding its file
+// first if it lives in a default-collapsed section. The single path a focus=
+// deep-link, a gutter click, a navigator entry, and the n/p keys all route
+// through, so they behave identically.
+function scrollToAnno(id) {
+  const sel = `.anno[data-anno="${id}"]`;
+  let target = $("#diff-body").querySelector(sel);
+  if (!target && diffCtx) {
+    const fact = diffCtx.anchored.find((a) => a.id === id);
+    const filePath = fact && (fact.target || {}).filePath;
+    if (filePath) {
+      const idx = diffCtx.files.findIndex((f) => f.new_path === filePath || f.old_path === filePath);
+      if (idx >= 0) {
+        const section = $("#diff-body").querySelector(`.dfile[data-dfile="${idx}"]`);
+        if (section) {
+          expandDiffFile(section);
+          target = $("#diff-body").querySelector(sel);
+        }
+      }
+    }
+  }
   if (target) {
     target.scrollIntoView({ block: "center" });
-    target.classList.add("anno-flash");
+    flashAnno(target);
   }
 }
 
-function lineMatch(fact, row) {
-  const t = fact.target || {};
-  if (t.kind !== "range" || t.startLine == null) return false;
-  const line = t.side === "old" ? row.old_line : row.new_line;
-  return line != null && line >= t.startLine && line <= (t.endLine ?? t.startLine);
+// Restart the flash animation even if the element was flashed before (n/p may
+// land on it twice).
+function flashAnno(el) {
+  el.classList.remove("anno-flash");
+  void el.offsetWidth;
+  el.classList.add("anno-flash");
+}
+
+// Fill a collapsed file's lazy body on first expand, cached via a rendered flag.
+function ensureDiffFileBody(section) {
+  if (!diffCtx) return;
+  const body = section.querySelector("[data-dfile-body]");
+  if (!body || body.dataset.rendered) return;
+  const idx = Number(section.dataset.dfile);
+  body.innerHTML = renderDiffFileBody(diffCtx.files[idx], diffCtx.anchored);
+  body.dataset.rendered = "1";
+}
+
+// Expand one accordion file section (render its body on first expand). Used by
+// navigation (navigator entry, focus jump) where the target must end up open.
+function expandDiffFile(section) {
+  if (!section) return;
+  ensureDiffFileBody(section);
+  section.setAttribute("aria-expanded", "true");
+}
+
+// Toggle one accordion file section; render its body on first expand. Transient
+// DOM state (aria-expanded), reconciled on each overlay render — not route state.
+function toggleDiffFile(section) {
+  if (!section) return;
+  const open = section.getAttribute("aria-expanded") === "true";
+  if (!open) ensureDiffFileBody(section);
+  section.setAttribute("aria-expanded", String(!open));
+}
+
+// The file/fact navigator sidebar: one entry per file (status + path + fact
+// badge) plus the unanchored-facts panel, so every fact — including those not
+// anchored to a captured diff line — is reachable on a large changeset.
+function renderDiffNav() {
+  if (!diffCtx) return "";
+  const { files, anchored, unanchored } = diffCtx;
+  const fileItems = files
+    .map((f, i) => {
+      const n = fileFactCount(f, anchored);
+      const badge = n ? `<span class="dfile-notes">${n}</span>` : "";
+      return `<li><button class="diff-nav-file" data-nav-file="${i}">
+        <span class="dstatus s-${escapeHtml(f.status)}">${escapeHtml(f.status)}</span>
+        <span class="dpath">${escapeHtml(filePathLabel(f))}</span>${badge}</button></li>`;
+    })
+    .join("");
+  let html = `<ol class="diff-nav-files">${fileItems}</ol>`;
+  if (unanchored && unanchored.length) {
+    const entries = unanchored
+      .map(
+        (a) =>
+          `<li><button class="diff-nav-fact" data-anno="${escapeHtml(a.id)}">${escapeHtml(a.title)}</button></li>`,
+      )
+      .join("");
+    html += `<section class="diff-unanchored" aria-label="unanchored review facts">
+      <h3>${unanchored.length} not anchored to a diff line</h3>
+      <ol>${entries}</ol></section>`;
+  }
+  return html;
+}
+
+// All rendered fact anchors in document order (inline annotations + unanchored
+// bodies) — the ordering n/p cycles through.
+function diffFactTargets() {
+  return Array.from($("#diff-body").querySelectorAll(".anno[data-anno]"));
+}
+
+// All change anchors (hunk headers) in rendered file bodies — the ordering ]/[
+// cycles through.
+function diffChangeTargets() {
+  return Array.from($("#diff-body").querySelectorAll(".dhunk"));
+}
+
+function jumpToTarget(targets, cursor, dir) {
+  if (!targets.length) return cursor;
+  const next = (cursor + dir + targets.length) % targets.length;
+  const el = targets[next];
+  const section = el.closest(".dfile");
+  if (section && section.getAttribute("aria-expanded") === "false") {
+    section.setAttribute("aria-expanded", "true");
+  }
+  el.scrollIntoView({ block: "center" });
+  return next;
+}
+
+function jumpFact(dir) {
+  const targets = diffFactTargets();
+  diffFactCursor = jumpToTarget(targets, diffFactCursor, dir);
+  const el = targets[diffFactCursor];
+  if (el) flashAnno(el);
+}
+
+function jumpChange(dir) {
+  diffChangeCursor = jumpToTarget(diffChangeTargets(), diffChangeCursor, dir);
 }
 
 function renderAnnotation(a, showLocation) {
@@ -956,6 +1084,51 @@ function renderAnnotation(a, showLocation) {
       : "";
   return `<div class="anno anno-${a.kind}" data-anno="${escapeHtml(a.id)}">
     <div class="anno-head"><span class="anno-kind anno-kind-${a.kind}">${a.kind}</span><span class="anno-track">${escapeHtml(a.track)}</span><span class="anno-title">${linkify(a.title)}</span> ${tags} ${loc}</div>${body}</div>`;
+}
+
+// How many file bodies render eagerly; the rest stay collapsed (empty body)
+// until expanded, capping live DOM at the files a reader actually opens.
+const DEFAULT_OPEN_FILES = 10;
+
+// The display path for a diff file (a rename shows both sides).
+function filePathLabel(f) {
+  const oldp = f.old_path;
+  const newp = f.new_path;
+  return oldp && newp && oldp !== newp ? `${oldp} → ${newp}` : newp || oldp || "(unknown path)";
+}
+
+// A file body over this many rows is treated as large/generated and collapsed
+// by default (it carries little line-by-line review value relative to its size).
+const LARGE_FILE_ROWS = 500;
+
+// Classify a file that carries no (or low) reviewable content, returning the
+// reason string used both as the default-collapse signal and the collapsed
+// one-line summary. `null` means a normal content-bearing file. The single
+// source of the reason text (the body's no-content note reuses it).
+function classifyLowSignal(f) {
+  if (f.is_binary) return "binary";
+  if (f.is_mode_only) return "mode change only";
+  const hunks = f.hunks || [];
+  const renamed = f.status === "renamed" || (f.old_path && f.new_path && f.old_path !== f.new_path);
+  if (renamed && !hunks.length) {
+    return f.similarity != null ? `rename ${f.similarity}%` : "rename";
+  }
+  const rowCount = hunks.reduce((n, h) => n + (h.rows ? h.rows.length : 0), 0);
+  if (rowCount > LARGE_FILE_ROWS) return "large file";
+  return null;
+}
+
+// The anchored facts (range + file-level) that belong to one file. The single
+// source of the per-file count the header badge and navigator both read.
+function fileFactCount(f, anchored) {
+  const oldp = f.old_path;
+  const newp = f.new_path;
+  let n = 0;
+  for (const a of anchored) {
+    const p = (a.target || {}).filePath;
+    if (p === newp || p === oldp) n += 1;
+  }
+  return n;
 }
 
 function renderDiff(artifact, annotations) {
@@ -974,6 +1147,13 @@ function renderDiff(artifact, annotations) {
     else unanchored.push(a);
   }
 
+  // The render inputs the delegated #diff-body / #diff-nav listeners read to
+  // fill a lazy file body or scroll to a fact. NOT state.diff (that stays the
+  // object-id string the route grammar serializes).
+  diffCtx = { objectId: shownDiffObject, files, anchored, unanchored };
+  diffFactCursor = -1;
+  diffChangeCursor = -1;
+
   const counts = annotations.reduce((acc, a) => ((acc[a.kind] = (acc[a.kind] || 0) + 1), acc), {});
   const breakdown = Object.entries(counts)
     .map(([k, n]) => `${n} ${k}${n === 1 ? "" : "s"}`)
@@ -986,15 +1166,47 @@ function renderDiff(artifact, annotations) {
   }
   if (!files.length) return html + `<p class="empty">No files captured in this snapshot.</p>`;
 
-  const emitted = new Set();
-  html += files.map((f) => renderDiffFile(f, anchored, emitted)).join("");
+  // File-by-file accordion: every header renders eagerly; a file's hunks/rows
+  // render lazily on first expand. Annotated files open by default, then a small
+  // budget of the rest, so the live DOM stays bounded on a large changeset.
+  // Low-signal files (binary / mode-only / pure-rename / large) collapse by
+  // default — unless they carry a fact, which always wins so the fact is visible.
+  let openBudget = DEFAULT_OPEN_FILES;
+  html += files
+    .map((f, i) => {
+      const reason = classifyLowSignal(f);
+      const annotated = fileFactCount(f, anchored) > 0;
+      const open = annotated || (reason ? false : openBudget-- > 0);
+      const body = open ? renderDiffFileBody(f, anchored) : "";
+      const lowCls = reason ? " dfile-lowsignal" : "";
+      const lowAttr = reason ? ` data-lowsignal="${escapeHtml(reason)}"` : "";
+      return `<section class="dfile${lowCls}" data-dfile="${i}" aria-expanded="${open}"${lowAttr}>${renderDiffFileHeader(f, anchored, reason)}<div class="dfile-body" data-dfile-body="${i}"${
+        open ? ` data-rendered="1"` : ""
+      }>${body}</div></section>`;
+    })
+    .join("");
   return html;
 }
 
-function renderDiffFile(f, anchored, emitted) {
+// The eager file header: status + path + fact-count badge. Operable as a
+// disclosure control (the delegated #diff-body listener toggles its section);
+// CSS draws the caret and drives the collapse off the section's aria-expanded.
+function renderDiffFileHeader(f, anchored, reason) {
+  const n = fileFactCount(f, anchored);
+  const summary = reason ? `<span class="dfile-summary">${escapeHtml(reason)}</span>` : "";
+  return `<header class="dfile-head" role="button" tabindex="0">
+    <span class="dstatus s-${escapeHtml(f.status)}">${escapeHtml(f.status)}</span>
+    <span class="dpath">${escapeHtml(filePathLabel(f))}</span>${summary}
+    ${n ? `<span class="dfile-notes">${n} note${n === 1 ? "" : "s"}</span>` : ""}</header>`;
+}
+
+// The lazy file body: file-level facts, metadata rows, hunks/rows with their
+// inline annotations, and the honesty-rule trailing facts. Built on first
+// expand. Each body owns its own `emitted` Set — a fact belongs to exactly one
+// file (fileFacts filters by path), so cross-file de-dup was never load-bearing.
+function renderDiffFileBody(f, anchored) {
   const oldp = f.old_path;
   const newp = f.new_path;
-  const path = oldp && newp && oldp !== newp ? `${oldp} → ${newp}` : newp || oldp || "(unknown path)";
   const fileFacts = anchored.filter((a) => {
     const p = (a.target || {}).filePath;
     return p === newp || p === oldp;
@@ -1002,11 +1214,8 @@ function renderDiffFile(f, anchored, emitted) {
   const rangeFacts = fileFacts.filter((a) => (a.target || {}).kind === "range");
   const fileLevelFacts = fileFacts.filter((a) => (a.target || {}).kind === "file");
 
-  let html = `<section class="dfile"><header class="dfile-head">
-    <span class="dstatus s-${escapeHtml(f.status)}">${escapeHtml(f.status)}</span>
-    <span class="dpath">${escapeHtml(path)}</span>
-    ${fileFacts.length ? `<span class="dfile-notes">${fileFacts.length} note${fileFacts.length === 1 ? "" : "s"}</span>` : ""}</header>`;
-
+  const emitted = new Set();
+  let html = "";
   for (const a of fileLevelFacts) {
     html += renderAnnotation(a, false);
     emitted.add(a.id);
@@ -1015,13 +1224,49 @@ function renderDiffFile(f, anchored, emitted) {
     html += `<div class="drow drow-meta"><span class="dtext">${escapeHtml(m.text)}</span></div>`;
   }
 
+  // Bucket range facts by the (side, line) they anchor to, once per file —
+  // O(facts) instead of an O(rows × facts) re-scan inside the row loop. The
+  // anchoring rule: a fact on the "old" side keys against old_line, otherwise
+  // against new_line, across its inclusive [startLine, endLine] line span.
+  const factsByLine = new Map();
+  for (const a of rangeFacts) {
+    const t = a.target || {};
+    if (t.startLine == null) continue;
+    const side = t.side === "old" ? "old" : "new";
+    const end = t.endLine ?? t.startLine;
+    for (let line = t.startLine; line <= end; line++) {
+      const key = `${side}:${line}`;
+      const bucket = factsByLine.get(key);
+      if (bucket) bucket.push(a);
+      else factsByLine.set(key, [a]);
+    }
+  }
+
   const hunks = f.hunks || [];
   for (const h of hunks) {
     html += `<div class="dhunk">${escapeHtml(h.header)}</div>`;
     for (const r of h.rows || []) {
-      const matching = rangeFacts.filter((a) => lineMatch(a, r));
+      // Look up this row's facts in O(1): a row matches a range fact on the
+      // captured side whose line falls in [startLine, endLine].
+      const matching = [];
+      const seen = new Set();
+      const collect = (key) => {
+        const bucket = factsByLine.get(key);
+        if (!bucket) return;
+        for (const a of bucket)
+          if (!seen.has(a.id)) {
+            seen.add(a.id);
+            matching.push(a);
+          }
+      };
+      if (r.old_line != null) collect(`old:${r.old_line}`);
+      if (r.new_line != null) collect(`new:${r.new_line}`);
       const sign = r.kind === "added" ? "+" : r.kind === "removed" ? "-" : " ";
-      html += `<div class="drow drow-${escapeHtml(r.kind)}${matching.length ? " drow-noted" : ""}">
+      // An annotated row is a clickable gutter marker linking to its annotation.
+      const notedLink = matching.length
+        ? ` drow-noted" data-anno="${escapeHtml(matching[0].id)}" tabindex="0" role="button`
+        : "";
+      html += `<div class="drow drow-${escapeHtml(r.kind)}${notedLink}">
         <span class="ln">${r.old_line ?? ""}</span>
         <span class="ln">${r.new_line ?? ""}</span>
         <span class="sign">${sign}</span>
@@ -1044,10 +1289,14 @@ function renderDiffFile(f, anchored, emitted) {
     }
   }
   if (!hunks.length && !(f.metadata_rows || []).length) {
-    const why = f.is_binary ? "binary" : f.is_mode_only ? "mode change only" : "no captured content";
-    html += `<div class="drow drow-meta"><span class="dtext">(${why})</span></div>`;
+    // The collapsed header already surfaces any low-signal reason; in the body
+    // only note files with no classifiable reason (e.g. an empty added file), so
+    // the reason text is not double-printed.
+    if (!classifyLowSignal(f)) {
+      html += `<div class="drow drow-meta"><span class="dtext">(no captured content)</span></div>`;
+    }
   }
-  return html + `</section>`;
+  return html;
 }
 
 function renderUnits() {
@@ -1872,6 +2121,31 @@ function onKey(ev) {
   }
   if (isTypingTarget(document.activeElement)) return;
 
+  // Diff-local jumps, active only while the overlay is open (layered Escape
+  // already closes it): ]/[ step changes, n/p step review facts.
+  if (state.diff) {
+    if (ev.key === "]") {
+      ev.preventDefault();
+      jumpChange(1);
+      return;
+    }
+    if (ev.key === "[") {
+      ev.preventDefault();
+      jumpChange(-1);
+      return;
+    }
+    if (ev.key === "n") {
+      ev.preventDefault();
+      jumpFact(1);
+      return;
+    }
+    if (ev.key === "p") {
+      ev.preventDefault();
+      jumpFact(-1);
+      return;
+    }
+  }
+
   if (pendingChord === "g") {
     pendingChord = null;
     if (ev.key === "t") return navigate({ lens: "timeline" });
@@ -2075,6 +2349,49 @@ function wireControls() {
   $("#diff-close").addEventListener("click", closeDiff);
   $("#diff-modal").addEventListener("click", (ev) => {
     if (ev.target === $("#diff-modal")) closeDiff();
+  });
+  // One delegated listener for the diff body (installed once, reads the
+  // module-local diffCtx renderDiff sets) — never wired at the openDiff call
+  // site, which stays route-only. A file header toggles its section; an
+  // annotated row's gutter scrolls to its annotation.
+  $("#diff-body").addEventListener("click", (ev) => {
+    const head = ev.target.closest(".dfile-head");
+    if (head) {
+      toggleDiffFile(head.closest(".dfile"));
+      return;
+    }
+    const noted = ev.target.closest(".drow-noted[data-anno]");
+    if (noted) scrollToAnno(noted.dataset.anno);
+  });
+  $("#diff-body").addEventListener("keydown", (ev) => {
+    if (ev.key !== "Enter" && ev.key !== " ") return;
+    const head = ev.target.closest(".dfile-head");
+    if (head) {
+      ev.preventDefault();
+      toggleDiffFile(head.closest(".dfile"));
+      return;
+    }
+    const noted = ev.target.closest(".drow-noted[data-anno]");
+    if (noted) {
+      ev.preventDefault();
+      scrollToAnno(noted.dataset.anno);
+    }
+  });
+  // The navigator sidebar: a file entry expands + scrolls its section; an
+  // unanchored-fact entry scrolls to its annotation body.
+  $("#diff-nav").addEventListener("click", (ev) => {
+    const fileBtn = ev.target.closest("[data-nav-file]");
+    if (fileBtn) {
+      const idx = Number(fileBtn.dataset.navFile);
+      const section = $("#diff-body").querySelector(`.dfile[data-dfile="${idx}"]`);
+      if (section) {
+        expandDiffFile(section);
+        section.scrollIntoView({ block: "start" });
+      }
+      return;
+    }
+    const factBtn = ev.target.closest(".diff-nav-fact[data-anno]");
+    if (factBtn) scrollToAnno(factBtn.dataset.anno);
   });
   $("#key-help-close").addEventListener("click", () => $("#key-help").classList.add("hidden"));
   $("#key-help").addEventListener("click", (ev) => {
