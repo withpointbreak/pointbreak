@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 #
-# Snapshot a git worktree plus its `.shore/data` review data into a self-contained
+# Snapshot a git worktree plus its `.git/shore` review data into a self-contained
 # Shoreline test fixture. Worktrees come and go; this preserves the review
 # context (the exact tree that was reviewed, the base it was reviewed against,
-# and the captured `.shore/data` store) so it survives the worktree's deletion.
+# and the captured Shoreline store) so it survives the worktree's deletion.
+#
+# Since the common-dir store collapse (ADR-0015 / plan 0075) the durable store
+# lives at `<git-common-dir>/shore` — i.e. `<repo>/.git/shore`, INSIDE `.git`.
+# The working-tree copy below excludes `/.git`, so the store is copied
+# separately into the fixture's own resolved store location.
 #
 # The fixture is a standalone git repo (origin removed) so git-based Shoreline
 # behavior keeps working without the source repo present. Build artifacts
-# (`target/`) are excluded by default. `.shore/data` is copied verbatim.
+# (`target/`) are excluded by default. The store is copied verbatim.
 #
 # Fixtures default to a location OUTSIDE this repo, since captured review data
 # may be private. Do not commit fixtures into the source tree.
@@ -179,17 +184,58 @@ if [ "$BRANCH" != "HEAD" ]; then
 fi
 git -C "$DEST" reset -q   # index -> HEAD; working tree untouched (still empty)
 
-# Populate the working tree exactly as the worktree has it (incl. .shore/data).
+# Populate the working tree exactly as the worktree has it. `/.git` is excluded,
+# so the durable store (which lives inside `.git`, see below) is NOT copied here.
 RSYNC_EXCLUDES=(--exclude='/.git')
 [ "$INCLUDE_TARGET" -eq 1 ] || RSYNC_EXCLUDES+=(--exclude='/target/')
 rsync -a "${RSYNC_EXCLUDES[@]}" "$WT/" "$DEST/"
+
+# Copy the durable Shoreline store. Since the common-dir store collapse
+# (ADR-0015 / plan 0075) the store lives at `<git-common-dir>/shore` — i.e.
+# inside `.git` — so the rsync above (which excludes `/.git`) never copies it.
+# Copy it explicitly into the fixture's OWN resolved store location (the fixture
+# is its own `git init`'d repo, so its common-dir is `<dest>/.git`).
+SRC_STORE="$COMMON_DIR/shore"
+STORE_SOURCE="common-dir ($SRC_STORE)"
+if [ ! -d "$SRC_STORE" ]; then
+  if [ -d "$WT/.shore/data" ]; then
+    # Legacy pre-0075 fixtures kept the store in the working tree at .shore/data.
+    SRC_STORE="$WT/.shore/data"
+    STORE_SOURCE="legacy ($SRC_STORE)"
+    printf 'warning: no common-dir store at %s/shore; falling back to legacy %s\n' \
+      "$COMMON_DIR" "$SRC_STORE" >&2
+  else
+    SRC_STORE=""
+    STORE_SOURCE="none"
+    printf 'warning: no Shoreline store found (neither %s/shore nor %s/.shore/data)\n' \
+      "$COMMON_DIR" "$WT" >&2
+  fi
+fi
+
+DEST_STORE="$(git -C "$DEST" rev-parse --path-format=absolute --git-common-dir)/shore"
+if [ -n "$SRC_STORE" ]; then
+  mkdir -p "$DEST_STORE"
+  cp -R "$SRC_STORE/." "$DEST_STORE/"
+fi
+
+# Post-copy assertion: a fixture with no store is useless — `shore inspect`
+# would report threadCount 0. Fail loudly so we never again silently produce
+# an empty fixture (the bug that excluded the .git-resident store via rsync).
+DEST_EVENTS=0
+if [ -d "$DEST_STORE/events" ]; then
+  DEST_EVENTS="$(ls "$DEST_STORE/events" | wc -l | tr -d ' ')"
+fi
+[ "$DEST_EVENTS" -gt 0 ] \
+  || die "fixture has no store events at $DEST_STORE (source: ${STORE_SOURCE:-none}); refusing to write an empty fixture"
 
 # Detach from the source repo so the fixture stands alone.
 git -C "$DEST" remote remove origin 2>/dev/null || true
 [ "$BRANCH" != "HEAD" ] && git -C "$DEST" branch --unset-upstream 2>/dev/null || true
 
-# Replicate the source repo's local excludes so `.shore/data` (and friends) stay
-# ignored as in the original, then exclude this fixture's metadata file.
+# Replicate the source repo's local excludes (so `.shore/*.local.json` and any
+# legacy working-tree `.shore/data` stay ignored as in the original), then
+# exclude this fixture's metadata file. The durable store lives in `.git/shore`,
+# which is never part of the working tree, so it needs no exclude.
 DEST_EXCLUDE="$DEST/.git/info/exclude"
 : > "$DEST_EXCLUDE"
 if [ -f "$COMMON_DIR/info/exclude" ]; then
@@ -198,21 +244,22 @@ fi
 grep -qxF '.shore/data' "$DEST_EXCLUDE" 2>/dev/null || printf '%s\n' '.shore/data' >> "$DEST_EXCLUDE"
 grep -qxF 'FIXTURE.md' "$DEST_EXCLUDE" 2>/dev/null || printf '%s\n' 'FIXTURE.md' >> "$DEST_EXCLUDE"
 
-# ---- .shore/data summary --------------------------------------------------
-SHORE_DIR="$DEST/.shore/data"
-SHORE_SUMMARY="(no .shore/data directory found in worktree)"
+# ---- store summary --------------------------------------------------------
+# Read from the fixture's resolved store (`.git/shore`), populated above.
+SHORE_DIR="$DEST_STORE"
+SHORE_SUMMARY="(no store found in worktree)"
 if [ -d "$SHORE_DIR" ]; then
   SJ="$SHORE_DIR/state.json"
   EVENTS_N="$(ls "$SHORE_DIR/events" 2>/dev/null | wc -l | tr -d ' ')"
   if [ -f "$SJ" ] && command -v jq >/dev/null 2>&1; then
-    SHORE_SUMMARY="$(jq -r '"\(.eventCount) events, \(.reviewUnitCount) review units, \(.observationCount) observations, \(.assessmentCount) assessments, \(.inputRequestCount) input requests" + (if (.diagnostics // []) | length > 0 then "; diagnostics: " + ((.diagnostics | map(.code)) | join(", ")) else "" end) + "\n  eventSetHash: \(.eventSetHash)"' "$SJ")"
+    SHORE_SUMMARY="$(jq -r '"\(.eventCount) events, \(.revisionCount) revisions, \(.observationCount) observations, \(.assessmentCount) assessments, \(.inputRequestCount) input requests" + (if (.diagnostics // []) | length > 0 then "; diagnostics: " + ((.diagnostics | map(.code)) | join(", ")) else "" end) + "\n  eventSetHash: \(.eventSetHash)"' "$SJ")"
   elif [ -f "$SJ" ] && command -v python3 >/dev/null 2>&1; then
     SHORE_SUMMARY="$(python3 - "$SJ" <<'PY'
 import json,sys
 d=json.load(open(sys.argv[1]))
 diag=", ".join(x.get("code","") for x in d.get("diagnostics",[]))
-s="%s events, %s review units, %s observations, %s assessments, %s input requests"%(
-  d.get("eventCount"),d.get("reviewUnitCount"),d.get("observationCount"),d.get("assessmentCount"),d.get("inputRequestCount"))
+s="%s events, %s revisions, %s observations, %s assessments, %s input requests"%(
+  d.get("eventCount"),d.get("revisionCount"),d.get("observationCount"),d.get("assessmentCount"),d.get("inputRequestCount"))
 if diag: s+="; diagnostics: "+diag
 s+="\n  eventSetHash: %s"%d.get("eventSetHash")
 print(s)
@@ -228,7 +275,7 @@ TODAY="$(date +%Y-%m-%d)"
 TOOL_ORIGIN="$(git -C "$TOOL_REPO" remote get-url origin 2>/dev/null || echo '(unknown)')"
 {
   printf '# Fixture: %s\n\n' "$NAME"
-  printf 'A snapshot of a git worktree plus its `.shore/data` review data, captured for\n'
+  printf 'A snapshot of a git worktree plus its `.git/shore` review data, captured for\n'
   printf 'testing Shoreline. The source worktree was *copied*, so this fixture stays\n'
   printf 'valid after the original worktree is deleted.\n\n'
   printf '> Excluded from the git working tree (see `.git/info/exclude`) so `git status`\n'
@@ -249,7 +296,8 @@ TOOL_ORIGIN="$(git -C "$TOOL_REPO" remote get-url origin 2>/dev/null || echo '(u
   [ -n "$PR_LINE" ] && printf -- '- Associated PR: %s\n' "$PR_LINE"
   printf -- '- Captured into fixture: %s\n' "$TODAY"
   printf -- '- target/ build artifacts: %s\n\n' "$([ "$INCLUDE_TARGET" -eq 1 ] && echo included || echo excluded)"
-  printf '## .shore/data review data\n\n'
+  printf '## .git/shore review data\n\n'
+  printf -- '- Store source: %s\n' "${STORE_SOURCE:-none}"
   printf -- '- %s\n\n' "$SHORE_SUMMARY"
   printf '## Notes\n\n'
   printf -- '- Standalone git repo (origin removed): `git log`/`diff`/`rev-parse`/`status` work without the source repo present.\n'
@@ -262,7 +310,7 @@ if [ ! -f "$INDEX" ]; then
   {
     printf '# shoreline-fixtures\n\n'
     printf 'Local snapshots of review sessions for testing Shoreline. Each fixture is a\n'
-    printf 'standalone copy of a source worktree plus its `.shore/data` data; see each\n'
+    printf 'standalone copy of a source worktree plus its `.git/shore` store; see each\n'
     printf "fixture's \`FIXTURE.md\` for provenance. These may contain private review data\n"
     printf -- '— do not commit them into the Shoreline source repo.\n\n'
     printf '## Fixtures\n\n'
@@ -278,6 +326,7 @@ echo "Verifying fixture"
 git -C "$DEST" fsck --connectivity-only >/dev/null 2>&1 && note "fsck: clean (independent of source repo)" || note "fsck: WARNING (check $DEST)"
 note "status: $(git -C "$DEST" status -sb | head -1)"
 note "resolves base: $(git -C "$DEST" cat-file -e "$BASE_COMMIT" 2>/dev/null && echo yes || echo NO)"
+note "store: $DEST_STORE ($DEST_EVENTS event files; source: ${STORE_SOURCE:-none})"
 note "size: $(du -sh "$DEST" 2>/dev/null | cut -f1)"
 
 echo "Done -> $DEST"
