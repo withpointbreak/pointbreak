@@ -1,0 +1,90 @@
+<div class="ds-page">
+  <div class="ds-group">
+    <p class="ds-label">Timeline — event rows &amp; detail pane</p>
+    <div style="display:grid;grid-template-columns:minmax(360px,1fr) minmax(320px,1fr);gap:14px;align-items:start">
+      <ol class="timeline" aria-label="event timeline">
+        <li class="event" aria-selected="true">
+          <span class="time">18:20:59.643</span>
+          <span class="rail" style="background:var(--success)"></span>
+          <span class="body">
+            <span class="title">Addressed reviewer finding: replay re-checks the digest <span class="badge">handoff</span></span>
+            <span class="meta">
+              <span class="type" style="color:var(--success)">observation</span>
+              <span>agent:claude-code-0080</span>
+              <span>revision 58fe0c5f</span>
+            </span>
+          </span>
+        </li>
+        <li class="event">
+          <span class="time">18:04:36.675</span>
+          <span class="rail" style="background:var(--assess)"></span>
+          <span class="body">
+            <span class="title">needs_changes</span>
+            <span class="meta">
+              <span class="type" style="color:var(--assess)">assessment</span>
+              <span>agent:codex-storage</span>
+              <span>revision 58fe0c5f</span>
+            </span>
+          </span>
+        </li>
+        <li class="event">
+          <span class="time">18:04:30.587</span>
+          <span class="rail" style="background:var(--validation)"></span>
+          <span class="body">
+            <span class="title">just check · passed</span>
+            <span class="meta">
+              <span class="type" style="color:var(--validation)">validation</span>
+              <span>agent:codex-storage</span>
+            </span>
+          </span>
+        </li>
+        <li class="event">
+          <span class="time">17:57:53.219</span>
+          <span class="rail" style="background:var(--accent)"></span>
+          <span class="body">
+            <span class="title">New pins lock the order/round-trip invariants <span class="badge head">head</span></span>
+            <span class="meta">
+              <span class="type" style="color:var(--accent)">capture</span>
+              <span>agent:claude-code-0080</span>
+            </span>
+          </span>
+        </li>
+        <li class="event">
+          <span class="time">17:51:02.004</span>
+          <span class="rail" style="background:var(--fg-dim)"></span>
+          <span class="body">
+            <span class="title">Earlier revision <span class="badge stale">superseded by <span class="ref" data-ref-kind="rev">rev:58fe0c5f</span></span></span>
+            <span class="meta">
+              <span class="type" style="color:var(--fg-dim)">revision_superseded</span>
+              <span>agent:claude-code-0080</span>
+            </span>
+          </span>
+        </li>
+      </ol>
+
+      <aside class="detail">
+        <h2>Addressed reviewer finding: replay re-checks the digest</h2>
+        <dl class="kv">
+          <dt>type</dt><dd>observation</dd>
+          <dt>occurredAt</dt><dd>6/23/2026, 18:20:59</dd>
+          <dt>eventId</dt><dd><span class="ref ref-hash">evt:cb7e7875</span></dd>
+          <dt>revision</dt><dd><span class="ref" data-ref-kind="rev">rev:58fe0c5f</span></dd>
+          <dt>track</dt><dd>agent:claude-code-0080</dd>
+          <dt>writer</dt><dd>human:kevin</dd>
+        </dl>
+        <span class="verify verify-valid">signature valid</span>
+        <pre>{
+  "kind": "review_observation_recorded",
+  "revisionId": "rev:sha256:58fe0c5f…",
+  "track": "agent:claude-code-0080",
+  "subject": {
+    "title": "Addressed reviewer finding",
+    "filePath": "src/.../event_store.rs",
+    "startLine": 155,
+    "endLine": 161
+  }
+}</pre>
+      </aside>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,37 @@
+<div class="ds-page">
+  <div class="ds-group">
+    <p class="ds-label">Filter toolbar</p>
+    <div class="toolbar" style="border:1px solid var(--border);border-radius:var(--r-lg)">
+      <input type="search" placeholder="filter by text (title, id, track…)" />
+      <select><option>all tracks</option></select>
+      <select><option>all revisions</option></select>
+      <select><option>all objects</option></select>
+      <button class="ghost">newest first</button>
+      <button class="ghost">clear</button>
+    </div>
+  </div>
+
+  <div class="ds-group">
+    <p class="ds-label">Ghost buttons</p>
+    <div class="ds-row">
+      <button class="ghost">clear</button>
+      <button class="ghost">newest first</button>
+      <button class="ghost">← units</button>
+      <button class="ghost">view snapshot diff</button>
+      <button class="ghost">show in timeline</button>
+    </div>
+  </div>
+
+  <div class="ds-group">
+    <p class="ds-label">Event-type toggles (on / off)</p>
+    <div class="type-toggles">
+      <span class="type-toggle"><span class="dot" style="background:var(--accent)"></span>capture</span>
+      <span class="type-toggle"><span class="dot" style="background:var(--success)"></span>observation</span>
+      <span class="type-toggle"><span class="dot" style="background:var(--assess)"></span>assessment</span>
+      <span class="type-toggle"><span class="dot" style="background:var(--warning)"></span>request</span>
+      <span class="type-toggle"><span class="dot" style="background:var(--teal)"></span>response</span>
+      <span class="type-toggle"><span class="dot" style="background:var(--validation)"></span>validation</span>
+      <span class="type-toggle off"><span class="dot" style="background:var(--fg-dim)"></span>revision_withdrawn</span>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,91 @@
+<div class="ds-page">
+  <div class="ds-group">
+    <p class="ds-label">Verdict — assessment states</p>
+    <div class="ds-row">
+      <span class="verdict verdict-accepted"><span class="verdict-status">current assessment</span><span class="verdict-value">accepted</span></span>
+      <span class="verdict verdict-needs_changes"><span class="verdict-status">current assessment</span><span class="verdict-value">needs_changes</span></span>
+      <span class="verdict verdict-needs_clarification"><span class="verdict-status">current assessment</span><span class="verdict-value">needs_clarification</span></span>
+      <span class="verdict verdict-ambiguous"><span class="verdict-status">current assessment</span><span class="verdict-value">ambiguous</span></span>
+      <span class="verdict verdict-unassessed"><span class="verdict-status">current assessment</span><span class="verdict-value">unassessed</span></span>
+    </div>
+    <div class="verdict verdict-accepted"><span class="verdict-status">current assessment</span><span class="verdict-value">accepted</span></div>
+    <p class="verdict-summary">The live author-response commit closes the prior stale-current validation blocker. The passthrough guard now excludes current-envelope events that structurally carry kind.</p>
+  </div>
+
+  <div class="ds-group">
+    <p class="ds-label">Summary stats</p>
+    <div class="up-stats">
+      <span class="up-stat"><b>33</b> files</span>
+      <span class="up-stat"><b>1241</b> rows</span>
+      <span class="up-stat"><b>16</b> observations</span>
+      <span class="up-stat"><b>1</b> input requests</span>
+      <span class="up-stat"><b>4</b> assessments</span>
+      <span class="up-stat"><b>25</b> validation checks</span>
+      <span class="up-stat"><b>0</b> adapter notes</span>
+    </div>
+  </div>
+
+  <div class="ds-group">
+    <p class="ds-label">Fact-status chips</p>
+    <div class="ds-row">
+      <span class="fact-status open">open</span>
+      <span class="fact-status responded">responded</span>
+      <span class="fact-status current">current</span>
+      <span class="fact-status superseded">superseded</span>
+      <span class="fact-status replaced">replaced</span>
+      <span class="fact-status stale">stale</span>
+      <span class="fact-status passed">passed</span>
+      <span class="fact-status failed">failed</span>
+      <span class="fact-status errored">errored</span>
+      <span class="fact-status skipped">skipped</span>
+    </div>
+  </div>
+
+  <div class="ds-group">
+    <p class="ds-label">Annotations — observation / input-request / assessment</p>
+    <div class="anno anno-observation">
+      <div class="anno-head"><span class="anno-kind anno-kind-observation">observation</span><span class="anno-track">agent:claude-code-0080</span><span class="anno-title">Core rename keeps the commit separate</span> <span class="anno-time">6/11/2026</span></div>
+      <div class="anno-body">The migrator branch keeps this commit separate from the throwaway migrator commit so it can land Tier-A as a clean-main PR.</div>
+    </div>
+    <div class="anno anno-input-request">
+      <div class="anno-head"><span class="anno-kind anno-kind-input-request">input-request</span><span class="anno-track">agent:codex-storage</span><span class="anno-title">Should the migrator re-mint validation_check_id?</span> <span class="fact-status open">advisory</span></div>
+      <div class="anno-body">Migrator validation events keep their source validation_check_id. If a past check consumes a re-mint, the read view breaks.</div>
+    </div>
+    <div class="anno anno-assessment">
+      <div class="anno-head"><span class="anno-kind anno-kind-assessment">assessment</span><span class="anno-track">agent:codex-storage</span><span class="anno-title">needs_changes</span></div>
+      <div class="anno-body">The byte-only list_event_bytes path dropped the filename/key stem check on replay; re-check the digest in the wrapper.</div>
+    </div>
+  </div>
+
+  <div class="ds-group">
+    <p class="ds-label">Signature readback (verify chips)</p>
+    <div class="ds-row">
+      <span class="verify verify-valid">signature valid</span>
+      <span class="verify verify-invalid">signature invalid</span>
+      <span class="verify verify-untrusted_key">untrusted key</span>
+      <span class="verify verify-unsigned">unsigned</span>
+    </div>
+  </div>
+
+  <div class="ds-group">
+    <p class="ds-label">Endorsements</p>
+    <div class="endorsements" style="max-width:520px">
+      <span class="endorsements-label">endorsements</span>
+      <ul class="endorse-list">
+        <li class="endorse endorse-endorsement-trusted"><span class="endorse-label">trusted</span><span class="endorse-who">agent:codex-storage</span><span class="endorse-attrs">role=reviewer · ed25519:9a3f…</span></li>
+        <li class="endorse endorse-unknown_endorser"><span class="endorse-label">unknown endorser</span><span class="endorse-who">agent:mystery</span></li>
+        <li class="endorse endorse-ambiguous_endorser"><span class="endorse-label">ambiguous</span><span class="endorse-who">human:kevin</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="ds-group">
+    <p class="ds-label">Reference chips</p>
+    <div class="ds-row">
+      <span class="ref" data-ref-kind="rev">rev:58fe0c5f</span>
+      <span class="ref" data-ref-kind="review-unit">review-unit:1ace028b</span>
+      <span class="ref ref-commit">405fb0c</span>
+      <span class="ref ref-hash">sha256:b8ecfc8f</span>
+    </div>
+  </div>
+</div>

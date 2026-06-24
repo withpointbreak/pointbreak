@@ -1,0 +1,33 @@
+<div class="ds-page">
+  <div class="ds-group">
+    <p class="ds-label">Annotated diff — file, hunk, rows &amp; inline review facts</p>
+    <div class="anno-summary">21 review facts on this revision · 16 observations, 1 input request, 4 assessments · 11 not anchored to a diff line</div>
+    <section class="dfile">
+      <header class="dfile-head">
+        <span class="dstatus s-added">added</span>
+        <span class="dpath">src/cli/inspect/design-system/styles.css</span>
+        <span class="dfile-notes">2 notes</span>
+      </header>
+      <div class="dhunk">@@ -1,6 +1,9 @@ fn replay_event(entry: &amp;JournalEntry)</div>
+      <div class="drow drow-context"><span class="ln">1</span><span class="ln">1</span><span class="sign"> </span><span class="dtext">    let decoded = entry.decode()?;</span></div>
+      <div class="drow drow-removed"><span class="ln">2</span><span class="ln"></span><span class="sign">-</span><span class="dtext">    let hash = sha256(decoded.bytes);</span></div>
+      <div class="drow drow-added drow-noted"><span class="ln"></span><span class="ln">2</span><span class="sign">+</span><span class="dtext">    let hash = sha256(decoded.content); // re-hash floor</span></div>
+      <div class="anno anno-observation" style="margin-left:52px">
+        <div class="anno-head"><span class="anno-kind anno-kind-observation">observation</span><span class="anno-track">agent:claude-code-0080</span><span class="anno-title">Re-hash before erase</span></div>
+        <div class="anno-body">Compact re-derives the decoded-content hash and refuses on drift (0077-B2).</div>
+      </div>
+      <div class="drow drow-added"><span class="ln"></span><span class="ln">3</span><span class="sign">+</span><span class="dtext">    if hash != entry.address { return Err(Drift); }</span></div>
+      <div class="drow drow-context"><span class="ln">3</span><span class="ln">4</span><span class="sign"> </span><span class="dtext">    store.put(decoded);</span></div>
+      <div class="drow drow-meta"><span class="dtext">(18 unchanged lines hidden)</span></div>
+    </section>
+    <section class="dfile">
+      <header class="dfile-head">
+        <span class="dstatus s-renamed">renamed</span>
+        <span class="dpath">src/store/event_store.rs → src/store/journal.rs</span>
+      </header>
+      <div class="dhunk">@@ -155,4 +155,4 @@</div>
+      <div class="drow drow-removed"><span class="ln">155</span><span class="ln"></span><span class="sign">-</span><span class="dtext">    pub fn writer_tool(&amp;self) -&gt; &amp;str { ... }</span></div>
+      <div class="drow drow-added"><span class="ln"></span><span class="ln">155</span><span class="sign">+</span><span class="dtext">    pub fn producer(&amp;self) -&gt; &amp;str { ... }</span></div>
+    </section>
+  </div>
+</div>

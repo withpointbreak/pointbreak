@@ -1,0 +1,75 @@
+<div class="ds-page">
+  <div class="ds-group">
+    <p class="ds-label">Unit card</p>
+    <div class="ds-stack" style="max-width:520px">
+      <div class="unit-card">
+        <h3>c2351ed43e9b</h3>
+        <div class="supersession-badges"><span class="badge head">head</span></div>
+        <div class="kv">
+          <span>captured</span><b>6/18/2026, 23:21:32</b>
+          <span>base</span><b>405fb0cc42fb (git_commit)</b>
+          <span>target</span><b>shoreline @ 405fb0c</b>
+          <span>snapshot</span><b>b8ecfc8ffbb7</b>
+        </div>
+        <div class="actions"><button class="ghost diff-btn">view snapshot diff</button></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="ds-group">
+    <p class="ds-label">Revision thread — single head</p>
+    <div class="ds-stack" style="max-width:520px">
+      <div class="unit-card thread-card">
+        <h3>revision thread · head 020ff756d7ab</h3>
+        <div class="kv">
+          <span>revisions</span><b>1</b>
+          <span>heads</span><b>1</b>
+          <span>superseded</span><b>0</b>
+        </div>
+        <div class="revision-dag">
+          <div class="revision-node head">
+            <div class="rev-node-head"><span class="ref" data-ref-kind="rev">rev:020ff756</span> <span class="fact-status current">HEAD</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="ds-group">
+    <p class="ds-label">Revision thread — competing heads (forked)</p>
+    <div class="ds-stack" style="max-width:520px">
+      <div class="unit-card thread-card competing">
+        <h3>revision thread · 2 heads</h3>
+        <div class="thread-competing">
+          <span class="fact-status competing">competing revisions (2)</span>
+          <span class="ref" data-ref-kind="rev">rev:aaaa1111</span>
+          <span class="ref" data-ref-kind="rev">rev:bbbb2222</span>
+        </div>
+        <div class="kv">
+          <span>revisions</span><b>3</b>
+          <span>heads</span><b>2</b>
+          <span>superseded</span><b>1</b>
+        </div>
+        <div class="revision-dag">
+          <div class="revision-node head"><div class="rev-node-head"><span class="ref" data-ref-kind="rev">rev:aaaa1111</span> <span class="fact-status current">HEAD</span></div></div>
+          <div class="revision-node head"><div class="rev-node-head"><span class="ref" data-ref-kind="rev">rev:bbbb2222</span> <span class="fact-status current">HEAD</span></div></div>
+          <div class="revision-node superseded">
+            <div class="rev-node-head"><span class="ref" data-ref-kind="rev">rev:cccc3333</span> <span class="fact-status superseded">superseded</span></div>
+            <div class="rev-edge">↳ superseded by <span class="ref" data-ref-kind="rev">rev:aaaa1111</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="ds-group">
+    <p class="ds-label">Badges</p>
+    <div class="ds-row">
+      <span class="badge">handoff</span>
+      <span class="badge head">head</span>
+      <span class="badge superseded">superseded</span>
+      <span class="badge supersedes">supersedes</span>
+      <span class="badge stale">stale</span>
+    </div>
+  </div>
+</div>

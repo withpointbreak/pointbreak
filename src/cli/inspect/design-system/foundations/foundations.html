@@ -1,0 +1,103 @@
+<!-- @dsCard group="Foundations" -->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Foundations — tokens</title>
+    <style>
+      :root {
+        /* Surfaces & text */
+        --bg: #0f1419;
+        --bg-elev: #171d26;
+        --bg-row: #1b222d;
+        --bg-row-sel: #243044;
+        --border: #2a323e;
+        --fg: #d7dde5;
+        --fg-dim: #8a95a3;
+        --accent: #5aa9e6;
+        /* Semantic status */
+        --success: #6dd28a;        /* head · passed · accepted · added */
+        --success-deep: #3a7a52;   /* observation accent */
+        --warning: #f0b75a;        /* superseded · open · needs-clarification · errored */
+        --warning-soft: #f0c674;   /* diagnostics text */
+        --warning-strong: #ffd27a; /* diagnostics code */
+        --danger: #f3a0a0;         /* failed · needs-changes · stale · error */
+        --danger-soft: #f3b0b0;    /* diff removed text */
+        --assess: #b388ff;         /* assessment */
+        --validation: #e88fb0;     /* validation kind */
+        --info: #8ab4f8;           /* hunk header */
+        --teal: #4fd0c0;           /* response outcome */
+        /* Diff surfaces */
+        --diff-add-bg: rgba(70, 170, 110, 0.14);
+        --diff-add-fg: #9ae6b4;
+        --diff-del-bg: rgba(200, 90, 90, 0.14);
+        --diff-del-fg: #f3b0b0;
+        --hunk-bg: #141b27;
+        /* Radii */
+        --r-sm: 4px; --r-md: 6px; --r-lg: 8px; --r-xl: 10px; --r-pill: 999px;
+        /* Type */
+        --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+        --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 var(--sans); padding: 24px; }
+      h1 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-dim); margin: 0 0 12px; }
+      section { margin-bottom: 28px; }
+      .swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+      .sw { border: 1px solid var(--border); border-radius: var(--r-lg); overflow: hidden; background: var(--bg-elev); }
+      .sw .chip { height: 46px; }
+      .sw .lbl { padding: 6px 8px; font-family: var(--mono); font-size: 11px; }
+      .sw .lbl b { color: var(--fg); font-weight: 600; display: block; }
+      .sw .lbl span { color: var(--fg-dim); }
+      .type-row { display: flex; align-items: baseline; gap: 14px; padding: 7px 0; border-bottom: 1px solid var(--border); }
+      .type-row .meta { font-family: var(--mono); font-size: 11px; color: var(--fg-dim); width: 150px; flex: 0 0 auto; }
+      .radii { display: flex; gap: 14px; flex-wrap: wrap; }
+      .radii .box { width: 72px; height: 72px; background: var(--bg-row); border: 1px solid var(--border); display: flex; align-items: flex-end; justify-content: center; padding: 5px; font-family: var(--mono); font-size: 11px; color: var(--fg-dim); }
+    </style>
+  </head>
+  <body>
+    <section>
+      <h1>Surfaces &amp; text</h1>
+      <div class="swatches" id="surfaces"></div>
+    </section>
+    <section>
+      <h1>Semantic status</h1>
+      <div class="swatches" id="status"></div>
+    </section>
+    <section>
+      <h1>Diff surfaces</h1>
+      <div class="swatches" id="diff"></div>
+    </section>
+    <section>
+      <h1>Type scale</h1>
+      <div class="type-row"><span class="meta">14px / 1.45 sans</span><span style="font-size:14px">Review stream · the body default</span></div>
+      <div class="type-row"><span class="meta">13px uppercase</span><span style="font-size:13px;text-transform:uppercase;letter-spacing:0.05em;color:var(--fg-dim)">Section heading</span></div>
+      <div class="type-row"><span class="meta">12px mono</span><span style="font-family:var(--mono);font-size:12px">rev:sha256:99d099b3 · key/value</span></div>
+      <div class="type-row"><span class="meta">11px mono dim</span><span style="font-family:var(--mono);font-size:11px;color:var(--fg-dim)">18:20:59.643 · timestamps &amp; meta</span></div>
+    </section>
+    <section>
+      <h1>Radii</h1>
+      <div class="radii">
+        <div class="box" style="border-radius:var(--r-sm)">4</div>
+        <div class="box" style="border-radius:var(--r-md)">6</div>
+        <div class="box" style="border-radius:var(--r-lg)">8</div>
+        <div class="box" style="border-radius:var(--r-xl)">10</div>
+        <div class="box" style="border-radius:var(--r-pill)">pill</div>
+      </div>
+    </section>
+    <script>
+      const groups = {
+        surfaces: [["--bg","base canvas"],["--bg-elev","elevated panel"],["--bg-row","row / control"],["--bg-row-sel","selected row"],["--border","hairline border"],["--fg","primary text"],["--fg-dim","muted text"],["--accent","links / brand"]],
+        status: [["--success","head · passed · accepted"],["--success-deep","observation accent"],["--warning","superseded · open"],["--warning-soft","diagnostics text"],["--danger","failed · needs-changes"],["--assess","assessment"],["--validation","validation"],["--info","hunk header"],["--teal","response outcome"]],
+        diff: [["--diff-add-bg","added line bg"],["--diff-add-fg","added text"],["--diff-del-bg","removed line bg"],["--diff-del-fg","removed text"],["--hunk-bg","hunk header bg"]]
+      };
+      const cs = getComputedStyle(document.documentElement);
+      for (const [id, items] of Object.entries(groups)) {
+        document.getElementById(id).innerHTML = items.map(([v, desc]) => {
+          const val = cs.getPropertyValue(v).trim();
+          return `<div class="sw"><div class="chip" style="background:${val}"></div><div class="lbl"><b>${v}</b><span>${val}</span><span style="display:block;margin-top:2px">${desc}</span></div></div>`;
+        }).join("");
+      }
+    </script>
+  </body>
+</html>
