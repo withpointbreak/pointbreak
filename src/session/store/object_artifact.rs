@@ -95,7 +95,7 @@ pub(crate) fn read_object_artifact_bytes(
     object_id: &ObjectId,
 ) -> Result<Vec<u8>> {
     let read_store = resolve_read_store(repo.as_ref())?;
-    ContentArtifacts::local(read_store.store_dir())
+    ContentArtifacts::from_backend(read_store.backend())
         .read_object_bytes(&object_content_ref(object_id), object_id)
 }
 
@@ -121,7 +121,7 @@ fn read_object_artifact_bytes_with_local_fallback(
 ) -> Result<Vec<u8>> {
     let content_ref = object_content_ref(object_id);
     let read_store = resolve_read_store(repo.as_ref())?;
-    match ContentArtifacts::local(read_store.store_dir())
+    match ContentArtifacts::from_backend(read_store.backend())
         .read_object_bytes_if_exists(&content_ref)?
     {
         Some(bytes) => Ok(bytes),
@@ -129,6 +129,8 @@ fn read_object_artifact_bytes_with_local_fallback(
             // Fall back to the worktree-local store: the case where the unit's
             // content-addressed artifact lives only in `.shore/data` (an
             // ephemeral or pre-migration capture) and not in the resolved store.
+            // This is a raw path-keyed read of a store never selected through
+            // `resolve_store`, so it has no backend handle and stays `local`.
             let local = ShoreStorePaths::resolve(repo.as_ref())?;
             ContentArtifacts::local(local.store_dir()).read_object_bytes(&content_ref, object_id)
         }

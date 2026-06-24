@@ -71,7 +71,7 @@ pub struct AssessmentShowFilters {
 pub fn show_assessments(options: AssessmentShowOptions) -> Result<AssessmentShowResult> {
     let read_store = resolve_read_store(&options.repo)?;
     let store_dir = read_store.store_dir();
-    let events = EventStore::open(store_dir).list_events()?;
+    let events = EventStore::from_backend(read_store.backend()).list_events()?;
     let resolved = resolve_revision(
         &events,
         RevisionSelection::from_revision_seed(options.revision_id.as_ref()),

@@ -41,7 +41,7 @@ pub struct InputRequestFetchResult {
 pub fn fetch_input_request(options: InputRequestFetchOptions) -> Result<InputRequestFetchResult> {
     let read_store = resolve_read_store(&options.repo)?;
     let store_dir = read_store.store_dir();
-    let events = EventStore::open(store_dir).list_events()?;
+    let events = EventStore::from_backend(read_store.backend()).list_events()?;
     let InputRequestProjectionRecords {
         mut request_records,
         responses,

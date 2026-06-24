@@ -234,7 +234,7 @@ fn write_validation_check_event(input: ValidationWriteInput) -> Result<Validatio
     let storage = LocalStorage::new(store_dir);
     prepare_write_landing(&write_store, &storage)?;
 
-    let event_store = EventStore::open(store_dir);
+    let event_store = EventStore::from_backend(write_store.backend());
     let track_id = validated_track_id(input.track.as_deref().ok_or_else(|| {
         ShoreError::WorkflowInputInvalid {
             reason: "track is required".to_owned(),

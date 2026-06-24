@@ -165,7 +165,7 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
 
     // The write half lands in the resolved write store (the clone-local store in
     // linked mode) and rebuilds its state.json there.
-    let event_store = EventStore::open(store_dir);
+    let event_store = EventStore::from_backend(write_store.backend());
 
     // Validation/derivation reads resolve the writer-visible union so the unit,
     // the target, and every relationship reference (`--replaces`,

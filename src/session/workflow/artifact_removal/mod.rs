@@ -135,7 +135,7 @@ pub fn remove_content(options: RemoveOptions) -> Result<RemoveResult> {
     let store_dir = write_store.store_dir().to_path_buf();
     let storage = LocalStorage::new(&store_dir);
     prepare_write_landing(&write_store, &storage)?;
-    let event_store = EventStore::open(&store_dir);
+    let event_store = EventStore::from_backend(write_store.backend());
 
     // Resolve the selector to content hashes from the event log + git
     // reachability — entirely before any event is emitted.
@@ -478,10 +478,9 @@ pub struct CompactResult {
 /// blob (there is no un-remove — the removal fact persists in the log).
 pub fn compact_store(options: CompactOptions) -> Result<CompactResult> {
     let write_store = resolve_write_store(&options.repo)?;
-    let store_dir = write_store.store_dir().to_path_buf();
-    let content = ContentArtifacts::local(&store_dir);
+    let content = ContentArtifacts::from_backend(write_store.backend());
 
-    let events = EventStore::open(&store_dir).list_events()?;
+    let events = EventStore::from_backend(write_store.backend()).list_events()?;
     let removal = ArtifactRemovalProjection::from_events(&events)?;
     let cosig = CosignatureIndex::build(&events)?;
 

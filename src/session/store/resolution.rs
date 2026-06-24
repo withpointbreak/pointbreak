@@ -5,6 +5,7 @@ use serde::Serialize;
 use crate::error::{Result, ShoreError};
 use crate::git::git_common_dir;
 use crate::session::event::ShoreEvent;
+use crate::session::store::backend::StoreBackend;
 use crate::session::store::event_store::EventStore;
 use crate::session::store::store_config::{StoreMode, resolve_store_mode};
 use crate::session::store::store_init::{
@@ -17,14 +18,24 @@ use crate::storage::LocalStorage;
 /// derive opaque clone/family refs from, so those are absent.
 const STORE_REF_LOCAL: &str = "local";
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+// No `Eq`/`PartialEq`: no resolution is compared whole (tests compare
+// `.store_dir()`), and the `StoreBackend` handle is intentionally not comparable.
+#[derive(Clone, Debug)]
 pub(crate) struct StoreResolution {
     store_dir: PathBuf,
+    backend: StoreBackend,
 }
 
 impl StoreResolution {
     pub(crate) fn store_dir(&self) -> &Path {
         &self.store_dir
+    }
+
+    /// The resolved storage backend handle. Journal/content consumers build their
+    /// wrappers from this; the `state.json` projection write and the file-only
+    /// maintenance paths keep using `store_dir`.
+    pub(crate) fn backend(&self) -> &StoreBackend {
+        &self.backend
     }
 
     pub(crate) fn command_view(&self) -> StoreResolutionView {
@@ -57,6 +68,10 @@ impl ReadStore {
     pub(crate) fn store_dir(&self) -> &Path {
         self.resolution.store_dir()
     }
+
+    pub(crate) fn backend(&self) -> &StoreBackend {
+        self.resolution.backend()
+    }
 }
 
 /// The read seam: read surfaces resolve their store here. With one default store
@@ -77,8 +92,12 @@ pub(crate) struct WriteValidationStore {
 }
 
 impl WriteValidationStore {
+    pub(crate) fn backend(&self) -> &StoreBackend {
+        self.read_store.backend()
+    }
+
     pub(crate) fn validation_events(&self) -> Result<Vec<ShoreEvent>> {
-        EventStore::open(self.read_store.store_dir()).list_events()
+        EventStore::from_backend(self.backend()).list_events()
     }
 }
 
@@ -103,6 +122,7 @@ pub(crate) fn resolve_write_validation_store(
 pub(crate) struct WriteStore {
     store_dir: PathBuf,
     worktree_root: PathBuf,
+    backend: StoreBackend,
 }
 
 impl WriteStore {
@@ -112,6 +132,10 @@ impl WriteStore {
 
     pub(crate) fn worktree_root(&self) -> &Path {
         &self.worktree_root
+    }
+
+    pub(crate) fn backend(&self) -> &StoreBackend {
+        &self.backend
     }
 }
 
@@ -123,6 +147,7 @@ pub(crate) fn resolve_write_store(repo: impl AsRef<Path>) -> Result<WriteStore> 
     Ok(WriteStore {
         store_dir: resolution.store_dir().to_path_buf(),
         worktree_root: paths.worktree_root().to_path_buf(),
+        backend: resolution.backend().clone(),
     })
 }
 
@@ -149,9 +174,7 @@ pub(crate) fn resolve_store(repo: impl AsRef<Path>) -> Result<StoreResolution> {
     // the common-dir store shared across the clone. The opt-in registration is
     // retired — sharing is the default, with no `shore store link`.
     if resolve_store_mode(paths.worktree_root())? == StoreMode::Ephemeral {
-        return Ok(StoreResolution {
-            store_dir: paths.store_dir().to_path_buf(),
-        });
+        return store_resolution_for(paths.store_dir().to_path_buf());
     }
 
     // A non-ephemeral worktree that still carries a populated worktree-local
@@ -178,9 +201,55 @@ pub(crate) fn resolve_store(repo: impl AsRef<Path>) -> Result<StoreResolution> {
 
     // The common-dir store is the default; its layout is created on first write,
     // so a read before any write resolves the dir without requiring it to exist.
-    Ok(StoreResolution {
-        store_dir: clone_local_store_dir(paths.worktree_root())?,
-    })
+    store_resolution_for(clone_local_store_dir(paths.worktree_root())?)
+}
+
+/// Pair a resolved store directory with the selected backend handle. Both
+/// `resolve_store` return paths route through here so the `SHORE_BACKEND`
+/// selection is applied in exactly one place.
+fn store_resolution_for(store_dir: PathBuf) -> Result<StoreResolution> {
+    let backend = select_backend(store_dir.clone())?;
+    Ok(StoreResolution { store_dir, backend })
+}
+
+/// Environment variable that selects the durable-storage backend. Unset is the
+/// `local` default; `memory` is rejected (it is in-process injection only); any
+/// other value is a hard error.
+const STORE_BACKEND_ENV: &str = "SHORE_BACKEND";
+
+/// Choose the backend for `store_dir` from the `SHORE_BACKEND` environment.
+/// Mechanism mirrors `SHORE_PERF`; the loud unknown-value posture mirrors
+/// `StoreMode`.
+fn select_backend(store_dir: PathBuf) -> Result<StoreBackend> {
+    classify_backend(std::env::var(STORE_BACKEND_ENV), store_dir)
+}
+
+/// Pure classifier for [`select_backend`], taking the raw `std::env::var`
+/// result so it can be unit-tested without mutating process-global state.
+/// Unset or `local` → the file backend; `memory` and any unknown value are
+/// loud, actionable errors.
+fn classify_backend(
+    value: std::result::Result<String, std::env::VarError>,
+    store_dir: PathBuf,
+) -> Result<StoreBackend> {
+    match value.as_deref() {
+        Ok("local") | Err(std::env::VarError::NotPresent) => Ok(StoreBackend::Local(store_dir)),
+        Ok("memory") => Err(ShoreError::Message(
+            "the in-memory store backend is not selectable via SHORE_BACKEND; it is reachable only \
+             through in-process injection (a spawned `shore` child would otherwise inherit an empty, \
+             lost-on-exit store). Unset SHORE_BACKEND or set it to `local`."
+                .to_owned(),
+        )),
+        Ok(other) => Err(ShoreError::Message(format!(
+            "unknown SHORE_BACKEND value `{other}`; the only supported value is `local`, which is \
+             also the default when SHORE_BACKEND is unset"
+        ))),
+        Err(std::env::VarError::NotUnicode(_)) => Err(ShoreError::Message(
+            "SHORE_BACKEND is set to a non-UTF-8 value; the only supported value is `local`, which \
+             is also the default when SHORE_BACKEND is unset"
+                .to_owned(),
+        )),
+    }
 }
 
 pub(crate) fn clone_local_store_dir(worktree_root: &Path) -> Result<PathBuf> {
@@ -382,6 +451,92 @@ mod tests {
         let write = resolve_write_store(repo.path()).unwrap();
         let read = resolve_read_store(repo.path()).unwrap();
         assert_eq!(write.store_dir(), read.store_dir());
+    }
+
+    #[test]
+    fn classify_backend_defaults_to_local_when_unset_or_local() {
+        // Unset → the default file backend, wrapping the resolved dir.
+        let dir = PathBuf::from("/tmp/shore-store");
+        let backend = classify_backend(Err(std::env::VarError::NotPresent), dir.clone()).unwrap();
+        assert_eq!(backend_dir(&backend), dir.as_path());
+        // An explicit `local` is the same default.
+        let backend = classify_backend(Ok("local".to_owned()), dir.clone()).unwrap();
+        assert_eq!(backend_dir(&backend), dir.as_path());
+    }
+
+    #[test]
+    fn classify_backend_rejects_memory_as_injection_only() {
+        // `memory` must never be reachable through the env var: a spawned child
+        // would inherit an empty, lost-on-exit store. It is in-process injection
+        // only.
+        let message = classify_backend(Ok("memory".to_owned()), PathBuf::from("/tmp/store"))
+            .expect_err("memory is not env-selectable")
+            .to_string();
+        assert!(
+            message.contains("SHORE_BACKEND"),
+            "names the env var: {message}"
+        );
+        assert!(
+            message.contains("injection"),
+            "explains it is injection-only: {message}"
+        );
+    }
+
+    #[test]
+    fn classify_backend_hard_errors_on_an_unknown_value() {
+        // An unrecognized value is a loud error, never a silent fallback.
+        let message = classify_backend(Ok("ndjson".to_owned()), PathBuf::from("/tmp/store"))
+            .expect_err("an unknown backend value is rejected")
+            .to_string();
+        assert!(
+            message.contains("ndjson"),
+            "names the offending value: {message}"
+        );
+        assert!(
+            message.contains("local"),
+            "names the supported value: {message}"
+        );
+    }
+
+    #[test]
+    fn read_write_and_validation_resolve_the_same_local_backend() {
+        // The handle is carried on every resolution and read/write/validation all
+        // agree on it, so a future backend choice can never split mid-operation.
+        let repo = GitRepo::new();
+        let read = resolve_read_store(repo.path()).unwrap();
+        let write = resolve_write_store(repo.path()).unwrap();
+        let validation = resolve_write_validation_store(repo.path()).unwrap();
+
+        assert!(matches!(read.backend(), StoreBackend::Local(_)));
+        assert!(matches!(write.backend(), StoreBackend::Local(_)));
+        assert!(matches!(validation.backend(), StoreBackend::Local(_)));
+        assert_eq!(backend_dir(read.backend()), backend_dir(write.backend()));
+        assert_eq!(
+            backend_dir(read.backend()),
+            backend_dir(validation.backend())
+        );
+        // DD-consistent for local: the handle wraps the resolved store dir.
+        assert_eq!(backend_dir(read.backend()), read.store_dir());
+    }
+
+    #[test]
+    fn select_backend_reads_the_environment_and_defaults_to_local() {
+        // Exercises the real env read (not just the pure classifier): with
+        // SHORE_BACKEND unset — the normal test/CI environment — the selector
+        // resolves the file backend at the given dir. This deliberately does not
+        // mutate SHORE_BACKEND: it is read by every resolve, so setting it here
+        // would poison concurrent resolves in a shared-process test runner. The
+        // reject-on-unknown and reject-on-memory paths are covered by the pure
+        // `classify_backend` tests above.
+        let dir = PathBuf::from("/tmp/shore-store");
+        let backend = select_backend(dir.clone()).unwrap();
+        assert_eq!(backend_dir(&backend), dir.as_path());
+    }
+
+    fn backend_dir(backend: &StoreBackend) -> &Path {
+        match backend {
+            StoreBackend::Local(dir) => dir.as_path(),
+        }
     }
 
     #[test]

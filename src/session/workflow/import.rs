@@ -63,7 +63,7 @@ pub fn import_notes(options: ImportNotesOptions) -> Result<ImportNotesResult> {
     let storage = LocalStorage::new(store_dir);
     prepare_write_landing(&write_store, &storage)?;
 
-    let event_store = EventStore::open(store_dir);
+    let event_store = EventStore::from_backend(write_store.backend());
     let existing_state = SessionState::from_events(&event_store.list_events()?)?;
 
     let journal_id = existing_state.journal_id.clone();

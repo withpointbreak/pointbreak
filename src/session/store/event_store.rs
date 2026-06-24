@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::error::{Result, SchemaBreakRecord, ShoreError};
 use crate::session::event::{AssertionMode, EventType, ShoreEvent};
-use crate::session::store::backend::{Journal, JournalEntry, LocalJournal};
+use crate::session::store::backend::{Journal, JournalEntry, LocalJournal, StoreBackend};
 use crate::storage::{CreateFileOutcome, LocalStorage};
 
 #[derive(Debug)]
@@ -20,6 +20,21 @@ impl EventStore {
             storage: LocalStorage::new(&store_dir),
             journal: Box::new(LocalJournal::new(&store_dir)),
             store_dir,
+        }
+    }
+
+    /// Build the event wrapper over the journal a resolved backend yields. This
+    /// is the constructor production consumers use, so the backend chosen once at
+    /// the resolve choke point flows here. `open` stays the convenience
+    /// constructor for tests and direct file-store access.
+    pub(crate) fn from_backend(backend: &StoreBackend) -> Self {
+        let journal = backend.journal();
+        match backend {
+            StoreBackend::Local(store_dir) => Self {
+                storage: LocalStorage::new(store_dir),
+                journal,
+                store_dir: store_dir.clone(),
+            },
         }
     }
 

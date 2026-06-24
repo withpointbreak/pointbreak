@@ -136,7 +136,8 @@ pub fn rebuild_state(repo: impl AsRef<Path>) -> Result<SessionState> {
     let span = tracing::info_span!("session.rebuild_state", repo = %worktree_root.display());
     let _entered = span.enter();
 
-    let state = SessionState::from_events(&EventStore::open(store_dir).list_events()?)?;
+    let state =
+        SessionState::from_events(&EventStore::from_backend(write_store.backend()).list_events()?)?;
     storage.write_json_atomic(
         &store_dir.join("state.json"),
         &state,
@@ -147,7 +148,7 @@ pub fn rebuild_state(repo: impl AsRef<Path>) -> Result<SessionState> {
 
 pub fn read_events(repo: impl AsRef<Path>) -> Result<Vec<ShoreEvent>> {
     let read_store = resolve_read_store(repo.as_ref())?;
-    EventStore::open(read_store.store_dir()).list_events()
+    EventStore::from_backend(read_store.backend()).list_events()
 }
 
 /// Render each skipped retired event as a `ProjectionDiagnostic`, carrying the
@@ -171,7 +172,7 @@ pub fn read_events_for_display(
     repo: impl AsRef<Path>,
 ) -> Result<(Vec<ShoreEvent>, Vec<ProjectionDiagnostic>)> {
     let read_store = resolve_read_store(repo.as_ref())?;
-    let (events, skipped) = EventStore::open(read_store.store_dir()).list_events_lenient()?;
+    let (events, skipped) = EventStore::from_backend(read_store.backend()).list_events_lenient()?;
     Ok((events, skipped_to_diagnostics(skipped)))
 }
 
@@ -184,7 +185,7 @@ fn list_events_if_store_exists(
         return Ok(None);
     }
 
-    let events = EventStore::open(&store_dir).list_events()?;
+    let events = EventStore::from_backend(read_store.backend()).list_events()?;
     Ok(Some((store_dir, events)))
 }
 

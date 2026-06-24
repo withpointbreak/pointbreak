@@ -11,11 +11,43 @@
 mod local;
 
 use std::fmt::Debug;
+use std::path::PathBuf;
 
 pub(crate) use local::{LocalContentStore, LocalJournal};
 
 use crate::error::Result;
 use crate::storage::{CreateFileOutcome, RemoveOutcome};
+
+/// The closed set of durable-storage backends, and the one place that dispatches
+/// to a concrete impl. A resolution carries a `StoreBackend` handle and the
+/// event/content wrappers are built from it, so the selection made once at the
+/// resolve choke point flows to every consumer without threading a path.
+///
+/// `Local` is the only variant today; a future file-shaped backend adds a
+/// variant here and every consumer follows with no change. Deliberately **not**
+/// `Eq`/`PartialEq`: no resolution is ever compared whole, and a later
+/// injection-only in-memory variant would not be comparable.
+#[derive(Clone, Debug)]
+pub(crate) enum StoreBackend {
+    /// The default file backend, wrapping the resolved store directory.
+    Local(PathBuf),
+}
+
+impl StoreBackend {
+    /// A fresh journal handle for this backend.
+    pub(crate) fn journal(&self) -> Box<dyn Journal> {
+        match self {
+            StoreBackend::Local(store_dir) => Box::new(LocalJournal::new(store_dir)),
+        }
+    }
+
+    /// A fresh content-store handle for this backend.
+    pub(crate) fn content_store(&self) -> Box<dyn ContentStore> {
+        match self {
+            StoreBackend::Local(store_dir) => Box::new(LocalContentStore::new(store_dir)),
+        }
+    }
+}
 
 /// One listed event: its opaque bytes plus the backend's content-address digest
 /// for it (the `sha256` of the logical idempotency key — the file backend's

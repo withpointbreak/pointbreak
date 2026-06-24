@@ -492,7 +492,7 @@ pub fn withdraw_ref(options: WithdrawRefOptions) -> Result<WithdrawRefResult> {
 
 pub fn list_associations(options: ListAssociationsOptions) -> Result<ListAssociationsResult> {
     let read_store = resolve_read_store(&options.repo)?;
-    let events = EventStore::open(read_store.store_dir()).list_events()?;
+    let events = EventStore::from_backend(read_store.backend()).list_events()?;
     let resolved = resolve_revision(
         &events,
         RevisionSelection::from_revision_seed(options.revision_id.as_ref()),
@@ -578,7 +578,7 @@ where
     let storage = LocalStorage::new(store_dir);
     prepare_write_landing(&write_store, &storage)?;
 
-    let event_store = EventStore::open(store_dir);
+    let event_store = EventStore::from_backend(write_store.backend());
 
     let validation_store = resolve_write_validation_store(repo)?;
     let validation_events = validation_store.validation_events()?;

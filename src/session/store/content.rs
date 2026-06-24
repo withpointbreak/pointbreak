@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use super::backend::{ContentStore, LocalContentStore};
+use super::backend::{ContentStore, LocalContentStore, StoreBackend};
 use super::body_artifact::parse_note_body_artifact;
 use super::object_artifact::{ObjectArtifact, decode_and_validate_object_artifact};
 use crate::error::{Result, ShoreError};
@@ -29,6 +29,15 @@ impl ContentArtifacts {
     pub(crate) fn local(store_dir: &Path) -> Self {
         Self {
             store: Box::new(LocalContentStore::new(store_dir)),
+        }
+    }
+
+    /// Build over the content store a resolved backend yields. The constructor
+    /// production consumers use, so the resolved backend flows through; `local`
+    /// stays for `store_dir`-keyed callers and direct file-store access.
+    pub(crate) fn from_backend(backend: &StoreBackend) -> Self {
+        Self {
+            store: backend.content_store(),
         }
     }
 

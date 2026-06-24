@@ -21,7 +21,7 @@ pub fn review_history(options: ReviewHistoryOptions) -> Result<ReviewHistoryResu
         .as_deref()
         .map(validated_track_id)
         .transpose()?;
-    let store = EventStore::open(read_store.store_dir());
+    let store = EventStore::from_backend(read_store.backend());
     let (events, skip_diagnostics) = if options.read_for_display {
         let (events, skipped) = store.list_events_lenient()?;
         (events, skipped_to_diagnostics(skipped))

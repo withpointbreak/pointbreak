@@ -115,7 +115,7 @@ pub fn respond_input_request(
 
     // The write half lands in the resolved write store (the clone-local store in
     // linked mode) and rebuilds its state.json there.
-    let event_store = EventStore::open(store_dir);
+    let event_store = EventStore::from_backend(write_store.backend());
 
     // The request being responded to may live only in the linked store: its
     // EventTarget fields are copied verbatim into the response, so the lookup

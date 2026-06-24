@@ -151,7 +151,7 @@ pub fn ingest_events(options: IngestEventsOptions) -> Result<IngestEventsResult>
         &current_timestamp(),
     );
 
-    let event_store = EventStore::open(store_dir);
+    let event_store = EventStore::from_backend(write_store.backend());
     let worktree_root = write_store.worktree_root();
     let mut events_created = 0usize;
     let mut events_existing = 0usize;

@@ -200,7 +200,7 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
         snapshot,
     )?;
 
-    let event_store = EventStore::open(&store_dir);
+    let event_store = EventStore::from_backend(write_store.backend());
     let mut recorder = CaptureRecorder::default();
     let writer = writer_from_options(&worktree_root, options.actor_id.as_ref());
     let occurred_at = current_timestamp();
