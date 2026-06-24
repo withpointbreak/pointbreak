@@ -11,7 +11,7 @@
 use std::path::Path;
 
 use super::backend::{ContentStore, LocalContentStore, StoreBackend};
-use super::body_artifact::parse_note_body_artifact;
+use super::body_artifact::{parse_note_body_artifact, validate_note_body_artifact_bytes};
 use super::object_artifact::{ObjectArtifact, decode_and_validate_object_artifact};
 use crate::error::{Result, ShoreError};
 use crate::model::ObjectId;
@@ -117,6 +117,27 @@ impl ContentArtifacts {
         }
     }
 
+    /// Fetch a note-body artifact's stored bytes and validate them against
+    /// `expected_content_hash` (locator-hash + content-hash check via
+    /// `validate_note_body_artifact_bytes`), returning the raw validated bytes. The
+    /// export seam needs the bytes, not a parsed body; a missing blob maps to the
+    /// canonical "import referenced artifacts" guidance.
+    pub(crate) fn read_note_body_bytes(
+        &self,
+        content_ref: &str,
+        expected_content_hash: &str,
+    ) -> Result<Vec<u8>> {
+        match self.store.get_if_exists(content_ref)? {
+            Some(bytes) => {
+                validate_note_body_artifact_bytes(content_ref, expected_content_hash, &bytes)?;
+                Ok(bytes)
+            }
+            None => Err(ShoreError::Message(format!(
+                "missing artifact {expected_content_hash}; import referenced artifacts before reading"
+            ))),
+        }
+    }
+
     /// Fetch and parse a note body artifact, mapping an absent blob to the
     /// canonical "import referenced artifacts" guidance.
     pub(crate) fn read_note_body(&self, content_ref: &str) -> Result<String> {
@@ -157,6 +178,7 @@ fn missing_object_artifact(object_id: &ObjectId) -> ShoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::canonical_hash::sha256_bytes_hex;
     use crate::model::{DiffSnapshot, ReviewId};
     use crate::session::store::body_artifact::NoteBodyEnvelope;
     use crate::session::store::object_artifact::build_object_artifact_v2;
@@ -316,6 +338,49 @@ mod tests {
             assert!(
                 content
                     .read_note_body("artifacts/notes/missing.json")
+                    .unwrap_err()
+                    .to_string()
+                    .contains("import referenced artifacts")
+            );
+        }
+    }
+
+    #[test]
+    fn read_note_body_bytes_validates_and_returns_raw_bytes_over_every_backend() {
+        let body = "the exported body";
+        let valid = NoteBodyEnvelope::new(body.to_owned())
+            .to_json_bytes()
+            .unwrap();
+        let hash = format!("sha256:{}", sha256_bytes_hex(body.as_bytes()));
+        let content_ref = format!("artifacts/notes/{}.json", sha256_bytes_hex(body.as_bytes()));
+
+        for (_guard, backend) in each_backend() {
+            backend
+                .content_store()
+                .put_once(&content_ref, &valid)
+                .unwrap();
+            let content = ContentArtifacts::from_backend(&backend);
+
+            // Valid: returns the stored bytes verbatim.
+            assert_eq!(
+                content.read_note_body_bytes(&content_ref, &hash).unwrap(),
+                valid
+            );
+
+            // Content-hash mismatch (right locator, wrong expected hash) is rejected.
+            let wrong_hash = "sha256:".to_owned() + &"0".repeat(64);
+            assert!(
+                content
+                    .read_note_body_bytes(&content_ref, &wrong_hash)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("hash mismatch")
+            );
+
+            // Missing blob maps to the import guidance.
+            assert!(
+                content
+                    .read_note_body_bytes("artifacts/notes/missing.json", &hash)
                     .unwrap_err()
                     .to_string()
                     .contains("import referenced artifacts")

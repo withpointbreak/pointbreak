@@ -16,6 +16,7 @@ use crate::session::event::{
 use crate::session::object_artifact::{
     decode_and_validate_object_artifact, object_artifact_path, read_object_artifact_bytes,
 };
+use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{
     prepare_write_landing, resolve_read_store, resolve_write_store,
 };
@@ -148,11 +149,8 @@ pub fn export_artifact(repo: impl AsRef<Path>, artifact: &ArtifactRef) -> Result
         }
         ArtifactLocator::Body { relative_path } => {
             let read_store = resolve_read_store(repo.as_ref())?;
-            read_body_artifact_bytes(
-                read_store.store_dir(),
-                relative_path,
-                &artifact.content_hash,
-            )
+            ContentArtifacts::from_backend(read_store.backend())
+                .read_note_body_bytes(relative_path, &artifact.content_hash)
         }
     }
 }
@@ -298,24 +296,6 @@ fn insert_artifact_ref(
     }
     refs.insert(key, artifact);
     Ok(())
-}
-
-fn read_body_artifact_bytes(
-    store_dir: &Path,
-    relative_path: &str,
-    expected_content_hash: &str,
-) -> Result<Vec<u8>> {
-    let path = store_dir.join(relative_path);
-    let bytes = std::fs::read(&path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            return ShoreError::Message(format!(
-                "missing artifact {expected_content_hash}; import referenced artifacts before reading"
-            ));
-        }
-        ShoreError::Message(format!("read artifact {}: {error}", path.display()))
-    })?;
-    validate_note_body_artifact_bytes(relative_path, expected_content_hash, &bytes)?;
-    Ok(bytes)
 }
 
 fn import_object_artifact(
