@@ -195,7 +195,7 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
     let journal_id = JournalId::new("journal:default");
     let snapshot = DiffSnapshot::new(review_id, fingerprint.object_id.clone(), files);
     let artifact = crate::session::object_artifact::write_object_artifact_to(
-        &store_dir,
+        write_store.backend(),
         &fingerprint,
         snapshot,
     )?;

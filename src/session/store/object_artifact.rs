@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::canonical_hash::sha256_json_prefixed;
 use crate::error::{Result, ShoreError};
 use crate::model::{DiffSnapshot, ObjectId};
+use crate::session::store::backend::StoreBackend;
 use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::resolve_read_store;
 use crate::session::{RevisionFingerprint, ShoreStorePaths};
@@ -31,14 +32,14 @@ pub struct ObjectArtifact {
     pub content_hash: String,
 }
 
-/// Write a object artifact to an explicit store dir (the resolved write store).
-/// Capture resolves the write store once for the whole landing (artifact → event
-/// → `state.json` all target the same dir). The content-addressed
+/// Write a object artifact through the resolved store's backend handle. Capture
+/// resolves the write store once for the whole landing (artifact → event →
+/// `state.json` all target the same store). The content-addressed
 /// exclusive-create write is idempotent: a byte-identical artifact already
 /// present returns `Ok` (INV-2/INV-3); a different artifact under the same path is
 /// a loud conflict.
 pub(crate) fn write_object_artifact_to(
-    store_dir: &Path,
+    backend: &StoreBackend,
     fingerprint: &RevisionFingerprint,
     snapshot: DiffSnapshot,
 ) -> Result<ObjectArtifact> {
@@ -57,7 +58,7 @@ pub(crate) fn write_object_artifact_to(
     // holds the same content. Two fresh worktrees write byte-identical v2
     // artifacts and dedup against each other — #146 is fixed. The existing
     // artifact is returned, so the capture event binds to the hash on disk.
-    let content = ContentArtifacts::local(store_dir);
+    let content = ContentArtifacts::from_backend(backend);
     let content_ref = object_content_ref(&artifact.snapshot.object_id);
     let bytes = serde_json::to_vec(&artifact)?;
     content.put_object(&content_ref, &bytes, artifact)
@@ -212,11 +213,52 @@ mod tests {
     use crate::canonical_hash::sha256_json_prefixed;
     use crate::git::capture_worktree_diff_files;
     use crate::model::{DiffSnapshot, ObjectId, ReviewId};
+    use crate::session::store::backend::StoreBackend;
     use crate::session::store::resolution::resolve_store;
     use crate::session::{
         CaptureOptions, CommitRangeSpec, capture_review, compute_revision_fingerprint,
         read_object_artifact,
     };
+
+    #[test]
+    fn write_object_artifact_routes_through_each_backend() {
+        // The object write goes through the resolved backend handle, so the same
+        // write that capture performs is exercisable over the injection-only
+        // in-memory backend as well as the file backend — a non-Local backend
+        // would capture the object write.
+        let repo = modified_repo();
+        let files = capture_worktree_diff_files(repo.path()).unwrap();
+        let fingerprint = compute_revision_fingerprint(repo.path()).unwrap();
+        let snapshot = DiffSnapshot::new(
+            ReviewId::new("review:default"),
+            fingerprint.object_id.clone(),
+            files,
+        );
+
+        let root = tempfile::tempdir().unwrap();
+        let backends = [
+            StoreBackend::Local(root.path().join(".shore/data")),
+            StoreBackend::memory(),
+        ];
+        for backend in backends {
+            let artifact =
+                write_object_artifact_to(&backend, &fingerprint, snapshot.clone()).unwrap();
+            assert_eq!(artifact.version, 2);
+
+            // The artifact reads back through the same backend's content store and
+            // decode-validates.
+            let content_ref = object_content_ref(&artifact.snapshot.object_id);
+            let read = ContentArtifacts::from_backend(&backend)
+                .read_object_bytes(&content_ref, &artifact.snapshot.object_id)
+                .unwrap();
+            assert_eq!(decode_and_validate_object_artifact(&read).unwrap(), artifact);
+
+            // A second write of the same snapshot dedups to the existing artifact.
+            let deduped =
+                write_object_artifact_to(&backend, &fingerprint, snapshot.clone()).unwrap();
+            assert_eq!(deduped, artifact, "a second write dedups");
+        }
+    }
 
     #[test]
     fn object_artifact_schema_is_pinned_at_shore_object_v2() {
@@ -383,13 +425,14 @@ mod tests {
             .unwrap()
             .store_dir()
             .to_path_buf();
+        let backend = StoreBackend::Local(store_dir.clone());
 
-        let first = write_object_artifact_to(&store_dir, &fingerprint, snapshot.clone()).unwrap();
+        let first = write_object_artifact_to(&backend, &fingerprint, snapshot.clone()).unwrap();
         assert_eq!(first.version, 2);
         let path = object_artifact_path(&store_dir, &fingerprint.object_id);
         let on_disk = fs::read(&path).unwrap();
 
-        let deduped = write_object_artifact_to(&store_dir, &fingerprint, snapshot).unwrap();
+        let deduped = write_object_artifact_to(&backend, &fingerprint, snapshot).unwrap();
         assert_eq!(deduped, first, "dedup returns the existing v2 artifact");
         assert_eq!(fs::read(&path).unwrap(), on_disk, "artifact left untouched");
     }
@@ -586,8 +629,8 @@ mod tests {
         fingerprint: &RevisionFingerprint,
         snapshot: DiffSnapshot,
     ) -> Result<ObjectArtifact> {
-        let store_dir = resolve_store(repo.as_ref())?.store_dir().to_path_buf();
-        write_object_artifact_to(&store_dir, fingerprint, snapshot)
+        let resolution = resolve_store(repo.as_ref())?;
+        write_object_artifact_to(resolution.backend(), fingerprint, snapshot)
     }
 
     fn write_current_object_artifact(repo: &TestRepo) -> ObjectArtifact {
