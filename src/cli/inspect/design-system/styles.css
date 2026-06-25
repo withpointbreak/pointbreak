@@ -95,7 +95,7 @@ body {
 
 /* ---- Detail pane ------------------------------------------------------ */
 .detail .empty { color: var(--fg-dim); }
-.detail h2 { font-size: 14px; margin: 0 0 4px; }
+.detail h2 { font-size: var(--fs-lg); margin: 0 0 4px; }
 .detail .kv { display: grid; grid-template-columns: 130px 1fr; gap: 4px 10px; font-size: 12px; margin-bottom: 12px; }
 .detail .kv dt { color: var(--fg-dim); font-family: var(--mono); }
 .detail .kv dd { margin: 0; font-family: var(--mono); word-break: break-all; }
