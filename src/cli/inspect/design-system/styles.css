@@ -229,6 +229,41 @@ body {
 .anno-title { font-weight: 500; }
 .anno-loc { font-family: var(--mono); font-size: 11px; color: var(--fg-dim); }
 .anno-body { font-size: 12px; color: var(--fg); margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
+.markdown-body {
+  white-space: normal;
+  word-break: break-word;
+}
+.markdown-body :where(p, ul, ol, pre) { margin: 6px 0 0; }
+.markdown-body :where(h1, h2, h3, h4, h5, h6) {
+  margin: 8px 0 4px;
+  font-size: var(--fs-md);
+  line-height: 1.25;
+}
+.markdown-body :where(ul, ol) { padding-left: 20px; }
+.markdown-body code {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  background: var(--bg-row);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 0 3px;
+}
+.markdown-body pre {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 8px;
+  overflow-x: auto;
+}
+.markdown-body pre code {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  white-space: pre;
+}
+.markdown-body a { color: var(--accent); text-decoration: none; }
+.markdown-body a:hover { text-decoration: underline; }
 
 /* ---- Unit page (composite) summary ----------------------------------- */
 .up-stats { display: flex; flex-wrap: wrap; gap: 8px; }

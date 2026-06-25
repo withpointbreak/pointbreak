@@ -58,6 +58,33 @@
   </div>
 
   <div class="ds-group">
+    <p class="ds-label">Markdown bodies (text/markdown) — observation &amp; verdict summary</p>
+    <div class="anno anno-observation">
+      <div class="anno-head"><span class="anno-kind anno-kind-observation">observation</span><span class="anno-track">agent:codex-storage</span><span class="anno-title">Re-check the digest in the wrapper</span></div>
+      <div class="anno-body markdown-body">
+        <h3>Why this matters</h3>
+        <p>The byte-only <code>list_event_bytes</code> path dropped the filename/key stem check. The wrapper must re-check before unlink:</p>
+        <ul>
+          <li>parse the stored envelope</li>
+          <li>compare against the <strong>decoded</strong> content, not the bytes</li>
+          <li>skip on <em>mismatch</em> with a diagnostic</li>
+        </ul>
+        <pre><code>let want = sha256(decode(stored)?);
+if want != address { return Skip::HashMismatch; }</code></pre>
+        <p>See <a href="https://example.com/adr-0020" target="_blank" rel="noreferrer">ADR-0020</a> for the byte-vs-content rule.</p>
+      </div>
+    </div>
+    <div class="verdict verdict-needs_changes" style="margin-top:10px"><span class="verdict-status">current assessment</span><span class="verdict-value">needs_changes</span></div>
+    <div class="verdict-summary markdown-body">
+      <p>Two blockers before this can land:</p>
+      <ol>
+        <li>restore the stem check on the <code>list_event_bytes</code> path</li>
+        <li>add a convergence test for the re-mint case</li>
+      </ol>
+    </div>
+  </div>
+
+  <div class="ds-group">
     <p class="ds-label">Signature readback (verify chips)</p>
     <div class="ds-row">
       <span class="verify verify-valid">signature valid</span>
