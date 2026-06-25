@@ -187,6 +187,11 @@ shore review observation add \
 Do not add, replace, or update an assessment. If the reviewer needs to revise the review call after
 your response, the reviewer records that later on the reviewer track.
 
+**Body content type.** Author response `--body` and input-request `--reason` default to plain text.
+Add `--body-content-type text/markdown` (or `--reason-content-type text/markdown`) only when structure
+genuinely helps — a short list, a code fence, or a reference link — and it renders as Markdown in the
+inspector. Keep responses concise; Markdown is for clarity, not license to write a document.
+
 ## Record the landing commit
 
 After the review reaches an accepting verdict and you commit the reviewed change, record the landed

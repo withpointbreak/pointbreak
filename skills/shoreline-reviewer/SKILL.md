@@ -154,6 +154,13 @@ shore review observation add \
 Plain observations are for facts that need no response. If you need the author to make a decision,
 open an advisory input request instead.
 
+**Body content type.** The `--body` (observations, input requests), `--summary` (validation,
+assessment), and `--reason` (input-request responses) fields default to plain text. Add the matching
+`--body-content-type`/`--summary-content-type`/`--reason-content-type text/markdown` only when
+structure genuinely helps — a short findings list, a code fence, or a reference link — and it renders
+as Markdown in the inspector. Keep bodies concise; Markdown is for clarity, not license to write a
+document.
+
 ## Record reviewer validation checks
 
 When you run checks during review, record the concrete result on the reviewer track. Use validation
