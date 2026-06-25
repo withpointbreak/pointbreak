@@ -17,7 +17,7 @@ cat "$TOKENS" "$DS/fonts.css" > "$DS/tokens.css"
 echo "published tokens.css (+ @font-face)"
 
 bake() {
-  local body="$1" out="$2" group="$3" title="$4"
+  local body="$1" out="$2" group="$3" title="$4" with_fonts="${5:-}"
   mkdir -p "$(dirname "$DS/$out")"
   {
     printf '<!-- @dsCard group="%s" -->\n' "$group"
@@ -25,6 +25,9 @@ bake() {
     printf '    <title>%s</title>\n    <style>\n' "$title"
     cat "$TOKENS"
     cat "$STYLES"
+    # Cards that demo the self-hosted font opt in (5th arg): inline the @font-face
+    # faces, path-rewritten one dir up since cards live in a subdirectory.
+    if [ -n "$with_fonts" ]; then sed 's#url("fonts/#url("../fonts/#g' "$DS/fonts.css"; fi
     printf '    </style>\n  </head>\n  <body>\n'
     cat "$DS/_bodies/$body"
     printf '  </body>\n</html>\n'
@@ -32,7 +35,7 @@ bake() {
   echo "baked $out"
 }
 
-bake foundations.body.html         foundations/foundations.html Foundations "Foundations — tokens"
+bake foundations.body.html         foundations/foundations.html Foundations "Foundations — tokens" with-fonts
 bake navigation-topbar.body.html   navigation/topbar.html      Navigation "Navigation — top bar, tabs, stats"
 bake inputs-controls.body.html     inputs/controls.html        Inputs     "Inputs — toolbar, buttons, toggles"
 bake data-timeline.body.html       data/timeline.html          Data       "Data — timeline & detail pane"

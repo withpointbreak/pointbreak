@@ -94,7 +94,7 @@
  */
 .compact {
   --row-pad: 4px 12px;
-  --line: 1.3;
+  --line: 1.3; /* @kind other */
 }
 
 /*
