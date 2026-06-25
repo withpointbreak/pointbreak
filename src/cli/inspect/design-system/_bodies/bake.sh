@@ -17,11 +17,15 @@ cat "$TOKENS" "$DS/fonts.css" > "$DS/tokens.css"
 echo "published tokens.css (+ @font-face)"
 
 bake() {
-  local body="$1" out="$2" group="$3" title="$4" with_fonts="${5:-}"
+  local body="$1" out="$2" group="$3" title="$4" with_fonts="${5:-}" theme="${6:-}"
+  # The light cards are identical snapshots with data-theme="light" on <html>; the
+  # tokens.css [data-theme="light"] aliases do the re-theming, no JS toggle needed.
+  local html_tag='<html lang="en">'
+  if [ -n "$theme" ]; then html_tag="<html lang=\"en\" data-theme=\"$theme\">"; fi
   mkdir -p "$(dirname "$DS/$out")"
   {
     printf '<!-- @dsCard group="%s" -->\n' "$group"
-    printf '<!doctype html>\n<html lang="en">\n  <head>\n    <meta charset="utf-8" />\n'
+    printf '<!doctype html>\n%s\n  <head>\n    <meta charset="utf-8" />\n' "$html_tag"
     printf '    <title>%s</title>\n    <style>\n' "$title"
     cat "$TOKENS"
     cat "$STYLES"
@@ -43,3 +47,14 @@ bake data-cards.body.html          data/cards.html             Data       "Data 
 bake data-review-facts.body.html   data/review-facts.html      Data       "Data — verdict, facts, endorsements"
 bake data-diff.body.html           data/diff.html              Data       "Data — annotated diff"
 bake feedback-diagnostics.body.html feedback/diagnostics.html  Feedback   "Feedback — diagnostics & errors"
+
+# Light-theme variants — the AA-tuned [data-theme="light"] palette is invisible in
+# the otherwise dark-only gallery, so these showcase it on the cards where it reads
+# most: the full token swatches plus the data-dense surfaces. Same bodies, re-themed
+# by the tokens alone. The foundations light card keeps the @font-face opt-in (5th arg)
+# so its JetBrains Mono ramp still renders; the rest stay zero-webfont.
+bake foundations.body.html         foundations/foundations-light.html "Light theme" "Foundations — light theme"      with-fonts light
+bake data-timeline.body.html       data/timeline-light.html           "Light theme" "Data — timeline, light theme"   "" light
+bake data-cards.body.html          data/cards-light.html              "Light theme" "Data — revision thread, light"  "" light
+bake data-review-facts.body.html   data/review-facts-light.html       "Light theme" "Data — review facts, light"     "" light
+bake data-diff.body.html           data/diff-light.html               "Light theme" "Data — annotated diff, light"   "" light
