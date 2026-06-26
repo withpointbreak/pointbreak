@@ -25,6 +25,10 @@ on:
         description: "Run the 3-shard rust-cache-warmth probe"
         type: boolean
         default: false
+      quiet_log:
+        description: "Compare chatty vs quiet test-ci log output on one runner"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -94,6 +98,22 @@ jobs:
           $total = $sw.Elapsed.TotalMilliseconds
           "$n x git rev-parse HEAD: $([math]::Round($total)) ms total (per-spawn ~ $([math]::Round($total / $n, 2)) ms)"
 
+      # --- log-output cost ------------------------------------------------------
+      # Does the chatty CI log (status-level=pass + final-status-level=all + forced
+      # color → ~3500 ANSI lines on Windows) add wall? Run the suite twice on the SAME
+      # runner to control for the large run-to-run variance: first chatty (the ci
+      # profile as shipped), then quiet (only failures, no color). The second run reuses
+      # the first's compiled binaries, so compare the two nextest run-phase `Summary
+      # [Ns]` lines (both warm, compile excluded) — the delta is the log-output cost.
+      - name: (measure) log-output cost (chatty vs quiet, same runner)
+        if: ${{ inputs.quiet_log }}
+        shell: bash
+        run: |
+          echo "=== chatty: ci profile as shipped (status-level=pass, final=all, color always) ==="
+          time just test-ci
+          echo "=== quiet: only failures, no color ==="
+          time env CARGO_TERM_COLOR=never just test-ci --status-level fail --final-status-level fail
+
   probe:
     name: shard probe ${{ matrix.shard }}/3
     if: ${{ inputs.shard_probe }}
@@ -108,13 +128,13 @@ jobs:
       - uses: taiki-e/install-action@just
       - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
-        # Run the probe twice — once with the default (per-leg) key, once with the
-        # shared key below — and compare cache hit/miss + compile time. A shared key
-        # restores one cache entry across all Windows legs (they compile the identical
-        # test-binary set), dodging the 10GB-cap eviction when N distinct shard caches
-        # evict each other.
-        # with:
-        #   shared-key: windows-shards
+        # A/B: shared-key now ACTIVE. All 3 shards restore ONE cache entry (they compile
+        # the identical test-binary set), instead of N distinct per-leg caches that fight
+        # the 10GB cap. Dispatch twice: the first run seeds the shared entry (cold), the
+        # second restores it (warm). Compare cache hit/miss + compile time against the
+        # earlier default-per-leg probe run (which was cold per-shard).
+        with:
+          shared-key: windows-shards
       - name: compile-only timing
         shell: bash
         run: time cargo nextest run --profile ci --no-run
