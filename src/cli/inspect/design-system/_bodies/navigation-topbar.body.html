@@ -1,12 +1,12 @@
 <div class="ds-page">
   <div class="ds-group">
     <p class="ds-label">Top bar</p>
-    <header class="topbar">
+    <header id="topbar">
       <div class="brand">shore<span>inspector</span></div>
-      <nav class="tabs">
-        <button class="tab" aria-selected="true">Timeline</button>
-        <button class="tab">Units</button>
-        <button class="tab">Revisions</button>
+      <nav id="lens-switcher" aria-label="master pane lens">
+        <button class="lens-tab" data-lens="timeline" aria-selected="true">Timeline</button>
+        <button class="lens-tab" data-lens="list" aria-selected="false">Revisions</button>
+        <button class="lens-tab" data-lens="threads" aria-selected="false">Threads</button>
       </nav>
       <div class="stats">
         <span class="stat">858 events</span>
@@ -19,11 +19,11 @@
   </div>
 
   <div class="ds-group">
-    <p class="ds-label">Tabs — selected vs. rest</p>
-    <nav class="tabs">
-      <button class="tab" aria-selected="true">Timeline</button>
-      <button class="tab">Units</button>
-      <button class="tab">Revisions</button>
+    <p class="ds-label">Lens tabs — selected vs. rest</p>
+    <nav id="lens-switcher" aria-label="master pane lens">
+      <button class="lens-tab" data-lens="timeline" aria-selected="true">Timeline</button>
+      <button class="lens-tab" data-lens="list" aria-selected="false">Revisions</button>
+      <button class="lens-tab" data-lens="threads" aria-selected="false">Threads</button>
     </nav>
   </div>
 
@@ -36,6 +36,46 @@
       <span class="stat mono">cd9181a6</span>
       <span class="stat">idle</span>
       <span class="stat refresh live">updated</span>
+    </div>
+  </div>
+
+  <div class="ds-group">
+    <p class="ds-label">Master/detail shell</p>
+    <div class="split">
+      <section id="master" class="master" aria-label="master pane">
+        <ol class="timeline">
+          <li class="event" aria-selected="true">
+            <span class="time">18:42:11</span><span class="rail" style="background:var(--accent)"></span>
+            <span class="body"><span class="title">accepted reviewer assessment recorded</span><span class="meta"><span>assessment</span><span>agent:codex-review</span></span></span>
+          </li>
+          <li class="event">
+            <span class="time">18:40:17</span><span class="rail" style="background:var(--success)"></span>
+            <span class="body"><span class="title">route diagnostic observation added</span><span class="meta"><span>observation</span><span>agent:codex</span></span></span>
+          </li>
+        </ol>
+      </section>
+      <aside id="detail" class="detail">
+        <h2>Current assessment</h2>
+        <div class="verdict verdict-accepted"><span class="verdict-status">resolved</span><span class="verdict-value">accepted</span></div>
+        <p class="advisory-note">advisory — a recorded judgement, not a merge gate</p>
+      </aside>
+    </div>
+  </div>
+
+  <div class="ds-group">
+    <p class="ds-label">Narrow shell stress</p>
+    <div class="ds-viewport" data-ds-state="narrow">
+      <header id="topbar">
+        <div class="brand">shore<span>inspector</span></div>
+        <nav id="lens-switcher" aria-label="master pane lens">
+          <button class="lens-tab" aria-selected="true">Timeline</button>
+          <button class="lens-tab" aria-selected="false">Revisions</button>
+        </nav>
+      </header>
+      <div class="split">
+        <section id="master" class="master" aria-label="master pane"><p class="empty">Compact master pane</p></section>
+        <aside id="detail" class="detail"><p class="empty">Detail stacks below when space is tight.</p></aside>
+      </div>
     </div>
   </div>
 </div>

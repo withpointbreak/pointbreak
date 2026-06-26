@@ -432,6 +432,108 @@ fn app_css_no_longer_declares_the_root_token_block() {
     );
 }
 
+#[test]
+fn design_system_docs_state_the_component_state_contract() {
+    let readme = include_str!("../src/cli/inspect/design-system/README.md");
+    let styles = include_str!("../src/cli/inspect/design-system/styles.css");
+
+    assert!(
+        !styles.contains("mirror the live inspector 1:1"),
+        "the gallery stylesheet must not claim complete live-app mirroring"
+    );
+    assert!(
+        readme.contains("component/state preview"),
+        "README names the narrower gallery contract"
+    );
+    assert!(
+        readme.contains("not a full live-app mirror"),
+        "README says runtime behavior belongs to the live inspector"
+    );
+    assert!(
+        readme.contains("shared tokens"),
+        "README keeps token sharing explicit"
+    );
+    assert!(
+        readme.contains("status/readback/diff/shell/feedback"),
+        "README names the critical parity surface set"
+    );
+    assert!(
+        !readme.contains("PR #261") && !styles.contains("PR #261"),
+        "gallery docs should describe current state, not a completed PR redo"
+    );
+}
+
+#[test]
+fn design_system_gallery_covers_live_shell_and_overlay_states() {
+    let bodies = [
+        include_str!("../src/cli/inspect/design-system/_bodies/navigation-topbar.body.html"),
+        include_str!("../src/cli/inspect/design-system/_bodies/inputs-controls.body.html"),
+        include_str!("../src/cli/inspect/design-system/_bodies/feedback-diagnostics.body.html"),
+        include_str!("../src/cli/inspect/design-system/_bodies/data-diff.body.html"),
+    ]
+    .join("\n");
+    let styles = include_str!("../src/cli/inspect/design-system/styles.css");
+    let bake = include_str!("../src/cli/inspect/design-system/_bodies/bake.sh");
+
+    for marker in [
+        "id=\"topbar\"",
+        "id=\"lens-switcher\"",
+        "class=\"lens-tab\"",
+        "class=\"split\"",
+        "id=\"master\"",
+        "id=\"detail\"",
+        "class=\"route-diagnostic\"",
+        "id=\"cmd-palette\"",
+        "class=\"cmd-item\"",
+        "class=\"cmd-empty\"",
+        "id=\"key-help\"",
+        "class=\"key-help-list\"",
+        "class=\"advisory-note\"",
+        "class=\"reader-scope-note\"",
+        "class=\"modal\"",
+        "class=\"modal-card\"",
+        "data-ds-state=\"narrow\"",
+    ] {
+        assert!(bodies.contains(marker), "gallery bodies include {marker}");
+    }
+
+    for selector in [
+        ".lens-tab",
+        ".route-diagnostic",
+        ".cmd-item",
+        ".key-help-list",
+        ".advisory-note",
+        ".reader-scope-note",
+        ".modal-card",
+        ".split",
+    ] {
+        assert!(
+            styles.contains(selector),
+            "gallery styles include {selector}"
+        );
+    }
+
+    for output in [
+        "navigation/topbar-light.html",
+        "inputs/controls-light.html",
+        "feedback/diagnostics-light.html",
+    ] {
+        assert!(bake.contains(output), "bake matrix includes {output}");
+    }
+
+    let normalized_bake = bake.split_whitespace().collect::<Vec<_>>().join(" ");
+    for named_pair in [
+        "bake navigation-topbar.body.html navigation/topbar.html Navigation \"Navigation — top bar, tabs, stats\" \"\" \"\" \"Navigation\"",
+        "bake inputs-controls.body.html inputs/controls.html Inputs \"Inputs — toolbar, buttons, toggles\" \"\" \"\" \"Inputs\"",
+        "bake feedback-diagnostics.body.html feedback/diagnostics.html Feedback \"Feedback — diagnostics & errors\" \"\" \"\" \"Feedback\"",
+    ] {
+        assert!(
+            normalized_bake.contains(named_pair),
+            "dark theme twin carries explicit marker name: {named_pair}"
+        );
+    }
+}
+
 // The theme flip, the OS-preference default, and the localStorage round-trip are
 // runtime client behavior; with no JS execution harness in the served envelope they
 // cannot be unit-tested. These assert the served-copy contracts that the wiring is

@@ -45,16 +45,16 @@ bake() {
   echo "baked $out"
 }
 
-# Dark cards. The five with a light twin carry an explicit name so each theme pair
-# reads cleanly in the Design pane; the three un-paired cards keep a group-only marker.
+# Dark cards. Every card has a light twin, so each dark card carries an explicit
+# name and each light card carries a matching "— light" name plus subtitle.
 bake foundations.body.html         foundations/foundations.html Foundations "Foundations — tokens"                with-fonts "" "Foundations"
-bake navigation-topbar.body.html   navigation/topbar.html      Navigation "Navigation — top bar, tabs, stats"
-bake inputs-controls.body.html     inputs/controls.html        Inputs     "Inputs — toolbar, buttons, toggles"
+bake navigation-topbar.body.html   navigation/topbar.html      Navigation "Navigation — top bar, tabs, stats"    "" "" "Navigation"
+bake inputs-controls.body.html     inputs/controls.html        Inputs     "Inputs — toolbar, buttons, toggles"    "" "" "Inputs"
 bake data-timeline.body.html       data/timeline.html          Data       "Data — timeline & detail pane"        "" "" "Timeline"
 bake data-cards.body.html          data/cards.html             Data       "Data — unit & revision-thread cards"  "" "" "Revision thread"
 bake data-review-facts.body.html   data/review-facts.html      Data       "Data — verdict, facts, endorsements"  "" "" "Review facts"
 bake data-diff.body.html           data/diff.html              Data       "Data — annotated diff"                "" "" "Annotated diff"
-bake feedback-diagnostics.body.html feedback/diagnostics.html  Feedback   "Feedback — diagnostics & errors"
+bake feedback-diagnostics.body.html feedback/diagnostics.html  Feedback   "Feedback — diagnostics & errors"      "" "" "Feedback"
 
 # Light-theme variants — paired beside their dark twin in the SAME group (not a
 # separate one), each carrying a "— light" name + "Light theme" subtitle so the pair
@@ -62,7 +62,10 @@ bake feedback-diagnostics.body.html feedback/diagnostics.html  Feedback   "Feedb
 # [data-theme="light"] aliases re-theme everything; no JS toggle. The foundations light
 # card keeps the @font-face opt-in (5th arg) for its mono ramp; the rest stay zero-webfont.
 bake foundations.body.html         foundations/foundations-light.html Foundations "Foundations — light theme"     with-fonts light "Foundations — light"     "Light theme"
+bake navigation-topbar.body.html   navigation/topbar-light.html       Navigation  "Navigation — light theme"     "" light "Navigation — light"      "Light theme"
+bake inputs-controls.body.html     inputs/controls-light.html         Inputs      "Inputs — light theme"         "" light "Inputs — light"          "Light theme"
 bake data-timeline.body.html       data/timeline-light.html           Data        "Data — timeline, light theme"  "" light "Timeline — light"        "Light theme"
 bake data-cards.body.html          data/cards-light.html              Data        "Data — revision thread, light" "" light "Revision thread — light" "Light theme"
 bake data-review-facts.body.html   data/review-facts-light.html       Data        "Data — review facts, light"    "" light "Review facts — light"    "Light theme"
 bake data-diff.body.html           data/diff-light.html               Data        "Data — annotated diff, light"  "" light "Annotated diff — light"  "Light theme"
+bake feedback-diagnostics.body.html feedback/diagnostics-light.html   Feedback    "Feedback — light theme"       "" light "Feedback — light"        "Light theme"

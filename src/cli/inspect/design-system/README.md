@@ -3,6 +3,11 @@
 Source for the `shore-inspector-ds` [Claude Design](https://claude.ai/design) gallery and
 the tokenized status palette consumed by the inspector's `../assets/app.css`.
 
+The gallery is a shared tokens component/state preview for critical inspector surfaces; it is not a full live-app mirror.
+It keeps representative static states for status/readback/diff/shell/feedback
+review, while runtime behavior such as routing, localStorage, copy-to-clipboard, and lazy rendering
+stays in the live inspector.
+
 ## Layout
 
 | Path | Role |
@@ -32,5 +37,5 @@ reads the inlined token values via `getComputedStyle`.
 
 The palette is single-sourced in `../assets/tokens.css` (the served frontend's
 only `:root`); `bake.sh` inlines that same file into every card, so the gallery
-and the live inspector never drift. Add or rename a token in `tokens.css` and
-re-bake.
+and the live inspector resolve the same shared tokens. Add or rename a token in
+`tokens.css` and re-bake.

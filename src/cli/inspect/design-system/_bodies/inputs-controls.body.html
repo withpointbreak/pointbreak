@@ -34,4 +34,32 @@
       <span class="type-toggle off"><span class="dot" style="background:var(--fg-dim)"></span>revision_withdrawn</span>
     </div>
   </div>
+
+  <div class="ds-group">
+    <p class="ds-label">Command palette — active and empty states</p>
+    <div id="cmd-palette" class="modal">
+      <div class="modal-card cmd-card">
+        <input id="cmd-input" class="cmd-input" type="text" value="diff" role="combobox" aria-expanded="true" aria-controls="cmd-results" />
+        <ul id="cmd-results" class="cmd-results" role="listbox" aria-label="commands">
+          <li class="cmd-item active" role="option" aria-selected="true"><span class="cmd-label">Open selected revision diff</span><span class="cmd-hint">Enter</span></li>
+          <li class="cmd-item" role="option"><span class="cmd-label">Copy current view link</span><span class="cmd-hint">⌘C</span></li>
+          <li class="cmd-empty">No commands match “timeline filter”.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="ds-group">
+    <p class="ds-label">Keyboard help overlay</p>
+    <div id="key-help" class="modal">
+      <div class="modal-card key-help-card">
+        <header class="modal-head"><h2>Keyboard shortcuts</h2><button class="ghost">close</button></header>
+        <dl class="key-help-list">
+          <dt><kbd>⌘K</kbd></dt><dd>open the command palette</dd>
+          <dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>move the selection down / up</dd>
+          <dt><kbd>Esc</kbd></dt><dd>close the active overlay</dd>
+        </dl>
+      </div>
+    </div>
+  </div>
 </div>

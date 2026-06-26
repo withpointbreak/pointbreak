@@ -12,10 +12,13 @@
 
 # Light-theme variant cards (same bodies, data-theme="light"); generated too.
 /foundations/foundations-light.html
+/navigation/topbar-light.html
+/inputs/controls-light.html
 /data/timeline-light.html
 /data/cards-light.html
 /data/review-facts-light.html
 /data/diff-light.html
+/feedback/diagnostics-light.html
 
 # Generated copy of ../assets/tokens.css (the single source), placed here by
 # bake.sh so the synced project carries a bindable token file. Regenerate; do
