@@ -26,11 +26,23 @@ jobs:
         run: just skills-validate
 
   test:
-    name: test (${{ matrix.os }})
+    name: ${{ matrix.name }}
+    # Windows is the CI long pole and is spawn-bound (per-CreateProcess cost), so its
+    # ~226s execution is fanned across parallel slice-partitioned shards while ubuntu and
+    # macOS stay single legs. Lint runs on Linux only; the cfg(windows)/cfg(not(unix))
+    # arms are type-checked once on a dedicated Windows check leg; the shard legs run
+    # tests only. All Windows legs share one rust-cache entry (shared-key) since they
+    # compile the identical test-binary set.
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - { name: "test (ubuntu-latest)", os: ubuntu-latest, gate: lint, run_tests: true }
+          - { name: "test (macos-latest)", os: macos-latest, gate: check, run_tests: true }
+          - { name: "test (windows-latest check)", os: windows-latest, gate: check, run_tests: false }
+          - { name: "test (windows-latest 1/3)", os: windows-latest, run_tests: true, shard: 1, shards: 3 }
+          - { name: "test (windows-latest 2/3)", os: windows-latest, run_tests: true, shard: 2, shards: 3 }
+          - { name: "test (windows-latest 3/3)", os: windows-latest, run_tests: true, shard: 3, shards: 3 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -43,15 +55,18 @@ jobs:
       - uses: taiki-e/install-action@just
       - uses: taiki-e/install-action@nextest
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ runner.os == 'Windows' && 'windows-shards' || '' }}
       - name: just lint
-        if: runner.os == 'Linux'
+        if: matrix.gate == 'lint'
         run: just lint
       - name: just check-types
-        if: runner.os != 'Linux'
+        if: matrix.gate == 'check'
         run: just check-types
       - name: configure Windows test debuginfo
         if: runner.os == 'Windows'
         shell: bash
         run: echo "CARGO_PROFILE_TEST_SPLIT_DEBUGINFO=packed" >> "$GITHUB_ENV"
       - name: just test-ci
-        run: just test-ci
+        if: matrix.run_tests
+        run: just test-ci ${{ matrix.shard && format('--partition slice:{0}/{1}', matrix.shard, matrix.shards) || '' }}
