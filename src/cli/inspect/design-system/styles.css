@@ -48,7 +48,7 @@ body {
   cursor: pointer;
   font: inherit;
 }
-.lens-tab[aria-selected="true"],
+.lens-tab[aria-pressed="true"],
 .tab[aria-selected="true"] { color: var(--fg); background: var(--bg-row); border-color: var(--border); }
 .stats { margin-left: auto; display: flex; gap: 14px; align-items: center; }
 .stat { color: var(--fg-dim); font-size: 12px; }
