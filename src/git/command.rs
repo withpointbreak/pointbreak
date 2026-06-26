@@ -199,6 +199,38 @@ pub fn git_path_is_ignored(repo: &Path, pathspec: &str) -> Result<bool> {
     Ok(!output.stdout.is_empty())
 }
 
+/// Batched form of [`git_path_is_ignored`]: reports, for each pathspec, whether it is
+/// ignored by the standard Git exclude sources, in a single `git check-ignore`
+/// invocation. Returns one bool per input path, in input order.
+///
+/// Pathspecs are passed as arguments (not via `--stdin`), so plain check-ignore echoes
+/// the ignored subset one per `\n`-delimited line; this is exact for newline-free
+/// pathspecs, which the store-exclude paths are. (`-z` is rejected outside `--stdin`
+/// mode, so it cannot be used here.)
+pub(crate) fn git_paths_are_ignored(repo: &Path, pathspecs: &[&str]) -> Result<Vec<bool>> {
+    if pathspecs.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Plain (non-verbose) check-ignore prints only the SUBSET that is ignored, each
+    // echoed as given on its own line, and exits 1 when none match — both 0 and 1 are
+    // non-error.
+    let mut args: Vec<&str> = Vec::with_capacity(pathspecs.len() + 1);
+    args.push("check-ignore");
+    args.extend_from_slice(pathspecs);
+    let output = run_git_allowing_statuses(repo, args, &[0, 1])?;
+
+    let ignored: std::collections::HashSet<&[u8]> = output
+        .stdout
+        .split(|byte| *byte == b'\n')
+        .map(|token| token.strip_suffix(b"\r").unwrap_or(token))
+        .filter(|token| !token.is_empty())
+        .collect();
+    Ok(pathspecs
+        .iter()
+        .map(|path| ignored.contains(path.as_bytes()))
+        .collect())
+}
+
 /// Three-valued reachability: is `ancestor_oid` an ancestor of `descendant_oid`?
 /// `merge-base --is-ancestor` reports only via exit code with empty stdout, and a
 /// missing/bad object (exit 128) is returned as [`Ancestry::MissingObject`]
@@ -691,6 +723,26 @@ mod tests {
 
         git(repo.path(), ["checkout", "--detach"]);
         assert_eq!(git_head_ref(repo.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn git_paths_are_ignored_reports_each_path_in_input_order() {
+        let repo = TwoCommitRepo::new();
+        // Write a repo-local exclude so exactly one of the probed paths is ignored.
+        let exclude = repo.path().join(".git/info/exclude");
+        fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+        fs::write(&exclude, ".shore/data/\n").unwrap();
+
+        let verdicts = git_paths_are_ignored(
+            repo.path(),
+            &[
+                ".shore/data/state.json",      // ignored (matches `.shore/data/`)
+                ".shore/delegates.local.json", // not ignored
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(verdicts, vec![true, false]);
     }
 
     struct TwoCommitRepo {
