@@ -69,9 +69,8 @@ fn resolve_actor_id(explicit: Option<&str>, env: Option<&str>, repo: &Path) -> A
 
 /// A safe, fully-qualified actor id: either an `actor:` prefix with a non-empty
 /// remainder, bounded length, and no whitespace or control characters, or a
-/// syntactically valid Ed25519 `did:key`. An invalid value is ignored rather
-/// than trusted, so a malformed override can never silently corrupt provenance.
-pub(crate) fn is_valid_actor_id(value: &str) -> bool {
+/// syntactically valid Ed25519 `did:key`.
+pub fn is_valid_actor_id(value: &str) -> bool {
     value.len() <= 256 && {
         value.strip_prefix("actor:").is_some_and(|rest| {
             !rest.is_empty() && rest.chars().all(|c| !c.is_whitespace() && !c.is_control())

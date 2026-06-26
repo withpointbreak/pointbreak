@@ -16,13 +16,11 @@ pub use identity::{
     DELEGATES_LOCAL_REL_PATH, DELEGATES_REL_PATH, DelegationMap, DelegationRecord,
     DelegationStageOutcome, DelegationWriteRecord, PrincipalResolution, PrincipalSource,
     PrincipalStatus, PrincipalView, UnresolvedReason, actor_attributes_from_value,
-    delegation_map_from_value, format_rfc3339_utc_millis, is_agent_actor_id, now_rfc3339_utc,
-    principal_display_label, principal_resolution_for_writer, principal_view_for,
+    delegation_map_from_value, format_rfc3339_utc_millis, is_agent_actor_id, is_valid_actor_id,
+    now_rfc3339_utc, principal_display_label, principal_resolution_for_writer, principal_view_for,
     resolve_writer_actor_id, stage_actor_attributes, stage_delegation,
 };
-pub(crate) use identity::{
-    current_timestamp, is_valid_actor_id, writer_from_git_config, writer_from_options,
-};
+pub(crate) use identity::{current_timestamp, writer_from_git_config, writer_from_options};
 pub use projection::cosignature::{
     EndorsementClassification, EndorsementReadback, EndorserAttributesView,
 };

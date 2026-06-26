@@ -567,6 +567,50 @@ fn keys_enroll_explicit_actor_flag_overrides_resolution() {
 }
 
 #[test]
+fn keys_enroll_rejects_invalid_explicit_actor_without_fallback() {
+    let home = tempfile::tempdir().expect("create keystore home");
+    let home_str = home.path().to_str().unwrap();
+    let _ = shore_env(
+        ["keys", "init", "--name", "default"],
+        &[("SHORE_HOME", home_str)],
+    );
+    let repo = support::git_repo::GitRepo::new();
+
+    let out = shore_env(
+        [
+            "keys",
+            "enroll",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "--actor",
+            "agent:codex",
+        ],
+        &[
+            ("SHORE_HOME", home_str),
+            ("SHORE_ACTOR_ID", "actor:git-email:resolved@example.com"),
+        ],
+    );
+
+    assert!(
+        !out.status.success(),
+        "malformed explicit actor must fail instead of falling back"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(r#"--actor "agent:codex" is not a valid actor id"#),
+        "stderr should explain the bad actor id: {stderr}"
+    );
+    assert!(
+        stderr.contains("actor:agent:codex"),
+        "stderr should show the fully-qualified form: {stderr}"
+    );
+    assert!(
+        !repo.path().join(".shore/allowed-signers.json").exists(),
+        "invalid explicit actor must not stage trust under a fallback identity"
+    );
+}
+
+#[test]
 fn keys_enroll_from_subdirectory_writes_to_worktree_root() {
     let home = tempfile::tempdir().expect("create keystore home");
     let home_str = home.path().to_str().unwrap();

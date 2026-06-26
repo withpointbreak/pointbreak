@@ -4,10 +4,12 @@ use std::path::PathBuf;
 use clap::Args;
 use serde::Serialize;
 use shoreline::crypto::SignerId;
+use shoreline::error::{Result as ShoreResult, ShoreError};
 use shoreline::keys::load_signer_id;
 use shoreline::model::ActorId;
 use shoreline::session::{
-    ALLOWED_SIGNERS_REL_PATH, EnrollmentDiff, resolve_writer_actor_id, stage_enrollment,
+    ALLOWED_SIGNERS_REL_PATH, EnrollmentDiff, is_valid_actor_id, resolve_writer_actor_id,
+    stage_enrollment,
 };
 
 use crate::cli::json::{self, DiagnosticDocument};
@@ -51,9 +53,9 @@ pub(super) fn run(
     // key resolves to the same did:key its loaded signer would.
     let signer_id: SignerId = load_signer_id(&args.name)?;
 
-    // Resolve the actor: explicit `--actor` wins, else the standard writer
-    // resolution (`SHORE_ACTOR_ID` then Git identity).
-    let actor = resolve_actor(&args);
+    // Resolve the actor: explicit `--actor` must be valid, else the standard
+    // writer resolution (`SHORE_ACTOR_ID` then Git identity).
+    let actor = resolve_actor(&args)?;
 
     // Possession-style: stage the working-tree edit only. The human's commit is
     // the authorization; this never invokes git. Resolve the worktree root first
@@ -75,10 +77,23 @@ pub(super) fn run(
     json::write_json(stdout, &document, args.pretty)
 }
 
-/// Resolve the actor to bind: `--actor` (validated by the writer's id check) else
-/// the standard writer resolution, via the public `resolve_writer_actor_id` (the
-/// same `SHORE_ACTOR_ID`-then-Git path every write command uses).
-fn resolve_actor(args: &EnrollArgs) -> ActorId {
-    let explicit = args.actor.as_deref().map(ActorId::new);
-    resolve_writer_actor_id(&args.repo, explicit.as_ref())
+/// Resolve the actor to bind: `--actor` is a strict command input, while a
+/// missing flag keeps the standard writer resolution path every write command
+/// uses.
+fn resolve_actor(args: &EnrollArgs) -> ShoreResult<ActorId> {
+    if let Some(raw_actor) = args.actor.as_deref() {
+        let actor = raw_actor.trim();
+        if !is_valid_actor_id(actor) {
+            return Err(ShoreError::WorkflowInputInvalid {
+                reason: format!(
+                    "--actor {raw_actor:?} is not a valid actor id; expected \
+                     actor:<scheme>:<value> (for example, actor:agent:codex) \
+                     or a did:key signer id"
+                ),
+            });
+        }
+        return Ok(ActorId::new(actor.to_owned()));
+    }
+
+    Ok(resolve_writer_actor_id(&args.repo, None))
 }
