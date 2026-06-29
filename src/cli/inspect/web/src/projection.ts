@@ -22,8 +22,8 @@ import {
   VERIFICATION_LABELS,
 } from "./types";
 
-/** A revision unit as served by `/api/revisions` (the fields the pure layer reads). */
-export interface RevisionUnit {
+/** A revision as served by `/api/revisions` (the fields the pure layer reads). */
+export interface Revision {
   revisionId?: string;
   objectId?: string;
   overview?: Overview;
@@ -269,17 +269,17 @@ export function latestActivityLine(overview?: Overview | null): string {
   return `<div class="overview-latest"><span>latest</span><b>${escapeHtml(title)}</b><span>${escapeHtml(fmtDateTime(latest.at || ""))}</span></div>`;
 }
 
-/** A once-per-load search record over a revision unit. */
-export function revisionSearchIndex(u: RevisionUnit): SearchIndex {
-  const overview: Overview = u.overview || {};
+/** A once-per-load search record over a revision. */
+export function revisionSearchIndex(r: Revision): SearchIndex {
+  const overview: Overview = r.overview || {};
   const currentAssessment: CurrentAssessment = overview.currentAssessment || {};
   const latest: LatestActivity = overview.latestActivity || {};
-  const target: TargetDisplay = u.targetDisplay || {};
+  const target: TargetDisplay = r.targetDisplay || {};
   const head: TargetHead = target.head || {};
   const cues = attentionTokens(overview);
   const text = [
-    u.revisionId,
-    u.objectId,
+    r.revisionId,
+    r.objectId,
     target.label,
     head.label,
     currentAssessment.status,
@@ -296,8 +296,8 @@ export function revisionSearchIndex(u: RevisionUnit): SearchIndex {
   return {
     text,
     type: "revision",
-    revision: u.revisionId,
-    object: u.objectId,
+    revision: r.revisionId,
+    object: r.objectId,
     status: currentAssessment.assessment || currentAssessment.status || "",
     attention: cues.map((cue) => cue.token).join(" "),
   };
@@ -305,8 +305,8 @@ export function revisionSearchIndex(u: RevisionUnit): SearchIndex {
 
 /** The composed review-overview card body for a revision. */
 export function renderRevisionOverview(
-  u: RevisionUnit,
-  overview: Overview | null | undefined = u.overview,
+  r: Revision,
+  overview: Overview | null | undefined = r.overview,
 ): string {
   return `<div class="overview-summary">
     <div class="overview-main">${assessmentCue(overview)}${overviewStats(overview)}</div>

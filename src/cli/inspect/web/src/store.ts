@@ -9,13 +9,13 @@
 // (the `if (!state.selected)` / `if (!state.diff)` reconciliation), with no DOM
 // access and no behaviour beyond the container contract.
 
-import type { RevisionUnit } from "./projection";
+import type { Revision } from "./projection";
 import type { HistoryEntry } from "./types";
 import { TYPES } from "./types";
 
 // The loaded `/api/*` documents the container holds. These are the fields the
 // app reads off each payload; the entry views reuse the shared wire shapes
-// (`HistoryEntry`, `RevisionUnit`). Sub-structures the renderers narrow at read
+// (`HistoryEntry`, `Revision`). Sub-structures the renderers narrow at read
 // time (history diagnostics, object threads, the per-revision classification map)
 // stay `unknown`-typed dynamic JSON rather than re-declaring the wire here.
 
@@ -25,9 +25,9 @@ export interface HistoryDoc {
   diagnostics: unknown[];
 }
 
-/** The `/api/revisions` document: one entry per captured revision unit. */
-export interface UnitsDoc {
-  entries: RevisionUnit[];
+/** The `/api/revisions` document: one entry per captured revision. */
+export interface RevisionsDoc {
+  entries: Revision[];
 }
 
 /** The `/api/objects` document: the laid-out threads plus the supersession map. */
@@ -54,7 +54,7 @@ export interface Selection {
  */
 export interface State {
   history: HistoryDoc | null;
-  units: UnitsDoc | null;
+  revisions: RevisionsDoc | null;
   objects: ObjectsDoc | null;
   // The master-pane projection, serialized into the URL fragment by the router.
   lens: string;
@@ -81,7 +81,7 @@ export interface State {
 // The initial state, ported verbatim from the served app.js `state` object.
 const state: State = {
   history: null,
-  units: null,
+  revisions: null,
   objects: null,
   lens: "timeline",
   selected: { kind: null, id: null },

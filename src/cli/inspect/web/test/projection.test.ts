@@ -17,7 +17,7 @@ import {
   overviewStats,
   plural,
   principalLabel,
-  type RevisionUnit,
+  type Revision,
   renderRevisionOverview,
   revisionSearchIndex,
   verificationChip,
@@ -31,7 +31,7 @@ function parse(html: string): Document {
 }
 
 const history = historyJson as unknown as { entries: HistoryEntry[] };
-const units = revisionsJson as unknown as { entries: RevisionUnit[] };
+const revisions = revisionsJson as unknown as { entries: Revision[] };
 
 function entryOfType(type: string): HistoryEntry {
   const found = history.entries.find((e) => e.eventType === type);
@@ -39,7 +39,7 @@ function entryOfType(type: string): HistoryEntry {
   return found;
 }
 
-const unit = units.entries[0];
+const revision = revisions.entries[0];
 
 describe("entryTrack", () => {
   it("reads the explicit trackId when present", () => {
@@ -310,7 +310,7 @@ describe("assessmentLabel", () => {
 
 describe("assessmentCue", () => {
   it("renders the current assessment from the overview", () => {
-    const cue = parse(assessmentCue(unit.overview)).querySelector(
+    const cue = parse(assessmentCue(revision.overview)).querySelector(
       ".overview-assessment",
     );
     expect(cue?.textContent).toContain("current assessment");
@@ -349,7 +349,7 @@ describe("plural", () => {
 
 describe("attentionTokens", () => {
   it("derives the open-request and validation-context cues from the fixture overview", () => {
-    const tokens = attentionTokens(unit.overview);
+    const tokens = attentionTokens(revision.overview);
     expect(tokens.map((t) => t.token)).toEqual([
       "open-request",
       "validation-context",
@@ -394,7 +394,7 @@ describe("attentionCues", () => {
   });
 
   it("renders a filter button per cue carrying its attention query", () => {
-    const buttons = parse(attentionCues(unit.overview)).querySelectorAll(
+    const buttons = parse(attentionCues(revision.overview)).querySelectorAll(
       "button.overview-cue",
     );
     expect(buttons).toHaveLength(2);
@@ -407,7 +407,7 @@ describe("attentionCues", () => {
 
 describe("overviewStats", () => {
   it("sums the fact counts and surfaces files and rows", () => {
-    const stats = parse(overviewStats(unit.overview)).querySelectorAll(
+    const stats = parse(overviewStats(revision.overview)).querySelectorAll(
       ".overview-stat",
     );
     const text = Array.from(stats, (s) => s.textContent?.trim());
@@ -425,7 +425,7 @@ describe("overviewStats", () => {
 
 describe("latestActivityLine", () => {
   it("renders the latest activity title", () => {
-    const line = parse(latestActivityLine(unit.overview)).querySelector(
+    const line = parse(latestActivityLine(revision.overview)).querySelector(
       ".overview-latest",
     );
     expect(line?.textContent).toContain("latest");
@@ -439,17 +439,17 @@ describe("latestActivityLine", () => {
 });
 
 describe("revisionSearchIndex", () => {
-  it("projects a searchable record over the revision unit", () => {
-    const idx = revisionSearchIndex(unit);
+  it("projects a searchable record over the revision", () => {
+    const idx = revisionSearchIndex(revision);
     expect(idx.type).toBe("revision");
-    expect(idx.revision).toBe(unit.revisionId);
-    expect(idx.object).toBe(unit.objectId);
+    expect(idx.revision).toBe(revision.revisionId);
+    expect(idx.object).toBe(revision.objectId);
     expect(idx.status).toBe("accepted");
     expect(idx.attention).toBe("open-request validation-context");
   });
 
   it("builds a lowercased haystack of the human-relevant fields", () => {
-    const text = revisionSearchIndex(unit).text;
+    const text = revisionSearchIndex(revision).text;
     for (const piece of [
       "accepted",
       "resolved",
@@ -469,7 +469,7 @@ describe("revisionSearchIndex", () => {
 
 describe("renderRevisionOverview", () => {
   it("composes the assessment, stats, cues, and latest-activity blocks", () => {
-    const doc = parse(renderRevisionOverview(unit));
+    const doc = parse(renderRevisionOverview(revision));
     expect(doc.querySelector(".overview-assessment")).not.toBeNull();
     expect(doc.querySelector(".overview-stats")).not.toBeNull();
     expect(doc.querySelector(".overview-latest")).not.toBeNull();
@@ -479,7 +479,7 @@ describe("renderRevisionOverview", () => {
   });
 
   it("keeps the overview copy advisory, never gate-like", () => {
-    const html = renderRevisionOverview(unit);
+    const html = renderRevisionOverview(revision);
     for (const forbidden of ["blocking", "merge status", "required"]) {
       expect(html).not.toContain(forbidden);
     }

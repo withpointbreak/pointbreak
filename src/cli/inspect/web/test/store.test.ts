@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { HistoryDoc, ObjectsDoc, UnitsDoc } from "../src/store";
+import type { HistoryDoc, ObjectsDoc, RevisionsDoc } from "../src/store";
 import { TYPES } from "../src/types";
 import historyJson from "./fixtures/history.json";
 import objectsJson from "./fixtures/objects.json";
@@ -20,7 +20,7 @@ describe("getState defaults", () => {
   it("returns the initial state ported from the app.js state object", () => {
     const s = store.getState();
     expect(s.history).toBeNull();
-    expect(s.units).toBeNull();
+    expect(s.revisions).toBeNull();
     expect(s.objects).toBeNull();
     expect(s.lens).toBe("timeline");
     expect(s.selected).toEqual({ kind: null, id: null });
@@ -63,12 +63,12 @@ describe("commit applies patches", () => {
   it("holds the loaded /api docs the container forwards to render", () => {
     store.commit({
       history: historyJson as unknown as HistoryDoc,
-      units: revisionsJson as unknown as UnitsDoc,
+      revisions: revisionsJson as unknown as RevisionsDoc,
       objects: objectsJson as unknown as ObjectsDoc,
     });
     const s = store.getState();
     expect(s.history?.entries.length ?? 0).toBeGreaterThan(0);
-    expect(s.units?.entries.length ?? 0).toBeGreaterThan(0);
+    expect(s.revisions?.entries.length ?? 0).toBeGreaterThan(0);
     expect(Array.isArray(s.objects?.threads)).toBe(true);
   });
 });
