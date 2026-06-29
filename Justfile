@@ -109,3 +109,8 @@ web-test:
 # web/src so the committed bundle stays fresh; the CI freshness gate fails a PR that forgets.
 web-build:
     cd src/cli/inspect/web && npm run build
+
+# Verify the committed inspector bundle is in sync with web/src (the CI freshness gate, run locally).
+# Rebuilds the bundle and fails if it differs from the committed artifact.
+web-verify:
+    cd src/cli/inspect/web && npm run build && git diff --exit-code ../assets/app.js
