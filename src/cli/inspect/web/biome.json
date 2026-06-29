@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!**/node_modules", "!**/dist"]
+    "includes": ["**", "!**/node_modules", "!**/dist", "!**/assets/app.js"]
   },
   "formatter": {
     "enabled": true,
@@ -30,16 +30,5 @@
         "organizeImports": "on"
       }
     }
-  },
-  "overrides": [
-    {
-      "includes": ["**/assets/app.js"],
-      "linter": {
-        "rules": {
-          "style": { "useTemplate": "off" },
-          "complexity": { "useOptionalChain": "off" }
-        }
-      }
-    }
-  ]
+  }
 }

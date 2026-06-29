@@ -1,29 +1,10 @@
-//! JSON + served-asset contract for the validation-evidence inspector UI
-//! (issue #130), exercised at the HTTP level per issue #110.
-//!
-//! This file locks the exact wire shapes the `app.js` validation work (timeline
-//! type, detail rows, unit-page section, lineage facts) reads: the
-//! `validation_check_recorded` history summary on `/api/history` and the
-//! `validationChecks` / `summary.validationCheckCount` / `validation_evidence`
-//! rows on `/api/revision`. Validation evidence stays advisory: it is structurally
-//! separate from `currentAssessment` and carries no merge/gate/acceptance keys.
-
 mod support;
 
 use support::git_repo::GitRepo;
 use support::inspect::{Inspector, capture_supersession_round, representative_store, urlencode};
 use support::shore;
 
-/// Spawn the inspector against a representative store and return the served
-/// `/app.js` bytes. `app.js` has no JS execution harness (issue #130), so the
-/// UI-wiring guard is a string-level contract over the served asset.
-fn spawn_and_get_app_js() -> String {
-    let store = representative_store();
-    let inspector = Inspector::spawn(store.repo.path());
-    inspector.get_text("/app.js")
-}
-
-/// The substring of `app.js` between two markers, for scoping an assertion to
+/// The substring of a served asset between two markers, for scoping an assertion to
 /// one function or block. Panics if either marker is absent.
 fn slice_between<'a>(haystack: &'a str, start: &str, end: &str) -> &'a str {
     let from = haystack
@@ -37,41 +18,16 @@ fn slice_between<'a>(haystack: &'a str, start: &str, end: &str) -> &'a str {
 }
 
 #[test]
-fn served_app_js_registers_validation_timeline_type() {
-    // One spawn, two assets: the type registration lives in app.js, but its hue
-    // is single-sourced in tokens.css, so the contract spans both.
+fn served_tokens_css_pins_the_validation_event_hue() {
+    // The validation event hue is single-sourced as an --evt-* token in
+    // tokens.css (var(--evt-note) is the unknown-type fallback), so the distinct
+    // validation hue is pinned there.
     let store = representative_store();
     let inspector = Inspector::spawn(store.repo.path());
-    let app_js = inspector.get_text("/app.js");
-
-    // TYPES registration: the event id with a human label and a distinct,
-    // non-fallback color. The hue is single-sourced as an --evt-* token
-    // (var(--evt-note) is the unknown-type fallback), so the TYPES block carries
-    // the token reference and tokens.css pins the value.
-    let types_block = slice_between(&app_js, "const TYPES = [", "const TYPE_MAP");
-    assert!(
-        types_block.contains(r#"id: "validation_check_recorded""#),
-        "TYPES must register validation_check_recorded"
-    );
-    assert!(
-        types_block.contains(r#"label: "validation""#),
-        "validation type needs a human label"
-    );
-    assert!(
-        types_block.contains("var(--evt-validation)"),
-        "validation type needs a distinct, non-fallback color token"
-    );
     let tokens_css = inspector.get_text("/tokens.css");
     assert!(
         tokens_css.contains("--evt-validation: #e88fb0"),
         "tokens.css must pin the distinct validation hue"
-    );
-
-    // The timeline title path reads the history summary's checkName.
-    let entry_title = slice_between(&app_js, "function entryTitle(e)", "function entryTags");
-    assert!(
-        entry_title.contains("checkName"),
-        "entryTitle must read the validation checkName"
     );
 }
 
@@ -99,34 +55,6 @@ fn served_tokens_css_light_theme_aliases_event_labels_to_status() {
             "light theme must alias the event label to its status twin: {alias}"
         );
     }
-}
-
-#[test]
-fn served_app_js_includes_validation_in_supersedable_facts() {
-    let app_js = spawn_and_get_app_js();
-
-    // Validation participates in supersession-staleness: a validation check on a
-    // superseded revision earns the stale badge, like every other review fact.
-    let line = app_js
-        .lines()
-        .find(|l| l.contains("SUPERSEDABLE_FACT_TYPES"))
-        .expect("SUPERSEDABLE_FACT_TYPES line");
-    assert!(
-        line.contains("validation_check_recorded"),
-        "validation must be a supersedable fact type"
-    );
-
-    // The stale badge is gated on supersedable facts and reads the supersession
-    // reverse edges (naming every superseding successor).
-    let badge = slice_between(
-        &app_js,
-        "function supersessionStaleBadge",
-        "function captureSupersedesBadge",
-    );
-    assert!(
-        badge.contains("isSupersedableFact") && badge.contains("supersededByRevision"),
-        "the stale badge is computed from supersession, gated on supersedable facts"
-    );
 }
 
 #[test]
@@ -190,31 +118,6 @@ fn supersession_thread_join_keys_exist_for_validation_entries() {
 }
 
 #[test]
-fn served_app_js_renders_unit_page_validation_section() {
-    let app_js = spawn_and_get_app_js();
-
-    // The unit page consumes the document array (projection reuse, not raw
-    // event parsing) via a dedicated card renderer, and shows the count stat.
-    assert!(
-        app_js.contains("d.validationChecks"),
-        "unit page must read d.validationChecks"
-    );
-    assert!(
-        app_js.contains("renderValidationCheckCard"),
-        "unit page must render validation cards"
-    );
-    assert!(
-        app_js.contains("validationCheckCount"),
-        "summary stat must read validationCheckCount"
-    );
-    // Advisory framing: a context-only caption, no verdict-style aggregate.
-    assert!(
-        app_js.contains("context only"),
-        "validation section needs an advisory caption"
-    );
-}
-
-#[test]
 fn served_app_css_styles_validation_facts() {
     let store = representative_store();
     let inspector = Inspector::spawn(store.repo.path());
@@ -228,64 +131,6 @@ fn served_app_css_styles_validation_facts() {
         );
     }
     assert!(app_css.contains(".validation-note"));
-}
-
-#[test]
-fn served_app_js_poller_is_diagnostic_aware() {
-    let app_js = spawn_and_get_app_js();
-
-    // The freshness poller reloads on a diagnosticCount change, not only on an
-    // eventSetHash change (#142). The JSON half — /api/freshness carries
-    // diagnosticCount — is locked in cli_inspect_endpoints.rs.
-    let poll = slice_between(
-        &app_js,
-        "async function pollFreshness()",
-        "function renderAll",
-    );
-    assert!(
-        poll.contains("diagnosticCount"),
-        "pollFreshness must consider diagnosticCount"
-    );
-
-    // The last-seen diagnostic count is seeded in load(), like lastHash.
-    let load = slice_between(
-        &app_js,
-        "async function load()",
-        "async function pollFreshness",
-    );
-    assert!(
-        load.contains("lastDiagnosticCount"),
-        "load() must seed state.lastDiagnosticCount"
-    );
-}
-
-#[test]
-fn served_app_js_handles_validation_in_detail_view() {
-    let app_js = spawn_and_get_app_js();
-
-    // renderDetail surfaces the validation fields as labeled kv rows.
-    let detail = slice_between(
-        &app_js,
-        "function renderDetail()",
-        "function snapshotIdForRevision",
-    );
-    assert!(detail.contains("validation_check_recorded"));
-    assert!(detail.contains("s.checkName"));
-    assert!(detail.contains("s.trigger"));
-    assert!(detail.contains("s.exitCode"));
-    assert!(detail.contains("validationCheckId"));
-
-    // validation:sha256:… ids render as a non-clickable chip (resolveRef has no
-    // validation case, so they must never be wired as navigable).
-    assert!(
-        app_js.contains(r#"kind: "validation", clickable: false"#),
-        "refInfo must classify validation ids as non-clickable"
-    );
-    let ref_re = slice_between(&app_js, "const REF_RE =", ";");
-    assert!(
-        ref_re.contains("validation"),
-        "REF_RE must include the validation prefix so the id renders as a chip"
-    );
 }
 
 #[test]

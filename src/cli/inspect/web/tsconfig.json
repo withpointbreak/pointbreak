@@ -13,6 +13,7 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true
   },
-  // app.js lives in the sibling assets/ tree (which ships); referencing it via ../ is fine.
-  "include": ["../assets/app.js", "src/**/*.ts", "test/**/*.ts"]
+  // app.js is now an esbuild-generated bundle (built from src/), not hand-source — it is not
+  // type-checked here; the real TypeScript under src/ + test/ is.
+  "include": ["src/**/*.ts", "test/**/*.ts"]
 }

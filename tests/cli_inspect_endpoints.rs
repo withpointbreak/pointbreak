@@ -594,27 +594,6 @@ fn tokens_css_carries_a_light_theme_override_block() {
 }
 
 #[test]
-fn app_js_wires_a_persisted_theme_toggle() {
-    let (_repo, inspector) = served_asset_inspector();
-    let app_js = inspector.get_text("/app.js");
-    // The toggle persists the choice across reloads.
-    assert!(
-        app_js.contains("localStorage"),
-        "the theme toggle persists [data-theme] in localStorage"
-    );
-    // It honors the OS preference as the default when nothing is stored.
-    assert!(
-        app_js.contains("prefers-color-scheme"),
-        "the default theme honors prefers-color-scheme"
-    );
-    // The toggle writes the data-theme attribute on the document element.
-    assert!(
-        app_js.contains("data-theme"),
-        "the toggle sets [data-theme] on <html>"
-    );
-}
-
-#[test]
 fn topbar_exposes_an_accessible_theme_toggle() {
     let (_repo, inspector) = served_asset_inspector();
     let index = inspector.get_text("/");
@@ -731,46 +710,19 @@ fn topbar_exposes_a_density_toggle() {
         index.contains("aria-label=\"Toggle density\""),
         "the topbar carries an accessible comfortable/compact density toggle"
     );
-    let app_js = inspector.get_text("/app.js");
-    assert!(
-        app_js.contains("compact") && app_js.contains("localStorage"),
-        "density is a persisted root class"
-    );
 }
 
-// The persistent placement is rendered DOM; this asserts the served-copy contracts
-// that the visible advisory framing exists in the served assets (top-bar text + the
-// two section captions + the load-bearing strings), strengthening the existing
-// readback contract that those strings appear at all.
+// The persistent placement is rendered DOM; this asserts the served-copy contract
+// that the visible top-bar advisory framing exists in the served index.html.
 #[test]
 fn advisory_framing_is_persistently_visible_not_tooltip_only() {
     let (_repo, inspector) = served_asset_inspector();
     let index = inspector.get_text("/");
-    let app_js = inspector.get_text("/app.js");
 
     // The persistent top-bar affordance states the read-only/advisory mode in
     // visible text (not a tooltip).
     assert!(
         index.contains("read-only · advisory"),
         "the topbar carries a persistent read-only · advisory affordance"
-    );
-
-    // The load-bearing strings still appear in the served assets AND now as
-    // visible framing, not only in title= attributes.
-    let served = format!("{index}{app_js}");
-    assert!(
-        served.contains("never gates a write") && served.contains("reader-relative"),
-        "the advisory framing strings remain in the served assets"
-    );
-
-    // Section captions: the assessment region and the verification region carry
-    // visible advisory / reader-scope captions.
-    assert!(
-        app_js.contains("advisory — a recorded judgement, not a merge gate"),
-        "the Current-assessment region carries a visible advisory caption"
-    );
-    assert!(
-        app_js.contains("reader-relative — computed against your enrolled keys"),
-        "the verification/endorsement region carries a visible reader-scope caption"
     );
 }

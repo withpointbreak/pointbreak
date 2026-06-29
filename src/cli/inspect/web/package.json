@@ -3,12 +3,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "lint": "biome lint ../assets/app.js",
     "format-check": "biome check ./src ./test",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "build": "node build.mjs",
-    "check": "npm run lint && npm run format-check && tsc --noEmit && vitest run"
+    "check": "npm run format-check && tsc --noEmit && vitest run"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.1",
