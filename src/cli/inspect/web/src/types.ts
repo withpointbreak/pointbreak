@@ -107,3 +107,137 @@ export const SUPERSEDABLE_FACT_TYPES: ReadonlySet<string> = new Set([
   "input_request_opened",
   "validation_check_recorded",
 ]);
+
+// ---------------------------------------------------------------------------
+// Shared wire record shapes
+//
+// A view over the `/api/*` JSON the pure layer reads — not an exhaustive model
+// of the wire. Fields the renderers tolerate as absent are optional; deeper
+// modules (query, diff-render, cards) reuse these rather than re-declaring them.
+// ---------------------------------------------------------------------------
+
+/** The captured base commit a revision was taken against. */
+export interface EntryBase {
+  commitOid?: string;
+}
+
+/** A file/line target a review fact addresses, when it has one. */
+export interface FactTarget {
+  filePath?: string;
+  startLine?: number;
+  endLine?: number;
+}
+
+/** Advisory attributes carried by a single endorsement attestation. */
+export interface EndorserAttributes {
+  kind?: string;
+  roles?: string[];
+}
+
+/** One endorsement attestation (one per endorsing signer/key). */
+export interface Endorsement {
+  classification?: string;
+  endorser?: string;
+  endorserAttributes?: EndorserAttributes;
+}
+
+/** The typed, type-specific detail of a history entry. */
+export interface EntrySummary {
+  title?: string;
+  body?: string;
+  summary?: string;
+  assessment?: string;
+  outcome?: string;
+  reasonCode?: string;
+  base?: EntryBase;
+  checkName?: string;
+  command?: string;
+  status?: string;
+  tags?: string[];
+  target?: FactTarget;
+  observationId?: string;
+  assessmentId?: string;
+  inputRequestId?: string;
+  validationCheckId?: string;
+}
+
+/** The actor (and producer) that wrote a history entry. */
+export interface EntryWriter {
+  actorId?: string;
+}
+
+/** The review subject a history entry addresses (keys on the revision). */
+export interface EntrySubject {
+  revisionId?: string;
+}
+
+/** The structured principal resolved client-side (ADR-0010 structured-first). */
+export interface EntryPrincipal {
+  status?: string;
+  actorId?: string;
+}
+
+/** A single `/api/history` timeline entry. */
+export interface HistoryEntry {
+  eventType: string;
+  eventId?: string;
+  trackId?: string;
+  writer?: EntryWriter;
+  subject?: EntrySubject;
+  principal?: EntryPrincipal;
+  summary?: EntrySummary;
+}
+
+/** A revision's current-assessment rollup. */
+export interface CurrentAssessment {
+  status?: string;
+  assessment?: string;
+}
+
+/** A revision's attention rollup (open requests, validation context, etc.). */
+export interface OverviewAttention {
+  openInputRequestCount?: number;
+  unassessed?: boolean;
+  failedValidationCount?: number;
+  erroredValidationCount?: number;
+  acceptedWithFollowUp?: boolean;
+  staleFactCount?: number;
+}
+
+/** A revision's fact/diff counts. */
+export interface OverviewCounts {
+  files?: number;
+  rows?: number;
+  observations?: number;
+  inputRequests?: number;
+  assessments?: number;
+  validationChecks?: number;
+  adapterNotes?: number;
+}
+
+/** The most recent activity recorded against a revision. */
+export interface LatestActivity {
+  title?: string;
+  kind?: string;
+  at?: string;
+}
+
+/** The server-computed review overview for one revision. */
+export interface Overview {
+  currentAssessment?: CurrentAssessment;
+  attention?: OverviewAttention;
+  counts?: OverviewCounts;
+  latestActivity?: LatestActivity;
+}
+
+/**
+ * A once-per-load search record: a lowercased haystack plus a small structured
+ * projection the query grammar matches by field. `text`/`type` are read by name;
+ * the remaining grammar fields (track/revision/object/status/attention) are read
+ * dynamically by the query matcher.
+ */
+export interface SearchIndex {
+  text: string;
+  type: string;
+  [field: string]: string | undefined;
+}
