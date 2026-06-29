@@ -104,3 +104,8 @@ web-check:
 # Run the inspector front-end JS unit tests (vitest).
 web-test:
     cd src/cli/inspect/web && npm run test
+
+# Build the inspector front-end bundle (esbuild -> the committed assets/app.js). Run after editing
+# web/src so the committed bundle stays fresh; the CI freshness gate fails a PR that forgets.
+web-build:
+    cd src/cli/inspect/web && npm run build

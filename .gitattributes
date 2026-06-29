@@ -9,3 +9,8 @@ tests/fixtures/review_documents/*.snap text eol=lf
 # instead of allowing CRLF conversion.
 tests/fixtures/event_signatures/*.bytes text eol=lf
 tests/fixtures/event_signatures/*.json text eol=lf
+
+# The inspector bundle is esbuild-emitted with LF and byte-compared by the CI
+# freshness gate; pin LF so a CRLF checkout (Windows git autocrlf) cannot flap the
+# diff.
+src/cli/inspect/assets/app.js text eol=lf
