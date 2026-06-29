@@ -1,0 +1,541 @@
+{
+  "adapterNotes": [],
+  "assessments": [
+    {
+      "assessment": "needs_changes",
+      "createdAt": "unix-ms:1782699185604",
+      "eventId": "evt:sha256:63d8e6174cc943ee8f049e5f6718ff385e763fd55731bb196de5fb2d3e90d4e0",
+      "id": "assess:sha256:96faccf9a8ca8174f227dd4d667fbe47a439ad8afa0259e01fb278685eff35da",
+      "relatedInputRequests": [],
+      "relatedObservations": [],
+      "replaces": [],
+      "status": "replaced",
+      "summary": "not yet",
+      "summaryContentHash": "sha256:3b82aae1ed24f6077df25a3b4e1b7a78f100716d5a6f6949a0610b05bc1f8959",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+      },
+      "trackId": "agent:codex",
+      "verificationStatus": "unsigned",
+      "writer": {
+        "actorId": "actor:git-email:shore-tests@example.com",
+        "producer": {
+          "name": "shore",
+          "version": "0.1.0"
+        }
+      }
+    },
+    {
+      "assessment": "accepted",
+      "createdAt": "unix-ms:1782699185663",
+      "eventId": "evt:sha256:c347fc5a1aa67bb44823826b40fbec2c4b90a51a70d2a19b707b4027dcb6e992",
+      "id": "assess:sha256:e4d41bfb3b0794d99572242aa51e54f043ec18d2c6e81796b756c78e7f24d088",
+      "relatedInputRequests": [],
+      "relatedObservations": [],
+      "replaces": [
+        "assess:sha256:96faccf9a8ca8174f227dd4d667fbe47a439ad8afa0259e01fb278685eff35da"
+      ],
+      "status": "current",
+      "summary": "ship it",
+      "summaryContentHash": "sha256:bef4261f394bf71fd2b565cd76396ac9ed7953f9110c69ee49d7a82871238fbf",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+      },
+      "trackId": "human:kevin",
+      "verificationStatus": "unsigned",
+      "writer": {
+        "actorId": "actor:git-email:shore-tests@example.com",
+        "producer": {
+          "name": "shore",
+          "version": "0.1.0"
+        }
+      }
+    }
+  ],
+  "commitRange": {
+    "anchored": false,
+    "currentCommits": [],
+    "currentRefs": [
+      {
+        "headOid": "ffc93defe11730aca098a481cc1409e76a2d249f",
+        "refAssociationId": "assoc-ref:sha256:8cf5b7c262bda47de419467ebdb9efd271330961df637b1f61bec5586f21d14c",
+        "refName": "refs/heads/main"
+      }
+    ],
+    "withdrawnCommits": [],
+    "withdrawnRefs": []
+  },
+  "currentAssessment": {
+    "assessment": "accepted",
+    "assessmentId": "assess:sha256:e4d41bfb3b0794d99572242aa51e54f043ec18d2c6e81796b756c78e7f24d088",
+    "status": "resolved"
+  },
+  "diagnostics": [],
+  "eventCount": 8,
+  "eventSetHash": "sha256:e81f297a301ad7d9df6bd90ceeb257511f661b4fc108460e7f2bdc3f76de0164",
+  "filters": {
+    "includeBody": true,
+    "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+  },
+  "inputRequests": [
+    {
+      "body": "should we ship this?",
+      "bodyContentHash": "sha256:2155bb9c776e6b03017ab64a3f0645cf07a8ea05ba8f25570a58e429f0538cc5",
+      "createdAt": "unix-ms:1782699185547",
+      "eventId": "evt:sha256:f47630e3267794e65fdfb05aec8c6ced794b0c4931169b5ac8628608c42b069c",
+      "id": "input-request:sha256:04da631687810e9a5b9816ccc8140fb521dd2fadc5d9d235f7251e0c6046e25c",
+      "mode": "operative",
+      "reasonCode": "manual_decision_required",
+      "responses": [],
+      "status": "open",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+      },
+      "title": "Need a decision",
+      "trackId": "agent:codex",
+      "verificationStatus": "unsigned",
+      "writer": {
+        "actorId": "actor:git-email:shore-tests@example.com",
+        "producer": {
+          "name": "shore",
+          "version": "0.1.0"
+        }
+      }
+    }
+  ],
+  "observations": [
+    {
+      "body": "the return value changed",
+      "bodyContentHash": "sha256:24c2131bbd193a1ae68ea4596caa49ae76e887925a7f14b3591963177cca2689",
+      "createdAt": "unix-ms:1782699185488",
+      "eventId": "evt:sha256:8ac34bc85b48ed6623660a174b024bd9099edd09877180bfa87101cc76ac6058",
+      "id": "obs:sha256:752a5b0ab30cfa3aa062bcf6f11b4c6ee3dcfd055207b6a995b91bf81ffec8d9",
+      "status": "active",
+      "supersedes": [],
+      "tags": [],
+      "target": {
+        "endLine": 2,
+        "filePath": "src/lib.rs",
+        "kind": "range",
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd",
+        "side": "new",
+        "startLine": 2
+      },
+      "title": "Observed change",
+      "trackId": "agent:codex",
+      "verificationStatus": "unsigned",
+      "writer": {
+        "actorId": "actor:git-email:shore-tests@example.com",
+        "producer": {
+          "name": "shore",
+          "version": "0.1.0"
+        }
+      }
+    }
+  ],
+  "revision": {
+    "base": {
+      "commitOid": "ffc93defe11730aca098a481cc1409e76a2d249f",
+      "kind": "git_commit",
+      "treeOid": "8a6622c20e639e20b00100e48d58c3834a2db323"
+    },
+    "id": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd",
+    "journalId": "journal:default",
+    "objectArtifactContentHash": "sha256:32161336d3627d277a7a5917abe2e2694edec4f3621dbf939bf22091b40e0871",
+    "objectId": "obj:sha256:38a493d2f09d6fde9d1dcac61a12c4ccc4de42a0b9c6829752d34cc648a9f9d7",
+    "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd",
+    "source": {
+      "includeUntracked": true,
+      "kind": "git_worktree",
+      "mode": "combined_head_to_working_tree"
+    },
+    "target": {
+      "kind": "git_working_tree",
+      "worktreeRoot": "/private/var/folders/pn/96xv56rd1mj4g7mxpx1z9jx80000gn/T/.tmplPi8eZ"
+    },
+    "targetDisplay": {
+      "head": {
+        "commitOidShort": "ffc93de",
+        "label": "ffc93de"
+      },
+      "kind": "working_tree",
+      "label": ".tmplPi8eZ",
+      "pathPrivate": true
+    },
+    "verificationStatus": "unsigned"
+  },
+  "rows": [
+    {
+      "coverage": "reviewed",
+      "filePath": "src/lib.rs",
+      "id": "row:000000",
+      "kind": "observation",
+      "projectionOrder": 0,
+      "projectionPhase": "narrative",
+      "relatedAssessmentIds": [],
+      "relatedInputRequestIds": [],
+      "relatedObservationIds": [
+        "obs:sha256:752a5b0ab30cfa3aa062bcf6f11b4c6ee3dcfd055207b6a995b91bf81ffec8d9"
+      ],
+      "relatedValidationCheckIds": [],
+      "target": {
+        "endLine": 2,
+        "filePath": "src/lib.rs",
+        "kind": "range",
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd",
+        "side": "new",
+        "startLine": 2
+      }
+    },
+    {
+      "coverage": "reviewed",
+      "id": "row:000001",
+      "kind": "input_request",
+      "projectionOrder": 1,
+      "projectionPhase": "narrative",
+      "relatedAssessmentIds": [],
+      "relatedInputRequestIds": [
+        "input-request:sha256:04da631687810e9a5b9816ccc8140fb521dd2fadc5d9d235f7251e0c6046e25c"
+      ],
+      "relatedObservationIds": [],
+      "relatedValidationCheckIds": [],
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+      }
+    },
+    {
+      "coverage": "reviewed",
+      "id": "row:000002",
+      "kind": "assessment",
+      "projectionOrder": 2,
+      "projectionPhase": "narrative",
+      "relatedAssessmentIds": [
+        "assess:sha256:96faccf9a8ca8174f227dd4d667fbe47a439ad8afa0259e01fb278685eff35da"
+      ],
+      "relatedInputRequestIds": [],
+      "relatedObservationIds": [],
+      "relatedValidationCheckIds": [],
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+      }
+    },
+    {
+      "coverage": "reviewed",
+      "id": "row:000003",
+      "kind": "assessment",
+      "projectionOrder": 3,
+      "projectionPhase": "narrative",
+      "relatedAssessmentIds": [
+        "assess:sha256:e4d41bfb3b0794d99572242aa51e54f043ec18d2c6e81796b756c78e7f24d088"
+      ],
+      "relatedInputRequestIds": [],
+      "relatedObservationIds": [],
+      "relatedValidationCheckIds": [],
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+      }
+    },
+    {
+      "coverage": "reviewed",
+      "id": "row:000004",
+      "kind": "validation_evidence",
+      "projectionOrder": 4,
+      "projectionPhase": "narrative",
+      "relatedAssessmentIds": [],
+      "relatedInputRequestIds": [],
+      "relatedObservationIds": [],
+      "relatedValidationCheckIds": [
+        "validation:sha256:6eacfb816ebdc508f4ffa46e13c4df7576702ad93e36521e276f4382b5553469"
+      ],
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+      }
+    },
+    {
+      "coverage": "reviewed",
+      "id": "row:000005",
+      "kind": "validation_evidence",
+      "projectionOrder": 5,
+      "projectionPhase": "narrative",
+      "relatedAssessmentIds": [],
+      "relatedInputRequestIds": [],
+      "relatedObservationIds": [],
+      "relatedValidationCheckIds": [
+        "validation:sha256:ad56705a57d1c3904835705d2e0aa49a1dc127ae0970ce34d88507497692b743"
+      ],
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+      }
+    },
+    {
+      "coverage": "unreviewed",
+      "filePath": "src/lib.rs",
+      "id": "row:000006",
+      "kind": "file_header",
+      "oldPath": "src/lib.rs",
+      "projectionOrder": 6,
+      "projectionPhase": "snapshot_remainder",
+      "relatedAssessmentIds": [],
+      "relatedInputRequestIds": [],
+      "relatedObservationIds": [],
+      "relatedValidationCheckIds": [],
+      "snapshotOrder": {
+        "fileIndex": 0
+      },
+      "target": {
+        "filePath": "src/lib.rs",
+        "kind": "file",
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+      }
+    },
+    {
+      "coverage": "unreviewed",
+      "filePath": "src/lib.rs",
+      "id": "row:000007",
+      "kind": "hunk_header",
+      "oldPath": "src/lib.rs",
+      "projectionOrder": 7,
+      "projectionPhase": "snapshot_remainder",
+      "relatedAssessmentIds": [],
+      "relatedInputRequestIds": [],
+      "relatedObservationIds": [],
+      "relatedValidationCheckIds": [],
+      "snapshotOrder": {
+        "fileIndex": 0,
+        "hunkIndex": 0
+      }
+    },
+    {
+      "coverage": "unreviewed",
+      "filePath": "src/lib.rs",
+      "id": "row:000008",
+      "kind": "diff",
+      "oldPath": "src/lib.rs",
+      "projectionOrder": 8,
+      "projectionPhase": "snapshot_remainder",
+      "relatedAssessmentIds": [],
+      "relatedInputRequestIds": [],
+      "relatedObservationIds": [],
+      "relatedValidationCheckIds": [],
+      "snapshotOrder": {
+        "fileIndex": 0,
+        "hunkIndex": 0,
+        "rowIndex": 0
+      }
+    },
+    {
+      "coverage": "unreviewed",
+      "filePath": "src/lib.rs",
+      "id": "row:000009",
+      "kind": "diff",
+      "oldPath": "src/lib.rs",
+      "projectionOrder": 9,
+      "projectionPhase": "snapshot_remainder",
+      "relatedAssessmentIds": [],
+      "relatedInputRequestIds": [],
+      "relatedObservationIds": [],
+      "relatedValidationCheckIds": [],
+      "snapshotOrder": {
+        "fileIndex": 0,
+        "hunkIndex": 0,
+        "rowIndex": 1
+      }
+    },
+    {
+      "coverage": "unreviewed",
+      "filePath": "src/lib.rs",
+      "id": "row:000010",
+      "kind": "diff",
+      "oldPath": "src/lib.rs",
+      "projectionOrder": 10,
+      "projectionPhase": "snapshot_remainder",
+      "relatedAssessmentIds": [],
+      "relatedInputRequestIds": [],
+      "relatedObservationIds": [],
+      "relatedValidationCheckIds": [],
+      "snapshotOrder": {
+        "fileIndex": 0,
+        "hunkIndex": 0,
+        "rowIndex": 2
+      }
+    },
+    {
+      "coverage": "unreviewed",
+      "filePath": "src/lib.rs",
+      "id": "row:000011",
+      "kind": "diff",
+      "oldPath": "src/lib.rs",
+      "projectionOrder": 11,
+      "projectionPhase": "snapshot_remainder",
+      "relatedAssessmentIds": [],
+      "relatedInputRequestIds": [],
+      "relatedObservationIds": [],
+      "relatedValidationCheckIds": [],
+      "snapshotOrder": {
+        "fileIndex": 0,
+        "hunkIndex": 0,
+        "rowIndex": 3
+      }
+    },
+    {
+      "coverage": "unreviewed",
+      "filePath": "src/lib.rs",
+      "id": "row:000012",
+      "kind": "diff",
+      "oldPath": "src/lib.rs",
+      "projectionOrder": 12,
+      "projectionPhase": "snapshot_remainder",
+      "relatedAssessmentIds": [],
+      "relatedInputRequestIds": [],
+      "relatedObservationIds": [],
+      "relatedValidationCheckIds": [],
+      "snapshotOrder": {
+        "fileIndex": 0,
+        "hunkIndex": 0,
+        "rowIndex": 4
+      }
+    },
+    {
+      "coverage": "unreviewed",
+      "filePath": "src/lib.rs",
+      "id": "row:000013",
+      "kind": "diff",
+      "oldPath": "src/lib.rs",
+      "projectionOrder": 13,
+      "projectionPhase": "snapshot_remainder",
+      "relatedAssessmentIds": [],
+      "relatedInputRequestIds": [],
+      "relatedObservationIds": [],
+      "relatedValidationCheckIds": [],
+      "snapshotOrder": {
+        "fileIndex": 0,
+        "hunkIndex": 0,
+        "rowIndex": 5
+      }
+    },
+    {
+      "coverage": "unreviewed",
+      "filePath": "src/lib.rs",
+      "id": "row:000014",
+      "kind": "diff",
+      "oldPath": "src/lib.rs",
+      "projectionOrder": 14,
+      "projectionPhase": "snapshot_remainder",
+      "relatedAssessmentIds": [],
+      "relatedInputRequestIds": [],
+      "relatedObservationIds": [],
+      "relatedValidationCheckIds": [],
+      "snapshotOrder": {
+        "fileIndex": 0,
+        "hunkIndex": 0,
+        "rowIndex": 6
+      }
+    },
+    {
+      "coverage": "unreviewed",
+      "filePath": "src/lib.rs",
+      "id": "row:000015",
+      "kind": "diff",
+      "oldPath": "src/lib.rs",
+      "projectionOrder": 15,
+      "projectionPhase": "snapshot_remainder",
+      "relatedAssessmentIds": [],
+      "relatedInputRequestIds": [],
+      "relatedObservationIds": [],
+      "relatedValidationCheckIds": [],
+      "snapshotOrder": {
+        "fileIndex": 0,
+        "hunkIndex": 0,
+        "rowIndex": 7
+      }
+    },
+    {
+      "coverage": "unreviewed",
+      "filePath": "src/lib.rs",
+      "id": "row:000016",
+      "kind": "diff",
+      "oldPath": "src/lib.rs",
+      "projectionOrder": 16,
+      "projectionPhase": "snapshot_remainder",
+      "relatedAssessmentIds": [],
+      "relatedInputRequestIds": [],
+      "relatedObservationIds": [],
+      "relatedValidationCheckIds": [],
+      "snapshotOrder": {
+        "fileIndex": 0,
+        "hunkIndex": 0,
+        "rowIndex": 8
+      }
+    }
+  ],
+  "schema": "shore.review-revision",
+  "summary": {
+    "adapterNoteCount": 0,
+    "assessmentCount": 2,
+    "fileCount": 1,
+    "inputRequestCount": 1,
+    "narrativeRowCount": 6,
+    "observationCount": 1,
+    "rowCount": 17,
+    "snapshotRemainderRowCount": 11,
+    "snapshotRowCount": 11,
+    "validationCheckCount": 2
+  },
+  "validationChecks": [
+    {
+      "checkName": "cargo test",
+      "createdAt": "unix-ms:1782699185721",
+      "eventId": "evt:sha256:9f8c8a056ba071ec66e4a5586d0b1d49b8539101ed9cf04c274b659815a0cf3a",
+      "id": "validation:sha256:6eacfb816ebdc508f4ffa46e13c4df7576702ad93e36521e276f4382b5553469",
+      "logArtifactContentHashes": [],
+      "status": "passed",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+      },
+      "trackId": "agent:codex",
+      "trigger": "manual",
+      "verificationStatus": "unsigned",
+      "writer": {
+        "actorId": "actor:git-email:shore-tests@example.com",
+        "producer": {
+          "name": "shore",
+          "version": "0.1.0"
+        }
+      }
+    },
+    {
+      "checkName": "cargo clippy",
+      "command": "cargo clippy -- -D warnings",
+      "createdAt": "unix-ms:1782699185782",
+      "eventId": "evt:sha256:cdf083ff5cb1d4bb44a3e9088a57c13c5d26c03e00ccc995dbdf54db2720f24b",
+      "exitCode": 1,
+      "id": "validation:sha256:ad56705a57d1c3904835705d2e0aa49a1dc127ae0970ce34d88507497692b743",
+      "logArtifactContentHashes": [],
+      "status": "failed",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+      },
+      "trackId": "human:kevin",
+      "trigger": "manual",
+      "verificationStatus": "unsigned",
+      "writer": {
+        "actorId": "actor:git-email:shore-tests@example.com",
+        "producer": {
+          "name": "shore",
+          "version": "0.1.0"
+        }
+      }
+    }
+  ],
+  "version": 1
+}

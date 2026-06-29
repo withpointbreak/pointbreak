@@ -1,0 +1,46 @@
+{
+  "diagnostics": [],
+  "eventCount": 8,
+  "eventSetHash": "sha256:e81f297a301ad7d9df6bd90ceeb257511f661b4fc108460e7f2bdc3f76de0164",
+  "revisionClassification": {
+    "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd": {
+      "state": "isolated",
+      "supersededBy": [],
+      "supersedes": []
+    }
+  },
+  "schema": "shore.inspect-objects",
+  "supersededBy": {},
+  "supersedes": {},
+  "threadCount": 1,
+  "threads": [
+    {
+      "competing": false,
+      "heads": [
+        "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+      ],
+      "laidOut": {
+        "bounds": {
+          "h": 62.0,
+          "w": 172.984375
+        },
+        "edges": [],
+        "nodes": [
+          {
+            "h": 54.0,
+            "id": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd",
+            "isHead": true,
+            "isSuperseded": false,
+            "w": 164.984375,
+            "x": 86.4921875,
+            "y": 31.0
+          }
+        ]
+      },
+      "revisions": [
+        "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+      ],
+      "superseded": []
+    }
+  ]
+}

@@ -4,13 +4,17 @@
   "type": "module",
   "scripts": {
     "lint": "biome lint ../assets/app.js",
+    "format-check": "biome check ./src ./test",
     "typecheck": "tsc --noEmit",
-    "check": "npm run lint && tsc --noEmit"
+    "test": "vitest run",
+    "check": "npm run lint && npm run format-check && tsc --noEmit && vitest run"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.1",
     "esbuild": "0.28.1",
-    "typescript": "6.0.3"
+    "happy-dom": "20.10.6",
+    "typescript": "6.0.3",
+    "vitest": "4.1.9"
   },
   "engines": {
     "node": ">=20"

@@ -1,0 +1,93 @@
+{
+  "contentHash": "sha256:32161336d3627d277a7a5917abe2e2694edec4f3621dbf939bf22091b40e0871",
+  "schema": "shore.object",
+  "snapshot": {
+    "files": [
+      {
+        "hunks": [
+          {
+            "header": "@@ -1,7 +1,7 @@",
+            "id": "src/lib.rs:1:1",
+            "new_lines": 7,
+            "new_start": 1,
+            "old_lines": 7,
+            "old_start": 1,
+            "rows": [
+              {
+                "kind": "context",
+                "new_line": 1,
+                "old_line": 1,
+                "text": "pub fn value() -> u32 {"
+              },
+              {
+                "kind": "removed",
+                "new_line": null,
+                "old_line": 2,
+                "text": "    1"
+              },
+              {
+                "kind": "added",
+                "new_line": 2,
+                "old_line": null,
+                "text": "    42"
+              },
+              {
+                "kind": "context",
+                "new_line": 3,
+                "old_line": 3,
+                "text": "}"
+              },
+              {
+                "kind": "context",
+                "new_line": 4,
+                "old_line": 4,
+                "text": ""
+              },
+              {
+                "kind": "context",
+                "new_line": 5,
+                "old_line": 5,
+                "text": "pub fn other() -> u32 {"
+              },
+              {
+                "kind": "removed",
+                "new_line": null,
+                "old_line": 6,
+                "text": "    2"
+              },
+              {
+                "kind": "added",
+                "new_line": 6,
+                "old_line": null,
+                "text": "    7"
+              },
+              {
+                "kind": "context",
+                "new_line": 7,
+                "old_line": 7,
+                "text": "}"
+              }
+            ]
+          }
+        ],
+        "id": "src/lib.rs",
+        "is_binary": false,
+        "is_mode_only": false,
+        "is_submodule": false,
+        "metadata_rows": [],
+        "new_mode": "100644",
+        "new_oid": null,
+        "new_path": "src/lib.rs",
+        "old_mode": "100644",
+        "old_oid": "4fc1e96",
+        "old_path": "src/lib.rs",
+        "similarity": null,
+        "status": "modified",
+        "synthetic": false
+      }
+    ],
+    "object_id": "obj:sha256:38a493d2f09d6fde9d1dcac61a12c4ccc4de42a0b9c6829752d34cc648a9f9d7",
+    "review_id": "review:default"
+  },
+  "version": 2
+}

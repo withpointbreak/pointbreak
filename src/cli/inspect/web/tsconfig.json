@@ -13,5 +13,5 @@
     "forceConsistentCasingInFileNames": true
   },
   // app.js lives in the sibling assets/ tree (which ships); referencing it via ../ is fine.
-  "include": ["../assets/app.js", "src/**/*.ts"]
+  "include": ["../assets/app.js", "src/**/*.ts", "test/**/*.ts"]
 }

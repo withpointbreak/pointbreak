@@ -1,0 +1,279 @@
+{
+  "diagnostics": [],
+  "entries": [
+    {
+      "eventId": "evt:sha256:5c73d1aed5e1f2e68520faf19a6468f6ee2eb691038eb620d54d48f403a03b95",
+      "eventType": "work_object_proposed",
+      "journalId": "journal:default",
+      "occurredAt": "unix-ms:1782699185391",
+      "payloadHash": "sha256:13870ee0a48a0ffafd3de2537c9b42363a2b6e53d2fe5924f381953a96f2474e",
+      "subject": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+      },
+      "summary": {
+        "base": {
+          "commitOid": "ffc93defe11730aca098a481cc1409e76a2d249f",
+          "kind": "git_commit",
+          "treeOid": "8a6622c20e639e20b00100e48d58c3834a2db323"
+        },
+        "engagementId": "engagement:sha256:7b8a07a15a63ca09e26080ec985cbabf6ebe03106c00c95d33125284b5b47764",
+        "kind": "revision_captured",
+        "objectArtifactContentHash": "sha256:32161336d3627d277a7a5917abe2e2694edec4f3621dbf939bf22091b40e0871",
+        "objectId": "obj:sha256:38a493d2f09d6fde9d1dcac61a12c4ccc4de42a0b9c6829752d34cc648a9f9d7",
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd",
+        "source": {
+          "includeUntracked": true,
+          "kind": "git_worktree",
+          "mode": "combined_head_to_working_tree"
+        },
+        "target": {
+          "kind": "git_working_tree",
+          "worktreeRoot": "/private/var/folders/pn/96xv56rd1mj4g7mxpx1z9jx80000gn/T/.tmplPi8eZ"
+        }
+      },
+      "verificationStatus": "unsigned",
+      "writer": {
+        "actorId": "actor:git-email:shore-tests@example.com",
+        "producer": {
+          "name": "shore",
+          "version": "0.1.0"
+        }
+      }
+    },
+    {
+      "eventId": "evt:sha256:fdcfefd1251ddb5fcf0740317c46a2f3197ae8908e6760a625800fd5167db8aa",
+      "eventType": "revision_ref_associated",
+      "journalId": "journal:default",
+      "occurredAt": "unix-ms:1782699185426",
+      "payloadHash": "sha256:99a8759240a1b286bff4d047e4bf8c812d05e2a9cbb80d39a8ffe45edf20ba3a",
+      "subject": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+      },
+      "summary": {
+        "headOid": "ffc93defe11730aca098a481cc1409e76a2d249f",
+        "kind": "revision_ref_associated",
+        "refAssociationId": "assoc-ref:sha256:8cf5b7c262bda47de419467ebdb9efd271330961df637b1f61bec5586f21d14c",
+        "refName": "refs/heads/main"
+      },
+      "verificationStatus": "unsigned",
+      "writer": {
+        "actorId": "actor:git-email:shore-tests@example.com",
+        "producer": {
+          "name": "shore",
+          "version": "0.1.0"
+        }
+      }
+    },
+    {
+      "eventId": "evt:sha256:8ac34bc85b48ed6623660a174b024bd9099edd09877180bfa87101cc76ac6058",
+      "eventType": "review_observation_recorded",
+      "journalId": "journal:default",
+      "occurredAt": "unix-ms:1782699185488",
+      "payloadHash": "sha256:3be3939b00d0f1f4bb6a89846df5238293440b83fdf3a27cbef5a89c696950f3",
+      "subject": {
+        "endLine": 2,
+        "filePath": "src/lib.rs",
+        "kind": "range",
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd",
+        "side": "new",
+        "startLine": 2
+      },
+      "summary": {
+        "body": "the return value changed",
+        "bodyByteSize": 24,
+        "bodyContentHash": "sha256:24c2131bbd193a1ae68ea4596caa49ae76e887925a7f14b3591963177cca2689",
+        "kind": "review_observation_recorded",
+        "observationId": "obs:sha256:752a5b0ab30cfa3aa062bcf6f11b4c6ee3dcfd055207b6a995b91bf81ffec8d9",
+        "target": {
+          "endLine": 2,
+          "filePath": "src/lib.rs",
+          "kind": "range",
+          "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd",
+          "side": "new",
+          "startLine": 2
+        },
+        "title": "Observed change"
+      },
+      "trackId": "agent:codex",
+      "verificationStatus": "unsigned",
+      "writer": {
+        "actorId": "actor:git-email:shore-tests@example.com",
+        "producer": {
+          "name": "shore",
+          "version": "0.1.0"
+        }
+      }
+    },
+    {
+      "eventId": "evt:sha256:f47630e3267794e65fdfb05aec8c6ced794b0c4931169b5ac8628608c42b069c",
+      "eventType": "input_request_opened",
+      "journalId": "journal:default",
+      "occurredAt": "unix-ms:1782699185547",
+      "payloadHash": "sha256:dd3bef903f8ba4f06fa4be461246a42f30b354b079d6ff76a3973197e0943691",
+      "subject": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+      },
+      "summary": {
+        "body": "should we ship this?",
+        "bodyByteSize": 20,
+        "bodyContentHash": "sha256:2155bb9c776e6b03017ab64a3f0645cf07a8ea05ba8f25570a58e429f0538cc5",
+        "inputRequestId": "input-request:sha256:04da631687810e9a5b9816ccc8140fb521dd2fadc5d9d235f7251e0c6046e25c",
+        "kind": "input_request_opened",
+        "mode": "operative",
+        "reasonCode": "manual_decision_required",
+        "target": {
+          "kind": "revision",
+          "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+        },
+        "title": "Need a decision"
+      },
+      "trackId": "agent:codex",
+      "verificationStatus": "unsigned",
+      "writer": {
+        "actorId": "actor:git-email:shore-tests@example.com",
+        "producer": {
+          "name": "shore",
+          "version": "0.1.0"
+        }
+      }
+    },
+    {
+      "eventId": "evt:sha256:63d8e6174cc943ee8f049e5f6718ff385e763fd55731bb196de5fb2d3e90d4e0",
+      "eventType": "review_assessment_recorded",
+      "journalId": "journal:default",
+      "occurredAt": "unix-ms:1782699185604",
+      "payloadHash": "sha256:4e2a7fe8f686190865d24ee90383b37931b626da16424a7f9f67016a64d89972",
+      "subject": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+      },
+      "summary": {
+        "assessment": "needs_changes",
+        "assessmentId": "assess:sha256:96faccf9a8ca8174f227dd4d667fbe47a439ad8afa0259e01fb278685eff35da",
+        "kind": "review_assessment_recorded",
+        "summary": "not yet",
+        "summaryByteSize": 7,
+        "summaryContentHash": "sha256:3b82aae1ed24f6077df25a3b4e1b7a78f100716d5a6f6949a0610b05bc1f8959",
+        "target": {
+          "kind": "revision",
+          "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+        }
+      },
+      "trackId": "agent:codex",
+      "verificationStatus": "unsigned",
+      "writer": {
+        "actorId": "actor:git-email:shore-tests@example.com",
+        "producer": {
+          "name": "shore",
+          "version": "0.1.0"
+        }
+      }
+    },
+    {
+      "eventId": "evt:sha256:c347fc5a1aa67bb44823826b40fbec2c4b90a51a70d2a19b707b4027dcb6e992",
+      "eventType": "review_assessment_recorded",
+      "journalId": "journal:default",
+      "occurredAt": "unix-ms:1782699185663",
+      "payloadHash": "sha256:ebd8fd47e36a2b22356743b9a9e929eddbafc9b02aeb206c526ed323d9dd456a",
+      "subject": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+      },
+      "summary": {
+        "assessment": "accepted",
+        "assessmentId": "assess:sha256:e4d41bfb3b0794d99572242aa51e54f043ec18d2c6e81796b756c78e7f24d088",
+        "kind": "review_assessment_recorded",
+        "replaces": [
+          "assess:sha256:96faccf9a8ca8174f227dd4d667fbe47a439ad8afa0259e01fb278685eff35da"
+        ],
+        "summary": "ship it",
+        "summaryByteSize": 7,
+        "summaryContentHash": "sha256:bef4261f394bf71fd2b565cd76396ac9ed7953f9110c69ee49d7a82871238fbf",
+        "target": {
+          "kind": "revision",
+          "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+        }
+      },
+      "trackId": "human:kevin",
+      "verificationStatus": "unsigned",
+      "writer": {
+        "actorId": "actor:git-email:shore-tests@example.com",
+        "producer": {
+          "name": "shore",
+          "version": "0.1.0"
+        }
+      }
+    },
+    {
+      "eventId": "evt:sha256:9f8c8a056ba071ec66e4a5586d0b1d49b8539101ed9cf04c274b659815a0cf3a",
+      "eventType": "validation_check_recorded",
+      "journalId": "journal:default",
+      "occurredAt": "unix-ms:1782699185721",
+      "payloadHash": "sha256:97051c157858e88b222c2fc3a35162b1923f36c9d87ccfd58ec91e9b910f8982",
+      "subject": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+      },
+      "summary": {
+        "checkName": "cargo test",
+        "kind": "validation_check_recorded",
+        "status": "passed",
+        "target": {
+          "kind": "revision",
+          "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+        },
+        "trigger": "manual",
+        "validationCheckId": "validation:sha256:6eacfb816ebdc508f4ffa46e13c4df7576702ad93e36521e276f4382b5553469"
+      },
+      "trackId": "agent:codex",
+      "verificationStatus": "unsigned",
+      "writer": {
+        "actorId": "actor:git-email:shore-tests@example.com",
+        "producer": {
+          "name": "shore",
+          "version": "0.1.0"
+        }
+      }
+    },
+    {
+      "eventId": "evt:sha256:cdf083ff5cb1d4bb44a3e9088a57c13c5d26c03e00ccc995dbdf54db2720f24b",
+      "eventType": "validation_check_recorded",
+      "journalId": "journal:default",
+      "occurredAt": "unix-ms:1782699185782",
+      "payloadHash": "sha256:f52fac559cc31bc52cdffb28ebb00662723786063714de786767e412124956dc",
+      "subject": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+      },
+      "summary": {
+        "checkName": "cargo clippy",
+        "command": "cargo clippy -- -D warnings",
+        "exitCode": 1,
+        "kind": "validation_check_recorded",
+        "status": "failed",
+        "target": {
+          "kind": "revision",
+          "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+        },
+        "trigger": "manual",
+        "validationCheckId": "validation:sha256:ad56705a57d1c3904835705d2e0aa49a1dc127ae0970ce34d88507497692b743"
+      },
+      "trackId": "human:kevin",
+      "verificationStatus": "unsigned",
+      "writer": {
+        "actorId": "actor:git-email:shore-tests@example.com",
+        "producer": {
+          "name": "shore",
+          "version": "0.1.0"
+        }
+      }
+    }
+  ],
+  "eventCount": 8,
+  "eventSetHash": "sha256:e81f297a301ad7d9df6bd90ceeb257511f661b4fc108460e7f2bdc3f76de0164",
+  "historyCount": 8,
+  "schema": "shore.inspect-history"
+}

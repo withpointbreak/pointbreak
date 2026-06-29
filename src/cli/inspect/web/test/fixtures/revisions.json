@@ -1,0 +1,85 @@
+{
+  "diagnostics": [],
+  "entries": [
+    {
+      "base": {
+        "commitOid": "ffc93defe11730aca098a481cc1409e76a2d249f",
+        "kind": "git_commit",
+        "treeOid": "8a6622c20e639e20b00100e48d58c3834a2db323"
+      },
+      "capturedAt": "unix-ms:1782699185391",
+      "commitRange": {
+        "anchored": false,
+        "currentCommits": [],
+        "currentRefs": [
+          {
+            "headOid": "ffc93defe11730aca098a481cc1409e76a2d249f",
+            "refAssociationId": "assoc-ref:sha256:8cf5b7c262bda47de419467ebdb9efd271330961df637b1f61bec5586f21d14c",
+            "refName": "refs/heads/main"
+          }
+        ],
+        "diagnostics": [],
+        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd",
+        "withdrawnCommits": [],
+        "withdrawnRefs": []
+      },
+      "groupedRevisionIds": [
+        "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+      ],
+      "mergeStatus": "unknown",
+      "objectArtifactContentHash": "sha256:32161336d3627d277a7a5917abe2e2694edec4f3621dbf939bf22091b40e0871",
+      "objectId": "obj:sha256:38a493d2f09d6fde9d1dcac61a12c4ccc4de42a0b9c6829752d34cc648a9f9d7",
+      "overview": {
+        "attention": {
+          "acceptedWithFollowUp": false,
+          "erroredValidationCount": 0,
+          "failedValidationCount": 1,
+          "openInputRequestCount": 1,
+          "staleFactCount": 0,
+          "unassessed": false
+        },
+        "counts": {
+          "adapterNotes": 0,
+          "assessments": 2,
+          "files": 1,
+          "inputRequests": 1,
+          "observations": 1,
+          "rows": 17,
+          "validationChecks": 2
+        },
+        "currentAssessment": {
+          "assessment": "accepted",
+          "status": "resolved"
+        },
+        "latestActivity": {
+          "at": "unix-ms:1782699185782",
+          "kind": "validation",
+          "title": "cargo clippy"
+        }
+      },
+      "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd",
+      "source": {
+        "includeUntracked": true,
+        "kind": "git_worktree",
+        "mode": "combined_head_to_working_tree"
+      },
+      "target": {
+        "kind": "git_working_tree",
+        "worktreeRoot": "/private/var/folders/pn/96xv56rd1mj4g7mxpx1z9jx80000gn/T/.tmplPi8eZ"
+      },
+      "targetDisplay": {
+        "head": {
+          "commitOidShort": "ffc93de",
+          "label": "ffc93de"
+        },
+        "kind": "working_tree",
+        "label": ".tmplPi8eZ",
+        "pathPrivate": true
+      }
+    }
+  ],
+  "eventCount": 8,
+  "eventSetHash": "sha256:e81f297a301ad7d9df6bd90ceeb257511f661b4fc108460e7f2bdc3f76de0164",
+  "revisionCount": 1,
+  "schema": "shore.inspect-revisions"
+}

@@ -96,6 +96,11 @@ web-install:
 
 # Node-only; intentionally NOT part of `just check` (the Rust gate stays Node-free). CI runs this
 # as its own ubuntu leg.
-# Front-end gate: Biome-lint the served app.js (lint-only, never format) + strict tsc --noEmit.
+# Front-end gate: Biome-lint the served app.js (lint-only) + Biome check (lint+format) the ported TS +
+# strict tsc --noEmit + the vitest unit tests.
 web-check:
     cd src/cli/inspect/web && npm run check
+
+# Run the inspector front-end JS unit tests (vitest).
+web-test:
+    cd src/cli/inspect/web && npm run test
