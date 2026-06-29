@@ -25,6 +25,23 @@ jobs:
       - name: Validate Agent Skills
         run: just skills-validate
 
+  web-check:
+    name: web check (inspector front-end)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: src/cli/inspect/web/.nvmrc
+          cache: npm
+          cache-dependency-path: src/cli/inspect/web/package-lock.json
+      - name: npm ci
+        working-directory: src/cli/inspect/web
+        run: npm ci
+      - name: biome lint + tsc --noEmit
+        working-directory: src/cli/inspect/web
+        run: npm run check
+
   test:
     name: ${{ matrix.name }}
     # Windows is the CI long pole and is spawn-bound (per-CreateProcess cost), so its
