@@ -646,6 +646,59 @@ mod tests {
     }
 
     #[test]
+    fn stored_artifact_hash_excludes_highlighting() {
+        // A snapshot whose file WOULD highlight (real Rust code). The stored artifact must never
+        // carry syntax tokens and its content hash must be self-consistent regardless of any
+        // highlighting elsewhere in the codebase. Keeping tokens off the stored type is also what
+        // preserves the byte-identical dedup that
+        // `same_range_in_two_repos_produces_byte_identical_artifacts` relies on.
+        let snapshot = DiffSnapshot::new(
+            ReviewId::new("review:default"),
+            ObjectId::new("obj:sha256:highlightable"),
+            vec![crate::model::DiffFile {
+                id: crate::model::FileId::new("src/lib.rs"),
+                status: crate::model::FileStatus::Modified,
+                old_path: Some("src/lib.rs".to_owned()),
+                new_path: Some("src/lib.rs".to_owned()),
+                old_mode: None,
+                new_mode: None,
+                old_oid: None,
+                new_oid: None,
+                similarity: None,
+                is_binary: false,
+                is_submodule: false,
+                is_mode_only: false,
+                synthetic: false,
+                metadata_rows: Vec::new(),
+                hunks: vec![crate::model::ReviewHunk {
+                    id: crate::model::HunkId::new("hunk:0"),
+                    header: "@@ -1 +1 @@".to_owned(),
+                    old_start: 1,
+                    old_lines: 1,
+                    new_start: 1,
+                    new_lines: 1,
+                    rows: vec![crate::model::DiffRow {
+                        kind: crate::model::DiffRowKind::Added,
+                        old_line: None,
+                        new_line: Some(1),
+                        text: "pub fn value() -> u32 { 1 }".to_owned(),
+                    }],
+                }],
+            }],
+        );
+        let artifact = build_object_artifact_v2(snapshot).unwrap();
+
+        let recomputed = object_artifact_content_hash(&artifact).unwrap();
+        assert_eq!(artifact.content_hash, recomputed);
+
+        let serialized = serde_json::to_string(&artifact).unwrap();
+        assert!(
+            !serialized.contains("\"tokens\""),
+            "stored ObjectArtifact must never serialize tokens"
+        );
+    }
+
+    #[test]
     fn object_artifact_hash_is_stable_across_json_round_trip() {
         let repo = modified_repo();
         let artifact = write_current_object_artifact(&repo);
