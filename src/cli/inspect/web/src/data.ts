@@ -16,8 +16,8 @@ import {
   commit,
   getState,
   type HistoryDoc,
-  type ObjectsDoc,
   type RevisionsDoc,
+  type ThreadsDoc,
 } from "./store";
 
 // The `/api/freshness` probe: the event-log head marker (the event count) the
@@ -89,14 +89,14 @@ export async function load(): Promise<void> {
     // `history.eventCount`) also keeps a retired/skipped event — where the event-file
     // marker exceeds the post-skip history count — from forcing a reload every tick.
     const freshness = (await fetchJSON("/api/freshness")) as FreshnessDoc;
-    const [historyRaw, revisionsRaw, objectsRaw] = await Promise.all([
+    const [historyRaw, revisionsRaw, threadsRaw] = await Promise.all([
       fetchJSON("/api/history"),
       fetchJSON("/api/revisions"),
-      fetchJSON("/api/objects"),
+      fetchJSON("/api/threads"),
     ]);
     const history = historyRaw as HistoryDoc;
     const revisions = revisionsRaw as RevisionsDoc;
-    const objects = objectsRaw as ObjectsDoc;
+    const threads = threadsRaw as ThreadsDoc;
     // Index before committing so a subscriber repaint never sees an un-indexed
     // entry.
     indexEntries(history, revisions);
@@ -104,7 +104,7 @@ export async function load(): Promise<void> {
     commit({
       history,
       revisions,
-      objects,
+      threads,
       lastEventCount: freshness.eventCount ?? null,
     });
   } catch (err) {

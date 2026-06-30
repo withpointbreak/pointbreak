@@ -113,12 +113,12 @@ export function presentTypes(): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// Threads + supersession classification (from /api/objects)
+// Threads + supersession classification (from /api/threads)
 // ---------------------------------------------------------------------------
 
 /** The laid-out supersession threads, or []. */
-export function objectThreads(): Thread[] {
-  return (getState().objects?.threads ?? []) as Thread[];
+export function currentThreads(): Thread[] {
+  return (getState().threads?.threads ?? []) as Thread[];
 }
 
 /** A thread's revision ids in laid-out order (by node y, then x), missing ones last. */
@@ -144,7 +144,7 @@ export function threadRevisionOrder(thread: Thread): string[] {
 export function revisionClassification(
   revisionId: string,
 ): RevisionClassification | null {
-  const map = getState().objects?.revisionClassification;
+  const map = getState().threads?.revisionClassification;
   const raw: unknown = map ? map[revisionId] : undefined;
   if (raw === null || typeof raw !== "object") return null;
   return raw as RevisionClassification;
@@ -407,7 +407,7 @@ export function lensEntryIds(): LensEntry[] {
   }
   if (s.lens === "threads") {
     const ids: LensEntry[] = [];
-    for (const t of objectThreads().filter(threadMatchesRevisionFilters)) {
+    for (const t of currentThreads().filter(threadMatchesRevisionFilters)) {
       for (const r of filteredThreadRevisionIds(t, threadRevisionOrder(t))) {
         ids.push({ kind: "revision", id: r });
       }
@@ -434,7 +434,7 @@ export function revisionExists(id: string): boolean {
 
 /** Whether a revision id appears in any laid-out thread. */
 export function revisionInAnyThread(id: string): boolean {
-  return objectThreads().some((t) => (t.revisions ?? []).includes(id));
+  return currentThreads().some((t) => (t.revisions ?? []).includes(id));
 }
 
 /** Whether an event id exists in the loaded history. */

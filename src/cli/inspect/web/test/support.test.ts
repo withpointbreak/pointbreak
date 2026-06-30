@@ -96,20 +96,47 @@ describe("the fetch mock", () => {
     ).json();
     expect(Array.isArray(revisions.entries)).toBe(true);
 
-    const objects: { threads: unknown[] } = await (
-      await fetch("/api/objects")
+    const threads: { threads: unknown[] } = await (
+      await fetch("/api/threads")
     ).json();
-    expect(Array.isArray(objects.threads)).toBe(true);
+    expect(Array.isArray(threads.threads)).toBe(true);
 
-    const object: Record<string, unknown> = await (
-      await fetch("/api/object?id=rev:sha256:abc")
+    const snapshot: Record<string, unknown> = await (
+      await fetch("/api/snapshots/snap:sha256:abc")
     ).json();
-    expect(object).toBeTypeOf("object");
+    expect(snapshot).toBeTypeOf("object");
 
     const revision: Record<string, unknown> = await (
-      await fetch("/api/revision?id=rev:sha256:abc")
+      await fetch("/api/revisions/rev:sha256:abc")
     ).json();
-    expect(revision).toBeTypeOf("object");
+    expect(revision.revision).toBeTypeOf("object");
+  });
+
+  it("mirrors the server's member matcher (INV-2): list vs member, encoded, empty, deeper", async () => {
+    installFetchMock();
+
+    // Exact list route resolves to the list fixture (has `entries`), not the member.
+    const list: { entries?: unknown[] } = await (
+      await fetch("/api/revisions")
+    ).json();
+    expect(Array.isArray(list.entries)).toBe(true);
+
+    // A percent-encoded member id resolves to the single committed fixture.
+    const encoded = await fetch("/api/snapshots/snap%3Agit%3Asha256%3Aabc");
+    expect(encoded.status).toBe(200);
+
+    // A member with a query string still resolves (the query is stripped).
+    const withHash = await fetch(
+      "/api/snapshots/snap:sha256:abc?contentHash=h",
+    );
+    expect(withHash.status).toBe(200);
+
+    // An empty member (trailing slash) is a 400, like the server's decode_member None.
+    expect((await fetch("/api/revisions/")).status).toBe(400);
+    expect((await fetch("/api/snapshots/")).status).toBe(400);
+
+    // A deeper / multi-segment path is a 404.
+    expect((await fetch("/api/revisions/a/b")).status).toBe(404);
   });
 
   it("serves a 404 for a route with no committed fixture", async () => {

@@ -151,11 +151,11 @@ export function renderDiffOverlay(): Promise<void> {
   // Opening through the manager tears down any prior overlay (palette/help) with
   // no focus restore — the indirection that replaces the served explicit closes.
   open("diff", "#diff-close");
-  // The object endpoint is object-scoped (no revision id on the wire); the revision
+  // The snapshot endpoint is object-scoped (no revision id on the wire); the revision
   // id is recovered from the revisions list for annotation lookup.
-  let objectUrl = `/api/object?id=${encodeURIComponent(objectId)}`;
+  let objectUrl = `/api/snapshots/${encodeURIComponent(objectId)}`;
   if (contentHash)
-    objectUrl += `&contentHash=${encodeURIComponent(contentHash)}`;
+    objectUrl += `?contentHash=${encodeURIComponent(contentHash)}`;
   return fetchJSON(objectUrl)
     .then((artifact) => {
       // A later overlay change may have superseded this fetch.

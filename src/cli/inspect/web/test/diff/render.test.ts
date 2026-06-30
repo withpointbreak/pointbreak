@@ -16,13 +16,13 @@ import {
   renderDiffNavSummary,
   unanchoredReason,
 } from "../../src/diff/render";
-import objectJson from "../fixtures/object.json";
+import snapshotJson from "../fixtures/snapshot.json";
 
 function parse(html: string): Document {
   return new DOMParser().parseFromString(html, "text/html");
 }
 
-const artifact = objectJson as unknown as DiffArtifact;
+const artifact = snapshotJson as unknown as DiffArtifact;
 const libFile = (artifact.snapshot?.files ?? [])[0] as DiffFile;
 
 // A range observation anchored to src/lib.rs:2 on the new side. In the fixture

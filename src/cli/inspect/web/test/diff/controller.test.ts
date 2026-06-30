@@ -5,8 +5,8 @@ import revisionsJson from "../fixtures/revisions.json";
 import { mountInspectorDom, resetDom } from "../support/dom";
 import {
   installFetchMock,
-  resetObjectResponse,
-  setObjectResponse,
+  resetSnapshotResponse,
+  setSnapshotResponse,
   uninstallFetchMock,
 } from "../support/fetch";
 
@@ -49,7 +49,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   uninstallFetchMock();
-  resetObjectResponse();
+  resetSnapshotResponse();
   resetDom();
 });
 
@@ -167,7 +167,7 @@ describe("closeDiff (route-clearing via the router, never a direct render)", () 
 
 describe("lazy file bodies", () => {
   it("fills a collapsed file body on first expand and toggles its disclosure state", async () => {
-    setObjectResponse(syntheticArtifact(12));
+    setSnapshotResponse(syntheticArtifact(12));
     await openCommitted();
     const collapsed = document.querySelector<HTMLElement>(
       '#diff-body .dfile[data-dfile="11"]',

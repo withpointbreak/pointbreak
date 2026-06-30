@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { HistoryDoc, ObjectsDoc, RevisionsDoc } from "../src/store";
+import type { HistoryDoc, RevisionsDoc, ThreadsDoc } from "../src/store";
 import type { HistoryEntry, SearchIndex } from "../src/types";
 import historyJson from "./fixtures/history.json";
-import objectsJson from "./fixtures/objects.json";
 import revisionsJson from "./fixtures/revisions.json";
+import threadsJson from "./fixtures/threads.json";
 
 // `model.ts` is state-reading but DOM-free, so each derivation and filter
 // predicate is exercised over a constructed store: seed the committed `/api/*`
@@ -35,7 +35,7 @@ function seedFixtures(): void {
   store.commit({
     history: historyJson as unknown as HistoryDoc,
     revisions: revisionsJson as unknown as RevisionsDoc,
-    objects: objectsJson as unknown as ObjectsDoc,
+    threads: threadsJson as unknown as ThreadsDoc,
   });
 }
 
@@ -44,7 +44,7 @@ function seedObjects(doc: {
   threads?: unknown[];
   revisionClassification?: Record<string, unknown>;
 }): void {
-  store.commit({ objects: doc as unknown as ObjectsDoc });
+  store.commit({ threads: doc as unknown as ThreadsDoc });
 }
 
 describe("presentTypes", () => {
@@ -68,16 +68,16 @@ describe("presentTypes", () => {
   });
 });
 
-describe("objectThreads", () => {
+describe("currentThreads", () => {
   it("returns the threads from the loaded objects doc", () => {
     seedFixtures();
-    const threads = model.objectThreads();
+    const threads = model.currentThreads();
     expect(threads).toHaveLength(1);
     expect(threads[0]?.revisions).toEqual([REV]);
   });
 
   it("returns an empty list when no objects doc is loaded", () => {
-    expect(model.objectThreads()).toEqual([]);
+    expect(model.currentThreads()).toEqual([]);
   });
 });
 

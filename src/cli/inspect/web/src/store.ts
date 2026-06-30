@@ -38,8 +38,8 @@ export interface RevisionsDoc {
   revisionCount?: number;
 }
 
-/** The `/api/objects` document: the laid-out threads plus the supersession map. */
-export interface ObjectsDoc {
+/** The `/api/threads` document: the laid-out threads plus the supersession map. */
+export interface ThreadsDoc {
   threads: unknown[];
   revisionClassification: Record<string, unknown>;
   // The supersession-thread count the stat row reads (present in the committed fixture).
@@ -65,7 +65,7 @@ export interface Selection {
 export interface State {
   history: HistoryDoc | null;
   revisions: RevisionsDoc | null;
-  objects: ObjectsDoc | null;
+  threads: ThreadsDoc | null;
   // The master-pane projection, serialized into the URL fragment by the router.
   lens: string;
   selected: Selection;
@@ -92,7 +92,7 @@ export interface State {
 const state: State = {
   history: null,
   revisions: null,
-  objects: null,
+  threads: null,
   lens: "timeline",
   selected: { kind: null, id: null },
   enabledTypes: new Set(TYPES.map((t) => t.id)),

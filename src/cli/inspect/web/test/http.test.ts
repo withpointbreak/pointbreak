@@ -43,8 +43,8 @@ describe("fetchJSON", () => {
 
   it("throws an HTTP status error for a non-OK response without an error field", async () => {
     stub(JSON.stringify({ data: 1 }), 500);
-    await expect(fetchJSON("/api/objects")).rejects.toThrow(
-      "/api/objects: HTTP 500",
+    await expect(fetchJSON("/api/threads")).rejects.toThrow(
+      "/api/threads: HTTP 500",
     );
   });
 

@@ -30,7 +30,7 @@ import type { Endorsement } from "./types";
 // ---------------------------------------------------------------------------
 // Wire view types
 //
-// A view over the `/api/revision` fact documents the cards read — only the
+// A view over the `/api/revisions/{id}` fact documents the cards read — only the
 // fields each renderer touches, optional where it tolerates absence. A later
 // plan's detail page imports these to type the records it threads in.
 // ---------------------------------------------------------------------------
@@ -141,7 +141,7 @@ export interface AdapterNote {
   createdAt?: string;
 }
 
-/** The fields the verdict badge/summary read off the `/api/revision` payload. */
+/** The fields the verdict badge/summary read off the `/api/revisions/{id}` payload. */
 export interface RevisionDetail {
   currentAssessment?: VerdictAssessment;
   assessments?: Assessment[];

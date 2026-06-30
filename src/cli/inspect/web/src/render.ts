@@ -46,7 +46,7 @@ let lastMasterLens: string | null = null;
 function renderStats(): void {
   const h = getState().history;
   const r = getState().revisions;
-  const o = getState().objects;
+  const o = getState().threads;
   const events = $("#stat-events");
   if (events) events.textContent = `${h?.eventCount ?? "—"} events`;
   const units = $("#stat-units");

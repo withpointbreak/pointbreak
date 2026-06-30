@@ -24,7 +24,7 @@ import { DEFAULT_OPEN_FILES, LARGE_FILE_ROWS } from "../types";
 // ---------------------------------------------------------------------------
 // Wire view types
 //
-// A view over the `/api/object` snapshot artifact and the review-fact records the
+// A view over the `/api/snapshots/{id}` snapshot artifact and the review-fact records the
 // diff renderer reads — only the fields the renderers touch, optional where they
 // tolerate absence. The controller (a later plan) imports these to type the
 // values it threads into `renderDiff`.

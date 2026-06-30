@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RoutePatch, SerializeSnapshot } from "../src/router";
-import type { HistoryDoc, ObjectsDoc, RevisionsDoc } from "../src/store";
+import type { HistoryDoc, RevisionsDoc, ThreadsDoc } from "../src/store";
 import { mountInspectorDom, resetDom } from "./support/dom";
 
 // The router is the hash grammar plus the navigate/apply choke point. `parseHash`
@@ -436,10 +436,10 @@ describe("applyHash (derive the view from the fragment, repaint via the subscrip
       revisions: {
         entries: [{ revisionId: REV, objectId: "obj:1" }],
       } as unknown as RevisionsDoc,
-      objects: {
+      threads: {
         threads: [{ revisions: [REV] }],
         revisionClassification: {},
-      } as unknown as ObjectsDoc,
+      } as unknown as ThreadsDoc,
     });
   }
 
@@ -470,10 +470,10 @@ describe("applyHash (derive the view from the fragment, repaint via the subscrip
     store.commit({
       history: { entries: [], diagnostics: [] } as unknown as HistoryDoc,
       revisions: { entries: [] } as unknown as RevisionsDoc,
-      objects: {
+      threads: {
         threads: [{ revisions: [REV] }],
         revisionClassification: {},
-      } as unknown as ObjectsDoc,
+      } as unknown as ThreadsDoc,
     });
     mountInspectorDom();
     history.replaceState(
@@ -517,10 +517,10 @@ describe("resolve surfaces the live-state diagnostic for reserved links", () => 
     store.commit({
       history: { entries: [], diagnostics: [] } as unknown as HistoryDoc,
       revisions: { entries: [] } as unknown as RevisionsDoc,
-      objects: {
+      threads: {
         threads: [],
         revisionClassification: {},
-      } as unknown as ObjectsDoc,
+      } as unknown as ThreadsDoc,
     });
     mountInspectorDom();
     const patch = router.resolve(router.parseHash("#/list?asof=2026", PT));

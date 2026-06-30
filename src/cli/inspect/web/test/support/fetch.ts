@@ -5,20 +5,19 @@
 // in the path under test. Append-only shared surface: extend with new routes here.
 
 import historyJson from "../fixtures/history.json";
-import objectJson from "../fixtures/object.json";
-import objectsJson from "../fixtures/objects.json";
 import revisionJson from "../fixtures/revision.json";
 import revisionsJson from "../fixtures/revisions.json";
+import snapshotJson from "../fixtures/snapshot.json";
+import threadsJson from "../fixtures/threads.json";
 
-// The committed fixtures keyed by request pathname (the query string is ignored:
-// `/api/object?id=…` and `/api/revision?id=…` resolve to the single-resource
-// fixtures regardless of which id is requested).
+// The exact-path collection/list routes, keyed by request pathname. The path-member
+// routes (`/api/revisions/{id}`, `/api/snapshots/{id}`) are dispatched separately
+// below; their id member is ignored (any id resolves to the single committed
+// fixture), mirroring how the old `?id=` mock ignored the query.
 const FIXTURES: Record<string, unknown> = {
   "/api/history": historyJson,
   "/api/revisions": revisionsJson,
-  "/api/objects": objectsJson,
-  "/api/object": objectJson,
-  "/api/revision": revisionJson,
+  "/api/threads": threadsJson,
 };
 
 // The freshness probe is not a captured fixture (it is the cheap event-count
@@ -43,19 +42,19 @@ export function resetFreshnessResponse(): void {
   freshness = DEFAULT_FRESHNESS;
 }
 
-// The single-resource `/api/object` artifact defaults to the committed fixture; a
-// diff-controller test overrides it to drive a synthetic snapshot (e.g. a
-// many-file accordion the single-file fixture cannot exercise).
-let objectResponse: unknown = objectJson;
+// The single-resource `/api/snapshots/{id}` artifact defaults to the committed
+// fixture; a diff-controller test overrides it to drive a synthetic snapshot (e.g.
+// a many-file accordion the single-file fixture cannot exercise).
+let snapshotResponse: unknown = snapshotJson;
 
-/** Override the `/api/object` response the mock returns (synthetic-snapshot tests). */
-export function setObjectResponse(payload: unknown): void {
-  objectResponse = payload;
+/** Override the `/api/snapshots/{id}` response the mock returns (synthetic-snapshot tests). */
+export function setSnapshotResponse(payload: unknown): void {
+  snapshotResponse = payload;
 }
 
-/** Restore the default `/api/object` response (the committed object fixture). */
-export function resetObjectResponse(): void {
-  objectResponse = objectJson;
+/** Restore the default `/api/snapshots/{id}` response (the committed snapshot fixture). */
+export function resetSnapshotResponse(): void {
+  snapshotResponse = snapshotJson;
 }
 
 /** The request target as a string, accepting the full `fetch` input union. */
@@ -70,28 +69,60 @@ function pathnameOf(input: RequestInfo | URL): string {
   return new URL(urlOf(input), "http://inspector.test").pathname;
 }
 
-const mockFetch: typeof fetch = (input) => {
-  const pathname = pathnameOf(input);
-  if (pathname === "/api/freshness") {
-    return Promise.resolve(
-      new Response(JSON.stringify(freshness), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-    );
-  }
-  const data = pathname === "/api/object" ? objectResponse : FIXTURES[pathname];
-  if (data === undefined) {
-    return Promise.resolve(
-      new Response(`no fixture for ${pathname}`, { status: 404 }),
-    );
-  }
+/** A JSON `200` response. */
+function json(data: unknown): Promise<Response> {
   return Promise.resolve(
     new Response(JSON.stringify(data), {
       status: 200,
       headers: { "content-type": "application/json" },
     }),
   );
+}
+
+/** An error response with a JSON body, mirroring the server's `{ error }` shape. */
+function errorResponse(status: number, message: string): Promise<Response> {
+  return Promise.resolve(
+    new Response(JSON.stringify({ error: message }), {
+      status,
+      headers: { "content-type": "application/json" },
+    }),
+  );
+}
+
+/**
+ * Classify a path under a member `prefix`, mirroring the server's
+ * `path_member`/`decode_member` route decisions:
+ * - `{ kind: "member", id }` — a single non-empty segment (→ 200 fixture);
+ * - `{ kind: "empty" }` — a trailing slash with no id (→ 400, like `decode_member` None);
+ * - `null` — not under `prefix`, or a deeper/multi-segment path (→ caller falls through to 404).
+ */
+function classifyMember(
+  pathname: string,
+  prefix: string,
+): { kind: "member"; id: string } | { kind: "empty" } | null {
+  if (!pathname.startsWith(prefix)) return null;
+  const rest = pathname.slice(prefix.length);
+  if (rest === "") return { kind: "empty" };
+  if (rest.includes("/")) return null;
+  return { kind: "member", id: rest };
+}
+
+const mockFetch: typeof fetch = (input) => {
+  const pathname = pathnameOf(input);
+  if (pathname === "/api/freshness") return json(freshness);
+  for (const [prefix, fixture] of [
+    ["/api/snapshots/", snapshotResponse],
+    ["/api/revisions/", revisionJson],
+  ] as const) {
+    const m = classifyMember(pathname, prefix);
+    if (m?.kind === "member") return json(fixture);
+    if (m?.kind === "empty") return errorResponse(400, "missing id");
+    // null → not this prefix (or deeper); keep checking, then fall through to 404.
+  }
+  const data = FIXTURES[pathname];
+  if (data === undefined)
+    return errorResponse(404, `no fixture for ${pathname}`);
+  return json(data);
 };
 
 // `null` is the "not installed" sentinel; the `=== null` guards narrow it away on

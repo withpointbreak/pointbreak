@@ -1,6 +1,6 @@
 // The detail pane: the `#detail` projection of the single selection. It paints
 // the event detail (identity table + readback + body + raw payload), the revision
-// composite page (the on-demand `/api/revision` fetch mounting the pure `cards`
+// composite page (the on-demand `/api/revisions/{id}` fetch mounting the pure `cards`
 // renderers), and the state-bound `staleFactSectionContext` fed into the pure
 // `cards.factSection`. Ported from the served app.js detail cluster (`renderDetail`
 // / `renderUnitPage` → `renderRevisionPage` / `openUnit` → `openRevision` /
@@ -67,10 +67,10 @@ import { getState } from "./store";
 import { type EntryBase, type HistoryEntry, typeLabel } from "./types";
 
 // ---------------------------------------------------------------------------
-// The /api/revision composite-page document (the fields the page reads)
+// The /api/revisions/{id} composite-page document (the fields the page reads)
 // ---------------------------------------------------------------------------
 
-/** The revision record on the `/api/revision` document (keyed on `id`, not `revisionId`). */
+/** The revision record on the `/api/revisions/{id}` document (keyed on `id`, not `revisionId`). */
 interface RevisionPageRevision {
   id?: string;
   base?: EntryBase;
@@ -90,7 +90,7 @@ interface RevisionPageSummary {
   adapterNoteCount?: number;
 }
 
-/** The `/api/revision` composite document the revision page projects. */
+/** The `/api/revisions/{id}` composite document the revision page projects. */
 interface RevisionPageDoc extends RevisionDetail {
   revision?: RevisionPageRevision;
   summary?: RevisionPageSummary;
@@ -205,7 +205,7 @@ export function staleFactSectionContext(revisionId: string): string {
   return `<p class="${CLASS.factStaleContext}">superseded by ${successors.map(linkify).join(" ")}</p>`;
 }
 
-/** Paint `#detail` with a revision's composite page from the `/api/revision` document. */
+/** Paint `#detail` with a revision's composite page from the `/api/revisions/{id}` document. */
 export function renderRevisionPage(d: RevisionPageDoc): void {
   const ru = d.revision ?? {};
   const base = ru.base ?? {};
@@ -297,7 +297,7 @@ export async function openRevision(revisionId: string): Promise<void> {
   if (el) el.innerHTML = `<p class="${CLASS.upEmpty}">loading…</p>`;
   try {
     const d = await fetchJSON(
-      `/api/revision?id=${encodeURIComponent(revisionId)}`,
+      `/api/revisions/${encodeURIComponent(revisionId)}`,
     );
     // A later selection change may have superseded this fetch.
     const sel = getState().selected;

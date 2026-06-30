@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { HistoryDoc, ObjectsDoc, RevisionsDoc } from "../src/store";
+import type { HistoryDoc, RevisionsDoc, ThreadsDoc } from "../src/store";
 import historyJson from "./fixtures/history.json";
-import objectsJson from "./fixtures/objects.json";
 import revisionsJson from "./fixtures/revisions.json";
+import threadsJson from "./fixtures/threads.json";
 import { mountInspectorDom, resetDom } from "./support/dom";
 import {
   installFetchMock,
-  resetObjectResponse,
+  resetSnapshotResponse,
   uninstallFetchMock,
 } from "./support/fetch";
 
@@ -43,14 +43,14 @@ beforeEach(async () => {
   store.commit({
     history: historyJson as unknown as HistoryDoc,
     revisions: revisionsJson as unknown as RevisionsDoc,
-    objects: objectsJson as unknown as ObjectsDoc,
+    threads: threadsJson as unknown as ThreadsDoc,
   });
   render.initControls();
 });
 
 afterEach(() => {
   uninstallFetchMock();
-  resetObjectResponse();
+  resetSnapshotResponse();
   resetDom();
 });
 

@@ -45,7 +45,7 @@ describe("load", () => {
     const s = store.getState();
     expect(s.history?.entries.length).toBe(8);
     expect(s.revisions?.entries.length).toBe(1);
-    expect(s.objects?.threads.length).toBe(1);
+    expect(s.threads?.threads.length).toBe(1);
   });
 
   it("seeds the freshness baseline from the event-count marker", async () => {

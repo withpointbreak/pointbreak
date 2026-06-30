@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { HistoryDoc, ObjectsDoc, RevisionsDoc } from "../src/store";
+import type { HistoryDoc, RevisionsDoc, ThreadsDoc } from "../src/store";
 import { TYPES } from "../src/types";
 import historyJson from "./fixtures/history.json";
-import objectsJson from "./fixtures/objects.json";
 import revisionsJson from "./fixtures/revisions.json";
+import threadsJson from "./fixtures/threads.json";
 
 // The store is a module singleton (one `state` object, one subscriber set), just
 // like the served app.js. Reset the module registry before each test so every
@@ -21,7 +21,7 @@ describe("getState defaults", () => {
     const s = store.getState();
     expect(s.history).toBeNull();
     expect(s.revisions).toBeNull();
-    expect(s.objects).toBeNull();
+    expect(s.threads).toBeNull();
     expect(s.lens).toBe("timeline");
     expect(s.selected).toEqual({ kind: null, id: null });
     expect(s.filterText).toBe("");
@@ -63,12 +63,12 @@ describe("commit applies patches", () => {
     store.commit({
       history: historyJson as unknown as HistoryDoc,
       revisions: revisionsJson as unknown as RevisionsDoc,
-      objects: objectsJson as unknown as ObjectsDoc,
+      threads: threadsJson as unknown as ThreadsDoc,
     });
     const s = store.getState();
     expect(s.history?.entries.length ?? 0).toBeGreaterThan(0);
     expect(s.revisions?.entries.length ?? 0).toBeGreaterThan(0);
-    expect(Array.isArray(s.objects?.threads)).toBe(true);
+    expect(Array.isArray(s.threads?.threads)).toBe(true);
   });
 });
 

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Thread } from "../src/model";
-import type { HistoryDoc, ObjectsDoc, RevisionsDoc } from "../src/store";
+import type { HistoryDoc, RevisionsDoc, ThreadsDoc } from "../src/store";
 import historyJson from "./fixtures/history.json";
 import revisionsJson from "./fixtures/revisions.json";
 import { mountInspectorDom, resetDom } from "./support/dom";
@@ -256,7 +256,7 @@ describe("keyboard stepping order follows the rendered DAG order", () => {
   it("threads-lens stepping visits revisions in rendered DAG order, not insertion order", () => {
     store.commit({
       revisions: revisionsJson as unknown as RevisionsDoc,
-      objects: { threads: [FORK] } as unknown as ObjectsDoc,
+      threads: { threads: [FORK] } as unknown as ThreadsDoc,
       lens: "threads",
       selected: { kind: null, id: null },
     });
@@ -272,7 +272,7 @@ describe("keyboard stepping visits only the filtered revision set", () => {
   it("skips a revision excluded by the active object filter (list and threads lenses)", () => {
     store.commit({
       revisions: FILTERED_REVISIONS as unknown as RevisionsDoc,
-      objects: { threads: [FILTERED_THREAD] } as unknown as ObjectsDoc,
+      threads: { threads: [FILTERED_THREAD] } as unknown as ThreadsDoc,
       filterObject: KO1,
       lens: "list",
       selected: { kind: null, id: null },

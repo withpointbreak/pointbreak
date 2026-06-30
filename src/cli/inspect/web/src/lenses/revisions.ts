@@ -17,8 +17,8 @@ import { $ } from "../dom";
 import { escapeHtml } from "../escape";
 import { fmtDateTime } from "../format";
 import {
+  currentThreads,
   matchesRevisionFilters,
-  objectThreads,
   overviewForRevision,
   renderThreadRevisionOverview,
   supersessionBadge,
@@ -104,7 +104,7 @@ export function renderRevisions(): void {
   const el = $("#revisions");
   if (!el) return;
   const state = getState();
-  const threads = objectThreads().filter(threadMatchesRevisionFilters);
+  const threads = currentThreads().filter(threadMatchesRevisionFilters);
   if (!threads.length) {
     el.innerHTML = `<p class="${CLASS.empty}" style="color:var(--fg-dim)">${
       state.filterText || state.filterObject

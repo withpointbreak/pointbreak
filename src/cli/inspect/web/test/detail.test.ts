@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { HistoryDoc, ObjectsDoc, RevisionsDoc } from "../src/store";
+import type { HistoryDoc, RevisionsDoc, ThreadsDoc } from "../src/store";
 import historyJson from "./fixtures/history.json";
-import objectsJson from "./fixtures/objects.json";
 import revisionsJson from "./fixtures/revisions.json";
+import threadsJson from "./fixtures/threads.json";
 import { mountInspectorDom, resetDom } from "./support/dom";
 import {
   installFetchMock,
-  resetObjectResponse,
+  resetSnapshotResponse,
   uninstallFetchMock,
 } from "./support/fetch";
 
@@ -54,14 +54,14 @@ beforeEach(async () => {
   store.commit({
     history: historyJson as unknown as HistoryDoc,
     revisions: revisionsJson as unknown as RevisionsDoc,
-    objects: objectsJson as unknown as ObjectsDoc,
+    threads: threadsJson as unknown as ThreadsDoc,
   });
   detail.initControls();
 });
 
 afterEach(() => {
   uninstallFetchMock();
-  resetObjectResponse();
+  resetSnapshotResponse();
   resetDom();
 });
 
@@ -184,7 +184,7 @@ describe("staleFactSectionContext (state-bound, fed into the pure factSection)",
   it("repeats the superseded-by context near each fact section of a stale revision", async () => {
     // Mark the captured revision superseded so its facts carry the stale context.
     store.commit({
-      objects: {
+      threads: {
         threads: [],
         revisionClassification: {
           [REV]: {
@@ -193,7 +193,7 @@ describe("staleFactSectionContext (state-bound, fed into the pure factSection)",
             supersedes: [],
           },
         },
-      } as unknown as ObjectsDoc,
+      } as unknown as ThreadsDoc,
     });
     store.commit({ selected: { kind: "revision", id: REV } });
     await detail.openRevision(REV);
@@ -214,7 +214,7 @@ describe("staleFactSectionContext (state-bound, fed into the pure factSection)",
   it("computes the stale context string directly from state", () => {
     expect(detail.staleFactSectionContext(REV)).toBe("");
     store.commit({
-      objects: {
+      threads: {
         threads: [],
         revisionClassification: {
           [REV]: {
@@ -223,7 +223,7 @@ describe("staleFactSectionContext (state-bound, fed into the pure factSection)",
             supersedes: [],
           },
         },
-      } as unknown as ObjectsDoc,
+      } as unknown as ThreadsDoc,
     });
     const context = detail.staleFactSectionContext(REV);
     expect(context).toContain("fact-stale-context");
