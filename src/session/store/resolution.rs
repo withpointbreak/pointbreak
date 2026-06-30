@@ -72,6 +72,18 @@ impl ReadStore {
     pub(crate) fn backend(&self) -> &StoreBackend {
         self.resolution.backend()
     }
+
+    /// Inject a resolved read store over an explicit backend — the test-only seam
+    /// that lets a unit test drive a read surface over the injection-only
+    /// in-memory backend (which `resolve_read_store` never selects, since the
+    /// repo-path resolver always yields the local backend). `store_dir` is the
+    /// path the file-only helpers would use; in-memory reads never touch it.
+    #[cfg(test)]
+    pub(crate) fn for_test(store_dir: PathBuf, backend: StoreBackend) -> Self {
+        ReadStore {
+            resolution: StoreResolution { store_dir, backend },
+        }
+    }
 }
 
 /// The read seam: read surfaces resolve their store here. With one default store

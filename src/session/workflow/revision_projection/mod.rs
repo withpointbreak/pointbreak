@@ -1,15 +1,19 @@
 use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 
 use crate::error::Result;
-use crate::model::{DiffSnapshot, EventId, ReviewId};
-use crate::session::assessment::{AssessmentProjectionOptions, project_assessments};
+use crate::model::{DiffSnapshot, EventId, ReviewId, RevisionId};
+use crate::session::assessment::{
+    AssessmentProjectionOptions, AssessmentView, CurrentAssessmentView, project_assessments,
+};
 use crate::session::event::ShoreEvent;
 use crate::session::input_request::{
-    InputRequestProjectionOptions, InputRequestStatusFilter, project_input_requests,
+    InputRequestProjectionOptions, InputRequestStatusFilter, InputRequestView,
+    project_input_requests,
 };
 use crate::session::observation::{
-    CurrentRevisionContext, ObservationProjectionOptions, RevisionScope, RevisionSelection,
-    project_observations, resolve_revision, validated_track_id,
+    CurrentRevisionContext, ObservationProjectionOptions, ObservationView, ResolvedRevision,
+    RevisionScope, RevisionSelection, project_observations, resolve_revision, validated_track_id,
 };
 use crate::session::projection::cosignature::{
     CosignatureIndex, endorsement_readbacks, enrich_endorser_attributes,
@@ -18,10 +22,14 @@ use crate::session::projection::{
     ArtifactRemovalProjection, RemovalOperativeStatus, skipped_to_diagnostics,
 };
 use crate::session::state::{ProjectionDiagnostic, SessionState};
-use crate::session::store::resolution::resolve_read_store;
-use crate::session::workflow::{ValidationCheckProjectionOptions, project_validation_checks};
+use crate::session::store::backend::StoreBackend;
+use crate::session::store::resolution::{ReadStore, resolve_read_store};
+use crate::session::workflow::{
+    ValidationCheckProjectionOptions, ValidationCheckView, project_validation_checks,
+};
 use crate::session::{
-    EventStore, RevisionCommitRangeProjection, RevisionCommitRangeView, verify_event_signature,
+    EventStore, RemovalPolicy, RevisionCommitRangeProjection, RevisionCommitRangeView, TrustSet,
+    verify_event_signature,
 };
 
 mod adapter_notes;
@@ -37,7 +45,7 @@ pub use self::identity::{
     MemberReadback, RevisionProjectionIdentity, RevisionProjectionSummary, RevisionShowFilters,
     RevisionShowOptions, RevisionShowResult, SnapshotContentState,
 };
-use self::resolving::selected_revision_capture;
+use self::resolving::{enumerate_revision_identities, selected_revision_capture};
 pub use self::rows::{RevisionProjectionRow, SnapshotOrder};
 use self::rows::{
     build_adapter_note_rows, build_assessment_rows, build_input_request_rows,
@@ -63,6 +71,37 @@ const SNAPSHOT_CONTENT_REMOVED_TARGET_MISSING: &str = "snapshot_content_removed_
 /// A capture re-binds a content hash that carries an operative removal.
 const IDENTITY_REUSED_AFTER_REMOVAL: &str = "identity_reused_after_removal";
 
+/// The store-wide read prefix shared by `show_revision` and the overview batch:
+/// the single event-log read plus the projections that own their data (not the
+/// borrowing `CosignatureIndex`). Each caller builds its own `cosig_index` from
+/// `events` locally, so the borrow lives on the caller's stack rather than inside
+/// this owned struct (which would be self-referential and would not compile).
+struct StoreWideRead {
+    events: Vec<ShoreEvent>,
+    removal: ArtifactRemovalProjection,
+    skip_diagnostics: Vec<ProjectionDiagnostic>,
+}
+
+/// Resolve and fold the event log once: the lenient/strict branch matching
+/// `show_revision`, the skip diagnostics for the display path, and the
+/// `ArtifactRemovalProjection`. The `CosignatureIndex` is deliberately *not*
+/// built here — it borrows `events`, so each caller builds it locally.
+fn load_store_wide_read(read_store: &ReadStore, read_for_display: bool) -> Result<StoreWideRead> {
+    let store = EventStore::from_backend(read_store.backend());
+    let (events, skip_diagnostics) = if read_for_display {
+        let (events, skipped) = store.list_events_lenient()?;
+        (events, skipped_to_diagnostics(skipped))
+    } else {
+        (store.list_events()?, Vec::new())
+    };
+    let removal = ArtifactRemovalProjection::from_events(&events)?;
+    Ok(StoreWideRead {
+        events,
+        removal,
+        skip_diagnostics,
+    })
+}
+
 pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult> {
     let read_store = resolve_read_store(&options.repo)?;
     let track_id = options
@@ -70,13 +109,11 @@ pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult>
         .as_deref()
         .map(validated_track_id)
         .transpose()?;
-    let store = EventStore::from_backend(read_store.backend());
-    let (events, skip_diagnostics) = if options.read_for_display {
-        let (events, skipped) = store.list_events_lenient()?;
-        (events, skipped_to_diagnostics(skipped))
-    } else {
-        (store.list_events()?, Vec::new())
-    };
+    let StoreWideRead {
+        events,
+        removal,
+        skip_diagnostics,
+    } = load_store_wide_read(&read_store, options.read_for_display)?;
     // The `--revision` seed is a head seed (forward-resolving); an exact request
     // (the inspector addressing a specific revision by id, e.g. a superseded DAG
     // node) resolves the id directly instead.
@@ -91,10 +128,10 @@ pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult>
         RevisionScope::default(),
     )?;
     let revision = selected_revision_capture(&events, &resolved)?;
-    let removal = ArtifactRemovalProjection::from_events(&events)?;
-    // Built once near the removal projection and shared downstream: the
-    // suppression decision, the claim diagnostics, and the endorsement readback
-    // block all read this one index (do not build a second).
+    // Built once from the shared read and shared downstream: the suppression
+    // decision, the claim diagnostics, and the endorsement readback block all read
+    // this one index (do not build a second). It borrows `events`, so it lives on
+    // this stack frame, not inside `StoreWideRead`.
     let cosig_index = CosignatureIndex::build(&events)?;
     // The bound hash's operative status is decided once here so the same decision
     // drives both suppression and the claim diagnostics.
@@ -382,37 +419,601 @@ pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult>
     })
 }
 
+/// Inputs for [`show_revision_overviews`], the single-pass batch behind the
+/// inspector's `/api/revisions` overview cards. It mirrors the slice of
+/// [`RevisionShowOptions`] the overview path actually reads: `trust_set` and
+/// `removal_policy` drive `operative_status` (the snapshot suppression that sets
+/// `file_count`/`row_count`), and `read_for_display` selects the lenient vs
+/// strict read. The verification-policy / actor-attributes / delegation-map
+/// inputs are deliberately absent — they feed only the per-event readback and the
+/// principal diagnostics, neither of which a [`RevisionOverview`] carries.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RevisionOverviewsOptions {
+    pub(super) repo: PathBuf,
+    pub(super) trust_set: TrustSet,
+    pub(super) removal_policy: RemovalPolicy,
+    pub(super) read_for_display: bool,
+}
+
+impl RevisionOverviewsOptions {
+    pub fn new(repo: impl AsRef<Path>) -> Self {
+        Self {
+            repo: repo.as_ref().to_path_buf(),
+            trust_set: TrustSet::default(),
+            removal_policy: RemovalPolicy::default(),
+            read_for_display: false,
+        }
+    }
+
+    /// Supply the reader's trust set; it drives the operative-removal decision
+    /// behind a revision's `file_count`/`row_count`.
+    pub fn with_trust_set(mut self, trust_set: TrustSet) -> Self {
+        self.trust_set = trust_set;
+        self
+    }
+
+    /// Supply the render-time removal policy (default `PossessionOrTrusted`).
+    pub fn with_removal_policy(mut self, removal_policy: RemovalPolicy) -> Self {
+        self.removal_policy = removal_policy;
+        self
+    }
+
+    /// Read for a human-facing surface: skip a retired/unsupported event and
+    /// surface it as a diagnostic instead of hard-failing the read. The inspector
+    /// overview path opts in, matching the singular `show_revision` it replaces.
+    pub fn with_read_for_display(mut self, value: bool) -> Self {
+        self.read_for_display = value;
+        self
+    }
+}
+
+/// The lean per-revision overview the inspector's `/api/revisions` cards read:
+/// exactly the projection slice `revision_overview_document` consumes (the
+/// summary counts, the current assessment, and the observation / input-request /
+/// assessment / validation / adapter-note views that drive the attention counts
+/// and latest-activity). It carries none of `show_revision`'s member readbacks,
+/// rows, commit range, or diagnostics — the batch never builds them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RevisionOverview {
+    pub summary: RevisionProjectionSummary,
+    pub current_assessment: CurrentAssessmentView,
+    pub observations: Vec<ObservationView>,
+    pub input_requests: Vec<InputRequestView>,
+    pub assessments: Vec<AssessmentView>,
+    pub validation_checks: Vec<ValidationCheckView>,
+    pub adapter_notes: Vec<AdapterNoteView>,
+}
+
+/// Batch the per-revision overview for every captured revision in one store-wide
+/// pass. This replaces the inspector's N+1 — `show_revision` once per revision,
+/// each re-reading and re-folding the whole event log — with a single
+/// `list_events_lenient` plus one `ArtifactRemovalProjection`/`CosignatureIndex`,
+/// then the same per-revision projections `show_revision` runs, minus the
+/// member-readback verification loop and the `SessionState`/commit-range/
+/// diagnostics assembly the overview never reads.
+pub fn show_revision_overviews(
+    options: RevisionOverviewsOptions,
+) -> Result<BTreeMap<RevisionId, RevisionOverview>> {
+    let read_store = resolve_read_store(&options.repo)?;
+    revision_overviews_from_store(
+        &read_store,
+        &options.repo,
+        &options.trust_set,
+        options.removal_policy,
+        options.read_for_display,
+    )
+}
+
+/// The store-injected core of [`show_revision_overviews`]: the single event-log
+/// read happens here, so a test can drive it over an in-memory backend and prove
+/// the log is read once for the whole batch (not `revision_count + 1` times). The
+/// repo-path entry resolves the local backend and delegates here.
+fn revision_overviews_from_store(
+    read_store: &ReadStore,
+    repo: &Path,
+    trust_set: &TrustSet,
+    removal_policy: RemovalPolicy,
+    read_for_display: bool,
+) -> Result<BTreeMap<RevisionId, RevisionOverview>> {
+    // The single read for the whole batch, via the same prefix `show_revision`
+    // uses. The overview never surfaces diagnostics, so the skip diagnostics are
+    // discarded. `cosig_index` borrows `events`, so it is built locally here, on
+    // this stack frame.
+    let StoreWideRead {
+        events,
+        removal,
+        skip_diagnostics: _,
+    } = load_store_wide_read(read_store, read_for_display)?;
+    let cosig_index = CosignatureIndex::build(&events)?;
+
+    let mut overviews = BTreeMap::new();
+    for revision in enumerate_revision_identities(&events)? {
+        let overview = build_revision_overview(
+            read_store.backend(),
+            repo,
+            &events,
+            &revision,
+            trust_set,
+            removal_policy,
+            &removal,
+            &cosig_index,
+        )?;
+        overviews.insert(revision.id.clone(), overview);
+    }
+    Ok(overviews)
+}
+
+/// The per-revision tail, the same one `show_revision` runs for the single
+/// revision it resolves: resolve the bound snapshot (an operative removal empties
+/// it), run the same five projections, and recompute the summary the same way. It
+/// omits the member-readback loop and the `SessionState`/commit-range/diagnostics
+/// assembly — none of which a [`RevisionOverview`] carries.
+#[allow(clippy::too_many_arguments)]
+fn build_revision_overview(
+    backend: &StoreBackend,
+    repo: &Path,
+    events: &[ShoreEvent],
+    revision: &RevisionProjectionIdentity,
+    trust_set: &TrustSet,
+    removal_policy: RemovalPolicy,
+    removal: &ArtifactRemovalProjection,
+    cosig_index: &CosignatureIndex<'_>,
+) -> Result<RevisionOverview> {
+    let resolved = ResolvedRevision {
+        journal_id: revision.journal_id.clone(),
+        revision_id: revision.revision_id.clone(),
+        object_id: revision.object_id.clone(),
+        object_artifact_content_hash: revision.object_artifact_content_hash.clone(),
+    };
+    let bound_status = removal.operative_status(
+        &revision.object_artifact_content_hash,
+        trust_set,
+        removal_policy,
+        cosig_index,
+    )?;
+    let snapshot_content = resolve_snapshot_content(repo, revision, bound_status)?;
+    let (snapshot, removed_snapshot_content_hash) = match snapshot_content {
+        SnapshotContent::Present(snapshot) => (snapshot, None),
+        SnapshotContent::SuppressedPresent { content_hash }
+        | SnapshotContent::PhysicallyRemoved { content_hash } => (
+            DiffSnapshot::new(
+                ReviewId::new(revision.journal_id.as_str()),
+                revision.object_id.clone(),
+                Vec::new(),
+            ),
+            Some(content_hash),
+        ),
+    };
+    // The overview reads only counts, titles, statuses, and timestamps — never a
+    // hydrated body — so `include_body` is false on every projection, matching the
+    // current overview path (which never sets `with_include_body`).
+    let observations = project_observations(ObservationProjectionOptions {
+        backend,
+        events,
+        resolved: &resolved,
+        track_filter: None,
+        file_filter: None,
+        tag_filters: &[],
+        include_body: false,
+    })?;
+    let input_requests = project_input_requests(InputRequestProjectionOptions {
+        backend,
+        events,
+        resolved: &resolved,
+        track_filter: None,
+        mode_filter: None,
+        file_filter: None,
+        status_filter: InputRequestStatusFilter::All,
+        include_body: false,
+    })?;
+    let (current_assessment, assessments) = project_assessments(AssessmentProjectionOptions {
+        backend: Some(backend),
+        events,
+        resolved: &resolved,
+        track_filter: None,
+        include_summary: false,
+        include_all: true,
+    })?;
+    let validation_checks = project_validation_checks(ValidationCheckProjectionOptions {
+        backend,
+        events,
+        revision_id: &resolved.revision_id,
+        track_filter: None,
+        status_filter: None,
+        include_body: false,
+    })?;
+    let adapter_notes = project_adapter_notes(events, backend, &snapshot, false)?;
+
+    // Recompute the summary exactly as `show_revision` does: the snapshot rows seed
+    // `file_count` + `snapshot_remainder_row_count`, the five narrative builders
+    // seed `narrative_row_count`, and `row_count` is their sum. The built rows are
+    // only counted here (the overview keeps no rows), so they are discarded.
+    let (_snapshot_rows, mut summary) = if removed_snapshot_content_hash.is_some() {
+        (Vec::new(), RevisionProjectionSummary::default())
+    } else {
+        build_snapshot_rows(&snapshot, &revision.id)
+    };
+    let mut narrative_rows = Vec::new();
+    narrative_rows.extend(build_observation_rows(&observations));
+    summary.observation_count = observations.len();
+    narrative_rows.extend(build_input_request_rows(&input_requests));
+    summary.input_request_count = input_requests.len();
+    narrative_rows.extend(build_assessment_rows(&assessments));
+    summary.assessment_count = assessments.len();
+    narrative_rows.extend(build_validation_rows(&validation_checks));
+    summary.validation_check_count = validation_checks.len();
+    narrative_rows.extend(build_adapter_note_rows(&adapter_notes, &revision.id));
+    summary.adapter_note_count = adapter_notes.len();
+    summary.narrative_row_count = narrative_rows.len();
+    summary.row_count = summary.narrative_row_count + summary.snapshot_remainder_row_count;
+
+    Ok(RevisionOverview {
+        summary,
+        current_assessment,
+        observations,
+        input_requests,
+        assessments,
+        validation_checks,
+        adapter_notes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
+    use std::sync::Arc;
 
     use super::rows::RevisionProjectionRowKind;
     use super::*;
     use crate::canonical_hash::sha256_json_prefixed;
     use crate::crypto::{EventSignatureBytes, EventSigner};
     use crate::model::{
-        DiffSnapshot, EngagementId, ObjectId, ReviewId, RevisionId, ValidationCheckId,
-        ValidationStatus, ValidationTarget, ValidationTrigger,
+        DiffSnapshot, EngagementId, JournalId, ObjectId, ReviewEndpoint, ReviewId, RevisionId,
+        RevisionSource, ValidationCheckId, ValidationStatus, ValidationTarget, ValidationTrigger,
+        WorktreeCaptureMode,
     };
     use crate::session::event::{
         ArtifactRemovedPayload, EventSignature, EventTarget, EventToBeSigned, EventType,
-        IngestProvenance, IngestVia, InputRequestReasonCode, InputRequestResponseOutcome,
-        ReviewAssessment, Revision, ShoreEvent, ValidationCheckRecordedPayload, WorkObjectProposal,
-        WorkObjectProposedPayload, Writer, event_signature_pre_authentication_encoding,
+        GitProvenance, IngestProvenance, IngestVia, InputRequestReasonCode,
+        InputRequestResponseOutcome, ReviewAssessment, Revision, ShoreEvent,
+        ValidationCheckRecordedPayload, WorkObjectProposal, WorkObjectProposedPayload, Writer,
+        event_signature_pre_authentication_encoding,
     };
     use crate::session::signing::test_support::DeterministicSigner;
+    use crate::session::store::backend::{InMemoryStore, StoreBackend};
     use crate::session::{
         AssessmentAddOptions, AssessmentShowOptions, CaptureOptions, CaptureResult,
         CurrentAssessmentStatus, EventStore, ImportNotesOptions, InputRequestListOptions,
         InputRequestOpenOptions, InputRequestRespondOptions, InputRequestStatus,
         InputRequestStatusFilter, ObservationAddOptions, ObservationListOptions,
-        ObservationTargetSelector, RemovalPolicy, capture_worktree_review, import_notes,
-        list_input_requests, list_observations, open_input_request, record_assessment,
-        record_observation, respond_input_request, show_assessments,
+        ObservationTargetSelector, RemovalPolicy, RevisionListOptions, capture_worktree_review,
+        import_notes, list_input_requests, list_observations, list_revisions, open_input_request,
+        record_assessment, record_observation, respond_input_request, show_assessments,
     };
+
+    // ---- Overview batch: golden-equality + single-read invariants ----
+
+    /// The batch overview for every captured revision must equal the overview
+    /// derived from today's per-revision `show_revision` path — the byte-exactness
+    /// oracle that lets the N+1 fix refactor safely (complements the wire-parity
+    /// gate). The fixture spans several revisions with observations, an input
+    /// request + response, an assessment, passed + failed validation checks, and
+    /// one operatively-removed snapshot (so the `operative_status` → empty-rows
+    /// path is exercised).
+    #[test]
+    fn show_revision_overviews_matches_per_revision_show_revision() {
+        let repo = build_multi_revision_fixture();
+        let trust = TrustSet::default();
+        let policy = RemovalPolicy::default();
+
+        let expected: BTreeMap<RevisionId, RevisionOverview> = list_revision_ids(repo.path())
+            .into_iter()
+            .map(|id| {
+                let overview = overview_from_show_revision(repo.path(), &id, &trust, policy);
+                (id, overview)
+            })
+            .collect();
+
+        let actual = show_revision_overviews(
+            RevisionOverviewsOptions::new(repo.path())
+                .with_trust_set(trust.clone())
+                .with_removal_policy(policy)
+                .with_read_for_display(true),
+        )
+        .unwrap();
+
+        assert_eq!(actual, expected);
+        // The fixture genuinely spanned multiple revisions and the removed-snapshot
+        // path, so the equality above is not vacuous.
+        assert_eq!(expected.len(), 3);
+        assert!(
+            expected
+                .values()
+                .any(|overview| overview.summary.file_count == 0),
+            "the operatively-removed revision contributes an empty snapshot"
+        );
+    }
+
+    /// The N+1 is gone: the batch reads the event log exactly once for the whole
+    /// batch, not `revision_count + 1` times (the old per-revision loop). Driven
+    /// over an injected in-memory backend whose journal counts its listings; the
+    /// revisions carry operative removals so the snapshot path short-circuits to a
+    /// stat and never reads an event byte the bare store lacks.
+    #[test]
+    fn revision_overviews_from_store_reads_the_log_once() {
+        // A real git repo backs `resolve_read_store(repo)` in the snapshot path; the
+        // events themselves come from the injected in-memory store.
+        let repo = modified_repo();
+        let (read_store, store) = in_memory_read_store_with_removed_revisions(repo.path(), 5);
+
+        let overviews = revision_overviews_from_store(
+            &read_store,
+            repo.path(),
+            &TrustSet::default(),
+            RemovalPolicy::default(),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(overviews.len(), 5);
+        assert_eq!(
+            store.list_event_entries_call_count(),
+            1,
+            "the batch reads the log once, not revision_count + 1"
+        );
+    }
+
+    fn build_multi_revision_fixture() -> TestRepo {
+        let repo = TestRepo::new();
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+        repo.commit_all("base");
+
+        // Revision A: an observation, an open input request, an accepted assessment.
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+        let a = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        record_observation(
+            ObservationAddOptions::new(repo.path())
+                .with_revision_id(a.revision_id.clone())
+                .with_track("agent:codex")
+                .with_title("A observation"),
+        )
+        .unwrap();
+        open_input_request(
+            InputRequestOpenOptions::new(repo.path())
+                .with_revision_id(a.revision_id.clone())
+                .with_track("agent:codex")
+                .with_title("A decision")
+                .with_reason_code(InputRequestReasonCode::ManualDecisionRequired),
+        )
+        .unwrap();
+        record_assessment(
+            AssessmentAddOptions::new(repo.path())
+                .with_revision_id(a.revision_id.clone())
+                .with_track("human:kevin")
+                .with_assessment(ReviewAssessment::Accepted)
+                .with_summary("ship A"),
+        )
+        .unwrap();
+
+        // Revision B: an input request + response, a passed and a failed check.
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+        let b = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        let request = open_input_request(
+            InputRequestOpenOptions::new(repo.path())
+                .with_revision_id(b.revision_id.clone())
+                .with_track("agent:codex")
+                .with_title("B decision")
+                .with_reason_code(InputRequestReasonCode::ManualDecisionRequired),
+        )
+        .unwrap();
+        respond_input_request(
+            InputRequestRespondOptions::new(repo.path(), request.input_request_id.clone())
+                .with_outcome(InputRequestResponseOutcome::Approved)
+                .with_reason("ok"),
+        )
+        .unwrap();
+        record_validation_with_status(
+            repo.path(),
+            &b,
+            "validation:sha256:b-pass",
+            ValidationStatus::Passed,
+        );
+        record_validation_with_status(
+            repo.path(),
+            &b,
+            "validation:sha256:b-fail",
+            ValidationStatus::Failed,
+        );
+
+        // Revision C: an operatively-removed snapshot (operative_status → empty rows).
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 4 }\n");
+        let c = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        record_artifact_removed(repo.path(), &c.object_artifact_content_hash);
+
+        repo
+    }
+
+    /// Derive an overview from today's singular `show_revision` path, the same way
+    /// the inspector's overview path does, so the batch can be checked against it.
+    fn overview_from_show_revision(
+        repo: &Path,
+        id: &RevisionId,
+        trust: &TrustSet,
+        policy: RemovalPolicy,
+    ) -> RevisionOverview {
+        let result = show_revision(
+            RevisionShowOptions::new(repo)
+                .with_revision_id(id.clone())
+                .with_exact(true)
+                .with_read_for_display(true)
+                .with_trust_set(trust.clone())
+                .with_removal_policy(policy),
+        )
+        .unwrap();
+        RevisionOverview {
+            summary: result.summary,
+            current_assessment: result.current_assessment,
+            observations: result.observations,
+            input_requests: result.input_requests,
+            assessments: result.assessments,
+            validation_checks: result.validation_checks,
+            adapter_notes: result.adapter_notes,
+        }
+    }
+
+    fn list_revision_ids(repo: &Path) -> Vec<RevisionId> {
+        list_revisions(RevisionListOptions::new(repo).with_read_for_display(true))
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|entry| entry.revision_id)
+            .collect()
+    }
+
+    fn record_validation_with_status(
+        repo: &Path,
+        capture: &CaptureResult,
+        validation_check_id: &str,
+        status: ValidationStatus,
+    ) {
+        let exit_code = Some(if matches!(status, ValidationStatus::Passed) {
+            0
+        } else {
+            1
+        });
+        let mut target = EventTarget::for_revision(
+            JournalId::new("journal:default"),
+            capture.revision_id.clone(),
+            None,
+        );
+        target.track_id = Some(crate::model::TrackId::new("agent:codex"));
+        let event = ShoreEvent::new(
+            EventType::ValidationCheckRecorded,
+            format!("validation_check_recorded:{validation_check_id}"),
+            target,
+            Writer::shore_local("0.1.0"),
+            ValidationCheckRecordedPayload {
+                validation_check_id: ValidationCheckId::new(validation_check_id),
+                target: ValidationTarget::Revision {
+                    revision_id: capture.revision_id.clone(),
+                },
+                check_name: "cargo test".to_owned(),
+                command: None,
+                status,
+                exit_code,
+                trigger: ValidationTrigger::Manual,
+                source_fingerprint: None,
+                summary: Some("ran".to_owned()),
+                summary_content_type: Default::default(),
+                summary_artifact_path: None,
+                summary_byte_size: Some(3),
+                summary_content_hash: Some("sha256:summary".to_owned()),
+                started_at: None,
+                completed_at: Some("2026-05-10T00:00:00Z".to_owned()),
+                log_artifact_content_hashes: Vec::new(),
+            },
+            "2026-05-10T00:00:00Z",
+        )
+        .unwrap();
+        EventStore::open(resolved_store_dir(repo))
+            .record_event_once(&event)
+            .unwrap();
+    }
+
+    /// Seed an injection-only in-memory store with `n` captured revisions, each
+    /// carrying an operative (locally-authored, unsigned) `ArtifactRemoved` so the
+    /// overview snapshot path short-circuits to a stat — no artifact bytes are
+    /// read from a store that does not hold them. Returns the read store plus the
+    /// shared `InMemoryStore` whose journal counts its listings.
+    fn in_memory_read_store_with_removed_revisions(
+        repo: &Path,
+        n: usize,
+    ) -> (ReadStore, Arc<InMemoryStore>) {
+        let store = InMemoryStore::new();
+        let backend = StoreBackend::Memory(Arc::clone(&store));
+        let event_store = EventStore::from_backend(&backend);
+        let journal_id = JournalId::new("journal:synthetic");
+        for index in 0..n {
+            let revision_id = RevisionId::new(format!("review-unit:sha256:r{index:02}"));
+            let object_id = ObjectId::new(format!("obj:sha256:o{index:02}"));
+            let content_hash = format!("sha256:{:064x}", index + 1);
+            event_store
+                .record_event_once(&synthetic_revision_proposed_event(
+                    &journal_id,
+                    &revision_id,
+                    &object_id,
+                    &content_hash,
+                    &format!("2026-05-10T00:00:{index:02}Z"),
+                ))
+                .unwrap();
+            event_store
+                .record_event_once(&synthetic_removal_event(
+                    &content_hash,
+                    &format!("2026-05-10T01:00:{index:02}Z"),
+                ))
+                .unwrap();
+        }
+        let read_store = ReadStore::for_test(resolved_store_dir(repo), backend);
+        (read_store, store)
+    }
+
+    fn synthetic_revision_proposed_event(
+        journal_id: &JournalId,
+        revision_id: &RevisionId,
+        object_id: &ObjectId,
+        content_hash: &str,
+        occurred_at: &str,
+    ) -> ShoreEvent {
+        ShoreEvent::new(
+            EventType::WorkObjectProposed,
+            format!("work_object_proposed:{}", revision_id.as_str()),
+            EventTarget::for_revision(journal_id.clone(), revision_id.clone(), None),
+            Writer::shore_local("0.1.0"),
+            WorkObjectProposedPayload {
+                engagement_id: EngagementId::new(format!("engagement:{}", revision_id.as_str())),
+                work_object: WorkObjectProposal::Revision {
+                    revision: Revision {
+                        id: revision_id.clone(),
+                        object_id: object_id.clone(),
+                        git_provenance: Some(GitProvenance {
+                            source: RevisionSource::GitWorktree {
+                                mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
+                                include_untracked: true,
+                            },
+                            base: ReviewEndpoint::GitCommit {
+                                commit_oid: "0".repeat(40),
+                                tree_oid: "tree".to_owned(),
+                            },
+                            target: ReviewEndpoint::GitWorkingTree {
+                                worktree_root: "/synthetic/worktree".to_owned(),
+                            },
+                        }),
+                    },
+                    object_artifact_content_hash: content_hash.to_owned(),
+                    supersedes: vec![],
+                },
+            },
+            occurred_at,
+        )
+        .unwrap()
+    }
+
+    fn synthetic_removal_event(content_hash: &str, occurred_at: &str) -> ShoreEvent {
+        ShoreEvent::new(
+            EventType::ArtifactRemoved,
+            ArtifactRemovedPayload::idempotency_key(content_hash),
+            EventTarget::for_journal(JournalId::new("journal:synthetic")),
+            Writer::shore_local("0.1.0"),
+            ArtifactRemovedPayload {
+                content_hash: content_hash.to_owned(),
+            },
+            occurred_at,
+        )
+        .unwrap()
+    }
 
     #[test]
     fn show_revision_errors_when_no_revision_is_captured() {

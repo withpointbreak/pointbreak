@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use super::{ContentStore, Journal, JournalEntry};
@@ -27,12 +28,22 @@ use crate::storage::{CreateOutcome, RemoveOutcome};
 pub(crate) struct InMemoryStore {
     events: Mutex<HashMap<String, Vec<u8>>>,
     blobs: Mutex<HashMap<String, Vec<u8>>>,
+    /// How many times any journal handle over this store has listed the event log.
+    /// Lets a test prove the overview batch reads the log once for the whole batch
+    /// (not `revision_count + 1` times — the N+1 it replaces).
+    list_event_entries_calls: AtomicUsize,
 }
 
 impl InMemoryStore {
     /// A fresh, empty in-memory store.
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// Test observability for the single-read invariant: the running count of
+    /// `list_event_entries` calls served by every journal handle over this store.
+    pub(crate) fn list_event_entries_call_count(&self) -> usize {
+        self.list_event_entries_calls.load(Ordering::Relaxed)
     }
 
     /// A journal handle sharing this store's event map.
@@ -79,6 +90,11 @@ impl Journal for InMemoryJournal {
     }
 
     fn list_event_entries(&self) -> Result<Vec<JournalEntry>> {
+        // Count every listing so a test can assert the overview batch reads the
+        // log once for the whole batch, not once per revision.
+        self.store
+            .list_event_entries_calls
+            .fetch_add(1, Ordering::Relaxed);
         // Each entry carries `sha256(idempotency_key)` as its content-address
         // digest — the same stem the file backend names files by — and the list
         // is ordered by that digest, matching the file backend's hash-sorted

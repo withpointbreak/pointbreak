@@ -78,9 +78,9 @@ pub use workflow::{
     RefFilterMode, ReloadDiagnostic, ReloadDiagnosticCode, ReloadOutcome, RemoveOptions,
     RemoveResult, RemoveSelector, RemovedContent, ReviewHistoryEntry, ReviewHistoryFilters,
     ReviewHistoryOptions, ReviewHistoryResult, RevisionListEntry, RevisionListOptions,
-    RevisionListResult, RevisionProjectionIdentity, RevisionProjectionRow,
-    RevisionProjectionSummary, RevisionShowFilters, RevisionShowOptions, RevisionShowResult,
-    SkippedRemoval, SnapshotContentState, SnapshotOrder, StoreMigrateResult,
+    RevisionListResult, RevisionOverview, RevisionOverviewsOptions, RevisionProjectionIdentity,
+    RevisionProjectionRow, RevisionProjectionSummary, RevisionShowFilters, RevisionShowOptions,
+    RevisionShowResult, SkippedRemoval, SnapshotContentState, SnapshotOrder, StoreMigrateResult,
     StoreStatusArtifactInventory, StoreStatusInventory, StoreStatusOptions, StoreStatusResult,
     StoreStatusRevisionObject, StoreStatusSensitivity, StoreStatusSensitivityFinding, SweepOutcome,
     SweptBlob, ValidationAddOptions, ValidationAddResult, ValidationCheckView,
@@ -92,7 +92,8 @@ pub use workflow::{
     list_validation_checks, migrate_store, migrate_store_to_common_dir, open_input_request,
     record_assessment, record_event_signature, record_observation, record_validation_check,
     referenced_artifacts, reload_session, remove_content, respond_input_request, review_history,
-    show_assessments, show_revision, store_status, withdraw_commit, withdraw_ref,
+    show_assessments, show_revision, show_revision_overviews, store_status, withdraw_commit,
+    withdraw_ref,
 };
 pub(in crate::session) use workflow::{assessment, input_request, observation};
 

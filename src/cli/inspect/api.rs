@@ -18,9 +18,10 @@ use shoreline::session::event::ReviewAssessment;
 use shoreline::session::{
     CurrentAssessmentStatus, EventVerificationPolicy, InputRequestStatus, LivenessEnrichment,
     ProjectionDiagnostic, ReviewHistoryEntry, ReviewHistoryOptions, RevisionListEntry,
-    RevisionListOptions, RevisionShowOptions, RevisionShowResult, SessionState, SupersessionView,
-    enrich_liveness, list_revisions, read_bound_object_artifact, read_events_for_display,
-    read_object_artifact, review_history, show_revision,
+    RevisionListOptions, RevisionOverview, RevisionOverviewsOptions, RevisionShowOptions,
+    SessionState, SupersessionView, enrich_liveness, list_revisions, read_bound_object_artifact,
+    read_events_for_display, read_object_artifact, review_history, show_revision,
+    show_revision_overviews,
 };
 
 #[derive(Serialize)]
@@ -352,43 +353,46 @@ fn to_unit_entry_documents(
         .collect()
 }
 
-/// Server-side overview seam for `/api/revisions`. This currently reuses the
-/// per-revision projection path and can be replaced by a cached projection
-/// without changing the client-facing JSON contract (#255).
+/// Server-side overview seam for `/api/revisions`. One store-wide pass
+/// (`show_revision_overviews`) builds every revision's overview, replacing the
+/// per-revision N+1 (`show_revision` once per revision, each re-reading and
+/// re-folding the whole event log). The client-facing JSON contract is unchanged;
+/// an `eventSetHash`-keyed projection cache can still layer on top (#255).
 fn revision_overviews(
     repo: &Path,
     entries: &[RevisionListEntry],
 ) -> Result<BTreeMap<String, RevisionOverviewDocument>, String> {
-    let mut overviews = BTreeMap::new();
+    // The overview slice reads no member readbacks or principal diagnostics, so the
+    // verification-policy / actor-attributes / delegation-map inputs are dropped;
+    // the trust set is retained — it drives the operative-removal decision behind
+    // file_count/row_count.
+    let overviews = show_revision_overviews(
+        RevisionOverviewsOptions::new(repo)
+            .with_read_for_display(true)
+            .with_trust_set(crate::cli::review::common::discover_trust_set(repo)),
+    )
+    .map_err(|error| {
+        tracing::debug!(error = %error, "inspect_unit_overviews_failed");
+        format!("revision overviews not available: {error}")
+    })?;
 
+    let mut documents = BTreeMap::new();
     for entry in entries {
         let revision_id = entry.revision_id.as_str().to_owned();
-        let mut show_options = RevisionShowOptions::new(repo)
-            .with_revision_id(entry.revision_id.clone())
-            .with_exact(true)
-            .with_read_for_display(true)
-            .with_verification_policy(EventVerificationPolicy::advisory())
-            .with_trust_set(crate::cli::review::common::discover_trust_set(repo))
-            .with_actor_attributes(crate::cli::review::common::discover_actor_attributes(repo));
-        if let Some(map) = crate::cli::review::common::discover_delegation_map(repo) {
-            show_options = show_options.with_delegation_map(map);
-        }
-
-        let result = show_revision(show_options).map_err(|error| {
-            tracing::debug!(error = %error, revision = revision_id, "inspect_unit_overview_failed");
-            format!("revision overview not available: {revision_id}")
-        })?;
-        overviews.insert(
+        let overview = overviews
+            .get(&entry.revision_id)
+            .ok_or_else(|| format!("revision overview not available: {revision_id}"))?;
+        documents.insert(
             revision_id,
-            revision_overview_document(&result, &entry.captured_at),
+            revision_overview_document(overview, &entry.captured_at),
         );
     }
 
-    Ok(overviews)
+    Ok(documents)
 }
 
 fn revision_overview_document(
-    result: &RevisionShowResult,
+    result: &RevisionOverview,
     captured_at: &str,
 ) -> RevisionOverviewDocument {
     let summary = &result.summary;
@@ -452,7 +456,7 @@ fn current_assessment_includes_follow_up(status: &CurrentAssessmentStatus) -> bo
 }
 
 fn latest_revision_activity(
-    result: &RevisionShowResult,
+    result: &RevisionOverview,
     captured_at: &str,
 ) -> Option<RevisionLatestActivityDocument> {
     let mut latest = Some(RevisionLatestActivityDocument {
