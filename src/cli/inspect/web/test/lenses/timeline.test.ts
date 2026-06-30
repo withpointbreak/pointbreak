@@ -208,4 +208,23 @@ describe("renderTimeline virtualization", () => {
     timeline.renderTimeline();
     expect(rowIds().length).toBe(5);
   });
+
+  it("does not blank when the filtered list shrinks below a deep scroll position", () => {
+    const entries = manyEntries(500);
+    // Three entries get a distinct type that is the only one enabled after narrowing.
+    for (let i = 0; i < 3; i++)
+      entries[i].eventType = "review_assessment_recorded";
+    seedHistory(entries);
+    const list = mockViewport(500, 0);
+    timeline.renderTimeline();
+    // Scroll deep into the full 500-row list.
+    (list as unknown as { scrollTop: number }).scrollTop = 450 * timeline.ROW_H;
+    list.dispatchEvent(new Event("scroll"));
+    expect(rowIds().length).toBeGreaterThan(0);
+    // Narrow to three matches without moving the (now out-of-range) scroll position.
+    store.commit({ enabledTypes: new Set(["review_assessment_recorded"]) });
+    timeline.renderTimeline();
+    // The three matches must render, not a blank list under a giant top spacer.
+    expect(rowIds().length).toBe(3);
+  });
 });

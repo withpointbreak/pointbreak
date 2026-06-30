@@ -3293,10 +3293,12 @@ click to open the revision page">
   __name(timelineRows, "timelineRows");
   function visibleRange(scrollTop, viewportH, rowCount) {
     if (viewportH <= 0 || rowCount === 0) return { start: 0, end: rowCount };
-    const start = Math.max(0, Math.floor(scrollTop / ROW_H) - OVERSCAN);
+    const maxScroll = Math.max(0, rowCount * ROW_H - viewportH);
+    const clamped = Math.min(Math.max(0, scrollTop), maxScroll);
+    const start = Math.max(0, Math.floor(clamped / ROW_H) - OVERSCAN);
     const end = Math.min(
       rowCount,
-      Math.ceil((scrollTop + viewportH) / ROW_H) + OVERSCAN
+      Math.ceil((clamped + viewportH) / ROW_H) + OVERSCAN
     );
     return { start, end };
   }

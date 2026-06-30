@@ -68,10 +68,16 @@ export function visibleRange(
   rowCount: number,
 ): { start: number; end: number } {
   if (viewportH <= 0 || rowCount === 0) return { start: 0, end: rowCount };
-  const start = Math.max(0, Math.floor(scrollTop / ROW_H) - OVERSCAN);
+  // Clamp to the content's real max scroll. After the list shrinks (a filter or
+  // search narrows the result set) the viewport's scrollTop can be far past the
+  // new content height; without this clamp `start` would exceed `rowCount` and
+  // the window would be empty, painting a blank list under a giant spacer.
+  const maxScroll = Math.max(0, rowCount * ROW_H - viewportH);
+  const clamped = Math.min(Math.max(0, scrollTop), maxScroll);
+  const start = Math.max(0, Math.floor(clamped / ROW_H) - OVERSCAN);
   const end = Math.min(
     rowCount,
-    Math.ceil((scrollTop + viewportH) / ROW_H) + OVERSCAN,
+    Math.ceil((clamped + viewportH) / ROW_H) + OVERSCAN,
   );
   return { start, end };
 }
