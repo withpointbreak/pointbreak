@@ -728,7 +728,7 @@
   var state = {
     history: null,
     revisions: null,
-    objects: null,
+    threads: null,
     lens: "timeline",
     selected: { kind: null, id: null },
     enabledTypes: new Set(TYPES.map((t) => t.id)),
@@ -796,20 +796,20 @@
   async function load() {
     try {
       const freshness = await fetchJSON("/api/freshness");
-      const [historyRaw, revisionsRaw, objectsRaw] = await Promise.all([
+      const [historyRaw, revisionsRaw, threadsRaw] = await Promise.all([
         fetchJSON("/api/history"),
         fetchJSON("/api/revisions"),
-        fetchJSON("/api/objects")
+        fetchJSON("/api/threads")
       ]);
       const history2 = historyRaw;
       const revisions = revisionsRaw;
-      const objects = objectsRaw;
+      const threads = threadsRaw;
       indexEntries(history2, revisions);
       showError(null);
       commit({
         history: history2,
         revisions,
-        objects,
+        threads,
         lastEventCount: freshness.eventCount ?? null
       });
     } catch (err) {
@@ -1151,10 +1151,10 @@
     return ordered;
   }
   __name(presentTypes, "presentTypes");
-  function objectThreads() {
-    return getState().objects?.threads ?? [];
+  function currentThreads() {
+    return getState().threads?.threads ?? [];
   }
-  __name(objectThreads, "objectThreads");
+  __name(currentThreads, "currentThreads");
   function threadRevisionOrder(thread) {
     const revisions = thread.revisions ?? [];
     const nodes = thread.laidOut?.nodes ?? [];
@@ -1169,7 +1169,7 @@
   }
   __name(threadRevisionOrder, "threadRevisionOrder");
   function revisionClassification(revisionId) {
-    const map = getState().objects?.revisionClassification;
+    const map = getState().threads?.revisionClassification;
     const raw = map ? map[revisionId] : void 0;
     if (raw === null || typeof raw !== "object") return null;
     return raw;
@@ -1370,7 +1370,7 @@
     }
     if (s.lens === "threads") {
       const ids = [];
-      for (const t of objectThreads().filter(threadMatchesRevisionFilters)) {
+      for (const t of currentThreads().filter(threadMatchesRevisionFilters)) {
         for (const r of filteredThreadRevisionIds(t, threadRevisionOrder(t))) {
           ids.push({ kind: "revision", id: r });
         }
@@ -1394,7 +1394,7 @@
   }
   __name(revisionExists, "revisionExists");
   function revisionInAnyThread(id) {
-    return objectThreads().some((t) => (t.revisions ?? []).includes(id));
+    return currentThreads().some((t) => (t.revisions ?? []).includes(id));
   }
   __name(revisionInAnyThread, "revisionInAnyThread");
   function eventExists(id) {
@@ -2009,9 +2009,9 @@
     const nav = $("#diff-nav");
     if (nav) nav.innerHTML = "";
     open("diff", "#diff-close");
-    let objectUrl = `/api/object?id=${encodeURIComponent(objectId)}`;
+    let objectUrl = `/api/snapshots/${encodeURIComponent(objectId)}`;
     if (contentHash)
-      objectUrl += `&contentHash=${encodeURIComponent(contentHash)}`;
+      objectUrl += `?contentHash=${encodeURIComponent(contentHash)}`;
     return fetchJSON(objectUrl).then((artifact) => {
       if (state2.diff !== objectId || state2.diffHash !== contentHash) return;
       const annotations = revisionId ? annotationsForRevision(revisionId) : [];
@@ -2439,7 +2439,7 @@
     if (el) el.innerHTML = `<p class="${CLASS.upEmpty}">loading…</p>`;
     try {
       const d = await fetchJSON(
-        `/api/revision?id=${encodeURIComponent(revisionId)}`
+        `/api/revisions/${encodeURIComponent(revisionId)}`
       );
       const sel = getState().selected;
       if (sel.kind !== "revision" || sel.id !== revisionId) return;
@@ -3154,7 +3154,7 @@ click to open the revision page">
     const el = $("#revisions");
     if (!el) return;
     const state2 = getState();
-    const threads = objectThreads().filter(threadMatchesRevisionFilters);
+    const threads = currentThreads().filter(threadMatchesRevisionFilters);
     if (!threads.length) {
       el.innerHTML = `<p class="${CLASS.empty}" style="color:var(--fg-dim)">${state2.filterText || state2.filterObject ? "No revision threads match the current filters." : "No captured revisions in this store."}</p>`;
       return;
@@ -3330,7 +3330,7 @@ click to open the revision page">
   function renderStats() {
     const h = getState().history;
     const r = getState().revisions;
-    const o = getState().objects;
+    const o = getState().threads;
     const events = $("#stat-events");
     if (events) events.textContent = `${h?.eventCount ?? "—"} events`;
     const units = $("#stat-units");
