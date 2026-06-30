@@ -19,6 +19,8 @@ import {
   factStatusClass,
   REF_KINDS,
   refClass,
+  TOKEN_KINDS,
+  tokClass,
   VERDICT_ASSESSMENTS,
   VERIFY_STATUSES,
   verdictClass,
@@ -134,6 +136,12 @@ describe("dynamic-family vocabulary arrays (derived from their producers)", () =
     expect([...DIFF_ROW_KINDS]).toEqual(["added", "removed", "context"]);
   });
 
+  test("TOKEN_KINDS and tokClass", () => {
+    expect(tokClass("keyword")).toBe("tok tok-keyword");
+    expect(TOKEN_KINDS).toContain("string");
+    expect(TOKEN_KINDS).not.toContain("plain");
+  });
+
   test("DIFF_FILE_STATUSES", () => {
     expect([...DIFF_FILE_STATUSES]).toEqual([
       "added",
@@ -213,6 +221,7 @@ describe("ALL_EMITTABLE_CLASSES", () => {
       [ANNO_KINDS, (k) => annoContainerClass(k)],
       [ANNO_KINDS, (k) => annoKindClass(k)],
       [DIFF_ROW_KINDS, (k) => drowClass(k, false)],
+      [TOKEN_KINDS, (k) => tokClass(k)],
       [DIFF_FILE_STATUSES, (s) => diffStatusClass(s)],
       [VERIFY_STATUSES, (s) => verifyClass(s)],
       [ENDORSE_CLASSES, (c) => endorseClass(c)],

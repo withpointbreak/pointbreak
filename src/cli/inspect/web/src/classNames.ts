@@ -160,6 +160,22 @@ export const ANNO_KINDS = [
 
 export const DIFF_ROW_KINDS = ["added", "removed", "context"] as const;
 
+// The syntax-highlight token kinds the diff renderer wraps in `tok tok-<kind>`
+// spans. `plain` is deliberately absent — gaps between spans are implicitly plain
+// text and never wrapped.
+export const TOKEN_KINDS = [
+  "keyword",
+  "string",
+  "comment",
+  "number",
+  "type",
+  "function",
+  "constant",
+  "operator",
+  "punctuation",
+  "variable",
+] as const;
+
 export const DIFF_FILE_STATUSES = [
   "added",
   "deleted",
@@ -235,6 +251,7 @@ export const REF_KINDS = [
 
 export type AnnoKind = (typeof ANNO_KINDS)[number];
 export type DiffRowKind = (typeof DIFF_ROW_KINDS)[number];
+export type TokenKind = (typeof TOKEN_KINDS)[number];
 export type DiffFileStatus = (typeof DIFF_FILE_STATUSES)[number];
 export type VerifyStatus = (typeof VERIFY_STATUSES)[number];
 export type EndorseClass = (typeof ENDORSE_CLASSES)[number];
@@ -258,6 +275,9 @@ export const annoKindClass = (kind: string): string =>
 /** `drow drow-<kind>[ drow-noted]` — a diff row class (the noted gutter affordance). */
 export const drowClass = (kind: string, noted: boolean): string =>
   `drow drow-${kind}${noted ? " drow-noted" : ""}`;
+
+/** `tok tok-<kind>` — a syntax-highlight token span class. */
+export const tokClass = (kind: string): string => `tok tok-${kind}`;
 
 /** `dstatus s-<status>` — a diff file's status chip class. */
 export const diffStatusClass = (status: string): string =>
@@ -318,6 +338,7 @@ export const ALL_EMITTABLE_CLASSES: readonly string[] = [
       ...ANNO_KINDS.map((k) => annoContainerClass(k)),
       ...ANNO_KINDS.map((k) => annoKindClass(k)),
       ...DIFF_ROW_KINDS.map((k) => drowClass(k, true)),
+      ...TOKEN_KINDS.map((k) => tokClass(k)),
       ...DIFF_FILE_STATUSES.map((s) => diffStatusClass(s)),
       ...VERIFY_STATUSES.map((s) => verifyClass(s)),
       ...ENDORSE_CLASSES.map((c) => endorseClass(c)),

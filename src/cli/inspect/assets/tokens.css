@@ -48,6 +48,21 @@
   --evt-note: #9aa7b5;       /* review_note_imported (neutral) */
   --evt-validation: #e88fb0; /* validation_check_recorded */
 
+  /* Syntax-highlight token palette — one color per token kind for the diff
+     viewer. Each aliases an existing semantic hue (already AA-tuned for chip text
+     on --bg-row in both themes), so the token colors track the theme through the
+     light-mode overrides of those hues without a second value set here. */
+  --tok-keyword: var(--assess);
+  --tok-string: var(--success);
+  --tok-comment: var(--fg-dim);
+  --tok-number: var(--teal);
+  --tok-type: var(--info);
+  --tok-function: var(--accent);
+  --tok-constant: var(--warning);
+  --tok-operator: var(--fg);
+  --tok-punctuation: var(--fg-dim);
+  --tok-variable: var(--fg);
+
   /* Diff surfaces */
   --diff-add-bg: rgba(70, 170, 110, 0.14);
   --diff-add-fg: #9ae6b4;
