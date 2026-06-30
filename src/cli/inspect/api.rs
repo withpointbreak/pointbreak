@@ -364,12 +364,14 @@ fn revision_overviews(
     repo: &Path,
     entries: &[RevisionListEntry],
 ) -> Result<BTreeMap<String, RevisionOverviewDocument>, String> {
-    // The overview slice reads no member readbacks or principal diagnostics, so the
-    // verification-policy / actor-attributes / delegation-map inputs are dropped;
-    // the trust set is retained — it drives the operative-removal decision behind
-    // file_count/row_count.
+    // Build overviews for exactly the listed entries (orphan-hidden and grouped-away
+    // captures are not among them). The overview slice reads no member readbacks or
+    // principal diagnostics, so the verification-policy / actor-attributes /
+    // delegation-map inputs are dropped; the trust set is retained — it drives the
+    // operative-removal decision behind file_count/row_count.
     let overviews = show_revision_overviews(
         RevisionOverviewsOptions::new(repo)
+            .with_revisions(entries.iter().map(|entry| entry.revision_id.clone()))
             .with_read_for_display(true)
             .with_trust_set(crate::cli::review::common::discover_trust_set(repo)),
     )

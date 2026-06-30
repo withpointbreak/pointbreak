@@ -430,6 +430,7 @@ pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult>
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RevisionOverviewsOptions {
     pub(super) repo: PathBuf,
+    pub(super) revisions: Vec<RevisionId>,
     pub(super) trust_set: TrustSet,
     pub(super) removal_policy: RemovalPolicy,
     pub(super) read_for_display: bool,
@@ -439,10 +440,22 @@ impl RevisionOverviewsOptions {
     pub fn new(repo: impl AsRef<Path>) -> Self {
         Self {
             repo: repo.as_ref().to_path_buf(),
+            revisions: Vec::new(),
             trust_set: TrustSet::default(),
             removal_policy: RemovalPolicy::default(),
             read_for_display: false,
         }
+    }
+
+    /// The revisions to build overviews for. The caller supplies exactly the set
+    /// it will surface — the inspector passes the `list_revisions` entry ids, which
+    /// are a subset of every `WorkObjectProposed` revision (orphan-hidden and
+    /// commit-OID-grouped captures are not listed). Building only this set keeps the
+    /// batch faithful to the per-revision path it replaces, and never resolves a
+    /// snapshot for a revision that never reaches the wire.
+    pub fn with_revisions(mut self, revisions: impl IntoIterator<Item = RevisionId>) -> Self {
+        self.revisions = revisions.into_iter().collect();
+        self
     }
 
     /// Supply the reader's trust set; it drives the operative-removal decision
@@ -498,6 +511,7 @@ pub fn show_revision_overviews(
     revision_overviews_from_store(
         &read_store,
         &options.repo,
+        &options.revisions,
         &options.trust_set,
         options.removal_policy,
         options.read_for_display,
@@ -507,10 +521,13 @@ pub fn show_revision_overviews(
 /// The store-injected core of [`show_revision_overviews`]: the single event-log
 /// read happens here, so a test can drive it over an in-memory backend and prove
 /// the log is read once for the whole batch (not `revision_count + 1` times). The
-/// repo-path entry resolves the local backend and delegates here.
+/// repo-path entry resolves the local backend and delegates here. Builds an
+/// overview for each requested revision found in the log; a requested id with no
+/// capture is skipped (the caller's lookup surfaces a genuine miss).
 fn revision_overviews_from_store(
     read_store: &ReadStore,
     repo: &Path,
+    revisions: &[RevisionId],
     trust_set: &TrustSet,
     removal_policy: RemovalPolicy,
     read_for_display: bool,
@@ -525,20 +542,32 @@ fn revision_overviews_from_store(
         skip_diagnostics: _,
     } = load_store_wide_read(read_store, read_for_display)?;
     let cosig_index = CosignatureIndex::build(&events)?;
+    // Index every captured identity by id once, then build only the requested
+    // revisions. The requested set is the caller's listed entries, a subset of all
+    // captures — building only it never resolves a snapshot for an orphan-hidden or
+    // grouped-away revision the caller will not surface.
+    let identities: BTreeMap<RevisionId, RevisionProjectionIdentity> =
+        enumerate_revision_identities(&events)?
+            .into_iter()
+            .map(|identity| (identity.id.clone(), identity))
+            .collect();
 
     let mut overviews = BTreeMap::new();
-    for revision in enumerate_revision_identities(&events)? {
+    for revision_id in revisions {
+        let Some(identity) = identities.get(revision_id) else {
+            continue;
+        };
         let overview = build_revision_overview(
             read_store.backend(),
             repo,
             &events,
-            &revision,
+            identity,
             trust_set,
             removal_policy,
             &removal,
             &cosig_index,
         )?;
-        overviews.insert(revision.id.clone(), overview);
+        overviews.insert(revision_id.clone(), overview);
     }
     Ok(overviews)
 }
@@ -709,16 +738,18 @@ mod tests {
         let trust = TrustSet::default();
         let policy = RemovalPolicy::default();
 
-        let expected: BTreeMap<RevisionId, RevisionOverview> = list_revision_ids(repo.path())
-            .into_iter()
+        let ids = list_revision_ids(repo.path());
+        let expected: BTreeMap<RevisionId, RevisionOverview> = ids
+            .iter()
             .map(|id| {
-                let overview = overview_from_show_revision(repo.path(), &id, &trust, policy);
-                (id, overview)
+                let overview = overview_from_show_revision(repo.path(), id, &trust, policy);
+                (id.clone(), overview)
             })
             .collect();
 
         let actual = show_revision_overviews(
             RevisionOverviewsOptions::new(repo.path())
+                .with_revisions(ids)
                 .with_trust_set(trust.clone())
                 .with_removal_policy(policy)
                 .with_read_for_display(true),
@@ -747,11 +778,13 @@ mod tests {
         // A real git repo backs `resolve_read_store(repo)` in the snapshot path; the
         // events themselves come from the injected in-memory store.
         let repo = modified_repo();
-        let (read_store, store) = in_memory_read_store_with_removed_revisions(repo.path(), 5);
+        let (read_store, store, revision_ids) =
+            in_memory_read_store_with_removed_revisions(repo.path(), 5);
 
         let overviews = revision_overviews_from_store(
             &read_store,
             repo.path(),
+            &revision_ids,
             &TrustSet::default(),
             RemovalPolicy::default(),
             true,
@@ -926,16 +959,18 @@ mod tests {
     /// Seed an injection-only in-memory store with `n` captured revisions, each
     /// carrying an operative (locally-authored, unsigned) `ArtifactRemoved` so the
     /// overview snapshot path short-circuits to a stat — no artifact bytes are
-    /// read from a store that does not hold them. Returns the read store plus the
-    /// shared `InMemoryStore` whose journal counts its listings.
+    /// read from a store that does not hold them. Returns the read store, the
+    /// shared `InMemoryStore` whose journal counts its listings, and the seeded
+    /// revision ids (the set to request overviews for).
     fn in_memory_read_store_with_removed_revisions(
         repo: &Path,
         n: usize,
-    ) -> (ReadStore, Arc<InMemoryStore>) {
+    ) -> (ReadStore, Arc<InMemoryStore>, Vec<RevisionId>) {
         let store = InMemoryStore::new();
         let backend = StoreBackend::Memory(Arc::clone(&store));
         let event_store = EventStore::from_backend(&backend);
         let journal_id = JournalId::new("journal:synthetic");
+        let mut revision_ids = Vec::new();
         for index in 0..n {
             let revision_id = RevisionId::new(format!("review-unit:sha256:r{index:02}"));
             let object_id = ObjectId::new(format!("obj:sha256:o{index:02}"));
@@ -955,9 +990,10 @@ mod tests {
                     &format!("2026-05-10T01:00:{index:02}Z"),
                 ))
                 .unwrap();
+            revision_ids.push(revision_id);
         }
         let read_store = ReadStore::for_test(resolved_store_dir(repo), backend);
-        (read_store, store)
+        (read_store, store, revision_ids)
     }
 
     fn synthetic_revision_proposed_event(
