@@ -264,10 +264,14 @@ impl LivenessBatch {
 
         // Shared fall-through. A commit that is itself a live tip is `Live` — except,
         // in broad mode, a tip that is also an ancestor of another tip is `Merged`
-        // (the merged-before-live order). In integration mode the merged check
-        // already ran, so a tip here is simply `Live`.
+        // (the merged-before-live order). Run that disambiguation unless we are in
+        // *active* narrow mode (an integration ref is set): merge-status passes
+        // `use_integration` even with no ref, and that case is the broad default, so
+        // it must still disambiguate. In active narrow mode the merged check already
+        // ran, so a tip here is simply `Live`.
+        let narrow = use_integration && self.integration.is_some();
         if let Some(tip) = self.tips.iter().find(|tip| tip.oid == commit_oid) {
-            if !use_integration {
+            if !narrow {
                 for other in &self.tips {
                     if other.oid == commit_oid {
                         continue;
@@ -738,6 +742,9 @@ mod tests {
         let direct = enrich_liveness(&view, repo.path(), None).unwrap();
         let batch = LivenessBatch::build(repo.path(), None).unwrap();
         let batched = batch.enrich_broad(repo.path(), &view).unwrap();
+        // merge-status runs `enrich_merge` with no integration ref — that is the broad
+        // default and must disambiguate the merged tip identically, not report it open.
+        let merge = batch.enrich_merge(repo.path(), &view).unwrap();
 
         assert_eq!(
             direct.per_commit[0].condition,
@@ -745,6 +752,7 @@ mod tests {
             "a tip that is an ancestor of another tip is merged"
         );
         assert_eq!(conditions_of(&direct), conditions_of(&batched));
+        assert_eq!(conditions_of(&direct), conditions_of(&merge));
     }
 
     /// Narrow (integration-ref) enrichment must also match the per-entry path: a
