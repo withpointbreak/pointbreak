@@ -105,7 +105,6 @@ impl TuiApp {
     }
 
     /// The syntax tokens for a diff row, or an empty slice when it is unhighlighted.
-    #[allow(dead_code)]
     pub(crate) fn highlights_for(&self, id: &RowId) -> &[TokenSpan] {
         self.highlights.get(id).map(Vec::as_slice).unwrap_or(&[])
     }

@@ -1,9 +1,10 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Text};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use shoreline::dump::{DumpDocument, DumpInputSource};
+use shoreline::highlight::{TokenKind, TokenSpan};
 use shoreline::model::{LineRange, ResolutionStatus, ReviewNoteId, ReviewRow, ReviewRowKind};
 use shoreline::sidecar::ReviewNotesDiagnosticCode;
 
@@ -61,7 +62,6 @@ fn footer(app: &TuiApp) -> Paragraph<'static> {
 
 fn render_stream(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let body_height = area.height.saturating_sub(2) as usize;
-    let selected_row_id = app.cursor().row_id.as_ref();
     let lines = app
         .document()
         .stream
@@ -69,20 +69,159 @@ fn render_stream(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         .iter()
         .skip(app.scroll_top())
         .take(body_height)
-        .map(|row| {
-            let display = DisplayRow::from_review_row(row);
-            let style = if selected_row_id == Some(&row.id) {
-                selected_row_style()
-            } else {
-                row_style(display.kind)
-            };
-            Line::styled(display_text(&display), style)
-        })
+        .map(|row| render_diff_line(app, row))
         .collect::<Vec<_>>();
 
     let paragraph = Paragraph::new(Text::from(lines))
         .block(Block::default().borders(Borders::ALL).title("Review"));
     frame.render_widget(paragraph, area);
+}
+
+/// Build one stream row's rendered line. A selected row uses the single selection style (tokens
+/// suppressed). An unhighlighted row (non-diff, unknown language, or over the size cap) renders
+/// exactly as before. A highlighted diff row becomes a multi-span line: the add/remove signal
+/// moves to a background tint while the code carries syntax foreground.
+fn render_diff_line(app: &TuiApp, row: &ReviewRow) -> Line<'static> {
+    let display = DisplayRow::from_review_row(row);
+    if app.cursor().row_id.as_ref() == Some(&row.id) {
+        return Line::styled(display_text(&display), selected_row_style());
+    }
+    let spans = app.highlights_for(&row.id);
+    if spans.is_empty() {
+        return Line::styled(display_text(&display), row_style(display.kind));
+    }
+    build_highlighted_line(&display, spans, color_depth())
+}
+
+/// Terminal color capability, used to choose between truecolor and named-ANSI palettes.
+#[derive(Clone, Copy)]
+enum ColorDepth {
+    Truecolor,
+    Named,
+}
+
+/// Truecolor only when the terminal advertises it; otherwise the named-ANSI palette (which also
+/// renders acceptably on 16-color terminals). No new dependency — just the `COLORTERM` convention.
+fn color_depth() -> ColorDepth {
+    match std::env::var("COLORTERM").ok().as_deref() {
+        Some("truecolor") | Some("24bit") => ColorDepth::Truecolor,
+        _ => ColorDepth::Named,
+    }
+}
+
+/// Build a highlighted diff row as a prefix span, a gutter span (both carrying the add/remove
+/// signal), and one code span per attributed segment. The segment sweep splits the raw text at the
+/// span boundaries so a later intraline channel can add another attribute without changing this.
+fn build_highlighted_line(
+    display: &DisplayRow,
+    spans: &[TokenSpan],
+    depth: ColorDepth,
+) -> Line<'static> {
+    let base = match diff_bg_tint(display.kind, depth) {
+        Some(bg) => Style::default().bg(bg),
+        None => Style::default(),
+    };
+    let signal_style = match diff_signal_fg(display.kind) {
+        Some(fg) => base.fg(fg),
+        None => base,
+    };
+    let mut out: Vec<Span<'static>> = Vec::new();
+    out.push(Span::styled(
+        format!("{:<4} ", display.prefix),
+        signal_style,
+    ));
+    out.push(Span::styled(format!("{} ", display.gutter), signal_style));
+    append_code_segments(&mut out, &display.text, spans, base, depth);
+    Line::from(out)
+}
+
+/// Append one span per code segment: each token span carries its syntax foreground over `base`, and
+/// the plain gaps between spans carry `base` alone. A malformed span (reversed, out of range, or off
+/// a char boundary) is skipped so the row still renders.
+fn append_code_segments(
+    out: &mut Vec<Span<'static>>,
+    text: &str,
+    spans: &[TokenSpan],
+    base: Style,
+    depth: ColorDepth,
+) {
+    let mut cursor = 0usize;
+    for span in spans {
+        if span.start < cursor
+            || span.end < span.start
+            || span.end > text.len()
+            || !text.is_char_boundary(span.start)
+            || !text.is_char_boundary(span.end)
+        {
+            continue;
+        }
+        if span.start > cursor {
+            out.push(Span::styled(text[cursor..span.start].to_owned(), base));
+        }
+        out.push(Span::styled(
+            text[span.start..span.end].to_owned(),
+            base.fg(token_fg(span.kind, depth)),
+        ));
+        cursor = span.end;
+    }
+    if cursor < text.len() {
+        out.push(Span::styled(text[cursor..].to_owned(), base));
+    }
+}
+
+/// The add/remove signal foreground kept on the prefix and gutter of a highlighted diff row.
+fn diff_signal_fg(kind: DisplayRowKind) -> Option<Color> {
+    match kind {
+        DisplayRowKind::Added => Some(Color::Green),
+        DisplayRowKind::Removed => Some(Color::Red),
+        _ => None,
+    }
+}
+
+/// The subtle background tint for a changed row (truecolor only), freeing the code foreground for
+/// syntax. Named/16-color terminals keep the plain background and rely on the prefix/gutter signal.
+fn diff_bg_tint(kind: DisplayRowKind, depth: ColorDepth) -> Option<Color> {
+    if !matches!(depth, ColorDepth::Truecolor) {
+        return None;
+    }
+    match kind {
+        DisplayRowKind::Added => Some(Color::Rgb(18, 38, 24)),
+        DisplayRowKind::Removed => Some(Color::Rgb(46, 22, 22)),
+        _ => None,
+    }
+}
+
+/// The per-kind syntax foreground. Truecolor echoes the inspector's `--tok-*` hues; the named
+/// palette respects the user's terminal theme and degrades cleanly to 16 colors.
+fn token_fg(kind: TokenKind, depth: ColorDepth) -> Color {
+    match depth {
+        ColorDepth::Truecolor => match kind {
+            TokenKind::Keyword => Color::Rgb(179, 136, 255),
+            TokenKind::String => Color::Rgb(109, 210, 138),
+            TokenKind::Comment => Color::Rgb(154, 165, 179),
+            TokenKind::Number => Color::Rgb(79, 208, 192),
+            TokenKind::Type => Color::Rgb(138, 180, 248),
+            TokenKind::Function => Color::Rgb(90, 169, 230),
+            TokenKind::Constant => Color::Rgb(240, 183, 90),
+            TokenKind::Operator => Color::Rgb(215, 221, 229),
+            TokenKind::Punctuation => Color::Rgb(154, 165, 179),
+            TokenKind::Variable => Color::Rgb(215, 221, 229),
+            TokenKind::Plain => Color::Reset,
+        },
+        ColorDepth::Named => match kind {
+            TokenKind::Keyword => Color::Magenta,
+            TokenKind::String => Color::Green,
+            TokenKind::Comment => Color::DarkGray,
+            TokenKind::Number => Color::Cyan,
+            TokenKind::Type => Color::Yellow,
+            TokenKind::Function => Color::Blue,
+            TokenKind::Constant => Color::LightYellow,
+            TokenKind::Operator => Color::White,
+            TokenKind::Punctuation => Color::Gray,
+            TokenKind::Variable => Color::White,
+            TokenKind::Plain => Color::Reset,
+        },
+    }
 }
 
 fn render_detail(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
@@ -265,8 +404,10 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Buffer;
-    use ratatui::style::Color;
+    use ratatui::style::{Color, Style};
+    use ratatui::text::Span;
     use shoreline::dump::{DumpDocument, DumpInputSource, DumpInputSummary};
+    use shoreline::highlight::{TokenKind, TokenSpan};
     use shoreline::model::{
         Anchor, DiffFile, DiffRow, DiffRowKind, DiffSnapshot, FileId, FileStatus, HunkId,
         LineRange, ObjectId, ResolutionStatus, ReviewHunk, ReviewId, ReviewNote, ReviewNoteId,
@@ -275,7 +416,9 @@ mod tests {
     use shoreline::sidecar::{DiagnosticLevel, ReviewNotesDiagnostic, ReviewNotesDiagnosticCode};
     use shoreline::stream::ViewportSpec;
 
-    use super::render;
+    use super::{
+        ColorDepth, append_code_segments, render, render_diff_line, selected_row_style, token_fg,
+    };
     use crate::tui::app::{TuiAction, TuiApp};
 
     #[test]
@@ -419,6 +562,113 @@ mod tests {
             text.contains("reload failed: boom"),
             "reload error missing; got:\n{text}"
         );
+    }
+
+    #[test]
+    fn highlighted_row_builds_multiple_styled_spans() {
+        // Cursor defaults to the first row (file header), so the .rs code row is unselected.
+        let app = app_with_note(ViewportSpec::new(100, 20));
+        let row = app
+            .document()
+            .stream
+            .rows
+            .iter()
+            .find(|row| row.id == RowId::new("row:0002"))
+            .expect("code row present");
+
+        let line = render_diff_line(&app, row);
+
+        assert!(line.spans.len() > 1);
+        // a code segment carries a syntax foreground, distinct from the gutter/prefix span.
+        assert!(line.spans.iter().any(|span| span.style.fg.is_some()));
+    }
+
+    #[test]
+    fn selected_row_suppresses_tokens() {
+        let mut app = app_with_note(ViewportSpec::new(100, 20));
+        // Move the cursor onto the highlighted code row.
+        while app.cursor().row_id.as_ref() != Some(&RowId::new("row:0002")) {
+            app.handle_action(TuiAction::RowDown);
+        }
+        let row = app
+            .document()
+            .stream
+            .rows
+            .iter()
+            .find(|row| row.id == RowId::new("row:0002"))
+            .expect("code row present");
+
+        let line = render_diff_line(&app, row);
+
+        // The selected row renders as a single selection style with no per-token spans.
+        assert_eq!(line.style, selected_row_style());
+        assert!(line.spans.iter().all(|span| span.style == Style::default()));
+    }
+
+    #[test]
+    fn token_fg_distinguishes_kinds() {
+        assert_eq!(
+            token_fg(TokenKind::Keyword, ColorDepth::Named),
+            Color::Magenta
+        );
+        assert_eq!(token_fg(TokenKind::String, ColorDepth::Named), Color::Green);
+        assert_ne!(
+            token_fg(TokenKind::Keyword, ColorDepth::Named),
+            token_fg(TokenKind::Number, ColorDepth::Named),
+        );
+    }
+
+    #[test]
+    fn append_code_segments_splits_on_adjacent_kinds() {
+        let mut out: Vec<Span<'static>> = Vec::new();
+        append_code_segments(
+            &mut out,
+            "ab",
+            &[
+                TokenSpan {
+                    start: 0,
+                    end: 1,
+                    kind: TokenKind::Keyword,
+                },
+                TokenSpan {
+                    start: 1,
+                    end: 2,
+                    kind: TokenKind::Number,
+                },
+            ],
+            Style::default(),
+            ColorDepth::Named,
+        );
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].content, "a");
+        assert_eq!(out[1].content, "b");
+        assert_eq!(
+            out[0].style.fg,
+            Some(token_fg(TokenKind::Keyword, ColorDepth::Named))
+        );
+        assert_eq!(
+            out[1].style.fg,
+            Some(token_fg(TokenKind::Number, ColorDepth::Named))
+        );
+    }
+
+    #[test]
+    fn append_code_segments_leaves_gaps_plain() {
+        let mut out: Vec<Span<'static>> = Vec::new();
+        append_code_segments(
+            &mut out,
+            "a b",
+            &[TokenSpan {
+                start: 0,
+                end: 1,
+                kind: TokenKind::Keyword,
+            }],
+            Style::default(),
+            ColorDepth::Named,
+        );
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[1].content, " b");
+        assert_eq!(out[1].style.fg, None); // the gap is plain
     }
 
     fn render_to_buffer(app: &TuiApp, width: u16, height: u16) -> Buffer {
