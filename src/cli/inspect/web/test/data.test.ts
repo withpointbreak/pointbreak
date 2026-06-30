@@ -31,14 +31,13 @@ afterEach(() => {
   resetDom();
 });
 
-// The single revision/object the committed fixtures describe, plus the history
-// payload's freshness hash.
+// The single revision/object the committed fixtures describe.
 const REV =
   "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd";
 const OBJ =
   "obj:sha256:38a493d2f09d6fde9d1dcac61a12c4ccc4de42a0b9c6829752d34cc648a9f9d7";
-const HISTORY_HASH =
-  "sha256:e81f297a301ad7d9df6bd90ceeb257511f661b4fc108460e7f2bdc3f76de0164";
+// history.json's eventCount, the marker the freshness baseline seeds from.
+const HISTORY_EVENT_COUNT = 8;
 
 describe("load", () => {
   it("commits history, revisions, and objects to the store", async () => {
@@ -49,11 +48,10 @@ describe("load", () => {
     expect(s.objects?.threads.length).toBe(1);
   });
 
-  it("seeds the freshness baselines from the history payload", async () => {
+  it("seeds the freshness baseline from the event-count marker", async () => {
     await data.load();
     const s = store.getState();
-    expect(s.lastHash).toBe(HISTORY_HASH);
-    expect(s.lastDiagnosticCount).toBe(0);
+    expect(s.lastEventCount).toBe(HISTORY_EVENT_COUNT);
   });
 
   it("indexes every entry before committing — a subscriber never sees an un-indexed entry", async () => {
@@ -129,25 +127,30 @@ describe("pollFreshness", () => {
     expect(refresh?.classList.contains("live")).toBe(false);
   });
 
-  it("reloads and flags the indicator when the event set changed", async () => {
+  it("reloads and flags the indicator when the event-count marker changed", async () => {
     await data.load();
-    setFreshnessResponse({
-      eventSetHash: "sha256:changed",
-      diagnosticCount: 0,
-    });
+    setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT + 1 });
     await data.pollFreshness();
     const refresh = document.querySelector("#refresh");
     expect(refresh?.textContent).toBe("updated");
     expect(refresh?.classList.contains("live")).toBe(true);
-    // The reload re-fetched and re-seeded the baseline from the history payload.
-    expect(store.getState().lastHash).toBe(HISTORY_HASH);
+    // The reload re-seeded the baseline from the freshness probe (the new marker),
+    // so a subsequent poll at the same marker reports unchanged — no reload loop.
+    expect(store.getState().lastEventCount).toBe(HISTORY_EVENT_COUNT + 1);
   });
 
-  it("reloads when only the diagnostic count changed", async () => {
+  it("does not reload when a non-marker field changes but the marker is steady", async () => {
     await data.load();
-    setFreshnessResponse({ eventSetHash: HISTORY_HASH, diagnosticCount: 3 });
+    // The poll keys ONLY on eventCount; an eventSetHash/diagnosticCount that moves
+    // while the marker holds must not trigger a reload (the old diagnostic-count
+    // key would have looped forever against a store carrying diagnostics).
+    setFreshnessResponse({
+      eventCount: HISTORY_EVENT_COUNT,
+      eventSetHash: "sha256:changed",
+      diagnosticCount: 3,
+    });
     await data.pollFreshness();
-    expect(document.querySelector("#refresh")?.textContent).toBe("updated");
+    expect(document.querySelector("#refresh")?.textContent).toBe("watching");
   });
 
   it("marks the indicator stalled when the freshness probe fails", async () => {

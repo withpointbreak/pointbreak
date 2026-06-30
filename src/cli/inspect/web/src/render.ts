@@ -42,7 +42,7 @@ let lastMasterLens: string | null = null;
 // Data-driven surfaces (stats, diagnostics, type facets)
 // ---------------------------------------------------------------------------
 
-/** Paint the topbar stat row from the loaded document counts and the freshness hash. */
+/** Paint the topbar stat row from the loaded document counts and the history event-set hash. */
 function renderStats(): void {
   const h = getState().history;
   const r = getState().revisions;

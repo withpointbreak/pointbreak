@@ -31,8 +31,7 @@ describe("getState defaults", () => {
     expect(s.diff).toBeNull();
     expect(s.diffHash).toBeNull();
     expect(s.focus).toBeNull();
-    expect(s.lastHash).toBeNull();
-    expect(s.lastDiagnosticCount).toBeNull();
+    expect(s.lastEventCount).toBeNull();
   });
 
   it("seeds enabledTypes and seenTypes from every known event type", () => {

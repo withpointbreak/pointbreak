@@ -124,20 +124,15 @@ describe("the fetch mock", () => {
     const def: Record<string, unknown> = await (
       await fetch("/api/freshness")
     ).json();
-    // Defaults to history.json's hash + diagnostic count (so a poll right after
-    // load reports unchanged).
-    expect(def.eventSetHash).toBeTypeOf("string");
-    expect(def.diagnosticCount).toBe(0);
+    // Defaults to history.json's eventCount marker (so a poll right after load
+    // reports unchanged).
+    expect(def.eventCount).toBe(8);
 
-    setFreshnessResponse({
-      eventSetHash: "sha256:changed",
-      diagnosticCount: 2,
-    });
+    setFreshnessResponse({ eventCount: 9 });
     const overridden: Record<string, unknown> = await (
       await fetch("/api/freshness")
     ).json();
-    expect(overridden.eventSetHash).toBe("sha256:changed");
-    expect(overridden.diagnosticCount).toBe(2);
+    expect(overridden.eventCount).toBe(9);
   });
 
   it("uninstall restores the prior global fetch", () => {

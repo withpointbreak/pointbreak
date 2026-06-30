@@ -81,6 +81,20 @@ impl Journal for LocalJournal {
             .collect()
     }
 
+    fn head_marker(&self) -> Result<u64> {
+        // A dirent scan of `events/`, filtered to event files, then counted —
+        // never opening a file. Distinct from `list_event_entries`, which reads
+        // every file's bytes; the marker pays only the directory listing. The same
+        // `is_event_file` filter keeps temp files and stray names out, so the count
+        // matches the listed-entry count without the reads.
+        Ok(self
+            .storage
+            .list_dir(&self.events_dir())?
+            .into_iter()
+            .filter(|path| is_event_file(path))
+            .count() as u64)
+    }
+
     #[cfg(test)]
     fn insert_raw(&self, idempotency_key: &str, bytes: &[u8]) -> Result<()> {
         // A plain atomic write at the key's content-addressed path, overwriting

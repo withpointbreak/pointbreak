@@ -104,6 +104,17 @@ pub(crate) trait Journal: Debug {
     /// content-addressed home.
     fn list_event_entries(&self) -> Result<Vec<JournalEntry>>;
 
+    /// A cheap, monotonic staleness signal — the count of stored events —
+    /// computed **without reading any event bytes** (no decode, no hash). It is
+    /// the per-read freshness *detector*: the append-only journal contract (there
+    /// is no remove; removals are appended events; `compact` never touches the
+    /// event log) makes the count rise on every real append and never fall, so a
+    /// changed count means the log moved. Its blind spot is exactly the event-set
+    /// hash's — an out-of-band edit to an existing event's bytes that adds no
+    /// entry — so the hash stays the authoritative confirm stamp on the full-read
+    /// surfaces.
+    fn head_marker(&self) -> Result<u64>;
+
     /// Test-only tamper hook: write `bytes` at the slot this backend would use
     /// for `idempotency_key`, bypassing create-side validation and dedup
     /// (overwriting any existing entry). It lets a test inject bytes that skip
@@ -238,6 +249,50 @@ mod tests {
             expected_digests.sort();
             let listed_digests: Vec<String> = first.iter().map(|e| e.key_digest.clone()).collect();
             assert_eq!(listed_digests, expected_digests);
+        }
+    }
+
+    #[test]
+    fn head_marker_counts_written_events_and_is_monotonic_on_append() {
+        for (_guard, backend) in each_backend() {
+            let journal = backend.journal();
+            assert_eq!(journal.head_marker().unwrap(), 0, "an empty log marks zero");
+
+            for key in ["k:a", "k:b", "k:c"] {
+                journal.create_event_once(key, key.as_bytes()).unwrap();
+            }
+            assert_eq!(
+                journal.head_marker().unwrap(),
+                3,
+                "the marker is the count of stored events"
+            );
+
+            journal.create_event_once("k:d", b"d").unwrap();
+            assert_eq!(
+                journal.head_marker().unwrap(),
+                4,
+                "an append bumps the marker by one"
+            );
+            // A deduped re-create writes nothing, so the marker is unchanged.
+            journal.create_event_once("k:d", b"again").unwrap();
+            assert_eq!(journal.head_marker().unwrap(), 4);
+        }
+    }
+
+    #[test]
+    fn head_marker_unchanged_by_an_in_place_envelope_edit() {
+        for (_guard, backend) in each_backend() {
+            let journal = backend.journal();
+            journal.create_event_once("k:a", b"original").unwrap();
+            journal.create_event_once("k:b", b"original").unwrap();
+            let before = journal.head_marker().unwrap();
+
+            // An out-of-band edit to an existing event's bytes overwrites in place;
+            // it adds no entry, so the count is unchanged — the same blind spot the
+            // event-set hash carries for an envelope-only edit.
+            journal.insert_raw("k:a", b"edited-in-place").unwrap();
+
+            assert_eq!(journal.head_marker().unwrap(), before);
         }
     }
 

@@ -95,6 +95,16 @@ pub(crate) fn resolve_read_store(repo: impl AsRef<Path>) -> Result<ReadStore> {
     })
 }
 
+/// The cheap freshness detector for a repo's event log: the journal's head marker
+/// (the event count, computed without reading or decoding any event bytes). The
+/// inspector's `/api/freshness` poll reads this instead of re-folding and
+/// re-hashing the whole log on every tick; the event-set hash stays the
+/// authoritative confirm stamp on the full-read surfaces (`/api/history`,
+/// `/api/revisions`).
+pub fn event_log_head_marker(repo: impl AsRef<Path>) -> Result<u64> {
+    resolve_read_store(repo)?.backend().journal().head_marker()
+}
+
 /// The write-validation seam: write surfaces resolve their validation/derivation
 /// reads here. With one store, the writer-visible event set is exactly that
 /// store's events.
@@ -429,6 +439,30 @@ mod tests {
         let read = resolve_read_store(repo.path()).unwrap();
         let expected = git_common_dir(repo.path()).unwrap().join("shore");
         assert_existing_paths_eq(read.store_dir(), &expected);
+    }
+
+    #[test]
+    fn event_log_head_marker_equals_the_event_count() {
+        // The cheap marker matches the count a full read would report — without
+        // doing the full read.
+        let repo = GitRepo::new();
+        let store_dir = git_common_dir(repo.path()).unwrap().join("shore");
+        record_review_initialized(&store_dir, "session:a");
+        record_review_initialized(&store_dir, "session:b");
+        record_review_initialized(&store_dir, "session:c");
+
+        let marker = event_log_head_marker(repo.path()).unwrap();
+        let direct = EventStore::open(&store_dir).list_events().unwrap().len() as u64;
+        assert_eq!(marker, direct);
+        assert_eq!(marker, 3);
+    }
+
+    #[test]
+    fn event_log_head_marker_is_zero_for_a_fresh_repo() {
+        // A read before any write resolves the (not-yet-created) store and marks
+        // zero, never erroring on the missing event directory.
+        let repo = GitRepo::new();
+        assert_eq!(event_log_head_marker(repo.path()).unwrap(), 0);
     }
 
     #[test]

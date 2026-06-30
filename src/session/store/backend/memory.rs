@@ -32,6 +32,9 @@ pub(crate) struct InMemoryStore {
     /// Lets a test prove the overview batch reads the log once for the whole batch
     /// (not `revision_count + 1` times — the N+1 it replaces).
     list_event_entries_calls: AtomicUsize,
+    /// How many times any journal handle over this store has read an event's
+    /// bytes. Lets a test prove `head_marker` reads no event bytes.
+    read_event_bytes_calls: AtomicUsize,
 }
 
 impl InMemoryStore {
@@ -44,6 +47,12 @@ impl InMemoryStore {
     /// `list_event_entries` calls served by every journal handle over this store.
     pub(crate) fn list_event_entries_call_count(&self) -> usize {
         self.list_event_entries_calls.load(Ordering::Relaxed)
+    }
+
+    /// Test observability for the no-bytes invariant: the running count of
+    /// `read_event_bytes` calls served by every journal handle over this store.
+    pub(crate) fn read_event_bytes_call_count(&self) -> usize {
+        self.read_event_bytes_calls.load(Ordering::Relaxed)
     }
 
     /// A journal handle sharing this store's event map.
@@ -82,6 +91,10 @@ impl Journal for InMemoryJournal {
     }
 
     fn read_event_bytes(&self, idempotency_key: &str) -> Result<Option<Vec<u8>>> {
+        // Counted so a test can assert `head_marker` reads no event bytes.
+        self.store
+            .read_event_bytes_calls
+            .fetch_add(1, Ordering::Relaxed);
         Ok(lock(&self.store.events).get(idempotency_key).cloned())
     }
 
@@ -109,6 +122,11 @@ impl Journal for InMemoryJournal {
             .collect();
         entries.sort_by(|a, b| a.key_digest.cmp(&b.key_digest));
         Ok(entries)
+    }
+
+    fn head_marker(&self) -> Result<u64> {
+        // The event map's length — the count of stored events, no bytes read.
+        Ok(lock(&self.store.events).len() as u64)
     }
 
     #[cfg(test)]
@@ -191,4 +209,26 @@ fn is_immediate_child(key: &str, prefix: &str) -> bool {
     key.strip_prefix(prefix)
         .and_then(|rest| rest.strip_prefix('/'))
         .is_some_and(|name| !name.is_empty() && !name.contains('/'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn head_marker_reads_no_event_bytes() {
+        let store = InMemoryStore::new();
+        let journal = store.journal();
+        for key in ["k:a", "k:b", "k:c"] {
+            journal.create_event_once(key, key.as_bytes()).unwrap();
+        }
+
+        let before = store.read_event_bytes_call_count();
+        assert_eq!(journal.head_marker().unwrap(), 3);
+        assert_eq!(
+            store.read_event_bytes_call_count(),
+            before,
+            "the marker is a count, not a read — it touches no event bytes"
+        );
+    }
 }

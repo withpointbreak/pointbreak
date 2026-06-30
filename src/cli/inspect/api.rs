@@ -19,9 +19,9 @@ use shoreline::session::{
     CurrentAssessmentStatus, EventVerificationPolicy, InputRequestStatus, LivenessEnrichment,
     ProjectionDiagnostic, ReviewHistoryEntry, ReviewHistoryOptions, RevisionListEntry,
     RevisionListOptions, RevisionOverview, RevisionOverviewsOptions, RevisionShowOptions,
-    SessionState, SupersessionView, enrich_liveness, list_revisions, read_bound_object_artifact,
-    read_events_for_display, read_object_artifact, review_history, show_revision,
-    show_revision_overviews,
+    SessionState, SupersessionView, enrich_liveness, event_log_head_marker, list_revisions,
+    read_bound_object_artifact, read_events_for_display, read_object_artifact, review_history,
+    show_revision, show_revision_overviews,
 };
 
 #[derive(Serialize)]
@@ -205,9 +205,11 @@ struct RevisionLatestActivityDocument {
 #[serde(rename_all = "camelCase")]
 struct FreshnessPayload {
     schema: &'static str,
-    event_set_hash: String,
-    event_count: usize,
-    diagnostic_count: usize,
+    /// The event-log head marker (the event count), the cheap change key the
+    /// client polls. Sourced from `event_log_head_marker` — no full read, no
+    /// event-set hash. The authoritative `eventSetHash` confirm stamp stays on the
+    /// full-read endpoints (`/api/history`, `/api/revisions`).
+    event_count: u64,
 }
 
 /// The literal floor label shown when no worktree basename can be derived.
@@ -948,20 +950,16 @@ fn set_head_live_branch(document: &mut serde_json::Value, live_branch: String) {
 
 /// Cheap freshness probe for client-side auto-refresh polling.
 ///
-/// Computes `eventSetHash` from the live event set (without hydrating bodies)
-/// so the UI can detect store changes and re-fetch only when something moved.
+/// Returns the event-log head marker (the event count) as `eventCount`, computed
+/// without reading or decoding any event bytes. The client compares it across
+/// polls and re-fetches only when it moves — replacing the old per-poll full read
+/// and event-set-hash recompute. The event-set hash remains the authoritative
+/// confirm stamp on the full-read endpoints (`/api/history`, `/api/revisions`).
 pub(super) fn freshness_json(repo: &Path) -> Result<String, String> {
-    let result = review_history(
-        ReviewHistoryOptions::new(repo)
-            .with_include_body(false)
-            .with_read_for_display(true),
-    )
-    .map_err(|error| error.to_string())?;
+    let event_count = event_log_head_marker(repo).map_err(|error| error.to_string())?;
     let payload = FreshnessPayload {
         schema: "shore.inspect-freshness",
-        event_set_hash: result.event_set_hash,
-        event_count: result.event_count,
-        diagnostic_count: result.diagnostics.len(),
+        event_count,
     };
     serde_json::to_string(&payload).map_err(|error| error.to_string())
 }

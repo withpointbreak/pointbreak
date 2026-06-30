@@ -21,26 +21,24 @@ const FIXTURES: Record<string, unknown> = {
   "/api/revision": revisionJson,
 };
 
-// The freshness probe is not a captured fixture (it is a tiny derived summary):
-// default it to history.json's hash + diagnostic count so a poll right after
-// `load()` reports "unchanged", and let a test override it to drive the
-// changed/reload path via {@link setFreshnessResponse}.
+// The freshness probe is not a captured fixture (it is the cheap event-count
+// marker): default it to history.json's eventCount so a poll right after `load()`
+// reports "unchanged", and let a test override it to drive the changed/reload
+// path via {@link setFreshnessResponse}.
 const historyDoc = historyJson as {
-  eventSetHash?: string;
-  diagnostics?: unknown[];
+  eventCount?: number;
 };
 const DEFAULT_FRESHNESS: unknown = {
-  eventSetHash: historyDoc.eventSetHash,
-  diagnosticCount: (historyDoc.diagnostics ?? []).length,
+  eventCount: historyDoc.eventCount,
 };
 let freshness: unknown = DEFAULT_FRESHNESS;
 
-/** Override the `/api/freshness` response the mock returns (changed-hash tests). */
+/** Override the `/api/freshness` response the mock returns (changed-marker tests). */
 export function setFreshnessResponse(payload: unknown): void {
   freshness = payload;
 }
 
-/** Restore the default freshness response (history.json's hash + diagnostic count). */
+/** Restore the default freshness response (history.json's eventCount marker). */
 export function resetFreshnessResponse(): void {
   freshness = DEFAULT_FRESHNESS;
 }

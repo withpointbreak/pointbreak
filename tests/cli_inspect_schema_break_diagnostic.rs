@@ -1,7 +1,8 @@
 //! A stored event whose type/envelope was retired at a breaking change must not
 //! blanket-500 the inspector. Every read endpoint skips it and returns 200 with
-//! a `ProjectionDiagnostic`, so the page still renders; `/api/freshness` counts
-//! the skip so the client auto-refresh still fires.
+//! a `ProjectionDiagnostic`, so the page still renders; `/api/freshness`'s
+//! event-file marker counts the skipped event's file, so the client auto-refresh
+//! still fires when such an event lands.
 
 mod support;
 
@@ -59,12 +60,15 @@ fn inspector_endpoints_return_200_with_schema_break_diagnostic() {
         "/api/revision missing the schema break diagnostic: {revision}"
     );
 
+    // The cheap marker is the event-FILE count, so it counts the retired event's
+    // file even though the lenient read drops it from history's post-skip count.
+    // That bump is what fires the client auto-refresh when such an event lands.
+    let history = inspector.get_json("/api/history");
     let freshness = inspector.get_json("/api/freshness");
+    let marker = freshness["eventCount"].as_u64().expect("eventCount");
+    let post_skip = history["eventCount"].as_u64().expect("history eventCount");
     assert!(
-        freshness["diagnosticCount"]
-            .as_u64()
-            .expect("diagnosticCount")
-            >= 1,
-        "freshness must count the skip: {freshness}"
+        marker > post_skip,
+        "the marker counts the skipped event's file (marker {marker} > post-skip {post_skip}): {freshness}"
     );
 }

@@ -424,7 +424,9 @@ fn linked_inspector_drill_in_survives_deleted_source_worktree() {
     assert_eq!(history["eventCount"], units["eventCount"]);
 
     let freshness = inspector.get_json("/api/freshness");
-    assert_eq!(freshness["eventSetHash"], history["eventSetHash"]);
+    // The freshness probe's change key is the event-log head marker (the event
+    // count), equal to the full read's count but without folding or hashing.
+    assert_eq!(freshness["eventCount"], history["eventCount"]);
 
     let objects = inspector.get_json("/api/objects");
     assert_eq!(objects["threadCount"], 1);

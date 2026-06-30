@@ -740,8 +740,7 @@
     diff: null,
     diffHash: null,
     focus: null,
-    lastHash: null,
-    lastDiagnosticCount: null
+    lastEventCount: null
   };
   var subscribers = /* @__PURE__ */ new Set();
   function getState() {
@@ -796,25 +795,28 @@
   __name(showError, "showError");
   async function load() {
     try {
-      const [historyRaw, revisionsRaw, objectsRaw] = await Promise.all([
+      const [historyRaw, revisionsRaw, objectsRaw, freshnessRaw] = await Promise.all([
         fetchJSON("/api/history"),
         fetchJSON("/api/revisions"),
-        fetchJSON("/api/objects")
+        fetchJSON("/api/objects"),
+        fetchJSON("/api/freshness")
       ]);
       const history2 = historyRaw;
       const revisions = revisionsRaw;
       const objects = objectsRaw;
+      const freshness = freshnessRaw;
       indexEntries(history2, revisions);
       showError(null);
       commit({
         history: history2,
         revisions,
         objects,
-        // Seed the diagnostic count alongside the hash so the poller can detect a
-        // divergence appearing or clearing without a new event: the history payload
-        // carries the same diagnostics set the freshness probe counts.
-        lastHash: history2.eventSetHash ?? null,
-        lastDiagnosticCount: (history2.diagnostics ?? []).length
+        // Seed the freshness baseline from the same marker the poller compares — the
+        // event-log head marker (the event-file count). Seeding from
+        // `history.eventCount` would diverge from the marker whenever the store
+        // carries a retired event the lenient read skips, and the poller would then
+        // reload on every tick.
+        lastEventCount: freshness.eventCount ?? null
       });
     } catch (err) {
       showError(err instanceof Error ? err.message : String(err));
@@ -826,9 +828,8 @@
       const f = await fetchJSON("/api/freshness");
       const refresh = $("#refresh");
       const s = getState();
-      const hashChanged = f.eventSetHash !== s.lastHash;
-      const diagChanged = (f.diagnosticCount ?? 0) !== (s.lastDiagnosticCount ?? 0);
-      if (hashChanged || diagChanged) {
+      const changed = (f.eventCount ?? null) !== s.lastEventCount;
+      if (changed) {
         if (refresh) {
           refresh.textContent = "updated";
           refresh.classList.add("live");

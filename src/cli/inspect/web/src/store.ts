@@ -23,8 +23,9 @@ import { TYPES } from "./types";
 export interface HistoryDoc {
   entries: HistoryEntry[];
   diagnostics: unknown[];
-  // The event-set hash the data loader seeds as the freshness baseline (present
-  // in the committed fixture; the poller compares the probe's hash against it).
+  // The event-set hash the stat row displays (present in the committed fixture).
+  // It is the authoritative confirm stamp on this full-read endpoint; the cheap
+  // freshness poll keys on the event-count marker instead.
   eventSetHash?: string;
   // The durable-event count the stat row reads (present in the committed fixture).
   eventCount?: number;
@@ -82,9 +83,9 @@ export interface State {
   diff: string | null;
   diffHash: string | null;
   focus: string | null;
-  // Freshness baselines the poller diffs against to surface a refresh cue.
-  lastHash: string | null;
-  lastDiagnosticCount: number | null;
+  // Freshness baseline the poller diffs against to surface a refresh cue: the
+  // event-log head marker (the event count) seeded at load.
+  lastEventCount: number | null;
 }
 
 // The initial state, ported verbatim from the served app.js `state` object.
@@ -103,8 +104,7 @@ const state: State = {
   diff: null,
   diffHash: null,
   focus: null,
-  lastHash: null,
-  lastDiagnosticCount: null,
+  lastEventCount: null,
 };
 
 const subscribers = new Set<() => void>();

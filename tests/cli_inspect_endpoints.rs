@@ -258,19 +258,24 @@ fn api_snapshot_returns_snapshot_scoped_artifact() {
 }
 
 #[test]
-fn api_freshness_carries_diagnostic_count_and_matches_history_hash() {
+fn api_freshness_exposes_the_event_count_marker() {
     let store = representative_store();
     let inspector = Inspector::spawn(store.repo.path());
     let history = inspector.get_json("/api/history");
     let freshness = inspector.get_json("/api/freshness");
 
     assert_eq!(freshness["schema"], "shore.inspect-freshness");
-    // Cheap-probe parity: the freshness hash equals the full history's hash.
-    assert_eq!(freshness["eventSetHash"], history["eventSetHash"]);
+    // The cheap change key is the event-log head marker — the event count, equal
+    // to what a full history read reports, but computed without the full read.
+    // (Monotonic-on-append and stable-across-envelope-edit are proven at the
+    // journal level, in the backend `head_marker` tests.)
+    assert!(freshness["eventCount"].is_u64());
     assert_eq!(freshness["eventCount"], history["eventCount"]);
-    // Post-0062: freshness carries a diagnostic count (0 for a clean local store).
-    assert_eq!(freshness["diagnosticCount"], 0);
-    assert!(freshness["diagnosticCount"].is_u64());
+    // The full-read fields are gone from the cheap probe: the freshness path no
+    // longer folds or hashes the log. The event-set hash stays the authoritative
+    // confirm stamp on the full-read endpoints (asserted for /api/history above).
+    assert!(freshness.get("eventSetHash").is_none());
+    assert!(freshness.get("diagnosticCount").is_none());
 }
 
 #[test]
@@ -299,7 +304,7 @@ fn payloads_never_expose_raw_repository_paths_on_path_private_surfaces() {
     let repo_path = store.repo.path().to_string_lossy().to_string();
     let inspector = Inspector::spawn(store.repo.path());
 
-    // The freshness probe is counts/hash only — genuinely path-free.
+    // The freshness probe is a bare event count — genuinely path-free.
     let freshness = inspector.get_json("/api/freshness");
     assert!(!freshness.to_string().contains(&repo_path));
 
