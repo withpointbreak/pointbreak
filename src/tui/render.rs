@@ -189,8 +189,10 @@ fn note_body(app: &TuiApp, note_id: &ReviewNoteId) -> Option<String> {
 fn display_text(row: &DisplayRow) -> String {
     if row.prefix.is_empty() {
         row.text.clone()
-    } else {
+    } else if row.gutter.is_empty() {
         format!("{:<4} {}", row.prefix, row.text)
+    } else {
+        format!("{:<4} {} {}", row.prefix, row.gutter, row.text)
     }
 }
 

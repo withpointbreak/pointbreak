@@ -21,29 +21,42 @@ pub(crate) struct DisplayRow {
     pub row_id: RowId,
     pub kind: DisplayRowKind,
     pub prefix: String,
+    /// Line-number gutter (`"{old} {new}"`) for diff rows; empty for every other row. Kept separate
+    /// from `text` so a byte-offset token span indexes only the raw code.
+    pub gutter: String,
+    /// Raw `DiffRow.text` for diff rows; the formatted display string for non-diff rows.
     pub text: String,
 }
 
 impl DisplayRow {
     pub(crate) fn from_review_row(row: &ReviewRow) -> Self {
-        let (kind, prefix, text) = match &row.kind {
+        let (kind, prefix, gutter, text) = match &row.kind {
             ReviewRowKind::FileHeader { path, status } => (
                 DisplayRowKind::FileHeader,
                 "",
+                String::new(),
                 if path == ORPHAN_SECTION_PATH {
                     path.clone()
                 } else {
                     format!("{path} ({})", display_file_status(status))
                 },
             ),
-            ReviewRowKind::HunkHeader { header } => {
-                (DisplayRowKind::HunkHeader, "@@", header.clone())
-            }
+            ReviewRowKind::HunkHeader { header } => (
+                DisplayRowKind::HunkHeader,
+                "@@",
+                String::new(),
+                header.clone(),
+            ),
             ReviewRowKind::Diff { row } => display_diff_row(row),
-            ReviewRowKind::Metadata { metadata } => {
-                (DisplayRowKind::Metadata, "!", metadata.text.clone())
+            ReviewRowKind::Metadata { metadata } => (
+                DisplayRowKind::Metadata,
+                "!",
+                String::new(),
+                metadata.text.clone(),
+            ),
+            ReviewRowKind::Note { title, .. } => {
+                (DisplayRowKind::Note, "note", String::new(), title.clone())
             }
-            ReviewRowKind::Note { title, .. } => (DisplayRowKind::Note, "note", title.clone()),
             ReviewRowKind::StaleNote {
                 title,
                 resolution_status,
@@ -53,25 +66,29 @@ impl DisplayRow {
             } => (
                 DisplayRowKind::StaleNote,
                 "stale",
+                String::new(),
                 format!(
                     "{title} — {target_path}:{} ({})",
                     display_line_range(target_line_range),
                     display_resolution_status(resolution_status),
                 ),
             ),
-            ReviewRowKind::EmptyState { message } => (DisplayRowKind::Empty, "", message.clone()),
+            ReviewRowKind::EmptyState { message } => {
+                (DisplayRowKind::Empty, "", String::new(), message.clone())
+            }
         };
 
         Self {
             row_id: row.id.clone(),
             kind,
             prefix: prefix.to_owned(),
+            gutter,
             text,
         }
     }
 }
 
-fn display_diff_row(row: &DiffRow) -> (DisplayRowKind, &'static str, String) {
+fn display_diff_row(row: &DiffRow) -> (DisplayRowKind, &'static str, String, String) {
     let (kind, prefix) = match row.kind {
         DiffRowKind::Added => (DisplayRowKind::Added, "+"),
         DiffRowKind::Removed => (DisplayRowKind::Removed, "-"),
@@ -79,7 +96,12 @@ fn display_diff_row(row: &DiffRow) -> (DisplayRowKind, &'static str, String) {
     };
     let old_line = display_line_number(row.old_line);
     let new_line = display_line_number(row.new_line);
-    (kind, prefix, format!("{old_line} {new_line} {}", row.text))
+    (
+        kind,
+        prefix,
+        format!("{old_line} {new_line}"),
+        row.text.clone(),
+    )
 }
 
 fn display_line_number(line: Option<u32>) -> String {
@@ -178,18 +200,30 @@ mod tests {
 
         assert_eq!(added.kind, DisplayRowKind::Added);
         assert_eq!(added.prefix, "+");
-        assert!(added.text.contains("12"));
-        assert!(added.text.contains("let value = 1;"));
+        assert!(added.gutter.contains("12"));
+        assert_eq!(added.text, "let value = 1;");
 
         assert_eq!(removed.kind, DisplayRowKind::Removed);
         assert_eq!(removed.prefix, "-");
-        assert!(removed.text.contains("7"));
-        assert!(removed.text.contains("let old = 1;"));
+        assert!(removed.gutter.contains("7"));
+        assert_eq!(removed.text, "let old = 1;");
 
         assert_eq!(context.kind, DisplayRowKind::Context);
         assert_eq!(context.prefix, " ");
-        assert!(context.text.contains("3"));
-        assert!(context.text.contains("let same = true;"));
+        assert!(context.gutter.contains("3"));
+        assert_eq!(context.text, "let same = true;");
+    }
+
+    #[test]
+    fn diff_display_row_keeps_gutter_separate_from_raw_code() {
+        let d = DisplayRow::from_review_row(&review_row_for_diff(
+            DiffRowKind::Added,
+            None,
+            Some(12),
+            "let x = 1;",
+        ));
+        assert_eq!(d.text, "let x = 1;"); // raw code only — no line numbers baked in
+        assert!(d.gutter.contains("12")); // line numbers moved to the gutter field
     }
 
     #[test]
