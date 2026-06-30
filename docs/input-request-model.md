@@ -125,23 +125,6 @@ Native assessments may relate to input requests through `--related-input-request
 relationship is evidence, not lifecycle. An assessment does not close an input request. Use
 `shore review input-request respond` to append the explicit closure event.
 
-## Non-Goals
-
-This document does not require:
-
-- a prompt system
-- a daemon
-- a notification service
-- a lock or lease protocol
-- a cloud backend
-- a TUI modal
-- note mutation
-- automatic expiry
-- explicit cancellation/escalation event types
-
-Those may become useful later, but the architectural requirement is narrower: Shoreline's durable model
-should request input at safe workflow boundaries and record the response that closes the request.
-
 ## Legacy Intervention Events
 
 Earlier development versions of Shoreline wrote intervention events and exposed a

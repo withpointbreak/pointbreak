@@ -1005,19 +1005,3 @@ Health checks and status commands should exercise the real path:
 
 A lightweight probe that bypasses event loading and state derivation can report healthy while the
 real workflow is broken. The health path should be the same code path users depend on.
-
-## Non-Goals
-
-This document does not require:
-
-- a daemon
-- remote storage
-- async storage
-- a delivery queue
-- filesystem locks
-- global event sequence allocation
-- committed store state (neither the common-dir `.git/shore` store nor an ephemeral `.shore/data/`
-  store is tracked in Git)
-
-The point is to keep the first storage stage small while making the safe path the easiest path to
-use.

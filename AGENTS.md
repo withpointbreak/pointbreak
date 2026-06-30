@@ -4,8 +4,8 @@ This file provides guidance to AI code assistants when working with code in this
 
 ## Project Overview
 
-Shoreline is an experimental Rust terminal review tool for understanding what a coding agent changed
-and why. It should stay focused on a small, Rust-native agent-review core with a data model that is
+Shoreline is an experimental Rust-native review record for understanding what a coding agent changed
+and why. It should stay focused on a small, agent-review core with a data model that is
 easy to reason about, test, and eventually expose to other tools.
 
 Build the review stream as a pure, headless data layer before building the TUI. Rendering,

@@ -4,9 +4,27 @@
 [![Documentation](https://docs.rs/shoreline/badge.svg)](https://docs.rs/shoreline)
 [![CI](https://github.com/kevinswiber/shoreline/actions/workflows/ci.yml/badge.svg)](https://github.com/kevinswiber/shoreline/actions/workflows/ci.yml)
 
-Shoreline is a local terminal review tool for code changes that humans and coding agents work on
-together. Capture a change, record observations and input requests, assess the review, and resume
-from durable local state when the session continues later.
+Shoreline is a durable, local-first review record for code changes that humans and coding agents
+build together. It is designed for the iteration that happens long before a pull request opens,
+where you might guide one agent to author a change and another to review it.
+
+Coding agents generate far more activity than anyone can follow. Rather than store or replay full
+transcripts, Shoreline keeps only the facts that move a review forward: what changed and why, the
+open questions, and each assessment. It records them as an append-only log you can read in the
+terminal, browse in a local web inspector, or consume as JSON.
+
+Every fact carries the actor that asserted it, human or agent, and can be signed with an Ed25519 key.
+Signing never blocks a write, but when a signature is present the record becomes tamper-evident, and
+a reader can tell whether each fact is merely signed or bound to a trusted identity. See
+[docs/signing-ux.md](docs/signing-ux.md).
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/kevinswiber/shoreline/main/assets/shore-inspector-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/kevinswiber/shoreline/main/assets/shore-inspector-light.png">
+  <img alt="The shore inspect web UI: a filterable event timeline with per-actor tracks and signature-trust badges, beside an event detail pane" src="https://raw.githubusercontent.com/kevinswiber/shoreline/main/assets/shore-inspector-light.png" width="800">
+</picture>
+
+*Watching a review in `shore inspect`: the event timeline, each fact attributed to its track, with signature-trust badges.*
 
 Install the `shoreline` crate; it provides the `shore` command:
 
@@ -39,6 +57,12 @@ shore review assessment add --track human:local --assessment needs-clarification
   --summary "Small change, but one decision is still open."
 ```
 
+In a real collaboration each actor records on its own track — the coding agent that authored the
+change (`agent:codex`), a reviewer that is a human or another agent, and you (`human:local`) — so
+every fact stays attributed to whoever asserted it. See
+[the review workflow](docs/review-workflow.md) and
+[agent authoring handoffs](docs/agent-authoring.md) for how the author and reviewer hand off.
+
 Or browse the whole store visually — event timeline, per-revision pages, and annotated diffs — in
 a local web UI:
 
@@ -51,29 +75,11 @@ raw event files, artifact paths, and `.shore/data/state.json` are internal stora
 command explicitly documents them. Consumers that prefer to read and write those facts in process
 can use the supported library API instead of the CLI — see [docs/library-api.md](docs/library-api.md).
 
-## Current Commands
+## Commands
 
-The current executable surfaces are:
-
-- `shore show`
-- `shore dump`
-- `shore inspect`
-- `shore review capture`
-- `shore review revisions` / `shore review show`
-- `shore review observation add/list`
-- `shore review input-request open/list/fetch/respond`
-- `shore review assessment add/show`
-- `shore review validation add/list`
-- `shore review association` (associate/withdraw a commit or ref)
-- `shore review endorse`
-- `shore review history`
-- `shore identity enroll/attest`
-- `shore keys init/list/show/enroll/use-ssh`
-- `shore store status/mode/migrate/remove/gc/compact`
-- `shore notes apply`
-
-See [docs/cli-reference.md](docs/cli-reference.md) for command options, output documents, schema
-names, and V1 limitations.
+The `shore` command surface is still taking shape and will change before v1. See
+[docs/cli-reference.md](docs/cli-reference.md) for the current commands, their options, output
+documents, schema names, and V1 limitations.
 
 ## Agent Skills
 
@@ -116,8 +122,8 @@ Architecture and model notes:
 
 ## Project Status
 
-Shoreline v0.1.0 is an experimental Rust-native review core. The package is named `shoreline`
-because a shoreline is the boundary where tool-assisted changes meet human review. The installed
+Shoreline is experimental and under active development. The package is named `shoreline`
+because a shoreline is the boundary where tool-assisted changes meet review. The installed
 command stays `shore` because command names should remain short and practical.
 
 The current focus is a headless, durable review model first:
@@ -126,28 +132,7 @@ The current focus is a headless, durable review model first:
 - append-only local events under `.shore/data/events/`
 - immutable snapshot and note-body artifacts under `.shore/data/artifacts/`
 - rebuildable projections and command-output JSON
-- a read-only terminal view over the same model
-
-## Design Principles
-
-- Keep the review stream as a pure, headless data layer.
-- Let rendering, scrolling, navigation, note placement, and session state derive from one explicit
-  review model.
-- Prefer direct Shoreline commands for durable review facts.
-- Treat sidecars as import/transport adapters, not as the authoritative store.
-- Keep public command output JSON stable enough for automation and tests.
-
-## Non-Goals For V1
-
-Shoreline should not start as:
-
-- a general Git porcelain
-- a complete review platform
-- a summarizer detached from code
-- a daemon, notification system, or multi-session broker
-- a terminal framework experiment
-
-The narrow goal is a reliable local review surface for tool-assisted or review-heavy changesets.
+- read-only terminal and local web views over the same model
 
 ## Contributing
 
