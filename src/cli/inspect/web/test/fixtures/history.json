@@ -275,5 +275,6 @@
   "eventCount": 8,
   "eventSetHash": "sha256:e81f297a301ad7d9df6bd90ceeb257511f661b4fc108460e7f2bdc3f76de0164",
   "historyCount": 8,
+  "nextCursor": null,
   "schema": "shore.inspect-history"
 }

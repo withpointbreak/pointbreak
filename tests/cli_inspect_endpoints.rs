@@ -728,3 +728,79 @@ fn advisory_framing_is_persistently_visible_not_tooltip_only() {
         "the topbar carries a persistent read-only · advisory affordance"
     );
 }
+
+#[test]
+fn api_history_windows_with_limit_and_continues_via_next_cursor() {
+    let store = representative_store();
+    let inspector = Inspector::spawn(store.repo.path());
+
+    let full = inspector.get_json("/api/history");
+    let total = full["entries"].as_array().unwrap().len();
+    let event_count = full["eventCount"].clone();
+    assert!(
+        total >= 2,
+        "representative store should yield multiple history entries, got {total}"
+    );
+
+    let page1 = inspector.get_json("/api/history?limit=1");
+    assert_eq!(page1["entries"].as_array().unwrap().len(), 1);
+    // Identity always reports the full event set, never the window.
+    assert_eq!(page1["eventCount"], event_count);
+    let token = page1["nextCursor"]
+        .as_str()
+        .expect("a continuation token when entries remain");
+
+    let page2 = inspector.get_json(&format!("/api/history?limit=1&cursor={}", urlencode(token)));
+    assert_eq!(page2["entries"].as_array().unwrap().len(), 1);
+    // Page two continues strictly after page one — no overlap.
+    assert_ne!(
+        page2["entries"][0]["eventId"],
+        page1["entries"][0]["eventId"]
+    );
+}
+
+#[test]
+fn api_history_unparamd_carries_null_next_cursor() {
+    let store = representative_store();
+    let inspector = Inspector::spawn(store.repo.path());
+
+    let full = inspector.get_json("/api/history");
+    assert!(!full["entries"].as_array().unwrap().is_empty());
+    // Additive and backward-compatible: an unwindowed read carries an explicit
+    // null continuation token, never a truncated page. The field must be present
+    // (a missing key would also read as null), so assert it explicitly.
+    let payload = full.as_object().expect("history payload is an object");
+    assert!(
+        payload.contains_key("nextCursor"),
+        "nextCursor is always present on the history payload"
+    );
+    assert!(payload["nextCursor"].is_null());
+}
+
+#[test]
+fn api_history_rejects_malformed_window_params() {
+    let store = representative_store();
+    let inspector = Inspector::spawn(store.repo.path());
+
+    assert!(
+        inspector
+            .get_error("/api/history?cursor=not-a-cursor!!")
+            .0
+            .contains("400")
+    );
+    // A present-but-empty cursor is malformed too (decoding "" fails), not a
+    // silent full page.
+    assert!(
+        inspector
+            .get_error("/api/history?cursor=")
+            .0
+            .contains("400")
+    );
+    // A non-numeric limit is a usage error.
+    assert!(
+        inspector
+            .get_error("/api/history?limit=abc")
+            .0
+            .contains("400")
+    );
+}

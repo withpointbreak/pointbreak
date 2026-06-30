@@ -16,12 +16,12 @@ use shoreline::documents::revision_show_document;
 use shoreline::model::{ObjectId, ReviewEndpoint, RevisionId, ValidationStatus};
 use shoreline::session::event::ReviewAssessment;
 use shoreline::session::{
-    CurrentAssessmentStatus, EventVerificationPolicy, InputRequestStatus, LivenessEnrichment,
-    ProjectionDiagnostic, ReviewHistoryEntry, ReviewHistoryOptions, RevisionListEntry,
-    RevisionListOptions, RevisionOverview, RevisionOverviewsOptions, RevisionShowOptions,
-    SessionState, SupersessionView, enrich_liveness, event_log_head_marker, list_revisions,
-    read_bound_object_artifact, read_events_for_display, read_object_artifact, review_history,
-    show_revision, show_revision_overviews,
+    CurrentAssessmentStatus, EventVerificationPolicy, HistoryWindow, InputRequestStatus,
+    LivenessEnrichment, ProjectionDiagnostic, ReviewHistoryEntry, ReviewHistoryOptions,
+    RevisionListEntry, RevisionListOptions, RevisionOverview, RevisionOverviewsOptions,
+    RevisionShowOptions, SessionState, SupersessionView, enrich_liveness, event_log_head_marker,
+    list_revisions, read_bound_object_artifact, read_events_for_display, read_object_artifact,
+    review_history, show_revision, show_revision_overviews,
 };
 
 #[derive(Serialize)]
@@ -32,6 +32,10 @@ struct HistoryPayload {
     event_count: usize,
     history_count: usize,
     entries: Vec<ReviewHistoryEntry>,
+    /// Opaque continuation token for the next page when a window was applied and
+    /// entries remain; `null` for an unwindowed or final page. Additive — always
+    /// present so existing consumers see a stable shape.
+    next_cursor: Option<String>,
     diagnostics: Vec<ProjectionDiagnostic>,
 }
 
@@ -549,8 +553,10 @@ fn assessment_label(assessment: ReviewAssessment) -> &'static str {
     }
 }
 
-/// Full chronological event timeline with hydrated bodies.
-pub(super) fn history_json(repo: &Path) -> Result<String, String> {
+/// Full chronological event timeline with hydrated bodies. A `window` bounds the
+/// rendered output (the first page, or a continuation from a cursor); the default
+/// window returns the full timeline.
+pub(super) fn history_json(repo: &Path, window: HistoryWindow) -> Result<String, String> {
     let mut options = ReviewHistoryOptions::new(repo)
         .with_include_body(true)
         .with_read_for_display(true)
@@ -560,6 +566,12 @@ pub(super) fn history_json(repo: &Path) -> Result<String, String> {
     if let Some(map) = crate::cli::review::common::discover_delegation_map(repo) {
         options = options.with_delegation_map(map);
     }
+    if let Some(limit) = window.limit {
+        options = options.with_limit(limit);
+    }
+    if let Some(cursor) = window.after {
+        options = options.with_cursor(cursor);
+    }
     let result = review_history(options).map_err(|error| error.to_string())?;
     let history_count = result.history_count();
     let payload = HistoryPayload {
@@ -568,6 +580,7 @@ pub(super) fn history_json(repo: &Path) -> Result<String, String> {
         event_count: result.event_count,
         history_count,
         entries: result.entries,
+        next_cursor: result.next_cursor,
         diagnostics: result.diagnostics,
     };
     serde_json::to_string(&payload).map_err(|error| error.to_string())

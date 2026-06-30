@@ -13,6 +13,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use shoreline::session::{HistoryCursor, HistoryWindow};
+
 use super::api;
 
 const INDEX_HTML: &str = include_str!("assets/index.html");
@@ -144,7 +146,10 @@ fn route(repo: &Path, method: &str, path: &str, query: Option<&str>) -> Response
         "/tokens.css" => Response::asset("text/css; charset=utf-8", TOKENS_CSS),
         "/app.css" => Response::asset("text/css; charset=utf-8", APP_CSS),
         "/app.js" => Response::asset("application/javascript; charset=utf-8", APP_JS),
-        "/api/history" => api_response(api::history_json(repo)),
+        "/api/history" => match history_window(query) {
+            Ok(window) => api_response(api::history_json(repo, window)),
+            Err(message) => Response::json_error("400 Bad Request", &message),
+        },
         "/api/revisions" => api_response(api::revisions_json(repo)),
         "/api/threads" => api_response(api::threads_json(repo)),
         "/api/freshness" => api_response(api::freshness_json(repo)),
@@ -200,6 +205,25 @@ fn split_target(target: &str) -> (&str, Option<&str>) {
         Some((path, query)) => (path, Some(query)),
         None => (target, None),
     }
+}
+
+/// Parse the optional `limit`/`cursor` window params on `/api/history`. A present
+/// but non-numeric `limit`, or a present `cursor` that fails to decode (an empty
+/// `?cursor=` decodes as malformed too), is a usage error — the caller turns it
+/// into a `400` without touching the store. An absent param means "no bound".
+fn history_window(query: Option<&str>) -> Result<HistoryWindow, String> {
+    let limit = match query_param(query, "limit") {
+        Some(raw) => Some(
+            raw.parse::<usize>()
+                .map_err(|_| "invalid limit".to_owned())?,
+        ),
+        None => None,
+    };
+    let after = match query_param(query, "cursor") {
+        Some(raw) => Some(HistoryCursor::decode(&raw).map_err(|_| "invalid cursor".to_owned())?),
+        None => None,
+    };
+    Ok(HistoryWindow { limit, after })
 }
 
 fn query_param(query: Option<&str>, key: &str) -> Option<String> {
