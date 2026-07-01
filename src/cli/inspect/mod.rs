@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use clap::Args;
 
 mod api;
+mod cache;
 mod server;
 mod wire;
 

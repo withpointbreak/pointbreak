@@ -927,3 +927,30 @@ fn api_history_rejects_malformed_offset_and_order() {
             .contains("400")
     );
 }
+
+#[test]
+fn api_history_reflects_a_new_event_after_an_append() {
+    let store = representative_store();
+    let inspector = Inspector::spawn(store.repo.path());
+
+    let before = inspector.get_json("/api/history")["matchCount"]
+        .as_u64()
+        .unwrap();
+
+    // Append a new event: a second capture over a changed worktree records a new
+    // work_object_proposed event, bumping event_log_head_marker so the projection
+    // cache invalidates (INV-5).
+    store.repo.write(
+        "src/lib.rs",
+        "pub fn value() -> u32 {\n    99\n}\n\npub fn other() -> u32 {\n    7\n}\n",
+    );
+    capture(store.repo.path());
+
+    let after = inspector.get_json("/api/history")["matchCount"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        after > before,
+        "the cache invalidates on a new event (marker changed): {before} -> {after}"
+    );
+}

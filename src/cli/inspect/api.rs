@@ -586,18 +586,25 @@ fn inspect_base_config(repo: &Path) -> BaseProjectionConfig {
     }
 }
 
-/// The server-side query surface for `/api/history`: build the full body-hydrated
-/// base projection, then run the pure `apply_history_query` (filter → facets →
-/// order → window). `query`/`page` carry the parsed params; the `at` › `offset` ›
-/// `cursor` precedence lives inside `apply_history_query`. The base is built
-/// uncached here (a later phase adds the projection cache).
+/// The server-side query surface for `/api/history`: reuse the cached
+/// body-hydrated base projection (rebuilt only when the store's head marker
+/// moves — #255 / INV-5), then run the pure `apply_history_query` (filter →
+/// facets → order → window). `query`/`page` carry the parsed params; the
+/// `at` › `offset` › `cursor` precedence lives inside `apply_history_query`.
 pub(super) fn history_json(
     repo: &Path,
+    cache: &super::cache::HistoryProjectionCache,
     query: &HistoryQuery,
     page: &HistoryPage,
 ) -> Result<String, String> {
+    // The cheap monotonic head marker is the per-request change detector (no
+    // event-byte decode — plan 0090); the cached base's `eventSetHash` is the
+    // served stamp. Build-once/serve-many across all queries for one store version.
+    let marker = event_log_head_marker(repo).map_err(|error| error.to_string())?;
     let config = inspect_base_config(repo);
-    let base = history_base_projection(repo, &config).map_err(|error| error.to_string())?;
+    let base = cache.get_or_build(marker, || {
+        history_base_projection(repo, &config).map_err(|error| error.to_string())
+    })?;
     let out = apply_history_query(&base, query, page);
     let payload = HistoryPayload {
         schema: "shore.inspect-history",

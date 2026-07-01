@@ -24,6 +24,10 @@ use super::api;
 pub(super) struct InspectState {
     pub repo: PathBuf,
     pub highlight_cache: RwLock<HighlightCache>,
+    /// The single-slot base-projection cache (#255): repeated `/api/history`
+    /// queries over one store version reuse the fully-hydrated base instead of
+    /// re-reading and re-hydrating the whole log per request (INV-5).
+    pub history_cache: super::cache::HistoryProjectionCache,
 }
 
 impl InspectState {
@@ -31,6 +35,7 @@ impl InspectState {
         Self {
             repo,
             highlight_cache: RwLock::new(HighlightCache::new(HIGHLIGHT_CACHE_CAPACITY)),
+            history_cache: super::cache::HistoryProjectionCache::new(),
         }
     }
 }
@@ -209,7 +214,12 @@ fn route(state: &InspectState, method: &str, path: &str, query: Option<&str>) ->
         "/app.css" => Response::asset("text/css; charset=utf-8", APP_CSS),
         "/app.js" => Response::asset("application/javascript; charset=utf-8", APP_JS),
         "/api/history" => match history_query(query) {
-            Ok(request) => api_response(api::history_json(repo, &request.query, &request.page)),
+            Ok(request) => api_response(api::history_json(
+                repo,
+                &state.history_cache,
+                &request.query,
+                &request.page,
+            )),
             Err(message) => Response::json_error("400 Bad Request", &message),
         },
         "/api/revisions" => api_response(api::revisions_json(repo)),
