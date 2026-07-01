@@ -149,6 +149,17 @@ function pageUrl(s: State, selector: HistoryPageSelector): string {
   return `/api/history?${params}`;
 }
 
+// Fetch a history doc without committing — the shared fetch for the page-fetch and
+// reveal paths. A failure surfaces in `#error` and yields null.
+async function fetchHistoryDoc(url: string): Promise<HistoryDoc | null> {
+  try {
+    return (await fetchJSON(url)) as HistoryDoc;
+  } catch (err) {
+    showError(err instanceof Error ? err.message : String(err));
+    return null;
+  }
+}
+
 // Merge a fetched page into the loaded window. Contiguous or overlapping windows
 // union (page entries win on overlap); a disjoint page (e.g. a reveal jumped far
 // away) replaces the window. Returns the merged entries and their global offset.
@@ -212,18 +223,89 @@ export function fetchHistoryPage(selector: HistoryPageSelector): Promise<void> {
   const url = pageUrl(s, selector);
   const existing = pageFetches.get(url);
   if (existing) return existing;
-  const run = (async () => {
-    try {
-      const raw = (await fetchJSON(url)) as HistoryDoc;
-      commitHistoryPage(raw);
-    } catch (err) {
-      showError(err instanceof Error ? err.message : String(err));
-    }
-  })().finally(() => {
-    pageFetches.delete(url);
-  });
+  const run = fetchHistoryDoc(url)
+    .then((doc) => {
+      if (doc) commitHistoryPage(doc);
+    })
+    .finally(() => {
+      pageFetches.delete(url);
+    });
   pageFetches.set(url, run);
   return run;
+}
+
+// ---------------------------------------------------------------------------
+// Fetch-to-reveal (deep link / ref chip → an off-page event)
+// ---------------------------------------------------------------------------
+
+/**
+ * A fetched reveal page: the window doc (query key stamped), whether the target is
+ * present on it, and the type set to enable — all present types, so nothing hides
+ * the target and the query watcher stays quiet after the reveal commit.
+ */
+export interface RevealPage {
+  doc: HistoryDoc;
+  present: boolean;
+  enabledTypes: Set<string>;
+}
+
+// The reset (unfiltered) query a reveal fetches under — order preserved, no
+// q/track/object/type — so the located page is a page of the default timeline view
+// and nothing filters the target out.
+function resetQuery(order: string): string {
+  const params = new URLSearchParams();
+  if (order && order !== "asc") params.set("order", order);
+  params.set("limit", String(HISTORY_PAGE));
+  return params.toString();
+}
+
+/**
+ * Fetch the page containing `eventId` (via `at=`) under the reset query, so a
+ * reveal or deep link can jump to an off-page event. Returns the window doc, whether
+ * the target is on the page, and the type set to enable. A pure fetch — the caller
+ * commits (navigation pushes a URL; the router reacts to one).
+ */
+export async function fetchRevealPage(
+  eventId: string,
+): Promise<RevealPage | null> {
+  const s = getState();
+  const queryKey = resetQuery(s.order);
+  const params = new URLSearchParams(queryKey);
+  params.set("at", eventId);
+  const doc = await fetchHistoryDoc(`/api/history?${params}`);
+  if (!doc) return null;
+  const present = (doc.entries ?? []).some((e) => e.eventId === eventId);
+  const facetKeys = doc.facets ? Object.keys(doc.facets) : [];
+  const enabledTypes = new Set([...s.enabledTypes, ...facetKeys]);
+  return { doc: { ...doc, queryKey }, present, enabledTypes };
+}
+
+/** The state patch a reveal applies: reset filters, the located window, the type
+ * set, and the event selection — shared by the chip reveal and the deep-link path. */
+export function revealPatch(page: RevealPage, eventId: string): Partial<State> {
+  return {
+    lens: "timeline",
+    selected: { kind: "event", id: eventId },
+    filterText: "",
+    filterTrack: "",
+    filterObject: "",
+    enabledTypes: page.enabledTypes,
+    diff: null,
+    diffHash: null,
+    focus: null,
+    history: page.doc,
+  };
+}
+
+/**
+ * Resolve the event id that carries a structured id (observation / assessment /
+ * input-request) via a server search, or null when nothing matches. The haystack
+ * indexes those ids, so `q=<id>` finds the carrying event.
+ */
+export async function fetchEventIdForQuery(q: string): Promise<string | null> {
+  const params = new URLSearchParams({ q, limit: "1" });
+  const doc = await fetchHistoryDoc(`/api/history?${params}`);
+  return doc?.entries?.[0]?.eventId ?? null;
 }
 
 /**

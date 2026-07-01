@@ -2,6 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RoutePatch, SerializeSnapshot } from "../src/router";
 import type { HistoryDoc, RevisionsDoc, ThreadsDoc } from "../src/store";
 import { mountInspectorDom, resetDom } from "./support/dom";
+import {
+  installFetchMock,
+  resetHistoryResponse,
+  setHistoryResponse,
+  uninstallFetchMock,
+} from "./support/fetch";
 
 // The router is the hash grammar plus the navigate/apply choke point. `parseHash`
 // and `serializeState` are pure inverses (no global reads — `parseHash` takes the
@@ -33,13 +39,23 @@ beforeEach(async () => {
   vi.resetModules();
   store = await import("../src/store");
   router = await import("../src/router");
+  // A deep link to an off-page event fetches its page to reveal it; the fixture
+  // mock absorbs those reveal fetches.
+  installFetchMock();
   // Each test starts from a clean fragment so `applyHash` reads what it sets.
   history.replaceState(null, "", "/");
 });
 
 afterEach(() => {
+  resetHistoryResponse();
+  uninstallFetchMock();
   resetDom();
 });
+
+/** Let the async fetch-to-reveal step `applyHash` kicks settle. */
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 /** The State-bound route fields a parsed patch carries (excludes the transient seam). */
 function routeFields(p: RoutePatch) {
@@ -455,11 +471,44 @@ describe("applyHash (derive the view from the fragment, repaint via the subscrip
     expect(notifications).toBe(1);
   });
 
-  it("falls back and shows a diagnostic when a deep link names an absent event", () => {
+  it("fetches-to-reveal a deep link to an off-page event, then selects it", async () => {
     seed();
     mountInspectorDom();
+    const X =
+      "evt:sha256:0000000000000000000000000000000000000000000000000000000000000abc";
+    setHistoryResponse({
+      entries: [{ eventId: X, eventType: "review_observation_recorded" }],
+      diagnostics: [],
+      offset: 120,
+      matchCount: 500,
+      matchIndex: 123,
+      facets: {},
+      nextCursor: null,
+    });
+    history.replaceState(null, "", `#/event/${encodeURIComponent(X)}`);
+    router.applyHash();
+    await flush();
+    expect(store.getState().selected).toEqual({ kind: "event", id: X });
+    // No "not in this store" fallback — the event was fetched, not reported absent.
+    const el = document.querySelector("#route-diagnostic");
+    expect(el?.textContent ?? "").not.toContain("is not in this store");
+  });
+
+  it("falls back and shows a diagnostic when a deep link names a genuinely absent event", async () => {
+    seed();
+    mountInspectorDom();
+    setHistoryResponse({
+      entries: [],
+      diagnostics: [],
+      offset: 0,
+      matchCount: 0,
+      matchIndex: null,
+      facets: {},
+      nextCursor: null,
+    });
     history.replaceState(null, "", "#/event/evt:sha256:absent");
     router.applyHash();
+    await flush();
     expect(store.getState().selected).toEqual({ kind: null, id: null });
     const el = document.querySelector("#route-diagnostic");
     expect(el?.classList.contains("hidden")).toBe(false);

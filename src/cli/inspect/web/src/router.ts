@@ -24,6 +24,7 @@
 // the store subscriber is the only repaint path, so importing render here would be
 // the router↔render cycle. This module imports neither render nor any lens.
 
+import { fetchRevealPage, revealPatch } from "./data";
 import { $ } from "./dom";
 import {
   eventExists,
@@ -227,10 +228,37 @@ export function navigate(
 /**
  * Derive the whole view from the current fragment and commit it — the store
  * subscriber repaints. Called on boot and from the popstate / hashchange listeners
- * (Back/Forward + manual edits), which the composition root wires.
+ * (Back/Forward + manual edits), which the composition root wires. An event
+ * selection that is not in the loaded window is fetched-to-reveal asynchronously
+ * (the history is server-paged, so the event may simply be off the loaded page).
  */
 export function applyHash(): void {
-  commit(resolve(parseHash(location.hash, presentTypes())));
+  const patch = resolve(parseHash(location.hash, presentTypes()));
+  commit(patch);
+  const sel = getState().selected;
+  if (sel.kind === "event" && sel.id && !eventExists(sel.id)) {
+    void revealSelectedEvent(sel.id, patch.lens ?? DEFAULT_LENS);
+  }
+}
+
+// Fetch-to-reveal an event a deep link named that is not in the loaded window:
+// fetch the page containing it and commit the located window, or fall back with the
+// existing "not in this store" diagnostic when it is genuinely absent from the set.
+async function revealSelectedEvent(
+  eventId: string,
+  lens: string,
+): Promise<void> {
+  const page = await fetchRevealPage(eventId);
+  if (!page) return;
+  if (page.present) {
+    commit(revealPatch(page, eventId));
+    clearRouteDiagnostic();
+    return;
+  }
+  commit({ selected: { kind: null, id: null } });
+  showRouteDiagnostic(
+    `fell back to the ${lens} lens — event ${shortRef(eventId)} is not in this store`,
+  );
 }
 
 /**
@@ -279,16 +307,10 @@ export function resolve(patch: RoutePatch): Partial<State> {
     next.selected = { kind: null, id: null };
     return next;
   }
-  if (sel.kind === "event" && sel.id && !eventExists(sel.id)) {
-    showRouteDiagnostic(
-      routeDiagnostic(
-        `fell back to the ${patch.lens || DEFAULT_LENS} lens — event ${shortRef(sel.id)} is not in this store`,
-        freshnessDiagnostic,
-      ),
-    );
-    next.selected = { kind: null, id: null };
-    return next;
-  }
+  // An event selection is not resolved against the loaded window here (the history
+  // is server-paged, so the event may be off the loaded page). `applyHash`
+  // fetches-to-reveal it and applies the "not in this store" fallback only when the
+  // server confirms it is genuinely absent.
   if (freshnessDiagnostic) {
     showRouteDiagnostic(freshnessDiagnostic);
     return next;

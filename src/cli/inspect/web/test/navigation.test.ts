@@ -3,7 +3,12 @@ import type { HistoryDoc, RevisionsDoc } from "../src/store";
 import historyJson from "./fixtures/history.json";
 import revisionsJson from "./fixtures/revisions.json";
 import { mountInspectorDom, resetDom } from "./support/dom";
-import { installFetchMock, uninstallFetchMock } from "./support/fetch";
+import {
+  installFetchMock,
+  resetHistoryResponse,
+  setHistoryResponse,
+  uninstallFetchMock,
+} from "./support/fetch";
 
 // `navigation.ts` is the ref-chip resolution layer: `resolveRef` turns a clicked
 // `data-ref-kind` chip into a `router.navigate` / diff-open, and the reveal helpers
@@ -46,9 +51,23 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  resetHistoryResponse();
   uninstallFetchMock();
   resetDom();
 });
+
+/** A single-entry reveal page whose at=/q= fetches both resolve to `event`. */
+function revealPageFor(event: HistoryDoc["entries"][number]): void {
+  setHistoryResponse({
+    entries: [event],
+    diagnostics: [],
+    offset: 0,
+    matchCount: 1,
+    matchIndex: 0,
+    facets: { [event.eventType]: 1 },
+    nextCursor: null,
+  });
+}
 
 describe("resolveRef routes a chip by kind", () => {
   it("a rev chip selects the revision and dismisses the diff", () => {
@@ -74,22 +93,39 @@ describe("resolveRef routes a chip by kind", () => {
     expect(store.getState().diff).toBe(OBJ);
   });
 
-  it("an obs chip reveals and selects the recording event", () => {
-    navigation.resolveRef("obs", OBS_ID);
+  it("an obs chip resolves the id to its event server-side, then reveals it", async () => {
+    const obsEntry = {
+      eventId: OBS_EVENT,
+      eventType: "review_observation_recorded",
+      summary: { observationId: OBS_ID },
+    };
+    revealPageFor(obsEntry as HistoryDoc["entries"][number]);
+    await navigation.resolveRefAsync("obs", OBS_ID);
     expect(store.getState().selected).toEqual({ kind: "event", id: OBS_EVENT });
     expect(store.getState().lens).toBe("timeline");
   });
 
-  it("an assess chip reveals and selects the recording event", () => {
-    navigation.resolveRef("assess", ASSESS_ID);
+  it("an assess chip resolves the id to its event server-side, then reveals it", async () => {
+    const assessEntry = {
+      eventId: ASSESS_EVENT,
+      eventType: "review_assessment_recorded",
+      summary: { assessmentId: ASSESS_ID },
+    };
+    revealPageFor(assessEntry as HistoryDoc["entries"][number]);
+    await navigation.resolveRefAsync("assess", ASSESS_ID);
     expect(store.getState().selected).toEqual({
       kind: "event",
       id: ASSESS_EVENT,
     });
   });
 
-  it("an evt chip reveals and selects the event directly", () => {
-    navigation.resolveRef("evt", OBS_EVENT);
+  it("an evt chip reveals and selects the event directly", async () => {
+    const evtEntry = {
+      eventId: OBS_EVENT,
+      eventType: "review_observation_recorded",
+    };
+    revealPageFor(evtEntry as HistoryDoc["entries"][number]);
+    await navigation.resolveRefAsync("evt", OBS_EVENT);
     expect(store.getState().selected).toEqual({ kind: "event", id: OBS_EVENT });
   });
 
@@ -101,15 +137,20 @@ describe("resolveRef routes a chip by kind", () => {
   });
 });
 
-describe("reveal helpers clear hiding filters and select through the router", () => {
-  it("revealEvent enables the target type, clears filters, and selects", () => {
+describe("reveal helpers fetch the target page and select through the router", () => {
+  it("revealEvent fetches the page, clears filters, and selects", async () => {
     store.commit({
       filterText: "something",
       filterTrack: "human:kevin",
       filterObject: OBJ,
       lens: "list",
     });
-    navigation.revealEvent(OBS_EVENT);
+    const obsEntry = {
+      eventId: OBS_EVENT,
+      eventType: "review_observation_recorded",
+    };
+    revealPageFor(obsEntry as HistoryDoc["entries"][number]);
+    await navigation.revealEvent(OBS_EVENT);
     const s = store.getState();
     expect(s.selected).toEqual({ kind: "event", id: OBS_EVENT });
     expect(s.lens).toBe("timeline");
@@ -117,6 +158,61 @@ describe("reveal helpers clear hiding filters and select through the router", ()
     expect(s.filterTrack).toBe("");
     expect(s.filterObject).toBe("");
     expect(s.enabledTypes.has("review_observation_recorded")).toBe(true);
+  });
+
+  it("revealEvent fetches the page containing an off-page event via at=, then selects it", async () => {
+    const X =
+      "evt:sha256:0000000000000000000000000000000000000000000000000000000000000abc";
+    let atUrl = "";
+    const inner = globalThis.fetch;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      if (new URL(url, "http://inspector.test").pathname === "/api/history")
+        atUrl = url;
+      return inner(input as RequestInfo, init);
+    }) as typeof fetch;
+    setHistoryResponse({
+      entries: [{ eventId: X, eventType: "review_observation_recorded" }],
+      diagnostics: [],
+      offset: 120,
+      matchCount: 500,
+      matchIndex: 123,
+      facets: {},
+      nextCursor: null,
+    });
+    try {
+      // The loaded window (the fixture) does NOT contain X.
+      await navigation.revealEvent(X);
+    } finally {
+      globalThis.fetch = inner;
+    }
+    expect(atUrl).toContain("at=evt%3Asha256%3A");
+    expect(store.getState().selected).toEqual({ kind: "event", id: X });
+    expect(store.getState().history?.entries.some((e) => e.eventId === X)).toBe(
+      true,
+    );
+    expect(store.getState().history?.offset).toBe(120);
+  });
+
+  it("revealEvent leaves the view unchanged for a genuinely absent event", async () => {
+    store.commit({ selected: { kind: "revision", id: REV } });
+    setHistoryResponse({
+      entries: [],
+      diagnostics: [],
+      offset: 0,
+      matchCount: 0,
+      matchIndex: null,
+      facets: {},
+      nextCursor: null,
+    });
+    await navigation.revealEvent("evt:sha256:absent");
+    // No matching page → the selection is not switched to the absent event.
+    expect(store.getState().selected).toEqual({ kind: "revision", id: REV });
   });
 
   it("navigateToRevision filters the timeline to that revision", () => {

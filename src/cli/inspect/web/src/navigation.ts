@@ -1,20 +1,24 @@
 // The ref-chip resolution layer: turn a clicked reference chip into a router
-// navigation (or a diff open), and reveal an event/revision by clearing the
-// filters that would hide it. Ported from the served app.js `resolveRef` /
-// `revealEvent` / `revealBy` / `navigateToUnit` (→ `navigateToRevision`) /
-// `navigateToTrack`, in the revision vocabulary.
+// navigation (or a diff open), and reveal an event by fetching the page that
+// contains it. Ported from the served app.js `resolveRef` / `revealEvent` /
+// `revealBy` / `navigateToUnit` (→ `navigateToRevision`) / `navigateToTrack`, in
+// the revision vocabulary.
 //
-// Everything routes through `router.navigate` (commit → the store subscriber
-// repaints); navigation never calls render. It owns the single `document`
-// `click→resolveRef` delegate (`onDocumentClick`, registered once by the
+// The history is server-paged now, so an event may be off the loaded window:
+// revealing it fetches the page that contains it (`at=<id>`), and a structured id
+// (observation / assessment / input-request) is resolved to its event by a server
+// search before the reveal. The reveal helpers are async; `resolveRef` stays the
+// sync entry point (it fire-and-forgets the async work), with `resolveRefAsync`
+// for awaiting callers/tests. Everything routes through `router.navigate` (commit →
+// the store subscriber repaints); navigation never calls render. It owns the single
+// `document` `click→resolveRef` delegate (`onDocumentClick`, registered once by the
 // composition root): chips render across timeline / detail / diff / cards, so it
 // must stay one global listener. Per the detail layer's deferral, that same
 // delegate also resolves the `data-reveal-revision` "show in timeline" button.
 
+import { fetchEventIdForQuery, fetchRevealPage, revealPatch } from "./data";
 import { openDiff } from "./diff/controller";
 import { navigate } from "./router";
-import { getState } from "./store";
-import type { HistoryEntry } from "./types";
 
 /** Scope the timeline to a single revision via the shareable `revision:<id>` query. */
 export function navigateToRevision(id: string): void {
@@ -37,41 +41,34 @@ export function navigateToTrack(id: string): void {
   });
 }
 
-// Make an event visible (clearing every filter that could hide it, including the
-// track filter — a cross-track chip would otherwise select a hidden row) and select
-// it, all through the router so the URL stays the single source of truth.
-/** Reveal and select an event on the timeline, clearing hiding filters. */
-export function revealEvent(eventId: string): void {
-  const e = (getState().history?.entries ?? []).find(
-    (x) => x.eventId === eventId,
-  );
-  if (!e) return;
-  const types = new Set(getState().enabledTypes);
-  types.add(e.eventType);
-  navigate({
-    lens: "timeline",
-    selected: { kind: "event", id: eventId },
-    filterText: "",
-    filterTrack: "",
-    filterObject: "",
-    enabledTypes: types,
-    diff: null,
-    diffHash: null,
-    focus: null,
-  });
+// Make an event visible: fetch the page that contains it (`at=<id>`) under the
+// reset query so nothing hides it, then select it through the router (URL stays the
+// single source of truth). A genuinely absent event leaves the view unchanged.
+/** Fetch the page containing an event, reset the filters, and select it. */
+export async function revealEvent(eventId: string): Promise<void> {
+  const page = await fetchRevealPage(eventId);
+  if (!page?.present) return;
+  navigate(revealPatch(page, eventId));
 }
 
-/** Reveal the first event matching a predicate (e.g. the fact that recorded an id). */
-export function revealBy(predicate: (e: HistoryEntry) => boolean): void {
-  const e = (getState().history?.entries ?? []).find(predicate);
-  if (e?.eventId) revealEvent(e.eventId);
+// Resolve a structured id (observation / assessment / input-request) to its event
+// via a server search, then reveal that event.
+/** Reveal the event carrying a structured id, resolved server-side. */
+async function revealByQuery(id: string): Promise<void> {
+  const eventId = await fetchEventIdForQuery(id);
+  if (eventId) await revealEvent(eventId);
 }
 
 // A reference chip resolves to a navigation through the router (set the selection /
 // scope and push a hash), never an in-place filter mutation. Navigating to a named
 // reference also dismisses any open diff overlay.
-/** Route a clicked reference chip to its resource by kind. */
+/** Route a clicked reference chip to its resource by kind (fire-and-forget). */
 export function resolveRef(kind: string, id: string): void {
+  void resolveRefAsync(kind, id);
+}
+
+/** Route a clicked reference chip by kind, awaitable for reveal-fetching callers. */
+export async function resolveRefAsync(kind: string, id: string): Promise<void> {
   switch (kind) {
     // The revision and the (retired) review-unit prefix both address a revision's
     // composite — their identity is unified onto the revision id.
@@ -91,20 +88,12 @@ export function resolveRef(kind: string, id: string): void {
       openDiff(id);
       break;
     case "obs":
-      revealBy((e) => e.summary?.observationId === id);
-      break;
     case "assess":
-      revealBy((e) => e.summary?.assessmentId === id);
-      break;
     case "input-request":
-      revealBy(
-        (e) =>
-          e.eventType === "input_request_opened" &&
-          e.summary?.inputRequestId === id,
-      );
+      await revealByQuery(id);
       break;
     case "evt":
-      revealEvent(id);
+      await revealEvent(id);
       break;
     default:
       break;
