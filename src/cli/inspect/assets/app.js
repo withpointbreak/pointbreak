@@ -129,6 +129,7 @@
     dagArrowHead: "dag-arrow-head",
     dagArrowHeadTraced: "dag-arrow-head-traced",
     revisionDag: "revision-dag",
+    factDag: "fact-dag",
     head: "head",
     stale: "stale",
     superseded: "superseded",
@@ -1294,6 +1295,53 @@
   }
   __name(renderMarkdownInline, "renderMarkdownInline");
 
+  // src/supersession.ts
+  function renderSupersessionSvg(laid, opts) {
+    const nodes = laid?.nodes ?? [];
+    if (!laid || !nodes.length) return "";
+    const w = laid.bounds?.w ?? 0;
+    const h = laid.bounds?.h ?? 0;
+    const center = new Map(
+      nodes.map((n) => [
+        n.id ?? "",
+        [n.x ?? 0, n.y ?? 0]
+      ])
+    );
+    const marker = /* @__PURE__ */ __name((id, cls) => `<marker id="${id}" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path class="${cls}" d="M0,0 L7,4 L0,8 z" /></marker>`, "marker");
+    const defs = `<defs>${marker("dag-arrow", CLASS.dagArrowHead)}${marker("dag-arrow-traced", CLASS.dagArrowHeadTraced)}</defs>`;
+    const edges = (laid.edges ?? []).map((e) => {
+      let path = e.path ?? [];
+      const from = e.from != null ? center.get(e.from) : void 0;
+      if (from && path.length > 1) {
+        const dist2 = /* @__PURE__ */ __name((p) => (p[0] - from[0]) ** 2 + (p[1] - from[1]) ** 2, "dist2");
+        if (dist2(path[0]) < dist2(path[path.length - 1]))
+          path = [...path].reverse();
+      }
+      const pts = path.map(([x, y]) => `${x},${y}`).join(" ");
+      return `<polyline class="${CLASS.dagEdge}" data-from="${escapeHtml(e.from ?? "")}" data-to="${escapeHtml(e.to ?? "")}" points="${pts}" marker-end="url(#dag-arrow)" />`;
+    }).join("");
+    const nodesHtml = nodes.map((n) => {
+      const id = n.id ?? "";
+      const sel = opts.isSelected(id);
+      const nodeW = n.w ?? 0;
+      const nodeH = n.h ?? 0;
+      const nx = n.x ?? 0;
+      const ny = n.y ?? 0;
+      const cls = dagNodeClass({
+        isHead: !!n.isHead,
+        isSuperseded: !!n.isSuperseded
+      });
+      const interactive = opts.interactive ? ' tabindex="0" role="link"' : "";
+      const selected = sel ? ' aria-selected="true"' : "";
+      return `<g class="${cls}" ${opts.idAttr}="${escapeHtml(id)}"${interactive}${selected} aria-label="${escapeHtml(opts.ariaNoun)} ${escapeHtml(shortId(id))}">
+        <rect x="${nx - nodeW / 2}" y="${ny - nodeH / 2}" width="${nodeW}" height="${nodeH}" rx="6" />
+        <text x="${nx}" y="${ny}" text-anchor="middle" dominant-baseline="middle">${escapeHtml(shortId(id))}</text>
+      </g>`;
+    }).join("");
+    return `<svg class="${CLASS.revisionDag}" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="xMinYMin meet" role="group" aria-label="supersession graph">${defs}${edges}${nodesHtml}</svg>`;
+  }
+  __name(renderSupersessionSvg, "renderSupersessionSvg");
+
   // src/cards.ts
   function verdictBadge(ca) {
     const status = ca?.status || "unassessed";
@@ -1473,6 +1521,21 @@
     return `<section><h2>${escapeHtml(title)} (${list.length})</h2>${context}${body}</section>`;
   }
   __name(factSection, "factSection");
+  function renderFactSupersessionBlock(graph, noun) {
+    const laid = graph?.laidOut;
+    if (!laid || !(laid.nodes ?? []).length) return "";
+    const svg = renderSupersessionSvg(laid, {
+      idAttr: "data-fact-id",
+      ariaNoun: noun,
+      interactive: false,
+      isSelected: /* @__PURE__ */ __name(() => false, "isSelected")
+    });
+    if (!svg) return "";
+    const heads = (laid.nodes ?? []).filter((n) => n.isHead).length;
+    const caption = `${noun} supersession${heads > 1 ? ` — ${heads} competing` : ""}`;
+    return `<figure class="${CLASS.factDag}"><figcaption>${escapeHtml(caption)}</figcaption>${svg}</figure>`;
+  }
+  __name(renderFactSupersessionBlock, "renderFactSupersessionBlock");
 
   // src/overlay.ts
   var registry = /* @__PURE__ */ new Map();
@@ -2502,6 +2565,11 @@
     const badge = supersessionBadge(revisionId);
     const title = `${shortId(ru.id)}${base.commitOid ? ` · base ${shortId(base.commitOid)}` : ""}`;
     const staleContext = staleFactSectionContext(revisionId);
+    const observationContext = renderFactSupersessionBlock(
+      d.factSupersession?.observations,
+      "observation"
+    ) + staleContext;
+    const assessmentContext = renderFactSupersessionBlock(d.factSupersession?.assessments, "assessment") + staleContext;
     const stat = /* @__PURE__ */ __name((label, n) => `<span class="${CLASS.upStat}"><b>${n ?? 0}</b> ${label}</span>`, "stat");
     const sections = [];
     sections.push(`<section><h2>Revision</h2><dl class="${CLASS.upIdentity}">
@@ -2528,7 +2596,7 @@
         "Observations",
         d.observations,
         renderObservationCard,
-        staleContext
+        observationContext
       )
     );
     sections.push(
@@ -2544,7 +2612,7 @@
         "Assessments",
         d.assessments,
         renderAssessmentCard,
-        staleContext
+        assessmentContext
       )
     );
     const validationChecks = d.validationChecks ?? [];
@@ -3464,46 +3532,15 @@ click to open the revision page">
   }
   __name(renderThreadCard, "renderThreadCard");
   function renderThreadSvg(laid) {
-    const nodes = laid?.nodes ?? [];
-    if (!laid || !nodes.length) return "";
-    const w = laid.bounds?.w ?? 0;
-    const h = laid.bounds?.h ?? 0;
-    const center = new Map(
-      nodes.map((n) => [
-        n.id ?? "",
-        [n.x ?? 0, n.y ?? 0]
-      ])
-    );
-    const marker = /* @__PURE__ */ __name((id, cls) => `<marker id="${id}" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path class="${cls}" d="M0,0 L7,4 L0,8 z" /></marker>`, "marker");
-    const defs = `<defs>${marker("dag-arrow", CLASS.dagArrowHead)}${marker("dag-arrow-traced", CLASS.dagArrowHeadTraced)}</defs>`;
-    const edges = (laid.edges ?? []).map((e) => {
-      let path = e.path ?? [];
-      const from = e.from != null ? center.get(e.from) : void 0;
-      if (from && path.length > 1) {
-        const dist2 = /* @__PURE__ */ __name((p) => (p[0] - from[0]) ** 2 + (p[1] - from[1]) ** 2, "dist2");
-        if (dist2(path[0]) < dist2(path[path.length - 1]))
-          path = [...path].reverse();
-      }
-      const pts = path.map(([x, y]) => `${x},${y}`).join(" ");
-      return `<polyline class="${CLASS.dagEdge}" data-from="${escapeHtml(e.from ?? "")}" data-to="${escapeHtml(e.to ?? "")}" points="${pts}" marker-end="url(#dag-arrow)" />`;
-    }).join("");
-    const selected = getState().selected;
-    const nodesHtml = nodes.map((n) => {
-      const sel = selected.kind === "revision" && selected.id === n.id;
-      const nodeW = n.w ?? 0;
-      const nodeH = n.h ?? 0;
-      const nx = n.x ?? 0;
-      const ny = n.y ?? 0;
-      const cls = dagNodeClass({
-        isHead: !!n.isHead,
-        isSuperseded: !!n.isSuperseded
-      });
-      return `<g class="${cls}" data-revision-id="${escapeHtml(n.id ?? "")}" tabindex="0" role="link"${sel ? ' aria-selected="true"' : ""} aria-label="revision ${escapeHtml(shortId(n.id))}">
-        <rect x="${nx - nodeW / 2}" y="${ny - nodeH / 2}" width="${nodeW}" height="${nodeH}" rx="6" />
-        <text x="${nx}" y="${ny}" text-anchor="middle" dominant-baseline="middle">${escapeHtml(shortId(n.id))}</text>
-      </g>`;
-    }).join("");
-    return `<svg class="${CLASS.revisionDag}" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="xMinYMin meet" role="group" aria-label="supersession graph">${defs}${edges}${nodesHtml}</svg>`;
+    return renderSupersessionSvg(laid, {
+      idAttr: "data-revision-id",
+      ariaNoun: "revision",
+      interactive: true,
+      isSelected: /* @__PURE__ */ __name((id) => {
+        const s = getState().selected;
+        return s.kind === "revision" && s.id === id;
+      }, "isSelected")
+    });
   }
   __name(renderThreadSvg, "renderThreadSvg");
   function wireDagInteractions(card) {
