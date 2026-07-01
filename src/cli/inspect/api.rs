@@ -1309,6 +1309,29 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_body_includes_emphasis_and_is_cached() {
+        // A single-word edit (`1` → `2`) on an otherwise-identical line: the shared content keeps the
+        // width-ratio distance well under the guard, so the changed digit is emphasized.
+        let (repo, object_id, content_hash) = captured_repo_with(
+            "src/lib.rs",
+            "pub fn value() -> u32 { 1 }\n",
+            "pub fn value() -> u32 { 2 }\n",
+        );
+        let cache = std::sync::RwLock::new(super::super::server::HighlightCache::new(8));
+        let first =
+            snapshot_json(repo.path(), &object_id, Some(&content_hash), Some(&cache)).unwrap();
+        assert!(
+            first.contains("\"emphasis\""),
+            "the rendered body carries intraline emphasis on the changed row"
+        );
+        // The second call hits the content-hash cache (unchanged key) and returns identical bytes,
+        // so emphasis rides the existing cache with no key change or invalidation.
+        let second =
+            snapshot_json(repo.path(), &object_id, Some(&content_hash), Some(&cache)).unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
     fn snapshot_json_omits_tokens_for_unknown_language() {
         let (repo, object_id, content_hash) =
             captured_repo_with("notes.xyzzy", "alpha\n", "beta\n");
