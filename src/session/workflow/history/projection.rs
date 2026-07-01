@@ -1,6 +1,9 @@
+use std::collections::BTreeMap;
+
 use super::cursor::{HistoryCursor, HistoryWindow, cmp_key};
 use super::options::ResolvedHistoryFilters;
 use super::result::ReviewHistoryResult;
+use super::search::{SearchRecord, entry_revision_id};
 use super::summary::{ReviewHistoryEntry, ReviewHistorySummary};
 use crate::error::{Result, ShoreError};
 use crate::model::{ReviewEndpoint, ReviewTargetRef, RevisionId, TargetRef};
@@ -17,7 +20,10 @@ use crate::session::projection::cosignature::{
 };
 use crate::session::state::SessionState;
 use crate::session::store::backend::StoreBackend;
-use crate::session::{principal_view_for, verify_event_signature};
+use crate::session::{
+    ActorAttributesMap, DelegationMap, EventVerificationPolicy, ProjectionDiagnostic, TrustSet,
+    principal_view_for, verify_event_signature,
+};
 
 pub(super) fn history_from_events(
     events: &[ShoreEvent],
@@ -75,6 +81,134 @@ pub(super) fn history_from_events(
         next_cursor: slice.next_cursor,
         diagnostics: state.diagnostics,
     })
+}
+
+/// Caller-supplied advisory verification + reader enrichment for the base build.
+/// Built by the binary — the library cannot reach the inspector's `pub(crate)`
+/// `discover_*` helpers (INV-8). `Default` is the zero-cost path unit tests use.
+#[derive(Clone, Debug, Default)]
+pub struct BaseProjectionConfig {
+    pub verification_policy: Option<EventVerificationPolicy>,
+    pub trust_set: TrustSet,
+    pub actor_attributes: Option<ActorAttributesMap>,
+    pub delegation_map: Option<DelegationMap>,
+}
+
+/// One entry of the base projection: the hydrated review-history entry plus its
+/// once-built search record (haystack + structured fields incl. resolved object).
+#[derive(Clone, Debug)]
+pub struct BaseEntry {
+    pub entry: ReviewHistoryEntry,
+    pub record: SearchRecord,
+}
+
+/// The full, body-hydrated, `(occurred_at, event_id)`-sorted review-history
+/// projection the inspector caches once per store version (#255) and queries in
+/// memory. Identity (`event_set_hash`, `event_count`) always describes the FULL
+/// replayed set (plan 0092 INV-5), never a later filtered query result.
+#[derive(Clone, Debug)]
+pub struct BaseHistoryProjection {
+    pub entries: Vec<BaseEntry>,
+    pub event_set_hash: String,
+    pub event_count: usize,
+    pub diagnostics: Vec<ProjectionDiagnostic>,
+}
+
+/// Build the cacheable base from an in-memory event set: filter to the review
+/// domain, sort by the envelope key, hydrate every body, and attach each entry's
+/// `SearchRecord` (with `object` resolved via the revision->object map). Unlike
+/// `history_from_events` it never windows — one base serves all queries for a
+/// store version (task 3.1 filters/windows it purely, in memory).
+pub(super) fn history_base_from_events(
+    events: &[ShoreEvent],
+    config: &BaseProjectionConfig,
+    backend: Option<&StoreBackend>,
+) -> Result<BaseHistoryProjection> {
+    let state = SessionState::from_events(events)?;
+    let event_set_hash = state
+        .event_set_hash
+        .clone()
+        .expect("SessionState::from_events sets event_set_hash");
+
+    // The base carries no revision/track/type filter — those are query params
+    // (task 3.1). Bodies are always hydrated (`q` search needs them); advisory
+    // verification + reader enrichment come from the caller's config (the binary
+    // fills it from `discover_*` — the library cannot reach those helpers, INV-8).
+    let filters = ResolvedHistoryFilters {
+        include_body: true,
+        verification_policy: config.verification_policy,
+        trust_set: config.trust_set.clone(),
+        actor_attributes: config.actor_attributes.clone(),
+        delegation_map: config.delegation_map.clone(),
+        ..Default::default()
+    };
+
+    // Build the co-signature index once, only when a policy is set (the zero-policy
+    // path stays free of cost) — it indexes the full event set, window-independent.
+    let cosig_index = filters
+        .verification_policy
+        .is_some()
+        .then(|| CosignatureIndex::build(events))
+        .transpose()?;
+
+    let mut matched: Vec<&ShoreEvent> = events
+        .iter()
+        .filter(|event| event_matches_filters(event, &filters))
+        .collect();
+    matched.sort_by(|left, right| {
+        cmp_key(&left.occurred_at, left.event_id.as_str())
+            .cmp(&cmp_key(&right.occurred_at, right.event_id.as_str()))
+    });
+
+    // Pass 1: hydrate every entry (the base never slices — the full body set is
+    // what `q` search needs). Pass 2: resolve `object` against the revision map
+    // and attach each entry's search record.
+    let built = matched
+        .iter()
+        .map(|event| history_entry_from_event(event, &filters, cosig_index.as_ref(), backend))
+        .collect::<Result<Vec<_>>>()?;
+    let object_by_revision = revision_object_map(&built);
+    let entries = built
+        .into_iter()
+        .map(|entry| {
+            let object = entry_object(&entry, &object_by_revision);
+            let record = SearchRecord::from_entry(&entry, object);
+            BaseEntry { entry, record }
+        })
+        .collect();
+
+    Ok(BaseHistoryProjection {
+        entries,
+        event_set_hash,
+        event_count: events.len(),
+        diagnostics: state.diagnostics,
+    })
+}
+
+/// The captured-object id for each revision, keyed by the capture's subject
+/// revision id (the same `entry_revision_id` the record/haystack join on, and the
+/// `/api/revisions` `revisionId` in production), from the `RevisionCaptured`
+/// entries. Empty keys are skipped.
+fn revision_object_map(entries: &[ReviewHistoryEntry]) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    for entry in entries {
+        if let ReviewHistorySummary::RevisionCaptured { object_id, .. } = &entry.summary {
+            let revision = entry_revision_id(entry);
+            if !revision.is_empty() {
+                map.insert(revision, object_id.as_str().to_owned());
+            }
+        }
+    }
+    map
+}
+
+/// The content-object id an entry's revision captured, or "" — the join the
+/// client did via `objectIdForRevisionIn(/api/revisions, entryRevisionId(e))`,
+/// single-sourced on the same `entry_revision_id` key.
+fn entry_object<'a>(entry: &ReviewHistoryEntry, map: &'a BTreeMap<String, String>) -> &'a str {
+    map.get(&entry_revision_id(entry))
+        .map(String::as_str)
+        .unwrap_or("")
 }
 
 pub(super) fn history_entry_from_event(

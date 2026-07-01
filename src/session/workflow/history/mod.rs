@@ -5,10 +5,13 @@ mod result;
 mod search;
 mod summary;
 
+use std::path::Path;
+
 pub use self::cursor::{HistoryCursor, HistoryWindow};
 use self::options::ResolvedHistoryFilters;
 pub use self::options::{ReviewHistoryFilters, ReviewHistoryOptions};
-use self::projection::history_from_events;
+pub use self::projection::{BaseEntry, BaseHistoryProjection, BaseProjectionConfig};
+use self::projection::{history_base_from_events, history_from_events};
 pub use self::result::ReviewHistoryResult;
 pub use self::search::{
     QueryClause, SearchRecord, build_haystack, matches_query, parse_search_query,
@@ -65,9 +68,29 @@ pub fn review_history(options: ReviewHistoryOptions) -> Result<ReviewHistoryResu
     Ok(result)
 }
 
+/// Read the store and build the full body-hydrated base projection the inspector
+/// caches (#255) and queries in memory (task 3.1). `config` (advisory
+/// verification + reader enrichment) is supplied by the caller — the binary
+/// builds it from `discover_*` (the library cannot reach those `pub(crate)`
+/// helpers — INV-8). Reads leniently for a display surface and folds the
+/// skip diagnostics in, like `review_history`.
+pub fn history_base_projection(
+    repo: impl AsRef<Path>,
+    config: &BaseProjectionConfig,
+) -> Result<BaseHistoryProjection> {
+    let read_store = resolve_read_store(repo.as_ref())?;
+    let store = EventStore::from_backend(read_store.backend());
+    let (events, skipped) = store.list_events_lenient()?;
+    let mut base = history_base_from_events(&events, config, Some(read_store.backend()))?;
+    base.diagnostics.extend(skipped_to_diagnostics(skipped));
+    Ok(base)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::projection::{history_entry_from_event, history_from_events};
+    use super::projection::{
+        history_base_from_events, history_entry_from_event, history_from_events,
+    };
     use super::summary::ReviewHistorySummary;
     use super::*;
     use crate::model::{
@@ -902,6 +925,75 @@ mod tests {
                 .iter()
                 .any(|diagnostic| { diagnostic.code == DUPLICATE_SEMANTIC_OBSERVATION_EVENT_CODE })
         );
+    }
+
+    #[test]
+    fn base_projection_hydrates_all_bodies_and_builds_records() {
+        let events = [
+            observation_event_with_body("inline body"),
+            assessment_event(),
+        ];
+        // A default config (no verification policy, no enrichment) exercises the
+        // zero-cost path; bodies are inline so no backend is needed.
+        let base =
+            history_base_from_events(&events, &BaseProjectionConfig::default(), None).unwrap();
+
+        assert_eq!(base.entries.len(), 2);
+        // Every entry is hydrated (include_body) — the inline body is in the haystack.
+        assert!(
+            base.entries
+                .iter()
+                .any(|entry| entry.record.text.contains("inline body"))
+        );
+        // Identity describes the full replayed set (plan 0092 INV-5).
+        assert_eq!(base.event_count, 2);
+        assert!(base.event_set_hash.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn base_projection_sorts_ascending_occurred_at_event_id() {
+        let late = event_with_time_and_key("2026-05-13T10:00:02Z", "late");
+        let early = event_with_time_and_key("2026-05-13T10:00:01Z", "early");
+        let base = history_base_from_events(&[late, early], &BaseProjectionConfig::default(), None)
+            .unwrap();
+
+        assert!(base.entries[0].entry.occurred_at < base.entries[1].entry.occurred_at);
+    }
+
+    #[test]
+    fn base_projection_resolves_object_field_to_the_captured_object() {
+        // A capture carries revision.object_id; an observation on the same revision
+        // must resolve `object` to that captured object id. Assert the JOIN (obs
+        // object == the capture's object) rather than a hard-coded string.
+        let capture = revision_captured_event_for("review-unit:sha256:one");
+        let obs = observation_event("review-unit:sha256:one", "agent:codex", "Keep");
+        let base =
+            history_base_from_events(&[capture, obs], &BaseProjectionConfig::default(), None)
+                .unwrap();
+
+        let captured_object = match &base
+            .entries
+            .iter()
+            .find(|entry| matches!(entry.entry.event_type, EventType::WorkObjectProposed))
+            .unwrap()
+            .entry
+            .summary
+        {
+            ReviewHistorySummary::RevisionCaptured { object_id, .. } => {
+                object_id.as_str().to_owned()
+            }
+            other => panic!("expected a capture summary, got {other:?}"),
+        };
+        let obs_entry = base
+            .entries
+            .iter()
+            .find(|entry| matches!(entry.entry.event_type, EventType::ReviewObservationRecorded))
+            .unwrap();
+        assert_eq!(
+            obs_entry.record.field("object"),
+            Some(captured_object.as_str())
+        );
+        assert!(!captured_object.is_empty());
     }
 
     fn review_initialized_event(key: &str) -> ShoreEvent {
