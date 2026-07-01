@@ -665,30 +665,6 @@
   __name(renderRevisionOverview, "renderRevisionOverview");
 
   // src/query.ts
-  function buildHaystack(e) {
-    const s = e.summary || {};
-    const parts = [
-      entryTitle(e),
-      s.body,
-      s.summary,
-      s.assessment,
-      s.outcome,
-      s.reasonCode,
-      e.eventId,
-      entryRevisionId(e),
-      s.observationId,
-      s.assessmentId,
-      s.inputRequestId,
-      s.validationCheckId,
-      entryTrack(e),
-      entryAnchor(e),
-      s.checkName,
-      s.command,
-      ...entryTags(e)
-    ];
-    return parts.filter(Boolean).join(" ").toLowerCase();
-  }
-  __name(buildHaystack, "buildHaystack");
   function tokenizeQuery(q) {
     const out = [];
     const re = /-?(?:[a-z]+:)?"[^"]*"|\S+/gi;
@@ -776,25 +752,245 @@
   }
   __name(commit, "commit");
 
-  // src/data.ts
-  function objectIdForRevisionIn(revisions, revisionId) {
-    return revisions.entries.find((r) => r.revisionId === revisionId)?.objectId ?? "";
+  // src/model.ts
+  function presentTypes() {
+    const history2 = getState().history;
+    const keys = history2?.facets ? Object.keys(history2.facets) : [];
+    const present = new Set(
+      keys.length ? keys : (history2?.entries ?? []).map((e) => e.eventType)
+    );
+    const ordered = TYPES.map((t) => t.id).filter((id) => present.has(id));
+    for (const id of present) if (!TYPE_MAP[id]) ordered.push(id);
+    return ordered;
   }
-  __name(objectIdForRevisionIn, "objectIdForRevisionIn");
-  function indexEntries(history2, revisions) {
-    for (const e of history2.entries ?? []) {
-      const revision = entryRevisionId(e);
-      e.__search = {
-        text: buildHaystack(e),
-        type: e.eventType,
-        track: entryTrack(e),
-        revision,
-        object: objectIdForRevisionIn(revisions, revision),
-        status: e.summary?.status ?? ""
-      };
+  __name(presentTypes, "presentTypes");
+  function currentThreads() {
+    return getState().threads?.threads ?? [];
+  }
+  __name(currentThreads, "currentThreads");
+  function threadRevisionOrder(thread) {
+    const revisions = thread.revisions ?? [];
+    const nodes = thread.laidOut?.nodes ?? [];
+    if (!nodes.length) return revisions;
+    const known = new Set(revisions);
+    const ordered = nodes.filter(
+      (n) => typeof n.id === "string" && known.has(n.id)
+    ).slice().sort((a, b) => (a.y ?? 0) - (b.y ?? 0) || (a.x ?? 0) - (b.x ?? 0)).map((n) => n.id);
+    if (ordered.length === revisions.length) return ordered;
+    const seen = new Set(ordered);
+    return ordered.concat(revisions.filter((id) => !seen.has(id)));
+  }
+  __name(threadRevisionOrder, "threadRevisionOrder");
+  function revisionClassification(revisionId) {
+    const map = getState().threads?.revisionClassification;
+    const raw = map ? map[revisionId] : void 0;
+    if (raw === null || typeof raw !== "object") return null;
+    return raw;
+  }
+  __name(revisionClassification, "revisionClassification");
+  function supersededByRevision(revisionId) {
+    return revisionClassification(revisionId)?.supersededBy ?? [];
+  }
+  __name(supersededByRevision, "supersededByRevision");
+  function supersedesRevision(revisionId) {
+    return revisionClassification(revisionId)?.supersedes ?? [];
+  }
+  __name(supersedesRevision, "supersedesRevision");
+  function revisionIsHead(revisionId) {
+    const klass = revisionClassification(revisionId)?.state;
+    return klass === "head" || klass === "isolated";
+  }
+  __name(revisionIsHead, "revisionIsHead");
+  function revisionForId(revisionId) {
+    return (getState().revisions?.entries ?? []).find(
+      (r) => r.revisionId === revisionId
+    ) ?? null;
+  }
+  __name(revisionForId, "revisionForId");
+  function objectIdForRevision(revisionId) {
+    return revisionForId(revisionId)?.objectId ?? "";
+  }
+  __name(objectIdForRevision, "objectIdForRevision");
+  function objectArtifactHashForRevision(revisionId) {
+    return revisionForId(revisionId)?.objectArtifactContentHash ?? "";
+  }
+  __name(objectArtifactHashForRevision, "objectArtifactHashForRevision");
+  function snapshotIdForRevision(revisionId) {
+    const revision = revisionForId(revisionId);
+    return revision ? revision.objectId ?? null : null;
+  }
+  __name(snapshotIdForRevision, "snapshotIdForRevision");
+  function revisionIdForObject(objectId, contentHash = null) {
+    const entries = getState().revisions?.entries ?? [];
+    const revision = entries.find(
+      (r) => r.objectId === objectId && (!contentHash || r.objectArtifactContentHash === contentHash)
+    ) ?? entries.find((r) => r.objectId === objectId);
+    return revision ? revision.revisionId ?? null : null;
+  }
+  __name(revisionIdForObject, "revisionIdForObject");
+  function overviewForRevision(revisionId) {
+    return revisionForId(revisionId)?.overview ?? null;
+  }
+  __name(overviewForRevision, "overviewForRevision");
+  function isSupersedableFact(e) {
+    return SUPERSEDABLE_FACT_TYPES.has(e.eventType);
+  }
+  __name(isSupersedableFact, "isSupersedableFact");
+  function supersessionStaleBadge(e) {
+    if (!isSupersedableFact(e)) return "";
+    const successors = supersededByRevision(entryRevisionId(e));
+    if (!successors.length) return "";
+    return `<span class="${CLASS.badge} ${CLASS.stale}">superseded by ${successors.map(linkify).join(" ")}</span>`;
+  }
+  __name(supersessionStaleBadge, "supersessionStaleBadge");
+  function captureSupersedesBadge(e) {
+    if (e.eventType !== "work_object_proposed") return "";
+    const predecessors = supersedesRevision(entryRevisionId(e));
+    if (!predecessors.length) return "";
+    return `<span class="${CLASS.badge} ${CLASS.supersedes}">supersedes ${predecessors.map(linkify).join(" ")}</span>`;
+  }
+  __name(captureSupersedesBadge, "captureSupersedesBadge");
+  function supersessionBadge(revisionId) {
+    if (!revisionId) return "";
+    if (revisionIsHead(revisionId))
+      return `<span class="${CLASS.badge} ${CLASS.head}">current in thread</span>`;
+    const successors = supersededByRevision(revisionId);
+    if (successors.length)
+      return `<span class="${CLASS.badge} ${CLASS.superseded}">superseded by ${successors.map(linkify).join(" ")}</span>`;
+    return "";
+  }
+  __name(supersessionBadge, "supersessionBadge");
+  function annotationsForRevision(revisionId) {
+    const out = [];
+    for (const e of getState().history?.entries ?? []) {
+      if (entryRevisionId(e) !== revisionId) continue;
+      const s = e.summary ?? {};
+      if (e.eventType === "review_observation_recorded") {
+        out.push({
+          kind: "observation",
+          id: s.observationId ?? e.eventId ?? "",
+          title: s.title ?? "(observation)",
+          body: s.body ?? "",
+          bodyContentType: s.bodyContentType,
+          track: e.trackId ?? "",
+          tags: Array.isArray(s.tags) ? s.tags : [],
+          target: s.target ?? {}
+        });
+      } else if (e.eventType === "input_request_opened") {
+        const meta = [s.mode, s.reasonCode].filter(Boolean).join(" · ");
+        out.push({
+          kind: "input-request",
+          id: s.inputRequestId ?? e.eventId ?? "",
+          title: s.title ?? "(input request)",
+          body: s.body ?? "",
+          bodyContentType: s.bodyContentType,
+          track: e.trackId ?? "",
+          tags: meta ? [meta] : [],
+          target: s.target ?? {}
+        });
+      } else if (e.eventType === "review_assessment_recorded") {
+        const label = assessmentDisplayLabel(s.assessment ?? "");
+        out.push({
+          kind: "assessment",
+          id: s.assessmentId ?? e.eventId ?? "",
+          title: `assessment: ${label || "?"}`,
+          body: s.summary ?? "",
+          bodyContentType: s.summaryContentType,
+          track: e.trackId ?? "",
+          tags: [],
+          target: s.target ?? {}
+        });
+      }
     }
+    return out;
   }
-  __name(indexEntries, "indexEntries");
+  __name(annotationsForRevision, "annotationsForRevision");
+  function renderThreadRevisionOverview(revisionId) {
+    const revision = revisionForId(revisionId);
+    const overview = overviewForRevision(revisionId);
+    if (!revision || !overview) return "";
+    return `<div class="${CLASS.threadOverview}">
+    <div><b>${targetDisplayLabel(revision.targetDisplay)}</b> <span>${escapeHtml(shortId(revisionId))}</span></div>
+    ${assessmentCue(overview)}
+    <div class="${CLASS.overviewCues}" aria-label="review cues"><span class="${CLASS.overviewLabel}">review cues</span>${attentionCues(overview)}</div>
+  </div>`;
+  }
+  __name(renderThreadRevisionOverview, "renderThreadRevisionOverview");
+  function matchesRevisionFilters(r) {
+    const s = getState();
+    if (s.filterObject && r.objectId !== s.filterObject) return false;
+    return matchesQuery(revisionSearchIndex(r), parseSearchQuery(s.filterText));
+  }
+  __name(matchesRevisionFilters, "matchesRevisionFilters");
+  function threadMatchesRevisionFilters(thread) {
+    const revisions = thread.revisions ?? [];
+    const s = getState();
+    if (!s.filterText && !s.filterObject) return true;
+    return revisions.map(revisionForId).filter((r) => r !== null).some(matchesRevisionFilters);
+  }
+  __name(threadMatchesRevisionFilters, "threadMatchesRevisionFilters");
+  function filteredThreadRevisionIds(thread, revisions = thread.revisions ?? []) {
+    const s = getState();
+    if (!s.filterText && !s.filterObject) return revisions;
+    return revisions.filter((revisionId) => {
+      const revision = revisionForId(revisionId);
+      return revision ? matchesRevisionFilters(revision) : false;
+    });
+  }
+  __name(filteredThreadRevisionIds, "filteredThreadRevisionIds");
+  function lensEntryIds() {
+    const s = getState();
+    if (s.lens === "list") {
+      return (s.revisions?.entries ?? []).filter(matchesRevisionFilters).map((r) => ({ kind: "revision", id: r.revisionId ?? "" }));
+    }
+    if (s.lens === "threads") {
+      const ids = [];
+      for (const t of currentThreads().filter(threadMatchesRevisionFilters)) {
+        for (const r of filteredThreadRevisionIds(t, threadRevisionOrder(t))) {
+          ids.push({ kind: "revision", id: r });
+        }
+      }
+      return ids;
+    }
+    return (s.history?.entries ?? []).map(
+      (e) => ({ kind: "event", id: e.eventId ?? "" })
+    );
+  }
+  __name(lensEntryIds, "lensEntryIds");
+  function selectedEventId() {
+    const selected = getState().selected;
+    return selected && selected.kind === "event" ? selected.id : null;
+  }
+  __name(selectedEventId, "selectedEventId");
+  function revisionExists(id) {
+    return (getState().revisions?.entries ?? []).some((r) => r.revisionId === id);
+  }
+  __name(revisionExists, "revisionExists");
+  function revisionInAnyThread(id) {
+    return currentThreads().some((t) => (t.revisions ?? []).includes(id));
+  }
+  __name(revisionInAnyThread, "revisionInAnyThread");
+  function eventExists(id) {
+    return (getState().history?.entries ?? []).some((e) => e.eventId === id);
+  }
+  __name(eventExists, "eventExists");
+
+  // src/data.ts
+  var HISTORY_PAGE = 100;
+  function historyQueryParams(s) {
+    const p = new URLSearchParams();
+    if (s.filterText) p.set("q", s.filterText);
+    if (s.filterTrack) p.set("track", s.filterTrack);
+    if (s.filterObject) p.set("object", s.filterObject);
+    if (s.order && s.order !== "asc") p.set("order", s.order);
+    const present = presentTypes();
+    if (present.some((id) => !s.enabledTypes.has(id))) {
+      p.set("type", present.filter((id) => s.enabledTypes.has(id)).join(","));
+    }
+    p.set("limit", String(HISTORY_PAGE));
+    return p.toString();
+  }
+  __name(historyQueryParams, "historyQueryParams");
   function showError(message) {
     const el = $("#error");
     if (!el) return;
@@ -810,20 +1006,17 @@
   async function load() {
     try {
       const freshness = await fetchJSON("/api/freshness");
+      const params = historyQueryParams(getState());
       const [historyRaw, revisionsRaw, threadsRaw] = await Promise.all([
-        fetchJSON("/api/history"),
+        fetchJSON(`/api/history?${params}`),
         fetchJSON("/api/revisions"),
         fetchJSON("/api/threads")
       ]);
-      const history2 = historyRaw;
-      const revisions = revisionsRaw;
-      const threads = threadsRaw;
-      indexEntries(history2, revisions);
       showError(null);
       commit({
-        history: history2,
-        revisions,
-        threads,
+        history: { ...historyRaw, queryKey: params },
+        revisions: revisionsRaw,
+        threads: threadsRaw,
         lastEventCount: freshness.eventCount ?? null
       });
     } catch (err) {
@@ -831,6 +1024,125 @@
     }
   }
   __name(load, "load");
+  var reloading = false;
+  function maybeReloadForQuery() {
+    const s = getState();
+    const want = historyQueryParams(s);
+    if (reloading || !s.history || s.history.queryKey === want) return;
+    reloading = true;
+    void load().finally(() => {
+      reloading = false;
+    });
+  }
+  __name(maybeReloadForQuery, "maybeReloadForQuery");
+  var pageFetches = /* @__PURE__ */ new Map();
+  function pageUrl(s, selector) {
+    const params = new URLSearchParams(historyQueryParams(s));
+    if (selector.offset != null) params.set("offset", String(selector.offset));
+    return `/api/history?${params}`;
+  }
+  __name(pageUrl, "pageUrl");
+  async function fetchHistoryDoc(url) {
+    try {
+      return await fetchJSON(url);
+    } catch (err) {
+      showError(err instanceof Error ? err.message : String(err));
+      return null;
+    }
+  }
+  __name(fetchHistoryDoc, "fetchHistoryDoc");
+  function mergeWindows(prev, page) {
+    const prevOffset = prev.offset ?? 0;
+    const prevEntries = prev.entries ?? [];
+    const prevEnd = prevOffset + prevEntries.length;
+    const pageOffset = page.offset ?? 0;
+    const pageEntries = page.entries ?? [];
+    const pageEnd = pageOffset + pageEntries.length;
+    if (pageOffset > prevEnd || pageEnd < prevOffset) {
+      return { entries: pageEntries, offset: pageOffset };
+    }
+    const offset = Math.min(prevOffset, pageOffset);
+    const end = Math.max(prevEnd, pageEnd);
+    const entries = [];
+    for (let g = offset; g < end; g++) {
+      entries.push(
+        g >= pageOffset && g < pageEnd ? pageEntries[g - pageOffset] : prevEntries[g - prevOffset]
+      );
+    }
+    return { entries, offset };
+  }
+  __name(mergeWindows, "mergeWindows");
+  function commitHistoryPage(page) {
+    const s = getState();
+    const queryKey = historyQueryParams(s);
+    const prev = s.history;
+    const merged = prev && prev.queryKey === queryKey ? mergeWindows(prev, page) : { entries: page.entries ?? [], offset: page.offset ?? 0 };
+    commit({
+      history: {
+        ...page,
+        entries: merged.entries,
+        offset: merged.offset,
+        queryKey
+      }
+    });
+  }
+  __name(commitHistoryPage, "commitHistoryPage");
+  function fetchHistoryPage(selector) {
+    const s = getState();
+    if (!s.history) return Promise.resolve();
+    const url = pageUrl(s, selector);
+    const existing = pageFetches.get(url);
+    if (existing) return existing;
+    const run2 = fetchHistoryDoc(url).then((doc) => {
+      if (doc) commitHistoryPage(doc);
+    }).finally(() => {
+      pageFetches.delete(url);
+    });
+    pageFetches.set(url, run2);
+    return run2;
+  }
+  __name(fetchHistoryPage, "fetchHistoryPage");
+  function resetQuery(order) {
+    const params = new URLSearchParams();
+    if (order && order !== "asc") params.set("order", order);
+    params.set("limit", String(HISTORY_PAGE));
+    return params.toString();
+  }
+  __name(resetQuery, "resetQuery");
+  async function fetchRevealPage(eventId) {
+    const s = getState();
+    const queryKey = resetQuery(s.order);
+    const params = new URLSearchParams(queryKey);
+    params.set("at", eventId);
+    const doc = await fetchHistoryDoc(`/api/history?${params}`);
+    if (!doc) return null;
+    const present = (doc.entries ?? []).some((e) => e.eventId === eventId);
+    const facetKeys = doc.facets ? Object.keys(doc.facets) : [];
+    const enabledTypes = /* @__PURE__ */ new Set([...s.enabledTypes, ...facetKeys]);
+    return { doc: { ...doc, queryKey }, present, enabledTypes };
+  }
+  __name(fetchRevealPage, "fetchRevealPage");
+  function revealPatch(page, eventId) {
+    return {
+      lens: "timeline",
+      selected: { kind: "event", id: eventId },
+      filterText: "",
+      filterTrack: "",
+      filterObject: "",
+      enabledTypes: page.enabledTypes,
+      diff: null,
+      diffHash: null,
+      focus: null,
+      history: page.doc
+    };
+  }
+  __name(revealPatch, "revealPatch");
+  async function fetchEventIdForQuery(q) {
+    const params = new URLSearchParams({ q, limit: "1" });
+    const doc = await fetchHistoryDoc(`/api/history?${params}`);
+    return doc?.entries?.[0]?.eventId ?? null;
+  }
+  __name(fetchEventIdForQuery, "fetchEventIdForQuery");
   async function pollFreshness() {
     try {
       const f = await fetchJSON("/api/freshness");
@@ -1154,268 +1466,6 @@
   }
   __name(factSection, "factSection");
 
-  // src/model.ts
-  var EMPTY_SEARCH_INDEX = { text: "", type: "" };
-  function presentTypes() {
-    const present = new Set(
-      (getState().history?.entries ?? []).map((e) => e.eventType)
-    );
-    const ordered = TYPES.map((t) => t.id).filter((id) => present.has(id));
-    for (const id of present) if (!TYPE_MAP[id]) ordered.push(id);
-    return ordered;
-  }
-  __name(presentTypes, "presentTypes");
-  function currentThreads() {
-    return getState().threads?.threads ?? [];
-  }
-  __name(currentThreads, "currentThreads");
-  function threadRevisionOrder(thread) {
-    const revisions = thread.revisions ?? [];
-    const nodes = thread.laidOut?.nodes ?? [];
-    if (!nodes.length) return revisions;
-    const known = new Set(revisions);
-    const ordered = nodes.filter(
-      (n) => typeof n.id === "string" && known.has(n.id)
-    ).slice().sort((a, b) => (a.y ?? 0) - (b.y ?? 0) || (a.x ?? 0) - (b.x ?? 0)).map((n) => n.id);
-    if (ordered.length === revisions.length) return ordered;
-    const seen = new Set(ordered);
-    return ordered.concat(revisions.filter((id) => !seen.has(id)));
-  }
-  __name(threadRevisionOrder, "threadRevisionOrder");
-  function revisionClassification(revisionId) {
-    const map = getState().threads?.revisionClassification;
-    const raw = map ? map[revisionId] : void 0;
-    if (raw === null || typeof raw !== "object") return null;
-    return raw;
-  }
-  __name(revisionClassification, "revisionClassification");
-  function supersededByRevision(revisionId) {
-    return revisionClassification(revisionId)?.supersededBy ?? [];
-  }
-  __name(supersededByRevision, "supersededByRevision");
-  function supersedesRevision(revisionId) {
-    return revisionClassification(revisionId)?.supersedes ?? [];
-  }
-  __name(supersedesRevision, "supersedesRevision");
-  function revisionIsHead(revisionId) {
-    const klass = revisionClassification(revisionId)?.state;
-    return klass === "head" || klass === "isolated";
-  }
-  __name(revisionIsHead, "revisionIsHead");
-  function revisionForId(revisionId) {
-    return (getState().revisions?.entries ?? []).find(
-      (r) => r.revisionId === revisionId
-    ) ?? null;
-  }
-  __name(revisionForId, "revisionForId");
-  function objectIdForRevision(revisionId) {
-    return revisionForId(revisionId)?.objectId ?? "";
-  }
-  __name(objectIdForRevision, "objectIdForRevision");
-  function objectArtifactHashForRevision(revisionId) {
-    return revisionForId(revisionId)?.objectArtifactContentHash ?? "";
-  }
-  __name(objectArtifactHashForRevision, "objectArtifactHashForRevision");
-  function snapshotIdForRevision(revisionId) {
-    const revision = revisionForId(revisionId);
-    return revision ? revision.objectId ?? null : null;
-  }
-  __name(snapshotIdForRevision, "snapshotIdForRevision");
-  function revisionIdForObject(objectId, contentHash = null) {
-    const entries = getState().revisions?.entries ?? [];
-    const revision = entries.find(
-      (r) => r.objectId === objectId && (!contentHash || r.objectArtifactContentHash === contentHash)
-    ) ?? entries.find((r) => r.objectId === objectId);
-    return revision ? revision.revisionId ?? null : null;
-  }
-  __name(revisionIdForObject, "revisionIdForObject");
-  function overviewForRevision(revisionId) {
-    return revisionForId(revisionId)?.overview ?? null;
-  }
-  __name(overviewForRevision, "overviewForRevision");
-  function eventMatchesObject(e, objectId) {
-    if (!objectId) return true;
-    return objectIdForRevision(entryRevisionId(e)) === objectId;
-  }
-  __name(eventMatchesObject, "eventMatchesObject");
-  function isSupersedableFact(e) {
-    return SUPERSEDABLE_FACT_TYPES.has(e.eventType);
-  }
-  __name(isSupersedableFact, "isSupersedableFact");
-  function supersessionStaleBadge(e) {
-    if (!isSupersedableFact(e)) return "";
-    const successors = supersededByRevision(entryRevisionId(e));
-    if (!successors.length) return "";
-    return `<span class="${CLASS.badge} ${CLASS.stale}">superseded by ${successors.map(linkify).join(" ")}</span>`;
-  }
-  __name(supersessionStaleBadge, "supersessionStaleBadge");
-  function captureSupersedesBadge(e) {
-    if (e.eventType !== "work_object_proposed") return "";
-    const predecessors = supersedesRevision(entryRevisionId(e));
-    if (!predecessors.length) return "";
-    return `<span class="${CLASS.badge} ${CLASS.supersedes}">supersedes ${predecessors.map(linkify).join(" ")}</span>`;
-  }
-  __name(captureSupersedesBadge, "captureSupersedesBadge");
-  function supersessionBadge(revisionId) {
-    if (!revisionId) return "";
-    if (revisionIsHead(revisionId))
-      return `<span class="${CLASS.badge} ${CLASS.head}">current in thread</span>`;
-    const successors = supersededByRevision(revisionId);
-    if (successors.length)
-      return `<span class="${CLASS.badge} ${CLASS.superseded}">superseded by ${successors.map(linkify).join(" ")}</span>`;
-    return "";
-  }
-  __name(supersessionBadge, "supersessionBadge");
-  function annotationsForRevision(revisionId) {
-    const out = [];
-    for (const e of getState().history?.entries ?? []) {
-      if (entryRevisionId(e) !== revisionId) continue;
-      const s = e.summary ?? {};
-      if (e.eventType === "review_observation_recorded") {
-        out.push({
-          kind: "observation",
-          id: s.observationId ?? e.eventId ?? "",
-          title: s.title ?? "(observation)",
-          body: s.body ?? "",
-          bodyContentType: s.bodyContentType,
-          track: e.trackId ?? "",
-          tags: Array.isArray(s.tags) ? s.tags : [],
-          target: s.target ?? {}
-        });
-      } else if (e.eventType === "input_request_opened") {
-        const meta = [s.mode, s.reasonCode].filter(Boolean).join(" · ");
-        out.push({
-          kind: "input-request",
-          id: s.inputRequestId ?? e.eventId ?? "",
-          title: s.title ?? "(input request)",
-          body: s.body ?? "",
-          bodyContentType: s.bodyContentType,
-          track: e.trackId ?? "",
-          tags: meta ? [meta] : [],
-          target: s.target ?? {}
-        });
-      } else if (e.eventType === "review_assessment_recorded") {
-        const label = assessmentDisplayLabel(s.assessment ?? "");
-        out.push({
-          kind: "assessment",
-          id: s.assessmentId ?? e.eventId ?? "",
-          title: `assessment: ${label || "?"}`,
-          body: s.summary ?? "",
-          bodyContentType: s.summaryContentType,
-          track: e.trackId ?? "",
-          tags: [],
-          target: s.target ?? {}
-        });
-      }
-    }
-    return out;
-  }
-  __name(annotationsForRevision, "annotationsForRevision");
-  function renderThreadRevisionOverview(revisionId) {
-    const revision = revisionForId(revisionId);
-    const overview = overviewForRevision(revisionId);
-    if (!revision || !overview) return "";
-    return `<div class="${CLASS.threadOverview}">
-    <div><b>${targetDisplayLabel(revision.targetDisplay)}</b> <span>${escapeHtml(shortId(revisionId))}</span></div>
-    ${assessmentCue(overview)}
-    <div class="${CLASS.overviewCues}" aria-label="review cues"><span class="${CLASS.overviewLabel}">review cues</span>${attentionCues(overview)}</div>
-  </div>`;
-  }
-  __name(renderThreadRevisionOverview, "renderThreadRevisionOverview");
-  var queryCache = {
-    raw: null,
-    clauses: []
-  };
-  function currentClauses() {
-    const filterText = getState().filterText;
-    if (queryCache.raw !== filterText) {
-      queryCache = { raw: filterText, clauses: parseSearchQuery(filterText) };
-    }
-    return queryCache.clauses;
-  }
-  __name(currentClauses, "currentClauses");
-  function matchesFilters(e) {
-    const s = getState();
-    if (!s.enabledTypes.has(e.eventType)) return false;
-    if (s.filterTrack && entryTrack(e) !== s.filterTrack) return false;
-    if (s.filterObject && !eventMatchesObject(e, s.filterObject)) return false;
-    return matchesQuery(e.__search ?? EMPTY_SEARCH_INDEX, currentClauses());
-  }
-  __name(matchesFilters, "matchesFilters");
-  function facetCounts() {
-    const s = getState();
-    const counts = {};
-    const clauses = currentClauses();
-    for (const e of s.history?.entries ?? []) {
-      if (s.filterTrack && entryTrack(e) !== s.filterTrack) continue;
-      if (s.filterObject && !eventMatchesObject(e, s.filterObject)) continue;
-      if (!matchesQuery(e.__search ?? EMPTY_SEARCH_INDEX, clauses)) continue;
-      counts[e.eventType] = (counts[e.eventType] ?? 0) + 1;
-    }
-    return counts;
-  }
-  __name(facetCounts, "facetCounts");
-  function matchesRevisionFilters(r) {
-    const s = getState();
-    if (s.filterObject && r.objectId !== s.filterObject) return false;
-    return matchesQuery(revisionSearchIndex(r), currentClauses());
-  }
-  __name(matchesRevisionFilters, "matchesRevisionFilters");
-  function threadMatchesRevisionFilters(thread) {
-    const revisions = thread.revisions ?? [];
-    const s = getState();
-    if (!s.filterText && !s.filterObject) return true;
-    return revisions.map(revisionForId).filter((r) => r !== null).some(matchesRevisionFilters);
-  }
-  __name(threadMatchesRevisionFilters, "threadMatchesRevisionFilters");
-  function filteredThreadRevisionIds(thread, revisions = thread.revisions ?? []) {
-    const s = getState();
-    if (!s.filterText && !s.filterObject) return revisions;
-    return revisions.filter((revisionId) => {
-      const revision = revisionForId(revisionId);
-      return revision ? matchesRevisionFilters(revision) : false;
-    });
-  }
-  __name(filteredThreadRevisionIds, "filteredThreadRevisionIds");
-  function lensEntryIds() {
-    const s = getState();
-    if (s.lens === "list") {
-      return (s.revisions?.entries ?? []).filter(matchesRevisionFilters).map((r) => ({ kind: "revision", id: r.revisionId ?? "" }));
-    }
-    if (s.lens === "threads") {
-      const ids = [];
-      for (const t of currentThreads().filter(threadMatchesRevisionFilters)) {
-        for (const r of filteredThreadRevisionIds(t, threadRevisionOrder(t))) {
-          ids.push({ kind: "revision", id: r });
-        }
-      }
-      return ids;
-    }
-    let entries = (s.history?.entries ?? []).filter(matchesFilters);
-    if (s.order === "desc") entries = entries.slice().reverse();
-    return entries.map(
-      (e) => ({ kind: "event", id: e.eventId ?? "" })
-    );
-  }
-  __name(lensEntryIds, "lensEntryIds");
-  function selectedEventId() {
-    const selected = getState().selected;
-    return selected && selected.kind === "event" ? selected.id : null;
-  }
-  __name(selectedEventId, "selectedEventId");
-  function revisionExists(id) {
-    return (getState().revisions?.entries ?? []).some((r) => r.revisionId === id);
-  }
-  __name(revisionExists, "revisionExists");
-  function revisionInAnyThread(id) {
-    return currentThreads().some((t) => (t.revisions ?? []).includes(id));
-  }
-  __name(revisionInAnyThread, "revisionInAnyThread");
-  function eventExists(id) {
-    return (getState().history?.entries ?? []).some((e) => e.eventId === id);
-  }
-  __name(eventExists, "eventExists");
-
   // src/overlay.ts
   var registry = /* @__PURE__ */ new Map();
   var activeOverlay = null;
@@ -1612,9 +1662,28 @@
   }
   __name(navigate, "navigate");
   function applyHash() {
-    commit(resolve(parseHash(location.hash, presentTypes())));
+    const patch = resolve(parseHash(location.hash, presentTypes()));
+    commit(patch);
+    const sel = getState().selected;
+    if (sel.kind === "event" && sel.id && !eventExists(sel.id)) {
+      void revealSelectedEvent(sel.id, patch.lens ?? DEFAULT_LENS2);
+    }
   }
   __name(applyHash, "applyHash");
+  async function revealSelectedEvent(eventId, lens) {
+    const page = await fetchRevealPage(eventId);
+    if (!page) return;
+    if (page.present) {
+      commit(revealPatch(page, eventId));
+      clearRouteDiagnostic();
+      return;
+    }
+    commit({ selected: { kind: null, id: null } });
+    showRouteDiagnostic(
+      `fell back to the ${lens} lens — event ${shortRef(eventId)} is not in this store`
+    );
+  }
+  __name(revealSelectedEvent, "revealSelectedEvent");
   function resolve(patch) {
     const freshnessDiagnostic = liveStateDiagnostic(patch);
     const next = statePatchFrom(patch);
@@ -1649,16 +1718,6 @@
         );
         next.lens = lens;
       }
-      next.selected = { kind: null, id: null };
-      return next;
-    }
-    if (sel.kind === "event" && sel.id && !eventExists(sel.id)) {
-      showRouteDiagnostic(
-        routeDiagnostic(
-          `fell back to the ${patch.lens || DEFAULT_LENS2} lens — event ${shortRef(sel.id)} is not in this store`,
-          freshnessDiagnostic
-        )
-      );
       next.selected = { kind: null, id: null };
       return next;
     }
@@ -2544,6 +2603,124 @@
   }
   __name(initControls3, "initControls");
 
+  // src/lenses/timeline.ts
+  var ROW_H = 52;
+  var OVERSCAN = 8;
+  function timelineRows() {
+    return getState().history?.entries ?? [];
+  }
+  __name(timelineRows, "timelineRows");
+  function loadedWindow(state2) {
+    const h = state2.history;
+    const entries = h?.entries ?? [];
+    const offset = h?.offset ?? 0;
+    const matchCount = h?.matchCount ?? entries.length;
+    return { offset, count: entries.length, matchCount };
+  }
+  __name(loadedWindow, "loadedWindow");
+  function visibleRange(scrollTop, viewportH, rowCount) {
+    if (viewportH <= 0 || rowCount === 0) return { start: 0, end: rowCount };
+    const maxScroll = Math.max(0, rowCount * ROW_H - viewportH);
+    const clamped = Math.min(Math.max(0, scrollTop), maxScroll);
+    const start = Math.max(0, Math.floor(clamped / ROW_H) - OVERSCAN);
+    const end = Math.min(
+      rowCount,
+      Math.ceil((clamped + viewportH) / ROW_H) + OVERSCAN
+    );
+    return { start, end };
+  }
+  __name(visibleRange, "visibleRange");
+  function spacer(height) {
+    const li = document.createElement("li");
+    li.dataset.spacer = "1";
+    li.setAttribute("aria-hidden", "true");
+    li.style.height = `${height}px`;
+    return li;
+  }
+  __name(spacer, "spacer");
+  function eventRow(e, selected) {
+    const li = document.createElement("li");
+    li.className = "event";
+    li.dataset.eventId = e.eventId ?? "";
+    if (e.eventId && e.eventId === selected)
+      li.setAttribute("aria-selected", "true");
+    const tags = entryTags(e).map((t) => `<span class="${CLASS.badge}">${escapeHtml(t)}</span>`).join(" ");
+    const revisionId = entryRevisionId(e);
+    const staleTag = supersessionStaleBadge(e);
+    const supersedesTag = captureSupersedesBadge(e);
+    li.innerHTML = `
+      <span class="${CLASS.time}">${escapeHtml(fmtTime(e.occurredAt ?? ""))}</span>
+      <span class="${CLASS.rail}" style="background:${typeColor(e.eventType)}"></span>
+      <span class="${CLASS.body}">
+        <span class="${CLASS.title}">${linkify(entryTitle(e))} ${tags} ${supersedesTag} ${staleTag}</span>
+        <span class="${CLASS.meta}">
+          <span class="${CLASS.type}" style="color:${typeColor(e.eventType)}">${escapeHtml(typeLabel(e.eventType))}</span>
+          ${entryTrack(e) ? `<span>${escapeHtml(entryTrack(e))}</span>` : ""}
+          ${revisionId ? `<span>revision ${escapeHtml(shortId(revisionId))}</span>` : ""}
+          ${entryAnchor(e) ? `<span>${escapeHtml(entryAnchor(e))}</span>` : ""}
+          ${verificationChip(e.verificationStatus ?? "")}
+        </span>
+      </span>`;
+    return li;
+  }
+  __name(eventRow, "eventRow");
+  function ensureScrollListener(list) {
+    if (list.dataset.virtualized) return;
+    list.dataset.virtualized = "1";
+    list.addEventListener("scroll", () => renderTimeline());
+  }
+  __name(ensureScrollListener, "ensureScrollListener");
+  function renderTimeline() {
+    const list = $("#timeline");
+    if (!list) return;
+    const state2 = getState();
+    const rows = timelineRows();
+    const { offset, matchCount } = loadedWindow(state2);
+    if (matchCount === 0) {
+      list.innerHTML = "";
+      const li = document.createElement("li");
+      li.className = "event";
+      li.innerHTML = `<span></span><span></span><span class="${CLASS.body}"><span class="${CLASS.title}" style="color:var(--fg-dim)">no events match the current filters</span></span>`;
+      list.appendChild(li);
+      return;
+    }
+    ensureScrollListener(list);
+    const loadEnd = offset + rows.length;
+    const viewportH = list.clientHeight;
+    const { start, end } = visibleRange(list.scrollTop, viewportH, matchCount);
+    const paintStart = Math.min(Math.max(start, offset), loadEnd);
+    const paintEnd = Math.min(Math.max(end, offset), loadEnd);
+    const selected = selectedEventId();
+    list.innerHTML = "";
+    if (paintStart > 0) list.appendChild(spacer(paintStart * ROW_H));
+    for (let i = paintStart; i < paintEnd; i++)
+      list.appendChild(eventRow(rows[i - offset], selected));
+    if (paintEnd < matchCount)
+      list.appendChild(spacer((matchCount - paintEnd) * ROW_H));
+    maybeExtendWindow(viewportH, end, loadEnd, matchCount);
+  }
+  __name(renderTimeline, "renderTimeline");
+  function maybeExtendWindow(viewportH, visibleEnd, loadEnd, matchCount) {
+    if (viewportH <= 0) return;
+    if (loadEnd >= matchCount) return;
+    if (visibleEnd < loadEnd - OVERSCAN) return;
+    void fetchHistoryPage({ offset: loadEnd });
+  }
+  __name(maybeExtendWindow, "maybeExtendWindow");
+  function scrollTimelineSelectionIntoView(eventId) {
+    const list = $("#timeline");
+    if (!list) return;
+    const local = timelineRows().findIndex((e) => e.eventId === eventId);
+    if (local < 0) return;
+    const global = loadedWindow(getState()).offset + local;
+    const centered = global * ROW_H - Math.max(0, (list.clientHeight - ROW_H) / 2);
+    list.scrollTop = Math.max(0, centered);
+    renderTimeline();
+    const el = list.querySelector(`li[data-event-id="${eventId}"]`);
+    if (el) el.scrollIntoView({ block: "center" });
+  }
+  __name(scrollTimelineSelectionIntoView, "scrollTimelineSelectionIntoView");
+
   // src/navigation.ts
   function navigateToRevision(id) {
     navigate({
@@ -2564,32 +2741,22 @@
     });
   }
   __name(navigateToTrack, "navigateToTrack");
-  function revealEvent(eventId) {
-    const e = (getState().history?.entries ?? []).find(
-      (x) => x.eventId === eventId
-    );
-    if (!e) return;
-    const types = new Set(getState().enabledTypes);
-    types.add(e.eventType);
-    navigate({
-      lens: "timeline",
-      selected: { kind: "event", id: eventId },
-      filterText: "",
-      filterTrack: "",
-      filterObject: "",
-      enabledTypes: types,
-      diff: null,
-      diffHash: null,
-      focus: null
-    });
+  async function revealEvent(eventId) {
+    const page = await fetchRevealPage(eventId);
+    if (!page?.present) return;
+    navigate(revealPatch(page, eventId));
   }
   __name(revealEvent, "revealEvent");
-  function revealBy(predicate) {
-    const e = (getState().history?.entries ?? []).find(predicate);
-    if (e?.eventId) revealEvent(e.eventId);
+  async function revealByQuery(id) {
+    const eventId = await fetchEventIdForQuery(id);
+    if (eventId) await revealEvent(eventId);
   }
-  __name(revealBy, "revealBy");
+  __name(revealByQuery, "revealByQuery");
   function resolveRef(kind, id) {
+    void resolveRefAsync(kind, id);
+  }
+  __name(resolveRef, "resolveRef");
+  async function resolveRefAsync(kind, id) {
     switch (kind) {
       // The revision and the (retired) review-unit prefix both address a revision's
       // composite — their identity is unified onto the revision id.
@@ -2609,24 +2776,18 @@
         openDiff(id);
         break;
       case "obs":
-        revealBy((e) => e.summary?.observationId === id);
-        break;
       case "assess":
-        revealBy((e) => e.summary?.assessmentId === id);
-        break;
       case "input-request":
-        revealBy(
-          (e) => e.eventType === "input_request_opened" && e.summary?.inputRequestId === id
-        );
+        await revealByQuery(id);
         break;
       case "evt":
-        revealEvent(id);
+        await revealEvent(id);
         break;
       default:
         break;
     }
   }
-  __name(resolveRef, "resolveRef");
+  __name(resolveRefAsync, "resolveRefAsync");
   function onDocumentClick(ev) {
     const t = ev.target;
     if (!(t instanceof Element)) return;
@@ -2974,6 +3135,10 @@
   }
   __name(isTypingTarget, "isTypingTarget");
   function stepSelection(delta) {
+    void stepSelectionAsync(delta);
+  }
+  __name(stepSelection, "stepSelection");
+  function stepList(delta) {
     const ids = lensEntryIds();
     if (!ids.length) return;
     let idx = ids.findIndex((x) => x.id === getState().selected.id);
@@ -2981,7 +3146,42 @@
     const next = Math.max(0, Math.min(ids.length - 1, idx + delta));
     navigate({ selected: ids[next] }, { replace: true });
   }
-  __name(stepSelection, "stepSelection");
+  __name(stepList, "stepList");
+  async function stepTimeline(delta) {
+    const state2 = getState();
+    const { offset, count, matchCount } = loadedWindow(state2);
+    const ids = lensEntryIds();
+    if (!ids.length || matchCount === 0) return;
+    const local = ids.findIndex((x) => x.id === state2.selected.id);
+    if (local < 0) {
+      navigate({ selected: ids[0] }, { replace: true });
+      return;
+    }
+    const cur = offset + local;
+    const target = Math.max(0, Math.min(matchCount - 1, cur + delta));
+    if (target === cur) return;
+    if (target >= offset && target < offset + count) {
+      navigate({ selected: ids[target - offset] }, { replace: true });
+      return;
+    }
+    await fetchHistoryPage({
+      offset: target >= offset + count ? offset + count : Math.max(0, offset - HISTORY_PAGE)
+    });
+    const w = loadedWindow(getState());
+    const loaded = lensEntryIds();
+    const localAfter = target - w.offset;
+    if (localAfter >= 0 && localAfter < loaded.length)
+      navigate({ selected: loaded[localAfter] }, { replace: true });
+  }
+  __name(stepTimeline, "stepTimeline");
+  async function stepSelectionAsync(delta) {
+    if (getState().lens === "timeline") {
+      await stepTimeline(delta);
+      return;
+    }
+    stepList(delta);
+  }
+  __name(stepSelectionAsync, "stepSelectionAsync");
   function activateSelection() {
     const sel = getState().selected;
     if (sel.kind === "revision" && sel.id) {
@@ -3325,107 +3525,6 @@ click to open the revision page">
   }
   __name(wireDagInteractions, "wireDagInteractions");
 
-  // src/lenses/timeline.ts
-  var ROW_H = 52;
-  var OVERSCAN = 8;
-  function timelineRows() {
-    const state2 = getState();
-    let entries = (state2.history?.entries ?? []).filter(matchesFilters);
-    if (state2.order === "desc") entries = entries.slice().reverse();
-    return entries;
-  }
-  __name(timelineRows, "timelineRows");
-  function visibleRange(scrollTop, viewportH, rowCount) {
-    if (viewportH <= 0 || rowCount === 0) return { start: 0, end: rowCount };
-    const maxScroll = Math.max(0, rowCount * ROW_H - viewportH);
-    const clamped = Math.min(Math.max(0, scrollTop), maxScroll);
-    const start = Math.max(0, Math.floor(clamped / ROW_H) - OVERSCAN);
-    const end = Math.min(
-      rowCount,
-      Math.ceil((clamped + viewportH) / ROW_H) + OVERSCAN
-    );
-    return { start, end };
-  }
-  __name(visibleRange, "visibleRange");
-  function spacer(height) {
-    const li = document.createElement("li");
-    li.dataset.spacer = "1";
-    li.setAttribute("aria-hidden", "true");
-    li.style.height = `${height}px`;
-    return li;
-  }
-  __name(spacer, "spacer");
-  function eventRow(e, selected) {
-    const li = document.createElement("li");
-    li.className = "event";
-    li.dataset.eventId = e.eventId ?? "";
-    if (e.eventId && e.eventId === selected)
-      li.setAttribute("aria-selected", "true");
-    const tags = entryTags(e).map((t) => `<span class="${CLASS.badge}">${escapeHtml(t)}</span>`).join(" ");
-    const revisionId = entryRevisionId(e);
-    const staleTag = supersessionStaleBadge(e);
-    const supersedesTag = captureSupersedesBadge(e);
-    li.innerHTML = `
-      <span class="${CLASS.time}">${escapeHtml(fmtTime(e.occurredAt ?? ""))}</span>
-      <span class="${CLASS.rail}" style="background:${typeColor(e.eventType)}"></span>
-      <span class="${CLASS.body}">
-        <span class="${CLASS.title}">${linkify(entryTitle(e))} ${tags} ${supersedesTag} ${staleTag}</span>
-        <span class="${CLASS.meta}">
-          <span class="${CLASS.type}" style="color:${typeColor(e.eventType)}">${escapeHtml(typeLabel(e.eventType))}</span>
-          ${entryTrack(e) ? `<span>${escapeHtml(entryTrack(e))}</span>` : ""}
-          ${revisionId ? `<span>revision ${escapeHtml(shortId(revisionId))}</span>` : ""}
-          ${entryAnchor(e) ? `<span>${escapeHtml(entryAnchor(e))}</span>` : ""}
-          ${verificationChip(e.verificationStatus ?? "")}
-        </span>
-      </span>`;
-    return li;
-  }
-  __name(eventRow, "eventRow");
-  function ensureScrollListener(list) {
-    if (list.dataset.virtualized) return;
-    list.dataset.virtualized = "1";
-    list.addEventListener("scroll", () => renderTimeline());
-  }
-  __name(ensureScrollListener, "ensureScrollListener");
-  function renderTimeline() {
-    const list = $("#timeline");
-    if (!list) return;
-    const rows = timelineRows();
-    if (!rows.length) {
-      list.innerHTML = "";
-      const li = document.createElement("li");
-      li.className = "event";
-      li.innerHTML = `<span></span><span></span><span class="${CLASS.body}"><span class="${CLASS.title}" style="color:var(--fg-dim)">no events match the current filters</span></span>`;
-      list.appendChild(li);
-      return;
-    }
-    ensureScrollListener(list);
-    const { start, end } = visibleRange(
-      list.scrollTop,
-      list.clientHeight,
-      rows.length
-    );
-    const selected = selectedEventId();
-    list.innerHTML = "";
-    if (start > 0) list.appendChild(spacer(start * ROW_H));
-    for (let i = start; i < end; i++)
-      list.appendChild(eventRow(rows[i], selected));
-    if (end < rows.length) list.appendChild(spacer((rows.length - end) * ROW_H));
-  }
-  __name(renderTimeline, "renderTimeline");
-  function scrollTimelineSelectionIntoView(eventId) {
-    const list = $("#timeline");
-    if (!list) return;
-    const index = timelineRows().findIndex((e) => e.eventId === eventId);
-    if (index < 0) return;
-    const centered = index * ROW_H - Math.max(0, (list.clientHeight - ROW_H) / 2);
-    list.scrollTop = Math.max(0, centered);
-    renderTimeline();
-    const el = list.querySelector(`li[data-event-id="${eventId}"]`);
-    if (el) el.scrollIntoView({ block: "center" });
-  }
-  __name(scrollTimelineSelectionIntoView, "scrollTimelineSelectionIntoView");
-
   // src/render.ts
   var lastMasterLens = null;
   function renderStats() {
@@ -3462,7 +3561,7 @@ click to open the revision page">
     const container = $("#filter-types");
     if (!container) return;
     container.innerHTML = "";
-    const counts = facetCounts();
+    const counts = getState().history?.facets ?? {};
     const state2 = getState();
     for (const id of presentTypes()) {
       if (!state2.seenTypes.has(id)) {
@@ -3635,6 +3734,7 @@ click to open the revision page">
   function main() {
     applyPrefs();
     subscribe(render);
+    subscribe(maybeReloadForQuery);
     initControls5();
     initControls();
     initControls4();
