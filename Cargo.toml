@@ -61,7 +61,7 @@ thiserror = "1"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "env-filter", "fmt", "json", "registry", "std"] }
 two-face = { version = "0.5.1", default-features = false, features = ["syntect-fancy"] }
-unicode-width = "0.1"
+unicode-width = "0.2"
 
 [dev-dependencies]
 base64 = "0.22"

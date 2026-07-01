@@ -139,10 +139,12 @@ for combining sequences/emoji — rare in code, and safe to add later for this b
   single guard test remain the guarantee.
 - **The build stays C-toolchain-free** (D2) — no `onig`, so the Windows CI long pole is not aggravated.
 - **A measured, moderate dependency cost.** The initial implementation adds **+14 marginal runtime crates**
-  (~+12%, 120→134); the intraline channel adds **+2** (`similar` + `unicode-width`, the latter giving
-  `delta`-exact display width for the distance guard). No `onig`; `regex-automata`/`regex-syntax`/`memchr` are
-  shared (already pulled by `tracing-subscriber`); **no new duplicate versions** (the `thiserror` v1/v2 split is
-  pre-existing).
+  (~+12%, 120→134); the intraline channel adds **+1** — `similar` (default features off, no subtree). It also
+  depends on `unicode-width` (for `delta`-exact display width in the distance guard), but that crate was
+  **already in the tree** via `ratatui`/`mmdflux`, so it is reused at that version and adds no new crate. No
+  `onig`; `regex-automata`/`regex-syntax`/`memchr` are shared (already pulled by `tracing-subscriber`); **no new
+  duplicate versions** — the direct `unicode-width` dependency is pinned to the same major (`0.2`) as the
+  existing transitive one so it unifies (the `thiserror` v1/v2 split is pre-existing).
 - **Binary size grows ~2.5 MiB.** A `cargo build --release` A/B measured the `shore` binary at **8,856,432
   bytes without highlighting vs 11,544,112 bytes with it — +2,687,680 bytes (+2.56 MiB, +30.3%)**, dominated by
   the `two-face` bundled syntax dump and `fancy-regex`. (Using syntect's stock dump alone — fewer languages,
