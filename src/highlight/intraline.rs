@@ -10,7 +10,7 @@ use similar::{Algorithm, DiffOp, capture_diff_slices};
 use unicode_width::UnicodeWidthStr;
 
 use super::RowKey;
-use crate::model::DiffFile;
+use crate::model::{DiffFile, DiffRowKind};
 
 /// delta's `--max-line-distance` default: a (removed, added) pair whose width-ratio distance exceeds
 /// this is treated as a wholesale replacement and left un-emphasized (a full-line rewrite lights up
@@ -168,12 +168,80 @@ fn diff_pair(minus: &str, plus: &str) -> (Vec<EmphSpan>, Vec<EmphSpan>, f64) {
 }
 
 /// Intraline emphasis for a whole diff file, keyed by the same [`RowKey`] as
-/// [`super::highlight_file`].
+/// [`super::highlight_file`] (INV-C: the identical `hunks.iter().enumerate()` /
+/// `rows.iter().enumerate()` walk, so an emphasis span lands on exactly the row a matching token
+/// would).
 ///
-/// Stub: the real block-buffering/greedy-pairing algorithm arrives in a later task; until then any
-/// file yields an empty map (render everything plain).
-pub fn emphasis_file(_file: &DiffFile) -> HashMap<RowKey, Vec<EmphSpan>> {
-    HashMap::new()
+/// Mirrors delta's `paint.rs`/`edits.rs`: within each hunk it buffers consecutive removed/added rows
+/// into minus/plus blocks (a `Context` row, or a `Removed` row that follows a non-empty plus buffer,
+/// flushes the current block), then pairs lines greedily by the [`MAX_LINE_DISTANCE`] width-ratio
+/// guard and emits each side's changed spans. Emphasis is **syntax-independent** — unlike
+/// [`super::highlight_file`] there is no language gate — but binary/submodule/mode-only files (which
+/// carry no diff rows) still short-circuit to empty. Best-effort: it never panics.
+pub fn emphasis_file(file: &DiffFile) -> HashMap<RowKey, Vec<EmphSpan>> {
+    let mut out = HashMap::new();
+    if file.is_binary || file.is_submodule || file.is_mode_only {
+        return out;
+    }
+    for (h, hunk) in file.hunks.iter().enumerate() {
+        // minus/plus buffers hold (row_index, text) for the current change block.
+        let mut minus: Vec<(usize, &str)> = Vec::new();
+        let mut plus: Vec<(usize, &str)> = Vec::new();
+        for (r, row) in hunk.rows.iter().enumerate() {
+            match row.kind {
+                DiffRowKind::Removed => {
+                    // A removed row after a non-empty plus buffer starts a fresh block, so a
+                    // `-,-,+,+,-,+` run splits correctly.
+                    if !plus.is_empty() {
+                        flush_block(h, &minus, &plus, &mut out);
+                        minus.clear();
+                        plus.clear();
+                    }
+                    minus.push((r, &row.text));
+                }
+                DiffRowKind::Added => plus.push((r, &row.text)),
+                DiffRowKind::Context => {
+                    flush_block(h, &minus, &plus, &mut out);
+                    minus.clear();
+                    plus.clear();
+                }
+            }
+        }
+        flush_block(h, &minus, &plus, &mut out); // end-of-hunk
+    }
+    out
+}
+
+/// Greedy homolog pairing (delta `infer_edits`): for each minus line, the first not-yet-consumed plus
+/// line whose width-ratio distance is `<= MAX_LINE_DISTANCE` is its homolog; emit both sides' changed
+/// spans (non-empty only). A minus line with no homolog within the guard — and every unmatched plus
+/// line — gets nothing (a wholesale replacement fails toward plain, INV-B/F).
+fn flush_block(
+    h: usize,
+    minus: &[(usize, &str)],
+    plus: &[(usize, &str)],
+    out: &mut HashMap<RowKey, Vec<EmphSpan>>,
+) {
+    let mut plus_index = 0; // plus lines consumed so far
+    for &(mr, mline) in minus {
+        // Scan the not-yet-consumed plus lines; `considered` counts those scanned-and-rejected
+        // before a homolog. On a match the rejected lines are consumed unpaired alongside the
+        // matched line; on no match `plus_index` is unchanged so the next minus line rescans them
+        // (delta `edits.rs::infer_edits`).
+        for (considered, &(pr, pline)) in plus[plus_index..].iter().enumerate() {
+            let (del, ins, dist) = diff_pair(mline, pline);
+            if dist <= MAX_LINE_DISTANCE {
+                if !del.is_empty() {
+                    out.insert((h, mr), del);
+                }
+                if !ins.is_empty() {
+                    out.insert((h, pr), ins);
+                }
+                plus_index += considered + 1;
+                break;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -218,6 +286,33 @@ mod tests {
         }
     }
 
+    fn ctx(text: &str) -> DiffRow {
+        row(DiffRowKind::Context, text)
+    }
+
+    fn removed(text: &str) -> DiffRow {
+        row(DiffRowKind::Removed, text)
+    }
+
+    fn added(text: &str) -> DiffRow {
+        row(DiffRowKind::Added, text)
+    }
+
+    fn binary_file() -> DiffFile {
+        let mut f = file_with(Some("a.rs"), Vec::new());
+        f.is_binary = true;
+        f
+    }
+
+    /// True when some span in `spans` fully covers the first occurrence of `needle` in `line`.
+    fn covers(line: &str, spans: &[EmphSpan], needle: &str) -> bool {
+        let Some(idx) = line.find(needle) else {
+            return false;
+        };
+        let (ns, ne) = (idx, idx + needle.len());
+        spans.iter().any(|s| s.start <= ns && ne <= s.end)
+    }
+
     #[test]
     fn emphspan_is_copy_two_field() {
         let s = EmphSpan { start: 0, end: 3 };
@@ -227,15 +322,76 @@ mod tests {
     }
 
     #[test]
-    fn emphasis_file_stub_is_empty() {
-        // Any DiffFile → empty map for now (algorithm arrives in a later task).
+    fn emphasis_keys_match_highlight_rowkeys() {
+        // One hunk: [Context, Removed "let b = 2;", Added "let b = 3;", Context]
         let file = file_with(
-            Some("a.rs"),
+            Some("m.rs"),
             vec![
-                row(DiffRowKind::Removed, "let b = 2;"),
-                row(DiffRowKind::Added, "let b = 3;"),
+                ctx("x"),
+                removed("let b = 2;"),
+                added("let b = 3;"),
+                ctx("y"),
             ],
         );
+        let e = emphasis_file(&file);
+        assert!(
+            covers("let b = 2;", &e[&(0, 1)], "2"),
+            "removed row (0,1) emphasizes the changed digit"
+        );
+        assert!(
+            covers("let b = 3;", &e[&(0, 2)], "3"),
+            "added row (0,2) emphasizes the changed digit"
+        );
+        assert!(
+            !e.contains_key(&(0, 0)) && !e.contains_key(&(0, 3)),
+            "context rows unmarked"
+        );
+    }
+
+    #[test]
+    fn emphasis_is_syntax_independent() {
+        // Plaintext path: highlight_file returns empty (no syntax), emphasis still applies.
+        let file = file_with(
+            Some("notes.txt"),
+            vec![removed("the quick brown fox"), added("the quick red fox")],
+        );
+        let e = emphasis_file(&file);
+        assert!(covers("the quick brown fox", &e[&(0, 0)], "brown"));
+        assert!(covers("the quick red fox", &e[&(0, 1)], "red"));
+    }
+
+    #[test]
+    fn emphasis_pairs_within_block_positionally_when_similar() {
+        // Removed,Removed,Added,Added → row0↔row2, row1↔row3
+        let file = file_with(
+            Some("m.rs"),
+            vec![
+                removed("let a = 1;"),
+                removed("let b = 2;"),
+                added("let a = 9;"),
+                added("let b = 8;"),
+            ],
+        );
+        let e = emphasis_file(&file);
+        assert!(covers("let a = 1;", &e[&(0, 0)], "1") && covers("let a = 9;", &e[&(0, 2)], "9"));
+        assert!(covers("let b = 2;", &e[&(0, 1)], "2") && covers("let b = 8;", &e[&(0, 3)], "8"));
+    }
+
+    #[test]
+    fn wholesale_replacement_in_block_is_not_emphasized() {
+        let file = file_with(
+            Some("m.rs"),
+            vec![
+                removed("    return Plain;"),
+                added("    throw new Error(\"unreachable\");"),
+            ],
+        );
+        assert!(emphasis_file(&file).is_empty());
+    }
+
+    #[test]
+    fn binary_file_has_no_emphasis() {
+        let file = binary_file(); // is_binary = true
         assert!(emphasis_file(&file).is_empty());
     }
 
