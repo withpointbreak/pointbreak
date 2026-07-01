@@ -1,15 +1,15 @@
 // The state-bound model layer: the revision / supersession / object derivations
-// over the loaded `/api/*` documents on the store, plus the state-bound timeline
-// filter predicates. Ported from the served app.js model/supersession cluster and
-// the per-render filter functions. State-reading (via `getState()`) but DOM-free —
-// it returns ids, classifications, annotation records, and ready-to-insert badge
-// HTML strings; the render/lenses/detail layers turn those into the live DOM.
+// over the loaded `/api/*` documents on the store, plus the revisions/threads-lens
+// filter predicates. Ported from the served app.js model/supersession cluster.
+// State-reading (via `getState()`) but DOM-free — it returns ids, classifications,
+// annotation records, and ready-to-insert badge HTML strings; the render/lenses/
+// detail layers turn those into the live DOM.
 //
-// The filter predicates (currentClauses/matchesFilters/facetCounts) live here, not
-// in the pure `query` grammar, because they need `eventMatchesObject` (a model
-// derivation) while `model` already imports `query`'s grammar — housing them in
-// `query` would close a cycle. So `query` stays pure and one-directional, and the
-// state-bound predicates own a module-local parse cache here.
+// The history timeline query (search / filter / facet counts) moved to the server,
+// so the timeline lens paints the server-filtered page window rather than matching
+// client-side. The revisions/threads lenses still match over the fully-loaded
+// supersession graph, so their predicates (matchesRevisionFilters and friends) use
+// the pure `query` grammar here.
 
 import { CLASS } from "./classNames";
 import type { Annotation } from "./diff/render";
@@ -19,17 +19,15 @@ import {
   assessmentDisplayLabel,
   attentionCues,
   entryRevisionId,
-  entryTrack,
   type Revision,
   revisionSearchIndex,
 } from "./projection";
-import { matchesQuery, parseSearchQuery, type QueryClause } from "./query";
+import { matchesQuery, parseSearchQuery } from "./query";
 import { linkify, shortId, targetDisplayLabel } from "./refs";
 import { getState } from "./store";
 import {
   type HistoryEntry,
   type Overview,
-  type SearchIndex,
   SUPERSEDABLE_FACT_TYPES,
   TYPE_MAP,
   TYPES,
@@ -94,18 +92,19 @@ export interface LensEntry {
   id: string;
 }
 
-// The fallback search record for an entry that has not been indexed yet, so the
-// matcher never has to read off a missing index.
-const EMPTY_SEARCH_INDEX: SearchIndex = { text: "", type: "" };
-
 // ---------------------------------------------------------------------------
 // Type distribution
 // ---------------------------------------------------------------------------
 
 /** The event types present in the history, known ones first (canonical order). */
 export function presentTypes(): string[] {
+  const history = getState().history;
+  // The server facets enumerate every matching type in the store (even those on
+  // an unloaded page), so they are the authority for which toggles to show; the
+  // loaded entries are the fallback before the first facets arrive.
+  const keys = history?.facets ? Object.keys(history.facets) : [];
   const present = new Set(
-    (getState().history?.entries ?? []).map((e) => e.eventType),
+    keys.length ? keys : (history?.entries ?? []).map((e) => e.eventType),
   );
   const ordered = TYPES.map((t) => t.id).filter((id) => present.has(id));
   for (const id of present) if (!TYPE_MAP[id]) ordered.push(id);
@@ -215,12 +214,6 @@ export function overviewForRevision(revisionId: string): Overview | null {
   return revisionForId(revisionId)?.overview ?? null;
 }
 
-/** Whether an event addresses the revision that captured a given object. */
-export function eventMatchesObject(e: HistoryEntry, objectId: string): boolean {
-  if (!objectId) return true;
-  return objectIdForRevision(entryRevisionId(e)) === objectId;
-}
-
 // ---------------------------------------------------------------------------
 // Supersession badges (ready-to-insert HTML; reader-relative, advisory)
 // ---------------------------------------------------------------------------
@@ -320,53 +313,19 @@ export function renderThreadRevisionOverview(revisionId: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// State-bound filter predicates
+// Revisions/threads-lens filter predicates
+//
+// The timeline history query is server-owned now (search / filter / facets are
+// applied to `/api/history`), so there is no client history predicate. The
+// revisions and threads lenses still filter client-side over the fully-loaded
+// supersession graph, so they parse the active `filterText` here.
 // ---------------------------------------------------------------------------
-
-// Parse the query once per filter string and memoize, since matchesFilters runs
-// per timeline entry. This parse cache is a transient view-cache, not store state.
-let queryCache: { raw: string | null; clauses: QueryClause[] } = {
-  raw: null,
-  clauses: [],
-};
-
-/** The parsed query clauses for the current filter text, memoized on the raw string. */
-export function currentClauses(): QueryClause[] {
-  const filterText = getState().filterText;
-  if (queryCache.raw !== filterText) {
-    queryCache = { raw: filterText, clauses: parseSearchQuery(filterText) };
-  }
-  return queryCache.clauses;
-}
-
-/** Whether a timeline event passes the type / track / object / query filters. */
-export function matchesFilters(e: HistoryEntry): boolean {
-  const s = getState();
-  if (!s.enabledTypes.has(e.eventType)) return false;
-  if (s.filterTrack && entryTrack(e) !== s.filterTrack) return false;
-  if (s.filterObject && !eventMatchesObject(e, s.filterObject)) return false;
-  return matchesQuery(e.__search ?? EMPTY_SEARCH_INDEX, currentClauses());
-}
-
-/** Per-type event counts under every filter except the type toggles. */
-export function facetCounts(): Record<string, number> {
-  const s = getState();
-  const counts: Record<string, number> = {};
-  const clauses = currentClauses();
-  for (const e of s.history?.entries ?? []) {
-    if (s.filterTrack && entryTrack(e) !== s.filterTrack) continue;
-    if (s.filterObject && !eventMatchesObject(e, s.filterObject)) continue;
-    if (!matchesQuery(e.__search ?? EMPTY_SEARCH_INDEX, clauses)) continue;
-    counts[e.eventType] = (counts[e.eventType] ?? 0) + 1;
-  }
-  return counts;
-}
 
 /** Whether a revision passes the object filter and the query clauses. */
 export function matchesRevisionFilters(r: Revision): boolean {
   const s = getState();
   if (s.filterObject && r.objectId !== s.filterObject) return false;
-  return matchesQuery(revisionSearchIndex(r), currentClauses());
+  return matchesQuery(revisionSearchIndex(r), parseSearchQuery(s.filterText));
 }
 
 /** Whether any of a thread's revisions passes the active filters. */
@@ -414,9 +373,9 @@ export function lensEntryIds(): LensEntry[] {
     }
     return ids;
   }
-  let entries = (s.history?.entries ?? []).filter(matchesFilters);
-  if (s.order === "desc") entries = entries.slice().reverse();
-  return entries.map(
+  // The server filtered and ordered the timeline page; step the loaded window
+  // as-is (paging past its edges is handled by the keyboard stepper).
+  return (s.history?.entries ?? []).map(
     (e): LensEntry => ({ kind: "event", id: e.eventId ?? "" }),
   );
 }

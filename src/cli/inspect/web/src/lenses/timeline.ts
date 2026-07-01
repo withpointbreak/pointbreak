@@ -6,20 +6,22 @@
 // the `#master` delegate (wired once by the composition root) handles selection,
 // skipping ref chips via its `closest("[data-ref-kind]")` guard.
 //
-// The DOM is virtualized: the client still fetches the full `/api/history` and
-// filters/searches over the whole set in memory (so client search keeps working),
-// but only the rows visible in the scroll viewport are painted, bracketed by top
-// and bottom spacers that preserve the full scroll height. When the viewport
-// height is unknown (no layout — e.g. detached/unmounted), the render falls back
-// to painting every filtered row.
+// The server filters, searches, and orders the history now, and returns only a
+// window of the matched set. The DOM is virtualized over the GLOBAL matched set:
+// the scroll height is sized by the server `matchCount`, the loaded window sits at
+// its `offset`, only the rows visible in the viewport are painted (bracketed by
+// top and bottom spacers that preserve the full scroll height), and a scroll that
+// nears the loaded edge fetches the next page. When the viewport height is unknown
+// (no layout — e.g. detached/unmounted), the render falls back to painting the
+// whole loaded window without paging.
 
 import { CLASS } from "../classNames";
+import { fetchHistoryPage } from "../data";
 import { $ } from "../dom";
 import { escapeHtml } from "../escape";
 import { fmtTime } from "../format";
 import {
   captureSupersedesBadge,
-  matchesFilters,
   selectedEventId,
   supersessionStaleBadge,
 } from "../model";
@@ -32,7 +34,7 @@ import {
   verificationChip,
 } from "../projection";
 import { linkify, shortId } from "../refs";
-import { getState } from "../store";
+import { getState, type State } from "../store";
 import type { HistoryEntry } from "../types";
 import { typeColor, typeLabel } from "../types";
 
@@ -47,14 +49,27 @@ export const ROW_H = 52;
 /** Extra rows rendered above and below the viewport so a fast scroll never flashes blank. */
 const OVERSCAN = 8;
 
-/** The filtered + ordered timeline entries — the full list the DOM is a window onto. */
+/** The loaded page entries — the server already filtered and ordered them. */
 export function timelineRows(): HistoryEntry[] {
-  // Server returns entries oldest->newest (occurredAt asc); default display is
-  // newest-first, with a toolbar toggle back to chronological.
-  const state = getState();
-  let entries = (state.history?.entries ?? []).filter(matchesFilters);
-  if (state.order === "desc") entries = entries.slice().reverse();
-  return entries;
+  return getState().history?.entries ?? [];
+}
+
+/**
+ * The loaded window's geometry in the GLOBAL matched-set index space: where the
+ * window starts (`offset`), how many rows are loaded (`count`), and the total
+ * matched size (`matchCount`, which sizes the virtual scrollbar). Shared with the
+ * keyboard stepper so the scroller and the stepper never disagree on geometry.
+ */
+export function loadedWindow(state: State): {
+  offset: number;
+  count: number;
+  matchCount: number;
+} {
+  const h = state.history;
+  const entries = h?.entries ?? [];
+  const offset = h?.offset ?? 0;
+  const matchCount = h?.matchCount ?? entries.length;
+  return { offset, count: entries.length, matchCount };
 }
 
 /**
@@ -129,12 +144,14 @@ function ensureScrollListener(list: HTMLElement): void {
   list.addEventListener("scroll", () => renderTimeline());
 }
 
-/** Paint the visible window of the filtered, ordered event timeline into `#timeline`. */
+/** Paint the visible window of the server-filtered timeline page into `#timeline`. */
 export function renderTimeline(): void {
   const list = $<HTMLElement>("#timeline");
   if (!list) return;
+  const state = getState();
   const rows = timelineRows();
-  if (!rows.length) {
+  const { offset, matchCount } = loadedWindow(state);
+  if (matchCount === 0) {
     list.innerHTML = "";
     const li = document.createElement("li");
     li.className = "event";
@@ -143,33 +160,56 @@ export function renderTimeline(): void {
     return;
   }
   ensureScrollListener(list);
-  const { start, end } = visibleRange(
-    list.scrollTop,
-    list.clientHeight,
-    rows.length,
-  );
+  const loadEnd = offset + rows.length;
+  const viewportH = list.clientHeight;
+  // The visible range is computed in the GLOBAL matched-set index space, then
+  // clamped to the loaded window so only loaded rows paint (unloaded global rows
+  // are covered by the spacers until a page fetch fills them in).
+  const { start, end } = visibleRange(list.scrollTop, viewportH, matchCount);
+  const paintStart = Math.min(Math.max(start, offset), loadEnd);
+  const paintEnd = Math.min(Math.max(end, offset), loadEnd);
   const selected = selectedEventId();
   list.innerHTML = "";
-  if (start > 0) list.appendChild(spacer(start * ROW_H));
-  for (let i = start; i < end; i++)
-    list.appendChild(eventRow(rows[i], selected));
-  if (end < rows.length) list.appendChild(spacer((rows.length - end) * ROW_H));
+  if (paintStart > 0) list.appendChild(spacer(paintStart * ROW_H));
+  for (let i = paintStart; i < paintEnd; i++)
+    list.appendChild(eventRow(rows[i - offset], selected));
+  if (paintEnd < matchCount)
+    list.appendChild(spacer((matchCount - paintEnd) * ROW_H));
+  maybeExtendWindow(viewportH, end, loadEnd, matchCount);
+}
+
+// Fetch the next page when the viewport nears the trailing loaded edge and more
+// of the matched set remains. Only with a real viewport (no layout ⇒ a full
+// fallback paint, not a scroll), and the page-fetch helper dedupes concurrent
+// requests so a burst of scroll events issues one fetch.
+function maybeExtendWindow(
+  viewportH: number,
+  visibleEnd: number,
+  loadEnd: number,
+  matchCount: number,
+): void {
+  if (viewportH <= 0) return;
+  if (loadEnd >= matchCount) return;
+  if (visibleEnd < loadEnd - OVERSCAN) return;
+  void fetchHistoryPage({ offset: loadEnd });
 }
 
 /**
  * Scroll the selected event's row into the virtual window and into view. Under
  * virtualization an off-screen row is not in the DOM, so set the scroll position
- * to center the row's index, repaint that window, then `scrollIntoView` the
- * now-rendered row. The centralized selection scroller (render.ts) routes event
- * selection here so route-state, deep-link, and keyboard nav all reach off-screen
- * rows.
+ * to center the row's GLOBAL index, repaint that window, then `scrollIntoView` the
+ * now-rendered row. A target outside the loaded window is left to the fetch-to-
+ * reveal path (it must fetch the containing page first). The centralized selection
+ * scroller (render.ts) routes event selection here.
  */
 export function scrollTimelineSelectionIntoView(eventId: string): void {
   const list = $<HTMLElement>("#timeline");
   if (!list) return;
-  const index = timelineRows().findIndex((e) => e.eventId === eventId);
-  if (index < 0) return;
-  const centered = index * ROW_H - Math.max(0, (list.clientHeight - ROW_H) / 2);
+  const local = timelineRows().findIndex((e) => e.eventId === eventId);
+  if (local < 0) return;
+  const global = loadedWindow(getState()).offset + local;
+  const centered =
+    global * ROW_H - Math.max(0, (list.clientHeight - ROW_H) / 2);
   list.scrollTop = Math.max(0, centered);
   renderTimeline();
   const el = list.querySelector(`li[data-event-id="${eventId}"]`);

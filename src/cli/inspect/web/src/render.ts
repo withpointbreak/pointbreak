@@ -23,7 +23,7 @@ import {
   renderTimeline,
   scrollTimelineSelectionIntoView,
 } from "./lenses/timeline";
-import { facetCounts, presentTypes } from "./model";
+import { presentTypes } from "./model";
 import { shortId } from "./refs";
 import { navigate } from "./router";
 import { getState } from "./store";
@@ -84,9 +84,9 @@ function renderTypeToggles(): void {
   const container = $("#filter-types");
   if (!container) return;
   container.innerHTML = "";
-  // Live facet counts: how many events each type would contribute under the rest
-  // of the current query (distribution first, then narrow).
-  const counts = facetCounts();
+  // Server-computed facet counts: how many events each type contributes under the
+  // rest of the current query (the toggle distribution, excluding the type filter).
+  const counts = getState().history?.facets ?? {};
   const state = getState();
   for (const id of presentTypes()) {
     // Default a newly-seen type (e.g. an unknown event type) to enabled once;

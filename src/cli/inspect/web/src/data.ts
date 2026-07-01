@@ -24,6 +24,7 @@ import {
   type State,
   type ThreadsDoc,
 } from "./store";
+import type { HistoryEntry } from "./types";
 
 // The `/api/freshness` probe: the event-log head marker (the event count) the
 // poller diffs against the stored baseline. Not store state (only its deltas are
@@ -125,6 +126,104 @@ export function maybeReloadForQuery(): void {
   void load().finally(() => {
     reloading = false;
   });
+}
+
+// ---------------------------------------------------------------------------
+// Incremental page fetching (scroll-extend / reveal / keyboard paging)
+// ---------------------------------------------------------------------------
+
+/** A page selector: extend the loaded window forward/back by `offset`. */
+export interface HistoryPageSelector {
+  offset?: number;
+}
+
+// In-flight page fetches keyed by URL, so concurrent identical requests share one
+// promise (a scroll fires renderTimeline repeatedly) and an awaiter still receives
+// the resolved result rather than a dropped no-op.
+const pageFetches = new Map<string, Promise<void>>();
+
+/** Build the `/api/history` URL for a page selector under the active query. */
+function pageUrl(s: State, selector: HistoryPageSelector): string {
+  const params = new URLSearchParams(historyQueryParams(s));
+  if (selector.offset != null) params.set("offset", String(selector.offset));
+  return `/api/history?${params}`;
+}
+
+// Merge a fetched page into the loaded window. Contiguous or overlapping windows
+// union (page entries win on overlap); a disjoint page (e.g. a reveal jumped far
+// away) replaces the window. Returns the merged entries and their global offset.
+function mergeWindows(
+  prev: HistoryDoc,
+  page: HistoryDoc,
+): { entries: HistoryEntry[]; offset: number } {
+  const prevOffset = prev.offset ?? 0;
+  const prevEntries = prev.entries ?? [];
+  const prevEnd = prevOffset + prevEntries.length;
+  const pageOffset = page.offset ?? 0;
+  const pageEntries = page.entries ?? [];
+  const pageEnd = pageOffset + pageEntries.length;
+  if (pageOffset > prevEnd || pageEnd < prevOffset) {
+    return { entries: pageEntries, offset: pageOffset };
+  }
+  const offset = Math.min(prevOffset, pageOffset);
+  const end = Math.max(prevEnd, pageEnd);
+  const entries: HistoryEntry[] = [];
+  for (let g = offset; g < end; g++) {
+    entries.push(
+      g >= pageOffset && g < pageEnd
+        ? pageEntries[g - pageOffset]
+        : prevEntries[g - prevOffset],
+    );
+  }
+  return { entries, offset };
+}
+
+// Commit a fetched page: merge it into the loaded window when the active query is
+// unchanged, else adopt it wholesale (the query moved on since the page was
+// requested, e.g. a reveal cleared the filters). Always stamps the current query
+// key so the loaded window tracks the active query.
+function commitHistoryPage(page: HistoryDoc): void {
+  const s = getState();
+  const queryKey = historyQueryParams(s);
+  const prev = s.history;
+  const merged =
+    prev && prev.queryKey === queryKey
+      ? mergeWindows(prev, page)
+      : { entries: page.entries ?? [], offset: page.offset ?? 0 };
+  commit({
+    history: {
+      ...page,
+      entries: merged.entries,
+      offset: merged.offset,
+      queryKey,
+    },
+  });
+}
+
+/**
+ * Fetch one more page of the current query and merge it into the loaded window.
+ * The single page-fetch path shared by the scroll-extend, keyboard, and reveal
+ * callers. Cycle-safe: it only `commit`s, never renders (the subscriber repaints).
+ * A failure surfaces in `#error` rather than throwing.
+ */
+export function fetchHistoryPage(selector: HistoryPageSelector): Promise<void> {
+  const s = getState();
+  if (!s.history) return Promise.resolve();
+  const url = pageUrl(s, selector);
+  const existing = pageFetches.get(url);
+  if (existing) return existing;
+  const run = (async () => {
+    try {
+      const raw = (await fetchJSON(url)) as HistoryDoc;
+      commitHistoryPage(raw);
+    } catch (err) {
+      showError(err instanceof Error ? err.message : String(err));
+    }
+  })().finally(() => {
+    pageFetches.delete(url);
+  });
+  pageFetches.set(url, run);
+  return run;
 }
 
 /**

@@ -15,10 +15,25 @@ import threadsJson from "../fixtures/threads.json";
 // below; their id member is ignored (any id resolves to the single committed
 // fixture), mirroring how the old `?id=` mock ignored the query.
 const FIXTURES: Record<string, unknown> = {
-  "/api/history": historyJson,
   "/api/revisions": revisionsJson,
   "/api/threads": threadsJson,
 };
+
+// `/api/history` is now query-parameterized (page/facets/matchCount) but the mock
+// ignores the query string (matches on pathname), defaulting to the committed
+// fixture. A paging/reveal test overrides it to drive a synthetic window (a later
+// page, an `at=` reveal page) the single-page fixture cannot exercise.
+let historyResponse: unknown = historyJson;
+
+/** Override the `/api/history` response the mock returns (paging / reveal tests). */
+export function setHistoryResponse(payload: unknown): void {
+  historyResponse = payload;
+}
+
+/** Restore the default `/api/history` response (the committed history fixture). */
+export function resetHistoryResponse(): void {
+  historyResponse = historyJson;
+}
 
 // The freshness probe is not a captured fixture (it is the cheap event-count
 // marker): default it to history.json's eventCount so a poll right after `load()`
@@ -110,6 +125,7 @@ function classifyMember(
 const mockFetch: typeof fetch = (input) => {
   const pathname = pathnameOf(input);
   if (pathname === "/api/freshness") return json(freshness);
+  if (pathname === "/api/history") return json(historyResponse);
   for (const [prefix, fixture] of [
     ["/api/snapshots/", snapshotResponse],
     ["/api/revisions/", revisionJson],

@@ -101,6 +101,27 @@ describe("renderTypeToggles (facet distribution + aria-pressed)", () => {
     expect(assess?.querySelector(".type-count")?.textContent).toBe("2");
   });
 
+  it("reads the per-type counts from the server facets, not a client recount", () => {
+    // Distinct facet numbers the client could not have derived from the loaded
+    // entries prove the toggles read the server-computed distribution.
+    store.commit({
+      history: {
+        ...(historyJson as unknown as HistoryDoc),
+        facets: {
+          review_observation_recorded: 7,
+          review_assessment_recorded: 3,
+        },
+      },
+    });
+    render.render();
+    expect(
+      $('[data-type="review_observation_recorded"] .type-count')?.textContent,
+    ).toBe("7");
+    expect(
+      $('[data-type="review_assessment_recorded"] .type-count')?.textContent,
+    ).toBe("3");
+  });
+
   it("the #filter-types delegate toggles a type and navigates (replace)", () => {
     render.render();
     const obs = $<HTMLElement>('[data-type="review_observation_recorded"]');
@@ -249,8 +270,9 @@ describe("scrollSelectionIntoView materializes an off-screen virtual row", () =>
 
   it("scrolls the selected off-screen event into the rendered window", () => {
     seedManyAndVirtualize();
-    // Default desc order puts e0 (oldest) last — far below the top window.
-    const targetId = "e0";
+    // The server-ordered page paints in array order, so the last row (e499) sits
+    // far below the top window.
+    const targetId = "e499";
     render.render();
     expect($(`#timeline li[data-event-id="${targetId}"]`)).toBeNull();
 

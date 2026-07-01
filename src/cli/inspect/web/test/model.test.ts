@@ -205,23 +205,6 @@ describe("revisionForId / overviewForRevision", () => {
   });
 });
 
-describe("eventMatchesObject", () => {
-  beforeEach(seedFixtures);
-
-  it("matches every event when no object filter is set", () => {
-    const e = (historyJson as unknown as HistoryDoc).entries[0];
-    expect(model.eventMatchesObject(e as HistoryEntry, "")).toBe(true);
-  });
-
-  it("matches an event whose revision captured the given object", () => {
-    const e = (historyJson as unknown as HistoryDoc).entries[2];
-    expect(model.eventMatchesObject(e as HistoryEntry, OBJ)).toBe(true);
-    expect(model.eventMatchesObject(e as HistoryEntry, "obj:other")).toBe(
-      false,
-    );
-  });
-});
-
 describe("isSupersedableFact", () => {
   it("classifies the review-fact event types as supersedable", () => {
     for (const type of [
@@ -494,99 +477,17 @@ function seedTimeline(): void {
   });
 }
 
-describe("currentClauses", () => {
-  it("memoizes the parsed clauses while the filter text is unchanged", () => {
-    store.commit({ filterText: "alpha type:observation" });
-    const first = model.currentClauses();
-    expect(first).toBe(model.currentClauses());
-    expect(first).toHaveLength(2);
-  });
-
-  it("reparses when the filter text changes", () => {
-    store.commit({ filterText: "alpha" });
-    const first = model.currentClauses();
-    store.commit({ filterText: "beta" });
-    const second = model.currentClauses();
-    expect(second).not.toBe(first);
-    expect(second).toEqual([{ kind: "text", value: "beta", negate: false }]);
-  });
-});
-
-describe("matchesFilters", () => {
-  beforeEach(seedTimeline);
-
-  it("keeps every enabled event when no narrowing filter is set", () => {
-    const entries = (store.getState().history?.entries ?? []) as HistoryEntry[];
-    expect(entries.filter(model.matchesFilters)).toHaveLength(3);
-  });
-
-  it("drops events whose type toggle is disabled", () => {
-    const enabled = new Set(store.getState().enabledTypes);
-    enabled.delete("review_observation_recorded");
-    store.commit({ enabledTypes: enabled });
-    const entries = (store.getState().history?.entries ?? []) as HistoryEntry[];
-    expect(entries.filter(model.matchesFilters).map((e) => e.eventId)).toEqual([
-      "evt:2",
-    ]);
-  });
-
-  it("applies the track filter", () => {
-    store.commit({ filterTrack: "human:kevin" });
-    const entries = (store.getState().history?.entries ?? []) as HistoryEntry[];
-    expect(entries.filter(model.matchesFilters).map((e) => e.eventId)).toEqual([
-      "evt:2",
-    ]);
-  });
-
-  it("applies the object filter through eventMatchesObject", () => {
-    store.commit({ filterObject: "obj:a" });
-    const entries = (store.getState().history?.entries ?? []) as HistoryEntry[];
-    expect(entries.filter(model.matchesFilters).map((e) => e.eventId)).toEqual([
-      "evt:1",
-      "evt:3",
-    ]);
-  });
-
-  it("applies a free-text query clause over the search index", () => {
-    store.commit({ filterText: "alpha" });
-    const entries = (store.getState().history?.entries ?? []) as HistoryEntry[];
-    expect(entries.filter(model.matchesFilters).map((e) => e.eventId)).toEqual([
-      "evt:1",
-    ]);
-  });
-
-  it("applies a field:value query clause", () => {
-    store.commit({ filterText: "type:assessment" });
-    const entries = (store.getState().history?.entries ?? []) as HistoryEntry[];
-    expect(entries.filter(model.matchesFilters).map((e) => e.eventId)).toEqual([
-      "evt:2",
-    ]);
-  });
-});
-
-describe("facetCounts", () => {
-  beforeEach(seedTimeline);
-
-  it("counts each type over the non-type filters, ignoring the type toggles", () => {
-    // Disabling a type toggle must not change the facet distribution — the count
-    // is what the toggle *would* contribute.
-    const enabled = new Set(store.getState().enabledTypes);
-    enabled.delete("review_observation_recorded");
-    store.commit({ enabledTypes: enabled });
-    expect(model.facetCounts()).toEqual({
-      review_observation_recorded: 2,
-      review_assessment_recorded: 1,
-    });
-  });
-
-  it("narrows the counts under the track filter", () => {
-    store.commit({ filterTrack: "agent:codex" });
-    expect(model.facetCounts()).toEqual({ review_observation_recorded: 2 });
-  });
-
-  it("narrows the counts under the object filter", () => {
-    store.commit({ filterObject: "obj:b" });
-    expect(model.facetCounts()).toEqual({ review_assessment_recorded: 1 });
+describe("the history filter predicates are retired (server-owned now)", () => {
+  it("no longer exports the timeline query predicates", () => {
+    // The server filters/searches/facets the history now; the client keeps only
+    // the revisions/threads-lens predicates.
+    const m = model as unknown as Record<string, unknown>;
+    expect(m.matchesFilters).toBeUndefined();
+    expect(m.facetCounts).toBeUndefined();
+    expect(m.currentClauses).toBeUndefined();
+    expect(m.eventMatchesObject).toBeUndefined();
+    expect(typeof model.matchesRevisionFilters).toBe("function");
+    expect(typeof model.threadMatchesRevisionFilters).toBe("function");
   });
 });
 
@@ -657,19 +558,17 @@ describe("lensEntryIds", () => {
     ]);
   });
 
-  it("lists the filtered events newest-first for the timeline lens", () => {
+  it("lists the loaded timeline events in server order for the timeline lens", () => {
+    // The server pre-filters and pre-orders the page; the lens paints the loaded
+    // window as-is, so the order toggle no longer reorders it client-side.
     seedTimeline();
     store.commit({ lens: "timeline", order: "desc" });
-    expect(model.lensEntryIds()).toEqual([
-      { kind: "event", id: "evt:3" },
-      { kind: "event", id: "evt:2" },
-      { kind: "event", id: "evt:1" },
+    expect(model.lensEntryIds().map((s) => s.id)).toEqual([
+      "evt:1",
+      "evt:2",
+      "evt:3",
     ]);
-  });
-
-  it("lists timeline events chronologically when ordered ascending", () => {
-    seedTimeline();
-    store.commit({ lens: "timeline", order: "asc" });
+    store.commit({ order: "asc" });
     expect(model.lensEntryIds().map((s) => s.id)).toEqual([
       "evt:1",
       "evt:2",
