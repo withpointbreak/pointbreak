@@ -6,8 +6,16 @@
 
 use std::collections::HashMap;
 
+use similar::{Algorithm, DiffOp, capture_diff_slices};
+use unicode_width::UnicodeWidthStr;
+
 use super::RowKey;
 use crate::model::DiffFile;
+
+/// delta's `--max-line-distance` default: a (removed, added) pair whose width-ratio distance exceeds
+/// this is treated as a wholesale replacement and left un-emphasized (a full-line rewrite lights up
+/// nothing; only genuinely similar lines emphasize their changed words).
+const MAX_LINE_DISTANCE: f64 = 0.6;
 
 /// A changed sub-span within a diff row, as **byte offsets into the raw `DiffRow.text`** (mirrors
 /// [`super::TokenSpan`] offsets). Emphasis is a boolean channel — there is no `kind`.
@@ -44,6 +52,119 @@ fn tokenize(line: &str) -> Vec<(usize, usize)> {
         out.push((ws, line.len()));
     }
     out
+}
+
+/// delta's exact Unicode display width (matching delta's `UnicodeWidthStr::width`): wide
+/// (CJK/fullwidth) chars count 2, so width-ratio distances line up with delta's.
+fn display_width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
+/// Display width of a byte-sliced section, with leading/trailing whitespace trimmed. Slicing is safe
+/// because token ranges land on char boundaries by construction (see [`tokenize`]); trimming matches
+/// delta's `annotate`, so internal spaces still count but a whitespace-only section scores width 0.
+fn section_width(line: &str, start: usize, end: usize) -> usize {
+    display_width(line[start..end].trim())
+}
+
+/// Merge sorted/overlapping spans into a minimal set of non-overlapping spans.
+fn coalesce(mut spans: Vec<EmphSpan>) -> Vec<EmphSpan> {
+    spans.sort_unstable_by_key(|s| s.start);
+    let mut out: Vec<EmphSpan> = Vec::new();
+    for s in spans {
+        match out.last_mut() {
+            Some(last) if s.start <= last.end => last.end = last.end.max(s.end),
+            _ => out.push(s),
+        }
+    }
+    out
+}
+
+/// Diff a `(minus, plus)` line pair. Returns the changed byte-spans on each side and delta's
+/// width-ratio distance: `numer = Σ changed widths`, `denom = 2·Σ equal widths + Σ changed widths`,
+/// `distance = numer/denom` (`0` when `denom == 0`). Width is per **section** (the coalesced op run),
+/// trimmed (mirrors delta `edits.rs::annotate`/`compute_distance`), so a whitespace-only changed
+/// section contributes `0` width and emits no span. Does **not** apply the [`MAX_LINE_DISTANCE`]
+/// guard itself — the caller uses `distance` for both pairing and gating.
+fn diff_pair(minus: &str, plus: &str) -> (Vec<EmphSpan>, Vec<EmphSpan>, f64) {
+    let mt = tokenize(minus);
+    let pt = tokenize(plus);
+    let ms: Vec<&str> = mt.iter().map(|&(s, e)| &minus[s..e]).collect();
+    let ps: Vec<&str> = pt.iter().map(|&(s, e)| &plus[s..e]).collect();
+
+    let mut del = Vec::new();
+    let mut ins = Vec::new();
+    let (mut numer, mut denom) = (0usize, 0usize);
+
+    // Byte range covering tokens `[i, i + len)` on one side.
+    let span = |ranges: &[(usize, usize)], i: usize, len: usize| -> (usize, usize) {
+        (ranges[i].0, ranges[i + len - 1].1)
+    };
+
+    for op in capture_diff_slices(Algorithm::Myers, &ms, &ps) {
+        match op {
+            DiffOp::Equal { old_index, len, .. } => {
+                let (s, e) = span(&mt, old_index, len);
+                denom += 2 * section_width(minus, s, e);
+            }
+            DiffOp::Delete {
+                old_index, old_len, ..
+            } => {
+                let (s, e) = span(&mt, old_index, old_len);
+                let w = section_width(minus, s, e);
+                numer += w;
+                denom += w;
+                if w > 0 {
+                    del.push(EmphSpan { start: s, end: e });
+                }
+            }
+            DiffOp::Insert {
+                new_index, new_len, ..
+            } => {
+                let (s, e) = span(&pt, new_index, new_len);
+                let w = section_width(plus, s, e);
+                numer += w;
+                denom += w;
+                if w > 0 {
+                    ins.push(EmphSpan { start: s, end: e });
+                }
+            }
+            DiffOp::Replace {
+                old_index,
+                old_len,
+                new_index,
+                new_len,
+            } => {
+                let (ms_, me_) = span(&mt, old_index, old_len);
+                let wo = section_width(minus, ms_, me_);
+                numer += wo;
+                denom += wo;
+                if wo > 0 {
+                    del.push(EmphSpan {
+                        start: ms_,
+                        end: me_,
+                    });
+                }
+                let (ps_, pe_) = span(&pt, new_index, new_len);
+                let wn = section_width(plus, ps_, pe_);
+                numer += wn;
+                denom += wn;
+                if wn > 0 {
+                    ins.push(EmphSpan {
+                        start: ps_,
+                        end: pe_,
+                    });
+                }
+            }
+        }
+    }
+
+    let distance = if denom > 0 {
+        numer as f64 / denom as f64
+    } else {
+        0.0
+    };
+    (coalesce(del), coalesce(ins), distance)
 }
 
 /// Intraline emphasis for a whole diff file, keyed by the same [`RowKey`] as
@@ -146,5 +267,37 @@ mod tests {
         assert_eq!(tokenize(line), vec![(0, 5), (5, 6), (6, 7)]);
         let joined: String = tokenize(line).iter().map(|&(s, e)| &line[s..e]).collect();
         assert_eq!(joined, line);
+    }
+
+    #[test]
+    fn display_width_is_unicode_display_width() {
+        assert_eq!(display_width("café"), 4); // narrow chars: width == char count
+        assert_eq!(display_width("한"), 2); // wide char: display width 2 (char count 1, 3 bytes)
+        assert_eq!(display_width(""), 0);
+    }
+
+    #[test]
+    fn diff_pair_single_word_substitution_emphasizes_only_that_word() {
+        let (del, ins, dist) = diff_pair("let x = 1;", "let y = 1;");
+        assert!(dist < 0.6, "similar lines are homologous, dist={dist}");
+        assert_eq!(del, vec![EmphSpan { start: 4, end: 5 }]); // "x"
+        assert_eq!(ins, vec![EmphSpan { start: 4, end: 5 }]); // "y"
+    }
+
+    #[test]
+    fn diff_pair_wholesale_replacement_exceeds_guard() {
+        let (_, _, dist) = diff_pair("alpha beta", "gamma delta");
+        assert!(
+            dist > 0.6,
+            "fully-different words are a wholesale replacement, dist={dist}"
+        );
+    }
+
+    #[test]
+    fn diff_pair_trailing_whitespace_is_distance_zero_and_no_span() {
+        let (del, ins, dist) = diff_pair("let x", "let x  ");
+        assert_eq!(dist, 0.0);
+        assert!(del.is_empty());
+        assert!(ins.is_empty(), "whitespace-only insertion is suppressed");
     }
 }
