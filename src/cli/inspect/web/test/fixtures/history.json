@@ -274,7 +274,17 @@
   ],
   "eventCount": 8,
   "eventSetHash": "sha256:e81f297a301ad7d9df6bd90ceeb257511f661b4fc108460e7f2bdc3f76de0164",
+  "facets": {
+    "input_request_opened": 1,
+    "review_assessment_recorded": 2,
+    "review_observation_recorded": 1,
+    "revision_ref_associated": 1,
+    "validation_check_recorded": 2,
+    "work_object_proposed": 1
+  },
   "historyCount": 8,
+  "matchCount": 8,
   "nextCursor": null,
+  "offset": 0,
   "schema": "shore.inspect-history"
 }

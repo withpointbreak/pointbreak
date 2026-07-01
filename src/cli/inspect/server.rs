@@ -6,7 +6,7 @@
 //! rule against pulling in a runtime before a remote backend forces it. It is
 //! a localhost developer tool, not a production server.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -14,7 +14,8 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::Duration;
 
-use shoreline::session::{HistoryCursor, HistoryWindow};
+use shoreline::model::EventId;
+use shoreline::session::{HistoryCursor, HistoryOrder, HistoryPage, HistoryQuery};
 
 use super::api;
 
@@ -207,8 +208,8 @@ fn route(state: &InspectState, method: &str, path: &str, query: Option<&str>) ->
         "/tokens.css" => Response::asset("text/css; charset=utf-8", TOKENS_CSS),
         "/app.css" => Response::asset("text/css; charset=utf-8", APP_CSS),
         "/app.js" => Response::asset("application/javascript; charset=utf-8", APP_JS),
-        "/api/history" => match history_window(query) {
-            Ok(window) => api_response(api::history_json(repo, window)),
+        "/api/history" => match history_query(query) {
+            Ok(request) => api_response(api::history_json(repo, &request.query, &request.page)),
             Err(message) => Response::json_error("400 Bad Request", &message),
         },
         "/api/revisions" => api_response(api::revisions_json(repo)),
@@ -274,23 +275,68 @@ fn split_target(target: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// Parse the optional `limit`/`cursor` window params on `/api/history`. A present
-/// but non-numeric `limit`, or a present `cursor` that fails to decode (an empty
-/// `?cursor=` decodes as malformed too), is a usage error — the caller turns it
-/// into a `400` without touching the store. An absent param means "no bound".
-fn history_window(query: Option<&str>) -> Result<HistoryWindow, String> {
-    let limit = match query_param(query, "limit") {
-        Some(raw) => Some(
-            raw.parse::<usize>()
-                .map_err(|_| "invalid limit".to_owned())?,
-        ),
-        None => None,
+/// The parsed `/api/history` request: the query model and the window spec.
+struct HistoryRequest {
+    query: HistoryQuery,
+    page: HistoryPage,
+}
+
+/// Parse the `/api/history` query params into a `HistoryQuery` + `HistoryPage`.
+/// `q` is free text; `track`/`object`/`at` are exact (empty => absent); `type` is
+/// a comma-separated enabled-type set (absent => all types); `order` is
+/// `asc`/`desc` (absent/empty => asc). A non-numeric `limit`/`offset`, a
+/// `cursor` that fails to decode (an empty `?cursor=` too), or an unknown `order`
+/// is a usage error the caller turns into a `400` without touching the store. The
+/// `at` › `offset` › `cursor` precedence lives in `apply_history_query`; the
+/// parser only collects the params.
+fn history_query(query: Option<&str>) -> Result<HistoryRequest, String> {
+    let q = query_param(query, "q").unwrap_or_default();
+    let track = query_param(query, "track").filter(|value| !value.is_empty());
+    let object = query_param(query, "object").filter(|value| !value.is_empty());
+    let types = query_param(query, "type").map(|raw| {
+        raw.split(',')
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect::<BTreeSet<String>>()
+    });
+    let order = match query_param(query, "order").as_deref() {
+        None | Some("") | Some("asc") => HistoryOrder::Asc,
+        Some("desc") => HistoryOrder::Desc,
+        Some(_) => return Err("invalid order".to_owned()),
     };
+    let limit = parse_usize(query_param(query, "limit"), "invalid limit")?;
+    let offset = parse_usize(query_param(query, "offset"), "invalid offset")?;
     let after = match query_param(query, "cursor") {
         Some(raw) => Some(HistoryCursor::decode(&raw).map_err(|_| "invalid cursor".to_owned())?),
         None => None,
     };
-    Ok(HistoryWindow { limit, after })
+    let at = query_param(query, "at")
+        .filter(|value| !value.is_empty())
+        .map(EventId::new);
+    Ok(HistoryRequest {
+        query: HistoryQuery {
+            q,
+            track,
+            object,
+            types,
+            order,
+        },
+        page: HistoryPage {
+            limit,
+            after,
+            offset,
+            at,
+        },
+    })
+}
+
+/// Parse an optional numeric query param; a present but non-numeric value is a
+/// usage error (`message`), an absent one is `None`.
+fn parse_usize(value: Option<String>, message: &'static str) -> Result<Option<usize>, String> {
+    match value {
+        Some(raw) => Ok(Some(raw.parse::<usize>().map_err(|_| message.to_owned())?)),
+        None => Ok(None),
+    }
 }
 
 fn query_param(query: Option<&str>, key: &str) -> Option<String> {

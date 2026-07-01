@@ -18,12 +18,12 @@ use shoreline::highlight::highlight_file;
 use shoreline::model::{ObjectId, ReviewEndpoint, RevisionId, ValidationStatus};
 use shoreline::session::event::ReviewAssessment;
 use shoreline::session::{
-    CurrentAssessmentStatus, EventVerificationPolicy, HistoryWindow, InputRequestStatus,
-    LivenessEnrichment, ProjectionDiagnostic, ReviewHistoryEntry, ReviewHistoryOptions,
+    BaseProjectionConfig, CurrentAssessmentStatus, EventVerificationPolicy, HistoryPage,
+    HistoryQuery, InputRequestStatus, LivenessEnrichment, ProjectionDiagnostic, ReviewHistoryEntry,
     RevisionListEntry, RevisionListOptions, RevisionOverview, RevisionOverviewsOptions,
-    RevisionShowOptions, SessionState, SupersessionView, enrich_liveness, event_log_head_marker,
-    list_revisions, read_bound_object_artifact, read_events_for_display, read_object_artifact,
-    review_history, show_revision, show_revision_overviews,
+    RevisionShowOptions, SessionState, SupersessionView, apply_history_query, enrich_liveness,
+    event_log_head_marker, history_base_projection, list_revisions, read_bound_object_artifact,
+    read_events_for_display, read_object_artifact, show_revision, show_revision_overviews,
 };
 
 use super::server::HighlightCache;
@@ -37,10 +37,25 @@ struct HistoryPayload {
     event_count: usize,
     history_count: usize,
     entries: Vec<ReviewHistoryEntry>,
+    /// Per-event-type counts under the active `q`/`track`/`object` query but
+    /// EXCLUDING the `type` page filter — the timeline's type-toggle numbers
+    /// (INV-3). Additive, always present.
+    facets: BTreeMap<String, usize>,
+    /// The full filtered size (post-`type`), so the virtualized scrollbar is sized
+    /// without transferring every row. Additive, always present.
+    match_count: usize,
+    /// The returned window's start index in the filtered set, for the sparse
+    /// virtual list. Additive, always present.
+    offset: usize,
     /// Opaque continuation token for the next page when a window was applied and
     /// entries remain; `null` for an unwindowed or final page. Additive — always
     /// present so existing consumers see a stable shape.
     next_cursor: Option<String>,
+    /// The located index of an `at=<eventId>` request within the filtered set, so
+    /// reveal / deep-link can fetch-to-reveal an off-page target. Present only for
+    /// an `at` request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    match_index: Option<usize>,
     diagnostics: Vec<ProjectionDiagnostic>,
 }
 
@@ -558,35 +573,44 @@ fn assessment_label(assessment: ReviewAssessment) -> &'static str {
     }
 }
 
-/// Full chronological event timeline with hydrated bodies. A `window` bounds the
-/// rendered output (the first page, or a continuation from a cursor); the default
-/// window returns the full timeline.
-pub(super) fn history_json(repo: &Path, window: HistoryWindow) -> Result<String, String> {
-    let mut options = ReviewHistoryOptions::new(repo)
-        .with_include_body(true)
-        .with_read_for_display(true)
-        .with_verification_policy(EventVerificationPolicy::advisory())
-        .with_trust_set(crate::cli::review::common::discover_trust_set(repo))
-        .with_actor_attributes(crate::cli::review::common::discover_actor_attributes(repo));
-    if let Some(map) = crate::cli::review::common::discover_delegation_map(repo) {
-        options = options.with_delegation_map(map);
+/// The advisory verification + reader enrichment config for the base projection.
+/// The library cannot reach these `pub(crate)` `discover_*` helpers (INV-8), so
+/// the binary builds the config here and passes it in — the single call site
+/// (reused by the projection cache in a later phase).
+fn inspect_base_config(repo: &Path) -> BaseProjectionConfig {
+    BaseProjectionConfig {
+        verification_policy: Some(EventVerificationPolicy::advisory()),
+        trust_set: crate::cli::review::common::discover_trust_set(repo),
+        actor_attributes: crate::cli::review::common::discover_actor_attributes(repo),
+        delegation_map: crate::cli::review::common::discover_delegation_map(repo),
     }
-    if let Some(limit) = window.limit {
-        options = options.with_limit(limit);
-    }
-    if let Some(cursor) = window.after {
-        options = options.with_cursor(cursor);
-    }
-    let result = review_history(options).map_err(|error| error.to_string())?;
-    let history_count = result.history_count();
+}
+
+/// The server-side query surface for `/api/history`: build the full body-hydrated
+/// base projection, then run the pure `apply_history_query` (filter → facets →
+/// order → window). `query`/`page` carry the parsed params; the `at` › `offset` ›
+/// `cursor` precedence lives inside `apply_history_query`. The base is built
+/// uncached here (a later phase adds the projection cache).
+pub(super) fn history_json(
+    repo: &Path,
+    query: &HistoryQuery,
+    page: &HistoryPage,
+) -> Result<String, String> {
+    let config = inspect_base_config(repo);
+    let base = history_base_projection(repo, &config).map_err(|error| error.to_string())?;
+    let out = apply_history_query(&base, query, page);
     let payload = HistoryPayload {
         schema: "shore.inspect-history",
-        event_set_hash: result.event_set_hash,
-        event_count: result.event_count,
-        history_count,
-        entries: result.entries,
-        next_cursor: result.next_cursor,
-        diagnostics: result.diagnostics,
+        event_set_hash: out.event_set_hash,
+        event_count: out.event_count,
+        history_count: out.entries.len(),
+        entries: out.entries,
+        facets: out.facets,
+        match_count: out.match_count,
+        offset: out.offset,
+        next_cursor: out.next_cursor,
+        match_index: out.match_index,
+        diagnostics: out.diagnostics,
     };
     serde_json::to_string(&payload).map_err(|error| error.to_string())
 }

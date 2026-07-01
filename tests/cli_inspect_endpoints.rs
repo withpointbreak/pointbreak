@@ -804,3 +804,126 @@ fn api_history_rejects_malformed_window_params() {
             .contains("400")
     );
 }
+
+#[test]
+fn api_history_q_filters_entries_and_reports_facets_and_match_count() {
+    let store = representative_store();
+    let inspector = Inspector::spawn(store.repo.path());
+
+    let full = inspector.get_json("/api/history");
+    let observations = entries_of_type(&full, "review_observation_recorded").len();
+    assert!(observations >= 1, "store should have observations");
+
+    let filtered = inspector.get_json("/api/history?type=review_observation_recorded");
+    // The page is observations only, and matchCount is the filtered (post-type) size.
+    assert!(
+        filtered["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["eventType"] == "review_observation_recorded")
+    );
+    assert_eq!(filtered["matchCount"], observations);
+    // Facets still report ALL types — they exclude the `type` page filter (INV-3).
+    assert_eq!(
+        filtered["facets"]["review_observation_recorded"],
+        observations
+    );
+    assert!(
+        filtered["facets"]["review_assessment_recorded"]
+            .as_u64()
+            .unwrap_or(0)
+            >= 1,
+        "facets count assessments even under a type=observation page filter"
+    );
+}
+
+#[test]
+fn api_history_q_full_text_search_narrows_the_page() {
+    let store = representative_store();
+    let inspector = Inspector::spawn(store.repo.path());
+
+    let full = inspector.get_json("/api/history");
+    let total = full["matchCount"].as_u64().unwrap();
+
+    // A `q` term present on some but not all entries narrows the page and the count.
+    let filtered = inspector.get_json("/api/history?q=type%3Aobservation");
+    let filtered_count = filtered["matchCount"].as_u64().unwrap();
+    assert!(filtered_count <= total);
+    assert!(
+        filtered["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["eventType"] == "review_observation_recorded")
+    );
+}
+
+#[test]
+fn api_history_offset_windows_the_filtered_set() {
+    let store = representative_store();
+    let inspector = Inspector::spawn(store.repo.path());
+
+    let total = inspector.get_json("/api/history")["matchCount"]
+        .as_u64()
+        .unwrap();
+    let page = inspector.get_json("/api/history?offset=1&limit=2");
+    assert_eq!(page["offset"], 1);
+    assert!(page["entries"].as_array().unwrap().len() <= 2);
+    assert_eq!(page["matchCount"], total);
+}
+
+#[test]
+fn api_history_at_locates_the_page_and_sets_match_index() {
+    let store = representative_store();
+    let inspector = Inspector::spawn(store.repo.path());
+
+    let full = inspector.get_json("/api/history");
+    let target = full["entries"][0]["eventId"].as_str().unwrap().to_owned();
+    let located = inspector.get_json(&format!("/api/history?limit=2&at={}", urlencode(&target)));
+    assert!(located["matchIndex"].is_u64());
+    assert!(
+        located["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["eventId"] == target.as_str())
+    );
+}
+
+#[test]
+fn api_history_unparamd_shape_is_unchanged_plus_additive_fields() {
+    let store = representative_store();
+    let inspector = Inspector::spawn(store.repo.path());
+
+    let full = inspector.get_json("/api/history");
+    let entries = full["entries"].as_array().unwrap().len();
+    // Unchanged (INV-6).
+    assert_eq!(full["schema"], "shore.inspect-history");
+    assert!(full["nextCursor"].is_null());
+    assert_eq!(full["historyCount"], entries);
+    // Additive (INV-7): facets/matchCount/offset always present, matchIndex only for at=.
+    assert!(full["facets"].is_object());
+    assert_eq!(full["offset"], 0);
+    assert_eq!(full["matchCount"], entries);
+    assert!(full.get("matchIndex").is_none() || full["matchIndex"].is_null());
+}
+
+#[test]
+fn api_history_rejects_malformed_offset_and_order() {
+    let store = representative_store();
+    let inspector = Inspector::spawn(store.repo.path());
+
+    assert!(
+        inspector
+            .get_error("/api/history?offset=abc")
+            .0
+            .contains("400")
+    );
+    assert!(
+        inspector
+            .get_error("/api/history?order=sideways")
+            .0
+            .contains("400")
+    );
+}
