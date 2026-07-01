@@ -293,4 +293,35 @@ describe("renderThreadSvg + wireDagInteractions (the no-trunk competing-heads DA
     // Opening a revision from the DAG clears any open diff overlay route.
     expect(store.getState().diff).toBeNull();
   });
+
+  it("keeps revision DAG nodes interactive and keyed on data-revision-id", () => {
+    seedThread(FORK);
+    const card = revisions.renderThreadCard(FORK);
+    const node = card.querySelector("g.dag-node[data-revision-id]");
+    expect(node).not.toBeNull();
+    expect(node?.getAttribute("tabindex")).toBe("0");
+    expect(node?.getAttribute("role")).toBe("link");
+    expect(node?.getAttribute("aria-label")?.startsWith("revision ")).toBe(
+      true,
+    );
+  });
+
+  it("renderThreadSvg emits byte-identical revision markup (characterization guard)", () => {
+    seedThread(FORK);
+    // Paint the SVG directly from the fixture's server-laid geometry. The FORK
+    // fixture's coordinates are fixed, so the output string is deterministic; any
+    // diff after the painter-core extraction means the wrapper regressed.
+    expect(revisions.renderThreadSvg(FORK.laidOut)).toMatchInlineSnapshot(`
+      "<svg class="revision-dag" width="300" height="200" viewBox="0 0 300 200" preserveAspectRatio="xMinYMin meet" role="group" aria-label="supersession graph"><defs><marker id="dag-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path class="dag-arrow-head" d="M0,0 L7,4 L0,8 z" /></marker><marker id="dag-arrow-traced" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path class="dag-arrow-head-traced" d="M0,0 L7,4 L0,8 z" /></marker></defs><polyline class="dag-edge" data-from="rev:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" data-to="rev:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" points="150,130 80,70" marker-end="url(#dag-arrow)" /><polyline class="dag-edge" data-from="rev:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" data-to="rev:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" points="150,130 220,70" marker-end="url(#dag-arrow)" /><g class="dag-node superseded" data-revision-id="rev:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" tabindex="0" role="link" aria-label="revision aaaaaaaaaaaa">
+              <rect x="90" y="130" width="120" height="40" rx="6" />
+              <text x="150" y="150" text-anchor="middle" dominant-baseline="middle">aaaaaaaaaaaa</text>
+            </g><g class="dag-node head" data-revision-id="rev:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" tabindex="0" role="link" aria-label="revision bbbbbbbbbbbb">
+              <rect x="20" y="30" width="120" height="40" rx="6" />
+              <text x="80" y="50" text-anchor="middle" dominant-baseline="middle">bbbbbbbbbbbb</text>
+            </g><g class="dag-node head" data-revision-id="rev:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" tabindex="0" role="link" aria-label="revision cccccccccccc">
+              <rect x="160" y="30" width="120" height="40" rx="6" />
+              <text x="220" y="50" text-anchor="middle" dominant-baseline="middle">cccccccccccc</text>
+            </g></svg>"
+    `);
+  });
 });

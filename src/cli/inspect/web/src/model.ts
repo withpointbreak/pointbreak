@@ -59,6 +59,8 @@ export interface ThreadEdge {
   from?: string;
   to?: string;
   path?: number[][];
+  /** The fact relation this edge encodes (`replaces`/`supersedes`); absent on revision edges. */
+  kind?: string;
 }
 
 /** A thread's server-computed layout (the placed supersession nodes, edges, and bounds). */
