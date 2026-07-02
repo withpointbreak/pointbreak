@@ -18,6 +18,24 @@ pub enum EventVerificationStatus {
     Unsigned,
 }
 
+impl EventVerificationStatus {
+    /// The canonical status code — exactly the serde snake_case wire form.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Valid => "valid",
+            Self::Invalid => "invalid",
+            Self::UntrustedKey => "untrusted_key",
+            Self::Unsigned => "unsigned",
+        }
+    }
+}
+
+impl std::fmt::Display for EventVerificationStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Base64-encoded Ed25519 signature bytes for a signed event.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -264,5 +282,22 @@ mod tests {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/event_signatures")
             .join(name)
+    }
+    #[test]
+    fn verification_status_string_form_matches_wire_form() {
+        for (status, code) in [
+            (EventVerificationStatus::Valid, "valid"),
+            (EventVerificationStatus::Invalid, "invalid"),
+            (EventVerificationStatus::UntrustedKey, "untrusted_key"),
+            (EventVerificationStatus::Unsigned, "unsigned"),
+        ] {
+            assert_eq!(status.as_str(), code);
+            assert_eq!(status.to_string(), code);
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                Value::String(code.to_owned()),
+                "as_str must equal the serde wire form"
+            );
+        }
     }
 }
