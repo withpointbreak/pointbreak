@@ -10,6 +10,9 @@ use crate::session::event::{
     Writer,
 };
 use crate::session::observation::ResolvedRevision;
+use crate::session::projection::body_content::{
+    BodyContentState, BodyRemovalLens, resolve_body_content,
+};
 use crate::session::store::backend::StoreBackend;
 use crate::session::workflow::util::sorted_unique;
 
@@ -22,6 +25,10 @@ pub(crate) struct AssessmentProjectionOptions<'a> {
     pub track_filter: Option<TrackId>,
     pub include_summary: bool,
     pub include_all: bool,
+    /// The reader's removal lens; `None` only on status-only projections that
+    /// never hydrate (no state resolution happens without it, and a `Some`
+    /// lens must always be paired with a live `backend`).
+    pub removal_lens: Option<&'a BodyRemovalLens<'a>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -74,6 +81,7 @@ pub struct AssessmentView {
     pub summary: Option<String>,
     pub summary_content_type: BodyContentType,
     pub summary_content_hash: Option<String>,
+    pub summary_content_state: BodyContentState,
     pub status: AssessmentRecordStatus,
     pub replaces: Vec<AssessmentId>,
     pub related_observations: Vec<ObservationId>,
@@ -103,6 +111,7 @@ pub(crate) fn project_assessments(
 
         let view = assessment_view_from_event(
             options.backend,
+            options.removal_lens,
             record.event,
             record.payload,
             record.track_id,
@@ -186,16 +195,36 @@ fn collect_assessment_records<'a>(
 
 fn assessment_view_from_event(
     backend: Option<&StoreBackend>,
+    removal_lens: Option<&BodyRemovalLens<'_>>,
     event: &ShoreEvent,
     payload: ReviewAssessmentRecordedPayload,
     track_id: TrackId,
     replaced_ids: &BTreeSet<AssessmentId>,
     include_summary: bool,
 ) -> Result<AssessmentView> {
-    let summary = if include_summary {
-        assessment_summary(backend, &payload)?
-    } else {
-        None
+    // With a lens (paired with a live backend), the seam decides removed vs
+    // present vs missing; without one (status-only projections) the legacy
+    // path runs and the state stays `Present` unresolved.
+    let (summary, summary_content_state) = match (backend, removal_lens) {
+        (Some(backend), Some(lens)) => {
+            let content = resolve_body_content(
+                backend,
+                lens,
+                include_summary,
+                payload.summary.clone(),
+                payload.summary_artifact_path.as_deref(),
+            )?;
+            let state = content.state();
+            (content.into_text(), state)
+        }
+        _ => {
+            let summary = if include_summary {
+                assessment_summary(backend, &payload)?
+            } else {
+                None
+            };
+            (summary, BodyContentState::default())
+        }
     };
     let status = if replaced_ids.contains(&payload.assessment_id) {
         AssessmentRecordStatus::Replaced
@@ -215,6 +244,7 @@ fn assessment_view_from_event(
         summary,
         summary_content_type: payload.summary_content_type,
         summary_content_hash: payload.summary_content_hash,
+        summary_content_state,
         status,
         replaces,
         related_observations,

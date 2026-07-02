@@ -786,6 +786,103 @@ fn write_native_review_notes(repo: &GitRepo) -> std::path::PathBuf {
     sidecar
 }
 
+/// Append a locally-authored `ArtifactRemoved` over `content_hash` (operative
+/// under the default policy via the possession arm), written as a flat event
+/// file exactly as the store lays events out (the stem is the eventId hash).
+fn record_note_body_removal(repo: &GitRepo, content_hash: &str) {
+    use shoreline::session::event::{ArtifactRemovedPayload, EventTarget, Writer};
+
+    let event = ShoreEvent::new(
+        EventType::ArtifactRemoved,
+        ArtifactRemovedPayload::idempotency_key(content_hash),
+        EventTarget::for_journal(shoreline::model::JournalId::new("journal:default")),
+        Writer::shore_local("test"),
+        ArtifactRemovedPayload {
+            content_hash: content_hash.to_owned(),
+        },
+        "2026-05-10T00:00:00Z",
+    )
+    .unwrap();
+    let stem = event
+        .event_id
+        .as_str()
+        .strip_prefix("evt:sha256:")
+        .expect("event id is sha256-prefixed");
+    let path = common_dir_store(repo.path())
+        .join("events")
+        .join(format!("{stem}.json"));
+    std::fs::write(path, serde_json::to_vec(&event).expect("serialize event"))
+        .expect("write removal event");
+}
+
+fn note_body_hash(body: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("sha256:{:x}", Sha256::digest(body.as_bytes()))
+}
+
+#[test]
+fn load_durable_notes_for_repo_replays_removed_swept_body_as_absent() {
+    use shoreline::session::{CompactOptions, compact_store};
+
+    let repo = modified_repo();
+    let large_body = "x".repeat(5000);
+    let sidecar = write_review_notes_with_body(&repo, &large_body);
+    import_notes(ImportNotesOptions::new(repo.path()).with_review_notes(&sidecar))
+        .expect("notes import succeeds");
+    let body_hash = note_body_hash(&large_body);
+    record_note_body_removal(&repo, &body_hash);
+    compact_store(CompactOptions::new(repo.path())).expect("compact sweeps the removed blob");
+
+    let parsed = load_durable_notes_for_repo(repo.path())
+        .expect("a swept imported-note body must not hard-error the replay")
+        .expect("durable notes exist");
+
+    assert_eq!(parsed.sidecar.files[0].notes[0].body, None);
+    assert_eq!(
+        parsed.sidecar.files[0].notes[0].title.as_deref(),
+        Some("Changed return value")
+    );
+}
+
+#[test]
+fn load_durable_notes_for_repo_replays_removed_unswept_body_as_absent() {
+    let repo = modified_repo();
+    let large_body = "x".repeat(5000);
+    let sidecar = write_review_notes_with_body(&repo, &large_body);
+    import_notes(ImportNotesOptions::new(repo.path()).with_review_notes(&sidecar))
+        .expect("notes import succeeds");
+    record_note_body_removal(&repo, &note_body_hash(&large_body));
+
+    let parsed = load_durable_notes_for_repo(repo.path())
+        .expect("a suppressed imported-note body must not hard-error the replay")
+        .expect("durable notes exist");
+
+    assert_eq!(parsed.sidecar.files[0].notes[0].body, None);
+}
+
+#[test]
+fn load_durable_notes_for_repo_missing_unremoved_body_still_errors() {
+    let repo = modified_repo();
+    let large_body = "x".repeat(5000);
+    let sidecar = write_review_notes_with_body(&repo, &large_body);
+    import_notes(ImportNotesOptions::new(repo.path()).with_review_notes(&sidecar))
+        .expect("notes import succeeds");
+    let hex = note_body_hash(&large_body);
+    let hex = hex.strip_prefix("sha256:").unwrap();
+    std::fs::remove_file(
+        common_dir_store(repo.path())
+            .join("artifacts")
+            .join("notes")
+            .join(format!("{hex}.json")),
+    )
+    .expect("delete the note blob without a removal event");
+
+    let err = load_durable_notes_for_repo(repo.path())
+        .expect_err("absent bytes without an operative removal keep the hard error");
+
+    assert!(err.to_string().contains("import referenced artifacts"));
+}
+
 fn write_review_notes_with_body(repo: &GitRepo, body: &str) -> std::path::PathBuf {
     let sidecar = repo.path().join("review-notes.json");
     std::fs::write(&sidecar, review_notes_with_body_json(body)).unwrap();

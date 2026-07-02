@@ -8,9 +8,11 @@ use crate::model::{
     ValidationTrigger,
 };
 use crate::session::SupersessionView;
-use crate::session::body_artifact::load_body_artifact;
 use crate::session::event::{
     BodyContentType, EventType, ShoreEvent, ValidationCheckRecordedPayload, Writer,
+};
+use crate::session::projection::body_content::{
+    BodyContentState, BodyRemovalLens, resolve_body_content,
 };
 use crate::session::store::backend::StoreBackend;
 
@@ -27,6 +29,9 @@ pub(crate) struct ValidationCheckProjectionOptions<'a> {
     pub track_filter: Option<TrackId>,
     pub status_filter: Option<ValidationStatus>,
     pub include_body: bool,
+    /// The reader's removal lens: an operative removal over an externalized
+    /// summary renders an explained removed state instead of the bytes.
+    pub removal_lens: &'a BodyRemovalLens<'a>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -51,6 +56,10 @@ pub struct ValidationCheckView {
     pub summary_content_type: BodyContentType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary_content_hash: Option<String>,
+    /// This view serializes directly (unlike its siblings), so the state
+    /// carries the wire skip predicate here: `Present` stays off the wire.
+    #[serde(skip_serializing_if = "BodyContentState::is_present")]
+    pub summary_content_state: BodyContentState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -124,11 +133,15 @@ pub fn project_validation_checks(
 
     let mut validations = Vec::new();
     for (_, record) in validation_records {
-        let summary = if options.include_body {
-            validation_summary(options.backend, &record.payload)?
-        } else {
-            None
-        };
+        let content = resolve_body_content(
+            options.backend,
+            options.removal_lens,
+            options.include_body,
+            record.payload.summary.clone(),
+            record.payload.summary_artifact_path.as_deref(),
+        )?;
+        let summary_content_state = content.state();
+        let summary = content.into_text();
 
         validations.push(ValidationCheckView {
             id: record.payload.validation_check_id,
@@ -144,6 +157,7 @@ pub fn project_validation_checks(
             summary,
             summary_content_type: record.payload.summary_content_type,
             summary_content_hash: record.payload.summary_content_hash,
+            summary_content_state,
             started_at: record.payload.started_at,
             completed_at: record.payload.completed_at,
             log_artifact_content_hashes: record.payload.log_artifact_content_hashes,
@@ -172,19 +186,6 @@ pub(crate) fn annotate_validation_supersession(
                     supersession.stale_by_superseding_revision(revision_id);
             }
         }
-    }
-}
-
-fn validation_summary(
-    backend: &StoreBackend,
-    payload: &ValidationCheckRecordedPayload,
-) -> Result<Option<String>> {
-    if payload.summary.is_some() {
-        return Ok(payload.summary.clone());
-    }
-    match payload.summary_artifact_path.as_deref() {
-        Some(path) => load_body_artifact(backend, path),
-        None => Ok(None),
     }
 }
 
@@ -233,6 +234,10 @@ mod tests {
         ];
         let dir = tempfile::tempdir().unwrap();
         let backend = StoreBackend::Local(dir.path().to_path_buf());
+        let removal = crate::session::ArtifactRemovalProjection::from_events(&[]).unwrap();
+        let cosig = crate::session::projection::cosignature::CosignatureIndex::build(&[]).unwrap();
+        let trust_set = crate::session::signing::TrustSet::default();
+        let lens = removal_lens_fixture(&removal, &trust_set, &cosig);
 
         let views = project_validation_checks(ValidationCheckProjectionOptions {
             backend: &backend,
@@ -241,6 +246,7 @@ mod tests {
             track_filter: None,
             status_filter: None,
             include_body: false,
+            removal_lens: &lens,
         })
         .unwrap();
 
@@ -268,6 +274,10 @@ mod tests {
         ];
         let dir = tempfile::tempdir().unwrap();
         let backend = StoreBackend::Local(dir.path().to_path_buf());
+        let removal = crate::session::ArtifactRemovalProjection::from_events(&[]).unwrap();
+        let cosig = crate::session::projection::cosignature::CosignatureIndex::build(&[]).unwrap();
+        let trust_set = crate::session::signing::TrustSet::default();
+        let lens = removal_lens_fixture(&removal, &trust_set, &cosig);
 
         let views = project_validation_checks(ValidationCheckProjectionOptions {
             backend: &backend,
@@ -276,6 +286,7 @@ mod tests {
             track_filter: None,
             status_filter: None,
             include_body: false,
+            removal_lens: &lens,
         })
         .unwrap();
 
@@ -310,6 +321,10 @@ mod tests {
         ];
         let dir = tempfile::tempdir().unwrap();
         let backend = StoreBackend::Local(dir.path().to_path_buf());
+        let removal = crate::session::ArtifactRemovalProjection::from_events(&[]).unwrap();
+        let cosig = crate::session::projection::cosignature::CosignatureIndex::build(&[]).unwrap();
+        let trust_set = crate::session::signing::TrustSet::default();
+        let lens = removal_lens_fixture(&removal, &trust_set, &cosig);
 
         let views = project_validation_checks(ValidationCheckProjectionOptions {
             backend: &backend,
@@ -318,6 +333,7 @@ mod tests {
             track_filter: None,
             status_filter: None,
             include_body: false,
+            removal_lens: &lens,
         })
         .unwrap();
 
@@ -333,6 +349,160 @@ mod tests {
                 "validation:sha256:third"
             ]
         );
+    }
+
+    /// A well-formed content-addressed note path (64-hex stem) plus its
+    /// normalized removal key.
+    fn hex_note_path() -> (String, String) {
+        let stem = "a".repeat(64);
+        (
+            format!("artifacts/notes/{stem}.json"),
+            format!("sha256:{stem}"),
+        )
+    }
+
+    fn removal_event_for(content_hash: &str) -> ShoreEvent {
+        use crate::session::event::ArtifactRemovedPayload;
+        ShoreEvent::new(
+            EventType::ArtifactRemoved,
+            ArtifactRemovedPayload::idempotency_key(content_hash),
+            EventTarget::for_journal(JournalId::new("journal:fixture")),
+            Writer::shore_local("test"),
+            ArtifactRemovedPayload {
+                content_hash: content_hash.to_owned(),
+            },
+            "2026-05-10T00:00:00Z",
+        )
+        .unwrap()
+    }
+
+    fn removal_lens_fixture<'a>(
+        removal: &'a crate::session::ArtifactRemovalProjection,
+        trust_set: &'a crate::session::signing::TrustSet,
+        cosig: &'a crate::session::projection::cosignature::CosignatureIndex<'a>,
+    ) -> BodyRemovalLens<'a> {
+        BodyRemovalLens::new(
+            removal,
+            trust_set,
+            crate::session::signing::RemovalPolicy::default(),
+            cosig,
+        )
+    }
+
+    #[test]
+    fn removed_and_swept_validation_summary_renders_physically_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = StoreBackend::Local(dir.path().to_path_buf());
+        let (path, hash) = hex_note_path();
+        let events = vec![
+            validation_event_with_summary_artifact(
+                "evt:sha256:0001",
+                "review-unit:sha256:one",
+                "validation:sha256:one",
+                &path,
+            ),
+            removal_event_for(&hash),
+        ];
+        let removal = crate::session::ArtifactRemovalProjection::from_events(&events).unwrap();
+        let cosig =
+            crate::session::projection::cosignature::CosignatureIndex::build(&events).unwrap();
+        let trust_set = crate::session::signing::TrustSet::default();
+        let lens = removal_lens_fixture(&removal, &trust_set, &cosig);
+        let revision_id = RevisionId::new("review-unit:sha256:one");
+
+        let checks = project_validation_checks(ValidationCheckProjectionOptions {
+            backend: &backend,
+            events: &events,
+            revision_id: &revision_id,
+            track_filter: None,
+            status_filter: None,
+            include_body: true,
+            removal_lens: &lens,
+        })
+        .expect("swept validation summary must not hard-error");
+
+        assert_eq!(checks[0].summary, None);
+        assert_eq!(
+            checks[0].summary_content_state,
+            BodyContentState::PhysicallyRemoved
+        );
+    }
+
+    #[test]
+    fn removed_unswept_validation_summary_is_suppressed_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = StoreBackend::Local(dir.path().to_path_buf());
+        let (path, hash) = hex_note_path();
+        fs::create_dir_all(dir.path().join("artifacts/notes")).unwrap();
+        fs::write(
+            dir.path().join(&path),
+            r#"{"schema":"shore.note-body","version":1,"body":"still stored"}"#,
+        )
+        .unwrap();
+        let events = vec![
+            validation_event_with_summary_artifact(
+                "evt:sha256:0001",
+                "review-unit:sha256:one",
+                "validation:sha256:one",
+                &path,
+            ),
+            removal_event_for(&hash),
+        ];
+        let removal = crate::session::ArtifactRemovalProjection::from_events(&events).unwrap();
+        let cosig =
+            crate::session::projection::cosignature::CosignatureIndex::build(&events).unwrap();
+        let trust_set = crate::session::signing::TrustSet::default();
+        let lens = removal_lens_fixture(&removal, &trust_set, &cosig);
+        let revision_id = RevisionId::new("review-unit:sha256:one");
+
+        let checks = project_validation_checks(ValidationCheckProjectionOptions {
+            backend: &backend,
+            events: &events,
+            revision_id: &revision_id,
+            track_filter: None,
+            status_filter: None,
+            include_body: true,
+            removal_lens: &lens,
+        })
+        .expect("suppressed validation summary renders");
+
+        assert_eq!(checks[0].summary, None);
+        assert_eq!(
+            checks[0].summary_content_state,
+            BodyContentState::SuppressedPresent
+        );
+    }
+
+    #[test]
+    fn missing_unremoved_validation_summary_still_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = StoreBackend::Local(dir.path().to_path_buf());
+        let (path, _hash) = hex_note_path();
+        let events = vec![validation_event_with_summary_artifact(
+            "evt:sha256:0001",
+            "review-unit:sha256:one",
+            "validation:sha256:one",
+            &path,
+        )];
+        let removal = crate::session::ArtifactRemovalProjection::from_events(&events).unwrap();
+        let cosig =
+            crate::session::projection::cosignature::CosignatureIndex::build(&events).unwrap();
+        let trust_set = crate::session::signing::TrustSet::default();
+        let lens = removal_lens_fixture(&removal, &trust_set, &cosig);
+        let revision_id = RevisionId::new("review-unit:sha256:one");
+
+        let err = project_validation_checks(ValidationCheckProjectionOptions {
+            backend: &backend,
+            events: &events,
+            revision_id: &revision_id,
+            track_filter: None,
+            status_filter: None,
+            include_body: true,
+            removal_lens: &lens,
+        })
+        .expect_err("absent summary bytes without an operative removal keep the hard error");
+
+        assert!(err.to_string().contains("import referenced artifacts"));
     }
 
     #[test]
@@ -352,6 +522,10 @@ mod tests {
             "validation:sha256:one",
             artifact_path,
         )];
+        let removal = crate::session::ArtifactRemovalProjection::from_events(&[]).unwrap();
+        let cosig = crate::session::projection::cosignature::CosignatureIndex::build(&[]).unwrap();
+        let trust_set = crate::session::signing::TrustSet::default();
+        let lens = removal_lens_fixture(&removal, &trust_set, &cosig);
         let revision_id = RevisionId::new("review-unit:sha256:one");
         let options = |include_body| ValidationCheckProjectionOptions {
             backend: &backend,
@@ -360,6 +534,7 @@ mod tests {
             track_filter: None,
             status_filter: None,
             include_body,
+            removal_lens: &lens,
         };
 
         let omitted = project_validation_checks(options(false)).unwrap();
@@ -424,6 +599,7 @@ mod tests {
             summary: None,
             summary_content_type: Default::default(),
             summary_content_hash: None,
+            summary_content_state: Default::default(),
             started_at: None,
             completed_at: None,
             log_artifact_content_hashes: Vec::new(),

@@ -5,12 +5,15 @@ use super::{
 };
 use crate::error::Result;
 use crate::model::{RevisionId, TrackId};
-use crate::session::EventStore;
 use crate::session::observation::{
     CurrentRevisionContext, RevisionScope, RevisionSelection, resolve_revision, validated_track_id,
 };
+use crate::session::projection::body_content::BodyRemovalLens;
+use crate::session::projection::cosignature::CosignatureIndex;
+use crate::session::signing::{RemovalPolicy, TrustSet};
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::resolution::resolve_read_store;
+use crate::session::{ArtifactRemovalProjection, EventStore};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssessmentShowOptions {
@@ -82,6 +85,11 @@ pub fn show_assessments(options: AssessmentShowOptions) -> Result<AssessmentShow
         .as_deref()
         .map(validated_track_id)
         .transpose()?;
+    let removal = ArtifactRemovalProjection::from_events(&events)?;
+    let cosig_index = CosignatureIndex::build(&events)?;
+    let trust_set = TrustSet::default();
+    let removal_lens =
+        BodyRemovalLens::new(&removal, &trust_set, RemovalPolicy::default(), &cosig_index);
     let (current, assessments) = project_assessments(AssessmentProjectionOptions {
         backend: Some(read_store.backend()),
         events: &events,
@@ -89,6 +97,7 @@ pub fn show_assessments(options: AssessmentShowOptions) -> Result<AssessmentShow
         track_filter: track_filter.clone(),
         include_summary: options.include_summary,
         include_all: options.include_all,
+        removal_lens: Some(&removal_lens),
     })?;
     let diagnostics = SessionState::from_events(&events)?.diagnostics;
 

@@ -64,6 +64,7 @@ pub fn review_history(options: ReviewHistoryOptions) -> Result<ReviewHistoryResu
         include_body: options.include_body,
         verification_policy: options.verification_policy,
         trust_set: options.trust_set,
+        removal_policy: options.removal_policy,
         actor_attributes: options.actor_attributes,
         delegation_map: options.delegation_map,
     };
@@ -113,6 +114,268 @@ mod tests {
     };
     use crate::session::state::DUPLICATE_SEMANTIC_OBSERVATION_EVENT_CODE;
     use crate::session::store::backend::StoreBackend;
+
+    /// A content-addressed note path + normalized hash + a Local backend, with
+    /// the blob optionally written (the removed-body fixtures).
+    fn note_blob_fixture(
+        write_blob: bool,
+    ) -> (
+        tempfile::TempDir,
+        crate::session::store::backend::StoreBackend,
+        String,
+        String,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = crate::session::store::backend::StoreBackend::Local(dir.path().to_path_buf());
+        let stem = "b".repeat(64);
+        let path = format!("artifacts/notes/{stem}.json");
+        let hash = format!("sha256:{stem}");
+        if write_blob {
+            std::fs::create_dir_all(dir.path().join("artifacts/notes")).unwrap();
+            std::fs::write(
+                dir.path().join(&path),
+                r#"{"schema":"shore.note-body","version":1,"body":"stored body"}"#,
+            )
+            .unwrap();
+        }
+        (dir, backend, path, hash)
+    }
+
+    /// An observation whose externalized body is payload-consistent: the
+    /// writers guarantee `body_content_hash` equals the locator hash, and the
+    /// diagnostics join on exactly that equality.
+    fn observation_event_with_artifact(path: &str, hash: &str) -> ShoreEvent {
+        let payload = ReviewObservationRecordedPayload {
+            observation_id: ObservationId::new("obs:sha256:artifact"),
+            target: ReviewTargetRef::Revision {
+                revision_id: revision_id("one"),
+            },
+            title: "Observation".to_owned(),
+            body: None,
+            body_content_type: Default::default(),
+            body_artifact_path: Some(path.to_owned()),
+            body_byte_size: Some(5000),
+            body_content_hash: Some(hash.to_owned()),
+            tags: vec![],
+            confidence: None,
+            supersedes_observation_ids: vec![],
+            responds_to_observation_ids: vec![],
+        };
+        tracked_event(
+            EventType::ReviewObservationRecorded,
+            "observation:artifact",
+            "agent:codex",
+            payload,
+            "2026-05-13T10:00:01Z",
+        )
+    }
+
+    fn artifact_removed_event(content_hash: &str) -> ShoreEvent {
+        use crate::session::event::ArtifactRemovedPayload;
+        ShoreEvent::new(
+            EventType::ArtifactRemoved,
+            ArtifactRemovedPayload::idempotency_key(content_hash),
+            EventTarget::for_journal(JournalId::new("journal:fixture")),
+            Writer::shore_local("test"),
+            ArtifactRemovedPayload {
+                content_hash: content_hash.to_owned(),
+            },
+            "2026-05-13T09:00:00Z",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn history_hydrates_removed_body_as_removed_state_instead_of_erroring() {
+        let (_dir, backend, path, hash) = note_blob_fixture(false);
+        let events = vec![
+            observation_event_with_artifact(&path, &hash),
+            artifact_removed_event(&hash),
+        ];
+
+        let result = history_from_events(
+            &events,
+            ResolvedHistoryFilters {
+                include_body: true,
+                ..ResolvedHistoryFilters::default()
+            },
+            HistoryWindow::default(),
+            Some(&backend),
+        )
+        .expect("swept observation body must not hard-error the history read");
+
+        let entry = result
+            .entries
+            .iter()
+            .find(|entry| {
+                matches!(
+                    entry.summary,
+                    ReviewHistorySummary::ReviewObservationRecorded { .. }
+                )
+            })
+            .expect("observation entry");
+        match &entry.summary {
+            ReviewHistorySummary::ReviewObservationRecorded {
+                body,
+                body_content_state,
+                ..
+            } => {
+                assert_eq!(*body, None);
+                assert_eq!(
+                    *body_content_state,
+                    crate::session::BodyContentState::PhysicallyRemoved
+                );
+            }
+            _ => unreachable!(),
+        }
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "body_content_physically_removed" && d.message.contains(&hash))
+        );
+    }
+
+    #[test]
+    fn history_reports_removed_response_reason_state() {
+        let (_dir, backend, path, hash) = note_blob_fixture(false);
+        let payload = InputRequestRespondedPayload {
+            input_request_response_id: InputRequestResponseId::new("resp:sha256:one"),
+            input_request_id: InputRequestId::new("input:sha256:one"),
+            outcome: InputRequestResponseOutcome::Approved,
+            reason: None,
+            reason_content_type: Default::default(),
+            reason_artifact_path: Some(path.clone()),
+            reason_byte_size: Some(5000),
+            reason_content_hash: Some(hash.clone()),
+            target_fingerprint: None,
+        };
+        let responded = tracked_event(
+            EventType::InputRequestResponded,
+            "response:removed-reason",
+            "agent:codex",
+            payload,
+            "2026-05-13T10:00:02Z",
+        );
+        let events = vec![responded, artifact_removed_event(&hash)];
+
+        let result = history_from_events(
+            &events,
+            ResolvedHistoryFilters {
+                include_body: true,
+                ..ResolvedHistoryFilters::default()
+            },
+            HistoryWindow::default(),
+            Some(&backend),
+        )
+        .expect("swept response reason must not hard-error the history read");
+
+        match &result.entries[0].summary {
+            ReviewHistorySummary::InputRequestResponded {
+                reason,
+                reason_content_state,
+                ..
+            } => {
+                assert_eq!(*reason, None);
+                assert_eq!(
+                    *reason_content_state,
+                    crate::session::BodyContentState::PhysicallyRemoved
+                );
+            }
+            other => panic!("expected a responded entry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn history_base_projection_survives_a_swept_body() {
+        let (_dir, backend, path, hash) = note_blob_fixture(false);
+        let events = vec![
+            observation_event_with_artifact(&path, &hash),
+            artifact_removed_event(&hash),
+        ];
+
+        let base =
+            history_base_from_events(&events, &BaseProjectionConfig::default(), Some(&backend))
+                .expect("the always-hydrating base cache must survive a swept body");
+
+        assert!(!base.entries.is_empty());
+    }
+
+    /// Body diagnostics are rendered-entry scoped: hydration and state
+    /// resolution only happen for entries that survive the window, so a
+    /// removed body sliced out by `limit` yields no diagnostic on that page.
+    #[test]
+    fn windowed_out_removed_body_yields_no_diagnostic() {
+        let (_dir, backend, path, hash) = note_blob_fixture(false);
+        let events = vec![
+            review_initialized_event("0"),
+            observation_event_with_artifact(&path, &hash),
+            artifact_removed_event(&hash),
+        ];
+
+        let result = history_from_events(
+            &events,
+            ResolvedHistoryFilters {
+                include_body: true,
+                ..ResolvedHistoryFilters::default()
+            },
+            HistoryWindow {
+                limit: Some(1),
+                after: None,
+            },
+            Some(&backend),
+        )
+        .expect("windowed read");
+
+        assert_eq!(result.entries.len(), 1);
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.code.starts_with("body_content_"))
+        );
+    }
+
+    #[test]
+    fn history_summary_serializes_body_content_state_snake_case_and_skips_present() {
+        let removed = ReviewHistorySummary::ReviewObservationRecorded {
+            observation_id: ObservationId::new("obs:sha256:one"),
+            target: ReviewTargetRef::Revision {
+                revision_id: revision_id("one"),
+            },
+            title: "t".to_owned(),
+            body: None,
+            body_content_type: Default::default(),
+            body_byte_size: None,
+            body_content_hash: Some("sha256:x".to_owned()),
+            body_content_state: crate::session::BodyContentState::PhysicallyRemoved,
+            tags: vec![],
+            confidence: None,
+            supersedes: vec![],
+            responds_to: vec![],
+        };
+        let json = serde_json::to_value(&removed).unwrap();
+        assert_eq!(json["bodyContentState"], "physically_removed");
+
+        let present = ReviewHistorySummary::ReviewObservationRecorded {
+            observation_id: ObservationId::new("obs:sha256:one"),
+            target: ReviewTargetRef::Revision {
+                revision_id: revision_id("one"),
+            },
+            title: "t".to_owned(),
+            body: Some("b".to_owned()),
+            body_content_type: Default::default(),
+            body_byte_size: None,
+            body_content_hash: None,
+            body_content_state: Default::default(),
+            tags: vec![],
+            confidence: None,
+            supersedes: vec![],
+            responds_to: vec![],
+        };
+        let json = serde_json::to_value(&present).unwrap();
+        assert!(json.get("bodyContentState").is_none());
+    }
 
     #[test]
     fn review_history_returns_empty_freshness_metadata_without_events() {
@@ -234,9 +497,14 @@ mod tests {
         ];
 
         for (event, event_type, summary_kind) in cases {
-            let entry =
-                history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None)
-                    .unwrap();
+            let entry = history_entry_from_event(
+                &event,
+                &ResolvedHistoryFilters::default(),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
             let summary_json = serde_json::to_value(&entry.summary).unwrap();
 
             assert_eq!(entry.event_type, event_type);
@@ -253,7 +521,7 @@ mod tests {
         let event = assessment_event_with_target(target.clone());
 
         let entry =
-            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None)
+            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None, None)
                 .unwrap();
         let json = serde_json::to_value(&entry).unwrap();
 
@@ -276,7 +544,7 @@ mod tests {
         let event = validation_check_recorded_event();
 
         let entry =
-            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None)
+            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None, None)
                 .unwrap();
         let json = serde_json::to_value(&entry.summary).unwrap();
 
@@ -291,7 +559,7 @@ mod tests {
         let event = observation_event_with_artifact_path("artifacts/notes/body.json");
 
         let entry =
-            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None)
+            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None, None)
                 .unwrap();
         let json = serde_json::to_string(&entry).unwrap();
 
@@ -333,7 +601,7 @@ mod tests {
         let event = observation_event("review-unit:sha256:one", "agent:codex", "Pinned");
 
         let entry =
-            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None)
+            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None, None)
                 .unwrap();
 
         assert_eq!(
@@ -354,7 +622,7 @@ mod tests {
         });
 
         let entry =
-            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None)
+            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None, None)
                 .unwrap();
 
         assert!(entry.subject.is_none());
@@ -506,7 +774,7 @@ mod tests {
         };
 
         let error =
-            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None)
+            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None, None)
                 .expect_err("task events must not project to review-history");
         let message = error.to_string();
 

@@ -6,9 +6,12 @@ use super::view::{
 };
 use crate::error::{Result, ShoreError};
 use crate::model::InputRequestId;
-use crate::session::EventStore;
+use crate::session::projection::body_content::BodyRemovalLens;
+use crate::session::projection::cosignature::CosignatureIndex;
+use crate::session::signing::{RemovalPolicy, TrustSet};
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::resolution::resolve_read_store;
+use crate::session::{ArtifactRemovalProjection, EventStore};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InputRequestFetchOptions {
@@ -41,14 +44,23 @@ pub struct InputRequestFetchResult {
 pub fn fetch_input_request(options: InputRequestFetchOptions) -> Result<InputRequestFetchResult> {
     let read_store = resolve_read_store(&options.repo)?;
     let events = EventStore::from_backend(read_store.backend()).list_events()?;
+    let removal = ArtifactRemovalProjection::from_events(&events)?;
+    let cosig_index = CosignatureIndex::build(&events)?;
+    let trust_set = TrustSet::default();
+    let removal_lens =
+        BodyRemovalLens::new(&removal, &trust_set, RemovalPolicy::default(), &cosig_index);
     let InputRequestProjectionRecords {
         mut request_records,
         responses,
-    } = collect_input_request_projection_records(&events)?;
+    } = collect_input_request_projection_records(
+        &events,
+        Some((read_store.backend(), &removal_lens)),
+    )?;
 
     if let Some(record) = request_records.remove(&options.input_request_id) {
         let view = input_request_view_from_event(
             read_store.backend(),
+            &removal_lens,
             record.event,
             record.payload,
             record.track_id,

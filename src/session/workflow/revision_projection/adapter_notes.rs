@@ -2,8 +2,10 @@ use std::collections::BTreeMap;
 
 use crate::error::Result;
 use crate::model::{DiffSnapshot, ResolutionStatus};
-use crate::session::body_artifact::load_body_artifact;
 use crate::session::event::{EventType, ImportedNoteTarget, ReviewNoteImportedPayload, ShoreEvent};
+use crate::session::projection::body_content::{
+    BodyContentState, BodyRemovalLens, resolve_body_content,
+};
 use crate::session::store::backend::StoreBackend;
 use crate::sidecar::{
     ReviewNoteEntry, ReviewNoteTarget, ReviewNotesFile, ReviewNotesSidecar, resolve_notes,
@@ -14,6 +16,11 @@ pub struct AdapterNoteView {
     pub id: String,
     pub title: String,
     pub body: Option<String>,
+    pub body_content_state: BodyContentState,
+    /// The removal key when the body is removed. The imported-note payload
+    /// carries no body content hash, so this is the surface's twin of the
+    /// snapshot result's removed-content-hash field; `None` while present.
+    pub removed_body_content_hash: Option<String>,
     pub target: Option<ImportedNoteTarget>,
     pub status: AdapterNoteStatus,
     pub file_path: String,
@@ -54,6 +61,7 @@ pub(super) fn project_adapter_notes(
     backend: &StoreBackend,
     snapshot: &DiffSnapshot,
     include_body: bool,
+    removal_lens: &BodyRemovalLens<'_>,
 ) -> Result<Vec<AdapterNoteView>> {
     let mut payloads = Vec::new();
     for event in events
@@ -69,15 +77,22 @@ pub(super) fn project_adapter_notes(
     let mut views = payloads
         .iter()
         .map(|payload| {
-            let body = if include_body {
-                adapter_note_body(backend, payload)?
-            } else {
-                None
-            };
+            let content = resolve_body_content(
+                backend,
+                removal_lens,
+                include_body,
+                payload.body.clone(),
+                payload.body_artifact_path.as_deref(),
+            )?;
+            let body_content_state = content.state();
+            let removed_body_content_hash = content.removed_content_hash().map(str::to_owned);
+            let body = content.into_text();
             Ok(AdapterNoteView {
                 id: payload.note_id.clone(),
                 title: payload.title.clone(),
                 body,
+                body_content_state,
+                removed_body_content_hash,
                 target: payload.target.clone(),
                 status: statuses
                     .get(&payload.note_id)
@@ -172,18 +187,5 @@ pub(super) fn adapter_note_status(status: &ResolutionStatus) -> AdapterNoteStatu
         ResolutionStatus::Stale => AdapterNoteStatus::Stale,
         ResolutionStatus::Orphaned => AdapterNoteStatus::Orphaned,
         ResolutionStatus::Unresolved => AdapterNoteStatus::Unresolved,
-    }
-}
-
-fn adapter_note_body(
-    backend: &StoreBackend,
-    payload: &ReviewNoteImportedPayload,
-) -> Result<Option<String>> {
-    if payload.body.is_some() {
-        return Ok(payload.body.clone());
-    }
-    match payload.body_artifact_path.as_deref() {
-        Some(path) => load_body_artifact(backend, path),
-        None => Ok(None),
     }
 }

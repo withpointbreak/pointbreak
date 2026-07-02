@@ -14,7 +14,11 @@ pub struct ReviewHistoryResult {
     /// An opaque continuation token for the next page when a window was applied
     /// and entries remain after it; `null` for an unwindowed or final page.
     pub next_cursor: Option<String>,
-    /// Diagnostics describe the full replayed event set, not only filtered entries.
+    /// Read/skip diagnostics describe the full replayed event set, not only
+    /// filtered entries. Body-content removal diagnostics are the exception:
+    /// they describe the rendered entries only — state resolution happens only
+    /// for entries that survive filtering/windowing, so a removed body outside
+    /// the window yields no diagnostic on that page.
     pub diagnostics: Vec<ProjectionDiagnostic>,
 }
 

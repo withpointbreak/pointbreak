@@ -2,13 +2,15 @@ use std::collections::BTreeMap;
 
 use crate::error::{Result, ShoreError};
 use crate::model::{EventId, InputRequestId, InputRequestResponseId, ReviewTargetRef, TrackId};
-use crate::session::body_artifact::load_body_artifact;
 use crate::session::event::{
     AssertionMode, BodyContentType, EventType, InputRequestOpenedPayload, InputRequestReasonCode,
     InputRequestRespondedPayload, InputRequestResponseOutcome, ShoreEvent, Writer,
     decode_input_request_opened_payload,
 };
 use crate::session::observation::{ResolvedRevision, target_matches_file};
+use crate::session::projection::body_content::{
+    BodyContentState, BodyRemovalLens, resolve_body_content,
+};
 use crate::session::store::backend::StoreBackend;
 
 pub(crate) struct InputRequestProjectionOptions<'a> {
@@ -20,6 +22,9 @@ pub(crate) struct InputRequestProjectionOptions<'a> {
     pub file_filter: Option<&'a str>,
     pub status_filter: InputRequestStatusFilter,
     pub include_body: bool,
+    /// The reader's removal lens: an operative removal over an externalized
+    /// body or response reason renders an explained removed state.
+    pub removal_lens: &'a BodyRemovalLens<'a>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -34,6 +39,7 @@ pub struct InputRequestView {
     pub body: Option<String>,
     pub body_content_type: BodyContentType,
     pub body_content_hash: Option<String>,
+    pub body_content_state: BodyContentState,
     pub status: InputRequestStatus,
     pub responses: Vec<InputRequestResponseView>,
     pub created_at: String,
@@ -48,6 +54,7 @@ pub struct InputRequestResponseView {
     pub reason: Option<String>,
     pub reason_content_type: BodyContentType,
     pub reason_content_hash: Option<String>,
+    pub reason_content_state: BodyContentState,
     pub created_at: String,
     pub writer: Writer,
 }
@@ -104,7 +111,10 @@ pub(crate) fn project_input_requests(
     let InputRequestProjectionRecords {
         request_records,
         responses,
-    } = collect_input_request_projection_records(options.events)?;
+    } = collect_input_request_projection_records(
+        options.events,
+        Some((options.backend, options.removal_lens)),
+    )?;
     let mut input_requests = Vec::new();
 
     for record in request_records.into_values() {
@@ -142,6 +152,7 @@ pub(crate) fn project_input_requests(
             .unwrap_or_default();
         let view = input_request_view_from_event(
             options.backend,
+            options.removal_lens,
             event,
             record.payload,
             record.track_id,
@@ -175,6 +186,10 @@ pub(super) struct InputRequestProjectionRecords<'a> {
 
 pub(super) fn collect_input_request_projection_records<'a>(
     events: &'a [ShoreEvent],
+    // Response reasons resolve their removed state at view construction (the
+    // artifact path does not survive onto the view). `None` for non-render
+    // callers; the state-only resolve never reads bytes.
+    reason_lens: Option<(&StoreBackend, &BodyRemovalLens<'_>)>,
 ) -> Result<InputRequestProjectionRecords<'a>> {
     let mut request_records: BTreeMap<InputRequestId, InputRequestOpenRecord<'a>> = BTreeMap::new();
     let mut response_records: BTreeMap<InputRequestResponseId, InputRequestResponseRecord<'a>> =
@@ -226,6 +241,19 @@ pub(super) fn collect_input_request_projection_records<'a>(
     for record in response_records.into_values() {
         let event = record.event;
         let payload = record.payload;
+        let reason_content_state = match reason_lens {
+            Some((backend, lens)) => resolve_body_content(
+                backend,
+                lens,
+                // State-only: this surface deliberately does not hydrate
+                // externalized reasons; `reason` stays the payload's value.
+                false,
+                payload.reason.clone(),
+                payload.reason_artifact_path.as_deref(),
+            )?
+            .state(),
+            None => BodyContentState::default(),
+        };
         responses
             .entry(payload.input_request_id)
             .or_default()
@@ -236,6 +264,7 @@ pub(super) fn collect_input_request_projection_records<'a>(
                 reason: payload.reason,
                 reason_content_type: payload.reason_content_type,
                 reason_content_hash: payload.reason_content_hash,
+                reason_content_state,
                 created_at: event.occurred_at.clone(),
                 writer: event.writer.clone(),
             });
@@ -259,17 +288,22 @@ fn should_replace_representative(current: Option<&ShoreEvent>, candidate: &Shore
 
 pub(super) fn input_request_view_from_event(
     backend: &StoreBackend,
+    removal_lens: &BodyRemovalLens<'_>,
     event: &ShoreEvent,
     payload: InputRequestOpenedPayload,
     track_id: TrackId,
     responses: Vec<InputRequestResponseView>,
     include_body: bool,
 ) -> Result<InputRequestView> {
-    let body = if include_body {
-        input_request_body(backend, &payload)?
-    } else {
-        None
-    };
+    let content = resolve_body_content(
+        backend,
+        removal_lens,
+        include_body,
+        payload.body.clone(),
+        payload.body_artifact_path.as_deref(),
+    )?;
+    let body_content_state = content.state();
+    let body = content.into_text();
     let status = status_for_responses(&responses);
 
     Ok(InputRequestView {
@@ -283,24 +317,12 @@ pub(super) fn input_request_view_from_event(
         body,
         body_content_type: payload.body_content_type,
         body_content_hash: payload.body_content_hash,
+        body_content_state,
         status,
         responses,
         created_at: event.occurred_at.clone(),
         writer: event.writer.clone(),
     })
-}
-
-fn input_request_body(
-    backend: &StoreBackend,
-    payload: &InputRequestOpenedPayload,
-) -> Result<Option<String>> {
-    if payload.body.is_some() {
-        return Ok(payload.body.clone());
-    }
-    match payload.body_artifact_path.as_deref() {
-        Some(path) => load_body_artifact(backend, path),
-        None => Ok(None),
-    }
 }
 
 fn status_for_responses(responses: &[InputRequestResponseView]) -> InputRequestStatus {

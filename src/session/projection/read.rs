@@ -2,8 +2,10 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::error::Result;
-use crate::session::body_artifact::load_body_artifact;
 use crate::session::event::{EventType, ReviewNoteImportedPayload, ShoreEvent};
+use crate::session::projection::body_content::{BodyRemovalLens, resolve_body_content};
+use crate::session::projection::cosignature::CosignatureIndex;
+use crate::session::signing::{RemovalPolicy, TrustSet};
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::backend::StoreBackend;
 use crate::session::store::resolution::{resolve_read_store, resolve_write_store};
@@ -16,6 +18,7 @@ use crate::storage::{Durability, LocalStorage};
 fn replay_note_entry(
     payload: &ReviewNoteImportedPayload,
     backend: &StoreBackend,
+    removal_lens: &BodyRemovalLens<'_>,
 ) -> Result<ReviewNoteEntry> {
     let target = payload
         .target
@@ -26,11 +29,17 @@ fn replay_note_entry(
             end_line: imported_target.end_line,
         });
 
-    let body = if let Some(artifact_path) = &payload.body_artifact_path {
-        load_body_artifact(backend, artifact_path)?
-    } else {
-        payload.body.clone()
-    };
+    // Removed bodies replay as absent: `shore.review-notes` is a foreign
+    // adapter schema, so the replay never fabricates text and carries no
+    // removed-state field (the explained render lives on the review surfaces).
+    let body = resolve_body_content(
+        backend,
+        removal_lens,
+        true,
+        payload.body.clone(),
+        payload.body_artifact_path.as_deref(),
+    )?
+    .into_text();
 
     Ok(ReviewNoteEntry {
         id: Some(payload.note_id.clone()),
@@ -48,11 +57,12 @@ fn replay_note_entry(
 fn parsed_review_notes_from_imports(
     payloads: &[ReviewNoteImportedPayload],
     backend: &StoreBackend,
+    removal_lens: &BodyRemovalLens<'_>,
 ) -> Result<ParsedReviewNotes> {
     let mut file_map: BTreeMap<String, (Option<String>, Vec<ReviewNoteEntry>)> = BTreeMap::new();
 
     for payload in payloads {
-        let entry = replay_note_entry(payload, backend)?;
+        let entry = replay_note_entry(payload, backend, removal_lens)?;
 
         file_map
             .entry(payload.file_path.clone())
@@ -96,12 +106,12 @@ pub fn load_durable_notes_for_repo(repo: impl AsRef<Path>) -> Result<Option<Pars
     };
 
     let mut imported_payloads = Vec::new();
-    for event in events {
+    for event in &events {
         if event.event_type != EventType::ReviewNoteImported {
             continue;
         }
 
-        let payload: ReviewNoteImportedPayload = serde_json::from_value(event.payload)?;
+        let payload: ReviewNoteImportedPayload = serde_json::from_value(event.payload.clone())?;
         imported_payloads.push(payload);
     }
 
@@ -109,9 +119,15 @@ pub fn load_durable_notes_for_repo(repo: impl AsRef<Path>) -> Result<Option<Pars
         return Ok(None);
     }
 
+    let removal = crate::session::ArtifactRemovalProjection::from_events(&events)?;
+    let cosig_index = CosignatureIndex::build(&events)?;
+    let trust_set = TrustSet::default();
+    let removal_lens =
+        BodyRemovalLens::new(&removal, &trust_set, RemovalPolicy::default(), &cosig_index);
     Ok(Some(parsed_review_notes_from_imports(
         &imported_payloads,
         &backend,
+        &removal_lens,
     )?))
 }
 
@@ -193,6 +209,15 @@ fn list_events_if_store_exists(
 
 #[cfg(test)]
 mod tests {
+    macro_rules! empty_lens {
+        ($lens:ident) => {
+            let removal = crate::session::ArtifactRemovalProjection::from_events(&[]).unwrap();
+            let cosig = CosignatureIndex::build(&[]).unwrap();
+            let trust_set = TrustSet::default();
+            let $lens =
+                BodyRemovalLens::new(&removal, &trust_set, RemovalPolicy::default(), &cosig);
+        };
+    }
     use std::process::Command;
 
     use super::*;
@@ -248,6 +273,7 @@ mod tests {
 
     #[test]
     fn imported_note_payload_converts_to_review_note_entry() {
+        empty_lens!(lens);
         let payload = ReviewNoteImportedPayload {
             sidecar_source: SidecarSource::ReviewNotes,
             note_id: "note:123".to_owned(),
@@ -270,7 +296,8 @@ mod tests {
             sidecar_content_hash: "sha256:abc".to_owned(),
         };
 
-        let entry = replay_note_entry(&payload, &StoreBackend::memory()).expect("entry builds");
+        let entry =
+            replay_note_entry(&payload, &StoreBackend::memory(), &lens).expect("entry builds");
 
         assert_eq!(entry.id.as_deref(), Some("note:123"));
         assert_eq!(entry.title.as_deref(), Some("Durable title"));
@@ -280,13 +307,14 @@ mod tests {
 
     #[test]
     fn imported_notes_group_by_file_without_using_event_order_as_file_order() {
+        empty_lens!(lens);
         let events = vec![
             test_payload_for("b.rs", "note:b"),
             test_payload_for("a.rs", "note:a"),
         ];
 
-        let parsed =
-            parsed_review_notes_from_imports(&events, &StoreBackend::memory()).expect("parses");
+        let parsed = parsed_review_notes_from_imports(&events, &StoreBackend::memory(), &lens)
+            .expect("parses");
 
         assert_eq!(parsed.sidecar.files.len(), 2);
         assert_eq!(
@@ -304,6 +332,7 @@ mod tests {
 
     #[test]
     fn artifact_backed_note_body_is_loaded_from_artifact() {
+        empty_lens!(lens);
         let store_dir = tempfile::tempdir().expect("create shore dir");
         let artifact_path = "artifacts/notes/note-abc.json";
         let artifact_file = store_dir.path().join(artifact_path);
@@ -321,24 +350,26 @@ mod tests {
         payload.body_byte_size = Some(256);
 
         let backend = StoreBackend::Local(store_dir.path().to_path_buf());
-        let entry = replay_note_entry(&payload, &backend).expect("entry builds");
+        let entry = replay_note_entry(&payload, &backend, &lens).expect("entry builds");
 
         assert_eq!(entry.body.as_deref(), Some("Artifact body"));
     }
 
     #[test]
     fn artifact_body_path_must_stay_under_artifacts_notes() {
+        empty_lens!(lens);
         let mut payload = test_payload_for("src/lib.rs", "note:escape");
         payload.body = None;
         payload.body_artifact_path = Some("../outside.json".to_owned());
 
-        let error = replay_note_entry(&payload, &StoreBackend::memory())
+        let error = replay_note_entry(&payload, &StoreBackend::memory(), &lens)
             .expect_err("path should be rejected");
         assert!(error.to_string().contains("Invalid artifact path"));
     }
 
     #[test]
     fn artifact_body_schema_must_match() {
+        empty_lens!(lens);
         let store_dir = tempfile::tempdir().expect("create shore dir");
         let artifact_path = "artifacts/notes/note-abc.json";
         let artifact_file = store_dir.path().join(artifact_path);
@@ -355,7 +386,8 @@ mod tests {
         payload.body_artifact_path = Some(artifact_path.to_owned());
 
         let backend = StoreBackend::Local(store_dir.path().to_path_buf());
-        let error = replay_note_entry(&payload, &backend).expect_err("schema should be rejected");
+        let error =
+            replay_note_entry(&payload, &backend, &lens).expect_err("schema should be rejected");
         assert!(error.to_string().contains("Unsupported note body artifact"));
     }
 

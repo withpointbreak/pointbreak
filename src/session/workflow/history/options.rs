@@ -7,7 +7,8 @@ use super::cursor::{HistoryCursor, HistoryWindow};
 use crate::model::{RevisionId, TrackId};
 use crate::session::event::EventType;
 use crate::session::{
-    ActorAttributesMap, DelegationMap, EventVerificationPolicy, RefFilterMode, TrustSet,
+    ActorAttributesMap, DelegationMap, EventVerificationPolicy, RefFilterMode, RemovalPolicy,
+    TrustSet,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -20,6 +21,7 @@ pub struct ReviewHistoryOptions {
     pub(super) include_body: bool,
     pub(super) verification_policy: Option<EventVerificationPolicy>,
     pub(super) trust_set: TrustSet,
+    pub(super) removal_policy: RemovalPolicy,
     pub(super) actor_attributes: Option<ActorAttributesMap>,
     pub(super) delegation_map: Option<DelegationMap>,
     pub(super) read_for_display: bool,
@@ -38,6 +40,7 @@ impl ReviewHistoryOptions {
             include_body: false,
             verification_policy: None,
             trust_set: TrustSet::default(),
+            removal_policy: RemovalPolicy::default(),
             actor_attributes: None,
             delegation_map: None,
             read_for_display: false,
@@ -80,6 +83,15 @@ impl ReviewHistoryOptions {
 
     pub fn with_trust_set(mut self, trust_set: TrustSet) -> Self {
         self.trust_set = trust_set;
+        self
+    }
+
+    /// Supply the render-time removal policy for body-content states. A
+    /// non-operative removal claim renders the bytes; an operative one renders
+    /// the explained removed state. Render-only: it never gates the compact
+    /// erasure sweep.
+    pub fn with_removal_policy(mut self, removal_policy: RemovalPolicy) -> Self {
+        self.removal_policy = removal_policy;
         self
     }
 
@@ -153,6 +165,7 @@ pub(super) struct ResolvedHistoryFilters {
     pub(super) include_body: bool,
     pub(super) verification_policy: Option<EventVerificationPolicy>,
     pub(super) trust_set: TrustSet,
+    pub(super) removal_policy: RemovalPolicy,
     pub(super) actor_attributes: Option<ActorAttributesMap>,
     pub(super) delegation_map: Option<DelegationMap>,
 }

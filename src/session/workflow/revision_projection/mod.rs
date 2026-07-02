@@ -184,6 +184,7 @@ pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult>
         file_filter: None,
         status_filter: InputRequestStatusFilter::All,
         include_body: options.include_body,
+        removal_lens: &body_removal_lens,
     })?;
     let (current_assessment, assessments) = project_assessments(AssessmentProjectionOptions {
         backend: Some(read_store.backend()),
@@ -192,6 +193,7 @@ pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult>
         track_filter: track_id.clone(),
         include_summary: options.include_body,
         include_all: true,
+        removal_lens: Some(&body_removal_lens),
     })?;
     let mut validation_checks = project_validation_checks(ValidationCheckProjectionOptions {
         backend: read_store.backend(),
@@ -200,6 +202,7 @@ pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult>
         track_filter: track_id.clone(),
         status_filter: None,
         include_body: options.include_body,
+        removal_lens: &body_removal_lens,
     })?;
     // Annotate each check with the successors of the revision it targets. An exact address can
     // resolve a superseded revision, so its checks carry the advisory staleness set; a head resolves
@@ -211,6 +214,7 @@ pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult>
         read_store.backend(),
         &snapshot,
         options.include_body,
+        &body_removal_lens,
     )?;
     let (snapshot_rows, mut summary) = if removed_snapshot_content_hash.is_some() {
         // Removed content has no snapshot rows; the explained absence is carried
@@ -272,7 +276,35 @@ pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult>
     // chain their pairs here as they gain states.
     let body_states = observations
         .iter()
-        .map(|o| (o.body_content_state, o.body_content_hash.as_deref()));
+        .map(|o| (o.body_content_state, o.body_content_hash.as_deref()))
+        .chain(
+            assessments
+                .iter()
+                .map(|a| (a.summary_content_state, a.summary_content_hash.as_deref())),
+        )
+        .chain(
+            input_requests
+                .iter()
+                .map(|r| (r.body_content_state, r.body_content_hash.as_deref())),
+        )
+        .chain(input_requests.iter().flat_map(|r| {
+            r.responses.iter().map(|resp| {
+                (
+                    resp.reason_content_state,
+                    resp.reason_content_hash.as_deref(),
+                )
+            })
+        }))
+        .chain(
+            validation_checks
+                .iter()
+                .map(|v| (v.summary_content_state, v.summary_content_hash.as_deref())),
+        )
+        .chain(
+            adapter_notes
+                .iter()
+                .map(|n| (n.body_content_state, n.removed_body_content_hash.as_deref())),
+        );
     diagnostics.extend(body_content_diagnostics(body_states));
 
     // The bound hash's claim diagnostic, mapped from the operative status decided
@@ -667,6 +699,7 @@ fn build_revision_overview(
         file_filter: None,
         status_filter: InputRequestStatusFilter::All,
         include_body: false,
+        removal_lens: &body_removal_lens,
     })?;
     let (current_assessment, assessments) = project_assessments(AssessmentProjectionOptions {
         backend: Some(backend),
@@ -675,6 +708,7 @@ fn build_revision_overview(
         track_filter: None,
         include_summary: false,
         include_all: true,
+        removal_lens: Some(&body_removal_lens),
     })?;
     let validation_checks = project_validation_checks(ValidationCheckProjectionOptions {
         backend,
@@ -683,8 +717,10 @@ fn build_revision_overview(
         track_filter: None,
         status_filter: None,
         include_body: false,
+        removal_lens: &body_removal_lens,
     })?;
-    let adapter_notes = project_adapter_notes(events, backend, &snapshot, false)?;
+    let adapter_notes =
+        project_adapter_notes(events, backend, &snapshot, false, &body_removal_lens)?;
 
     // Recompute the summary exactly as `show_revision` does: the snapshot rows seed
     // `file_count` + `snapshot_remainder_row_count`, the five narrative builders
@@ -2586,6 +2622,305 @@ mod tests {
         assert!(diagnostic.message.contains(&body_hash));
         assert!(diagnostic.message.contains("still stored"));
         assert!(!diagnostic.message.contains("swept"));
+    }
+
+    /// Capture plus one externalized (> 4096-byte) assessment summary; returns
+    /// the repo and the summary's normalized content hash (the removal key).
+    fn revision_with_externalized_assessment_summary() -> (TestRepo, String) {
+        let repo = modified_repo();
+        let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        let assessment = record_assessment(
+            AssessmentAddOptions::new(repo.path())
+                .with_revision_id(capture.revision_id.clone())
+                .with_track("human:kevin")
+                .with_assessment(ReviewAssessment::Accepted)
+                .with_summary("s".repeat(5000)),
+        )
+        .unwrap();
+        let hash = assessment
+            .summary_content_hash
+            .expect("a >4096-byte summary is stored as a note artifact");
+        (repo, hash)
+    }
+
+    #[test]
+    fn removed_and_swept_assessment_summary_renders_physically_removed() {
+        let (repo, summary_hash) = revision_with_externalized_assessment_summary();
+        record_artifact_removed(repo.path(), &summary_hash);
+        delete_note_body_blob(repo.path(), &summary_hash);
+
+        let result = show_revision(RevisionShowOptions::new(repo.path()).with_include_body(true))
+            .expect("swept assessment summary must not hard-error");
+
+        let record = &result.current_assessment.records[0];
+        assert_eq!(record.summary, None);
+        assert_eq!(
+            record.summary_content_state,
+            BodyContentState::PhysicallyRemoved
+        );
+        assert!(record.summary_content_hash.is_some());
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "body_content_physically_removed"
+                    && d.message.contains(&summary_hash))
+        );
+    }
+
+    #[test]
+    fn removed_unswept_assessment_summary_is_suppressed_present() {
+        let (repo, summary_hash) = revision_with_externalized_assessment_summary();
+        record_artifact_removed(repo.path(), &summary_hash);
+
+        let result = show_revision(RevisionShowOptions::new(repo.path()).with_include_body(true))
+            .expect("suppressed assessment summary renders");
+
+        let record = &result.current_assessment.records[0];
+        assert_eq!(record.summary, None);
+        assert_eq!(
+            record.summary_content_state,
+            BodyContentState::SuppressedPresent
+        );
+    }
+
+    #[test]
+    fn missing_unremoved_assessment_summary_still_errors() {
+        let (repo, summary_hash) = revision_with_externalized_assessment_summary();
+        delete_note_body_blob(repo.path(), &summary_hash);
+
+        let err = show_revision(RevisionShowOptions::new(repo.path()).with_include_body(true))
+            .expect_err("absent summary bytes without an operative removal keep the hard error");
+
+        assert!(err.to_string().contains("import referenced artifacts"));
+    }
+
+    /// INV: without a lens (status-only projections, e.g. the engagement
+    /// lifecycle) no state resolution happens — an operative removal over the
+    /// summary hash still reads `Present` because nothing consults it.
+    #[test]
+    fn status_only_assessment_projection_with_no_lens_stays_present() {
+        let repo = modified_repo();
+        let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        let assessment = record_assessment(
+            AssessmentAddOptions::new(repo.path())
+                .with_revision_id(capture.revision_id.clone())
+                .with_track("human:kevin")
+                .with_assessment(ReviewAssessment::Accepted)
+                .with_summary("s".repeat(5000)),
+        )
+        .unwrap();
+        let hash = assessment
+            .summary_content_hash
+            .expect("a >4096-byte summary is stored as a note artifact");
+        record_artifact_removed(repo.path(), &hash);
+
+        let events = EventStore::open(resolved_store_dir(repo.path()))
+            .list_events()
+            .unwrap();
+        let resolved = ResolvedRevision {
+            journal_id: capture.journal_id.clone(),
+            revision_id: capture.revision_id.clone(),
+            object_id: capture.object_id.clone(),
+            object_artifact_content_hash: capture.object_artifact_content_hash.clone(),
+        };
+        let (current, _) = project_assessments(AssessmentProjectionOptions {
+            backend: None,
+            events: &events,
+            resolved: &resolved,
+            track_filter: None,
+            include_summary: false,
+            include_all: true,
+            removal_lens: None,
+        })
+        .unwrap();
+
+        let record = &current.records[0];
+        assert_eq!(record.summary, None);
+        assert_eq!(record.summary_content_state, BodyContentState::Present);
+    }
+
+    /// Capture plus an input request with an externalized (> 4096-byte) body
+    /// and one response with an externalized reason; returns the repo and the
+    /// two normalized content hashes (the removal keys).
+    fn revision_with_externalized_input_request() -> (TestRepo, String, String) {
+        let repo = modified_repo();
+        let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        let request = open_input_request(
+            InputRequestOpenOptions::new(repo.path())
+                .with_revision_id(capture.revision_id.clone())
+                .with_track("agent:codex")
+                .with_title("a large request")
+                .with_reason_code(InputRequestReasonCode::ManualDecisionRequired)
+                .with_body("b".repeat(5000)),
+        )
+        .unwrap();
+        let body_hash = request
+            .body_content_hash
+            .expect("a >4096-byte body is stored as a note artifact");
+        let response = respond_input_request(
+            InputRequestRespondOptions::new(repo.path(), request.input_request_id.clone())
+                .with_outcome(InputRequestResponseOutcome::Approved)
+                .with_reason("r".repeat(5000)),
+        )
+        .unwrap();
+        let reason_hash = response
+            .reason_content_hash
+            .expect("a >4096-byte reason is stored as a note artifact");
+        (repo, body_hash, reason_hash)
+    }
+
+    #[test]
+    fn removed_and_swept_input_request_body_renders_physically_removed() {
+        let (repo, body_hash, _reason_hash) = revision_with_externalized_input_request();
+        record_artifact_removed(repo.path(), &body_hash);
+        delete_note_body_blob(repo.path(), &body_hash);
+
+        let result = show_revision(RevisionShowOptions::new(repo.path()).with_include_body(true))
+            .expect("swept input-request body must not hard-error");
+
+        let request = &result.input_requests[0];
+        assert_eq!(request.body, None);
+        assert_eq!(
+            request.body_content_state,
+            BodyContentState::PhysicallyRemoved
+        );
+        assert!(request.body_content_hash.is_some());
+    }
+
+    #[test]
+    fn removed_unswept_input_request_body_is_suppressed_present() {
+        let (repo, body_hash, _reason_hash) = revision_with_externalized_input_request();
+        record_artifact_removed(repo.path(), &body_hash);
+
+        let result = show_revision(RevisionShowOptions::new(repo.path()).with_include_body(true))
+            .expect("suppressed input-request body renders");
+
+        let request = &result.input_requests[0];
+        assert_eq!(request.body, None);
+        assert_eq!(
+            request.body_content_state,
+            BodyContentState::SuppressedPresent
+        );
+    }
+
+    #[test]
+    fn missing_unremoved_input_request_body_still_errors() {
+        let (repo, body_hash, _reason_hash) = revision_with_externalized_input_request();
+        delete_note_body_blob(repo.path(), &body_hash);
+
+        let err = show_revision(RevisionShowOptions::new(repo.path()).with_include_body(true))
+            .expect_err("absent request-body bytes without an operative removal keep the error");
+
+        assert!(err.to_string().contains("import referenced artifacts"));
+    }
+
+    /// The response view deliberately does not hydrate externalized reasons
+    /// (a pre-existing surface gap); this adds the removed-state cue without
+    /// changing that: `reason` stays what the payload carries, the state and
+    /// the diagnostic explain the removal.
+    #[test]
+    fn removed_response_reason_reports_state_without_hydration_change() {
+        let (repo, _body_hash, reason_hash) = revision_with_externalized_input_request();
+        record_artifact_removed(repo.path(), &reason_hash);
+        delete_note_body_blob(repo.path(), &reason_hash);
+
+        let result = show_revision(RevisionShowOptions::new(repo.path()).with_include_body(true))
+            .expect("swept response reason must not hard-error");
+
+        let response = &result.input_requests[0].responses[0];
+        assert_eq!(response.reason, None);
+        assert_eq!(
+            response.reason_content_state,
+            BodyContentState::PhysicallyRemoved
+        );
+        assert!(result.diagnostics.iter().any(
+            |d| d.code == "body_content_physically_removed" && d.message.contains(&reason_hash)
+        ));
+    }
+
+    /// Import one review note with an externalized (> 4096-byte) body; returns
+    /// the body's normalized content hash (the removal key).
+    fn import_removable_review_note_body(repo: &TestRepo) -> String {
+        let body = "n".repeat(5000);
+        let path = repo.write_fixture(
+            "removable-review-notes.json",
+            review_notes_json_with_notes(
+                "src/lib.rs",
+                vec![review_note_json(
+                    "removable",
+                    "Removable imported note",
+                    &body,
+                    "new",
+                    1,
+                    1,
+                )],
+            ),
+        );
+        import_notes(ImportNotesOptions::new(repo.path()).with_review_notes(path)).unwrap();
+        format!(
+            "sha256:{}",
+            crate::canonical_hash::sha256_bytes_hex(body.as_bytes())
+        )
+    }
+
+    #[test]
+    fn removed_and_swept_adapter_note_body_renders_physically_removed() {
+        let repo = modified_repo();
+        capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        let body_hash = import_removable_review_note_body(&repo);
+        record_artifact_removed(repo.path(), &body_hash);
+        delete_note_body_blob(repo.path(), &body_hash);
+
+        let result = show_revision(RevisionShowOptions::new(repo.path()).with_include_body(true))
+            .expect("swept adapter-note body must not hard-error");
+
+        let note = &result.adapter_notes[0];
+        assert_eq!(note.body, None);
+        assert_eq!(note.body_content_state, BodyContentState::PhysicallyRemoved);
+        assert_eq!(
+            note.removed_body_content_hash.as_deref(),
+            Some(body_hash.as_str())
+        );
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "body_content_physically_removed"
+                    && d.message.contains(&body_hash))
+        );
+    }
+
+    #[test]
+    fn removed_unswept_adapter_note_body_is_suppressed_present() {
+        let repo = modified_repo();
+        capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        let body_hash = import_removable_review_note_body(&repo);
+        record_artifact_removed(repo.path(), &body_hash);
+
+        let result = show_revision(RevisionShowOptions::new(repo.path()).with_include_body(true))
+            .expect("suppressed adapter-note body renders");
+
+        let note = &result.adapter_notes[0];
+        assert_eq!(note.body, None);
+        assert_eq!(note.body_content_state, BodyContentState::SuppressedPresent);
+        assert_eq!(
+            note.removed_body_content_hash.as_deref(),
+            Some(body_hash.as_str())
+        );
+    }
+
+    #[test]
+    fn missing_unremoved_adapter_note_body_still_errors() {
+        let repo = modified_repo();
+        capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        let body_hash = import_removable_review_note_body(&repo);
+        delete_note_body_blob(repo.path(), &body_hash);
+
+        let err = show_revision(RevisionShowOptions::new(repo.path()).with_include_body(true))
+            .expect_err("absent note bytes without an operative removal keep the hard error");
+
+        assert!(err.to_string().contains("import referenced artifacts"));
     }
 
     #[test]

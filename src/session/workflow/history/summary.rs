@@ -10,7 +10,9 @@ use crate::session::event::{
     AssertionMode, BodyContentType, EventType, ImportedNoteTarget, InputRequestReasonCode,
     InputRequestResponseOutcome, ReviewAssessment, SidecarSource, Writer,
 };
-use crate::session::{EndorsementReadback, EventVerificationStatus, PrincipalView};
+use crate::session::{
+    BodyContentState, EndorsementReadback, EventVerificationStatus, PrincipalView,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,6 +72,8 @@ pub enum ReviewHistorySummary {
         body_byte_size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         body_content_hash: Option<String>,
+        #[serde(skip_serializing_if = "BodyContentState::is_present")]
+        body_content_state: BodyContentState,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         tags: Vec<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -94,6 +98,8 @@ pub enum ReviewHistorySummary {
         body_byte_size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         body_content_hash: Option<String>,
+        #[serde(skip_serializing_if = "BodyContentState::is_present")]
+        body_content_state: BodyContentState,
     },
     InputRequestResponded {
         input_request_response_id: InputRequestResponseId,
@@ -107,6 +113,8 @@ pub enum ReviewHistorySummary {
         reason_byte_size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         reason_content_hash: Option<String>,
+        #[serde(skip_serializing_if = "BodyContentState::is_present")]
+        reason_content_state: BodyContentState,
     },
     ReviewAssessmentRecorded {
         assessment_id: AssessmentId,
@@ -120,6 +128,8 @@ pub enum ReviewHistorySummary {
         summary_byte_size: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         summary_content_hash: Option<String>,
+        #[serde(skip_serializing_if = "BodyContentState::is_present")]
+        summary_content_state: BodyContentState,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         replaces: Vec<AssessmentId>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -140,6 +150,13 @@ pub enum ReviewHistorySummary {
         body: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         body_byte_size: Option<u64>,
+        #[serde(skip_serializing_if = "BodyContentState::is_present")]
+        body_content_state: BodyContentState,
+        /// The removal key when the body is removed: the imported-note payload
+        /// carries no body content hash, so this is the surface's twin of the
+        /// snapshot result's removed-content-hash field; absent while present.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        removed_body_content_hash: Option<String>,
         #[serde(skip_serializing_if = "Vec::is_empty")]
         tags: Vec<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -170,6 +187,8 @@ pub enum ReviewHistorySummary {
         summary_content_type: BodyContentType,
         #[serde(skip_serializing_if = "Option::is_none")]
         summary_content_hash: Option<String>,
+        #[serde(skip_serializing_if = "BodyContentState::is_present")]
+        summary_content_state: BodyContentState,
         #[serde(skip_serializing_if = "Option::is_none")]
         started_at: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]

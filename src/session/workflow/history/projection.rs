@@ -15,14 +15,18 @@ use crate::session::event::{
     RevisionRefWithdrawnPayload, ShoreEvent, ValidationCheckRecordedPayload, WorkObjectProposal,
     WorkObjectProposedPayload, decode_input_request_opened_payload,
 };
+use crate::session::projection::body_content::{
+    BodyRemovalLens, body_content_diagnostics, resolve_body_content,
+};
 use crate::session::projection::cosignature::{
     CosignatureIndex, endorsement_readbacks, enrich_endorser_attributes,
 };
 use crate::session::state::SessionState;
 use crate::session::store::backend::StoreBackend;
 use crate::session::{
-    ActorAttributesMap, DelegationMap, EventVerificationPolicy, ProjectionDiagnostic, TrustSet,
-    principal_view_for, verify_event_signature,
+    ActorAttributesMap, ArtifactRemovalProjection, BodyContentState, DelegationMap,
+    EventVerificationPolicy, ProjectionDiagnostic, TrustSet, principal_view_for,
+    verify_event_signature,
 };
 
 pub(super) fn history_from_events(
@@ -36,14 +40,24 @@ pub(super) fn history_from_events(
         .event_set_hash
         .clone()
         .expect("SessionState::from_events sets event_set_hash");
-    // Build the co-signature index once per document, only when a policy is set —
-    // the zero-policy path stays free of cost and output. It indexes the full
-    // event set (correctness), independent of any window.
-    let cosig_index = filters
+    // Build the co-signature index once per document. It indexes the full event
+    // set (correctness), independent of any window; endorsement readbacks read
+    // it only when a verification policy is set, the removal lens always does.
+    let cosig_index = CosignatureIndex::build(events)?;
+    let readback_index = filters
         .verification_policy
         .is_some()
-        .then(|| CosignatureIndex::build(events))
-        .transpose()?;
+        .then_some(&cosig_index);
+    let removal = ArtifactRemovalProjection::from_events(events)?;
+    // The lens pairs with a live backend (no backend, no byte reads, no state).
+    let removal_lens = backend.map(|_| {
+        BodyRemovalLens::new(
+            &removal,
+            &filters.trust_set,
+            filters.removal_policy,
+            &cosig_index,
+        )
+    });
 
     // Filter to the matching event references and sort them by the envelope
     // (occurred_at, event_id) — the same ordering as before — without hydrating
@@ -70,8 +84,25 @@ pub(super) fn history_from_events(
     let slice = window.apply(&keys);
     let entries = matched[slice.range.clone()]
         .iter()
-        .map(|event| history_entry_from_event(event, &filters, cosig_index.as_ref(), backend))
+        .map(|event| {
+            history_entry_from_event(
+                event,
+                &filters,
+                readback_index,
+                backend,
+                removal_lens.as_ref(),
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
+
+    // Body-content diagnostics are rendered-entry scoped: state resolution only
+    // happens for entries that survive the window, so out-of-window removals
+    // yield no diagnostic on this page (read/skip diagnostics keep describing
+    // the full replayed set).
+    let mut diagnostics = state.diagnostics;
+    diagnostics.extend(body_content_diagnostics(
+        entries.iter().flat_map(entry_body_states),
+    ));
 
     Ok(ReviewHistoryResult {
         event_set_hash,
@@ -79,8 +110,47 @@ pub(super) fn history_from_events(
         filters: filters.into(),
         entries,
         next_cursor: slice.next_cursor,
-        diagnostics: state.diagnostics,
+        diagnostics,
     })
+}
+
+/// The (state, removal-key) pairs a rendered entry contributes to the
+/// body-content diagnostics. Imported notes carry their key in
+/// `removed_body_content_hash` (their payload has no body hash).
+fn entry_body_states(entry: &ReviewHistoryEntry) -> Vec<(BodyContentState, Option<&str>)> {
+    match &entry.summary {
+        ReviewHistorySummary::ReviewObservationRecorded {
+            body_content_state,
+            body_content_hash,
+            ..
+        } => vec![(*body_content_state, body_content_hash.as_deref())],
+        ReviewHistorySummary::ReviewAssessmentRecorded {
+            summary_content_state,
+            summary_content_hash,
+            ..
+        } => vec![(*summary_content_state, summary_content_hash.as_deref())],
+        ReviewHistorySummary::InputRequestOpened {
+            body_content_state,
+            body_content_hash,
+            ..
+        } => vec![(*body_content_state, body_content_hash.as_deref())],
+        ReviewHistorySummary::InputRequestResponded {
+            reason_content_state,
+            reason_content_hash,
+            ..
+        } => vec![(*reason_content_state, reason_content_hash.as_deref())],
+        ReviewHistorySummary::ReviewNoteImported {
+            body_content_state,
+            removed_body_content_hash,
+            ..
+        } => vec![(*body_content_state, removed_body_content_hash.as_deref())],
+        ReviewHistorySummary::ValidationCheckRecorded {
+            summary_content_state,
+            summary_content_hash,
+            ..
+        } => vec![(*summary_content_state, summary_content_hash.as_deref())],
+        _ => Vec::new(),
+    }
 }
 
 /// Caller-supplied advisory verification + reader enrichment for the base build.
@@ -92,6 +162,9 @@ pub struct BaseProjectionConfig {
     pub trust_set: TrustSet,
     pub actor_attributes: Option<ActorAttributesMap>,
     pub delegation_map: Option<DelegationMap>,
+    /// Render-time removal policy for body-content states (advisory,
+    /// reader-relative; never gates the compact erasure sweep).
+    pub removal_policy: crate::session::RemovalPolicy,
 }
 
 /// One entry of the base projection: the hydrated review-history entry plus its
@@ -140,16 +213,26 @@ pub(super) fn history_base_from_events(
         trust_set: config.trust_set.clone(),
         actor_attributes: config.actor_attributes.clone(),
         delegation_map: config.delegation_map.clone(),
+        removal_policy: config.removal_policy,
         ..Default::default()
     };
 
-    // Build the co-signature index once, only when a policy is set (the zero-policy
-    // path stays free of cost) — it indexes the full event set, window-independent.
-    let cosig_index = filters
+    // One co-signature index per build: endorsement readbacks read it only when
+    // a policy is set, the removal lens always does.
+    let cosig_index = CosignatureIndex::build(events)?;
+    let readback_index = filters
         .verification_policy
         .is_some()
-        .then(|| CosignatureIndex::build(events))
-        .transpose()?;
+        .then_some(&cosig_index);
+    let removal = ArtifactRemovalProjection::from_events(events)?;
+    let removal_lens = backend.map(|_| {
+        BodyRemovalLens::new(
+            &removal,
+            &filters.trust_set,
+            filters.removal_policy,
+            &cosig_index,
+        )
+    });
 
     let mut matched: Vec<&ShoreEvent> = events
         .iter()
@@ -165,8 +248,20 @@ pub(super) fn history_base_from_events(
     // and attach each entry's search record.
     let built = matched
         .iter()
-        .map(|event| history_entry_from_event(event, &filters, cosig_index.as_ref(), backend))
+        .map(|event| {
+            history_entry_from_event(
+                event,
+                &filters,
+                readback_index,
+                backend,
+                removal_lens.as_ref(),
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
+    let mut diagnostics = state.diagnostics;
+    diagnostics.extend(body_content_diagnostics(
+        built.iter().flat_map(entry_body_states),
+    ));
     let object_by_revision = revision_object_map(&built);
     let entries = built
         .into_iter()
@@ -181,7 +276,7 @@ pub(super) fn history_base_from_events(
         entries,
         event_set_hash,
         event_count: events.len(),
-        diagnostics: state.diagnostics,
+        diagnostics,
     })
 }
 
@@ -216,6 +311,7 @@ pub(super) fn history_entry_from_event(
     filters: &ResolvedHistoryFilters,
     cosig_index: Option<&CosignatureIndex<'_>>,
     backend: Option<&StoreBackend>,
+    removal_lens: Option<&BodyRemovalLens<'_>>,
 ) -> Result<ReviewHistoryEntry> {
     let summary = match event.event_type {
         EventType::ReviewInitialized => {
@@ -260,19 +356,22 @@ pub(super) fn history_entry_from_event(
         EventType::ReviewObservationRecorded => {
             let payload: ReviewObservationRecordedPayload =
                 serde_json::from_value(event.payload.clone())?;
+            let (body, body_content_state, _) = resolved_text(
+                backend,
+                removal_lens,
+                filters.include_body,
+                payload.body,
+                payload.body_artifact_path.as_deref(),
+            )?;
             ReviewHistorySummary::ReviewObservationRecorded {
                 observation_id: payload.observation_id,
                 target: payload.target,
                 title: payload.title,
-                body: optional_text(
-                    backend,
-                    filters.include_body,
-                    payload.body,
-                    payload.body_artifact_path.as_deref(),
-                )?,
+                body,
                 body_content_type: payload.body_content_type,
                 body_byte_size: payload.body_byte_size,
                 body_content_hash: payload.body_content_hash,
+                body_content_state,
                 tags: payload.tags,
                 confidence: payload.confidence,
                 supersedes: payload.supersedes_observation_ids,
@@ -282,19 +381,22 @@ pub(super) fn history_entry_from_event(
         EventType::ReviewAssessmentRecorded => {
             let payload: ReviewAssessmentRecordedPayload =
                 serde_json::from_value(event.payload.clone())?;
+            let (summary, summary_content_state, _) = resolved_text(
+                backend,
+                removal_lens,
+                filters.include_body,
+                payload.summary,
+                payload.summary_artifact_path.as_deref(),
+            )?;
             ReviewHistorySummary::ReviewAssessmentRecorded {
                 assessment_id: payload.assessment_id,
                 target: payload.target,
                 assessment: payload.assessment,
-                summary: optional_text(
-                    backend,
-                    filters.include_body,
-                    payload.summary,
-                    payload.summary_artifact_path.as_deref(),
-                )?,
+                summary,
                 summary_content_type: payload.summary_content_type,
                 summary_byte_size: payload.summary_byte_size,
                 summary_content_hash: payload.summary_content_hash,
+                summary_content_state,
                 replaces: payload.replaces_assessment_ids,
                 related_observations: payload.related_observation_ids,
                 related_input_requests: payload.related_input_request_ids,
@@ -302,43 +404,56 @@ pub(super) fn history_entry_from_event(
         }
         EventType::InputRequestOpened => {
             let payload = decode_input_request_opened_payload(event.payload.clone())?;
+            let (body, body_content_state, _) = resolved_text(
+                backend,
+                removal_lens,
+                filters.include_body,
+                payload.body,
+                payload.body_artifact_path.as_deref(),
+            )?;
             ReviewHistorySummary::InputRequestOpened {
                 input_request_id: payload.input_request_id,
                 target: payload.target,
                 mode: event.assertion_mode,
                 reason_code: payload.reason_code,
                 title: payload.title,
-                body: optional_text(
-                    backend,
-                    filters.include_body,
-                    payload.body,
-                    payload.body_artifact_path.as_deref(),
-                )?,
+                body,
                 body_content_type: payload.body_content_type,
                 body_byte_size: payload.body_byte_size,
                 body_content_hash: payload.body_content_hash,
+                body_content_state,
             }
         }
         EventType::InputRequestResponded => {
             let payload: InputRequestRespondedPayload =
                 serde_json::from_value(event.payload.clone())?;
+            let (reason, reason_content_state, _) = resolved_text(
+                backend,
+                removal_lens,
+                filters.include_body,
+                payload.reason,
+                payload.reason_artifact_path.as_deref(),
+            )?;
             ReviewHistorySummary::InputRequestResponded {
                 input_request_response_id: payload.input_request_response_id,
                 input_request_id: payload.input_request_id,
                 outcome: payload.outcome,
-                reason: optional_text(
-                    backend,
-                    filters.include_body,
-                    payload.reason,
-                    payload.reason_artifact_path.as_deref(),
-                )?,
+                reason,
                 reason_content_type: payload.reason_content_type,
                 reason_byte_size: payload.reason_byte_size,
                 reason_content_hash: payload.reason_content_hash,
+                reason_content_state,
             }
         }
         EventType::ReviewNoteImported => {
             let payload: ReviewNoteImportedPayload = serde_json::from_value(event.payload.clone())?;
+            let (body, body_content_state, removed_body_content_hash) = resolved_text(
+                backend,
+                removal_lens,
+                filters.include_body,
+                payload.body,
+                payload.body_artifact_path.as_deref(),
+            )?;
             ReviewHistorySummary::ReviewNoteImported {
                 sidecar_source: payload.sidecar_source,
                 note_id: payload.note_id,
@@ -346,13 +461,10 @@ pub(super) fn history_entry_from_event(
                 file_old_path: payload.file_old_path,
                 target: payload.target,
                 title: payload.title,
-                body: optional_text(
-                    backend,
-                    filters.include_body,
-                    payload.body,
-                    payload.body_artifact_path.as_deref(),
-                )?,
+                body,
                 body_byte_size: payload.body_byte_size.map(|size| size as u64),
+                body_content_state,
+                removed_body_content_hash,
                 tags: payload.tags,
                 confidence: payload.confidence,
                 external_source: payload.external_source,
@@ -364,6 +476,13 @@ pub(super) fn history_entry_from_event(
         EventType::ValidationCheckRecorded => {
             let payload: ValidationCheckRecordedPayload =
                 serde_json::from_value(event.payload.clone())?;
+            let (summary, summary_content_state, _) = resolved_text(
+                backend,
+                removal_lens,
+                filters.include_body,
+                payload.summary,
+                payload.summary_artifact_path.as_deref(),
+            )?;
             ReviewHistorySummary::ValidationCheckRecorded {
                 validation_check_id: payload.validation_check_id,
                 target: payload.target,
@@ -373,14 +492,10 @@ pub(super) fn history_entry_from_event(
                 exit_code: payload.exit_code,
                 trigger: payload.trigger,
                 source_fingerprint: payload.source_fingerprint,
-                summary: optional_text(
-                    backend,
-                    filters.include_body,
-                    payload.summary,
-                    payload.summary_artifact_path.as_deref(),
-                )?,
+                summary,
                 summary_content_type: payload.summary_content_type,
                 summary_content_hash: payload.summary_content_hash,
+                summary_content_state,
                 started_at: payload.started_at,
                 completed_at: payload.completed_at,
                 log_artifact_content_hashes: payload.log_artifact_content_hashes,
@@ -472,6 +587,33 @@ pub(super) fn history_entry_from_event(
         ),
         summary,
     })
+}
+
+/// The seam wrapper over [`optional_text`]: with a lens (paired with a live
+/// backend) the body-content seam decides removed vs present vs missing and
+/// reports the state (plus the removal key for surfaces whose payload carries
+/// no body hash); without one, the legacy hydration runs and the state stays
+/// `Present` unresolved.
+fn resolved_text(
+    backend: Option<&StoreBackend>,
+    removal_lens: Option<&BodyRemovalLens<'_>>,
+    include_body: bool,
+    inline: Option<String>,
+    artifact_path: Option<&str>,
+) -> Result<(Option<String>, BodyContentState, Option<String>)> {
+    match (backend, removal_lens) {
+        (Some(backend), Some(lens)) => {
+            let content = resolve_body_content(backend, lens, include_body, inline, artifact_path)?;
+            let state = content.state();
+            let removed_hash = content.removed_content_hash().map(str::to_owned);
+            Ok((content.into_text(), state, removed_hash))
+        }
+        _ => Ok((
+            optional_text(backend, include_body, inline, artifact_path)?,
+            BodyContentState::default(),
+            None,
+        )),
+    }
 }
 
 fn optional_text(

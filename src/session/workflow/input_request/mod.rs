@@ -1021,8 +1021,8 @@ mod tests {
         ];
         let reverse: Vec<ShoreEvent> = forward.iter().rev().cloned().collect();
 
-        let forward_records = collect_input_request_projection_records(&forward).unwrap();
-        let reverse_records = collect_input_request_projection_records(&reverse).unwrap();
+        let forward_records = collect_input_request_projection_records(&forward, None).unwrap();
+        let reverse_records = collect_input_request_projection_records(&reverse, None).unwrap();
 
         assert_eq!(forward_records.request_records.len(), 1);
         assert_eq!(
@@ -1424,6 +1424,7 @@ mod tests {
             body: None,
             body_content_type: Default::default(),
             body_content_hash: None,
+            body_content_state: Default::default(),
             status: InputRequestStatus::Open,
             responses: vec![],
             created_at: created_at.to_owned(),

@@ -60,8 +60,6 @@ impl BodyContent {
     /// The removal key, borrowed from the removed variants; `None` when present.
     /// Surfaces whose payload carries no body hash (imported notes) render this
     /// as their `removed_body_content_hash` twin of the snapshot result field.
-    // Consumed by the imported-note surfaces; drop the allow with the first one.
-    #[allow(dead_code)]
     pub(crate) fn removed_content_hash(&self) -> Option<&str> {
         match self {
             Self::Present(_) => None,
@@ -138,7 +136,16 @@ pub(crate) fn resolve_body_content(
     let Some(path) = artifact_path else {
         return Ok(BodyContent::Present(None));
     };
-    let content_hash = note_body_content_hash_from_path(path)?;
+    // A path whose stem is not a well-formed content hash has no derivable
+    // removal key (no claim can target it), so the lens is skipped and the
+    // legacy load below keeps its exact behavior for such paths.
+    let Ok(content_hash) = note_body_content_hash_from_path(path) else {
+        return Ok(BodyContent::Present(if include_body {
+            load_body_artifact(backend, path)?
+        } else {
+            None
+        }));
+    };
     let status =
         lens.removal
             .operative_status(&content_hash, lens.trust_set, lens.policy, lens.cosig)?;
@@ -386,6 +393,23 @@ mod tests {
             .expect("no claim and no read must not error");
         assert_eq!(untouched.state(), BodyContentState::Present);
         assert_eq!(untouched.into_text(), None);
+    }
+
+    #[test]
+    fn non_content_addressed_path_skips_the_lens_and_loads_legacy() {
+        let backend = StoreBackend::memory();
+        ContentArtifacts::from_backend(&backend)
+            .put_note_body(
+                "artifacts/notes/abc.json",
+                br#"{"schema":"shore.note-body","version":1,"body":"legacy body"}"#,
+            )
+            .expect("write legacy blob");
+
+        let content = resolve(&backend, &[], true, None, Some("artifacts/notes/abc.json"))
+            .expect("legacy path stays readable");
+
+        assert_eq!(content.state(), BodyContentState::Present);
+        assert_eq!(content.into_text(), Some("legacy body".to_owned()));
     }
 
     #[test]

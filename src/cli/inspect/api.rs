@@ -665,6 +665,7 @@ fn inspect_base_config(repo: &Path) -> BaseProjectionConfig {
         trust_set: crate::cli::review::common::discover_trust_set(repo),
         actor_attributes: crate::cli::review::common::discover_actor_attributes(repo),
         delegation_map: crate::cli::review::common::discover_delegation_map(repo),
+        removal_policy: shoreline::session::RemovalPolicy::default(),
     }
 }
 

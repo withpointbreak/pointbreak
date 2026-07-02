@@ -178,13 +178,15 @@ fn engagement_lifecycle(
     };
     let (current, _) = project_assessments(AssessmentProjectionOptions {
         // A status-only projection: `include_summary: false` means no summary
-        // artifact is read, so no backend handle is needed.
+        // artifact is read, so no backend handle is needed — and with no
+        // backend there is no removal lens (no state resolution here).
         backend: None,
         events,
         resolved: &resolved,
         track_filter: None,
         include_summary: false,
         include_all: false,
+        removal_lens: None,
     })?;
 
     Ok(match current.status {
