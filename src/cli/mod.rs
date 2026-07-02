@@ -18,6 +18,9 @@ mod review;
 mod show;
 mod store;
 
+#[cfg(test)]
+mod help_vocab_guard;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "shore",

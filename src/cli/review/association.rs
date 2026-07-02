@@ -42,7 +42,7 @@ struct AssociateCommitArgs {
     #[arg(long)]
     track: String,
 
-    /// The commit rev to associate with this review unit (resolved to an OID).
+    /// The commit rev to associate with this revision (resolved to an OID).
     #[arg(long)]
     commit: String,
 

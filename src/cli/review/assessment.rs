@@ -31,7 +31,7 @@ pub(super) struct AssessmentAddArgs {
     #[arg(long, default_value = ".")]
     repo: PathBuf,
 
-    /// Captured Revision to assess; defaults to the single captured unit.
+    /// Captured revision to assess; defaults to the single captured revision.
     #[arg(long)]
     revision: Option<String>,
 
@@ -116,7 +116,7 @@ pub(super) struct AssessmentShowArgs {
     #[arg(long, default_value = ".")]
     repo: PathBuf,
 
-    /// Captured Revision to read; defaults to the single captured unit.
+    /// Captured revision to read; defaults to the single captured revision.
     #[arg(long)]
     revision: Option<String>,
 

@@ -31,7 +31,7 @@ pub(super) struct HistoryArgs {
     #[arg(long = "event-type")]
     event_types: Vec<HistoryEventTypeArg>,
 
-    /// Filter to events of units associated with this ref; a short branch name is
+    /// Filter to events of revisions associated with this ref; a short branch name is
     /// normalized to its full ref before matching.
     #[arg(long = "ref", alias = "branch")]
     ref_name: Option<String>,

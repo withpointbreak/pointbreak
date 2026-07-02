@@ -319,13 +319,13 @@ impl CommitRangeBuilder {
             diagnostics.push(diagnostic(
                 RETRACTION_TARGET_MISSING_CODE,
                 format!(
-                    "review unit {} withdraws association {missing}, which has no matching association",
+                    "revision {} withdraws association {missing}, which has no matching association",
                     revision_id.as_str()
                 ),
             ));
         }
 
-        // divergent_commit_association: two or more distinct current OIDs claim the unit.
+        // divergent_commit_association: two or more distinct current OIDs claim the revision.
         let distinct_oids = current_commits
             .iter()
             .map(|commit| commit.commit_oid.as_str())
@@ -334,7 +334,7 @@ impl CommitRangeBuilder {
             diagnostics.push(diagnostic(
                 DIVERGENT_COMMIT_ASSOCIATION_CODE,
                 format!(
-                    "review unit {} has {} distinct current commit associations",
+                    "revision {} has {} distinct current commit associations",
                     revision_id.as_str(),
                     distinct_oids.len()
                 ),
@@ -630,21 +630,40 @@ mod tests {
             .map(|commit| commit.commit_oid.as_str())
             .collect();
         assert_eq!(oids, vec!["oidA", "oidB"]);
+        let divergent = view
+            .diagnostics
+            .iter()
+            .find(|d| d.code == DIVERGENT_COMMIT_ASSOCIATION_CODE)
+            .expect("divergent diagnostic present");
         assert!(
-            view.diagnostics
-                .iter()
-                .any(|d| d.code == DIVERGENT_COMMIT_ASSOCIATION_CODE)
+            divergent.message.contains("revision"),
+            "message names the revision work object: {}",
+            divergent.message
+        );
+        assert!(
+            !divergent.message.contains("review unit"),
+            "retired vocabulary swept: {}",
+            divergent.message
         );
     }
 
     #[test]
     fn retraction_target_missing_self_heals() {
         let missing = view_of(&[worktree_capture(), commit_withdrawn("oidA")]);
+        let retraction = missing
+            .diagnostics
+            .iter()
+            .find(|d| d.code == RETRACTION_TARGET_MISSING_CODE)
+            .expect("retraction diagnostic present");
         assert!(
-            missing
-                .diagnostics
-                .iter()
-                .any(|d| d.code == RETRACTION_TARGET_MISSING_CODE)
+            retraction.message.contains("revision"),
+            "message names the revision work object: {}",
+            retraction.message
+        );
+        assert!(
+            !retraction.message.contains("review unit"),
+            "retired vocabulary swept: {}",
+            retraction.message
         );
         assert!(!missing.anchored);
 
