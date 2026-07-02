@@ -10,7 +10,7 @@ use std::path::Path;
 use ed25519_dalek::{Signer as _, SigningKey};
 use serde_json::Value;
 use shoreline::crypto::{EventSignatureBytes, EventSigner, SignerId};
-use shoreline::error::Result;
+use shoreline::error::{Result, ShoreError};
 use shoreline::model::ActorId;
 use shoreline::session::event::{
     EventType, InputRequestReasonCode, InputRequestResponseOutcome, ReviewAssessment,
@@ -845,5 +845,29 @@ fn library_api_documents_sensitivity_vocabulary() {
             api.contains(required),
             "library API docs should mention {required}"
         );
+    }
+}
+
+/// A strict-policy rejection is classifiable by variant from an external consumer,
+/// with the event id and status available without parsing message text (#144).
+#[test]
+fn ingest_rejection_is_classifiable_by_variant() {
+    let (_origin, events, _body) = origin_with_large_input_request();
+    let event = events.first().expect("origin produced events").clone();
+    let expected_id = event.event_id.clone();
+    let dest = GitRepo::new();
+
+    let error = ingest_events(
+        IngestEventsOptions::new(dest.path(), vec![event])
+            .with_verification_policy(EventVerificationPolicy::trusted_strict()),
+    )
+    .unwrap_err();
+
+    match error {
+        ShoreError::EventVerificationRejected { event_id, status } => {
+            assert_eq!(event_id, expected_id);
+            assert_eq!(status, EventVerificationStatus::Unsigned);
+        }
+        other => panic!("expected EventVerificationRejected, got {other:?}"),
     }
 }

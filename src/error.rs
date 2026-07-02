@@ -1,3 +1,6 @@
+use crate::crypto::EventVerificationStatus;
+use crate::model::EventId;
+
 pub type Result<T> = std::result::Result<T, ShoreError>;
 
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +38,12 @@ pub enum ShoreError {
 
     #[error("{reason}")]
     WorkflowInputInvalid { reason: String },
+
+    #[error("event signature verification rejected event {} with status {}", .event_id.as_str(), .status.as_str())]
+    EventVerificationRejected {
+        event_id: EventId,
+        status: EventVerificationStatus,
+    },
 
     #[error("unknown claude code session line type `{kind}` at line {line}")]
     UnknownClaudeSessionLineType { line: usize, kind: String },
@@ -77,6 +86,18 @@ mod tests {
             reason: "track is required".to_owned(),
         };
         assert_eq!(err.to_string(), "track is required");
+    }
+
+    #[test]
+    fn event_verification_rejected_preserves_display_text() {
+        let err = ShoreError::EventVerificationRejected {
+            event_id: crate::model::EventId::new("evt:sha256:abc"),
+            status: crate::crypto::EventVerificationStatus::Unsigned,
+        };
+        assert_eq!(
+            err.to_string(),
+            "event signature verification rejected event evt:sha256:abc with status unsigned"
+        );
     }
 
     #[test]

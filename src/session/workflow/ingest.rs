@@ -2204,4 +2204,56 @@ mod tests {
         assert!(projection.may_resume);
         assert_eq!(projection.state, AgentResumptionState::Ready);
     }
+    #[test]
+    fn strict_rejection_is_classifiable_without_message_parsing() {
+        let (untrusted, _signer, _actor) = signed_captured_event();
+        let expected_id = untrusted.event_id.clone();
+        let dest = dest_repo();
+
+        let error = ingest_events(
+            IngestEventsOptions::new(dest.path(), vec![untrusted])
+                .with_verification_policy(EventVerificationPolicy::trusted_strict())
+                .with_trust_set(TrustSet::default()),
+        )
+        .unwrap_err();
+
+        let rendered = error.to_string();
+        match &error {
+            ShoreError::EventVerificationRejected { event_id, status } => {
+                assert_eq!(*event_id, expected_id);
+                assert_eq!(*status, EventVerificationStatus::UntrustedKey);
+            }
+            other => panic!("expected EventVerificationRejected, got {other:?}"),
+        }
+        assert_eq!(
+            rendered,
+            format!(
+                "event signature verification rejected event {} with status untrusted_key",
+                expected_id.as_str()
+            )
+        );
+        assert_eq!(stored_event_count(dest.path()), 0);
+    }
+
+    #[test]
+    fn import_event_rejection_is_classifiable_without_message_parsing() {
+        let unsigned = unsigned_event();
+        let expected_id = unsigned.event_id.clone();
+        let dest = dest_repo();
+
+        let error = import_event(
+            ImportEventOptions::new(dest.path(), unsigned)
+                .with_verification_policy(EventVerificationPolicy::trusted_strict()),
+        )
+        .unwrap_err();
+
+        match &error {
+            ShoreError::EventVerificationRejected { event_id, status } => {
+                assert_eq!(*event_id, expected_id);
+                assert_eq!(*status, EventVerificationStatus::Unsigned);
+            }
+            other => panic!("expected EventVerificationRejected, got {other:?}"),
+        }
+        assert_eq!(stored_event_count(dest.path()), 0);
+    }
 }

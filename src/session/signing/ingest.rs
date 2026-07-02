@@ -35,12 +35,9 @@ pub(crate) fn verify_events_for_ingest(
         };
 
         if policy.rejects(status) {
-            return Err(ShoreError::WorkflowInputInvalid {
-                reason: format!(
-                    "event signature verification rejected event {} with status {}",
-                    event.event_id.as_str(),
-                    status_code(status)
-                ),
+            return Err(ShoreError::EventVerificationRejected {
+                event_id: event.event_id.clone(),
+                status,
             });
         }
 
@@ -58,14 +55,5 @@ fn verification_message(status: EventVerificationStatus) -> Option<String> {
             Some("event signer is not authorized by the trust set".to_owned())
         }
         EventVerificationStatus::Unsigned => Some("event is unsigned".to_owned()),
-    }
-}
-
-fn status_code(status: EventVerificationStatus) -> &'static str {
-    match status {
-        EventVerificationStatus::Valid => "valid",
-        EventVerificationStatus::Invalid => "invalid",
-        EventVerificationStatus::UntrustedKey => "untrusted_key",
-        EventVerificationStatus::Unsigned => "unsigned",
     }
 }
