@@ -13,6 +13,7 @@ use crate::session::worktree_fingerprint_for_files;
 #[derive(Clone, Debug, Default)]
 pub struct IngestOptions {
     helper_paths: Vec<PathBuf>,
+    pathspecs: Vec<String>,
 }
 
 impl IngestOptions {
@@ -22,6 +23,14 @@ impl IngestOptions {
 
     pub fn exclude_helper_path(mut self, path: impl AsRef<Path>) -> Self {
         self.helper_paths.push(path.as_ref().to_path_buf());
+        self
+    }
+
+    /// Scope the ingested diff to the given native git pathspecs, executed by
+    /// git itself after `--` (tracked diff and untracked discovery alike).
+    /// Empty (the default) ingests the whole repository.
+    pub fn with_pathspecs(mut self, pathspecs: Vec<String>) -> Self {
+        self.pathspecs = pathspecs;
         self
     }
 }
@@ -36,7 +45,7 @@ pub fn ingest_tracked_diff_with_options(
 ) -> Result<DiffSnapshot> {
     let repo = repo.as_ref();
     let files = filter_helper_paths(
-        capture_worktree_diff_files(repo)?,
+        capture_worktree_diff_files_scoped(repo, &options.pathspecs)?,
         repo,
         &options.helper_paths,
     )?;
@@ -109,23 +118,33 @@ const SHARED_DIFF_FLAGS: &[&str] = &[
     "--submodule=short",
 ];
 
-/// Assemble a `git diff` argument list: `diff <mode_flags> <shared> <endpoints> --`.
-fn diff_args<'a>(mode_flags: &[&'a str], endpoint_args: &[&'a str]) -> Vec<&'a str> {
-    let mut args = Vec::with_capacity(2 + mode_flags.len() + SHARED_DIFF_FLAGS.len());
-    args.push("diff");
-    args.extend_from_slice(mode_flags);
-    args.extend_from_slice(SHARED_DIFF_FLAGS);
-    args.extend_from_slice(endpoint_args);
-    args.push("--");
+/// Assemble a `git diff` argument list:
+/// `diff <mode_flags> <shared> <endpoints> -- <pathspecs>`. An empty pathspec
+/// set reproduces today's whole-repo command exactly.
+fn diff_args(mode_flags: &[&str], endpoint_args: &[&str], pathspecs: &[String]) -> Vec<OsString> {
+    let mut args: Vec<OsString> = Vec::with_capacity(
+        2 + mode_flags.len() + SHARED_DIFF_FLAGS.len() + endpoint_args.len() + pathspecs.len(),
+    );
+    args.push(OsString::from("diff"));
+    args.extend(mode_flags.iter().copied().map(OsString::from));
+    args.extend(SHARED_DIFF_FLAGS.iter().copied().map(OsString::from));
+    args.extend(endpoint_args.iter().copied().map(OsString::from));
+    args.push(OsString::from("--"));
+    args.extend(pathspecs.iter().map(OsString::from));
     args
 }
 
 /// Run the raw + patch passes for `endpoint_args` and merge them into the
 /// `DiffFile` row inventory. Diff-source-agnostic: callers supply the endpoints
-/// (`["HEAD"]` for the worktree, `[base_oid, target_oid]` for a commit range).
-fn diff_files_for_args(repo: &Path, endpoint_args: &[&str]) -> Result<Vec<DiffFile>> {
-    let raw_output = run_git(repo, diff_args(&["--raw", "-z"], endpoint_args))?;
-    let patch_output = run_git(repo, diff_args(&["--patch"], endpoint_args))?;
+/// (`["HEAD"]` for the worktree, `[base_oid, target_oid]` for a commit range)
+/// and an optional pathspec scope git applies after `--`.
+fn diff_files_for_args(
+    repo: &Path,
+    endpoint_args: &[&str],
+    pathspecs: &[String],
+) -> Result<Vec<DiffFile>> {
+    let raw_output = run_git(repo, diff_args(&["--raw", "-z"], endpoint_args, pathspecs))?;
+    let patch_output = run_git(repo, diff_args(&["--patch"], endpoint_args, pathspecs))?;
 
     let raw_files = parse_raw(&raw_output.stdout)?;
     let patch_files =
@@ -144,7 +163,14 @@ fn diff_files_for_args(repo: &Path, endpoint_args: &[&str]) -> Result<Vec<DiffFi
 }
 
 pub(crate) fn capture_worktree_diff_files(repo: &Path) -> Result<Vec<DiffFile>> {
-    let mut files = diff_files_for_args(repo, &["HEAD"])?;
+    capture_worktree_diff_files_scoped(repo, &[])
+}
+
+pub(crate) fn capture_worktree_diff_files_scoped(
+    repo: &Path,
+    pathspecs: &[String],
+) -> Result<Vec<DiffFile>> {
+    let mut files = diff_files_for_args(repo, &["HEAD"], pathspecs)?;
     files.extend(synthesize_untracked_files(repo)?);
     Ok(files)
 }
@@ -158,7 +184,7 @@ pub(crate) fn capture_commit_range_diff_files(
     base_oid: &str,
     target_oid: &str,
 ) -> Result<Vec<DiffFile>> {
-    diff_files_for_args(repo, &[base_oid, target_oid])
+    diff_files_for_args(repo, &[base_oid, target_oid], &[])
 }
 
 fn synthesize_untracked_files(repo: &Path) -> Result<Vec<DiffFile>> {
@@ -344,9 +370,58 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    use super::capture_commit_range_diff_files;
+    use super::{
+        capture_commit_range_diff_files, capture_worktree_diff_files,
+        capture_worktree_diff_files_scoped,
+    };
     use crate::git::command::run_git;
     use crate::model::{FileMetadataKind, FileStatus};
+
+    #[test]
+    fn scoped_worktree_diff_files_include_only_pathspec_matches() {
+        let repo = TestRepo::new();
+        repo.write("a/one.txt", "one\n");
+        repo.write("b/two.txt", "two\n");
+        repo.commit_all("base");
+        repo.write("a/one.txt", "one changed\n");
+        repo.write("b/two.txt", "two changed\n");
+
+        let files = capture_worktree_diff_files_scoped(repo.path(), &["a".to_owned()]).unwrap();
+
+        let paths: Vec<&str> = files.iter().filter_map(|f| f.new_path.as_deref()).collect();
+        assert_eq!(paths, vec!["a/one.txt"]);
+    }
+
+    #[test]
+    fn scoped_worktree_diff_accepts_multiple_pathspecs() {
+        let repo = TestRepo::new();
+        repo.write("a/one.txt", "one\n");
+        repo.write("b/two.txt", "two\n");
+        repo.write("c/three.txt", "three\n");
+        repo.commit_all("base");
+        repo.write("a/one.txt", "changed\n");
+        repo.write("b/two.txt", "changed\n");
+        repo.write("c/three.txt", "changed\n");
+
+        let files =
+            capture_worktree_diff_files_scoped(repo.path(), &["a".to_owned(), "c".to_owned()])
+                .unwrap();
+
+        let paths: Vec<&str> = files.iter().filter_map(|f| f.new_path.as_deref()).collect();
+        assert_eq!(paths, vec!["a/one.txt", "c/three.txt"]);
+    }
+
+    #[test]
+    fn unscoped_worktree_diff_files_delegate_with_empty_pathspecs() {
+        let repo = TestRepo::new();
+        repo.write("a/one.txt", "one\n");
+        repo.commit_all("base");
+        repo.write("a/one.txt", "changed\n");
+
+        let unscoped = capture_worktree_diff_files(repo.path()).unwrap();
+        let empty_scope = capture_worktree_diff_files_scoped(repo.path(), &[]).unwrap();
+        assert_eq!(unscoped, empty_scope);
+    }
 
     #[test]
     fn commit_range_diff_files_capture_committed_change_with_clean_worktree() {
