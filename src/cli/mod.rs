@@ -20,6 +20,8 @@ mod store;
 
 #[cfg(test)]
 mod help_vocab_guard;
+#[cfg(test)]
+mod reference_coverage;
 
 #[derive(Debug, Parser)]
 #[command(

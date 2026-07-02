@@ -2,8 +2,23 @@
 
 This reference covers the public `shore` command surface provided by the `shoreline` crate.
 
-Command output JSON is the integration surface. Raw event files, artifact paths, event filenames,
-and the store's `state.json` are internal storage details unless a command explicitly returns them.
+Command output JSON is the machine-integration surface, under a **tiered stability promise**. A
+narrow **hard core** is frozen within each document's `version`:
+
+- the envelope discriminators (`schema`, `version`) on every document;
+- the field-paths a non-human consumer actually reads — `shore review capture`'s `revision.id`,
+  `shore review input-request list`'s `inputRequests[].{id,title,mode,reasonCode,trackId}`, and
+  `shore review input-request respond`'s `inputRequestResponseId` and `eventId`;
+- the wire-value vocabularies that review-loop drivers branch on — the assessment values and the
+  input-request response outcomes (see the [`assessment`](#shore-review-assessment) and
+  [`input-request`](#shore-review-input-request) sections).
+
+Changing any hard-core value is a coordinated break: bump that document's `version` and migrate
+consumers. Everything else in the documents is **soft shell** — stable but additive-evolvable within
+a `version`: fields may be added, consumers must select by field name and tolerate unknown fields,
+and removing, renaming, or reshaping an existing field bumps the `version`. Raw event files,
+artifact paths, event filenames, and the store's `state.json` are internal storage details unless a
+command explicitly returns them.
 
 ## Global Tracing Flags
 
@@ -399,8 +414,10 @@ sweep — plus `body_content_suppressed_present` / `body_content_physically_remo
 The field is omitted entirely while content is present, and a body that is missing *without* a
 recorded removal still fails the read with the `import referenced artifacts` guidance.
 
-Command output is the stable integration surface. Raw store paths, event files, artifact paths,
-`.git` paths, `.shore/data` paths, and `state.json` remain internal storage details.
+Command output is the machine-integration surface, under the tiered stability promise described at
+the [top of this reference](#cli-reference) (a frozen hard core; an additive-evolvable soft shell).
+Raw store paths, event files, artifact paths, `.git` paths, `.shore/data` paths, and `state.json`
+remain internal storage details.
 
 ## `shore identity`
 
@@ -495,7 +512,9 @@ unresolved signer is a hard error rather than an unsigned write. Only shipped su
 
 ```bash
 shore review observation add --track <track-id> --title <title> \
-  [--revision <revision-id>] [target options] [--body-content-type text/plain|text/markdown]
+  [--revision <revision-id>] [target options] [--body-content-type text/plain|text/markdown] \
+  [--tag <tag>]... [--confidence low|medium|high] [--supersedes <observation-id>]... \
+  [--responds-to <observation-id>]...
 shore review observation list [--revision <revision-id>] [--track <track-id>] \
   [--file <path>] [--tag <tag>] [--include-body] [--pretty|--compact]
 ```
@@ -515,8 +534,13 @@ Observations are append-only review notes for a captured revision.
   as Markdown in the inspector.
 - Large bodies are stored as Shoreline-owned `shore.note-body` artifacts while command output keeps
   artifact paths private.
-- `--supersedes <observation-id>` records a correction by appending a new observation that names the
-  older observation.
+- `--supersedes <observation-id>` (repeatable) records a correction by appending a new observation
+  that names the older observation.
+- `--responds-to <observation-id>` (repeatable) records that this observation responds to an
+  existing observation — a fact-to-fact relationship (a derived `responded_by` back-pointer is
+  surfaced on the target). It does not supersede or mutate the target.
+- `--confidence <low|medium|high>` records an optional confidence level on the observation.
+- `--tag <tag>` (repeatable) attaches free-form tags used by the `observation list` `--tag` filter.
 - `observation list` replays durable events for the revision and may filter by revision, track,
   file, or tag. It hydrates body text only with `--include-body`.
 
@@ -557,7 +581,9 @@ Input requests are durable pause or decision requests for a captured revision.
   requested.
 - `input-request respond <id>` appends an `input_request_responded` event.
 - Response reasons may use `--reason-content-type text/markdown`; the default is `text/plain`.
-- Response outcomes are `approved`, `rejected`, `dismissed`, `superseded`, and `abandoned`.
+- Response outcomes are `approved`, `rejected`, `dismissed`, `superseded`, and `abandoned`. These
+  wire values are part of the frozen hard core (review-loop drivers branch on them): stable within
+  `version:1`, changed only by a coordinated `version` bump.
 
 Output documents are compact `shore.review-input-request-open`,
 `shore.review-input-request-list`, `shore.review-input-request-fetch`, and
@@ -583,7 +609,9 @@ Assessments record review calls for a captured revision.
   multiple captured revisions exist.
 - CLI input uses `kebab-case` assessment values: `accepted`, `accepted-with-follow-up`,
   `needs-changes`, and `needs-clarification`. Command JSON output uses the matching `snake_case`
-  values: `accepted`, `accepted_with_follow_up`, `needs_changes`, and `needs_clarification`.
+  values: `accepted`, `accepted_with_follow_up`, `needs_changes`, and `needs_clarification`. The
+  `snake_case` wire values are part of the frozen hard core (review-loop drivers branch on them):
+  stable within `version:1`, changed only by a coordinated `version` bump.
 - Targets mirror the revision ledger: review-wide by default, captured file, captured range,
   native observation, native input request, or another assessment.
 - Summaries may come from `--summary`, `--summary-file`, or `--summary-stdin`.
@@ -663,11 +691,56 @@ writing identity), never the target's author.
 The endorsement record and its read-side classification are decided in
 [ADR-0013](./adr/adr-0013-endorsement-record-and-classification.md).
 
+## `shore review association`
+
+```bash
+shore review association associate-commit --track <track-id> --commit <rev> \
+  [--revision <revision-id>] [--sign-key <name|path>] [--repo <path>]
+shore review association withdraw-commit --track <track-id> --withdraws <commit-association-id> \
+  [--revision <revision-id>] [--sign-key <name|path>] [--repo <path>]
+shore review association associate-ref --track <track-id> --ref <name> --head <oid> \
+  [--revision <revision-id>] [--sign-key <name|path>] [--repo <path>]
+shore review association withdraw-ref --track <track-id> --withdraws <ref-association-id> \
+  [--revision <revision-id>] [--sign-key <name|path>] [--repo <path>]
+shore review association list [--revision <revision-id>] [--axis commit|ref] [--current] \
+  [--repo <path>] [--pretty | --compact]
+```
+
+`shore review association` records and withdraws the commit-graph associations of a captured
+revision as append-only associate/withdraw events on two axes — commit and ref. This is how a
+revision is tied to the commits and branches that carry it; recording a landed commit
+(`associate-commit`) is the association half of the ADR-0014 lifecycle
+([ADR-0014](./adr/adr-0014-reviewunit-commit-range-lifecycle.md)).
+
+- **`associate-commit`** binds `--commit <rev>` (resolved to an OID) to the revision on the commit
+  axis. **`associate-ref`** binds `--ref <name>` (a short branch name is normalized to its full ref)
+  at the explicit `--head <oid>` (never inferred) on the ref axis.
+- **`withdraw-commit`** / **`withdraw-ref`** retract an earlier association by its id
+  (`--withdraws <id>`). Withdrawal is terminal: a later re-association of the same target does not
+  revive the withdrawn edge.
+- All four writes are signable — `--sign-key <name|path>` selects the signing key exactly as
+  `shore review capture` does, and signing never gates the write.
+- `--revision <revision-id>` pins the target revision; without it the command defaults to the single
+  captured revision and errors if multiple captured revisions exist.
+- **`list`** reports both axes unless `--axis commit|ref` narrows to one, and `--current` excludes
+  withdrawn associations, showing only what currently holds. It emits `shore.review-association-list`
+  JSON.
+- The write forms emit `shore.review-association-commit`, `shore.review-association-commit-withdrawn`,
+  `shore.review-association-ref`, and `shore.review-association-ref-withdrawn` JSON with the new
+  association id and write counts.
+
+Divergent or dangling associations surface as advisory diagnostics on the read surfaces
+(`divergent_commit_association` when two or more distinct current commit OIDs claim one revision;
+`retraction_target_missing` when a withdrawal names an association that never appeared); they are
+render-only and never gate a write.
+
 ## `shore review history`
 
 ```bash
 shore review history [--repo <path>] [--revision <id>] [--track <track-id>] \
-  [--event-type <event-type>]... [--include-body] [--pretty | --compact]
+  [--event-type <event-type>]... [--ref <name> [--by label|liveness]] \
+  [--limit <n>] [--cursor <cursor>] [--watch [--poll-ms <ms>]] \
+  [--include-body] [--pretty | --compact]
 ```
 
 `shore review history` reads the chronological ledger of durable Shoreline events.
@@ -679,6 +752,15 @@ shore review history [--repo <path>] [--revision <id>] [--track <track-id>] \
 - `historyCount` is the number of returned entries after filters.
 - Entries are sorted by `occurredAt`, then `eventId`, as display chronology.
 - `--revision`, `--track`, and repeated `--event-type` narrow the returned entries.
+- `--ref <name>` filters to events of revisions associated with a ref (a short branch name is
+  normalized to its full ref). `--by` chooses how `--ref` matches: `label` (the recorded label,
+  offline; the default) or `liveness` (reachability from the ref's live tip).
+- `--limit <n>` returns at most N entries as a forward page (from the start, or from `--cursor`); the
+  response carries a `nextCursor` to continue. `--cursor <cursor>` continues from a previous
+  response's opaque `nextCursor`. Omit both for the full history.
+- `--watch` re-renders whenever the store's liveness changes, polling client-side at `--poll-ms`
+  (default 3000). It is pull-only — no daemon and no filesystem watch — and is cancelled with
+  Ctrl-C; under `--watch` the same `--limit` page is re-rendered on each liveness change.
 - Succession and commit/ref association filters include `revision-captured`,
   `revision-commit-associated`, `revision-commit-withdrawn`, `revision-ref-associated`, and
   `revision-ref-withdrawn`.
@@ -737,8 +819,8 @@ narrative-first plus snapshot-complete view of one captured revision.
 ## `shore review revisions`
 
 ```bash
-shore review revisions [--repo <path>] [--object <object-id>] [--ref <name>] \
-  [--all | --orphans] [--pretty | --compact]
+shore review revisions [--repo <path>] [--object <object-id>] [--ref <name> [--by label|liveness]] \
+  [--integration-ref <name>] [--worktree <path>] [--all | --orphans] [--pretty | --compact]
 ```
 
 `shore review revisions` is the discovery surface for captured revisions. It emits
@@ -748,9 +830,14 @@ endpoints, and `objectArtifactContentHash`.
 
 - `--object <object-id>` lists only the revisions that share one content object. Coincident content
   may span supersession threads, so this is a listing/grouping lens, never a head selector.
-- `--ref <name>` filters to revisions associated with a ref. The succession view (the supersession
-  DAG and a thread's competing heads) is reported by this same projection; there is no separate
-  lineage surface.
+- `--ref <name>` filters to revisions associated with a ref (a short branch name is normalized to
+  its full ref). `--by` chooses how `--ref` matches: `label` (the recorded label, offline; the
+  default) or `liveness` (reachability from the ref's live tip). The succession view (the
+  supersession DAG and a thread's competing heads) is reported by this same projection; there is no
+  separate lineage surface.
+- `--integration-ref <name>` sets the reachability target for the `merged` status: a revision is
+  `merged` only when it is an ancestor of this ref. It defaults to broad reachability (any live tip).
+- `--worktree <path>` scopes the listing to captures belonging to the worktree at that path.
 - `--all` / `--orphans` control whether revisions whose anchored commits are all unreachable
   (orphaned) are shown or shown exclusively; by default orphaned revisions are hidden.
 
