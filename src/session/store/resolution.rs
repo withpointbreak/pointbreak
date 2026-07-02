@@ -209,14 +209,16 @@ pub(crate) fn resolve_store(repo: impl AsRef<Path>) -> Result<StoreResolution> {
         return Err(ShoreError::Message(
             "a worktree-local .shore/data/ review store from before the shared-store default \
              was detected. Reads and writes now use the shared store under .git/shore, so this \
-             worktree-local store is no longer read automatically. Switch it over in two steps: \
-             (1) run `shore store migrate` to copy its events and artifacts into the shared store \
-             — this is non-destructive and leaves .shore/data/ in place so you can verify the \
-             result first; then (2) delete the .shore/data/ directory to complete the switch. \
-             This message keeps appearing until .shore/data/ is removed, by design, so the \
-             original store is never discarded before you confirm the migration succeeded. (If \
-             this worktree is meant to stay isolated and discardable instead, run \
-             `shore store mode ephemeral` and its .shore/data/ store is used as-is.)"
+             worktree-local store is no longer read automatically. Complete the switch in one \
+             command with `shore store migrate --retire-source`, which copies its events and \
+             artifacts into the shared store, independently verifies the fold, and then deletes \
+             .shore/data/. Or take it in two steps: (1) run `shore store migrate` to copy \
+             non-destructively, leaving .shore/data/ in place so you can verify the result \
+             first; then (2) delete the .shore/data/ directory. This message keeps appearing \
+             until .shore/data/ is removed, by design, so the original store is never discarded \
+             before the migration is confirmed. (If this worktree is meant to stay isolated and \
+             discardable instead, run `shore store mode ephemeral` and its .shore/data/ store is \
+             used as-is.)"
                 .to_owned(),
         ));
     }
@@ -400,6 +402,10 @@ mod tests {
         assert!(
             message.contains("store migrate"),
             "names the fix (`shore store migrate`); got: {message}"
+        );
+        assert!(
+            message.contains("--retire-source"),
+            "names the one-command completion; got: {message}"
         );
         assert!(
             message.contains(".shore/data"),

@@ -282,6 +282,50 @@ fn legacy_worktree_local_store_errors_until_migrated() {
     assert_no_storage_path_leak(&list);
 }
 
+// 4b. The one-command completion: `store migrate --retire-source` folds,
+//     verifies, and deletes `.shore/data` so the very next read resolves —
+//     no undocumented manual `rm` step.
+#[test]
+fn legacy_worktree_local_store_resolves_after_migrate_retire_source() {
+    let repo = GitRepo::new();
+    repo.write("README.md", "base\n");
+    repo.commit_all("base");
+    repo.write("README.md", "changed\n");
+    let repo_arg = repo.path().to_str().unwrap();
+
+    run_json(&["store", "mode", "ephemeral", "--repo", repo_arg]);
+    let capture = run_json(&["review", "capture", "--repo", repo_arg]);
+    let unit_id = capture["revision"]["id"].as_str().unwrap().to_owned();
+    run_json(&["store", "mode", "shared", "--repo", repo_arg]);
+    assert!(repo.path().join(".shore/data/events").is_dir());
+
+    // The guard fires and its hint names the one-command completion.
+    let read = shore(["review", "revisions", "--repo", repo_arg]);
+    assert!(!read.status.success(), "a legacy store must fail the read");
+    let stderr = String::from_utf8_lossy(&read.stderr);
+    assert!(
+        stderr.contains("--retire-source"),
+        "the hint names the one-command completion: {stderr}"
+    );
+
+    // ONE command completes the switch: fold + verify + retire.
+    let migrate = run_json(&["store", "migrate", "--retire-source", "--repo", repo_arg]);
+    assert_eq!(migrate["sourceRetired"], serde_json::Value::Bool(true));
+    assert!(!repo.path().join(".shore/data").exists());
+
+    let list = run_json(&["review", "revisions", "--repo", repo_arg]);
+    let ids: Vec<&str> = list["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["revisionId"].as_str().unwrap())
+        .collect();
+    assert!(
+        ids.contains(&unit_id.as_str()),
+        "the record resolves immediately after the one-command migration"
+    );
+}
+
 // 5. Sibling captures: each worktree's `unit show` with NO `--revision`
 //    resolves its OWN worktree's capture (worktree read scoping holds).
 #[test]

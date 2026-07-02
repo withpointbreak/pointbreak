@@ -73,12 +73,61 @@ fn store_migrate_folds_worktree_local_into_common_dir() {
     // DiagnosticDocument flattens the body to the TOP LEVEL (the `store status`
     // tests assert this shape) — assert top-level fields, NOT json["body"][…].
     assert!(json["eventsCreated"].as_u64().unwrap() >= 1);
+    // The default run reports the source honestly un-retired (additive field).
+    assert_eq!(json["sourceRetired"], Value::Bool(false));
     // No raw private paths leak into the JSON (the export-manifest discipline).
     assert!(!stdout.contains(".shore/data"));
     assert!(!stdout.contains(".git"));
     // Non-destructive: the worktree-local store still exists after migration.
     assert!(repo.path().join(".shore/data/events").is_dir());
     // The folded events now resolve from the shared common-dir store.
+    assert!(
+        support::common_dir_store(repo.path())
+            .join("events")
+            .is_dir()
+    );
+}
+
+#[test]
+fn store_migrate_retire_source_completes_in_one_command() {
+    let repo = repo_with_pending_change();
+    let repo_arg = repo.path().to_str().unwrap().to_owned();
+
+    // Seed a pre-flip worktree-local store, same shape as the fold test.
+    assert!(
+        shore(["store", "mode", "ephemeral", "--repo", &repo_arg])
+            .status
+            .success()
+    );
+    assert!(
+        shore(["review", "capture", "--repo", &repo_arg])
+            .status
+            .success()
+    );
+    assert!(
+        shore(["store", "mode", "shared", "--repo", &repo_arg])
+            .status
+            .success()
+    );
+    assert!(repo.path().join(".shore/data/events").is_dir());
+
+    let migrate = shore(["store", "migrate", "--retire-source", "--repo", &repo_arg]);
+    assert!(
+        migrate.status.success(),
+        "migrate --retire-source: {}",
+        String::from_utf8_lossy(&migrate.stderr)
+    );
+
+    let stdout = String::from_utf8(migrate.stdout).unwrap();
+    let json = parse_json(stdout.as_bytes());
+    assert_eq!(json["sourceRetired"], Value::Bool(true));
+    assert!(json["verifiedEvents"].as_u64().unwrap() >= 1);
+    assert!(json["verifiedArtifacts"].as_u64().unwrap() >= 1);
+    // No raw private paths leak into the JSON.
+    assert!(!stdout.contains(".shore/data"));
+    assert!(!stdout.contains(".git"));
+    // The verified fold retired the source in the same command.
+    assert!(!repo.path().join(".shore/data").exists());
     assert!(
         support::common_dir_store(repo.path())
             .join("events")

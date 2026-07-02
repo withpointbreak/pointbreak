@@ -67,6 +67,13 @@ struct StoreMigrateArgs {
     #[arg(long)]
     include_ephemeral: bool,
 
+    /// After the fold is independently verified (every source event and artifact
+    /// file present in the shared store), delete the worktree-local .shore/data
+    /// so reads resolve in one command. Off by default: the source is never
+    /// discarded before the migration is confirmed.
+    #[arg(long)]
+    retire_source: bool,
+
     #[arg(long)]
     pretty: bool,
 }
@@ -138,6 +145,9 @@ struct StoreMigrateBody {
     artifacts_created: usize,
     artifacts_existing: usize,
     source_empty: bool,
+    source_retired: bool,
+    verified_events: usize,
+    verified_artifacts: usize,
 }
 
 #[derive(serde::Serialize)]
@@ -267,7 +277,9 @@ fn migrate(
     let span = tracing::info_span!("shore.store.migrate");
     let _entered = span.enter();
     let result = migrate_store_to_common_dir(
-        MigrateToCommonDirOptions::new(args.repo).with_include_ephemeral(args.include_ephemeral),
+        MigrateToCommonDirOptions::new(args.repo)
+            .with_include_ephemeral(args.include_ephemeral)
+            .with_retire_source(args.retire_source),
     )?;
     let document = json::DiagnosticDocument::new(
         "shore.store-migrate",
@@ -414,6 +426,9 @@ impl From<MigrateToCommonDirResult> for StoreMigrateBody {
             artifacts_created: result.artifacts_created,
             artifacts_existing: result.artifacts_existing,
             source_empty: result.source_empty,
+            source_retired: result.source_retired,
+            verified_events: result.verified_events,
+            verified_artifacts: result.verified_artifacts,
         }
     }
 }
