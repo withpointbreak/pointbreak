@@ -1,27 +1,72 @@
 /*
- * shore inspector — design tokens (the single source of truth).
+ * shore inspector — design tokens (the single source of truth), now skinned to
+ * the unified Pointbreak palette: "harbor" ocean-navy surfaces, the sky accent,
+ * and the logo's wave ramp. The token NAMES and architecture are Shoreline's,
+ * kept verbatim so the inspector's component CSS re-skins with a value swap and
+ * no rewrite; only the values carry the Pointbreak identity.
  *
- * Every design token lives here: surface/text colors, the semantic status
- * palette, diff surfaces, the radii scale, and the type stacks. app.css and the
- * design-system gallery carry component rules only and reference these via
- * var(--…); this file is the only :root across the served frontend.
+ * Every design token lives here: the brand ramps, surface/text colors, the
+ * semantic status palette, event-type + syntax + diff tokens, the radii scale,
+ * and the type registers. app.css and the design-system gallery carry component
+ * rules only and reference these via var(--…); this file is the only :root
+ * across the served frontend.
+ *
+ * Dark-first: :root is the dark theme (the product's native register), and the
+ * light-theme override is a semantic-alias flip — components never change, only
+ * the alias→value mapping. Both themes are WCAG-AA contrast-audited against the
+ * surfaces each token actually renders on (the merged design-system's
+ * contrast-check.mjs is the audit of record): every text pair clears AA (4.5:1)
+ * in both themes, including the composited diff/emphasis rows. Borders sit below
+ * the 3:1 non-text bar by design — a perception-grade boundary that surfaces and
+ * spacing reinforce, matching Shoreline's own values.
  */
 
 :root {
   color-scheme: dark;
 
-  --bg: #0f1419;
-  --bg-elev: #171d26;
-  --bg-row: #1b222d;
-  --bg-row-sel: #243044;
-  --border: #3a444f;   /* perception-grade boundary, raised from #2a323e */
-  --fg: #d7dde5;
-  --fg-dim: #9aa5b3;   /* clears AA on the selected-row surface, raised from #8a95a3 */
-  --accent: #5aa9e6;
+  /* Brand — the wave ramp, lifted verbatim from the Pointbreak logo. This is
+     the canonical brand scale the identity designs around; the ocean scale
+     below it is the marketing site's existing ramp, kept for compatibility
+     until the site migrates. Reserved for identity moments (the mark, hero
+     gradients, empty states) — not the working accent. */
+  --wave-crest: #06b6d4;  /* the logo's bright cyan — outer ring */
+  --wave-face: #0891b2;
+  --wave-mid: #158dc2;
+  --wave-deep: #005a9d;
+  --wave-trough: #003359;
 
-  /* Semantic status — one source of truth for every state tint. The diagnostics
-     container background stays a literal in app.css (its text aliases are not
-     re-pointed for light); only the repeated status palette is tokenized here. */
+  /* Ocean scale (site heritage). */
+  --ocean-deep: #0c4a6e;
+  --ocean-primary: #0369a1;
+  --ocean-light: #0ea5e9;
+  --ocean-lighter: #38bdf8;
+  --ocean-mist: #e0f2fe;
+  --ocean-foam: #f0f9ff;
+  --sand: #fef3c7;
+
+  /* Surfaces — "harbor": Shoreline's lightness ladder re-hued to the ocean
+     navy (hue ~207°). --bg is the marketing chrome canvas exactly, so the
+     product and the site's terminal/debugger mockups share a floor. --border
+     keeps Shoreline's perception-grade-boundary lesson: clearly visible
+     against every surface it separates. */
+  --bg: #0a1929;
+  --bg-elev: #0e2233;
+  --bg-row: #132a3f;
+  --bg-row-sel: #1c3b5a;
+  --border: #33506c;
+  --fg: #d9e8f5;
+  --fg-dim: #9db1c4;   /* 5.22:1 on --bg-row-sel — raised from #96aabc (4.81) for the margin Shoreline keeps (5.32) */
+
+  /* Accent — the signature sky-blue. --accent is the text/icon/glow register
+     (site's sky-400 CTA hue); --accent-strong is the fill register;
+     --on-accent is the label color on accent fills. */
+  --accent: #38bdf8;
+  --accent-strong: #0ea5e9;
+  --on-accent: #0a1929;
+
+  /* Semantic status — Shoreline's AA-tuned set, verbatim. One source of truth
+     for every state tint; these carry the inspector's meaning and are the
+     most-checked values in either system. */
   --success: #6dd28a;        /* head · passed · accepted · added */
   --success-deep: #3a7a52;   /* observation accent */
   --warning: #f0b75a;        /* superseded · open · needs-clarification · errored */
@@ -36,11 +81,10 @@
   /* Event-type palette — one hue per durable event type, the color-code the
      timeline rails, type-filter toggles, and type labels are scanned by. Single
      source of truth (moved out of app.js); each kept perceptually distinct so a
-     dense timeline stays readable by color. Theme-agnostic for now (same in
-     light + dark), so a later light-mode AA pass can override the warm/light
-     hues without touching the component code. */
+     dense timeline stays readable by color. --evt-capture tracks the accent so
+     it inherits the brand. */
   --evt-init: #7f8c9b;       /* review_initialized (neutral) */
-  --evt-capture: #5aa9e6;    /* work_object_proposed */
+  --evt-capture: var(--accent);      /* work_object_proposed */
   --evt-observation: #6dd28a;/* review_observation_recorded */
   --evt-assessment: #b388ff; /* review_assessment_recorded */
   --evt-request: #f0b75a;    /* input_request_opened */
@@ -63,12 +107,13 @@
   --tok-punctuation: var(--fg-dim);
   --tok-variable: var(--fg);
 
-  /* Diff surfaces */
+  /* Diff surfaces (translucent and theme-neutral — they composite over
+     whichever --bg-row the theme sets). */
   --diff-add-bg: rgba(70, 170, 110, 0.14);
   --diff-add-fg: #9ae6b4;
   --diff-del-bg: rgba(200, 90, 90, 0.14);
   --diff-del-fg: #f3b0b0;
-  --hunk-bg: #141b27;
+  --hunk-bg: #10243a;        /* harbor-tinted hunk strip (was #141b27) */
 
   /* Intraline emphasis: a stronger add/del tint than the row base so a changed
      sub-span reads as "more changed" than its row. Like --diff-*-bg these are
@@ -82,31 +127,62 @@
   --error-bg: #3a1416;
   --error-border: #5a2226;
 
-  /* Radii */
+  /* Radii — one px ladder (Shoreline's product scale plus the site's softest
+     step), with the marketing --radius-* names kept as aliases so the site's
+     component CSS keeps resolving during migration. */
   --r-sm: 4px;
   --r-md: 6px;
   --r-lg: 8px;
   --r-xl: 10px;
+  --r-2xl: 14px;
   --r-pill: 999px;
+  --radius-sm: var(--r-md);
+  --radius-md: var(--r-lg);
+  --radius-lg: var(--r-xl);
+  --radius-xl: var(--r-2xl);
+  --radius-pill: var(--r-pill);
 
-  /* Type scale — four body steps plus one heading step. --fs-lg gives primary
-     headings (detail-pane title, modal titles) a size anchor instead of resting
-     on weight/color alone, without disturbing the dense terminal register. */
+  /* Type — two registers in one sheet.
+     --fs-*: the product's dense terminal register (four body steps plus one
+     heading step; --fs-lg anchors detail-pane/modal titles).
+     --text-*: the marketing display ramp, for hero/site surfaces that need
+     scale the product never uses. Don't use display sizes in product UI. */
   --fs-xs: 11px;
   --fs-sm: 12px;
   --fs-md: 13px;
   --fs-base: 14px;
   --fs-lg: 19px;
 
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 18px;
+  --text-xl: 20px;
+  --text-2xl: 24px;
+  --text-3xl: 30px;
+  --text-4xl: 36px;
+  --text-5xl: 48px;
+  --text-7xl: 72px;
+
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+
   /* Vertical rhythm — comfortable defaults; .compact tightens them */
   --row-pad: 8px 14px;
   --line: 1.45; /* @kind other */
 
-  /* Type stacks. The @kind tags classify these for design-system tooling that
-     reads tokens.css standalone (unitless line-height and font stacks can't be
+  /* Type stacks — merged. The product ships no webfont: --mono keeps
+     ui-monospace first so the inspector resolves the OS mono and never depends
+     on a font load; "JetBrains Mono" is named for surfaces that self-host it
+     (the gallery's published token copy concatenates the @font-face layer).
+     The @kind tags classify these for design-system tooling that reads
+     tokens.css standalone (unitless line-height and font stacks can't be
      inferred from value alone); inert everywhere else. */
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; /* @kind font */
-  --sans: system-ui, -apple-system, "Segoe UI", sans-serif; /* @kind font */
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; /* @kind font */
+  --font-mono: var(--mono); /* @kind font */
+  --font-sans: var(--sans); /* @kind font */
 }
 
 /*
@@ -120,37 +196,43 @@
 }
 
 /*
- * Light theme — a semantic-alias override. Components never change; only the
- * alias→value mapping flips. Status hues are darkened so chip text (which sits on
- * --bg-row) clears WCAG AA on a light surface; the values below were contrast-checked
- * against the white/elev/row surfaces they actually render on. The radii, type, and
- * --mono/--sans stacks are theme-agnostic and inherit from :root.
+ * Light theme — a semantic-alias override (Shoreline's mechanism), skinned to
+ * the ocean brand: the elevated surface is ocean-foam, the selection is a
+ * mist-family blue, and the accent re-points to ocean-primary (the site's
+ * light-theme primary), which clears AA on white where the cyan accents cannot.
+ * Components never change; only the alias→value mapping flips. Status hues keep
+ * Shoreline's light values — darkened so chip text (which sits on --bg-row)
+ * clears WCAG AA on the pale row surfaces. The radii, type, and --mono/--sans
+ * stacks are theme-agnostic and inherit from :root.
  */
 [data-theme="light"] {
   color-scheme: light;
 
   --bg: #ffffff;
-  --bg-elev: #f6f8fa;
-  --bg-row: #f0f2f5;
-  --bg-row-sel: #dbe7ff;
-  --border: #d0d7de;
-  --fg: #1f2328;
-  --fg-dim: #59636e;
-  --accent: #0969da;
+  --bg-elev: #f0f9ff;      /* ocean-foam */
+  --bg-row: #e9f3fb;
+  --bg-row-sel: #d3e9fa;
+  --border: #bcd3e5;
+  --fg: #142433;
+  --fg-dim: #4c6173;       /* 5.15:1 on --bg-row-sel — darkened from #52687b (4.51, razor-thin) */
+
+  --accent: #0369a1;       /* ocean-primary */
+  --accent-strong: #0369a1;
+  --on-accent: #ffffff;
 
   --success: #1a7f37;
-  --warning: #8a5d00;     /* darkened from #9a6700 so chip text clears AA on --bg-row */
+  --warning: #8a5d00;
   --danger: #cf222e;
-  --assess: #7a44d4;      /* darkened from #8250df for an AA margin on --bg-row */
-  --validation: #b32d80;  /* darkened from #bf3989 for an AA margin on --bg-row */
-  --teal: #0f6f66;        /* darkened from #137f74 so chip text clears AA on --bg-row */
-  --info: #0969da;        /* aliases to accent on light; paired with a light --hunk-bg */
+  --assess: #7a44d4;
+  --validation: #b32d80;
+  --teal: #0f6f66;
+  --info: #0969da;
 
   /* Event-type labels in light theme. The :root --evt-* hues are dark-tuned and
      fall under WCAG AA as label text on these pale surfaces, so each colored
      event type aliases its AA-tuned status twin — keeping one color per concept
-     across the timeline and the annotation-kind labels, AA-safe on --bg/--bg-row.
-     The neutral init/note types keep their :root grays. */
+     across the timeline and the annotation-kind labels. The neutral init/note
+     types keep their :root grays. */
   --evt-capture: var(--accent);
   --evt-observation: var(--success);
   --evt-assessment: var(--assess);
@@ -160,13 +242,13 @@
 
   /* Diff foregrounds darken to read on the pale add/del rows; the translucent
      --diff-*-bg values are theme-neutral and keep their :root definitions.
-     Darkened again from #147029/#b42318: those cleared AA on the base add/del
-     rows (5.43/5.53) but fell to 4.03/3.74 on the stronger --emph-*-bg
-     intraline tint. These clear both surfaces — 6.56/7.18 on the base rows,
-     4.87/4.85 on the emphasized sub-spans. */
+     Darkened past #147029/#b42318 so the intraline-EMPHASIS pairs clear AA too
+     (4.87/4.85 vs 4.03/3.74 — an inherited light-theme gap this sheet closes).
+     These clear both surfaces — 6.56/7.18 on the base rows, 4.87/4.85 on the
+     emphasized sub-spans. */
   --diff-add-fg: #116226;
   --diff-del-fg: #961b11;
-  --hunk-bg: #eef1f6;     /* light hunk strip so the dark-blue --info text reads */
+  --hunk-bg: #e7f1fa;      /* light hunk strip so the dark-blue --info text reads */
 
   --error-bg: #ffebe9;
   --error-border: #ffc9c9;

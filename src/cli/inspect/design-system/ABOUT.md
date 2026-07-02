@@ -22,10 +22,12 @@ information-first — the product shows facts with attribution, not chatter.
 
 **Transition note:** Shoreline is being consolidated under the **Pointbreak**
 brand and this name is retiring (trademark conflict; "Pointbreak Review" is a
-candidate sub-brand). These projects mirror the inspector as currently
-shipped and will retire with the name. The successor design language — this
-system's architecture re-skinned to the Pointbreak brand — is being explored
-in the `pointbreak-ds-exploration` project (`unified/` namespace).
+candidate sub-brand). The inspector's tokens have now adopted the unified
+Pointbreak palette — "harbor" ocean-navy surfaces, the sky accent, and the
+logo's wave ramp — keeping Shoreline's token names and architecture; only the
+values carry the brand. These projects mirror that shipped inspector and will
+retire with the name. The full unified system (which also serves the marketing
+site) lives in the `pointbreak-ds-exploration` project (`unified/` namespace).
 
 ## The two synced projects
 
@@ -41,8 +43,12 @@ in the `pointbreak-ds-exploration` project (`unified/` namespace).
   WCAG AA contrast-checked against the surfaces they actually render on, in
   both themes — the checks are documented in `tokens.css` comments. Don't
   introduce colors casually.
-- **Neutral slate surfaces** (`--bg → --bg-elev → --bg-row → --bg-row-sel`):
-  a color-quiet canvas so the status hues carry all the meaning.
+- **Harbor surfaces** (`--bg → --bg-elev → --bg-row → --bg-row-sel`): an
+  ocean-navy wash — `--bg` (`#0a1929`) is shared with the marketing chrome —
+  quiet enough that the status hues still carry all the meaning. The **accent**
+  is sky-blue (`--accent`, re-pointing to ocean-primary in light for AA); the
+  logo's **wave ramp** (`--wave-*`) is reserved for identity moments, not
+  working UI.
 - **The status system is the identity**: success/warning/danger/assess/
   validation/info/teal; one hue per concept. Event types get their own
   palette (`--evt-*`) that color-codes timeline rails, filter toggles, and
