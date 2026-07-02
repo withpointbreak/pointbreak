@@ -413,6 +413,33 @@ fn capture_ingest_options(options: &CaptureOptions) -> IngestOptions {
         })
 }
 
+/// Canonicalize a capture pathspec set: reject empty entries, keep `:`-magic
+/// entries verbatim, strip trailing slashes from plain paths (git treats `b/`
+/// and `b` identically for directories), then sort + dedup so set-equal
+/// spellings record one scope and mint one revision id.
+fn normalize_pathspecs(pathspecs: &[String]) -> Result<Vec<String>> {
+    let mut normalized = Vec::with_capacity(pathspecs.len());
+    for pathspec in pathspecs {
+        if pathspec.is_empty() {
+            return Err(crate::error::ShoreError::Message(
+                "empty pathspec is not a valid capture scope".to_owned(),
+            ));
+        }
+        if pathspec.starts_with(':') {
+            normalized.push(pathspec.clone());
+            continue;
+        }
+        let trimmed = pathspec.trim_end_matches('/');
+        if trimmed.is_empty() {
+            return Err(crate::error::ShoreError::Message(format!(
+                "pathspec {pathspec:?} is not a valid capture scope"
+            )));
+        }
+        normalized.push(trimmed.to_owned());
+    }
+    Ok(sorted_unique(normalized))
+}
+
 fn work_object_proposed_idempotency_key(revision_id: &RevisionId) -> String {
     format!("work_object_proposed:{}", revision_id.as_str())
 }
@@ -502,6 +529,47 @@ mod tests {
         capture_worktree_review, export_artifact, import_artifact, read_object_artifact,
         referenced_artifacts, show_revision,
     };
+
+    #[test]
+    fn normalize_pathspecs_sorts_dedups_and_strips_trailing_slashes() {
+        let normalized = super::normalize_pathspecs(&[
+            "b/".to_owned(),
+            "a".to_owned(),
+            "a/".to_owned(),
+            "b".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(normalized, vec!["a".to_owned(), "b".to_owned()]);
+    }
+
+    #[test]
+    fn normalize_pathspecs_keeps_magic_pathspecs_verbatim() {
+        // A leading ':' marks git pathspec magic; stripping could corrupt forms
+        // like `:/`, so magic entries pass through untouched.
+        let normalized =
+            super::normalize_pathspecs(&[":(exclude)b/".to_owned(), ":/".to_owned()]).unwrap();
+        assert_eq!(normalized, vec![":(exclude)b/".to_owned(), ":/".to_owned()]);
+    }
+
+    #[test]
+    fn normalize_pathspecs_rejects_empty_and_all_slash_entries() {
+        let empty = super::normalize_pathspecs(&["".to_owned()]).unwrap_err();
+        assert!(empty.to_string().contains("pathspec"), "message: {empty}");
+
+        let slashes = super::normalize_pathspecs(&["///".to_owned()]).unwrap_err();
+        assert!(
+            slashes.to_string().contains("pathspec"),
+            "message: {slashes}"
+        );
+    }
+
+    #[test]
+    fn normalize_pathspecs_passes_an_empty_set_through() {
+        assert_eq!(
+            super::normalize_pathspecs(&[]).unwrap(),
+            Vec::<String>::new()
+        );
+    }
 
     #[test]
     fn capture_review_from_commit_range_records_commit_pair_endpoints() {
