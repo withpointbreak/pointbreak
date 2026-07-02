@@ -1,0 +1,90 @@
+# ID Prefixes
+
+**This is an internal contributor document.** Consumers of Shoreline's CLI output and JSON
+documents must keep treating every id as an opaque string — see "IDs are opaque" in
+[review-workflow.md](./review-workflow.md). Nothing here is a license to parse ids; it is the
+convention Shoreline's own code follows when it mints them.
+
+## The convention
+
+Ratified by [ADR-0028](./adr/adr-0028-id-prefix-convention.md):
+
+- **Existing prefix strings are frozen as-is.** They feed content-derived ids, so changing one
+  changes the ids newly minted for identical content and breaks cross-clone convergence with
+  existing stores. The frozen-value test in `src/model/id_prefix.rs` is the tripwire.
+- **New prefixes are spelled-out, hyphenated, lowercase domain names** (`[a-z][a-z-]*`, no
+  trailing hyphen). The abbreviation set is closed: `evt`, `rev`, `obj`, `obs`, `assess` (and
+  legacy `snap`) are grandfathered, not precedent.
+- **`src/model/id_prefix.rs` is the live source of truth.** Production code mints through its
+  constants; the `cfg(test)` table beneath them is the enumerable contract the registry and
+  drift tests check. The table below is a readable snapshot — on any disagreement, the
+  registry wins.
+
+## Current prefixes
+
+| prefix | kind | shape(s) | minted by | linkified |
+|---|---|---|---|---|
+| `evt` | content id | `evt:sha256:<hex>` | event envelope (`session/event`); re-derived by the event-store validation check | yes |
+| `rev` | content id | `rev:sha256:<hex>`, `rev:worktree:sha256:<hex>` | capture fingerprinting (`session/store/fingerprint`) | yes (plain form only) |
+| `obj` | content id | `obj:sha256:<hex>`, `obj:git:sha256:<hex>` | capture fingerprinting | no |
+| `engagement` | content id | `engagement:sha256:<hex>` | capture fingerprinting; Claude Code adapter | no |
+| `obs` | content id | `obs:sha256:<hex>` | observation workflow; Claude Code adapter | yes |
+| `assess` | content id | `assess:sha256:<hex>` | assessment workflow | yes |
+| `validation` | content id | `validation:sha256:<hex>` | validation workflow | yes (non-clickable) |
+| `input-request` | content id | `input-request:sha256:<hex>` | input-request workflow | yes |
+| `input-request-response` | content id | `input-request-response:sha256:<hex>` | input-request workflow | yes |
+| `assoc-commit` | content id | `assoc-commit:sha256:<hex>` | association events (`session/event/association`) | no |
+| `assoc-ref` | content id | `assoc-ref:sha256:<hex>` | association events | no |
+| `withdraw-commit` | content id | `withdraw-commit:sha256:<hex>` | association events | no |
+| `withdraw-ref` | content id | `withdraw-ref:sha256:<hex>` | association events | no |
+| `task-attempt` | content id | `task-attempt:sha256:<hex>` | Claude Code adapter | no |
+| `checkpoint` | content id | `checkpoint:sha256:<hex>` | Claude Code adapter | no |
+| `note` | content id | `note:sha256:<hex>`; `note:<explicit_id>`; `note:<file_index>:<note_index>` | note import; sidecar resolution | yes (`note:sha256:` form only) |
+| `journal` | structural | `journal:claude:<session_uuid>`; `journal:default` sentinel | Claude Code adapter; capture/removal/state defaults | no |
+| `review` | structural | `review:default` sentinel only | capture default | no |
+| `actor` | structural | `actor:git-email:<email>`, `actor:git-name:<name>`, `actor:local`, `actor:claude_code:user`, `actor:claude_code:assistant` | writer identity; Claude Code adapter | no |
+| `row` | structural | `row:<zero-padded ordinal>` | review-stream and projection row builders | no |
+| `object` | artifact ref | `object:sha256:<hex>` | export/inventory | no |
+| `body` | artifact ref | `body:sha256:<hex>` | export | no |
+| `note-body` | artifact ref | `note-body:sha256:<hex>` | export/inventory | no |
+| `file` | artifact ref | `file:sha256:<hex>` (hash of a redacted relative path) | sensitivity scan | no |
+| `unix-ms` | token | `unix-ms:<millis>` | event `occurredAt` clock | no |
+| `review-unit` | content id (legacy) | not minted; old stores' fact bodies may reference it | — | yes |
+| `snap` | content id (legacy) | not minted; old stores' fact bodies may reference it | — | yes |
+
+"Linkified" means the inspector's reference regex turns the token into a navigable chip; the
+list is derived from `REF_ID_PREFIXES` in `src/cli/inspect/web/src/classNames.ts` and mirrored
+by the registry's `linkified` flags under a drift test. Membership and shape gaps are tracked
+in [#344](https://github.com/kevinswiber/shoreline/issues/344).
+
+## Shape notes
+
+- Infixes (`worktree:`, `git:`) are owned by the mint site, not the prefix: the registry
+  freezes only the leading token.
+- `actor:agent:<name>` and `actor:env:<…>` arrive from user configuration (`SHORE_ACTOR_ID`)
+  and are validated, never minted.
+- `review:default` and `journal:default` are fixed sentinels — structural values with no
+  digest payload. One consumer string-compares `journal:default`
+  (`src/session/projection/state.rs`); it is protected by the frozen-value test.
+- `FileId` is path-based and carries **no** prefix by design (distinct from the `file:`
+  redaction ref). `HunkId` is likewise path-based; the two reserved sentinel values
+  `hunk:stale` / `hunk:orphaned` (`src/stream/build.rs`) are const-declared and sit outside
+  the registry — see ADR-0028's consequences.
+- Event idempotency keys (`work_object_proposed:…`, `review_observation_recorded:…`) are a
+  separate namespace derived from event-type names, not id prefixes, and are out of the
+  registry's scope.
+
+## Adding a prefix
+
+1. Pick a spelled-out, hyphenated, lowercase domain name (`[a-z][a-z-]*`, no trailing hyphen).
+   No new abbreviations.
+2. Add the constant and its table entry in `src/model/id_prefix.rs`; extend the frozen-value
+   test with the new constant. The uniqueness/charset/partition tests take care of themselves.
+3. Mint through the constant — never an inline literal. (The adoption sweep in the registry's
+   history shows the format!-swap patterns.)
+4. Decide linkification. If yes: add the prefix to `REF_ID_PREFIXES` in
+   `src/cli/inspect/web/src/classNames.ts` (mind overlap ordering — longer prefixes before
+   their own prefixes), update the `refs.test.ts` alternation lock in the same edit, set
+   `linkified: true` in the registry, and rebuild the bundle (`just web-build` +
+   `just web-verify`). If no: `linkified: false` and the drift test stays green untouched.
+5. Add a row to the table above.
