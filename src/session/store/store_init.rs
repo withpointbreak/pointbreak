@@ -267,6 +267,66 @@ pub fn ensure_local_actor_attributes_excluded(worktree_root: &Path) -> Result<()
 // actor-attributes twins there is no possession-based `--local` store-config CLI, so it
 // needs no standalone `ensure_*` wrapper. (The committed `.shore/store.json` stays tracked.)
 
+/// One canonical probe → line mapping for the committed `.shore/.gitignore`.
+/// `data/` covers the opt-in ephemeral store; `*.local.json` covers every
+/// private `.local.json` override. Probes are worktree-relative paths checked
+/// against ALL standard ignore sources, so user-managed ignore files are
+/// respected and never duplicated.
+const SHORE_GITIGNORE_SPECS: [(&str, &str); 4] = [
+    (".shore/data/state.json", "data/"),
+    (".shore/delegates.local.json", "*.local.json"),
+    (".shore/actor-attributes.local.json", "*.local.json"),
+    (".shore/store.local.json", "*.local.json"),
+];
+
+/// Keep Shoreline's generated/private files out of Git status via a committed
+/// `.shore/.gitignore` — visible in the working tree, scoped to the directory,
+/// and shared through clone — never by mutating the hidden, per-clone
+/// `.git/info/exclude`. A path already ignored by any standard source is
+/// skipped, so this is a no-op in a repo that manages its own ignores.
+pub fn ensure_shore_gitignore(worktree_root: &Path) -> Result<()> {
+    let probes: Vec<&str> = SHORE_GITIGNORE_SPECS
+        .iter()
+        .map(|(probe, _)| *probe)
+        .collect();
+    let ignored = git_paths_are_ignored(worktree_root, &probes)?;
+    let mut missing: Vec<&str> = Vec::new();
+    for ((_, line), is_ignored) in SHORE_GITIGNORE_SPECS.iter().zip(ignored) {
+        if !is_ignored && !missing.contains(line) {
+            missing.push(line);
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    append_shore_gitignore_lines(worktree_root, &missing)
+}
+
+/// Append `lines` (each newline-terminated) to `<worktree_root>/.shore/.gitignore`,
+/// creating `.shore/` and the file as needed and normalizing a missing trailing
+/// newline on existing content. Callers pass only not-yet-ignored lines.
+fn append_shore_gitignore_lines(worktree_root: &Path, lines: &[&str]) -> Result<()> {
+    let path = worktree_root.join(".shore/.gitignore");
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| io_error("create .shore directory", parent, error))?;
+    }
+    let current = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(io_error("read .shore/.gitignore", &path, error)),
+    };
+    let mut updated = current;
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    for line in lines {
+        updated.push_str(line);
+        updated.push('\n');
+    }
+    fs::write(&path, updated).map_err(|error| io_error("write .shore/.gitignore", &path, error))
+}
+
 /// Append `line` (newline-terminated) to the repository-local
 /// `.git/info/exclude`, creating the file and its parent if needed. Callers
 /// guard against duplicate entries before calling.
@@ -536,6 +596,95 @@ mod tests {
             .filter(|l| l.trim() == ".shore/actor-attributes.local.json")
             .count();
         assert_eq!(hits, 1, "the entry is written at most once");
+    }
+
+    #[test]
+    fn ensure_shore_gitignore_writes_the_two_canonical_lines() {
+        let repo = git_repo();
+        ensure_shore_gitignore(repo.path()).unwrap();
+        let body = fs::read_to_string(repo.path().join(".shore/.gitignore")).unwrap();
+        assert_eq!(body, "data/\n*.local.json\n");
+        // The mechanism is the committed .shore/.gitignore — never the repo-local
+        // exclude and never the root .gitignore. (`git init` may seed a commented
+        // info/exclude template, so assert on content, not existence.)
+        let exclude = git_info_exclude_path(repo.path()).unwrap();
+        if exclude.exists() {
+            let exclude_body = fs::read_to_string(&exclude).unwrap();
+            assert!(
+                !exclude_body.contains(".shore"),
+                "no .shore entry lands in info/exclude: {exclude_body}"
+            );
+        }
+        assert!(!repo.path().join(".gitignore").exists());
+    }
+
+    #[test]
+    fn ensure_shore_gitignore_is_idempotent() {
+        let repo = git_repo();
+        ensure_shore_gitignore(repo.path()).unwrap();
+        ensure_shore_gitignore(repo.path()).unwrap();
+        let body = fs::read_to_string(repo.path().join(".shore/.gitignore")).unwrap();
+        assert_eq!(
+            body, "data/\n*.local.json\n",
+            "each line is written at most once"
+        );
+    }
+
+    #[test]
+    fn ensure_shore_gitignore_appends_missing_lines_preserving_user_content() {
+        let repo = git_repo();
+        // A user-owned .shore/.gitignore that already covers the data/ store (via
+        // its own spelling) but not the local overrides, with no trailing newline
+        // so the append also exercises newline normalization.
+        fs::create_dir_all(repo.path().join(".shore")).unwrap();
+        fs::write(repo.path().join(".shore/.gitignore"), "# mine\ndata").unwrap();
+        ensure_shore_gitignore(repo.path()).unwrap();
+        let body = fs::read_to_string(repo.path().join(".shore/.gitignore")).unwrap();
+        // The user's `data` line (no slash) is a basename pattern that matches the
+        // data directory, so the .shore/data/state.json probe reports ignored and
+        // only *.local.json is appended; existing content survives verbatim.
+        assert_eq!(body, "# mine\ndata\n*.local.json\n");
+    }
+
+    #[test]
+    fn ensure_shore_gitignore_is_a_noop_when_probes_are_already_ignored() {
+        let repo = git_repo();
+        // Any standard ignore source counts — here the root .gitignore covers both
+        // the store dir and the local overrides, so nothing is written.
+        fs::write(
+            repo.path().join(".gitignore"),
+            ".shore/data/\n.shore/*.local.json\n",
+        )
+        .unwrap();
+        ensure_shore_gitignore(repo.path()).unwrap();
+        assert!(
+            !repo.path().join(".shore/.gitignore").exists(),
+            "user-managed ignore files are respected; no file is generated"
+        );
+    }
+
+    #[test]
+    fn shore_gitignore_covers_all_four_probe_paths() {
+        let repo = git_repo();
+        ensure_shore_gitignore(repo.path()).unwrap();
+        let ignored = crate::git::git_paths_are_ignored(
+            repo.path(),
+            &[
+                ".shore/data/state.json",
+                ".shore/delegates.local.json",
+                ".shore/actor-attributes.local.json",
+                ".shore/store.local.json",
+            ],
+        )
+        .unwrap();
+        assert_eq!(ignored, vec![true, true, true, true]);
+        // The committed config siblings are never ignored.
+        let committed = crate::git::git_paths_are_ignored(
+            repo.path(),
+            &[".shore/store.json", ".shore/delegates.json"],
+        )
+        .unwrap();
+        assert_eq!(committed, vec![false, false]);
     }
 
     #[test]
