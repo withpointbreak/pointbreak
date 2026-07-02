@@ -234,6 +234,33 @@ workflow or worktree produced the event, only its stamp and signature, so a resp
 verified, authorized signer binds identically from any store. Sign responses that must stay binding
 after a migration into the shared store.
 
+### Sensitivity vocabulary — `shoreline::session`
+
+`store_status` reports a redacted worktree sensitivity scan. The scan's vocabulary is a typed
+public contract so downstream boundaries (for example a relay's egress classification gate) can
+classify findings without vendoring string literals:
+
+| Item | Purpose |
+| ---- | ------- |
+| `SensitivityKind` | The five finding classes: `known_token`, `private_key`, `high_entropy`, `sensitive_filename`, `generated_path`. `severity()` and `policy_outcome()` pin each kind's scanner assignment. |
+| `SensitivitySeverity` | `medium` < `high` (derived ordering). |
+| `SensitivityPolicyOutcome` | The combined-outcome lattice `allow` < `warn` < `block`; `combine(...)` folds finding outcomes with `max` (identity `allow`), so a repository's combined outcome is `block` > `warn` > `allow` by dominance. |
+
+All three enums serialize to those snake_case wire strings (serde and `as_str()` agree), parse
+back via `parse(...)`, and enumerate via `ALL`. The scan document itself
+(`StoreStatusSensitivity` / `StoreStatusSensitivityFinding`) keeps plain-`String` fields on the
+wire; the enums are the vocabulary those strings are drawn from, and
+`tests/fixtures/sensitivity/conformance-vectors.json` pins the agreement: seeded vectors, the
+expected `(kind, severity, policyOutcome)` rows for a positive (`block`) and a negative (`allow`)
+repository, exercised against the real scanner by `tests/sensitivity_conformance.rs`. Boundary
+implementations can assert identical per-kind behavior from the same file.
+
+One deliberate divergence is part of the contract: shoreline's `known_token` detector matches the
+`sk-`/`ghp_`/`github_pat_`/`AKIA` prefixes only at the start of a token, while shoreline-relay's
+egress gate matches the prefix anywhere in a token (its threat model is "the secret must not
+cross the wire", not "the token starts with a known prefix"). The fixture's embedded-prefix
+vector records both expectations: no shoreline finding, `known_token` at the relay.
+
 ### Artifacts — `shoreline::session`
 
 | Item | Purpose |

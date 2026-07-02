@@ -823,3 +823,27 @@ fn sensitivity_vocabulary_is_publicly_nameable_and_stable() {
         SensitivityPolicyOutcome::Block
     );
 }
+
+/// The sensitivity vocabulary is documented as a supported public contract (#150),
+/// including the conformance fixture and the relay's deliberate known_token
+/// divergence.
+#[test]
+fn library_api_documents_sensitivity_vocabulary() {
+    let api = std::fs::read_to_string("docs/library-api.md").expect("read library API docs");
+
+    for required in [
+        "SensitivityKind",
+        "SensitivitySeverity",
+        "SensitivityPolicyOutcome",
+        "known_token",
+        "sensitive_filename",
+        "`block` > `warn` > `allow`",
+        "conformance-vectors.json",
+        "anywhere in a token",
+    ] {
+        assert!(
+            api.contains(required),
+            "library API docs should mention {required}"
+        );
+    }
+}
