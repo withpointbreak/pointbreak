@@ -8,9 +8,10 @@ use shoreline::documents::{
 };
 use shoreline::model::{CommitAssociationId, RefAssociationId, RevisionId};
 use shoreline::session::{
-    AssociateCommitOptions, AssociateRefOptions, AssociationAxis, ListAssociationsOptions,
-    WithdrawCommitOptions, WithdrawRefOptions, associate_commit, associate_ref, list_associations,
-    withdraw_commit, withdraw_ref,
+    AssociateCommitOptions, AssociateRefOptions, AssociationAxis, CommitEdgeSource,
+    CommitGraphCondition, ListAssociationsOptions, ListAssociationsResult, RevisionCommitRangeView,
+    WithdrawCommitOptions, WithdrawRefOptions, associate_commit, associate_ref, enrich_liveness,
+    list_associations, withdraw_commit, withdraw_ref,
 };
 
 use crate::cli::output;
@@ -281,7 +282,145 @@ fn list_run(args: ListArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::e
         args.format_args.explicit(pretty),
         output::OutputFormat::Json,
     )?;
-    output::write_document_json_fallback(stdout, format, &list_associations_document(result))
+    // `list_associations_document` consumes the result by value; the text digest
+    // reads the same data, so clone it only when the text lane will render (the
+    // machine lanes never pay for the clone).
+    let digest_source = matches!(format.format, output::OutputFormat::Text).then(|| result.clone());
+    let document = list_associations_document(result);
+    output::write_document(stdout, format, &document, || {
+        let source = digest_source
+            .as_ref()
+            .expect("text lane resolves the digest source");
+        render_association_text(source, landing_headline(source, &args.repo))
+    })
+}
+
+/// Best-effort landing headline for the current commit set, derived from the same
+/// liveness machinery `review show` uses and mapped exactly like the revision
+/// list's `merge_status_for`: `merged|open|orphaned`, and `unknown` on any git
+/// failure or withheld headline. Runs only on the text lane (the sole caller is
+/// the text renderer) and never propagates a liveness error to the exit code
+/// (INV-10). The machine lanes gain nothing — the JSON document is untouched.
+fn landing_headline(result: &ListAssociationsResult, repo: &Path) -> &'static str {
+    match enrich_liveness(&commit_range_view(result), repo, None) {
+        Ok(enrichment) => match enrichment.headline {
+            Some(CommitGraphCondition::Merged) => "merged",
+            Some(CommitGraphCondition::Live) => "open",
+            Some(CommitGraphCondition::Orphaned { .. }) => "orphaned",
+            None => "unknown",
+        },
+        Err(_) => "unknown",
+    }
+}
+
+/// Adapt the association-list result to the commit-range view the liveness seam
+/// consumes. The two structs carry the same lifecycle fields; the view is the
+/// shape `enrich_liveness` reads (only `current_commits` and `diagnostics`
+/// participate in the headline).
+fn commit_range_view(result: &ListAssociationsResult) -> RevisionCommitRangeView {
+    RevisionCommitRangeView {
+        revision_id: result.revision_id.clone(),
+        anchored: result.anchored,
+        current_commits: result.current_commits.clone(),
+        current_refs: result.current_refs.clone(),
+        withdrawn_commits: result.withdrawn_commits.clone(),
+        withdrawn_refs: result.withdrawn_refs.clone(),
+        diagnostics: result.diagnostics.clone(),
+    }
+}
+
+/// The projection diagnostic code the digest translates into plain language.
+/// Matched by value: the projection's `pub const` is library-private (not
+/// re-exported), and the digest keys on the code, never the disposable message.
+const DIVERGENT_COMMIT_ASSOCIATION_CODE: &str = "divergent_commit_association";
+
+/// The text digest for `review association list`: the anchored state, current
+/// commit/ref associations as short refs, withdrawn counts, a plain-language
+/// divergence line, and the best-effort landing headline. Reads only the public
+/// `ListAssociationsResult` (INV-12); ids truncate via `output::short_ref`
+/// (INV-7); user-controlled ref/head strings are bounded via `clamp_title`.
+/// `landing` is the caller-computed headline word; this renderer is pure
+/// formatting and makes no git/liveness calls of its own.
+fn render_association_text(result: &ListAssociationsResult, landing: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+
+    let anchor = if result.anchored {
+        "anchored"
+    } else {
+        "not anchored"
+    };
+    lines.push(format!(
+        "{anchor} · {} · {}",
+        count_label(
+            result.current_commits.len(),
+            "current commit association",
+            "current commit associations",
+        ),
+        count_label(
+            result.current_refs.len(),
+            "current ref association",
+            "current ref associations",
+        ),
+    ));
+
+    for commit in &result.current_commits {
+        lines.push(format!(
+            "  commit {} ({})",
+            output::short_ref(&commit.commit_oid),
+            source_label(commit.source),
+        ));
+    }
+
+    for reference in &result.current_refs {
+        lines.push(format!(
+            "  ref {} → {}",
+            super::common::clamp_title(&reference.ref_name),
+            super::common::clamp_title(&output::short_ref(&reference.head_oid)),
+        ));
+    }
+
+    if !result.withdrawn_commits.is_empty() || !result.withdrawn_refs.is_empty() {
+        lines.push(format!(
+            "withdrawn: {} · {}",
+            count_label(result.withdrawn_commits.len(), "commit", "commits"),
+            count_label(result.withdrawn_refs.len(), "ref", "refs"),
+        ));
+    }
+
+    if result
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == DIVERGENT_COMMIT_ASSOCIATION_CODE)
+    {
+        lines.push(format!(
+            "⚠ commit associations diverge: {} \
+             (a squash or rebase may have rewritten the tip — withdraw the stale \
+             one or associate the landed commit)",
+            count_label(
+                result.current_commits.len(),
+                "current commit association",
+                "current commit associations",
+            ),
+        ));
+    }
+
+    lines.push(format!("landing: {landing}"));
+
+    lines.join("\n")
+}
+
+/// The current commit edge's provenance, in the result's own vocabulary.
+fn source_label(source: CommitEdgeSource) -> &'static str {
+    match source {
+        CommitEdgeSource::CaptureTarget => "capture_target",
+        CommitEdgeSource::Association => "association",
+    }
+}
+
+/// `N noun`, singular when `count == 1`.
+fn count_label(count: usize, singular: &str, plural: &str) -> String {
+    let noun = if count == 1 { singular } else { plural };
+    format!("{count} {noun}")
 }
 
 /// Apply the `--revision` selection shared by the write verbs. The four
@@ -329,3 +468,39 @@ impl_association_selection!(
     AssociateRefOptions,
     WithdrawRefOptions,
 );
+
+#[cfg(test)]
+mod tests {
+    use shoreline::model::RevisionId;
+    use shoreline::session::{CurrentCommitAssociation, ListAssociationsResult};
+
+    use super::*;
+
+    fn anchored_result(commit_oid: &str) -> ListAssociationsResult {
+        ListAssociationsResult {
+            revision_id: RevisionId::new("rev:sha256:test"),
+            anchored: true,
+            current_commits: vec![CurrentCommitAssociation {
+                commit_oid: commit_oid.to_owned(),
+                tree_oid: format!("{commit_oid}-tree"),
+                commit_association_id: None,
+                source: CommitEdgeSource::CaptureTarget,
+            }],
+            current_refs: Vec::new(),
+            withdrawn_commits: Vec::new(),
+            withdrawn_refs: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn landing_headline_degrades_to_unknown_off_a_repo() {
+        // A path that is not a git repository makes the liveness probe fail; the
+        // headline degrades to `unknown` rather than propagating the error (INV-10).
+        let dir = tempfile::tempdir().expect("create tempdir");
+        assert_eq!(
+            landing_headline(&anchored_result(&"0".repeat(40)), dir.path()),
+            "unknown"
+        );
+    }
+}

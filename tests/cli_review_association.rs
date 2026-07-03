@@ -16,6 +16,49 @@ fn modified_repo() -> GitRepo {
     repo
 }
 
+/// Two committed revisions plus a dirty worktree, so associating both `HEAD` and
+/// `HEAD~1` yields two distinct current commit associations — the divergent-tip
+/// shape a squash or rebase leaves behind.
+fn divergent_repo() -> GitRepo {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    repo.commit_all("second");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    repo
+}
+
+/// Two committed revisions on `main`, clean worktree — so `--base HEAD~1`
+/// captures the committed range and anchors a reachable target commit.
+fn committed_repo() -> GitRepo {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    repo.commit_all("change");
+    repo
+}
+
+fn associate_commit(repo: &GitRepo, commit: &str) {
+    let output = shore([
+        "review",
+        "association",
+        "associate-commit",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--track",
+        "agent:codex",
+        "--commit",
+        commit,
+    ]);
+    assert!(
+        output.status.success(),
+        "associate-commit {commit} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn capture(repo: &GitRepo) {
     let output = shore(["review", "capture", "--repo", repo.path().to_str().unwrap()]);
     assert!(
@@ -397,6 +440,182 @@ fn unit_show_includes_commit_range_and_liveness_block() {
     let per_commit = commit_range["liveness"]["perCommit"].as_array().unwrap();
     assert_eq!(per_commit.len(), 1);
     assert!(per_commit[0]["condition"].is_string());
+}
+
+#[test]
+fn text_association_digest_phrases_divergence() {
+    let repo = divergent_repo();
+    capture(&repo);
+    associate_commit(&repo, "HEAD");
+    associate_commit(&repo, "HEAD~1");
+    let repo_path = repo.path().to_str().unwrap();
+
+    let output = shore([
+        "review",
+        "association",
+        "list",
+        "--repo",
+        repo_path,
+        "--format",
+        "text",
+    ]);
+    assert!(
+        output.status.success(),
+        "list --format text failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("anchored"),
+        "digest names the anchor state: {stdout}"
+    );
+    assert!(
+        stdout.contains("2 current commit associations"),
+        "digest counts the current commit associations: {stdout}"
+    );
+    // The human phrasing of the diagnostic, not the raw machine code.
+    assert!(
+        stdout.contains("diverge"),
+        "digest phrases divergence: {stdout}"
+    );
+    assert!(
+        !stdout.contains("divergent_commit_association"),
+        "the raw diagnostic code stays machine-side: {stdout}"
+    );
+    assert!(
+        !stdout.contains("\"schema\""),
+        "the text lane is not JSON: {stdout}"
+    );
+}
+
+#[test]
+fn text_association_digest_renders_clean_single_association() {
+    let repo = modified_repo();
+    capture(&repo);
+    associate_commit(&repo, "HEAD");
+    let repo_path = repo.path().to_str().unwrap();
+    let head_oid = repo.git(["rev-parse", "HEAD"]).stdout.trim().to_owned();
+    shore([
+        "review",
+        "association",
+        "associate-ref",
+        "--repo",
+        repo_path,
+        "--track",
+        "agent:codex",
+        "--ref",
+        "refs/heads/feat/x",
+        "--head",
+        &head_oid,
+    ]);
+
+    let output = shore([
+        "review",
+        "association",
+        "list",
+        "--repo",
+        repo_path,
+        "--format",
+        "text",
+    ]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // "1 current commit association" — a single, un-diverged edge.
+    assert!(
+        stdout.contains("assoc"),
+        "digest names associations: {stdout}"
+    );
+    assert!(
+        stdout.contains("feat/x"),
+        "digest shows the ref name: {stdout}"
+    );
+    assert!(
+        !stdout.contains("diverge"),
+        "a single association carries no divergence language: {stdout}"
+    );
+    assert!(
+        !stdout.contains("\"schema\""),
+        "the text lane is not JSON: {stdout}"
+    );
+}
+
+#[test]
+fn text_association_digest_reports_landing_when_liveness_resolves() {
+    let repo = committed_repo();
+    let repo_path = repo.path().to_str().unwrap();
+    // A commit-range capture anchors the target (HEAD) commit, reachable from main.
+    let capture = shore(["review", "capture", "--repo", repo_path, "--base", "HEAD~1"]);
+    assert!(
+        capture.status.success(),
+        "capture failed: {}",
+        String::from_utf8_lossy(&capture.stderr)
+    );
+    associate_commit(&repo, "HEAD");
+
+    let output = shore([
+        "review",
+        "association",
+        "list",
+        "--repo",
+        repo_path,
+        "--format",
+        "text",
+    ]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("landing:"),
+        "digest carries a landing line: {stdout}"
+    );
+    assert!(
+        !stdout.contains("landing: unknown"),
+        "a reachable anchor resolves to a real headline, not the placeholder: {stdout}"
+    );
+}
+
+#[test]
+fn text_association_digest_reads_orphaned_anchor_as_orphaned() {
+    // A range capture anchored to a commit on a soon-deleted branch: the commit
+    // survives in the object store but no live ref reaches it → orphaned. Liveness
+    // resolves it (a real status), so the headline is `orphaned`, never `unknown`,
+    // and the read still exits 0 (INV-10).
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.git(["checkout", "-b", "feature"]);
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    repo.commit_all("feature work");
+    let repo_path = repo.path().to_str().unwrap();
+    let capture = shore(["review", "capture", "--repo", repo_path, "--base", "main"]);
+    assert!(capture.status.success());
+    let revision_id = parse_json(&capture.stdout)["revision"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    repo.git(["checkout", "main"]);
+    repo.git(["branch", "-D", "feature"]);
+
+    // The current worktree no longer resolves this revision, so name it explicitly.
+    let output = shore([
+        "review",
+        "association",
+        "list",
+        "--repo",
+        repo_path,
+        "--revision",
+        &revision_id,
+        "--format",
+        "text",
+    ]);
+    assert!(
+        output.status.success(),
+        "the digest exits 0 even when the anchor is orphaned"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("landing: orphaned"),
+        "an unreachable anchor reads as orphaned: {stdout}"
+    );
 }
 
 #[test]
