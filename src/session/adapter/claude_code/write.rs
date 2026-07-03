@@ -556,16 +556,21 @@ mod tests {
     }
 
     #[test]
-    fn task_event_target_subject_serializes_as_externally_tagged_target_ref() {
+    fn task_event_target_binds_an_opaque_subject_id() {
         let intent = checkpoint_intent_basic();
         let event: ShoreEvent = intent_to_event(&intent).unwrap();
 
+        // The envelope binds only the opaque subjectId — no structural subject on
+        // the wire. The checkpoint subject is reconstructed from the payload.
         let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["target"]["subject"]["task"]["kind"], "checkpoint");
-        assert_eq!(
-            json["target"]["subject"]["task"]["checkpointId"],
-            "checkpoint:sha256:cp"
+        assert!(
+            json["target"]["subjectId"]
+                .as_str()
+                .unwrap()
+                .starts_with("subject:sha256:")
         );
+        assert!(json["target"].get("subject").is_none());
+        assert_eq!(json["payload"]["checkpointId"], "checkpoint:sha256:cp");
     }
 
     fn _suppress_unused_review_target_ref() {

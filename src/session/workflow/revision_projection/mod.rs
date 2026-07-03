@@ -3371,7 +3371,7 @@ mod tests {
                 let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
                     return false;
                 };
-                json["eventType"] == "work_object_proposed"
+                json["eventType"] == "t:02"
                     && json["payload"]["workObject"]["revision"]["id"] == revision_id.as_str()
             })
             .expect("find capture event")

@@ -44,7 +44,7 @@ fn artifact_removed_event(repo: &Path) -> Value {
             continue;
         }
         let value: Value = parse_json(&fs::read(&path).unwrap());
-        if value["eventType"] == "artifact_removed" {
+        if value["eventType"] == "t:16" {
             return value;
         }
     }

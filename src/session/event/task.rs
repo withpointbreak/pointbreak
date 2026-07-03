@@ -276,7 +276,15 @@ mod tests {
         .unwrap();
 
         let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["target"]["subject"]["task"]["kind"], "task_attempt");
+        // The envelope binds the opaque subjectId; the task subject is
+        // reconstructed from the payload's parentTaskAttemptId (asserted below).
+        assert!(
+            json["target"]["subjectId"]
+                .as_str()
+                .unwrap()
+                .starts_with("subject:sha256:")
+        );
+        assert!(json["target"].get("subject").is_none());
         assert_eq!(json["payload"]["checkpointId"], "checkpoint:sha256:cp");
         assert_eq!(
             json["payload"]["parentTaskAttemptId"],
@@ -465,8 +473,14 @@ mod tests {
         .unwrap();
 
         let json = serde_json::to_value(&event).unwrap();
-        assert_eq!(json["eventType"], "task_observation_recorded");
-        assert_eq!(json["target"]["subject"]["task"]["kind"], "task_attempt");
+        assert_eq!(json["eventType"], "t:14");
+        assert!(
+            json["target"]["subjectId"]
+                .as_str()
+                .unwrap()
+                .starts_with("subject:sha256:")
+        );
+        assert!(json["target"].get("subject").is_none());
         assert_eq!(json["payload"]["observationId"], "obs:sha256:o1");
     }
 }

@@ -265,7 +265,7 @@ mod tests {
 
         let tbs = EventToBeSigned::from_event(&event, &signer).unwrap();
 
-        assert_eq!(tbs.event_type, "validation_check_recorded");
+        assert_eq!(tbs.event_type, "t:12");
         assert_eq!(tbs.assertion_mode, AssertionMode::Advisory);
     }
 

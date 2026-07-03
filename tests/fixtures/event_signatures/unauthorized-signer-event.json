@@ -1,8 +1,8 @@
 {
   "assertionMode": "advisory",
-  "eventId": "evt:sha256:c8c482c5babf434fed7858df6c26b9bd983015dca114f297febe62bfbc9f1de2",
-  "eventType": "review_observation_recorded",
-  "idempotencyKey": "review_observation_recorded:review-unit:sha256:1111111111111111111111111111111111111111111111111111111111111111:agent:vector:event-signature-golden-vector",
+  "eventId": "evt:sha256:0fe6523806ec94ccbe5380da6583477b32c6ed398c741d483c4b61a5a68a837d",
+  "eventType": "t:03",
+  "idempotencyKey": "t:03:review-unit:sha256:1111111111111111111111111111111111111111111111111111111111111111:agent:vector:event-signature-golden-vector",
   "occurredAt": "2026-06-03T23:59:00Z",
   "payload": {
     "body": "Pinned event signature vector.",
@@ -23,18 +23,13 @@
   "schema": "shore.event",
   "signature": {
     "alg": "ed25519",
-    "sig": "SPAHCLnriNcnRmTh3ILzS31EP911t8yOmDxHBahXgGwJb7HmJFg1vM9X83fVO7TdX//CUVPViAly09vnQpo+Dw==",
+    "sig": "gpNzURhkZWDUFsiZTCKBgYw91emzhjrUtwrLYOjh488m7YURInOXtcEUbk6Y45Wv4+jN3jZ/p05ZbqOLbtdDBQ==",
     "sigVersion": 1
   },
   "signer": "did:key:z6MkhFwXNFWosLeugvSf4wcL9t3uuRXueGSFTRgSvHhWj5G2",
   "target": {
     "journalId": "journal:fixture:event-signatures",
-    "subject": {
-      "review": {
-        "kind": "revision",
-        "revisionId": "review-unit:sha256:1111111111111111111111111111111111111111111111111111111111111111"
-      }
-    }
+    "subjectId": "subject:sha256:9d1205f9d068ff91d7bc7c7a9534de45ac7d4dac2a3009d5cde62531e11e5d0d"
   },
   "version": 1,
   "writer": {

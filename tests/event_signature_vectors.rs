@@ -88,7 +88,7 @@ fn golden_cosignature_idempotency_key_derives_from_full_triple() {
     let key = EventSignatureRecordedPayload::idempotency_key("sha256:rec", &signer, "SIG_BASE64");
     assert_eq!(
         key,
-        "event_signature_recorded:sha256:rec:did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd:SIG_BASE64"
+        "t:15:sha256:rec:did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd:SIG_BASE64"
     );
 
     let key_a = EventSignatureRecordedPayload::idempotency_key("sha256:rec", &signer, "SIGAAA");
@@ -123,7 +123,7 @@ fn golden_event_record_hash_is_signature_blind() {
     assert_eq!(signed_hash, unsigned.event_record_hash().unwrap());
     assert_eq!(
         signed_hash,
-        "sha256:23933e6fe38b38b812f02cc3751a1c3117af0797d29b19b2b66ed8463dde323d"
+        "sha256:cea1dd4ffbd3952266fb35b5a72fd369c74caa6b246ac446bcdc40f0920309a4"
     );
 }
 
@@ -306,8 +306,8 @@ fn producer_rename_left_signed_material_untouched() {
     // reproduce these bytes exactly; an unexpected change here is a
     // stop-the-line signal that an edit touched the signed material.
     const CANONICAL_TBS_SHA256: &str =
-        "3b6fcea2e242327fa8066fc89bbce42538a73c89512949bd34d90ae6286e2163";
-    const PAE_SHA256: &str = "d5ef6ca53f999dbef4e04371e352792fa63aae72dea14e839898cb0ca5504a24";
+        "c9d734fe39395b4280137048d20a87b13acb69cf53f5ab0bc68c1348fb71b6f5";
+    const PAE_SHA256: &str = "a90d1927745b03816f2cb9bca079bc4d5f919de8bda7d3da18f77a8547bd2039";
 
     let canonical_tbs =
         std::fs::read(fixture_path("canonical-tbs-v1.bytes")).expect("read canonical tbs bytes");

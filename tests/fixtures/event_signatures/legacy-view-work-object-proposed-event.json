@@ -1,8 +1,8 @@
 {
   "assertionMode": "advisory",
-  "eventId": "evt:sha256:8dee7b23b2176959bf8b0e0dcd1cac18e7ba4308e034b18505a09a9e0ec62fe6",
-  "eventType": "work_object_proposed",
-  "idempotencyKey": "work_object_proposed:rev:sha256:8888888888888888888888888888888888888888888888888888888888888888",
+  "eventId": "evt:sha256:92577402f9919ee4ee9c32bb42461dff93063046747b23adc99275d532ae9ef1",
+  "eventType": "t:02",
+  "idempotencyKey": "t:02:subject:sha256:c290d3630e6324d3bd85b0e5eaf84fe466b733a1909a9e99781f2a7373653570",
   "occurredAt": "2026-06-03T23:59:45Z",
   "payload": {
     "engagementId": "engagement:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -20,18 +20,13 @@
   "schema": "shore.event",
   "signature": {
     "alg": "ed25519",
-    "sig": "SM7v7VSSvMmhdV6ilsPV8xKOU/v6giQCH//dA8TvwoUWWIRvqY/9itIBRt8c6vhX8occAIPSKvBOSDjkelShDw==",
+    "sig": "qcuICBB0PiYp3fVtXLoxudxkiUNgytpJVrKR3FfMtXF6A+6G7v2Ph1/dBdYTfO3DtOv8kjUiqSIfGKW/JSt/AQ==",
     "sigVersion": 1
   },
   "signer": "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd",
   "target": {
     "journalId": "journal:fixture:event-signatures",
-    "subject": {
-      "review": {
-        "kind": "revision",
-        "revisionId": "rev:sha256:8888888888888888888888888888888888888888888888888888888888888888"
-      }
-    }
+    "subjectId": "subject:sha256:c290d3630e6324d3bd85b0e5eaf84fe466b733a1909a9e99781f2a7373653570"
   },
   "version": 1,
   "writer": {

@@ -1,8 +1,8 @@
 {
   "assertionMode": "advisory",
-  "eventId": "evt:sha256:9f1675cbd114516ff64928ee1b42ed34a2bb66aa93d161af38925f965e5027ab",
-  "eventType": "work_object_proposed",
-  "idempotencyKey": "work_object_proposed:task-attempt:sha256:5555555555555555555555555555555555555555555555555555555555555555:task_attempt:event-signature-task-vector",
+  "eventId": "evt:sha256:5c75c18f2ae64ce1c75dbf4a2312d9f1374761a0a02a70b1cb6295c364a6827c",
+  "eventType": "t:02",
+  "idempotencyKey": "t:02:subject:sha256:2732135d0d145b80822cd7beb67d84f3c4977486cd252df3f46636d2df5c2b5f",
   "occurredAt": "2026-06-03T23:59:30Z",
   "payload": {
     "engagementId": "engagement:sha256:7777777777777777777777777777777777777777777777777777777777777777",
@@ -19,17 +19,13 @@
   "schema": "shore.event",
   "signature": {
     "alg": "ed25519",
-    "sig": "LPnShOJ/yytTHzgecxjJjx/nNFhiUrc2fJsAWlLdIIYQrmlWGajqwDDWZ4UlXkkI80logASfutcSegmWKYuBBg==",
+    "sig": "i/tgOLT8MrREbnC6Eux41MmJXM4Kj3ap9PrldOE+oeiLV4GzoH1LERykbZrHoVgxEBi6rrirbKFP1ee+NbuCCQ==",
     "sigVersion": 1
   },
   "signer": "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd",
   "target": {
     "journalId": "journal:claude:event-signature-task-vector",
-    "subject": {
-      "task": {
-        "kind": "task_attempt"
-      }
-    }
+    "subjectId": "subject:sha256:2732135d0d145b80822cd7beb67d84f3c4977486cd252df3f46636d2df5c2b5f"
   },
   "version": 1,
   "writer": {

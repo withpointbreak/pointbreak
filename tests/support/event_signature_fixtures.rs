@@ -15,8 +15,11 @@ use ed25519_dalek::{Signer as _, SigningKey};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use shoreline::crypto::SignerId;
+use shoreline::model::{
+    JournalId, ReviewTargetRef, RevisionId, TargetRef, TaskTargetRef, TrackId, WorkObjectId,
+};
 use shoreline::session::event::{
-    EventToBeSigned, ShoreEvent, event_signature_pre_authentication_encoding,
+    EventTarget, EventToBeSigned, ShoreEvent, event_signature_pre_authentication_encoding,
 };
 
 /// In-memory fixture set: file name → exact file bytes.
@@ -72,10 +75,9 @@ const MUTATION_CASES: &[MutationCase] = &[
     },
     MutationCase {
         file: "target-mutated-event.json",
-        mutation: "target subject revisionId changed after signing",
+        mutation: "target subjectId changed after signing",
         apply: |event| {
-            event["target"]["subject"]["review"]["revisionId"] =
-                json!(format!("rev:sha256:{}", "9".repeat(64)));
+            event["target"]["subjectId"] = json!(format!("subject:sha256:{}", "9".repeat(64)));
         },
     },
     MutationCase {
@@ -249,9 +251,29 @@ fn seed_from_hex(hex: &str) -> [u8; 32] {
     seed
 }
 
+/// Build the opaque envelope target for a subject and return both the serialized
+/// `{journalId, subjectId?, trackId?}` value and the derived `subjectId`. The
+/// signed vectors bind the opaque subjectId (seam S2), and the two
+/// work-object-proposed producers fold that same subjectId into their idempotency
+/// key, so both are sourced from one live `EventTarget::for_subject` call.
+fn subject_target(journal_id: &str, subject: TargetRef, track_id: Option<&str>) -> (Value, String) {
+    let target = EventTarget::for_subject(
+        JournalId::new(journal_id),
+        subject,
+        track_id.map(TrackId::new),
+    )
+    .expect("build event target");
+    let subject_id = target
+        .subject_id
+        .clone()
+        .expect("a non-journal subject has an opaque id");
+    let value = serde_json::to_value(&target).expect("serialize event target");
+    (value, subject_id)
+}
+
 /// The shared unsigned envelope every vector derives from. Hashes are
-/// recomputed from content; the trailing asserts pin them to the values the
-/// v1 vectors shipped with (they do not depend on the writer envelope shape).
+/// recomputed from content; the trailing assert pins the eventId to the value
+/// the opaque-coded vectors carry.
 fn base_event() -> Value {
     let revision_id = format!("review-unit:sha256:{}", "1".repeat(64));
     let body = "Pinned event signature vector.";
@@ -267,23 +289,30 @@ fn base_event() -> Value {
         },
         "title": "Golden vector observation",
     });
-    let idempotency_key = format!(
-        "review_observation_recorded:{revision_id}:agent:vector:event-signature-golden-vector"
+    // The envelope binds the opaque subjectId; the structural target stays in the
+    // payload above and is reconstructed by the projection.
+    let (target, _subject_id) = subject_target(
+        "journal:fixture:event-signatures",
+        TargetRef::Review(ReviewTargetRef::Revision {
+            revision_id: RevisionId::new(&revision_id),
+        }),
+        None,
     );
+    let idempotency_key = format!("t:03:{revision_id}:agent:vector:event-signature-golden-vector");
     let event_id = format!(
         "evt:sha256:{}",
         hex(&Sha256::digest(idempotency_key.as_bytes()))
     );
     let payload_hash = sha256_canonical_json_prefixed(&payload);
     assert_eq!(
-        event_id, "evt:sha256:c8c482c5babf434fed7858df6c26b9bd983015dca114f297febe62bfbc9f1de2",
+        event_id, "evt:sha256:0fe6523806ec94ccbe5380da6583477b32c6ed398c741d483c4b61a5a68a837d",
         "eventId derivation drifted from the pinned vector"
     );
 
     json!({
         "assertionMode": "advisory",
         "eventId": event_id,
-        "eventType": "review_observation_recorded",
+        "eventType": "t:03",
         "idempotencyKey": idempotency_key,
         "occurredAt": "2026-06-03T23:59:00Z",
         "payload": payload,
@@ -291,15 +320,7 @@ fn base_event() -> Value {
         "schema": "shore.event",
         "signature": null,
         "signer": null,
-        "target": {
-            "journalId": "journal:fixture:event-signatures",
-            "subject": {
-                "review": {
-                    "kind": "revision",
-                    "revisionId": revision_id,
-                }
-            }
-        },
+        "target": target,
         "version": 1,
         "writer": {
             "actorId": "actor:git-email:alice@example.com",
@@ -327,8 +348,16 @@ fn task_event() -> Value {
             "taskAttemptId": task_attempt_id,
         },
     });
-    let idempotency_key =
-        format!("work_object_proposed:{task_attempt_id}:task_attempt:{claude_session_uuid}");
+    // The task-attempt WorkObjectProposed folds the opaque subjectId into its
+    // idempotency key (the envelope binds the same subjectId).
+    let (target, subject_id) = subject_target(
+        &format!("journal:claude:{claude_session_uuid}"),
+        TargetRef::Task(TaskTargetRef::TaskAttempt {
+            task_attempt_id: WorkObjectId::new(&task_attempt_id),
+        }),
+        None,
+    );
+    let idempotency_key = format!("t:02:{subject_id}");
     let event_id = format!(
         "evt:sha256:{}",
         hex(&Sha256::digest(idempotency_key.as_bytes()))
@@ -338,7 +367,7 @@ fn task_event() -> Value {
     json!({
         "assertionMode": "advisory",
         "eventId": event_id,
-        "eventType": "work_object_proposed",
+        "eventType": "t:02",
         "idempotencyKey": idempotency_key,
         "occurredAt": "2026-06-03T23:59:30Z",
         "payload": payload,
@@ -346,14 +375,7 @@ fn task_event() -> Value {
         "schema": "shore.event",
         "signature": null,
         "signer": null,
-        "target": {
-            "journalId": format!("journal:claude:{claude_session_uuid}"),
-            "subject": {
-                "task": {
-                    "kind": "task_attempt",
-                }
-            }
-        },
+        "target": target,
         "version": 1,
         "writer": {
             "actorId": "actor:git-email:alice@example.com",
@@ -385,7 +407,16 @@ fn legacy_view_revision_proposed_event() -> Value {
             "snapshotArtifactContentHash": format!("sha256:{}", "a".repeat(64)),
         },
     });
-    let idempotency_key = format!("work_object_proposed:{revision_id}");
+    // The review-domain WorkObjectProposed folds the opaque subjectId into its
+    // idempotency key (the envelope binds the same subjectId).
+    let (target, subject_id) = subject_target(
+        "journal:fixture:event-signatures",
+        TargetRef::Review(ReviewTargetRef::Revision {
+            revision_id: RevisionId::new(&revision_id),
+        }),
+        None,
+    );
+    let idempotency_key = format!("t:02:{subject_id}");
     let event_id = format!(
         "evt:sha256:{}",
         hex(&Sha256::digest(idempotency_key.as_bytes()))
@@ -395,7 +426,7 @@ fn legacy_view_revision_proposed_event() -> Value {
     json!({
         "assertionMode": "advisory",
         "eventId": event_id,
-        "eventType": "work_object_proposed",
+        "eventType": "t:02",
         "idempotencyKey": idempotency_key,
         "occurredAt": "2026-06-03T23:59:45Z",
         "payload": payload,
@@ -404,15 +435,7 @@ fn legacy_view_revision_proposed_event() -> Value {
         "schema": "shore.event",
         "signature": null,
         "signer": null,
-        "target": {
-            "journalId": "journal:fixture:event-signatures",
-            "subject": {
-                "review": {
-                    "kind": "revision",
-                    "revisionId": revision_id,
-                }
-            }
-        },
+        "target": target,
         "version": 1,
         "writer": {
             "actorId": "actor:git-email:alice@example.com",

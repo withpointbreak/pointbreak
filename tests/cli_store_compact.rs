@@ -66,7 +66,7 @@ fn mark_removal_ingested(repo: &Path) {
             continue;
         }
         let mut value: Value = parse_json(&fs::read(&path).unwrap());
-        if value["eventType"] == "artifact_removed" {
+        if value["eventType"] == "t:16" {
             value["ingest"] = serde_json::json!({
                 "via": "ingest-events",
                 "receivedAt": "2026-06-19T01:00:00Z"

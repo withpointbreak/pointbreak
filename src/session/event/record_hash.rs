@@ -195,7 +195,7 @@ mod tests {
 
         assert_eq!(
             hash,
-            "sha256:23933e6fe38b38b812f02cc3751a1c3117af0797d29b19b2b66ed8463dde323d",
+            "sha256:cea1dd4ffbd3952266fb35b5a72fd369c74caa6b246ac446bcdc40f0920309a4",
         );
     }
 

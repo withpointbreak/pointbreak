@@ -13,7 +13,7 @@
     {
       "expected": "invalid",
       "file": "target-mutated-event.json",
-      "mutation": "target subject revisionId changed after signing"
+      "mutation": "target subjectId changed after signing"
     },
     {
       "expected": "invalid",

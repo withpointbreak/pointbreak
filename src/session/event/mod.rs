@@ -422,13 +422,17 @@ mod tests {
         .unwrap();
 
         let json = serde_json::to_value(event).unwrap();
-        assert_eq!(json["eventType"], "work_object_proposed");
+        assert_eq!(json["eventType"], "t:02");
         assert_eq!(json["target"]["journalId"], "journal:default");
-        assert_eq!(json["target"]["subject"]["review"]["kind"], "revision");
-        assert_eq!(
-            json["target"]["subject"]["review"]["revisionId"],
-            "review-unit:sha256:abc"
+        // The envelope binds only the opaque subjectId; the structural subject
+        // moved to the payload and is reconstructed by the projection.
+        assert!(
+            json["target"]["subjectId"]
+                .as_str()
+                .unwrap()
+                .starts_with("subject:sha256:")
         );
+        assert!(json["target"].get("subject").is_none());
         assert!(json["target"].get("trackId").is_none());
         assert!(json["target"].get("workUnitId").is_none());
         assert!(json["target"].get("snapshotId").is_none());
@@ -663,9 +667,17 @@ mod tests {
 
         let json = serde_json::to_value(event).unwrap();
 
-        assert_eq!(json["eventType"], "review_observation_recorded");
+        assert_eq!(json["eventType"], "t:03");
         assert_eq!(json["target"]["trackId"], "agent:codex");
-        assert_eq!(json["target"]["subject"]["review"]["kind"], "range");
+        // The envelope binds the opaque subjectId; the structural "range" subject
+        // rides the payload target (asserted below).
+        assert!(
+            json["target"]["subjectId"]
+                .as_str()
+                .unwrap()
+                .starts_with("subject:sha256:")
+        );
+        assert!(json["target"].get("subject").is_none());
         assert_eq!(json["payload"]["observationId"], "obs:sha256:one");
         assert_eq!(json["payload"]["target"]["kind"], "range");
         assert_eq!(json["payload"]["bodyContentHash"], "sha256:body");
@@ -791,7 +803,7 @@ mod tests {
 
         let json = serde_json::to_value(&event).expect("event serializes");
 
-        assert_eq!(json["eventType"], "review_note_imported");
+        assert_eq!(json["eventType"], "t:07");
         assert_eq!(json["payload"]["noteId"], "note:abc");
         assert!(json["payloadHash"].as_str().unwrap().starts_with("sha256:"));
     }
