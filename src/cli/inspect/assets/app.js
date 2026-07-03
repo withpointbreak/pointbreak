@@ -3425,9 +3425,14 @@
   // src/prefs.ts
   var THEME_KEY = "shore-inspect-theme";
   var DENSITY_KEY = "shore-inspect-density";
-  function preferredTheme() {
+  var liveMediaQueries = [];
+  function hasPinnedTheme() {
     const stored = localStorage.getItem(THEME_KEY);
-    if (stored === "light" || stored === "dark") return stored;
+    return stored === "light" || stored === "dark";
+  }
+  __name(hasPinnedTheme, "hasPinnedTheme");
+  function preferredTheme() {
+    if (hasPinnedTheme()) return localStorage.getItem(THEME_KEY);
     return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
   }
   __name(preferredTheme, "preferredTheme");
@@ -3460,9 +3465,19 @@
     applyDensity(preferredDensity());
   }
   __name(applyPrefs, "applyPrefs");
+  function watchColorScheme() {
+    const query = window.matchMedia("(prefers-color-scheme: light)");
+    liveMediaQueries.push(query);
+    query.addEventListener("change", () => {
+      if (hasPinnedTheme()) return;
+      applyTheme(preferredTheme());
+    });
+  }
+  __name(watchColorScheme, "watchColorScheme");
   function initControls5() {
     $("#theme-toggle")?.addEventListener("click", toggleTheme);
     $("#density-toggle")?.addEventListener("click", toggleDensity);
+    watchColorScheme();
   }
   __name(initControls5, "initControls");
 

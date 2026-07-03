@@ -7,6 +7,7 @@ import {
   preferredTheme,
   toggleDensity,
   toggleTheme,
+  watchColorScheme,
 } from "../src/prefs";
 import { mountInspectorDom, resetDom } from "./support/dom";
 
@@ -33,6 +34,40 @@ function fakeMediaQueryList(matches: boolean, media: string): MediaQueryList {
 function stubPrefersLight(prefersLight: boolean): void {
   window.matchMedia = (query: string) =>
     fakeMediaQueryList(prefersLight && query.includes("light"), query);
+}
+
+/** A matchMedia stub whose OS preference can flip live, firing registered `change` handlers. */
+function stubControllableColorScheme(initialPrefersLight: boolean): {
+  setPrefersLight(next: boolean): void;
+} {
+  let prefersLight = initialPrefersLight;
+  const handlers: Array<(e: MediaQueryListEvent) => void> = [];
+  window.matchMedia = (query: string): MediaQueryList => {
+    const isLightQuery = query.includes("light");
+    return {
+      get matches() {
+        return isLightQuery ? prefersLight : !prefersLight;
+      },
+      media: query,
+      onchange: null,
+      addEventListener: (
+        _type: string,
+        cb: EventListenerOrEventListenerObject,
+      ) => {
+        handlers.push(cb as (e: MediaQueryListEvent) => void);
+      },
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    } as MediaQueryList;
+  };
+  return {
+    setPrefersLight(next: boolean): void {
+      prefersLight = next;
+      for (const cb of handlers) cb({ matches: next } as MediaQueryListEvent);
+    },
+  };
 }
 
 beforeEach(() => {
@@ -121,6 +156,28 @@ describe("applyPrefs", () => {
   it("defaults density to comfortable when unset", () => {
     applyPrefs();
     expect(document.documentElement.classList.contains("compact")).toBe(false);
+  });
+});
+
+describe("watchColorScheme", () => {
+  it("re-applies the theme live when the OS preference flips and no theme is pinned", () => {
+    const media = stubControllableColorScheme(false);
+    applyPrefs();
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+    watchColorScheme();
+    media.setPrefersLight(true);
+    expect(document.documentElement.getAttribute("data-theme")).toBe("light");
+    media.setPrefersLight(false);
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
+  });
+
+  it("ignores OS changes once the reader has pinned an explicit theme", () => {
+    const media = stubControllableColorScheme(false);
+    localStorage.setItem(THEME_KEY, "dark");
+    applyPrefs();
+    watchColorScheme();
+    media.setPrefersLight(true);
+    expect(document.documentElement.getAttribute("data-theme")).toBe("dark");
   });
 });
 

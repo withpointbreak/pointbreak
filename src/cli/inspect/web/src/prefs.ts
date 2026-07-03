@@ -11,10 +11,21 @@ import { $ } from "./dom";
 const THEME_KEY = "shore-inspect-theme";
 const DENSITY_KEY = "shore-inspect-density";
 
+// Strong references to the MediaQueryLists we've attached `change` listeners to.
+// WebKit/Safari garbage-collects a MediaQueryList that is reachable only through
+// its own listener, which silently stops the listener from ever firing; holding a
+// reference here keeps the query alive (Chromium/Firefox retain it regardless).
+const liveMediaQueries: MediaQueryList[] = [];
+
+/** True when the reader has pinned an explicit theme via the toggle (so the OS is ignored). */
+function hasPinnedTheme(): boolean {
+  const stored = localStorage.getItem(THEME_KEY);
+  return stored === "light" || stored === "dark";
+}
+
 /** The stored theme if it is `light`/`dark`, else the OS color-scheme preference. */
 export function preferredTheme(): string {
-  const stored = localStorage.getItem(THEME_KEY);
-  if (stored === "light" || stored === "dark") return stored;
+  if (hasPinnedTheme()) return localStorage.getItem(THEME_KEY) as string;
   return window.matchMedia("(prefers-color-scheme: light)").matches
     ? "light"
     : "dark";
@@ -64,8 +75,27 @@ export function applyPrefs(): void {
   applyDensity(preferredDensity());
 }
 
-/** Wire the `#theme-toggle` / `#density-toggle` buttons (the fixed-id listener tier). */
+/**
+ * Follow live OS color-scheme changes while the reader hasn't pinned a theme.
+ * `applyPrefs` reads the OS preference once before first paint; without this,
+ * a later system light/dark switch only takes effect on the next page load.
+ * A pinned light/dark choice (via the toggle) still wins over the OS.
+ *
+ * The query is retained in `liveMediaQueries` so Safari doesn't garbage-collect
+ * it out from under its own listener (see the note on that binding).
+ */
+export function watchColorScheme(): void {
+  const query = window.matchMedia("(prefers-color-scheme: light)");
+  liveMediaQueries.push(query);
+  query.addEventListener("change", () => {
+    if (hasPinnedTheme()) return;
+    applyTheme(preferredTheme());
+  });
+}
+
+/** Wire the `#theme-toggle` / `#density-toggle` buttons and the OS color-scheme watcher. */
 export function initControls(): void {
   $("#theme-toggle")?.addEventListener("click", toggleTheme);
   $("#density-toggle")?.addEventListener("click", toggleDensity);
+  watchColorScheme();
 }
