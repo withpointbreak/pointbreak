@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::error::{Result, SchemaBreakRecord, ShoreError};
 use crate::model::id_prefix;
-use crate::session::event::{AssertionMode, EventType, ShoreEvent};
+use crate::session::event::{AssertionMode, EventType, ShoreEvent, event_type_from_code};
 use crate::session::store::backend::{Journal, JournalEntry, LocalJournal, StoreBackend};
 use crate::storage::{CreateOutcome, LocalStorage};
 
@@ -198,23 +198,44 @@ impl EventStore {
             event_type: &'a str,
             #[serde(default)]
             writer: WriterProbe,
+            #[serde(default)]
+            target: TargetProbe,
         }
-        // Two hard breaks, two probe shapes. `role` (ADR-0007): serde ignores
-        // unknown fields, so a stored pre-break envelope would otherwise load
-        // silently with degraded meaning; the probe makes the break loud.
-        // `tool` (ADR-0010): the rename to `producer` makes the break naturally
-        // loud (the required field is missing), but only as an opaque serde
-        // error; the probe upgrades it to the typed migration error pointing at
-        // the doc anchor where the replacement field is documented. The probe
-        // runs before full decode, so the typed error wins.
+        // Hard breaks, probed in wire position before full decode so the typed
+        // migration error wins over an opaque serde error. `role` (ADR-0007) and
+        // `tool` (ADR-0010): serde ignores unknown fields, so a stored pre-break
+        // envelope would otherwise load silently with degraded meaning (or fail
+        // opaquely); the probe makes the break loud and points at the doc anchor.
+        // `target.subject` is the pre-opaque-code structural subject, retired for
+        // the opaque `subjectId` — serde would silently ignore it, so probe it too.
         #[derive(Default, serde::Deserialize)]
         struct WriterProbe {
             role: Option<serde::de::IgnoredAny>,
             tool: Option<serde::de::IgnoredAny>,
         }
+        #[derive(Default, serde::Deserialize)]
+        struct TargetProbe {
+            subject: Option<serde::de::IgnoredAny>,
+        }
         let probe: EventProbe<'_> = serde_json::from_slice(bytes)?;
         if let Some(record) = schema_break_for(probe.event_type) {
             return Err(ShoreError::UnsupportedEventType(record));
+        }
+        // After the opaque-coded break the stored `eventType` is a `t:NN` code; a
+        // readable snake_case name in that position is the pre-opaque-code shape.
+        // Reject it loudly with a migration pointer instead of failing deep in the
+        // type-code serde adapter.
+        if event_type_from_code(probe.event_type).is_none() {
+            return Err(ShoreError::UnsupportedEventType(
+                schema_break_for("eventType.snake_case")
+                    .expect("the pre-opaque-code event-type encoding has a break record"),
+            ));
+        }
+        if probe.target.subject.is_some() {
+            return Err(ShoreError::UnsupportedEventEnvelope(
+                schema_break_for("target.subject")
+                    .expect("the pre-opaque-code structural subject has a break record"),
+            ));
         }
         if probe.writer.role.is_some() {
             return Err(ShoreError::UnsupportedEventEnvelope(
@@ -409,6 +430,13 @@ fn schema_break_for(retired: &str) -> Option<SchemaBreakRecord> {
         ),
         "writer.role" => ("0.1", "docs/storage-model.md#legacy-writer-role-events"),
         "writer.tool" => ("0.1", "docs/storage-model.md#legacy-writer-tool-events"),
+        // The opaque-coded signed-identity break: the readable snake_case
+        // `eventType` encoding and the structural `target.subject` envelope are
+        // both retired for the opaque `t:NN` code and `subjectId`.
+        "eventType.snake_case" | "target.subject" => (
+            "0.1",
+            "docs/store-migration.md#1-a-fail-loud-strict-reader-not-a-dual-read",
+        ),
         _ => return None,
     };
     Some(SchemaBreakRecord {
@@ -449,6 +477,14 @@ mod tests {
             ),
             ("writer.role", "storage-model.md#legacy-writer-role-events"),
             ("writer.tool", "storage-model.md#legacy-writer-tool-events"),
+            (
+                "eventType.snake_case",
+                "store-migration.md#1-a-fail-loud-strict-reader-not-a-dual-read",
+            ),
+            (
+                "target.subject",
+                "store-migration.md#1-a-fail-loud-strict-reader-not-a-dual-read",
+            ),
         ] {
             let record =
                 schema_break_for(retired).expect("a retired identifier has a break record");
@@ -461,6 +497,47 @@ mod tests {
             );
         }
         assert!(schema_break_for("review_observation_recorded").is_none());
+    }
+
+    #[test]
+    fn pre_opaque_code_snake_case_event_type_is_rejected_with_a_break_record() {
+        // An old-shape stored envelope carries a readable snake_case eventType where
+        // a t:NN code is now required. The strict reader must reject it loudly with a
+        // typed break record, not fail deep in serde and not accept it.
+        let bytes = br#"{"eventType":"review_observation_recorded"}"#;
+        let err = EventStore::decode_validated_event(bytes, None).unwrap_err();
+        match err {
+            ShoreError::UnsupportedEventType(record) => {
+                assert_eq!(record.retired, "eventType.snake_case");
+                assert!(!record.broken_at.is_empty());
+                assert!(
+                    record.anchor.contains("store-migration"),
+                    "{}",
+                    record.anchor
+                );
+            }
+            other => panic!("expected UnsupportedEventType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pre_opaque_code_structural_subject_envelope_is_rejected_with_a_break_record() {
+        // A t:NN-coded envelope that still carries the old structural `subject`
+        // (rather than the opaque subjectId) is the pre-reshape shape: reject it
+        // loudly rather than silently ignoring the unknown field.
+        let bytes = br#"{"eventType":"t:03","target":{"journalId":"journal:x","subject":{"review":{"kind":"revision","revisionId":"rev:sha256:a"}}}}"#;
+        let err = EventStore::decode_validated_event(bytes, None).unwrap_err();
+        match err {
+            ShoreError::UnsupportedEventEnvelope(record) => {
+                assert_eq!(record.retired, "target.subject");
+                assert!(
+                    record.anchor.contains("store-migration"),
+                    "{}",
+                    record.anchor
+                );
+            }
+            other => panic!("expected UnsupportedEventEnvelope, got {other:?}"),
+        }
     }
 
     #[test]
@@ -945,8 +1022,11 @@ mod tests {
             let valid = review_initialized_event();
             store.record_event_once(&valid).unwrap();
 
-            // A retired-type blob and a writer.role blob, injected raw: the probe
+            // Retired-type and retired-envelope blobs, injected raw: the probe
             // rejects them before full decode, so no valid signature/hash is needed.
+            // A prior-break retired eventType, the opaque-coded break (a readable
+            // snake_case eventType where a t:NN code is now required), and a
+            // writer.role envelope carried on an otherwise-valid t:NN code.
             journal
                 .insert_raw(
                     "retired:type:key",
@@ -955,14 +1035,20 @@ mod tests {
                 .unwrap();
             journal
                 .insert_raw(
+                    "retired:opaque-code:key",
+                    br#"{"eventType":"review_observation_recorded"}"#,
+                )
+                .unwrap();
+            journal
+                .insert_raw(
                     "retired:envelope:key",
-                    br#"{"eventType":"review_initialized","writer":{"role":"x"}}"#,
+                    br#"{"eventType":"t:01","writer":{"role":"x"}}"#,
                 )
                 .unwrap();
 
             let (events, skipped) = store.list_events_lenient().unwrap();
             assert_eq!(events.len(), 1, "the one valid event survives");
-            assert_eq!(skipped.len(), 2);
+            assert_eq!(skipped.len(), 3);
             let codes: std::collections::BTreeSet<_> = skipped.iter().map(|s| s.code).collect();
             assert!(codes.contains(&"unsupported_event_type"));
             assert!(codes.contains(&"unsupported_event_envelope"));
@@ -972,10 +1058,11 @@ mod tests {
     #[test]
     fn list_events_lenient_hard_errors_on_genuine_corruption_over_every_backend() {
         for_each_event_backend(|store, journal| {
-            // Not a retired schema — a malformed event that fails decode for
-            // another reason must propagate, not be silently skipped.
+            // Not a retired schema — a well-coded but malformed event (a valid t:NN
+            // eventType with the rest of the envelope missing) fails decode for
+            // another reason and must propagate, not be silently skipped.
             journal
-                .insert_raw("corrupt:key", br#"{"eventType":"review_initialized"}"#)
+                .insert_raw("corrupt:key", br#"{"eventType":"t:01"}"#)
                 .unwrap();
             assert!(store.list_events_lenient().is_err());
         });

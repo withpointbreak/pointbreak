@@ -64,7 +64,7 @@ pub use tbs::{
     EVENT_TO_BE_SIGNED_V1_PAYLOAD_TYPE, EventToBeSigned,
     event_signature_pre_authentication_encoding, event_to_be_signed, pre_authentication_encoding,
 };
-pub(crate) use type_code::type_code;
+pub(crate) use type_code::{event_type_from_code, type_code};
 pub use validation::ValidationCheckRecordedPayload;
 pub use work_object_proposed::{
     GitProvenance, Revision, WorkObjectProposal, WorkObjectProposedPayload,
