@@ -1,9 +1,9 @@
-# ADR-0029: CLI Output-Mode Convention — Human-Default Output, `--format`-Selected Machine Contract
+# ADR-0029: CLI Output-Mode Convention — Text-Default Output, `--format`-Selected Machine Contract
 
 **Status:** Accepted (owner-approved 2026-07-02); landed 2026-07-02 (grounding issue #96).
 **Date:** 2026-07-02
 **See also:** **ADR-0028** (id-prefix convention — the ids-are-opaque contract and the
-display-truncation precedent this ADR extends to CLI human output), **ADR-0030** (named command
+display-truncation precedent this ADR extends to CLI text output), **ADR-0030** (named command
 surface — the human-named commands that ride this convention), the "Command output JSON" and "IDs
 are opaque" sections of `docs/review-workflow.md` (the stability promise this ADR re-grades), and
 `docs/cli-reference.md` (the per-command reference this convention governs). Grounding issue:
@@ -83,44 +83,44 @@ one-line advisory hint to stderr alongside successful JSON stdout
 
 ## Decision
 
-1. **Human-default is adopted: bare `shore …` speaks to a person.** Every document-emitting
-   command's default stdout becomes its **human lane** — a human-readable rendering, bounded and
+1. **Text-default is adopted: bare `shore …` speaks to a person.** Every document-emitting
+   command's default stdout becomes its **text lane** — a human-readable rendering, bounded and
    domain-named once bespoke (Decision 3 defines the content and the transition fallback). The
    machine document moves behind an explicit selector (Decision 2) — this is
-   git's porcelain rule in its native orientation: the human default evolves freely; the named
+   git's porcelain rule in its native orientation: the text default evolves freely; the named
    machine format is the contract. **This is a breaking change to today's default and is
    accepted**; Decision 8 defines the migration. The break is invocation-level only — the machine
    documents themselves do not change shape, so no document `version` bumps.
 
-2. **The selector is `--format <human|json|json-pretty>`, with `SHORE_FORMAT` as the scripted
+2. **The selector is `--format <text|json|json-pretty>`, with `SHORE_FORMAT` as the scripted
    default.** Precedence: explicit `--format` flag > `SHORE_FORMAT` environment variable >
-   built-in default (`human`).
+   built-in default (`text`).
    - `--format json` emits the machine document — the **machine lane** — byte-identical to
      today's compact default output. Consumers migrate by adding one flag or exporting one
      variable; nothing about the documents, field names, or values changes.
    - `--format json-pretty` is the same document, indented: the eyeball-debugging form. The byte
      contract is pinned on `json` only.
-   - `--format human` explicitly selects the human lane (it out-ranks an exported
+   - `--format text` explicitly selects the text lane (it out-ranks an exported
      `SHORE_FORMAT=json` for one call).
    - `SHORE_FORMAT` accepts the same values and exists so a script or agent harness pins the
      machine lane once instead of repeating the flag on every call. CI and byte-pinned tests
      should prefer the per-call flag, which is immune to environment leakage.
    - The `--pretty`/`--compact` flags are retired with the flip; their jobs are absorbed
-     (`json` is compact; `json-pretty` is indented; `human` is readable). An unknown or invalid
+     (`json` is compact; `json-pretty` is indented; `text` is readable). An unknown or invalid
      `SHORE_FORMAT` value is a hard error, not a silent fallback.
    - The convention applies uniformly to reads and write acks. Exit-code semantics are shared
      across lanes and remain contract.
 
-3. **Human-lane output is formally disposable; the machine lane is the stability surface.**
-   Wording, layout, truncation, ordering, and color of the human lane may change in any release
+3. **Text-lane output is formally disposable; the machine lane is the stability surface.**
+   Wording, layout, truncation, ordering, and color of the text lane may change in any release
    without notice, and nothing — no script, skill, or relay — may parse it. **Transition
-   fallback:** a command that does not yet have a bespoke human rendering emits the indented
-   JSON document as its interim human lane; because the human lane is disposable, replacing that
+   fallback:** a command that does not yet have a bespoke text rendering emits the indented
+   JSON document as its interim text lane; because the text lane is disposable, replacing that
    fallback with a real digest later is not a break. The fallback is
    **parseable-but-non-contract** — it happens to be valid JSON, but parsing it is as forbidden
-   as parsing any human rendering — and it is **not available to the consumed commands**: any
+   as parsing any text rendering — and it is **not available to the consumed commands**: any
    command whose document carries a hard-core consumed field-path (Decision 7) must ship a real,
-   non-JSON human rendering at the flip, so an unmigrated parser of those commands fails loudly
+   non-JSON text rendering at the flip, so an unmigrated parser of those commands fails loudly
    instead of silently reading disposable output that will later change shape. Once the machine lane is selected, its
    stdout bytes are **presentation-invariant**: serialization form, field shape, and byte-level
    rendering are a pure function of the command, its arguments, and the recorded content — no
@@ -133,17 +133,17 @@ one-line advisory hint to stderr alongside successful JSON stdout
    `src/cli/identity/enroll.rs:67`) — are outside this rule: they change what is recorded, never
    how it is rendered.
 
-   Implementation guidance (non-binding): human renderings enter through a sibling of the
+   Implementation guidance (non-binding): text renderings enter through a sibling of the
    `write_json` seam so lane selection stays a single decision point per command.
 
 4. **isatty may govern color, pager, and stderr hints — never data shape.** The default is
-   `human` everywhere, piped or not; the lane never flips on TTY detection (a piped bare
-   `shore …` receives human bytes — the caller's cue to select `--format json`, exactly git's
-   posture for its default output). On the human lane, color and paging may key on
-   `isatty(stdout)`. A human rendering that pages does so only at a TTY; pager selection respects
+   `text` everywhere, piped or not; the lane never flips on TTY detection (a piped bare
+   `shore …` receives text bytes — the caller's cue to select `--format json`, exactly git's
+   posture for its default output). On the text lane, color and paging may key on
+   `isatty(stdout)`. A text rendering that pages does so only at a TTY; pager selection respects
    `SHORE_PAGER` then `PAGER`, and any paging command must offer a `--no-pager` escape. The
    machine lane never pages. Whether a given human surface colors or pages at all is per-command
-   design; the invariant this ADR pins is *where* those affordances may exist (human lane and
+   design; the invariant this ADR pins is *where* those affordances may exist (text lane and
    stderr only) and *what* they may never do (change data shape).
 
 5. **Presentation precedence is a total order: `--color` > `NO_COLOR` > `CLICOLOR_FORCE` >
@@ -158,9 +158,9 @@ one-line advisory hint to stderr alongside successful JSON stdout
    (b) neither a `--format` flag nor `SHORE_FORMAT` selected the lane, and (c) `SHORE_NO_HINT`
    is unset or empty, the command prints exactly one line to stderr, of the form:
 
-   > `hint: human-format output on stdout; pass --format json (or set SHORE_FORMAT=json) for the stable machine format`
+   > `hint: text-format output on stdout; pass --format json (or set SHORE_FORMAT=json) for the stable machine format`
 
-   Humans at a TTY get the readable default and need no hint; the hazard under a human default
+   Humans at a TTY get the readable default and need no hint; the hazard under a text default
    is the *script* that pipes without selecting, and the hint reaches its author on stderr
    without corrupting the pipe. The wording is non-contract — stderr is never contract. This
    extends the existing `identity enroll`/`attest` stderr-hint precedent.
@@ -192,13 +192,13 @@ one-line advisory hint to stderr alongside successful JSON stdout
    retained per shoreline-relay#11), the byte-snapshot suite, and the documented examples. Each
    adds `--format json` (or exports `SHORE_FORMAT=json` at the top of its script). Because the
    machine bytes are unchanged, migration is mechanical and verifiable — an unmigrated consumer
-   fails loudly on first parse of human output, and the stderr hint (Decision 6) names the fix.
+   fails loudly on first parse of text output, and the stderr hint (Decision 6) names the fix.
    Sequencing lives in the implementation plan; the gate lives here.
 
-9. **Opaque-id display truncation (ADR-0028 extended to the CLI human lane).** Human renderings
+9. **Opaque-id display truncation (ADR-0028 extended to the CLI text lane).** Text renderings
    may display-truncate prefixed ids exactly as the inspector does (`shortId` — the 12-char
    digest tail — and `shortRef` — `rev:1ace028b` — `src/cli/inspect/web/src/refs.ts:29-40`).
-   The machine lane always emits full ids; a human rendering must keep the full id one step away
+   The machine lane always emits full ids; a text rendering must keep the full id one step away
    (the machine lane, or an explicit widening flag), and a truncated form must never look
    parseable or be accepted back as an argument. Consumers pass ids back verbatim from the
    machine lane only, per ADR-0028 and `docs/review-workflow.md`.
@@ -222,7 +222,7 @@ one-line advisory hint to stderr alongside successful JSON stdout
 - **One coordinated, tractable break.** Every consumer that must migrate is first-party and
   enumerable (four field-paths, two enum vocabularies, the snapshot suite); the machine bytes
   under `--format json` are today's bytes, so migration adds a flag/env and reparses nothing.
-- **Human output can iterate freely.** The disposable declaration means digests and diff
+- **Text output can iterate freely.** The disposable declaration means digests and diff
   renderings improve without contract ceremony; the interim indented-JSON fallback can be
   replaced per command without further breaks.
 - **The freeze set is finally named.** The tiered promise legitimizes additive evolution on the
@@ -233,33 +233,33 @@ one-line advisory hint to stderr alongside successful JSON stdout
   acceptable now precisely because the consumer census found no third-party stdout consumers.
 - **Accepted cost: environment-sensitive lane selection.** `SHORE_FORMAT` trades per-call
   explicitness for script convenience; a script relying on it inherits environment fragility
-  (an unset variable yields human bytes). Mitigated by the flag's precedence, the loud parse
+  (an unset variable yields text bytes). Mitigated by the flag's precedence, the loud parse
   failure, and the hint; byte-pinned tests and CI use the flag form.
 - **Accepted cost: interim fallback keeps the #96 trap on some commands.** Until a bespoke
-  digest lands, a command's human lane is indented JSON — no better for a human than today
+  digest lands, a command's text lane is indented JSON — no better for a human than today
   (`shore review show` stays unreadable until its digest ships). The digest wave closes this
   per family.
-- **Accepted cost: two renderings to maintain** on every participating command, with the human
+- **Accepted cost: two renderings to maintain** on every participating command, with the text
   side untestable-by-contract (its tests may assert behavior, never bytes).
 
 ### Rejected
 
-- **Machine-default + explicit human opt-in (extending today's posture — the audit synthesis's
+- **Machine-default + explicit text opt-in (extending today's posture — the audit synthesis's
   lower-risk scoring).** Zero-break and honest to the historical agent-majority audience, but it
   institutionalizes the wrong default for people: every human readback forever pays a mode flag,
   and the bare command greets a person with a wall of compact JSON. Rejected by owner decision:
   the break is affordable now (first-party-only consumers), and it will never be cheaper.
-- **A boolean `--human` flag as the selector.** A boolean cannot express the machine/pretty/human
+- **A boolean `--text` flag as the selector.** A boolean cannot express the machine/pretty/text
   triage, invites a second axis beside `--pretty`/`--compact` instead of absorbing them, and
   cannot be pinned once per script the way `--format`+`SHORE_FORMAT` can. The enum also leaves
   room for future formats (e.g. JSONL) without a new flag.
 - **TTY-adaptive data shape (the gh model) — rejected, revisit conditions recorded.** The trap
   is structural: an agent that happens to run under a PTY (sandboxes, `script`, some CI
-  harnesses) would silently receive human output, and a human piping to a file would silently
+  harnesses) would silently receive text output, and a human piping to a file would silently
   get machine output — the lane must follow an explicit selection, not a guess. Reopening this
   is gated on the conditions in Revisit Triggers, all of which must hold.
-- **Dual-stream rendering (JSON on stdout + human on stderr simultaneously).** Violates stream
-  discipline (stderr is diagnostics and hints, not a data channel) and makes the human rendering
+- **Dual-stream rendering (JSON on stdout + text on stderr simultaneously).** Violates stream
+  discipline (stderr is diagnostics and hints, not a data channel) and makes the text rendering
   un-pipeable to a pager.
 - **Cosmetic TTY-adaptivity on the machine lane (gh pretty-prints and colors `--json` at a
   TTY).** Even "presentation-only" adaptation of machine stdout puts ANSI or reflowed JSON in

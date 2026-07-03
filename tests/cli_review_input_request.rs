@@ -856,7 +856,7 @@ where
 }
 
 #[test]
-fn human_input_request_list_shows_open_titles() {
+fn text_input_request_list_shows_open_titles() {
     let repo = modified_repo();
     let repo_arg = repo.path().to_str().unwrap();
     shore(["review", "capture", "--repo", repo_arg]);
@@ -898,7 +898,7 @@ fn human_input_request_list_shows_open_titles() {
         "--repo",
         repo_arg,
         "--format",
-        "human",
+        "text",
     ]);
     let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -910,7 +910,7 @@ fn human_input_request_list_shows_open_titles() {
 }
 
 #[test]
-fn human_respond_ack_confirms_outcome() {
+fn text_respond_ack_confirms_outcome() {
     let repo = modified_repo();
     let repo_arg = repo.path().to_str().unwrap();
     shore(["review", "capture", "--repo", repo_arg]);
@@ -944,7 +944,7 @@ fn human_respond_ack_confirms_outcome() {
         "--reason",
         "looks fine",
         "--format",
-        "human",
+        "text",
     ]);
     let stdout = String::from_utf8_lossy(&output.stdout);
 

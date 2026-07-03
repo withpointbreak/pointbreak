@@ -533,7 +533,7 @@ fn unit_show_renders_endorsement_on_capture_identity() {
 }
 
 #[test]
-fn human_digest_is_bounded_and_never_renders_rows() {
+fn text_digest_is_bounded_and_never_renders_rows() {
     let repo = modified_repo();
     let repo_arg = repo.path().to_str().unwrap();
     shore(["review", "capture", "--repo", repo_arg]);
@@ -541,7 +541,7 @@ fn human_digest_is_bounded_and_never_renders_rows() {
     add_input_request_with_body(&repo, "please decide");
     add_assessment(&repo);
 
-    let output = shore(["review", "show", "--repo", repo_arg, "--format", "human"]);
+    let output = shore(["review", "show", "--repo", repo_arg, "--format", "text"]);
     assert!(
         output.status.success(),
         "stderr:\n{}",
@@ -562,7 +562,7 @@ fn human_digest_is_bounded_and_never_renders_rows() {
 }
 
 #[test]
-fn human_digest_reports_signed_by_enrolled_key() {
+fn text_digest_reports_signed_by_enrolled_key() {
     const ENROLLED: &str = "actor:git-email:kevin@swiber.dev";
 
     // Enrolled key signs the assessment → the current call verifies valid.
@@ -618,14 +618,7 @@ fn human_digest_reports_signed_by_enrolled_key() {
         .success()
     );
     let yes_out = shore_env(
-        [
-            "review",
-            "show",
-            "--repo",
-            yes_repo_arg,
-            "--format",
-            "human",
-        ],
+        ["review", "show", "--repo", yes_repo_arg, "--format", "text"],
         &yes_env,
     );
     let yes_stdout = String::from_utf8_lossy(&yes_out.stdout);
@@ -668,7 +661,7 @@ fn human_digest_reports_signed_by_enrolled_key() {
         .success()
     );
     let no_out = shore_env(
-        ["review", "show", "--repo", no_repo_arg, "--format", "human"],
+        ["review", "show", "--repo", no_repo_arg, "--format", "text"],
         &[("SHORE_HOME", no_home_s)],
     );
     let no_stdout = String::from_utf8_lossy(&no_out.stdout);
@@ -679,7 +672,7 @@ fn human_digest_reports_signed_by_enrolled_key() {
 }
 
 #[test]
-fn human_digest_clamps_long_open_request_titles() {
+fn text_digest_clamps_long_open_request_titles() {
     let repo = modified_repo();
     let repo_arg = repo.path().to_str().unwrap();
     shore(["review", "capture", "--repo", repo_arg]);
@@ -698,7 +691,7 @@ fn human_digest_clamps_long_open_request_titles() {
         "manual-decision-required",
     ]);
 
-    let output = shore(["review", "show", "--repo", repo_arg, "--format", "human"]);
+    let output = shore(["review", "show", "--repo", repo_arg, "--format", "text"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let longest = stdout
         .lines()
@@ -719,14 +712,14 @@ fn human_digest_clamps_long_open_request_titles() {
 }
 
 #[test]
-fn human_digest_groups_fact_counts_by_track() {
+fn text_digest_groups_fact_counts_by_track() {
     let repo = multi_file_repo();
     let repo_arg = repo.path().to_str().unwrap();
     shore(["review", "capture", "--repo", repo_arg]);
     add_observation(&repo, "agent:codex", "Codex finding");
     add_observation(&repo, "agent:claude", "Claude finding");
 
-    let output = shore(["review", "show", "--repo", repo_arg, "--format", "human"]);
+    let output = shore(["review", "show", "--repo", repo_arg, "--format", "text"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(stdout.contains("tracks:"), "stdout:\n{stdout}");

@@ -1,29 +1,29 @@
 //! Output-lane selection for document-emitting commands.
 //!
 //! One decision point per command: the format enum, the shared `--format` args,
-//! precedence resolution, the write entry, the JSON-fallback human lane, and the
+//! precedence resolution, the write entry, the JSON-fallback text lane, and the
 //! id/byte display helpers. Every lane-related choice funnels through here so the
-//! machine contract and the human rendering can never be selected by accident.
+//! machine contract and the text rendering can never be selected by accident.
 
 use std::io::Write;
 
 use crate::cli::json;
 
 /// The resolved output lane. The machine lanes (`Json`, `JsonPretty`) route
-/// through the shared `write_json` primitive; `Human` renders a disposable view.
+/// through the shared `write_json` primitive; `Text` renders a disposable view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OutputFormat {
     Json,
     JsonPretty,
-    Human,
+    Text,
 }
 
-/// The `--format` flag values. clap renders these as `json | json-pretty | human`.
+/// The `--format` flag values. clap renders these as `json | json-pretty | text`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub(super) enum FormatArg {
     Json,
     JsonPretty,
-    Human,
+    Text,
 }
 
 impl From<FormatArg> for OutputFormat {
@@ -31,7 +31,7 @@ impl From<FormatArg> for OutputFormat {
         match arg {
             FormatArg::Json => OutputFormat::Json,
             FormatArg::JsonPretty => OutputFormat::JsonPretty,
-            FormatArg::Human => OutputFormat::Human,
+            FormatArg::Text => OutputFormat::Text,
         }
     }
 }
@@ -39,7 +39,7 @@ impl From<FormatArg> for OutputFormat {
 /// Shared `--format` argument, flattened into every document-emitting command.
 #[derive(Debug, Default, clap::Args)]
 pub(super) struct FormatArgs {
-    /// Output format: human | json | json-pretty.
+    /// Output format: text | json | json-pretty.
     #[arg(long, value_enum)]
     pub(super) format: Option<FormatArg>,
 }
@@ -100,12 +100,12 @@ fn env_format() -> Result<Option<OutputFormat>, Box<dyn std::error::Error>> {
 }
 
 /// Lane dispatch: `Json` and `JsonPretty` emit the machine document byte-for-byte
-/// through `write_json`; `Human` writes the rendered view.
+/// through `write_json`; `Text` writes the rendered view.
 pub(super) fn write_document<T, F>(
     stdout: &mut dyn Write,
     format: ResolvedFormat,
     document: &T,
-    render_human: F,
+    render_text: F,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     T: serde::Serialize,
@@ -114,12 +114,12 @@ where
     match format.format {
         OutputFormat::Json => json::write_json(stdout, document, false)?,
         OutputFormat::JsonPretty => json::write_json(stdout, document, true)?,
-        OutputFormat::Human => writeln!(stdout, "{}", render_human())?,
+        OutputFormat::Text => writeln!(stdout, "{}", render_text())?,
     }
     Ok(())
 }
 
-/// Interim human lane for commands with no bespoke digest yet: indented JSON.
+/// Interim text lane for commands with no bespoke digest yet: indented JSON.
 pub(super) fn write_document_json_fallback<T: serde::Serialize>(
     stdout: &mut dyn Write,
     format: ResolvedFormat,
@@ -191,11 +191,11 @@ fn is_hex(value: &str) -> bool {
     !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-/// Human-facing byte size, e.g. `24588565` -> `"24.6 MB"`. SI (1000-based) units;
+/// Readable byte size, e.g. `24588565` -> `"24.6 MB"`. SI (1000-based) units;
 /// exact rounding is disposable.
-// Part of the output seam consumed by the per-command human renderers.
+// Part of the output seam consumed by the per-command text renderers.
 #[allow(dead_code)]
-pub(super) fn human_bytes(bytes: u64) -> String {
+pub(super) fn format_bytes(bytes: u64) -> String {
     const KB: f64 = 1_000.0;
     const MB: f64 = 1_000_000.0;
     const GB: f64 = 1_000_000_000.0;
@@ -216,9 +216,9 @@ fn parse_format_value(value: &str) -> Result<OutputFormat, Box<dyn std::error::E
     match value {
         "json" => Ok(OutputFormat::Json),
         "json-pretty" => Ok(OutputFormat::JsonPretty),
-        "human" => Ok(OutputFormat::Human),
+        "text" => Ok(OutputFormat::Text),
         other => Err(format!(
-            "invalid SHORE_FORMAT value {other:?}: expected one of human, json, json-pretty"
+            "invalid SHORE_FORMAT value {other:?}: expected one of json, json-pretty, text"
         )
         .into()),
     }
@@ -234,11 +234,11 @@ mod tests {
         // assertion never depends on the test process's ambient SHORE_FORMAT.
         // Explicit flag wins over both env and default, and is not `defaulted`.
         let flag = resolve_format_from(
-            Some(OutputFormat::Human),
+            Some(OutputFormat::Text),
             Some(OutputFormat::Json),
             OutputFormat::Json,
         );
-        assert_eq!(flag.format, OutputFormat::Human);
+        assert_eq!(flag.format, OutputFormat::Text);
         assert!(!flag.defaulted);
         // No flag: the env selection wins over the default, and is not `defaulted`.
         let env = resolve_format_from(None, Some(OutputFormat::JsonPretty), OutputFormat::Json);
@@ -289,13 +289,13 @@ mod tests {
             parse_format_value("json-pretty").unwrap(),
             OutputFormat::JsonPretty
         );
-        assert_eq!(parse_format_value("human").unwrap(), OutputFormat::Human);
+        assert_eq!(parse_format_value("text").unwrap(), OutputFormat::Text);
     }
 
     #[test]
-    fn human_bytes_renders_representative_sizes() {
-        assert_eq!(human_bytes(0), "0 B");
-        assert_eq!(human_bytes(512), "512 B");
-        assert_eq!(human_bytes(24_588_565), "24.6 MB");
+    fn format_bytes_renders_representative_sizes() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(24_588_565), "24.6 MB");
     }
 }

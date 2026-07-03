@@ -479,7 +479,7 @@ fn common_dir_store(repo: &GitRepo) -> std::path::PathBuf {
 }
 
 #[test]
-fn human_capture_ack_shows_short_revision_and_diffstat() {
+fn text_capture_ack_shows_short_revision_and_diffstat() {
     let repo = modified_repo();
     let output = shore([
         "review",
@@ -487,7 +487,7 @@ fn human_capture_ack_shows_short_revision_and_diffstat() {
         "--repo",
         repo.path().to_str().unwrap(),
         "--format",
-        "human",
+        "text",
     ]);
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);

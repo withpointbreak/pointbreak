@@ -1,5 +1,5 @@
 //! The `--format`/`SHORE_FORMAT` output-lane selector across document-emitting
-//! commands: precedence, the machine-lane byte contract, the interim human
+//! commands: precedence, the machine-lane byte contract, the interim text
 //! fallback, and the hard error on an invalid env value.
 
 mod support;
@@ -14,10 +14,10 @@ fn format_json_pretty_matches_legacy_pretty() {
 }
 
 #[test]
-fn format_human_falls_back_to_indented_json_pre_digest() {
+fn format_text_falls_back_to_indented_json_pre_digest() {
     let repo = support::dump_repo();
     let path = repo.path().to_str().unwrap();
-    let output = support::shore(["dump", "--repo", path, "--format", "human"]);
+    let output = support::shore(["dump", "--repo", path, "--format", "text"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Pre-digest fallback: indented JSON (multi-line), same schema tag visible.
     assert!(stdout.lines().count() > 1);

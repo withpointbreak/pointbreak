@@ -64,11 +64,10 @@ pub(super) fn run(
     // the git-free document workflow: best-effort, omitted when reachability is
     // unknown.
     let liveness = enrich_liveness(&result.commit_range, &args.repo, None).ok();
-    // `revision_show_document` consumes `result` by value; the human digest reads
-    // the same result, so clone it only when the human lane will actually render
+    // `revision_show_document` consumes `result` by value; the text digest reads
+    // the same result, so clone it only when the text lane will actually render
     // (the machine lanes never pay for the clone — this is the #96 heavy command).
-    let digest_source =
-        matches!(format.format, output::OutputFormat::Human).then(|| result.clone());
+    let digest_source = matches!(format.format, output::OutputFormat::Text).then(|| result.clone());
     let document = revision_show_document(result);
     let mut value = serde_json::to_value(&document)?;
     if let Some(liveness) = liveness
@@ -82,12 +81,12 @@ pub(super) fn run(
         render_revision_digest(
             digest_source
                 .as_ref()
-                .expect("human lane resolves the digest source"),
+                .expect("text lane resolves the digest source"),
         )
     })
 }
 
-/// The #96 human digest for `review show`: a bounded per-track summary mirroring
+/// The #96 text digest for `review show`: a bounded per-track summary mirroring
 /// the inspector revision-page header — identity line, current call,
 /// signed-by-enrolled-key, summary counts, per-track fact counts, and open input
 /// requests. Never the snapshot rows (INV-6); reads only the public
@@ -195,7 +194,7 @@ fn mode_label(mode: AssertionMode) -> &'static str {
     }
 }
 
-/// Short human label for a review endpoint, matching the capture ack's endpoint
+/// Short readable label for a review endpoint, matching the capture ack's endpoint
 /// vocabulary (commit short ref vs. working tree).
 fn endpoint_label(endpoint: &ReviewEndpoint) -> String {
     match endpoint {

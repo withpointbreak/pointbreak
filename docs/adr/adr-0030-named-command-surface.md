@@ -2,7 +2,7 @@
 
 **Status:** Accepted (owner-approved 2026-07-02); landed 2026-07-02 (grounding issue #96).
 **Date:** 2026-07-02
-**See also:** **ADR-0029** (CLI output-mode convention — the human-default/`--format` split this
+**See also:** **ADR-0029** (CLI output-mode convention — the text-default/`--format` split this
 surface rides), **ADR-0018**
 (event-borne supersession — the reshape that made the captured revision the product's subject),
 the "Old dump/show stream vs. revision ledger" section of `docs/review-workflow.md` (the two-surface
@@ -38,7 +38,7 @@ inspector reads the captured snapshot well but requires a browser.
 What the terminal must *not* do is rebuild the inspector: the supersession DAG, the filterable
 event timeline, the per-line-annotated cross-file diff, and the endorsement web are relational,
 visual, and already served (`src/cli/inspect/`). The terminal owes the human the loop-inline
-readbacks — bounded digests (ADR-0029's human lane) and the captured diff itself.
+readbacks — bounded digests (ADR-0029's text lane) and the captured diff itself.
 
 ## Decision
 
@@ -53,8 +53,8 @@ top-level bare `show` names none). This principle decides every case below.
 ### 2. `shore diff` — captured-revision human diff readback (the #96 home)
 
 `shore diff` prints a captured revision's diff — base to target, from the frozen captured snapshot
-— as a human unified diff on stdout. Under ADR-0029's human-default convention it is
-**human-only**: its human lane is its only lane (it offers no `--format json` initially — passing
+— as a human unified diff on stdout. Under ADR-0029's text-default convention it is
+**text-only**: its text lane is its only lane (it offers no `--format json` initially — passing
 one is an error; machine consumers keep using the review documents). It is non-interactive and
 pipe-friendly (piped output is plain bytes), with pager and color only at a TTY under ADR-0029's
 presentation rules (Decisions 4–5: `SHORE_PAGER`/`PAGER`, `--no-pager`, the `--color`/`NO_COLOR`
@@ -104,7 +104,7 @@ the surface — not reserved. Any future proposal starts from a product case, no
 The job the name pointed at — reload/freshness status — is already served where the facts live:
 `eventSetHash` freshness metadata on the ledger reads and `shore store status`. A thin `session`
 wrapper would be a second home for the same facts, and "session" is an overloaded noun in the
-internal model. Freshness readback for humans rides ADR-0029's human lane on the commands that
+internal model. Freshness readback for humans rides ADR-0029's text lane on the commands that
 already own the data (the store digest and review digests), not a new verb. Dropped from the
 surface.
 
@@ -127,7 +127,7 @@ surface.
 
 ### 7. Terminal surfaces do not ASCII-clone the inspector
 
-The digest layer (ADR-0029's human lane) and `shore diff` may mirror the inspector's
+The digest layer (ADR-0029's text lane) and `shore diff` may mirror the inspector's
 revision-page *header* — current assessment, open input requests, fact counts, diffstat — and no
 more. The supersession DAG, the event timeline, the annotated cross-file diff with per-line
 facts, and the endorsement web stay inspector-only. A terminal surface that starts growing a
@@ -137,7 +137,7 @@ lens the inspector already owns is out of scope by decision, not by omission.
 
 ### Accepted
 
-- **#96 gets its home**: `shore diff` (this ADR) plus the bounded digests (ADR-0029's human lane)
+- **#96 gets its home**: `shore diff` (this ADR) plus the bounded digests (ADR-0029's text lane)
   are the deliverable the issue's deferral pointed at; the composite `shore review show` stops
   masquerading as a human surface.
 - **One `show` concept survives**: `show` means the review record (`shore review show`); the

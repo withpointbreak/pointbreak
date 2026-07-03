@@ -64,20 +64,20 @@ pub(super) fn run(
     let (options, skip) = capture_options(&args, tracing, stderr);
     let capture = capture_review(options)?;
     super::common::surface_best_effort_skip(&skip, stderr);
-    // `capture_document` consumes the result by value; keep a clone for the human lane.
-    let human_source = capture.clone();
+    // `capture_document` consumes the result by value; keep a clone for the text lane.
+    let text_source = capture.clone();
     let document = capture_document(capture);
     let format =
         output::resolve_format(args.format_args.explicit(false), output::OutputFormat::Json)?;
     output::write_document(stdout, format, &document, || {
-        render_capture_human(&human_source)
+        render_capture_text(&text_source)
     })
 }
 
-/// Human capture ack: a few-line confirmation shaped on the inspector's
+/// Text capture ack: a few-line confirmation shaped on the inspector's
 /// revision-page header — revision short ref, base -> target, diffstat, event
 /// counts. Renders from the public `CaptureResult`; wording is disposable.
-fn render_capture_human(result: &CaptureResult) -> String {
+fn render_capture_text(result: &CaptureResult) -> String {
     let stat = &result.diffstat;
 
     let statuses: Vec<String> = [
@@ -125,7 +125,7 @@ fn render_capture_human(result: &CaptureResult) -> String {
     .join("\n")
 }
 
-/// Short human label for a capture endpoint, matching the document's endpoint
+/// Short readable label for a capture endpoint, matching the document's endpoint
 /// vocabulary (commit vs. working tree).
 fn endpoint_label(endpoint: &ReviewEndpoint) -> String {
     match endpoint {

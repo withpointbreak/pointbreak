@@ -17,7 +17,7 @@ use shoreline::session::{
     resolve_writer_actor_id,
 };
 
-/// Clamp a review title for a single-line human digest, shared by the
+/// Clamp a review title for a single-line text digest, shared by the
 /// review-show digest and the input-request list. Collapses embedded whitespace
 /// (including newlines and tabs) to single spaces so the title can never break
 /// the one-line-per-item bound, then clamps to a sane width with an ellipsis.
@@ -34,7 +34,7 @@ pub(crate) fn clamp_title(title: &str) -> String {
 }
 
 /// The inspector's current-assessment header line (`detail.ts:250`), shared by
-/// the review-show digest and `assessment show`'s human lane: the resolved call
+/// the review-show digest and `assessment show`'s text lane: the resolved call
 /// followed by the advisory note, or the unassessed / ambiguous states. The
 /// review call is advisory — a recorded judgement, never a merge gate.
 pub(crate) fn current_call_line(status: &CurrentAssessmentStatus) -> String {

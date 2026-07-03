@@ -201,28 +201,28 @@ fn review_assessment_show(
     let format = output::resolve_format(format_explicit, output::OutputFormat::Json)?;
     let result = show_assessments(assessment_show_options(args))?;
     let delegation_map = super::common::discover_delegation_map(&repo);
-    // `assessment_show_document` consumes the result by value; the human lane
+    // `assessment_show_document` consumes the result by value; the text lane
     // reads the same result, so clone it only when that lane will render.
-    let human_source = matches!(format.format, output::OutputFormat::Human).then(|| result.clone());
+    let text_source = matches!(format.format, output::OutputFormat::Text).then(|| result.clone());
     let document = assessment_show_document(
         "shore.review-assessment-show",
         result,
         delegation_map.as_ref(),
     );
     output::write_document(stdout, format, &document, || {
-        render_assessment_show_human(
-            human_source
+        render_assessment_show_text(
+            text_source
                 .as_ref()
-                .expect("human lane resolves the assessment source"),
+                .expect("text lane resolves the assessment source"),
         )
     })
 }
 
-/// Bespoke human lane for `assessment show` (INV-5): the current call, the
+/// Bespoke text lane for `assessment show` (INV-5): the current call, the
 /// track and recorded-at of each current record, its summary when hydrated, and
 /// the replaced count when `--all` reveals history. Reads only the public
 /// `AssessmentShowResult`; ids truncate via `output::short_ref`.
-fn render_assessment_show_human(result: &AssessmentShowResult) -> String {
+fn render_assessment_show_text(result: &AssessmentShowResult) -> String {
     let mut lines = vec![super::common::current_call_line(&result.current.status)];
     for record in &result.current.records {
         lines.push(format!(

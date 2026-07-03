@@ -102,7 +102,7 @@ fn shore_review_assessment_show_marks_ambiguous_with_two_writers() {
 }
 
 #[test]
-fn human_assessment_show_renders_current_call_not_json() {
+fn text_assessment_show_renders_current_call_not_json() {
     let repo = support::dump_repo();
     let repo_arg = repo.path().to_str().unwrap();
     shore(["review", "capture", "--repo", repo_arg]);
@@ -115,7 +115,7 @@ fn human_assessment_show_renders_current_call_not_json() {
         "--repo",
         repo_arg,
         "--format",
-        "human",
+        "text",
     ]);
     assert!(
         show.status.success(),
