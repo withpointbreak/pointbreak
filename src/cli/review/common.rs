@@ -17,6 +17,22 @@ use shoreline::session::{
     resolve_writer_actor_id,
 };
 
+/// Clamp a review title for a single-line human digest, shared by the
+/// review-show digest and the input-request list. Collapses embedded whitespace
+/// (including newlines and tabs) to single spaces so the title can never break
+/// the one-line-per-item bound, then clamps to a sane width with an ellipsis.
+/// Disposable formatting (INV-3); the title is user-controlled, so bounding it is
+/// what keeps the digest bounded.
+pub(crate) fn clamp_title(title: &str) -> String {
+    const MAX: usize = 72;
+    let flattened = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flattened.chars().count() <= MAX {
+        return flattened;
+    }
+    let clamped: String = flattened.chars().take(MAX - 1).collect();
+    format!("{clamped}…")
+}
+
 /// The inspector's current-assessment header line (`detail.ts:250`), shared by
 /// the review-show digest and `assessment show`'s human lane: the resolved call
 /// followed by the advisory note, or the unassessed / ambiguous states. The

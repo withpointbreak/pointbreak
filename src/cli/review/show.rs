@@ -158,7 +158,7 @@ fn render_revision_digest(result: &RevisionShowResult) -> String {
             lines.push(format!(
                 "  {} — \"{}\" ({})",
                 output::short_ref(request.id.as_str()),
-                request.title,
+                super::common::clamp_title(&request.title),
                 mode_label(request.mode),
             ));
         }

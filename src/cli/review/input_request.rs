@@ -344,7 +344,7 @@ fn render_input_request_list_human(result: &InputRequestListResult) -> String {
         lines.push(format!(
             "  {} · \"{}\" · {} · {} · {}",
             output::short_ref(request.id.as_str()),
-            truncate_title(&request.title),
+            super::common::clamp_title(&request.title),
             wire_label(&request.mode),
             wire_label(&request.reason_code),
             request.status.as_str(),
@@ -382,16 +382,6 @@ fn status_filter_label(filter: InputRequestStatusFilter) -> &'static str {
         InputRequestStatusFilter::Ambiguous => "ambiguous",
         InputRequestStatusFilter::All => "all",
     }
-}
-
-/// Clamp a request title for the human line at a sane width (INV-3, disposable).
-fn truncate_title(title: &str) -> String {
-    const MAX: usize = 72;
-    if title.chars().count() <= MAX {
-        return title.to_owned();
-    }
-    let clamped: String = title.chars().take(MAX - 1).collect();
-    format!("{clamped}…")
 }
 
 fn input_request_open_options(

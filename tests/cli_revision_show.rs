@@ -679,6 +679,46 @@ fn human_digest_reports_signed_by_enrolled_key() {
 }
 
 #[test]
+fn human_digest_clamps_long_open_request_titles() {
+    let repo = modified_repo();
+    let repo_arg = repo.path().to_str().unwrap();
+    shore(["review", "capture", "--repo", repo_arg]);
+    let long_title = "x".repeat(320);
+    shore([
+        "review",
+        "input-request",
+        "open",
+        "--repo",
+        repo_arg,
+        "--track",
+        "agent:codex",
+        "--title",
+        &long_title,
+        "--reason",
+        "manual-decision-required",
+    ]);
+
+    let output = shore(["review", "show", "--repo", repo_arg, "--format", "human"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let longest = stdout
+        .lines()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap();
+
+    assert!(stdout.contains("open input requests"), "stdout:\n{stdout}");
+    // The one user-controlled string in the digest must not blow the line bound.
+    assert!(
+        !stdout.contains(&long_title),
+        "the full 320-char title must be clamped:\n{stdout}"
+    );
+    assert!(
+        longest < 150,
+        "digest lines must stay bounded, longest was {longest}:\n{stdout}"
+    );
+}
+
+#[test]
 fn human_digest_groups_fact_counts_by_track() {
     let repo = multi_file_repo();
     let repo_arg = repo.path().to_str().unwrap();
