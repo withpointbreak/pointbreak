@@ -6,12 +6,14 @@
 //! content-addressed snapshot artifact.
 
 mod intraline;
+mod segment;
 mod syntax;
 mod tokenize;
 
 use std::collections::HashMap;
 
 pub use intraline::{EmphSpan, emphasis_file};
+pub use segment::{AttributedSegment, attributed_segments};
 use syntax::syntax_for_paths;
 use tokenize::LineTokenizer;
 
