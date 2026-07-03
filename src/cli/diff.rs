@@ -102,40 +102,59 @@ pub(super) fn run(
     }
     let result: RevisionShowResult = show_revision(options)?;
 
+    // `shore diff` is a filter: render the whole output, then write it. A broken
+    // downstream pipe (`shore diff | head`) is a clean stop, not an error.
+    write_all_filtered(stdout, &render_output(&args, &result))
+}
+
+/// Build the full `shore diff` output as one string: the removed-content or
+/// empty-diff message, the `--stat` table, or the diffstat header + blank line +
+/// (plain or colored) diff body. Pure — no writes, no store, no git.
+fn render_output(args: &DiffArgs, result: &RevisionShowResult) -> String {
     // Removed/suppressed content: an explained line, the full id one step away.
     if result.snapshot_content_state != SnapshotContentState::Present {
         let hash = result
             .removed_snapshot_content_hash
             .as_deref()
             .unwrap_or("");
-        writeln!(
-            stdout,
-            "captured diff content is unavailable ({}); it was removed from this store",
+        return format!(
+            "captured diff content is unavailable ({}); it was removed from this store\n",
             crate::cli::output::short_ref(hash)
-        )?;
-        return Ok(());
+        );
     }
 
     // A genuine empty diff (present, but no files) — distinct from removed content.
     if result.snapshot.files.is_empty() {
-        writeln!(stdout, "no changes in the captured revision")?;
-        return Ok(());
+        return "no changes in the captured revision\n".to_string();
     }
 
     if args.stat {
-        write!(stdout, "{}", render_stat_table(&result.snapshot.files))?;
-        return Ok(());
+        return render_stat_table(&result.snapshot.files);
     }
 
-    write!(stdout, "{}", render_diffstat(&result.snapshot.files))?;
-    writeln!(stdout)?;
-    let body = if resolve_color(args.color) {
+    let mut out = render_diffstat(&result.snapshot.files);
+    out.push('\n');
+    out.push_str(&if resolve_color(args.color) {
         render_unified_diff_colored(&result.snapshot)
     } else {
         render_unified_diff(&result.snapshot)
-    };
-    write!(stdout, "{body}")?;
-    Ok(())
+    });
+    out
+}
+
+/// Write `content` to `out` and flush, treating a broken downstream pipe as a
+/// clean stop — a filter is done when its reader goes away (`shore diff | head`).
+/// Any other write/flush error propagates. (Rust ignores SIGPIPE, so a closed
+/// pipe surfaces here as an `io::ErrorKind::BrokenPipe` rather than a signal.)
+fn write_all_filtered(
+    out: &mut dyn Write,
+    content: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match out.write_all(content.as_bytes()).and_then(|()| out.flush()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Render a captured snapshot as a plain git-style unified diff. Pure: no git,
@@ -697,5 +716,32 @@ mod tests {
         assert!(out.contains("\x1b[")); // an SGR wraps the keyword
         assert!(out.contains("\x1b[0m")); // reset
         assert!(out.ends_with('\n'));
+    }
+
+    /// A `Write` that always fails with a chosen `ErrorKind` — models a downstream
+    /// reader that has gone away (`shore diff | head`).
+    struct FailingWriter(std::io::ErrorKind);
+    impl Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(self.0, "write failed"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::new(self.0, "flush failed"))
+        }
+    }
+
+    #[test]
+    fn write_all_filtered_treats_a_broken_pipe_as_a_clean_stop() {
+        // `shore diff | head` closes the pipe early — a filter is done when its
+        // reader goes away, so this is a clean exit, not an error.
+        let mut out = FailingWriter(std::io::ErrorKind::BrokenPipe);
+        assert!(write_all_filtered(&mut out, "diff --git a/x b/x\n").is_ok());
+    }
+
+    #[test]
+    fn write_all_filtered_propagates_non_pipe_errors() {
+        // A real write failure (not a closed pipe) is still an error.
+        let mut out = FailingWriter(std::io::ErrorKind::PermissionDenied);
+        assert!(write_all_filtered(&mut out, "x").is_err());
     }
 }
