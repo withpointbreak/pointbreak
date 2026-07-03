@@ -11,9 +11,10 @@ use shoreline::session::event::{
     AssertionMode, InputRequestReasonCode, InputRequestResponseOutcome,
 };
 use shoreline::session::{
-    InputRequestFetchOptions, InputRequestListOptions, InputRequestOpenOptions,
-    InputRequestRespondOptions, InputRequestStatusFilter, InputRequestTargetSelector,
-    fetch_input_request, list_input_requests, open_input_request, respond_input_request,
+    InputRequestFetchOptions, InputRequestListOptions, InputRequestListResult,
+    InputRequestOpenOptions, InputRequestRespondOptions, InputRequestRespondResult,
+    InputRequestStatusFilter, InputRequestTargetSelector, fetch_input_request, list_input_requests,
+    open_input_request, respond_input_request,
 };
 
 use crate::cli::output;
@@ -276,11 +277,20 @@ fn review_input_request_list(
     let pretty = args.pretty && !args.compact;
     let format_explicit = args.format_args.explicit(pretty);
     let repo = args.repo.clone();
-    let result = list_input_requests(input_request_list_options(args));
-    let delegation_map = super::common::discover_delegation_map(&repo);
-    let document = input_request_list_document(result?, delegation_map.as_ref());
     let format = output::resolve_format(format_explicit, output::OutputFormat::Json)?;
-    output::write_document_json_fallback(stdout, format, &document)
+    let result = list_input_requests(input_request_list_options(args))?;
+    let delegation_map = super::common::discover_delegation_map(&repo);
+    // `input_request_list_document` consumes the result by value; the human lane
+    // reads the same result, so clone it only when that lane will render.
+    let human_source = matches!(format.format, output::OutputFormat::Human).then(|| result.clone());
+    let document = input_request_list_document(result, delegation_map.as_ref());
+    output::write_document(stdout, format, &document, || {
+        render_input_request_list_human(
+            human_source
+                .as_ref()
+                .expect("human lane resolves the list source"),
+        )
+    })
 }
 
 fn review_input_request_fetch(
@@ -309,9 +319,79 @@ fn review_input_request_respond(
     let (options, skip) = input_request_respond_options(args, stderr)?;
     let result = respond_input_request(options)?;
     super::common::surface_best_effort_skip(&skip, stderr);
+    let human_source = result.clone();
     let document = input_request_respond_document(result);
     let format = output::resolve_format(format_explicit, output::OutputFormat::Json)?;
-    output::write_document_json_fallback(stdout, format, &document)
+    output::write_document(stdout, format, &document, || {
+        render_input_request_respond_human(&human_source)
+    })
+}
+
+/// Bespoke human lane for `input-request list` (INV-5): a header naming the
+/// active status filter and count, then one scannable line per request. An empty
+/// list renders a `no ... input requests` line, never silence. Reads only the
+/// public `InputRequestListResult`; ids truncate via `output::short_ref`.
+fn render_input_request_list_human(result: &InputRequestListResult) -> String {
+    let status = status_filter_label(result.filters.status);
+    if result.input_requests.is_empty() {
+        return format!("no {status} input requests");
+    }
+    let mut lines = vec![format!(
+        "{status} input requests ({}):",
+        result.input_requests.len()
+    )];
+    for request in &result.input_requests {
+        lines.push(format!(
+            "  {} · \"{}\" · {} · {} · {}",
+            output::short_ref(request.id.as_str()),
+            truncate_title(&request.title),
+            wire_label(&request.mode),
+            wire_label(&request.reason_code),
+            request.status.as_str(),
+        ));
+    }
+    lines.join("\n")
+}
+
+/// Bespoke human lane for `input-request respond` (INV-5): a one-line
+/// confirmation of the recorded outcome. Reads only the public respond result.
+fn render_input_request_respond_human(result: &InputRequestRespondResult) -> String {
+    let events = result.events_created;
+    let noun = if events == 1 { "event" } else { "events" };
+    format!(
+        "responded {} to {} ({events} {noun} created)",
+        wire_label(&result.outcome),
+        output::short_ref(result.input_request_id.as_str()),
+    )
+}
+
+/// The snake_case wire spelling of a simple serde enum, for disposable human
+/// labels (INV-3) — `Approved` → `approved`, `ManualDecisionRequired` →
+/// `manual_decision_required`.
+fn wire_label<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+fn status_filter_label(filter: InputRequestStatusFilter) -> &'static str {
+    match filter {
+        InputRequestStatusFilter::Open => "open",
+        InputRequestStatusFilter::Responded => "responded",
+        InputRequestStatusFilter::Ambiguous => "ambiguous",
+        InputRequestStatusFilter::All => "all",
+    }
+}
+
+/// Clamp a request title for the human line at a sane width (INV-3, disposable).
+fn truncate_title(title: &str) -> String {
+    const MAX: usize = 72;
+    if title.chars().count() <= MAX {
+        return title.to_owned();
+    }
+    let clamped: String = title.chars().take(MAX - 1).collect();
+    format!("{clamped}…")
 }
 
 fn input_request_open_options(

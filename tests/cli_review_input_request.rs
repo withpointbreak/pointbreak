@@ -855,6 +855,108 @@ where
     child.wait_with_output().expect("run shore binary")
 }
 
+#[test]
+fn human_input_request_list_shows_open_titles() {
+    let repo = modified_repo();
+    let repo_arg = repo.path().to_str().unwrap();
+    shore(["review", "capture", "--repo", repo_arg]);
+    shore([
+        "review",
+        "input-request",
+        "open",
+        "--repo",
+        repo_arg,
+        "--track",
+        "agent:codex",
+        "--title",
+        "Advisory question",
+        "--reason",
+        "manual-decision-required",
+        "--mode",
+        "advisory",
+    ]);
+    shore([
+        "review",
+        "input-request",
+        "open",
+        "--repo",
+        repo_arg,
+        "--track",
+        "agent:codex",
+        "--title",
+        "Operative gate",
+        "--reason",
+        "manual-decision-required",
+        "--mode",
+        "operative",
+    ]);
+
+    let output = shore([
+        "review",
+        "input-request",
+        "list",
+        "--repo",
+        repo_arg,
+        "--format",
+        "human",
+    ]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(stdout.contains("open input requests"), "stdout:\n{stdout}");
+    assert!(stdout.contains("advisory"), "stdout:\n{stdout}");
+    assert!(stdout.contains("operative"), "stdout:\n{stdout}");
+    assert!(stdout.contains("input-request:"), "stdout:\n{stdout}");
+    assert!(!stdout.contains("\"schema\""), "stdout:\n{stdout}");
+}
+
+#[test]
+fn human_respond_ack_confirms_outcome() {
+    let repo = modified_repo();
+    let repo_arg = repo.path().to_str().unwrap();
+    shore(["review", "capture", "--repo", repo_arg]);
+    let requested = parse_json(
+        &shore([
+            "review",
+            "input-request",
+            "open",
+            "--repo",
+            repo_arg,
+            "--track",
+            "agent:codex",
+            "--title",
+            "Need a decision",
+            "--reason",
+            "manual-decision-required",
+        ])
+        .stdout,
+    );
+    let input_request_id = requested["inputRequestId"].as_str().unwrap();
+
+    let output = shore([
+        "review",
+        "input-request",
+        "respond",
+        input_request_id,
+        "--repo",
+        repo_arg,
+        "--outcome",
+        "approved",
+        "--reason",
+        "looks fine",
+        "--format",
+        "human",
+    ]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(stdout.contains("responded"), "stdout:\n{stdout}");
+    assert!(stdout.contains("approved"), "stdout:\n{stdout}");
+    assert!(
+        stdout.lines().count() <= 4,
+        "ack must be terse, got {} lines:\n{stdout}",
+        stdout.lines().count()
+    );
+}
+
 fn parse_json(stdout: &[u8]) -> Value {
     serde_json::from_slice(stdout).expect("stdout is valid JSON")
 }
