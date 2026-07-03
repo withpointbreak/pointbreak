@@ -12,7 +12,8 @@ use std::path::PathBuf;
 
 use shoreline::model::{DiffFile, DiffRowKind, DiffSnapshot, FileStatus, RevisionId};
 use shoreline::session::{
-    RevisionShowOptions, RevisionShowResult, SnapshotContentState, show_revision,
+    RevisionShowOptions, RevisionShowResult, SnapshotContentState, diffstat_from_files,
+    show_revision,
 };
 
 #[derive(Debug, clap::Args)]
@@ -158,22 +159,6 @@ fn render_file_header(out: &mut String, file: &DiffFile) {
     }
 }
 
-/// Insertion/deletion line counts for one file (from the row kinds).
-fn file_line_counts(file: &DiffFile) -> (usize, usize) {
-    let mut insertions = 0;
-    let mut deletions = 0;
-    for hunk in &file.hunks {
-        for row in &hunk.rows {
-            match row.kind {
-                DiffRowKind::Added => insertions += 1,
-                DiffRowKind::Removed => deletions += 1,
-                DiffRowKind::Context => {}
-            }
-        }
-    }
-    (insertions, deletions)
-}
-
 fn plural(count: usize, singular: &str) -> String {
     if count == 1 {
         format!("{count} {singular}")
@@ -183,33 +168,34 @@ fn plural(count: usize, singular: &str) -> String {
 }
 
 /// One-line summary: `N files changed, A insertions(+), R deletions(-)`.
-/// Rendered above the diff body by default. Disposable — nothing parses it.
+/// Counts come from the shared `diffstat_from_files` so diffstat semantics live
+/// in one place. Rendered above the diff body by default; disposable output.
 pub(super) fn render_diffstat(files: &[DiffFile]) -> String {
-    let (insertions, deletions) = files
-        .iter()
-        .map(file_line_counts)
-        .fold((0, 0), |(i, d), (fi, fd)| (i + fi, d + fd));
+    let stat = diffstat_from_files(files);
     format!(
         "{} changed, {}(+), {}(-)\n",
-        plural(files.len(), "file"),
-        plural(insertions, "insertion"),
-        plural(deletions, "deletion"),
+        plural(stat.file_count, "file"),
+        plural(stat.added_lines, "insertion"),
+        plural(stat.removed_lines, "deletion"),
     )
 }
 
 /// Body-less per-file stat block (git `--stat`-style), ending with the summary.
+/// Per-file counts reuse `diffstat_from_files` over a single-file slice.
 pub(super) fn render_stat_table(files: &[DiffFile]) -> String {
     let mut out = String::new();
     for file in files {
-        let (insertions, deletions) = file_line_counts(file);
+        let stat = diffstat_from_files(std::slice::from_ref(file));
         let path = file
             .new_path
             .as_deref()
             .or(file.old_path.as_deref())
             .unwrap_or("");
         out.push_str(&format!(
-            " {path} | {} +{insertions} -{deletions}\n",
-            insertions + deletions
+            " {path} | {} +{} -{}\n",
+            stat.added_lines + stat.removed_lines,
+            stat.added_lines,
+            stat.removed_lines,
         ));
     }
     out.push_str(&render_diffstat(files));

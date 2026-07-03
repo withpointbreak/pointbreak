@@ -41,7 +41,7 @@ pub use association::{
 };
 pub use capture::{
     CaptureDiffstat, CaptureOptions, CaptureResult, CommitRangeSpec, capture_review,
-    capture_worktree_review,
+    capture_worktree_review, diffstat_from_files,
 };
 pub use commit_range_liveness::{
     CommitGraphCondition, CommitLiveness, LivenessEnrichment, OrphanReason, enrich_liveness,
