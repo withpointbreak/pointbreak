@@ -1,6 +1,12 @@
-# ADR-0029: CLI Output-Mode Convention — Text-Default Output, `--format`-Selected Machine Contract
+# ADR-0029: CLI Output-Mode Convention — JSON-Default Machine Contract, Opt-in `--format text` Human Lane
 
 **Status:** Accepted (owner-approved 2026-07-02); landed 2026-07-02 (grounding issue #96).
+**Amended 2026-07-03 (owner): the default-lane flip is withdrawn — compact JSON stays the default
+output; the text lane is opt-in via `--format text` / `SHORE_FORMAT=text`. Decisions 1, 6, and 8
+(and the "default is text" clauses of 2 and 4) are superseded by the Amendment below; the
+`--format` selector, the disposable-text/stable-json posture, and Decisions 5/7/9/10 stand as
+landed. Read the Amendment first — the original Context/Decision text is retained as the historical
+record.**
 **Date:** 2026-07-02
 **See also:** **ADR-0028** (id-prefix convention — the ids-are-opaque contract and the
 display-truncation precedent this ADR extends to CLI text output), **ADR-0030** (named command
@@ -9,6 +15,53 @@ are opaque" sections of `docs/review-workflow.md` (the stability promise this AD
 `docs/cli-reference.md` (the per-command reference this convention governs). Grounding issue:
 **#96** (human-readable readback). Held open, compatible either way: **shoreline-relay#11**
 (fix-or-retire of the relay's non-default `cli-fallback` stdout parser).
+
+## Amendment (2026-07-03): JSON stays the default; the text lane is opt-in
+
+**Owner decision (2026-07-03): the default-lane flip is withdrawn. The compact-JSON machine document
+remains the default stdout for every command; the human text lane is reached explicitly via
+`--format text` (or `SHORE_FORMAT=text`).** This adopts the posture the original ADR recorded under
+*Rejected → "Machine-default + explicit text opt-in"*: that option is now **Accepted**, and the flip
+it was weighed against is **not pursued**.
+
+**Why.** The flip's only benefit was cosmetic — a person who does not know `--format text` would get
+the readable digest without asking. Its cost was structural: a one-time break of every first-party
+stdout consumer (the bundled skills, the loop drivers, the relay `cli-fallback` builders), gated on
+shoreline-relay#11 and a coordinated release (original Decision 8). Re-weighed after wave-1 shipped,
+that coordination risk is not worth the saved keystroke: the digests already exist and are one flag
+away, and keeping JSON the default is **zero-break** — no consumer migrates and no release must be
+sequenced.
+
+**Superseded** (retained above for the record; do not implement):
+- **Decision 1** (adopt text-default; "breaking change … accepted") — withdrawn; there is no flip.
+- **Decision 8** (the flip as one coordinated break, gated on first-party migration) — withdrawn.
+  shoreline-relay#11 no longer gates this ADR; the relay keeps parsing `--format json` (today's
+  default bytes) unchanged.
+- **Decision 6** (the `hint: text-format output on stdout; pass --format json` stderr hint) —
+  withdrawn; it only made sense once text was the default. A discoverability nudge in the *other*
+  direction (hint a TTY human toward `--format text`) is a possible future affordance, not decided
+  here.
+- The **built-in default** in **Decision 2** is **`json`**, not `text`; and **Decision 4**'s "the
+  default is `text` everywhere, piped or not" is withdrawn. The default is `json` everywhere.
+
+**Stands, exactly as landed** (independent of which lane is default):
+- **Decision 2's selector and precedence** — `--format <text|json|json-pretty>`, `SHORE_FORMAT`, and
+  `--format` flag > `SHORE_FORMAT` > built-in default — ship as-is; only the built-in default value
+  differs (`json`). Because there is no flip, the legacy `--pretty`/`--compact` flags are **not**
+  retired here; removing them would be a separate decision.
+- **Decision 3** — text is formally disposable, the machine lane is the stability surface, and
+  un-digested commands fall back to indented JSON on the text lane — stands. (Its clause requiring
+  the consumed commands to ship a bespoke text rendering "at the flip" is moot; those renderers
+  shipped anyway in wave-1.)
+- **Decisions 5** (color precedence), **7** (tiered hard-core / soft-shell stability), **9**
+  (opaque-id display truncation), **10** (relay `cli-fallback` stays open), and **Decision 4's core
+  rule** (isatty may govern color/pager/stderr, never data shape) — all stand unchanged.
+
+**Net effect.** ADR-0029 now reads as: *one seam, three lanes, `json` the default and the contract,
+`text` the opt-in human view — no coordinated break.* Wave-1 (plan 0106, Phases 1–5) delivered the
+`--format text` digests on seven commands and is the complete deliverable; the flip half of the plan
+is retired. Reviving the flip would be a fresh decision (a new ADR or a superseding amendment) that
+re-opens the Decision 8 migration gate.
 
 ## Context
 
