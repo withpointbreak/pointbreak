@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::crypto::EventSigner;
-use crate::error::Result;
+use crate::error::{Result, ShoreError};
 use crate::git::{
     IngestOptions, capture_commit_range_diff_files, git_commit_tree_oid, git_head_oid,
     git_head_ref, git_rev_parse_commit_oid, ingest_tracked_diff_with_options,
@@ -14,6 +14,7 @@ use crate::model::{
 };
 use crate::session::event::{
     EventTarget, EventType, Revision, ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload,
+    subject_id, type_code,
 };
 use crate::session::fingerprint::{
     ResolvedCommitEndpoint, RevisionFingerprint, engagement_id_from_root, engagement_id_provisional,
@@ -310,7 +311,7 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
     )?;
     let mut event = ShoreEvent::new(
         EventType::WorkObjectProposed,
-        work_object_proposed_idempotency_key(&fingerprint.revision_id),
+        work_object_proposed_idempotency_key(&fingerprint.revision_id)?,
         target,
         writer,
         WorkObjectProposedPayload {
@@ -533,8 +534,20 @@ fn normalize_pathspecs(pathspecs: &[String]) -> Result<Vec<String>> {
     Ok(sorted_unique(normalized))
 }
 
-fn work_object_proposed_idempotency_key(revision_id: &RevisionId) -> String {
-    format!("work_object_proposed:{}", revision_id.as_str())
+fn work_object_proposed_idempotency_key(revision_id: &RevisionId) -> Result<String> {
+    // Lead with the stable type code and fold the opaque subject id over the
+    // revision subject (seam S2) — never the human event-kind string.
+    let subject = TargetRef::Review(ReviewTargetRef::Revision {
+        revision_id: revision_id.clone(),
+    });
+    let subject_id = subject_id(&subject)?.ok_or_else(|| {
+        ShoreError::Message("work object proposed subject must have an id".to_owned())
+    })?;
+    Ok(format!(
+        "{}:{}",
+        type_code(EventType::WorkObjectProposed),
+        subject_id
+    ))
 }
 
 /// Derive the engagement grouping hint for a generative move over the existing

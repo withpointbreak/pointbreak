@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::kind::EventType;
 use super::payload::EventPayload;
+use super::type_code::type_code;
 
 /// Content-targeted, reason-free removal fact. The payload carries **only** the
 /// `content_hash` it retires; the writer and session ride on the event envelope
@@ -15,7 +16,7 @@ pub struct ArtifactRemovedPayload {
 
 impl ArtifactRemovedPayload {
     pub fn idempotency_key(content_hash: &str) -> String {
-        format!("artifact_removed:{content_hash}")
+        format!("{}:{content_hash}", type_code(EventType::ArtifactRemoved))
     }
 }
 
@@ -51,7 +52,7 @@ mod tests {
     fn idempotency_key_is_content_targeted() {
         assert_eq!(
             ArtifactRemovedPayload::idempotency_key("sha256:abc"),
-            "artifact_removed:sha256:abc"
+            format!("{}:sha256:abc", type_code(EventType::ArtifactRemoved))
         );
     }
 }

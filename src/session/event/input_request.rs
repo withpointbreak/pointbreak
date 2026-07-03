@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::kind::EventType;
 use super::payload::{BodyContentType, EventPayload};
+use super::type_code::type_code;
 use crate::error::{Result, ShoreError};
 use crate::model::{
     InputRequestId, InputRequestResponseId, ReviewTargetRef, RevisionId, TaskTargetRef, TrackId,
@@ -79,10 +80,11 @@ pub(crate) fn decode_input_request_opened_payload(
 
 impl InputRequestOpenedPayload {
     // The two idempotency-key constructors materialize one shared pattern:
-    // `<event-kind>:<work-object-identity-in-domain-appropriate-form>:<source_key>`.
-    // Review-domain identity is `(revision_id, track_id)`; task-domain is
-    // `(work_object_id, work_object_type)`. Two serializations of one pattern --
-    // callers pick the constructor that matches their work-object kind.
+    // `<type-code>:<work-object-identity-in-domain-appropriate-form>:<source_key>`.
+    // Review-domain identity is `(revision_id, track_id)`; task-domain is the
+    // domain-prefixed `work_object_id` (self-disambiguating, so no kind tag). Two
+    // serializations of one pattern -- callers pick the constructor that matches
+    // their work-object kind.
 
     pub fn idempotency_key(
         revision_id: &RevisionId,
@@ -90,7 +92,8 @@ impl InputRequestOpenedPayload {
         source_key: &str,
     ) -> String {
         format!(
-            "input_request_opened:{}:{}:{}",
+            "{}:{}:{}:{}",
+            type_code(EventType::InputRequestOpened),
             revision_id.as_str(),
             track_id.as_str(),
             source_key
@@ -99,17 +102,13 @@ impl InputRequestOpenedPayload {
 
     pub fn idempotency_key_for_work_object(
         work_object_id: &WorkObjectId,
-        work_object_type: WorkObjectType,
+        _work_object_type: WorkObjectType,
         source_key: &str,
     ) -> String {
-        let kind = match work_object_type {
-            WorkObjectType::Revision => "revision",
-            WorkObjectType::TaskAttempt => "task_attempt",
-        };
         format!(
-            "input_request_opened:{}:{}:{}",
+            "{}:{}:{}",
+            type_code(EventType::InputRequestOpened),
             work_object_id.as_str(),
-            kind,
             source_key
         )
     }
@@ -160,7 +159,8 @@ pub struct InputRequestRespondedPayload {
 impl InputRequestRespondedPayload {
     pub fn idempotency_key(input_request_id: &InputRequestId, source_key: &str) -> String {
         format!(
-            "input_request_responded:{}:{}",
+            "{}:{}:{}",
+            type_code(EventType::InputRequestResponded),
             input_request_id.as_str(),
             source_key
         )
@@ -187,7 +187,13 @@ mod tests {
             &TrackId::new("human:kevin"),
             "source-1",
         );
-        assert_eq!(key, "input_request_opened:ru-1:human:kevin:source-1");
+        assert_eq!(
+            key,
+            format!(
+                "{}:ru-1:human:kevin:source-1",
+                type_code(EventType::InputRequestOpened)
+            )
+        );
     }
 
     #[test]
@@ -199,7 +205,14 @@ mod tests {
         );
         assert_eq!(
             key,
-            "input_request_opened:task-attempt:sha256:abc:task_attempt:source-1"
+            format!(
+                "{}:task-attempt:sha256:abc:source-1",
+                type_code(EventType::InputRequestOpened)
+            )
+        );
+        assert!(
+            !key.contains("task_attempt"),
+            "the renamable kind discriminator must be dropped, got {key}"
         );
     }
 
@@ -211,7 +224,10 @@ mod tests {
         );
         assert_eq!(
             key,
-            "input_request_responded:input-request:sha256:abc:response-source"
+            format!(
+                "{}:input-request:sha256:abc:response-source",
+                type_code(EventType::InputRequestResponded)
+            )
         );
     }
 

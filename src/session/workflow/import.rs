@@ -8,7 +8,7 @@ use crate::model::{JournalId, id_prefix};
 use crate::session::body_artifact::{BodyArtifactOutcome, stage_body_artifact};
 use crate::session::event::{
     EventTarget, EventType, ImportedNoteTarget, ReviewInitializedPayload,
-    ReviewNoteImportedPayload, ShoreEvent, SidecarSource,
+    ReviewNoteImportedPayload, ShoreEvent, SidecarSource, type_code,
 };
 use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{prepare_write_landing, resolve_write_store};
@@ -182,7 +182,8 @@ pub(crate) fn extract_note_import_records(
 
             records.push(NoteImportRecord {
                 idempotency_key: format!(
-                    "review_note_imported:{}:{}:{}",
+                    "{}:{}:{}:{}",
+                    type_code(EventType::ReviewNoteImported),
                     sidecar_source_key(sidecar_source),
                     journal_id.as_str(),
                     note_id
@@ -273,7 +274,10 @@ mod tests {
 
         assert_eq!(
             records[0].idempotency_key,
-            "review_note_imported:review_notes:work:default:note:my-id"
+            format!(
+                "{}:review_notes:work:default:note:my-id",
+                type_code(EventType::ReviewNoteImported)
+            )
         );
         assert_eq!(records[0].payload.note_id, "note:my-id");
     }
@@ -290,11 +294,10 @@ mod tests {
         )
         .expect("records extract");
 
-        assert!(
-            records[0]
-                .idempotency_key
-                .starts_with("review_note_imported:review_notes:work:default:note:sha256:")
-        );
+        assert!(records[0].idempotency_key.starts_with(&format!(
+            "{}:review_notes:work:default:note:sha256:",
+            type_code(EventType::ReviewNoteImported)
+        )));
         assert!(records[0].payload.note_id.starts_with("note:sha256:"));
     }
 

@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::kind::EventType;
 use super::payload::{BodyContentType, EventPayload};
+use super::type_code::type_code;
 use crate::model::{
     AssessmentId, InputRequestId, ObservationId, ReviewTargetRef, RevisionId, TrackId,
 };
@@ -61,7 +62,8 @@ impl ReviewAssessmentRecordedPayload {
         source_key: &str,
     ) -> String {
         format!(
-            "review_assessment_recorded:{}:{}:{}",
+            "{}:{}:{}:{}",
+            type_code(EventType::ReviewAssessmentRecorded),
             revision_id.as_str(),
             track_id.as_str(),
             source_key
@@ -191,6 +193,13 @@ mod tests {
             "source-key",
         );
 
-        assert!(key.starts_with("review_assessment_recorded:"));
+        assert!(key.starts_with(&format!(
+            "{}:",
+            type_code(EventType::ReviewAssessmentRecorded)
+        )));
+        assert!(
+            !key.contains("review_assessment_recorded"),
+            "opaque type code must replace the renamable display string"
+        );
     }
 }

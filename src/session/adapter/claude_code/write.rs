@@ -8,7 +8,8 @@ use crate::model::{
 };
 use crate::session::event::{
     EventTarget, EventType, ShoreEvent, TaskCheckpointCapturedPayload,
-    TaskObservationRecordedPayload, WorkObjectProposal, WorkObjectProposedPayload,
+    TaskObservationRecordedPayload, WorkObjectProposal, WorkObjectProposedPayload, subject_id,
+    type_code,
 };
 use crate::session::{EventStore, EventWriteOutcome};
 
@@ -56,9 +57,20 @@ pub(crate) fn intent_to_event(intent: &AdapterIntent) -> Result<ShoreEvent> {
                     source_speaker: Some(*source_speaker),
                 },
             };
-            // The generative move is keyed on the proposed work object's id, the
-            // same scheme the review path uses for its revision proposal.
-            let idempotency_key = format!("work_object_proposed:{}", task_attempt_id.as_str());
+            // The generative move leads with the stable type code and folds the
+            // opaque subject id over the task-attempt subject (seam S2), the same
+            // scheme the review path uses for its revision proposal.
+            let subject_id = subject_id(&TargetRef::Task(TaskTargetRef::TaskAttempt {
+                task_attempt_id: task_attempt_id.clone(),
+            }))?
+            .ok_or_else(|| {
+                ShoreError::Message("task attempt subject must have an id".to_owned())
+            })?;
+            let idempotency_key = format!(
+                "{}:{}",
+                type_code(EventType::WorkObjectProposed),
+                subject_id
+            );
             let mut event = ShoreEvent::new(
                 EventType::WorkObjectProposed,
                 idempotency_key,
@@ -224,7 +236,7 @@ mod tests {
     use crate::session::EventStore;
     use crate::session::event::{
         AssertionMode, EventType, ShoreEvent, SourceRef, SourceSpeaker, WorkObjectProposal,
-        WorkObjectProposedPayload, Writer, WriterProducer,
+        WorkObjectProposedPayload, Writer, WriterProducer, subject_id, type_code,
     };
 
     fn writer_user_for_test() -> Writer {
@@ -296,9 +308,20 @@ mod tests {
         let event = intent_to_event(&intent).unwrap();
 
         assert_eq!(event.event_type, EventType::WorkObjectProposed);
+        // The key leads with the stable type code and folds the opaque subject id
+        // over the task-attempt subject — no human event-kind string, no `kind` tag.
+        let expected_subject_id = subject_id(&TargetRef::Task(TaskTargetRef::TaskAttempt {
+            task_attempt_id: WorkObjectId::new("task-attempt:sha256:ta"),
+        }))
+        .unwrap()
+        .unwrap();
         assert_eq!(
             event.idempotency_key,
-            "work_object_proposed:task-attempt:sha256:ta"
+            format!(
+                "{}:{}",
+                type_code(EventType::WorkObjectProposed),
+                expected_subject_id
+            )
         );
         assert_eq!(
             event.reconstruct_subject().unwrap(),

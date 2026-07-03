@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::kind::EventType;
 use super::payload::{BodyContentType, EventPayload};
+use super::type_code::type_code;
 use crate::model::{
     RevisionId, TrackId, ValidationCheckId, ValidationStatus, ValidationTarget, ValidationTrigger,
 };
@@ -45,7 +46,8 @@ impl ValidationCheckRecordedPayload {
         source_key: &str,
     ) -> String {
         format!(
-            "validation_check_recorded:{}:{}:{}",
+            "{}:{}:{}:{}",
+            type_code(EventType::ValidationCheckRecorded),
             revision_id.as_str(),
             track_id.as_str(),
             source_key
@@ -116,7 +118,10 @@ mod tests {
 
         assert_eq!(
             key,
-            "validation_check_recorded:review-unit:sha256:def:agent:codex:validation:sha256:ghi"
+            format!(
+                "{}:review-unit:sha256:def:agent:codex:validation:sha256:ghi",
+                type_code(EventType::ValidationCheckRecorded)
+            )
         );
     }
 

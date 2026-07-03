@@ -57,12 +57,14 @@ pub use review::{
 };
 pub use signature::{EffectiveSignerError, EventSignature, resolve_effective_signer};
 pub use source::SourceRef;
+pub(crate) use subject_id::subject_id;
 pub use target::EventTarget;
 pub use task::{SourceSpeaker, TaskCheckpointCapturedPayload, TaskObservationRecordedPayload};
 pub use tbs::{
     EVENT_TO_BE_SIGNED_V1_PAYLOAD_TYPE, EventToBeSigned,
     event_signature_pre_authentication_encoding, event_to_be_signed, pre_authentication_encoding,
 };
+pub(crate) use type_code::type_code;
 pub use validation::ValidationCheckRecordedPayload;
 pub use work_object_proposed::{
     GitProvenance, Revision, WorkObjectProposal, WorkObjectProposedPayload,
@@ -503,7 +505,10 @@ mod tests {
                 &TrackId::new("agent:codex"),
                 "input-request:sha256:abc"
             ),
-            "input_request_opened:review-unit:sha256:unit:agent:codex:input-request:sha256:abc"
+            format!(
+                "{}:review-unit:sha256:unit:agent:codex:input-request:sha256:abc",
+                type_code(EventType::InputRequestOpened)
+            )
         );
     }
 
@@ -534,7 +539,10 @@ mod tests {
                 &InputRequestId::new("input-request:sha256:abc"),
                 "input-request-response:sha256:def"
             ),
-            "input_request_responded:input-request:sha256:abc:input-request-response:sha256:def"
+            format!(
+                "{}:input-request:sha256:abc:input-request-response:sha256:def",
+                type_code(EventType::InputRequestResponded)
+            )
         );
     }
 

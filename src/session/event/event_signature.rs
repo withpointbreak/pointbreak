@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::kind::EventType;
 use super::payload::EventPayload;
 use super::signature::EventSignature;
+use super::type_code::type_code;
 use crate::crypto::SignerId;
 use crate::model::EventId;
 
@@ -56,9 +57,9 @@ pub struct EventSignatureRecordedPayload {
 
 impl EventSignatureRecordedPayload {
     /// Idempotency key = the FULL attestation triple (ADR-0004 amendment D3):
-    /// `event_signature_recorded:<targetEventRecordHash>:<attestingSigner>:<sig-encoding>`.
+    /// `<type-code>:<targetEventRecordHash>:<attestingSigner>:<sig-encoding>`.
     ///
-    /// Follows the established `<event_kind>:<work-object-identity>:<source_key>`
+    /// Follows the established `<type-code>:<work-object-identity>:<source_key>`
     /// shape (cf. `ReviewAssessmentRecordedPayload::idempotency_key`). The signature
     /// component carries the full `sig` bytes (`attestation.sig.as_str()`), so
     /// two DISTINCT signatures by one signer key to DISTINCT members — closing
@@ -69,7 +70,8 @@ impl EventSignatureRecordedPayload {
         signature_encoding: &str,
     ) -> String {
         format!(
-            "event_signature_recorded:{}:{}:{}",
+            "{}:{}:{}:{}",
+            type_code(EventType::EventSignatureRecorded),
             target_event_record_hash,
             attesting_signer.as_str(),
             signature_encoding,
@@ -89,7 +91,7 @@ mod tests {
     use crate::model::{EventId, JournalId};
     use crate::session::event::{
         EventPayload, EventSignature, EventSignatureRecordedPayload, EventTarget, EventType,
-        InclusionProof, ShoreEvent, Writer,
+        InclusionProof, ShoreEvent, Writer, type_code,
     };
 
     const FRIENDLY_SIGNER: &str = "did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd";
@@ -129,7 +131,10 @@ mod tests {
 
         assert_eq!(
             key,
-            "event_signature_recorded:sha256:rec:did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd:SIG_BASE64"
+            format!(
+                "{}:sha256:rec:did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd:SIG_BASE64",
+                type_code(EventType::EventSignatureRecorded)
+            )
         );
     }
 

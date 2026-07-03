@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::kind::EventType;
 use super::payload::EventPayload;
+use super::type_code::type_code;
 use crate::model::{JournalId, Side};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -10,7 +11,11 @@ pub struct ReviewInitializedPayload {}
 
 impl ReviewInitializedPayload {
     pub fn idempotency_key(journal_id: &JournalId) -> String {
-        format!("review_initialized:{}", journal_id.as_str())
+        format!(
+            "{}:{}",
+            type_code(EventType::ReviewInitialized),
+            journal_id.as_str()
+        )
     }
 }
 

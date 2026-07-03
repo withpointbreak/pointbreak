@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use super::kind::EventType;
 use super::payload::EventPayload;
+use super::type_code::type_code;
 use crate::canonical_hash::sha256_json_prefixed;
 use crate::error::Result;
 use crate::model::{
@@ -33,7 +34,8 @@ pub struct RevisionCommitAssociatedPayload {
 impl RevisionCommitAssociatedPayload {
     pub fn idempotency_key(revision_id: &RevisionId, commit_oid: &str) -> String {
         format!(
-            "revision_commit_associated:{}:{}",
+            "{}:{}:{}",
+            type_code(EventType::RevisionCommitAssociated),
             revision_id.as_str(),
             commit_oid
         )
@@ -58,7 +60,8 @@ pub struct RevisionRefAssociatedPayload {
 impl RevisionRefAssociatedPayload {
     pub fn idempotency_key(revision_id: &RevisionId, ref_name: &str, head_oid: &str) -> String {
         format!(
-            "revision_ref_associated:{}:{}",
+            "{}:{}:{}",
+            type_code(EventType::RevisionRefAssociated),
             revision_id.as_str(),
             ref_distinguisher(ref_name, head_oid)
         )
@@ -82,7 +85,8 @@ pub struct RevisionCommitWithdrawnPayload {
 impl RevisionCommitWithdrawnPayload {
     pub fn idempotency_key(commit_association_id: &CommitAssociationId) -> String {
         format!(
-            "revision_commit_withdrawn:{}",
+            "{}:{}",
+            type_code(EventType::RevisionCommitWithdrawn),
             commit_association_id.as_str()
         )
     }
@@ -104,7 +108,11 @@ pub struct RevisionRefWithdrawnPayload {
 
 impl RevisionRefWithdrawnPayload {
     pub fn idempotency_key(ref_association_id: &RefAssociationId) -> String {
-        format!("revision_ref_withdrawn:{}", ref_association_id.as_str())
+        format!(
+            "{}:{}",
+            type_code(EventType::RevisionRefWithdrawn),
+            ref_association_id.as_str()
+        )
     }
 }
 
@@ -195,7 +203,10 @@ mod tests {
         let ru = RevisionId::new("ru:sha256:abc");
         assert_eq!(
             RevisionCommitAssociatedPayload::idempotency_key(&ru, "oid123"),
-            "revision_commit_associated:ru:sha256:abc:oid123"
+            format!(
+                "{}:ru:sha256:abc:oid123",
+                type_code(EventType::RevisionCommitAssociated)
+            )
         );
     }
 
@@ -204,7 +215,10 @@ mod tests {
         let ru = RevisionId::new("ru:sha256:abc");
         assert_eq!(
             RevisionRefAssociatedPayload::idempotency_key(&ru, "refs/heads/feat/x", "oidH"),
-            "revision_ref_associated:ru:sha256:abc:refs/heads/feat/x@oidH"
+            format!(
+                "{}:ru:sha256:abc:refs/heads/feat/x@oidH",
+                type_code(EventType::RevisionRefAssociated)
+            )
         );
     }
 
@@ -213,12 +227,18 @@ mod tests {
         let cid = CommitAssociationId::new("assoc-commit:sha256:zzz");
         assert_eq!(
             RevisionCommitWithdrawnPayload::idempotency_key(&cid),
-            "revision_commit_withdrawn:assoc-commit:sha256:zzz"
+            format!(
+                "{}:assoc-commit:sha256:zzz",
+                type_code(EventType::RevisionCommitWithdrawn)
+            )
         );
         let rid = RefAssociationId::new("assoc-ref:sha256:yyy");
         assert_eq!(
             RevisionRefWithdrawnPayload::idempotency_key(&rid),
-            "revision_ref_withdrawn:assoc-ref:sha256:yyy"
+            format!(
+                "{}:assoc-ref:sha256:yyy",
+                type_code(EventType::RevisionRefWithdrawn)
+            )
         );
     }
 

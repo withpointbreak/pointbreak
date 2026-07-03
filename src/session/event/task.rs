@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::kind::EventType;
 use super::payload::EventPayload;
+use super::type_code::type_code;
 use crate::model::{CheckpointId, ObservationId, WorkObjectId, WorkObjectType};
 
 /// Which conversation participant produced the source message this event was
@@ -35,17 +36,13 @@ pub struct TaskCheckpointCapturedPayload {
 impl TaskCheckpointCapturedPayload {
     pub fn idempotency_key_for_work_object(
         work_object_id: &WorkObjectId,
-        work_object_type: WorkObjectType,
+        _work_object_type: WorkObjectType,
         source_key: &str,
     ) -> String {
-        let kind = match work_object_type {
-            WorkObjectType::Revision => "revision",
-            WorkObjectType::TaskAttempt => "task_attempt",
-        };
         format!(
-            "task_checkpoint_captured:{}:{}:{}",
+            "{}:{}:{}",
+            type_code(EventType::TaskCheckpointCaptured),
             work_object_id.as_str(),
-            kind,
             source_key
         )
     }
@@ -79,17 +76,13 @@ pub struct TaskObservationRecordedPayload {
 impl TaskObservationRecordedPayload {
     pub fn idempotency_key_for_work_object(
         work_object_id: &WorkObjectId,
-        work_object_type: WorkObjectType,
+        _work_object_type: WorkObjectType,
         source_key: &str,
     ) -> String {
-        let kind = match work_object_type {
-            WorkObjectType::Revision => "revision",
-            WorkObjectType::TaskAttempt => "task_attempt",
-        };
         format!(
-            "task_observation_recorded:{}:{}:{}",
+            "{}:{}:{}",
+            type_code(EventType::TaskObservationRecorded),
             work_object_id.as_str(),
-            kind,
             source_key
         )
     }
@@ -193,8 +186,46 @@ mod tests {
         );
         assert_eq!(
             key,
-            "task_checkpoint_captured:task-attempt:sha256:ta:task_attempt:checkpoint:sha256:cp"
+            format!(
+                "{}:task-attempt:sha256:ta:checkpoint:sha256:cp",
+                type_code(EventType::TaskCheckpointCaptured)
+            )
         );
+    }
+
+    #[test]
+    fn work_object_key_drops_the_renamable_kind_tag_and_leads_with_the_type_code() {
+        let key = TaskCheckpointCapturedPayload::idempotency_key_for_work_object(
+            &WorkObjectId::new("task-attempt:sha256:ta"),
+            WorkObjectType::TaskAttempt,
+            "checkpoint:sha256:cp",
+        );
+
+        assert!(
+            key.starts_with(&format!(
+                "{}:",
+                type_code(EventType::TaskCheckpointCaptured)
+            )),
+            "key must lead with the frozen type code, got {key}"
+        );
+        assert!(
+            !key.contains("task_attempt"),
+            "the renamable kind discriminator must be gone, got {key}"
+        );
+        assert!(
+            !key.contains("revision"),
+            "the renamable kind discriminator must be gone, got {key}"
+        );
+
+        // The dropped `work_object_type` tag is the only renamable token besides the
+        // (frozen) type code, so a hypothetical rename of the kind — modeled here as
+        // passing the other variant for the same domain-prefixed id — yields the same key.
+        let same_key_other_tag = TaskCheckpointCapturedPayload::idempotency_key_for_work_object(
+            &WorkObjectId::new("task-attempt:sha256:ta"),
+            WorkObjectType::Revision,
+            "checkpoint:sha256:cp",
+        );
+        assert_eq!(key, same_key_other_tag);
     }
 
     #[test]
@@ -334,7 +365,10 @@ mod tests {
         );
         assert_eq!(
             key,
-            "task_observation_recorded:task-attempt:sha256:ta:task_attempt:obs:sha256:o1"
+            format!(
+                "{}:task-attempt:sha256:ta:obs:sha256:o1",
+                type_code(EventType::TaskObservationRecorded)
+            )
         );
     }
 

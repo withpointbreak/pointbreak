@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::kind::EventType;
 use super::payload::{BodyContentType, EventPayload};
+use super::type_code::type_code;
 use crate::model::{ObservationId, ReviewTargetRef, RevisionId, TrackId};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -37,7 +38,8 @@ impl ReviewObservationRecordedPayload {
         source_key: &str,
     ) -> String {
         format!(
-            "review_observation_recorded:{}:{}:{}",
+            "{}:{}:{}:{}",
+            type_code(EventType::ReviewObservationRecorded),
             revision_id.as_str(),
             track_id.as_str(),
             source_key
