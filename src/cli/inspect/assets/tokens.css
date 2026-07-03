@@ -57,6 +57,25 @@
   --fg: #d9e8f5;
   --fg-dim: #9db1c4;   /* 5.22:1 on --bg-row-sel — raised from #96aabc (4.81) for the margin Shoreline keeps (5.32) */
 
+  /* Header chrome — a dedicated deeper tone so the topbar reads as a distinct
+     band over the page (page/topbar/field sat within ~1.06 when the topbar
+     borrowed --bg-elev). Its own token so --bg-elev keeps serving cards/code
+     blocks unchanged. */
+  --bg-topbar: #143252;
+
+  /* List selection — a light wash paired with an --accent left bar (app.css).
+     The bar carries the selected signal, so the wash stays light enough that
+     the colored event-type labels on a selected row clear AA (a strong fill
+     cannot back dark colored text at AA). Distinct from --bg-row-sel, which
+     still fills the fill-based selections (command palette, DAG node). */
+  --sel-bg: #122c46;
+
+  /* Read-only code/JSON readout surface — a quiet panel, distinct from the
+     functional --bg-elev overlays (command palette, diff headers) that should
+     stand out. Dark keeps the recessive navy; light is a barely-there near-white
+     (ocean-foam --bg-elev read as too strong a blue card on the white page). */
+  --bg-code: #0e2233;
+
   /* Accent — the signature sky-blue. --accent is the text/icon/glow register
      (site's sky-400 CTA hue); --accent-strong is the fill register;
      --on-accent is the label color on accent fills. */
@@ -80,16 +99,18 @@
 
   /* Event-type palette — one hue per durable event type, the color-code the
      timeline rails, type-filter toggles, and type labels are scanned by. Single
-     source of truth (moved out of app.js); each kept perceptually distinct so a
-     dense timeline stays readable by color. --evt-capture tracks the accent so
-     it inherits the brand. */
-  --evt-init: #7f8c9b;       /* review_initialized (neutral) */
+     source of truth (moved out of app.js); each chromatic type kept perceptually
+     distinct so a dense timeline stays readable by color. --evt-capture tracks
+     the accent so it inherits the brand. The neutral types alias --fg-dim so
+     their labels stay AA on every surface, including a selected row (their own
+     lighter grays fell well under AA there). */
+  --evt-init: var(--fg-dim);     /* review_initialized (neutral) */
   --evt-capture: var(--accent);      /* work_object_proposed */
   --evt-observation: #6dd28a;/* review_observation_recorded */
   --evt-assessment: #b388ff; /* review_assessment_recorded */
   --evt-request: #f0b75a;    /* input_request_opened */
   --evt-response: #4fd0c0;   /* input_request_responded */
-  --evt-note: #9aa7b5;       /* review_note_imported (neutral) */
+  --evt-note: var(--fg-dim);     /* review_note_imported (neutral) */
   --evt-validation: #e88fb0; /* validation_check_recorded */
 
   /* Syntax-highlight token palette — one color per token kind for the diff
@@ -212,6 +233,9 @@
   --bg-elev: #f0f9ff;      /* ocean-foam */
   --bg-row: #e9f3fb;
   --bg-row-sel: #d3e9fa;
+  --bg-topbar: #dfeaf6;    /* deeper header band — 1.22 step from the white page */
+  --sel-bg: #edf4fe;       /* light selection wash; the --accent bar signals selection */
+  --bg-code: #f6f9fd;      /* quiet near-white code panel; softer than the ocean-foam --bg-elev */
   --border: #bcd3e5;
   --fg: #142433;
   --fg-dim: #4c6173;       /* 5.15:1 on --bg-row-sel — darkened from #52687b (4.51, razor-thin) */

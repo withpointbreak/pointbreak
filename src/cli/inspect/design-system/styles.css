@@ -41,7 +41,7 @@ body {
   align-items: center;
   gap: 18px;
   padding: 10px 16px;
-  background: var(--bg-elev);
+  background: var(--bg-topbar);
   border-bottom: 1px solid var(--border);
 }
 .brand { font-weight: 700; letter-spacing: 0.3px; }
@@ -96,7 +96,7 @@ body {
 /* ---- Inputs ----------------------------------------------------------- */
 .toolbar { display: flex; gap: 8px; align-items: center; padding: 8px 16px; flex-wrap: wrap; }
 .toolbar input[type="search"], .toolbar select {
-  background: var(--bg-row);
+  background: var(--bg);
   color: var(--fg);
   border: 1px solid var(--border);
   border-radius: var(--r-md);
@@ -104,6 +104,7 @@ body {
   font: inherit;
 }
 .toolbar input[type="search"] { flex: 1; min-width: 180px; }
+.toolbar input[type="search"]::placeholder { color: var(--fg-dim); opacity: 1; }
 .ghost { background: transparent; color: var(--fg-dim); border: 1px solid var(--border); border-radius: var(--r-md); padding: 5px 10px; cursor: pointer; font: inherit; }
 .type-toggles { display: flex; gap: 4px; flex-wrap: wrap; }
 .type-toggle {
@@ -198,7 +199,9 @@ body {
 }
 .event:last-child { border-bottom: 0; }
 .event:hover { background: var(--bg-row); }
-.event[aria-selected="true"] { background: var(--bg-row-sel); }
+/* Selection = a light --sel-bg wash + an --accent left bar; the bar carries the
+   signal so the wash stays light enough for colored event-type labels to clear AA. */
+.event[aria-selected="true"] { background: var(--sel-bg); box-shadow: inset 3px 0 0 var(--accent); }
 .event .time { color: var(--fg-dim); font-size: 11px; font-family: var(--mono); }
 .event .rail { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; }
 .event .body { min-width: 0; }
@@ -213,7 +216,7 @@ body {
 .detail .kv dt { color: var(--fg-dim); font-family: var(--mono); }
 .detail .kv dd { margin: 0; font-family: var(--mono); word-break: break-all; }
 .detail pre {
-  background: var(--bg-elev);
+  background: var(--bg-code);
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
   padding: 12px;
@@ -500,6 +503,8 @@ body {
 
 /* ---- Endorsements / verify ------------------------------------------- */
 .verify { font-family: var(--mono); font-size: 11px; padding: 1px 6px; border-radius: var(--r-sm); background: var(--bg-row); color: var(--fg-dim); white-space: nowrap; }
+/* On a selected row the chip re-seats on --bg so its tint text clears AA. */
+[aria-selected="true"] .verify { background: var(--bg); }
 .verify-valid { color: var(--success); }
 .verify-invalid { color: var(--danger); }
 .verify-untrusted_key { color: var(--warning); }
