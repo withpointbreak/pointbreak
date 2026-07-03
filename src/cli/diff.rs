@@ -1,7 +1,7 @@
-//! `shore diff` — captured-revision human diff readback (ADR-0030 D2).
+//! `shore diff` — captured-revision diff readback (ADR-0030 D2).
 //!
 //! Prints a captured revision's diff — base to target, from the frozen captured
-//! snapshot — as a human unified diff on stdout. Human-only (no machine lane),
+//! snapshot — as a text unified diff on stdout. Text-only (no machine lane),
 //! non-interactive, pipe-friendly; the output is formally disposable (nothing
 //! parses it). The subject is always the frozen snapshot, never the live working
 //! tree: `git diff` owns the live tree, and shore's bare verbs read against the
@@ -142,7 +142,7 @@ fn render_file_header(out: &mut String, file: &DiffFile) {
     }
 
     // The `--- / +++` pair belongs to textual files with hunks; binary and
-    // mode-only files carry their human summary in `metadata_rows` instead.
+    // mode-only files carry their readable summary in `metadata_rows` instead.
     if !file.hunks.is_empty() {
         let minus = if matches!(file.status, FileStatus::Added) {
             "/dev/null".to_string()

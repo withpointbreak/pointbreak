@@ -91,7 +91,7 @@ shore diff [--repo <path>] [--revision <id>] [--stat]
 ```
 
 `shore diff` prints a captured revision's diff — base to target, from the **frozen captured
-snapshot** — as a human unified diff on stdout. It is the terminal reader for the immutable diff a
+snapshot** — as a text unified diff on stdout. It is the terminal reader for the immutable diff a
 revision recorded; its subject is always the captured snapshot, never the live working tree
 (`git diff` owns the live tree).
 
@@ -100,7 +100,7 @@ revision recorded; its subject is always the captured snapshot, never the live w
   superseded revision resolves its thread's current head. Omit it to diff the current capture; it is
   required when the store holds more than one candidate.
 - `--stat` prints only the diffstat (a per-file summary and totals), not the diff body.
-- The command is **human-only and non-interactive**: it has no `--format` selector and emits no JSON
+- The command is **text-only and non-interactive**: it has no `--format` selector and emits no JSON
   (machine consumers read the review documents, e.g. `shore review show --format json`). Its output
   is **disposable** — wording, layout, and ordering may change between releases, so nothing should
   parse it.

@@ -109,7 +109,7 @@ fn shore_diff_renders_content_unavailable_when_removed() {
 
 #[test]
 fn shore_diff_ignores_ambient_shore_format_json() {
-    // `shore diff` is human-only: a global machine-format pin must not break it.
+    // `shore diff` is text-only: a global machine-format pin must not break it.
     let repo = modified_repo();
     capture(repo.path());
 
@@ -119,7 +119,7 @@ fn shore_diff_ignores_ambient_shore_format_json() {
     );
     assert!(output.status.success(), "stderr:\n{}", err_text(&output));
     let text = out_text(&output);
-    assert!(text.contains("diff --git")); // human output, not JSON
+    assert!(text.contains("diff --git")); // text output, not JSON
     assert!(!text.trim_start().starts_with('{'));
 }
 
