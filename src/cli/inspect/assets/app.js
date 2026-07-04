@@ -2845,14 +2845,17 @@
       list.appendChild(eventRow(rows[i - offset], selected));
     if (paintEnd < matchCount)
       list.appendChild(spacer((matchCount - paintEnd) * ROW_H));
-    maybeExtendWindow(viewportH, end, loadEnd, matchCount);
+    maybeExtendWindow(viewportH, start, end, offset, loadEnd, matchCount);
   }
   __name(renderTimeline, "renderTimeline");
-  function maybeExtendWindow(viewportH, visibleEnd, loadEnd, matchCount) {
+  function maybeExtendWindow(viewportH, visibleStart, visibleEnd, loadStart, loadEnd, matchCount) {
     if (viewportH <= 0) return;
-    if (loadEnd >= matchCount) return;
-    if (visibleEnd < loadEnd - OVERSCAN) return;
-    void fetchHistoryPage({ offset: loadEnd });
+    if (loadEnd < matchCount && visibleEnd >= loadEnd - OVERSCAN) {
+      void fetchHistoryPage({ offset: loadEnd });
+    }
+    if (loadStart > 0 && visibleStart <= loadStart + OVERSCAN) {
+      void fetchHistoryPage({ offset: Math.max(0, loadStart - HISTORY_PAGE) });
+    }
   }
   __name(maybeExtendWindow, "maybeExtendWindow");
   function scrollTimelineSelectionIntoView(eventId) {

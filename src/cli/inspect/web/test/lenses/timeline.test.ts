@@ -330,6 +330,78 @@ describe("paged virtual timeline (server matchCount + offset window)", () => {
     }
     expect(fetched).toBe(false);
   });
+
+  it("requests the previous page when the viewport nears the loaded start (post-reveal, offset > 0)", async () => {
+    let lastUrl = "";
+    const innerFetch = globalThis.fetch;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      if (new URL(url, "http://inspector.test").pathname === "/api/history")
+        lastUrl = url;
+      return innerFetch(input as RequestInfo, init);
+    }) as typeof fetch;
+    setHistoryResponse({
+      entries: manyEntries(20, 0),
+      diagnostics: [],
+      offset: 0,
+      matchCount: 100,
+      facets: {},
+    });
+    try {
+      // A post-reveal window loaded at a non-zero offset; the same default query
+      // key so the fetched previous page merges rather than replacing the window.
+      seedHistory(manyEntries(20, 20), {
+        offset: 20,
+        matchCount: 100,
+        queryKey: "order=desc&limit=100",
+      });
+      // scrollTop 0 puts the visible start at the leading edge (into the spacer).
+      mockViewport(500, 0);
+      timeline.renderTimeline();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      globalThis.fetch = innerFetch;
+    }
+    // A previous-page fetch back-filled the leading gap: the window grew and its
+    // offset dropped, with the total match count unchanged.
+    expect(lastUrl).toContain("offset=0");
+    expect(store.getState().history?.entries.length).toBe(40);
+    expect(store.getState().history?.offset).toBe(0);
+    expect(store.getState().history?.matchCount).toBe(100);
+  });
+
+  it("does not page before the start when the window already begins at offset 0", async () => {
+    let fetched = false;
+    const innerFetch = globalThis.fetch;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      if (new URL(url, "http://inspector.test").pathname === "/api/history")
+        fetched = true;
+      return innerFetch(input as RequestInfo, init);
+    }) as typeof fetch;
+    try {
+      // A window at offset 0 large enough that the trailing edge is far from the
+      // viewport (so the forward branch stays quiet). Scrolled to the very top,
+      // the leading-edge check must NOT fire a previous-page fetch (loadStart 0).
+      seedHistory(manyEntries(60, 0), { offset: 0, matchCount: 100 });
+      mockViewport(500, 0);
+      timeline.renderTimeline();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      globalThis.fetch = innerFetch;
+    }
+    expect(fetched).toBe(false);
+  });
 });
 
 describe("scrollTimelineSelectionIntoView (global-index scroller)", () => {

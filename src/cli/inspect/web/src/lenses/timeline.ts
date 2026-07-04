@@ -16,7 +16,7 @@
 // whole loaded window without paging.
 
 import { CLASS } from "../classNames";
-import { fetchHistoryPage } from "../data";
+import { fetchHistoryPage, HISTORY_PAGE } from "../data";
 import { $ } from "../dom";
 import { escapeHtml } from "../escape";
 import { fmtTime } from "../format";
@@ -177,7 +177,7 @@ export function renderTimeline(): void {
     list.appendChild(eventRow(rows[i - offset], selected));
   if (paintEnd < matchCount)
     list.appendChild(spacer((matchCount - paintEnd) * ROW_H));
-  maybeExtendWindow(viewportH, end, loadEnd, matchCount);
+  maybeExtendWindow(viewportH, start, end, offset, loadEnd, matchCount);
 }
 
 // Fetch the next page when the viewport nears the trailing loaded edge and more
@@ -186,14 +186,24 @@ export function renderTimeline(): void {
 // requests so a burst of scroll events issues one fetch.
 function maybeExtendWindow(
   viewportH: number,
+  visibleStart: number,
   visibleEnd: number,
+  loadStart: number,
   loadEnd: number,
   matchCount: number,
 ): void {
   if (viewportH <= 0) return;
-  if (loadEnd >= matchCount) return;
-  if (visibleEnd < loadEnd - OVERSCAN) return;
-  void fetchHistoryPage({ offset: loadEnd });
+  // Forward: the viewport nears the trailing loaded edge and more remains.
+  if (loadEnd < matchCount && visibleEnd >= loadEnd - OVERSCAN) {
+    void fetchHistoryPage({ offset: loadEnd });
+  }
+  // Backward (symmetric): the viewport nears the leading loaded edge and the
+  // window starts above the set's start (e.g. a reveal landed it mid-set). The
+  // fixed-height spacer model keeps the scroll track a stable `matchCount` rows,
+  // so a prepend back-fills leading-spacer rows in place with no scroll jump.
+  if (loadStart > 0 && visibleStart <= loadStart + OVERSCAN) {
+    void fetchHistoryPage({ offset: Math.max(0, loadStart - HISTORY_PAGE) });
+  }
 }
 
 /**
