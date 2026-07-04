@@ -29,7 +29,7 @@
 //! owner's runbook area. Generalizing that side file into shipped maintenance
 //! commands is deliberately out of scope here.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -118,6 +118,14 @@ pub fn migrate_opaque_identity(options: MigrateOptions) -> Result<MigrateSummary
     let keystore = build_keystore_index(&options.keystore_dir)?;
     let mut summary = MigrateSummary::default();
 
+    // Every moving content id this store actually produces. A moving reference to
+    // an id in this set is a genuine dependency the fixpoint orders behind its
+    // producer; a moving reference to an id *not* in it is an advisory
+    // forward-pointer (ADR-0026 `responds_to`) or other cross-store reference to
+    // content this store never held, and must ride through verbatim rather than
+    // stall the fixpoint on a reference that can never resolve.
+    let produced = collect_produced_content_ids(&raw)?;
+
     let target = EventStore::from_backend(&StoreBackend::Local(options.target_store_dir.clone()));
     let mut content_remap: BTreeMap<String, String> = BTreeMap::new();
     let mut old_to_new: BTreeMap<String, ShoreEvent> = BTreeMap::new();
@@ -134,13 +142,19 @@ pub fn migrate_opaque_identity(options: MigrateOptions) -> Result<MigrateSummary
         let mut progressed = false;
         let mut still_pending: Vec<&Value> = Vec::with_capacity(pending.len());
         for value in pending {
-            if !references_resolved(value, &content_remap)? {
+            if !references_resolved(value, &content_remap, &produced)? {
                 still_pending.push(value);
                 continue;
             }
             let old_event_id = event_id_of(value)?;
-            let event =
-                transform_pass_one(value, &mut content_remap, &keystore, &options, &mut summary)?;
+            let event = transform_pass_one(
+                value,
+                &mut content_remap,
+                &produced,
+                &keystore,
+                &options,
+                &mut summary,
+            )?;
             record_into(&target, &event)?;
             old_to_new.insert(old_event_id, event);
             progressed = true;
@@ -225,6 +239,7 @@ fn build_keystore_index(keystore_dir: &Path) -> Result<BTreeMap<String, String>>
 fn transform_pass_one(
     value: &Value,
     content_remap: &mut BTreeMap<String, String>,
+    produced: &BTreeSet<String>,
     keystore: &BTreeMap<String, String>,
     options: &MigrateOptions,
     summary: &mut MigrateSummary,
@@ -242,7 +257,7 @@ fn transform_pass_one(
 
     // Remap every moving content id this event references (in the envelope subject
     // and the payload reference fields), then re-parse the reshaped subject.
-    remap_references(&mut migrated, content_remap)?;
+    remap_references(&mut migrated, content_remap, produced)?;
     let subject: TargetRef =
         serde_json::from_value(subject_value(&migrated).clone()).map_err(|error| {
             migrate_error(&format!("reshaped target.subject does not decode: {error}"))
@@ -533,15 +548,24 @@ impl ContentKind {
     }
 }
 
-/// Whether every moving content id this event references has already been
-/// re-derived. A capture, association, or content-id-free event references
-/// nothing and resolves immediately.
-fn references_resolved(value: &Value, content_remap: &BTreeMap<String, String>) -> Result<bool> {
+/// Whether every moving content id this event references that this store can
+/// resolve has already been re-derived. A reference to a moving id this store
+/// never produces (`produced`) is an unresolvable forward-pointer, not a pending
+/// dependency, so it does not defer the event. A capture, association, or
+/// content-id-free event references nothing and resolves immediately.
+fn references_resolved(
+    value: &Value,
+    content_remap: &BTreeMap<String, String>,
+    produced: &BTreeSet<String>,
+) -> Result<bool> {
     let own_field = own_field_of(value)?;
     let mut resolved = true;
     let mut probe = value.clone();
     visit_reference_strings(&mut probe, own_field, &mut |string| {
-        if is_moving_content_id(string) && !content_remap.contains_key(string) {
+        if is_moving_content_id(string)
+            && produced.contains(string.as_str())
+            && !content_remap.contains_key(string)
+        {
             resolved = false;
         }
         Ok(())
@@ -550,25 +574,55 @@ fn references_resolved(value: &Value, content_remap: &BTreeMap<String, String>) 
 }
 
 /// Remap every moving content-id reference this event folds through the old->new
-/// map. A reference to an id not yet re-derived is a dependency-order or dangling
-/// reference and stops the migration (the fixpoint has already deferred a
-/// resolvable event, so reaching here means a genuine cycle or dangle).
-fn remap_references(value: &mut Value, content_remap: &BTreeMap<String, String>) -> Result<()> {
+/// map. A reference to an id this store produces but has not yet re-derived is a
+/// dependency-order or cycle error and stops the migration (the fixpoint has
+/// already deferred a resolvable event, so reaching here means a genuine cycle).
+/// A reference to a moving id this store never produces is an advisory
+/// forward-pointer (ADR-0026 `responds_to`) or other cross-store reference; it
+/// has no re-derived form here and rides through verbatim, which keeps a fresh
+/// re-record folding the same literal id convergent.
+fn remap_references(
+    value: &mut Value,
+    content_remap: &BTreeMap<String, String>,
+    produced: &BTreeSet<String>,
+) -> Result<()> {
     let own_field = own_field_of(value)?;
     visit_reference_strings(value, own_field, &mut |string| {
         if is_moving_content_id(string) {
             match content_remap.get(string.as_str()) {
                 Some(new) => *string = new.clone(),
-                None => {
+                None if produced.contains(string.as_str()) => {
                     return Err(migrate_error(&format!(
                         "reference to content id {string} that has no re-derived form \
-                         (dependency-order or dangling reference)"
+                         (dependency-order or cyclic reference)"
                     )));
                 }
+                None => {}
             }
         }
         Ok(())
     })
+}
+
+/// Every old moving content id an event in the source produces (each moving
+/// content family's own-id field). A moving reference to an id in this set is a
+/// genuine in-store dependency; a moving reference to an id absent from it points
+/// at content this store never held and is preserved verbatim rather than
+/// remapped or treated as a fixpoint dependency.
+fn collect_produced_content_ids(raw: &[Value]) -> Result<BTreeSet<String>> {
+    let mut produced = BTreeSet::new();
+    for value in raw {
+        let Some(kind) = ContentKind::from_event_type(event_type_of(value)?) else {
+            continue;
+        };
+        if !kind.is_moving() {
+            continue;
+        }
+        if let Some(id) = value["payload"][kind.own_field()].as_str() {
+            produced.insert(id.to_owned());
+        }
+    }
+    Ok(produced)
 }
 
 /// The event's own content-id field name, if it is a recognized content event.
@@ -1286,6 +1340,66 @@ mod tests {
             responds_to[0].as_str().unwrap(),
             anchor_new_id,
             "the response link points at the anchor's re-derived id, not the frozen one"
+        );
+    }
+
+    #[test]
+    fn a_dangling_forward_pointer_rides_through_and_does_not_stall() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let keystore = tempfile::tempdir().unwrap();
+        let did = held_key(keystore.path());
+
+        let revision_id = "rev:sha256:r";
+        seed(
+            source.path(),
+            &legacy_capture(revision_id, "obj:sha256:o", Some(&did)),
+        );
+        // An advisory responds_to forward-pointer (ADR-0026) to an observation no
+        // event in this store produces — a cross-store or otherwise unresolvable
+        // pointer. It must not be treated as a fixpoint dependency (which would
+        // stall the whole migration on a reference that can never resolve).
+        let dangling = "obs:sha256:231e9f4144c6a5cb0000000000000000000000000000000000000000000000";
+        seed(
+            source.path(),
+            &legacy_observation(
+                revision_id,
+                "agent:tester",
+                "obs:sha256:responder",
+                "acknowledgment",
+                &[dangling],
+                Some(&did),
+            ),
+        );
+
+        let summary = run(source.path(), target.path(), keystore.path());
+        assert!(
+            summary.self_check_passed,
+            "an unresolvable forward-pointer must not stall the migration"
+        );
+
+        let events = migrated_events(target.path());
+        let responder = events
+            .iter()
+            .find(|event| event.payload["title"] == "acknowledgment")
+            .expect("responder observation");
+
+        // The responder's own id still moved onto the opaque subject ...
+        assert_ne!(
+            responder.payload["observationId"].as_str().unwrap(),
+            "obs:sha256:responder",
+            "the responder's own id re-derives"
+        );
+        // ... but the unresolvable forward-pointer rides through verbatim, since
+        // there is no re-derived form in this store to remap it to.
+        let responds_to = responder.payload["respondsToObservationIds"]
+            .as_array()
+            .expect("responder carries a response link");
+        assert_eq!(responds_to.len(), 1);
+        assert_eq!(
+            responds_to[0].as_str().unwrap(),
+            dangling,
+            "a forward-pointer to content this store never held is preserved unchanged"
         );
     }
 
