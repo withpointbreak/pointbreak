@@ -894,3 +894,44 @@ not "stop ever breaking."
 **Status:** Accepted; the one signed-store break this amendment authorizes (the opaque-coded signed
 identity migration) lands with its owner-gated implementation work. The signature-neutral pieces —
 the reserved storage-descriptor fields and the view-upcast doctrine — land ahead of the break.
+
+## Amendment: The First View Upcast Is Retired at the 1.0 Store-Format Floor
+
+**Status:** stays Accepted; this is a landing record, not a re-decision. The view-upcast seam (D2), its
+signature-safety invariant (D4), and the reserved hash-excluded `payloadVersion` field (D3) from the
+*Opaque-Coded Signed Identity, the View-Upcast Seam, and the Storage Descriptor* amendment are
+**unchanged and remain available**. Only the single *preventive* first upcast that amendment shipped is
+retired. (owner-approved 2026-07-03, landed as PR #373.)
+
+### Context
+
+That amendment's D2 described the view-upcast seam as *preventive* — "no interpretation change is waiting
+for it today" — and its landing shipped a **single targeted first upcast** plus its signature-safety
+test: the `work_object_proposed` decode in `revision_projection/resolving.rs` re-presented a revision
+capture that bound its object artifact under the retired `snapshotArtifactContentHash` wire key as the
+current `objectArtifactContentHash`.
+
+At 1.0 the current on-disk shape is the **store-format floor**: no supported store carries a pre-1.0
+payload view, so nothing needs that first upcast. A live upcast for data no supported store holds is dead
+read-path surface.
+
+### Decision
+
+- **The seam and its guarantees stay.** D2's read-time view-upcast doctrine, D4's signature-safety
+  invariant (every digest is computed over the stored `ShoreEvent`, never an upcast view), and D3's
+  hash-excluded `payloadVersion` field (`default = 1`, reserved) are **unchanged**. A future
+  interpretation-only change re-instantiates the seam exactly as D2 specifies — a pure
+  `upcast(old_value) -> current_model` in the projection layer, keyed on `payloadVersion`, under D4's
+  invariant. Upcasting stays the sanctioned mechanism for interpretation changes; it is simply **dormant
+  at the 1.0 floor, with no active attach point**.
+- **The single first upcast is retired.** The `work_object_proposed` upcast and its dedicated
+  signature-safety test are removed. Both projection decode paths (`selected_revision_capture` and
+  `revision_identity_from_capture_event`) now share one decoder that **refuses** a pre-1.0 legacy view
+  (the `snapshotArtifactContentHash` shape) with a clear error instead of upcasting it — the fail-loud
+  floor. D2's `resolving.rs` example is, until a future upcast lands, the rejection path rather than a
+  live upcast.
+- **The signed layer is untouched.** This retires read-path surface only; it changes no signed identity,
+  no digest, and not `payloadVersion`'s hash-excluded status. No store is re-minted.
+
+The reference docs — `docs/store-migration.md` §1a and `docs/event-versioning.md` — already describe this
+fail-loud floor and frame `payloadVersion` as reserved for a future interpretation change.
