@@ -80,11 +80,6 @@ run *args:
 migrate-store repo=".":
     cargo +stable run --example migrate-store -- {{ repo }}
 
-# One-off: reshape a pre-break store onto the opaque-coded signed-identity wire,
-# writing a fresh target store. Owner-run; throwaway, not part of the shipped CLI.
-migrate-opaque source target keystore:
-    cargo +stable run --example migrate-opaque -- {{ source }} {{ target }} {{ keystore }}
-
 # Fold a worktree-local .shore/data store into the common-dir store (.git/shore).
 # Non-destructive + idempotent; refuses an ephemeral/sensitive worktree unless
 # you pass include-ephemeral=true. This IS a shipped subcommand (shore store migrate).

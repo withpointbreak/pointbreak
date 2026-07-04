@@ -7,7 +7,6 @@ mod event_store;
 pub(in crate::session) mod fingerprint;
 pub(in crate::session) mod inventory;
 pub(in crate::session) mod object_artifact;
-mod opaque_migrate;
 pub(in crate::session) mod resolution;
 pub(in crate::session) mod sensitivity;
 pub(in crate::session) mod sensitivity_config;
@@ -22,7 +21,6 @@ pub use fingerprint::compute_revision_fingerprint;
 pub(crate) use fingerprint::worktree_fingerprint_for_files;
 pub use fingerprint::{RevisionFingerprint, capture_worktree_fingerprint};
 pub use object_artifact::{ObjectArtifact, read_bound_object_artifact, read_object_artifact};
-pub use opaque_migrate::{MigrateOptions, MigrateSummary, migrate_opaque_identity};
 pub use resolution::event_log_head_marker;
 // `StoreMode` and the thin repo-level entry points re-export from `session::mod`
 // for the binary crate. The underlying read/write helpers stay crate-internal:
