@@ -151,13 +151,19 @@ describe("parseHash", () => {
 
   it("reads the cross-lens scope, order, and query params", () => {
     const p = router.parseHash(
-      "#/timeline?track=human:kevin&object=obj:1&order=asc&q=hello%20world",
+      "#/timeline?track=human:kevin&snapshot=obj:1&order=asc&q=hello%20world",
       PT,
     );
     expect(p.filterTrack).toBe("human:kevin");
     expect(p.filterSnapshot).toBe("obj:1");
     expect(p.order).toBe("asc");
     expect(p.filterText).toBe("hello world");
+  });
+
+  it("still parses the legacy object= param into the snapshot filter (#334 grace)", () => {
+    expect(router.parseHash("#/timeline?object=obj:1", PT).filterSnapshot).toBe(
+      "obj:1",
+    );
   });
 
   it("ignores an invalid order, falling back to desc", () => {
@@ -266,7 +272,7 @@ describe("serializeState", () => {
         PT,
       ),
     ).toBe(
-      "#/timeline?track=human%3Akevin&object=obj%3A1&order=asc&q=hello%20world&diff=obj%3A1&diffHash=sha256%3Aabc&focus=evt%3A9",
+      "#/timeline?track=human%3Akevin&snapshot=obj%3A1&order=asc&q=hello%20world&diff=obj%3A1&diffHash=sha256%3Aabc&focus=evt%3A9",
     );
   });
 
@@ -294,7 +300,7 @@ describe("grammar round-trip (parseHash and serializeState are inverses)", () =>
     `#/revision/${encodeURIComponent(REV)}`,
     `#/revision/${encodeURIComponent(REV)}?lens=list`,
     `#/event/${encodeURIComponent(EVT)}`,
-    "#/timeline?track=human:kevin&object=obj:1&order=asc&q=needle",
+    "#/timeline?track=human:kevin&snapshot=obj:1&order=asc&q=needle",
     "#/timeline?diff=obj:1&diffHash=sha256:abc&focus=evt:9",
     // A subset of the present types — serializeState only re-emits present ids.
     `#/timeline?types=${PT[0]},${PT[1]}`,

@@ -173,8 +173,8 @@ fn served_index_html_offers_the_threads_lens_not_a_lineages_tab() {
         html.contains("data-lens=\"threads\"") && html.contains("data-lens=\"list\""),
         "the lens switcher offers the threads + list lenses"
     );
-    // The retired lineage filter never returns; object filtering is now a token
-    // in the structured query grammar (`object:`), not a dropdown.
+    // The retired lineage filter never returns; snapshot filtering is now a token
+    // in the structured query grammar (`snapshot:`), not a dropdown.
     assert!(
         !html.contains("id=\"filter-lineage\""),
         "no lineage filter remains"

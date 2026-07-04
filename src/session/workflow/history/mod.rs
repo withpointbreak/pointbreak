@@ -1244,10 +1244,12 @@ mod tests {
     }
 
     #[test]
-    fn base_projection_resolves_object_field_to_the_captured_object() {
+    fn base_projection_resolves_snapshot_field_to_the_captured_object() {
         // A capture carries revision.object_id; an observation on the same revision
-        // must resolve `object` to that captured object id. Assert the JOIN (obs
-        // object == the capture's object) rather than a hard-coded string.
+        // must resolve the `snapshot` grammar field to that captured object id.
+        // Assert the JOIN (obs snapshot == the capture's object) rather than a
+        // hard-coded string. The field key is `snapshot` (#334); the value is still
+        // sourced from the shared `object_id` document field.
         let capture = revision_captured_event_for("review-unit:sha256:one");
         let obs = observation_event("review-unit:sha256:one", "agent:codex", "Keep");
         let base =
@@ -1273,7 +1275,7 @@ mod tests {
             .find(|entry| matches!(entry.entry.event_type, EventType::ReviewObservationRecorded))
             .unwrap();
         assert_eq!(
-            obs_entry.record.field("object"),
+            obs_entry.record.field("snapshot"),
             Some(captured_object.as_str())
         );
         assert!(!captured_object.is_empty());

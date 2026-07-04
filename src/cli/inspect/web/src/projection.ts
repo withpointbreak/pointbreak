@@ -319,9 +319,9 @@ export function revisionSearchIndex(r: Revision): SearchIndex {
     text,
     type: "revision",
     revision: r.revisionId,
-    // The search-index key stays `object` (shared history/query grammar);
-    // only the value source is snapshot-named.
-    object: r.snapshotId,
+    // The search-index key is `snapshot` (grammar renamed from `object`, #334);
+    // the value is the revision's snapshot/content-object id.
+    snapshot: r.snapshotId,
     status: currentAssessment.assessment || currentAssessment.status || "",
     attention: cues.map((cue) => cue.token).join(" "),
   };

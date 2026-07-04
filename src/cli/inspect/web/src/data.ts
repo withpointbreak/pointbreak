@@ -47,9 +47,8 @@ export function historyQueryParams(s: State): string {
   const p = new URLSearchParams();
   if (s.filterText) p.set("q", s.filterText);
   if (s.filterTrack) p.set("track", s.filterTrack);
-  // The `/api/history` param stays `object` (shared history grammar); client
-  // state is snapshot-named.
-  if (s.filterSnapshot) p.set("object", s.filterSnapshot);
+  // Writes `snapshot`; the server still accepts legacy `object` (#334 transition).
+  if (s.filterSnapshot) p.set("snapshot", s.filterSnapshot);
   if (s.order && s.order !== "asc") p.set("order", s.order);
   const present = presentTypes();
   if (present.some((id) => !s.enabledTypes.has(id))) {

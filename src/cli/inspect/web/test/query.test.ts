@@ -99,7 +99,7 @@ describe("fieldMatches", () => {
   });
 
   it("treats a missing field as no match", () => {
-    expect(fieldMatches(idx, "object", "anything")).toBe(false);
+    expect(fieldMatches(idx, "snapshot", "anything")).toBe(false);
   });
 });
 

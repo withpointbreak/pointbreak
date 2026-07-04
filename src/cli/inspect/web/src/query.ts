@@ -41,7 +41,10 @@ export function parseSearchQuery(q: string): QueryClause[] {
       tok = tok.slice(1);
     }
     const colon = tok.indexOf(":");
-    const field = colon > 0 ? tok.slice(0, colon).toLowerCase() : "";
+    let field = colon > 0 ? tok.slice(0, colon).toLowerCase() : "";
+    // Legacy `object:` aliases to the renamed `snapshot` field (#334 transition);
+    // the token is user-typed, so old queries keep working.
+    if (field === "object") field = "snapshot";
     if (field && QUERY_FIELDS.includes(field)) {
       // The value is matched as a substring of the stored field so short ids work.
       const raw = tok.slice(colon + 1).replace(/^"|"$/g, "");

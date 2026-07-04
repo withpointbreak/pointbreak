@@ -82,7 +82,7 @@ export const QUERY_FIELDS: readonly string[] = [
   "type",
   "track",
   "revision",
-  "object",
+  "snapshot",
   "status",
   "attention",
 ];

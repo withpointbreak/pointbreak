@@ -16,17 +16,17 @@ pub struct SearchRecord {
 }
 
 impl SearchRecord {
-    /// Build the record for `entry`. `object` is the content-object id the
+    /// Build the record for `entry`. `snapshot` is the content-object id the
     /// entry's revision captured (resolved by the caller against the
     /// revision->object map); "" when the entry addresses no captured object.
-    /// Mirrors `web/src/data.ts indexEntries`: `{ text, type, track, revision,
-    /// object, status }`.
-    pub fn from_entry(entry: &ReviewHistoryEntry, object: &str) -> Self {
+    /// The grammar key is `snapshot` (renamed from `object` in #334); the value is
+    /// still sourced from the shared `object_id` document field.
+    pub fn from_entry(entry: &ReviewHistoryEntry, snapshot: &str) -> Self {
         let mut fields = BTreeMap::new();
         fields.insert("type".to_owned(), event_type_wire(entry));
         fields.insert("track".to_owned(), entry_track(entry));
         fields.insert("revision".to_owned(), entry_revision_id(entry));
-        fields.insert("object".to_owned(), object.to_owned());
+        fields.insert("snapshot".to_owned(), snapshot.to_owned());
         fields.insert("status".to_owned(), summary_status(entry));
         Self {
             text: build_haystack(entry),
@@ -91,6 +91,13 @@ pub fn parse_search_query(query: &str) -> Vec<QueryClause> {
             Some(index) if index > 0 => token[..index].to_lowercase(),
             _ => String::new(),
         };
+        // Legacy `object:` aliases to the renamed `snapshot` field during the
+        // transition (#334); the token is user-typed, so old queries keep working.
+        let field = if field == "object" {
+            "snapshot".to_owned()
+        } else {
+            field
+        };
         if !field.is_empty() && QUERY_FIELDS.contains(&field.as_str()) {
             let value = strip_wrapping_quotes(&token[colon.expect("field implies a colon") + 1..])
                 .to_lowercase();
@@ -132,7 +139,14 @@ pub fn matches_query(record: &SearchRecord, clauses: &[QueryClause]) -> bool {
 /// The grammar fields a `field:value` clause may address (mirrors web
 /// `QUERY_FIELDS`). `attention` is in the client list but is never populated in a
 /// history record, so a bare `attention:` clause matches "" — preserved.
-const QUERY_FIELDS: &[&str] = &["type", "track", "revision", "object", "status", "attention"];
+const QUERY_FIELDS: &[&str] = &[
+    "type",
+    "track",
+    "revision",
+    "snapshot",
+    "status",
+    "attention",
+];
 
 /// The event-type human-label ↔ wire-id table (mirrors `web/src/types.ts TYPES`).
 /// Shared by `field_matches` (resolve a `type:` value) and `type_label`.
@@ -625,8 +639,33 @@ mod tests {
         assert_eq!(record.field("type"), Some("validation_check_recorded"));
         assert_eq!(record.field("status"), Some("passed"));
         assert!(record.field("revision").is_some());
-        // `object` is supplied by the caller (the revision->object map); empty here.
-        assert_eq!(record.field("object"), Some(""));
+        // The grammar key is `snapshot` (renamed from `object` in #334); the value
+        // is supplied by the caller (the revision->object map), empty here.
+        assert_eq!(record.field("snapshot"), Some(""));
+        assert_eq!(
+            record.field("object"),
+            None,
+            "the legacy key is gone from the record"
+        );
+    }
+
+    #[test]
+    fn parse_search_query_reads_snapshot_and_aliases_legacy_object() {
+        let snap = parse_search_query("snapshot:obj-1");
+        assert_eq!(
+            snap,
+            vec![QueryClause::Field {
+                field: "snapshot".to_owned(),
+                value: "obj-1".to_owned(),
+                negate: false,
+            }]
+        );
+        // A user-typed legacy `object:` token aliases to the snapshot field (#334).
+        assert_eq!(
+            parse_search_query("object:obj-1"),
+            snap,
+            "legacy object: token aliases to the snapshot field"
+        );
     }
 
     // ---- 1.2 grammar parity corpus (mirrors web/src/test/query.test.ts) ----
@@ -820,7 +859,7 @@ mod tests {
     #[test]
     fn field_matches_missing_field_is_no_match() {
         let record = record("review_observation_recorded", &[], "");
-        assert!(!field_matches(&record, "object", "anything"));
+        assert!(!field_matches(&record, "snapshot", "anything"));
     }
 
     #[test]

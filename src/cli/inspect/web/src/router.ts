@@ -10,7 +10,7 @@
 //   #/revision/<revisionId>    entity-primary: the named revision is selected
 //   #/event/<eventId>          entity-primary: the named event is selected
 //   ?lens=<lens>               the master lens behind an entity-primary path
-//   ?track= ?object=           cross-lens scope (survive a lens switch)
+//   ?track= ?snapshot=         cross-lens scope (survive a lens switch)
 //   ?order= ?types= ?q=        per-lens timeline controls
 //   ?diff=<snapshotId> ?focus=<factId> ?diffHash=<snapshotContentHash>
 //                              the route-preserving diff overlay
@@ -128,9 +128,10 @@ export function parseHash(
     lens: DEFAULT_LENS,
     selected: { kind: null, id: null },
     filterTrack: p.track != null ? p.track : "",
-    // The URL param stays `object` (shared history grammar); client state is
-    // snapshot-named.
-    filterSnapshot: p.object != null ? p.object : "",
+    // The filter param is `snapshot`; legacy `object` is still parsed for old
+    // bookmarks during the transition (#334).
+    filterSnapshot:
+      p.snapshot != null ? p.snapshot : p.object != null ? p.object : "",
     order: p.order === "asc" || p.order === "desc" ? p.order : "desc",
     filterText: p.q != null ? p.q : "",
     enabledTypes:
@@ -191,10 +192,10 @@ export function serializeState(
   }
   if (snapshot.filterTrack)
     params.push(`track=${encodeURIComponent(snapshot.filterTrack)}`);
-  // The URL param stays `object` (shared history grammar); client state is
-  // snapshot-named.
+  // Writes `snapshot`; the parser still accepts legacy `object` for old
+  // bookmarks (#334 transition).
   if (snapshot.filterSnapshot)
-    params.push(`object=${encodeURIComponent(snapshot.filterSnapshot)}`);
+    params.push(`snapshot=${encodeURIComponent(snapshot.filterSnapshot)}`);
   if (snapshot.order && snapshot.order !== "desc")
     params.push(`order=${encodeURIComponent(snapshot.order)}`);
   if (presentTypes.some((id) => !snapshot.enabledTypes.has(id))) {

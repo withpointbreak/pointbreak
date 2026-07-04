@@ -80,7 +80,7 @@ describe("shared constants", () => {
       "type",
       "track",
       "revision",
-      "object",
+      "snapshot",
       "status",
       "attention",
     ]);

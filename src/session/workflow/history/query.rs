@@ -17,13 +17,13 @@ pub enum HistoryOrder {
 }
 
 /// The query applied to the base projection: full-text `q`, the exact `track` and
-/// `object` params, the enabled event-type page set (`None` => all types), and the
+/// `snapshot` params, the enabled event-type page set (`None` => all types), and the
 /// display order. Pure data — `apply_history_query` runs it over a cached base.
 #[derive(Clone, Debug, Default)]
 pub struct HistoryQuery {
     pub q: String,
     pub track: Option<String>,
-    pub object: Option<String>,
+    pub snapshot: Option<String>,
     pub types: Option<BTreeSet<String>>,
     pub order: HistoryOrder,
 }
@@ -66,10 +66,10 @@ pub fn apply_history_query(
     page: &HistoryPage,
 ) -> QueriedHistory {
     let clauses = parse_search_query(&query.q);
-    // The facet predicate is q + track + object, EXCLUDING the `types` page filter
+    // The facet predicate is q + track + snapshot, EXCLUDING the `types` page filter
     // (INV-3). The page predicate additionally applies the `types` set.
     let facet_match = |entry: &BaseEntry| {
-        track_object_match(entry, query) && matches_query(&entry.record, &clauses)
+        track_snapshot_match(entry, query) && matches_query(&entry.record, &clauses)
     };
 
     let mut facets: BTreeMap<String, usize> = BTreeMap::new();
@@ -107,17 +107,18 @@ pub fn apply_history_query(
     }
 }
 
-/// The `track=` and `object=` params: exact matches against the entry's record
-/// fields (mirrors the client's `entryTrack === filterTrack` / object equality).
-/// An absent param does not constrain.
-fn track_object_match(entry: &BaseEntry, query: &HistoryQuery) -> bool {
+/// The `track=` and `snapshot=` params: exact matches against the entry's record
+/// fields (mirrors the client's `entryTrack === filterTrack` / snapshot equality).
+/// An absent param does not constrain. The `snapshot` field value is sourced from
+/// the shared `object_id` document field (renamed grammar key, #334).
+fn track_snapshot_match(entry: &BaseEntry, query: &HistoryQuery) -> bool {
     if let Some(track) = &query.track
         && entry.record.field("track") != Some(track.as_str())
     {
         return false;
     }
-    if let Some(object) = &query.object
-        && entry.record.field("object") != Some(object.as_str())
+    if let Some(snapshot) = &query.snapshot
+        && entry.record.field("snapshot") != Some(snapshot.as_str())
     {
         return false;
     }

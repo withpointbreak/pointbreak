@@ -292,17 +292,20 @@ struct HistoryRequest {
 }
 
 /// Parse the `/api/history` query params into a `HistoryQuery` + `HistoryPage`.
-/// `q` is free text; `track`/`object`/`at` are exact (empty => absent); `type` is
+/// `q` is free text; `track`/`snapshot`/`at` are exact (empty => absent); `type` is
 /// a comma-separated enabled-type set (absent => all types); `order` is
 /// `asc`/`desc` (absent/empty => asc). A non-numeric `limit`/`offset` or an unknown
 /// `order` is a usage error the caller turns into a `400` without touching the
 /// store. The `at` › `offset` precedence lives in `apply_history_query`; the parser
 /// only collects the params. Paging is positional (`offset`/`at`); the opaque
-/// forward cursor stays on the CLI path (`shore review history --cursor`).
+/// forward cursor stays on the CLI path (`shore review history --cursor`). The
+/// legacy `object=` param aliases to `snapshot=` for old bookmarks (#334).
 fn history_query(query: Option<&str>) -> Result<HistoryRequest, String> {
     let q = query_param(query, "q").unwrap_or_default();
     let track = query_param(query, "track").filter(|value| !value.is_empty());
-    let object = query_param(query, "object").filter(|value| !value.is_empty());
+    let snapshot = query_param(query, "snapshot")
+        .or_else(|| query_param(query, "object"))
+        .filter(|value| !value.is_empty());
     let types = query_param(query, "type").map(|raw| {
         raw.split(',')
             .filter(|value| !value.is_empty())
@@ -323,7 +326,7 @@ fn history_query(query: Option<&str>) -> Result<HistoryRequest, String> {
         query: HistoryQuery {
             q,
             track,
-            object,
+            snapshot,
             types,
             order,
         },
@@ -447,6 +450,18 @@ mod tests {
         assert!(cache.get("a").is_none());
         assert_eq!(cache.get("b").as_deref(), Some("2"));
         assert_eq!(cache.get("c").as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn history_query_reads_snapshot_param_and_aliases_legacy_object() {
+        let from_new = history_query(Some("snapshot=obj-1")).unwrap();
+        assert_eq!(from_new.query.snapshot.as_deref(), Some("obj-1"));
+        // A stale bookmark's legacy `object=` param still resolves to snapshot (#334).
+        let from_legacy = history_query(Some("object=obj-1")).unwrap();
+        assert_eq!(from_legacy.query.snapshot.as_deref(), Some("obj-1"));
+        // Absent => no snapshot constraint.
+        let absent = history_query(Some("q=hello")).unwrap();
+        assert_eq!(absent.query.snapshot, None);
     }
 
     #[test]

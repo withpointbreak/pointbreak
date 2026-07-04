@@ -436,7 +436,7 @@
     "type",
     "track",
     "revision",
-    "object",
+    "snapshot",
     "status",
     "attention"
   ];
@@ -665,9 +665,9 @@
       text,
       type: "revision",
       revision: r.revisionId,
-      // The search-index key stays `object` (shared history/query grammar);
-      // only the value source is snapshot-named.
-      object: r.snapshotId,
+      // The search-index key is `snapshot` (grammar renamed from `object`, #334);
+      // the value is the revision's snapshot/content-object id.
+      snapshot: r.snapshotId,
       status: currentAssessment.assessment || currentAssessment.status || "",
       attention: cues.map((cue) => cue.token).join(" ")
     };
@@ -703,7 +703,8 @@
         tok = tok.slice(1);
       }
       const colon = tok.indexOf(":");
-      const field = colon > 0 ? tok.slice(0, colon).toLowerCase() : "";
+      let field = colon > 0 ? tok.slice(0, colon).toLowerCase() : "";
+      if (field === "object") field = "snapshot";
       if (field && QUERY_FIELDS.includes(field)) {
         const raw = tok.slice(colon + 1).replace(/^"|"$/g, "");
         clauses.push({ kind: "field", field, value: raw.toLowerCase(), negate });
@@ -994,7 +995,7 @@
     const p = new URLSearchParams();
     if (s.filterText) p.set("q", s.filterText);
     if (s.filterTrack) p.set("track", s.filterTrack);
-    if (s.filterSnapshot) p.set("object", s.filterSnapshot);
+    if (s.filterSnapshot) p.set("snapshot", s.filterSnapshot);
     if (s.order && s.order !== "asc") p.set("order", s.order);
     const present = presentTypes();
     if (present.some((id) => !s.enabledTypes.has(id))) {
@@ -1677,9 +1678,9 @@
       lens: DEFAULT_LENS2,
       selected: { kind: null, id: null },
       filterTrack: p.track != null ? p.track : "",
-      // The URL param stays `object` (shared history grammar); client state is
-      // snapshot-named.
-      filterSnapshot: p.object != null ? p.object : "",
+      // The filter param is `snapshot`; legacy `object` is still parsed for old
+      // bookmarks during the transition (#334).
+      filterSnapshot: p.snapshot != null ? p.snapshot : p.object != null ? p.object : "",
       order: p.order === "asc" || p.order === "desc" ? p.order : "desc",
       filterText: p.q != null ? p.q : "",
       enabledTypes: p.types != null ? new Set(p.types.split(",").filter(Boolean)) : new Set(presentTypes2),
@@ -1724,7 +1725,7 @@
     if (snapshot.filterTrack)
       params.push(`track=${encodeURIComponent(snapshot.filterTrack)}`);
     if (snapshot.filterSnapshot)
-      params.push(`object=${encodeURIComponent(snapshot.filterSnapshot)}`);
+      params.push(`snapshot=${encodeURIComponent(snapshot.filterSnapshot)}`);
     if (snapshot.order && snapshot.order !== "desc")
       params.push(`order=${encodeURIComponent(snapshot.order)}`);
     if (presentTypes2.some((id) => !snapshot.enabledTypes.has(id))) {

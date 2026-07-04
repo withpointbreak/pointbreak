@@ -38,7 +38,7 @@ const INDEX_BODY = `
     <input
       id="filter-text"
       type="search"
-      placeholder="search — text, or field:value (type: track: revision: object: status:)"
+      placeholder="search — text, or field:value (type: track: revision: snapshot: status:)"
     />
     <div id="filter-types" class="type-toggles"></div>
     <button id="order-toggle" class="ghost" title="toggle timeline order">newest first</button>
@@ -77,7 +77,7 @@ const INDEX_BODY = `
       aria-expanded="true"
       aria-controls="cmd-results"
       aria-autocomplete="list"
-      placeholder="Jump to a revision, object, track, or run a command…"
+      placeholder="Jump to a revision, snapshot, track, or run a command…"
     />
     <ul id="cmd-results" class="cmd-results" role="listbox" aria-label="commands"></ul>
   </div>
