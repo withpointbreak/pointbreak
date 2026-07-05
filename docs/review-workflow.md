@@ -152,7 +152,7 @@ the same predecessor, the resulting **competing heads** are surfaced as competin
 a single winner.
 
 Write commands such as `shore observation add`,
-`shore review input-request open`, and `shore review assessment add` accept
+`shore review input-request open`, and `shore assessment add` accept
 `--revision <id>`. When more than one captured revision is current, pass
 the ID from capture output or `shore review revisions`; otherwise writes fail
 with an ambiguity error.
@@ -328,20 +328,20 @@ revision. CLI input and human-facing display use `accepted`,
 JSON output uses the matching `snake_case` values.
 
 ```bash
-shore review assessment add \
+shore assessment add \
   --track human:kevin \
   --assessment accepted \
   --summary "looks good, ship it"
 
 # Assessment that replaces an older one
-shore review assessment add \
+shore assessment add \
   --track human:kevin \
   --assessment accepted-with-follow-up \
   --summary "supersedes earlier needs-changes after offline discussion" \
   --replaces <older-assessment-id>
 
-shore review assessment show --pretty
-shore review assessment show --all --include-summary
+shore assessment show --pretty
+shore assessment show --all --include-summary
 ```
 
 `--replaces` is the only V1 relationship that removes an older assessment
@@ -352,7 +352,7 @@ they do not mutate observations or close input requests (use
 
 State-change outcomes such as deferred, split-out, overridden, and superseded
 are recorded as observations tagged with `state-change:*`. Use
-`shore review assessment` for review calls and `shore observation add`
+`shore assessment` for review calls and `shore observation add`
 with a concrete tag such as `--tag state-change:deferred` for state-change
 evidence.
 
@@ -552,13 +552,13 @@ shore review input-request respond <input-request-id> \
   --reason "verified backfill plan with on-call DBA"
 
 # 5. Record the final assessment for the revision.
-shore review assessment add \
+shore assessment add \
   --track human:kevin \
   --assessment accepted-with-follow-up \
   --summary "ship it; follow up on the retry-path unit test"
 
 # 6. Verify the durable record.
-shore review assessment show --pretty
+shore assessment show --pretty
 shore history --pretty | less
 ```
 

@@ -201,7 +201,7 @@ fn review_assessment_show(
     let format_explicit = args.format_args.explicit(pretty);
     let repo = args.repo.clone();
     let format = output::resolve_format(format_explicit, output::OutputFormat::Json)?;
-    let result = show_assessments(assessment_show_options(args))?;
+    let result = show_assessments(assessment_show_options(args)?)?;
     let delegation_map = crate::cli::common::discover_delegation_map(&repo);
     // `assessment_show_document` consumes the result by value; the text lane
     // reads the same result, so clone it only when that lane will render.
@@ -258,14 +258,30 @@ pub(super) fn assessment_add_options(
     args: AssessmentAddArgs,
     stderr: &mut dyn Write,
 ) -> Result<(AssessmentAddOptions, crate::cli::common::SigningSkip), Box<dyn std::error::Error>> {
+    let ids = crate::cli::idresolve::IdResolver::new(&args.repo);
+    let observation = args
+        .observation
+        .as_deref()
+        .map(|raw| ids.observation(raw))
+        .transpose()?;
+    let input_request = args
+        .input_request
+        .as_deref()
+        .map(|raw| ids.input_request(raw))
+        .transpose()?;
+    let target_assessment = args
+        .target_assessment
+        .as_deref()
+        .map(|raw| ids.assessment(raw))
+        .transpose()?;
     let target = assessment_target(
         args.file.as_ref(),
         args.side,
         args.start_line,
         args.end_line,
-        args.observation.as_ref(),
-        args.input_request.as_ref(),
-        args.target_assessment.as_ref(),
+        observation.as_ref(),
+        input_request.as_ref(),
+        target_assessment.as_ref(),
     )?;
     let summary = read_body_input(
         args.summary.as_deref(),
@@ -277,21 +293,22 @@ pub(super) fn assessment_add_options(
         .with_assessment(args.assessment.into())
         .with_target_selector(target);
 
-    if let Some(revision) = args.revision {
-        options = options.with_revision_id(RevisionId::new(revision));
+    if let Some(revision) = &args.revision {
+        options = options.with_revision_id(RevisionId::new(ids.rev(revision)?));
     }
     if let Some(summary) = summary {
         options = options.with_summary(summary);
     }
     options = options.with_summary_content_type(args.summary_content_type.into());
-    for assessment_id in args.replaces {
-        options = options.replacing(AssessmentId::new(assessment_id));
+    for assessment_id in &args.replaces {
+        options = options.replacing(AssessmentId::new(ids.assessment(assessment_id)?));
     }
-    for observation_id in args.related_observations {
-        options = options.related_observation(ObservationId::new(observation_id));
+    for observation_id in &args.related_observations {
+        options = options.related_observation(ObservationId::new(ids.observation(observation_id)?));
     }
-    for input_request_id in args.related_input_requests {
-        options = options.related_input_request(InputRequestId::new(input_request_id));
+    for input_request_id in &args.related_input_requests {
+        options = options
+            .related_input_request(InputRequestId::new(ids.input_request(input_request_id)?));
     }
     if let Some(idempotency_key) = args.idempotency_key {
         options = options.with_idempotency_key(idempotency_key);
@@ -308,18 +325,21 @@ pub(super) fn assessment_add_options(
     Ok((options, skip))
 }
 
-pub(super) fn assessment_show_options(args: AssessmentShowArgs) -> AssessmentShowOptions {
+pub(super) fn assessment_show_options(
+    args: AssessmentShowArgs,
+) -> Result<AssessmentShowOptions, Box<dyn std::error::Error>> {
     let mut options = AssessmentShowOptions::new(&args.repo)
         .with_all(args.all)
         .with_include_summary(args.include_summary)
         .with_trust_set(crate::cli::common::discover_trust_set(&args.repo));
-    if let Some(revision) = args.revision {
-        options = options.with_revision_id(RevisionId::new(revision));
+    if let Some(revision) = &args.revision {
+        let ids = crate::cli::idresolve::IdResolver::new(&args.repo);
+        options = options.with_revision_id(RevisionId::new(ids.rev(revision)?));
     }
     if let Some(track) = args.track {
         options = options.with_track(track);
     }
-    options
+    Ok(options)
 }
 
 pub(super) fn assessment_target(

@@ -361,7 +361,6 @@ fn review_documents_are_byte_stable() {
     let assessment_add = run_command(
         &repo,
         &[
-            "review",
             "assessment",
             "add",
             "--repo",
@@ -380,7 +379,6 @@ fn review_documents_are_byte_stable() {
     let assessment_show = run_command(
         &repo,
         &[
-            "review",
             "assessment",
             "show",
             "--repo",

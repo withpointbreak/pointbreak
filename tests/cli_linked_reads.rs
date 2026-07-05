@@ -133,7 +133,6 @@ impl LinkedFixture {
             "approve this path?",
         ]);
         run_shore_json(&[
-            "review",
             "assessment",
             "add",
             "--repo",
@@ -319,7 +318,6 @@ fn deleted_worktree_assessment_show_renders() {
     let (fixture, _) = populated_fixture_with_deleted_seed("m6");
 
     let json = run_shore_json(&[
-        "review",
         "assessment",
         "show",
         "--repo",
@@ -578,7 +576,6 @@ fn linked_reader_records_assessment_on_linked_only_unit() {
     // RED today: record_assessment validates against the reader's empty local
     // store and fails with "unknown review unit".
     let result = run_shore_json(&[
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -613,7 +610,6 @@ fn linked_reader_assessment_relates_linked_only_observation() {
     // RED today: relationship validation reads the reader's local store and
     // fails with "unknown observation".
     let result = run_shore_json(&[
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -637,7 +633,6 @@ fn linked_reader_assessment_relates_linked_only_observation() {
 fn linked_reader_assessment_replaces_linked_only_assessment() {
     let fixture = LinkedFixture::new();
     let seed_assessment = run_shore_json(&[
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -659,7 +654,6 @@ fn linked_reader_assessment_replaces_linked_only_assessment() {
     // RED today: --replaces validation reads the reader's local store and fails
     // with "unknown assessment".
     let result = run_shore_json(&[
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -734,7 +728,6 @@ fn linked_fact_writes_land_in_linked_store_not_worktree_local() {
         "?",
     ]);
     run_shore_json(&[
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -1172,7 +1165,6 @@ fn linked_assessment_show_resolves_linked_unit() {
     fixture.seed_full_facts("short body");
 
     let json = run_shore_json(&[
-        "review",
         "assessment",
         "show",
         "--repo",

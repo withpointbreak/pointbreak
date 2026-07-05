@@ -506,7 +506,6 @@ fn record_review_facts(repo: &Path) {
             "approve this path?",
         ],
         vec![
-            "review",
             "assessment",
             "add",
             "--repo",

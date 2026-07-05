@@ -20,10 +20,10 @@ as evidence without changing the current-assessment projection.
 
 ## CLI surface
 
-Use `shore review assessment add` to record a durable assessment:
+Use `shore assessment add` to record a durable assessment:
 
 ```bash
-shore review assessment add \
+shore assessment add \
   --track human:kevin \
   --assessment accepted \
   --summary "looks good, ship it"
@@ -33,14 +33,14 @@ The command targets the selected revision by default. It can also target a captu
 or a native observation, input request, or assessment in the same revision:
 
 ```bash
-shore review assessment add --track human:kevin --assessment needs-changes --file src/lib.rs
-shore review assessment add --track human:kevin --assessment needs-changes \
+shore assessment add --track human:kevin --assessment needs-changes --file src/lib.rs
+shore assessment add --track human:kevin --assessment needs-changes \
   --file src/lib.rs --start-line 42 --end-line 58
-shore review assessment add --track human:kevin --assessment accepted \
+shore assessment add --track human:kevin --assessment accepted \
   --observation <observation-id>
-shore review assessment add --track human:kevin --assessment accepted \
+shore assessment add --track human:kevin --assessment accepted \
   --input-request <input-request-id>
-shore review assessment add --track human:kevin --assessment accepted-with-follow-up \
+shore assessment add --track human:kevin --assessment accepted-with-follow-up \
   --target-assessment <assessment-id>
 ```
 
@@ -55,12 +55,12 @@ never mutated in place; the replacement is a new fact. `--related-observation` a
 `--related-input-request` record evidence links only; they do not mutate observations or close input
 requests.
 
-Use `shore review assessment show` to read the current assessment projection:
+Use `shore assessment show` to read the current assessment projection:
 
 ```bash
-shore review assessment show --pretty
-shore review assessment show --all --include-summary
-shore review assessment show --track human:kevin
+shore assessment show --pretty
+shore assessment show --all --include-summary
+shore assessment show --track human:kevin
 ```
 
 `show` replays `.shore/data/events/`, reports `current.status` as `unassessed`, `resolved`, or

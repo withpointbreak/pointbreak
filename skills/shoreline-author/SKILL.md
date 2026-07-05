@@ -9,7 +9,7 @@ You are the coding agent that just authored the change. At the end of a coherent
 durable Shoreline handoff record before you tell the user the task is done. Your job is to make your
 change legible for review, not to review your own work.
 
-Do not run `shore review assessment add`. Assessments are the reviewer's call. If you assess your own
+Do not run `shore assessment add`. Assessments are the reviewer's call. If you assess your own
 work, you turn the handoff into self-grading and pollute the review surface the reviewer owns.
 
 ## Workflow at a glance
@@ -207,7 +207,7 @@ shore review input-request open \
   --body "Both existing call sites are plausible defaults. I left the behavior unchanged and need a reviewer to choose before landing the new option."
 ```
 
-Use the current command name `shore review input-request`. Use `shore review assessment` only when you
+Use the current command name `shore review input-request`. Use `shore assessment` only when you
 are acting as the reviewer, not while authoring the handoff.
 
 ## Read back and hand off

@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 
 use crate::cli_tracing::TracingArgs;
 
+mod assessment;
 mod capture;
 pub(crate) mod common;
 mod diff;
@@ -52,6 +53,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    Assessment(Box<assessment::AssessmentArgs>),
     Capture(capture::CaptureArgs),
     Diff(diff::DiffArgs),
     #[command(hide = true)]
@@ -150,6 +152,10 @@ impl HintPredicate {
 /// Family/rename tasks append rows; they never change this mechanism.
 const REMOVED_COMMAND_HINTS: &[(HintPredicate, &str)] = &[
     (
+        HintPredicate::AdjacentWindow(&["review", "assessment"]),
+        "Use `shore assessment` instead of `shore review assessment`.",
+    ),
+    (
         HintPredicate::AdjacentWindow(&["review", "capture"]),
         "Use `shore capture` instead of `shore review capture`.",
     ),
@@ -206,6 +212,7 @@ fn run_cli(
     crate::cli_tracing::init_tracing(&cli.tracing)?;
 
     match cli.command {
+        Command::Assessment(args) => assessment::run(*args, stdout, stderr),
         Command::Capture(args) => capture::run(args, &cli.tracing, stdout, stderr),
         Command::Diff(args) => diff::run(args, stdout),
         Command::Dump(args) => {

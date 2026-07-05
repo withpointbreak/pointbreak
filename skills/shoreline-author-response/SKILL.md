@@ -10,7 +10,7 @@ existing revision, and you are picking that review back up. Your job is to triag
 respond through structured input-request channels, make required changes when the review asks for
 them, and record your response on your author track.
 
-Do not run `shore review assessment add`. The reviewer owns the assessment. Do not run
+Do not run `shore assessment add`. The reviewer owns the assessment. Do not run
 `shore capture`; this response attaches to the existing revision with `--revision`.
 
 Do not run `shore review show --pretty` as a readback surface. Use bounded list commands for the
@@ -73,7 +73,7 @@ shore review validation list \
   --track "$reviewer_track" \
   --include-body --pretty
 
-shore review assessment show \
+shore assessment show \
   --revision "$revision_id" \
   --track "$reviewer_track" \
   --include-summary --pretty
@@ -265,7 +265,7 @@ shore review input-request list \
   --status all \
   --include-body --pretty
 
-shore review assessment show \
+shore assessment show \
   --revision "$revision_id" \
   --track "$reviewer_track" \
   --include-summary --pretty

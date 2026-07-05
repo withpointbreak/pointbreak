@@ -37,7 +37,6 @@ fn ambiguous_assessments_emit_a_tagged_fact_graph() {
     // A (needs-changes) replaced by B (accepted); then C (needs-changes) competes
     // with B, neither replacing the other -> current = {B, C} -> Ambiguous.
     let a = assessment_id(&shore([
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -50,7 +49,6 @@ fn ambiguous_assessments_emit_a_tagged_fact_graph() {
         "not yet",
     ]));
     let b = assessment_id(&shore([
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -65,7 +63,6 @@ fn ambiguous_assessments_emit_a_tagged_fact_graph() {
         &a,
     ]));
     let _c = shore([
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -198,7 +195,6 @@ fn shared_review_show_document_has_no_fact_supersession() {
     let arg = repo.path().to_str().unwrap();
     let rev = capture(repo.path());
     let a = assessment_id(&shore([
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -212,7 +208,6 @@ fn shared_review_show_document_has_no_fact_supersession() {
     ]));
     let _ = a;
     let _ = shore([
-        "review",
         "assessment",
         "add",
         "--repo",

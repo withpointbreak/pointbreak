@@ -121,7 +121,7 @@ shore review input-request open \
 Record the current assessment:
 
 ```bash
-shore review assessment add \
+shore assessment add \
   --track human:local \
   --assessment needs-clarification \
   --summary "Implementation is small, but fallback wording needs a decision."

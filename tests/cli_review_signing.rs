@@ -237,7 +237,6 @@ fn all_six_write_paths_stay_exit_zero_without_a_key() {
 
     let assessment = shore_env(
         [
-            "review",
             "assessment",
             "add",
             "--repo",
@@ -361,7 +360,6 @@ fn all_six_write_paths_accept_sign_key_flag() {
 
     let assessment = shore_env(
         [
-            "review",
             "assessment",
             "add",
             "--repo",

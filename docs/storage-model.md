@@ -287,7 +287,7 @@ threshold are externalized to `artifacts/notes/<sha256(body)>.json` with the `sh
 envelope (schema `shore.note-body`, version `1`), keeping `state.json` bounded and avoiding
 unbounded event payload growth.
 
-The direct read surface is `shore review assessment show`, which replays events and can optionally
+The direct read surface is `shore assessment show`, which replays events and can optionally
 hydrate summaries. Summary artifact paths, event filenames, and `state.json` paths are internal
 storage details, not command-output API. Native assessments also appear in the composite
 `shore review show` projection, but they are not projected into `shore dump` or `shore show`.
@@ -436,7 +436,7 @@ semantics.
 
 Reads resolve the shared common-dir store on every review read surface. `shore review revisions` and
 `show`, `shore history`, the observation, input-request, and validation lists,
-`shore review assessment show`, the association list, and the inspector API all
+`shore assessment show`, the association list, and the inspector API all
 read it from any worktree of the clone, including object artifacts and large note-shaped bodies, so
 their `eventCount` and `eventSetHash` reflect that one store.
 

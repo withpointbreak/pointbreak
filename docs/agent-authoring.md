@@ -95,7 +95,7 @@ that should happen before landing. Use `--mode operative` when the answer should
 `--mode advisory` when the request is durable context for the reviewer but does not need to pause the
 workflow.
 
-The authoring agent must not add a `shore review assessment`. Assessments are the reviewer's current
+The authoring agent must not add a `shore assessment`. Assessments are the reviewer's current
 call, such as `accepted` or `needs-changes`. If the author records its own assessment, it turns the
 handoff into self-grading and pollutes the review surface the reviewer owns. This author/reviewer
 split is a review-**policy** convention, not a substrate restriction: the event log is symmetric —
@@ -186,7 +186,7 @@ shore review input-request list --revision <revision-id> --track <track> --statu
 The reviewer then records their own facts on their own track. For example:
 
 ```bash
-shore review assessment add \
+shore assessment add \
   --revision <revision-id> \
   --track human:kevin \
   --assessment needs-clarification \
@@ -250,7 +250,7 @@ shore review input-request open \
 The reviewer records the review call once:
 
 ```bash
-shore review assessment add \
+shore assessment add \
   --revision <revision-id> \
   --track <reviewer-track> \
   --assessment accepted-with-follow-up \
@@ -272,7 +272,7 @@ shore observation list --revision <revision-id> --track <reviewer-track> \
   --include-body --pretty
 shore review validation list --revision <revision-id> --track <reviewer-track> \
   --include-body --pretty
-shore review assessment show --revision <revision-id> --track <reviewer-track> \
+shore assessment show --revision <revision-id> --track <reviewer-track> \
   --include-summary --pretty
 shore review input-request list --revision <revision-id> --track <reviewer-track> \
   --status open --include-body --pretty

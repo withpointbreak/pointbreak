@@ -93,12 +93,12 @@ identity. There is no fixed vocabulary or required shape; the label is opaque to
 exists so a revision's facts can be filtered and grouped by who recorded them.
 
 - On every write command that records a fact (`shore observation add`,
-  `shore review assessment add`, `shore review validation add`,
+  `shore assessment add`, `shore review validation add`,
   `shore review association associate-commit` / `associate-ref` / `withdraw-commit` /
   `withdraw-ref`, `shore review input-request open`), `--track <track-id>` is **required** and
   stamps the lane that owns the new fact.
 - On read/list commands (`shore observation list`, `shore review input-request list`,
-  `shore review validation list`, `shore review assessment show`, `shore history`,
+  `shore review validation list`, `shore assessment show`, `shore history`,
   `shore review show`), `--track <track-id>` is **optional** and narrows the results to one
   lane; omitted, all lanes are returned.
 
@@ -319,7 +319,7 @@ immediately visible to `review revisions`, `review show`, and `history` from any
 [`shore store`](#shore-store)).
 
 The native review write commands — `shore observation add`, `shore review input-request open`
-and `respond`, `shore review assessment add`, and `shore review validation add` — behave the same
+and `respond`, `shore assessment add`, and `shore review validation add` — behave the same
 way. They resolve the shared common-dir store, so you can record a
 fact against a revision (or related observation, assessment, or request) captured in a sibling
 worktree, and the fact lands directly in that shared store, visible to every worktree in place. An
@@ -655,12 +655,12 @@ Output documents are compact `shore.review-input-request-open`,
 V1 is durable and polling-friendly. It does not add a daemon, filesystem watch mode, TUI prompt,
 notification transport, or cancellation/escalation event.
 
-## `shore review assessment`
+## `shore assessment`
 
 ```bash
-shore review assessment add --track <track-id> --assessment <assessment> \
+shore assessment add --track <track-id> --assessment <assessment> \
   [--revision <revision-id>] [target options] [--summary-content-type text/plain|text/markdown]
-shore review assessment show [--revision <revision-id>] [--all] [--track <track-id>] \
+shore assessment show [--revision <revision-id>] [--all] [--track <track-id>] \
   [--include-summary] [--pretty|--compact]
 ```
 

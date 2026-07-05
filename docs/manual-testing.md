@@ -163,24 +163,24 @@ shore review input-request list --pretty --status all
 an older assessment from the current set.
 
 ```bash
-shore review assessment add \
+shore assessment add \
   --track human:kevin \
   --assessment accepted \
   --summary "looks good, ship it"
 
-shore review assessment show --pretty
-shore review assessment show --pretty --include-summary
+shore assessment show --pretty
+shore assessment show --pretty --include-summary
 
 # Replacing example
-ASSESS_OLD=$(shore review assessment show | jq -r '.current.assessmentId')
-shore review assessment add \
+ASSESS_OLD=$(shore assessment show | jq -r '.current.assessmentId')
+shore assessment add \
   --track human:kevin \
   --assessment accepted-with-follow-up \
   --summary "second pass; follow-up filed" \
   --replaces "$ASSESS_OLD"
 
-shore review assessment show --pretty
-shore review assessment show --pretty --all
+shore assessment show --pretty
+shore assessment show --pretty --all
 ```
 
 **Expect.**

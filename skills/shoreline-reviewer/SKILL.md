@@ -9,7 +9,7 @@ You are the reviewing agent for a Shoreline revision another agent captured. You
 the change independently, record durable review findings, answer any open operative requests you can
 answer, and make the review call.
 
-Record exactly one assessment with `shore review assessment add`. The assessment is the reviewer's
+Record exactly one assessment with `shore assessment add`. The assessment is the reviewer's
 call, so this role owns it. Never write to the author's track.
 
 Do not run `shore review show --pretty` as a readback surface. It includes the full captured
@@ -234,7 +234,7 @@ After you have reviewed the change and recorded your evidence, add one assessmen
 track. Use `accepted`, `accepted-with-follow-up`, `needs-changes`, or `needs-clarification`.
 
 ```bash
-shore review assessment add \
+shore assessment add \
   --revision "$revision_id" \
   --track "$reviewer_track" \
   --assessment accepted-with-follow-up \
@@ -268,7 +268,7 @@ shore review input-request list \
   --status all \
   --include-body --pretty
 
-shore review assessment show \
+shore assessment show \
   --revision "$revision_id" \
   --track "$reviewer_track" \
   --include-summary --pretty

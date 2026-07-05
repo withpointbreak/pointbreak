@@ -595,7 +595,6 @@ fn text_digest_reports_signed_by_enrolled_key() {
     assert!(
         shore_env(
             [
-                "review",
                 "assessment",
                 "add",
                 "--repo",
@@ -638,7 +637,6 @@ fn text_digest_reports_signed_by_enrolled_key() {
     assert!(
         shore_env(
             [
-                "review",
                 "assessment",
                 "add",
                 "--repo",
@@ -789,7 +787,6 @@ fn add_observation_with_body(repo: &GitRepo, track: &str, title: &str, body: &st
 fn add_assessment(repo: &GitRepo) -> Value {
     parse_json(
         &shore([
-            "review",
             "assessment",
             "add",
             "--repo",

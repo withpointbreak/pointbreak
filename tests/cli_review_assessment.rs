@@ -9,6 +9,96 @@ use support::git_repo::GitRepo;
 use support::shore;
 
 #[test]
+fn assessment_add_and_show_run_at_the_top_level() {
+    let repo = support::dump_repo();
+    shore(["capture", "--repo", repo.path().to_str().unwrap()]);
+
+    let add = shore([
+        "assessment",
+        "add",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--track",
+        "human:kevin",
+        "--assessment",
+        "accepted",
+        "--summary",
+        "looks good",
+    ]);
+    assert!(
+        add.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let added = parse_json(&add.stdout);
+    assert_eq!(added["schema"], "shore.review-assessment-add"); // INV-1
+
+    let show = shore([
+        "assessment",
+        "show",
+        "--repo",
+        repo.path().to_str().unwrap(),
+    ]);
+    assert!(
+        show.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&show.stderr)
+    );
+    let shown = parse_json(&show.stdout);
+    assert_eq!(shown["schema"], "shore.review-assessment-show");
+}
+
+#[test]
+fn assessment_add_observation_target_resolves_a_bare_fragment() {
+    let repo = support::dump_repo();
+    shore(["capture", "--repo", repo.path().to_str().unwrap()]);
+    let observation = parse_json(
+        &shore([
+            "observation",
+            "add",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "--track",
+            "human:kevin",
+            "--title",
+            "note",
+            "--body",
+            "body text",
+        ])
+        .stdout,
+    );
+    let observation_id = observation["observationId"].as_str().unwrap().to_owned();
+    // observation_id = "obs:sha256:<hex>".
+    let fragment = &observation_id["obs:sha256:".len()..][..8];
+
+    let add = shore([
+        "assessment",
+        "add",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--track",
+        "human:kevin",
+        "--assessment",
+        "accepted",
+        "--summary",
+        "targeting the note",
+        "--observation",
+        fragment,
+    ]);
+    assert!(
+        add.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let added = parse_json(&add.stdout);
+    assert_eq!(added["target"]["kind"], "observation");
+    assert_eq!(
+        added["target"]["observationId"], observation_id,
+        "the target must echo the resolved FULL observation id, not the bare fragment"
+    );
+}
+
+#[test]
 fn shore_review_assessment_add_emits_assessment_id_and_event() {
     let repo = support::dump_repo();
     let repo_arg = repo.path().to_str().unwrap();
@@ -20,7 +110,6 @@ fn shore_review_assessment_add_emits_assessment_id_and_event() {
     );
 
     let add = shore([
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -62,7 +151,7 @@ fn shore_review_assessment_show_resolves_to_single_assessment() {
     shore(["capture", "--repo", repo_arg]);
     let assessment = add_assessment(repo_arg, "human:kevin", "accepted", "ship it");
 
-    let show = shore(["review", "assessment", "show", "--repo", repo_arg]);
+    let show = shore(["assessment", "show", "--repo", repo_arg]);
     assert!(
         show.status.success(),
         "assessment show failed: {}",
@@ -88,7 +177,7 @@ fn shore_review_assessment_show_marks_ambiguous_with_two_writers() {
     add_assessment(repo_arg, "human:kevin", "accepted", "ship it");
     add_assessment(repo_arg, "agent:codex", "needs-changes", "fix it");
 
-    let show = shore(["review", "assessment", "show", "--repo", repo_arg]);
+    let show = shore(["assessment", "show", "--repo", repo_arg]);
     assert!(
         show.status.success(),
         "assessment show failed: {}",
@@ -108,15 +197,7 @@ fn text_assessment_show_renders_current_call_not_json() {
     shore(["capture", "--repo", repo_arg]);
     add_assessment(repo_arg, "human:kevin", "accepted", "ship it");
 
-    let show = shore([
-        "review",
-        "assessment",
-        "show",
-        "--repo",
-        repo_arg,
-        "--format",
-        "text",
-    ]);
+    let show = shore(["assessment", "show", "--repo", repo_arg, "--format", "text"]);
     assert!(
         show.status.success(),
         "assessment show failed: {}",
@@ -141,7 +222,6 @@ fn shore_review_assessment_add_rejects_state_change_value() {
     shore(["capture", "--repo", repo_arg]);
 
     let bad = shore([
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -181,7 +261,6 @@ fn shore_review_assessment_add_records_file_range_target() {
     shore(["capture", "--repo", repo_arg]);
 
     let output = shore([
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -225,7 +304,6 @@ fn shore_review_assessment_add_records_related_facts_and_replacement() {
     let first = add_assessment(repo_arg, "human:kevin", "needs-changes", "Fix this");
 
     let second = shore([
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -284,7 +362,6 @@ fn shore_review_assessment_add_targets_input_request_and_emits_related_input_req
     let request_id = request["inputRequestId"].as_str().unwrap();
 
     let assessment = shore([
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -353,7 +430,6 @@ fn shore_review_assessment_add_rejects_old_intervention_flags() {
     let request_id = request["inputRequestId"].as_str().unwrap();
 
     let old_target_flag = shore([
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -366,7 +442,6 @@ fn shore_review_assessment_add_rejects_old_intervention_flags() {
         request_id,
     ]);
     let old_related_flag = shore([
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -400,7 +475,6 @@ fn shore_review_assessment_add_reports_unknown_input_request_target() {
     shore(["capture", "--repo", repo_arg]);
 
     let output = shore([
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -409,8 +483,10 @@ fn shore_review_assessment_add_reports_unknown_input_request_target() {
         "human:kevin",
         "--assessment",
         "needs-clarification",
+        // A well-formed full id that resolves (passthrough) but is absent from the
+        // store, so the library — not the short-id resolver — reports it unknown.
         "--input-request",
-        "input-request:sha256:missing",
+        "input-request:sha256:0000000000000000000000000000000000000000000000000000000000000000",
     ]);
 
     assert!(!output.status.success());
@@ -429,7 +505,6 @@ fn shore_review_assessment_add_summary_stdin_reads_from_stdin() {
 
     let output = shore_with_stdin(
         [
-            "review",
             "assessment",
             "add",
             "--repo",
@@ -460,7 +535,6 @@ fn shore_review_assessment_add_targets_prior_assessment() {
     let first = add_assessment(repo_arg, "human:kevin", "needs-changes", "Fix this");
 
     let output = shore([
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -493,7 +567,6 @@ fn shore_review_assessment_add_rejects_invalid_input() {
     let observation = add_observation(&repo, "Target conflict");
 
     let missing_track = shore([
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -502,7 +575,6 @@ fn shore_review_assessment_add_rejects_invalid_input() {
         "accepted",
     ]);
     let conflicting_target = shore([
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -517,7 +589,6 @@ fn shore_review_assessment_add_rejects_invalid_input() {
         "src/lib.rs",
     ]);
     let side_without_file = shore([
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -532,7 +603,6 @@ fn shore_review_assessment_add_rejects_invalid_input() {
         "old",
     ]);
     let unknown_replacement = shore([
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -543,8 +613,10 @@ fn shore_review_assessment_add_rejects_invalid_input() {
         "accepted",
         "--summary",
         "Ship it",
+        // Well-formed full id that resolves (passthrough) but is absent, so the
+        // library reports the unknown replacement rather than the resolver.
         "--replaces",
-        "assess:sha256:missing",
+        "assess:sha256:0000000000000000000000000000000000000000000000000000000000000000",
     ]);
 
     assert!(!missing_track.status.success());
@@ -561,7 +633,6 @@ fn shore_review_assessment_add_rejects_invalid_input() {
 
 fn add_assessment(repo_arg: &str, track: &str, assessment: &str, summary: &str) -> Value {
     let output = shore([
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -583,7 +654,6 @@ fn add_assessment(repo_arg: &str, track: &str, assessment: &str, summary: &str) 
 
 fn assessment_show(repo: &GitRepo, args: &[&str]) -> Value {
     let mut command = vec![
-        "review",
         "assessment",
         "show",
         "--repo",

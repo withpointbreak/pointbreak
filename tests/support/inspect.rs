@@ -364,7 +364,6 @@ pub fn representative_store() -> RepresentativeStore {
     // A first assessment (agent track), then a superseding assessment (human
     // track) that replaces it, so current-assessment resolution is exercised.
     let first = run_shore_json(&[
-        "review",
         "assessment",
         "add",
         "--repo",
@@ -381,7 +380,6 @@ pub fn representative_store() -> RepresentativeStore {
         .expect("assessment add returns an assessment id")
         .to_owned();
     run_shore(&[
-        "review",
         "assessment",
         "add",
         "--repo",

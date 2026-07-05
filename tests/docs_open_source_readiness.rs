@@ -58,7 +58,7 @@ fn cli_reference_exists_and_covers_current_commands() {
         "shore store migrate",
         "shore observation add",
         "shore review input-request open",
-        "shore review assessment add",
+        "shore assessment add",
         "shore history",
         "shore review show",
         "shore notes apply",
@@ -98,7 +98,7 @@ fn cli_reference_exists_and_covers_current_commands() {
     );
     assert_markdown_section_contains(
         &cli,
-        "## `shore review assessment`",
+        "## `shore assessment`",
         &[
             "--revision <revision-id>",
             "--include-summary",
@@ -160,7 +160,7 @@ fn getting_started_walks_through_first_review() {
         "shore review show",
         "shore observation add",
         "shore review input-request open",
-        "shore review assessment add",
+        "shore assessment add",
         ".git/shore",
     ] {
         assert!(
