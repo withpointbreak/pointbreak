@@ -10,6 +10,7 @@ use crate::cli_tracing::TracingArgs;
 mod diff;
 mod dump;
 mod identity;
+mod idresolve;
 mod input;
 mod inspect;
 mod json;
