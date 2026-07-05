@@ -6,7 +6,7 @@ fn cli_reference_documents_verification_and_endorsement_readback() {
     // reader-relative contract, are documented on the read surfaces.
     assert_markdown_section_contains(
         &cli,
-        "## `shore review history`",
+        "## `shore history`",
         &[
             "verificationStatus",
             "untrusted_key",
@@ -59,7 +59,7 @@ fn cli_reference_exists_and_covers_current_commands() {
         "shore review observation add",
         "shore review input-request open",
         "shore review assessment add",
-        "shore review history",
+        "shore history",
         "shore review show",
         "shore notes apply",
     ] {

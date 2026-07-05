@@ -113,7 +113,7 @@ fn main_worktree_capture_round_trips_through_the_common_dir_store() {
     assert_eq!(show["revision"]["id"], Value::String(unit_id.clone()));
     assert_no_storage_path_leak(&show);
 
-    let history = run_json(&["review", "history", "--repo", repo_arg]);
+    let history = run_json(&["history", "--repo", repo_arg]);
     assert!(
         history["entries"]
             .as_array()

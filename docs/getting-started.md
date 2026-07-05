@@ -88,7 +88,7 @@ requests, assessments, and imported notes already recorded for the same revision
 For a chronological event log, use:
 
 ```bash
-shore review history --pretty
+shore history --pretty
 ```
 
 ## 5. Record Review Facts

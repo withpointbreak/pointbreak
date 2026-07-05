@@ -48,7 +48,7 @@ fn has_schema_break_diagnostic(json: &Value) -> bool {
 fn review_history_surfaces_schema_break_diagnostic_and_exits_zero() {
     let repo = store_with_retired_event();
 
-    let output = shore(["review", "history", "--repo", repo.path().to_str().unwrap()]);
+    let output = shore(["history", "--repo", repo.path().to_str().unwrap()]);
 
     assert!(
         output.status.success(),

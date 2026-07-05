@@ -11,6 +11,7 @@ mod capture;
 pub(crate) mod common;
 mod diff;
 mod dump;
+mod history;
 mod identity;
 mod idresolve;
 mod input;
@@ -53,6 +54,7 @@ enum Command {
     Diff(diff::DiffArgs),
     #[command(hide = true)]
     Dump(dump::DumpArgs),
+    History(history::HistoryArgs),
     Identity(identity::IdentityArgs),
     Inspect(inspect::InspectArgs),
     Keys(keys::KeysArgs),
@@ -148,6 +150,10 @@ const REMOVED_COMMAND_HINTS: &[(HintPredicate, &str)] = &[
         "Use `shore capture` instead of `shore review capture`.",
     ),
     (
+        HintPredicate::AdjacentWindow(&["review", "history"]),
+        "Use `shore history` instead of `shore review history`.",
+    ),
+    (
         HintPredicate::AdjacentWindow(&["review", "intervention"]),
         "Use `shore input-request` instead of `shore review intervention`.",
     ),
@@ -194,6 +200,7 @@ fn run_cli(
             tracing::debug!(command = "dump", "command_start");
             dump::run(args, &cli.tracing, stdout)
         }
+        Command::History(args) => history::run(args, stdout),
         Command::Identity(args) => identity::run(args, stdout, stderr),
         Command::Inspect(args) => inspect::run(args, stdout),
         Command::Keys(args) => keys::run(args, stdout),

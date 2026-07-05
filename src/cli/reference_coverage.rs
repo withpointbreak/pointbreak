@@ -20,7 +20,7 @@ const REQUIRED_FLAGS: &[&str] = &[
     "--cursor",
     "--watch",
     "--poll-ms",
-    "--by", // review history
+    "--by", // history
     "--integration-ref",
     "--worktree", // review revisions
     "--responds-to",

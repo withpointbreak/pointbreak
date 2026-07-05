@@ -96,7 +96,7 @@ fn cli_history_resolves_principal_from_checked_in_delegates_file() {
     write_delegates(&repo, RESOLVING_DELEGATES);
     let path = repo.path().to_str().unwrap();
 
-    let output = shore(["review", "history", "--repo", path]);
+    let output = shore(["history", "--repo", path]);
     assert!(output.status.success());
     let json = parse_json(&output.stdout);
 
@@ -116,7 +116,7 @@ fn cli_local_override_replaces_committed_principal_for_the_agent() {
     write_local_delegates(&repo, LOCAL_OVERRIDE_DELEGATES); // local: claude-code -> alice
     let path = repo.path().to_str().unwrap();
 
-    let output = shore(["review", "history", "--repo", path]);
+    let output = shore(["history", "--repo", path]);
     assert!(output.status.success());
     let json = parse_json(&output.stdout);
 
@@ -139,7 +139,7 @@ fn cli_resolves_principal_when_repo_points_at_a_subdirectory() {
     let subdir = repo.path().join("src");
     assert!(subdir.is_dir(), "the fixture writes src/lib.rs");
 
-    let output = shore(["review", "history", "--repo", subdir.to_str().unwrap()]);
+    let output = shore(["history", "--repo", subdir.to_str().unwrap()]);
     assert!(
         output.status.success(),
         "stderr: {}",
@@ -161,7 +161,7 @@ fn cli_warns_and_proceeds_on_malformed_delegates_file() {
     write_delegates(&repo, "{ not valid json");
     let path = repo.path().to_str().unwrap();
 
-    let output = shore(["review", "history", "--repo", path]);
+    let output = shore(["history", "--repo", path]);
     assert!(
         output.status.success(),
         "a malformed delegates file must not block a read"
@@ -185,7 +185,7 @@ fn cli_without_delegates_file_degrades_agent_writers_to_none() {
     let repo = repo_with_agent_observation();
     let path = repo.path().to_str().unwrap();
 
-    let output = shore(["review", "history", "--repo", path]);
+    let output = shore(["history", "--repo", path]);
     assert!(output.status.success());
     let json = parse_json(&output.stdout);
 

@@ -694,7 +694,6 @@ fn scoped_capture_surfaces_its_pathspecs_in_show_revisions_and_history() {
 
     let history = parse_json(
         &shore([
-            "review",
             "history",
             "--repo",
             repo.path().to_str().unwrap(),

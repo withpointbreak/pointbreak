@@ -98,7 +98,7 @@ exists so a revision's facts can be filtered and grouped by who recorded them.
   `withdraw-ref`, `shore review input-request open`), `--track <track-id>` is **required** and
   stamps the lane that owns the new fact.
 - On read/list commands (`shore review observation list`, `shore review input-request list`,
-  `shore review validation list`, `shore review assessment show`, `shore review history`,
+  `shore review validation list`, `shore review assessment show`, `shore history`,
   `shore review show`), `--track <track-id>` is **optional** and narrows the results to one
   lane; omitted, all lanes are returned.
 
@@ -226,7 +226,7 @@ truncated, clickable references that navigate to the resource they name, and the
 when the store changes or a freshness diagnostic appears or clears.
 
 The inspector is a read-only, single-store, localhost developer tool. It reads through the same
-validated projections as `shore review history` and `shore review show` rather than parsing raw
+validated projections as `shore history` and `shore review show` rather than parsing raw
 storage, and it serves over a synchronous, dependency-free HTTP server with no async runtime. The
 small JSON API the page consumes (`/api/history`, `/api/revisions`, `/api/revisions/{id}`,
 `/api/threads`, `/api/snapshots/{id}`, `/api/freshness`) is an internal surface for the bundled page,
@@ -301,7 +301,7 @@ tree, including untracked files (source `git_worktree`).
   the captured revision's identity: the same range captured under a different scope is a different
   revision, while identical captured content still shares one content object. A scope that matches
   no changed files is an error — a scoped capture never records an empty revision. The scope is
-  visible in `shore review show`, `shore review revisions`, and `shore review history` under
+  visible in `shore review show`, `shore review revisions`, and `shore history` under
   `source.pathspecs`; an unscoped capture carries no `pathspecs` key and its identity is unchanged
   from before the option existed. (This is deliberately git pathspec syntax, not the
   gitignore-style globs of `.shore/sensitivity.json` — capture scoping is executed by git, while
@@ -466,7 +466,7 @@ already `missing`).
 Removed content renders as an explained state on every read surface, never as an error. For
 note-shaped bodies (observation and input-request bodies, response reasons, assessment and
 validation summaries, imported note bodies), `shore review show`, the leaf `list`/`fetch`/`show`
-commands, and `shore review history` omit the body text and carry a `bodyContentState` /
+commands, and `shore history` omit the body text and carry a `bodyContentState` /
 `summaryContentState` / `reasonContentState` field beside the content hash — `suppressed_present`
 while the bytes are still stored (a compact would reclaim them) or `physically_removed` after the
 sweep — plus `body_content_suppressed_present` / `body_content_physically_removed` diagnostics.
@@ -796,16 +796,16 @@ Divergent or dangling associations surface as advisory diagnostics on the read s
 `retraction_target_missing` when a withdrawal names an association that never appeared); they are
 render-only and never gate a write.
 
-## `shore review history`
+## `shore history`
 
 ```bash
-shore review history [--repo <path>] [--revision <id>] [--track <track-id>] \
+shore history [--repo <path>] [--revision <id>] [--track <track-id>] \
   [--event-type <event-type>]... [--ref <name> [--by label|liveness]] \
   [--limit <n>] [--cursor <cursor>] [--watch [--poll-ms <ms>]] \
   [--include-body] [--pretty | --compact]
 ```
 
-`shore review history` reads the chronological ledger of durable Shoreline events.
+`shore history` reads the chronological ledger of durable Shoreline events.
 
 - History replays the resolved store's `events/` and emits compact `shore.review-history` v1 JSON by
   default.
@@ -835,7 +835,7 @@ shore review history [--repo <path>] [--revision <id>] [--track <track-id>] \
 
 ### Verification status and endorsement readback
 
-`shore review history`, `shore review show`, and the inspector endpoints render two
+`shore history`, `shore review show`, and the inspector endpoints render two
 reader-relative, **advisory** facts beside each event. They render only — they never gate a write or
 change an exit code, and the temporal `require-verified-endorsement` tier is out of scope.
 
@@ -930,7 +930,7 @@ shore review show [--repo <path>] [--revision <id>] [--track <track-id>] \
 - Each narrative member (observations, input requests and their responses, assessments, validation
   checks) and the `revision` identity (the capture event) carry the same reader-relative
   `verificationStatus` and `endorsements` (with `endorserAttributes`) readback documented under
-  [`shore review history`](#verification-status-and-endorsement-readback) — advisory, render-only,
+  [`shore history`](#verification-status-and-endorsement-readback) — advisory, render-only,
   resolved against the reader's `.shore/` trust and attributes config.
 
 Revision-scoped selection seeds on `--revision <id>` and resolves that revision's thread head; no
@@ -943,7 +943,7 @@ interdiff or stack DAG beyond the supersession graph.
 Capture and succession facts stay signable under ADR-0004's generic `EventToBeSigned` contract with
 the Dead Simple Signing Envelope (DSSE) and pre-authentication encoding rules.
 
-`shore review show` is distinct from `shore review history`: history is the chronological raw
+`shore review show` is distinct from `shore history`: history is the chronological raw
 event listing, while `shore review show` is the composite revision view for agents and future
 frontends.
 

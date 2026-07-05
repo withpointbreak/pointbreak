@@ -321,7 +321,7 @@ shore review association associate-commit \
 
 This is git-resolved and machine-readable: the revision then reports `anchored` with merged/live
 reachability in `shore review show`, and `shore review revisions --ref <branch>` /
-`shore review history --ref <branch>` can find the landed work by branch. A worktree-captured revision is
+`shore history --ref <branch>` can find the landed work by branch. A worktree-captured revision is
 born floating, so this is the event it was waiting for; a commit-range-captured revision is already
 anchored at its captured target, so associate that same commit on a rebase or fast-forward — or,
 when a squash or merge produced a new commit, expect a `divergent_commit_association` diagnostic and

@@ -194,16 +194,16 @@ shore review assessment show --pretty --all
 
 ## F. Review history with filters
 
-**Goal.** Confirm `shore review history` is chronological, preserves duplicate semantic events,
+**Goal.** Confirm `shore history` is chronological, preserves duplicate semantic events,
 and applies filters without changing freshness metadata.
 
 ```bash
-shore review history --pretty | jq '.eventCount, .historyCount'
-shore review history --pretty --event-type review-observation-recorded \
+shore history --pretty | jq '.eventCount, .historyCount'
+shore history --pretty --event-type review-observation-recorded \
   | jq '.eventCount, .historyCount'
-shore review history --pretty --track human:kevin \
+shore history --pretty --track human:kevin \
   | jq '.eventCount, .historyCount'
-shore review history --pretty --include-body \
+shore history --pretty --include-body \
   | jq '.entries[] | select(.eventType=="review_observation_recorded") | .summary.body'
 ```
 
@@ -316,7 +316,7 @@ EOF
 
 shore notes apply --review-notes review-notes.json | jq .
 shore dump --pretty | jq '.stream.rows[] | select(.kind.note) | .kind.note'
-shore review history --pretty --event-type review-note-imported \
+shore history --pretty --event-type review-note-imported \
   | jq '.entries | length'
 ```
 
@@ -326,7 +326,7 @@ shore review history --pretty --event-type review-note-imported \
 - `shore dump` includes one `note` row attached to the right `target_row_id`.
 - A second run with the same sidecar increments `notesExisting` and leaves `notesCreated` at 0:
   imported-note events are idempotent on their semantic ID.
-- `shore review history --event-type review-note-imported` returns one entry.
+- `shore history --event-type review-note-imported` returns one entry.
 - `shore review show --pretty | jq '.adapterNotes'` returns the imported note as one entry in
   the revision's adapter-notes list.
 
@@ -384,7 +384,7 @@ ls .shore/data/artifacts/notes/        # only populated for large-body events
 # Read commands work without state.json
 HASH_BEFORE=$(jq -r .eventSetHash .shore/data/state.json)
 rm .shore/data/state.json
-shore review history --pretty | jq -r .eventSetHash    # same hash
+shore history --pretty | jq -r .eventSetHash    # same hash
 shore review show --pretty >/dev/null
 test -f .shore/data/state.json && echo "rebuilt" || echo "still missing (expected for reads)"
 
@@ -395,7 +395,7 @@ jq '.eventCount, .eventSetHash' .shore/data/state.json
 
 **Expect.**
 
-- `shore review history` and `shore review show` both succeed without `state.json` present.
+- `shore history` and `shore review show` both succeed without `state.json` present.
   Their `eventSetHash` matches the value that was in the deleted projection.
 - After the next write command, `.shore/data/state.json` exists again and reports a higher
   `eventCount` and a new `eventSetHash`.
@@ -420,7 +420,7 @@ When refactoring storage, projections, or CLI surfaces, also look at:
   an artifact at all, so use a body well over that threshold to exercise this path —
   `python3 -c "print('x'*5000)" > big-body.txt` and pass `--body-file big-body.txt` to two
   separate `observation add` calls.
-- **Exit codes**: piping `shore dump`, `shore review show`, or `shore review history` through
+- **Exit codes**: piping `shore dump`, `shore review show`, or `shore history` through
   `jq -e 'has("schema")'` should always exit 0 for successful runs.
 - **Tracing**: passing `--log info --log-file /tmp/shore.log` to any command should write to that
   file and not corrupt the JSON on stdout. `shore show` requires `--log-file` when tracing is

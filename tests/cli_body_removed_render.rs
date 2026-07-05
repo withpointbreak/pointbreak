@@ -141,7 +141,7 @@ fn swept_body_renders_physically_removed_across_read_surfaces() {
     ));
 
     // review history: the entry carries the state; the read survives.
-    let history = shore(["review", "history", "--repo", arg, "--include-body"]);
+    let history = shore(["history", "--repo", arg, "--include-body"]);
     assert_success(&history, "review history");
     let history = parse_json(&history.stdout);
     let entry = history["entries"]

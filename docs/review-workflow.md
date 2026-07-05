@@ -35,7 +35,7 @@ the **competing heads** are surfaced rather than one silently winning.
 1. Start from a Git worktree containing the change you want to review.
 2. Capture a revision with `shore capture`.
 3. Inspect what was captured with `shore review show` and
-   `shore review history`.
+   `shore history`.
 4. Record review facts as you read the diff:
    - **Observations** are notes you want preserved.
    - **Input requests** are durable pause/decision requests for someone else.
@@ -171,7 +171,7 @@ Three read surfaces describe revisions, and they answer different questions:
 ```bash
 shore review revisions     # what revisions exist in the store
 shore review show          # composite revision view (narrative + snapshot)
-shore review history       # chronological raw event listing
+shore history       # chronological raw event listing
 ```
 
 For a visual, cross-linked view of the whole store — an event timeline, composite per-revision
@@ -230,17 +230,17 @@ shore review show --include-body
 Passing `--revision <id>` seeds head selection on that revision and resolves its thread's current
 head; an intra-thread fork is reported as competing revisions.
 
-### `shore review history`
+### `shore history`
 
-`shore review history` is the chronological raw-event listing across the
+`shore history` is the chronological raw-event listing across the
 entire `events/` log — across revisions if there is more than one.
 It is the place to answer "what happened, in what order?" rather than
 "what does this revision look like right now?".
 
 ```bash
-shore review history --pretty
-shore review history --event-type review-observation-recorded
-shore review history --revision <id> --include-body
+shore history --pretty
+shore history --event-type review-observation-recorded
+shore history --revision <id> --include-body
 ```
 
 `eventSetHash` and `eventCount` describe the full validated event set used to
@@ -559,7 +559,7 @@ shore review assessment add \
 
 # 6. Verify the durable record.
 shore review assessment show --pretty
-shore review history --pretty | less
+shore history --pretty | less
 ```
 
 That is the full V1 workflow. Anything beyond it — notifications, daemons,

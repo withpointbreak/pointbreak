@@ -101,7 +101,7 @@ fn enrolled_endorser_reads_endorsement_trusted_with_endorser() {
     let home = tempfile::tempdir().unwrap();
     let (repo, target) = endorsed_repo(home.path().to_str().unwrap(), true, false);
     let out = shore_env(
-        ["review", "history", "--repo", repo.path().to_str().unwrap()],
+        ["history", "--repo", repo.path().to_str().unwrap()],
         &[("SHORE_HOME", home.path().to_str().unwrap())],
     );
     let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -115,7 +115,7 @@ fn unenrolled_signer_reads_unknown_endorser() {
     let home = tempfile::tempdir().unwrap();
     let (repo, target) = endorsed_repo(home.path().to_str().unwrap(), false, false);
     let out = shore_env(
-        ["review", "history", "--repo", repo.path().to_str().unwrap()],
+        ["history", "--repo", repo.path().to_str().unwrap()],
         &[("SHORE_HOME", home.path().to_str().unwrap())],
     );
     let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -129,7 +129,7 @@ fn attested_kind_and_roles_surface_in_enrichment() {
     let home = tempfile::tempdir().unwrap();
     let (repo, target) = endorsed_repo(home.path().to_str().unwrap(), true, true);
     let out = shore_env(
-        ["review", "history", "--repo", repo.path().to_str().unwrap()],
+        ["history", "--repo", repo.path().to_str().unwrap()],
         &[("SHORE_HOME", home.path().to_str().unwrap())],
     );
     let doc: Value = serde_json::from_slice(&out.stdout).unwrap();

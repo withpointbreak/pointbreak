@@ -412,10 +412,7 @@ fn review_documents_are_byte_stable() {
     assert_snapshot("unit_list", &unit_list);
 
     // 12. review history
-    let history = run_command(
-        &repo,
-        &["review", "history", "--repo", &repo_path, "--include-body"],
-    );
+    let history = run_command(&repo, &["history", "--repo", &repo_path, "--include-body"]);
     assert_snapshot("history", &history);
 
     // 13. review validation add

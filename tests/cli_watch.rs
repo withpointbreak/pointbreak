@@ -27,7 +27,6 @@ impl Watcher {
     fn spawn(repo: &Path, poll_ms: u64) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_shore"))
             .args([
-                "review",
                 "history",
                 "--repo",
                 repo.to_str().unwrap(),

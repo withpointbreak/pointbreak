@@ -183,7 +183,8 @@ fn history_options(args: &HistoryArgs) -> Result<ReviewHistoryOptions, Box<dyn s
         options = options.with_cursor(cursor);
     }
     if let Some(revision) = &args.revision {
-        options = options.with_revision_id(RevisionId::new(revision.clone()));
+        let ids = crate::cli::idresolve::IdResolver::new(&args.repo);
+        options = options.with_revision_id(RevisionId::new(ids.rev(revision)?));
     }
     if let Some(track) = &args.track {
         options = options.with_track(track.clone());

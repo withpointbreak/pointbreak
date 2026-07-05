@@ -307,7 +307,7 @@ Validation evidence follows the same revision ledger model:
   embed validation history, summary content, logs, or reports
 
 Validation evidence is advisory. It may support review judgment in `shore review show`,
-`shore review history`, and `shore review validation list`, but it never grants review acceptance,
+`shore history`, and `shore review validation list`, but it never grants review acceptance,
 merge authority, or write authority. It never changes `currentAssessment`, assessment ambiguity,
 operative input-request counts, or any other operative projection.
 
@@ -329,7 +329,7 @@ type, `sigVersion`, or family-specific signing path. See
 
 Review history is the chronological read surface over durable events:
 
-- `shore review history` returns `shore.review-history` JSON derived from a validated scan of the
+- `shore history` returns `shore.review-history` JSON derived from a validated scan of the
   resolved store's `events/`
 - `eventSetHash` and `eventCount` describe the full event set read for the command, not only the
   returned entries after filters
@@ -435,7 +435,7 @@ See [cli-reference.md](./cli-reference.md#sensitivity-exclude-globs) for the for
 semantics.
 
 Reads resolve the shared common-dir store on every review read surface. `shore review revisions` and
-`show`, `shore review history`, the observation, input-request, and validation lists,
+`show`, `shore history`, the observation, input-request, and validation lists,
 `shore review assessment show`, the association list, and the inspector API all
 read it from any worktree of the clone, including object artifacts and large note-shaped bodies, so
 their `eventCount` and `eventSetHash` reflect that one store.
@@ -740,7 +740,7 @@ the projection saw; it is not a causal ordering primitive or a raw event-file ch
 
 If a cached projection's `eventSetHash` does not match a fresh scan of the store's `events/`, the
 projection is stale and should be rebuilt from the event files. The event files remain authoritative;
-`state.json` is still safe to delete and regenerate. `shore review history` and
+`state.json` is still safe to delete and regenerate. `shore history` and
 `shore review show` reuse this freshness primitive, and future derived-index projections should
 do the same rather than inventing per-projection hashes.
 

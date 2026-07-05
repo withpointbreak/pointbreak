@@ -94,7 +94,7 @@ impl LinkedFixture {
     }
 
     fn history_json(&self, worktree: &Path, include_body: bool) -> Value {
-        let mut args = vec!["review", "history", "--repo", worktree.to_str().unwrap()];
+        let mut args = vec!["history", "--repo", worktree.to_str().unwrap()];
         if include_body {
             args.push("--include-body");
         }
@@ -1348,7 +1348,7 @@ fn main_worktree_of_a_clone_round_trips_a_capture_in_place() {
     let show = run_shore_json(&["review", "show", "--repo", main.path().to_str().unwrap()]);
     assert_eq!(show["revision"]["id"], Value::String(unit_id.clone()));
 
-    let history = run_shore_json(&["review", "history", "--repo", main.path().to_str().unwrap()]);
+    let history = run_shore_json(&["history", "--repo", main.path().to_str().unwrap()]);
     assert!(
         history["entries"]
             .as_array()

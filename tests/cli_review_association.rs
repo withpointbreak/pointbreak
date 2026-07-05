@@ -324,7 +324,6 @@ fn history_filters_to_the_commit_associated_event_type() {
 
     let json = parse_json(
         &shore([
-            "review",
             "history",
             "--repo",
             repo_path,

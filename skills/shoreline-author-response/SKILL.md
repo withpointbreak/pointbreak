@@ -209,7 +209,7 @@ shore review association associate-commit \
 
 Unlike a prose note, this association is git-resolved and machine-readable: the unit then reports
 `anchored` with merged/live reachability in `shore review show`, and `shore review revisions
---ref <branch>` / `shore review history --ref <branch>` can find the landed work by branch. It is an
+--ref <branch>` / `shore history --ref <branch>` can find the landed work by branch. It is an
 author fact — it never goes on the reviewer track, never becomes an assessment, and is never a
 recapture (`shore capture` is not re-run for the landing).
 
