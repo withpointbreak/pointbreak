@@ -221,7 +221,7 @@ shore input-request list --revision "$revision_id" --track "$track" --status ope
 ```
 
 These commands verify the author's writes without replaying the captured snapshot. The
-`shore review show --pretty` command emits the full integration-JSON document: it includes the
+`shore revision show --pretty` command emits the full integration-JSON document: it includes the
 complete captured snapshot, is large for any real change, and is meant for tooling or the rare case
 where the full snapshot is genuinely needed. It is not the human readback surface.
 

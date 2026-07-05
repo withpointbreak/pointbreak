@@ -44,7 +44,7 @@ The short path is:
 ```bash
 cd path/to/git-worktree
 shore capture
-shore review show --pretty
+shore revision show --pretty
 ```
 
 Then record what you learn:

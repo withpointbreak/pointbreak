@@ -154,7 +154,7 @@ shore input-request list --revision "$revision_id" --track "$track" --status ope
 
 The commands emit compact JSON by default, so piping capture output through `jq` is only for human
 readability. The readback uses bounded list commands so the author can verify the observations and
-open input requests without replaying the captured snapshot. `shore review show` remains the
+open input requests without replaying the captured snapshot. `shore revision show` remains the
 full composite JSON view of a revision; it includes the complete captured snapshot, can be large
 for real changes, and is meant for tooling or cases where the full snapshot is genuinely needed. The
 write commands above pass the captured revision ID explicitly because write commands can infer a
@@ -320,7 +320,7 @@ shore association record \
 ```
 
 This is git-resolved and machine-readable: the revision then reports `anchored` with merged/live
-reachability in `shore review show`, and `shore review revisions --ref <branch>` /
+reachability in `shore revision show`, and `shore revision list --ref <branch>` /
 `shore history --ref <branch>` can find the landed work by branch. A worktree-captured revision is
 born floating, so this is the event it was waiting for; a commit-range-captured revision is already
 anchored at its captured target, so associate that same commit on a rebase or fast-forward — or,

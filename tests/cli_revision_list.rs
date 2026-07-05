@@ -10,16 +10,61 @@ use support::git_repo::GitRepo;
 use support::shore;
 
 #[test]
+fn revision_list_runs_at_top_level() {
+    let repo = modified_repo();
+    shore(["capture", "--repo", repo.path().to_str().unwrap()]);
+
+    let output = shore(["revision", "list", "--repo", repo.path().to_str().unwrap()]);
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = parse_json(&output.stdout);
+    assert_eq!(json["schema"], "shore.review-revision-list");
+}
+
+#[test]
+fn revision_list_object_filter_resolves_a_short_id() {
+    let repo = modified_repo();
+    shore(["capture", "--repo", repo.path().to_str().unwrap()]);
+    let path = repo.path().to_str().unwrap();
+
+    let listed = parse_json(&shore(["revision", "list", "--repo", path]).stdout);
+    let object_id = listed["entries"][0]["objectId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // object_id = "obj:sha256:<hex>"; form the prefixed short id from the digest.
+    let digest = object_id.rsplit_once("sha256:").unwrap().1;
+    let prefixed_short = format!("obj:{}", &digest[..8]);
+
+    let filtered = shore([
+        "revision",
+        "list",
+        "--repo",
+        path,
+        "--object",
+        &prefixed_short,
+    ]);
+    assert!(
+        filtered.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&filtered.stderr)
+    );
+    let json = parse_json(&filtered.stdout);
+    assert_eq!(json["revisionCount"], 1);
+    // The listing lens filtered on the resolved FULL object id.
+    assert_eq!(json["entries"][0]["objectId"], object_id);
+}
+
+#[test]
 fn revision_list_emits_v1_json_with_freshness_metadata() {
     let repo = modified_repo();
     let capture = parse_json(&shore(["capture", "--repo", repo.path().to_str().unwrap()]).stdout);
 
-    let output = shore([
-        "review",
-        "revisions",
-        "--repo",
-        repo.path().to_str().unwrap(),
-    ]);
+    let output = shore(["revision", "list", "--repo", repo.path().to_str().unwrap()]);
 
     assert!(
         output.status.success(),
@@ -60,12 +105,7 @@ fn revision_list_does_not_expose_storage_paths() {
     let repo = modified_repo();
     shore(["capture", "--repo", repo.path().to_str().unwrap()]);
 
-    let output = shore([
-        "review",
-        "revisions",
-        "--repo",
-        repo.path().to_str().unwrap(),
-    ]);
+    let output = shore(["revision", "list", "--repo", repo.path().to_str().unwrap()]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json = parse_json(&output.stdout);
 
@@ -82,8 +122,8 @@ fn revision_list_pretty_prints() {
     shore(["capture", "--repo", repo.path().to_str().unwrap()]);
 
     let output = shore([
-        "review",
-        "revisions",
+        "revision",
+        "list",
         "--repo",
         repo.path().to_str().unwrap(),
         "--pretty",
@@ -99,12 +139,7 @@ fn revision_list_returns_multiple_entries_in_capture_order() {
     repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
     let second = parse_json(&shore(["capture", "--repo", repo.path().to_str().unwrap()]).stdout);
 
-    let output = shore([
-        "review",
-        "revisions",
-        "--repo",
-        repo.path().to_str().unwrap(),
-    ]);
+    let output = shore(["revision", "list", "--repo", repo.path().to_str().unwrap()]);
     let json = parse_json(&output.stdout);
     let entries = json["entries"].as_array().unwrap();
 
@@ -126,12 +161,7 @@ fn revision_list_returns_multiple_entries_in_capture_order() {
 fn revision_list_succeeds_without_events() {
     let repo = GitRepo::new();
 
-    let output = shore([
-        "review",
-        "revisions",
-        "--repo",
-        repo.path().to_str().unwrap(),
-    ]);
+    let output = shore(["revision", "list", "--repo", repo.path().to_str().unwrap()]);
     let json = parse_json(&output.stdout);
 
     assert!(output.status.success());
@@ -160,7 +190,7 @@ fn revision_list_reads_capture_from_the_shared_store_after_seed_worktree_removed
     let reader = fixture.add_worktree("reader");
     assert!(!reader.join(".shore/data/events").exists());
 
-    let output = shore(["review", "revisions", "--repo", reader.to_str().unwrap()]);
+    let output = shore(["revision", "list", "--repo", reader.to_str().unwrap()]);
     assert!(
         output.status.success(),
         "list stderr:\n{}",
@@ -189,7 +219,7 @@ fn revision_list_omits_ambient_ambiguous_current_diagnostic_from_shared_store() 
     // sees them with no `store link` step.
     let reader = fixture.add_worktree("reader");
 
-    let output = shore(["review", "revisions", "--repo", reader.to_str().unwrap()]);
+    let output = shore(["revision", "list", "--repo", reader.to_str().unwrap()]);
     assert!(
         output.status.success(),
         "list stderr:\n{}",
@@ -231,12 +261,7 @@ fn unit_list_renders_commit_range_source_without_paths() {
         "HEAD~1",
     ]);
 
-    let output = shore([
-        "review",
-        "revisions",
-        "--repo",
-        repo.path().to_str().unwrap(),
-    ]);
+    let output = shore(["revision", "list", "--repo", repo.path().to_str().unwrap()]);
     assert!(
         output.status.success(),
         "stderr:\n{}",
@@ -329,7 +354,7 @@ fn unit_list_attaches_merge_status_and_accepts_integration_and_worktree_flags() 
     let worktree_id = worktree["revision"]["id"].as_str().unwrap().to_owned();
 
     // Default list: each entry carries a structural merge-status.
-    let default = parse_json(&shore(["review", "revisions", "--repo", repo_arg]).stdout);
+    let default = parse_json(&shore(["revision", "list", "--repo", repo_arg]).stdout);
     let status_for = |id: &str| -> String {
         default["entries"]
             .as_array()
@@ -347,8 +372,8 @@ fn unit_list_attaches_merge_status_and_accepts_integration_and_worktree_flags() 
     // --integration-ref and --worktree parse; the worktree-identity scope keeps
     // the worktree capture.
     let scoped = shore([
-        "review",
-        "revisions",
+        "revision",
+        "list",
         "--repo",
         repo_arg,
         "--integration-ref",
@@ -370,11 +395,11 @@ fn unit_list_attaches_merge_status_and_accepts_integration_and_worktree_flags() 
     assert!(scoped_ids.contains(&worktree_id));
 }
 
-/// Run `review unit list` with extra flags and return the entry ids in order.
+/// Run `revision list` with extra flags and return the entry ids in order.
 fn unit_list_ids(repo: &GitRepo, extra: &[&str]) -> Vec<String> {
     let mut args: Vec<String> = vec![
-        "review".to_owned(),
-        "revisions".to_owned(),
+        "revision".to_owned(),
+        "list".to_owned(),
         "--repo".to_owned(),
         repo.path().to_str().unwrap().to_owned(),
     ];

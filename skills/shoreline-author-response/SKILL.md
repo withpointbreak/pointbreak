@@ -13,7 +13,7 @@ them, and record your response on your author track.
 Do not run `shore assessment add`. The reviewer owns the assessment. Do not run
 `shore capture`; this response attaches to the existing revision with `--revision`.
 
-Do not run `shore review show --pretty` as a readback surface. Use bounded list commands for the
+Do not run `shore revision show --pretty` as a readback surface. Use bounded list commands for the
 reviewer's observations, input requests, and assessment.
 
 ## Workflow at a glance
@@ -39,7 +39,7 @@ Set the revision ID, reviewer track, and your existing author track. If the revi
 known, list captured units first:
 
 ```bash
-shore review revisions --pretty
+shore revision list --pretty
 revision_id="<revision-id>"
 reviewer_track="<reviewer-track>"
 author_track="<author-track>"
@@ -208,7 +208,7 @@ shore association record \
 ```
 
 Unlike a prose note, this association is git-resolved and machine-readable: the unit then reports
-`anchored` with merged/live reachability in `shore review show`, and `shore review revisions
+`anchored` with merged/live reachability in `shore revision show`, and `shore revision list
 --ref <branch>` / `shore history --ref <branch>` can find the landed work by branch. It is an
 author fact — it never goes on the reviewer track, never becomes an assessment, and is never a
 recapture (`shore capture` is not re-run for the landing).
@@ -288,7 +288,7 @@ did not change, and which input requests you responded to. Leave the assessment 
 - **Recapturing the revision.** Attach to the existing revision with `--revision`; do not run
   `shore capture` for the response leg.
 - **Using full revision show for readback.** Use bounded observation, input-request, and
-  assessment read commands. Do not use `shore review show --pretty` for this response loop.
+  assessment read commands. Do not use `shore revision show --pretty` for this response loop.
 - **Ignoring reviewer validation evidence.** Read `shore validation list` on the reviewer
   track before deciding what checks to rerun.
 - **Attaching live-code checks to an old snapshot.** If response edits moved the checkout beyond the

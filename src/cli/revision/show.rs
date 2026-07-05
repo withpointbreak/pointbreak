@@ -17,15 +17,15 @@ use crate::cli::output;
 /// Show the composite view of a captured revision.
 #[derive(Debug, Args)]
 pub(super) struct ShowArgs {
-    /// Repository root or a path inside the repository.
-    #[arg(long, default_value = ".")]
-    repo: PathBuf,
-
     /// The revision to show (a head seed): a current head resolves exactly; a
     /// superseded revision resolves its thread's current head, erroring when that
     /// thread has competing heads. Omitted shows the current capture.
-    #[arg(long)]
+    #[arg(value_name = "REVISION")]
     revision: Option<String>,
+
+    /// Repository root or a path inside the repository.
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
 
     /// Filter narrative facts to one review track.
     #[arg(long)]
@@ -48,12 +48,19 @@ pub(super) struct ShowArgs {
 }
 
 pub(super) fn run(
-    args: ShowArgs,
+    mut args: ShowArgs,
     stdout: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let span = tracing::info_span!("shore.review.show");
+    let span = tracing::info_span!("shore.revision.show");
     let _entered = span.enter();
-    tracing::debug!(command = "review.show", "command_start");
+    tracing::debug!(command = "revision.show", "command_start");
+
+    let ids = crate::cli::id_resolver::IdResolver::new(&args.repo);
+    let resolved = match &args.revision {
+        Some(revision) => Some(ids.rev(revision)?),
+        None => None,
+    };
+    args.revision = resolved;
 
     let format = output::resolve_format(
         args.format_args.explicit(args.pretty),
@@ -87,7 +94,7 @@ pub(super) fn run(
     })
 }
 
-/// The #96 text digest for `review show`: a bounded per-track summary mirroring
+/// The #96 text digest for `revision show`: a bounded per-track summary mirroring
 /// the inspector revision-page header — identity line, current call,
 /// signed-by-enrolled-key, summary counts, per-track fact counts, and open input
 /// requests. Never the snapshot rows (INV-6); reads only the public

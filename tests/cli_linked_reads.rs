@@ -102,12 +102,11 @@ impl LinkedFixture {
 
     fn unit_show_json(&self, worktree: &Path, revision_id: &str) -> Value {
         run_shore_json(&[
-            "review",
+            "revision",
             "show",
+            revision_id,
             "--repo",
             worktree.to_str().unwrap(),
-            "--revision",
-            revision_id,
             "--include-body",
         ])
     }
@@ -191,7 +190,7 @@ impl LinkedFixture {
     }
 
     fn unit_list_json(&self, worktree: &Path) -> Value {
-        run_shore_json(&["review", "revisions", "--repo", worktree.to_str().unwrap()])
+        run_shore_json(&["revision", "list", "--repo", worktree.to_str().unwrap()])
     }
 }
 
@@ -1273,12 +1272,7 @@ fn worktree_local_unit_list_is_unchanged() {
     repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
     run_shore_json(&["capture", "--repo", repo.path().to_str().unwrap()]);
 
-    let json = run_shore_json(&[
-        "review",
-        "revisions",
-        "--repo",
-        repo.path().to_str().unwrap(),
-    ]);
+    let json = run_shore_json(&["revision", "list", "--repo", repo.path().to_str().unwrap()]);
 
     assert_eq!(json["schema"], "shore.review-revision-list");
     assert_eq!(json["version"], 1);
@@ -1304,19 +1298,14 @@ fn main_worktree_of_a_clone_round_trips_a_capture_in_place() {
 
     // With NO --revision, the same worktree's reads resolve the capture in
     // place (write-through landed it in the same `.git/shore` store reads use).
-    let list = run_shore_json(&[
-        "review",
-        "revisions",
-        "--repo",
-        main.path().to_str().unwrap(),
-    ]);
+    let list = run_shore_json(&["revision", "list", "--repo", main.path().to_str().unwrap()]);
     assert_eq!(list["revisionCount"], 1);
     assert_eq!(
         list["entries"][0]["revisionId"],
         Value::String(unit_id.clone())
     );
 
-    let show = run_shore_json(&["review", "show", "--repo", main.path().to_str().unwrap()]);
+    let show = run_shore_json(&["revision", "show", "--repo", main.path().to_str().unwrap()]);
     assert_eq!(show["revision"]["id"], Value::String(unit_id.clone()));
 
     let history = run_shore_json(&["history", "--repo", main.path().to_str().unwrap()]);
@@ -1346,12 +1335,7 @@ fn fresh_single_worktree_has_clean_own_only_reads() {
     let capture = run_shore_json(&["capture", "--repo", repo.path().to_str().unwrap()]);
     let unit_id = capture["revision"]["id"].as_str().unwrap().to_owned();
 
-    let list = run_shore_json(&[
-        "review",
-        "revisions",
-        "--repo",
-        repo.path().to_str().unwrap(),
-    ]);
+    let list = run_shore_json(&["revision", "list", "--repo", repo.path().to_str().unwrap()]);
     assert_eq!(list["revisionCount"], 1);
     assert_eq!(
         list["entries"][0]["revisionId"],

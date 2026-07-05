@@ -79,7 +79,7 @@ on internal file paths.
 ## 4. Inspect The Review
 
 ```bash
-shore review show --pretty
+shore revision show --pretty
 ```
 
 This shows the composite revision view: captured files and rows, plus any observations, input
@@ -130,7 +130,7 @@ shore assessment add \
 Read the updated revision:
 
 ```bash
-shore review show --pretty --include-body
+shore revision show --pretty --include-body
 ```
 
 ## 6. Where To Go Next

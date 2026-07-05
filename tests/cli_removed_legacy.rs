@@ -10,7 +10,8 @@ struct RemovedPath {
 
 // Family/rename tasks APPEND rows here.
 const REMOVED_PATHS: &[RemovedPath] = &[
-    // Fully removed review verbs: unregistered, no successor hint.
+    // Fully removed review verbs: unregistered with no verb-specific successor
+    // (the retired-`review` family hint is asserted separately).
     RemovedPath {
         argv: &["review", "publish", "--help"],
         hint_contains: &[],
@@ -21,6 +22,10 @@ const REMOVED_PATHS: &[RemovedPath] = &[
     },
     RemovedPath {
         argv: &["review", "ack", "--help"],
+        hint_contains: &[],
+    },
+    RemovedPath {
+        argv: &["review", "disposition", "--help"],
         hint_contains: &[],
     },
     // Retired names that point at their post-reshape successors.
@@ -92,7 +97,34 @@ const REMOVED_PATHS: &[RemovedPath] = &[
         argv: &["input-request", "fetch", "--help"],
         hint_contains: &["shore input-request show"],
     },
+    // The revision family: the verb-less plural and the digest both moved.
+    RemovedPath {
+        argv: &["review", "revisions", "--help"],
+        hint_contains: &["shore revision list"],
+    },
+    RemovedPath {
+        argv: &["review", "show", "--help"],
+        hint_contains: &["shore revision show"],
+    },
 ];
+
+#[test]
+fn review_namespace_is_retired_with_a_hint() {
+    for argv in [vec!["review"], vec!["review", "--help"]] {
+        let out = shore(argv.clone());
+        assert!(!out.status.success(), "{argv:?} should be unregistered");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("unrecognized subcommand"),
+            "{argv:?} stderr:\n{err}"
+        );
+        // The bare-`review` leading-token hint points at the flattened surface.
+        assert!(
+            err.contains("flattened to the top level"),
+            "{argv:?} stderr:\n{err}"
+        );
+    }
+}
 
 #[test]
 fn removed_review_paths_are_unregistered_and_hint_at_successors() {
@@ -144,13 +176,12 @@ fn legacy_hunk_flag_is_rejected_without_shore_mutation() {
 }
 
 #[test]
-fn help_omits_legacy_hunk_and_removed_review_commands() {
+fn help_omits_legacy_hunk_input() {
     let dump = shore(["dump", "--help"]);
     let show = shore(["show", "--help"]);
     let notes_apply = shore(["notes", "apply", "--help"]);
-    let review = shore(["review", "--help"]);
 
-    for output in [&dump, &show, &notes_apply, &review] {
+    for output in [&dump, &show, &notes_apply] {
         assert!(
             output.status.success(),
             "stderr:\n{}",
@@ -158,12 +189,7 @@ fn help_omits_legacy_hunk_and_removed_review_commands() {
         );
     }
 
-    for (name, output) in [
-        ("dump", dump),
-        ("show", show),
-        ("notes apply", notes_apply),
-        ("review", review),
-    ] {
+    for (name, output) in [("dump", dump), ("show", show), ("notes apply", notes_apply)] {
         let stdout = String::from_utf8(output.stdout).expect("stdout is utf-8");
         assert!(
             !stdout.contains("--legacy-hunk-agent-context"),
@@ -172,15 +198,6 @@ fn help_omits_legacy_hunk_and_removed_review_commands() {
         assert!(
             !stdout.contains("agent-context.json"),
             "{name} help still mentions agent-context.json:\n{stdout}"
-        );
-    }
-
-    let review_stdout =
-        String::from_utf8(shore(["review", "--help"]).stdout).expect("review help stdout is utf-8");
-    for command in ["publish", "verdict", "ack"] {
-        assert!(
-            !review_stdout.contains(command),
-            "review help still mentions {command}:\n{review_stdout}"
         );
     }
 }

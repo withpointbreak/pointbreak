@@ -34,7 +34,7 @@ the **competing heads** are surfaced rather than one silently winning.
 
 1. Start from a Git worktree containing the change you want to review.
 2. Capture a revision with `shore capture`.
-3. Inspect what was captured with `shore review show` and
+3. Inspect what was captured with `shore revision show` and
    `shore history`.
 4. Record review facts as you read the diff:
    - **Observations** are notes you want preserved.
@@ -89,7 +89,7 @@ captured snapshot as an immutable Shoreline-owned object artifact. The output do
 You can pin later commands to the captured revision with `--revision
 <id>`. When only one revision exists in the store, commands that need a
 current revision pick it automatically. When multiple exist, list them with
-`shore review revisions` and pass either the exact revision ID or seed a
+`shore revision list` and pass either the exact revision ID or seed a
 supersession thread with `--revision <id>`.
 
 The snapshot is now frozen. Re-running `shore capture` later creates a
@@ -135,7 +135,7 @@ shore capture --base v1.2.0 --target HEAD --path docs/spec
 
 `--path` takes a native git pathspec, is repeatable, and scopes tracked and
 untracked files alike; a scope that matches no changed files is an error. See
-[`shore capture`](./cli-reference.md#shore-review-capture) for the full
+[`shore capture`](./cli-reference.md#shore-capture) for the full
 semantics.
 
 Record a succession round by naming the revisions a new capture supersedes:
@@ -154,7 +154,7 @@ a single winner.
 Write commands such as `shore observation add`,
 `shore input-request open`, and `shore assessment add` accept
 `--revision <id>`. When more than one captured revision is current, pass
-the ID from capture output or `shore review revisions`; otherwise writes fail
+the ID from capture output or `shore revision list`; otherwise writes fail
 with an ambiguity error.
 
 Supersession makes that ambiguity contextual. A revision-scoped read seeds on `--revision <id>` and
@@ -169,8 +169,8 @@ superseded revisions.
 Three read surfaces describe revisions, and they answer different questions:
 
 ```bash
-shore review revisions     # what revisions exist in the store
-shore review show          # composite revision view (narrative + snapshot)
+shore revision list     # what revisions exist in the store
+shore revision show          # composite revision view (narrative + snapshot)
 shore history       # chronological raw event listing
 ```
 
@@ -179,11 +179,11 @@ pages, supersession-thread pages, and captured diffs annotated with their review
 `shore inspect` to open a local web UI (see the [CLI reference](cli-reference.md)). The commands
 below remain the scriptable surface.
 
-### `shore review revisions`
+### `shore revision list`
 
-`shore review revisions` projects every `work_object_proposed` event into a
+`shore revision list` projects every `work_object_proposed` event into a
 flat directory of revisions. It is the discovery surface — start here when
-`shore review show` errors with `multiple captured revisions; pass
+`shore revision show` errors with `multiple captured revisions; pass
 --revision`, or whenever you need to pick an ID for `--revision <id>`.
 
 It returns `shore.review-revision-list` JSON with `eventSetHash`, `eventCount`,
@@ -194,7 +194,7 @@ time so the newest revision appears last. Pass `--object <object-id>` to list on
 that share one content object — a listing lens that may span threads, never a head selector.
 
 ```bash
-shore review revisions --pretty
+shore revision list --pretty
 ```
 
 When a revision supersedes another, the list/read projections build the supersession DAG and surface
@@ -203,9 +203,9 @@ renderer; this release has no interdiff or stack DAG. Capture facts remain signa
 generic `EventToBeSigned` producer-fact view and ADR-0004's Dead Simple Signing Envelope (DSSE)
 pre-authentication encoding.
 
-### `shore review show`
+### `shore revision show`
 
-`shore review show` is the composite view of one revision. It returns
+`shore revision show` is the composite view of one revision. It returns
 `shore.review-revision` JSON containing:
 
 - revision identity and event-set freshness metadata
@@ -221,13 +221,13 @@ metadata row, hunk header, and diff row. Track filters narrow narrative facts
 without changing snapshot completeness.
 
 ```bash
-shore review show --pretty
-shore review show --revision <revision-id>
-shore review show --track agent:codex
-shore review show --include-body
+shore revision show --pretty
+shore revision show <revision-id>
+shore revision show --track agent:codex
+shore revision show --include-body
 ```
 
-Passing `--revision <id>` seeds head selection on that revision and resolves its thread's current
+Passing a revision id seeds head selection on that revision and resolves its thread's current
 head; an intra-thread fork is reported as competing revisions.
 
 ### `shore history`
@@ -371,7 +371,7 @@ shore notes apply --repo . --review-notes review-notes.json
 ```
 
 It writes one immutable `review_note_imported` event per imported note.
-Imported notes appear in `shore review show` as adapter notes, and in
+Imported notes appear in `shore revision show` as adapter notes, and in
 `shore dump` and `shore show` as note rows in the review stream.
 
 ### `shore dump`
@@ -386,7 +386,7 @@ shore dump --review-notes review-notes.json
 
 `shore dump` operates on the **working tree at run time**, not on a captured
 revision. It does not include native observations, input requests, or
-assessments — use `shore review show` for those.
+assessments — use `shore revision show` for those.
 
 ### `shore show`
 
@@ -456,9 +456,9 @@ There are two overlapping read surfaces today:
   durable event log. It is the surface for recording review facts.
 
 Native observations, input requests, and assessments appear in
-`shore review show` but are not yet projected into `shore dump` or
+`shore revision show` but are not yet projected into `shore dump` or
 `shore show`. If you need a single view that combines a captured snapshot
-with all ledger facts, use `shore review show`.
+with all ledger facts, use `shore revision show`.
 
 ### Tracks
 
@@ -522,7 +522,7 @@ git status
 shore capture | jq .
 
 # 2. Read the captured revision (composite view, narrative + snapshot).
-shore review show --pretty | less
+shore revision show --pretty | less
 
 # 3. Record observations as you read the diff.
 shore observation add \

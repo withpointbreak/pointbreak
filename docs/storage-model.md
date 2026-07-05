@@ -219,7 +219,7 @@ unbounded event payload growth.
 The direct read surface is `shore observation list`, which replays events and can optionally
 hydrate bodies. Body artifact paths, event filenames, and `state.json` paths are internal storage
 details, not command-output API. Native observations also appear in the composite
-`shore review show` projection, but they are not projected into `shore dump` or `shore show`.
+`shore revision show` projection, but they are not projected into `shore dump` or `shore show`.
 
 Native input requests follow the same revision ledger model:
 
@@ -253,7 +253,7 @@ unbounded event payload growth.
 The direct read surfaces are `shore review input-request list` and `shore review input-request fetch`,
 which replay events and can optionally hydrate bodies. Body artifact paths, reason artifact paths,
 event filenames, and `state.json` paths are internal storage details, not command-output API. Native
-input requests also appear in the composite `shore review show` projection. They are not
+input requests also appear in the composite `shore revision show` projection. They are not
 projected into `shore dump` or `shore show`.
 
 Native assessments follow the same revision ledger model:
@@ -290,7 +290,7 @@ unbounded event payload growth.
 The direct read surface is `shore assessment show`, which replays events and can optionally
 hydrate summaries. Summary artifact paths, event filenames, and `state.json` paths are internal
 storage details, not command-output API. Native assessments also appear in the composite
-`shore review show` projection, but they are not projected into `shore dump` or `shore show`.
+`shore revision show` projection, but they are not projected into `shore dump` or `shore show`.
 
 State-change outcomes such as deferred, split-out, overridden, and superseded are represented as
 native observations tagged with `state-change:*`, not as assessment values.
@@ -306,7 +306,7 @@ Validation evidence follows the same revision ledger model:
 - bounded `state.json` summarizes validation evidence with `validationCheckCount`, but it does not
   embed validation history, summary content, logs, or reports
 
-Validation evidence is advisory. It may support review judgment in `shore review show`,
+Validation evidence is advisory. It may support review judgment in `shore revision show`,
 `shore history`, and `shore validation list`, but it never grants review acceptance,
 merge authority, or write authority. It never changes `currentAssessment`, assessment ambiguity,
 operative input-request counts, or any other operative projection.
@@ -346,9 +346,9 @@ Shared state diagnostics are still included so callers can see duplicate semanti
 inspecting the underlying events. Raw event files, artifact paths, event filenames, and `state.json`
 are storage details, not history output API.
 
-`shore review show` is the composite read surface for one captured revision:
+`shore revision show` is the composite read surface for one captured revision:
 
-- `shore review show` returns `shore.review-revision` JSON derived from a validated scan of the
+- `shore revision show` returns `shore.review-revision` JSON derived from a validated scan of the
   resolved store's `events/` plus the bound immutable object artifact for the selected revision
 - `eventSetHash` and `eventCount` describe the full event set read for the command, not only the
   selected revision's returned narrative facts
@@ -434,7 +434,7 @@ reports the excluded-path count and per-glob match counts so an over-broad exclu
 See [cli-reference.md](./cli-reference.md#sensitivity-exclude-globs) for the format and glob
 semantics.
 
-Reads resolve the shared common-dir store on every review read surface. `shore review revisions` and
+Reads resolve the shared common-dir store on every review read surface. `shore revision list` and
 `show`, `shore history`, the observation, input-request, and validation lists,
 `shore assessment show`, the association list, and the inspector API all
 read it from any worktree of the clone, including object artifacts and large note-shaped bodies, so
@@ -713,7 +713,7 @@ elision threshold, no generated-file detection, and no metadata-only marker for 
   three variants carry file-level Git facts (rename, mode change, submodule pointer change) and
   also leave `hunks` empty, but they are not content-omission markers. There is no `ElidedFile`
   or `GeneratedFile` variant.
-- **Read surface.** `shore review show` is narrative-first plus snapshot-complete: reviewed
+- **Read surface.** `shore revision show` is narrative-first plus snapshot-complete: reviewed
   ledger material appears first, and the snapshot remainder includes every captured file, metadata
   row, hunk header, and diff row. No flag omits row bodies.
 - **Content-hash scope.** `ObjectArtifact.contentHash` covers the full row inventory. The object
@@ -741,7 +741,7 @@ the projection saw; it is not a causal ordering primitive or a raw event-file ch
 If a cached projection's `eventSetHash` does not match a fresh scan of the store's `events/`, the
 projection is stale and should be rebuilt from the event files. The event files remain authoritative;
 `state.json` is still safe to delete and regenerate. `shore history` and
-`shore review show` reuse this freshness primitive, and future derived-index projections should
+`shore revision show` reuse this freshness primitive, and future derived-index projections should
 do the same rather than inventing per-projection hashes.
 
 ## Shared Mutable Files

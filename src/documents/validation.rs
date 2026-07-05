@@ -1,4 +1,4 @@
-// Document builders for `shore review validation add` and `list`.
+// Document builders for `shore validation add` and `list`.
 use crate::documents::{DiagnosticDocument, EventWriteDocument, ValidationCheckViewDocument};
 use crate::model::{ValidationStatus, ValidationTarget};
 use crate::session::{DelegationMap, ValidationAddResult, ValidationListResult};

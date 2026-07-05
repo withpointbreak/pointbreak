@@ -5,11 +5,59 @@ use support::git_repo::GitRepo;
 use support::{shore, shore_env};
 
 #[test]
-fn review_help_lists_show() {
-    let output = shore(["review", "--help"]);
+fn revision_help_lists_show() {
+    let output = shore(["revision", "--help"]);
 
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("show"));
+}
+
+#[test]
+fn revision_show_positional_accepts_and_omits() {
+    let repo = modified_repo();
+    shore(["capture", "--repo", repo.path().to_str().unwrap()]);
+    let path = repo.path().to_str().unwrap();
+
+    // Omitted: shows the current capture (the flag-absent behavior).
+    let current = shore(["revision", "show", "--repo", path]);
+    assert!(
+        current.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&current.stderr)
+    );
+    let json = parse_json(&current.stdout);
+    assert_eq!(json["schema"], "shore.review-revision");
+    let id = json["revision"]["id"].as_str().unwrap().to_owned();
+
+    // Positional full id: selects that revision.
+    let selected = shore(["revision", "show", &id, "--repo", path]);
+    assert!(
+        selected.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&selected.stderr)
+    );
+    assert_eq!(parse_json(&selected.stdout)["revision"]["id"], id);
+}
+
+#[test]
+fn revision_show_positional_resolves_a_prefixed_short_id() {
+    let repo = modified_repo();
+    shore(["capture", "--repo", repo.path().to_str().unwrap()]);
+    let path = repo.path().to_str().unwrap();
+
+    let current = parse_json(&shore(["revision", "show", "--repo", path]).stdout);
+    let id = current["revision"]["id"].as_str().unwrap().to_owned();
+    // id = "rev:…sha256:<hex>"; the bare-prefixed short form resolves it.
+    let digest = id.rsplit_once("sha256:").unwrap().1;
+    let prefixed_short = format!("rev:{}", &digest[..8]);
+
+    let selected = shore(["revision", "show", &prefixed_short, "--repo", path]);
+    assert!(
+        selected.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&selected.stderr)
+    );
+    assert_eq!(parse_json(&selected.stdout)["revision"]["id"], id);
 }
 
 #[test]
@@ -17,7 +65,7 @@ fn revision_show_emits_v1_json() {
     let repo = modified_repo();
     shore(["capture", "--repo", repo.path().to_str().unwrap()]);
 
-    let output = shore(["review", "show", "--repo", repo.path().to_str().unwrap()]);
+    let output = shore(["revision", "show", "--repo", repo.path().to_str().unwrap()]);
 
     assert!(
         output.status.success(),
@@ -48,7 +96,7 @@ fn revision_show_rejects_invalid_track_before_json_output() {
     shore(["capture", "--repo", repo.path().to_str().unwrap()]);
 
     let output = shore([
-        "review",
+        "revision",
         "show",
         "--repo",
         repo.path().to_str().unwrap(),
@@ -67,7 +115,7 @@ fn revision_show_pretty_prints() {
     shore(["capture", "--repo", repo.path().to_str().unwrap()]);
 
     let output = shore([
-        "review",
+        "revision",
         "show",
         "--repo",
         repo.path().to_str().unwrap(),
@@ -83,7 +131,7 @@ fn revision_show_rejects_pretty_and_compact_together() {
     shore(["capture", "--repo", repo.path().to_str().unwrap()]);
 
     let output = shore([
-        "review",
+        "revision",
         "show",
         "--repo",
         repo.path().to_str().unwrap(),
@@ -103,17 +151,16 @@ fn revision_show_supports_explicit_revision_when_ambiguous() {
     repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
     let second = parse_json(&shore(["capture", "--repo", repo.path().to_str().unwrap()]).stdout);
 
-    let ambiguous = shore(["review", "show", "--repo", repo.path().to_str().unwrap()]);
+    let ambiguous = shore(["revision", "show", "--repo", repo.path().to_str().unwrap()]);
     assert!(!ambiguous.status.success());
     assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("multiple captured revisions"));
 
     let explicit = shore([
-        "review",
+        "revision",
         "show",
+        first["revision"]["id"].as_str().unwrap(),
         "--repo",
         repo.path().to_str().unwrap(),
-        "--revision",
-        first["revision"]["id"].as_str().unwrap(),
     ]);
     let json = parse_json(&explicit.stdout);
 
@@ -128,7 +175,7 @@ fn revision_show_include_body_hydrates_without_internal_paths() {
     add_observation_with_body(&repo, "agent:codex", "Body", "visible body");
 
     let output = shore([
-        "review",
+        "revision",
         "show",
         "--repo",
         repo.path().to_str().unwrap(),
@@ -158,7 +205,7 @@ fn revision_show_includes_input_requests_and_omits_legacy_fields() {
     );
 
     let output = shore([
-        "review",
+        "revision",
         "show",
         "--repo",
         repo.path().to_str().unwrap(),
@@ -202,7 +249,7 @@ fn revision_show_rows_are_narrative_first_and_snapshot_complete() {
     add_observation(&repo, "agent:codex", "Narrative");
 
     let json =
-        parse_json(&shore(["review", "show", "--repo", repo.path().to_str().unwrap()]).stdout);
+        parse_json(&shore(["revision", "show", "--repo", repo.path().to_str().unwrap()]).stdout);
 
     let rows = json["rows"].as_array().unwrap();
     let first_remainder = rows
@@ -237,10 +284,10 @@ fn revision_show_track_filter_echoes_and_narrows_narrative_only() {
     add_observation(&repo, "agent:claude", "Claude");
 
     let all =
-        parse_json(&shore(["review", "show", "--repo", repo.path().to_str().unwrap()]).stdout);
+        parse_json(&shore(["revision", "show", "--repo", repo.path().to_str().unwrap()]).stdout);
     let codex = parse_json(
         &shore([
-            "review",
+            "revision",
             "show",
             "--repo",
             repo.path().to_str().unwrap(),
@@ -270,7 +317,7 @@ fn revision_show_includes_current_assessment_status() {
     add_assessment(&repo);
 
     let json =
-        parse_json(&shore(["review", "show", "--repo", repo.path().to_str().unwrap()]).stdout);
+        parse_json(&shore(["revision", "show", "--repo", repo.path().to_str().unwrap()]).stdout);
 
     assert_eq!(json["currentAssessment"]["status"], "resolved");
     assert_eq!(json["currentAssessment"]["assessment"], "accepted");
@@ -291,7 +338,7 @@ fn revision_show_includes_adapter_notes_without_storage_paths() {
         review_notes.to_str().unwrap(),
     ]);
 
-    let output = shore(["review", "show", "--repo", repo.path().to_str().unwrap()]);
+    let output = shore(["revision", "show", "--repo", repo.path().to_str().unwrap()]);
     let json = parse_json(&output.stdout);
     let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -325,12 +372,11 @@ fn unit_show_projects_range_capture_with_bound_snapshot() {
     let revision_id = capture["revision"]["id"].as_str().unwrap();
 
     let output = shore([
-        "review",
+        "revision",
         "show",
+        revision_id,
         "--repo",
         repo.path().to_str().unwrap(),
-        "--revision",
-        revision_id,
     ]);
 
     // The command succeeding proves load_bound_object_artifact validated the
@@ -369,7 +415,7 @@ fn unit_show_disambiguates_worktree_and_range_units() {
         .stdout,
     );
 
-    let ambiguous = shore(["review", "show", "--repo", repo.path().to_str().unwrap()]);
+    let ambiguous = shore(["revision", "show", "--repo", repo.path().to_str().unwrap()]);
     assert!(!ambiguous.status.success());
     assert!(
         String::from_utf8_lossy(&ambiguous.stderr).contains("multiple captured revisions"),
@@ -379,12 +425,11 @@ fn unit_show_disambiguates_worktree_and_range_units() {
 
     let json = parse_json(
         &shore([
-            "review",
+            "revision",
             "show",
+            range["revision"]["id"].as_str().unwrap(),
             "--repo",
             repo.path().to_str().unwrap(),
-            "--revision",
-            range["revision"]["id"].as_str().unwrap(),
         ])
         .stdout,
     );
@@ -431,7 +476,7 @@ fn unit_show_renders_verification_status_on_members_and_capture() {
         .success()
     );
 
-    let out = shore_env(["review", "show", "--repo", repo_arg], &env);
+    let out = shore_env(["revision", "show", "--repo", repo_arg], &env);
     assert!(
         out.status.success(),
         "stderr:\n{}",
@@ -517,7 +562,7 @@ fn unit_show_renders_endorsement_on_capture_identity() {
     );
 
     let out = shore_env(
-        ["review", "show", "--repo", repo_arg],
+        ["revision", "show", "--repo", repo_arg],
         &[("SHORE_HOME", env_home)],
     );
     let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -536,7 +581,7 @@ fn text_digest_is_bounded_and_never_renders_rows() {
     add_input_request_with_body(&repo, "please decide");
     add_assessment(&repo);
 
-    let output = shore(["review", "show", "--repo", repo_arg, "--format", "text"]);
+    let output = shore(["revision", "show", "--repo", repo_arg, "--format", "text"]);
     assert!(
         output.status.success(),
         "stderr:\n{}",
@@ -612,7 +657,14 @@ fn text_digest_reports_signed_by_enrolled_key() {
         .success()
     );
     let yes_out = shore_env(
-        ["review", "show", "--repo", yes_repo_arg, "--format", "text"],
+        [
+            "revision",
+            "show",
+            "--repo",
+            yes_repo_arg,
+            "--format",
+            "text",
+        ],
         &yes_env,
     );
     let yes_stdout = String::from_utf8_lossy(&yes_out.stdout);
@@ -654,7 +706,14 @@ fn text_digest_reports_signed_by_enrolled_key() {
         .success()
     );
     let no_out = shore_env(
-        ["review", "show", "--repo", no_repo_arg, "--format", "text"],
+        [
+            "revision",
+            "show",
+            "--repo",
+            no_repo_arg,
+            "--format",
+            "text",
+        ],
         &[("SHORE_HOME", no_home_s)],
     );
     let no_stdout = String::from_utf8_lossy(&no_out.stdout);
@@ -683,7 +742,7 @@ fn text_digest_clamps_long_open_request_titles() {
         "manual-decision-required",
     ]);
 
-    let output = shore(["review", "show", "--repo", repo_arg, "--format", "text"]);
+    let output = shore(["revision", "show", "--repo", repo_arg, "--format", "text"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let longest = stdout
         .lines()
@@ -711,7 +770,7 @@ fn text_digest_groups_fact_counts_by_track() {
     add_observation(&repo, "agent:codex", "Codex finding");
     add_observation(&repo, "agent:claude", "Claude finding");
 
-    let output = shore(["review", "show", "--repo", repo_arg, "--format", "text"]);
+    let output = shore(["revision", "show", "--repo", repo_arg, "--format", "text"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(stdout.contains("tracks:"), "stdout:\n{stdout}");

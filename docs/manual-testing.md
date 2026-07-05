@@ -224,15 +224,15 @@ shore history --pretty --include-body \
 revision view returns narrative facts before the snapshot remainder with body text omitted by
 default.
 
-### `shore review revisions`
+### `shore revision list`
 
-`shore review revisions` projects `work_object_proposed` events into a flat directory of
-revisions. Reach for it whenever `shore review show` errors with
+`shore revision list` projects `work_object_proposed` events into a flat directory of
+revisions. Reach for it whenever `shore revision show` errors with
 `multiple captured revisions; pass --revision`.
 
 ```bash
-shore review revisions --pretty | jq '{eventSetHash, revisionCount, ids: [.entries[].revisionId]}'
-shore review revisions --pretty | jq '.entries[] | {revisionId, capturedAt, objectArtifactContentHash}'
+shore revision list --pretty | jq '{eventSetHash, revisionCount, ids: [.entries[].revisionId]}'
+shore revision list --pretty | jq '.entries[] | {revisionId, capturedAt, objectArtifactContentHash}'
 ```
 
 **Expect.**
@@ -243,9 +243,9 @@ shore review revisions --pretty | jq '.entries[] | {revisionId, capturedAt, obje
   `target`, and `objectArtifactContentHash` and no event paths, artifact paths, or `statePath`.
 - Entries are sorted by `capturedAt`, so the newest revision appears last.
 
-### `shore review show`
+### `shore revision show`
 
-`shore review show` puts each revision fact in two places:
+`shore revision show` puts each revision fact in two places:
 
 - top-level `observations[]`, `inputRequests[]`, `assessments[]`, and `adapterNotes[]` carry the
   hydrated facts (including `body` / `summary` / `reason` when `--include-body` is passed).
@@ -255,18 +255,18 @@ shore review revisions --pretty | jq '.entries[] | {revisionId, capturedAt, obje
   or `"snapshot_remainder"`. Body text is **not** carried on rows.
 
 ```bash
-shore review show --pretty | jq '.eventSetHash, .summary'
-shore review show --pretty | jq '[.rows[].kind] | unique'
-shore review show --pretty \
+shore revision show --pretty | jq '.eventSetHash, .summary'
+shore revision show --pretty | jq '[.rows[].kind] | unique'
+shore revision show --pretty \
   | jq '[.rows[] | {kind, projectionPhase}] | group_by(.projectionPhase) | map({phase: .[0].projectionPhase, count: length})'
 
 # Bodies are omitted by default and live on the top-level fact lists when hydrated.
-shore review show --pretty | jq '.observations[] | {title, body}'
-shore review show --pretty --include-body | jq '.observations[] | {title, body}'
-shore review show --pretty --include-body | jq '.assessments[] | {assessment, summary}'
+shore revision show --pretty | jq '.observations[] | {title, body}'
+shore revision show --pretty --include-body | jq '.observations[] | {title, body}'
+shore revision show --pretty --include-body | jq '.assessments[] | {assessment, summary}'
 
 # Track filter narrows narrative material but leaves the snapshot remainder intact.
-shore review show --pretty --track agent:codex \
+shore revision show --pretty --track agent:codex \
   | jq '{
       observations: [.observations[].trackId] | unique,
       input_requests_count: (.inputRequests | length),
@@ -327,7 +327,7 @@ shore history --pretty --event-type review-note-imported \
 - A second run with the same sidecar increments `notesExisting` and leaves `notesCreated` at 0:
   imported-note events are idempotent on their semantic ID.
 - `shore history --event-type review-note-imported` returns one entry.
-- `shore review show --pretty | jq '.adapterNotes'` returns the imported note as one entry in
+- `shore revision show --pretty | jq '.adapterNotes'` returns the imported note as one entry in
   the revision's adapter-notes list.
 
 To exercise the TUI by eye, run `shore show` and confirm `j`/`k`, `[`/`]`, and `{`/`}` work, and
@@ -370,7 +370,7 @@ The authority split (see `docs/storage-model.md`):
 - `.shore/data/events/` — append-only immutable per-fact events.
 - `.shore/data/artifacts/` — immutable support records that events bind to: captured revision
   snapshots (`artifacts/objects/`), and content-addressed bodies for large observation,
-  input request, and assessment payloads (`artifacts/notes/`). `review show` reads the
+  input request, and assessment payloads (`artifacts/notes/`). `revision show` reads the
   snapshot artifact for the selected revision; the event log alone cannot reconstruct snapshot
   rows or large note bodies.
 - `.shore/data/state.json` — rebuildable projection summary. Reads do not depend on its existence;
@@ -385,7 +385,7 @@ ls .shore/data/artifacts/notes/        # only populated for large-body events
 HASH_BEFORE=$(jq -r .eventSetHash .shore/data/state.json)
 rm .shore/data/state.json
 shore history --pretty | jq -r .eventSetHash    # same hash
-shore review show --pretty >/dev/null
+shore revision show --pretty >/dev/null
 test -f .shore/data/state.json && echo "rebuilt" || echo "still missing (expected for reads)"
 
 # A write command rebuilds the projection
@@ -395,7 +395,7 @@ jq '.eventCount, .eventSetHash' .shore/data/state.json
 
 **Expect.**
 
-- `shore history` and `shore review show` both succeed without `state.json` present.
+- `shore history` and `shore revision show` both succeed without `state.json` present.
   Their `eventSetHash` matches the value that was in the deleted projection.
 - After the next write command, `.shore/data/state.json` exists again and reports a higher
   `eventCount` and a new `eventSetHash`.
@@ -420,7 +420,7 @@ When refactoring storage, projections, or CLI surfaces, also look at:
   an artifact at all, so use a body well over that threshold to exercise this path —
   `python3 -c "print('x'*5000)" > big-body.txt` and pass `--body-file big-body.txt` to two
   separate `observation add` calls.
-- **Exit codes**: piping `shore dump`, `shore review show`, or `shore history` through
+- **Exit codes**: piping `shore dump`, `shore revision show`, or `shore history` through
   `jq -e 'has("schema")'` should always exit 0 for successful runs.
 - **Tracing**: passing `--log info --log-file /tmp/shore.log` to any command should write to that
   file and not corrupt the JSON on stdout. `shore show` requires `--log-file` when tracing is

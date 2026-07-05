@@ -107,8 +107,8 @@ fn swept_body_renders_physically_removed_across_read_surfaces() {
     compact(repo.path());
 
     // review show: explained absence, not a hard error.
-    let show = shore(["review", "show", "--repo", arg, "--include-body"]);
-    assert_success(&show, "review show");
+    let show = shore(["revision", "show", "--repo", arg, "--include-body"]);
+    assert_success(&show, "revision show");
     let show = parse_json(&show.stdout);
     let observation = observation_entry(&show);
     assert!(observation.get("body").is_none(), "no fabricated body");
@@ -158,8 +158,8 @@ fn unswept_removal_renders_suppressed_present() {
     let (revision_id, body_hash) = capture_with_externalized_observation_body(repo.path());
     remove_revision(repo.path(), &revision_id);
 
-    let show = shore(["review", "show", "--repo", arg, "--include-body"]);
-    assert_success(&show, "review show");
+    let show = shore(["revision", "show", "--repo", arg, "--include-body"]);
+    assert_success(&show, "revision show");
     let show = parse_json(&show.stdout);
     let observation = observation_entry(&show);
     assert!(observation.get("body").is_none());
@@ -185,7 +185,7 @@ fn missing_blob_without_removal_still_hard_errors() {
     )
     .expect("delete the note blob without a removal event");
 
-    let show = shore(["review", "show", "--repo", arg, "--include-body"]);
+    let show = shore(["revision", "show", "--repo", arg, "--include-body"]);
 
     assert!(
         !show.status.success(),
@@ -204,8 +204,8 @@ fn wire_stays_silent_without_removal() {
     let arg = repo.path().to_str().unwrap();
     let (_revision_id, _body_hash) = capture_with_externalized_observation_body(repo.path());
 
-    let show = shore(["review", "show", "--repo", arg, "--include-body"]);
-    assert_success(&show, "review show");
+    let show = shore(["revision", "show", "--repo", arg, "--include-body"]);
+    assert_success(&show, "revision show");
     let list = shore(["observation", "list", "--repo", arg, "--include-body"]);
     assert_success(&list, "observation list");
 

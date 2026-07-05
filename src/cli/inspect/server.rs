@@ -298,7 +298,7 @@ struct HistoryRequest {
 /// `order` is a usage error the caller turns into a `400` without touching the
 /// store. The `at` › `offset` precedence lives in `apply_history_query`; the parser
 /// only collects the params. Paging is positional (`offset`/`at`); the opaque
-/// forward cursor stays on the CLI path (`shore review history --cursor`). The
+/// forward cursor stays on the CLI path (`shore history --cursor`). The
 /// legacy `object=` param aliases to `snapshot=` for old bookmarks (#334).
 fn history_query(query: Option<&str>) -> Result<HistoryRequest, String> {
     let q = query_param(query, "q").unwrap_or_default();

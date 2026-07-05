@@ -243,18 +243,6 @@ fn shore_review_assessment_add_rejects_state_change_value() {
 }
 
 #[test]
-fn shore_review_disposition_command_is_removed() {
-    let output = shore(["review", "disposition", "--help"]);
-
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("unrecognized subcommand"),
-        "expected removed disposition command; got stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[test]
 fn shore_review_assessment_add_records_file_range_target() {
     let repo = support::dump_repo();
     let repo_arg = repo.path().to_str().unwrap();

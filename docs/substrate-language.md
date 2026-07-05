@@ -202,7 +202,7 @@ authorize a public task command surface.
 ## Carry-Forward Rules
 
 - Keep substrate vocabulary internal unless a user-facing term is clearly better than the domain
-  term. Prefer `shore review show` over exposing "projection" in the command surface; keep `Journal`
+  term. Prefer `shore revision show` over exposing "projection" in the command surface; keep `Journal`
   and `Engagement` out of the command surface entirely.
 - Preserve ambiguity in projections. Multiple distinct facts should surface as ambiguous or
   diagnostic state, not disappear behind timestamp tie-breakers. Competing supersession heads are the

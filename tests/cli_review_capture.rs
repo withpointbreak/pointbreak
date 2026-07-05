@@ -303,7 +303,7 @@ fn capture_without_base_keeps_worktree_behavior() {
     shore(["capture", "--repo", repo.path().to_str().unwrap()]);
 
     let show =
-        parse_json(&shore(["review", "show", "--repo", repo.path().to_str().unwrap()]).stdout);
+        parse_json(&shore(["revision", "show", "--repo", repo.path().to_str().unwrap()]).stdout);
 
     assert_eq!(show["revision"]["source"]["kind"], "git_worktree");
     assert_eq!(show["revision"]["target"]["kind"], "git_working_tree");
@@ -339,12 +339,11 @@ fn capture_accepts_supersedes_and_records_no_lineage_attach() {
     // the single current head (the second revision).
     let resolved = parse_json(
         &shore([
-            "review",
+            "revision",
             "show",
+            &first_id,
             "--repo",
             repo.path().to_str().unwrap(),
-            "--revision",
-            &first_id,
         ])
         .stdout,
     );
@@ -563,15 +562,13 @@ fn abbreviated_supersedes_resolves_to_the_full_id_before_it_is_stored() {
     );
     let second_id = second["revision"]["id"].as_str().unwrap().to_owned();
 
-    // Still `review show` — the revision family (task 3.9) hasn't flattened yet.
     let resolved = parse_json(
         &shore([
-            "review",
+            "revision",
             "show",
+            &first_id,
             "--repo",
             repo.path().to_str().unwrap(),
-            "--revision",
-            &first_id,
         ])
         .stdout,
     );
@@ -664,26 +661,18 @@ fn scoped_capture_surfaces_its_pathspecs_in_show_revisions_and_history() {
 
     let shown = parse_json(
         &shore([
-            "review",
+            "revision",
             "show",
+            revision_id,
             "--repo",
             repo.path().to_str().unwrap(),
-            "--revision",
-            revision_id,
         ])
         .stdout,
     );
     assert_eq!(shown["revision"]["source"]["pathspecs"][0], "a");
 
-    let listed = parse_json(
-        &shore([
-            "review",
-            "revisions",
-            "--repo",
-            repo.path().to_str().unwrap(),
-        ])
-        .stdout,
-    );
+    let listed =
+        parse_json(&shore(["revision", "list", "--repo", repo.path().to_str().unwrap()]).stdout);
     let entry = listed["entries"]
         .as_array()
         .unwrap()
@@ -738,15 +727,8 @@ fn differently_scoped_range_captures_stay_distinct_in_revisions() {
         );
     }
 
-    let listed = parse_json(
-        &shore([
-            "review",
-            "revisions",
-            "--repo",
-            repo.path().to_str().unwrap(),
-        ])
-        .stdout,
-    );
+    let listed =
+        parse_json(&shore(["revision", "list", "--repo", repo.path().to_str().unwrap()]).stdout);
     assert_eq!(listed["revisionCount"], 2);
     let mut scopes: Vec<String> = listed["entries"]
         .as_array()
@@ -771,12 +753,11 @@ fn unscoped_capture_surfaces_no_pathspecs_key() {
 
     let shown = parse_json(
         &shore([
-            "review",
+            "revision",
             "show",
+            revision_id,
             "--repo",
             repo.path().to_str().unwrap(),
-            "--revision",
-            revision_id,
         ])
         .stdout,
     );

@@ -1,4 +1,4 @@
-//! `shore review history --watch` re-renders only when the store's liveness
+//! `shore history --watch` re-renders only when the store's liveness
 //! token (`event_set_hash`) changes, never on a bare poll tick, and runs as a
 //! pure client-side poll: no daemon, no filesystem watch. It is killed on drop.
 
@@ -15,7 +15,7 @@ use support::git_repo::GitRepo;
 use support::inspect::capture;
 use support::shore;
 
-/// A spawned `shore review history --watch`, draining stdout into a shared
+/// A spawned `shore history --watch`, draining stdout into a shared
 /// buffer in the background; killed on drop.
 struct Watcher {
     child: Child,

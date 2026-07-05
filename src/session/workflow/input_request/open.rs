@@ -240,7 +240,7 @@ pub fn open_input_request(options: InputRequestOpenOptions) -> Result<InputReque
         InputRequestOpenedPayload {
             input_request_id: input_request_id.clone(),
             target: target.clone(),
-            // `shore review input-request open` only opens review-domain requests.
+            // `shore input-request open` only opens review-domain requests.
             task_target: None,
             reason_code,
             title,

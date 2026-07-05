@@ -1,5 +1,5 @@
 //! A stored event whose type/envelope was retired at a breaking change must not
-//! hard-fail the CLI read surfaces. `shore review history` / `show` skip it and
+//! hard-fail the CLI read surfaces. `shore history` / `show` skip it and
 //! surface a `ProjectionDiagnostic` instead, exiting 0 so the rest of the
 //! review still renders.
 
@@ -66,12 +66,7 @@ fn review_history_surfaces_schema_break_diagnostic_and_exits_zero() {
 fn review_revisions_surfaces_schema_break_diagnostic_and_exits_zero() {
     let repo = store_with_retired_event();
 
-    let output = shore([
-        "review",
-        "revisions",
-        "--repo",
-        repo.path().to_str().unwrap(),
-    ]);
+    let output = shore(["revision", "list", "--repo", repo.path().to_str().unwrap()]);
 
     assert!(
         output.status.success(),
@@ -89,7 +84,7 @@ fn review_revisions_surfaces_schema_break_diagnostic_and_exits_zero() {
 fn review_show_surfaces_schema_break_diagnostic_and_exits_zero() {
     let repo = store_with_retired_event();
 
-    let output = shore(["review", "show", "--repo", repo.path().to_str().unwrap()]);
+    let output = shore(["revision", "show", "--repo", repo.path().to_str().unwrap()]);
 
     assert!(
         output.status.success(),

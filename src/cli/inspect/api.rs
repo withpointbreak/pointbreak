@@ -1176,7 +1176,7 @@ fn splice_fact_supersession(
     Ok(())
 }
 
-/// Reuses the exact `shore.review-revision` document the `shore review show`
+/// Reuses the exact `shore.review-revision` document the `shore revision show`
 /// command builds (`revision_show_document`), so the inspector renders the same
 /// authoritative composite — current-assessment status, duplicate-collapsed
 /// facts, supersession, adapter notes, and projection rows — rather than

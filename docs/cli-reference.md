@@ -11,8 +11,8 @@ narrow **hard core** is frozen within each document's `version`:
   `shore input-request respond`'s `inputRequestResponseId` and `eventId`;
 - the wire-value vocabularies — the assessment values, the input-request response outcomes, and the
   input-request `mode` (`operative`/`advisory`) and `reasonCode` value sets that ride the consumed
-  `input-request list` field-paths (see the [`assessment`](#shore-review-assessment) and
-  [`input-request`](#shore-review-input-request) sections).
+  `input-request list` field-paths (see the [`assessment`](#shore-assessment) and
+  [`input-request`](#shore-input-request) sections).
 
 Changing any hard-core value is a coordinated break: bump that document's `version` and migrate
 consumers. Everything else in the documents is **soft shell** — stable but additive-evolvable within
@@ -53,7 +53,7 @@ per-call override; a malformed value is ignored and falls through rather than co
 provenance.
 
 Review read commands (`history`, the `observation` / `input-request` / `assessment` / `validation`
-list and show commands, `review show`, and the inspector) discover a checked-in delegation map at
+list and show commands, `revision show`, and the inspector) discover a checked-in delegation map at
 `<repo>/.shore/delegates.json` and resolve the human principal an agent wrote on behalf of,
 rendering it beside the writer as `claude-code (for kevin@swiber.dev)`. Discovery is presence-based
 — absent file, no change. A malformed `.shore/delegates.json` prints a single warning to stderr and
@@ -99,7 +99,7 @@ exists so a revision's facts can be filtered and grouped by who recorded them.
   stamps the lane that owns the new fact.
 - On read/list commands (`shore observation list`, `shore input-request list`,
   `shore validation list`, `shore assessment show`, `shore history`,
-  `shore review show`), `--track <track-id>` is **optional** and narrows the results to one
+  `shore revision show`), `--track <track-id>` is **optional** and narrows the results to one
   lane; omitted, all lanes are returned.
 
 ## `shore diff`
@@ -129,7 +129,7 @@ revision recorded; its subject is always the captured snapshot, never the live w
   `--color always` to force color through a pipe (e.g. `shore diff --color always | less -R`). A
   reader that closes the pipe early (`shore diff | head`) is a clean exit.
 - The command is **text-only and non-interactive**: it has no `--format` selector and emits no JSON
-  (machine consumers read the review documents, e.g. `shore review show --format json`). Its output
+  (machine consumers read the review documents, e.g. `shore revision show --format json`). Its output
   is **disposable** — wording, layout, and ordering may change between releases, so nothing should
   parse it.
 - When a revision's captured content has been removed from the store, `shore diff` prints a short
@@ -226,7 +226,7 @@ truncated, clickable references that navigate to the resource they name, and the
 when the store changes or a freshness diagnostic appears or clears.
 
 The inspector is a read-only, single-store, localhost developer tool. It reads through the same
-validated projections as `shore history` and `shore review show` rather than parsing raw
+validated projections as `shore history` and `shore revision show` rather than parsing raw
 storage, and it serves over a synchronous, dependency-free HTTP server with no async runtime. The
 small JSON API the page consumes (`/api/history`, `/api/revisions`, `/api/revisions/{id}`,
 `/api/threads`, `/api/snapshots/{id}`, `/api/freshness`) is an internal surface for the bundled page,
@@ -238,7 +238,7 @@ payload is **content-only**: it carries the immutable diff content and its `cont
 `revisionId`, `source`, `base`, or `target`. The captured worktree path is therefore simply absent
 from the snapshot wire (there is nothing to redact). Endpoint/target display lives on
 `/api/revisions/{id}` and `/api/revisions`, derived from the revision projection (a path-private
-`targetDisplay` block), not from the snapshot artifact. `shore review revisions` JSON still carries
+`targetDisplay` block), not from the snapshot artifact. `shore revision list` JSON still carries
 `target.worktreeRoot`, unchanged.
 
 ## `shore capture`
@@ -301,7 +301,7 @@ tree, including untracked files (source `git_worktree`).
   the captured revision's identity: the same range captured under a different scope is a different
   revision, while identical captured content still shares one content object. A scope that matches
   no changed files is an error — a scoped capture never records an empty revision. The scope is
-  visible in `shore review show`, `shore review revisions`, and `shore history` under
+  visible in `shore revision show`, `shore revision list`, and `shore history` under
   `source.pathspecs`; an unscoped capture carries no `pathspecs` key and its identity is unchanged
   from before the option existed. (This is deliberately git pathspec syntax, not the
   gitignore-style globs of `.shore/sensitivity.json` — capture scoping is executed by git, while
@@ -314,7 +314,7 @@ storage, remote storage, or note mutation.
 
 By default every worktree of a clone resolves the shared common-dir store at `.git/shore`, so
 `shore capture` lands its capture directly there — no setup step — and the capture is
-immediately visible to `review revisions`, `review show`, and `history` from any sibling worktree. An
+immediately visible to `revision list`, `revision show`, and `history` from any sibling worktree. An
 `ephemeral` worktree instead captures into its own discardable `.shore/data/` store (see
 [`shore store`](#shore-store)).
 
@@ -362,7 +362,7 @@ explicit override controls are a forward-looking note for when movement can targ
 blocking findings still name only safe finding kinds, such as `known_token`, and command output does
 not print the secret text or file path.
 
-Every review read command resolves the shared common-dir store: `review revisions` and `review show`,
+Every review read command resolves the shared common-dir store: `revision list` and `revision show`,
 `history`, the observation, input-request, and validation lists, the association list, and
 `assessment show` read it from any worktree of the clone, including hydrated bodies and the captured
 snapshot, so their `eventCount` and `eventSetHash` reflect that one store.
@@ -465,7 +465,7 @@ already `missing`).
 
 Removed content renders as an explained state on every read surface, never as an error. For
 note-shaped bodies (observation and input-request bodies, response reasons, assessment and
-validation summaries, imported note bodies), `shore review show`, the leaf `list`/`fetch`/`show`
+validation summaries, imported note bodies), `shore revision show`, the leaf `list`/`fetch`/`show`
 commands, and `shore history` omit the body text and carry a `bodyContentState` /
 `summaryContentState` / `reasonContentState` field beside the content hash — `suppressed_present`
 while the bytes are still stored (a compact would reclaim them) or `physically_removed` after the
@@ -835,7 +835,7 @@ shore history [--repo <path>] [--revision <id>] [--track <track-id>] \
 
 ### Verification status and endorsement readback
 
-`shore history`, `shore review show`, and the inspector endpoints render two
+`shore history`, `shore revision show`, and the inspector endpoints render two
 reader-relative, **advisory** facts beside each event. They render only — they never gate a write or
 change an exit code, and the temporal `require-verified-endorsement` tier is out of scope.
 
@@ -875,17 +875,17 @@ attributes for the endorser. The classification rules are decided in
 }
 ```
 
-History is not the full revision row projection. Use `shore review show` for the composite
+History is not the full revision row projection. Use `shore revision show` for the composite
 narrative-first plus snapshot-complete view of one captured revision.
 
-## `shore review revisions`
+## `shore revision list`
 
 ```bash
-shore review revisions [--repo <path>] [--object <object-id>] [--ref <name> [--by label|liveness]] \
+shore revision list [--repo <path>] [--object <object-id>] [--ref <name> [--by label|liveness]] \
   [--integration-ref <name>] [--worktree <path>] [--all | --orphans] [--pretty | --compact]
 ```
 
-`shore review revisions` is the discovery surface for captured revisions. It emits
+`shore revision list` is the discovery surface for captured revisions. It emits
 `shore.review-revision-list` JSON with `eventSetHash`, `eventCount`, `revisionCount`, and entries
 sorted by capture time. Each entry carries the revision id, the content-only object id, the capture
 endpoints, and `objectArtifactContentHash`.
@@ -903,19 +903,19 @@ endpoints, and `objectArtifactContentHash`.
 - `--all` / `--orphans` control whether revisions whose anchored commits are all unreachable
   (orphaned) are shown or shown exclusively; by default orphaned revisions are hidden.
 
-## `shore review show`
+## `shore revision show`
 
 ```bash
-shore review show [--repo <path>] [--revision <id>] [--track <track-id>] \
+shore revision show [REVISION] [--repo <path>] [--track <track-id>] \
   [--include-body] [--pretty | --compact]
 ```
 
-`shore review show` is the composite view for one revision. It emits compact
+`shore revision show` is the composite view for one revision. It emits compact
 `shore.review-revision` v1 JSON by default.
 
 - When exactly one revision has been captured, Shoreline selects it automatically.
-- If multiple revisions exist, pass `--revision <id>`. The flag is a **head seed**: a current head
-  resolves exactly; a superseded revision resolves its thread's current head; and a thread with
+- If multiple revisions exist, pass the `[REVISION]` positional. It is a **head seed**: a current
+  head resolves exactly; a superseded revision resolves its thread's current head; and a thread with
   competing heads is reported as competing rather than auto-picked.
 - The output includes revision identity, event-set freshness metadata, filters, summary counts,
   current assessment status, native observations, input requests, assessments, validation checks,
@@ -933,8 +933,8 @@ shore review show [--repo <path>] [--revision <id>] [--track <track-id>] \
   [`shore history`](#verification-status-and-endorsement-readback) — advisory, render-only,
   resolved against the reader's `.shore/` trust and attributes config.
 
-Revision-scoped selection seeds on `--revision <id>` and resolves that revision's thread head; no
-implicit newest capture globally wins. Unscoped current selection with multiple unrelated captured
+Revision-scoped selection seeds on the `[REVISION]` positional and resolves that revision's thread
+head; no implicit newest capture globally wins. Unscoped current selection with multiple unrelated captured
 revisions still errors at the selection boundary, but routine list, history, and exact-revision reads
 have no always-on ambiguous-current warning. A thread-level read may surface
 `stale_by_superseding_revision` for a revision that a newer revision supersedes. This release has no
@@ -943,8 +943,8 @@ interdiff or stack DAG beyond the supersession graph.
 Capture and succession facts stay signable under ADR-0004's generic `EventToBeSigned` contract with
 the Dead Simple Signing Envelope (DSSE) and pre-authentication encoding rules.
 
-`shore review show` is distinct from `shore history`: history is the chronological raw
-event listing, while `shore review show` is the composite revision view for agents and future
+`shore revision show` is distinct from `shore history`: history is the chronological raw
+event listing, while `shore revision show` is the composite revision view for agents and future
 frontends.
 
 ## `shore notes apply`

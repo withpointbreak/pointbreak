@@ -272,7 +272,7 @@ fn drained(stderr: &Arc<Mutex<String>>) -> String {
     stderr.lock().map(|guard| guard.clone()).unwrap_or_default()
 }
 
-/// Run `shore review capture` against a repo, returning the captured Revision id.
+/// Run `shore capture` against a repo, returning the captured Revision id.
 pub fn capture(repo: &Path) -> String {
     let output = shore(["capture", "--repo", repo.to_str().unwrap()]);
     assert!(

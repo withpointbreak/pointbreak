@@ -294,7 +294,7 @@ fn list_run(args: ListArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::e
 }
 
 /// Best-effort landing headline for the current commit set, derived from the same
-/// liveness machinery `review show` uses and mapped exactly like the revision
+/// liveness machinery `revision show` uses and mapped exactly like the revision
 /// list's `merge_status_for`: `merged|open|orphaned`, and `unknown` on any git
 /// failure or withheld headline. Runs only on the text lane (the sole caller is
 /// the text renderer) and never propagates a liveness error to the exit code

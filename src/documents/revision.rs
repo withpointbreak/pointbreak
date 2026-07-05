@@ -1,4 +1,4 @@
-// Document builders for `shore review revision show` and `list`.
+// Document builders for `shore revision show` and `list`.
 use std::collections::BTreeMap;
 
 use crate::documents::{

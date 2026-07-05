@@ -39,7 +39,7 @@ fn strip_ansi(s: &str) -> String {
 }
 
 /// A repo with one committed base and an uncommitted single-line change, so
-/// `shore review capture` records a one-file worktree diff.
+/// `shore capture` records a one-file worktree diff.
 fn modified_repo() -> GitRepo {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");

@@ -25,7 +25,7 @@ mod keys;
 mod notes;
 mod observation;
 mod output;
-mod review;
+mod revision;
 mod show;
 mod store;
 mod validation;
@@ -71,9 +71,7 @@ enum Command {
     #[command(hide = true)]
     Notes(notes::NotesArgs),
     Observation(Box<observation::ObservationArgs>),
-    // Boxed because the review subcommands carry much larger argument structs
-    // than the other top-level commands.
-    Review(Box<review::ReviewArgs>),
+    Revision(revision::RevisionArgs),
     #[command(hide = true)]
     Show(show::ShowArgs),
     Store(store::StoreArgs),
@@ -129,11 +127,7 @@ enum HintPredicate {
     /// Two or three adjacent argv tokens, e.g. `["review", "revisions"]`.
     AdjacentWindow(&'static [&'static str]),
     /// The first non-flag argv token — the attempted subcommand. Used for the
-    /// bare-family and pluralized-family retirements the family/rename tasks add.
-    // Precursor: no seed row uses this yet; the first LeadingToken row (bare
-    // `review`) arrives when the `review` namespace is retired. Remove this allow
-    // when a row uses it.
-    #[allow(dead_code)]
+    /// bare-family retirements, e.g. a stale `shore review …`.
     LeadingToken(&'static str),
 }
 
@@ -214,6 +208,14 @@ const REMOVED_COMMAND_HINTS: &[(HintPredicate, &str)] = &[
         "Use `shore observation` instead of `shore review observation`.",
     ),
     (
+        HintPredicate::AdjacentWindow(&["review", "revisions"]),
+        "Use `shore revision list`.",
+    ),
+    (
+        HintPredicate::AdjacentWindow(&["review", "show"]),
+        "Use `shore revision show [REVISION]`.",
+    ),
+    (
         HintPredicate::AdjacentWindow(&["review", "validation"]),
         "Use `shore validation` instead of `shore review validation`.",
     ),
@@ -230,6 +232,13 @@ const REMOVED_COMMAND_HINTS: &[(HintPredicate, &str)] = &[
         HintPredicate::AdjacentWindow(&["review", "unit"]),
         "`shore review unit` is removed; list with `shore revision list` \
          and show one with `shore revision show <revision>`.",
+    ),
+    // The catch-all for the retired `review` namespace; must stay LAST so every
+    // verb-specific window above wins first.
+    (
+        HintPredicate::LeadingToken("review"),
+        "The `review` family flattened to the top level. Use `shore capture`, \
+         `shore revision list`, `shore revision show`, `shore observation …`, etc.",
     ),
 ];
 
@@ -274,7 +283,7 @@ fn run_cli(
         Command::Keys(args) => keys::run(args, stdout),
         Command::Notes(args) => notes::run(args, stdout),
         Command::Observation(args) => observation::run(*args, stdout, stderr),
-        Command::Review(args) => review::run(*args, stdout, stderr),
+        Command::Revision(args) => revision::run(args, stdout),
         Command::Show(args) => {
             tracing::debug!(command = "show", "command_start");
             show::run(args, &cli.tracing)

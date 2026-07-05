@@ -21,7 +21,7 @@ fn cli_reference_documents_verification_and_endorsement_readback() {
     );
     assert_markdown_section_contains(
         &cli,
-        "## `shore review show`",
+        "## `shore revision show`",
         &["verificationStatus", "endorsements", "endorserAttributes"],
     );
 }
@@ -60,7 +60,7 @@ fn cli_reference_exists_and_covers_current_commands() {
         "shore input-request open",
         "shore assessment add",
         "shore history",
-        "shore review show",
+        "shore revision show",
         "shore notes apply",
     ] {
         assert!(
@@ -123,7 +123,7 @@ fn public_docs_cover_the_shared_common_dir_store() {
             "policyOutcome",
             "file:sha256:",
             "hard-blocking policy",
-            "review revisions",
+            "revision list",
             "shared common-dir store",
         ],
     );
@@ -157,7 +157,7 @@ fn getting_started_walks_through_first_review() {
     for required in [
         "cargo install shoreline",
         "shore capture",
-        "shore review show",
+        "shore revision show",
         "shore observation add",
         "shore input-request open",
         "shore assessment add",

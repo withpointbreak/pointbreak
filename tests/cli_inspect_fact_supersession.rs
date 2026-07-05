@@ -2,7 +2,7 @@
 //! graphs spliced into `/api/revisions/{id}` (#234). Asserts TOPOLOGY over a real
 //! ambiguous-assessment fork and a real superseded-observation chain, the tagged
 //! edge `kind`, that a non-forked revision omits the field, and that the shared
-//! `shore review show` document is untouched. Never asserts exact pixels.
+//! `shore revision show` document is untouched. Never asserts exact pixels.
 
 mod support;
 
@@ -220,10 +220,9 @@ fn shared_review_show_document_has_no_fact_supersession() {
         "hold",
     ]);
 
-    let show: Value = serde_json::from_slice(
-        &shore(["review", "show", "--repo", arg, "--revision", &rev]).stdout,
-    )
-    .expect("review show JSON");
+    let show: Value =
+        serde_json::from_slice(&shore(["revision", "show", &rev, "--repo", arg]).stdout)
+            .expect("revision show JSON");
     assert!(
         show.get("factSupersession").is_none(),
         "shared doc must not carry the graph"

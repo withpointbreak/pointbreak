@@ -12,7 +12,7 @@ answer, and make the review call.
 Record exactly one assessment with `shore assessment add`. The assessment is the reviewer's
 call, so this role owns it. Never write to the author's track.
 
-Do not run `shore review show --pretty` as a readback surface. It includes the full captured
+Do not run `shore revision show --pretty` as a readback surface. It includes the full captured
 snapshot and can emit megabytes for a real change. Use bounded list commands for the author's
 handoff, your reviewer notes, input requests, and assessment.
 
@@ -39,7 +39,7 @@ If the revision ID is not already known, list captured units and pick the one yo
 review:
 
 ```bash
-shore review revisions --pretty
+shore revision list --pretty
 revision_id="<revision-id>"
 author_track="<author-track>"
 ```
@@ -119,7 +119,7 @@ tests, full tests or checks when appropriate, lint, formatting, documentation ch
 status when the project uses it.
 
 The revision snapshot is frozen at the author's capture moment, while your checkout may have moved
-since then. Compare the captured unit's endpoints from `shore review revisions --pretty` with the
+since then. Compare the captured unit's endpoints from `shore revision list --pretty` with the
 commit or branch head you actually review. If they diverge or you cannot prove they match, record a
 reviewer observation that names the live commit and the possible snapshot mismatch.
 
@@ -281,7 +281,7 @@ an implementation role.
 ## Common errors
 
 - **Using full revision show for readback.** Use bounded observation, input-request, and
-  assessment read commands. Do not use `shore review show --pretty` for this review loop.
+  assessment read commands. Do not use `shore revision show --pretty` for this review loop.
 - **Writing on the author's track.** The reviewer uses a separate reviewer track for every write.
 - **Rubber-stamping the handoff.** The author's observations are context. Verify claims yourself.
 - **Treating validation evidence as an assessment.** Check records are advisory context. The

@@ -14,8 +14,8 @@ mod wire;
 ///
 /// The server is intentionally synchronous (thread-per-connection, std only).
 /// It introduces no async runtime, matching the storage-model guidance, and
-/// reuses the same validated projections as `shore review history` /
-/// `shore review revisions`, so it never parses raw `.shore/data/` files itself.
+/// reuses the same validated projections as `shore history` /
+/// `shore revision list`, so it never parses raw `.shore/data/` files itself.
 #[derive(Debug, Args)]
 pub(super) struct InspectArgs {
     /// Repository root or a path inside the repository.

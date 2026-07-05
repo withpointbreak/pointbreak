@@ -829,8 +829,10 @@ fn input_request_open_requires_revision_when_current_is_ambiguous() {
 }
 
 #[test]
-fn legacy_intervention_command_is_not_registered() {
-    let output = shore(["review", "intervention", "list"]);
+fn unknown_top_level_commands_keep_clap_suggestions() {
+    // A typo of a top-level command still draws clap's did-you-mean suggestion;
+    // the removed-command hint table never suppresses it.
+    let output = shore(["revison"]);
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -838,24 +840,8 @@ fn legacy_intervention_command_is_not_registered() {
         stderr.contains("unrecognized subcommand"),
         "stderr:\n{stderr}"
     );
-    assert!(stderr.contains("input-request"), "stderr:\n{stderr}");
-}
-
-#[test]
-fn other_unknown_review_subcommands_keep_clap_suggestions() {
-    // Target a review subcommand that is still registered at this point in the
-    // flatten sequence (`revisions` is among the last to move, in the revision
-    // family); the typo should still draw clap's did-you-mean suggestion.
-    let output = shore(["review", "revisons"]);
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("unrecognized subcommand"),
-        "stderr:\n{stderr}"
-    );
-    assert!(stderr.contains("revisions"), "stderr:\n{stderr}");
-    assert!(stderr.contains("Usage: shore review"), "stderr:\n{stderr}");
+    assert!(stderr.contains("revision"), "stderr:\n{stderr}");
+    assert!(stderr.contains("Usage: shore"), "stderr:\n{stderr}");
 }
 
 fn request(repo: &GitRepo, title: &str) -> Value {
@@ -1122,7 +1108,7 @@ fn externalized_response_reason_hydrates_with_include_body() {
         "fetch --include-body must hydrate the externalized reason"
     );
 
-    let show = shore(["review", "show", "--repo", arg, "--include-body"]);
+    let show = shore(["revision", "show", "--repo", arg, "--include-body"]);
     assert!(
         show.status.success(),
         "stderr:\n{}",
@@ -1281,12 +1267,11 @@ fn missing_reason_artifact_on_an_unrelated_request_does_not_poison_other_reads()
     let recapture = parse_json(&recapture.stdout);
     let latest_revision = recapture["revision"]["id"].as_str().unwrap();
     let show = shore([
-        "review",
+        "revision",
         "show",
+        latest_revision,
         "--repo",
         arg,
-        "--revision",
-        latest_revision,
         "--include-body",
     ]);
     assert!(

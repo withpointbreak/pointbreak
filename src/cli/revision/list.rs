@@ -9,7 +9,7 @@ use crate::cli::output;
 
 /// List captured revisions.
 #[derive(Debug, Args)]
-pub(super) struct RevisionsArgs {
+pub(super) struct RevisionListArgs {
     /// Repository root or a path inside the repository.
     #[arg(long, default_value = ".")]
     repo: PathBuf,
@@ -77,12 +77,18 @@ impl From<RefFilterByArg> for RefFilterMode {
 }
 
 pub(super) fn run(
-    args: RevisionsArgs,
+    args: RevisionListArgs,
     stdout: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let span = tracing::info_span!("shore.review.revisions");
+    let span = tracing::info_span!("shore.revision.list");
     let _entered = span.enter();
-    tracing::debug!(command = "review.revisions", "command_start");
+    tracing::debug!(command = "revision.list", "command_start");
+
+    let ids = crate::cli::id_resolver::IdResolver::new(&args.repo);
+    let object = match &args.object {
+        Some(object) => Some(ids.object(object)?),
+        None => None,
+    };
 
     let pretty = args.pretty;
     let mut options = RevisionListOptions::new(&args.repo).with_read_for_display(true);
@@ -108,7 +114,7 @@ pub(super) fn run(
     // `--object` is a listing lens: filter to revisions over the same content
     // object id (coincident content, which may span threads). It never resolves a
     // head and never force-disambiguates.
-    if let Some(object) = args.object.as_deref() {
+    if let Some(object) = object.as_deref() {
         result
             .entries
             .retain(|entry| entry.object_id.as_str() == object);

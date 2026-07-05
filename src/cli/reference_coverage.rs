@@ -22,7 +22,7 @@ const REQUIRED_FLAGS: &[&str] = &[
     "--poll-ms",
     "--by", // history
     "--integration-ref",
-    "--worktree", // review revisions
+    "--worktree", // revision list
     "--responds-to",
     "--confidence", // observation add
 ];
