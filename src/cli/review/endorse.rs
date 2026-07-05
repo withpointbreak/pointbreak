@@ -15,7 +15,7 @@ use crate::cli::output;
 
 #[derive(Debug, Args)]
 pub(super) struct EndorseArgs {
-    /// The target event id to endorse (e.g. a WorkObjectProposed `evt:sha256:…`).
+    /// The event id to endorse (any recorded event's `evt:sha256:…` id).
     target: String,
     /// Signing key (name in the keystore, or a path). Honors `SHORE_SIGNING_KEY`
     /// and the user-default key. UNLIKE ordinary writes, an endorsement has NO

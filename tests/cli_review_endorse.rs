@@ -1,7 +1,7 @@
 mod support;
 use serde_json::Value;
 use support::git_repo::GitRepo;
-use support::shore_env;
+use support::{shore, shore_env};
 
 /// Find the captured Revision event id from the store the CLI wrote, via the
 /// PUBLIC read path (INV-F: `tests/` see only `pub` — `EventStore` is `pub(crate)`,
@@ -51,6 +51,17 @@ fn endorse_with_signing_off_is_a_hard_error() {
     assert!(
         !stderr.is_empty(),
         "names why: no signer ⇒ nothing to attest"
+    );
+}
+
+#[test]
+fn endorse_help_is_free_of_substrate_vocabulary() {
+    let output = shore(["review", "endorse", "--help"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf-8");
+    assert!(
+        !stdout.contains("WorkObjectProposed"),
+        "endorse --help still leaks the substrate event-type name:\n{stdout}"
     );
 }
 
