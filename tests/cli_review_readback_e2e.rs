@@ -23,7 +23,7 @@ fn captured_event_id(repo: &std::path::Path) -> String {
 fn endorsed_repo(home: &str, enroll: bool, attest: bool) -> (GitRepo, String) {
     assert!(
         shore_env(
-            ["keys", "init", "--name", "default"],
+            ["key", "init", "--name", "default"],
             &[("SHORE_HOME", home)]
         )
         .status
@@ -40,7 +40,7 @@ fn endorsed_repo(home: &str, enroll: bool, attest: bool) -> (GitRepo, String) {
         assert!(
             shore_env(
                 [
-                    "keys", "enroll", "default", "--actor", ENDORSER, "--repo", &repo_arg
+                    "key", "enroll", "default", "--actor", ENDORSER, "--repo", &repo_arg
                 ],
                 &[("SHORE_HOME", home)],
             )

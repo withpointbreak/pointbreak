@@ -55,10 +55,10 @@ segment is reserved.
 Because the author-response pass writes under the same `actor:agent:*` id as the author, it reuses
 the same auto-generated key and enrollment — **signing is automatic** here too: your first write
 under this id generates a passphrase-less per-machine key (or reuses the author run's) and signs the
-event, printing a one-line notice with your `did:key` and `shore keys enroll` so a human can add you
+event, printing a one-line notice with your `did:key` and `shore key enroll` so a human can add you
 to the committed allow-list. Signing never blocks a write — if no key can be made the write still
 succeeds, unsigned. Set `SHORE_SIGNING=off` to disable signing. A human can instead reuse an existing
-SSH key via `shore keys use-ssh` (agents still auto-keygen, unchanged).
+SSH key via `shore key use-ssh` (agents still auto-keygen, unchanged).
 
 Read the reviewer's durable review facts:
 

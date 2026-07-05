@@ -50,17 +50,17 @@ fn reject_unsupported_type(type_tag: &str) -> Result<()> {
         "sk-ssh-ed25519@openssh.com" => Err(invalid(
             "sk-ssh-ed25519 (FIDO/-sk) keys sign a hash+flags+counter construction, not the raw \
              message, so they can never verify under the strict Ed25519 path; use a plain \
-             ssh-ed25519 key or `shore keys init`",
+             ssh-ed25519 key or `shore key init`",
         )),
         tag if tag.starts_with("ssh-rsa") || tag.starts_with("rsa-") => Err(invalid(format!(
-            "{tag} is an RSA key, not Ed25519; adopt a plain ssh-ed25519 key or run `shore keys init`"
+            "{tag} is an RSA key, not Ed25519; adopt a plain ssh-ed25519 key or run `shore key init`"
         ))),
         tag if tag.starts_with("ecdsa-") => Err(invalid(format!(
-            "{tag} is an ECDSA key, not Ed25519; adopt a plain ssh-ed25519 key or run `shore keys init`"
+            "{tag} is an ECDSA key, not Ed25519; adopt a plain ssh-ed25519 key or run `shore key init`"
         ))),
         other => Err(invalid(format!(
             "unsupported SSH key type {other:?}: only plain ssh-ed25519 keys are supported (or run \
-             `shore keys init`)"
+             `shore key init`)"
         ))),
     }
 }
@@ -160,22 +160,22 @@ mod tests {
     }
 
     #[test]
-    fn rejects_rsa_key_pointing_at_keys_init() {
+    fn rejects_rsa_key_pointing_at_key_init() {
         let line = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB dev@example";
         let err = parse_ssh_ed25519_public_key(line).unwrap_err().to_string();
         assert!(err.contains("ssh-rsa") || err.contains("RSA"));
         assert!(
-            err.contains("keys init"),
-            "must point at `shore keys init`: {err}"
+            err.contains("key init"),
+            "must point at `shore key init`: {err}"
         );
     }
 
     #[test]
-    fn rejects_ecdsa_key_pointing_at_keys_init() {
+    fn rejects_ecdsa_key_pointing_at_key_init() {
         let line = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTY dev@example";
         let err = parse_ssh_ed25519_public_key(line).unwrap_err().to_string();
         assert!(err.contains("ecdsa") || err.contains("ECDSA"));
-        assert!(err.contains("keys init"));
+        assert!(err.contains("key init"));
     }
 
     #[test]

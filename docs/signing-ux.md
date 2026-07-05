@@ -2,7 +2,7 @@
 
 Shoreline events may carry an optional Ed25519 signature that authenticates the producer facts. This
 page orients you across the three signing flows and the verification ladder. Reference material lives
-in [cli-reference.md](./cli-reference.md) (the `shore keys` family and signing env vars),
+in [cli-reference.md](./cli-reference.md) (the `shore key` family and signing env vars),
 [storage-model.md](./storage-model.md) (the allowed-signers format and the user-level key home), and
 [ADR-0010](./adr/adr-0010-actor-identity-and-delegation.md) (the decisions).
 
@@ -31,8 +31,8 @@ A read surface (with a verification policy and the discovered trust set) renders
 ### Human: `init` then `enroll`
 
 ```bash
-shore keys init --name default          # generate a key, print its did:key
-shore keys enroll default --actor actor:git-email:alice@example.com
+shore key init --name default          # generate a key, print its did:key
+shore key enroll default --actor actor:git-email:alice@example.com
 git add .shore/allowed-signers.json && git commit   # the commit is the authorization
 ```
 
@@ -43,7 +43,7 @@ The human opts in explicitly. Until the enrollment is committed, the human's sig
 
 An agent writing under an `actor:agent:*` id needs no setup. The first write silently generates a
 passphrase-less per-machine key, signs, and prints a notice with the agent's `did:key` and
-`shore keys enroll`. A human reviews and commits the allow-list edit to bind the agent. See
+`shore key enroll`. A human reviews and commits the allow-list edit to bind the agent. See
 [agent-authoring.md](./agent-authoring.md). `SHORE_SIGNING=off` opts out.
 
 ### CI: ephemeral self-certifying `did:key`
@@ -51,8 +51,8 @@ passphrase-less per-machine key, signs, and prints a notice with the agent's `di
 CI can sign without any enrollment by making the writing actor *be* the signing key:
 
 ```bash
-shore keys init --name ci
-export SHORE_ACTOR_ID="$(shore keys show ci --did | jq -r .didKey)"
+shore key init --name ci
+export SHORE_ACTOR_ID="$(shore key show ci --did | jq -r .didKey)"
 shore capture --sign-key ci   # writer.actorId == signer -> self-certifying
 ```
 
@@ -67,8 +67,8 @@ with `gpg.format=ssh` + `user.signingKey`. Adopt an existing Ed25519 SSH key as 
 with no new key ceremony:
 
 ```bash
-shore keys use-ssh ~/.ssh/id_ed25519.pub --name default   # adopt; print its did:key
-shore keys enroll default --actor actor:git-email:alice@example.com
+shore key use-ssh ~/.ssh/id_ed25519.pub --name default   # adopt; print its did:key
+shore key enroll default --actor actor:git-email:alice@example.com
 git add .shore/allowed-signers.json && git commit          # the commit is the authorization
 ```
 
@@ -90,7 +90,7 @@ ssh-add ~/.ssh/id_ed25519     # load it (add --apple-use-keychain on macOS to pe
 ssh-add -l                    # verify it is listed
 ```
 
-If the key is not loaded, `shore keys list` reports `agentLoaded: false` and a signed write degrades to
+If the key is not loaded, `shore key list` reports `agentLoaded: false` and a signed write degrades to
 **unsigned, exit 0** (`signing_agent_key_absent`) — never blocking, but not yet `valid`. Load the key
 and re-run the write.
 
@@ -102,7 +102,7 @@ keys, 1Password, and hardware-backed agents all work for free.
 
 - `ed25519-sk` (FIDO/`-sk`) signs a hash + flags + counter construction, never the raw message, so a
   signature from one can **never verify** under the strict Ed25519 path. Hard exclusion.
-- RSA and ECDSA are not Ed25519 — rejected, pointing at `shore keys init`.
+- RSA and ECDSA are not Ed25519 — rejected, pointing at `shore key init`.
 - **No SSHSIG wrapper.** The `DSSEv1 ` PAE prefix already supplies domain separation, so Shoreline sends
   the bytes to the agent raw (sign flags = 0) and unwraps the SSH-wire `string "ssh-ed25519", string sig`
   response to the 64-byte signature ADR-0004 wants. Cross-protocol confusion with the same key is

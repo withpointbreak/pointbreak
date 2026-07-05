@@ -70,7 +70,7 @@ fn write_with_signing_off_is_unsigned_and_exit_zero_even_with_a_default_key() {
     let env_home = home.path().to_str().unwrap();
     // A "default" key exists, but SHORE_SIGNING=off forces no signing.
     let init = shore_env(
-        ["keys", "init", "--name", "default"],
+        ["key", "init", "--name", "default"],
         &[("SHORE_HOME", env_home)],
     );
     assert!(init.status.success());
@@ -117,7 +117,7 @@ fn present_but_unenrolled_key_signs_and_verifies_untrusted_key() {
     let home = tempfile::tempdir().unwrap();
     let env_home = home.path().to_str().unwrap();
     let init = shore_env(
-        ["keys", "init", "--name", "default"],
+        ["key", "init", "--name", "default"],
         &[("SHORE_HOME", env_home)],
     );
     assert!(init.status.success());
@@ -139,10 +139,7 @@ fn present_but_unenrolled_key_signs_and_verifies_untrusted_key() {
 fn ci_ephemeral_did_key_self_certifies_valid_under_empty_trust_set() {
     let home = tempfile::tempdir().unwrap();
     let env_home = home.path().to_str().unwrap();
-    let init = shore_env(
-        ["keys", "init", "--name", "ci"],
-        &[("SHORE_HOME", env_home)],
-    );
+    let init = shore_env(["key", "init", "--name", "ci"], &[("SHORE_HOME", env_home)]);
     assert!(init.status.success());
     let did_key = parse(&init)["didKey"].as_str().unwrap().to_owned();
 
@@ -179,7 +176,7 @@ fn sign_key_flag_signs_the_write() {
     let home = tempfile::tempdir().unwrap();
     let env_home = home.path().to_str().unwrap();
     let init = shore_env(
-        ["keys", "init", "--name", "mykey"],
+        ["key", "init", "--name", "mykey"],
         &[("SHORE_HOME", env_home)],
     );
     assert!(init.status.success());
@@ -322,7 +319,7 @@ fn all_six_write_paths_accept_sign_key_flag() {
     let env_home = home.path().to_str().unwrap();
     let env = [("SHORE_HOME", env_home)];
     assert!(
-        shore_env(["keys", "init", "--name", "default"], &env)
+        shore_env(["key", "init", "--name", "default"], &env)
             .status
             .success()
     );
@@ -454,7 +451,7 @@ fn agent_unavailable_write_is_unsigned_and_exit_zero() {
     let env_home = home.path().to_str().unwrap();
     // Adopt an agent-backed `default` reference (no live agent needed to write it).
     let adopt = shore_env(
-        ["keys", "use-ssh", &format!("key::{SSH_ED25519_PUBKEY}")],
+        ["key", "use-ssh", &format!("key::{SSH_ED25519_PUBKEY}")],
         &[("SHORE_HOME", env_home)],
     );
     assert!(

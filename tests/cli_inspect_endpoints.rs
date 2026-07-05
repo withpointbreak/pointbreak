@@ -329,7 +329,7 @@ fn inspect_history_endpoint_renders_endorsement_readback() {
     let env_home = home.path().to_str().unwrap();
     let env: [(&str, &str); 1] = [("SHORE_HOME", env_home)];
     assert!(
-        shore_env(["keys", "init", "--name", "default"], &env)
+        shore_env(["key", "init", "--name", "default"], &env)
             .status
             .success()
     );
@@ -342,7 +342,7 @@ fn inspect_history_endpoint_renders_endorsement_readback() {
     assert!(
         shore_env(
             [
-                "keys",
+                "key",
                 "enroll",
                 "default",
                 "--actor",

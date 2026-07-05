@@ -96,10 +96,10 @@ hyphenated, like the track rule; `/` inside the agent segment is reserved.
 
 **Signing is automatic.** On your first write under this `actor:agent:*` id, Shoreline generates a
 passphrase-less per-machine key and signs the event; it prints a one-line notice with your `did:key`
-and `shore keys enroll` so a human can add you to the committed allow-list (once enrolled, your
+and `shore key enroll` so a human can add you to the committed allow-list (once enrolled, your
 signed events verify and bind). Signing never blocks a write — if no key can be made the write still
 succeeds, unsigned. Set `SHORE_SIGNING=off` to disable signing. A human can instead reuse an existing
-SSH key via `shore keys use-ssh` (agents still auto-keygen, unchanged).
+SSH key via `shore key use-ssh` (agents still auto-keygen, unchanged).
 
 ## Record observations
 
@@ -272,6 +272,6 @@ capture a separate handoff when that task reaches its own end.
   a brand-new per-run identity whose auto-generated key is **not enrolled**, so every event lands
   signed-but-**untrusted** with no diagnostic — while the durable, already-enrolled
   `actor:agent:claude-code` key goes unused. Always
-  `export SHORE_ACTOR_ID="actor:agent:<agent-name>"` with no run suffix (`shore keys list` shows the
-  canonical name as `enrolled:true`). Do not `shore keys enroll` a throwaway per-run key to paper
+  `export SHORE_ACTOR_ID="actor:agent:<agent-name>"` with no run suffix (`shore key list` shows the
+  canonical name as `enrolled:true`). Do not `shore key enroll` a throwaway per-run key to paper
   over it. When these instructions arrive as skill args, take the run id as the track only.

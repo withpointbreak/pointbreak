@@ -444,7 +444,7 @@ fn unit_show_renders_verification_status_on_members_and_capture() {
     let env: [(&str, &str); 1] = [("SHORE_HOME", env_home)];
     // A present-but-unenrolled key → signs, verifies untrusted_key under the empty trust set.
     assert!(
-        shore_env(["keys", "init", "--name", "default"], &env)
+        shore_env(["key", "init", "--name", "default"], &env)
             .status
             .success()
     );
@@ -498,7 +498,7 @@ fn unit_show_renders_endorsement_on_capture_identity() {
     let env_home = home.path().to_str().unwrap();
     let env: [(&str, &str); 1] = [("SHORE_HOME", env_home)];
     assert!(
-        shore_env(["keys", "init", "--name", "default"], &env)
+        shore_env(["key", "init", "--name", "default"], &env)
             .status
             .success()
     );
@@ -508,7 +508,7 @@ fn unit_show_renders_endorsement_on_capture_identity() {
     assert!(
         shore_env(
             [
-                "keys",
+                "key",
                 "enroll",
                 "default",
                 "--actor",
@@ -610,7 +610,7 @@ fn text_digest_reports_signed_by_enrolled_key() {
     let yes_home_s = yes_home.path().to_str().unwrap();
     let yes_env: [(&str, &str); 1] = [("SHORE_HOME", yes_home_s)];
     assert!(
-        shore_env(["keys", "init", "--name", "default"], &yes_env)
+        shore_env(["key", "init", "--name", "default"], &yes_env)
             .status
             .success()
     );
@@ -619,7 +619,7 @@ fn text_digest_reports_signed_by_enrolled_key() {
     assert!(
         shore_env(
             [
-                "keys",
+                "key",
                 "enroll",
                 "default",
                 "--actor",

@@ -450,7 +450,7 @@ fn history_renders_verification_status_for_a_signed_capture() {
     // A present-but-unenrolled key → signs, verifies untrusted_key under the empty trust set.
     assert!(
         shore_env(
-            ["keys", "init", "--name", "default"],
+            ["key", "init", "--name", "default"],
             &[("SHORE_HOME", env_home)]
         )
         .status
@@ -488,7 +488,7 @@ fn history_renders_endorsement_for_an_endorsed_capture() {
     let env_home = home.path().to_str().unwrap();
     assert!(
         shore_env(
-            ["keys", "init", "--name", "default"],
+            ["key", "init", "--name", "default"],
             &[("SHORE_HOME", env_home)]
         )
         .status

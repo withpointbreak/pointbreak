@@ -217,7 +217,7 @@ fn write_key_document(path: &Path, document: &KeyFile, private: bool) -> Result<
 /// public key (no seed), plus the `<name>.pub` did:key sidecar. The `did:key`
 /// derives from `public_key` with no agent and no private key, so the reference is
 /// enroll/list/show-able offline. Refuse-to-clobber via `create_new`.
-/// `pub`: `shore keys use-ssh` consumes it via `shoreline::keys`.
+/// `pub`: `shore key use-ssh` consumes it via `shoreline::keys`.
 pub fn write_agent_reference(name: &str, public_key: [u8; 32]) -> Result<KeyHandle> {
     write_agent_reference_in(&keys_dir()?, &KeyName::parse(name)?, public_key)
 }

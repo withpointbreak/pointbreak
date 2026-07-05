@@ -8,7 +8,7 @@ fn endorse_is_available_at_the_top_level() {
     let home = tempfile::tempdir().unwrap();
     let home_str = home.path().to_str().unwrap();
     let _ = shore_env(
-        ["keys", "init", "--name", "default"],
+        ["key", "init", "--name", "default"],
         &[("SHORE_HOME", home_str)],
     );
     let (repo, target) = capture_target(home_str);
@@ -32,7 +32,7 @@ fn endorse_target_accepts_a_bare_fragment() {
     let home = tempfile::tempdir().unwrap();
     let home_str = home.path().to_str().unwrap();
     let _ = shore_env(
-        ["keys", "init", "--name", "default"],
+        ["key", "init", "--name", "default"],
         &[("SHORE_HOME", home_str)],
     );
     let (repo, target) = capture_target(home_str);
@@ -149,7 +149,7 @@ fn endorse_with_a_key_emits_review_endorse_document_and_writes_a_carrier() {
     let home_str = home.path().to_str().unwrap();
     // A signing key in an overridden keystore.
     let _ = shore_env(
-        ["keys", "init", "--name", "default"],
+        ["key", "init", "--name", "default"],
         &[("SHORE_HOME", home_str)],
     );
 
@@ -192,7 +192,7 @@ fn endorse_is_idempotent_for_the_same_signer_and_target() {
     let home = tempfile::tempdir().unwrap();
     let home_str = home.path().to_str().unwrap();
     let _ = shore_env(
-        ["keys", "init", "--name", "default"],
+        ["key", "init", "--name", "default"],
         &[("SHORE_HOME", home_str)],
     );
     let (repo, target) = capture_target(home_str);

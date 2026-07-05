@@ -343,7 +343,7 @@ fn store_remove_signs_the_event_when_a_sign_key_is_given() {
     let home = tempfile::tempdir().unwrap();
     let env_home = home.path().to_str().unwrap();
     let init = shore_env(
-        ["keys", "init", "--name", "mykey"],
+        ["key", "init", "--name", "mykey"],
         &[("SHORE_HOME", env_home)],
     );
     assert!(init.status.success());

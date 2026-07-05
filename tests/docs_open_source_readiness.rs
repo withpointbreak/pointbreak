@@ -415,12 +415,12 @@ fn docs_cover_key_custody_and_signing_ux() {
     // CLI: the keys family, the sign-key flag, and the new env vars.
     assert_markdown_section_contains(
         &cli,
-        "## `shore keys`",
+        "## `shore key`",
         &[
-            "shore keys init",
-            "shore keys list",
-            "shore keys show",
-            "shore keys enroll",
+            "shore key init",
+            "shore key list",
+            "shore key show",
+            "shore key enroll",
             "shore.keys-init",
             "--sign-key",
         ],
@@ -448,7 +448,7 @@ fn docs_cover_key_custody_and_signing_ux() {
 
     // Agent-authoring: auto-keygen + enrollment.
     assert!(
-        agent_authoring.contains("shore keys enroll"),
+        agent_authoring.contains("shore key enroll"),
         "agent-authoring documents the enrollment pointer"
     );
 
@@ -480,11 +480,11 @@ fn docs_cover_ssh_agent_use_ssh_signing() {
     let agent_authoring =
         std::fs::read_to_string("docs/agent-authoring.md").expect("read agent authoring");
 
-    // CLI: the use-ssh subcommand + its JSON contract string live under `## `shore keys``.
+    // CLI: the use-ssh subcommand + its JSON contract string live under `## `shore key``.
     assert_markdown_section_contains(
         &cli,
-        "## `shore keys`",
-        &["shore keys use-ssh", "shore.keys-use-ssh"],
+        "## `shore key`",
+        &["shore key use-ssh", "shore.keys-use-ssh"],
     );
 
     // Signing UX: the developer parallel, custody, the exclusions, and the agent never-gates modes.
@@ -509,7 +509,7 @@ fn docs_cover_ssh_agent_use_ssh_signing() {
 
     // Agent-authoring: the human use-ssh note (agents still auto-keygen).
     assert!(
-        agent_authoring.contains("shore keys use-ssh"),
+        agent_authoring.contains("shore key use-ssh"),
         "agent-authoring notes the human use-ssh path"
     );
 
@@ -549,7 +549,9 @@ fn adr_0010_second_amendment_records_ssh_agent_custody() {
         "ADR-0010 records the ssh-agent custody landing amendment"
     );
 
-    // As-built decisions captured (feature language, no plan numbers).
+    // As-built decisions captured (feature language, no plan numbers). The ADR
+    // body is historical — it records the surface as it was, so the needle keeps
+    // the old `keys` spelling on purpose.
     for token in [
         "shore keys use-ssh",
         "ssh-agent",

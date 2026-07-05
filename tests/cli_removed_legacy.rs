@@ -111,6 +111,11 @@ const REMOVED_PATHS: &[RemovedPath] = &[
         argv: &["identity", "enroll", "--help"],
         hint_contains: &["shore identity delegate <AGENT> --principal <P>"],
     },
+    // The `keys` family noun singularized; subverbs are unchanged.
+    RemovedPath {
+        argv: &["keys", "init", "--help"],
+        hint_contains: &["The `keys` family is now `key`"],
+    },
 ];
 
 #[test]

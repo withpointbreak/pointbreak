@@ -879,7 +879,7 @@ override; if you hand-create the override instead, commit a two-line `.shore/.gi
 In this release, delegation entries are created by editing `.shore/delegates.json` directly (or by
 an agent proposing a working-tree edit); the human's review-and-commit is the authorization. The
 symmetric signature trust set `.shore/allowed-signers.json` is staged the same possession-style way —
-by `shore keys enroll` or a hand edit — and documented in the next section.
+by `shore key enroll` or a hand edit — and documented in the next section.
 
 Pre-cutover honesty: agent events written before the `actor:agent:` cutover carry the human's
 git-email id and remain exactly what they claimed at write time. The `agent:*` *track* name is a
@@ -908,7 +908,7 @@ authorized to sign on its behalf:
 
 Like the delegation map, it is **reader-supplied trust config**, never store content: a consumer
 without the file — a mirror, an exported bundle — renders a signed event as `untrusted_key`, never a
-wrong `valid`. Entries are staged possession-style (`shore keys enroll` writes the working-tree
+wrong `valid`. Entries are staged possession-style (`shore key enroll` writes the working-tree
 file; the human's commit is the authorization) and the file is deliberately tracked in Git.
 
 Private **keys never live in the repo `.shore/` or the store** — both are copyable, linkable, or
@@ -920,7 +920,7 @@ directory inherits the parent ACL (documented caveat). A private-key file is a m
 Shoreline-native JSON document carrying the raw 32-byte Ed25519 seed (`{ "version", "alg", "seed" }`,
 base64); a `<name>.pub` sidecar records the derived `did:key`.
 
-A key may instead be **agent-backed**: a custody-tagged reference adopted with `shore keys use-ssh`,
+A key may instead be **agent-backed**: a custody-tagged reference adopted with `shore key use-ssh`,
 where ssh-agent custodies the private key and the keystore stores only the **public** key — no seed.
 Its on-disk document is `{ "version", "alg", "custody": "agent", "publicKey" }` (the public key
 base64); it lives at the same `~/.shore/keys/<name>` with the same `<name>.pub` did:key sidecar, never

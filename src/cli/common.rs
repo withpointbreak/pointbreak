@@ -604,7 +604,7 @@ fn resolve_agent_signer(
                     // The write path surfaces this as the one-line stderr notice.
                     Some(format!(
                         "shore: generated signing key for {} ({did}); \
-                         run `shore keys enroll` to stage trust",
+                         run `shore key enroll` to stage trust",
                         actor.as_str()
                     )),
                 )),
@@ -1270,7 +1270,7 @@ mod resolve_signer_tests {
             .diagnostic
             .expect("first write carries the enrollment notice");
         assert!(notice.contains("generated signing key"));
-        assert!(notice.contains("shore keys enroll"));
+        assert!(notice.contains("shore key enroll"));
 
         let second =
             resolve_signer_with_env(repo(), &agent_actor(), None, None, None, Some(root.path()));

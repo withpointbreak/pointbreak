@@ -34,7 +34,7 @@ fn agent_skills_document_automatic_signing_and_enrollment() {
         "skills/shoreline-author-response/SKILL.md",
     ] {
         // Auto-keygen + enrollment pointer is present in every shipped skill.
-        assert_contains(skill, "shore keys enroll");
+        assert_contains(skill, "shore key enroll");
         // The opt-out escape is documented.
         assert_contains(skill, "SHORE_SIGNING=off");
         // The existing agent actor-id export is unchanged.
@@ -53,8 +53,8 @@ fn agent_skills_note_human_use_ssh_path() {
         "skills/shoreline-author-response/SKILL.md",
     ] {
         // Humans can reuse an existing SSH key; agents still auto-keygen (note stays).
-        assert_contains(skill, "shore keys use-ssh");
-        assert_contains(skill, "shore keys enroll");
+        assert_contains(skill, "shore key use-ssh");
+        assert_contains(skill, "shore key enroll");
         // No private plan labels leak into shipped skills.
         assert_not_contains(skill, "0067");
         assert_not_contains(skill, "0066");

@@ -17,7 +17,7 @@ fn encode_pubkey(bytes: &[u8]) -> String {
 fn keys_init_writes_key_and_emits_did_key_document() {
     let home = tempfile::tempdir().expect("create keystore home");
     let out = shore_env(
-        ["keys", "init", "--name", "default"],
+        ["key", "init", "--name", "default"],
         &[("SHORE_HOME", home.path().to_str().unwrap())],
     );
     assert!(
@@ -44,7 +44,7 @@ fn keys_init_writes_key_and_emits_did_key_document() {
 fn keys_init_defaults_name_to_default() {
     let home = tempfile::tempdir().expect("create keystore home");
     let out = shore_env(
-        ["keys", "init"],
+        ["key", "init"],
         &[("SHORE_HOME", home.path().to_str().unwrap())],
     );
     assert!(out.status.success());
@@ -56,10 +56,10 @@ fn keys_init_defaults_name_to_default() {
 fn keys_init_twice_same_name_is_a_clean_error_not_a_panic() {
     let home = tempfile::tempdir().expect("create keystore home");
     let env = [("SHORE_HOME", home.path().to_str().unwrap())];
-    let first = shore_env(["keys", "init", "--name", "default"], &env);
+    let first = shore_env(["key", "init", "--name", "default"], &env);
     assert!(first.status.success());
 
-    let second = shore_env(["keys", "init", "--name", "default"], &env);
+    let second = shore_env(["key", "init", "--name", "default"], &env);
     assert!(!second.status.success(), "second init must fail");
     let stderr = String::from_utf8_lossy(&second.stderr);
     // A clean CLI error: a message on stderr, not a Rust panic.
@@ -71,7 +71,7 @@ fn keys_init_twice_same_name_is_a_clean_error_not_a_panic() {
 fn keys_init_rejects_path_unsafe_name_without_escaping_the_keystore() {
     let home = tempfile::tempdir().expect("create keystore home");
     let out = shore_env(
-        ["keys", "init", "--name", "../../id_ed25519"],
+        ["key", "init", "--name", "../../id_ed25519"],
         &[("SHORE_HOME", home.path().to_str().unwrap())],
     );
     assert!(
@@ -91,12 +91,12 @@ fn keys_init_rejects_path_unsafe_name_without_escaping_the_keystore() {
 fn keys_list_reports_generated_keys_and_marks_default() {
     let home = tempfile::tempdir().expect("create keystore home");
     let env = [("SHORE_HOME", home.path().to_str().unwrap())];
-    let _ = shore_env(["keys", "init", "--name", "default"], &env);
-    let _ = shore_env(["keys", "init", "--name", "work"], &env);
+    let _ = shore_env(["key", "init", "--name", "default"], &env);
+    let _ = shore_env(["key", "init", "--name", "work"], &env);
 
     let repo = support::git_repo::GitRepo::new();
     let out = shore_env(
-        ["keys", "list", "--repo", repo.path().to_str().unwrap()],
+        ["key", "list", "--repo", repo.path().to_str().unwrap()],
         &env,
     );
     assert!(
@@ -120,7 +120,7 @@ fn keys_list_reports_generated_keys_and_marks_default() {
 fn keys_list_marks_enrolled_only_when_did_key_is_in_allowed_signers() {
     let home = tempfile::tempdir().expect("create keystore home");
     let env = [("SHORE_HOME", home.path().to_str().unwrap())];
-    let init = shore_env(["keys", "init", "--name", "default"], &env);
+    let init = shore_env(["key", "init", "--name", "default"], &env);
     let init_json: Value = serde_json::from_slice(&init.stdout).unwrap();
     let did_key = init_json["didKey"].as_str().unwrap().to_owned();
 
@@ -131,7 +131,7 @@ fn keys_list_marks_enrolled_only_when_did_key_is_in_allowed_signers() {
     repo.write(".shore/allowed-signers.json", &allowed);
 
     let out = shore_env(
-        ["keys", "list", "--repo", repo.path().to_str().unwrap()],
+        ["key", "list", "--repo", repo.path().to_str().unwrap()],
         &env,
     );
     let json: Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -150,7 +150,7 @@ fn keys_list_empty_keystore_is_empty_list_exit_zero() {
     let env = [("SHORE_HOME", home.path().to_str().unwrap())];
     let repo = support::git_repo::GitRepo::new();
     let out = shore_env(
-        ["keys", "list", "--repo", repo.path().to_str().unwrap()],
+        ["key", "list", "--repo", repo.path().to_str().unwrap()],
         &env,
     );
     assert!(out.status.success());
@@ -163,11 +163,11 @@ fn keys_list_empty_keystore_is_empty_list_exit_zero() {
 fn keys_show_default_with_did_prints_the_did_key() {
     let home = tempfile::tempdir().expect("create keystore home");
     let env = [("SHORE_HOME", home.path().to_str().unwrap())];
-    let init = shore_env(["keys", "init", "--name", "default"], &env);
+    let init = shore_env(["key", "init", "--name", "default"], &env);
     let init_json: Value = serde_json::from_slice(&init.stdout).unwrap();
     let did_key = init_json["didKey"].as_str().unwrap().to_owned();
 
-    let out = shore_env(["keys", "show", "default", "--did"], &env);
+    let out = shore_env(["key", "show", "default", "--did"], &env);
     assert!(
         out.status.success(),
         "show stderr:\n{}",
@@ -183,10 +183,10 @@ fn keys_show_default_with_did_prints_the_did_key() {
 fn keys_show_defaults_to_did_key_with_no_field_flags() {
     let home = tempfile::tempdir().expect("create keystore home");
     let env = [("SHORE_HOME", home.path().to_str().unwrap())];
-    let _ = shore_env(["keys", "init"], &env);
+    let _ = shore_env(["key", "init"], &env);
 
     // No name and no field flags: defaults to `default` key, did:key field present.
-    let out = shore_env(["keys", "show"], &env);
+    let out = shore_env(["key", "show"], &env);
     assert!(out.status.success());
     let json: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(json["didKey"].as_str().unwrap().starts_with("did:key:z"));
@@ -196,13 +196,13 @@ fn keys_show_defaults_to_did_key_with_no_field_flags() {
 fn keys_show_pubkey_is_consistent_with_the_did_key() {
     let home = tempfile::tempdir().expect("create keystore home");
     let env = [("SHORE_HOME", home.path().to_str().unwrap())];
-    let init = shore_env(["keys", "init", "--name", "default"], &env);
+    let init = shore_env(["key", "init", "--name", "default"], &env);
     let did_key = serde_json::from_slice::<Value>(&init.stdout).unwrap()["didKey"]
         .as_str()
         .unwrap()
         .to_owned();
 
-    let out = shore_env(["keys", "show", "default", "--pubkey"], &env);
+    let out = shore_env(["key", "show", "default", "--pubkey"], &env);
     let json: Value = serde_json::from_slice(&out.stdout).unwrap();
     let pubkey_field = json["publicKey"].as_str().expect("publicKey present");
 
@@ -222,7 +222,7 @@ fn keys_show_works_for_an_agent_backed_reference() {
     let env = [("SHORE_HOME", home.path().to_str().unwrap())];
     let adopt = shore_env(
         [
-            "keys",
+            "key",
             "use-ssh",
             &format!("key::{SSH_ED25519_PUBKEY}"),
             "--name",
@@ -240,7 +240,7 @@ fn keys_show_works_for_an_agent_backed_reference() {
         .unwrap()
         .to_owned();
 
-    let did_out = shore_env(["keys", "show", "ssh-test", "--did"], &env);
+    let did_out = shore_env(["key", "show", "ssh-test", "--did"], &env);
     assert!(
         did_out.status.success(),
         "keys show --did must work for an agent-backed key:\n{}",
@@ -251,7 +251,7 @@ fn keys_show_works_for_an_agent_backed_reference() {
         did
     );
 
-    let pub_out = shore_env(["keys", "show", "ssh-test", "--pubkey"], &env);
+    let pub_out = shore_env(["key", "show", "ssh-test", "--pubkey"], &env);
     assert!(
         pub_out.status.success(),
         "keys show --pubkey must work for an agent-backed key:\n{}",
@@ -268,7 +268,7 @@ fn keys_show_works_for_an_agent_backed_reference() {
 fn keys_show_missing_name_is_a_clean_error_not_a_panic() {
     let home = tempfile::tempdir().expect("create keystore home");
     let env = [("SHORE_HOME", home.path().to_str().unwrap())];
-    let out = shore_env(["keys", "show", "does-not-exist", "--did"], &env);
+    let out = shore_env(["key", "show", "does-not-exist", "--did"], &env);
     assert!(!out.status.success(), "missing key must fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("panicked"), "no panic: {stderr}");
@@ -280,7 +280,7 @@ fn keys_enroll_stages_working_tree_file_and_reports_actor_and_did() {
     let home = tempfile::tempdir().expect("create keystore home");
     let home_str = home.path().to_str().unwrap();
     let init = shore_env(
-        ["keys", "init", "--name", "default"],
+        ["key", "init", "--name", "default"],
         &[("SHORE_HOME", home_str)],
     );
     let did = serde_json::from_slice::<Value>(&init.stdout).unwrap()["didKey"]
@@ -290,7 +290,7 @@ fn keys_enroll_stages_working_tree_file_and_reports_actor_and_did() {
 
     let repo = support::git_repo::GitRepo::new();
     let out = shore_env(
-        ["keys", "enroll", "--repo", repo.path().to_str().unwrap()],
+        ["key", "enroll", "--repo", repo.path().to_str().unwrap()],
         &[
             ("SHORE_HOME", home_str),
             ("SHORE_ACTOR_ID", "actor:agent:claude-code"),
@@ -322,7 +322,7 @@ fn keys_enroll_works_for_an_agent_backed_reference() {
     let home_str = home.path().to_str().unwrap();
     // Adopt an agent-backed `default` reference: no agent running, no private key.
     let adopt = shore_env(
-        ["keys", "use-ssh", &format!("key::{SSH_ED25519_PUBKEY}")],
+        ["key", "use-ssh", &format!("key::{SSH_ED25519_PUBKEY}")],
         &[("SHORE_HOME", home_str)],
     );
     assert!(
@@ -337,7 +337,7 @@ fn keys_enroll_works_for_an_agent_backed_reference() {
 
     let repo = support::git_repo::GitRepo::new();
     let out = shore_env(
-        ["keys", "enroll", "--repo", repo.path().to_str().unwrap()],
+        ["key", "enroll", "--repo", repo.path().to_str().unwrap()],
         &[
             ("SHORE_HOME", home_str),
             ("SHORE_ACTOR_ID", "actor:git-email:dev@example.com"),
@@ -364,11 +364,11 @@ fn keys_enroll_works_for_an_agent_backed_reference() {
 fn keys_list_reports_file_custody_for_a_seed_key() {
     let home = tempfile::tempdir().expect("create keystore home");
     let env = [("SHORE_HOME", home.path().to_str().unwrap())];
-    let _ = shore_env(["keys", "init", "--name", "default"], &env);
+    let _ = shore_env(["key", "init", "--name", "default"], &env);
 
     let repo = support::git_repo::GitRepo::new();
     let out = shore_env(
-        ["keys", "list", "--repo", repo.path().to_str().unwrap()],
+        ["key", "list", "--repo", repo.path().to_str().unwrap()],
         &env,
     );
     assert!(
@@ -394,7 +394,7 @@ fn keys_list_reports_agent_custody_and_enrollment_for_an_adopted_key() {
     let home = tempfile::tempdir().expect("create keystore home");
     let env = [("SHORE_HOME", home.path().to_str().unwrap())];
     let adopt = shore_env(
-        ["keys", "use-ssh", &format!("key::{SSH_ED25519_PUBKEY}")],
+        ["key", "use-ssh", &format!("key::{SSH_ED25519_PUBKEY}")],
         &env,
     );
     let did_key = serde_json::from_slice::<Value>(&adopt.stdout).unwrap()["didKey"]
@@ -409,7 +409,7 @@ fn keys_list_reports_agent_custody_and_enrollment_for_an_adopted_key() {
     repo.write(".shore/allowed-signers.json", &allowed);
 
     let out = shore_env(
-        ["keys", "list", "--repo", repo.path().to_str().unwrap()],
+        ["key", "list", "--repo", repo.path().to_str().unwrap()],
         &env,
     );
     let json: Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -432,13 +432,13 @@ fn keys_list_succeeds_and_agent_loaded_is_unknown_when_no_agent() {
         ("SSH_AUTH_SOCK", "/nonexistent/shore-no-agent.sock"),
     ];
     let _ = shore_env(
-        ["keys", "use-ssh", &format!("key::{SSH_ED25519_PUBKEY}")],
+        ["key", "use-ssh", &format!("key::{SSH_ED25519_PUBKEY}")],
         &env,
     );
 
     let repo = support::git_repo::GitRepo::new();
     let out = shore_env(
-        ["keys", "list", "--repo", repo.path().to_str().unwrap()],
+        ["key", "list", "--repo", repo.path().to_str().unwrap()],
         &env,
     );
 
@@ -468,7 +468,7 @@ fn keys_enroll_re_enroll_reports_already_present_and_is_a_noop() {
     let home = tempfile::tempdir().expect("create keystore home");
     let home_str = home.path().to_str().unwrap();
     let _ = shore_env(
-        ["keys", "init", "--name", "default"],
+        ["key", "init", "--name", "default"],
         &[("SHORE_HOME", home_str)],
     );
     let repo = support::git_repo::GitRepo::new();
@@ -478,7 +478,7 @@ fn keys_enroll_re_enroll_reports_already_present_and_is_a_noop() {
     ];
 
     let first = shore_env(
-        ["keys", "enroll", "--repo", repo.path().to_str().unwrap()],
+        ["key", "enroll", "--repo", repo.path().to_str().unwrap()],
         &env,
     );
     assert_eq!(
@@ -489,7 +489,7 @@ fn keys_enroll_re_enroll_reports_already_present_and_is_a_noop() {
     let before = std::fs::read(&path).unwrap();
 
     let second = shore_env(
-        ["keys", "enroll", "--repo", repo.path().to_str().unwrap()],
+        ["key", "enroll", "--repo", repo.path().to_str().unwrap()],
         &env,
     );
     let doc: Value = serde_json::from_slice(&second.stdout).unwrap();
@@ -503,12 +503,12 @@ fn keys_enroll_does_not_commit_or_stage_to_git() {
     let home = tempfile::tempdir().expect("create keystore home");
     let home_str = home.path().to_str().unwrap();
     let _ = shore_env(
-        ["keys", "init", "--name", "default"],
+        ["key", "init", "--name", "default"],
         &[("SHORE_HOME", home_str)],
     );
     let repo = support::git_repo::GitRepo::new();
     let _ = shore_env(
-        ["keys", "enroll", "--repo", repo.path().to_str().unwrap()],
+        ["key", "enroll", "--repo", repo.path().to_str().unwrap()],
         &[
             ("SHORE_HOME", home_str),
             ("SHORE_ACTOR_ID", "actor:agent:claude-code"),
@@ -543,14 +543,14 @@ fn keys_enroll_explicit_actor_flag_overrides_resolution() {
     let home = tempfile::tempdir().expect("create keystore home");
     let home_str = home.path().to_str().unwrap();
     let _ = shore_env(
-        ["keys", "init", "--name", "default"],
+        ["key", "init", "--name", "default"],
         &[("SHORE_HOME", home_str)],
     );
     let repo = support::git_repo::GitRepo::new();
 
     let out = shore_env(
         [
-            "keys",
+            "key",
             "enroll",
             "--repo",
             repo.path().to_str().unwrap(),
@@ -571,14 +571,14 @@ fn keys_enroll_rejects_invalid_explicit_actor_without_fallback() {
     let home = tempfile::tempdir().expect("create keystore home");
     let home_str = home.path().to_str().unwrap();
     let _ = shore_env(
-        ["keys", "init", "--name", "default"],
+        ["key", "init", "--name", "default"],
         &[("SHORE_HOME", home_str)],
     );
     let repo = support::git_repo::GitRepo::new();
 
     let out = shore_env(
         [
-            "keys",
+            "key",
             "enroll",
             "--repo",
             repo.path().to_str().unwrap(),
@@ -615,7 +615,7 @@ fn keys_enroll_from_subdirectory_writes_to_worktree_root() {
     let home = tempfile::tempdir().expect("create keystore home");
     let home_str = home.path().to_str().unwrap();
     let _ = shore_env(
-        ["keys", "init", "--name", "default"],
+        ["key", "init", "--name", "default"],
         &[("SHORE_HOME", home_str)],
     );
 
@@ -624,7 +624,7 @@ fn keys_enroll_from_subdirectory_writes_to_worktree_root() {
     std::fs::create_dir_all(&subdir).unwrap();
 
     let out = shore_env(
-        ["keys", "enroll", "--repo", subdir.to_str().unwrap()],
+        ["key", "enroll", "--repo", subdir.to_str().unwrap()],
         &[
             ("SHORE_HOME", home_str),
             ("SHORE_ACTOR_ID", "actor:agent:claude-code"),
@@ -649,7 +649,7 @@ fn keys_enroll_from_subdirectory_writes_to_worktree_root() {
 
     // keys list from the subdir now sees the key as enrolled (single discovery path).
     let init = shore_env(
-        ["keys", "show", "default", "--did"],
+        ["key", "show", "default", "--did"],
         &[("SHORE_HOME", home_str)],
     );
     let did = serde_json::from_slice::<Value>(&init.stdout).unwrap()["didKey"]
@@ -657,7 +657,7 @@ fn keys_enroll_from_subdirectory_writes_to_worktree_root() {
         .unwrap()
         .to_owned();
     let list = shore_env(
-        ["keys", "list", "--repo", subdir.to_str().unwrap()],
+        ["key", "list", "--repo", subdir.to_str().unwrap()],
         &[("SHORE_HOME", home_str)],
     );
     let listed: Value = serde_json::from_slice(&list.stdout).unwrap();
@@ -679,7 +679,7 @@ fn keys_show_rejects_path_traversal_name_even_when_target_exists() {
     let home_str = home.path().to_str().unwrap();
     // Plant a valid key file as a sibling of keys/, reachable only via traversal.
     let init = shore_env(
-        ["keys", "init", "--name", "planted"],
+        ["key", "init", "--name", "planted"],
         &[("SHORE_HOME", home_str)],
     );
     assert!(init.status.success());
@@ -690,7 +690,7 @@ fn keys_show_rejects_path_traversal_name_even_when_target_exists() {
     .unwrap();
 
     let out = shore_env(
-        ["keys", "show", "../outside-key", "--did"],
+        ["key", "show", "../outside-key", "--did"],
         &[("SHORE_HOME", home_str)],
     );
     assert!(
@@ -719,7 +719,7 @@ fn keys_use_ssh_from_pubkey_path_writes_reference_and_emits_did_key() {
     std::fs::write(&pubfile, SSH_ED25519_PUBKEY).unwrap();
 
     let out = shore_env(
-        ["keys", "use-ssh", pubfile.to_str().unwrap()],
+        ["key", "use-ssh", pubfile.to_str().unwrap()],
         &[("SHORE_HOME", home.path().to_str().unwrap())],
     );
     assert!(
@@ -747,7 +747,7 @@ fn keys_use_ssh_accepts_a_key_literal() {
     let home = tempfile::tempdir().expect("create keystore home");
     let literal = format!("key::{SSH_ED25519_PUBKEY}");
     let out = shore_env(
-        ["keys", "use-ssh", &literal],
+        ["key", "use-ssh", &literal],
         &[("SHORE_HOME", home.path().to_str().unwrap())],
     );
     assert!(
@@ -769,7 +769,7 @@ fn keys_use_ssh_path_and_literal_derive_the_same_did_key() {
 
     let from_path = shore_env(
         [
-            "keys",
+            "key",
             "use-ssh",
             "--name",
             "viapath",
@@ -779,7 +779,7 @@ fn keys_use_ssh_path_and_literal_derive_the_same_did_key() {
     );
     let literal = format!("key::{SSH_ED25519_PUBKEY}");
     let from_literal = shore_env(
-        ["keys", "use-ssh", "--name", "vialiteral", &literal],
+        ["key", "use-ssh", "--name", "vialiteral", &literal],
         &[("SHORE_HOME", home.path().to_str().unwrap())],
     );
     let a: Value = serde_json::from_slice(&from_path.stdout).unwrap();
@@ -795,7 +795,7 @@ fn keys_use_ssh_writes_a_did_key_sidecar() {
     let home = tempfile::tempdir().expect("create keystore home");
     let literal = format!("key::{SSH_ED25519_PUBKEY}");
     let out = shore_env(
-        ["keys", "use-ssh", &literal],
+        ["key", "use-ssh", &literal],
         &[("SHORE_HOME", home.path().to_str().unwrap())],
     );
     let json: Value = serde_json::from_slice(&out.stdout).unwrap();
@@ -811,7 +811,7 @@ fn keys_use_ssh_rejects_a_non_ed25519_key_with_a_clear_error() {
     let home = tempfile::tempdir().expect("create keystore home");
     let literal = format!("key::{SSH_RSA_PUBKEY}");
     let out = shore_env(
-        ["keys", "use-ssh", &literal],
+        ["key", "use-ssh", &literal],
         &[("SHORE_HOME", home.path().to_str().unwrap())],
     );
     assert!(!out.status.success(), "an ssh-rsa key must be rejected");
@@ -829,10 +829,10 @@ fn keys_use_ssh_collision_refuses_to_overwrite() {
     let home = tempfile::tempdir().expect("create keystore home");
     let env = [("SHORE_HOME", home.path().to_str().unwrap())];
     let literal = format!("key::{SSH_ED25519_PUBKEY}");
-    let first = shore_env(["keys", "use-ssh", &literal], &env);
+    let first = shore_env(["key", "use-ssh", &literal], &env);
     assert!(first.status.success());
 
-    let second = shore_env(["keys", "use-ssh", &literal], &env);
+    let second = shore_env(["key", "use-ssh", &literal], &env);
     assert!(
         !second.status.success(),
         "a --name collision must refuse to overwrite"
@@ -849,7 +849,7 @@ fn keys_use_ssh_rejects_a_path_unsafe_name() {
     let home = tempfile::tempdir().expect("create keystore home");
     let literal = format!("key::{SSH_ED25519_PUBKEY}");
     let out = shore_env(
-        ["keys", "use-ssh", "--name", "../../id_ed25519", &literal],
+        ["key", "use-ssh", "--name", "../../id_ed25519", &literal],
         &[("SHORE_HOME", home.path().to_str().unwrap())],
     );
     assert!(
@@ -860,5 +860,16 @@ fn keys_use_ssh_rejects_a_path_unsafe_name() {
     assert!(
         !stderr.contains("panicked"),
         "clean error, not a panic: {stderr}"
+    );
+}
+
+#[test]
+fn keys_family_is_retired() {
+    let out = shore_env(["keys", "init", "--help"], &[]);
+    assert!(!out.status.success(), "the keys family should be retired");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unrecognized subcommand"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }

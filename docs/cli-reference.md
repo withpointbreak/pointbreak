@@ -492,7 +492,7 @@ shore identity attest <actor-id> --kind <kind> [--role <role>]... \
 
 `shore identity` writes the actor/principal config the read side (above) resolves. Both subcommands are
 possession-style: they stage the working-tree edit only and never invoke git — review and commit the
-file to apply it (`git log -p` is the audit trail), exactly like `shore keys enroll`.
+file to apply it (`git log -p` is the audit trail), exactly like `shore key enroll`.
 
 - **`delegate`** stages a delegation record into `.shore/delegates.json` binding `<agent-actor-id>` (an
   `actor:agent:<name>` id) to a responsible **non-agent** `--principal` (the human/actor that answers
@@ -518,7 +518,7 @@ The delegation-map format is documented in [storage-model.md](./storage-model.md
 decisions are in [ADR-0010](./adr/adr-0010-actor-identity-and-delegation.md) (delegation) and
 [ADR-0012](./adr/adr-0012-actor-attributes-and-roles.md) (actor attributes).
 
-## `shore keys`
+## `shore key`
 
 Manage the user-level signing keystore and stage signer enrollment. Keys live in `~/.shore/keys/`
 (honoring `$XDG_DATA_HOME` on Unix and `%APPDATA%\shore` on Windows; `SHORE_HOME` overrides) — never
@@ -527,31 +527,31 @@ allowed-signers format.
 
 ```bash
 # Generate a human signing key and print its did:key (shore.keys-init).
-shore keys init --name default
+shore key init --name default
 
 # List local keys with enrollment status and which is the default (shore.keys-list).
-shore keys list --repo .
+shore key list --repo .
 
 # Print a key's did:key and/or raw public key (shore.keys-show).
-shore keys show default --did
-shore keys show default --pubkey
+shore key show default --did
+shore key show default --pubkey
 
 # Adopt an existing SSH Ed25519 key as an agent-backed signer (shore.keys-use-ssh).
 # Reuses ssh-agent custody — no new key material. Parallel to `init`.
-shore keys use-ssh ~/.ssh/id_ed25519.pub --name default
-shore keys use-ssh 'key::ssh-ed25519 AAAA…'   # git user.signingKey literal form
+shore key use-ssh ~/.ssh/id_ed25519.pub --name default
+shore key use-ssh 'key::ssh-ed25519 AAAA…'   # git user.signingKey literal form
 
 # Stage an allow-list entry binding a key's did:key to an actor (shore.keys-enroll).
 # Possession-style: this stages the working-tree .shore/allowed-signers.json edit only;
 # review and commit it to authorize the binding.
-shore keys enroll default --actor actor:agent:claude-code --repo .
+shore key enroll default --actor actor:agent:claude-code --repo .
 ```
 
 `init` refuses to overwrite an existing named key. `use-ssh` adopts an existing SSH **public** key as an
 agent-backed `default` signer: it accepts a `*.pub` path or a `key::ssh-ed25519 AAAA…` literal, emits a
-`shore.keys-use-ssh` document with the derived `did:key` (the same `.didKey` field `shore keys show
+`shore.keys-use-ssh` document with the derived `did:key` (the same `.didKey` field `shore key show
 --did` prints) plus an enrollment hint, and (like `init`) refuses to overwrite. Only plain `ssh-ed25519`
-keys are accepted; `ed25519-sk`/RSA/ECDSA are rejected with a clear error pointing at `shore keys init`.
+keys are accepted; `ed25519-sk`/RSA/ECDSA are rejected with a clear error pointing at `shore key init`.
 `list`/`enroll` take `--repo` (default `.`) to resolve the committed `.shore/allowed-signers.json`;
 every subcommand accepts `--pretty`. Enrollment never commits — the human's commit is the authorization.
 

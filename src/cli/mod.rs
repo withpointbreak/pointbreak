@@ -21,7 +21,7 @@ mod input;
 mod input_request;
 mod inspect;
 mod json;
-mod keys;
+mod key;
 mod notes;
 mod observation;
 mod output;
@@ -67,7 +67,7 @@ enum Command {
     Identity(identity::IdentityArgs),
     InputRequest(Box<input_request::InputRequestArgs>),
     Inspect(inspect::InspectArgs),
-    Keys(keys::KeysArgs),
+    Key(key::KeyArgs),
     #[command(hide = true)]
     Notes(notes::NotesArgs),
     Observation(Box<observation::ObservationArgs>),
@@ -237,12 +237,16 @@ const REMOVED_COMMAND_HINTS: &[(HintPredicate, &str)] = &[
         "`shore review unit` is removed; list with `shore revision list` \
          and show one with `shore revision show <revision>`.",
     ),
-    // The catch-all for the retired `review` namespace; must stay LAST so every
-    // verb-specific window above wins first.
+    // The catch-all for the retired `review` namespace; must stay LAST among the
+    // review rows so every verb-specific window above wins first.
     (
         HintPredicate::LeadingToken("review"),
         "The `review` family flattened to the top level. Use `shore capture`, \
          `shore revision list`, `shore revision show`, `shore observation …`, etc.",
+    ),
+    (
+        HintPredicate::LeadingToken("keys"),
+        "The `keys` family is now `key`. Use `shore key <sub>`.",
     ),
 ];
 
@@ -284,7 +288,7 @@ fn run_cli(
         Command::Identity(args) => identity::run(args, stdout, stderr),
         Command::InputRequest(args) => input_request::run(*args, stdout, stderr),
         Command::Inspect(args) => inspect::run(args, stdout),
-        Command::Keys(args) => keys::run(args, stdout),
+        Command::Key(args) => key::run(args, stdout),
         Command::Notes(args) => notes::run(args, stdout),
         Command::Observation(args) => observation::run(*args, stdout, stderr),
         Command::Revision(args) => revision::run(args, stdout),
