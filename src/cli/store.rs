@@ -7,12 +7,12 @@ use shoreline::session::{
     CompactOptions, CompactResult, MigrateToCommonDirOptions, MigrateToCommonDirResult,
     ProjectionDiagnostic, RemovalOperativeStatus, RemoveOptions, RemoveResult, RemoveSelector,
     RemovedContent, SkippedRemoval, StoreForgetOptions, StoreForgetResult, StoreLinkOptions,
-    StoreLinkResult, StoreListEntry, StoreListResult, StoreMode, StoreModeSource,
+    StoreLinkPreview, StoreLinkResult, StoreListEntry, StoreListResult, StoreMode, StoreModeSource,
     StoreStatusInventory, StoreStatusOptions, StoreStatusResult, StoreStatusSensitivity,
     StoreUnlinkOptions, StoreUnlinkResult, SweepOutcome, SweptBlob, compact_store,
     forget_family_store, link_store_to_family, list_family_stores, migrate_store_to_common_dir,
-    remove_content, resolve_store_mode_for_repo, set_store_mode_for_repo, store_status,
-    unlink_store_from_family,
+    preview_link_to_family, remove_content, resolve_store_mode_for_repo, set_store_mode_for_repo,
+    store_status, unlink_store_from_family,
 };
 
 use crate::cli::common::{
@@ -115,6 +115,13 @@ struct StoreLinkArgs {
     /// After the fold is independently verified, delete the clone-local `.git/shore` history.
     #[arg(long)]
     retire_source: bool,
+
+    /// Preview gates 1–5 and the fold preflight without writing anything — no
+    /// scaffold, no fold, no binding flip. Emits a `shore.store-link-preview`
+    /// document; exits non-zero with the first blocking reason if the link would
+    /// not succeed.
+    #[arg(long)]
+    dry_run: bool,
 
     #[arg(long, default_value = ".")]
     repo: PathBuf,
@@ -266,6 +273,25 @@ struct StoreLinkBody {
     folded_artifacts_created: usize,
     folded_removal_event_count: usize,
     source_retired: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filesystem_warning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_overlap_warning: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoreLinkPreviewBody {
+    family_ref: String,
+    clone_ref: String,
+    would_create_family: bool,
+    source_present: bool,
+    export_fidelity: String,
+    folded_events_to_create: usize,
+    folded_events_existing: usize,
+    folded_artifacts_to_create: usize,
+    folded_artifacts_existing: usize,
+    folded_removal_event_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     filesystem_warning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -562,6 +588,45 @@ fn link(args: StoreLinkArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::
         .with_include_sensitive(args.include_sensitive)
         .with_retire_source(args.retire_source)
         .with_trust_set(trust);
+
+    let format = output::resolve_format(
+        args.format_args.explicit(args.pretty),
+        output::OutputFormat::Json,
+    )?;
+
+    if args.dry_run {
+        // Preview only: gates + fold preflight, zero writes. A blocking gate or a
+        // blocking fold preflight propagates as `Err` (non-zero exit + its message);
+        // a clean path emits the preview document (exit 0).
+        let preview = preview_link_to_family(options)?;
+        let body = StoreLinkPreviewBody::from(preview);
+        let mut diagnostics = Vec::new();
+        if body.folded_removal_event_count > 0 {
+            diagnostics.push(ProjectionDiagnostic {
+                code: "family_fold_removal_possession_lost".to_owned(),
+                message: format!(
+                    "{} unsigned removal event(s) would be folded and lose possession-based \
+                     suppression; re-issue `shore store remove` in the family store to restore it",
+                    body.folded_removal_event_count
+                ),
+            });
+        }
+        if let Some(warning) = &body.filesystem_warning {
+            diagnostics.push(ProjectionDiagnostic {
+                code: "family_store_filesystem_warning".to_owned(),
+                message: warning.clone(),
+            });
+        }
+        if let Some(warning) = &body.history_overlap_warning {
+            diagnostics.push(ProjectionDiagnostic {
+                code: "family_history_overlap_warning".to_owned(),
+                message: warning.clone(),
+            });
+        }
+        let document = json::DiagnosticDocument::new("shore.store-link-preview", body, diagnostics);
+        return output::write_document_json_fallback(stdout, format, &document);
+    }
+
     let result = link_store_to_family(options)?;
     let body = StoreLinkBody::from(result);
 
@@ -589,10 +654,6 @@ fn link(args: StoreLinkArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::
         });
     }
 
-    let format = output::resolve_format(
-        args.format_args.explicit(args.pretty),
-        output::OutputFormat::Json,
-    )?;
     let digest =
         matches!(format.format, output::OutputFormat::Text).then(|| render_store_link_text(&body));
     let document = json::DiagnosticDocument::new("shore.store-link", body, diagnostics);
@@ -864,6 +925,25 @@ impl From<StoreLinkResult> for StoreLinkBody {
             source_retired: result.source_retired,
             filesystem_warning: result.filesystem_warning,
             history_overlap_warning: result.history_overlap_warning,
+        }
+    }
+}
+
+impl From<StoreLinkPreview> for StoreLinkPreviewBody {
+    fn from(preview: StoreLinkPreview) -> Self {
+        Self {
+            family_ref: preview.family_ref,
+            clone_ref: preview.clone_ref,
+            would_create_family: preview.would_create_family,
+            source_present: preview.source_present,
+            export_fidelity: preview.export_fidelity,
+            folded_events_to_create: preview.folded_events_to_create,
+            folded_events_existing: preview.folded_events_existing,
+            folded_artifacts_to_create: preview.folded_artifacts_to_create,
+            folded_artifacts_existing: preview.folded_artifacts_existing,
+            folded_removal_event_count: preview.folded_removal_event_count,
+            filesystem_warning: preview.filesystem_warning,
+            history_overlap_warning: preview.history_overlap_warning,
         }
     }
 }

@@ -89,8 +89,8 @@ pub use store_identity::{
     StoreFamily, StoreIdentity, StoreIdentityOptions, StorePlacement, store_identity,
 };
 pub use store_link::{
-    StoreLinkOptions, StoreLinkResult, StoreUnlinkOptions, StoreUnlinkResult, link_store_to_family,
-    unlink_store_from_family,
+    StoreLinkOptions, StoreLinkPreview, StoreLinkResult, StoreUnlinkOptions, StoreUnlinkResult,
+    link_store_to_family, preview_link_to_family, unlink_store_from_family,
 };
 pub use store_migrate_common_dir::{
     MigrateToCommonDirOptions, MigrateToCommonDirResult, migrate_store_to_common_dir,

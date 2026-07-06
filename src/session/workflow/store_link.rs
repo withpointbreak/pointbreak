@@ -12,7 +12,8 @@ use crate::canonical_hash::sha256_bytes_hex;
 use crate::error::{Result, ShoreError};
 use crate::session::event::EventType;
 use crate::session::store::bundle::{
-    import_store_bundle_with_verification, verify_source_subset_of_target,
+    ExportFidelityStatus, import_store_bundle_with_verification, preview_import_store_bundle,
+    verify_source_subset_of_target,
 };
 use crate::session::store::resolution::clone_local_store_dir;
 use crate::session::store::sensitivity::scan_worktree_sensitivity;
@@ -100,7 +101,54 @@ pub struct StoreLinkResult {
     pub history_overlap_warning: Option<String>,
 }
 
-pub fn link_store_to_family(options: StoreLinkOptions) -> Result<StoreLinkResult> {
+/// The dry-run report for `shore store link --dry-run`: what the link WOULD do,
+/// with zero writes. Blocking gates and the fold preflight (fidelity / event
+/// conflict) surface as `Err` before this is built, so a `StoreLinkPreview` always
+/// describes a link that would succeed.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoreLinkPreview {
+    pub family_ref: String,
+    pub clone_ref: String,
+    /// The link would found a new family (no `family.json` yet).
+    pub would_create_family: bool,
+    /// The clone-local source store has events to fold.
+    pub source_present: bool,
+    /// `"full"` on this (successful) preview path; a non-`Full` source blocks with
+    /// the strict-import refusal instead of reaching here.
+    pub export_fidelity: String,
+    pub folded_events_to_create: usize,
+    pub folded_events_existing: usize,
+    pub folded_artifacts_to_create: usize,
+    pub folded_artifacts_existing: usize,
+    pub folded_removal_event_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filesystem_warning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history_overlap_warning: Option<String>,
+}
+
+/// Everything `link` computes before it writes: the gate outcomes (gates 1–5), the
+/// minted clone ref, and the founding root-commit anchors. Gates 1–3 refuse via
+/// `Err` here; gates 4–5 are advisory warnings carried in the plan. Shared by the
+/// real link and its dry-run preview so the gate ladder is spelled exactly once.
+struct LinkPlan {
+    slug: String,
+    family_dir: PathBuf,
+    worktree_root: PathBuf,
+    clone_ref: String,
+    root_oids: Vec<String>,
+    /// True when no `family.json` exists yet — the link would found the family.
+    would_create_family: bool,
+    filesystem_warning: Option<String>,
+    history_overlap_warning: Option<String>,
+}
+
+/// Run gates 1–5 and mint the clone ref, performing no writes. The blocking gates
+/// (1–3) short-circuit with the actionable refusal; the advisory gates (4–5) carry
+/// their warnings forward. Both `link_store_to_family` and `preview_link_to_family`
+/// enter through here.
+fn plan_link(options: &StoreLinkOptions) -> Result<LinkPlan> {
     let paths = ShoreStorePaths::resolve(&options.repo)?;
     let worktree_root = paths.worktree_root().to_path_buf();
 
@@ -135,7 +183,8 @@ pub fn link_store_to_family(options: StoreLinkOptions) -> Result<StoreLinkResult
     }
     // (3) Family-stamp mismatch refusal (no override).
     let family_dir = user_level_store_dir(&slug)?;
-    if let Some(manifest) = read_family_manifest(&family_dir)?
+    let existing_manifest = read_family_manifest(&family_dir)?;
+    if let Some(manifest) = &existing_manifest
         && manifest.family_id != slug
     {
         return Err(ShoreError::Message(format!(
@@ -153,35 +202,82 @@ pub fn link_store_to_family(options: StoreLinkOptions) -> Result<StoreLinkResult
     let root_oids = root_commit_oids(&worktree_root)?;
     let history_overlap_warning = history_overlap_warning_for(&family_dir, &slug, &root_oids)?;
 
-    // Preparation (all reversible until the binding flip):
     let clone_ref = mint_clone_ref(&worktree_root);
-    let created_family = ensure_family_store_scaffold(&family_dir, &slug, &root_oids)?;
+
+    Ok(LinkPlan {
+        would_create_family: existing_manifest.is_none(),
+        slug,
+        family_dir,
+        worktree_root,
+        clone_ref,
+        root_oids,
+        filesystem_warning,
+        history_overlap_warning,
+    })
+}
+
+pub fn link_store_to_family(options: StoreLinkOptions) -> Result<StoreLinkResult> {
+    let plan = plan_link(&options)?;
+
+    // Preparation (all reversible until the binding flip):
+    let created_family =
+        ensure_family_store_scaffold(&plan.family_dir, &plan.slug, &plan.root_oids)?;
 
     // Fold the clone-local store forward. The verified fold + removal count +
     // retire-after-verify body lives in `fold_source_forward`.
-    let source = clone_local_store_dir(&worktree_root)?;
+    let source = clone_local_store_dir(&plan.worktree_root)?;
     let fold = fold_source_forward(
         &source,
-        &family_dir,
+        &plan.family_dir,
         &options.trust_set,
         options.retire_source,
     )?;
 
-    register_clone(&family_dir, &slug, &clone_ref, &worktree_root)?;
+    register_clone(
+        &plan.family_dir,
+        &plan.slug,
+        &plan.clone_ref,
+        &plan.worktree_root,
+    )?;
     // The binding flip is LAST — the point of no return.
-    set_family_binding_for_repo(&options.repo, &slug, &clone_ref)?;
+    set_family_binding_for_repo(&options.repo, &plan.slug, &plan.clone_ref)?;
 
     Ok(StoreLinkResult {
-        family_ref: slug,
-        clone_ref,
+        family_ref: plan.slug,
+        clone_ref: plan.clone_ref,
         created_family,
         folded_events_created: fold.events_created,
         folded_events_existing: fold.events_existing,
         folded_artifacts_created: fold.artifacts_created,
         folded_removal_event_count: fold.removal_event_count,
         source_retired: fold.source_retired,
-        filesystem_warning,
-        history_overlap_warning,
+        filesystem_warning: plan.filesystem_warning,
+        history_overlap_warning: plan.history_overlap_warning,
+    })
+}
+
+/// Dry-run of `link_store_to_family`: run the shared gate ladder and the fold
+/// preflight, report what the link WOULD do, and write nothing. Blocking gates and
+/// the fold preflight (fidelity / event conflict) surface as `Err` with the same
+/// messages the real link produces; a clean path returns the preview.
+pub fn preview_link_to_family(options: StoreLinkOptions) -> Result<StoreLinkPreview> {
+    let plan = plan_link(&options)?;
+    let source = clone_local_store_dir(&plan.worktree_root)?;
+    let fold = preview_fold(&source, &plan.family_dir)?;
+
+    Ok(StoreLinkPreview {
+        family_ref: plan.slug,
+        clone_ref: plan.clone_ref,
+        would_create_family: plan.would_create_family,
+        source_present: fold.source_present,
+        export_fidelity: fold.export_fidelity,
+        folded_events_to_create: fold.events_to_create,
+        folded_events_existing: fold.events_existing,
+        folded_artifacts_to_create: fold.artifacts_to_create,
+        folded_artifacts_existing: fold.artifacts_existing,
+        folded_removal_event_count: fold.removal_event_count,
+        filesystem_warning: plan.filesystem_warning,
+        history_overlap_warning: plan.history_overlap_warning,
     })
 }
 
@@ -345,6 +441,17 @@ impl FoldOutcome {
     }
 }
 
+/// The source store's unsigned `ArtifactRemoved` events — the possession-stripping
+/// population the fold restamps (and the dry-run preview discloses). Shared by
+/// `fold_source_forward` and `preview_fold` so the disclosure count is spelled once.
+fn count_unsigned_artifact_removals(source: &Path) -> Result<usize> {
+    Ok(EventStore::open(source)
+        .list_events()?
+        .iter()
+        .filter(|event| event.event_type == EventType::ArtifactRemoved && event.signature.is_none())
+        .count())
+}
+
 /// Fold the clone-local store forward into the family store: verify-and-import
 /// (advisory policy — reported, never blocking), count the source's unsigned
 /// `ArtifactRemoved` events (the possession-stripping population the fold restamps),
@@ -365,11 +472,7 @@ fn fold_source_forward(
     // BundleApply provenance: a prior UNSIGNED ArtifactRemoved loses operative
     // suppression in the family store. The CLI discloses the "re-issue `shore store
     // remove` natively" guidance when this is > 0.
-    let removal_event_count = EventStore::open(source)
-        .list_events()?
-        .iter()
-        .filter(|event| event.event_type == EventType::ArtifactRemoved && event.signature.is_none())
-        .count();
+    let removal_event_count = count_unsigned_artifact_removals(source)?;
 
     // Verified fold — advisory verification is reported, never blocking; the trust
     // set is threaded from the CLI (mirrors compact).
@@ -405,10 +508,60 @@ fn fold_source_forward(
     Ok(outcome)
 }
 
+/// Counts a fold preview produces (mirrors `FoldOutcome`, but nothing is written).
+struct FoldPreview {
+    source_present: bool,
+    export_fidelity: String,
+    events_to_create: usize,
+    events_existing: usize,
+    artifacts_to_create: usize,
+    artifacts_existing: usize,
+    removal_event_count: usize,
+}
+
+/// Preview the fold without importing: an absent/empty source is a clean no-op
+/// (mirrors `fold_source_forward`'s guard); otherwise count the unsigned removals
+/// (shared helper) and run the fold preflight (shared `preview_import_store_bundle`,
+/// which refuses non-`Full` fidelity / event conflicts before this returns `Ok`).
+fn preview_fold(source: &Path, family_dir: &Path) -> Result<FoldPreview> {
+    if !source.join("events").exists() {
+        return Ok(FoldPreview {
+            source_present: false,
+            export_fidelity: fidelity_label(ExportFidelityStatus::Full),
+            events_to_create: 0,
+            events_existing: 0,
+            artifacts_to_create: 0,
+            artifacts_existing: 0,
+            removal_event_count: 0,
+        });
+    }
+
+    let removal_event_count = count_unsigned_artifact_removals(source)?;
+    let import = preview_import_store_bundle(source, family_dir)?;
+    Ok(FoldPreview {
+        source_present: true,
+        export_fidelity: fidelity_label(import.fidelity_status),
+        events_to_create: import.events_created,
+        events_existing: import.events_existing,
+        artifacts_to_create: import.artifacts_created,
+        artifacts_existing: import.artifacts_existing,
+        removal_event_count,
+    })
+}
+
+fn fidelity_label(status: ExportFidelityStatus) -> String {
+    match status {
+        ExportFidelityStatus::Full => "full",
+        ExportFidelityStatus::Incomplete => "incomplete",
+    }
+    .to_owned()
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::ffi::OsStr;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
 
     use super::*;
@@ -852,6 +1005,246 @@ mod tests {
             resolve_family_binding(repo.path()).unwrap().is_none(),
             "the binding is cleared despite the dangling family dir"
         );
+    }
+
+    #[test]
+    fn dry_run_on_a_clean_path_returns_a_preview_and_writes_nothing() {
+        let repo = modified_git_repo();
+        crate::session::capture_worktree_review(crate::session::CaptureOptions::new(repo.path()))
+            .unwrap();
+        let home = repo.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let before = tree_fingerprint(&home);
+
+        let preview = with_shore_home(&home, || {
+            preview_link_to_family(StoreLinkOptions::new(repo.path(), Some("fam".to_owned())))
+        })
+        .unwrap();
+
+        assert!(preview.would_create_family);
+        assert!(preview.source_present);
+        assert_eq!(preview.export_fidelity, "full");
+        assert!(preview.folded_events_to_create >= 1);
+        assert_eq!(preview.folded_events_existing, 0);
+        assert_eq!(preview.folded_removal_event_count, 0);
+        // Writes nothing: the home tree is byte-identical and no binding was written.
+        assert_eq!(tree_fingerprint(&home), before);
+        assert!(!repo.path().join(".shore/store.local.json").exists());
+        let binding = with_shore_home(&home, || resolve_family_binding(repo.path())).unwrap();
+        assert!(binding.is_none());
+    }
+
+    #[test]
+    fn dry_run_reports_existing_counts_when_the_family_already_holds_the_history() {
+        let repo = modified_git_repo();
+        crate::session::capture_worktree_review(crate::session::CaptureOptions::new(repo.path()))
+            .unwrap();
+        let home = repo.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        with_shore_home(&home, || {
+            link_store_to_family(StoreLinkOptions::new(repo.path(), Some("fam".to_owned())))
+                .unwrap()
+        });
+        let after_link = tree_fingerprint(&home);
+
+        let preview = with_shore_home(&home, || {
+            preview_link_to_family(StoreLinkOptions::new(repo.path(), Some("fam".to_owned())))
+        })
+        .unwrap();
+
+        assert!(!preview.would_create_family);
+        assert_eq!(preview.folded_events_to_create, 0);
+        assert!(preview.folded_events_existing >= 1);
+        // The second, dry, pass added nothing to the family store.
+        assert_eq!(tree_fingerprint(&home), after_link);
+    }
+
+    #[test]
+    fn dry_run_blocks_on_an_ephemeral_worktree_without_the_override() {
+        let repo = git_repo();
+        write_store_config(repo.path(), StoreMode::Ephemeral).unwrap();
+        let home = repo.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let before = tree_fingerprint(&home);
+
+        let error = with_shore_home(&home, || {
+            preview_link_to_family(StoreLinkOptions::new(repo.path(), Some("fam".to_owned())))
+        })
+        .expect_err("an ephemeral worktree refuses without the override");
+
+        assert!(error.to_string().contains("ephemeral"));
+        assert_eq!(tree_fingerprint(&home), before);
+        assert!(!repo.path().join(".shore/store.local.json").exists());
+    }
+
+    #[test]
+    fn dry_run_previews_success_with_the_include_ephemeral_override() {
+        let repo = git_repo();
+        write_store_config(repo.path(), StoreMode::Ephemeral).unwrap();
+        let home = repo.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let before = tree_fingerprint(&home);
+
+        let preview = with_shore_home(&home, || {
+            preview_link_to_family(
+                StoreLinkOptions::new(repo.path(), Some("fam".to_owned()))
+                    .with_include_ephemeral(true),
+            )
+        })
+        .unwrap();
+
+        assert!(preview.would_create_family);
+        assert_eq!(tree_fingerprint(&home), before);
+    }
+
+    #[test]
+    fn dry_run_blocks_on_a_sensitive_worktree_without_the_override() {
+        let repo = git_repo();
+        std::fs::create_dir_all(repo.path().join("keys")).unwrap();
+        std::fs::write(
+            repo.path().join("keys/dev.pem"),
+            "-----BEGIN PRIVATE KEY-----\nredacted\n",
+        )
+        .unwrap();
+        let home = repo.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let before = tree_fingerprint(&home);
+
+        let error = with_shore_home(&home, || {
+            preview_link_to_family(StoreLinkOptions::new(repo.path(), Some("fam".to_owned())))
+        })
+        .expect_err("a sensitive worktree refuses without the override");
+
+        assert!(error.to_string().contains("sensitivity.json"));
+        assert_eq!(tree_fingerprint(&home), before);
+    }
+
+    #[test]
+    fn dry_run_previews_success_with_the_include_sensitive_override() {
+        let repo = git_repo();
+        std::fs::create_dir_all(repo.path().join("keys")).unwrap();
+        std::fs::write(
+            repo.path().join("keys/dev.pem"),
+            "-----BEGIN PRIVATE KEY-----\nredacted\n",
+        )
+        .unwrap();
+        let home = repo.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let before = tree_fingerprint(&home);
+
+        let preview = with_shore_home(&home, || {
+            preview_link_to_family(
+                StoreLinkOptions::new(repo.path(), Some("fam".to_owned()))
+                    .with_include_sensitive(true),
+            )
+        })
+        .unwrap();
+
+        assert!(preview.would_create_family);
+        assert_eq!(tree_fingerprint(&home), before);
+    }
+
+    #[test]
+    fn dry_run_blocks_on_a_family_stamp_mismatch() {
+        let repo = git_repo();
+        let home = repo.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let error = with_shore_home(&home, || {
+            let family_dir = user_level_store_dir("fam").unwrap();
+            std::fs::create_dir_all(&family_dir).unwrap();
+            write_family_manifest(&family_dir, "other", &[]).unwrap();
+            // Snapshot AFTER the pre-stamp — the preview must add nothing more.
+            let before = tree_fingerprint(&home);
+            let error =
+                preview_link_to_family(StoreLinkOptions::new(repo.path(), Some("fam".to_owned())))
+                    .expect_err("a family-stamp mismatch refuses");
+            assert_eq!(tree_fingerprint(&home), before);
+            error
+        });
+        assert!(error.to_string().contains("other"));
+    }
+
+    #[test]
+    fn dry_run_surfaces_incomplete_fidelity_as_the_blocking_reason() {
+        // The motivating scenario from issue #393: the fold preflight refuses a
+        // source whose object artifact is gone, without a real fold attempt.
+        let repo = modified_git_repo();
+        crate::session::capture_worktree_review(crate::session::CaptureOptions::new(repo.path()))
+            .unwrap();
+        let source = crate::session::store::resolution::clone_local_store_dir(repo.path()).unwrap();
+        std::fs::remove_dir_all(source.join("artifacts/objects")).unwrap();
+        let home = repo.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let before = tree_fingerprint(&home);
+
+        let error = with_shore_home(&home, || {
+            preview_link_to_family(StoreLinkOptions::new(repo.path(), Some("fam".to_owned())))
+        })
+        .expect_err("an incomplete-fidelity source blocks the fold preflight");
+
+        assert!(error.to_string().contains("full-fidelity"), "{error}");
+        assert_eq!(tree_fingerprint(&home), before);
+    }
+
+    #[test]
+    fn dry_run_previews_the_filesystem_advisory_warning() {
+        let repo = git_repo();
+        let home = repo.path().join("Dropbox");
+        std::fs::create_dir_all(&home).unwrap();
+
+        let preview = with_shore_home(&home, || {
+            preview_link_to_family(StoreLinkOptions::new(repo.path(), Some("fam".to_owned())))
+        })
+        .unwrap();
+
+        assert!(preview.filesystem_warning.is_some());
+        assert!(preview.would_create_family);
+    }
+
+    #[test]
+    fn dry_run_previews_the_history_overlap_advisory_warning() {
+        let founder = git_repo();
+        let joiner = git_repo(); // distinct root OID (git_repo seeds unique content)
+        let home = founder.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        with_shore_home(&home, || {
+            link_store_to_family(StoreLinkOptions::new(
+                founder.path(),
+                Some("fam".to_owned()),
+            ))
+            .unwrap()
+        });
+
+        let preview = with_shore_home(&home, || {
+            preview_link_to_family(StoreLinkOptions::new(joiner.path(), Some("fam".to_owned())))
+        })
+        .unwrap();
+
+        assert!(preview.history_overlap_warning.is_some());
+        assert!(!preview.would_create_family);
+    }
+
+    /// Recursive path→bytes fingerprint of a directory tree, for asserting a
+    /// preview left `SHORE_HOME` byte-for-byte untouched.
+    fn tree_fingerprint(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        fn walk(dir: &Path, base: &Path, acc: &mut BTreeMap<PathBuf, Vec<u8>>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, base, acc);
+                } else if let Ok(bytes) = std::fs::read(&path) {
+                    let rel = path.strip_prefix(base).unwrap_or(&path).to_path_buf();
+                    acc.insert(rel, bytes);
+                }
+            }
+        }
+        let mut acc = BTreeMap::new();
+        walk(root, root, &mut acc);
+        acc
     }
 
     fn modified_git_repo() -> tempfile::TempDir {

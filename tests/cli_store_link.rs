@@ -133,6 +133,81 @@ fn store_link_default_fold_discloses_removed_unsigned_events() {
 }
 
 #[test]
+fn store_link_dry_run_previews_without_writing() {
+    let repo = captured_repo();
+    let repo_arg = repo.path().to_str().unwrap().to_owned();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_str().unwrap();
+    assert!(
+        shore_env(
+            ["capture", "--repo", &repo_arg],
+            &[("SHORE_HOME", home_str)]
+        )
+        .status
+        .success()
+    );
+
+    let dry = shore_env(
+        ["store", "link", "acme", "--dry-run", "--repo", &repo_arg],
+        &[("SHORE_HOME", home_str)],
+    );
+    assert!(
+        dry.status.success(),
+        "dry-run exits 0 on a clean path: {}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    let json = parse_json(&dry.stdout);
+    assert_eq!(json["schema"], "shore.store-link-preview");
+    assert_eq!(json["familyRef"], "acme");
+    assert_eq!(json["wouldCreateFamily"], true);
+    assert_eq!(json["exportFidelity"], "full");
+    assert!(json["foldedEventsToCreate"].as_u64().unwrap() >= 1);
+    // No binding was flipped, and a subsequent status still reports the local store.
+    assert!(!repo.path().join(".shore/store.local.json").exists());
+    let status = shore_env(
+        ["store", "status", "--repo", &repo_arg],
+        &[("SHORE_HOME", home_str)],
+    );
+    assert_eq!(parse_json(&status.stdout)["mode"], "local");
+}
+
+#[test]
+fn store_link_dry_run_blocks_on_ephemeral_without_override() {
+    let repo = captured_repo();
+    let repo_arg = repo.path().to_str().unwrap().to_owned();
+    let home = tempfile::tempdir().unwrap();
+    let home_str = home.path().to_str().unwrap();
+    assert!(
+        shore_env(
+            ["capture", "--repo", &repo_arg],
+            &[("SHORE_HOME", home_str)]
+        )
+        .status
+        .success()
+    );
+    assert!(
+        shore_env(
+            ["store", "mode", "ephemeral", "--repo", &repo_arg],
+            &[("SHORE_HOME", home_str)]
+        )
+        .status
+        .success()
+    );
+
+    let dry = shore_env(
+        ["store", "link", "acme", "--dry-run", "--repo", &repo_arg],
+        &[("SHORE_HOME", home_str)],
+    );
+    assert!(
+        !dry.status.success(),
+        "an ephemeral worktree blocks the dry-run"
+    );
+    let stderr = String::from_utf8_lossy(&dry.stderr);
+    assert!(stderr.contains("ephemeral"), "names the gate: {stderr}");
+    assert!(!repo.path().join(".shore/store.local.json").exists());
+}
+
+#[test]
 fn store_unlink_round_trips() {
     let repo = captured_repo();
     let repo_arg = repo.path().to_str().unwrap().to_owned();

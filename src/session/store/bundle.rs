@@ -217,6 +217,85 @@ pub(crate) fn import_store_bundle_with_verification(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ImportPreview {
+    pub fidelity_status: ExportFidelityStatus,
+    pub events_created: usize,
+    pub events_existing: usize,
+    pub artifacts_created: usize,
+    pub artifacts_existing: usize,
+}
+
+/// Run the fold preflight — `build_export_manifest` + `preflight_event_conflicts`
+/// — and count what a strict import WOULD create vs. already find present, without
+/// committing anything to the target. Reuses the exact predicates
+/// `import_store_bundle_with_verification` runs, so the preview's verdict cannot
+/// drift from the real fold: a non-`Full` source refuses with the same
+/// `strict import requires a full-fidelity export manifest` message, and a
+/// divergent same-key payload surfaces the same `event conflict` message.
+pub(crate) fn preview_import_store_bundle(
+    source_store_dir: impl AsRef<Path>,
+    target_store_dir: impl AsRef<Path>,
+) -> Result<ImportPreview> {
+    let source_store_dir = source_store_dir.as_ref();
+    let target_store_dir = target_store_dir.as_ref();
+
+    let manifest = build_export_manifest(source_store_dir)?;
+    if manifest.fidelity_status != ExportFidelityStatus::Full {
+        return Err(ShoreError::Message(
+            "strict import requires a full-fidelity export manifest".to_owned(),
+        ));
+    }
+
+    let events = read_source_events(source_store_dir)?;
+    let target_event_store = EventStore::open(target_store_dir);
+    preflight_event_conflicts(&target_event_store, &events)?;
+
+    let mut events_created = 0;
+    let mut events_existing = 0;
+    for source in &events {
+        let path = target_event_store.event_path_for_idempotency_key(&source.event.idempotency_key);
+        if path.exists() {
+            events_existing += 1;
+        } else {
+            events_created += 1;
+        }
+    }
+
+    let artifacts = read_source_artifacts(source_store_dir, &manifest)?;
+    let mut artifacts_created = 0;
+    let mut artifacts_existing = 0;
+    for artifact in &artifacts {
+        let path = target_store_dir.join(&artifact.relative_path);
+        match std::fs::read(&path) {
+            Ok(existing_bytes) => {
+                if existing_bytes != artifact.bytes {
+                    return Err(ShoreError::Message(format!(
+                        "artifact conflict for {}",
+                        artifact.relative_path.display()
+                    )));
+                }
+                artifacts_existing += 1;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => artifacts_created += 1,
+            Err(error) => {
+                return Err(ShoreError::Message(format!(
+                    "read target artifact {} for import preview: {error}",
+                    artifact.relative_path.display()
+                )));
+            }
+        }
+    }
+
+    Ok(ImportPreview {
+        fidelity_status: manifest.fidelity_status,
+        events_created,
+        events_existing,
+        artifacts_created,
+        artifacts_existing,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SourceSubsetVerification {
     pub verified_events: usize,
     pub verified_artifacts: usize,
@@ -1415,6 +1494,89 @@ mod tests {
         .unwrap();
         assert_eq!(again.events_created, 0);
         assert_eq!(again.events_existing, 1);
+    }
+
+    #[test]
+    fn preview_import_reports_to_create_counts_against_an_empty_target() {
+        let repo = modified_repo();
+        capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        let source = resolved_store_dir(repo.path());
+        let target_root = tempfile::tempdir().unwrap();
+        let target = target_root.path().join(".shore/data");
+
+        let preview = preview_import_store_bundle(&source, &target).unwrap();
+
+        // A worktree capture records the capture event + the ref association, and
+        // one object artifact — all absent from the fresh target.
+        assert_eq!(preview.fidelity_status, ExportFidelityStatus::Full);
+        assert_eq!(preview.events_created, 2);
+        assert_eq!(preview.events_existing, 0);
+        assert_eq!(preview.artifacts_created, 1);
+        assert_eq!(preview.artifacts_existing, 0);
+        // The preview writes nothing: the target store never materializes.
+        assert!(!target.join("events").exists());
+        assert!(!target.join("artifacts").exists());
+    }
+
+    #[test]
+    fn preview_import_reports_existing_counts_after_a_real_import() {
+        let repo = modified_repo();
+        capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        let source = resolved_store_dir(repo.path());
+        let target_root = tempfile::tempdir().unwrap();
+        let target = target_root.path().join(".shore/data");
+        import_store_bundle(&source, &target).unwrap();
+
+        let preview = preview_import_store_bundle(&source, &target).unwrap();
+
+        assert_eq!(preview.events_created, 0);
+        assert_eq!(preview.events_existing, 2);
+        assert_eq!(preview.artifacts_created, 0);
+        assert_eq!(preview.artifacts_existing, 1);
+    }
+
+    #[test]
+    fn preview_import_refuses_incomplete_fidelity() {
+        let repo = modified_repo();
+        capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        remove_object_artifacts(repo.path());
+        let target_root = tempfile::tempdir().unwrap();
+        let target = target_root.path().join(".shore/data");
+
+        let error = preview_import_store_bundle(resolved_store_dir(repo.path()), &target)
+            .expect_err("an incomplete source must refuse like the real strict import");
+
+        assert!(error.to_string().contains("full-fidelity"), "{error}");
+        assert!(!target.join("events").exists());
+    }
+
+    #[test]
+    fn preview_import_reports_an_event_conflict() {
+        let source_one = tempfile::tempdir().unwrap();
+        let source_two = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let key = "review_initialized:session:default:work:default";
+        write_event_to_store(
+            &source_one.path().join(".shore/data"),
+            review_initialized_event(key, 1),
+        );
+        write_event_to_store(
+            &source_two.path().join(".shore/data"),
+            review_initialized_event(key, 2),
+        );
+        import_store_bundle(
+            source_one.path().join(".shore/data"),
+            target.path().join(".shore/data"),
+        )
+        .unwrap();
+
+        let error = preview_import_store_bundle(
+            source_two.path().join(".shore/data"),
+            target.path().join(".shore/data"),
+        )
+        .expect_err("a divergent payload under the same key must conflict");
+
+        assert!(error.to_string().contains("event conflict"), "{error}");
     }
 
     fn modified_repo() -> TestRepo {
