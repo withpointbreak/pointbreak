@@ -34,13 +34,14 @@ body { display: flex; flex-direction: column; }
   align-items: center;
   gap: 4px;
   color: var(--fg);
+  font-size: var(--fs-sm);
   border: 1px solid var(--border);
   border-radius: var(--r-md);
   padding: 2px 8px;
   cursor: default;
 }
 .store-identity-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.store-identity-repo { font-weight: 600; }
+.store-identity-repo { font-weight: 500; }
 .store-identity-caret { color: var(--fg-dim); font-size: var(--fs-sm); }
 .store-identity-detail {
   position: absolute;
