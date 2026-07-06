@@ -1,7 +1,7 @@
 # ADR-0033: The User-Level Family Store Tier (Direction C)
 
 **Status:** Accepted (owner-approved 2026-07-06); landed via plan 0117 (user-level family store
-tier), PR #<FILL IN AT LANDING>.
+tier), PR #390.
 **Date:** 2026-07-06
 **See also:** [ADR-0015](./adr-0015-single-common-dir-store.md) (single-common-dir
 topology; precondition 4 gated this tier and §4 earmarked `link`/`unlink` as its surface),
