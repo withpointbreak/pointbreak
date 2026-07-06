@@ -80,6 +80,10 @@ pub struct MigrateToCommonDirResult {
     /// the retire was not requested or nothing needed verifying.
     pub verified_events: usize,
     pub verified_artifacts: usize,
+    /// Referenced artifacts absent from the source with no removal claim (old
+    /// snapshots GC'd/migrated away). The migrate carried the referencing events
+    /// without their content; the CLI discloses this when > 0.
+    pub absent_artifact_count: usize,
     /// Unique paths the consent-gate sensitivity scan skipped via the
     /// configured exclude globs — `Some` whenever the gate scan ran (audit for
     /// the targeted opt-out), `None` when `--include-ephemeral` skipped the
@@ -150,6 +154,7 @@ pub fn migrate_store_to_common_dir(
                     source_retired,
                     verified_events: 0,
                     verified_artifacts: 0,
+                    absent_artifact_count: 0,
                     sensitivity_excluded_path_count,
                 });
             }
@@ -175,6 +180,7 @@ pub fn migrate_store_to_common_dir(
             source_retired: false,
             verified_events: 0,
             verified_artifacts: 0,
+            absent_artifact_count: 0,
             sensitivity_excluded_path_count,
         });
     }
@@ -270,6 +276,7 @@ impl MigrateToCommonDirResult {
             source_retired: false,
             verified_events: 0,
             verified_artifacts: 0,
+            absent_artifact_count: imported.absent_artifact_count,
             sensitivity_excluded_path_count: None,
         }
     }

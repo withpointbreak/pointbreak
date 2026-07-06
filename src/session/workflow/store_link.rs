@@ -91,6 +91,10 @@ pub struct StoreLinkResult {
     /// population the fold restamps. The CLI prints the re-issue disclosure when this
     /// is > 0. Populated by the fold; 0 for an empty source.
     pub folded_removal_event_count: usize,
+    /// Referenced artifacts absent from the source with no removal claim to explain
+    /// them (old snapshots GC'd/migrated away). The fold carried the referencing
+    /// events without their content; the CLI discloses this when > 0.
+    pub folded_absent_artifact_count: usize,
     pub source_retired: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filesystem_warning: Option<String>,
@@ -122,6 +126,10 @@ pub struct StoreLinkPreview {
     pub folded_artifacts_to_create: usize,
     pub folded_artifacts_existing: usize,
     pub folded_removal_event_count: usize,
+    /// Referenced artifacts absent from the source with no removal claim — the fold
+    /// would carry the referencing events without their content. Advisory, never
+    /// blocking; `export_fidelity` reads `incomplete` when this is > 0.
+    pub folded_absent_artifact_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filesystem_warning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -250,6 +258,7 @@ pub fn link_store_to_family(options: StoreLinkOptions) -> Result<StoreLinkResult
         folded_events_existing: fold.events_existing,
         folded_artifacts_created: fold.artifacts_created,
         folded_removal_event_count: fold.removal_event_count,
+        folded_absent_artifact_count: fold.absent_artifact_count,
         source_retired: fold.source_retired,
         filesystem_warning: plan.filesystem_warning,
         history_overlap_warning: plan.history_overlap_warning,
@@ -276,6 +285,7 @@ pub fn preview_link_to_family(options: StoreLinkOptions) -> Result<StoreLinkPrev
         folded_artifacts_to_create: fold.artifacts_to_create,
         folded_artifacts_existing: fold.artifacts_existing,
         folded_removal_event_count: fold.removal_event_count,
+        folded_absent_artifact_count: fold.absent_artifact_count,
         filesystem_warning: plan.filesystem_warning,
         history_overlap_warning: plan.history_overlap_warning,
     })
@@ -426,6 +436,7 @@ struct FoldOutcome {
     events_existing: usize,
     artifacts_created: usize,
     removal_event_count: usize,
+    absent_artifact_count: usize,
     source_retired: bool,
 }
 
@@ -436,6 +447,7 @@ impl FoldOutcome {
             events_existing: 0,
             artifacts_created: 0,
             removal_event_count: 0,
+            absent_artifact_count: 0,
             source_retired: false,
         }
     }
@@ -488,6 +500,7 @@ fn fold_source_forward(
         events_existing: imported.events_existing,
         artifacts_created: imported.artifacts_created,
         removal_event_count,
+        absent_artifact_count: imported.absent_artifact_count,
         source_retired: false,
     };
 
@@ -517,12 +530,14 @@ struct FoldPreview {
     artifacts_to_create: usize,
     artifacts_existing: usize,
     removal_event_count: usize,
+    absent_artifact_count: usize,
 }
 
 /// Preview the fold without importing: an absent/empty source is a clean no-op
 /// (mirrors `fold_source_forward`'s guard); otherwise count the unsigned removals
 /// (shared helper) and run the fold preflight (shared `preview_import_store_bundle`,
-/// which refuses non-`Full` fidelity / event conflicts before this returns `Ok`).
+/// which tolerates an incomplete source and reports the absent-artifact count, the
+/// same way the real fold does).
 fn preview_fold(source: &Path, family_dir: &Path) -> Result<FoldPreview> {
     if !source.join("events").exists() {
         return Ok(FoldPreview {
@@ -533,6 +548,7 @@ fn preview_fold(source: &Path, family_dir: &Path) -> Result<FoldPreview> {
             artifacts_to_create: 0,
             artifacts_existing: 0,
             removal_event_count: 0,
+            absent_artifact_count: 0,
         });
     }
 
@@ -546,6 +562,7 @@ fn preview_fold(source: &Path, family_dir: &Path) -> Result<FoldPreview> {
         artifacts_to_create: import.artifacts_created,
         artifacts_existing: import.artifacts_existing,
         removal_event_count,
+        absent_artifact_count: import.absent_artifact_count,
     })
 }
 
@@ -1166,10 +1183,12 @@ mod tests {
     }
 
     #[test]
-    fn dry_run_surfaces_incomplete_fidelity_as_the_blocking_reason() {
+    fn dry_run_tolerates_an_unaccounted_missing_artifact_and_discloses_it() {
         // An UNACCOUNTED missing artifact (bytes gone, no `ArtifactRemoved` claim to
-        // explain it) is a genuine defect: the fold preflight refuses it, without a
-        // real fold attempt. A claim-covered absence is linkable instead — see
+        // explain it — an old snapshot GC'd/migrated away) is the source's existing
+        // state, not a blocker: the preview reports the store linkable with an
+        // absent-artifact disclosure and `export_fidelity` `incomplete`, writing
+        // nothing. A claim-covered absence stays `full` — see
         // `dry_run_previews_a_store_with_a_removed_artifact_as_linkable`.
         let repo = modified_git_repo();
         crate::session::capture_worktree_review(crate::session::CaptureOptions::new(repo.path()))
@@ -1180,12 +1199,13 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         let before = tree_fingerprint(&home);
 
-        let error = with_shore_home(&home, || {
+        let preview = with_shore_home(&home, || {
             preview_link_to_family(StoreLinkOptions::new(repo.path(), Some("fam".to_owned())))
         })
-        .expect_err("an incomplete-fidelity source blocks the fold preflight");
+        .unwrap();
 
-        assert!(error.to_string().contains("full-fidelity"), "{error}");
+        assert_eq!(preview.export_fidelity, "incomplete");
+        assert!(preview.folded_absent_artifact_count >= 1);
         assert_eq!(tree_fingerprint(&home), before);
     }
 
@@ -1213,8 +1233,11 @@ mod tests {
         })
         .unwrap();
 
+        // Claim-covered absence is `full` fidelity and is NOT counted as an
+        // unaccounted absence — the two absence kinds stay distinct.
         assert_eq!(preview.export_fidelity, "full");
         assert!(preview.folded_removal_event_count >= 1);
+        assert_eq!(preview.folded_absent_artifact_count, 0);
     }
 
     #[test]

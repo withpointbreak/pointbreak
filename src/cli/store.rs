@@ -257,6 +257,7 @@ struct StoreMigrateBody {
     source_retired: bool,
     verified_events: usize,
     verified_artifacts: usize,
+    folded_absent_artifact_count: usize,
     /// Absent (not zero) when `--include-ephemeral` skipped the gate scan.
     #[serde(skip_serializing_if = "Option::is_none")]
     sensitivity_excluded_path_count: Option<usize>,
@@ -272,6 +273,7 @@ struct StoreLinkBody {
     folded_events_existing: usize,
     folded_artifacts_created: usize,
     folded_removal_event_count: usize,
+    folded_absent_artifact_count: usize,
     source_retired: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     filesystem_warning: Option<String>,
@@ -292,6 +294,7 @@ struct StoreLinkPreviewBody {
     folded_artifacts_to_create: usize,
     folded_artifacts_existing: usize,
     folded_removal_event_count: usize,
+    folded_absent_artifact_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     filesystem_warning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -567,11 +570,19 @@ fn migrate(
             .with_include_ephemeral(args.include_ephemeral)
             .with_retire_source(args.retire_source),
     )?;
-    let document = json::DiagnosticDocument::new(
-        "shore.store-migrate",
-        StoreMigrateBody::from(result),
-        vec![],
-    );
+    let body = StoreMigrateBody::from(result);
+    let mut diagnostics = Vec::new();
+    if body.folded_absent_artifact_count > 0 {
+        diagnostics.push(ProjectionDiagnostic {
+            code: "family_fold_absent_artifact".to_owned(),
+            message: format!(
+                "{} referenced artifact(s) were absent from the source (no longer on disk, no \
+                 removal claim) and were folded without their content",
+                body.folded_absent_artifact_count
+            ),
+        });
+    }
+    let document = json::DiagnosticDocument::new("shore.store-migrate", body, diagnostics);
     let format = output::resolve_format(
         args.format_args.explicit(args.pretty),
         output::OutputFormat::Json,
@@ -611,6 +622,16 @@ fn link(args: StoreLinkArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::
                 ),
             });
         }
+        if body.folded_absent_artifact_count > 0 {
+            diagnostics.push(ProjectionDiagnostic {
+                code: "family_fold_absent_artifact".to_owned(),
+                message: format!(
+                    "{} referenced artifact(s) are absent from the source (no longer on disk, no \
+                     removal claim) and would be folded without their content",
+                    body.folded_absent_artifact_count
+                ),
+            });
+        }
         if let Some(warning) = &body.filesystem_warning {
             diagnostics.push(ProjectionDiagnostic {
                 code: "family_store_filesystem_warning".to_owned(),
@@ -638,6 +659,16 @@ fn link(args: StoreLinkArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::
                 "{} unsigned removal event(s) were folded and lost possession-based suppression; \
                  re-issue `shore store remove` in the family store to restore it",
                 body.folded_removal_event_count
+            ),
+        });
+    }
+    if body.folded_absent_artifact_count > 0 {
+        diagnostics.push(ProjectionDiagnostic {
+            code: "family_fold_absent_artifact".to_owned(),
+            message: format!(
+                "{} referenced artifact(s) were absent from the source (no longer on disk, no \
+                 removal claim) and were folded without their content",
+                body.folded_absent_artifact_count
             ),
         });
     }
@@ -891,6 +922,7 @@ impl From<MigrateToCommonDirResult> for StoreMigrateBody {
             source_retired: result.source_retired,
             verified_events: result.verified_events,
             verified_artifacts: result.verified_artifacts,
+            folded_absent_artifact_count: result.absent_artifact_count,
             sensitivity_excluded_path_count: result.sensitivity_excluded_path_count,
         }
     }
@@ -922,6 +954,7 @@ impl From<StoreLinkResult> for StoreLinkBody {
             folded_events_existing: result.folded_events_existing,
             folded_artifacts_created: result.folded_artifacts_created,
             folded_removal_event_count: result.folded_removal_event_count,
+            folded_absent_artifact_count: result.folded_absent_artifact_count,
             source_retired: result.source_retired,
             filesystem_warning: result.filesystem_warning,
             history_overlap_warning: result.history_overlap_warning,
@@ -942,6 +975,7 @@ impl From<StoreLinkPreview> for StoreLinkPreviewBody {
             folded_artifacts_to_create: preview.folded_artifacts_to_create,
             folded_artifacts_existing: preview.folded_artifacts_existing,
             folded_removal_event_count: preview.folded_removal_event_count,
+            folded_absent_artifact_count: preview.folded_absent_artifact_count,
             filesystem_warning: preview.filesystem_warning,
             history_overlap_warning: preview.history_overlap_warning,
         }

@@ -83,6 +83,12 @@ pub(crate) struct ImportBundleResult {
     pub events_existing: usize,
     pub artifacts_created: usize,
     pub artifacts_existing: usize,
+    /// Referenced artifacts the source could not resolve to bytes and no
+    /// `ArtifactRemoved` claim explains — an unaccountable absence (e.g. an old
+    /// snapshot compacted/migrated away without a claim). The fold carries the
+    /// referencing events regardless; this count is disclosed as advisory. A
+    /// claim-covered absence never counts here.
+    pub absent_artifact_count: usize,
     pub verification: Vec<IngestEventVerification>,
     pub commit_order: Vec<ImportCommitStep>,
 }
@@ -200,12 +206,15 @@ pub(crate) fn import_store_bundle_with_verification(
 ) -> Result<ImportBundleResult> {
     let source_store_dir = source_store_dir.as_ref();
     let target_store_dir = target_store_dir.as_ref();
+    // The fold tolerates an incomplete source: a referenced artifact absent from
+    // disk (with no `ArtifactRemoved` claim to explain it) is the source's existing
+    // state — an old snapshot compacted or migrated away. Carrying its referencing
+    // events forward preserves that state without introducing NEW corruption, so the
+    // fold proceeds and discloses the absent count rather than refusing. Only the
+    // present artifacts land (`read_source_artifacts` reads `manifest.artifacts`,
+    // which never lists an absent one); every event still folds.
     let manifest = build_export_manifest(source_store_dir)?;
-    if manifest.fidelity_status != ExportFidelityStatus::Full {
-        return Err(ShoreError::Message(
-            "strict import requires a full-fidelity export manifest".to_owned(),
-        ));
-    }
+    let absent_artifact_count = absent_artifact_count(&manifest);
 
     let events = read_source_events(source_store_dir)?;
     let source_events = events
@@ -226,6 +235,7 @@ pub(crate) fn import_store_bundle_with_verification(
         events_existing,
         artifacts_created,
         artifacts_existing,
+        absent_artifact_count,
         verification,
         commit_order: vec![
             ImportCommitStep::Artifacts,
@@ -235,6 +245,18 @@ pub(crate) fn import_store_bundle_with_verification(
     })
 }
 
+/// Referenced artifacts the manifest could not resolve to bytes — the
+/// `missing_referenced_artifact` diagnostics. A claim-covered absence is never a
+/// diagnostic, so it never counts here; this is the unaccountable-absence tally the
+/// fold discloses.
+fn absent_artifact_count(manifest: &ExportManifest) -> usize {
+    manifest
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "missing_referenced_artifact")
+        .count()
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ImportPreview {
     pub fidelity_status: ExportFidelityStatus,
@@ -242,15 +264,18 @@ pub(crate) struct ImportPreview {
     pub events_existing: usize,
     pub artifacts_created: usize,
     pub artifacts_existing: usize,
+    /// Absent referenced artifacts the fold would carry events past without their
+    /// bytes (mirrors `ImportBundleResult::absent_artifact_count`).
+    pub absent_artifact_count: usize,
 }
 
 /// Run the fold preflight — `build_export_manifest` + `preflight_event_conflicts`
-/// — and count what a strict import WOULD create vs. already find present, without
+/// — and count what the fold WOULD create vs. already find present, without
 /// committing anything to the target. Reuses the exact predicates
-/// `import_store_bundle_with_verification` runs, so the preview's verdict cannot
-/// drift from the real fold: a non-`Full` source refuses with the same
-/// `strict import requires a full-fidelity export manifest` message, and a
-/// divergent same-key payload surfaces the same `event conflict` message.
+/// `import_store_bundle_with_verification` runs, so the preview cannot drift from
+/// the real fold: it tolerates an incomplete source the same way (disclosing the
+/// absent-artifact count rather than refusing), and surfaces the same
+/// `event conflict` message for a divergent same-key payload.
 pub(crate) fn preview_import_store_bundle(
     source_store_dir: impl AsRef<Path>,
     target_store_dir: impl AsRef<Path>,
@@ -259,11 +284,7 @@ pub(crate) fn preview_import_store_bundle(
     let target_store_dir = target_store_dir.as_ref();
 
     let manifest = build_export_manifest(source_store_dir)?;
-    if manifest.fidelity_status != ExportFidelityStatus::Full {
-        return Err(ShoreError::Message(
-            "strict import requires a full-fidelity export manifest".to_owned(),
-        ));
-    }
+    let absent_artifact_count = absent_artifact_count(&manifest);
 
     let events = read_source_events(source_store_dir)?;
     let target_event_store = EventStore::open(target_store_dir);
@@ -311,6 +332,7 @@ pub(crate) fn preview_import_store_bundle(
         events_existing,
         artifacts_created,
         artifacts_existing,
+        absent_artifact_count,
     })
 }
 
@@ -1334,19 +1356,29 @@ mod tests {
     }
 
     #[test]
-    fn strict_import_rejects_events_when_referenced_artifact_is_missing() {
+    fn import_tolerates_an_absent_referenced_artifact_and_discloses_the_count() {
+        // A referenced artifact absent with NO removal claim is the source's existing
+        // state (an old snapshot GC'd/migrated away). The fold no longer refuses: it
+        // carries the referencing events forward and discloses the absent count.
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         remove_object_artifacts(repo.path());
         let target = tempfile::tempdir().unwrap();
+        let target_store_dir = target.path().join(".shore/data");
 
-        let error = import_store_bundle(
-            resolved_store_dir(repo.path()),
-            target.path().join(".shore/data"),
-        )
-        .expect_err("incomplete bundle is rejected");
+        let result =
+            import_store_bundle(resolved_store_dir(repo.path()), &target_store_dir).unwrap();
 
-        assert!(error.to_string().contains("full-fidelity"));
+        // The events fold; the absent object is not carried but is disclosed.
+        assert!(result.events_created >= 1);
+        assert_eq!(result.artifacts_created, 0);
+        assert_eq!(result.absent_artifact_count, 1);
+        assert!(
+            !EventStore::open(&target_store_dir)
+                .list_events()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1555,17 +1587,20 @@ mod tests {
     }
 
     #[test]
-    fn preview_import_refuses_incomplete_fidelity() {
+    fn preview_import_tolerates_incomplete_fidelity_and_reports_the_absent_count() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
         remove_object_artifacts(repo.path());
         let target_root = tempfile::tempdir().unwrap();
         let target = target_root.path().join(".shore/data");
 
-        let error = preview_import_store_bundle(resolved_store_dir(repo.path()), &target)
-            .expect_err("an incomplete source must refuse like the real strict import");
+        // Mirrors the real fold: no refusal, the absent object is disclosed, and the
+        // preview still writes nothing.
+        let preview =
+            preview_import_store_bundle(resolved_store_dir(repo.path()), &target).unwrap();
 
-        assert!(error.to_string().contains("full-fidelity"), "{error}");
+        assert_eq!(preview.fidelity_status, ExportFidelityStatus::Incomplete);
+        assert_eq!(preview.absent_artifact_count, 1);
         assert!(!target.join("events").exists());
     }
 
