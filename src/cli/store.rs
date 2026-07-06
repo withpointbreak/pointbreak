@@ -8,11 +8,11 @@ use shoreline::session::{
     ProjectionDiagnostic, RemovalOperativeStatus, RemoveOptions, RemoveResult, RemoveSelector,
     RemovedContent, SkippedRemoval, StoreForgetOptions, StoreForgetResult, StoreLinkOptions,
     StoreLinkPreview, StoreLinkResult, StoreListEntry, StoreListResult, StoreMode, StoreModeSource,
-    StoreStatusInventory, StoreStatusOptions, StoreStatusResult, StoreStatusSensitivity,
-    StoreUnlinkOptions, StoreUnlinkResult, SweepOutcome, SweptBlob, compact_store,
-    forget_family_store, link_store_to_family, list_family_stores, migrate_store_to_common_dir,
-    preview_link_to_family, remove_content, resolve_store_mode_for_repo, set_store_mode_for_repo,
-    store_status, unlink_store_from_family,
+    StoreSensitivityPathGroup, StoreStatusInventory, StoreStatusOptions, StoreStatusResult,
+    StoreStatusSensitivity, StoreUnlinkOptions, StoreUnlinkResult, SweepOutcome, SweptBlob,
+    compact_store, explain_store_sensitivity, forget_family_store, link_store_to_family,
+    list_family_stores, migrate_store_to_common_dir, preview_link_to_family, remove_content,
+    resolve_store_mode_for_repo, set_store_mode_for_repo, store_status, unlink_store_from_family,
 };
 
 use crate::cli::common::{
@@ -50,6 +50,13 @@ struct StoreStatusArgs {
 
     #[arg(long)]
     pretty: bool,
+
+    /// Also list the real worktree paths each sensitivity finding matched, so an
+    /// excludeGlobs decision is actionable. Local-only, printed to your terminal.
+    /// Text-only — it keeps the `shore.store-status` JSON document uniformly
+    /// path-free — so it cannot be combined with a JSON format.
+    #[arg(long)]
+    show_paths: bool,
 
     #[command(flatten)]
     format_args: output::FormatArgs,
@@ -453,12 +460,38 @@ pub(super) fn run(
 fn status(args: StoreStatusArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::error::Error>> {
     let span = tracing::info_span!("shore.store.status");
     let _entered = span.enter();
+
+    let explicit = args.format_args.explicit(args.pretty);
+    if args.show_paths {
+        // `--show-paths` is text-only, but NOT as a security barrier: the listing
+        // goes to the operator's own terminal, the paths are their own local
+        // files, and plain text is as machine-readable as JSON — a program can
+        // read either lane. The restriction keeps the versioned
+        // `shore.store-status` JSON document a single, uniformly path-free shape,
+        // so a tool that pipes that document into a log or relay never depends on
+        // a flag to stay path-free. The redaction that genuinely matters is on the
+        // STORED/forwarded data (events in `.git/shore`, the default document);
+        // this local listing never writes to the store, so it sits outside that
+        // contract. So refuse an explicit JSON selection rather than silently
+        // dropping the paths, and otherwise force the text lane (overriding the
+        // JSON default) so `store status --show-paths` alone prints them.
+        if matches!(
+            explicit,
+            Some(output::OutputFormat::Json | output::OutputFormat::JsonPretty)
+        ) {
+            return Err(
+                "`--show-paths` lists real worktree paths on the text lane only, to keep the \
+                 `shore.store-status` JSON document uniformly path-free; it cannot be combined \
+                 with a JSON format. Drop the JSON selection or pass `--format text`."
+                    .into(),
+            );
+        }
+        return status_with_paths(&args.repo, stdout);
+    }
+
     let result = store_status(StoreStatusOptions::new(args.repo))?;
     let body = StoreStatusBody::from(result);
-    let format = output::resolve_format(
-        args.format_args.explicit(args.pretty),
-        output::OutputFormat::Json,
-    )?;
+    let format = output::resolve_format(explicit, output::OutputFormat::Json)?;
     // `DiagnosticDocument::new` takes the body by value; render the digest from it
     // first, only on the text lane (the machine lanes never pay for it).
     let digest = matches!(format.format, output::OutputFormat::Text)
@@ -467,6 +500,50 @@ fn status(args: StoreStatusArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn s
     output::write_document(stdout, format, &document, || {
         digest.expect("text lane resolves the digest")
     })
+}
+
+/// The text-only `store status --show-paths` lane: the standard digest followed
+/// by the real matched worktree paths per finding. The paths come from a
+/// dedicated non-serializable scan (`explain_store_sensitivity`) and go straight
+/// to stdout — they never enter a `DiagnosticDocument` or any emitted JSON, so
+/// the sensitivity no-path contract still holds on the machine lanes.
+fn status_with_paths(
+    repo: &std::path::Path,
+    stdout: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let result = store_status(StoreStatusOptions::new(repo))?;
+    let body = StoreStatusBody::from(result);
+    writeln!(stdout, "{}", render_store_status_text(&body))?;
+
+    let groups = explain_store_sensitivity(repo)?;
+    writeln!(stdout, "\n{}", render_sensitivity_paths(&groups))?;
+    Ok(())
+}
+
+/// Cap the paths listed per finding kind under `--show-paths`, mirroring the
+/// digest's bounded finding summary; the surplus is tallied, not listed.
+const MAX_SHOWN_PATHS_PER_KIND: usize = 20;
+
+/// Render the local-only matched-path listing for `--show-paths`: `kind (outcome)`
+/// headers with the real relative paths beneath, bounded per kind. When nothing
+/// matched, say so explicitly so the operator knows the scan ran.
+fn render_sensitivity_paths(groups: &[StoreSensitivityPathGroup]) -> String {
+    if groups.is_empty() {
+        return "matched paths: none".to_owned();
+    }
+    let mut lines =
+        vec!["matched paths (local only; never written to the store or emitted JSON):".to_owned()];
+    for group in groups {
+        lines.push(format!("  {} ({}):", group.kind, group.policy_outcome));
+        for path in group.paths.iter().take(MAX_SHOWN_PATHS_PER_KIND) {
+            lines.push(format!("    {path}"));
+        }
+        let remaining = group.paths.len().saturating_sub(MAX_SHOWN_PATHS_PER_KIND);
+        if remaining > 0 {
+            lines.push(format!("    … and {remaining} more"));
+        }
+    }
+    lines.join("\n")
 }
 
 /// The text digest for `store status`: a one-line-first summary a person reads

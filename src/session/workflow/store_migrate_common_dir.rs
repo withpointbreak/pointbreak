@@ -118,8 +118,9 @@ pub fn migrate_store_to_common_dir(
         let scan = scan_worktree_sensitivity(&worktree_root)?;
         if scan.policy_outcome == SENSITIVITY_BLOCK {
             return Err(ShoreError::Message(
-                "refusing to migrate a worktree flagged sensitive into the shared store; \
-                 add known-safe paths to .shore/sensitivity.json excludeGlobs for a targeted \
+                "refusing to migrate a worktree flagged sensitive into the shared store; run \
+                 `shore store status --show-paths` to see which files matched, then add \
+                 known-safe paths to .shore/sensitivity.json excludeGlobs for a targeted \
                  exclude, or re-run with the include-ephemeral override to fan it in wholesale"
                     .to_owned(),
             ));

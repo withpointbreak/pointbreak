@@ -282,7 +282,7 @@ worktree, and the fact lands directly in that shared store, visible to every wor
 ## `shore store`
 
 ```bash
-shore store status [--repo <path>] [--pretty]
+shore store status [--repo <path>] [--pretty] [--show-paths]
 shore store mode (shared | ephemeral | show) [--repo <path>] [--pretty]
 shore store migrate [--repo <path>] [--include-ephemeral] [--retire-source] [--pretty]
 shore store link [<slug>] [--repo <path>] [--include-ephemeral] [--include-sensitive] [--retire-source] [--pretty]
@@ -318,7 +318,9 @@ the machine-wide **user-level family store tier** with `shore store link` (see b
   under the shared-store model (#146), while a rebased recapture can store another artifact for the
   same stable object id.
 - `sensitivity` reports `policyOutcome` plus redacted findings. Finding references use
-  `file:sha256:*` refs, and command output does not print secret values or source file paths.
+  `file:sha256:*` refs, and the JSON document never prints secret values or source file paths. The
+  local-only `--show-paths` flag is the one exception, and only on the text lane — see
+  [Sensitivity exclude globs](#sensitivity-exclude-globs).
 
 Sensitivity findings are reported but do not currently abort a write. A hard-blocking policy and
 explicit override controls are a forward-looking note for when movement can target a wider store;
@@ -378,6 +380,25 @@ seeing), and `shore store migrate` reports `sensitivityExcludedPathCount` whenev
 ran (absent under `--include-ephemeral`, which skips the scan). Excluded paths themselves are never
 listed — the scan's redacted `file:sha256:*` posture stands. The gate behavior is unchanged: a
 `block` finding outside the excludes still refuses without `--include-ephemeral`.
+
+**Seeing which files matched (`shore store status --show-paths`).** A finding names only its *kind*
+and a redacted `file:sha256:*` reference, so on its own it does not tell you which file to exclude.
+`--show-paths` closes that loop: it re-runs the same scan (the same matchers, the same exclude
+globs) locally and lists the real matched worktree paths grouped by finding kind, so you can author
+a targeted `excludeGlobs` entry. The `link`/`migrate` sensitivity gate errors point at this command.
+
+`--show-paths` is **text-only**: it forces the text lane and refuses an explicit `--format json` /
+`--format json-pretty` / `--pretty`. That restriction is deliberately **not a security barrier** —
+the listing prints to your own terminal, the paths are your own local files, and plain text is as
+machine-readable as JSON, so nothing is being withheld from a program. It exists only to keep the
+versioned `shore.store-status` JSON document a single, uniformly path-free shape, so a tool that
+pipes that document into a log, an index, or a relay never depends on a flag to stay path-free. The
+redaction that genuinely matters is on the **stored and forwarded** data — the events written to
+`.git/shore` and the default `shore.store-status` document, which can cross machine, family-store,
+and relay boundaries and would otherwise leak your local filesystem layout to whoever reads the
+store. `--show-paths` never writes to the store or emits JSON, so it sits outside that contract by
+construction: the type that carries the real paths is not serializable, and the paths reach nothing
+but stdout.
 
 A pre-flip worktree-local `.shore/data` store on a non-ephemeral worktree (data written before the
 shared common-dir default) is detected on any read or write and errors with a hint to run

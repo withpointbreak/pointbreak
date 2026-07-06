@@ -347,6 +347,147 @@ fn text_store_digest_summarizes_blocked_sensitivity_findings() {
     );
 }
 
+#[test]
+fn show_paths_lists_real_matched_paths_on_the_text_lane() {
+    let repo = GitRepo::new();
+    repo.write("keys/dev.pem", "-----BEGIN PRIVATE KEY-----\nredacted\n");
+    repo.write(
+        "src/token.txt",
+        "let key = \"sk-test000000000000000000000000\";\n",
+    );
+
+    let output = shore([
+        "store",
+        "status",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--show-paths",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    // The digest still leads; the matched-path listing follows it.
+    assert!(
+        stdout.contains("sensitivity: block"),
+        "digest present: {stdout}"
+    );
+    assert!(
+        stdout.contains("matched paths"),
+        "path section header: {stdout}"
+    );
+    // The real relative paths appear, grouped under their finding kind.
+    assert!(stdout.contains("private_key"), "kind header: {stdout}");
+    assert!(
+        stdout.contains("keys/dev.pem"),
+        "real path listed: {stdout}"
+    );
+    assert!(
+        stdout.contains("src/token.txt"),
+        "real path listed: {stdout}"
+    );
+    // It is the text lane, never the machine document.
+    assert!(!stdout.contains("\"schema\""), "not JSON: {stdout}");
+    // The redacted token never appears alongside the real paths.
+    assert!(
+        !stdout.contains("redacted-file:sha256:"),
+        "text lane shows real paths, not tokens: {stdout}"
+    );
+    // No secret material is echoed, only the paths.
+    assert!(!stdout.contains("sk-test"), "no secret value: {stdout}");
+    assert!(!stdout.contains("PRIVATE KEY"), "no secret value: {stdout}");
+}
+
+#[test]
+fn show_paths_reports_none_when_nothing_matched() {
+    let repo = GitRepo::new();
+    repo.write("README.md", "safe\n");
+    repo.commit_all("base");
+
+    let output = shore([
+        "store",
+        "status",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--show-paths",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains("matched paths: none"),
+        "empty scan states so explicitly: {stdout}"
+    );
+}
+
+#[test]
+fn show_paths_refuses_an_explicit_json_format() {
+    let repo = GitRepo::new();
+    repo.write("keys/dev.pem", "-----BEGIN PRIVATE KEY-----\nredacted\n");
+
+    let output = shore([
+        "store",
+        "status",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--show-paths",
+        "--format",
+        "json",
+    ]);
+
+    assert!(
+        !output.status.success(),
+        "--show-paths with an explicit JSON format is refused"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--show-paths") && stderr.contains("text"),
+        "the refusal explains the text-only constraint: {stderr}"
+    );
+    // The refusal path never leaks a real worktree path.
+    assert!(
+        !stderr.contains("keys/dev.pem"),
+        "no path in the error: {stderr}"
+    );
+}
+
+#[test]
+fn show_paths_never_reaches_the_json_lane() {
+    // The same sensitive worktree: the paths surface under --show-paths (text),
+    // but the machine document keeps only redacted tokens — the no-path contract
+    // on the emitted JSON holds regardless of the flag.
+    let repo = GitRepo::new();
+    repo.write("keys/dev.pem", "-----BEGIN PRIVATE KEY-----\nredacted\n");
+
+    let repo_arg = repo.path().to_str().unwrap();
+    let text = shore(["store", "status", "--repo", repo_arg, "--show-paths"]);
+    let text_stdout = String::from_utf8(text.stdout).unwrap();
+    assert!(
+        text_stdout.contains("keys/dev.pem"),
+        "text lists the path: {text_stdout}"
+    );
+
+    let json = shore(["store", "status", "--repo", repo_arg, "--format", "json"]);
+    let json_stdout = String::from_utf8(json.stdout).unwrap();
+    assert!(
+        !json_stdout.contains("keys/dev.pem"),
+        "the JSON document never carries the real path: {json_stdout}"
+    );
+    let value = parse_json(json_stdout.as_bytes());
+    let references = &value["sensitivity"]["findings"][0]["references"];
+    assert!(
+        references[0].as_str().unwrap().starts_with("file:sha256:"),
+        "the JSON reference stays redacted: {references}"
+    );
+}
+
 struct LinkedWorktreeFixture {
     main: GitRepo,
     _linked_parent: tempfile::TempDir,

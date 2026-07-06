@@ -96,9 +96,10 @@ pub use store_migrate_common_dir::{
     MigrateToCommonDirOptions, MigrateToCommonDirResult, migrate_store_to_common_dir,
 };
 pub use store_status::{
-    StoreStatusArtifactInventory, StoreStatusInventory, StoreStatusOptions, StoreStatusResult,
-    StoreStatusRevisionObject, StoreStatusSensitivity, StoreStatusSensitivityExcludeGlob,
-    StoreStatusSensitivityFinding, store_status,
+    StoreSensitivityPathGroup, StoreStatusArtifactInventory, StoreStatusInventory,
+    StoreStatusOptions, StoreStatusResult, StoreStatusRevisionObject, StoreStatusSensitivity,
+    StoreStatusSensitivityExcludeGlob, StoreStatusSensitivityFinding, explain_store_sensitivity,
+    store_status,
 };
 pub use validation::{
     ValidationAddOptions, ValidationAddResult, ValidationCheckView, ValidationListFilters,

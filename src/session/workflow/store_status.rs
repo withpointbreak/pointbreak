@@ -9,7 +9,7 @@ use crate::session::store::inventory::{
 };
 use crate::session::store::resolution::resolve_store;
 use crate::session::store::sensitivity::{
-    SensitivityFinding, SensitivityScan, scan_worktree_sensitivity,
+    SensitivityFinding, SensitivityScan, explain_worktree_sensitivity, scan_worktree_sensitivity,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -126,6 +126,36 @@ pub fn store_status(options: StoreStatusOptions) -> Result<StoreStatusResult> {
         inventory: StoreStatusInventory::from(inventory),
         sensitivity: StoreStatusSensitivity::from(sensitivity),
     })
+}
+
+/// Per-finding real matched paths for the local-only `store status --show-paths`
+/// surface. Deliberately NOT `Serialize`: real worktree paths must never reach
+/// the store or any emitted JSON (the sensitivity no-path contract). Produced by
+/// [`explain_store_sensitivity`] and rendered to the operator's terminal only.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreSensitivityPathGroup {
+    pub kind: String,
+    pub severity: String,
+    pub policy_outcome: String,
+    pub paths: Vec<String>,
+}
+
+/// Resolve the worktree for `repo` and return the real matched paths per finding
+/// kind for the local-only explain surface. Shares the exact matchers used by
+/// [`store_status`]'s redacting scan (via `explain_worktree_sensitivity`); the
+/// caller is responsible for rendering the result to stdout only and never
+/// routing it through a `DiagnosticDocument` or any emitted JSON.
+pub fn explain_store_sensitivity(repo: impl AsRef<Path>) -> Result<Vec<StoreSensitivityPathGroup>> {
+    let worktree_root = git_worktree_root(repo.as_ref())?;
+    Ok(explain_worktree_sensitivity(&worktree_root)?
+        .into_iter()
+        .map(|group| StoreSensitivityPathGroup {
+            kind: group.kind,
+            severity: group.severity,
+            policy_outcome: group.policy_outcome,
+            paths: group.paths,
+        })
+        .collect())
 }
 
 struct FamilyLifecycleFields {

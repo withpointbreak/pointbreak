@@ -184,7 +184,8 @@ fn plan_link(options: &StoreLinkOptions) -> Result<LinkPlan> {
         let scan = scan_worktree_sensitivity(&worktree_root)?;
         if scan.policy_outcome == SENSITIVITY_BLOCK {
             return Err(ShoreError::Message(
-                "refusing to link a worktree flagged sensitive into a family store; add \
+                "refusing to link a worktree flagged sensitive into a family store; run \
+                 `shore store status --show-paths` to see which files matched, then add \
                  known-safe paths to .shore/sensitivity.json excludeGlobs for a targeted \
                  exclude, or re-run with the include-sensitive override to link it anyway"
                     .to_owned(),
@@ -711,6 +712,10 @@ mod tests {
         assert!(
             message.contains("sensitivity.json"),
             "names the exclude fix: {message}"
+        );
+        assert!(
+            message.contains("store status --show-paths"),
+            "points at the local-only command that lists the matched files: {message}"
         );
 
         let linked = with_shore_home(&home, || {

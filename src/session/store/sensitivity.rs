@@ -47,6 +47,20 @@ pub(crate) struct SensitivityFinding {
     pub references: Vec<String>,
 }
 
+/// Per-finding real matched paths for the local-only explain surface. Kept
+/// separate from [`SensitivityFinding`] and deliberately NOT `Serialize`: these
+/// are the operator's own worktree paths and must never reach the store or any
+/// emitted JSON (the sensitivity no-path contract). Consumed only by the
+/// text-only `store status --show-paths` renderer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SensitivityFindingPaths {
+    pub kind: String,
+    pub severity: String,
+    pub policy_outcome: String,
+    /// Matched worktree-relative paths, sorted and deduped.
+    pub paths: Vec<String>,
+}
+
 #[derive(Debug)]
 struct FindingAccumulator {
     kind: &'static str,
@@ -56,11 +70,35 @@ struct FindingAccumulator {
     references: BTreeSet<String>,
 }
 
-pub(crate) fn scan_worktree_sensitivity(worktree_root: &Path) -> Result<SensitivityScan> {
+/// A single matcher hit on one file: the kind and its fixed severity/outcome.
+#[derive(Debug)]
+struct MatchedKind {
+    kind: &'static str,
+    severity: &'static str,
+    policy_outcome: &'static str,
+}
+
+/// The shared worktree walk behind both [`scan_worktree_sensitivity`] (which
+/// redacts every matched path to a `redacted-file:sha256:…` token) and
+/// [`explain_worktree_sensitivity`] (which keeps the real relative path for the
+/// local-only explain surface). Factoring the walk keeps the two entry points
+/// from drifting: they run the SAME exclude logic and the SAME matchers; only
+/// the reference-vs-real-path collection differs. The real paths held here are
+/// transient and private — this struct is never serialized.
+struct SensitivityWalk {
+    /// Each matched file's relative path with the kinds it tripped, in git
+    /// inventory order.
+    matches: Vec<(PathBuf, Vec<MatchedKind>)>,
+    excluded_path_count: usize,
+    exclude_globs: Vec<String>,
+    glob_match_counts: Vec<usize>,
+}
+
+fn walk_worktree_sensitivity(worktree_root: &Path) -> Result<SensitivityWalk> {
     let exclude_globs = resolve_sensitivity_excludes(worktree_root)?;
     let mut glob_match_counts = vec![0usize; exclude_globs.len()];
     let mut excluded_path_count = 0usize;
-    let mut findings = BTreeMap::<&'static str, FindingAccumulator>::new();
+    let mut matches = Vec::new();
     for relative_path in git_inventory_paths(worktree_root)? {
         // A path matching ANY configured glob is skipped before every
         // filename/content check — an explicit operator opt-out, surfaced via
@@ -87,38 +125,85 @@ pub(crate) fn scan_worktree_sensitivity(worktree_root: &Path) -> Result<Sensitiv
             continue;
         }
 
-        let reference = redacted_file_ref(&relative_path);
-        let relative_display = relative_path.to_string_lossy();
-        let relative_lower = relative_display.to_ascii_lowercase();
+        let kinds = classify_file(&path, &relative_path, &metadata)?;
+        if !kinds.is_empty() {
+            matches.push((relative_path, kinds));
+        }
+    }
 
-        if sensitive_filename(&relative_lower) {
+    Ok(SensitivityWalk {
+        matches,
+        excluded_path_count,
+        exclude_globs,
+        glob_match_counts,
+    })
+}
+
+/// The per-file matcher battery, the single home of the sensitivity predicates
+/// so the redacting scan and the explain scan cannot drift. Returns every kind
+/// the file tripped, in a stable order.
+fn classify_file(
+    path: &Path,
+    relative_path: &Path,
+    metadata: &fs::Metadata,
+) -> Result<Vec<MatchedKind>> {
+    let mut kinds = Vec::new();
+    let relative_display = relative_path.to_string_lossy();
+    let relative_lower = relative_display.to_ascii_lowercase();
+
+    if sensitive_filename(&relative_lower) {
+        kinds.push(MatchedKind {
+            kind: "sensitive_filename",
+            severity: "medium",
+            policy_outcome: "warn",
+        });
+    }
+    if generated_path(&relative_lower) && metadata.len() > LARGE_GENERATED_BYTES {
+        kinds.push(MatchedKind {
+            kind: "generated_path",
+            severity: "medium",
+            policy_outcome: "warn",
+        });
+    }
+
+    let text = read_text_prefix(path)?;
+    if contains_known_token(&text) {
+        kinds.push(MatchedKind {
+            kind: "known_token",
+            severity: "high",
+            policy_outcome: "block",
+        });
+    }
+    if contains_private_key_marker(&text) {
+        kinds.push(MatchedKind {
+            kind: "private_key",
+            severity: "high",
+            policy_outcome: "block",
+        });
+    }
+    if contains_high_entropy_token(&text) {
+        kinds.push(MatchedKind {
+            kind: "high_entropy",
+            severity: "medium",
+            policy_outcome: "warn",
+        });
+    }
+    Ok(kinds)
+}
+
+pub(crate) fn scan_worktree_sensitivity(worktree_root: &Path) -> Result<SensitivityScan> {
+    let walk = walk_worktree_sensitivity(worktree_root)?;
+    let mut findings = BTreeMap::<&'static str, FindingAccumulator>::new();
+    for (relative_path, kinds) in &walk.matches {
+        let reference = redacted_file_ref(relative_path);
+        for matched in kinds {
             add_finding(
                 &mut findings,
-                "sensitive_filename",
-                "medium",
-                "warn",
+                matched.kind,
+                matched.severity,
+                matched.policy_outcome,
                 &reference,
             );
-        }
-        if generated_path(&relative_lower) && metadata.len() > LARGE_GENERATED_BYTES {
-            add_finding(
-                &mut findings,
-                "generated_path",
-                "medium",
-                "warn",
-                &reference,
-            );
-        }
-
-        let text = read_text_prefix(&path)?;
-        if contains_known_token(&text) {
-            add_finding(&mut findings, "known_token", "high", "block", &reference);
-        }
-        if contains_private_key_marker(&text) {
-            add_finding(&mut findings, "private_key", "high", "block", &reference);
-        }
-        if contains_high_entropy_token(&text) {
-            add_finding(&mut findings, "high_entropy", "medium", "warn", &reference);
         }
     }
 
@@ -136,13 +221,48 @@ pub(crate) fn scan_worktree_sensitivity(worktree_root: &Path) -> Result<Sensitiv
     Ok(SensitivityScan {
         policy_outcome: combined_policy_outcome(&findings).to_owned(),
         findings,
-        excluded_path_count,
-        exclude_globs: exclude_globs
+        excluded_path_count: walk.excluded_path_count,
+        exclude_globs: walk
+            .exclude_globs
             .into_iter()
-            .zip(glob_match_counts)
+            .zip(walk.glob_match_counts)
             .map(|(glob, matched)| SensitivityExcludeGlob { glob, matched })
             .collect(),
     })
+}
+
+/// The local-only counterpart to [`scan_worktree_sensitivity`]: the same walk
+/// and the same matchers, but each finding retains the REAL worktree-relative
+/// paths instead of the redacted token. The returned type is not `Serialize`;
+/// callers must render it to a human's terminal only and never route it through
+/// the store or an emitted JSON document.
+pub(crate) fn explain_worktree_sensitivity(
+    worktree_root: &Path,
+) -> Result<Vec<SensitivityFindingPaths>> {
+    let walk = walk_worktree_sensitivity(worktree_root)?;
+    let mut grouped: BTreeMap<&'static str, (&'static str, &'static str, BTreeSet<String>)> =
+        BTreeMap::new();
+    for (relative_path, kinds) in &walk.matches {
+        let display = relative_path.to_string_lossy().into_owned();
+        for matched in kinds {
+            let entry = grouped
+                .entry(matched.kind)
+                .or_insert_with(|| (matched.severity, matched.policy_outcome, BTreeSet::new()));
+            entry.2.insert(display.clone());
+        }
+    }
+
+    Ok(grouped
+        .into_iter()
+        .map(
+            |(kind, (severity, policy_outcome, paths))| SensitivityFindingPaths {
+                kind: kind.to_owned(),
+                severity: severity.to_owned(),
+                policy_outcome: policy_outcome.to_owned(),
+                paths: paths.into_iter().collect(),
+            },
+        )
+        .collect())
 }
 
 fn add_finding(
@@ -442,6 +562,58 @@ mod tests {
         assert!(!json.contains("PRIVATE KEY"));
         assert!(!json.contains(".env"));
         assert!(!json.contains("target/generated"));
+    }
+
+    #[test]
+    fn explain_scan_returns_the_real_paths_the_redacting_scan_hides() {
+        // Same matchers as scan_worktree_sensitivity, but the explain surface
+        // keeps the real relative path so the operator can author a targeted
+        // excludeGlobs entry.
+        let repo = TestRepo::new();
+        repo.write("keys/dev.pem", "-----BEGIN PRIVATE KEY-----\nredacted\n");
+        repo.write(
+            "src/token.txt",
+            "let key = \"sk-test000000000000000000000000\";\n",
+        );
+        repo.commit_all("base");
+
+        let groups = explain_worktree_sensitivity(repo.path()).unwrap();
+
+        let private_key = groups
+            .iter()
+            .find(|group| group.kind == "private_key")
+            .expect("private_key group present");
+        assert_eq!(private_key.policy_outcome, "block");
+        assert_eq!(private_key.paths, vec!["keys/dev.pem".to_owned()]);
+
+        let known_token = groups
+            .iter()
+            .find(|group| group.kind == "known_token")
+            .expect("known_token group present");
+        assert_eq!(known_token.paths, vec!["src/token.txt".to_owned()]);
+    }
+
+    #[test]
+    fn explain_scan_honors_exclude_globs_like_the_redacting_scan() {
+        // A path opted out via excludeGlobs is not a finding, so it must not
+        // surface in the explain lane either — both scans share one walk.
+        let repo = TestRepo::new();
+        repo.write(
+            "fixtures/dev.pem",
+            "-----BEGIN PRIVATE KEY-----\nredacted\n",
+        );
+        repo.write(
+            ".shore/sensitivity.json",
+            r#"{"schema":"shore.sensitivity-config","version":1,"excludeGlobs":["fixtures/**"]}"#,
+        );
+        repo.commit_all("base");
+
+        let groups = explain_worktree_sensitivity(repo.path()).unwrap();
+
+        assert!(
+            groups.is_empty(),
+            "excluded path must not be explained: {groups:?}"
+        );
     }
 
     fn assert_finding(scan: &SensitivityScan, kind: &str, severity: &str, policy_outcome: &str) {

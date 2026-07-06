@@ -199,6 +199,10 @@ fn store_migrate_block_refusal_names_the_targeted_exclude_alternative() {
         "the refusal names the targeted alternative: {stderr}"
     );
     assert!(
+        stderr.contains("store status --show-paths"),
+        "the refusal points at the command that lists the matched files: {stderr}"
+    );
+    assert!(
         stderr.contains("include-ephemeral"),
         "the blanket override stays documented: {stderr}"
     );
