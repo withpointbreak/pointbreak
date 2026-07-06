@@ -41,10 +41,12 @@ fn index_html_is_one_master_detail_shell_not_four_views() {
 fn served_assets_preserve_the_advisory_framing_and_competing_peers() {
     let store = representative_store();
     let html = Inspector::spawn(store.repo.path()).get_text("/");
-    // The persistent top-bar advisory affordance stays visible.
+    // The advisory / read-only framing now lives in the store-identity popover note
+    // (issue #391 follow-up) rather than a persistent top-bar badge, but it stays in
+    // the served markup as rendered text, not a `title`-only tooltip.
     assert!(
-        html.contains("advisory"),
-        "the top-bar advisory affordance persists"
+        html.contains("never gates writes") && html.contains("reader-relative"),
+        "the served shell carries the read-only / advisory framing as rendered text"
     );
 }
 

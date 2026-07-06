@@ -710,18 +710,19 @@ fn topbar_exposes_a_density_toggle() {
     );
 }
 
-// The persistent placement is rendered DOM; this asserts the served-copy contract
-// that the visible top-bar advisory framing exists in the served index.html.
+// The advisory / read-only framing is rendered DOM text, not a `title`-only tooltip.
+// It moved from a persistent top-bar badge into the store-identity popover note
+// (issue #391 follow-up): the badge was redundant on a wholly read-only tool, but the
+// substantive posture — recorded state only, reader-relative verification — stays in
+// the served index.html as a real `<p>`, not hidden behind a `title` attribute.
 #[test]
-fn advisory_framing_is_persistently_visible_not_tooltip_only() {
+fn advisory_framing_is_rendered_text_not_tooltip_only() {
     let (_repo, inspector) = served_asset_inspector();
     let index = inspector.get_text("/");
 
-    // The persistent top-bar affordance states the read-only/advisory mode in
-    // visible text (not a tooltip).
     assert!(
-        index.contains("read-only · advisory"),
-        "the topbar carries a persistent read-only · advisory affordance"
+        index.contains("never gates writes") && index.contains("reader-relative"),
+        "the store-identity popover carries the read-only / advisory framing as rendered text"
     );
 }
 
