@@ -1,10 +1,6 @@
 //! Theme selection for `shore diff`'s truecolor lane: preference grammar,
 //! precedence, palettes, and terminal-background detection.
 
-// Consumed by the diff render path once the wiring lands; until then the
-// items here are dead code to the binary. Remove this allow with that wiring.
-#![allow(dead_code)]
-
 use std::borrow::Cow;
 
 use shoreline::highlight::TokenKind;

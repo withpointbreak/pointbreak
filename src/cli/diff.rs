@@ -20,7 +20,7 @@ use shoreline::session::{
     show_revision,
 };
 
-use super::theme::DiffPalette;
+use super::theme::{self, DiffPalette};
 
 /// Print a captured revision's diff (base to target) as a text unified diff.
 #[derive(Debug, clap::Args)]
@@ -39,6 +39,14 @@ pub(super) struct DiffArgs {
     /// When to colorize output: auto (TTY only) | always | never.
     #[arg(long, value_enum, default_value_t = ColorChoice::Auto)]
     color: ColorChoice,
+    /// Color theme for the diff body: auto (detect the terminal background
+    /// and pick the light or dark palette), light, dark, or the name of a
+    /// bundled syntax theme (for example "Monokai Extended" or
+    /// "OneHalfLight"). Themes apply on truecolor terminals; the 16-color
+    /// palette follows the terminal's own theme. Overrides SHORE_THEME and
+    /// BAT_THEME.
+    #[arg(long)]
+    theme: Option<String>,
 }
 
 /// When `shore diff` colorizes its output. Resolved against the ADR-0029 D5
@@ -106,15 +114,47 @@ pub(super) fn run(
     }
     let result: RevisionShowResult = show_revision(options)?;
 
+    // The theme decision point: resolve the colored lane here (env reads,
+    // terminal detection, the stderr warning) so the render stays pure. Built
+    // after `show_revision` so a store error is never preempted by a theme
+    // error, and only when the colored body lane is active — `--stat` and
+    // plain output never resolve themes (and never query the terminal).
+    let lane: Option<ColorLane> = if resolve_color(args.color) && !args.stat {
+        Some(match color_depth() {
+            ColorDepth::Named => ColorLane::Named,
+            ColorDepth::Truecolor => {
+                let selection = theme::theme_selection_from_env(args.theme.as_deref());
+                // The terminal gate; the Auto-only condition lives inside
+                // resolve_truecolor_palette, which invokes the detector at
+                // most once, only where Auto behavior applies.
+                let gate = theme::detection_allowed(
+                    true, // color already resolved on in this branch
+                    std::io::stdout().is_terminal(),
+                    true, // truecolor in this arm
+                );
+                let choice = theme::resolve_truecolor_palette(&selection, || {
+                    if gate { theme::detect_mode() } else { None }
+                })?;
+                if let Some(warning) = &choice.warning {
+                    eprintln!("warning: {warning}");
+                }
+                ColorLane::Truecolor(Box::new(choice.palette))
+            }
+        })
+    } else {
+        None
+    };
+
     // `shore diff` is a filter: render the whole output, then write it. A broken
     // downstream pipe (`shore diff | head`) is a clean stop, not an error.
-    write_all_filtered(stdout, &render_output(&args, &result))
+    write_all_filtered(stdout, &render_output(&args, &result, lane.as_ref()))
 }
 
 /// Build the full `shore diff` output as one string: the removed-content or
 /// empty-diff message, the `--stat` table, or the diffstat header + blank line +
-/// (plain or colored) diff body. Pure — no writes, no store, no git.
-fn render_output(args: &DiffArgs, result: &RevisionShowResult) -> String {
+/// (plain or colored) diff body. Pure — no writes, no store, no git, no env;
+/// the resolved lane (or `None` for plain) is threaded in from `run()`.
+fn render_output(args: &DiffArgs, result: &RevisionShowResult, lane: Option<&ColorLane>) -> String {
     // Removed/suppressed content: an explained line, the full id one step away.
     if result.snapshot_content_state != SnapshotContentState::Present {
         let hash = result
@@ -138,19 +178,17 @@ fn render_output(args: &DiffArgs, result: &RevisionShowResult) -> String {
 
     let mut out = render_diffstat(&result.snapshot.files);
     out.push('\n');
-    out.push_str(&if resolve_color(args.color) {
-        // Interim lane construction: today's dark palette on truecolor. The
-        // theme selection/detection wiring replaces this with the resolved
-        // lane threaded in from `run()`.
-        let lane = match color_depth() {
-            ColorDepth::Truecolor => ColorLane::Truecolor(Box::new(DiffPalette::builtin_dark())),
-            ColorDepth::Named => ColorLane::Named,
-        };
-        render_unified_diff_colored(&result.snapshot, &lane)
-    } else {
-        render_unified_diff(&result.snapshot)
-    });
+    out.push_str(&render_body(&result.snapshot, lane));
     out
+}
+
+/// The (plain or colored) diff body: the pure seam between the lane decision
+/// in `run()` and the renderers. `None` renders plain.
+fn render_body(snapshot: &DiffSnapshot, lane: Option<&ColorLane>) -> String {
+    match lane {
+        Some(lane) => render_unified_diff_colored(snapshot, lane),
+        None => render_unified_diff(snapshot),
+    }
 }
 
 /// Write `content` to `out` and flush, treating a broken downstream pipe as a
@@ -746,6 +784,39 @@ mod tests {
     fn token_kind_maps_to_an_ansi_sgr_sequence() {
         let seq = named_sgr_for_kind(TokenKind::Keyword);
         assert!(seq.starts_with("\x1b[")); // CSI
+    }
+
+    #[test]
+    fn theme_flag_parses_into_diff_args() {
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            args: DiffArgs,
+        }
+        let cli = TestCli::parse_from(["test", "--theme", "OneHalfLight"]);
+        assert_eq!(cli.args.theme.as_deref(), Some("OneHalfLight"));
+        let cli = TestCli::parse_from(["test"]);
+        assert!(cli.args.theme.is_none());
+    }
+
+    #[test]
+    fn render_body_uses_the_given_lane() {
+        // The pure body seam: a truecolor light lane surfaces light bytes,
+        // no lane renders plain.
+        let snapshot = snapshot_with(vec![modified_file(
+            "src/lib.rs",
+            vec![hunk(
+                "@@ -1 +1 @@",
+                vec![row(DiffRowKind::Added, "let x = 2;")],
+            )],
+        )]);
+        let lane = ColorLane::Truecolor(Box::new(DiffPalette::builtin_light()));
+        let colored = render_body(&snapshot, Some(&lane));
+        assert!(colored.contains("\x1b[38;2;122;68;212m")); // light keyword
+        let plain = render_body(&snapshot, None);
+        assert!(!plain.contains('\x1b'));
+        assert_eq!(strip_ansi(&colored), plain);
     }
 
     #[test]
