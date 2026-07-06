@@ -195,6 +195,43 @@ impl DiffPalette {
     }
 }
 
+/// Look up an embedded theme by its bat-compatible name (case-sensitive).
+/// The single two-face read site. `EmbeddedLazyThemeSet::get` takes the
+/// `EmbeddedThemeName` enum, so by-name lookup goes through the inner
+/// `LazyThemeSet` (via the provided `From` impl), whose `get(&str)` is the
+/// name-keyed accessor.
+pub(super) fn theme_by_name(name: &str) -> Option<syntect::highlighting::Theme> {
+    let set: two_face::theme::LazyThemeSet = two_face::theme::extra().into();
+    set.get(name).cloned()
+}
+
+/// Every embedded theme name, for unknown-name error messages. Sorted for
+/// stable output.
+pub(super) fn available_theme_names() -> Vec<String> {
+    let mut names: Vec<String> = two_face::theme::EmbeddedLazyThemeSet::theme_names()
+        .iter()
+        .map(|name| name.as_name().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Which emph pair a named theme gets: BT.601 integer luminance of the
+/// theme's background. `None` (or a bat alpha-sentinel background) yields no
+/// verdict — the caller falls back to Dark without a terminal query.
+pub(super) fn classify_theme_mode(theme: &syntect::highlighting::Theme) -> Option<DiffMode> {
+    let bg = theme.settings.background?;
+    if bg.a == 0 || bg.a == 1 {
+        return None;
+    }
+    let luma = (299 * u32::from(bg.r) + 587 * u32::from(bg.g) + 114 * u32::from(bg.b)) / 1000;
+    Some(if luma >= 128 {
+        DiffMode::Light
+    } else {
+        DiffMode::Dark
+    })
+}
+
 /// Where a theme selection came from — governs the unknown-name posture:
 /// explicit sources fail hard, the inherited source warns and falls back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -317,19 +354,58 @@ mod tests {
         syntect::highlighting::Color { r, g, b, a }
     }
 
-    /// Unwrapping lookup for tests only; the production lookup (with its
-    /// provenance-aware posture) lands with the theme-lookup work.
-    /// `EmbeddedLazyThemeSet::get` takes the enum, so by-name lookup converts
-    /// to the inner `LazyThemeSet` first.
-    fn theme_by_name_for_tests(name: &str) -> syntect::highlighting::Theme {
-        let set: two_face::theme::LazyThemeSet = two_face::theme::extra().into();
-        set.get(name).expect("embedded theme").clone()
+    fn theme_with_background(
+        bg: Option<syntect::highlighting::Color>,
+    ) -> syntect::highlighting::Theme {
+        let mut theme = syntect::highlighting::Theme::default();
+        theme.settings.background = bg;
+        theme
+    }
+
+    #[test]
+    fn looks_up_embedded_themes_by_their_bat_names() {
+        // two-face names are bat's lookup vocabulary (verified identical).
+        assert!(theme_by_name("Monokai Extended").is_some());
+        assert!(theme_by_name("OneHalfLight").is_some());
+        assert!(theme_by_name("Solarized (dark)").is_some());
+        assert!(theme_by_name("no-such-theme").is_none());
+        // Names are case-sensitive (bat semantics).
+        assert!(theme_by_name("monokai extended").is_none());
+    }
+
+    #[test]
+    fn lists_available_names_for_error_messages() {
+        let names = available_theme_names();
+        assert!(names.iter().any(|n| n == "Monokai Extended"));
+        assert!(names.iter().any(|n| n == "OneHalfLight"));
+        assert!(names.len() >= 20); // the embedded set is substantial
+    }
+
+    #[test]
+    fn classifies_theme_mode_from_background_luminance() {
+        // BT.601 integer luminance: (299r + 587g + 114b) / 1000 >= 128 → Light.
+        let light = theme_with_background(Some(color(0xff, 0xff, 0xff, 0xff)));
+        assert_eq!(classify_theme_mode(&light), Some(DiffMode::Light));
+        let dark = theme_with_background(Some(color(0x27, 0x28, 0x22, 0xff))); // Monokai bg
+        assert_eq!(classify_theme_mode(&dark), Some(DiffMode::Dark));
+        // No background, or a sentinel alpha → no verdict.
+        assert_eq!(classify_theme_mode(&theme_with_background(None)), None);
+        let sentinel = theme_with_background(Some(color(0, 0, 0, 0)));
+        assert_eq!(classify_theme_mode(&sentinel), None);
+    }
+
+    #[test]
+    fn embedded_light_and_dark_themes_classify_correctly() {
+        let one_half_light = theme_by_name("OneHalfLight").unwrap();
+        assert_eq!(classify_theme_mode(&one_half_light), Some(DiffMode::Light));
+        let monokai = theme_by_name("Monokai Extended").unwrap();
+        assert_eq!(classify_theme_mode(&monokai), Some(DiffMode::Dark));
     }
 
     #[test]
     fn derives_a_palette_from_an_embedded_theme() {
         // "Monokai Extended" is embedded via two-face; loading is pure (no I/O).
-        let theme = theme_by_name_for_tests("Monokai Extended");
+        let theme = theme_by_name("Monokai Extended").expect("embedded theme");
         let p = DiffPalette::from_theme(&theme, DiffMode::Dark);
         // Monokai keywords are colored: a truecolor fg SGR, not empty.
         assert!(p.sgr_for(TokenKind::Keyword).starts_with("\x1b[38;2;"));
