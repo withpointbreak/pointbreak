@@ -228,3 +228,38 @@ fn shore_diff_color_text_is_identical_to_plain_after_stripping_ansi() {
     assert!(colored.status.success() && plain.status.success());
     assert_eq!(strip_ansi(&out_text(&colored)), out_text(&plain));
 }
+
+#[test]
+fn diff_revision_flag_resolves_short_ids() {
+    let repo = modified_repo();
+    let captured = capture(repo.path());
+    let full = captured["revision"]["id"].as_str().unwrap().to_owned();
+    let digest = full.rsplit_once("sha256:").unwrap().1.to_owned();
+    let path = repo.path().to_str().unwrap();
+
+    let full_out = shore(["diff", "--repo", path, "--revision", &full, "--stat"]);
+    assert!(
+        full_out.status.success(),
+        "stderr:\n{}",
+        err_text(&full_out)
+    );
+
+    // Prefixed short form resolves to the same revision.
+    let prefixed = format!("rev:{}", &digest[..8]);
+    let prefixed_out = shore(["diff", "--repo", path, "--revision", &prefixed, "--stat"]);
+    assert!(
+        prefixed_out.status.success(),
+        "stderr:\n{}",
+        err_text(&prefixed_out)
+    );
+    assert_eq!(out_text(&prefixed_out), out_text(&full_out));
+
+    // Bare fragment: `--revision` implies exactly one id kind, so it resolves too.
+    let bare_out = shore(["diff", "--repo", path, "--revision", &digest[..8], "--stat"]);
+    assert!(
+        bare_out.status.success(),
+        "stderr:\n{}",
+        err_text(&bare_out)
+    );
+    assert_eq!(out_text(&bare_out), out_text(&full_out));
+}

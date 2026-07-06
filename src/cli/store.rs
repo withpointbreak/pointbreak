@@ -520,9 +520,11 @@ fn selector_from_args(
     args: &StoreRemoveArgs,
 ) -> Result<RemoveSelector, Box<dyn std::error::Error>> {
     if let Some(id) = &args.snapshot {
-        Ok(RemoveSelector::Snapshot(ObjectId::new(id.clone())))
+        let ids = crate::cli::id_resolver::IdResolver::new(&args.repo);
+        Ok(RemoveSelector::Snapshot(ObjectId::new(ids.object(id)?)))
     } else if let Some(id) = &args.revision {
-        Ok(RemoveSelector::Revision(RevisionId::new(id.clone())))
+        let ids = crate::cli::id_resolver::IdResolver::new(&args.repo);
+        Ok(RemoveSelector::Revision(RevisionId::new(ids.rev(id)?)))
     } else if let Some(reference) = &args.r#ref {
         Ok(RemoveSelector::Ref(reference.clone()))
     } else if let Some(range) = &args.range {

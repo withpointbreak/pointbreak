@@ -327,7 +327,7 @@ fn store_remove_unknown_snapshot_errors() {
         "--repo",
         repo.path().to_str().unwrap(),
         "--snapshot",
-        "snap:sha256:does-not-exist",
+        &format!("obj:sha256:{}", "0".repeat(64)),
     ]);
 
     assert!(!output.status.success());
@@ -421,4 +421,54 @@ fn add_worktree(repo: &Path, path: &Path, branch: &str) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn store_remove_selectors_resolve_short_ids() {
+    // --snapshot: a prefixed short obj id resolves to the full artifact claim.
+    let repo = modified_repo();
+    let captured = capture(repo.path());
+    let object_id = captured["revision"]["objectId"].as_str().unwrap();
+    let content_hash = captured["revision"]["objectArtifactContentHash"]
+        .as_str()
+        .unwrap();
+    let digest = object_id.rsplit_once("sha256:").unwrap().1;
+    let short_snapshot = format!("obj:{}", &digest[..8]);
+
+    let output = shore([
+        "store",
+        "remove",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--snapshot",
+        &short_snapshot,
+    ]);
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = parse_json(&output.stdout);
+    assert_eq!(json["removed"][0]["contentHash"], content_hash);
+
+    // --revision: a bare fragment resolves (the flag implies exactly one kind).
+    let rev_repo = modified_repo();
+    let rev_captured = capture(rev_repo.path());
+    let revision_id = rev_captured["revision"]["id"].as_str().unwrap();
+    let rev_digest = revision_id.rsplit_once("sha256:").unwrap().1;
+
+    let rev_output = shore([
+        "store",
+        "remove",
+        "--repo",
+        rev_repo.path().to_str().unwrap(),
+        "--revision",
+        &rev_digest[..8],
+    ]);
+    assert!(
+        rev_output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&rev_output.stderr)
+    );
+    assert_eq!(parse_json(&rev_output.stdout)["eventsCreated"], 1);
 }
