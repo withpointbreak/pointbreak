@@ -8,7 +8,6 @@ mod event_signature;
 mod history;
 mod import;
 mod ingest;
-mod reload;
 mod revision_list;
 mod revision_projection;
 mod store_migrate_common_dir;
@@ -71,8 +70,6 @@ pub use observation::{
     ObservationStatus, ObservationTargetSelector, ObservationView, list_observations,
     record_observation,
 };
-pub(crate) use reload::reload_diagnostics_for_document;
-pub use reload::{ReloadDiagnostic, ReloadDiagnosticCode, ReloadOutcome, reload_session};
 pub use revision_list::{
     OrphanVisibility, RefFilterMode, RevisionListEntry, RevisionListOptions, RevisionListResult,
     list_revisions, list_units_for_ref,

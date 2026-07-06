@@ -20,8 +20,8 @@ use shoreline::session::{
     EventVerificationStatus, EventWriteOutcome, ImportArtifactOptions, ImportArtifactOutcome,
     ImportNotesOptions, IngestEventsOptions, InputRequestFetchOptions, InputRequestListOptions,
     InputRequestOpenOptions, InputRequestRespondOptions, InputRequestStatus,
-    InputRequestStatusFilter, ObservationAddOptions, ReloadOutcome, ReviewHistoryOptions,
-    RevisionShowOptions, SensitivityKind, SensitivityPolicyOutcome, SensitivitySeverity, TrustSet,
+    InputRequestStatusFilter, ObservationAddOptions, ReviewHistoryOptions, RevisionShowOptions,
+    SensitivityKind, SensitivityPolicyOutcome, SensitivitySeverity, TrustSet,
     capture_worktree_review, event_signature_trust_set, export_artifact, fetch_input_request,
     import_artifact, import_notes, ingest_events, list_input_requests, open_input_request,
     read_events, record_observation, referenced_artifacts, respond_input_request, review_history,
@@ -669,14 +669,6 @@ fn library_api_documents_event_signing_surface() {
             "library API docs should mention {required}"
         );
     }
-}
-
-/// `ReloadOutcome` is part of the supported surface and must be nameable from a
-/// non-test external build (#117).
-#[test]
-fn reload_outcome_is_publicly_nameable() {
-    fn _accepts(_: ReloadOutcome) {}
-    let _: Option<ReloadOutcome> = None;
 }
 
 /// The exclusion helper must be reachable from outside the crate so the

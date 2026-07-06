@@ -260,7 +260,7 @@ const HIGHLIGHT_ROW_CAP: usize = 500;
 const SGR_RESET: &str = "\x1b[0m";
 const SGR_UNDERLINE: &str = "\x1b[4m";
 
-/// Terminal color capability, mirroring the TUI's `color_depth` (`src/tui/render.rs`).
+/// Terminal color capability.
 #[derive(Clone, Copy)]
 pub(super) enum ColorDepth {
     Truecolor,
@@ -269,7 +269,7 @@ pub(super) enum ColorDepth {
 
 /// Truecolor only when the terminal advertises it via `COLORTERM`; otherwise the
 /// named-ANSI 16-color palette, which degrades cleanly on limited terminals. No new
-/// dependency — just the `COLORTERM` convention the TUI already follows.
+/// dependency — just the `COLORTERM` convention.
 fn color_depth() -> ColorDepth {
     match std::env::var("COLORTERM").ok().as_deref() {
         Some("truecolor") | Some("24bit") => ColorDepth::Truecolor,
@@ -287,11 +287,10 @@ pub(super) enum ColorLane {
     Truecolor(Box<DiffPalette>),
 }
 
-/// `TokenKind` → named-ANSI SGR foreground, the 16-color lane's frozen table.
-/// The color *policy* mirrors the TUI palette (`token_fg`, `src/tui/render.rs`);
-/// only the *encoding* is new — raw SGR strings, no ratatui and no styling
-/// dependency (INV-E: a new emit surface, not a parallel highlighter). The
-/// truecolor tables live on [`DiffPalette`]. `Plain` carries no color.
+/// `TokenKind` → named-ANSI SGR foreground, the 16-color lane's frozen table —
+/// raw SGR strings, no styling dependency (INV-E: a new emit surface, not a
+/// parallel highlighter). The truecolor tables live on [`DiffPalette`].
+/// `Plain` carries no color.
 fn named_sgr_for_kind(kind: TokenKind) -> &'static str {
     match kind {
         TokenKind::Keyword => "\x1b[35m",     // magenta

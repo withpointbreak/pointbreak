@@ -325,38 +325,6 @@ fn revision_show_includes_current_assessment_status() {
 }
 
 #[test]
-fn revision_show_includes_adapter_notes_without_storage_paths() {
-    let repo = modified_repo();
-    shore(["capture", "--repo", repo.path().to_str().unwrap()]);
-    let review_notes = repo.write_fixture("review-notes.json", native_review_notes_json());
-    shore([
-        "notes",
-        "apply",
-        "--repo",
-        repo.path().to_str().unwrap(),
-        "--review-notes",
-        review_notes.to_str().unwrap(),
-    ]);
-
-    let output = shore(["revision", "show", "--repo", repo.path().to_str().unwrap()]);
-    let json = parse_json(&output.stdout);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    assert_eq!(json["adapterNotes"].as_array().unwrap().len(), 1);
-    assert_eq!(json["adapterNotes"][0]["title"], "Changed return value");
-    assert_eq!(json["adapterNotes"][0]["status"], "exact");
-    assert!(
-        json["rows"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|row| row["kind"] == "adapter_note")
-    );
-    assert!(!stdout.contains("artifacts/notes/"));
-    assert!(!stdout.contains(".shore/data/events"));
-}
-
-#[test]
 fn unit_show_projects_range_capture_with_bound_snapshot() {
     let repo = support::committed_repo();
     let capture = parse_json(
@@ -895,24 +863,6 @@ fn respond_to_input_request(repo: &GitRepo, input_request_id: &str, reason: &str
         ])
         .stdout,
     )
-}
-
-fn native_review_notes_json() -> &'static str {
-    r#"{
-  "schema": "shore.review-notes",
-  "version": 1,
-  "files": [
-    {
-      "path": "src/lib.rs",
-      "notes": [
-        {
-          "title": "Changed return value",
-          "target": { "side": "new", "startLine": 1, "endLine": 1 }
-        }
-      ]
-    }
-  ]
-}"#
 }
 
 fn parse_json(bytes: &[u8]) -> Value {

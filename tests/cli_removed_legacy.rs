@@ -1,6 +1,6 @@
 mod support;
 
-use support::{dump_repo, shore};
+use support::shore;
 
 struct RemovedPath {
     argv: &'static [&'static str],
@@ -116,6 +116,19 @@ const REMOVED_PATHS: &[RemovedPath] = &[
         argv: &["keys", "init", "--help"],
         hint_contains: &["The `keys` family is now `key`"],
     },
+    // The legacy working-tree surfaces retired end-to-end (ADR-0030 second amendment).
+    RemovedPath {
+        argv: &["dump", "--help"],
+        hint_contains: &["shore diff", "shore inspect", "shore revision show"],
+    },
+    RemovedPath {
+        argv: &["show", "--help"],
+        hint_contains: &["shore diff", "shore inspect", "shore revision show"],
+    },
+    RemovedPath {
+        argv: &["notes", "apply", "--help"],
+        hint_contains: &["shore observation", "shore revision show"],
+    },
 ];
 
 #[test]
@@ -155,59 +168,5 @@ fn removed_review_paths_are_unregistered_and_hint_at_successors() {
                 case.argv
             );
         }
-    }
-}
-
-#[test]
-fn legacy_hunk_flag_is_rejected_without_shore_mutation() {
-    for command in [vec!["dump"], vec!["show"], vec!["notes", "apply"]] {
-        let repo = dump_repo();
-        let mut args = command;
-        args.extend([
-            "--repo",
-            repo.path().to_str().unwrap(),
-            "--legacy-hunk-agent-context",
-            "agent-context.json",
-        ]);
-
-        let output = shore(args);
-
-        assert!(!output.status.success());
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("unexpected argument"),
-            "stderr:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            !repo.path().join(".shore/data").exists(),
-            "clap rejection must happen before any writer runs"
-        );
-    }
-}
-
-#[test]
-fn help_omits_legacy_hunk_input() {
-    let dump = shore(["dump", "--help"]);
-    let show = shore(["show", "--help"]);
-    let notes_apply = shore(["notes", "apply", "--help"]);
-
-    for output in [&dump, &show, &notes_apply] {
-        assert!(
-            output.status.success(),
-            "stderr:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    for (name, output) in [("dump", dump), ("show", show), ("notes apply", notes_apply)] {
-        let stdout = String::from_utf8(output.stdout).expect("stdout is utf-8");
-        assert!(
-            !stdout.contains("--legacy-hunk-agent-context"),
-            "{name} help still mentions legacy Hunk input:\n{stdout}"
-        );
-        assert!(
-            !stdout.contains("agent-context.json"),
-            "{name} help still mentions agent-context.json:\n{stdout}"
-        );
     }
 }

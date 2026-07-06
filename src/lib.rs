@@ -1,6 +1,5 @@
 pub mod crypto;
 pub mod documents;
-pub mod dump;
 pub mod error;
 pub mod git;
 pub mod highlight;
@@ -9,7 +8,6 @@ pub mod model;
 pub mod perf;
 pub mod session;
 pub mod sidecar;
-pub mod stream;
 
 mod canonical_hash;
 mod storage;

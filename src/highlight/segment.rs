@@ -3,9 +3,7 @@
 //! [`attributed_segments`] merges the syntax-token channel ([`TokenSpan`]) and the intraline-emphasis
 //! channel ([`EmphSpan`]) of a single row into a flat, gap-free list of minimal segments, each tagged
 //! with its covering token kind and emphasis flag. It is the shared, surface-neutral form of the
-//! per-row sweep each emit surface needs: the TUI's private `append_code_segments`
-//! (`src/tui/render.rs`) is the ratatui-typed sibling and is a candidate follow-up to migrate onto
-//! this helper.
+//! per-row sweep each emit surface needs.
 
 use super::{EmphSpan, TokenKind, TokenSpan};
 
@@ -29,9 +27,8 @@ pub struct AttributedSegment {
 /// Best-effort: a span that is reversed, out of range, or not on a UTF-8 char boundary is dropped
 /// from *its* channel independently, so a malformed channel degrades to plain rather than corrupting
 /// the sweep — it never panics. Because every boundary is a validated char boundary, each
-/// `text[a..b]` an emit surface slices from a returned segment is safe. Mirrors the TUI's
-/// `append_code_segments` (`src/tui/render.rs`) but surface-neutral: no ratatui, no ANSI — the emit
-/// surface maps segments to its own styling.
+/// `text[a..b]` an emit surface slices from a returned segment is safe. Surface-neutral:
+/// no ANSI — the emit surface maps segments to its own styling.
 pub fn attributed_segments(
     text: &str,
     tokens: &[TokenSpan],

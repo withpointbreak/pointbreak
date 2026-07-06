@@ -8,8 +8,8 @@ mod support;
 fn format_json_pretty_matches_legacy_pretty() {
     let repo = support::dump_repo();
     let path = repo.path().to_str().unwrap();
-    let via_format = support::shore(["dump", "--repo", path, "--format", "json-pretty"]);
-    let via_legacy = support::shore(["dump", "--repo", path, "--pretty"]);
+    let via_format = support::shore(["history", "--repo", path, "--format", "json-pretty"]);
+    let via_legacy = support::shore(["history", "--repo", path, "--pretty"]);
     assert_eq!(via_format.stdout, via_legacy.stdout);
 }
 
@@ -17,18 +17,18 @@ fn format_json_pretty_matches_legacy_pretty() {
 fn format_text_falls_back_to_indented_json_pre_digest() {
     let repo = support::dump_repo();
     let path = repo.path().to_str().unwrap();
-    let output = support::shore(["dump", "--repo", path, "--format", "text"]);
+    let output = support::shore(["history", "--repo", path, "--format", "text"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Pre-digest fallback: indented JSON (multi-line), same schema tag visible.
     assert!(stdout.lines().count() > 1);
-    assert!(stdout.contains("shore.dump"));
+    assert!(stdout.contains("shore.review-history"));
 }
 
 #[test]
 fn invalid_shore_format_is_a_hard_error() {
     let repo = support::dump_repo();
     let path = repo.path().to_str().unwrap();
-    let output = support::shore_env(["dump", "--repo", path], &[("SHORE_FORMAT", "bogus")]);
+    let output = support::shore_env(["history", "--repo", path], &[("SHORE_FORMAT", "bogus")]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("SHORE_FORMAT"));
 }

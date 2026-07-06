@@ -26,7 +26,7 @@ pub use ids::{
     ObservationId, RefAssociationId, RefWithdrawalId, ReviewId, ReviewNoteId, RevisionId, RowId,
     TrackId, ValidationCheckId, WorkObjectId,
 };
-pub use review::{DiffSnapshot, Review, ReviewStream};
+pub use review::DiffSnapshot;
 pub use review_note::{
     Anchor, AnchorResolution, AnchorResolutionReason, LineRange, ResolutionStatus, ReviewNote,
     ReviewNoteSource, Side, re_resolve_review_notes,
@@ -35,7 +35,7 @@ pub(crate) use review_note::{hash_normalized_lines, rows_for_line_range};
 pub use revision::{
     CommitRangeCaptureMode, ReviewEndpoint, ReviewTargetRef, RevisionSource, WorktreeCaptureMode,
 };
-pub use row::{DiffRow, DiffRowKind, FileMetadataKind, FileMetadataRow, ReviewRow, ReviewRowKind};
+pub use row::{DiffRow, DiffRowKind, FileMetadataKind, FileMetadataRow};
 pub use validation::{ValidationStatus, ValidationTarget, ValidationTrigger};
 pub use work_object::{
     EngagementType, TargetRef, TaskTargetRef, WorkObjectType, engagement_type_of_subject,

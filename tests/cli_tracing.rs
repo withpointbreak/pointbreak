@@ -10,15 +10,21 @@ use support::git_repo::GitRepo;
 fn cli_default_logging_has_empty_stderr() {
     let repo = dump_repo();
 
-    let output =
-        shore_without_log_env(["dump", "--repo", repo.path().to_str().unwrap(), "--compact"]);
+    let output = shore_without_log_env([
+        "history",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--compact",
+    ]);
 
     assert!(
         output.status.success(),
         "stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).starts_with("{\"schema\":\"shore.dump\""));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).starts_with("{\"schema\":\"shore.review-history\"")
+    );
     assert!(String::from_utf8_lossy(&output.stderr).is_empty());
 }
 
@@ -29,7 +35,7 @@ fn cli_log_filter_writes_trace_output_to_stderr_without_polluting_stdout() {
     let output = shore([
         "--log",
         "shore=debug",
-        "dump",
+        "history",
         "--repo",
         repo.path().to_str().unwrap(),
         "--compact",
@@ -43,7 +49,7 @@ fn cli_log_filter_writes_trace_output_to_stderr_without_polluting_stdout() {
     let stdout = String::from_utf8(output.stdout).expect("stdout is utf-8");
     let stderr = String::from_utf8(output.stderr).expect("stderr is utf-8");
 
-    assert!(stdout.starts_with("{\"schema\":\"shore.dump\""));
+    assert!(stdout.starts_with("{\"schema\":\"shore.review-history\""));
     assert!(!stdout.contains("shore::"));
     assert!(stderr.contains("shore") || stderr.contains("event"));
 }
@@ -58,7 +64,7 @@ fn cli_log_file_writes_trace_output_to_file_not_stdout_or_stderr() {
         "shore=debug",
         "--log-file",
         log_path.to_str().unwrap(),
-        "dump",
+        "history",
         "--repo",
         repo.path().to_str().unwrap(),
         "--compact",
@@ -69,7 +75,9 @@ fn cli_log_file_writes_trace_output_to_file_not_stdout_or_stderr() {
         "stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).starts_with("{\"schema\":\"shore.dump\""));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).starts_with("{\"schema\":\"shore.review-history\"")
+    );
     assert!(String::from_utf8_lossy(&output.stderr).is_empty());
     assert!(std::fs::read_to_string(log_path).unwrap().contains("shore"));
 }
@@ -86,7 +94,7 @@ fn cli_log_json_format_writes_parseable_json_lines() {
         "json",
         "--log-file",
         log_path.to_str().unwrap(),
-        "dump",
+        "history",
         "--repo",
         repo.path().to_str().unwrap(),
         "--compact",
@@ -113,7 +121,7 @@ fn cli_log_filter_precedence_is_flag_then_shore_log_then_rust_log() {
         [
             "--log",
             "off",
-            "dump",
+            "history",
             "--repo",
             repo.path().to_str().unwrap(),
         ],
@@ -122,7 +130,7 @@ fn cli_log_filter_precedence_is_flag_then_shore_log_then_rust_log() {
     assert!(String::from_utf8_lossy(&flag_beats_env.stderr).is_empty());
 
     let shore_log_beats_rust_log = shore_with_env(
-        ["dump", "--repo", repo.path().to_str().unwrap()],
+        ["history", "--repo", repo.path().to_str().unwrap()],
         [("SHORE_LOG", "off"), ("RUST_LOG", "shore=debug")],
     );
     assert!(String::from_utf8_lossy(&shore_log_beats_rust_log.stderr).is_empty());
@@ -130,26 +138,10 @@ fn cli_log_filter_precedence_is_flag_then_shore_log_then_rust_log() {
 
 #[test]
 fn cli_log_invalid_filter_exits_nonzero() {
-    let output = shore(["--log", "[", "dump", "--repo", "."]);
+    let output = shore(["--log", "[", "history", "--repo", "."]);
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("invalid log filter"));
-}
-
-#[test]
-fn show_requires_log_file_when_logging_is_enabled() {
-    let repo = dump_repo();
-
-    let output = shore([
-        "--log",
-        "shore=debug",
-        "show",
-        "--repo",
-        repo.path().to_str().unwrap(),
-    ]);
-
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("shore show requires --log-file"));
 }
 
 fn shore<I, S>(args: I) -> Output

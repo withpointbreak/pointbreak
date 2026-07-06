@@ -34,10 +34,6 @@ pub(crate) enum LogFormatArg {
     Json,
 }
 
-pub(crate) fn tracing_enabled(args: &TracingArgs) -> bool {
-    resolve_log_filter(args).is_some() || perf::is_enabled()
-}
-
 pub(crate) fn init_tracing(args: &TracingArgs) -> Result<(), Box<dyn std::error::Error>> {
     let perf_enabled = perf::is_enabled();
     let log_filter = resolve_log_filter(args);

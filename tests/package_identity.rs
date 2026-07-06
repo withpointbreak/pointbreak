@@ -6,7 +6,7 @@ use std::{fs, io};
 fn package_and_library_identity_are_shoreline() {
     assert_eq!(env!("CARGO_PKG_NAME"), "shoreline");
 
-    let _ = std::any::type_name::<shoreline::model::ReviewStream>();
+    let _ = std::any::type_name::<shoreline::model::DiffSnapshot>();
 }
 
 #[test]

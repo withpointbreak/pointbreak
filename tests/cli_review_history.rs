@@ -414,36 +414,6 @@ fn review_history_succeeds_without_events() {
 }
 
 #[test]
-fn review_history_includes_imported_review_notes() {
-    let repo = modified_repo();
-    let review_notes = repo.write_fixture("review-notes.json", native_review_notes_json());
-    shore([
-        "notes",
-        "apply",
-        "--repo",
-        repo.path().to_str().unwrap(),
-        "--review-notes",
-        review_notes.to_str().unwrap(),
-    ]);
-
-    let output = shore([
-        "history",
-        "--repo",
-        repo.path().to_str().unwrap(),
-        "--event-type",
-        "review-note-imported",
-    ]);
-    let json = parse_json(&output.stdout);
-
-    assert_eq!(json["historyCount"], 1);
-    assert_eq!(json["entries"][0]["eventType"], "review_note_imported");
-    assert_eq!(
-        json["entries"][0]["summary"]["title"],
-        "Changed return value"
-    );
-}
-
-#[test]
 fn history_renders_verification_status_for_a_signed_capture() {
     let home = tempfile::tempdir().unwrap();
     let env_home = home.path().to_str().unwrap();
@@ -757,22 +727,4 @@ fn respond_to_input_request(repo: &GitRepo, input_request_id: &str, reason: &str
         ])
         .stdout,
     )
-}
-
-fn native_review_notes_json() -> &'static str {
-    r#"{
-  "schema": "shore.review-notes",
-  "version": 1,
-  "files": [
-    {
-      "path": "src/lib.rs",
-      "notes": [
-        {
-          "title": "Changed return value",
-          "target": { "side": "new", "startLine": 1, "endLine": 1 }
-        }
-      ]
-    }
-  ]
-}"#
 }
