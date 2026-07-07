@@ -34,7 +34,7 @@ fn release_workflows_target_single_pointbreak_crate() {
     assert!(release_script.contains(r#"REPO="kevinswiber/pointbreak""#));
     assert!(!release.contains("boardwalk"));
     assert!(cog.contains(r#""git commit --amend -m 'chore: v{{version}}'""#));
-    assert!(cog.contains(r#""git tag -f v{{version}}""#));
+    assert!(cog.contains(r#""git tag -f -m 'v{{version}}' v{{version}}""#));
     assert!(cog.contains(r#""git push origin HEAD:main""#));
     assert!(cog.contains(r#""git push origin refs/tags/v{{version}}""#));
     assert!(cog.contains("gh workflow run release.yml -f tag=v{{version}}"));
