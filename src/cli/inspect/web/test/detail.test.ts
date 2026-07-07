@@ -101,6 +101,21 @@ describe("renderDetail (event detail / empty prompt)", () => {
     expect(revLink?.hasAttribute("data-ref-kind")).toBe(false);
   });
 
+  it("entity anchors display the short ref form with the full id in href and title", async () => {
+    const refs = await import("../src/refs");
+    store.commit({ selected: { kind: "event", id: OBS_EVENT }, open: true });
+    detail.renderDetail();
+    const evLink = document.querySelector<HTMLAnchorElement>(
+      `#detail-body dl.kv a[href="#/event/${encodeURIComponent(OBS_EVENT)}"]`,
+    );
+    expect(evLink?.textContent).toBe(refs.shortRef(OBS_EVENT));
+    expect(evLink?.getAttribute("title")).toBe(OBS_EVENT);
+    const revLink = document.querySelector<HTMLAnchorElement>(
+      `#detail-body dl.kv a[href="#/revision/${encodeURIComponent(REV)}"]`,
+    );
+    expect(revLink?.textContent).toBe(refs.shortRef(REV));
+  });
+
   it("the track kv row stays a ref chip (no entity route exists for tracks)", () => {
     store.commit({ selected: { kind: "event", id: OBS_EVENT }, open: true });
     detail.renderDetail();

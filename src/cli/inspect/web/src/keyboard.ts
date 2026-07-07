@@ -275,6 +275,21 @@ export function onKey(ev: KeyboardEvent): void {
       activateSelection();
       return;
     }
+    case " ": {
+      // Space pages the open detail pane (Shift+Space pages up) — the reader
+      // idiom: j/k steps items, Space reads more of the current one. A native
+      // control target keeps its native Space; a closed pane keeps the
+      // browser's default page scroll.
+      const t = ev.target;
+      if (t instanceof Element && t.closest("a[href], button")) return;
+      if (!getState().open) return;
+      const pane = $("#detail");
+      if (!pane) return;
+      ev.preventDefault();
+      const page = pane.clientHeight > 0 ? pane.clientHeight * 0.85 : 400;
+      pane.scrollTop += ev.shiftKey ? -page : page;
+      return;
+    }
     case "?":
       ev.preventDefault();
       toggleHelp();

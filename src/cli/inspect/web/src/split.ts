@@ -49,6 +49,9 @@ export function initControls(): void {
 
   divider.addEventListener("pointerdown", (ev) => {
     ev.preventDefault();
+    // preventDefault suppresses native focus-on-mousedown, so focus explicitly:
+    // a click must leave the divider keyboard-operable (arrows/Enter).
+    divider.focus();
     divider.setPointerCapture?.(ev.pointerId);
     divider.classList.add("dragging");
   });

@@ -2611,7 +2611,7 @@
   // src/detail.ts
   var shownCompositeId = null;
   function entityAnchor(kind, id, label) {
-    return `<a href="#/${kind}/${encodeURIComponent(id)}">${escapeHtml(label ?? id)}</a>`;
+    return `<a href="#/${kind}/${encodeURIComponent(id)}" title="${escapeHtml(id)}">${escapeHtml(label ?? shortRef(id))}</a>`;
   }
   __name(entityAnchor, "entityAnchor");
   function eventBodyBlock(e) {
@@ -3550,6 +3550,17 @@
         activateSelection();
         return;
       }
+      case " ": {
+        const t = ev.target;
+        if (t instanceof Element && t.closest("a[href], button")) return;
+        if (!getState().open) return;
+        const pane = $("#detail");
+        if (!pane) return;
+        ev.preventDefault();
+        const page = pane.clientHeight > 0 ? pane.clientHeight * 0.85 : 400;
+        pane.scrollTop += ev.shiftKey ? -page : page;
+        return;
+      }
       case "?":
         ev.preventDefault();
         toggleHelp();
@@ -4052,6 +4063,7 @@ click to open the revision page">
     divider.setAttribute("aria-valuenow", String(preferredSplit() ?? 50));
     divider.addEventListener("pointerdown", (ev) => {
       ev.preventDefault();
+      divider.focus();
       divider.setPointerCapture?.(ev.pointerId);
       divider.classList.add("dragging");
     });

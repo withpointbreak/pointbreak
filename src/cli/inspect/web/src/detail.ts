@@ -61,6 +61,7 @@ import {
 import {
   linkify,
   shortId,
+  shortRef,
   type TargetDisplay,
   targetDisplayLabel,
   targetHeadBadge,
@@ -125,7 +126,9 @@ function entityAnchor(
   id: string,
   label?: string,
 ): string {
-  return `<a href="#/${kind}/${encodeURIComponent(id)}">${escapeHtml(label ?? id)}</a>`;
+  // Match the ref-chip display contract: the short form as text, the full id
+  // in the title tooltip (and in the href).
+  return `<a href="#/${kind}/${encodeURIComponent(id)}" title="${escapeHtml(id)}">${escapeHtml(label ?? shortRef(id))}</a>`;
 }
 
 /** The first non-empty body fallback for an event: body, then summary, then reason. */

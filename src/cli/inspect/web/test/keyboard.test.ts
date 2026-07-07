@@ -103,6 +103,17 @@ describe("selection stepping / activation / search", () => {
     expect(store.getState().diff).toBe(OBJ);
   });
 
+  it("Enter twice from a parked EVENT cursor descends into the diff", async () => {
+    key({ key: "j" }); // park the cursor on the first timeline event
+    await new Promise((r) => setTimeout(r, 0));
+    expect(store.getState().selected.kind).toBe("event");
+    expect(store.getState().open).toBe(false);
+    key({ key: "Enter" });
+    expect(store.getState().open).toBe(true);
+    key({ key: "Enter" });
+    expect(store.getState().diff).not.toBeNull();
+  });
+
   it("Enter on a focused native control stays native (no ladder)", () => {
     store.commit({ selected: { kind: "revision", id: REV }, open: false });
     const btn = document.querySelector<HTMLElement>("#theme-toggle");
@@ -191,6 +202,29 @@ describe("overlays via the keyboard", () => {
     expect(store.getState().filterText).toBe("sig");
     key({ key: "Escape" });
     expect(store.getState().filterText).toBe("");
+  });
+});
+
+describe("Space scrolls the open detail pane", () => {
+  it("Space pages down, Shift+Space pages up; closed pane leaves Space native", () => {
+    store.commit({ selected: { kind: "revision", id: REV }, open: true });
+    const pane = document.querySelector<HTMLElement>("#detail");
+    if (!pane) throw new Error("#detail not mounted");
+    pane.scrollTop = 0;
+    key({ key: " " });
+    const paged = pane.scrollTop;
+    expect(paged).toBeGreaterThan(0);
+    key({ key: " ", shiftKey: true });
+    expect(pane.scrollTop).toBeLessThan(paged);
+    // Closed: Space is not intercepted (native page scroll keeps working).
+    store.commit({ open: false });
+    const ev = new KeyboardEvent("keydown", {
+      key: " ",
+      bubbles: true,
+      cancelable: true,
+    });
+    document.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(false);
   });
 });
 

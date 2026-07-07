@@ -163,6 +163,15 @@ describe("the divider controller (drag / reset / keys)", () => {
     expect(el.classList.contains("dragging")).toBe(false);
   });
 
+  it("pointerdown focuses the divider so arrow keys work right after a click", () => {
+    split.initControls();
+    const el = divider();
+    el.dispatchEvent(
+      new PointerEvent("pointerdown", { pointerId: 1, bubbles: true }),
+    );
+    expect(document.activeElement).toBe(el);
+  });
+
   it("divider keys never leak to the global keyboard handler", () => {
     document.addEventListener("keydown", keyboard.onKey);
     store.commit({ selected: { kind: "revision", id: REV }, open: false });
