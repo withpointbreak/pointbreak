@@ -38,13 +38,36 @@ caller would see them.
 
 - `shore capture` and the write commands emit **compact JSON only**. Pipe through `jq` or
   `python3 -m json.tool` if you want to read them. Most read commands accept `--pretty`.
-- `shore` writes durable state into `.shore/data/` inside the worktree. After a manual test, you can
-  remove the temp directory; nothing escapes it.
+- `shore` resolves one of three durable stores, and every command in this playbook reads and writes
+  whichever one is resolved:
+  - **Default — the clone's common-dir store at `.git/shore/`.** Automatic, no setup, shared by the
+    main worktree and every linked worktree of the clone. It lives entirely inside `.git/`, so it
+    never appears in `git status` and never adds rows to a captured snapshot, and no `.shore/`
+    directory is created. The walkthroughs below use this default unless they say otherwise.
+  - **Ephemeral opt-in — a discardable worktree-local store at `.shore/data/`.** Enabled per
+    worktree with `shore store mode ephemeral`; Shoreline also writes a `.shore/store.json` marker
+    and a generated `.shore/.gitignore` (ignoring `data/` and `*.local.json`). Remove the worktree
+    and the review facts vanish with it. §H opts into this mode to poke at the store's files
+    directly.
+  - **Family opt-in — a machine-wide store at `<shore-home>/stores/<slug>/`.** Enabled per physical
+    clone with `shore store link <slug>` so review facts survive removing any one clone and are
+    shared across a repository family, offline. The "Family store" walkthrough exercises the loop.
+
+  See [storage-model.md](./storage-model.md#shared-common-dir-store-selection) for the default and
+  ephemeral tiers and [the family-store tier](./storage-model.md#user-level-family-store-tier) for
+  depth. After a manual test you can remove the temp directory (and, for the family walkthrough, its
+  throwaway `SHORE_HOME`); nothing escapes them.
+- **How to run these.** Sections A and C–G share **one** repo: §A does the single `shore capture`
+  that the later sections annotate, so keep working in the same temp repo through §G. Bare review
+  commands need exactly one captured revision — a second capture triggers
+  `multiple captured revisions; pass --revision` — so §B (untracked files), §H (storage soundness),
+  and the family-store walkthrough each start from their **own** fresh temp repo and say so.
 
 ## A. Basic capture of tracked changes
 
-**Goal.** Confirm that `shore capture` records a `work_object_proposed` event, writes a
-snapshot artifact, and rebuilds `.shore/data/state.json`.
+**Goal.** Confirm that `shore capture` records a `work_object_proposed` event (plus the
+`revision_ref_associated` event that binds the revision ref), writes a snapshot artifact, and
+rebuilds `.git/shore/state.json`.
 
 ```bash
 # Add a tracked file on top of the baseline commit, then modify it so the
@@ -54,26 +77,33 @@ git add src.txt && git commit -q -m "add src"
 echo -e "alpha\nbeta-modified\ngamma\ndelta" > src.txt
 
 shore capture | jq .
-ls -la .shore/data/
-ls .shore/data/events/ .shore/data/artifacts/objects/
+ls -la .git/shore/
+ls .git/shore/events/ .git/shore/artifacts/objects/
 ```
 
 **Expect.**
 
-- One JSON document with `schema: "shore.review-capture"`, a `revision.id`, a `revisionId`, an
-  `objectId`, and an `objectArtifactContentHash`.
-- `.shore/data/events/` contains exactly one event file.
-- `.shore/data/artifacts/objects/` contains exactly one snapshot artifact.
-- `.shore/data/state.json` exists and reports `revisionCount: 1`.
-- No `.git/info/exclude` entry is written; a worktree-local (ephemeral) store is covered by the
-  generated, committed `.shore/.gitignore` instead, and the root `.gitignore` is unchanged
-  (`git status --short` reports no `.gitignore` line).
+- One JSON document with `schema: "shore.review-capture"`; under `revision` it carries `id`,
+  `revisionId`, `objectId`, and `objectArtifactContentHash`. It also reports `eventsCreated: 2` and
+  `eventsCreatedByType: { "work_object_proposed": 1, "revision_ref_associated": 1 }`.
+- `.git/shore/events/` contains exactly two event files — one `work_object_proposed` and one
+  `revision_ref_associated`.
+- `.git/shore/artifacts/objects/` contains exactly one snapshot artifact.
+- `.git/shore/state.json` exists and reports `revisionCount: 1` with `eventCount: 2`.
+- Nothing lands in the working tree: the default store is inside `.git/`, so no `.shore/` directory
+  is created, the root `.gitignore` is untouched, and `git status --short` shows only your own
+  change (` M src.txt`). (An ephemeral-mode worktree instead materializes `.shore/data/` guarded by
+  a generated `.shore/.gitignore`; see §H.)
 
 ## B. Capture with untracked files
 
 **Goal.** Confirm that untracked files appear as `added` in the captured snapshot.
 
+Run §B in its **own** fresh temp repo (re-run the setup baseline) so its capture is the only
+revision and the later sections' single-revision commands are unaffected:
+
 ```bash
+# Fresh temp repo with only the baseline commit (see setup), then add one untracked file:
 echo "fresh content" > new-file.txt
 shore capture | jq .diffstat
 shore revision show --pretty | jq '[.rows[] | select(.kind == "file_header") | .filePath]'
@@ -81,15 +111,12 @@ shore revision show --pretty | jq '[.rows[] | select(.kind == "file_header") | .
 
 **Expect.**
 
-- One `file_header` row per modified, added, or deleted path.
-- The untracked `new-file.txt` appears among the captured files.
-- No root `.gitignore` row appears: the shared store lives inside `.git/`, and an ephemeral store
-  is covered by the generated `.shore/.gitignore` — Shoreline never edits the root `.gitignore`.
-- No `.shore/data/` rows appear, because the generated ignore keeps Shoreline's own storage out of
-  the captured snapshot.
-
-If you want a fresh capture that *only* sees the untracked file, run this in a different temp repo
-that has no other diff.
+- `diffstat` reports `fileCount: 1`, `addedFiles: 1` (the untracked `new-file.txt`), and zero
+  modified, deleted, or renamed files.
+- One `file_header` row, for `new-file.txt` — the untracked file is captured as `added`.
+- Nothing Shoreline-owned appears in the snapshot or in `git status`: the default store lives inside
+  `.git/`, so there is no `.shore/` directory and no store rows in the captured diff, and Shoreline
+  never edits the root `.gitignore` (`git status --short` shows only `?? new-file.txt`).
 
 ## C. Observations — add and list
 
@@ -295,7 +322,25 @@ shore revision show --pretty --track agent:codex \
 durable store, and that `.shore/data/state.json` is a pure projection that can be deleted and
 regenerated.
 
-The authority split (see `docs/storage-model.md`):
+This section runs in its **own** fresh temp repo switched to **ephemeral** mode, so the store lands
+at a visible, worktree-local `.shore/data/` you can list and delete directly. (The default store
+holds the same layout inside `.git/shore/`; ephemeral just surfaces it in the working tree.)
+
+```bash
+# Fresh temp repo with the baseline commit (see setup). Add a tracked file, then modify it so the
+# working tree has a real diff, and opt into ephemeral BEFORE capturing:
+echo -e "alpha\nbeta\ngamma" > src.txt
+git add src.txt && git commit -q -m "add src"
+echo -e "alpha\nbeta-modified\ngamma\ndelta" > src.txt
+
+shore store mode ephemeral                                # store now resolves to .shore/data/
+shore capture >/dev/null
+shore observation add --track agent:codex --title "seed one" >/dev/null
+shore observation add --track human:kevin --title "seed two" >/dev/null
+```
+
+The authority split (see [storage-model.md](./storage-model.md#shared-common-dir-store-selection),
+shown here with the ephemeral `.shore/data/` paths):
 
 - `.shore/data/events/` — append-only immutable per-fact events.
 - `.shore/data/artifacts/` — immutable support records that events bind to: captured revision
@@ -336,6 +381,52 @@ If you want to confirm idempotency directly, re-run the same `observation add` w
 `--idempotency-key <same-key>`: the response should show `eventsCreated: 0`, `eventsExisting: 1`,
 and the same `observationId` and `eventId` as the first call.
 
+## Family store — link, capture, status, unlink
+
+**Goal.** Confirm the opt-in user-level family store: `shore store link` promotes a clone to a
+machine-wide store at `<shore-home>/stores/<slug>/`, `shore store status` reports the family
+placement, captures write there while linked, and `shore store unlink` detaches without moving data.
+
+Run this in its **own** fresh temp repo, and point `SHORE_HOME` at a throwaway directory so the
+family store never touches your real `~/.shore`:
+
+```bash
+# Fresh temp repo with the baseline commit (see setup). Set a throwaway family-store home first:
+export SHORE_HOME="$(mktemp -d)"
+echo -e "alpha\nbeta\ngamma" > src.txt
+git add src.txt && git commit -q -m "add src"
+echo -e "alpha\nbeta-modified\ngamma\ndelta" > src.txt
+shore capture >/dev/null                    # a fact in the clone-local .git/shore store, to fold forward
+
+shore store status | jq '{mode, storeRef}'                     # before link
+shore store link demo-family --dry-run | jq '{schema}'         # preview only; writes nothing, exits 0
+shore store link demo-family | jq '{schema, familyRef, createdFamily, foldedEventsCreated}'
+shore store status | jq '{mode, storeRef, liveCloneCount, orphaned}'   # after link
+echo "later change" >> src.txt && shore capture >/dev/null     # now writes into the family store
+shore store unlink | jq '{schema, previousFamilyRef, deregistered}'
+shore store status | jq '{mode, storeRef}'                     # back to clone-local
+```
+
+**Expect.**
+
+- Before link, `store status` reports `mode: "local"` and `storeRef: "local"` (the clone-local
+  `.git/shore` default).
+- `store link … --dry-run` emits a `shore.store-link-preview` document and exits 0 without writing
+  anything; the real `store link` emits `shore.store-link` with `familyRef: "demo-family"`,
+  `createdFamily: true`, and `foldedEventsCreated: 2` (the clone-local history folded forward).
+- After link, `store status` reports `mode: "user-level"`, `storeRef: "demo-family"`,
+  `liveCloneCount: 1`, `orphaned: false`, and the family directory exists at
+  `$SHORE_HOME/stores/demo-family/` with `events/` and `artifacts/`.
+- Capturing while linked writes into the family store — its `events/` grows to four (the two folded
+  events plus the two from the new capture).
+- `store unlink` emits `shore.store-unlink` with `previousFamilyRef: "demo-family"` and
+  `deregistered: true`; afterward `store status` reports `mode: "local"` again. Unlink moves no
+  review data.
+
+See [storage-model.md](./storage-model.md#user-level-family-store-tier) for the link gates
+(ephemeral/sensitivity refusals, sync-managed-path warnings, and the destructive `store forget`
+verb) that this quick loop does not exercise.
+
 ## I. Things to glance at after big changes
 
 When refactoring storage, projections, or CLI surfaces, also look at:
@@ -345,7 +436,7 @@ When refactoring storage, projections, or CLI surfaces, also look at:
 - **Event file count**: each `add`/`request`/`resolve`/`apply` call should create exactly one new
   event file unless it is a same-key idempotent retry.
 - **Artifact dedup**: writing two observations with the same **large** body string should yield
-  one file in `.shore/data/artifacts/notes/` (content-addressed) and two events that both reference it
+  one file in `.git/shore/artifacts/notes/` (content-addressed) and two events that both reference it
   by content hash. Bodies under roughly 4 KiB stay inline in the event payload and do not produce
   an artifact at all, so use a body well over that threshold to exercise this path —
   `python3 -c "print('x'*5000)" > big-body.txt` and pass `--body-file big-body.txt` to two
@@ -358,7 +449,8 @@ When refactoring storage, projections, or CLI surfaces, also look at:
 ## What this playbook does not cover
 
 - Performance benchmarking or stress tests.
-- Multi-writer coordination — V1 is intentionally single-writer per `.shore/data/`.
+- Multi-writer coordination — V1 is intentionally single-writer per resolved store (the default
+  `.git/shore`, an ephemeral `.shore/data`, or a linked family store).
 - Daemon, notification, or delivery-queue behavior — none of those exist in V1.
 
 If a workflow you exercise during real review reveals a gap that is not covered here, add a short
