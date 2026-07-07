@@ -4010,6 +4010,10 @@ click to open the revision page">
       "click",
       () => navigate({ open: false })
     );
+    $("#detail-back")?.addEventListener(
+      "click",
+      () => navigate({ open: false })
+    );
     $("#detail-read")?.addEventListener(
       "click",
       () => commit({ reading: !getState().reading })

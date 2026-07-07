@@ -241,6 +241,15 @@ describe("renderSelected (delegates to detail)", () => {
     expect(btn.getAttribute("aria-label")).toBe("Restore split");
   });
 
+  it("the back affordance closes the detail keeping the cursor", () => {
+    render.initControls();
+    store.commit({ selected: { kind: "event", id: OBS_EVENT }, open: true });
+    render.render();
+    ($("#detail-back") as HTMLElement).click();
+    expect(store.getState().open).toBe(false);
+    expect(store.getState().selected.id).toBe(OBS_EVENT);
+  });
+
   it("the close button closes the detail keeping the cursor", () => {
     store.commit({ selected: { kind: "event", id: OBS_EVENT }, open: true });
     render.render();

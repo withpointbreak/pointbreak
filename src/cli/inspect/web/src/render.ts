@@ -363,6 +363,11 @@ export function initControls(): void {
   $<HTMLElement>("#detail-close")?.addEventListener("click", () =>
     navigate({ open: false }),
   );
+  // The narrow-viewport sheet's back affordance — the same close rung with a
+  // different face; CSS hides it at wide widths (no TS knows the breakpoint).
+  $<HTMLElement>("#detail-back")?.addEventListener("click", () =>
+    navigate({ open: false }),
+  );
   // Reading mode toggles through commit, never navigate — it is session-only
   // state (not URL), and a navigate would push a junk history entry.
   $<HTMLElement>("#detail-read")?.addEventListener("click", () =>

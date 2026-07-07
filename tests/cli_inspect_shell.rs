@@ -69,6 +69,25 @@ fn served_css_has_a_narrow_viewport_shell_contract() {
             && css.contains("justify-content: flex-start"),
         "topbar and stats should be able to wrap instead of causing narrow overflow"
     );
+    // The narrow detail is a slide-over sheet, not a stacked half-height row:
+    // full-height over the list, transform-driven so the open/close animates,
+    // with the list's scroll position preserved beneath it.
+    let narrow = css
+        .split("@media (max-width: 760px)")
+        .nth(1)
+        .expect("narrow viewport media block exists");
+    assert!(
+        narrow.contains("#detail") && narrow.contains("position: fixed"),
+        "narrow detail should be a full-height sheet over the list"
+    );
+    assert!(
+        narrow.contains("translateX"),
+        "the sheet should slide via a transform bound to the open state"
+    );
+    assert!(
+        css.contains("prefers-reduced-motion"),
+        "the sheet slide should honor prefers-reduced-motion"
+    );
 }
 
 #[test]

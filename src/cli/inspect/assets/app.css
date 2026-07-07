@@ -241,6 +241,11 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-directio
 .divider:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
 .divider:focus-visible::after { background: var(--accent); }
 
+/* The narrow-viewport sheet honors reduced motion: an instant swap, no slide. */
+@media (prefers-reduced-motion: reduce) {
+  #detail { transition: none; }
+}
+
 /* The master pane is the swappable lens body; it owns the scroll + the divider
    between it and the detail pane. */
 #master { min-height: 0; min-width: 0; display: flex; flex-direction: column; }
@@ -275,6 +280,9 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-directio
    larger than the ghost default — at --fs-xs the ✕ is too small a target. */
 .detail-head { display: flex; justify-content: flex-end; gap: 2px; }
 .detail-head .ghost { font-size: var(--fs-md); line-height: 1; }
+/* The sheet's back affordance: markup at every width, revealed only by the
+   narrow media block below. */
+.detail-back { display: none; margin-right: auto; }
 .detail .empty { color: var(--fg-dim); }
 .detail h2 { font-size: var(--fs-lg); margin: 0 0 4px; }
 .detail .kv { display: grid; grid-template-columns: 130px 1fr; gap: 4px 10px; font-size: var(--fs-sm); margin-bottom: 12px; }
@@ -315,17 +323,44 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-directio
     padding: 8px 10px;
   }
 
+  /* The list owns the whole viewport; the detail becomes a slide-over sheet.
+     No TS knows this breakpoint — the sheet is a pure re-projection of the same
+     split-closed class the wide layout uses (open ⇔ the sheet is in). */
   .split {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(220px, 45vh) minmax(0, 1fr);
   }
 
   .divider { display: none; }
 
-  #master {
-    border-right: 0;
-    border-bottom: 1px solid var(--border);
+  #master { border-right: 0; }
+
+  /* Specificity: the wide layout hides a closed pane via
+     `.split.split-closed #detail { display: none; }` (1-2-0), which a bare
+     `#detail` rule cannot override. The sheet must exist off-canvas while
+     closed for the slide to animate, so the closed state re-declares
+     `display: block` at the same specificity (order wins), and the base sheet
+     rule rides `.split #detail`. The list never reflows beneath the fixed
+     sheet, so its scroll position survives open/close. */
+  .split #detail {
+    position: fixed;
+    inset: 0;
+    z-index: 4;
+    background: var(--bg);
+    border-left: 1px solid var(--border);
+    transform: translateX(102%);
+    transition: transform 0.22s ease;
   }
+  .split.split-closed #detail { display: block; transform: translateX(102%); }
+  .split:not(.split-closed) #detail { transform: translateX(0); box-shadow: -18px 0 32px rgba(0, 0, 0, 0.28); }
+
+  /* The sheet's back affordance (hidden at wide widths). */
+  .detail-back { display: inline-block; }
+
+  /* Reading mode is meaningless when the sheet owns the viewport. */
+  .split.reading { grid-template-columns: minmax(0, 1fr); }
+  .split.reading .master-rail { display: none; }
+  .split.reading #master { display: flex; }
+  #detail-read { display: none; }
 
   .diff-layout {
     flex-direction: column;
