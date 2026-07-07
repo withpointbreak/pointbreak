@@ -3548,6 +3548,9 @@
   // src/prefs.ts
   var THEME_KEY = "shore-inspect-theme";
   var DENSITY_KEY = "shore-inspect-density";
+  var SPLIT_KEY = "shore-inspect-split";
+  var SPLIT_MIN = 25;
+  var SPLIT_MAX = 75;
   var liveMediaQueries = [];
   function hasPinnedTheme() {
     const stored = localStorage.getItem(THEME_KEY);
@@ -3583,9 +3586,28 @@
     applyDensity(next);
   }
   __name(toggleDensity, "toggleDensity");
+  function preferredSplit() {
+    const raw = localStorage.getItem(SPLIT_KEY);
+    const n = raw === null ? Number.NaN : Number.parseInt(raw, 10);
+    return Number.isInteger(n) && n >= SPLIT_MIN && n <= SPLIT_MAX ? n : null;
+  }
+  __name(preferredSplit, "preferredSplit");
+  function applySplit(pct) {
+    if (pct === null) {
+      document.documentElement.style.removeProperty("--split-master");
+      localStorage.removeItem(SPLIT_KEY);
+      return;
+    }
+    const clamped = Math.round(Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, pct)));
+    document.documentElement.style.setProperty("--split-master", `${clamped}%`);
+    localStorage.setItem(SPLIT_KEY, String(clamped));
+  }
+  __name(applySplit, "applySplit");
   function applyPrefs() {
     applyTheme(preferredTheme());
     applyDensity(preferredDensity());
+    const split = preferredSplit();
+    if (split !== null) applySplit(split);
   }
   __name(applyPrefs, "applyPrefs");
   function watchColorScheme() {
@@ -3966,6 +3988,65 @@ click to open the revision page">
   }
   __name(initControls6, "initControls");
 
+  // src/split.ts
+  var MIN_PCT = 25;
+  var MAX_PCT = 75;
+  function currentPct(divider) {
+    const aria = Number(divider.getAttribute("aria-valuenow"));
+    if (Number.isFinite(aria) && aria >= MIN_PCT && aria <= MAX_PCT) return aria;
+    return preferredSplit() ?? 50;
+  }
+  __name(currentPct, "currentPct");
+  function setPct(divider, pct) {
+    const clamped = pct === null ? null : Math.round(Math.min(MAX_PCT, Math.max(MIN_PCT, pct)));
+    applySplit(clamped);
+    divider.setAttribute("aria-valuenow", String(clamped ?? 50));
+  }
+  __name(setPct, "setPct");
+  function stepPct(split) {
+    const w = split.getBoundingClientRect().width;
+    return w > 0 ? 24 / w * 100 : 3;
+  }
+  __name(stepPct, "stepPct");
+  function initControls7() {
+    const split = $(".split");
+    const divider = $(".divider");
+    if (!split || !divider) return;
+    divider.setAttribute("aria-valuenow", String(preferredSplit() ?? 50));
+    divider.addEventListener("pointerdown", (ev) => {
+      ev.preventDefault();
+      divider.setPointerCapture?.(ev.pointerId);
+      divider.classList.add("dragging");
+    });
+    divider.addEventListener("pointermove", (ev) => {
+      if (!divider.classList.contains("dragging")) return;
+      const r = split.getBoundingClientRect();
+      if (r.width <= 0) return;
+      setPct(divider, (ev.clientX - r.left) / r.width * 100);
+    });
+    divider.addEventListener("pointerup", (ev) => {
+      divider.classList.remove("dragging");
+      divider.releasePointerCapture?.(ev.pointerId);
+    });
+    divider.addEventListener("dblclick", () => setPct(divider, null));
+    divider.addEventListener("keydown", (ev) => {
+      if (ev.key === "ArrowLeft") {
+        ev.preventDefault();
+        ev.stopPropagation();
+        setPct(divider, currentPct(divider) - stepPct(split));
+      } else if (ev.key === "ArrowRight") {
+        ev.preventDefault();
+        ev.stopPropagation();
+        setPct(divider, currentPct(divider) + stepPct(split));
+      } else if (ev.key === "Enter") {
+        ev.preventDefault();
+        ev.stopPropagation();
+        setPct(divider, null);
+      }
+    });
+  }
+  __name(initControls7, "initControls");
+
   // src/main.ts
   function wireToolbar() {
     for (const tab of document.querySelectorAll(".lens-tab")) {
@@ -4007,6 +4088,7 @@ click to open the revision page">
     initControls3();
     initControls6();
     initControls2();
+    initControls7();
     wireToolbar();
     document.addEventListener("keydown", onKey);
     document.addEventListener("click", onDocumentClick);

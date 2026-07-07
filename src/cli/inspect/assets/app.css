@@ -181,17 +181,43 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-directio
 .type-toggle .type-count { color: var(--fg-dim); font-variant-numeric: tabular-nums; }
 .type-toggle.off { opacity: 0.4; }
 
-.split { flex: 1 1 auto; min-height: 0; min-width: 0; display: grid; grid-template-columns: minmax(360px, 1fr) minmax(360px, 1fr); }
+/* The split grid learns the reader's ratio through --split-master (an integer
+   master-pane percent, prefs-persisted); unset resolves to the 50/50 default.
+   The 10px middle track is the divider. */
+.split { flex: 1 1 auto; min-height: 0; min-width: 0; display: grid; grid-template-columns: minmax(360px, var(--split-master, 1fr)) 10px minmax(360px, 1fr); }
 
 /* Closed = no detail pane at all: the timeline takes the full width and the
    empty-prompt placeholder never occupies half the viewport. `split-closed` is
    render's projection of `!state.open` (the cursor may still be parked). */
 .split.split-closed { grid-template-columns: minmax(0, 1fr); }
-.split.split-closed #detail { display: none; }
+.split.split-closed #detail, .split.split-closed .divider { display: none; }
+
+/* The divider: at rest it renders exactly the seam #master's border-right used
+   to draw; the 3px handle pill appears on hover/drag/focus only. */
+.divider { cursor: col-resize; position: relative; touch-action: none; }
+.divider::before { content: ""; position: absolute; inset: 0 4px; border-left: 1px solid var(--border); }
+.divider::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 3px;
+  height: 34px;
+  border-radius: 3px;
+  background: transparent;
+  transition: background 0.15s;
+}
+.divider:hover::after, .divider.dragging::after { background: var(--accent); }
+/* Keep a real outline here — the shell contract rejects any :focus-visible
+   block that strips the outline without replacement (and it reads comments
+   too, so this one names no forbidden literal). */
+.divider:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+.divider:focus-visible::after { background: var(--accent); }
 
 /* The master pane is the swappable lens body; it owns the scroll + the divider
    between it and the detail pane. */
-#master { min-height: 0; min-width: 0; display: flex; flex-direction: column; border-right: 1px solid var(--border); }
+#master { min-height: 0; min-width: 0; display: flex; flex-direction: column; }
 #master > * { flex: 1 1 auto; min-height: 0; }
 
 .timeline { list-style: none; margin: 0; padding: 0; overflow-y: auto; }
@@ -219,8 +245,10 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-directio
 
 .detail { min-width: 0; overflow-y: auto; padding: 14px 16px; }
 /* The persistent pane chrome: the ghost controls (close, and later reading
-   mode / back) survive every #detail-body repaint. */
+   mode / back) survive every #detail-body repaint. The glyphs read one step
+   larger than the ghost default — at --fs-xs the ✕ is too small a target. */
 .detail-head { display: flex; justify-content: flex-end; gap: 2px; }
+.detail-head .ghost { font-size: var(--fs-md); line-height: 1; }
 .detail .empty { color: var(--fg-dim); }
 .detail h2 { font-size: var(--fs-lg); margin: 0 0 4px; }
 .detail .kv { display: grid; grid-template-columns: 130px 1fr; gap: 4px 10px; font-size: var(--fs-sm); margin-bottom: 12px; }
@@ -259,6 +287,8 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-directio
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(220px, 45vh) minmax(0, 1fr);
   }
+
+  .divider { display: none; }
 
   #master {
     border-right: 0;

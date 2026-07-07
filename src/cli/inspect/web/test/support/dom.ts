@@ -57,6 +57,9 @@ const INDEX_BODY = `
   </div>
   <div class="split">
     <section id="master" class="master" aria-label="master pane"></section>
+    <div class="divider" role="separator" aria-orientation="vertical" tabindex="0"
+         aria-label="Resize panes — arrow keys adjust, Enter resets"
+         aria-valuenow="50" aria-valuemin="25" aria-valuemax="75"></div>
     <aside id="detail" class="detail">
       <header class="detail-head">
         <button id="detail-close" class="ghost" aria-label="Close detail" title="Close detail (Esc)">✕</button>
@@ -138,4 +141,5 @@ export function resetDom(): void {
   const root = document.documentElement;
   root.removeAttribute("data-theme");
   root.classList.remove("compact");
+  root.style.removeProperty("--split-master");
 }

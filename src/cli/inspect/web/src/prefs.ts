@@ -1,7 +1,10 @@
-// Reader-local display preferences (theme / density). Ported from the served
-// app.js prefs cluster. These are reader-local choices, persisted in localStorage
-// and never encoded in the URL/hash — they are not shareable view state, so they
-// live off the store, applied straight to the document root as app.js does.
+// Reader-local display preferences (theme / density / split width). Ported from
+// the served app.js prefs cluster. These are reader-local choices, persisted in
+// localStorage and never encoded in the URL/hash — they are not shareable view
+// state, so they live off the store, applied straight to the document root as
+// app.js does. The split width is an integer master-pane percent (25–75) applied
+// as the `--split-master` custom property the `.split` grid reads; unset means
+// the 50/50 default.
 //
 // Unlike app.js, the apply-on-load is NOT a top-level import side-effect: `main`
 // calls `applyPrefs()` explicitly before the first paint.
@@ -10,6 +13,10 @@ import { $ } from "./dom";
 
 const THEME_KEY = "shore-inspect-theme";
 const DENSITY_KEY = "shore-inspect-density";
+const SPLIT_KEY = "shore-inspect-split";
+
+const SPLIT_MIN = 25;
+const SPLIT_MAX = 75;
 
 // Strong references to the MediaQueryLists we've attached `change` listeners to.
 // WebKit/Safari garbage-collects a MediaQueryList that is reachable only through
@@ -65,14 +72,42 @@ export function toggleDensity(): void {
   applyDensity(next);
 }
 
+/** The stored split width (integer master percent, 25–75), or null for the 50/50 default. */
+export function preferredSplit(): number | null {
+  const raw = localStorage.getItem(SPLIT_KEY);
+  const n = raw === null ? Number.NaN : Number.parseInt(raw, 10);
+  return Number.isInteger(n) && n >= SPLIT_MIN && n <= SPLIT_MAX ? n : null;
+}
+
 /**
- * Apply the persisted theme + density. `main` calls this before the first paint
- * so the chosen theme is in place immediately (reproduces app.js's top-level
- * `applyTheme(preferredTheme())` / `applyDensity(...)`, as an explicit call).
+ * Apply (and persist) a split width, clamped to the valid range so the stored
+ * pref can never hold junk from our own writers; null clears back to the 50/50
+ * default (property and key both removed). The divider controller is the only
+ * post-paint caller — every width write goes through here.
+ */
+export function applySplit(pct: number | null): void {
+  if (pct === null) {
+    document.documentElement.style.removeProperty("--split-master");
+    localStorage.removeItem(SPLIT_KEY);
+    return;
+  }
+  const clamped = Math.round(Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, pct)));
+  document.documentElement.style.setProperty("--split-master", `${clamped}%`);
+  localStorage.setItem(SPLIT_KEY, String(clamped));
+}
+
+/**
+ * Apply the persisted theme + density + split width. `main` calls this before
+ * the first paint so the chosen theme is in place immediately (reproduces
+ * app.js's top-level `applyTheme(preferredTheme())` / `applyDensity(...)`, as an
+ * explicit call). A stored-but-invalid split key is left untouched and simply
+ * not applied (the default grid wins).
  */
 export function applyPrefs(): void {
   applyTheme(preferredTheme());
   applyDensity(preferredDensity());
+  const split = preferredSplit();
+  if (split !== null) applySplit(split);
 }
 
 /**

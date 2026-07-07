@@ -23,6 +23,7 @@ import { initControls as initPalette } from "./palette";
 import { applyPrefs, initControls as initPrefs } from "./prefs";
 import { initControls as initRender, render } from "./render";
 import { applyHash, navigate } from "./router";
+import { initControls as initSplit } from "./split";
 import { getState, subscribe } from "./store";
 import { DEFAULT_LENS, LENSES } from "./types";
 
@@ -77,6 +78,7 @@ export function main(): Promise<void> {
   initHelp();
   initRender();
   initDetail();
+  initSplit();
   wireToolbar();
   document.addEventListener("keydown", onKey);
   document.addEventListener("click", onDocumentClick);

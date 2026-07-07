@@ -2,8 +2,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   applyDensity,
   applyPrefs,
+  applySplit,
   applyTheme,
   initControls,
+  preferredSplit,
   preferredTheme,
   toggleDensity,
   toggleTheme,
@@ -14,6 +16,7 @@ import { mountInspectorDom, resetDom } from "./support/dom";
 // The persisted storage keys (the reader-local preference contract; mirrors app.js).
 const THEME_KEY = "shore-inspect-theme";
 const DENSITY_KEY = "shore-inspect-density";
+const SPLIT_KEY = "shore-inspect-split";
 
 const realMatchMedia = window.matchMedia;
 
@@ -156,6 +159,41 @@ describe("applyPrefs", () => {
   it("defaults density to comfortable when unset", () => {
     applyPrefs();
     expect(document.documentElement.classList.contains("compact")).toBe(false);
+  });
+});
+
+describe("preferredSplit / applySplit (the divider width pref)", () => {
+  it("applyPrefs sets --split-master from the stored width", () => {
+    localStorage.setItem(SPLIT_KEY, "62");
+    applyPrefs();
+    expect(
+      document.documentElement.style.getPropertyValue("--split-master"),
+    ).toBe("62%");
+  });
+
+  it("defaults to the 50/50 grid when the width pref is unset or out of range", () => {
+    applyPrefs();
+    expect(
+      document.documentElement.style.getPropertyValue("--split-master"),
+    ).toBe("");
+    localStorage.setItem(SPLIT_KEY, "9000");
+    expect(preferredSplit()).toBeNull();
+    applyPrefs();
+    expect(
+      document.documentElement.style.getPropertyValue("--split-master"),
+    ).toBe("");
+  });
+
+  it("applySplit persists and clamps; null clears the property and the key", () => {
+    applySplit(62);
+    expect(localStorage.getItem(SPLIT_KEY)).toBe("62");
+    applySplit(99);
+    expect(localStorage.getItem(SPLIT_KEY)).toBe("75");
+    applySplit(null);
+    expect(
+      document.documentElement.style.getPropertyValue("--split-master"),
+    ).toBe("");
+    expect(localStorage.getItem(SPLIT_KEY)).toBeNull();
   });
 });
 

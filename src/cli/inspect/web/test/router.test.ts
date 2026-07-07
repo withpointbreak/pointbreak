@@ -217,9 +217,9 @@ describe("parseHash", () => {
   });
 
   it("parses entity-primary as open and lens-primary ?sel= as a parked cursor", () => {
-    expect(router.parseHash(`#/event/${encodeURIComponent(EVT)}`, PT).open).toBe(
-      true,
-    );
+    expect(
+      router.parseHash(`#/event/${encodeURIComponent(EVT)}`, PT).open,
+    ).toBe(true);
     expect(
       router.parseHash(`#/revision/${encodeURIComponent(REV)}`, PT).open,
     ).toBe(true);
