@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use mmdflux::graph::{Direction, Edge, Graph, Node};
 use mmdflux::layout::{LaidOutGraph, LayoutOptions, layout_graph};
@@ -17,15 +17,15 @@ use pointbreak::highlight::{emphasis_file, highlight_file};
 use pointbreak::model::{ObjectId, ReviewEndpoint, RevisionId, RevisionSource, ValidationStatus};
 use pointbreak::session::event::ReviewAssessment;
 use pointbreak::session::{
-    AssessmentRecordStatus, AssessmentView, BaseProjectionConfig, CurrentAssessmentStatus,
-    EventVerificationPolicy, HistoryPage, HistoryQuery, InputRequestStatus, LivenessEnrichment,
-    ObservationStatus, ObservationView, ProjectionDiagnostic, ReviewHistoryEntry,
-    RevisionCommitRangeView, RevisionListEntry, RevisionListOptions, RevisionOverview,
-    RevisionOverviewsOptions, RevisionProjectionSummary, RevisionShowOptions, RevisionShowResult,
-    SessionState, StoreIdentity, StoreIdentityOptions, SupersessionView, apply_history_query,
-    enrich_liveness, event_log_head_marker, history_base_projection, list_revisions,
-    read_bound_object_artifact, read_events_for_display, read_object_artifact, show_revision,
-    show_revision_overviews, store_identity,
+    AssessmentRecordStatus, AssessmentView, BaseHistoryProjection, BaseProjectionConfig,
+    CurrentAssessmentStatus, EventVerificationPolicy, HistoryPage, HistoryQuery,
+    InputRequestStatus, LivenessEnrichment, ObservationStatus, ObservationView,
+    ProjectionDiagnostic, ReviewHistoryEntry, RevisionCommitRangeView, RevisionListEntry,
+    RevisionListOptions, RevisionOverview, RevisionOverviewsOptions, RevisionProjectionSummary,
+    RevisionShowOptions, RevisionShowResult, SessionState, StoreIdentity, StoreIdentityOptions,
+    SupersessionView, apply_history_query, enrich_liveness, event_log_head_marker,
+    history_base_projection, list_revisions, read_bound_object_artifact, read_events_for_display,
+    read_object_artifact, show_revision, show_revision_overviews, store_identity,
 };
 use serde::Serialize;
 
@@ -668,14 +668,7 @@ pub(super) fn history_json(
     query: &HistoryQuery,
     page: &HistoryPage,
 ) -> Result<String, String> {
-    // The cheap monotonic head marker is the per-request change detector (no
-    // event-byte decode — plan 0090); the cached base's `eventSetHash` is the
-    // served stamp. Build-once/serve-many across all queries for one store version.
-    let marker = event_log_head_marker(repo).map_err(|error| error.to_string())?;
-    let config = inspect_base_config(repo);
-    let base = cache.get_or_build(marker, || {
-        history_base_projection(repo, &config).map_err(|error| error.to_string())
-    })?;
+    let base = cached_history_base(repo, cache)?;
     let out = apply_history_query(&base, query, page);
     let payload = HistoryPayload {
         schema: "pointbreak.inspect-history",
@@ -690,6 +683,31 @@ pub(super) fn history_json(
         diagnostics: out.diagnostics,
     };
     serde_json::to_string(&payload).map_err(|error| error.to_string())
+}
+
+/// Warm the history base projection cache without serializing a history page.
+///
+/// This is intentionally best-effort for server startup: endpoint requests use the
+/// same cache path and will surface any real error to the client.
+pub(super) fn warm_history_cache(
+    repo: &Path,
+    cache: &super::cache::HistoryProjectionCache,
+) -> Result<(), String> {
+    cached_history_base(repo, cache).map(|_| ())
+}
+
+fn cached_history_base(
+    repo: &Path,
+    cache: &super::cache::HistoryProjectionCache,
+) -> Result<Arc<BaseHistoryProjection>, String> {
+    // The cheap monotonic head marker is the per-request change detector (no
+    // event-byte decode — plan 0090); the cached base's `eventSetHash` is the
+    // served stamp. Build-once/serve-many across all queries for one store version.
+    let marker = event_log_head_marker(repo).map_err(|error| error.to_string())?;
+    cache.get_or_build(marker, || {
+        let config = inspect_base_config(repo);
+        history_base_projection(repo, &config).map_err(|error| error.to_string())
+    })
 }
 
 /// Captured Revisions with their base/target/snapshot identity.
@@ -1623,6 +1641,32 @@ mod tests {
         let payload: serde_json::Value =
             serde_json::from_str(&threads_json(repo.path()).unwrap()).unwrap();
         assert_eq!(payload["schema"], "pointbreak.inspect-threads");
+    }
+
+    #[test]
+    fn warm_history_cache_exercises_default_history_path() {
+        let (repo, _, _) = captured_repo();
+        let cache = super::super::cache::HistoryProjectionCache::new();
+
+        warm_history_cache(repo.path(), &cache).expect("warm history cache");
+        let payload: serde_json::Value = serde_json::from_str(
+            &history_json(
+                repo.path(),
+                &cache,
+                &HistoryQuery::default(),
+                &HistoryPage::default(),
+            )
+            .expect("history json"),
+        )
+        .unwrap();
+
+        assert_eq!(payload["schema"], "pointbreak.inspect-history");
+        assert!(
+            payload["entries"]
+                .as_array()
+                .is_some_and(|entries| !entries.is_empty()),
+            "default warmed history path returns entries"
+        );
     }
 
     #[test]

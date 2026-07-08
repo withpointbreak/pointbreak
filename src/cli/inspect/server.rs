@@ -156,11 +156,13 @@ pub(super) fn serve(
     writeln!(stdout, "  stop:  Ctrl-C")?;
     stdout.flush().ok();
 
+    let state = Arc::new(InspectState::new(repo));
+    warm_history_cache(Arc::clone(&state));
+
     if open {
         open_browser(&url);
     }
 
-    let state = Arc::new(InspectState::new(repo));
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
@@ -178,6 +180,16 @@ pub(super) fn serve(
     }
 
     Ok(())
+}
+
+fn warm_history_cache(state: Arc<InspectState>) {
+    thread::spawn(move || {
+        if let Err(error) = api::warm_history_cache(state.repo.as_path(), &state.history_cache) {
+            tracing::debug!(error = %error, "inspect_history_cache_warm_failed");
+        } else {
+            tracing::debug!("inspect_history_cache_warmed");
+        }
+    });
 }
 
 fn handle_connection(stream: TcpStream, state: &InspectState) -> std::io::Result<()> {
