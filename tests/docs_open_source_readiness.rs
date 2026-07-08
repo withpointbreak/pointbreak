@@ -449,9 +449,15 @@ fn docs_cover_key_custody_and_signing_ux() {
             "shore key list",
             "shore key show",
             "shore key enroll",
+            "shore key discover",
             "pointbreak.key-init",
+            "pointbreak.key-discover",
             "--sign-key",
         ],
+    );
+    assert!(
+        cli.contains("discovery does not authorize keys"),
+        "cli-reference documents that discovery is advisory"
     );
     for token in ["SHORE_SIGNING", "SHORE_SIGNING_KEY", "SHORE_HOME"] {
         assert!(cli.contains(token), "cli-reference documents {token}");
@@ -462,6 +468,8 @@ fn docs_cover_key_custody_and_signing_ux() {
         ".shore/allowed-signers.json",
         "\"allowedSigners\"",
         "not the OpenSSH",
+        "OpenSSH allowed-signers files are evidence inputs",
+        ".shore/allowed-signers.json remains the committed trust file",
         "~/.shore/keys/",
     ] {
         assert!(storage.contains(token), "storage-model documents {token}");
@@ -470,7 +478,11 @@ fn docs_cover_key_custody_and_signing_ux() {
     assert!(storage.contains("never") && storage.contains("key home"));
 
     // Library API: the production signer, CLI-layer resolution, never-gates.
-    for token in ["FileEd25519Signer", "signing never gates"] {
+    for token in [
+        "FileEd25519Signer",
+        "discover_enrollment_candidates",
+        "signing never gates",
+    ] {
         assert!(library_api.contains(token), "library-api documents {token}");
     }
 
@@ -487,6 +499,9 @@ fn docs_cover_key_custody_and_signing_ux() {
             signing_ux.contains(rung),
             "signing-ux documents the {rung} rung"
         );
+    }
+    for token in ["shore key discover", "review candidate"] {
+        assert!(signing_ux.contains(token), "signing-ux documents {token}");
     }
 
     // No private plan labels in any touched doc.

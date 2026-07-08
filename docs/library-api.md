@@ -176,6 +176,13 @@ the CLI resolution layer carries either signer as a boxed `dyn EventSigner` (a b
 unchanged generic `sign_with` accept it), and a tightly-scoped sign-time degrade keeps never-gates true
 for the network signer. See [ADR-0010](./adr/adr-0010-actor-identity-and-delegation.md).
 
+`discover_enrollment_candidates` (`pointbreak::keys`) is the public discovery API behind
+`shore key discover`. It returns `EnrollmentDiscovery` with advisory candidates and structured
+diagnostics for local Git/OpenSSH signing evidence such as `gpg.format=ssh`, `user.signingKey`, and
+`gpg.ssh.allowedSignersFile`. Discovery does not authorize keys and does not write either the
+user-level key home or `.shore/allowed-signers.json`; callers still need an explicit reviewed
+enrollment step before a friendly actor's signature can become `valid`.
+
 ### Actor identity and delegation — `pointbreak::session`
 
 Verification answers "is this event authentic?"; delegation answers the orthogonal question "whose

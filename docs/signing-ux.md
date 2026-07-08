@@ -67,14 +67,18 @@ with `gpg.format=ssh` + `user.signingKey`. Adopt an existing Ed25519 SSH key as 
 with no new key ceremony:
 
 ```bash
+shore key discover --repo .                               # inspect Git/OpenSSH evidence
 shore key use-ssh ~/.ssh/id_ed25519.pub --name default   # adopt; print its did:key
-shore key enroll default --actor actor:git-email:alice@example.com
+shore key enroll --signer did:key:z6Mk... --actor actor:git-email:alice@example.com
 git add .shore/allowed-signers.json && git commit          # the commit is the authorization
 ```
 
-The positional argument is either a path to a `*.pub` file or a `key::ssh-ed25519 AAAA…` literal (git's
-`user.signingKey` form). Here "agent" is the **ssh-agent** key custodian — distinct from a coding or
-reviewing agent (acting software).
+`shore key discover` reads local Git SSH signing config and OpenSSH allowed-signers files as setup
+evidence. Discovery does not authorize keys: review candidate details first, then choose whether to
+adopt signing custody with `shore key use-ssh` and/or stage Pointbreak trust with `shore key enroll
+--signer`. The positional `use-ssh` argument is either a path to a `*.pub` file or a
+`key::ssh-ed25519 AAAA…` literal (git's `user.signingKey` form). Here "agent" is the **ssh-agent**
+key custodian — distinct from a coding or reviewing agent (acting software).
 
 **No Ed25519 SSH key yet?** Create one (the same key works for git commit signing):
 

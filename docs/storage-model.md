@@ -984,6 +984,12 @@ without the file — a mirror, an exported bundle — renders a signed event as 
 wrong `valid`. Entries are staged possession-style (`shore key enroll` writes the working-tree
 file; the human's commit is the authorization) and the file is deliberately tracked in Git.
 
+OpenSSH allowed-signers files are evidence inputs for `shore key discover`, not Pointbreak trust
+policy. They can provide principal hints and public signing keys that help a human stage a reviewed
+Pointbreak entry. In short: .shore/allowed-signers.json remains the committed trust file and the
+only portable authorization source for friendly `actor:*` ids. Discovery never silently copies OpenSSH
+entries into this file and never makes an event `valid` by itself.
+
 Private **keys never live in the repo `.shore/` or the store** — both are copyable, linkable, or
 mirrored surfaces and would ship the private key. They live in a user-level **key home**,
 `~/.shore/keys/`, resolved as `SHORE_HOME` (verbatim override, mainly for tests/CI), then

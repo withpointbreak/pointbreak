@@ -594,6 +594,10 @@ shore key init --name default
 # List local keys with enrollment status and which is the default (pointbreak.key-list).
 shore key list --repo .
 
+# Discover local Git/OpenSSH signing evidence (pointbreak.key-discover).
+# Discovery only suggests reviewed next steps.
+shore key discover --repo .
+
 # Print a key's did:key and/or raw public key (pointbreak.key-show).
 shore key show default --did
 shore key show default --pubkey
@@ -607,6 +611,7 @@ shore key use-ssh 'key::ssh-ed25519 AAAA…'   # git user.signingKey literal for
 # Possession-style: this stages the working-tree .shore/allowed-signers.json edit only;
 # review and commit it to authorize the binding.
 shore key enroll default --actor actor:agent:claude-code --repo .
+shore key enroll --signer did:key:z6Mk... --actor actor:git-email:alice@example.com --repo .
 ```
 
 `init` refuses to overwrite an existing named key. `use-ssh` adopts an existing SSH **public** key as an
@@ -614,8 +619,17 @@ agent-backed `default` signer: it accepts a `*.pub` path or a `key::ssh-ed25519 
 `pointbreak.key-use-ssh` document with the derived `did:key` (the same `.didKey` field `shore key show
 --did` prints) plus an enrollment hint, and (like `init`) refuses to overwrite. Only plain `ssh-ed25519`
 keys are accepted; `ed25519-sk`/RSA/ECDSA are rejected with a clear error pointing at `shore key init`.
-`list`/`enroll` take `--repo` (default `.`) to resolve the committed `.shore/allowed-signers.json`;
-every subcommand accepts `--pretty`. Enrollment never commits — the human's commit is the authorization.
+`discover` reads local Git/OpenSSH signing evidence and emits a `pointbreak.key-discover` document:
+`candidates[]` includes `source`, `signerId`, `keyArgument`, `suggestedName`, `actorHints`, and
+advisory `commands`; `diagnostics[]` reports non-fatal missing or unsupported evidence with source
+details. This discovery does not authorize keys, does not write the key home, and does not stage
+`.shore/allowed-signers.json`. Review a candidate, optionally adopt public key custody with
+`shore key use-ssh`, then stage reviewed trust with `shore key enroll --signer <did:key> --actor
+<actor> --repo .`.
+
+`list`/`enroll`/`discover` take `--repo` (default `.`) to resolve the committed
+`.shore/allowed-signers.json` or local Git/OpenSSH evidence; every subcommand accepts `--pretty`.
+Enrollment never commits — the human's commit is the authorization.
 
 Each **write** subcommand (`capture`, `observation add`, `assessment add`,
 `validation add`, `association record`/`withdraw`, `input-request open`/`respond`)
