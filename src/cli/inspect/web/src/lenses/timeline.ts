@@ -207,14 +207,14 @@ function eventRow(e: HistoryEntry, selected: string | null): HTMLLIElement {
     .map((t) => `<span class="${CLASS.badge}">${escapeHtml(t)}</span>`)
     .join(" ");
   const revisionId = entryRevisionId(e);
-  const staleTag = supersessionStaleBadge(e);
-  const supersedesTag = captureSupersedesBadge(e);
+  const staleTag = supersessionStaleBadge(e, { tabIndex: -1 });
+  const supersedesTag = captureSupersedesBadge(e, { tabIndex: -1 });
   const factTag = factSupersessionBadge(e);
   li.innerHTML = `
       <span class="${CLASS.time}"><span class="${CLASS.eventDate}">${escapeHtml(fmtDate(e.occurredAt ?? ""))}</span><span>${escapeHtml(fmtTime(e.occurredAt ?? ""))}</span></span>
       <span class="${CLASS.rail}" style="background:${typeColor(e.eventType)}"></span>
       <span class="${CLASS.body}">
-        <span class="${CLASS.title}">${linkify(entryTitle(e))} ${tags} ${supersedesTag} ${staleTag} ${factTag}</span>
+        <span class="${CLASS.title}">${linkify(entryTitle(e), { tabIndex: -1 })} ${tags} ${supersedesTag} ${staleTag} ${factTag}</span>
         <span class="${CLASS.meta}">
           <span class="${CLASS.type}" style="color:${typeColor(e.eventType)}">${escapeHtml(typeLabel(e.eventType))}</span>
           ${entryTrack(e) ? `<span>${escapeHtml(entryTrack(e))}</span>` : ""}

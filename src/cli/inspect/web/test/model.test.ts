@@ -231,6 +231,11 @@ describe("isSupersedableFact", () => {
 });
 
 describe("supersession badges", () => {
+  const HEAD_REV =
+    "rev:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const OLD_REV =
+    "rev:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
   beforeEach(() => {
     seedObjects({
       revisionClassification: {
@@ -242,6 +247,16 @@ describe("supersession badges", () => {
         "rev:old": {
           state: "superseded",
           supersededBy: ["rev:head"],
+          supersedes: [],
+        },
+        [HEAD_REV]: {
+          state: "head",
+          supersededBy: [],
+          supersedes: [OLD_REV],
+        },
+        [OLD_REV]: {
+          state: "superseded",
+          supersededBy: [HEAD_REV],
           supersedes: [],
         },
       },
@@ -256,6 +271,15 @@ describe("supersession badges", () => {
     expect(badge).toContain("superseded by");
     expect(badge).toContain("rev:old".replace("rev:old", "rev:head"));
     expect(badge).toContain("stale");
+    expect(
+      model.supersessionStaleBadge(
+        {
+          eventType: "review_observation_recorded",
+          subject: { revisionId: OLD_REV },
+        },
+        { tabIndex: -1 },
+      ),
+    ).toContain('tabindex="-1"');
   });
 
   it("does not stale-badge a fact on a current head", () => {
@@ -283,6 +307,15 @@ describe("supersession badges", () => {
     });
     expect(badge).toContain("supersedes");
     expect(badge).toContain("rev:old");
+    expect(
+      model.captureSupersedesBadge(
+        {
+          eventType: "work_object_proposed",
+          subject: { revisionId: HEAD_REV },
+        },
+        { tabIndex: -1 },
+      ),
+    ).toContain('tabindex="-1"');
   });
 
   it("does not supersedes-badge a non-capture event or a capture with no predecessors", () => {

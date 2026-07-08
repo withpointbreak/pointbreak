@@ -147,10 +147,11 @@ describe("renderLensSwitcher + renderMaster (lens dispatch + scaffold)", () => {
       "false",
     );
     const master = $("#master");
-    expect(master?.querySelector("#timeline")).not.toBeNull();
-    expect((master?.querySelectorAll("#timeline .event").length ?? 0) > 0).toBe(
-      true,
-    );
+    const timeline = master?.querySelector<HTMLElement>("#timeline");
+    expect(timeline).not.toBeNull();
+    expect(timeline?.getAttribute("aria-label")).toBe("event timeline");
+    expect(timeline?.getAttribute("tabindex")).toBe("0");
+    expect((timeline?.querySelectorAll(".event").length ?? 0) > 0).toBe(true);
   });
 
   it("dispatches the list lens to renderRevisionList (#units)", () => {

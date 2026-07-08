@@ -380,7 +380,8 @@
     `\\b(?:${REF_ID_PREFIXES.join("|")}):(?:git:|worktree:)?sha256:[0-9a-f]{6,}\\b|(?<!:)\\bsha256:[0-9a-f]{16,}\\b|\\b[0-9a-f]{40}\\b|\\b(?:agent|human):[a-z0-9][a-z0-9_-]*\\b`,
     "gi"
   );
-  function linkifyEscaped(escaped) {
+  function linkifyEscaped(escaped, opts = {}) {
+    const tabIndex = typeof opts === "object" ? opts.tabIndex ?? 0 : 0;
     return escaped.replace(REF_RE, (token) => {
       const info = refInfo(token);
       if (!info) return token;
@@ -388,12 +389,12 @@
       if (!info.clickable) {
         return `<span class="${refClass(info.kind)}" title="${escapeHtml(token)}">${display}</span>`;
       }
-      return `<span class="${refClass(info.kind)}" role="link" tabindex="0" data-ref-kind="${info.kind}" data-ref-id="${escapeHtml(token)}" title="${escapeHtml(token)}">${display}</span>`;
+      return `<span class="${refClass(info.kind)}" role="link" tabindex="${tabIndex}" data-ref-kind="${info.kind}" data-ref-id="${escapeHtml(token)}" title="${escapeHtml(token)}">${display}</span>`;
     });
   }
   __name(linkifyEscaped, "linkifyEscaped");
-  function linkify(text) {
-    return linkifyEscaped(escapeHtml(String(text ?? "")));
+  function linkify(text, opts = {}) {
+    return linkifyEscaped(escapeHtml(String(text ?? "")), opts);
   }
   __name(linkify, "linkify");
   function isMarkdownContentType(contentType) {
@@ -916,18 +917,18 @@
     return SUPERSEDABLE_FACT_TYPES.has(e.eventType);
   }
   __name(isSupersedableFact, "isSupersedableFact");
-  function supersessionStaleBadge(e) {
+  function supersessionStaleBadge(e, opts = {}) {
     if (!isSupersedableFact(e)) return "";
     const successors = supersededByRevision(entryRevisionId(e));
     if (!successors.length) return "";
-    return `<span class="${CLASS.badge} ${CLASS.stale}">superseded by ${successors.map(linkify).join(" ")}</span>`;
+    return `<span class="${CLASS.badge} ${CLASS.stale}">superseded by ${successors.map((id) => linkify(id, opts)).join(" ")}</span>`;
   }
   __name(supersessionStaleBadge, "supersessionStaleBadge");
-  function captureSupersedesBadge(e) {
+  function captureSupersedesBadge(e, opts = {}) {
     if (e.eventType !== "work_object_proposed") return "";
     const predecessors = supersedesRevision(entryRevisionId(e));
     if (!predecessors.length) return "";
-    return `<span class="${CLASS.badge} ${CLASS.supersedes}">supersedes ${predecessors.map(linkify).join(" ")}</span>`;
+    return `<span class="${CLASS.badge} ${CLASS.supersedes}">supersedes ${predecessors.map((id) => linkify(id, opts)).join(" ")}</span>`;
   }
   __name(captureSupersedesBadge, "captureSupersedesBadge");
   function entryFactId(e) {
@@ -2963,14 +2964,14 @@
       li.setAttribute("aria-selected", "true");
     const tags = entryTags(e).map((t) => `<span class="${CLASS.badge}">${escapeHtml(t)}</span>`).join(" ");
     const revisionId = entryRevisionId(e);
-    const staleTag = supersessionStaleBadge(e);
-    const supersedesTag = captureSupersedesBadge(e);
+    const staleTag = supersessionStaleBadge(e, { tabIndex: -1 });
+    const supersedesTag = captureSupersedesBadge(e, { tabIndex: -1 });
     const factTag = factSupersessionBadge(e);
     li.innerHTML = `
       <span class="${CLASS.time}"><span class="${CLASS.eventDate}">${escapeHtml(fmtDate(e.occurredAt ?? ""))}</span><span>${escapeHtml(fmtTime(e.occurredAt ?? ""))}</span></span>
       <span class="${CLASS.rail}" style="background:${typeColor(e.eventType)}"></span>
       <span class="${CLASS.body}">
-        <span class="${CLASS.title}">${linkify(entryTitle(e))} ${tags} ${supersedesTag} ${staleTag} ${factTag}</span>
+        <span class="${CLASS.title}">${linkify(entryTitle(e), { tabIndex: -1 })} ${tags} ${supersedesTag} ${staleTag} ${factTag}</span>
         <span class="${CLASS.meta}">
           <span class="${CLASS.type}" style="color:${typeColor(e.eventType)}">${escapeHtml(typeLabel(e.eventType))}</span>
           ${entryTrack(e) ? `<span>${escapeHtml(entryTrack(e))}</span>` : ""}
@@ -3687,6 +3688,12 @@
     void stepSelectionAsync(delta);
   }
   __name(stepSelection, "stepSelection");
+  function focusTimelineTabStop() {
+    const state2 = getState();
+    if (state2.lens !== "timeline" || state2.reading) return;
+    $("#timeline")?.focus({ preventScroll: true });
+  }
+  __name(focusTimelineTabStop, "focusTimelineTabStop");
   function stepList(delta) {
     const ids = lensEntryIds();
     if (!ids.length) return;
@@ -3704,13 +3711,18 @@
     const local = ids.findIndex((x) => x.id === state2.selected.id);
     if (local < 0) {
       navigate({ selected: ids[0] }, { replace: true });
+      focusTimelineTabStop();
       return;
     }
     const cur = offset + local;
     const target = Math.max(0, Math.min(matchCount - 1, cur + delta));
-    if (target === cur) return;
+    if (target === cur) {
+      focusTimelineTabStop();
+      return;
+    }
     if (target >= offset && target < offset + count) {
       navigate({ selected: ids[target - offset] }, { replace: true });
+      focusTimelineTabStop();
       return;
     }
     await fetchHistoryPage({
@@ -3719,8 +3731,10 @@
     const w = loadedWindow(getState());
     const loaded = lensEntryIds();
     const localAfter = target - w.offset;
-    if (localAfter >= 0 && localAfter < loaded.length)
+    if (localAfter >= 0 && localAfter < loaded.length) {
       navigate({ selected: loaded[localAfter] }, { replace: true });
+      focusTimelineTabStop();
+    }
   }
   __name(stepTimeline, "stepTimeline");
   async function stepSelectionAsync(delta) {
@@ -3736,6 +3750,7 @@
     if (!getState().open) {
       if (!sel.id) return;
       navigate({ open: true });
+      focusTimelineTabStop();
       return;
     }
     if (sel.kind === "revision" && sel.id) {
@@ -3803,6 +3818,7 @@
       toggle();
       return;
     }
+    if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
     if (ev.key === "Escape") {
       handleEscape();
       return;
@@ -4164,7 +4180,7 @@ click to open the revision page">
       } else if (lens === "threads") {
         master.innerHTML = `<div id="revisions" class="${CLASS.units}" aria-label="supersession threads"></div>`;
       } else {
-        master.innerHTML = `<ol id="timeline" class="${CLASS.timeline}" aria-label="event timeline"></ol>`;
+        master.innerHTML = `<ol id="timeline" class="${CLASS.timeline}" aria-label="event timeline" tabindex="0"></ol>`;
       }
     }
     if (lens === "list") renderRevisionList();

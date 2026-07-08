@@ -210,7 +210,7 @@ function renderMaster(): void {
     } else if (lens === "threads") {
       master.innerHTML = `<div id="revisions" class="${CLASS.units}" aria-label="supersession threads"></div>`;
     } else {
-      master.innerHTML = `<ol id="timeline" class="${CLASS.timeline}" aria-label="event timeline"></ol>`;
+      master.innerHTML = `<ol id="timeline" class="${CLASS.timeline}" aria-label="event timeline" tabindex="0"></ol>`;
     }
   }
   if (lens === "list") renderRevisionList();

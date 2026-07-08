@@ -60,6 +60,12 @@ function stepSelection(delta: number): void {
   void stepSelectionAsync(delta);
 }
 
+function focusTimelineTabStop(): void {
+  const state = getState();
+  if (state.lens !== "timeline" || state.reading) return;
+  $<HTMLElement>("#timeline")?.focus({ preventScroll: true });
+}
+
 // Step the fully-loaded revisions/threads lenses over their in-memory entries.
 function stepList(delta: number): void {
   const ids = lensEntryIds();
@@ -82,13 +88,18 @@ async function stepTimeline(delta: number): Promise<void> {
   if (local < 0) {
     // No selection (or an off-window one) → start at the first loaded row.
     navigate({ selected: ids[0] }, { replace: true });
+    focusTimelineTabStop();
     return;
   }
   const cur = offset + local;
   const target = Math.max(0, Math.min(matchCount - 1, cur + delta));
-  if (target === cur) return; // clamped at an end of the matched set
+  if (target === cur) {
+    focusTimelineTabStop();
+    return; // clamped at an end of the matched set
+  }
   if (target >= offset && target < offset + count) {
     navigate({ selected: ids[target - offset] }, { replace: true });
+    focusTimelineTabStop();
     return;
   }
   await fetchHistoryPage({
@@ -100,8 +111,10 @@ async function stepTimeline(delta: number): Promise<void> {
   const w = loadedWindow(getState());
   const loaded = lensEntryIds();
   const localAfter = target - w.offset;
-  if (localAfter >= 0 && localAfter < loaded.length)
+  if (localAfter >= 0 && localAfter < loaded.length) {
     navigate({ selected: loaded[localAfter] }, { replace: true });
+    focusTimelineTabStop();
+  }
 }
 
 /** Step the selection by delta, paging the timeline past its loaded edges. */
@@ -120,6 +133,7 @@ function activateSelection(): void {
   if (!getState().open) {
     if (!sel.id) return;
     navigate({ open: true });
+    focusTimelineTabStop();
     return;
   }
   if (sel.kind === "revision" && sel.id) {
@@ -201,6 +215,7 @@ export function onKey(ev: KeyboardEvent): void {
     togglePalette();
     return;
   }
+  if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
   // Escape is global (it fires even while typing); everything else yields to a
   // focused text field.
   if (ev.key === "Escape") {

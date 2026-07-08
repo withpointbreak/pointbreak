@@ -88,6 +88,18 @@ describe("selection stepping / activation / search", () => {
     expect(store.getState().selected.id).toBe(first.id);
   });
 
+  it("j focuses the timeline tab stop and Enter keeps Tab origin there", async () => {
+    const render = await import("../src/render");
+    store.subscribe(render.render);
+    render.render();
+    key({ key: "j" });
+    const timeline = document.querySelector("#timeline");
+    expect(document.activeElement).toBe(timeline);
+    key({ key: "Enter" });
+    expect(store.getState().open).toBe(true);
+    expect(document.activeElement).toBe(timeline);
+  });
+
   it("Enter activates the selected revision's diff once the detail is open", () => {
     store.commit({ selected: { kind: "revision", id: REV }, open: true });
     key({ key: "Enter" });
@@ -277,6 +289,19 @@ describe("h / l resize the split from anywhere", () => {
     key({ key: "l" });
     expect(store.getState().lens).toBe("timeline");
     expect(splitMaster()).toBe("53%");
+  });
+
+  it("Cmd-L is left to the browser location-bar shortcut", () => {
+    store.commit({ selected: { kind: "revision", id: REV }, open: true });
+    const ev = new KeyboardEvent("keydown", {
+      key: "l",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    document.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(false);
+    expect(splitMaster()).toBe("");
   });
 
   it("h / l are inert while a text field is focused", () => {

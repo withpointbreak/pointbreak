@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { HistoryDoc } from "../../src/store";
+import type { HistoryDoc, ThreadsDoc } from "../../src/store";
 import type { HistoryEntry } from "../../src/types";
 import historyJson from "../fixtures/history.json";
 import { mountInspectorDom, resetDom } from "../support/dom";
@@ -35,7 +35,8 @@ beforeEach(async () => {
   // renderMaster (the render orchestrator) injects the timeline body inside
   // #master; mirror it.
   const master = document.querySelector("#master");
-  if (master) master.innerHTML = `<ol id="timeline" class="timeline"></ol>`;
+  if (master)
+    master.innerHTML = `<ol id="timeline" class="timeline" aria-label="event timeline" tabindex="0"></ol>`;
   history.replaceState(null, "", "/");
 });
 
@@ -132,6 +133,40 @@ describe("renderTimeline", () => {
     expect(chip).not.toBeNull();
     expect(chip?.dataset.refKind).toBe("rev");
     expect(chip?.dataset.refId).toBe(ref);
+    expect(chip?.getAttribute("tabindex")).toBe("-1");
+  });
+
+  it("keeps supersession badge refs out of the sequential timeline tab order", () => {
+    const head =
+      "rev:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const old =
+      "rev:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    store.commit({
+      threads: {
+        revisionClassification: {
+          [head]: { state: "head", supersededBy: [], supersedes: [old] },
+          [old]: { state: "superseded", supersededBy: [head], supersedes: [] },
+        },
+      } as unknown as ThreadsDoc,
+    });
+    seedHistory([
+      entry("e1", {
+        eventType: "work_object_proposed",
+        subject: { revisionId: head },
+      }),
+      entry("e2", {
+        eventType: "review_observation_recorded",
+        subject: { revisionId: old },
+      }),
+    ]);
+    timeline.renderTimeline();
+    const refs = Array.from(
+      document.querySelectorAll<HTMLElement>("#timeline [data-ref-kind]"),
+    );
+    expect(refs.length).toBeGreaterThan(0);
+    expect(refs.every((ref) => ref.getAttribute("tabindex") === "-1")).toBe(
+      true,
+    );
   });
 
   it("pills a fact superseded by a loaded sibling, and leaves the superseder unpilled", () => {

@@ -10,6 +10,10 @@ export interface RefInfo {
   clickable: boolean;
 }
 
+export interface LinkifyOptions {
+  tabIndex?: 0 | -1;
+}
+
 /** The captured base commit head shown in a target's display badge. */
 export interface TargetHead {
   label?: string;
@@ -108,7 +112,11 @@ export const REF_RE = new RegExp(
 );
 
 /** Replace embedded ids in already-escaped text with truncated reference chips. */
-export function linkifyEscaped(escaped: string): string {
+export function linkifyEscaped(
+  escaped: string,
+  opts: LinkifyOptions | number = {},
+): string {
+  const tabIndex = typeof opts === "object" ? (opts.tabIndex ?? 0) : 0;
   return escaped.replace(REF_RE, (token) => {
     const info = refInfo(token);
     if (!info) return token;
@@ -116,13 +124,16 @@ export function linkifyEscaped(escaped: string): string {
     if (!info.clickable) {
       return `<span class="${refClass(info.kind)}" title="${escapeHtml(token)}">${display}</span>`;
     }
-    return `<span class="${refClass(info.kind)}" role="link" tabindex="0" data-ref-kind="${info.kind}" data-ref-id="${escapeHtml(token)}" title="${escapeHtml(token)}">${display}</span>`;
+    return `<span class="${refClass(info.kind)}" role="link" tabindex="${tabIndex}" data-ref-kind="${info.kind}" data-ref-id="${escapeHtml(token)}" title="${escapeHtml(token)}">${display}</span>`;
   });
 }
 
 /** Escape then linkify free text. */
-export function linkify(text: unknown): string {
-  return linkifyEscaped(escapeHtml(String(text ?? "")));
+export function linkify(
+  text: unknown,
+  opts: LinkifyOptions | number = {},
+): string {
+  return linkifyEscaped(escapeHtml(String(text ?? "")), opts);
 }
 
 /** Whether a body content type selects markdown rendering. */

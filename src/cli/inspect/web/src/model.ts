@@ -24,7 +24,12 @@ import {
   revisionSearchIndex,
 } from "./projection";
 import { matchesQuery, parseSearchQuery } from "./query";
-import { linkify, shortId, targetDisplayLabel } from "./refs";
+import {
+  type LinkifyOptions,
+  linkify,
+  shortId,
+  targetDisplayLabel,
+} from "./refs";
 import { getState } from "./store";
 import {
   type HistoryEntry,
@@ -264,19 +269,25 @@ export function isSupersedableFact(e: HistoryEntry): boolean {
 }
 
 /** A "superseded by <successors>" badge for a fact on a superseded revision, or "". */
-export function supersessionStaleBadge(e: HistoryEntry): string {
+export function supersessionStaleBadge(
+  e: HistoryEntry,
+  opts: LinkifyOptions = {},
+): string {
   if (!isSupersedableFact(e)) return "";
   const successors = supersededByRevision(entryRevisionId(e));
   if (!successors.length) return "";
-  return `<span class="${CLASS.badge} ${CLASS.stale}">superseded by ${successors.map(linkify).join(" ")}</span>`;
+  return `<span class="${CLASS.badge} ${CLASS.stale}">superseded by ${successors.map((id) => linkify(id, opts)).join(" ")}</span>`;
 }
 
 /** A "supersedes <predecessors>" badge for a capture event, or "". */
-export function captureSupersedesBadge(e: HistoryEntry): string {
+export function captureSupersedesBadge(
+  e: HistoryEntry,
+  opts: LinkifyOptions = {},
+): string {
   if (e.eventType !== "work_object_proposed") return "";
   const predecessors = supersedesRevision(entryRevisionId(e));
   if (!predecessors.length) return "";
-  return `<span class="${CLASS.badge} ${CLASS.supersedes}">supersedes ${predecessors.map(linkify).join(" ")}</span>`;
+  return `<span class="${CLASS.badge} ${CLASS.supersedes}">supersedes ${predecessors.map((id) => linkify(id, opts)).join(" ")}</span>`;
 }
 
 // The fact id a supersedable entry addresses: an observation/assessment carries

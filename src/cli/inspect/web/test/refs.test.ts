@@ -154,6 +154,15 @@ describe("linkify / linkifyEscaped", () => {
     expect(span?.textContent).toBe("rev:abcdef01");
   });
 
+  it("can render clickable ref chips outside the sequential tab order", () => {
+    const span = parse(
+      linkify("see rev:sha256:abcdef0123456789", { tabIndex: -1 }),
+    ).querySelector("span.ref");
+    expect(span?.getAttribute("data-ref-kind")).toBe("rev");
+    expect(span?.getAttribute("role")).toBe("link");
+    expect(span?.getAttribute("tabindex")).toBe("-1");
+  });
+
   it("renders a non-clickable chip for hashes (no role, no data-ref-kind)", () => {
     const span = parse(linkify("sha256:abcdef0123456789")).querySelector(
       "span.ref",
