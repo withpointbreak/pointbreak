@@ -12,7 +12,10 @@
 /** A verbatim mirror of `assets/index.html`'s `<body>` (minus the `<script>` tag). */
 const INDEX_BODY = `
 <header id="topbar">
-  <div class="brand">Pointbreak<span>Review</span></div>
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <span class="brand-text">Pointbreak<span class="brand-accent">Review</span></span>
+  </div>
   <nav id="lens-switcher" aria-label="master pane lens">
     <button class="lens-tab" type="button" data-lens="timeline" aria-pressed="true">Timeline</button>
     <button class="lens-tab" type="button" data-lens="list" aria-pressed="false">Revisions</button>

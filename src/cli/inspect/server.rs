@@ -87,6 +87,7 @@ const INDEX_HTML: &str = include_str!("assets/index.html");
 const TOKENS_CSS: &str = include_str!("assets/tokens.css");
 const APP_CSS: &str = include_str!("assets/app.css");
 const APP_JS: &str = include_str!("assets/app.js");
+const POINTBREAK_LOGO_MONO_SVG: &[u8] = include_bytes!("assets/pointbreak-logo-mono.svg");
 
 struct Response {
     status: &'static str,
@@ -105,6 +106,10 @@ impl Response {
 
     fn asset(content_type: &'static str, body: &str) -> Self {
         Self::new("200 OK", content_type, body.as_bytes().to_vec())
+    }
+
+    fn asset_bytes(content_type: &'static str, body: &[u8]) -> Self {
+        Self::new("200 OK", content_type, body.to_vec())
     }
 
     fn json_ok(body: String) -> Self {
@@ -213,6 +218,9 @@ fn route(state: &InspectState, method: &str, path: &str, query: Option<&str>) ->
         "/tokens.css" => Response::asset("text/css; charset=utf-8", TOKENS_CSS),
         "/app.css" => Response::asset("text/css; charset=utf-8", APP_CSS),
         "/app.js" => Response::asset("application/javascript; charset=utf-8", APP_JS),
+        "/pointbreak-logo-mono.svg" => {
+            Response::asset_bytes("image/svg+xml; charset=utf-8", POINTBREAK_LOGO_MONO_SVG)
+        }
         "/api/history" => match history_query(query) {
             Ok(request) => api_response(api::history_json(
                 repo,

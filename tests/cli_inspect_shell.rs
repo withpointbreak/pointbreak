@@ -51,6 +51,25 @@ fn served_assets_preserve_the_advisory_framing_and_competing_peers() {
 }
 
 #[test]
+fn served_topbar_uses_the_pointbreak_logo_mark() {
+    let store = representative_store();
+    let inspector = Inspector::spawn(store.repo.path());
+    let html = inspector.get_text("/");
+    assert!(
+        html.contains("class=\"brand-mark\"")
+            && html.contains("aria-hidden=\"true\"")
+            && html.contains("Pointbreak<span class=\"brand-accent\">Review</span>"),
+        "the served shell should keep readable text while rendering the decorative logo mark"
+    );
+
+    let logo = inspector.get_text("/pointbreak-logo-mono.svg");
+    assert!(
+        logo.contains("currentColor") && logo.contains("<svg"),
+        "the served logo asset should be the currentColor mono Pointbreak mark"
+    );
+}
+
+#[test]
 fn served_css_has_a_narrow_viewport_shell_contract() {
     let css = served_app_css();
     assert!(

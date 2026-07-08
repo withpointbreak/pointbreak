@@ -21,8 +21,24 @@ body { display: flex; flex-direction: column; }
   flex: 0 0 auto;
 }
 
-.brand { font-weight: 700; letter-spacing: 0; }
-.brand span { color: var(--accent); margin-left: 4px; font-weight: 500; }
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+.brand-mark {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  background: var(--accent);
+  -webkit-mask: url("/pointbreak-logo-mono.svg") center / contain no-repeat;
+  mask: url("/pointbreak-logo-mono.svg") center / contain no-repeat;
+}
+.brand-text { white-space: nowrap; }
+.brand-accent { color: var(--accent); margin-left: 4px; font-weight: 500; }
 
 /* The served repository / store identity (issue #391): a compact chip showing the
    repository name only, with the full detail — placement/family/worktree, the store
