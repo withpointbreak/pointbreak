@@ -893,6 +893,7 @@ fn key_discover_reports_allowed_signers_candidate_with_key_literal_argument() {
 #[test]
 fn key_discover_expands_tilde_user_signing_key_path() {
     let home = tempfile::tempdir().expect("create isolated home");
+    let home_str = home.path().to_str().unwrap();
     let ssh_dir = home.path().join(".ssh");
     std::fs::create_dir_all(&ssh_dir).unwrap();
     let private_path = ssh_dir.join("id_ed25519");
@@ -914,7 +915,7 @@ fn key_discover_expands_tilde_user_signing_key_path() {
             "--format",
             "json",
         ],
-        &[("HOME", home.path().to_str().unwrap())],
+        &[("HOME", home_str), ("USERPROFILE", home_str)],
     );
     assert!(
         out.status.success(),
@@ -924,12 +925,16 @@ fn key_discover_expands_tilde_user_signing_key_path() {
     let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
     let candidates = doc["candidates"].as_array().unwrap();
     assert_eq!(candidates.len(), 1, "{doc:#}");
-    assert_eq!(candidates[0]["keyArgument"], public_path.to_str().unwrap());
+    support::assert_existing_paths_eq(
+        std::path::Path::new(candidates[0]["keyArgument"].as_str().unwrap()),
+        &public_path,
+    );
 }
 
 #[test]
 fn key_discover_expands_tilde_allowed_signers_file_path() {
     let home = tempfile::tempdir().expect("create isolated home");
+    let home_str = home.path().to_str().unwrap();
     let ssh_dir = home.path().join(".ssh");
     std::fs::create_dir_all(&ssh_dir).unwrap();
     let allowed_signers_path = ssh_dir.join("allowed_signers");
@@ -956,7 +961,7 @@ fn key_discover_expands_tilde_allowed_signers_file_path() {
             "--format",
             "json",
         ],
-        &[("HOME", home.path().to_str().unwrap())],
+        &[("HOME", home_str), ("USERPROFILE", home_str)],
     );
     assert!(
         out.status.success(),
@@ -966,9 +971,9 @@ fn key_discover_expands_tilde_allowed_signers_file_path() {
     let doc: Value = serde_json::from_slice(&out.stdout).unwrap();
     let candidates = doc["candidates"].as_array().unwrap();
     assert_eq!(candidates.len(), 1, "{doc:#}");
-    assert_eq!(
-        candidates[0]["source"]["path"],
-        allowed_signers_path.to_str().unwrap()
+    support::assert_existing_paths_eq(
+        std::path::Path::new(candidates[0]["source"]["path"].as_str().unwrap()),
+        &allowed_signers_path,
     );
 }
 
