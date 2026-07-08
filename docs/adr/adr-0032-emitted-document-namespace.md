@@ -1,16 +1,16 @@
-# ADR-0032: Machine-Document Namespace — Emitted Documents Re-Mint Under `pointbreak.*`; At-Rest Substrate Schemas Stay `shore.*`
+# ADR-0032: Machine-Document Namespace — Emitted Documents Re-Mint Under `pointbreak.*`; At-Rest Rename Deferred
 
 **Status:** Accepted; landed in-repo via plan 0123.
 **Public-safe:** yes, once the name split is public — engineering rationale only.
 **Date:** 2026-07-05
 **See also:** **ADR-0029** (output-mode convention — Decision 7's tiered posture stands; this ADR
-is the authorized coordinated break for the `schema` discriminator *values*, leaving the hard-core
-field paths, wire vocabularies, and the per-document `version` lever untouched), **ADR-0031**
+is the authorized coordinated break for emitted-document `schema` discriminator *values*, leaving the
+hard-core field paths, wire vocabularies, and the per-document `version` lever untouched), **ADR-0031**
 (draft — the ratified surface grammar the new names align to), **ADR-0030** (+ Amendment — the
 named command surface and the hidden legacy surfaces this ADR re-mints uniformly), **ADR-0028**
 (id prefixes — ids and their prefixes are untouched here), **ADR-0004** (event signatures — why
-at-rest schemas are frozen), `docs/substrate-language.md` (substrate vocabulary is internal;
-product surfaces are domain-named).
+at-rest schema renames are a store-format break), `docs/substrate-language.md` (substrate vocabulary
+is internal; product surfaces are domain-named).
 
 ## Context
 
@@ -22,11 +22,12 @@ signature-load-bearing for every stored event (2,680 in this repo's own store). 
 derivation consumes schema strings as digest inputs (`shore.worktree-fingerprint`,
 `shore.revision-identity`, `shore.object-identity` in `src/session/store/fingerprint.rs`;
 `shore.event-set.v1` in `src/session/projection/freshness.rs:7`) — changing any of them re-derives
-opaque ids, a convergence-gated store break (`docs/store-migration.md`). The rest of the at-rest
-set: `shore.event`, `shore.object`, `shore.state`, `shore.note-body` (store files),
+opaque ids and must be handled as a deliberate store-format break (`docs/store-migration.md`). The
+rest of the current at-rest set: `shore.event`, `shore.object`, `shore.state`, `shore.note-body`
+(store files),
 `shore.actor-attributes.v1` (`src/session/identity/actor_attributes.rs`), `shore.store-config`,
 `shore.sensitivity-config`, and `shore.store-export-manifest` (`src/session/store/bundle.rs`, an
-export artifact read back by import). These sit behind the 1.0 store-format floor.
+export artifact read back by import). These are not changed by this ADR.
 
 **Schemas on emitted documents** — the product's machine lane. Every `shore review-*`, `keys-*`,
 `identity-*`, `store-*`, `notes-apply`, and `dump` invocation wraps its body in the
@@ -40,11 +41,12 @@ and the inspector web app match no schema literals.
 
 Two forces make the current naming wrong for the emitted population:
 
-1. **The namespace misstates contract ownership.** `shore` is the internal substrate codename
-   (`docs/substrate-language.md`; the `.shore` dotdir and `SHORE_*` env anchor that layer). The
-   emitted documents are the product's primary integration contract, and the product's published
-   name — crate, repository, brand — is `pointbreak`. A consumer reading `shore.review-capture`
-   is told the wrong owner.
+1. **The namespace misstates contract ownership.** The emitted documents are the product's primary
+   integration contract, and the product's published name — crate, repository, brand — is
+   `pointbreak`. A consumer reading `shore.review-capture` is told the wrong owner. The older
+   rationale that `shore` names a reusable substrate may still apply to at-rest bytes, but that is a
+   separate pre-1.0 format decision and no longer a reason to keep the emitted contract under
+   `shore.*`.
 2. **ADR-0031 creates permanent name drift.** The flatten renames commands with a zero-wire-drift
    promise, so after it lands, `input-request show` would emit `shore.review-input-request-fetch`,
    the `key` family would emit `shore.keys-*`, and `identity delegate` would emit
@@ -56,13 +58,13 @@ no product surface) would mint its documents under whichever rule exists when it
 
 ## Decision
 
-### 1. The namespace rule: at rest = `shore.*`, emitted = `pointbreak.*`
+### 1. Phase 1 namespace rule: emitted = `pointbreak.*`, at rest unchanged
 
-Schema strings that rest on disk, ride signed bytes, or feed identity digests are **substrate
-schemas** and keep `shore.*` permanently. This is not a preference: renaming them invalidates
-signatures and re-derives opaque ids behind the 1.0 format floor. The frozen set is enumerated in
-Context; the `eventType` wire vocabulary (including `work_object_proposed`) stays frozen per
-ADR-0029.
+Schema strings that rest on disk, ride signed bytes, or feed identity digests are **not changed by
+this ADR**. Renaming them invalidates signatures and re-derives opaque ids, so that work belongs in a
+separate pre-1.0 store-format remint or migration plan. This ADR deliberately avoids that store break
+and leaves the current `shore.*` at-rest set enumerated in Context untouched. The `eventType` wire
+vocabulary (including `work_object_proposed`) also stays unchanged here.
 
 Schema strings on documents the product **emits** — CLI stdout machine lane and the inspect HTTP
 API — are **product contract** and carry the `pointbreak.*` namespace. The namespace answers
@@ -123,12 +125,14 @@ Any new domain surface (a task family, if/when it reaches the product) mints its
 `pointbreak.<domain>-…` from the first release. No new `shore.*` product surface is created after
 this ADR.
 
-### 6. Out of scope — unchanged
+### 6. Out of scope — deferred Pointbreak-wide rename
 
 `SHORE_*` environment variables, the `.shore` dotdir, the `~/.shore` keystore, the `shore` binary
 name, tracing span names (`shore.review.capture` etc. — never contract), and test-fixture schemas
 (`shore.test*`). Additive `POINTBREAK_*` env aliases remain a later option per research 0027/0028,
-not part of this decision.
+not part of this decision. This ADR does not bless those names permanently; it keeps phase 1 limited
+to emitted documents so the later Pointbreak-wide rename can handle filesystem paths, environment
+variables, at-rest schemas, and store migration policy in one coordinated slice.
 
 ## Consequences
 
@@ -139,18 +143,20 @@ not part of this decision.
   and lockstep the relay `cli-fallback` parser if it still exists. Verified: no first-party
   consumer matches schema strings today, so the practical blast radius is the snapshot suite and
   documentation.
-- The namespace becomes a contract-ownership statement: `pointbreak.*` = the product promises
-  this; `shore.*` = substrate internals you should not be parsing.
+- The emitted namespace becomes a contract-ownership statement: `pointbreak.*` = the product promises
+  this. The current at-rest `shore.*` names remain implementation/store-format names for this phase
+  only.
 - The ADR-0031 command/document name drift is resolved in the same break — one window instead of
   drift-forever or two breaks.
-- The substrate keeps a stable, brand-independent name: any future product-brand evolution
-  re-mints only emitted documents; stored bytes, signatures, and identities are insulated.
+- The source tree gets a safe first phase of the broader Pointbreak rename: emitted, non-persisted
+  contracts move first; signed bytes, filesystem paths, environment variables, and opaque identities
+  are left for the store-format slice.
 
 ### Rejected
 
-- **Uniform `pointbreak.*` including at-rest schemas** — a full store break: signature
-  invalidation plus opaque-id re-derivation behind the 1.0 format floor, for zero benefit at rest
-  (stored bytes are not a consumer surface).
+- **Renaming at-rest schemas in this ADR** — a full store break: signature invalidation plus opaque-id
+  re-derivation. Pre-1.0 is the right window to consider that broader rename, but it should land with
+  explicit store migration or strict-refusal policy instead of riding a stdout-only schema remint.
 - **Subject-scoped split (only `review-*` documents move)** — a mixed emission namespace where
   consumers memorize which families are "domain enough"; `store`/`key`/`identity` are product
   surface (research 0028 keeps them mounted under the product tree).
@@ -160,15 +166,17 @@ not part of this decision.
 - **Defer until a second domain surfaces** — mints more `shore.*` product surface in the
   meantime, and misses the ADR-0031 alignment window: the fetch/keys/enroll archaeology would
   freeze into the contract, turning one break into two.
-- **Keep `shore.*` and document it as a codename** — leaves the internal codename on the
-  product's primary integration contract permanently, compounding with every future domain.
+- **Keep emitted `shore.*` and document it as a codename** — leaves the internal codename on the
+  product's primary integration contract, compounding with every future domain.
 
 ## Revisit Triggers
 
+- The Pointbreak-wide rename plan reaches filesystem paths, environment variables, the binary name,
+  or at-rest schemas.
 - A second product surface or brand emerges that emits documents (the namespace rule needs a
   per-product prefix decision).
-- A store-format major break is undertaken for independent reasons — the only window in which
-  re-namespacing at-rest schemas could ever be reconsidered.
+- A store-format major break is undertaken for independent reasons — a natural window to consider
+  re-namespacing at-rest schemas.
 - The machine-lane envelope itself is redesigned (ADR-0029 successor), which would subsume this
   naming rule.
 
