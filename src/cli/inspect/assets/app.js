@@ -1153,12 +1153,24 @@
   }
   __name(loadIdentity, "loadIdentity");
   var reloading = false;
+  async function reloadHistoryForQuery() {
+    const queryKey = historyQueryParams(getState());
+    const doc = await fetchHistoryDoc(`/api/history?${queryKey}`);
+    if (!doc) return false;
+    showError(null);
+    commitHistoryPage(doc, queryKey);
+    return true;
+  }
+  __name(reloadHistoryForQuery, "reloadHistoryForQuery");
   function maybeReloadForQuery() {
     const s = getState();
     const want = historyQueryParams(s);
     if (reloading || !s.history || s.history.queryKey === want) return;
     reloading = true;
-    void load().finally(() => {
+    void reloadHistoryForQuery().then((reloaded) => {
+      reloading = false;
+      if (reloaded) maybeReloadForQuery();
+    }).catch(() => {
       reloading = false;
     });
   }
@@ -1200,9 +1212,9 @@
     return { entries, offset };
   }
   __name(mergeWindows, "mergeWindows");
-  function commitHistoryPage(page) {
+  function commitHistoryPage(page, requestedQueryKey) {
     const s = getState();
-    const queryKey = historyQueryParams(s);
+    const queryKey = requestedQueryKey ?? historyQueryParams(s);
     const prev = s.history;
     const merged = prev && prev.queryKey === queryKey ? mergeWindows(prev, page) : { entries: page.entries ?? [], offset: page.offset ?? 0 };
     commit({

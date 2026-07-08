@@ -57,6 +57,29 @@ function captureHistoryUrls(): () => void {
   };
 }
 
+// Capture request paths during a focused interaction. The fixture mock still
+// serves responses; this just records the network shape the data layer chose.
+function captureRequestPaths(): { paths: string[]; restore: () => void } {
+  const inner = globalThis.fetch;
+  const paths: string[] = [];
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : input.url;
+    paths.push(new URL(url, "http://inspector.test").pathname);
+    return inner(input as RequestInfo, init);
+  }) as typeof fetch;
+  return {
+    paths,
+    restore: () => {
+      globalThis.fetch = inner;
+    },
+  };
+}
+
 /** Let all pending microtasks / the load chain settle. */
 function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
@@ -164,6 +187,57 @@ describe("load", () => {
     expect(lastHistoryUrl).toContain("q=pinned");
   });
 
+  it("a query change does not re-fetch revisions or threads", async () => {
+    await data.load();
+    const revisions = store.getState().revisions;
+    const threads = store.getState().threads;
+    const { paths, restore } = captureRequestPaths();
+    try {
+      store.subscribe(data.maybeReloadForQuery);
+      store.commit({ filterText: "pinned" });
+      await flush();
+    } finally {
+      restore();
+    }
+    expect(paths).toContain("/api/history");
+    expect(paths).not.toContain("/api/freshness");
+    expect(paths).not.toContain("/api/revisions");
+    expect(paths).not.toContain("/api/threads");
+    expect(store.getState().revisions).toBe(revisions);
+    expect(store.getState().threads).toBe(threads);
+  });
+
+  it("a failed query reload does not retry in a tight loop", async () => {
+    await data.load();
+    const inner = globalThis.fetch;
+    let historyRequests = 0;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      if (new URL(url, "http://inspector.test").pathname === "/api/history") {
+        historyRequests += 1;
+        return Promise.reject(new Error("history offline"));
+      }
+      return inner(input as RequestInfo, init);
+    }) as typeof fetch;
+    try {
+      store.subscribe(data.maybeReloadForQuery);
+      store.commit({ filterText: "pinned" });
+      await flush();
+      await flush();
+    } finally {
+      globalThis.fetch = inner;
+    }
+    expect(historyRequests).toBe(1);
+    expect(document.querySelector("#error")?.textContent).toContain(
+      "history offline",
+    );
+  });
+
   it("the query watcher does not loop when the query key already matches", async () => {
     await data.load();
     // Mirror render's type-toggle seeding: every present type enabled, so the
@@ -225,9 +299,16 @@ describe("pollFreshness", () => {
   it("reloads and flags the indicator when the event-count marker changed", async () => {
     await data.load();
     setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT + 1 });
-    await data.pollFreshness();
+    const { paths, restore } = captureRequestPaths();
+    try {
+      await data.pollFreshness();
+    } finally {
+      restore();
+    }
     const refresh = document.querySelector("#refresh");
     expect(refresh?.getAttribute("data-state")).toBe("updated");
+    expect(paths).toContain("/api/revisions");
+    expect(paths).toContain("/api/threads");
     // The reload re-seeded the baseline from the freshness probe (the new marker),
     // so a subsequent poll at the same marker reports unchanged — no reload loop.
     expect(store.getState().lastEventCount).toBe(HISTORY_EVENT_COUNT + 1);

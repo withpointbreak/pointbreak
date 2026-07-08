@@ -1,12 +1,12 @@
 // The data-loading layer: fetch the `/api/*` documents and commit them to the
 // store. Ported from the served app.js `load` / `pollFreshness` / `showError`.
 //
-// The server owns the history query now: `load` fetches only the first page of the
-// history for the store's current filter/search/order, and the server returns the
-// windowed entries plus the toggle `facets`, the total `matchCount`, and the window
-// `offset`. Paging is positional (`offset`/`at`); there is no opaque cursor. The
-// loader no longer builds a client search index — there is nothing to index before
-// commit.
+// The server owns the history query now: full reloads fetch only the first page of
+// the history for the store's current filter/search/order, and query-only reloads
+// fetch just that history page. The server returns the windowed entries plus the
+// toggle `facets`, the total `matchCount`, and the window `offset`. Paging is
+// positional (`offset`/`at`); there is no opaque cursor. The loader no longer
+// builds a client search index — there is nothing to index before commit.
 //
 // The cycle cut (data must not depend on render): `load` only `commit`s; it never
 // calls a render function. The store subscriber repaints in response. The
@@ -129,6 +129,15 @@ export async function loadIdentity(): Promise<void> {
 // active query, which is what stops the loop).
 let reloading = false;
 
+async function reloadHistoryForQuery(): Promise<boolean> {
+  const queryKey = historyQueryParams(getState());
+  const doc = await fetchHistoryDoc(`/api/history?${queryKey}`);
+  if (!doc) return false;
+  showError(null);
+  commitHistoryPage(doc, queryKey);
+  return true;
+}
+
 /**
  * Fetch page 1 when the active query no longer matches the loaded page's query
  * key. A store subscriber: the toolbar/search/type-toggle/order controls only
@@ -140,9 +149,16 @@ export function maybeReloadForQuery(): void {
   const want = historyQueryParams(s);
   if (reloading || !s.history || s.history.queryKey === want) return;
   reloading = true;
-  void load().finally(() => {
-    reloading = false;
-  });
+  void reloadHistoryForQuery()
+    .then((reloaded) => {
+      reloading = false;
+      // A later query change may have arrived while this fetch was in flight. The
+      // commit was ignored by the re-entry guard above, so check once more now.
+      if (reloaded) maybeReloadForQuery();
+    })
+    .catch(() => {
+      reloading = false;
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -210,9 +226,9 @@ function mergeWindows(
 // unchanged, else adopt it wholesale (the query moved on since the page was
 // requested, e.g. a reveal cleared the filters). Always stamps the current query
 // key so the loaded window tracks the active query.
-function commitHistoryPage(page: HistoryDoc): void {
+function commitHistoryPage(page: HistoryDoc, requestedQueryKey?: string): void {
   const s = getState();
-  const queryKey = historyQueryParams(s);
+  const queryKey = requestedQueryKey ?? historyQueryParams(s);
   const prev = s.history;
   const merged =
     prev && prev.queryKey === queryKey
