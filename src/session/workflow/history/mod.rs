@@ -12,7 +12,9 @@ pub use self::cursor::{HistoryCursor, HistoryWindow};
 use self::options::ResolvedHistoryFilters;
 pub use self::options::{ReviewHistoryFilters, ReviewHistoryOptions};
 pub use self::projection::{BaseEntry, BaseHistoryProjection, BaseProjectionConfig};
-use self::projection::{history_base_from_events, history_from_events};
+use self::projection::{
+    history_base_from_events, history_default_page_from_events, history_from_events,
+};
 pub use self::query::{
     HistoryOrder, HistoryPage, HistoryQuery, QueriedHistory, apply_history_query,
 };
@@ -83,12 +85,67 @@ pub fn history_base_projection(
     repo: impl AsRef<Path>,
     config: &BaseProjectionConfig,
 ) -> Result<BaseHistoryProjection> {
-    let read_store = resolve_read_store(repo.as_ref())?;
+    let span = tracing::debug_span!("shore.history.base_projection");
+    let _guard = span.enter();
+
+    let read_store = {
+        let span = tracing::debug_span!("shore.history.resolve_read_store");
+        let _guard = span.enter();
+        resolve_read_store(repo.as_ref())?
+    };
     let store = EventStore::from_backend(read_store.backend());
-    let (events, skipped) = store.list_events_lenient()?;
+    let (events, skipped) = {
+        let span = tracing::debug_span!("shore.history.list_events_lenient");
+        let _guard = span.enter();
+        store.list_events_lenient()?
+    };
     let mut base = history_base_from_events(&events, config, Some(read_store.backend()))?;
-    base.diagnostics.extend(skipped_to_diagnostics(skipped));
+    let diagnostics = {
+        let span = tracing::debug_span!("shore.history.skipped_to_diagnostics");
+        let _guard = span.enter();
+        skipped_to_diagnostics(skipped)
+    };
+    base.diagnostics.extend(diagnostics);
     Ok(base)
+}
+
+/// Fast inspector path for the default first history page: read the event log and
+/// hydrate only the requested page, avoiding the full body-hydrated search base
+/// while the background cache warm is still running.
+pub fn default_history_page_projection(
+    repo: impl AsRef<Path>,
+    config: &BaseProjectionConfig,
+    limit: usize,
+    order: HistoryOrder,
+) -> Result<QueriedHistory> {
+    let span = tracing::debug_span!("shore.history.default_page_projection");
+    let _guard = span.enter();
+
+    let read_store = {
+        let span = tracing::debug_span!("shore.history.default_page.resolve_read_store");
+        let _guard = span.enter();
+        resolve_read_store(repo.as_ref())?
+    };
+    let store = EventStore::from_backend(read_store.backend());
+    let (events, skipped) = {
+        let span = tracing::debug_span!("shore.history.default_page.list_events_lenient");
+        let _guard = span.enter();
+        store.list_events_lenient()?
+    };
+    let mut page = history_default_page_from_events(
+        &events,
+        config,
+        Some(read_store.backend()),
+        limit,
+        order,
+    )?;
+    let diagnostics = {
+        let span = tracing::debug_span!("shore.history.default_page.skipped_to_diagnostics");
+        let _guard = span.enter();
+        skipped_to_diagnostics(skipped)
+    };
+    page.diagnostics.extend(diagnostics);
+    Ok(page)
 }
 
 #[cfg(test)]

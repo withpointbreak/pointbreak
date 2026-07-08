@@ -145,19 +145,40 @@ pub struct RevisionListResult {
 }
 
 pub fn list_revisions(options: RevisionListOptions) -> Result<RevisionListResult> {
-    let read_store = resolve_read_store(&options.repo)?;
-    let store = EventStore::from_backend(read_store.backend());
-    let (events, skip_diagnostics) = if options.read_for_display {
-        let (events, skipped) = store.list_events_lenient()?;
-        (events, skipped_to_diagnostics(skipped))
-    } else {
-        (store.list_events()?, Vec::new())
+    let span = tracing::debug_span!("shore.revisions.list");
+    let _guard = span.enter();
+
+    let read_store = {
+        let span = tracing::debug_span!("shore.revisions.list.resolve_read_store");
+        let _guard = span.enter();
+        resolve_read_store(&options.repo)?
     };
-    let projection = RevisionCommitRangeProjection::from_events(&events)?;
-    let mut result = list_from_events(&events, &projection)?;
+    let store = EventStore::from_backend(read_store.backend());
+    let (events, skip_diagnostics) = {
+        let span = tracing::debug_span!("shore.revisions.list.read_events");
+        let _guard = span.enter();
+        if options.read_for_display {
+            let (events, skipped) = store.list_events_lenient()?;
+            (events, skipped_to_diagnostics(skipped))
+        } else {
+            (store.list_events()?, Vec::new())
+        }
+    };
+    let projection = {
+        let span = tracing::debug_span!("shore.revisions.list.commit_range_projection");
+        let _guard = span.enter();
+        RevisionCommitRangeProjection::from_events(&events)?
+    };
+    let mut result = {
+        let span = tracing::debug_span!("shore.revisions.list.from_events");
+        let _guard = span.enter();
+        list_from_events(&events, &projection)?
+    };
     result.diagnostics.extend(skip_diagnostics);
 
     if let Some(ref_filter) = &options.ref_filter {
+        let span = tracing::debug_span!("shore.revisions.list.ref_filter");
+        let _guard = span.enter();
         let matching = revisions_matching_ref(
             &projection,
             &ref_filter.name,
@@ -171,6 +192,8 @@ pub fn list_revisions(options: RevisionListOptions) -> Result<RevisionListResult
     }
 
     if let Some(worktree) = &options.worktree_scope {
+        let span = tracing::debug_span!("shore.revisions.list.worktree_scope");
+        let _guard = span.enter();
         let context = CurrentRevisionContext::for_repo(worktree)?;
         let in_scope = revision_ids_in_worktree(&events, &context)?;
         result
@@ -185,14 +208,22 @@ pub fn list_revisions(options: RevisionListOptions) -> Result<RevisionListResult
     // git ancestry probe per (commit, tip) pair per entry. A git failure here
     // degrades every entry to "reachability unknown" — the same graceful fallback
     // the per-entry path applies — so it is carried as `Option`, never propagated.
-    let liveness = LivenessBatch::build(&options.repo, options.integration_ref.as_deref()).ok();
+    let liveness = {
+        let span = tracing::debug_span!("shore.revisions.list.liveness_batch");
+        let _guard = span.enter();
+        LivenessBatch::build(&options.repo, options.integration_ref.as_deref()).ok()
+    };
 
-    apply_orphan_visibility(
-        &mut result,
-        &options.repo,
-        options.orphan_visibility,
-        liveness.as_ref(),
-    );
+    {
+        let span = tracing::debug_span!("shore.revisions.list.orphan_visibility");
+        let _guard = span.enter();
+        apply_orphan_visibility(
+            &mut result,
+            &options.repo,
+            options.orphan_visibility,
+            liveness.as_ref(),
+        );
+    }
 
     // Canonical read-surface order: build entries → `--ref` retain → `--worktree`
     // identity retain → orphan-visibility retain → grouping → recompute count →
@@ -200,11 +231,23 @@ pub fn list_revisions(options: RevisionListOptions) -> Result<RevisionListResult
     // (a `--ref`/`--worktree`/orphan filter that drops a member shrinks its group; a
     // group whose only surviving member matched still surfaces via that member), and
     // before merge-status, which is attached over the grouped entries.
-    let grouping = CommitOidGroupingProjection::from_events(&events)?;
-    result.entries = group_entries(result.entries, &grouping);
+    let grouping = {
+        let span = tracing::debug_span!("shore.revisions.list.grouping_projection");
+        let _guard = span.enter();
+        CommitOidGroupingProjection::from_events(&events)?
+    };
+    result.entries = {
+        let span = tracing::debug_span!("shore.revisions.list.group_entries");
+        let _guard = span.enter();
+        group_entries(result.entries, &grouping)
+    };
     result.revision_count = result.entries.len();
 
-    attach_merge_status(&mut result, &options.repo, liveness.as_ref());
+    {
+        let span = tracing::debug_span!("shore.revisions.list.attach_merge_status");
+        let _guard = span.enter();
+        attach_merge_status(&mut result, &options.repo, liveness.as_ref());
+    }
 
     Ok(result)
 }

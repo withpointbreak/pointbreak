@@ -23,9 +23,10 @@ use pointbreak::session::{
     ProjectionDiagnostic, ReviewHistoryEntry, RevisionCommitRangeView, RevisionListEntry,
     RevisionListOptions, RevisionOverview, RevisionOverviewsOptions, RevisionProjectionSummary,
     RevisionShowOptions, RevisionShowResult, SessionState, StoreIdentity, StoreIdentityOptions,
-    SupersessionView, apply_history_query, enrich_liveness, event_log_head_marker,
-    history_base_projection, list_revisions, read_bound_object_artifact, read_events_for_display,
-    read_object_artifact, show_revision, show_revision_overviews, store_identity,
+    SupersessionView, apply_history_query, default_history_page_projection, enrich_liveness,
+    event_log_head_marker, history_base_projection, list_revisions, read_bound_object_artifact,
+    read_events_for_display, read_object_artifact, show_revision, show_revision_overviews,
+    store_identity,
 };
 use serde::Serialize;
 
@@ -452,33 +453,53 @@ fn revision_overviews(
     repo: &Path,
     entries: &[RevisionListEntry],
 ) -> Result<BTreeMap<String, RevisionOverviewDocument>, String> {
+    let span = tracing::debug_span!(
+        "shore.inspect.revisions.revision_overviews",
+        revision_count = entries.len()
+    );
+    let _guard = span.enter();
+
     // Build overviews for exactly the listed entries (orphan-hidden and grouped-away
     // captures are not among them). The overview slice reads no member readbacks or
     // principal diagnostics, so the verification-policy / actor-attributes /
     // delegation-map inputs are dropped; the trust set is retained — it drives the
     // operative-removal decision behind file_count/row_count.
-    let overviews = show_revision_overviews(
-        RevisionOverviewsOptions::new(repo)
-            .with_revisions(entries.iter().map(|entry| entry.revision_id.clone()))
-            .with_read_for_display(true)
-            .with_trust_set(crate::cli::common::discover_trust_set(repo)),
-    )
-    .map_err(|error| {
-        tracing::debug!(error = %error, "inspect_unit_overviews_failed");
-        format!("revision overviews not available: {error}")
-    })?;
+    let trust_set = {
+        let span = tracing::debug_span!("shore.inspect.revisions.discover_trust_set");
+        let _guard = span.enter();
+        crate::cli::common::discover_trust_set(repo)
+    };
+    let overviews = {
+        let span = tracing::debug_span!("shore.inspect.revisions.show_revision_overviews");
+        let _guard = span.enter();
+        show_revision_overviews(
+            RevisionOverviewsOptions::new(repo)
+                .with_revisions(entries.iter().map(|entry| entry.revision_id.clone()))
+                .with_read_for_display(true)
+                .with_trust_set(trust_set),
+        )
+        .map_err(|error| {
+            tracing::debug!(error = %error, "inspect_unit_overviews_failed");
+            format!("revision overviews not available: {error}")
+        })?
+    };
 
-    let mut documents = BTreeMap::new();
-    for entry in entries {
-        let revision_id = entry.revision_id.as_str().to_owned();
-        let overview = overviews
-            .get(&entry.revision_id)
-            .ok_or_else(|| format!("revision overview not available: {revision_id}"))?;
-        documents.insert(
-            revision_id,
-            revision_overview_document(overview, &entry.captured_at),
-        );
-    }
+    let documents = {
+        let span = tracing::debug_span!("shore.inspect.revisions.overview_documents");
+        let _guard = span.enter();
+        let mut documents = BTreeMap::new();
+        for entry in entries {
+            let revision_id = entry.revision_id.as_str().to_owned();
+            let overview = overviews
+                .get(&entry.revision_id)
+                .ok_or_else(|| format!("revision overview not available: {revision_id}"))?;
+            documents.insert(
+                revision_id,
+                revision_overview_document(overview, &entry.captured_at),
+            );
+        }
+        documents
+    };
 
     Ok(documents)
 }
@@ -668,8 +689,39 @@ pub(super) fn history_json(
     query: &HistoryQuery,
     page: &HistoryPage,
 ) -> Result<String, String> {
+    let span = tracing::debug_span!("shore.inspect.api.history_json");
+    let _guard = span.enter();
+
+    if let Some(limit) = default_history_page_limit(query, page) {
+        let span = tracing::debug_span!("shore.inspect.history.default_page_fast_path");
+        let _guard = span.enter();
+        let marker = {
+            let span = tracing::debug_span!("shore.inspect.history.event_log_head_marker");
+            let _guard = span.enter();
+            event_log_head_marker(repo).map_err(|error| error.to_string())?
+        };
+        if let Some(base) = cache.try_get(marker) {
+            let span = tracing::debug_span!("shore.inspect.history.default_page_cache_hit");
+            let _guard = span.enter();
+            let out = apply_history_query(&base, query, page);
+            return serialize_history_payload(out);
+        }
+        let config = {
+            let span = tracing::debug_span!("shore.inspect.history.inspect_base_config");
+            let _guard = span.enter();
+            inspect_base_config(repo)
+        };
+        let out = default_history_page_projection(repo, &config, limit, query.order)
+            .map_err(|error| error.to_string())?;
+        return serialize_history_payload(out);
+    }
+
     let base = cached_history_base(repo, cache)?;
     let out = apply_history_query(&base, query, page);
+    serialize_history_payload(out)
+}
+
+fn serialize_history_payload(out: pointbreak::session::QueriedHistory) -> Result<String, String> {
     let payload = HistoryPayload {
         schema: "pointbreak.inspect-history",
         event_set_hash: out.event_set_hash,
@@ -682,7 +734,19 @@ pub(super) fn history_json(
         match_index: out.match_index,
         diagnostics: out.diagnostics,
     };
+    let span = tracing::debug_span!("shore.inspect.history.serialize_json");
+    let _guard = span.enter();
     serde_json::to_string(&payload).map_err(|error| error.to_string())
+}
+
+fn default_history_page_limit(query: &HistoryQuery, page: &HistoryPage) -> Option<usize> {
+    (query.q.is_empty()
+        && query.track.is_none()
+        && query.snapshot.is_none()
+        && query.types.is_none()
+        && page.offset.is_none()
+        && page.at.is_none())
+    .then_some(page.limit?)
 }
 
 /// Warm the history base projection cache without serializing a history page.
@@ -693,6 +757,9 @@ pub(super) fn warm_history_cache(
     repo: &Path,
     cache: &super::cache::HistoryProjectionCache,
 ) -> Result<(), String> {
+    let span = tracing::debug_span!("shore.inspect.warm_history_cache");
+    let _guard = span.enter();
+
     cached_history_base(repo, cache).map(|_| ())
 }
 
@@ -700,29 +767,61 @@ fn cached_history_base(
     repo: &Path,
     cache: &super::cache::HistoryProjectionCache,
 ) -> Result<Arc<BaseHistoryProjection>, String> {
+    let span = tracing::debug_span!("shore.inspect.history.cached_base");
+    let _guard = span.enter();
+
     // The cheap monotonic head marker is the per-request change detector (no
     // event-byte decode — plan 0090); the cached base's `eventSetHash` is the
     // served stamp. Build-once/serve-many across all queries for one store version.
-    let marker = event_log_head_marker(repo).map_err(|error| error.to_string())?;
+    let marker = {
+        let span = tracing::debug_span!("shore.inspect.history.event_log_head_marker");
+        let _guard = span.enter();
+        event_log_head_marker(repo).map_err(|error| error.to_string())?
+    };
+    let span = tracing::debug_span!("shore.inspect.history.cache_get_or_build", marker);
+    let _guard = span.enter();
     cache.get_or_build(marker, || {
-        let config = inspect_base_config(repo);
+        let span = tracing::debug_span!("shore.inspect.history.cache_build");
+        let _guard = span.enter();
+        let config = {
+            let span = tracing::debug_span!("shore.inspect.history.inspect_base_config");
+            let _guard = span.enter();
+            inspect_base_config(repo)
+        };
         history_base_projection(repo, &config).map_err(|error| error.to_string())
     })
 }
 
 /// Captured Revisions with their base/target/snapshot identity.
 pub(super) fn revisions_json(repo: &Path) -> Result<String, String> {
-    let result = list_revisions(RevisionListOptions::new(repo).with_read_for_display(true))
-        .map_err(|error| error.to_string())?;
+    let span = tracing::debug_span!("shore.inspect.api.revisions_json");
+    let _guard = span.enter();
+
+    let result = {
+        let span = tracing::debug_span!("shore.inspect.revisions.list_revisions");
+        let _guard = span.enter();
+        list_revisions(RevisionListOptions::new(repo).with_read_for_display(true))
+            .map_err(|error| error.to_string())?
+    };
     let overviews = revision_overviews(repo, &result.entries)?;
+    let entries = {
+        let span = tracing::debug_span!(
+            "shore.inspect.revisions.to_entry_documents",
+            revision_count = result.entries.len()
+        );
+        let _guard = span.enter();
+        to_unit_entry_documents(result.entries, overviews)?
+    };
     let payload = RevisionsPayload {
         schema: "pointbreak.inspect-revisions",
         event_set_hash: result.event_set_hash,
         event_count: result.event_count,
         revision_count: result.revision_count,
-        entries: to_unit_entry_documents(result.entries, overviews)?,
+        entries,
         diagnostics: result.diagnostics,
     };
+    let span = tracing::debug_span!("shore.inspect.revisions.serialize_json");
+    let _guard = span.enter();
     serde_json::to_string(&payload).map_err(|error| error.to_string())
 }
 
@@ -730,35 +829,55 @@ pub(super) fn revisions_json(repo: &Path) -> Result<String, String> {
 /// graph, labeled domain-side), each with its competing heads and superseded
 /// revisions. Fork-tolerant: never a null head, never a "malformed" error.
 pub(super) fn threads_json(repo: &Path) -> Result<String, String> {
-    let (events, display_diagnostics) =
-        read_events_for_display(repo).map_err(|error| error.to_string())?;
-    let state = SessionState::from_events(&events).map_err(|error| error.to_string())?;
-    let view = SupersessionView::from_events(&events).map_err(|error| error.to_string())?;
+    let span = tracing::debug_span!("shore.inspect.api.threads_json");
+    let _guard = span.enter();
 
-    let threads = view
-        .components
-        .iter()
-        .map(|component| {
-            let heads: Vec<String> = component
-                .intersection(&view.heads)
-                .map(|revision| revision.as_str().to_owned())
-                .collect();
-            let superseded: Vec<String> = component
-                .intersection(&view.superseded)
-                .map(|revision| revision.as_str().to_owned())
-                .collect();
-            Ok(ThreadDocument {
-                revisions: component
-                    .iter()
+    let (events, display_diagnostics) = {
+        let span = tracing::debug_span!("shore.inspect.threads.read_events_for_display");
+        let _guard = span.enter();
+        read_events_for_display(repo).map_err(|error| error.to_string())?
+    };
+    let state = {
+        let span = tracing::debug_span!("shore.inspect.threads.session_state");
+        let _guard = span.enter();
+        SessionState::from_events(&events).map_err(|error| error.to_string())?
+    };
+    let view = {
+        let span = tracing::debug_span!("shore.inspect.threads.supersession_view");
+        let _guard = span.enter();
+        SupersessionView::from_events(&events).map_err(|error| error.to_string())?
+    };
+
+    let threads = {
+        let span = tracing::debug_span!(
+            "shore.inspect.threads.thread_documents",
+            component_count = view.components.len()
+        );
+        let _guard = span.enter();
+        view.components
+            .iter()
+            .map(|component| {
+                let heads: Vec<String> = component
+                    .intersection(&view.heads)
                     .map(|revision| revision.as_str().to_owned())
-                    .collect(),
-                competing: heads.len() > 1,
-                heads,
-                superseded,
-                laid_out: thread_layout(component, &view)?,
+                    .collect();
+                let superseded: Vec<String> = component
+                    .intersection(&view.superseded)
+                    .map(|revision| revision.as_str().to_owned())
+                    .collect();
+                Ok(ThreadDocument {
+                    revisions: component
+                        .iter()
+                        .map(|revision| revision.as_str().to_owned())
+                        .collect(),
+                    competing: heads.len() > 1,
+                    heads,
+                    superseded,
+                    laid_out: thread_layout(component, &view)?,
+                })
             })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Result<Vec<_>, String>>()?
+    };
 
     // Build everything that borrows `view` before moving `view.diagnostics` out.
     let supersedes = revision_edge_map(&view.supersedes);
@@ -778,6 +897,8 @@ pub(super) fn threads_json(repo: &Path) -> Result<String, String> {
         revision_classification: classification,
         diagnostics,
     };
+    let span = tracing::debug_span!("shore.inspect.threads.serialize_json");
+    let _guard = span.enter();
     serde_json::to_string(&payload).map_err(|error| error.to_string())
 }
 
@@ -1667,6 +1788,32 @@ mod tests {
                 .is_some_and(|entries| !entries.is_empty()),
             "default warmed history path returns entries"
         );
+    }
+
+    #[test]
+    fn default_limited_history_page_matches_warmed_cache() {
+        let (repo, _, _) = captured_repo();
+        let cache = super::super::cache::HistoryProjectionCache::new();
+        let query = HistoryQuery {
+            order: pointbreak::session::HistoryOrder::Desc,
+            ..HistoryQuery::default()
+        };
+        let page = HistoryPage {
+            limit: Some(2),
+            ..HistoryPage::default()
+        };
+
+        let fast: serde_json::Value =
+            serde_json::from_str(&history_json(repo.path(), &cache, &query, &page).unwrap())
+                .unwrap();
+        warm_history_cache(repo.path(), &cache).expect("warm history cache");
+        let cached: serde_json::Value =
+            serde_json::from_str(&history_json(repo.path(), &cache, &query, &page).unwrap())
+                .unwrap();
+
+        assert_eq!(fast, cached);
+        assert_eq!(fast["offset"], 0);
+        assert_eq!(fast["historyCount"], 2);
     }
 
     #[test]

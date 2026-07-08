@@ -65,35 +65,67 @@ pub fn apply_history_query(
     query: &HistoryQuery,
     page: &HistoryPage,
 ) -> QueriedHistory {
-    let clauses = parse_search_query(&query.q);
+    let span = tracing::debug_span!(
+        "shore.history.apply_query",
+        base_entry_count = base.entries.len(),
+        q_empty = query.q.is_empty()
+    );
+    let _guard = span.enter();
+
+    let clauses = {
+        let span = tracing::debug_span!("shore.history.query.parse_search_query");
+        let _guard = span.enter();
+        parse_search_query(&query.q)
+    };
     // The facet predicate is q + track + snapshot, EXCLUDING the `types` page filter
     // (INV-3). The page predicate additionally applies the `types` set.
     let facet_match = |entry: &BaseEntry| {
         track_snapshot_match(entry, query) && matches_query(&entry.record, &clauses)
     };
 
-    let mut facets: BTreeMap<String, usize> = BTreeMap::new();
-    for entry in base.entries.iter().filter(|&entry| facet_match(entry)) {
-        *facets.entry(event_type_wire(&entry.entry)).or_default() += 1;
-    }
+    let facets = {
+        let span = tracing::debug_span!("shore.history.query.facets");
+        let _guard = span.enter();
+        let mut facets: BTreeMap<String, usize> = BTreeMap::new();
+        for entry in base.entries.iter().filter(|&entry| facet_match(entry)) {
+            *facets.entry(event_type_wire(&entry.entry)).or_default() += 1;
+        }
+        facets
+    };
 
-    let mut filtered: Vec<&BaseEntry> = base
-        .entries
-        .iter()
-        .filter(|&entry| facet_match(entry) && type_set_match(entry, query.types.as_ref()))
-        .collect();
+    let mut filtered: Vec<&BaseEntry> = {
+        let span = tracing::debug_span!("shore.history.query.filter_entries");
+        let _guard = span.enter();
+        base.entries
+            .iter()
+            .filter(|&entry| facet_match(entry) && type_set_match(entry, query.types.as_ref()))
+            .collect()
+    };
     // The base is ascending `(occurred_at, event_id)`; `Desc` reverses the ordered
     // filtered set so windowing runs in display order (INV-2).
     if matches!(query.order, HistoryOrder::Desc) {
+        let span = tracing::debug_span!("shore.history.query.reverse_filtered");
+        let _guard = span.enter();
         filtered.reverse();
     }
     let match_count = filtered.len();
 
-    let (range, match_index) = resolve_window(&filtered, page);
-    let entries = filtered[range.clone()]
-        .iter()
-        .map(|entry| entry.entry.clone())
-        .collect();
+    let (range, match_index) = {
+        let span = tracing::debug_span!("shore.history.query.resolve_window");
+        let _guard = span.enter();
+        resolve_window(&filtered, page)
+    };
+    let entries = {
+        let span = tracing::debug_span!(
+            "shore.history.query.clone_window_entries",
+            window_count = range.len()
+        );
+        let _guard = span.enter();
+        filtered[range.clone()]
+            .iter()
+            .map(|entry| entry.entry.clone())
+            .collect()
+    };
 
     QueriedHistory {
         entries,

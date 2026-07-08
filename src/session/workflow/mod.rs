@@ -53,8 +53,8 @@ pub use history::{
     BaseEntry, BaseHistoryProjection, BaseProjectionConfig, HistoryCursor, HistoryOrder,
     HistoryPage, HistoryQuery, HistoryWindow, QueriedHistory, QueryClause, ReviewHistoryEntry,
     ReviewHistoryFilters, ReviewHistoryOptions, ReviewHistoryResult, SearchRecord,
-    apply_history_query, build_haystack, history_base_projection, matches_query,
-    parse_search_query, review_history,
+    apply_history_query, build_haystack, default_history_page_projection, history_base_projection,
+    matches_query, parse_search_query, review_history,
 };
 pub use ingest::{
     ImportEventOptions, IngestEventsOptions, IngestEventsResult, import_event, ingest_events,

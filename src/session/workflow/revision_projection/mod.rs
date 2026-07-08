@@ -86,14 +86,25 @@ struct StoreWideRead {
 /// `ArtifactRemovalProjection`. The `CosignatureIndex` is deliberately *not*
 /// built here — it borrows `events`, so each caller builds it locally.
 fn load_store_wide_read(read_store: &ReadStore, read_for_display: bool) -> Result<StoreWideRead> {
+    let span = tracing::debug_span!("shore.revisions.overviews.load_store_wide_read");
+    let _guard = span.enter();
+
     let store = EventStore::from_backend(read_store.backend());
-    let (events, skip_diagnostics) = if read_for_display {
-        let (events, skipped) = store.list_events_lenient()?;
-        (events, skipped_to_diagnostics(skipped))
-    } else {
-        (store.list_events()?, Vec::new())
+    let (events, skip_diagnostics) = {
+        let span = tracing::debug_span!("shore.revisions.overviews.read_events");
+        let _guard = span.enter();
+        if read_for_display {
+            let (events, skipped) = store.list_events_lenient()?;
+            (events, skipped_to_diagnostics(skipped))
+        } else {
+            (store.list_events()?, Vec::new())
+        }
     };
-    let removal = ArtifactRemovalProjection::from_events(&events)?;
+    let removal = {
+        let span = tracing::debug_span!("shore.revisions.overviews.artifact_removal_projection");
+        let _guard = span.enter();
+        ArtifactRemovalProjection::from_events(&events)?
+    };
     Ok(StoreWideRead {
         events,
         removal,
@@ -545,7 +556,14 @@ pub struct RevisionOverview {
 pub fn show_revision_overviews(
     options: RevisionOverviewsOptions,
 ) -> Result<BTreeMap<RevisionId, RevisionOverview>> {
-    let read_store = resolve_read_store(&options.repo)?;
+    let span = tracing::debug_span!("shore.revisions.overviews");
+    let _guard = span.enter();
+
+    let read_store = {
+        let span = tracing::debug_span!("shore.revisions.overviews.resolve_read_store");
+        let _guard = span.enter();
+        resolve_read_store(&options.repo)?
+    };
     revision_overviews_from_store(
         &read_store,
         &options.repo,
@@ -570,6 +588,12 @@ fn revision_overviews_from_store(
     removal_policy: RemovalPolicy,
     read_for_display: bool,
 ) -> Result<BTreeMap<RevisionId, RevisionOverview>> {
+    let span = tracing::debug_span!(
+        "shore.revisions.overviews.from_store",
+        requested_revision_count = revisions.len()
+    );
+    let _guard = span.enter();
+
     // The single read for the whole batch, via the same prefix `show_revision`
     // uses. The overview never surfaces diagnostics, so the skip diagnostics are
     // discarded. `cosig_index` borrows `events`, so it is built locally here, on
@@ -579,37 +603,52 @@ fn revision_overviews_from_store(
         removal,
         skip_diagnostics: _,
     } = load_store_wide_read(read_store, read_for_display)?;
-    let cosig_index = CosignatureIndex::build(&events)?;
+    let cosig_index = {
+        let span = tracing::debug_span!("shore.revisions.overviews.cosignature_index");
+        let _guard = span.enter();
+        CosignatureIndex::build(&events)?
+    };
     // One supersession view for the whole batch, from the already-read events (single-read
     // preserved). Each overview reads its own direct superseders from it.
-    let supersession = SupersessionView::from_events(&events)?;
+    let supersession = {
+        let span = tracing::debug_span!("shore.revisions.overviews.supersession_view");
+        let _guard = span.enter();
+        SupersessionView::from_events(&events)?
+    };
     // Index every captured identity by id once, then build only the requested
     // revisions. The requested set is the caller's listed entries, a subset of all
     // captures — building only it never resolves a snapshot for an orphan-hidden or
     // grouped-away revision the caller will not surface.
-    let identities: BTreeMap<RevisionId, RevisionProjectionIdentity> =
+    let identities: BTreeMap<RevisionId, RevisionProjectionIdentity> = {
+        let span = tracing::debug_span!("shore.revisions.overviews.enumerate_identities");
+        let _guard = span.enter();
         enumerate_revision_identities(&events)?
             .into_iter()
             .map(|identity| (identity.id.clone(), identity))
-            .collect();
+            .collect()
+    };
 
     let mut overviews = BTreeMap::new();
-    for revision_id in revisions {
-        let Some(identity) = identities.get(revision_id) else {
-            continue;
-        };
-        let overview = build_revision_overview(
-            read_store.backend(),
-            repo,
-            &events,
-            identity,
-            trust_set,
-            removal_policy,
-            &removal,
-            &cosig_index,
-            &supersession,
-        )?;
-        overviews.insert(revision_id.clone(), overview);
+    {
+        let span = tracing::debug_span!("shore.revisions.overviews.build_requested");
+        let _guard = span.enter();
+        for revision_id in revisions {
+            let Some(identity) = identities.get(revision_id) else {
+                continue;
+            };
+            let overview = build_revision_overview(
+                read_store.backend(),
+                repo,
+                &events,
+                identity,
+                trust_set,
+                removal_policy,
+                &removal,
+                &cosig_index,
+                &supersession,
+            )?;
+            overviews.insert(revision_id.clone(), overview);
+        }
     }
     Ok(overviews)
 }
@@ -631,20 +670,31 @@ fn build_revision_overview(
     cosig_index: &CosignatureIndex<'_>,
     supersession: &SupersessionView,
 ) -> Result<RevisionOverview> {
+    let span = tracing::debug_span!("shore.revisions.overviews.build_one");
+    let _guard = span.enter();
+
     let resolved = ResolvedRevision {
         journal_id: revision.journal_id.clone(),
         revision_id: revision.revision_id.clone(),
         object_id: revision.object_id.clone(),
         object_artifact_content_hash: revision.object_artifact_content_hash.clone(),
     };
-    let bound_status = removal.operative_status(
-        &revision.object_artifact_content_hash,
-        trust_set,
-        removal_policy,
-        cosig_index,
-    )?;
+    let bound_status = {
+        let span = tracing::debug_span!("shore.revisions.overviews.operative_status");
+        let _guard = span.enter();
+        removal.operative_status(
+            &revision.object_artifact_content_hash,
+            trust_set,
+            removal_policy,
+            cosig_index,
+        )?
+    };
     let body_removal_lens = BodyRemovalLens::new(removal, trust_set, removal_policy, cosig_index);
-    let snapshot_content = resolve_snapshot_content(repo, revision, bound_status)?;
+    let snapshot_content = {
+        let span = tracing::debug_span!("shore.revisions.overviews.resolve_snapshot_content");
+        let _guard = span.enter();
+        resolve_snapshot_content(repo, revision, bound_status)?
+    };
     let (snapshot, removed_snapshot_content_hash) = match snapshot_content {
         SnapshotContent::Present(snapshot) => (snapshot, None),
         SnapshotContent::SuppressedPresent { content_hash }
@@ -660,66 +710,90 @@ fn build_revision_overview(
     // The overview reads only counts, titles, statuses, and timestamps — never a
     // hydrated body — so `include_body` is false on every projection, matching the
     // current overview path (which never sets `with_include_body`).
-    let observations = project_observations(ObservationProjectionOptions {
-        backend,
-        events,
-        resolved: &resolved,
-        track_filter: None,
-        file_filter: None,
-        tag_filters: &[],
-        include_body: false,
-        removal_lens: &body_removal_lens,
-    })?;
-    let input_requests = project_input_requests(InputRequestProjectionOptions {
-        backend,
-        events,
-        resolved: &resolved,
-        track_filter: None,
-        mode_filter: None,
-        file_filter: None,
-        status_filter: InputRequestStatusFilter::All,
-        include_body: false,
-        removal_lens: &body_removal_lens,
-    })?;
-    let (current_assessment, assessments) = project_assessments(AssessmentProjectionOptions {
-        backend: Some(backend),
-        events,
-        resolved: &resolved,
-        track_filter: None,
-        include_summary: false,
-        include_all: true,
-        removal_lens: Some(&body_removal_lens),
-    })?;
-    let validation_checks = project_validation_checks(ValidationCheckProjectionOptions {
-        backend,
-        events,
-        revision_id: &resolved.revision_id,
-        track_filter: None,
-        status_filter: None,
-        include_body: false,
-        removal_lens: &body_removal_lens,
-    })?;
+    let observations = {
+        let span = tracing::debug_span!("shore.revisions.overviews.project_observations");
+        let _guard = span.enter();
+        project_observations(ObservationProjectionOptions {
+            backend,
+            events,
+            resolved: &resolved,
+            track_filter: None,
+            file_filter: None,
+            tag_filters: &[],
+            include_body: false,
+            removal_lens: &body_removal_lens,
+        })?
+    };
+    let input_requests = {
+        let span = tracing::debug_span!("shore.revisions.overviews.project_input_requests");
+        let _guard = span.enter();
+        project_input_requests(InputRequestProjectionOptions {
+            backend,
+            events,
+            resolved: &resolved,
+            track_filter: None,
+            mode_filter: None,
+            file_filter: None,
+            status_filter: InputRequestStatusFilter::All,
+            include_body: false,
+            removal_lens: &body_removal_lens,
+        })?
+    };
+    let (current_assessment, assessments) = {
+        let span = tracing::debug_span!("shore.revisions.overviews.project_assessments");
+        let _guard = span.enter();
+        project_assessments(AssessmentProjectionOptions {
+            backend: Some(backend),
+            events,
+            resolved: &resolved,
+            track_filter: None,
+            include_summary: false,
+            include_all: true,
+            removal_lens: Some(&body_removal_lens),
+        })?
+    };
+    let validation_checks = {
+        let span = tracing::debug_span!("shore.revisions.overviews.project_validation_checks");
+        let _guard = span.enter();
+        project_validation_checks(ValidationCheckProjectionOptions {
+            backend,
+            events,
+            revision_id: &resolved.revision_id,
+            track_filter: None,
+            status_filter: None,
+            include_body: false,
+            removal_lens: &body_removal_lens,
+        })?
+    };
 
     // Recompute the summary exactly as `show_revision` does: the snapshot rows seed
     // `file_count` + `snapshot_remainder_row_count`, the narrative builders
     // seed `narrative_row_count`, and `row_count` is their sum. The built rows are
     // only counted here (the overview keeps no rows), so they are discarded.
-    let (_snapshot_rows, mut summary) = if removed_snapshot_content_hash.is_some() {
-        (Vec::new(), RevisionProjectionSummary::default())
-    } else {
-        build_snapshot_rows(&snapshot, &revision.id)
+    let (_snapshot_rows, mut summary) = {
+        let span = tracing::debug_span!("shore.revisions.overviews.build_snapshot_rows");
+        let _guard = span.enter();
+        if removed_snapshot_content_hash.is_some() {
+            (Vec::new(), RevisionProjectionSummary::default())
+        } else {
+            build_snapshot_rows(&snapshot, &revision.id)
+        }
     };
-    let mut narrative_rows = Vec::new();
-    narrative_rows.extend(build_observation_rows(&observations));
-    summary.observation_count = observations.len();
-    narrative_rows.extend(build_input_request_rows(&input_requests));
-    summary.input_request_count = input_requests.len();
-    narrative_rows.extend(build_assessment_rows(&assessments));
-    summary.assessment_count = assessments.len();
-    narrative_rows.extend(build_validation_rows(&validation_checks));
-    summary.validation_check_count = validation_checks.len();
-    summary.narrative_row_count = narrative_rows.len();
-    summary.row_count = summary.narrative_row_count + summary.snapshot_remainder_row_count;
+    {
+        let span = tracing::debug_span!("shore.revisions.overviews.build_narrative_counts");
+        let _guard = span.enter();
+        let mut narrative_rows = Vec::new();
+        narrative_rows.extend(build_observation_rows(&observations));
+        summary.observation_count = observations.len();
+        narrative_rows.extend(build_input_request_rows(&input_requests));
+        summary.input_request_count = input_requests.len();
+        narrative_rows.extend(build_assessment_rows(&assessments));
+        summary.assessment_count = assessments.len();
+        narrative_rows.extend(build_validation_rows(&validation_checks));
+        summary.validation_check_count = validation_checks.len();
+        summary.narrative_row_count = narrative_rows.len();
+        summary.row_count = summary.narrative_row_count + summary.snapshot_remainder_row_count;
+    }
 
     Ok(RevisionOverview {
         summary,

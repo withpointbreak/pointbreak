@@ -59,6 +59,15 @@ impl HistoryProjectionCache {
         });
         Ok(base)
     }
+
+    /// Return the cached base for `marker` only when it is immediately available.
+    /// If a background warm is holding the write lock, this deliberately returns
+    /// `None` so first-paint paths can avoid waiting for the full haystack build.
+    pub(super) fn try_get(&self, marker: u64) -> Option<Arc<BaseHistoryProjection>> {
+        let guard = self.slot.try_read().ok()?;
+        let cached = guard.as_ref()?;
+        (cached.marker == marker).then(|| Arc::clone(&cached.base))
+    }
 }
 
 #[cfg(test)]
@@ -129,5 +138,15 @@ mod tests {
         // entry behind).
         let ok = cache.get_or_build(7, || Ok(base_stub("v1")));
         assert!(ok.is_ok());
+    }
+
+    #[test]
+    fn try_get_returns_matching_cached_base_without_building() {
+        let cache = HistoryProjectionCache::new();
+        let built = cache.get_or_build(7, || Ok(base_stub("v1"))).unwrap();
+
+        let hit = cache.try_get(7).expect("matching marker hits");
+        assert!(Arc::ptr_eq(&built, &hit));
+        assert!(cache.try_get(8).is_none(), "stale marker misses");
     }
 }

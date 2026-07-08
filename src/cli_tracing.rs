@@ -10,10 +10,10 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 
-/// Per-layer filter applied to `PerfLayer` so it observes shore spans
+/// Per-layer filter applied to `PerfLayer` so it observes Pointbreak spans
 /// (including the existing `event_store.*` debug spans) regardless of the
 /// user's `--log` filter, without bleeding those events into the fmt layer.
-const PERF_OBSERVE_FILTER: &str = "shore=debug";
+const PERF_OBSERVE_FILTER: &str = "shore=debug,pointbreak=debug";
 
 #[derive(Clone, Debug, Args)]
 pub(crate) struct TracingArgs {

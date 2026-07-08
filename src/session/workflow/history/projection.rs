@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use super::cursor::{HistoryCursor, HistoryWindow, cmp_key};
 use super::options::ResolvedHistoryFilters;
+use super::query::{HistoryOrder, QueriedHistory};
 use super::result::ReviewHistoryResult;
 use super::search::{SearchRecord, entry_revision_id};
 use super::summary::{ReviewHistoryEntry, ReviewHistorySummary};
@@ -192,7 +193,14 @@ pub(super) fn history_base_from_events(
     config: &BaseProjectionConfig,
     backend: Option<&StoreBackend>,
 ) -> Result<BaseHistoryProjection> {
-    let state = SessionState::from_events(events)?;
+    let span = tracing::debug_span!("shore.history.base_from_events", event_count = events.len());
+    let _guard = span.enter();
+
+    let state = {
+        let span = tracing::debug_span!("shore.history.session_state_from_events");
+        let _guard = span.enter();
+        SessionState::from_events(events)?
+    };
     let event_set_hash = state
         .event_set_hash
         .clone()
@@ -214,12 +222,20 @@ pub(super) fn history_base_from_events(
 
     // One co-signature index per build: endorsement readbacks read it only when
     // a policy is set, the removal lens always does.
-    let cosig_index = CosignatureIndex::build(events)?;
+    let cosig_index = {
+        let span = tracing::debug_span!("shore.history.cosignature_index");
+        let _guard = span.enter();
+        CosignatureIndex::build(events)?
+    };
     let readback_index = filters
         .verification_policy
         .is_some()
         .then_some(&cosig_index);
-    let removal = ArtifactRemovalProjection::from_events(events)?;
+    let removal = {
+        let span = tracing::debug_span!("shore.history.artifact_removal_projection");
+        let _guard = span.enter();
+        ArtifactRemovalProjection::from_events(events)?
+    };
     let removal_lens = backend.map(|_| {
         BodyRemovalLens::new(
             &removal,
@@ -229,46 +245,192 @@ pub(super) fn history_base_from_events(
         )
     });
 
-    let mut matched: Vec<&ShoreEvent> = events
-        .iter()
-        .filter(|event| event_matches_filters(event, &filters))
-        .collect();
-    matched.sort_by(|left, right| {
-        cmp_key(&left.occurred_at, left.event_id.as_str())
-            .cmp(&cmp_key(&right.occurred_at, right.event_id.as_str()))
-    });
+    let matched: Vec<&ShoreEvent> = {
+        let span = tracing::debug_span!("shore.history.filter_and_sort_events");
+        let _guard = span.enter();
+        let mut matched: Vec<&ShoreEvent> = events
+            .iter()
+            .filter(|event| event_matches_filters(event, &filters))
+            .collect();
+        matched.sort_by(|left, right| {
+            cmp_key(&left.occurred_at, left.event_id.as_str())
+                .cmp(&cmp_key(&right.occurred_at, right.event_id.as_str()))
+        });
+        matched
+    };
 
     // Pass 1: hydrate every entry (the base never slices — the full body set is
     // what `q` search needs). Pass 2: resolve `object` against the revision map
     // and attach each entry's search record.
-    let built = matched
-        .iter()
-        .map(|event| {
-            history_entry_from_event(
-                event,
-                &filters,
-                readback_index,
-                backend,
-                removal_lens.as_ref(),
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let built = {
+        let span = tracing::debug_span!(
+            "shore.history.hydrate_entries",
+            matched_event_count = matched.len()
+        );
+        let _guard = span.enter();
+        matched
+            .iter()
+            .map(|event| {
+                history_entry_from_event(
+                    event,
+                    &filters,
+                    readback_index,
+                    backend,
+                    removal_lens.as_ref(),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
     let mut diagnostics = state.diagnostics;
-    diagnostics.extend(body_content_diagnostics(
-        built.iter().flat_map(entry_body_states),
-    ));
-    let object_by_revision = revision_object_map(&built);
-    let entries = built
-        .into_iter()
-        .map(|entry| {
-            let object = entry_object(&entry, &object_by_revision);
-            let record = SearchRecord::from_entry(&entry, object);
-            BaseEntry { entry, record }
-        })
-        .collect();
+    let body_diagnostics = {
+        let span = tracing::debug_span!("shore.history.body_content_diagnostics");
+        let _guard = span.enter();
+        body_content_diagnostics(built.iter().flat_map(entry_body_states))
+    };
+    diagnostics.extend(body_diagnostics);
+    let object_by_revision = {
+        let span = tracing::debug_span!("shore.history.revision_object_map");
+        let _guard = span.enter();
+        revision_object_map(&built)
+    };
+    let entries = {
+        let span = tracing::debug_span!("shore.history.search_records", entry_count = built.len());
+        let _guard = span.enter();
+        built
+            .into_iter()
+            .map(|entry| {
+                let object = entry_object(&entry, &object_by_revision);
+                let record = SearchRecord::from_entry(&entry, object);
+                BaseEntry { entry, record }
+            })
+            .collect()
+    };
 
     Ok(BaseHistoryProjection {
         entries,
+        event_set_hash,
+        event_count: events.len(),
+        diagnostics,
+    })
+}
+
+pub(super) fn history_default_page_from_events(
+    events: &[ShoreEvent],
+    config: &BaseProjectionConfig,
+    backend: Option<&StoreBackend>,
+    limit: usize,
+    order: HistoryOrder,
+) -> Result<QueriedHistory> {
+    let span = tracing::debug_span!("shore.history.default_page_from_events");
+    let _guard = span.enter();
+
+    let state = {
+        let span = tracing::debug_span!("shore.history.default_page.session_state_from_events");
+        let _guard = span.enter();
+        SessionState::from_events(events)?
+    };
+    let event_set_hash = state
+        .event_set_hash
+        .clone()
+        .expect("SessionState::from_events sets event_set_hash");
+
+    let filters = ResolvedHistoryFilters {
+        include_body: true,
+        verification_policy: config.verification_policy,
+        trust_set: config.trust_set.clone(),
+        actor_attributes: config.actor_attributes.clone(),
+        delegation_map: config.delegation_map.clone(),
+        removal_policy: config.removal_policy,
+        ..Default::default()
+    };
+
+    let cosig_index = {
+        let span = tracing::debug_span!("shore.history.default_page.cosignature_index");
+        let _guard = span.enter();
+        CosignatureIndex::build(events)?
+    };
+    let readback_index = filters
+        .verification_policy
+        .is_some()
+        .then_some(&cosig_index);
+    let removal = {
+        let span = tracing::debug_span!("shore.history.default_page.artifact_removal_projection");
+        let _guard = span.enter();
+        ArtifactRemovalProjection::from_events(events)?
+    };
+    let removal_lens = backend.map(|_| {
+        BodyRemovalLens::new(
+            &removal,
+            &filters.trust_set,
+            filters.removal_policy,
+            &cosig_index,
+        )
+    });
+
+    let mut matched: Vec<&ShoreEvent> = {
+        let span = tracing::debug_span!("shore.history.default_page.filter_and_sort_events");
+        let _guard = span.enter();
+        let mut matched: Vec<&ShoreEvent> = events
+            .iter()
+            .filter(|event| event_matches_filters(event, &filters))
+            .collect();
+        matched.sort_by(|left, right| {
+            cmp_key(&left.occurred_at, left.event_id.as_str())
+                .cmp(&cmp_key(&right.occurred_at, right.event_id.as_str()))
+        });
+        matched
+    };
+    if matches!(order, HistoryOrder::Desc) {
+        let span = tracing::debug_span!("shore.history.default_page.reverse_matched");
+        let _guard = span.enter();
+        matched.reverse();
+    }
+
+    let facets = {
+        let span = tracing::debug_span!("shore.history.default_page.facets");
+        let _guard = span.enter();
+        let mut facets = BTreeMap::new();
+        for event in &matched {
+            *facets
+                .entry(event.event_type.as_str().to_owned())
+                .or_default() += 1;
+        }
+        facets
+    };
+    let match_count = matched.len();
+    let end = limit.min(matched.len());
+
+    let entries = {
+        let span = tracing::debug_span!("shore.history.default_page.hydrate_window");
+        let _guard = span.enter();
+        matched[..end]
+            .iter()
+            .map(|event| {
+                history_entry_from_event(
+                    event,
+                    &filters,
+                    readback_index,
+                    backend,
+                    removal_lens.as_ref(),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
+
+    let mut diagnostics = state.diagnostics;
+    let body_diagnostics = {
+        let span = tracing::debug_span!("shore.history.default_page.body_content_diagnostics");
+        let _guard = span.enter();
+        body_content_diagnostics(entries.iter().flat_map(entry_body_states))
+    };
+    diagnostics.extend(body_diagnostics);
+
+    Ok(QueriedHistory {
+        entries,
+        facets,
+        match_count,
+        offset: 0,
+        match_index: None,
         event_set_hash,
         event_count: events.len(),
         diagnostics,
