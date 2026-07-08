@@ -196,21 +196,42 @@ impl Inspector {
     /// GET a path returning the raw status line and body, with no status
     /// assertion — for socket-level route/error coverage.
     pub fn raw_get(&self, path: &str) -> (String, String) {
+        let mut last_error = String::new();
+        for attempt in 0..12 {
+            match self.try_raw_get(path) {
+                Ok(response) => return response,
+                Err(error) => {
+                    last_error = error;
+                    thread::sleep(Duration::from_millis(20 * (attempt + 1)));
+                }
+            }
+        }
+        panic!(
+            "GET {path} failed after retries: {last_error}; server stderr: {}",
+            drained(&self.stderr)
+        );
+    }
+
+    fn try_raw_get(&self, path: &str) -> Result<(String, String), String> {
         let mut stream = TcpStream::connect(&self.addr).expect("connect to inspector");
         let request = format!(
             "GET {path} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
             self.addr
         );
-        stream.write_all(request.as_bytes()).expect("send request");
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|error| error.to_string())?;
         let _ = stream.shutdown(Shutdown::Write);
         let mut response = Vec::new();
-        stream.read_to_end(&mut response).expect("read response");
+        stream
+            .read_to_end(&mut response)
+            .map_err(|error| error.to_string())?;
         let text = String::from_utf8_lossy(&response);
         let (head, body) = text
             .split_once("\r\n\r\n")
-            .expect("response has header/body delimiter");
+            .ok_or_else(|| format!("response has no header/body delimiter: {text}"))?;
         let status = head.lines().next().unwrap_or_default().to_owned();
-        (status, body.to_owned())
+        Ok((status, body.to_owned()))
     }
 
     /// Issue a raw request line (method + target) and return the status line,
