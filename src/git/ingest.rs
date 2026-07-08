@@ -162,6 +162,15 @@ fn diff_files_for_args(
         .collect::<Result<Vec<_>>>()
 }
 
+fn diff_files_for_treeish_pair(
+    repo: &Path,
+    base_treeish: &str,
+    target_treeish: &str,
+    pathspecs: &[String],
+) -> Result<Vec<DiffFile>> {
+    diff_files_for_args(repo, &[base_treeish, target_treeish], pathspecs)
+}
+
 pub(crate) fn capture_worktree_diff_files(repo: &Path) -> Result<Vec<DiffFile>> {
     capture_worktree_diff_files_scoped(repo, &[])
 }
@@ -188,7 +197,18 @@ pub(crate) fn capture_commit_range_diff_files(
     target_oid: &str,
     pathspecs: &[String],
 ) -> Result<Vec<DiffFile>> {
-    diff_files_for_args(repo, &[base_oid, target_oid], pathspecs)
+    diff_files_for_treeish_pair(repo, base_oid, target_oid, pathspecs)
+}
+
+/// Tree diff between the empty tree and a resolved root commit. Never reads the
+/// working tree or index and never synthesizes untracked rows.
+pub(crate) fn capture_root_commit_diff_files(
+    repo: &Path,
+    empty_tree_oid: &str,
+    target_commit_oid: &str,
+    pathspecs: &[String],
+) -> Result<Vec<DiffFile>> {
+    diff_files_for_treeish_pair(repo, empty_tree_oid, target_commit_oid, pathspecs)
 }
 
 fn synthesize_untracked_files(repo: &Path, pathspecs: &[String]) -> Result<Vec<DiffFile>> {

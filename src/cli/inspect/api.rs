@@ -337,6 +337,14 @@ fn derive_target_display(target: &ReviewEndpoint, base: &ReviewEndpoint) -> Targ
             "git_commit",
             short_oid(commit_oid).unwrap_or_else(|| GIT_COMMIT_FLOOR.to_owned()),
         ),
+        ReviewEndpoint::GitTree { tree_oid } => (
+            "git_tree",
+            short_oid(tree_oid).unwrap_or_else(|| "tree".to_owned()),
+        ),
+        ReviewEndpoint::GitIndex { tree_oid } => (
+            "git_index",
+            short_oid(tree_oid).unwrap_or_else(|| "index".to_owned()),
+        ),
     };
     TargetDisplay {
         kind,
@@ -378,7 +386,9 @@ fn head_display(base: &ReviewEndpoint) -> Option<HeadDisplay> {
                 live_branch: None,
             })
         }
-        ReviewEndpoint::GitWorkingTree { .. } => None,
+        ReviewEndpoint::GitTree { .. }
+        | ReviewEndpoint::GitIndex { .. }
+        | ReviewEndpoint::GitWorkingTree { .. } => None,
     }
 }
 
@@ -1336,7 +1346,9 @@ pub(super) fn revision_json(repo: &Path, revision_id: &str) -> Result<String, St
     let target_display = derive_target_display(&result.revision.target, &result.revision.base);
     let head_oid = match &result.revision.base {
         ReviewEndpoint::GitCommit { commit_oid, .. } => Some(commit_oid.clone()),
-        ReviewEndpoint::GitWorkingTree { .. } => None,
+        ReviewEndpoint::GitTree { .. }
+        | ReviewEndpoint::GitIndex { .. }
+        | ReviewEndpoint::GitWorkingTree { .. } => None,
     };
     let commit_range = result.commit_range.clone();
     // Build the inspector-private fact graphs while `result` is still live; it is

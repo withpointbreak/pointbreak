@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
 use crate::error::{Result, ShoreError};
@@ -396,6 +397,14 @@ pub(crate) fn git_commit_tree_oid(repo: &Path, commit_oid: &str) -> Result<Strin
     git_rev_parse_peeled(repo, commit_oid, "tree", "commit tree oid")
 }
 
+/// Compute the empty tree OID using the repository's configured object format.
+/// This deliberately asks Git instead of embedding the SHA-1 empty-tree
+/// constant, so SHA-256 repositories use their own empty-tree identity.
+pub(crate) fn git_empty_tree_oid(repo: &Path) -> Result<String> {
+    let output = run_git_with_stdin(repo, ["hash-object", "-t", "tree", "--stdin"], b"", &[0])?;
+    git_stdout_string(repo, &output.stdout, "empty tree oid")
+}
+
 /// List the full commit OIDs reachable in a `<a>..<b>` revision range via
 /// `git rev-list`.
 ///
@@ -580,6 +589,54 @@ where
     ))
 }
 
+fn run_git_with_stdin<I, S>(
+    cwd: &Path,
+    args: I,
+    stdin: &[u8],
+    allowed_statuses: &[i32],
+) -> Result<GitOutput>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let args = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_owned())
+        .collect::<Vec<_>>();
+    let mut child = Command::new("git")
+        .args(&args)
+        .current_dir(cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| ShoreError::Message(format!("run git {:?}: {error}", args)))?;
+
+    child
+        .stdin
+        .as_mut()
+        .expect("git stdin is piped")
+        .write_all(stdin)
+        .map_err(|error| ShoreError::Message(format!("write git {:?} stdin: {error}", args)))?;
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| ShoreError::Message(format!("wait for git {:?}: {error}", args)))?;
+    let status_code = output.status.code();
+    if !status_code.is_some_and(|code| allowed_statuses.contains(&code)) {
+        return Err(ShoreError::GitCommand {
+            command: format!("{args:?}"),
+            status: output.status.to_string(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
+    }
+
+    Ok(GitOutput {
+        stdout: output.stdout,
+    })
+}
+
 fn git_stdout_path(repo: &Path, stdout: &[u8], description: &str) -> Result<PathBuf> {
     let trimmed = trim_git_stdout(stdout);
     if trimmed.is_empty() {
@@ -638,6 +695,8 @@ fn git_path_from_bytes(bytes: &[u8]) -> Result<PathBuf> {
 mod tests {
     use std::ffi::OsString;
     use std::fs;
+    use std::io::Write;
+    use std::process::Stdio;
 
     use tempfile::TempDir;
 
@@ -713,9 +772,72 @@ mod tests {
         assert_ne!(tree_via_commit, head_oid);
     }
 
+    #[test]
+    fn empty_tree_oid_matches_git_stdin_hash_object() {
+        let repo = TwoCommitRepo::new();
+        let oid = git_empty_tree_oid(repo.path()).unwrap();
+        let expected = git_hash_object_tree_from_stdin(repo.path(), b"").unwrap();
+
+        assert_eq!(oid, expected);
+        assert!(git_rev_parse_peeled(repo.path(), &oid, "tree", "tree oid").is_ok());
+    }
+
+    #[test]
+    fn empty_tree_oid_uses_repository_hash_algorithm_when_sha256_is_supported() {
+        let Some(repo) = maybe_sha256_repo() else {
+            return;
+        };
+
+        let oid = git_empty_tree_oid(repo.path()).unwrap();
+        let expected = git_hash_object_tree_from_stdin(repo.path(), b"").unwrap();
+
+        assert_eq!(oid, expected);
+        assert_ne!(oid, "4b825dc642cb6eb9a060e54bf8d69288fbee4904");
+        assert_eq!(oid.len(), 64);
+    }
+
     fn rev_parse(repo: &Path, rev: &str) -> String {
         let output = run_git(repo, ["rev-parse", rev]).unwrap();
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    fn git_hash_object_tree_from_stdin(repo: &Path, input: &[u8]) -> Result<String> {
+        let mut child = Command::new("git")
+            .args(["hash-object", "-t", "tree", "--stdin"])
+            .current_dir(repo)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| ShoreError::Message(format!("run git hash-object: {error}")))?;
+        child
+            .stdin
+            .as_mut()
+            .expect("hash-object stdin is piped")
+            .write_all(input)
+            .map_err(|error| {
+                ShoreError::Message(format!("write git hash-object stdin: {error}"))
+            })?;
+        let output = child
+            .wait_with_output()
+            .map_err(|error| ShoreError::Message(format!("wait for git hash-object: {error}")))?;
+        if !output.status.success() {
+            return Err(ShoreError::Message(format!(
+                "git hash-object -t tree --stdin failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    }
+
+    fn maybe_sha256_repo() -> Option<TempDir> {
+        let repo = TempDir::new().expect("create sha256 test repository directory");
+        let output = Command::new("git")
+            .args(["init", "--object-format=sha256"])
+            .current_dir(repo.path())
+            .output()
+            .expect("run git init --object-format=sha256");
+        output.status.success().then_some(repo)
     }
 
     #[test]

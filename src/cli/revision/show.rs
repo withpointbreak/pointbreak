@@ -209,6 +209,12 @@ fn endpoint_label(endpoint: &ReviewEndpoint) -> String {
         ReviewEndpoint::GitCommit { commit_oid, .. } => {
             format!("{} (commit)", output::short_ref(commit_oid))
         }
+        ReviewEndpoint::GitTree { tree_oid } => {
+            format!("{} (tree)", output::short_ref(tree_oid))
+        }
+        ReviewEndpoint::GitIndex { tree_oid } => {
+            format!("{} (index)", output::short_ref(tree_oid))
+        }
         ReviewEndpoint::GitWorkingTree { .. } => "worktree".to_owned(),
     }
 }

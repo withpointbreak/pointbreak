@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 use crate::crypto::EventSigner;
 use crate::error::{Result, ShoreError};
 use crate::git::{
-    IngestOptions, capture_commit_range_diff_files, git_commit_tree_oid, git_head_oid,
-    git_head_ref, git_rev_parse_commit_oid, ingest_tracked_diff_with_options,
+    IngestOptions, capture_commit_range_diff_files, capture_root_commit_diff_files,
+    git_commit_tree_oid, git_empty_tree_oid, git_head_oid, git_head_ref, git_rev_parse_commit_oid,
+    ingest_tracked_diff_with_options,
 };
 use crate::model::{
     ActorId, DiffFile, DiffRowKind, DiffSnapshot, EngagementId, EngagementType, FileStatus,
@@ -17,7 +18,8 @@ use crate::session::event::{
     subject_id, type_code,
 };
 use crate::session::fingerprint::{
-    ResolvedCommitEndpoint, RevisionFingerprint, engagement_id_from_root, engagement_id_provisional,
+    ResolvedCommitEndpoint, ResolvedTreeEndpoint, RevisionFingerprint, engagement_id_from_root,
+    engagement_id_provisional,
 };
 use crate::session::store::resolution::{prepare_write_landing, resolve_write_store};
 use crate::session::workflow::util::sorted_unique;
@@ -51,6 +53,25 @@ impl CommitRangeSpec {
     }
 }
 
+/// Root-commit capture input: an optional target rev (defaults to `HEAD`).
+/// The target must resolve to a commit; the base side is the repository's
+/// empty tree OID for its object format.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RootCommitSpec {
+    target_rev: Option<String>,
+}
+
+impl RootCommitSpec {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_target_rev(mut self, target_rev: impl Into<String>) -> Self {
+        self.target_rev = Some(target_rev.into());
+        self
+    }
+}
+
 /// Which source adapter a capture lowers through. The default is the worktree
 /// (`HEAD` -> working tree) adapter; `CommitRange` is the first explicit
 /// non-worktree source (research 0004 carry-forward).
@@ -58,6 +79,7 @@ impl CommitRangeSpec {
 enum CaptureSourceSpec {
     Worktree,
     CommitRange(CommitRangeSpec),
+    RootCommit(RootCommitSpec),
 }
 
 impl CaptureSourceSpec {
@@ -66,6 +88,7 @@ impl CaptureSourceSpec {
         match self {
             Self::Worktree => "worktree",
             Self::CommitRange(_) => "commit_range",
+            Self::RootCommit(_) => "root_commit",
         }
     }
 }
@@ -100,6 +123,14 @@ impl CaptureOptions {
     /// diff). The default (no call) keeps today's worktree capture behavior.
     pub fn with_commit_range(mut self, range: CommitRangeSpec) -> Self {
         self.source = CaptureSourceSpec::CommitRange(range);
+        self
+    }
+
+    /// Capture the root commit as an empty-tree -> target-commit diff. The
+    /// working tree, index, untracked files, and helper-path exclusions are not
+    /// read; the default target is `HEAD`.
+    pub fn with_root_commit(mut self, root: RootCommitSpec) -> Self {
+        self.source = CaptureSourceSpec::RootCommit(root);
         self
     }
 
@@ -262,6 +293,9 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
         CaptureSourceSpec::CommitRange(range) => {
             prepare_commit_range_capture(&worktree_root, range, &pathspecs)?
         }
+        CaptureSourceSpec::RootCommit(root) => {
+            prepare_root_commit_capture(&worktree_root, root, &pathspecs)?
+        }
     };
     if !pathspecs.is_empty() && files.is_empty() {
         return Err(crate::error::ShoreError::Message(format!(
@@ -340,7 +374,7 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
     // helper skips it. Any failure degrades to a diagnostic and never blocks capture.
     let auto_record_ref = match &options.source {
         CaptureSourceSpec::Worktree => true,
-        CaptureSourceSpec::CommitRange(_) => matches!(
+        CaptureSourceSpec::CommitRange(_) | CaptureSourceSpec::RootCommit(_) => matches!(
             &fingerprint.target,
             ReviewEndpoint::GitCommit { commit_oid, .. }
                 if *commit_oid == git_head_oid(&worktree_root)?
@@ -487,6 +521,36 @@ fn prepare_commit_range_capture(
     let fingerprint = crate::session::fingerprint::commit_range_revision_fingerprint_for_files(
         worktree_root,
         &base,
+        &target,
+        &files,
+        pathspecs,
+    )?;
+    Ok(PreparedCapture { files, fingerprint })
+}
+
+/// Root-commit adapter: resolve the target rev to a commit endpoint, diff the
+/// repository's empty tree against that target commit (no working-tree, index,
+/// or untracked involvement; no helper-path exclusion), and fingerprint it as a
+/// root-commit review unit.
+fn prepare_root_commit_capture(
+    worktree_root: &Path,
+    root: &RootCommitSpec,
+    pathspecs: &[String],
+) -> Result<PreparedCapture> {
+    let empty_tree = ResolvedTreeEndpoint {
+        tree_oid: git_empty_tree_oid(worktree_root)?,
+    };
+    let target_rev = root.target_rev.as_deref().unwrap_or("HEAD");
+    let target = resolve_commit_endpoint(worktree_root, target_rev)?;
+    let files = capture_root_commit_diff_files(
+        worktree_root,
+        &empty_tree.tree_oid,
+        &target.commit_oid,
+        pathspecs,
+    )?;
+    let fingerprint = crate::session::fingerprint::root_commit_revision_fingerprint_for_files(
+        worktree_root,
+        &empty_tree,
         &target,
         &files,
         pathspecs,
@@ -644,9 +708,9 @@ mod tests {
     use crate::session::workflow::capture::diffstat_from_files;
     use crate::session::{
         ArtifactKind, CaptureOptions, CommitRangeSpec, EventStore, ImportArtifactOptions,
-        ImportArtifactOutcome, RevisionShowOptions, ShoreStorePaths, capture_review,
-        capture_worktree_review, ensure_shore_gitignore, export_artifact, import_artifact,
-        read_object_artifact, referenced_artifacts, show_revision,
+        ImportArtifactOutcome, RevisionShowOptions, RootCommitSpec, ShoreStorePaths,
+        capture_review, capture_worktree_review, ensure_shore_gitignore, export_artifact,
+        import_artifact, read_object_artifact, referenced_artifacts, show_revision,
     };
 
     fn diff_row(kind: DiffRowKind) -> DiffRow {
@@ -901,6 +965,199 @@ mod tests {
             panic!("expected a commit-range source");
         };
         assert_eq!(pathspecs, &vec!["a".to_owned()]);
+    }
+
+    #[test]
+    fn root_capture_records_first_commit_contents_as_added_files() {
+        let repo = one_commit_repo();
+
+        let result = capture_review(
+            CaptureOptions::new(repo.path()).with_root_commit(RootCommitSpec::new()),
+        )
+        .unwrap();
+        let artifact = read_object_artifact(repo.path(), &result.object_id).unwrap();
+
+        assert!(matches!(
+            result.source,
+            RevisionSource::GitRootCommit { .. }
+        ));
+        assert!(matches!(result.base, ReviewEndpoint::GitTree { .. }));
+        assert!(matches!(result.target, ReviewEndpoint::GitCommit { .. }));
+        assert_eq!(result.diffstat.added_files, 1);
+        assert_eq!(artifact.snapshot.files[0].status, FileStatus::Added);
+    }
+
+    #[test]
+    fn root_capture_ignores_dirty_worktree_index_and_untracked_files() {
+        let repo = one_commit_repo();
+
+        let clean = capture_review(
+            CaptureOptions::new(repo.path()).with_root_commit(RootCommitSpec::new()),
+        )
+        .unwrap();
+        let clean_artifact = read_object_artifact(repo.path(), &clean.object_id).unwrap();
+
+        repo.write("tracked.txt", "dirty\n");
+        repo.git(["add", "tracked.txt"]);
+        repo.write("untracked.txt", "untracked\n");
+        let helper_path = repo.path().join("helper.log");
+        fs::write(&helper_path, "helper\n").unwrap();
+
+        let dirty = capture_review(
+            CaptureOptions::new(repo.path())
+                .with_root_commit(RootCommitSpec::new())
+                .with_excluded_helper_path(&helper_path),
+        )
+        .unwrap();
+        let dirty_artifact = read_object_artifact(repo.path(), &dirty.object_id).unwrap();
+
+        assert_eq!(clean.object_id, dirty.object_id);
+        assert_eq!(clean.revision_id, dirty.revision_id);
+        assert_eq!(clean.diffstat, dirty.diffstat);
+        assert_eq!(clean_artifact.snapshot.files, dirty_artifact.snapshot.files);
+        assert_eq!(dirty.events_existing, 2);
+    }
+
+    #[test]
+    fn scoped_root_capture_uses_git_pathspecs() {
+        let repo = TestRepo::new();
+        repo.write("a/one.txt", "one\n");
+        repo.write("b/two.txt", "two\n");
+        repo.commit_all("root");
+
+        let result = capture_review(
+            CaptureOptions::new(repo.path())
+                .with_root_commit(RootCommitSpec::new())
+                .with_pathspecs(vec!["a".to_owned()]),
+        )
+        .unwrap();
+        let artifact = read_object_artifact(repo.path(), &result.object_id).unwrap();
+
+        let paths: Vec<&str> = artifact
+            .snapshot
+            .files
+            .iter()
+            .filter_map(|file| file.new_path.as_deref())
+            .collect();
+        assert_eq!(paths, vec!["a/one.txt"]);
+        let RevisionSource::GitRootCommit { pathspecs, .. } = &result.source else {
+            panic!("expected a root commit source");
+        };
+        assert_eq!(pathspecs, &vec!["a".to_owned()]);
+    }
+
+    #[test]
+    fn scoped_root_capture_matching_no_changes_errors() {
+        let repo = one_commit_repo();
+
+        let error = capture_review(
+            CaptureOptions::new(repo.path())
+                .with_root_commit(RootCommitSpec::new())
+                .with_pathspecs(vec!["docs".to_owned()]),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("matched no changed files"));
+        let events = EventStore::open(resolved_store_dir(repo.path()))
+            .list_events()
+            .unwrap_or_default();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn root_capture_target_rev_defaults_to_head_but_can_be_explicit() {
+        let repo = committed_repo();
+        let first_commit = repo.rev_parse("HEAD~1");
+        let head_commit = repo.rev_parse("HEAD");
+
+        let head = capture_review(
+            CaptureOptions::new(repo.path()).with_root_commit(RootCommitSpec::new()),
+        )
+        .unwrap();
+        let explicit = capture_review(
+            CaptureOptions::new(repo.path())
+                .with_root_commit(RootCommitSpec::new().with_target_rev("HEAD~1")),
+        )
+        .unwrap();
+
+        match &head.target {
+            ReviewEndpoint::GitCommit { commit_oid, .. } => assert_eq!(commit_oid, &head_commit),
+            other => panic!("unexpected root target endpoint: {other:?}"),
+        }
+        match &explicit.target {
+            ReviewEndpoint::GitCommit { commit_oid, .. } => assert_eq!(commit_oid, &first_commit),
+            other => panic!("unexpected root target endpoint: {other:?}"),
+        }
+        assert_ne!(head.object_id, explicit.object_id);
+        assert_ne!(head.revision_id, explicit.revision_id);
+    }
+
+    #[test]
+    fn root_capture_rejects_non_commit_target() {
+        let repo = committed_repo();
+
+        let error = capture_review(
+            CaptureOptions::new(repo.path())
+                .with_root_commit(RootCommitSpec::new().with_target_rev("HEAD:src/lib.rs")),
+        )
+        .unwrap_err();
+
+        let message = error.to_string();
+        assert!(message.contains("HEAD:src/lib.rs"), "message: {message}");
+        assert!(message.contains("commit"), "message: {message}");
+    }
+
+    #[test]
+    fn root_capture_tipping_at_head_records_capture_branch_ref() {
+        let repo = one_commit_repo();
+        repo.git(["branch", "-M", "feat/root"]);
+        let head_oid = repo.rev_parse("HEAD");
+
+        let capture = capture_review(
+            CaptureOptions::new(repo.path()).with_root_commit(RootCommitSpec::new()),
+        )
+        .unwrap();
+
+        let events = EventStore::open(resolved_store_dir(repo.path()))
+            .list_events()
+            .unwrap();
+        let ref_count = events
+            .iter()
+            .filter(|event| event.event_type == EventType::RevisionRefAssociated)
+            .count();
+        assert_eq!(
+            ref_count, 1,
+            "a HEAD-tipping root capture records its capture-branch ref"
+        );
+
+        let projection =
+            crate::session::RevisionCommitRangeProjection::from_events(&events).unwrap();
+        let view = projection.unit(&capture.revision_id).unwrap();
+        assert_eq!(view.current_refs.len(), 1);
+        assert_eq!(view.current_refs[0].ref_name, "refs/heads/feat/root");
+        assert_eq!(view.current_refs[0].head_oid, head_oid);
+    }
+
+    #[test]
+    fn root_capture_not_tipping_at_head_records_nothing() {
+        let repo = committed_repo();
+        repo.git(["branch", "-M", "feat/root"]);
+
+        capture_review(
+            CaptureOptions::new(repo.path())
+                .with_root_commit(RootCommitSpec::new().with_target_rev("HEAD~1")),
+        )
+        .unwrap();
+
+        let events = EventStore::open(resolved_store_dir(repo.path()))
+            .list_events()
+            .unwrap();
+        assert!(
+            !events
+                .iter()
+                .any(|event| event.event_type == EventType::RevisionRefAssociated),
+            "a root capture targeting a non-HEAD commit records no capture-branch ref"
+        );
     }
 
     #[test]
@@ -1869,6 +2126,13 @@ mod tests {
         repo.commit_all("base");
         repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
         repo.commit_all("change");
+        repo
+    }
+
+    fn one_commit_repo() -> TestRepo {
+        let repo = TestRepo::new();
+        repo.write("tracked.txt", "clean\n");
+        repo.commit_all("root");
         repo
     }
 

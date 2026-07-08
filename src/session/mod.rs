@@ -81,7 +81,7 @@ pub use workflow::{
     RevisionListEntry, RevisionListOptions, RevisionListResult, RevisionOverview,
     RevisionOverviewsOptions, RevisionProjectionIdentity, RevisionProjectionRow,
     RevisionProjectionSummary, RevisionShowFilters, RevisionShowOptions, RevisionShowResult,
-    SearchRecord, SkippedRemoval, SnapshotContentState, SnapshotOrder, StoreFamily,
+    RootCommitSpec, SearchRecord, SkippedRemoval, SnapshotContentState, SnapshotOrder, StoreFamily,
     StoreForgetOptions, StoreForgetResult, StoreIdentity, StoreIdentityOptions, StoreLinkOptions,
     StoreLinkPreview, StoreLinkResult, StoreListEntry, StoreListResult, StorePlacement,
     StoreSensitivityPathGroup, StoreStatusArtifactInventory, StoreStatusInventory,
