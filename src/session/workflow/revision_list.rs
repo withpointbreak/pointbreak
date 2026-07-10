@@ -252,36 +252,44 @@ pub fn list_revisions(options: RevisionListOptions) -> Result<RevisionListResult
     Ok(result)
 }
 
-/// Attach the structural merge-status to each surfaced entry. Run after the
-/// visibility filter so hidden orphans are not classified twice. Reuses each
-/// entry's `commit_range` view against the shared reachability batch.
+/// Attach the structural merge-status to each surfaced entry, and merge any
+/// enrichment-level diagnostics (divergence needs ancestry, so it is
+/// liveness-derived) into the entry's per-unit `commit_range.diagnostics` —
+/// the same array the fold's diagnostics land in. Run after the visibility
+/// filter so hidden orphans are not classified twice. Reuses each entry's
+/// `commit_range` view against the shared reachability batch.
 fn attach_merge_status(
     result: &mut RevisionListResult,
     repo: &Path,
     liveness: Option<&LivenessBatch>,
 ) {
     for entry in &mut result.entries {
-        entry.merge_status = merge_status_for(&entry.commit_range, repo, liveness).to_owned();
+        let (merge_status, diagnostics) = merge_status_for(&entry.commit_range, repo, liveness);
+        entry.merge_status = merge_status.to_owned();
+        entry.commit_range.diagnostics.extend(diagnostics);
     }
 }
 
 /// The domain-named merge-status for a unit's current commit set, from the landed
-/// liveness engine's agreed headline. `unknown` covers no commit anchor,
-/// disagreeing per-commit conditions, a projection diagnostic, or an unavailable
+/// liveness engine's landing headline, plus the enrichment's diagnostics.
+/// `unknown` covers no commit anchor, divergent landing claims, or an unavailable
 /// repo (graceful degradation — never an error).
 fn merge_status_for(
     view: &RevisionCommitRangeView,
     repo: &Path,
     liveness: Option<&LivenessBatch>,
-) -> &'static str {
+) -> (&'static str, Vec<ProjectionDiagnostic>) {
     match liveness.map(|batch| batch.enrich_merge(repo, view)) {
-        Some(Ok(enrichment)) => match enrichment.headline {
-            Some(CommitGraphCondition::Merged) => "merged",
-            Some(CommitGraphCondition::Live) => "open",
-            Some(CommitGraphCondition::Orphaned { .. }) => "orphaned",
-            None => "unknown",
-        },
-        Some(Err(_)) | None => "unknown",
+        Some(Ok(enrichment)) => {
+            let merge_status = match enrichment.headline {
+                Some(CommitGraphCondition::Merged) => "merged",
+                Some(CommitGraphCondition::Live) => "open",
+                Some(CommitGraphCondition::Orphaned { .. }) => "orphaned",
+                None => "unknown",
+            };
+            (merge_status, enrichment.diagnostics)
+        }
+        Some(Err(_)) | None => ("unknown", Vec::new()),
     }
 }
 

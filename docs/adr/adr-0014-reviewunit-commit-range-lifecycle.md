@@ -376,3 +376,74 @@ derived per-OID matrix / withheld-headline-under-ambiguity, broad-default `merge
 `divergent_commit_association` / `retraction_target_missing` diagnostics, and the
 `shore review association` surface all stand verbatim — read with `revision` substituted for `review_unit`
 in the four event names, their wire values, and their idempotency-key prefixes.
+
+## Amendment: Divergence Means Competing Landing Claims — Not Accretion (2026-07-09)
+
+**The original decision stands.** The four-event family (§1), idempotency keys (§2), withdraw-only
+terminality (§3), all-statuses-derived (§4), the §10 association-vs-supersession distinction, signing
+(§8), and the CLI surface (§9) are all unchanged. This amendment re-scopes **when
+`divergent_commit_association` fires and what withholds the landing headline** (§5/§7), adds one git
+plumbing helper (§6), and adds a **write-time advisory guard** on `shore association record --commit`.
+Tracked as [issue #443](https://github.com/kevinswiber/pointbreak/issues/443).
+
+**What was wrong.** §7's predicate — two un-withdrawn commit associations with different OIDs
+(`src/session/projection/commit_range.rs:328-342`) — fires on states the model itself blesses: a
+commit-range capture's target plus its landed squash/merge commit, and successive passes landing
+commits on one revision over time. Commits accreting on a revision are a history, not a competition.
+Compounding it, `headline_for` (`src/session/workflow/commit_range_liveness.rs:443-457`) withholds the
+headline whenever *any* diagnostic is present or per-OID conditions disagree, so the expected end state
+of a successful review + landing renders as `⚠ commit associations diverge … landing: unknown`
+(`src/cli/association.rs:376-391`) — a healthy record that reads as broken, which in practice sends
+agents to `shore capture --supersedes` when recording the association was the whole point (§10).
+Meanwhile the predicate cannot catch the mistake it guards against: an association to the *wrong*
+revision is usually a **single** edge, invisible to any edge-count rule.
+
+**Divergence, re-scoped.** Two current landing claims are divergent only when they **compete to be the
+same landing**; everything else is history. Concretely:
+
+- **The capture-target edge never participates.** `CommitEdgeSource::CaptureTarget`
+  (`commit_range.rs:57-64`) is provenance — where the review happened — not a landing claim.
+  Divergence is assessed among `CommitEdgeSource::Association` edges only. This alone un-flags the
+  standard squash-landing pattern.
+- **Same tree = rewrite, not divergence.** Two current association edges with distinct commit OIDs but
+  the same `tree_oid` (already in the payload) are content-equivalent (rebase/cherry-pick). The pure
+  fold — which keeps its §5 git-free discipline — emits the informational
+  **`rewritten_commit_association`** for this case and makes **no divergence claim of its own**; the
+  fold-level distinct-OID predicate is removed.
+- **Ancestry decides, at enrichment time.** The read-time liveness enrichment (§5, already git-backed)
+  computes the **maximal** current association claims with one `git merge-base --independent <oids…>`
+  call (new status-tolerant helper `git_independent_commits` beside `git_is_ancestor`,
+  `src/git/command.rs:319-333`). A chain of successive landings has one maximal claim — never
+  divergent. **`divergent_commit_association`** (same code string, new layer) fires iff **two or more
+  incomparable maximal claims are each live or merged with distinct trees**. Orphaned claims never
+  compete — a rebased-away tip shows in the per-OID matrix (and is worth withdrawing) but is no longer
+  a candidate landing. Missing/gc'd objects degrade per §6 (orphaned, never an error, never a
+  divergence claim); an unavailable repo makes no divergence claim (headline already degrades to
+  unknown). No timestamp arbitration — topology, not clocks — so the ADR-0008 class-(c) posture holds;
+  this narrows, and still realizes, the reserved `ambiguous_supersession`.
+
+**Headline, re-scoped.** The landing headline is the condition of the **unique maximal live-or-merged
+association claim**; it falls back to the capture target's condition when no association edges exist,
+and reads `orphaned` when every current claim is orphaned. It is withheld only under real divergence
+(or when liveness is unavailable). The blanket `!diagnostics.is_empty() → None` rule in `headline_for`
+is dropped — an unrelated `retraction_target_missing` or `rewritten_commit_association` no longer
+blanks the landing status. Enrichment-level divergence surfaces through the same per-unit
+`diagnostics` the read surfaces already render; the `association list` ⚠ digest rewords to match (it
+must no longer suggest "associate the landed commit" in a state reachable only by having done so).
+
+**Write-time advisory guard.** The moment to catch a wrong-revision association is
+`associate_commit` (`src/session/workflow/association/mod.rs:337`), where both the commit and the
+revision's bound snapshot are in hand. Compare the commit's changed paths
+(`git diff-tree --no-commit-id --name-only -r`) against the captured `DiffSnapshot`'s paths: an empty
+intersection adds the advisory **`commit_association_content_mismatch`** to the result document (and a
+text-lane warning), naming a better-matching current revision when one exists. **Advisory, never
+blocking** (ADR-0003 posture): the association records regardless, and the check degrades silently
+when the snapshot bytes are suppressed/removed or git is unavailable. Tree/patch equality short-circuits
+as an exact landing.
+
+**What does not change (restated for the implementer).** No new event type, payload field, or
+`sigVersion`; nothing new is stored — both new codes are derived diagnostics, and the guard writes
+nothing. Withdrawal, idempotency, convergence, and the surface-both/pick-no-winner posture for real
+divergence are unchanged. §10 stands verbatim: association = the *same* revision landing as commit X;
+supersession = a *new* revision replacing an old one. A commit landing after capture or assessment is
+recorded with an association and is never grounds to recapture or supersede.

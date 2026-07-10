@@ -423,7 +423,10 @@ fn unit_show_includes_commit_range_and_liveness_block() {
 }
 
 #[test]
-fn text_association_digest_phrases_divergence() {
+fn text_association_digest_treats_successive_landings_as_history() {
+    // HEAD~1 is an ancestor of HEAD: two landings forming a chain are ordinary
+    // accretion, so the digest carries no divergence warning and the landing
+    // headline follows the tip claim (a live branch tip → open).
     let repo = divergent_repo();
     capture(&repo);
     record_commit(&repo, "HEAD");
@@ -445,21 +448,68 @@ fn text_association_digest_phrases_divergence() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("anchored"),
-        "digest names the anchor state: {stdout}"
-    );
-    assert!(
         stdout.contains("2 current commit associations"),
         "digest counts the current commit associations: {stdout}"
     );
+    assert!(
+        !stdout.contains("⚠"),
+        "a landing chain is history, not a warning: {stdout}"
+    );
+    assert!(
+        stdout.contains("landing: open"),
+        "the headline follows the tip claim: {stdout}"
+    );
+}
+
+#[test]
+fn text_association_digest_phrases_competing_claims() {
+    // A genuine fork: two live branch tips, neither an ancestor of the other,
+    // with different trees, both claiming the revision. The digest warns in
+    // plain language and withholds the landing headline.
+    let repo = divergent_repo();
+    repo.git(["branch", "-M", "main"]);
+    repo.git(["branch", "rival", "HEAD~1"]);
+    repo.git(["stash"]);
+    repo.git(["checkout", "rival"]);
+    repo.write("src/other.rs", "pub fn rival() -> u32 { 9 }\n");
+    repo.commit_all("rival");
+    repo.git(["checkout", "main"]);
+    repo.git(["stash", "pop"]);
+    capture(&repo);
+    record_commit(&repo, "main");
+    record_commit(&repo, "rival");
+    let repo_path = repo.path().to_str().unwrap();
+
+    let output = shore([
+        "association",
+        "list",
+        "--repo",
+        repo_path,
+        "--format",
+        "text",
+    ]);
+    assert!(
+        output.status.success(),
+        "list --format text failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("anchored"),
+        "digest names the anchor state: {stdout}"
+    );
     // The human phrasing of the diagnostic, not the raw machine code.
     assert!(
-        stdout.contains("diverge"),
-        "digest phrases divergence: {stdout}"
+        stdout.contains("competing landing commits"),
+        "digest phrases the competition: {stdout}"
     );
     assert!(
         !stdout.contains("divergent_commit_association"),
         "the raw diagnostic code stays machine-side: {stdout}"
+    );
+    assert!(
+        stdout.contains("landing: unknown"),
+        "competing claims withhold the landing headline: {stdout}"
     );
     assert!(
         !stdout.contains("\"schema\""),

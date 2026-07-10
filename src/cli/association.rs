@@ -277,25 +277,39 @@ fn list_run(args: ListArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::e
         let source = digest_source
             .as_ref()
             .expect("text lane resolves the digest source");
-        render_association_text(source, landing_headline(source, &args.repo))
+        render_association_text(source, landing_digest(source, &args.repo))
     })
 }
 
-/// Best-effort landing headline for the current commit set, derived from the same
+/// The text lane's landing readout: the headline word plus any enrichment-level
+/// diagnostics (divergence needs ancestry, so it is liveness-derived and never
+/// present on the fold's own diagnostics).
+struct LandingDigest {
+    landing: &'static str,
+    diagnostics: Vec<pointbreak::session::ProjectionDiagnostic>,
+}
+
+/// Best-effort landing readout for the current commit set, derived from the same
 /// liveness machinery `revision show` uses and mapped exactly like the revision
 /// list's `merge_status_for`: `merged|open|orphaned`, and `unknown` on any git
 /// failure or withheld headline. Runs only on the text lane (the sole caller is
 /// the text renderer) and never propagates a liveness error to the exit code
 /// (INV-10). The machine lanes gain nothing — the JSON document is untouched.
-fn landing_headline(result: &ListAssociationsResult, repo: &Path) -> &'static str {
+fn landing_digest(result: &ListAssociationsResult, repo: &Path) -> LandingDigest {
     match enrich_liveness(&commit_range_view(result), repo, None) {
-        Ok(enrichment) => match enrichment.headline {
-            Some(CommitGraphCondition::Merged) => "merged",
-            Some(CommitGraphCondition::Live) => "open",
-            Some(CommitGraphCondition::Orphaned { .. }) => "orphaned",
-            None => "unknown",
+        Ok(enrichment) => LandingDigest {
+            landing: match enrichment.headline {
+                Some(CommitGraphCondition::Merged) => "merged",
+                Some(CommitGraphCondition::Live) => "open",
+                Some(CommitGraphCondition::Orphaned { .. }) => "orphaned",
+                None => "unknown",
+            },
+            diagnostics: enrichment.diagnostics,
         },
-        Err(_) => "unknown",
+        Err(_) => LandingDigest {
+            landing: "unknown",
+            diagnostics: Vec::new(),
+        },
     }
 }
 
@@ -315,19 +329,15 @@ fn commit_range_view(result: &ListAssociationsResult) -> RevisionCommitRangeView
     }
 }
 
-/// The projection diagnostic code the digest translates into plain language.
-/// Matched by value: the projection's `pub const` is library-private (not
-/// re-exported), and the digest keys on the code, never the disposable message.
-const DIVERGENT_COMMIT_ASSOCIATION_CODE: &str = "divergent_commit_association";
-
 /// The text digest for `association list`: the anchored state, current
-/// commit/ref associations as short refs, withdrawn counts, a plain-language
-/// divergence line, and the best-effort landing headline. Reads only the public
-/// `ListAssociationsResult` (INV-12); ids truncate via `output::short_ref`
-/// (INV-7); user-controlled ref/head strings are bounded via `clamp_title`.
-/// `landing` is the caller-computed headline word; this renderer is pure
-/// formatting and makes no git/liveness calls of its own.
-fn render_association_text(result: &ListAssociationsResult, landing: &str) -> String {
+/// commit/ref associations as short refs, withdrawn counts, any enrichment
+/// diagnostics (competing landing claims) as ⚠ lines, and the best-effort
+/// landing headline. Reads only the public `ListAssociationsResult` (INV-12);
+/// ids truncate via `output::short_ref` (INV-7); user-controlled ref/head
+/// strings are bounded via `clamp_title`. `landing` is the caller-computed
+/// readout; this renderer is pure formatting and makes no git/liveness calls
+/// of its own.
+fn render_association_text(result: &ListAssociationsResult, landing: LandingDigest) -> String {
     let mut lines: Vec<String> = Vec::new();
 
     let anchor = if result.anchored {
@@ -373,24 +383,14 @@ fn render_association_text(result: &ListAssociationsResult, landing: &str) -> St
         ));
     }
 
-    if result
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.code == DIVERGENT_COMMIT_ASSOCIATION_CODE)
-    {
-        lines.push(format!(
-            "⚠ commit associations diverge: {} \
-             (a squash or rebase may have rewritten the tip — withdraw the stale \
-             one or associate the landed commit)",
-            count_label(
-                result.current_commits.len(),
-                "current commit association",
-                "current commit associations",
-            ),
-        ));
+    // Enrichment-level diagnostics: competing landing claims. Multiple commits
+    // accreting on one revision over successive landings are ordinary history
+    // and print nothing; only genuinely forked claims reach here.
+    for diagnostic in &landing.diagnostics {
+        lines.push(format!("⚠ {}", diagnostic.message));
     }
 
-    lines.push(format!("landing: {landing}"));
+    lines.push(format!("landing: {}", landing.landing));
 
     lines.join("\n")
 }
@@ -484,9 +484,8 @@ mod tests {
         // A path that is not a git repository makes the liveness probe fail; the
         // headline degrades to `unknown` rather than propagating the error (INV-10).
         let dir = tempfile::tempdir().expect("create tempdir");
-        assert_eq!(
-            landing_headline(&anchored_result(&"0".repeat(40)), dir.path()),
-            "unknown"
-        );
+        let digest = landing_digest(&anchored_result(&"0".repeat(40)), dir.path());
+        assert_eq!(digest.landing, "unknown");
+        assert!(digest.diagnostics.is_empty());
     }
 }

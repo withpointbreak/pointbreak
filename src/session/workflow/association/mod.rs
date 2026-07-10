@@ -364,6 +364,16 @@ pub fn associate_commit(options: AssociateCommitOptions) -> Result<AssociateComm
         },
     )?;
     let (commit_oid, tree_oid) = endpoint.expect("build closure resolved the commit endpoint");
+    let mut diagnostics = outcome.diagnostics;
+    if let Some(diagnostic) = commit_association_content_guard(
+        &options.repo,
+        &outcome.events,
+        &outcome.revision_id,
+        &commit_oid,
+        &tree_oid,
+    ) {
+        diagnostics.push(diagnostic);
+    }
     Ok(AssociateCommitResult {
         revision_id: outcome.revision_id,
         commit_association_id: association_id.expect("build closure set the association id"),
@@ -373,7 +383,183 @@ pub fn associate_commit(options: AssociateCommitOptions) -> Result<AssociateComm
         events_created: outcome.events_created,
         events_existing: outcome.events_existing,
         events_created_by_type: outcome.events_created_by_type,
-        diagnostics: outcome.diagnostics,
+        diagnostics,
+    })
+}
+
+/// The advisory guard's diagnostic code: the associated commit shares no
+/// changed paths with the revision's captured snapshot — the classic
+/// wrong-revision association (ADR-0014, 2026-07-09 amendment). Advisory and
+/// never blocking: the association has already recorded when this is computed,
+/// and it decorates only the write's result document, never the store.
+pub const COMMIT_ASSOCIATION_CONTENT_MISMATCH_CODE: &str = "commit_association_content_mismatch";
+
+/// One captured revision's content coordinates, scanned from the event set the
+/// write already holds.
+struct CaptureContent {
+    object_id: crate::model::ObjectId,
+    content_hash: String,
+    /// `(commit_oid, tree_oid)` for a commit-anchored capture target.
+    target: Option<(String, String)>,
+}
+
+/// Every captured revision's content coordinates, keyed by revision id. A
+/// payload that fails to decode is skipped — the guard is advisory and must
+/// never turn a malformed sibling event into a write failure.
+fn revision_captures(events: &[ShoreEvent]) -> BTreeMap<RevisionId, CaptureContent> {
+    use crate::session::event::{GitProvenance, WorkObjectProposal, WorkObjectProposedPayload};
+
+    let mut captures = BTreeMap::new();
+    for event in events
+        .iter()
+        .filter(|event| event.event_type == EventType::WorkObjectProposed)
+    {
+        let Ok(payload) =
+            serde_json::from_value::<WorkObjectProposedPayload>(event.payload.clone())
+        else {
+            continue;
+        };
+        let WorkObjectProposal::Revision {
+            revision,
+            object_artifact_content_hash,
+            ..
+        } = payload.work_object
+        else {
+            continue;
+        };
+        let target = match &revision.git_provenance {
+            Some(GitProvenance {
+                target:
+                    ReviewEndpoint::GitCommit {
+                        commit_oid,
+                        tree_oid,
+                    },
+                ..
+            }) => Some((commit_oid.clone(), tree_oid.clone())),
+            _ => None,
+        };
+        captures.insert(
+            revision.id.clone(),
+            CaptureContent {
+                object_id: revision.object_id,
+                content_hash: object_artifact_content_hash,
+                target,
+            },
+        );
+    }
+    captures
+}
+
+/// The path set a captured snapshot touches (old and new sides both count, so
+/// renames overlap from either direction). `None` when the bound artifact is
+/// unreadable — removed, suppressed, or not yet synced — which silences the
+/// guard rather than failing the write.
+fn snapshot_paths(
+    repo: &Path,
+    capture: &CaptureContent,
+) -> Option<std::collections::HashSet<String>> {
+    let artifact = crate::session::object_artifact::read_bound_object_artifact(
+        repo,
+        &capture.object_id,
+        &capture.content_hash,
+    )
+    .ok()?;
+    Some(
+        artifact
+            .snapshot
+            .files
+            .iter()
+            .flat_map(|file| file.old_path.iter().chain(file.new_path.iter()))
+            .cloned()
+            .collect(),
+    )
+}
+
+/// The advisory wrong-revision check for `associate_commit`: an association
+/// whose commit touches none of the revision's captured paths earns a
+/// `commit_association_content_mismatch` diagnostic, naming a better-matching
+/// current revision when one exists. Every failure inside the guard degrades
+/// to silence (`None`) — an unavailable git, an unreadable snapshot, or an
+/// empty commit simply says nothing.
+fn commit_association_content_guard(
+    repo: &Path,
+    events: &[ShoreEvent],
+    revision_id: &RevisionId,
+    commit_oid: &str,
+    tree_oid: &str,
+) -> Option<ProjectionDiagnostic> {
+    let captures = revision_captures(events);
+    let capture = captures.get(revision_id)?;
+
+    // Exact landing: the commit is (or carries the tree of) the captured
+    // target — nothing to compare.
+    if let Some((target_commit, target_tree)) = &capture.target
+        && (target_commit == commit_oid || target_tree == tree_oid)
+    {
+        return None;
+    }
+
+    let commit_paths: std::collections::HashSet<String> =
+        crate::git::git_commit_changed_paths(repo, commit_oid)
+            .ok()?
+            .into_iter()
+            .collect();
+    if commit_paths.is_empty() {
+        return None;
+    }
+    let captured_paths = snapshot_paths(repo, capture)?;
+    if captured_paths.is_empty() || commit_paths.intersection(&captured_paths).next().is_some() {
+        return None;
+    }
+
+    // Mismatch. Best-effort suggestion: the current (non-superseded) captured
+    // revision whose snapshot overlaps the commit the most; ties break to the
+    // smallest id for determinism.
+    let supersession =
+        crate::session::projection::supersession::SupersessionView::from_events(events).ok();
+    let mut best: Option<(usize, &RevisionId)> = None;
+    for (other_id, other_capture) in &captures {
+        if other_id == revision_id {
+            continue;
+        }
+        if let Some(view) = &supersession
+            && !view.stale_by_superseding_revision(other_id).is_empty()
+        {
+            continue;
+        }
+        let Some(other_paths) = snapshot_paths(repo, other_capture) else {
+            continue;
+        };
+        let overlap = commit_paths.intersection(&other_paths).count();
+        if overlap > 0
+            && best.is_none_or(|(best_overlap, best_id)| {
+                overlap > best_overlap || (overlap == best_overlap && other_id < best_id)
+            })
+        {
+            best = Some((overlap, other_id));
+        }
+    }
+
+    let short_commit = &commit_oid[..commit_oid.len().min(12)];
+    let mut message = format!(
+        "commit {short_commit} touches none of the paths captured by revision {}",
+        revision_id.as_str(),
+    );
+    match best {
+        Some((_, better)) => {
+            message.push_str(&format!(
+                "; its paths overlap revision {} — verify the association targets \
+                 the right revision, or withdraw it",
+                better.as_str(),
+            ));
+        }
+        None => {
+            message.push_str("; verify the association targets the right revision, or withdraw it");
+        }
+    }
+    Some(ProjectionDiagnostic {
+        code: COMMIT_ASSOCIATION_CONTENT_MISMATCH_CODE.to_owned(),
+        message,
     })
 }
 
@@ -554,6 +740,9 @@ struct AssociationWriteOutcome {
     events_existing: usize,
     events_created_by_type: BTreeMap<String, usize>,
     diagnostics: Vec<ProjectionDiagnostic>,
+    /// The post-write event list the state re-projection already read; carried
+    /// so `associate_commit`'s advisory content guard never re-reads the store.
+    events: Vec<ShoreEvent>,
 }
 
 /// Shared scaffold: resolve the unit and write store, let the caller build the
@@ -623,7 +812,8 @@ where
         EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => (0, 1),
     };
 
-    let state = SessionState::from_events(&event_store.list_events()?)?;
+    let events = event_store.list_events()?;
+    let state = SessionState::from_events(&events)?;
     storage.write_json_atomic(
         &store_dir.join("state.json"),
         &state,
@@ -637,6 +827,7 @@ where
         events_existing,
         events_created_by_type,
         diagnostics: state.diagnostics,
+        events,
     })
 }
 
@@ -721,6 +912,94 @@ mod tests {
         assert_eq!(again.events_existing, 1);
         assert_eq!(again.commit_association_id, first.commit_association_id);
         assert_eq!(again.event_id, first.event_id);
+    }
+
+    #[test]
+    fn associate_commit_overlapping_content_raises_no_mismatch() {
+        // The fixture's HEAD created `src.txt`, which the captured worktree diff
+        // also touches — an ordinary landing shape, so the advisory guard stays
+        // silent.
+        let (repo, _unit) = Repo::with_capture();
+
+        let result = associate_commit(
+            AssociateCommitOptions::new(repo.path(), "HEAD").with_track("agent:codex"),
+        )
+        .unwrap();
+
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == COMMIT_ASSOCIATION_CONTENT_MISMATCH_CODE),
+            "overlapping paths must not flag: {:?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn associate_commit_disjoint_content_flags_advisory_mismatch() {
+        // A commit touching only an unrelated file shares no paths with the
+        // captured snapshot (`src.txt`): the association still records — the
+        // guard is advisory — but the result carries the mismatch diagnostic.
+        let (repo, unit) = Repo::with_capture();
+        std::fs::write(repo.path().join("unrelated.txt"), "elsewhere\n").unwrap();
+        repo.git(["add", "unrelated.txt"]);
+        repo.git(["commit", "-m", "unrelated"]);
+
+        let result = associate_commit(
+            AssociateCommitOptions::new(repo.path(), "HEAD")
+                .with_revision_id(unit.clone())
+                .with_track("agent:codex"),
+        )
+        .unwrap();
+
+        assert_eq!(result.events_created, 1, "advisory: the write still lands");
+        let mismatch = result
+            .diagnostics
+            .iter()
+            .find(|d| d.code == COMMIT_ASSOCIATION_CONTENT_MISMATCH_CODE)
+            .expect("disjoint content earns the advisory mismatch");
+        assert!(
+            mismatch.message.contains(unit.as_str()),
+            "message names the associated revision: {}",
+            mismatch.message
+        );
+    }
+
+    #[test]
+    fn associate_commit_mismatch_names_a_better_matching_revision() {
+        // Two captures: the fixture's `src.txt` revision and a later
+        // `unrelated.txt` revision. Landing the unrelated commit onto the
+        // src.txt revision flags the mismatch and points at the sibling whose
+        // snapshot the commit actually matches.
+        let (repo, src_unit) = Repo::with_capture();
+        repo.git(["add", "--all"]);
+        repo.git(["commit", "-m", "land src change"]);
+        std::fs::write(repo.path().join("unrelated.txt"), "elsewhere\n").unwrap();
+        repo.git(["add", "unrelated.txt"]);
+        // Staged, so the default worktree capture (diff HEAD → worktree) sees it.
+        let unrelated_capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        repo.git(["commit", "-m", "unrelated"]);
+
+        let result = associate_commit(
+            AssociateCommitOptions::new(repo.path(), "HEAD")
+                .with_revision_id(src_unit)
+                .with_track("agent:codex"),
+        )
+        .unwrap();
+
+        let mismatch = result
+            .diagnostics
+            .iter()
+            .find(|d| d.code == COMMIT_ASSOCIATION_CONTENT_MISMATCH_CODE)
+            .expect("disjoint content earns the advisory mismatch");
+        assert!(
+            mismatch
+                .message
+                .contains(unrelated_capture.revision_id.as_str()),
+            "message suggests the overlapping sibling: {}",
+            mismatch.message
+        );
     }
 
     #[test]

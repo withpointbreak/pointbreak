@@ -67,12 +67,25 @@ pub(super) fn run(
     let digest_source = matches!(format.format, output::OutputFormat::Text).then(|| result.clone());
     let document = revision_show_document(result);
     let mut value = serde_json::to_value(&document)?;
-    if let Some(liveness) = liveness
-        && let Some(commit_range) = value
+    if let Some(mut liveness) = liveness {
+        // Enrichment-level diagnostics (divergence needs ancestry, so it is
+        // liveness-derived) surface in the document's top-level diagnostics —
+        // the same array the fold's per-unit diagnostics land in — rather than
+        // duplicated inside the embedded liveness blob.
+        let enrichment_diagnostics = std::mem::take(&mut liveness.diagnostics);
+        if let Some(commit_range) = value
             .get_mut("commitRange")
             .and_then(|cr| cr.as_object_mut())
-    {
-        commit_range.insert("liveness".to_owned(), serde_json::to_value(liveness)?);
+        {
+            commit_range.insert("liveness".to_owned(), serde_json::to_value(liveness)?);
+        }
+        if !enrichment_diagnostics.is_empty()
+            && let Some(diagnostics) = value.get_mut("diagnostics").and_then(|d| d.as_array_mut())
+        {
+            for diagnostic in enrichment_diagnostics {
+                diagnostics.push(serde_json::to_value(diagnostic)?);
+            }
+        }
     }
     output::write_document(stdout, format, &value, || {
         render_revision_digest(

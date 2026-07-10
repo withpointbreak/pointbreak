@@ -3,22 +3,28 @@
 //! This is the **only** place git touches the lifecycle: the pure projection
 //! never imports it. Given a unit's current commit associations and a repo, it
 //! joins each OID against the live-ref set to derive merged/live/orphaned, plus
-//! a headline that is withheld whenever the per-OID conditions disagree or the
-//! projection already flagged a diagnostic.
+//! a landing headline and the divergence verdict. Landing claims are the
+//! association-source edges (the capture target is provenance, never a claim);
+//! a chain of successive landings collapses to its tip via one
+//! `merge-base --independent` call, and `divergent_commit_association` fires
+//! only when two or more incomparable claims are each live or merged with
+//! distinct trees — competing to be the same landing (ADR-0014, 2026-07-09
+//! amendment).
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use serde::Serialize;
 
 use crate::error::Result;
 use crate::git::{
-    Ancestry, git_for_each_ref, git_is_ancestor, git_object_exists, git_rev_list_reachable,
-    git_rev_parse_commit_oid, git_worktree_list,
+    Ancestry, git_for_each_ref, git_independent_commits, git_is_ancestor, git_object_exists,
+    git_rev_list_reachable, git_rev_parse_commit_oid, git_worktree_list,
 };
-use crate::session::RevisionCommitRangeView;
+use crate::session::projection::commit_range::DIVERGENT_COMMIT_ASSOCIATION_CODE;
 use crate::session::state::ProjectionDiagnostic;
+use crate::session::{CommitEdgeSource, RevisionCommitRangeView};
 
 const SHORT_OID_LEN: usize = 12;
 
@@ -59,6 +65,12 @@ pub struct LivenessEnrichment {
     pub per_commit: Vec<CommitLiveness>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headline: Option<CommitGraphCondition>,
+    /// Enrichment-level diagnostics — today only `divergent_commit_association`,
+    /// which needs ancestry and therefore cannot come from the git-free fold.
+    /// Read surfaces merge these into the same per-unit diagnostics they already
+    /// render.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<ProjectionDiagnostic>,
 }
 
 /// Joins `view`'s current commit associations against the repo's live-ref set.
@@ -78,6 +90,7 @@ pub fn enrich_liveness(
         return Ok(LivenessEnrichment {
             per_commit: Vec::new(),
             headline: None,
+            diagnostics: Vec::new(),
         });
     }
 
@@ -111,10 +124,13 @@ pub fn enrich_liveness(
         });
     }
 
-    let headline = headline_for(&per_commit, &view.diagnostics);
+    let (headline, diagnostics) = landing_analysis(view, &per_commit, &mut |oids| {
+        git_independent_commits(repo, oids)
+    })?;
     Ok(LivenessEnrichment {
         per_commit,
         headline,
+        diagnostics,
     })
 }
 
@@ -143,6 +159,10 @@ pub(crate) struct LivenessBatch {
     integration_reachable: HashSet<String>,
     ancestry: RefCell<HashMap<(String, String), Ancestry>>,
     object_exists: RefCell<HashMap<String, bool>>,
+    /// Maximal-claims memo keyed by the sorted claim set: sibling captures that
+    /// converge on the same landing claims share one `merge-base --independent`
+    /// spawn across the whole list.
+    independent: RefCell<HashMap<Vec<String>, Vec<String>>>,
 }
 
 impl LivenessBatch {
@@ -175,6 +195,7 @@ impl LivenessBatch {
             integration_reachable,
             ancestry: RefCell::new(HashMap::new()),
             object_exists: RefCell::new(HashMap::new()),
+            independent: RefCell::new(HashMap::new()),
         })
     }
 
@@ -209,6 +230,7 @@ impl LivenessBatch {
             return Ok(LivenessEnrichment {
                 per_commit: Vec::new(),
                 headline: None,
+                diagnostics: Vec::new(),
             });
         }
         let mut seen = HashSet::new();
@@ -225,11 +247,25 @@ impl LivenessBatch {
                 live_branch,
             });
         }
-        let headline = headline_for(&per_commit, &view.diagnostics);
+        let (headline, diagnostics) = landing_analysis(view, &per_commit, &mut |oids| {
+            self.independent_of(repo, oids)
+        })?;
         Ok(LivenessEnrichment {
             per_commit,
             headline,
+            diagnostics,
         })
+    }
+
+    fn independent_of(&self, repo: &Path, oids: &[String]) -> Result<Vec<String>> {
+        let mut key: Vec<String> = oids.to_vec();
+        key.sort();
+        if let Some(maximal) = self.independent.borrow().get(&key) {
+            return Ok(maximal.clone());
+        }
+        let maximal = git_independent_commits(repo, oids)?;
+        self.independent.borrow_mut().insert(key, maximal.clone());
+        Ok(maximal)
     }
 
     fn classify(
@@ -438,16 +474,125 @@ fn ancestry(
     Ok(ancestry)
 }
 
-/// A headline only when every per-OID condition agrees and the projection
-/// flagged no diagnostics; otherwise withheld.
-fn headline_for(
+/// The landing headline plus the divergence verdict (ADR-0014, 2026-07-09
+/// amendment). Landing claims are the association-source edges — the capture
+/// target is provenance and never competes. A chain of successive landings
+/// collapses to its tip through `independent` (one `merge-base --independent`
+/// per claim set); orphaned claims never compete; and only two or more
+/// incomparable live-or-merged claims with **distinct trees** are divergent —
+/// then the headline is withheld and `divergent_commit_association` fires.
+/// Same-tree survivors are a content-equivalent rewrite (the fold's
+/// `rewritten_commit_association`): the content landed, so the headline reads
+/// `Merged` when any of them is merged, else `Live`. Fold-level diagnostics
+/// never withhold the headline — an unrelated `retraction_target_missing` says
+/// nothing about the landing.
+fn landing_analysis(
+    view: &RevisionCommitRangeView,
     per_commit: &[CommitLiveness],
-    diagnostics: &[ProjectionDiagnostic],
-) -> Option<CommitGraphCondition> {
-    if !diagnostics.is_empty() {
-        return None;
+    independent: &mut dyn FnMut(&[String]) -> Result<Vec<String>>,
+) -> Result<(Option<CommitGraphCondition>, Vec<ProjectionDiagnostic>)> {
+    let condition_of = |oid: &str| {
+        per_commit
+            .iter()
+            .find(|commit| commit.commit_oid == oid)
+            .map(|commit| &commit.condition)
+    };
+
+    let mut seen = HashSet::new();
+    let claims: Vec<_> = view
+        .current_commits
+        .iter()
+        .filter(|commit| commit.source == CommitEdgeSource::Association)
+        .filter(|commit| seen.insert(commit.commit_oid.as_str()))
+        .collect();
+
+    // No landing claims: the headline is the capture target's own condition
+    // (agreed across the per-OID set, which is a single seeded commit here).
+    if claims.is_empty() {
+        return Ok((
+            agreed_condition(per_commit.iter().map(|c| &c.condition)),
+            Vec::new(),
+        ));
     }
-    let mut conditions = per_commit.iter().map(|commit| &commit.condition);
+
+    // Only live-or-merged claims can compete, so they alone enter the
+    // independence probe: an orphaned claim never competes regardless of
+    // topology (an abandoned descendant of the real landing must not shadow
+    // it), and a gc'd claim would make `merge-base` refuse the whole call.
+    let alive: Vec<String> = claims
+        .iter()
+        .filter(|claim| {
+            matches!(
+                condition_of(&claim.commit_oid),
+                Some(CommitGraphCondition::Live | CommitGraphCondition::Merged)
+            )
+        })
+        .map(|claim| claim.commit_oid.clone())
+        .collect();
+    let maximal: HashSet<String> = independent(&alive)?.into_iter().collect();
+
+    let competing: Vec<_> = claims
+        .iter()
+        .filter(|claim| maximal.contains(&claim.commit_oid))
+        .collect();
+
+    match competing.len() {
+        // Every claim is orphaned: the headline is the claims' agreed condition
+        // (orphaned), withheld only when the orphan reasons disagree.
+        0 => Ok((
+            agreed_condition(claims.iter().filter_map(|c| condition_of(&c.commit_oid))),
+            Vec::new(),
+        )),
+        1 => Ok((condition_of(&competing[0].commit_oid).cloned(), Vec::new())),
+        _ => {
+            let trees: BTreeSet<&str> = competing
+                .iter()
+                .map(|claim| claim.tree_oid.as_str())
+                .collect();
+            if trees.len() == 1 {
+                let merged = competing.iter().any(|claim| {
+                    matches!(
+                        condition_of(&claim.commit_oid),
+                        Some(CommitGraphCondition::Merged)
+                    )
+                });
+                let condition = if merged {
+                    CommitGraphCondition::Merged
+                } else {
+                    CommitGraphCondition::Live
+                };
+                return Ok((Some(condition), Vec::new()));
+            }
+            let mut oids: Vec<&str> = competing
+                .iter()
+                .map(|claim| {
+                    let oid = claim.commit_oid.as_str();
+                    &oid[..oid.len().min(SHORT_OID_LEN)]
+                })
+                .collect();
+            oids.sort_unstable();
+            Ok((
+                None,
+                vec![ProjectionDiagnostic {
+                    code: DIVERGENT_COMMIT_ASSOCIATION_CODE.to_owned(),
+                    message: format!(
+                        "revision {} has {} competing landing commits ({}); \
+                         none is an ancestor of another and their trees differ",
+                        view.revision_id.as_str(),
+                        competing.len(),
+                        oids.join(", "),
+                    ),
+                }],
+            ))
+        }
+    }
+}
+
+/// The single condition an iterator agrees on, or `None` when it is empty or
+/// its members disagree.
+fn agreed_condition<'a>(
+    mut conditions: impl Iterator<Item = &'a CommitGraphCondition>,
+) -> Option<CommitGraphCondition> {
     let first = conditions.next()?.clone();
     if conditions.all(|condition| *condition == first) {
         Some(first)
@@ -804,6 +949,189 @@ mod tests {
             .iter()
             .map(|commit| (commit.commit_oid.clone(), commit.condition.clone()))
             .collect()
+    }
+
+    fn claim(oid: &str, tree: &str) -> CurrentCommitAssociation {
+        CurrentCommitAssociation {
+            commit_oid: oid.to_owned(),
+            tree_oid: tree.to_owned(),
+            commit_association_id: None,
+            source: CommitEdgeSource::Association,
+        }
+    }
+
+    fn capture_target(oid: &str) -> CurrentCommitAssociation {
+        CurrentCommitAssociation {
+            commit_oid: oid.to_owned(),
+            tree_oid: format!("{oid}-tree"),
+            commit_association_id: None,
+            source: CommitEdgeSource::CaptureTarget,
+        }
+    }
+
+    fn view_of_edges(edges: Vec<CurrentCommitAssociation>) -> RevisionCommitRangeView {
+        RevisionCommitRangeView {
+            revision_id: RevisionId::new("review-unit:sha256:test"),
+            anchored: !edges.is_empty(),
+            current_commits: edges,
+            current_refs: Vec::new(),
+            withdrawn_commits: Vec::new(),
+            withdrawn_refs: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn tree_of(repo: &LivenessRepo, rev: &str) -> String {
+        repo.oid(&format!("{rev}^{{tree}}"))
+    }
+
+    /// Successive landings form a chain: the headline follows the tip claim and
+    /// nothing diverges, even though the per-OID conditions disagree
+    /// (merged vs live) — accretion is history, not competition.
+    #[test]
+    fn landing_chain_headline_follows_the_tip() {
+        let repo = LivenessRepo::new();
+        let mid = repo.oid("main~1");
+        let tip = repo.oid("main");
+        let view = view_of_edges(vec![
+            claim(&mid, &tree_of(&repo, "main~1")),
+            claim(&tip, &tree_of(&repo, "main")),
+        ]);
+
+        let enrichment = enrich_liveness(&view, repo.path(), None).unwrap();
+
+        assert_eq!(enrichment.headline, Some(CommitGraphCondition::Live));
+        assert!(enrichment.diagnostics.is_empty());
+    }
+
+    /// The standard squash-landing shape: the capture target was rewritten away
+    /// (orphaned) and the landed commit is merged. The capture target is
+    /// provenance, never a claim, so the headline follows the landing and no
+    /// divergence fires.
+    #[test]
+    fn capture_target_plus_landed_commit_is_not_divergent() {
+        let repo = LivenessRepo::new();
+        let dangling = repo.dangling_oid();
+        let mid = repo.oid("main~1");
+        let view = view_of_edges(vec![
+            capture_target(&dangling),
+            claim(&mid, &tree_of(&repo, "main~1")),
+        ]);
+
+        let enrichment = enrich_liveness(&view, repo.path(), None).unwrap();
+
+        assert_eq!(enrichment.headline, Some(CommitGraphCondition::Merged));
+        assert!(enrichment.diagnostics.is_empty());
+    }
+
+    /// An orphaned claim (a rebased-away earlier landing) never competes: the
+    /// surviving live claim carries the headline alone.
+    #[test]
+    fn orphaned_claim_never_competes() {
+        let repo = LivenessRepo::new();
+        let dangling = repo.dangling_oid();
+        let tip = repo.oid("main");
+        let view = view_of_edges(vec![
+            claim(&dangling, "rewritten-tree"),
+            claim(&tip, &tree_of(&repo, "main")),
+        ]);
+
+        let enrichment = enrich_liveness(&view, repo.path(), None).unwrap();
+
+        assert_eq!(enrichment.headline, Some(CommitGraphCondition::Live));
+        assert!(enrichment.diagnostics.is_empty());
+    }
+
+    /// A claim whose object is gone entirely is excluded before the ancestry
+    /// probe (merge-base would refuse the missing OID) and never competes.
+    #[test]
+    fn missing_object_claim_never_competes_or_errors() {
+        let repo = LivenessRepo::new();
+        let tip = repo.oid("main");
+        let missing = "0".repeat(tip.len());
+        let view = view_of_edges(vec![
+            claim(&missing, "gone-tree"),
+            claim(&tip, &tree_of(&repo, "main")),
+        ]);
+
+        let enrichment = enrich_liveness(&view, repo.path(), None).unwrap();
+
+        assert_eq!(enrichment.headline, Some(CommitGraphCondition::Live));
+        assert!(enrichment.diagnostics.is_empty());
+    }
+
+    /// Two incomparable live claims with distinct trees genuinely compete: the
+    /// headline is withheld and `divergent_commit_association` fires — from the
+    /// enrichment, with identical verdicts on the direct and batch paths.
+    #[test]
+    fn incomparable_live_claims_with_distinct_trees_are_divergent() {
+        let repo = LivenessRepo::new();
+        repo.git(["checkout", "-b", "rival", "main~2"]);
+        repo.commit("rival", "rival\n");
+        let rival = repo.oid("rival");
+        repo.git(["checkout", "main"]);
+        let tip = repo.oid("main");
+        let view = view_of_edges(vec![
+            claim(&tip, &tree_of(&repo, "main")),
+            claim(&rival, &tree_of(&repo, "rival")),
+        ]);
+
+        let direct = enrich_liveness(&view, repo.path(), None).unwrap();
+        let batch = LivenessBatch::build(repo.path(), None).unwrap();
+        let batched = batch.enrich_broad(repo.path(), &view).unwrap();
+
+        for enrichment in [&direct, &batched] {
+            assert!(enrichment.headline.is_none());
+            let divergent = enrichment
+                .diagnostics
+                .iter()
+                .find(|d| d.code == DIVERGENT_COMMIT_ASSOCIATION_CODE)
+                .expect("competing landing claims diverge");
+            assert!(
+                divergent.message.contains("competing landing commits"),
+                "message explains the competition: {}",
+                divergent.message
+            );
+        }
+        assert_eq!(direct.headline, batched.headline);
+        assert_eq!(direct.diagnostics, batched.diagnostics);
+    }
+
+    /// Incomparable claims that carry the same tree are a content-equivalent
+    /// rewrite, not a divergence: the content landed, so the headline reads
+    /// `Merged` when any of them is merged.
+    #[test]
+    fn content_equivalent_incomparable_claims_are_not_divergent() {
+        let repo = LivenessRepo::new();
+        repo.git(["checkout", "-b", "rival", "main~2"]);
+        repo.commit("rival", "rival\n");
+        let rival = repo.oid("rival");
+        repo.git(["checkout", "main"]);
+        let mid = repo.oid("main~1");
+        // Fabricated shared tree: tree equality is string equality on the view.
+        let view = view_of_edges(vec![claim(&mid, "sharedtree"), claim(&rival, "sharedtree")]);
+
+        let enrichment = enrich_liveness(&view, repo.path(), None).unwrap();
+
+        assert_eq!(enrichment.headline, Some(CommitGraphCondition::Merged));
+        assert!(enrichment.diagnostics.is_empty());
+    }
+
+    /// Fold-level diagnostics no longer blank the headline: a view carrying an
+    /// unrelated `retraction_target_missing` still reads its landing condition.
+    #[test]
+    fn unrelated_fold_diagnostics_do_not_withhold_the_headline() {
+        let repo = LivenessRepo::new();
+        let tip = repo.oid("main");
+        let mut view = view_of_edges(vec![claim(&tip, &tree_of(&repo, "main"))]);
+        view.diagnostics.push(ProjectionDiagnostic {
+            code: "retraction_target_missing".to_owned(),
+            message: "unrelated".to_owned(),
+        });
+
+        let enrichment = enrich_liveness(&view, repo.path(), None).unwrap();
+
+        assert_eq!(enrichment.headline, Some(CommitGraphCondition::Live));
     }
 
     #[test]

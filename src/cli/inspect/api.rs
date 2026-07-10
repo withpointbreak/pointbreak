@@ -2435,6 +2435,7 @@ mod tests {
                 live_branch: Some("main".to_owned()),
             }],
             headline: Some(CommitGraphCondition::Live),
+            diagnostics: Vec::new(),
         };
         assert_eq!(
             resolve_head_live_branch(&matched, "headoid").as_deref(),
@@ -2463,6 +2464,7 @@ mod tests {
                 },
             ],
             headline: None,
+            diagnostics: Vec::new(),
         };
         assert_eq!(resolve_head_live_branch(&ambiguous, "baseoid"), None);
     }

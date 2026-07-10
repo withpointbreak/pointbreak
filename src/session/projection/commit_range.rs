@@ -26,10 +26,21 @@ use crate::session::event::{
 };
 use crate::session::state::ProjectionDiagnostic;
 
-/// Two un-withdrawn commit edges with different OIDs claim one unit at once. The
-/// projection surfaces both and withholds any headline. Realizes the condition
-/// ADR-0008 reserved as `ambiguous_supersession` for the commit axis.
+/// Two or more current landing claims compete: incomparable under ancestry
+/// (neither reaches the other), each live or merged, with distinct trees.
+/// Realizes the condition ADR-0008 reserved as `ambiguous_supersession` for the
+/// commit axis, re-scoped by the 2026-07-09 ADR-0014 amendment: only
+/// association-source edges compete (the capture target is provenance, not a
+/// landing claim), a chain of successive landings is history, and orphaned
+/// claims never compete. Ancestry needs git, so this is emitted by the
+/// read-time liveness enrichment, never by this pure fold — the const lives
+/// here as the code's single definition beside its sibling.
 pub const DIVERGENT_COMMIT_ASSOCIATION_CODE: &str = "divergent_commit_association";
+/// Two or more current association edges carry the same tree under different
+/// commit OIDs — a content-equivalent rewrite (rebase, cherry-pick, amend).
+/// Informational: nothing competes, but the stale edge is worth withdrawing.
+/// Decidable in this git-free fold because the payload stores `tree_oid`.
+pub const REWRITTEN_COMMIT_ASSOCIATION_CODE: &str = "rewritten_commit_association";
 /// A withdrawal names an association id absent from the unit's associated set.
 /// The withdrawal has no effect yet; the diagnostic clears when the association
 /// backfills. Recorded, never rejected.
@@ -325,20 +336,34 @@ impl CommitRangeBuilder {
             ));
         }
 
-        // divergent_commit_association: two or more distinct current OIDs claim the revision.
-        let distinct_oids = current_commits
+        // rewritten_commit_association: same tree under different commit OIDs among
+        // the association edges — a content-equivalent rewrite, decidable without
+        // git. Divergence (competing landing claims) needs ancestry and is decided
+        // by the read-time liveness enrichment, never here: multiple distinct OIDs
+        // accreting on one revision over successive landings are history, not a
+        // conflict, and the capture-target edge is provenance rather than a claim.
+        let mut oids_by_tree = BTreeMap::<&str, std::collections::BTreeSet<&str>>::new();
+        for commit in current_commits
             .iter()
-            .map(|commit| commit.commit_oid.as_str())
-            .collect::<std::collections::BTreeSet<_>>();
-        if distinct_oids.len() > 1 {
-            diagnostics.push(diagnostic(
-                DIVERGENT_COMMIT_ASSOCIATION_CODE,
-                format!(
-                    "revision {} has {} distinct current commit associations",
-                    revision_id.as_str(),
-                    distinct_oids.len()
-                ),
-            ));
+            .filter(|commit| commit.source == CommitEdgeSource::Association)
+        {
+            oids_by_tree
+                .entry(commit.tree_oid.as_str())
+                .or_default()
+                .insert(commit.commit_oid.as_str());
+        }
+        for (tree_oid, oids) in oids_by_tree {
+            if oids.len() > 1 {
+                diagnostics.push(diagnostic(
+                    REWRITTEN_COMMIT_ASSOCIATION_CODE,
+                    format!(
+                        "revision {} has {} content-equivalent commit associations \
+                         for tree {tree_oid} — a rewritten landing; withdraw the stale edge",
+                        revision_id.as_str(),
+                        oids.len(),
+                    ),
+                ));
+            }
         }
 
         RevisionCommitRangeView {
@@ -505,6 +530,10 @@ mod tests {
     }
 
     fn commit_associated(commit_oid: &str) -> ShoreEvent {
+        commit_associated_with_tree(commit_oid, &format!("{commit_oid}-tree"))
+    }
+
+    fn commit_associated_with_tree(commit_oid: &str, tree_oid: &str) -> ShoreEvent {
         let ru = revision_id();
         let cid = build_commit_association_id(&ru, commit_oid).unwrap();
         ShoreEvent::new(
@@ -517,7 +546,7 @@ mod tests {
                 target: target(),
                 commit: ReviewEndpoint::GitCommit {
                     commit_oid: commit_oid.to_owned(),
-                    tree_oid: format!("{commit_oid}-tree"),
+                    tree_oid: tree_oid.to_owned(),
                 },
             },
             "2026-06-19T00:00:01Z",
@@ -667,7 +696,10 @@ mod tests {
     }
 
     #[test]
-    fn divergent_commit_association_withholds_and_surfaces_both() {
+    fn accreted_commit_associations_are_history_not_divergence() {
+        // Successive landings on one revision (different trees) surface both
+        // edges with NO fold diagnostic: divergence needs ancestry and belongs
+        // to the read-time liveness enrichment, never this git-free fold.
         let view = view_of(&[
             worktree_capture(),
             commit_associated("oidA"),
@@ -681,20 +713,59 @@ mod tests {
             .map(|commit| commit.commit_oid.as_str())
             .collect();
         assert_eq!(oids, vec!["oidA", "oidB"]);
-        let divergent = view
+        assert!(
+            view.diagnostics.is_empty(),
+            "accretion is history, not a conflict: {:?}",
+            view.diagnostics
+        );
+    }
+
+    #[test]
+    fn rewritten_commit_association_flags_content_equivalent_edges() {
+        let view = view_of(&[
+            worktree_capture(),
+            commit_associated_with_tree("oidA", "sharedtree"),
+            commit_associated_with_tree("oidB", "sharedtree"),
+        ]);
+
+        assert_eq!(view.current_commits.len(), 2);
+        let rewritten = view
             .diagnostics
             .iter()
-            .find(|d| d.code == DIVERGENT_COMMIT_ASSOCIATION_CODE)
-            .expect("divergent diagnostic present");
+            .find(|d| d.code == REWRITTEN_COMMIT_ASSOCIATION_CODE)
+            .expect("rewritten diagnostic present");
         assert!(
-            divergent.message.contains("revision"),
+            rewritten.message.contains("revision"),
             "message names the revision work object: {}",
-            divergent.message
+            rewritten.message
         );
         assert!(
-            !divergent.message.contains("review unit"),
-            "retired vocabulary swept: {}",
-            divergent.message
+            !view
+                .diagnostics
+                .iter()
+                .any(|d| d.code == DIVERGENT_COMMIT_ASSOCIATION_CODE),
+            "a content-equivalent rewrite never reads as divergence"
+        );
+    }
+
+    #[test]
+    fn capture_target_never_joins_the_rewrite_check() {
+        // A commit-range capture target sharing its tree with one landed
+        // association (a message-amended landing) is provenance beside a claim,
+        // not a rewrite pair.
+        let view = view_of(&[
+            capture(ReviewEndpoint::GitCommit {
+                commit_oid: "target".to_owned(),
+                tree_oid: "sharedtree".to_owned(),
+            }),
+            commit_associated_with_tree("oidA", "sharedtree"),
+        ]);
+
+        assert_eq!(view.current_commits.len(), 2);
+        assert!(
+            view.diagnostics.is_empty(),
+            "capture target is provenance, never a claim: {:?}",
+            view.diagnostics
         );
     }
 

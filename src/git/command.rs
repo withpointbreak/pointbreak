@@ -336,6 +336,57 @@ pub(crate) fn git_is_ancestor(
     })
 }
 
+/// The maximal (mutually independent) commits among `oids`: the subset not
+/// reachable from any other member, via one `merge-base --independent` call.
+/// A chain collapses to its tip; only genuinely incomparable commits survive.
+/// Callers pass only OIDs whose objects exist (liveness classifies missing
+/// objects first); a bad object errors like any other git failure. Zero or one
+/// input echoes back without spawning git.
+pub(crate) fn git_independent_commits(repo: &Path, oids: &[String]) -> Result<Vec<String>> {
+    if oids.len() <= 1 {
+        return Ok(oids.to_vec());
+    }
+    let mut args = vec!["merge-base".to_owned(), "--independent".to_owned()];
+    args.extend(oids.iter().cloned());
+    let output = run_git(repo, args)?;
+    let text = git_field_string(&output.stdout, "merge-base --independent output")?;
+    Ok(text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+/// The paths `commit_oid` touches relative to its parent(s)
+/// (`diff-tree --no-commit-id --name-only -z -r --root -m`). A merge commit
+/// lists the union of its per-parent diffs; a root commit lists its full tree;
+/// a rename lists both sides (no rename detection). NUL-delimited so exotic
+/// path bytes never corrupt the split; a non-UTF-8 path is skipped rather than
+/// erroring — the sole consumer is an advisory overlap check.
+pub(crate) fn git_commit_changed_paths(repo: &Path, commit_oid: &str) -> Result<Vec<String>> {
+    let output = run_git(
+        repo,
+        [
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-z",
+            "-r",
+            "--root",
+            "-m",
+            commit_oid,
+        ],
+    )?;
+    Ok(output
+        .stdout
+        .split(|byte| *byte == b'\0')
+        .filter(|field| !field.is_empty())
+        .filter_map(|field| std::str::from_utf8(field).ok())
+        .map(str::to_owned)
+        .collect())
+}
+
 /// Ref tips matching `patterns` (e.g. `&["refs/heads/*"]`), as `(oid, full ref)`
 /// pairs. Empty `patterns` lists every ref.
 pub(crate) fn git_for_each_ref(repo: &Path, patterns: &[&str]) -> Result<Vec<RefEntry>> {

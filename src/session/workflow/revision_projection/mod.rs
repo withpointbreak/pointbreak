@@ -1887,8 +1887,12 @@ mod tests {
     fn show_revision_extends_diagnostics_with_commit_range_diagnostics() {
         let repo = modified_repo();
         let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
-        record_commit_association(repo.path(), &capture, "oidA");
-        record_commit_association(repo.path(), &capture, "oidB");
+        // Two association edges sharing one tree under different commit OIDs — the
+        // fold's content-equivalent-rewrite diagnostic. (Divergence is an
+        // enrichment-level verdict needing real ancestry, so the fold seam is
+        // exercised through the rewrite code.)
+        record_commit_association_with_tree(repo.path(), &capture, "oidA", "sharedtree");
+        record_commit_association_with_tree(repo.path(), &capture, "oidB", "sharedtree");
 
         let result = show_revision(RevisionShowOptions::new(repo.path())).unwrap();
 
@@ -1896,11 +1900,25 @@ mod tests {
             result
                 .diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.code == "divergent_commit_association")
+                .any(|diagnostic| diagnostic.code == "rewritten_commit_association")
         );
     }
 
     fn record_commit_association(repo: &Path, capture: &CaptureResult, commit_oid: &str) {
+        record_commit_association_with_tree(
+            repo,
+            capture,
+            commit_oid,
+            &format!("{commit_oid}-tree"),
+        );
+    }
+
+    fn record_commit_association_with_tree(
+        repo: &Path,
+        capture: &CaptureResult,
+        commit_oid: &str,
+        tree_oid: &str,
+    ) {
         use crate::session::event::{RevisionCommitAssociatedPayload, build_commit_association_id};
         let commit_association_id =
             build_commit_association_id(&capture.revision_id, commit_oid).unwrap();
@@ -1922,7 +1940,7 @@ mod tests {
                 },
                 commit: crate::model::ReviewEndpoint::GitCommit {
                     commit_oid: commit_oid.to_owned(),
-                    tree_oid: format!("{commit_oid}-tree"),
+                    tree_oid: tree_oid.to_owned(),
                 },
             },
             "2026-05-10T00:00:00Z",
