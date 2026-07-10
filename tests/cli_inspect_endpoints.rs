@@ -810,83 +810,108 @@ fn design_system_gallery_covers_the_shipped_attention_lens() {
 }
 
 #[test]
-fn design_system_visual_variant_is_gallery_only() {
+fn design_system_promotes_only_the_selected_review_visual_treatments() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let variant = std::fs::read_to_string(
-        root.join("src/cli/inspect/design-system/variants/instrument-neutral.css"),
-    )
-    .expect("instrument-neutral gallery variant exists");
-    assert!(variant.contains("data-visual-variant=\"instrument-neutral\""));
-
-    let allowed = [
-        "--bg",
-        "--bg-elev",
-        "--bg-row",
-        "--bg-row-sel",
-        "--bg-topbar",
-        "--sel-bg",
-        "--bg-code",
-        "--border",
-        "--fg",
-        "--fg-dim",
-        "--accent",
-        "--accent-strong",
-        "--on-accent",
-    ]
-    .into_iter()
-    .collect::<std::collections::BTreeSet<_>>();
-    let declarations = variant
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("--"))
-        .filter_map(|line| line.split(':').next())
-        .map(|name| format!("--{name}"))
-        .collect::<std::collections::BTreeSet<_>>();
-    assert!(
-        !declarations.is_empty(),
-        "variant must declare candidate tokens"
-    );
-    for declaration in declarations {
-        assert!(
-            allowed.contains(declaration.as_str()),
-            "candidate must not override {declaration}"
-        );
-    }
-
-    for live in [
-        "src/cli/inspect/assets/index.html",
-        "src/cli/inspect/assets/app.css",
-        "src/cli/inspect/assets/app.js",
-        "src/cli/inspect/server.rs",
+    let tokens = std::fs::read_to_string(root.join("src/cli/inspect/assets/tokens.css"))
+        .expect("live Review tokens exist");
+    for declaration in [
+        "--bg: #080c0d;",
+        "--bg-elev: #0e1416;",
+        "--bg-row: #151e20;",
+        "--bg-row-sel: #1b2729;",
+        "--bg-topbar: #101716;",
+        "--sel-bg: #1b2729;",
+        "--bg-code: #0e1416;",
+        "--border: #354540;",
+        "--fg: #f0f5f1;",
+        "--fg-dim: #a5b2ad;",
+        "--accent: #5ce5f4;",
+        "--accent-strong: #1fc4d6;",
+        "--on-accent: #071012;",
+        "--bg: #fdfbf5;",
+        "--bg-elev: #fffefa;",
+        "--bg-row: #f7f3e9;",
+        "--bg-row-sel: #e2dbce;",
+        "--bg-topbar: #f4f0e6;",
+        "--sel-bg: #f7f3e9;",
+        "--bg-code: #fffefa;",
+        "--border: #9eaaa4;",
+        "--fg: #1b1d1c;",
+        "--fg-dim: #4e5853;",
+        "--accent: #006875;",
+        "--accent-strong: #007885;",
+        "--on-accent: #ffffff;",
     ] {
-        let source = std::fs::read_to_string(root.join(live)).expect("live source is readable");
         assert!(
-            !source.contains("instrument-neutral"),
-            "{live} must not reference the candidate"
+            tokens.contains(declaration),
+            "live tokens must promote {declaration}"
         );
     }
+
+    // Density, semantic status, and syntax aliases were controls in the study,
+    // not selected treatments.
+    for unchanged in [
+        "--row-pad: 8px 14px;",
+        "--row-pad: 4px 12px;",
+        "--success: #6dd28a;",
+        "--success: #1a7f37;",
+        "--tok-string: var(--success);",
+        "--tok-type: var(--info);",
+    ] {
+        assert!(
+            tokens.contains(unchanged),
+            "unselected contract must remain unchanged: {unchanged}"
+        );
+    }
+
+    let styles = std::fs::read_to_string(root.join("src/cli/inspect/design-system/styles.css"))
+        .expect("gallery styles exist");
+    let mono_identity = styles
+        .split(".large-identity-mark-mono {")
+        .nth(1)
+        .and_then(|rest| rest.split('}').next())
+        .expect("large mono identity selector");
+    let multiband_identity = styles
+        .split(".large-identity-mark-multiband {")
+        .nth(1)
+        .and_then(|rest| rest.split('}').next())
+        .expect("large multiband identity selector");
+    assert!(mono_identity.contains("display: none;"));
+    assert!(multiband_identity.contains("display: block;"));
+
+    let app_css = std::fs::read_to_string(root.join("src/cli/inspect/assets/app.css"))
+        .expect("live component styles exist");
+    assert!(app_css.contains("url(\"/pointbreak-logo-mono.svg\")"));
+    assert!(
+        !app_css.contains("pointbreak-logo.svg"),
+        "compact live chrome must remain mono"
+    );
 }
 
 #[test]
-fn design_system_gallery_bakes_matched_review_comparison_matrix() {
+fn design_system_final_state_has_no_temporary_visual_system() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    assert!(
+        !root.join("src/cli/inspect/design-system/variants").exists(),
+        "the promoted visual system must not leave a temporary variant directory"
+    );
+
     let bake = include_str!("../src/cli/inspect/design-system/_bodies/bake.sh");
-    for scenario in [
-        "foundations",
-        "navigation-wide",
-        "navigation-narrow",
-        "timeline-wide",
-        "attention",
-        "review-facts",
-        "annotated-diff",
-        "compact-density",
-        "large-identity",
+    for forbidden in [
+        "data-visual-variant",
+        "bake_variant",
+        "bake_comparison",
+        "comparisons/",
     ] {
-        for treatment in ["baseline", "candidate"] {
-            for theme in ["dark", "light"] {
-                let output = format!("comparisons/{scenario}-{treatment}-{theme}.html");
-                assert!(bake.contains(&output), "bake matrix must include {output}");
-            }
-        }
+        assert!(
+            !bake.contains(forbidden),
+            "final bake must not contain {forbidden}"
+        );
     }
+    assert!(bake.contains("identity/large.html"));
+    assert!(bake.contains("identity/large-light.html"));
+    assert!(bake.contains("data/attention.html"));
+    assert!(bake.contains("data/attention-light.html"));
 
     let review_facts =
         include_str!("../src/cli/inspect/design-system/_bodies/data-review-facts.body.html");
@@ -901,37 +926,59 @@ fn design_system_gallery_bakes_matched_review_comparison_matrix() {
     assert!(attention.contains("stale-assessment"));
     assert!(attention.contains("accepted · current"));
 
-    let large_identity = include_str!(
-        "../src/cli/inspect/design-system/_bodies/comparison-large-identity.body.html"
-    );
+    let large_identity =
+        include_str!("../src/cli/inspect/design-system/_bodies/identity-large.body.html");
     assert!(large_identity.contains("../logo/pointbreak-logo.svg"));
-    let narrow = include_str!(
-        "../src/cli/inspect/design-system/_bodies/comparison-navigation-narrow.body.html"
-    );
-    assert!(
-        narrow.contains("class=\"brand-mark\""),
-        "compact comparison chrome keeps the mono brand-mark treatment"
-    );
 }
 
 #[test]
-fn design_system_contrast_audit_composes_only_an_explicit_gallery_variant() {
+fn design_system_contrast_audit_gates_every_syntax_tinted_row_pair() {
     let audit = include_str!("../src/cli/inspect/design-system/contrast-check.mjs");
     for marker in [
-        "--variant",
-        "allowedVariantTokens",
-        "variantPath",
-        "instrument-neutral",
+        "add row",
+        "delete row",
+        "emphasized add",
+        "emphasized delete",
     ] {
-        assert!(
-            audit.contains(marker),
-            "variant audit must contain {marker}"
-        );
+        assert!(audit.contains(marker), "final audit must cover {marker}");
     }
     assert!(
-        !audit.contains("writeFile"),
-        "the contrast audit must never rewrite live tokens"
+        !audit.contains("result.diagnostic") && !audit.contains("diagnostic = false"),
+        "syntax/tinted-row pairs must be release gates, not diagnostics"
     );
+    assert!(!audit.contains("--variant"));
+
+    let tokens = include_str!("../src/cli/inspect/assets/tokens.css");
+    for correction in [
+        "--diff-add-bg: #f3fbf3;",
+        "--diff-del-bg: #fff8f6;",
+        "--emph-add-bg: #e0ffe0;",
+        "--emph-del-bg: #fff2e6;",
+    ] {
+        assert!(
+            tokens.contains(correction),
+            "light diff correction must include {correction}"
+        );
+    }
+}
+
+#[test]
+fn review_visual_promotion_leaves_terminal_palettes_compatibility_frozen() {
+    let terminal = include_str!("../src/cli/theme.rs");
+    let readme = include_str!("../src/cli/inspect/design-system/README.md");
+    assert!(readme.contains("remain compatibility-frozen"));
+    assert!(readme.contains("not mechanically follow"));
+    for pinned in [
+        "\\x1b[38;2;90;169;230m",  // existing dark function color
+        "\\x1b[48;2;0;96;0m",      // existing dark add emphasis
+        "\\x1b[38;2;3;105;161m",   // existing light function color
+        "\\x1b[48;2;160;239;160m", // existing light add emphasis
+    ] {
+        assert!(
+            terminal.contains(pinned),
+            "terminal compatibility pin must remain {pinned:?}"
+        );
+    }
 }
 
 #[test]

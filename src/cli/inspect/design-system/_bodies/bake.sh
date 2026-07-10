@@ -10,7 +10,6 @@ STYLES="$DS/styles.css"
 # gallery files. Both checks are repository-local and network-free.
 node "$DS/brand-check.mjs"
 node "$DS/contrast-check.mjs"
-node "$DS/contrast-check.mjs" --variant variants/instrument-neutral.css
 
 # Publish a token file for the synced design-system project: the shared product
 # tokens plus the self-hosted JetBrains Mono @font-face block (fonts.css). The
@@ -24,7 +23,6 @@ echo "published tokens.css (+ @font-face)"
 
 bake() {
   local body="$1" out="$2" group="$3" title="$4" with_fonts="${5:-}" theme="${6:-}" name="${7:-}" subtitle="${8:-}"
-  local visual_variant="${VISUAL_VARIANT:-}" variant_css="${VARIANT_CSS:-}"
   # The light cards are identical snapshots with data-theme="light" on <html>; the
   # tokens.css [data-theme="light"] aliases do the re-theming, no JS toggle needed.
   local html_tag='<html lang="en">'
@@ -42,42 +40,17 @@ bake() {
     printf '    <title>%s</title>\n    <style>\n' "$title"
     cat "$TOKENS"
     cat "$STYLES"
-    # Temporary visual candidates compose after the live component layer and
-    # are emitted only into gitignored gallery cards.
-    if [ -n "$variant_css" ]; then cat "$variant_css"; fi
     # Cards that demo the self-hosted font opt in (5th arg): inline the @font-face
     # faces, path-rewritten one dir up since cards live in a subdirectory.
     if [ -n "$with_fonts" ]; then sed 's#url("fonts/#url("../fonts/#g' "$DS/fonts.css"; fi
     # Theme scope wrapper: the Design gallery re-hosts card markup and drops
     # <html> attributes, so the data-theme marker must ride an inner element
     # (the <html> attribute is still set above for standalone rendering).
-    if [ -n "$visual_variant" ]; then
-      printf '    </style>\n  </head>\n  <body>\n    <div class="ds-card" data-theme="%s" data-visual-variant="%s">\n' "${theme:-dark}" "$visual_variant"
-    else
-      printf '    </style>\n  </head>\n  <body>\n    <div class="ds-card" data-theme="%s">\n' "${theme:-dark}"
-    fi
+    printf '    </style>\n  </head>\n  <body>\n    <div class="ds-card" data-theme="%s">\n' "${theme:-dark}"
     cat "$DS/_bodies/$body"
     printf '    </div>\n  </body>\n</html>\n'
   } > "$DS/$out"
   echo "baked $out"
-}
-
-bake_variant() {
-  local variant="$1"
-  shift
-  VISUAL_VARIANT="$variant" VARIANT_CSS="$DS/variants/$variant.css" bake "$@"
-}
-
-bake_comparison() {
-  local body="$1" baseline_out="$2" candidate_out="$3" scenario="$4" theme="$5"
-  local theme_label
-  case "$theme" in
-    dark) theme_label="Dark theme" ;;
-    light) theme_label="Light theme" ;;
-    *) echo "unsupported comparison theme: $theme" >&2; return 1 ;;
-  esac
-  bake "$body" "$baseline_out" "Review comparison" "$scenario — baseline — $theme" "" "$theme" "$scenario — baseline — $theme" "$theme_label · current Review"
-  bake_variant instrument-neutral "$body" "$candidate_out" "Review comparison" "$scenario — instrument-neutral — $theme" "" "$theme" "$scenario — candidate — $theme" "$theme_label · unshipped candidate"
 }
 
 # Dark cards. Every card has a light twin, so each dark card carries an explicit
@@ -91,10 +64,7 @@ bake data-review-facts.body.html   data/review-facts.html      Data       "Data 
 bake data-diff.body.html           data/diff.html              Data       "Data — annotated diff"                "" "" "Annotated diff — dark" "Dark theme"
 bake data-attention.body.html      data/attention.html         Data       "Data — Attention lens"                "" "" "Attention — dark" "Dark theme"
 bake feedback-diagnostics.body.html feedback/diagnostics.html  Feedback   "Feedback — diagnostics & errors"      "" "" "Feedback — dark" "Dark theme"
-
-# Temporary, unserved candidate proof. Task 3.2 owns the full comparison
-# matrix; this pair only proves that the isolated override composes and bakes.
-bake_variant instrument-neutral foundations.body.html foundations/foundations-instrument-neutral.html Foundations "Foundations — instrument-neutral candidate" with-fonts "" "Foundations — instrument-neutral dark" "Dark theme · unshipped candidate"
+bake identity-large.body.html      identity/large.html          Identity   "Identity — large multiband treatment"  "" "" "Large identity — dark" "Dark theme"
 
 # Light-theme variants — paired beside their dark twin in the SAME group (not a
 # separate one), each carrying a "— light" name + "Light theme" subtitle so the pair
@@ -110,26 +80,4 @@ bake data-review-facts.body.html   data/review-facts-light.html       Data      
 bake data-diff.body.html           data/diff-light.html               Data        "Data — annotated diff, light"  "" light "Annotated diff — light"  "Light theme"
 bake data-attention.body.html      data/attention-light.html          Data        "Data — Attention lens, light"  "" light "Attention — light"       "Light theme"
 bake feedback-diagnostics.body.html feedback/diagnostics-light.html   Feedback    "Feedback — light theme"       "" light "Feedback — light"        "Light theme"
-bake_variant instrument-neutral foundations.body.html foundations/foundations-instrument-neutral-light.html Foundations "Foundations — instrument-neutral candidate, light" with-fonts light "Foundations — instrument-neutral light" "Light theme · unshipped candidate"
-
-# Matched baseline/candidate comparison matrix. Every pair shares body markup,
-# component styles, theme, and viewport; only the candidate token scope (and
-# the sanctioned large-identity treatment) differs.
-bake_comparison foundations.body.html comparisons/foundations-baseline-dark.html comparisons/foundations-candidate-dark.html foundations dark
-bake_comparison foundations.body.html comparisons/foundations-baseline-light.html comparisons/foundations-candidate-light.html foundations light
-bake_comparison navigation-topbar.body.html comparisons/navigation-wide-baseline-dark.html comparisons/navigation-wide-candidate-dark.html navigation-wide dark
-bake_comparison navigation-topbar.body.html comparisons/navigation-wide-baseline-light.html comparisons/navigation-wide-candidate-light.html navigation-wide light
-bake_comparison comparison-navigation-narrow.body.html comparisons/navigation-narrow-baseline-dark.html comparisons/navigation-narrow-candidate-dark.html navigation-narrow dark
-bake_comparison comparison-navigation-narrow.body.html comparisons/navigation-narrow-baseline-light.html comparisons/navigation-narrow-candidate-light.html navigation-narrow light
-bake_comparison data-timeline.body.html comparisons/timeline-wide-baseline-dark.html comparisons/timeline-wide-candidate-dark.html timeline-wide dark
-bake_comparison data-timeline.body.html comparisons/timeline-wide-baseline-light.html comparisons/timeline-wide-candidate-light.html timeline-wide light
-bake_comparison data-attention.body.html comparisons/attention-baseline-dark.html comparisons/attention-candidate-dark.html attention dark
-bake_comparison data-attention.body.html comparisons/attention-baseline-light.html comparisons/attention-candidate-light.html attention light
-bake_comparison data-review-facts.body.html comparisons/review-facts-baseline-dark.html comparisons/review-facts-candidate-dark.html review-facts dark
-bake_comparison data-review-facts.body.html comparisons/review-facts-baseline-light.html comparisons/review-facts-candidate-light.html review-facts light
-bake_comparison data-diff.body.html comparisons/annotated-diff-baseline-dark.html comparisons/annotated-diff-candidate-dark.html annotated-diff dark
-bake_comparison data-diff.body.html comparisons/annotated-diff-baseline-light.html comparisons/annotated-diff-candidate-light.html annotated-diff light
-bake_comparison comparison-compact-density.body.html comparisons/compact-density-baseline-dark.html comparisons/compact-density-candidate-dark.html compact-density dark
-bake_comparison comparison-compact-density.body.html comparisons/compact-density-baseline-light.html comparisons/compact-density-candidate-light.html compact-density light
-bake_comparison comparison-large-identity.body.html comparisons/large-identity-baseline-dark.html comparisons/large-identity-candidate-dark.html large-identity dark
-bake_comparison comparison-large-identity.body.html comparisons/large-identity-baseline-light.html comparisons/large-identity-candidate-light.html large-identity light
+bake identity-large.body.html      identity/large-light.html          Identity    "Identity — large multiband treatment, light" "" light "Large identity — light" "Light theme"

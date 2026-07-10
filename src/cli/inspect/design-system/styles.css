@@ -507,7 +507,7 @@ body {
   color: var(--warning);
 }
 
-/* ---- Comparison-only large identity --------------------------------- */
+/* ---- Large identity -------------------------------------------------- */
 .large-identity {
   display: grid;
   grid-template-columns: 180px minmax(0, 1fr);
@@ -524,12 +524,12 @@ body {
   height: 180px;
 }
 .large-identity-mark-mono {
-  display: block;
+  display: none;
   background: var(--accent);
   -webkit-mask: url("../../assets/pointbreak-logo-mono.svg") center / contain no-repeat;
   mask: url("../../assets/pointbreak-logo-mono.svg") center / contain no-repeat;
 }
-.large-identity-mark-multiband { display: none; object-fit: contain; }
+.large-identity-mark-multiband { display: block; object-fit: contain; }
 .large-identity p {
   margin: 0 0 8px;
   color: var(--accent);

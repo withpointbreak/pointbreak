@@ -29,12 +29,11 @@ surface because Pointbreak also covers debugging collaboration tools.
   WCAG AA contrast-checked against the surfaces they actually render on, in
   both themes by the product-local `contrast-check.mjs`, which parses the live
   `../assets/tokens.css` source. Don't introduce colors casually.
-- **Harbor surfaces** (`--bg → --bg-elev → --bg-row → --bg-row-sel`): an
-  ocean-navy wash — `--bg` (`#0a1929`) is shared with the marketing chrome —
-  quiet enough that the status hues still carry all the meaning. The **accent**
-  is sky-blue (`--accent`, re-pointing to ocean-primary in light for AA); the
-  logo's **wave ramp** (`--wave-*`) is reserved for identity moments, not
-  working UI.
+- **Instrument surfaces** (`--bg → --bg-elev → --bg-row → --bg-row-sel`): a
+  low-chroma dark ladder and warm off-white light ladder, quiet enough that
+  status hues still carry the meaning. The **accent** is luminous cyan in dark
+  and restrained teal in light; the logo's **wave ramp** (`--wave-*`) is
+  reserved for identity moments, not working UI.
 - **The status system is the identity**: success/warning/danger/assess/
   validation/info/teal; one hue per concept. Event types get their own
   palette (`--evt-*`) that color-codes timeline rails, filter toggles, and
@@ -53,14 +52,10 @@ surface because Pointbreak also covers debugging collaboration tools.
 
 The gallery's multiband logo and self-hosted fonts are locally vendored brand
 inputs pinned by `pointbreak-brand.lock.json`. `brand-check.mjs` verifies their
-bytes and logo geometry offline. The live inspector continues to use its compact
-mono logo and system font stack.
-
-The gallery also contains a temporary `instrument-neutral` comparison variant.
-It is not shipped, served, or a new product status system; it changes only the
-surface, text, border, and accent aliases used to study visual alignment with
-the accepted marketing system. Operational status, event, diff, syntax,
-density, typography, and compact chrome remain the current Review system.
+bytes and logo geometry offline. Large identity patterns use the multiband
+mark; the live inspector continues to use its compact mono logo and system font
+stack. Operational status, event, syntax, density, typography, and component
+hierarchy remain Review-specific rather than inheriting marketing composition.
 
 ## Vocabulary the UI speaks
 

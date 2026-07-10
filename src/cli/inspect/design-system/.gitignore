@@ -10,7 +10,7 @@
 /data/diff.html
 /data/attention.html
 /feedback/diagnostics.html
-/foundations/foundations-instrument-neutral.html
+/identity/large.html
 
 # Light-theme variant cards (same bodies, data-theme="light"); generated too.
 /foundations/foundations-light.html
@@ -22,8 +22,7 @@
 /data/diff-light.html
 /data/attention-light.html
 /feedback/diagnostics-light.html
-/foundations/foundations-instrument-neutral-light.html
-/comparisons/*.html
+/identity/large-light.html
 
 # Generated copy of ../assets/tokens.css (the single source), placed here by
 # bake.sh so the synced project carries a bindable token file. Regenerate; do

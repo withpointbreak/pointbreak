@@ -1,7 +1,7 @@
 /*
  * Pointbreak Review inspector — design tokens (the single source of truth), now skinned to
- * the unified Pointbreak palette: "harbor" ocean-navy surfaces, the sky accent,
- * and the logo's wave ramp. The token names and architecture stay stable so the
+ * the unified Pointbreak palette: low-chroma instrument surfaces, a cyan/teal
+ * working accent, and the logo's wave ramp. The token names and architecture stay stable so the
  * inspector's component CSS re-skins with a value swap and no rewrite; the
  * values carry the Pointbreak identity.
  *
@@ -46,44 +46,42 @@
   --ocean-foam: #f0f9ff;
   --sand: #fef3c7;
 
-  /* Surfaces — "harbor": the inspector's lightness ladder re-hued to the ocean
-     navy (hue ~207°). --bg is the marketing chrome canvas exactly, so the
-     product and the site's terminal/debugger mockups share a floor. --border
-     keeps the prior perception-grade-boundary lesson: clearly visible
-     against every surface it separates. */
-  --bg: #0a1929;
-  --bg-elev: #0e2233;
-  --bg-row: #132a3f;
-  --bg-row-sel: #1c3b5a;
-  --border: #33506c;
-  --fg: #d9e8f5;
-  --fg-dim: #9db1c4;   /* 5.22:1 on --bg-row-sel — raised from #96aabc (4.81) for the established margin (5.32) */
+  /* Surfaces — a low-chroma instrument register. The lightness ladder carries
+     hierarchy while the restrained green cast relates the product to the
+     marketing system without importing its editorial composition. */
+  --bg: #080c0d;
+  --bg-elev: #0e1416;
+  --bg-row: #151e20;
+  --bg-row-sel: #1b2729;
+  --border: #354540;
+  --fg: #f0f5f1;
+  --fg-dim: #a5b2ad;
 
   /* Header chrome — a dedicated deeper tone so the topbar reads as a distinct
      band over the page (page/topbar/field sat within ~1.06 when the topbar
      borrowed --bg-elev). Its own token so --bg-elev keeps serving cards/code
      blocks unchanged. */
-  --bg-topbar: #143252;
+  --bg-topbar: #101716;
 
   /* List selection — a light wash paired with an --accent left bar (app.css).
      The bar carries the selected signal, so the wash stays light enough that
      the colored event-type labels on a selected row clear AA (a strong fill
      cannot back dark colored text at AA). Distinct from --bg-row-sel, which
      still fills the fill-based selections (command palette, DAG node). */
-  --sel-bg: #122c46;
+  --sel-bg: #1b2729;
 
   /* Read-only code/JSON readout surface — a quiet panel, distinct from the
      functional --bg-elev overlays (command palette, diff headers) that should
      stand out. Dark keeps the recessive navy; light is a barely-there near-white
      (ocean-foam --bg-elev read as too strong a blue card on the white page). */
-  --bg-code: #0e2233;
+  --bg-code: #0e1416;
 
-  /* Accent — the signature sky-blue. --accent is the text/icon/glow register
-     (site's sky-400 CTA hue); --accent-strong is the fill register;
+  /* Accent — a luminous cyan working signal. --accent is the text/icon/glow
+     register; --accent-strong is the fill register;
      --on-accent is the label color on accent fills. */
-  --accent: #38bdf8;
-  --accent-strong: #0ea5e9;
-  --on-accent: #0a1929;
+  --accent: #5ce5f4;
+  --accent-strong: #1fc4d6;
+  --on-accent: #071012;
 
   /* Semantic status — the inspector's AA-tuned set, verbatim. One source of truth
      for every state tint; these carry the inspector's meaning and are the
@@ -136,7 +134,7 @@
   --diff-add-fg: #9ae6b4;
   --diff-del-bg: rgba(200, 90, 90, 0.14);
   --diff-del-fg: #f3b0b0;
-  --hunk-bg: #10243a;        /* harbor-tinted hunk strip (was #141b27) */
+  --hunk-bg: #10243a;        /* distinct dark hunk strip */
 
   /* Intraline emphasis: a stronger add/del tint than the row base so a changed
      sub-span reads as "more changed" than its row. Like --diff-*-bg these are
@@ -220,9 +218,8 @@
 
 /*
  * Light theme — a semantic-alias override, skinned to
- * the ocean brand: the elevated surface is ocean-foam, the selection is a
- * mist-family blue, and the accent re-points to ocean-primary (the site's
- * light-theme primary), which clears AA on white where the cyan accents cannot.
+ * warm instrument neutrals and a restrained teal accent. The lighter work
+ * surfaces preserve contrast for Review's fixed semantic palette.
  * Components never change; only the alias→value mapping flips. Status hues keep
  * the inspector's light values — darkened so chip text (which sits on --bg-row)
  * clears WCAG AA on the pale row surfaces. The radii, type, and --mono/--sans
@@ -231,19 +228,19 @@
 [data-theme="light"] {
   color-scheme: light;
 
-  --bg: #ffffff;
-  --bg-elev: #f0f9ff;      /* ocean-foam */
-  --bg-row: #e9f3fb;
-  --bg-row-sel: #d3e9fa;
-  --bg-topbar: #dfeaf6;    /* deeper header band — 1.22 step from the white page */
-  --sel-bg: #edf4fe;       /* light selection wash; the --accent bar signals selection */
-  --bg-code: #f6f9fd;      /* quiet near-white code panel; softer than the ocean-foam --bg-elev */
-  --border: #bcd3e5;
-  --fg: #142433;
-  --fg-dim: #4c6173;       /* 5.15:1 on --bg-row-sel — darkened from #52687b (4.51, razor-thin) */
+  --bg: #fdfbf5;
+  --bg-elev: #fffefa;
+  --bg-row: #f7f3e9;
+  --bg-row-sel: #e2dbce;
+  --bg-topbar: #f4f0e6;
+  --sel-bg: #f7f3e9;
+  --bg-code: #fffefa;
+  --border: #9eaaa4;
+  --fg: #1b1d1c;
+  --fg-dim: #4e5853;
 
-  --accent: #0369a1;       /* ocean-primary */
-  --accent-strong: #0369a1;
+  --accent: #006875;
+  --accent-strong: #007885;
   --on-accent: #ffffff;
 
   --success: #1a7f37;
@@ -266,14 +263,15 @@
   --evt-response: var(--teal);
   --evt-validation: var(--validation);
 
-  /* Diff foregrounds darken to read on the pale add/del rows; the translucent
-     --diff-*-bg values are theme-neutral and keep their :root definitions.
-     Darkened past #147029/#b42318 so the intraline-EMPHASIS pairs clear AA too
-     (4.87/4.85 vs 4.03/3.74 — an inherited light-theme gap this sheet closes).
-     These clear both surfaces — 6.56/7.18 on the base rows, 4.87/4.85 on the
-     emphasized sub-spans. */
+  /* Diff foregrounds darken to read on pale add/delete rows. Explicit
+     high-luminance light surfaces keep every syntax span at AA while preserving
+     the same row-tint/intraline-tint grammar as dark. */
   --diff-add-fg: #116226;
   --diff-del-fg: #961b11;
+  --diff-add-bg: #f3fbf3;
+  --diff-del-bg: #fff8f6;
+  --emph-add-bg: #e0ffe0;
+  --emph-del-bg: #fff2e6;
   --hunk-bg: #e7f1fa;      /* light hunk strip so the dark-blue --info text reads */
 
   --error-bg: #ffebe9;
