@@ -478,6 +478,35 @@ body {
 .unit-card .actions { margin-top: 8px; }
 .unit-card .diff-btn, .detail .diff-btn { font-size: 12px; }
 
+/* ---- Attention lens -------------------------------------------------- */
+.attention-tier {
+  margin: 12px 0 6px;
+  font-size: var(--fs-sm);
+  font-family: var(--mono);
+  color: var(--fg-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.attention-tier:first-child { margin-top: 0; }
+.attention-card { margin: 0 0 8px; }
+.attention-card h3 { word-break: break-all; }
+.attention-kind {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  font-size: var(--fs-sm);
+  color: var(--accent);
+  text-transform: none;
+}
+.attention-freshness {
+  display: inline-block;
+  margin: 0 0 8px;
+  font-size: var(--fs-sm);
+  font-family: var(--mono);
+  color: var(--warning);
+}
+
 /* ---- Badges & chips --------------------------------------------------- */
 .badge { font-family: var(--mono); font-size: 11px; padding: 1px 6px; border-radius: var(--r-sm); background: var(--bg-row); color: var(--fg-dim); }
 .badge.stale { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); }

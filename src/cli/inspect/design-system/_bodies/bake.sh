@@ -23,6 +23,7 @@ echo "published tokens.css (+ @font-face)"
 
 bake() {
   local body="$1" out="$2" group="$3" title="$4" with_fonts="${5:-}" theme="${6:-}" name="${7:-}" subtitle="${8:-}"
+  local visual_variant="${VISUAL_VARIANT:-}" variant_css="${VARIANT_CSS:-}"
   # The light cards are identical snapshots with data-theme="light" on <html>; the
   # tokens.css [data-theme="light"] aliases do the re-theming, no JS toggle needed.
   local html_tag='<html lang="en">'
@@ -40,17 +41,30 @@ bake() {
     printf '    <title>%s</title>\n    <style>\n' "$title"
     cat "$TOKENS"
     cat "$STYLES"
+    # Temporary visual candidates compose after the live component layer and
+    # are emitted only into gitignored gallery cards.
+    if [ -n "$variant_css" ]; then cat "$variant_css"; fi
     # Cards that demo the self-hosted font opt in (5th arg): inline the @font-face
     # faces, path-rewritten one dir up since cards live in a subdirectory.
     if [ -n "$with_fonts" ]; then sed 's#url("fonts/#url("../fonts/#g' "$DS/fonts.css"; fi
     # Theme scope wrapper: the Design gallery re-hosts card markup and drops
     # <html> attributes, so the data-theme marker must ride an inner element
     # (the <html> attribute is still set above for standalone rendering).
-    printf '    </style>\n  </head>\n  <body>\n    <div class="ds-card" data-theme="%s">\n' "${theme:-dark}"
+    if [ -n "$visual_variant" ]; then
+      printf '    </style>\n  </head>\n  <body>\n    <div class="ds-card" data-theme="%s" data-visual-variant="%s">\n' "${theme:-dark}" "$visual_variant"
+    else
+      printf '    </style>\n  </head>\n  <body>\n    <div class="ds-card" data-theme="%s">\n' "${theme:-dark}"
+    fi
     cat "$DS/_bodies/$body"
     printf '    </div>\n  </body>\n</html>\n'
   } > "$DS/$out"
   echo "baked $out"
+}
+
+bake_variant() {
+  local variant="$1"
+  shift
+  VISUAL_VARIANT="$variant" VARIANT_CSS="$DS/variants/$variant.css" bake "$@"
 }
 
 # Dark cards. Every card has a light twin, so each dark card carries an explicit
@@ -62,7 +76,12 @@ bake data-timeline.body.html       data/timeline.html          Data       "Data 
 bake data-cards.body.html          data/cards.html             Data       "Data — unit & revision-thread cards"  "" "" "Revision thread — dark" "Dark theme"
 bake data-review-facts.body.html   data/review-facts.html      Data       "Data — verdict, facts, endorsements"  "" "" "Review facts — dark" "Dark theme"
 bake data-diff.body.html           data/diff.html              Data       "Data — annotated diff"                "" "" "Annotated diff — dark" "Dark theme"
+bake data-attention.body.html      data/attention.html         Data       "Data — Attention lens"                "" "" "Attention — dark" "Dark theme"
 bake feedback-diagnostics.body.html feedback/diagnostics.html  Feedback   "Feedback — diagnostics & errors"      "" "" "Feedback — dark" "Dark theme"
+
+# Temporary, unserved candidate proof. Task 3.2 owns the full comparison
+# matrix; this pair only proves that the isolated override composes and bakes.
+bake_variant instrument-neutral foundations.body.html foundations/foundations-instrument-neutral.html Foundations "Foundations — instrument-neutral candidate" with-fonts "" "Foundations — instrument-neutral dark" "Dark theme · unshipped candidate"
 
 # Light-theme variants — paired beside their dark twin in the SAME group (not a
 # separate one), each carrying a "— light" name + "Light theme" subtitle so the pair
@@ -76,4 +95,6 @@ bake data-timeline.body.html       data/timeline-light.html           Data      
 bake data-cards.body.html          data/cards-light.html              Data        "Data — revision thread, light" "" light "Revision thread — light" "Light theme"
 bake data-review-facts.body.html   data/review-facts-light.html       Data        "Data — review facts, light"    "" light "Review facts — light"    "Light theme"
 bake data-diff.body.html           data/diff-light.html               Data        "Data — annotated diff, light"  "" light "Annotated diff — light"  "Light theme"
+bake data-attention.body.html      data/attention-light.html          Data        "Data — Attention lens, light"  "" light "Attention — light"       "Light theme"
 bake feedback-diagnostics.body.html feedback/diagnostics-light.html   Feedback    "Feedback — light theme"       "" light "Feedback — light"        "Light theme"
+bake_variant instrument-neutral foundations.body.html foundations/foundations-instrument-neutral-light.html Foundations "Foundations — instrument-neutral candidate, light" with-fonts light "Foundations — instrument-neutral light" "Light theme · unshipped candidate"

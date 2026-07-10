@@ -56,6 +56,12 @@ inputs pinned by `pointbreak-brand.lock.json`. `brand-check.mjs` verifies their
 bytes and logo geometry offline. The live inspector continues to use its compact
 mono logo and system font stack.
 
+The gallery also contains a temporary `instrument-neutral` comparison variant.
+It is not shipped, served, or a new product status system; it changes only the
+surface, text, border, and accent aliases used to study visual alignment with
+the accepted marketing system. Operational status, event, diff, syntax,
+density, typography, and compact chrome remain the current Review system.
+
 ## Vocabulary the UI speaks
 
 Use surface words in any generated copy: **change, review, revision,

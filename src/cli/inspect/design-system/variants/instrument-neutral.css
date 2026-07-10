@@ -1,0 +1,33 @@
+/* Temporary, gallery-only comparison values. Never served by the inspector. */
+[data-visual-variant="instrument-neutral"],
+[data-visual-variant="instrument-neutral"][data-theme="dark"] {
+  --bg: #080c0d;
+  --bg-elev: #0e1416;
+  --bg-row: #151e20;
+  --bg-row-sel: #1b2729;
+  --bg-topbar: #101716;
+  --sel-bg: #1b2729;
+  --bg-code: #0e1416;
+  --border: #354540;
+  --fg: #f0f5f1;
+  --fg-dim: #a5b2ad;
+  --accent: #5ce5f4;
+  --accent-strong: #1fc4d6;
+  --on-accent: #071012;
+}
+
+[data-visual-variant="instrument-neutral"][data-theme="light"] {
+  --bg: #f4f0e6;
+  --bg-elev: #fdfbf5;
+  --bg-row: #eee8dc;
+  --bg-row-sel: #e2dbce;
+  --bg-topbar: #e9e3d7;
+  --sel-bg: #eee8dc;
+  --bg-code: #fdfbf5;
+  --border: #9eaaa4;
+  --fg: #1b1d1c;
+  --fg-dim: #4e5853;
+  --accent: #006875;
+  --accent-strong: #007885;
+  --on-accent: #ffffff;
+}

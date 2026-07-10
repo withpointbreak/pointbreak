@@ -771,6 +771,102 @@ fn design_system_gallery_covers_live_shell_and_overlay_states() {
 }
 
 #[test]
+fn design_system_gallery_covers_the_shipped_attention_lens() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let body = std::fs::read_to_string(
+        root.join("src/cli/inspect/design-system/_bodies/data-attention.body.html"),
+    )
+    .expect("Attention gallery body exists");
+    let styles = std::fs::read_to_string(root.join("src/cli/inspect/design-system/styles.css"))
+        .expect("gallery styles exist");
+
+    for marker in [
+        "attention-card",
+        "attention-tier",
+        "attention-kind",
+        "attention-freshness",
+    ] {
+        assert!(
+            body.contains(marker) || styles.contains(marker),
+            "missing {marker}"
+        );
+    }
+    assert!(body.contains("Needs input"));
+    assert!(body.contains("Advisory"));
+    for marker in [
+        "open-input-request",
+        "ambiguous-assessment",
+        "stale-assessment",
+        "failed-validation",
+        "manual_decision_required",
+        "accepted · current",
+        "superseded by",
+    ] {
+        assert!(
+            body.contains(marker),
+            "Attention body must include {marker}"
+        );
+    }
+}
+
+#[test]
+fn design_system_visual_variant_is_gallery_only() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let variant = std::fs::read_to_string(
+        root.join("src/cli/inspect/design-system/variants/instrument-neutral.css"),
+    )
+    .expect("instrument-neutral gallery variant exists");
+    assert!(variant.contains("data-visual-variant=\"instrument-neutral\""));
+
+    let allowed = [
+        "--bg",
+        "--bg-elev",
+        "--bg-row",
+        "--bg-row-sel",
+        "--bg-topbar",
+        "--sel-bg",
+        "--bg-code",
+        "--border",
+        "--fg",
+        "--fg-dim",
+        "--accent",
+        "--accent-strong",
+        "--on-accent",
+    ]
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
+    let declarations = variant
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("--"))
+        .filter_map(|line| line.split(':').next())
+        .map(|name| format!("--{name}"))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(
+        !declarations.is_empty(),
+        "variant must declare candidate tokens"
+    );
+    for declaration in declarations {
+        assert!(
+            allowed.contains(declaration.as_str()),
+            "candidate must not override {declaration}"
+        );
+    }
+
+    for live in [
+        "src/cli/inspect/assets/index.html",
+        "src/cli/inspect/assets/app.css",
+        "src/cli/inspect/assets/app.js",
+        "src/cli/inspect/server.rs",
+    ] {
+        let source = std::fs::read_to_string(root.join(live)).expect("live source is readable");
+        assert!(
+            !source.contains("instrument-neutral"),
+            "{live} must not reference the candidate"
+        );
+    }
+}
+
+#[test]
 fn design_system_gallery_keeps_dag_edges_and_current_copy_in_sync() {
     let styles = include_str!("../src/cli/inspect/design-system/styles.css");
     let data_cards = include_str!("../src/cli/inspect/design-system/_bodies/data-cards.body.html");
