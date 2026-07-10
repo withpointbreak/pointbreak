@@ -17,14 +17,15 @@ use pointbreak::highlight::{emphasis_file, highlight_file};
 use pointbreak::model::{ObjectId, ReviewEndpoint, RevisionId, RevisionSource, ValidationStatus};
 use pointbreak::session::event::ReviewAssessment;
 use pointbreak::session::{
-    AssessmentRecordStatus, AssessmentView, BaseHistoryProjection, BaseProjectionConfig,
-    CurrentAssessmentStatus, EventVerificationPolicy, HistoryPage, HistoryQuery,
-    InputRequestStatus, LivenessEnrichment, ObservationStatus, ObservationView,
-    ProjectionDiagnostic, ReviewHistoryEntry, RevisionCommitRangeView, RevisionListEntry,
-    RevisionListOptions, RevisionOverview, RevisionOverviewsOptions, RevisionProjectionSummary,
-    RevisionShowOptions, RevisionShowResult, SessionState, StoreIdentity, StoreIdentityOptions,
-    SupersessionView, apply_history_query, default_history_page_projection, enrich_liveness,
-    event_log_head_marker, history_base_projection, list_revisions, read_bound_object_artifact,
+    AssessmentRecordStatus, AssessmentView, AttentionItem, AttentionListOptions,
+    BaseHistoryProjection, BaseProjectionConfig, CurrentAssessmentStatus, EventVerificationPolicy,
+    HistoryPage, HistoryQuery, InputRequestStatus, LivenessEnrichment, ObservationStatus,
+    ObservationView, ProjectionDiagnostic, ReviewHistoryEntry, RevisionCommitRangeView,
+    RevisionListEntry, RevisionListOptions, RevisionOverview, RevisionOverviewsOptions,
+    RevisionProjectionSummary, RevisionShowOptions, RevisionShowResult, SessionState,
+    StoreIdentity, StoreIdentityOptions, SupersessionView, apply_history_query,
+    default_history_page_projection, enrich_liveness, event_log_head_marker,
+    history_base_projection, list_attention, list_revisions, read_bound_object_artifact,
     read_events_for_display, read_object_artifact, show_revision, show_revision_overviews,
     store_identity,
 };
@@ -92,6 +93,16 @@ struct ThreadsPayload {
     /// advisory readback: a fork classifies both competing heads as `head`, no
     /// winner.
     revision_classification: BTreeMap<String, RevisionClassification>,
+    diagnostics: Vec<ProjectionDiagnostic>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AttentionPayload {
+    schema: &'static str,
+    event_set_hash: String,
+    event_count: usize,
+    items: Vec<AttentionItem>,
     diagnostics: Vec<ProjectionDiagnostic>,
 }
 
@@ -909,6 +920,26 @@ pub(super) fn threads_json(repo: &Path) -> Result<String, String> {
     };
     let span = tracing::debug_span!("shore.inspect.threads.serialize_json");
     let _guard = span.enter();
+    serde_json::to_string(&payload).map_err(|error| error.to_string())
+}
+
+/// The attention projection served to the web client. Re-derives per request from
+/// `repo` like its neighbors — no caching, pull-only. The library `AttentionItem`
+/// serializes directly (same single-spelling reuse as `RevisionListEntry`), so
+/// there is no parallel DTO.
+pub(super) fn attention_json(repo: &Path) -> Result<String, String> {
+    let span = tracing::debug_span!("shore.inspect.api.attention_json");
+    let _guard = span.enter();
+
+    let result =
+        list_attention(AttentionListOptions::new(repo)).map_err(|error| error.to_string())?;
+    let payload = AttentionPayload {
+        schema: "pointbreak.inspect-attention",
+        event_set_hash: result.event_set_hash,
+        event_count: result.event_count,
+        items: result.items,
+        diagnostics: result.diagnostics,
+    };
     serde_json::to_string(&payload).map_err(|error| error.to_string())
 }
 

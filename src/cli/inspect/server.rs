@@ -250,6 +250,7 @@ fn route(state: &InspectState, method: &str, path: &str, query: Option<&str>) ->
         },
         "/api/revisions" => api_response(api::revisions_json(repo)),
         "/api/threads" => api_response(api::threads_json(repo)),
+        "/api/attention" => api_response(api::attention_json(repo)),
         "/api/freshness" => api_response(api::freshness_json(repo)),
         "/api/identity" => api_response(api::identity_json(repo)),
         "/favicon.ico" => Response::new("204 No Content", "image/x-icon", Vec::new()),

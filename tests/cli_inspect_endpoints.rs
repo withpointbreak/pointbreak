@@ -86,6 +86,80 @@ fn inspector_harness_serves_history_for_minimal_store() {
 }
 
 #[test]
+fn api_attention_serves_projection() {
+    let store = representative_store();
+    // The fixture's human assessment REPLACES the agent one, leaving a single
+    // current record. Append one extra un-replaced assessment on a distinct track
+    // so two current assessments coexist and the revision is ambiguous.
+    let added = support::shore([
+        "assessment",
+        "add",
+        "--repo",
+        store.repo.path().to_str().unwrap(),
+        "--track",
+        "agent:second",
+        "--assessment",
+        "accepted",
+        "--summary",
+        "second opinion",
+    ]);
+    assert!(
+        added.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+
+    let inspector = Inspector::spawn(store.repo.path());
+    let attention = inspector.get_json("/api/attention");
+
+    assert_eq!(attention["schema"], "pointbreak.inspect-attention");
+    assert!(
+        attention["eventSetHash"]
+            .as_str()
+            .unwrap()
+            .starts_with("sha256:")
+    );
+
+    let items = attention["items"].as_array().unwrap();
+    let kinds: Vec<&str> = items
+        .iter()
+        .map(|item| item["kind"].as_str().unwrap())
+        .collect();
+    assert!(kinds.contains(&"open_input_request"), "kinds: {kinds:?}");
+    assert!(kinds.contains(&"failed_validation"), "kinds: {kinds:?}");
+    assert!(kinds.contains(&"ambiguous_assessment"), "kinds: {kinds:?}");
+
+    // Stage guard (invariant 2): no item carries a "stage" key, and no field
+    // anywhere carries a lifecycle-stage value.
+    for item in items {
+        let obj = item.as_object().unwrap();
+        assert!(
+            !obj.contains_key("stage"),
+            "item carries a stage key: {item}"
+        );
+        for (key, value) in obj {
+            if let Some(text) = value.as_str() {
+                assert!(
+                    !matches!(text, "reviewing" | "deciding" | "done"),
+                    "item field {key} carries a lifecycle-stage value: {item}"
+                );
+            }
+        }
+    }
+
+    // failed_validation legitimately carries a VALIDATION outcome in "status".
+    let failed = items
+        .iter()
+        .find(|item| item["kind"] == "failed_validation")
+        .expect("a failed_validation item");
+    let status = failed["status"].as_str().unwrap();
+    assert!(
+        status == "failed" || status == "errored",
+        "failed_validation status must be failed/errored, got {status}"
+    );
+}
+
+#[test]
 fn api_history_returns_chronological_typed_summaries() {
     let store = representative_store();
     let inspector = Inspector::spawn(store.repo.path());
