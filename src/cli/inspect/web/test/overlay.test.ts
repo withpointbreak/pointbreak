@@ -202,3 +202,109 @@ describe("trapFocus", () => {
     expect(document.activeElement).toBe(first);
   });
 });
+
+// The manager's whole keyboard contract: one entry point owns Tab (the trap),
+// Escape (close), delegation to the active overlay's registered keys, and
+// deliberate inertness for everything else — inert keys are NOT preventDefaulted,
+// so typing into overlay-internal inputs (the palette's #cmd-input) keeps working.
+describe("handleOverlayKey", () => {
+  function kbd(init: KeyboardEventInit): KeyboardEvent {
+    return new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      ...init,
+    });
+  }
+
+  it("returns false when no overlay is active", () => {
+    expect(overlay.handleOverlayKey(kbd({ key: "j" }))).toBe(false);
+  });
+
+  it("delegates a registered key to the active overlay's onKey", () => {
+    const help = need("#key-help");
+    const seen: string[] = [];
+    overlay.register("help", {
+      node: help,
+      onClose: () => {},
+      onKey: (ev) => {
+        seen.push(ev.key);
+        return true;
+      },
+    });
+    overlay.open("help");
+    expect(overlay.handleOverlayKey(kbd({ key: "n" }))).toBe(true);
+    expect(seen).toEqual(["n"]);
+  });
+
+  it("closes the active overlay on Escape", () => {
+    const help = need("#key-help");
+    let closed = false;
+    overlay.register("help", {
+      node: help,
+      onClose: () => {
+        closed = true;
+      },
+    });
+    overlay.open("help");
+    expect(overlay.handleOverlayKey(kbd({ key: "Escape" }))).toBe(true);
+    expect(closed).toBe(true);
+    expect(overlay.activeName()).toBe(null);
+  });
+
+  it("owns Escape even when the active overlay registered its own onKey", () => {
+    const help = need("#key-help");
+    const seen: string[] = [];
+    let closed = false;
+    overlay.register("help", {
+      node: help,
+      onClose: () => {
+        closed = true;
+      },
+      onKey: (ev) => {
+        seen.push(ev.key);
+        return true;
+      },
+    });
+    overlay.open("help");
+    expect(overlay.handleOverlayKey(kbd({ key: "Escape" }))).toBe(true);
+    // Escape never reaches the overlay's own map — the manager owns it.
+    expect(seen).toEqual([]);
+    expect(closed).toBe(true);
+  });
+
+  it("reports an unregistered key as handled (inert) without preventDefault", () => {
+    const help = need("#key-help");
+    overlay.register("help", { node: help, onClose: () => {} });
+    overlay.open("help");
+    const ev = kbd({ key: "j" });
+    expect(overlay.handleOverlayKey(ev)).toBe(true);
+    // Typing into overlay inputs must keep working.
+    expect(ev.defaultPrevented).toBe(false);
+  });
+
+  it("treats a key the overlay's onKey declines as inert without preventDefault", () => {
+    const help = need("#key-help");
+    overlay.register("help", {
+      node: help,
+      onClose: () => {},
+      onKey: () => false,
+    });
+    overlay.open("help");
+    const ev = kbd({ key: "x" });
+    expect(overlay.handleOverlayKey(ev)).toBe(true);
+    expect(ev.defaultPrevented).toBe(false);
+  });
+
+  it("still traps Tab within the active overlay", () => {
+    const panel = document.createElement("div");
+    panel.innerHTML = `<button id="hk-a">a</button><button id="hk-b">b</button>`;
+    document.body.appendChild(panel);
+    overlay.register("hk", { node: panel, onClose: () => {} });
+    overlay.open("hk");
+    need("#hk-b").focus();
+    const ev = kbd({ key: "Tab" });
+    expect(overlay.handleOverlayKey(ev)).toBe(true);
+    expect(ev.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(need("#hk-a"));
+  });
+});

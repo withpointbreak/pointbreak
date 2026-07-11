@@ -18,6 +18,9 @@ import { OVERLAY_SELECTORS } from "./types";
 export interface OverlayRegistration {
   node: HTMLElement;
   onClose: () => void;
+  /** Optional per-overlay key handler; returns true when the overlay consumed the
+   *  key (the handler calls ev.preventDefault() itself for consumed keys). */
+  onKey?: (ev: KeyboardEvent) => boolean;
 }
 
 /** Options shared by the close paths. */
@@ -168,6 +171,30 @@ export function trapFocus(ev: KeyboardEvent): boolean {
     return true;
   }
   return false;
+}
+
+/**
+ * The overlay manager's whole keyboard contract. Returns true iff an overlay is
+ * active — the caller must stop global processing (the event was consumed,
+ * deliberately left inert, or left to the browser default). Tab runs the focus
+ * trap, Escape closes, everything else is offered to the active overlay's
+ * registered `onKey`; unowned keys are inert WITHOUT preventDefault, so typing
+ * into overlay-internal inputs keeps working.
+ */
+export function handleOverlayKey(ev: KeyboardEvent): boolean {
+  if (!activeOverlay) return false;
+  if (ev.key === "Tab") {
+    trapFocus(ev);
+    return true;
+  }
+  if (ev.key === "Escape") {
+    ev.preventDefault();
+    closeActive();
+    return true;
+  }
+  const reg = registry.get(activeOverlay.name);
+  reg?.onKey?.(ev);
+  return true;
 }
 
 function noop(): void {}
