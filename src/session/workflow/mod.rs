@@ -50,7 +50,7 @@ pub use capture::{
     UnstagedSpec, WorktreeSpec, capture_review, capture_worktree_review, diffstat_from_files,
 };
 pub use commit_range_liveness::{
-    CommitGraphCondition, CommitLiveness, LivenessEnrichment, OrphanReason,
+    CommitGraphCondition, CommitLiveness, LivenessEnrichment, OrphanReason, commit_graph_stamp,
     effective_integration_ref, enrich_liveness, resolve_default_integration_ref,
 };
 pub use event_signature::{

@@ -29,11 +29,13 @@ import {
 } from "./store";
 import type { HistoryEntry } from "./types";
 
-// The `/api/freshness` probe: the event-log head marker (the event count) the
-// poller diffs against the stored baseline. Not store state (only its deltas are
-// committed, via a reload).
+// The `/api/freshness` probe: the event-log head marker (the event count) and
+// the commit-graph stamp (the git ref state merge statuses read, #467) the
+// poller diffs against the stored baselines. Not store state (only its deltas
+// are committed, via a reload).
 interface FreshnessDoc {
   eventCount?: number;
+  commitGraphStamp?: string;
 }
 
 /** The first-page size — large enough to fill a viewport, small enough to keep the transfer cheap. */
@@ -99,6 +101,7 @@ export async function load(): Promise<void> {
     commit({
       history: { ...(historyRaw as HistoryDoc), queryKey: params },
       lastEventCount: freshness.eventCount ?? null,
+      lastCommitGraphStamp: freshness.commitGraphStamp ?? null,
     });
 
     const [revisionsRaw, threadsRaw, attentionRaw] = await Promise.all([
@@ -374,14 +377,23 @@ export function setLiveness(state: Liveness): void {
 }
 
 /**
- * Probe `/api/freshness` and reload when the event-log head marker changed,
- * updating the liveness indicator. A probe failure marks it stalled.
+ * Probe `/api/freshness` and reload when the event-log head marker or the
+ * commit-graph stamp changed, updating the liveness indicator. The stamp
+ * catches a pure-git landing — a fast-forward flips merge statuses without
+ * appending an event (#467). A probe failure marks it stalled.
  */
 export async function pollFreshness(): Promise<void> {
   try {
     const f = (await fetchJSON("/api/freshness")) as FreshnessDoc;
     const s = getState();
-    const changed = (f.eventCount ?? null) !== s.lastEventCount;
+    // The stamp participates only when both sides carry one: a degraded
+    // server omits it (transient git failure), and absence must not read as
+    // change — an omit↔value flap would fire spurious full reloads.
+    const stampChanged =
+      f.commitGraphStamp != null &&
+      s.lastCommitGraphStamp != null &&
+      f.commitGraphStamp !== s.lastCommitGraphStamp;
+    const changed = (f.eventCount ?? null) !== s.lastEventCount || stampChanged;
     if (changed) {
       setLiveness("updated");
       await load();

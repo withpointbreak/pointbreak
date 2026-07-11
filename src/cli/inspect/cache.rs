@@ -14,33 +14,51 @@
 
 use std::sync::{Arc, RwLock};
 
-use pointbreak::session::BaseHistoryProjection;
+use pointbreak::session::{BaseHistoryProjection, BaseProjectionConfig, TrustSet};
 
-/// The history base projection cache: one fully-hydrated base per store version.
-pub(super) type HistoryProjectionCache = MarkerCache<u64, BaseHistoryProjection>;
+/// The history base projection cache: one fully-hydrated base per store
+/// version and reader configuration. Keyed by [`HistoryCacheKey`], not the
+/// bare marker: the base embeds trust-, attribution-, and delegation-dependent
+/// rendering, and all three documents can change without moving the marker
+/// (#460).
+pub(super) type HistoryProjectionCache = MarkerCache<HistoryCacheKey, BaseHistoryProjection>;
+
+/// Cache key for the history base projection: the store version (head marker)
+/// plus the WHOLE discovered configuration the build renders with, held by
+/// value (the documents are small and structurally comparable). `shore key
+/// enroll`, or any edit to the committed allowed-signers / actor-attributes /
+/// delegates documents, changes trust-dependent rendering without appending an
+/// event, so the key must carry them or enrollment would serve a stale base
+/// until an unrelated event moved the marker (#460). Keying on the whole
+/// config — not a hand-picked field subset — makes a future discovered input
+/// key the cache by construction.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct HistoryCacheKey {
+    pub(super) marker: u64,
+    pub(super) config: BaseProjectionConfig,
+}
 
 /// The `/api/revisions` response cache: the endpoint takes no query parameters,
 /// so the serialized payload itself is the cacheable unit (#426). Keyed by
 /// [`RevisionsCacheKey`], not the bare marker: the payload embeds
-/// trust-dependent removal decisions, and trust configuration can change
-/// without moving the marker.
+/// trust-dependent removal decisions and git-derived merge statuses, and both
+/// inputs can change without moving the marker.
 pub(super) type RevisionsResponseCache = MarkerCache<RevisionsCacheKey, String>;
 
 /// Cache key for the `/api/revisions` payload: the store version (head marker)
-/// plus the reader trust configuration the build read. `shore key enroll` — or
-/// any edit to the committed allowed-signers document — changes operative-
-/// removal decisions (and with them `file_count`/`row_count` suppression)
-/// without appending an event, so the trust fingerprint must key the cache or
-/// enrollment would serve stale removal-sensitive counts until an unrelated
-/// event moved the marker.
+/// plus the two non-event inputs the build reads. The trust set (held by
+/// value — the allowed-signers document is small and structurally comparable)
+/// covers `shore key enroll` and allowed-signers edits, which change
+/// operative-removal decisions without appending an event (#426). The
+/// commit-graph stamp covers pure-git ref moves — most importantly the landing
+/// itself, a fast-forward that flips `mergeStatus` open→merged with no shore
+/// event — which would otherwise serve stale until an unrelated event moved
+/// the marker (#467).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct RevisionsCacheKey {
     pub(super) marker: u64,
-    /// The canonical serialization of the trust set the payload was built
-    /// with. The allowed-signers document is small and its serialization is
-    /// stable (sorted keys), so the string itself is the fingerprint — no
-    /// hashing, no collisions.
-    pub(super) trust_fingerprint: String,
+    pub(super) trust_set: TrustSet,
+    pub(super) commit_graph_stamp: String,
 }
 
 /// A single-slot cache of one expensive derivation, keyed by the store version
@@ -61,12 +79,14 @@ impl<K: PartialEq, T> MarkerCache<K, T> {
         }
     }
 
-    /// Return the cached value when `key` matches; otherwise run `build`,
-    /// store it under `key`, and return it. A build error caches nothing.
+    /// Return the cached value when `key` matches; otherwise run `build` (which
+    /// receives the key, so a build can read the configuration the key carries
+    /// without a second clone), store it under `key`, and return it. A build
+    /// error caches nothing.
     pub(super) fn get_or_build(
         &self,
         key: K,
-        build: impl FnOnce() -> Result<T, String>,
+        build: impl FnOnce(&K) -> Result<T, String>,
     ) -> Result<Arc<T>, String> {
         if let Some(cached) = self.slot.read().unwrap().as_ref()
             && cached.key == key
@@ -81,7 +101,7 @@ impl<K: PartialEq, T> MarkerCache<K, T> {
         {
             return Ok(Arc::clone(&cached.value));
         }
-        let value = Arc::new(build()?);
+        let value = Arc::new(build(&key)?);
         *guard = Some(Cached {
             key,
             value: Arc::clone(&value),
@@ -117,9 +137,9 @@ mod tests {
 
     #[test]
     fn builds_once_and_reuses_on_unchanged_marker() {
-        let cache = HistoryProjectionCache::new();
+        let cache = MarkerCache::<u64, BaseHistoryProjection>::new();
         let builds = AtomicUsize::new(0);
-        let build = || {
+        let build = |_key: &u64| {
             builds.fetch_add(1, Ordering::SeqCst);
             Ok(base_stub("v1"))
         };
@@ -136,17 +156,17 @@ mod tests {
 
     #[test]
     fn rebuilds_when_marker_changes() {
-        let cache = HistoryProjectionCache::new();
+        let cache = MarkerCache::<u64, BaseHistoryProjection>::new();
         let builds = AtomicUsize::new(0);
 
         let v1 = cache
-            .get_or_build(7, || {
+            .get_or_build(7, |_| {
                 builds.fetch_add(1, Ordering::SeqCst);
                 Ok(base_stub("v1"))
             })
             .unwrap();
         let v2 = cache
-            .get_or_build(8, || {
+            .get_or_build(8, |_| {
                 builds.fetch_add(1, Ordering::SeqCst);
                 Ok(base_stub("v2"))
             })
@@ -162,63 +182,65 @@ mod tests {
 
     #[test]
     fn build_error_is_not_cached() {
-        let cache = HistoryProjectionCache::new();
-        assert!(cache.get_or_build(7, || Err("boom".to_owned())).is_err());
+        let cache = MarkerCache::<u64, BaseHistoryProjection>::new();
+        assert!(cache.get_or_build(7, |_| Err("boom".to_owned())).is_err());
         // A subsequent good build at the same marker still runs (the error left no
         // entry behind).
-        let ok = cache.get_or_build(7, || Ok(base_stub("v1")));
+        let ok = cache.get_or_build(7, |_| Ok(base_stub("v1")));
         assert!(ok.is_ok());
     }
 
     #[test]
     fn try_get_returns_matching_cached_base_without_building() {
-        let cache = HistoryProjectionCache::new();
-        let built = cache.get_or_build(7, || Ok(base_stub("v1"))).unwrap();
+        let cache = MarkerCache::<u64, BaseHistoryProjection>::new();
+        let built = cache.get_or_build(7, |_| Ok(base_stub("v1"))).unwrap();
 
         let hit = cache.try_get(&7).expect("matching marker hits");
         assert!(Arc::ptr_eq(&built, &hit));
         assert!(cache.try_get(&8).is_none(), "stale marker misses");
     }
 
-    fn revisions_key(marker: u64, trust: &str) -> RevisionsCacheKey {
+    fn revisions_key(marker: u64, stamp: &str) -> RevisionsCacheKey {
         RevisionsCacheKey {
             marker,
-            trust_fingerprint: trust.to_owned(),
+            trust_set: TrustSet::default(),
+            commit_graph_stamp: stamp.to_owned(),
         }
     }
 
     #[test]
-    fn revisions_cache_reuses_only_on_identical_marker_and_trust() {
+    fn revisions_cache_reuses_only_on_identical_marker_and_ref_state() {
         let cache = RevisionsResponseCache::new();
         let v1 = cache
-            .get_or_build(revisions_key(1, "trust-a"), || {
+            .get_or_build(revisions_key(1, "stamp-a"), |_| {
                 Ok("{\"entries\":[]}".to_owned())
             })
             .unwrap();
         let hit = cache
-            .get_or_build(revisions_key(1, "trust-a"), || {
+            .get_or_build(revisions_key(1, "stamp-a"), |_| {
                 panic!("identical key must not rebuild")
             })
             .unwrap();
         assert!(Arc::ptr_eq(&v1, &hit));
 
-        // Same store version, changed trust configuration: MUST rebuild — a
-        // key enrollment flips operative-removal decisions without moving the
-        // marker.
-        let retrusted = cache
-            .get_or_build(revisions_key(1, "trust-b"), || {
-                Ok("{\"entries\":[\"suppressed\"]}".to_owned())
+        // Same store version, moved commit-graph stamp: MUST rebuild — a
+        // pure-git landing flips merge statuses without moving the marker
+        // (#467). Trust changes rebuild the same way (structural key
+        // inequality; covered end-to-end in the api tests).
+        let restamped = cache
+            .get_or_build(revisions_key(1, "stamp-b"), |_| {
+                Ok("{\"entries\":[\"landed\"]}".to_owned())
             })
             .unwrap();
-        assert_eq!(*retrusted, "{\"entries\":[\"suppressed\"]}");
+        assert_eq!(*restamped, "{\"entries\":[\"landed\"]}");
         assert!(
-            cache.try_get(&revisions_key(1, "trust-a")).is_none(),
-            "the single slot now holds the re-trusted payload"
+            cache.try_get(&revisions_key(1, "stamp-a")).is_none(),
+            "the single slot now holds the re-stamped payload"
         );
 
         // Marker move rebuilds as before.
         let v2 = cache
-            .get_or_build(revisions_key(2, "trust-b"), || {
+            .get_or_build(revisions_key(2, "stamp-b"), |_| {
                 Ok("{\"entries\":[1]}".to_owned())
             })
             .unwrap();

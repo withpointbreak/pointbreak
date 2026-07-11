@@ -384,6 +384,11 @@ fn api_freshness_exposes_the_event_count_marker() {
     // confirm stamp on the full-read endpoints (asserted for /api/history above).
     assert!(freshness.get("eventSetHash").is_none());
     assert!(freshness.get("diagnosticCount").is_none());
+    // The commit-graph stamp is the second change key: a pure-git ref move —
+    // most importantly a landing fast-forward — flips revision merge statuses
+    // without appending an event, and the polling client refetches on either
+    // key (#467).
+    assert!(freshness["commitGraphStamp"].is_string());
 }
 
 #[test]

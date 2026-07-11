@@ -195,8 +195,11 @@ export interface State {
   diffHash: string | null;
   focus: string | null;
   // Freshness baseline the poller diffs against to surface a refresh cue: the
-  // event-log head marker (the event count) seeded at load.
+  // event-log head marker (the event count) and the commit-graph stamp (the
+  // git ref state the revision merge statuses read — a pure-git landing moves
+  // it with no new event, #467), both seeded at load.
   lastEventCount: number | null;
+  lastCommitGraphStamp: string | null;
 }
 
 // The initial state, ported verbatim from the served app.js `state` object.
@@ -221,6 +224,7 @@ const state: State = {
   diffHash: null,
   focus: null,
   lastEventCount: null,
+  lastCommitGraphStamp: null,
 };
 
 const subscribers = new Set<() => void>();

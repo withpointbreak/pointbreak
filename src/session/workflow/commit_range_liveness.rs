@@ -20,7 +20,8 @@ use serde::Serialize;
 use crate::error::Result;
 use crate::git::{
     Ancestry, git_default_branch_ref, git_for_each_ref, git_independent_commits, git_is_ancestor,
-    git_object_exists, git_rev_list_reachable, git_rev_parse_commit_oid, git_worktree_list,
+    git_object_exists, git_ref_state_lines, git_rev_list_reachable, git_rev_parse_commit_oid,
+    git_worktree_list,
 };
 use crate::session::projection::commit_range::DIVERGENT_COMMIT_ASSOCIATION_CODE;
 use crate::session::state::ProjectionDiagnostic;
@@ -175,6 +176,28 @@ pub fn effective_integration_ref(repo: &Path, explicit: Option<&str>) -> Option<
         Some(reference) => Some(reference.to_owned()),
         None => resolve_default_integration_ref(repo),
     }
+}
+
+/// A change-detection stamp over every git input the commit-graph liveness
+/// reads: branch and remote ref tips with their symref targets (which drive
+/// default-branch detection, #466), plus linked-worktree HEADs (the only way a
+/// detached-worktree commit counts as live). Equal ref states always stamp
+/// identically; any ref move, branch create/delete, fetch, or worktree HEAD
+/// change produces a different stamp. Two git spawns, no ancestry walks — this
+/// detects change for cache keys and freshness polls (#467), it does not
+/// classify.
+pub fn commit_graph_stamp(repo: &Path) -> Result<String> {
+    let mut input = git_ref_state_lines(repo)?;
+    input.push_str("\n--worktrees--\n");
+    for worktree in git_worktree_list(repo)? {
+        let head = worktree.head.as_deref().unwrap_or("-");
+        let branch = worktree.branch.as_deref().unwrap_or("-");
+        input.push_str(head);
+        input.push(' ');
+        input.push_str(branch);
+        input.push('\n');
+    }
+    Ok(crate::canonical_hash::sha256_bytes_hex(input.as_bytes()))
 }
 
 /// Reachability resolved **once** for an entire revision list, so classifying each

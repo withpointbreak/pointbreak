@@ -413,6 +413,24 @@ pub(crate) fn git_for_each_ref(repo: &Path, patterns: &[&str]) -> Result<Vec<Ref
         .collect())
 }
 
+/// The raw branch/remote ref state, one `<oid> <refname> <symref-target>` line
+/// per ref, for change detection: this is every ref input the commit-graph
+/// liveness reads — branch and remote tips (including `origin/HEAD`, whose
+/// symref target drives default-branch detection). Returned as git emits it
+/// (sorted by refname), so equal ref states always produce equal text.
+pub(crate) fn git_ref_state_lines(repo: &Path) -> Result<String> {
+    let output = run_git(
+        repo,
+        [
+            "for-each-ref",
+            "--format=%(objectname) %(refname) %(symref)",
+            "refs/heads/",
+            "refs/remotes/",
+        ],
+    )?;
+    git_field_string(&output.stdout, "for-each-ref state output")
+}
+
 /// Whether `oid` names an object present in the repository (`cat-file -e`).
 pub(crate) fn git_object_exists(repo: &Path, oid: &str) -> Result<bool> {
     let (code, _) = run_git_status(repo, ["cat-file", "-e", oid], &[0, 1])?;

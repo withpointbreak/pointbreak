@@ -24,10 +24,10 @@ use pointbreak::session::{
     RevisionListEntry, RevisionListOptions, RevisionOverview, RevisionOverviewsOptions,
     RevisionProjectionSummary, RevisionShowOptions, RevisionShowResult, SessionState,
     SnapshotSummaryCache, StoreIdentity, StoreIdentityOptions, SupersessionView, TrustSet,
-    apply_history_query, default_history_page_projection, enrich_liveness, event_log_head_marker,
-    history_base_projection, list_attention, list_revisions, read_bound_object_artifact,
-    read_events_for_display, read_object_artifact, show_revision, show_revision_overviews,
-    store_identity, trust_set_to_value,
+    apply_history_query, commit_graph_stamp, default_history_page_projection, enrich_liveness,
+    event_log_head_marker, history_base_projection, list_attention, list_revisions,
+    read_bound_object_artifact, read_events_for_display, read_object_artifact, show_revision,
+    show_revision_overviews, store_identity,
 };
 use serde::Serialize;
 
@@ -288,6 +288,14 @@ struct FreshnessPayload {
     /// event-set hash. The authoritative `eventSetHash` confirm stamp stays on the
     /// full-read endpoints (`/api/history`, `/api/revisions`).
     event_count: u64,
+    /// The commit-graph stamp over the git ref state the revisions payload's
+    /// merge statuses read. A pure-git landing — a fast-forward that appends
+    /// no event — moves this stamp while the event count stays put, and the
+    /// polling client refetches on either change (#467). Best-effort: omitted
+    /// when the stamp cannot be derived, in which case the client falls back
+    /// to event-count-only change detection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit_graph_stamp: Option<String>,
 }
 
 /// The literal floor label shown when no worktree basename can be derived.
@@ -716,23 +724,14 @@ pub(super) fn history_json(
     if let Some(limit) = default_history_page_limit(query, page) {
         let span = tracing::debug_span!("shore.inspect.history.default_page_fast_path");
         let _guard = span.enter();
-        let marker = {
-            let span = tracing::debug_span!("shore.inspect.history.event_log_head_marker");
-            let _guard = span.enter();
-            event_log_head_marker(repo).map_err(|error| error.to_string())?
-        };
-        if let Some(base) = cache.try_get(&marker) {
+        let key = history_cache_key(repo)?;
+        if let Some(base) = cache.try_get(&key) {
             let span = tracing::debug_span!("shore.inspect.history.default_page_cache_hit");
             let _guard = span.enter();
             let out = apply_history_query(&base, query, page);
             return serialize_history_payload(out);
         }
-        let config = {
-            let span = tracing::debug_span!("shore.inspect.history.inspect_base_config");
-            let _guard = span.enter();
-            inspect_base_config(repo)
-        };
-        let out = default_history_page_projection(repo, &config, limit, query.order)
+        let out = default_history_page_projection(repo, &key.config, limit, query.order)
             .map_err(|error| error.to_string())?;
         return serialize_history_payload(out);
     }
@@ -784,6 +783,28 @@ pub(super) fn warm_history_cache(
     cached_history_base(repo, cache).map(|_| ())
 }
 
+/// Discover the read-side configuration ONCE and carry it inside the cache
+/// key, so the key and the build can never disagree on the configuration they
+/// describe (#460) — the build reads `key.config` back out. The change
+/// detector is the cheap monotonic head marker (no event-byte decode — plan
+/// 0090) plus the whole discovered configuration the base projection renders
+/// with; configuration discovery is infallible (absent/malformed documents
+/// fall back to defaults) and spawns no git process after the worktree root is
+/// memoized.
+fn history_cache_key(repo: &Path) -> Result<super::cache::HistoryCacheKey, String> {
+    let config = {
+        let span = tracing::debug_span!("shore.inspect.history.inspect_base_config");
+        let _guard = span.enter();
+        inspect_base_config(repo)
+    };
+    let marker = {
+        let span = tracing::debug_span!("shore.inspect.history.event_log_head_marker");
+        let _guard = span.enter();
+        event_log_head_marker(repo).map_err(|error| error.to_string())?
+    };
+    Ok(super::cache::HistoryCacheKey { marker, config })
+}
+
 fn cached_history_base(
     repo: &Path,
     cache: &super::cache::HistoryProjectionCache,
@@ -791,25 +812,19 @@ fn cached_history_base(
     let span = tracing::debug_span!("shore.inspect.history.cached_base");
     let _guard = span.enter();
 
-    // The cheap monotonic head marker is the per-request change detector (no
-    // event-byte decode — plan 0090); the cached base's `eventSetHash` is the
-    // served stamp. Build-once/serve-many across all queries for one store version.
-    let marker = {
-        let span = tracing::debug_span!("shore.inspect.history.event_log_head_marker");
-        let _guard = span.enter();
-        event_log_head_marker(repo).map_err(|error| error.to_string())?
-    };
-    let span = tracing::debug_span!("shore.inspect.history.cache_get_or_build", marker);
+    // The cached base's `eventSetHash` is the served stamp. Build-once/
+    // serve-many across all queries for one store version + reader
+    // configuration (#460).
+    let key = history_cache_key(repo)?;
+    let span = tracing::debug_span!(
+        "shore.inspect.history.cache_get_or_build",
+        marker = key.marker
+    );
     let _guard = span.enter();
-    cache.get_or_build(marker, || {
+    cache.get_or_build(key, |key| {
         let span = tracing::debug_span!("shore.inspect.history.cache_build");
         let _guard = span.enter();
-        let config = {
-            let span = tracing::debug_span!("shore.inspect.history.inspect_base_config");
-            let _guard = span.enter();
-            inspect_base_config(repo)
-        };
-        history_base_projection(repo, &config).map_err(|error| error.to_string())
+        history_base_projection(repo, &key.config).map_err(|error| error.to_string())
     })
 }
 
@@ -848,23 +863,27 @@ pub(super) fn warm_revisions_cache(
 pub(super) fn revisions_cache_is_warm(
     repo: &Path,
     cache: &super::cache::RevisionsResponseCache,
+    commit_graph_stamp: Option<&str>,
 ) -> bool {
     let trust_set = crate::cli::common::discover_trust_set(repo);
-    revisions_cache_key(repo, &trust_set)
+    revisions_cache_key(repo, &trust_set, commit_graph_stamp)
         .ok()
         .and_then(|key| cache.try_get(&key))
         .is_some()
 }
 
-/// The `/api/revisions` cache key: store version + the trust configuration the
-/// build will read. The trust set is serialized through the same canonical
-/// on-disk shape (`trust_set_to_value`, sorted keys) so an unchanged
-/// allowed-signers document always fingerprints identically, and `shore key
-/// enroll` — which changes operative-removal decisions without appending an
-/// event — always misses the cache.
+/// The `/api/revisions` cache key: store version + the trust configuration +
+/// the commit-graph stamp the build will read. The trust set is held by value
+/// (structural equality), so `shore key enroll` — which changes operative-
+/// removal decisions without appending an event — always misses the cache. The
+/// stamp covers pure-git ref moves, most importantly the landing fast-forward
+/// that flips `mergeStatus` with no event (#467); a repo where the stamp
+/// cannot be derived keys on a sentinel, matching the build's own graceful
+/// liveness degradation.
 fn revisions_cache_key(
     repo: &Path,
     trust_set: &TrustSet,
+    commit_graph_stamp: Option<&str>,
 ) -> Result<super::cache::RevisionsCacheKey, String> {
     let marker = {
         let span = tracing::debug_span!("shore.inspect.revisions.event_log_head_marker");
@@ -873,15 +892,29 @@ fn revisions_cache_key(
     };
     Ok(super::cache::RevisionsCacheKey {
         marker,
-        trust_fingerprint: trust_fingerprint(trust_set)?,
+        trust_set: trust_set.clone(),
+        commit_graph_stamp: stamp_or_sentinel(commit_graph_stamp),
     })
 }
 
-/// Canonical fingerprint of a reader trust configuration: the stable (sorted-
-/// key) serialization of its on-disk shape. Equal trust sets always
-/// fingerprint identically; any enrollment change produces a different string.
-fn trust_fingerprint(trust_set: &TrustSet) -> Result<String, String> {
-    serde_json::to_string(&trust_set_to_value(trust_set)).map_err(|error| error.to_string())
+/// The key form of a possibly-underivable commit-graph stamp: a repo where the
+/// stamp cannot be read keys on a stable sentinel, matching the build's own
+/// graceful liveness degradation. One mapping shared by every key derivation,
+/// so the warm gate and the request path can never disagree on the error form.
+fn stamp_or_sentinel(commit_graph_stamp: Option<&str>) -> String {
+    commit_graph_stamp
+        .map(str::to_owned)
+        .unwrap_or_else(|| "unavailable".to_owned())
+}
+
+/// Derive the commit-graph stamp for one request, degrading to `None` on any
+/// git failure. Hoisted by the freshness route so one derivation (two git
+/// spawns) serves both the warm gate and the freshness payload in a single
+/// poll tick.
+pub(super) fn freshness_commit_graph_stamp(repo: &Path) -> Option<String> {
+    let span = tracing::debug_span!("shore.inspect.commit_graph_stamp");
+    let _guard = span.enter();
+    commit_graph_stamp(repo).ok()
 }
 
 fn cached_revisions_json(
@@ -897,14 +930,15 @@ fn cached_revisions_json(
         let _guard = span.enter();
         crate::cli::common::discover_trust_set(repo)
     };
-    let key = revisions_cache_key(repo, &trust_set)?;
+    let stamp = freshness_commit_graph_stamp(repo);
+    let key = revisions_cache_key(repo, &trust_set, stamp.as_deref())?;
     let span = tracing::debug_span!(
         "shore.inspect.revisions.cache_get_or_build",
         marker = key.marker
     );
     let _guard = span.enter();
-    cache.get_or_build(key, || {
-        build_revisions_json(repo, &trust_set, snapshot_summaries)
+    cache.get_or_build(key, |key| {
+        build_revisions_json(repo, &key.trust_set, snapshot_summaries)
     })
 }
 
@@ -1540,11 +1574,15 @@ fn set_head_live_branch(document: &mut serde_json::Value, live_branch: String) {
 /// polls and re-fetches only when it moves — replacing the old per-poll full read
 /// and event-set-hash recompute. The event-set hash remains the authoritative
 /// confirm stamp on the full-read endpoints (`/api/history`, `/api/revisions`).
-pub(super) fn freshness_json(repo: &Path) -> Result<String, String> {
+pub(super) fn freshness_json(
+    repo: &Path,
+    commit_graph_stamp: Option<String>,
+) -> Result<String, String> {
     let event_count = event_log_head_marker(repo).map_err(|error| error.to_string())?;
     let payload = FreshnessPayload {
         schema: "pointbreak.inspect-freshness",
         event_count,
+        commit_graph_stamp,
     };
     serde_json::to_string(&payload).map_err(|error| error.to_string())
 }
@@ -2598,12 +2636,12 @@ mod tests {
         assert_eq!(resolve_head_live_branch(&ambiguous, "baseoid"), None);
     }
 
-    /// The trust fingerprint keys the `/api/revisions` cache (#426): an
-    /// enrollment change must always change it (or a stale trust-dependent
+    /// The trust set keys the `/api/revisions` cache by value (#426): an
+    /// enrollment change must compare unequal (or a stale trust-dependent
     /// payload serves until an unrelated event moves the marker), and an
-    /// unchanged document must never change it (or the cache never hits).
+    /// unchanged document must compare equal (or the cache never hits).
     #[test]
-    fn trust_fingerprint_tracks_enrollment_changes_and_nothing_else() {
+    fn trust_set_equality_tracks_enrollment_changes_and_nothing_else() {
         let dir = tempfile::tempdir().expect("temp allowed-signers dir");
         let write = |name: &str, contents: &str| {
             let path = dir.path().join(name);
@@ -2621,16 +2659,113 @@ mod tests {
             r#"{"allowedSigners":{"actor:agent:codex":["did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd"]}}"#,
         );
 
-        let empty_fp = trust_fingerprint(&empty).unwrap();
-        let enrolled_fp = trust_fingerprint(&enrolled).unwrap();
         assert_ne!(
-            empty_fp, enrolled_fp,
+            empty, enrolled,
             "an enrollment must miss the response cache"
         );
         assert_eq!(
-            enrolled_fp,
-            trust_fingerprint(&enrolled_again).unwrap(),
+            enrolled, enrolled_again,
             "an unchanged trust document must keep hitting the cache"
+        );
+    }
+
+    #[test]
+    fn history_cache_rebuilds_when_trust_configuration_changes() {
+        let (repo, _, _) = captured_repo();
+        let cache = super::super::cache::HistoryProjectionCache::new();
+
+        let first = cached_history_base(repo.path(), &cache).expect("warm history cache");
+        let unchanged = cached_history_base(repo.path(), &cache).expect("unchanged config");
+        assert!(
+            Arc::ptr_eq(&first, &unchanged),
+            "an unchanged configuration keeps hitting the cache"
+        );
+
+        // Enrollment changes trust-dependent rendering without appending an
+        // event — the head marker is untouched — so the cached base must be
+        // rebuilt, not served stale (#460).
+        std::fs::create_dir_all(repo.path().join(".shore")).unwrap();
+        std::fs::write(
+            repo.path().join(".shore/allowed-signers.json"),
+            r#"{"allowedSigners":{"actor:git-email:alice@example.com":["did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd"]}}"#,
+        )
+        .unwrap();
+        let rebuilt = cached_history_base(repo.path(), &cache).expect("rebuild after enrollment");
+        assert!(
+            !Arc::ptr_eq(&first, &rebuilt),
+            "a trust-configuration change must miss the history cache"
+        );
+
+        // Every discovered document keys the cache, not just the trust set:
+        // a delegation edit must rebuild the same way.
+        std::fs::write(
+            repo.path().join(".shore/delegates.json"),
+            r#"{"delegates":{"actor:agent:claude-code":[{"principal":"actor:git-email:alice@example.com","validFrom":"2026-06-10T00:00:00Z","validUntil":null}]}}"#,
+        )
+        .unwrap();
+        let redelegated =
+            cached_history_base(repo.path(), &cache).expect("rebuild after delegation edit");
+        assert!(
+            !Arc::ptr_eq(&rebuilt, &redelegated),
+            "a delegation change must miss the history cache"
+        );
+    }
+
+    #[test]
+    fn revisions_cache_rebuilds_when_ref_state_moves() {
+        let (repo, _, _) = captured_repo();
+        let cache = super::super::cache::RevisionsResponseCache::new();
+        let summaries = Arc::new(SnapshotSummaryCache::new());
+
+        let first =
+            cached_revisions_json(repo.path(), &cache, &summaries).expect("warm revisions cache");
+        let warm_stamp = freshness_commit_graph_stamp(repo.path());
+        assert!(
+            revisions_cache_is_warm(repo.path(), &cache, warm_stamp.as_deref()),
+            "freshly built cache reads warm"
+        );
+
+        // A pure-git ref move changes the liveness inputs the payload's
+        // mergeStatus is derived from without appending a shore event — the
+        // cache must read cold and rebuild (#467).
+        git(repo.path(), &["branch", "stamp-probe"]);
+        let moved_stamp = freshness_commit_graph_stamp(repo.path());
+        assert!(
+            !revisions_cache_is_warm(repo.path(), &cache, moved_stamp.as_deref()),
+            "a ref move must read cold so the freshness-poll rewarm fires"
+        );
+        let rebuilt =
+            cached_revisions_json(repo.path(), &cache, &summaries).expect("rebuild after ref move");
+        assert!(
+            !Arc::ptr_eq(&first, &rebuilt),
+            "a ref move must rebuild the payload"
+        );
+    }
+
+    #[test]
+    fn freshness_reports_commit_graph_stamp_movement() {
+        let (repo, _, _) = captured_repo();
+
+        let freshness = |repo: &Path| -> serde_json::Value {
+            // The route hoists one stamp derivation per poll and feeds it to
+            // the payload; mirror that wiring here.
+            let stamp = freshness_commit_graph_stamp(repo);
+            serde_json::from_str(&freshness_json(repo, stamp).unwrap()).unwrap()
+        };
+        let first = freshness(repo.path());
+        assert!(
+            first["commitGraphStamp"].is_string(),
+            "freshness carries the commit-graph stamp: {first}"
+        );
+
+        // A pure-git ref move leaves the event count unchanged but moves the
+        // stamp, so the polling client knows to refetch (#467).
+        git(repo.path(), &["branch", "stamp-probe"]);
+        let second = freshness(repo.path());
+        assert_eq!(first["eventCount"], second["eventCount"]);
+        assert_ne!(
+            first["commitGraphStamp"], second["commitGraphStamp"],
+            "a ref move must move the stamp"
         );
     }
 }

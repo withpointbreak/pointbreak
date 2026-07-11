@@ -152,7 +152,10 @@ fn entry_body_states(entry: &ReviewHistoryEntry) -> Vec<(BodyContentState, Optio
 /// Caller-supplied advisory verification + reader enrichment for the base build.
 /// Built by the binary — the library cannot reach the inspector's `pub(crate)`
 /// `discover_*` helpers (INV-8). `Default` is the zero-cost path unit tests use.
-#[derive(Clone, Debug, Default)]
+/// Structurally comparable (`Eq`) so a cache can key on the WHOLE config: a
+/// future discovered input added here automatically keys any config-derived
+/// cache, instead of silently recreating #460 one field at a time.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BaseProjectionConfig {
     pub verification_policy: Option<EventVerificationPolicy>,
     pub trust_set: TrustSet,

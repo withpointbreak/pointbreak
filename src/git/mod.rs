@@ -11,7 +11,7 @@ pub(crate) use command::{
     git_config_path_get, git_default_branch_ref, git_empty_tree_oid, git_for_each_ref,
     git_head_commit_oid_optional, git_head_oid, git_head_ref, git_independent_commits,
     git_is_ancestor, git_object_exists, git_path_is_untracked, git_paths_are_ignored,
-    git_rev_list_range, git_rev_list_reachable, git_rev_parse_commit_oid,
+    git_ref_state_lines, git_rev_list_range, git_rev_list_reachable, git_rev_parse_commit_oid,
     git_tracked_and_untracked_inventory, git_untracked_inventory, git_worktree_list,
     git_write_index_tree_oid,
 };

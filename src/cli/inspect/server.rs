@@ -225,8 +225,12 @@ fn warm_caches(state: Arc<InspectState>) {
 /// is the client's own change detector, so by the time it refetches
 /// `/api/revisions` the rebuild has usually already started (or finished)
 /// instead of blocking that request for the full build.
-fn maybe_warm_revisions_cache(state: &Arc<InspectState>) {
-    if api::revisions_cache_is_warm(state.repo.as_path(), &state.revisions_cache) {
+fn maybe_warm_revisions_cache(state: &Arc<InspectState>, commit_graph_stamp: Option<&str>) {
+    if api::revisions_cache_is_warm(
+        state.repo.as_path(),
+        &state.revisions_cache,
+        commit_graph_stamp,
+    ) {
         return;
     }
     if state.revisions_warm_in_flight.swap(true, Ordering::AcqRel) {
@@ -313,9 +317,12 @@ fn route(state: &Arc<InspectState>, method: &str, path: &str, query: Option<&str
         "/api/freshness" => {
             // The freshness poll is the client's change detector; ride it to
             // start rebuilding the expensive revisions payload before the
-            // client's follow-up refetch arrives.
-            maybe_warm_revisions_cache(state);
-            api_response(api::freshness_json(repo))
+            // client's follow-up refetch arrives. The commit-graph stamp is
+            // derived ONCE per poll (two git spawns) and shared by the warm
+            // gate and the payload.
+            let stamp = api::freshness_commit_graph_stamp(repo);
+            maybe_warm_revisions_cache(state, stamp.as_deref());
+            api_response(api::freshness_json(repo, stamp))
         }
         "/api/identity" => api_response(api::identity_json(repo)),
         "/favicon.ico" => Response::new("204 No Content", "image/x-icon", Vec::new()),

@@ -801,7 +801,8 @@
     diff: null,
     diffHash: null,
     focus: null,
-    lastEventCount: null
+    lastEventCount: null,
+    lastCommitGraphStamp: null
   };
   var subscribers = /* @__PURE__ */ new Set();
   function getState() {
@@ -1153,7 +1154,8 @@
       showError(null);
       commit({
         history: { ...historyRaw, queryKey: params },
-        lastEventCount: freshness.eventCount ?? null
+        lastEventCount: freshness.eventCount ?? null,
+        lastCommitGraphStamp: freshness.commitGraphStamp ?? null
       });
       const [revisionsRaw, threadsRaw, attentionRaw] = await Promise.all([
         fetchJSON("/api/revisions"),
@@ -1329,7 +1331,8 @@
     try {
       const f = await fetchJSON("/api/freshness");
       const s = getState();
-      const changed = (f.eventCount ?? null) !== s.lastEventCount;
+      const stampChanged = f.commitGraphStamp != null && s.lastCommitGraphStamp != null && f.commitGraphStamp !== s.lastCommitGraphStamp;
+      const changed = (f.eventCount ?? null) !== s.lastEventCount || stampChanged;
       if (changed) {
         setLiveness("updated");
         await load();

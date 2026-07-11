@@ -48,6 +48,7 @@ const historyDoc = historyJson as {
 };
 const DEFAULT_FRESHNESS: unknown = {
   eventCount: historyDoc.eventCount,
+  commitGraphStamp: "stamp-fixture",
 };
 let freshness: unknown = DEFAULT_FRESHNESS;
 

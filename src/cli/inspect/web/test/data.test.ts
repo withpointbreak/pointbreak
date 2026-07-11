@@ -117,6 +117,7 @@ describe("load", () => {
     await data.load();
     const s = store.getState();
     expect(s.lastEventCount).toBe(HISTORY_EVENT_COUNT);
+    expect(s.lastCommitGraphStamp).toBe("stamp-fixture");
   });
 
   it("reads the freshness marker before the documents (baseline can't outrun the docs)", async () => {
@@ -367,13 +368,50 @@ describe("pollFreshness", () => {
     expect(store.getState().lastEventCount).toBe(HISTORY_EVENT_COUNT + 1);
   });
 
-  it("does not reload when a non-marker field changes but the marker is steady", async () => {
+  it("reloads when the commit-graph stamp moved while the marker held", async () => {
     await data.load();
-    // The poll keys ONLY on eventCount; an eventSetHash/diagnosticCount that moves
-    // while the marker holds must not trigger a reload (the old diagnostic-count
-    // key would have looped forever against a store carrying diagnostics).
+    // A pure-git landing (a fast-forward) flips revision merge statuses without
+    // appending an event: the marker holds but the stamp moves, and the poll
+    // must refetch (#467).
     setFreshnessResponse({
       eventCount: HISTORY_EVENT_COUNT,
+      commitGraphStamp: "stamp-moved",
+    });
+    const { paths, restore } = captureRequestPaths();
+    try {
+      await data.pollFreshness();
+    } finally {
+      restore();
+    }
+    expect(document.querySelector("#refresh")?.getAttribute("data-state")).toBe(
+      "updated",
+    );
+    expect(paths).toContain("/api/revisions");
+    // The reload re-seeded the stamp baseline, so the next poll at the same
+    // stamp reports unchanged — no reload loop.
+    expect(store.getState().lastCommitGraphStamp).toBe("stamp-moved");
+  });
+
+  it("does not reload when the stamp is omitted while the marker is steady", async () => {
+    await data.load();
+    // A transient server-side stamp failure omits the field. Absence is not a
+    // signal — flapping omit↔value must not fire reloads.
+    setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT });
+    await data.pollFreshness();
+    expect(document.querySelector("#refresh")?.getAttribute("data-state")).toBe(
+      "watching",
+    );
+  });
+
+  it("does not reload when a non-key field changes but marker and stamp are steady", async () => {
+    await data.load();
+    // The poll keys ONLY on eventCount + commitGraphStamp; an eventSetHash/
+    // diagnosticCount that moves while both hold must not trigger a reload (the
+    // old diagnostic-count key would have looped forever against a store
+    // carrying diagnostics).
+    setFreshnessResponse({
+      eventCount: HISTORY_EVENT_COUNT,
+      commitGraphStamp: "stamp-fixture",
       eventSetHash: "sha256:changed",
       diagnosticCount: 3,
     });
