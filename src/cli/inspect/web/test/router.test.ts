@@ -658,11 +658,7 @@ describe("applyHash (derive the view from the fragment, repaint via the subscrip
       } as unknown as ThreadsDoc,
     });
     mountInspectorDom();
-    history.replaceState(
-      null,
-      "",
-      `#/threads?sel=${encodeURIComponent(REV)}`,
-    );
+    history.replaceState(null, "", `#/threads?sel=${encodeURIComponent(REV)}`);
     router.applyHash();
     expect(store.getState().lens).toBe("list");
     expect(store.getState().selected).toEqual({ kind: "revision", id: REV });
