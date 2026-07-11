@@ -23,11 +23,11 @@ use pointbreak::session::{
     ObservationView, ProjectionDiagnostic, ReviewHistoryEntry, RevisionCommitRangeView,
     RevisionListEntry, RevisionListOptions, RevisionOverview, RevisionOverviewsOptions,
     RevisionProjectionSummary, RevisionShowOptions, RevisionShowResult, SessionState,
-    SnapshotSummaryCache, StoreIdentity, StoreIdentityOptions, SupersessionView,
+    SnapshotSummaryCache, StoreIdentity, StoreIdentityOptions, SupersessionView, TrustSet,
     apply_history_query, default_history_page_projection, enrich_liveness, event_log_head_marker,
     history_base_projection, list_attention, list_revisions, read_bound_object_artifact,
     read_events_for_display, read_object_artifact, show_revision, show_revision_overviews,
-    store_identity,
+    store_identity, trust_set_to_value,
 };
 use serde::Serialize;
 
@@ -473,6 +473,7 @@ fn to_unit_entry_documents(
 fn revision_overviews(
     repo: &Path,
     entries: &[RevisionListEntry],
+    trust_set: &TrustSet,
     snapshot_summaries: &Arc<SnapshotSummaryCache>,
 ) -> Result<BTreeMap<String, RevisionOverviewDocument>, String> {
     let span = tracing::debug_span!(
@@ -485,12 +486,9 @@ fn revision_overviews(
     // captures are not among them). The overview slice reads no member readbacks or
     // principal diagnostics, so the verification-policy / actor-attributes /
     // delegation-map inputs are dropped; the trust set is retained — it drives the
-    // operative-removal decision behind file_count/row_count.
-    let trust_set = {
-        let span = tracing::debug_span!("shore.inspect.revisions.discover_trust_set");
-        let _guard = span.enter();
-        crate::cli::common::discover_trust_set(repo)
-    };
+    // operative-removal decision behind file_count/row_count. The CALLER discovers
+    // it (once) because the same value keys the response cache (#426): key and
+    // build must never disagree on the trust configuration.
     let overviews = {
         let span = tracing::debug_span!("shore.inspect.revisions.show_revision_overviews");
         let _guard = span.enter();
@@ -498,7 +496,7 @@ fn revision_overviews(
             RevisionOverviewsOptions::new(repo)
                 .with_revisions(entries.iter().map(|entry| entry.revision_id.clone()))
                 .with_read_for_display(true)
-                .with_trust_set(trust_set)
+                .with_trust_set(trust_set.clone())
                 .with_snapshot_summary_cache(Arc::clone(snapshot_summaries)),
         )
         .map_err(|error| {
@@ -723,7 +721,7 @@ pub(super) fn history_json(
             let _guard = span.enter();
             event_log_head_marker(repo).map_err(|error| error.to_string())?
         };
-        if let Some(base) = cache.try_get(marker) {
+        if let Some(base) = cache.try_get(&marker) {
             let span = tracing::debug_span!("shore.inspect.history.default_page_cache_hit");
             let _guard = span.enter();
             let out = apply_history_query(&base, query, page);
@@ -844,16 +842,46 @@ pub(super) fn warm_revisions_cache(
 }
 
 /// Whether the `/api/revisions` cache already holds the payload for the store's
-/// current head marker. `false` on any marker-read error — the caller only uses
-/// this to decide whether a background warm is worth spawning.
+/// current head marker AND the current reader trust configuration. `false` on
+/// any key-derivation error — the caller only uses this to decide whether a
+/// background warm is worth spawning.
 pub(super) fn revisions_cache_is_warm(
     repo: &Path,
     cache: &super::cache::RevisionsResponseCache,
 ) -> bool {
-    event_log_head_marker(repo)
+    let trust_set = crate::cli::common::discover_trust_set(repo);
+    revisions_cache_key(repo, &trust_set)
         .ok()
-        .and_then(|marker| cache.try_get(marker))
+        .and_then(|key| cache.try_get(&key))
         .is_some()
+}
+
+/// The `/api/revisions` cache key: store version + the trust configuration the
+/// build will read. The trust set is serialized through the same canonical
+/// on-disk shape (`trust_set_to_value`, sorted keys) so an unchanged
+/// allowed-signers document always fingerprints identically, and `shore key
+/// enroll` — which changes operative-removal decisions without appending an
+/// event — always misses the cache.
+fn revisions_cache_key(
+    repo: &Path,
+    trust_set: &TrustSet,
+) -> Result<super::cache::RevisionsCacheKey, String> {
+    let marker = {
+        let span = tracing::debug_span!("shore.inspect.revisions.event_log_head_marker");
+        let _guard = span.enter();
+        event_log_head_marker(repo).map_err(|error| error.to_string())?
+    };
+    Ok(super::cache::RevisionsCacheKey {
+        marker,
+        trust_fingerprint: trust_fingerprint(trust_set)?,
+    })
+}
+
+/// Canonical fingerprint of a reader trust configuration: the stable (sorted-
+/// key) serialization of its on-disk shape. Equal trust sets always
+/// fingerprint identically; any enrollment change produces a different string.
+fn trust_fingerprint(trust_set: &TrustSet) -> Result<String, String> {
+    serde_json::to_string(&trust_set_to_value(trust_set)).map_err(|error| error.to_string())
 }
 
 fn cached_revisions_json(
@@ -861,18 +889,28 @@ fn cached_revisions_json(
     cache: &super::cache::RevisionsResponseCache,
     snapshot_summaries: &Arc<SnapshotSummaryCache>,
 ) -> Result<Arc<String>, String> {
-    let marker = {
-        let span = tracing::debug_span!("shore.inspect.revisions.event_log_head_marker");
+    // Discover the trust set ONCE, key the cache with it, and build with the
+    // same value: the key and the payload can never disagree on the trust
+    // configuration they describe.
+    let trust_set = {
+        let span = tracing::debug_span!("shore.inspect.revisions.discover_trust_set");
         let _guard = span.enter();
-        event_log_head_marker(repo).map_err(|error| error.to_string())?
+        crate::cli::common::discover_trust_set(repo)
     };
-    let span = tracing::debug_span!("shore.inspect.revisions.cache_get_or_build", marker);
+    let key = revisions_cache_key(repo, &trust_set)?;
+    let span = tracing::debug_span!(
+        "shore.inspect.revisions.cache_get_or_build",
+        marker = key.marker
+    );
     let _guard = span.enter();
-    cache.get_or_build(marker, || build_revisions_json(repo, snapshot_summaries))
+    cache.get_or_build(key, || {
+        build_revisions_json(repo, &trust_set, snapshot_summaries)
+    })
 }
 
 fn build_revisions_json(
     repo: &Path,
+    trust_set: &TrustSet,
     snapshot_summaries: &Arc<SnapshotSummaryCache>,
 ) -> Result<String, String> {
     let span = tracing::debug_span!("shore.inspect.api.revisions_json");
@@ -884,7 +922,7 @@ fn build_revisions_json(
         list_revisions(RevisionListOptions::new(repo).with_read_for_display(true))
             .map_err(|error| error.to_string())?
     };
-    let overviews = revision_overviews(repo, &result.entries, snapshot_summaries)?;
+    let overviews = revision_overviews(repo, &result.entries, trust_set, snapshot_summaries)?;
     let entries = {
         let span = tracing::debug_span!(
             "shore.inspect.revisions.to_entry_documents",
@@ -2558,5 +2596,41 @@ mod tests {
             diagnostics: Vec::new(),
         };
         assert_eq!(resolve_head_live_branch(&ambiguous, "baseoid"), None);
+    }
+
+    /// The trust fingerprint keys the `/api/revisions` cache (#426): an
+    /// enrollment change must always change it (or a stale trust-dependent
+    /// payload serves until an unrelated event moves the marker), and an
+    /// unchanged document must never change it (or the cache never hits).
+    #[test]
+    fn trust_fingerprint_tracks_enrollment_changes_and_nothing_else() {
+        let dir = tempfile::tempdir().expect("temp allowed-signers dir");
+        let write = |name: &str, contents: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, contents).expect("write allowed-signers fixture");
+            TrustSet::from_allowed_signers_file(&path).expect("parse allowed-signers fixture")
+        };
+
+        let empty = write("empty.json", r#"{"allowedSigners":{}}"#);
+        let enrolled = write(
+            "one.json",
+            r#"{"allowedSigners":{"actor:agent:codex":["did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd"]}}"#,
+        );
+        let enrolled_again = write(
+            "one-again.json",
+            r#"{"allowedSigners":{"actor:agent:codex":["did:key:z6MkehRgf7yJbgaGfYsdoAsKdBPE3dj2CYhowQdcjqSJgvVd"]}}"#,
+        );
+
+        let empty_fp = trust_fingerprint(&empty).unwrap();
+        let enrolled_fp = trust_fingerprint(&enrolled).unwrap();
+        assert_ne!(
+            empty_fp, enrolled_fp,
+            "an enrollment must miss the response cache"
+        );
+        assert_eq!(
+            enrolled_fp,
+            trust_fingerprint(&enrolled_again).unwrap(),
+            "an unchanged trust document must keep hitting the cache"
+        );
     }
 }
