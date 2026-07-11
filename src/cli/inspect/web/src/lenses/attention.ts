@@ -17,6 +17,21 @@ import { linkify, shortRef } from "../refs";
 import type { AttentionItem } from "../store";
 import { getState } from "../store";
 
+/**
+ * Split attention items into the needs-input (primary) and advisory (secondary)
+ * tiers — the one tier predicate, shared with the tab badge so the lens and the
+ * badge can never disagree on what counts as needing input.
+ */
+export function partitionAttentionTiers(items: AttentionItem[]): {
+  primary: AttentionItem[];
+  secondary: AttentionItem[];
+} {
+  return {
+    primary: items.filter((item) => item.tier !== "secondary"),
+    secondary: items.filter((item) => item.tier === "secondary"),
+  };
+}
+
 /** Paint the attention items into the `#attention` body, grouped by tier. */
 export function renderAttention(): void {
   const el = $("#attention");
@@ -26,8 +41,7 @@ export function renderAttention(): void {
     el.innerHTML = `<p class="${CLASS.attentionEmpty}" style="color:var(--fg-dim)">Nothing needs attention in this store.</p>`;
     return;
   }
-  const primary = items.filter((item) => item.tier !== "secondary");
-  const secondary = items.filter((item) => item.tier === "secondary");
+  const { primary, secondary } = partitionAttentionTiers(items);
   // Re-apply the lens-local cursor from state so it survives this repaint.
   const focus = getState().attentionFocus;
   el.innerHTML =

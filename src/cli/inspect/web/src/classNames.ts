@@ -151,6 +151,11 @@ export const CLASS = {
   attentionMeta: "attention-meta",
   attentionFreshness: "attention-freshness",
   attentionFocus: "attention-focus",
+
+  // The attention tab's judgment-queue count badge (absent when both tiers are
+  // empty) and the muted advisory count beside the needs-input number.
+  attentionBadge: "attention-badge",
+  attentionBadgeSecondary: "attention-badge-secondary",
 } as const;
 
 // ---------------------------------------------------------------------------

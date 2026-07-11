@@ -121,6 +121,20 @@ body { display: flex; flex-direction: column; }
 }
 .lens-tab[aria-pressed="true"] { color: var(--fg); background: var(--bg-row); border-color: var(--border); }
 
+/* The attention tab's judgment-queue badge: the needs-input count as the
+   number, the advisory count muted beside it. Absent when both are zero. */
+.attention-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  font-size: var(--fs-sm);
+  font-family: var(--mono);
+  color: var(--accent);
+}
+.attention-badge-secondary { color: var(--fg-dim); margin-left: 2px; }
+
 .stats { margin-left: auto; display: flex; flex-wrap: wrap; gap: 14px; align-items: center; min-width: 0; }
 .stat { color: var(--fg-dim); font-size: var(--fs-sm); }
 .stat.mono { font-family: var(--mono); }

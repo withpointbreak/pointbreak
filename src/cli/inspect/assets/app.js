@@ -158,7 +158,11 @@
     attentionKind: "attention-kind",
     attentionMeta: "attention-meta",
     attentionFreshness: "attention-freshness",
-    attentionFocus: "attention-focus"
+    attentionFocus: "attention-focus",
+    // The attention tab's judgment-queue count badge (absent when both tiers are
+    // empty) and the muted advisory count beside the needs-input number.
+    attentionBadge: "attention-badge",
+    attentionBadgeSecondary: "attention-badge-secondary"
   };
   var ANNO_KINDS = [
     "observation",
@@ -4437,6 +4441,13 @@
   __name(onKey, "onKey");
 
   // src/lenses/attention.ts
+  function partitionAttentionTiers(items) {
+    return {
+      primary: items.filter((item) => item.tier !== "secondary"),
+      secondary: items.filter((item) => item.tier === "secondary")
+    };
+  }
+  __name(partitionAttentionTiers, "partitionAttentionTiers");
   function renderAttention() {
     const el = $("#attention");
     if (!el) return;
@@ -4445,8 +4456,7 @@
       el.innerHTML = `<p class="${CLASS.attentionEmpty}" style="color:var(--fg-dim)">Nothing needs attention in this store.</p>`;
       return;
     }
-    const primary = items.filter((item) => item.tier !== "secondary");
-    const secondary = items.filter((item) => item.tier === "secondary");
+    const { primary, secondary } = partitionAttentionTiers(items);
     const focus = getState().attentionFocus;
     el.innerHTML = renderTier("Needs input", primary, focus) + renderTier("Advisory", secondary, focus);
   }
@@ -4670,9 +4680,30 @@ click to open the revision page">
     const lens = getState().lens;
     for (const tab of document.querySelectorAll(".lens-tab")) {
       tab.setAttribute("aria-pressed", String(tab.dataset.lens === lens));
+      if (tab.dataset.lens === "attention") renderAttentionBadge(tab);
     }
   }
   __name(renderLensSwitcher, "renderLensSwitcher");
+  function renderAttentionBadge(tab) {
+    const { primary, secondary } = partitionAttentionTiers(
+      getState().attention?.items ?? []
+    );
+    tab.querySelector(`.${CLASS.attentionBadge}`)?.remove();
+    if (!primary.length && !secondary.length) return;
+    const badge = document.createElement("span");
+    badge.className = CLASS.attentionBadge;
+    const needsInput = primary.length === 1 ? "1 item needs input" : `${primary.length} items need input`;
+    badge.setAttribute(
+      "aria-label",
+      [
+        primary.length ? needsInput : "",
+        secondary.length ? `${secondary.length} advisory` : ""
+      ].filter(Boolean).join(", ")
+    );
+    badge.innerHTML = `${primary.length ? primary.length : ""}${secondary.length ? `<span class="${CLASS.attentionBadgeSecondary}">+${secondary.length}</span>` : ""}`;
+    tab.appendChild(badge);
+  }
+  __name(renderAttentionBadge, "renderAttentionBadge");
   function syncControls() {
     const state2 = getState();
     const text = $("#filter-text");

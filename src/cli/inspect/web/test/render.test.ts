@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { HistoryDoc, RevisionsDoc, ThreadsDoc } from "../src/store";
+import type {
+  AttentionDoc,
+  AttentionItem,
+  HistoryDoc,
+  RevisionsDoc,
+  ThreadsDoc,
+} from "../src/store";
 import historyJson from "./fixtures/history.json";
 import revisionsJson from "./fixtures/revisions.json";
 import threadsJson from "./fixtures/threads.json";
@@ -194,6 +200,87 @@ describe("renderLensSwitcher + renderMaster (lens dispatch + scaffold)", () => {
     expect((master?.querySelectorAll("#timeline .event").length ?? 0) > 0).toBe(
       true,
     );
+  });
+});
+
+describe("the attention tab count badge (global judgment-queue counts)", () => {
+  // The badge is a pure projection of the already-loaded /api/attention items:
+  // the needs-input count as the number, the advisory count muted beside it.
+  // It reflects the store-wide queue from every lens; the per-revision view is
+  // the detail pane's job.
+  const item = (id: string, tier: string): AttentionItem => ({
+    id,
+    kind: "open_input_request",
+    tier,
+  });
+  const attentionOf = (items: AttentionItem[]): AttentionDoc => ({
+    items,
+    eventSetHash: "sha256:badge-test",
+  });
+
+  it("shows the needs-input count on the attention tab", () => {
+    store.commit({
+      attention: attentionOf([
+        item("a", "primary"),
+        item("b", "primary"),
+        item("c", "secondary"),
+      ]),
+    });
+    render.render();
+    const badge = $('.lens-tab[data-lens="attention"] .attention-badge');
+    expect(badge?.textContent).toContain("2");
+    // Read-only chrome: the tab's own click is the only behavior — the badge
+    // carries no control of its own (no dismissal affordance of any kind).
+    expect(badge?.querySelector("button, input, a")).toBeNull();
+  });
+
+  it("renders the advisory count muted, separately from the primary number", () => {
+    store.commit({
+      attention: attentionOf([item("a", "primary"), item("c", "secondary")]),
+    });
+    render.render();
+    const secondary = $(
+      '.lens-tab[data-lens="attention"] .attention-badge-secondary',
+    );
+    expect(secondary?.textContent).toContain("1");
+  });
+
+  it("keeps the badge for an advisory-only queue (zero of both is the only empty state)", () => {
+    store.commit({ attention: attentionOf([item("c", "secondary")]) });
+    render.render();
+    expect($(".attention-badge")).not.toBeNull();
+    expect($(".attention-badge-secondary")?.textContent).toContain("1");
+  });
+
+  it("renders no badge element before the attention doc loads or when it is empty", () => {
+    render.render(); // attention: null (never committed)
+    expect($(".attention-badge")).toBeNull();
+    store.commit({ attention: attentionOf([]) });
+    render.render();
+    expect($(".attention-badge")).toBeNull();
+    expect($(".attention-badge-secondary")).toBeNull();
+  });
+
+  it("drops the badge on the same repaint that clears the items", () => {
+    store.commit({ attention: attentionOf([item("a", "primary")]) });
+    render.render();
+    expect($(".attention-badge")).not.toBeNull();
+    // The derived count fell on its own (a judgment landed elsewhere); the next
+    // poll repaint drops the element — no reader action, no lingering zero.
+    store.commit({ attention: attentionOf([]) });
+    render.render();
+    expect($(".attention-badge")).toBeNull();
+  });
+
+  it("names both counts accessibly (the badge is not color-only)", () => {
+    store.commit({
+      attention: attentionOf([item("a", "primary"), item("b", "secondary")]),
+    });
+    render.render();
+    const badge = $('.lens-tab[data-lens="attention"] .attention-badge');
+    const label = badge?.getAttribute("aria-label") ?? "";
+    expect(label).toMatch(/input/);
+    expect(label).toContain("advisory");
   });
 });
 

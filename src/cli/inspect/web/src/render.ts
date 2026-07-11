@@ -18,7 +18,7 @@ import { renderDetail, showComposite } from "./detail";
 import { openDiff, renderDiffOverlay } from "./diff/controller";
 import { $ } from "./dom";
 import { escapeHtml } from "./escape";
-import { renderAttention } from "./lenses/attention";
+import { partitionAttentionTiers, renderAttention } from "./lenses/attention";
 import { renderRevisionList } from "./lenses/revisions";
 import {
   renderTimeline,
@@ -174,7 +174,42 @@ function renderLensSwitcher(): void {
   const lens = getState().lens;
   for (const tab of document.querySelectorAll<HTMLElement>(".lens-tab")) {
     tab.setAttribute("aria-pressed", String(tab.dataset.lens === lens));
+    if (tab.dataset.lens === "attention") renderAttentionBadge(tab);
   }
+}
+
+// The attention tab's count badge: the store-wide judgment queue, glanceable
+// from every lens (the per-revision view lives on the detail page). The
+// needs-input count is the number; the advisory count rides muted beside it.
+// Both zero removes the element — an honest empty state, never a "0" chip. The
+// counts are derived from the served items, so they fall (or rise) on their own
+// and the badge follows on the same repaint; there is no dismissal affordance.
+/** Reconcile the judgment-queue count badge inside the attention tab. */
+function renderAttentionBadge(tab: HTMLElement): void {
+  const { primary, secondary } = partitionAttentionTiers(
+    getState().attention?.items ?? [],
+  );
+  tab.querySelector(`.${CLASS.attentionBadge}`)?.remove();
+  if (!primary.length && !secondary.length) return;
+  const badge = document.createElement("span");
+  badge.className = CLASS.attentionBadge;
+  // The aria-label replaces the badge's text in the tab's accessible name, so
+  // the counts are announced with their meaning, not read as bare digits.
+  const needsInput =
+    primary.length === 1
+      ? "1 item needs input"
+      : `${primary.length} items need input`;
+  badge.setAttribute(
+    "aria-label",
+    [
+      primary.length ? needsInput : "",
+      secondary.length ? `${secondary.length} advisory` : "",
+    ]
+      .filter(Boolean)
+      .join(", "),
+  );
+  badge.innerHTML = `${primary.length ? primary.length : ""}${secondary.length ? `<span class="${CLASS.attentionBadgeSecondary}">+${secondary.length}</span>` : ""}`;
+  tab.appendChild(badge);
 }
 
 // Reflect the current filter/order state into the toolbar controls (the option
