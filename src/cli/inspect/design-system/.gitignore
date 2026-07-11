@@ -28,3 +28,11 @@
 # bake.sh so the synced project carries a bindable token file. Regenerate; do
 # not edit or commit.
 /tokens.css
+
+# Generated copy of the lock-verified live mono mark for the synced project.
+/logo/pointbreak-logo-mono.svg
+
+# Claude Design compiler artifacts and generated template thumbnails.
+/_ds_*
+/_adherence.oxlintrc.json
+templates/**/.thumbnail

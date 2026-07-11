@@ -11,6 +11,11 @@ STYLES="$DS/styles.css"
 node "$DS/brand-check.mjs"
 node "$DS/contrast-check.mjs"
 
+# Publish the live compact mono mark inside the synced project. The source stays
+# lock-verified at ../assets; this generated copy gives cards and standalone
+# project styles one project-local URL.
+cp "$DS/../assets/pointbreak-logo-mono.svg" "$DS/logo/pointbreak-logo-mono.svg"
+
 # Publish a token file for the synced design-system project: the shared product
 # tokens plus the self-hosted JetBrains Mono @font-face block (fonts.css). The
 # project's styles.css @imports this, so the compiler resolves both the tokens
@@ -39,7 +44,7 @@ bake() {
     printf '<!doctype html>\n%s\n  <head>\n    <meta charset="utf-8" />\n' "$html_tag"
     printf '    <title>%s</title>\n    <style>\n' "$title"
     cat "$TOKENS"
-    cat "$STYLES"
+    sed 's#url("logo/#url("../logo/#g' "$STYLES"
     # Cards that demo the self-hosted font opt in (5th arg): inline the @font-face
     # faces, path-rewritten one dir up since cards live in a subdirectory.
     if [ -n "$with_fonts" ]; then sed 's#url("fonts/#url("../fonts/#g' "$DS/fonts.css"; fi

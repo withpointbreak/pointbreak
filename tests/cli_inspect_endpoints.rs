@@ -589,6 +589,54 @@ fn design_system_bake_is_gated_by_a_local_live_token_audit() {
 }
 
 #[test]
+fn design_system_gallery_is_claude_design_sync_ready() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let design_system = root.join("src/cli/inspect/design-system");
+    let styles = std::fs::read_to_string(design_system.join("styles.css"))
+        .expect("design-system stylesheet is readable");
+    let bake = std::fs::read_to_string(design_system.join("_bodies/bake.sh"))
+        .expect("design-system bake script is readable");
+    let readme = std::fs::read_to_string(design_system.join("README.md"))
+        .expect("design-system README is readable");
+    let gitignore = std::fs::read_to_string(design_system.join(".gitignore"))
+        .expect("design-system gitignore is readable");
+
+    assert!(
+        !styles.contains("url(\"/pointbreak-logo-mono") && !styles.contains("../../assets/"),
+        "gallery styles must not use origin-absolute or project-escaping mono-logo URLs"
+    );
+    assert!(
+        styles.contains("url(\"logo/pointbreak-logo-mono.svg\")"),
+        "gallery styles use one project-root-relative mono-logo URL"
+    );
+    assert!(
+        bake.contains(
+            "cp \"$DS/../assets/pointbreak-logo-mono.svg\" \"$DS/logo/pointbreak-logo-mono.svg\""
+        ),
+        "bake publishes the live mono logo inside the synced project"
+    );
+    assert!(
+        bake.contains("s#url(\"logo/#url(\"../logo/#g"),
+        "bake rewrites project-root logo URLs for one-level-deep cards"
+    );
+    assert!(
+        readme.contains("pointbreak-product-ds"),
+        "README names the active Claude Design project"
+    );
+    for ignored in [
+        "/logo/pointbreak-logo-mono.svg",
+        "/_ds_*",
+        "/_adherence.oxlintrc.json",
+        "templates/**/.thumbnail",
+    ] {
+        assert!(
+            gitignore.contains(ignored),
+            "gitignore must include {ignored}"
+        );
+    }
+}
+
+#[test]
 fn design_system_brand_assets_are_locked_and_verified_offline() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let design_system = root.join("src/cli/inspect/design-system");

@@ -57,8 +57,8 @@ body {
   width: 24px;
   height: 24px;
   background: var(--accent);
-  -webkit-mask: url("/pointbreak-logo-mono.svg") center / contain no-repeat;
-  mask: url("/pointbreak-logo-mono.svg") center / contain no-repeat;
+  -webkit-mask: url("logo/pointbreak-logo-mono.svg") center / contain no-repeat;
+  mask: url("logo/pointbreak-logo-mono.svg") center / contain no-repeat;
 }
 .brand-text { white-space: nowrap; }
 .brand-accent { color: var(--accent); margin-left: 4px; font-weight: 500; }
@@ -526,8 +526,8 @@ body {
 .large-identity-mark-mono {
   display: none;
   background: var(--accent);
-  -webkit-mask: url("../../assets/pointbreak-logo-mono.svg") center / contain no-repeat;
-  mask: url("../../assets/pointbreak-logo-mono.svg") center / contain no-repeat;
+  -webkit-mask: url("logo/pointbreak-logo-mono.svg") center / contain no-repeat;
+  mask: url("logo/pointbreak-logo-mono.svg") center / contain no-repeat;
 }
 .large-identity-mark-multiband { display: block; object-fit: contain; }
 .large-identity p {

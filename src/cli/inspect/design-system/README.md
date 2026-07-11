@@ -1,6 +1,6 @@
 # Pointbreak Review inspector — design system
 
-Source for the `pointbreak-review-inspector-ds` [Claude Design](https://claude.ai/design) gallery and
+Source for the `pointbreak-product-ds` [Claude Design](https://claude.ai/design) gallery and
 the tokenized status palette consumed by the inspector's `../assets/app.css`.
 
 The gallery is a shared tokens component/state preview for critical inspector surfaces; it is not a full live-app mirror.
@@ -12,7 +12,7 @@ stays in the live inspector.
 
 | Path | Role |
 | --- | --- |
-| `ABOUT.md` | Product context for Claude Design (what Pointbreak Review/`shore inspect` is, the design language, UI vocabulary). Synced to both projects alongside the cards. |
+| `ABOUT.md` | Product context for Claude Design (what Pointbreak Review/`shore inspect` is, the design language, UI vocabulary). Synced to the project alongside the cards. |
 | `../assets/tokens.css` | Review's live token source and single source of truth for the palette (the only `:root`). |
 | `styles.css` | Component rules only — references the tokens via `var(--…)`. |
 | `_bodies/*.body.html` | Per-card markup fragments (the authored content of each card). |
@@ -54,7 +54,12 @@ not mechanically follow web inspector token changes.
    bash _bodies/bake.sh
    ```
 3. Sync to claude.ai/design via the DesignSync tool / `/design-sync` skill
-   (project `pointbreak-review-inspector-ds`): `list_files` → `finalize_plan` → `write_files`.
+   (project `pointbreak-product-ds`): `list_files` → `finalize_plan` → `write_files`.
+
+The synced set is the baked `<group>/*.html` cards, published `tokens.css`,
+`styles.css`, `fonts/`, `logo/` (tracked multiband plus generated mono copy),
+and `ABOUT.md`. Never sync `contrast-check.mjs`, `brand-check.mjs`,
+`pointbreak-brand.lock.json`, `_bodies/`, or `.gitignore`.
 
 The palette is single-sourced in `../assets/tokens.css` (the served frontend's
 only `:root`); `bake.sh` inlines that same file into every card, so the gallery
