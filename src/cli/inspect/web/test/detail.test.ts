@@ -531,3 +531,204 @@ describe("renderRevisionPage fact-supersession DAG (fork-gated, additive)", () =
     expect(detailEl().querySelector("figure.fact-dag")).toBeNull();
   });
 });
+
+// The revision-level supersession block: fork-gated by the server (the field is
+// absent for a singleton component) and rendered from component data identically
+// under EVERY member's page — never hosted under one head, no primary chrome.
+describe("renderRevisionPage revision supersession block (fork-gated)", () => {
+  const RS_ROOT =
+    "rev:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const RS_HEAD_B =
+    "rev:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const RS_HEAD_C =
+    "rev:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+  // A forked component: B and C each supersede the root A, so the layout has two
+  // equal-rank heads (id-ordered on the wire) and one superseded root.
+  const REVISION_SUPERSESSION = {
+    revisions: [RS_ROOT, RS_HEAD_B, RS_HEAD_C],
+    heads: [RS_HEAD_B, RS_HEAD_C],
+    superseded: [RS_ROOT],
+    competing: true,
+    laidOut: {
+      bounds: { w: 300, h: 200 },
+      nodes: [
+        {
+          id: RS_ROOT,
+          x: 150,
+          y: 150,
+          w: 120,
+          h: 40,
+          isHead: false,
+          isSuperseded: true,
+        },
+        {
+          id: RS_HEAD_B,
+          x: 80,
+          y: 50,
+          w: 120,
+          h: 40,
+          isHead: true,
+          isSuperseded: false,
+        },
+        {
+          id: RS_HEAD_C,
+          x: 220,
+          y: 50,
+          w: 120,
+          h: 40,
+          isHead: true,
+          isSuperseded: false,
+        },
+      ],
+      edges: [
+        {
+          from: RS_HEAD_B,
+          to: RS_ROOT,
+          path: [
+            [80, 70],
+            [150, 130],
+          ],
+        },
+        {
+          from: RS_HEAD_C,
+          to: RS_ROOT,
+          path: [
+            [220, 70],
+            [150, 130],
+          ],
+        },
+      ],
+    },
+  };
+
+  /** The forked composite document as served under `selfId`'s page. */
+  function forkedDocFor(selfId: string): Record<string, unknown> {
+    const base = revisionJson as Record<string, unknown>;
+    return {
+      ...base,
+      revision: { ...(base.revision as Record<string, unknown>), id: selfId },
+      revisionSupersession: REVISION_SUPERSESSION,
+    };
+  }
+
+  async function openForkedPage(selfId: string): Promise<void> {
+    setCompositeResponse(forkedDocFor(selfId));
+    store.commit({ selected: { kind: "revision", id: selfId } });
+    await detail.openRevision(selfId);
+  }
+
+  function blockEl(): HTMLElement | null {
+    return detailEl().querySelector<HTMLElement>(
+      "figure.revision-supersession",
+    );
+  }
+
+  it("renders the DAG and unranked competing-head chips when the block is present", async () => {
+    await openForkedPage(RS_HEAD_B);
+    const figure = blockEl();
+    expect(figure).not.toBeNull();
+    expect(figure?.querySelector("svg.revision-dag")).not.toBeNull();
+    expect(
+      figure?.querySelectorAll("g.dag-node[data-revision-id]").length,
+    ).toBe(3);
+    // Every head renders as a navigable peer chip, in the server's id order —
+    // no recency sort, no "current first", no primary styling hook.
+    const chips = Array.from(
+      figure?.querySelectorAll('.revision-heads [data-ref-kind="rev"]') ?? [],
+    );
+    expect(chips.map((c) => c.getAttribute("data-ref-id"))).toEqual([
+      RS_HEAD_B,
+      RS_HEAD_C,
+    ]);
+    expect(figure?.querySelector(".revision-heads")?.textContent).toContain(
+      "competing revisions (2)",
+    );
+  });
+
+  it("marks the reader's own head with only a quiet you-are-here note", async () => {
+    await openForkedPage(RS_HEAD_B);
+    const notes = Array.from(
+      blockEl()?.querySelectorAll(".revision-self") ?? [],
+    );
+    expect(notes.length).toBe(1);
+    expect(notes[0]?.textContent).toBe("you are here");
+    // The marker follows the self chip, not the other head's.
+    expect(notes[0]?.previousElementSibling?.getAttribute("data-ref-id")).toBe(
+      RS_HEAD_B,
+    );
+  });
+
+  it("renders identical bytes under every member's page (host-independence)", async () => {
+    await openForkedPage(RS_HEAD_B);
+    const asB = blockEl()?.outerHTML ?? "";
+    await openForkedPage(RS_HEAD_C);
+    const asC = blockEl()?.outerHTML ?? "";
+    expect(asB).not.toBe("");
+    expect(asC).not.toBe("");
+    // The hosts differ only in the self-node selection state and the quiet
+    // you-are-here marker; everything else is byte-identical component data.
+    const normalize = (html: string): string =>
+      html
+        .replaceAll(' aria-selected="true"', "")
+        .replace(/<span class="revision-self">[^<]*<\/span>/g, "");
+    expect(normalize(asB)).toBe(normalize(asC));
+    expect(asB).not.toBe(asC); // the self markers really do move
+  });
+
+  it("renders no block when the document carries no revisionSupersession", async () => {
+    setCompositeResponse(revisionJson); // the default, non-forked fixture
+    store.commit({ selected: { kind: "revision", id: REV } });
+    await detail.openRevision(REV);
+    expect(blockEl()).toBeNull();
+  });
+
+  it("navigates to a revision when its DAG node is clicked", async () => {
+    await openForkedPage(RS_HEAD_B);
+    const node = blockEl()?.querySelector<SVGGElement>(
+      `g.dag-node[data-revision-id="${RS_ROOT}"]`,
+    );
+    expect(node).not.toBeNull();
+    node?.dispatchEvent(new Event("click", { bubbles: true }));
+    expect(store.getState().selected).toEqual({
+      kind: "revision",
+      id: RS_ROOT,
+    });
+    // Opening a revision from the DAG clears any open diff overlay route.
+    expect(store.getState().diff).toBeNull();
+  });
+
+  it("activates a DAG node from the keyboard (Enter)", async () => {
+    await openForkedPage(RS_HEAD_B);
+    const node = blockEl()?.querySelector<SVGGElement>(
+      `g.dag-node[data-revision-id="${RS_HEAD_C}"]`,
+    );
+    expect(node?.getAttribute("tabindex")).toBe("0");
+    expect(node?.getAttribute("role")).toBe("link");
+    node?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+    expect(store.getState().selected).toEqual({
+      kind: "revision",
+      id: RS_HEAD_C,
+    });
+  });
+
+  it("traces a node and its incident edges on hover, swapping the arrowhead marker", async () => {
+    await openForkedPage(RS_HEAD_B);
+    const figure = blockEl();
+    const headB = figure?.querySelector<SVGGElement>(
+      `g.dag-node[data-revision-id="${RS_HEAD_B}"]`,
+    );
+    headB?.dispatchEvent(new Event("mouseenter"));
+    expect(headB?.classList.contains("traced")).toBe(true);
+    const traced = figure?.querySelectorAll("polyline.dag-edge.traced") ?? [];
+    expect(traced.length).toBe(1); // only the B→root edge is incident to B
+    const incident = figure?.querySelector(
+      `polyline.dag-edge[data-from="${RS_HEAD_B}"]`,
+    );
+    expect(incident?.getAttribute("marker-end")).toBe("url(#dag-arrow-traced)");
+    headB?.dispatchEvent(new Event("mouseleave"));
+    expect(headB?.classList.contains("traced")).toBe(false);
+    expect(incident?.getAttribute("marker-end")).toBe("url(#dag-arrow)");
+  });
+});

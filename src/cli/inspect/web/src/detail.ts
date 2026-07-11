@@ -11,9 +11,12 @@
 //
 // Two structural moves preserve the served behaviour behind the new boundaries:
 //   - Detail mutates `#detail-body` and reads state / `http`; it never calls render
-//     (the store subscriber repaints on commit) and never imports a navigation
-//     module. The "show in timeline" affordance is therefore emitted as a
-//     `data-reveal-revision` dataset for the navigation delegate to resolve.
+//     (the store subscriber repaints on commit) and never imports the ref-chip
+//     resolution module. The "show in timeline" affordance is therefore emitted as
+//     a `data-reveal-revision` dataset for the navigation delegate to resolve. The
+//     one imperative exception is the supersession DAG's node wiring
+//     (`wireDagInteractions`): hover tracing cannot delegate, so its nodes route
+//     through `router.navigate` directly, as the DAG's lens host used to.
 //   - The per-render diff-button listeners become one delegated `#detail` click
 //     handler (installed once by the composition root): the buttons carry
 //     `data-open-diff` / `data-diff-hash` / `data-diff-focus`, and the delegate
@@ -49,6 +52,7 @@ import {
   supersededByRevision,
   supersedesRevision,
   supersessionBadge,
+  type Thread,
 } from "./model";
 import {
   endorsementsBlock,
@@ -66,7 +70,9 @@ import {
   targetDisplayLabel,
   targetHeadBadge,
 } from "./refs";
+import { navigate } from "./router";
 import { getState } from "./store";
+import { renderSupersessionSvg } from "./supersession";
 import {
   type EntryBase,
   type EntrySource,
@@ -109,6 +115,9 @@ interface RevisionPageDoc extends RevisionDetail {
   inputRequests?: InputRequest[];
   validationChecks?: ValidationCheck[];
   factSupersession?: FactSupersession;
+  // Fork-gated: present only when the revision's supersession component has more
+  // than one member (same `Thread` wire shape `/api/threads` round-trips).
+  revisionSupersession?: Thread;
 }
 
 // The revision whose composite is currently shown, so a re-render with an
@@ -492,6 +501,92 @@ export function renderDetail(): void {
 // Revision composite page
 // ---------------------------------------------------------------------------
 
+// The revision-level supersession block (fork-gated: the server omits the field
+// for a singleton component and degrades to omission on read/layout errors, so
+// an absent or unlaid block simply means non-forked — no error UI). The block
+// renders from component data identically under every member's page: heads are
+// an unranked, id-ordered peer set (the server's wire order, never re-sorted)
+// with no primary chrome; the reader's own head carries only a quiet marker.
+function renderRevisionSupersessionBlock(
+  thread: Thread | undefined,
+  selfId: string,
+): string {
+  const laid = thread?.laidOut;
+  if (!thread || !laid || !(laid.nodes ?? []).length) return "";
+  const svg = renderSupersessionSvg(laid, {
+    idAttr: "data-revision-id",
+    ariaNoun: "revision",
+    interactive: true,
+    isSelected: (id) => id === selfId,
+  });
+  if (!svg) return "";
+  const heads = thread.heads ?? [];
+  // A fork surfaces every competing head as a navigable chip — never a null head.
+  const chips = thread.competing
+    ? `<div class="${CLASS.revisionHeads}"><span class="${CLASS.factStatus} ${CLASS.competing}">competing revisions (${heads.length})</span> ${heads
+        .map(
+          (h) =>
+            linkify(h) +
+            (h === selfId
+              ? `<span class="${CLASS.revisionSelf}">you are here</span>`
+              : ""),
+        )
+        .join(" ")}</div>`
+    : "";
+  const caption = `revision supersession${thread.competing ? ` — ${heads.length} competing` : ""}`;
+  return `<figure class="${CLASS.revisionSupersession}"><figcaption>${escapeHtml(caption)}</figcaption>${chips}${svg}</figure>`;
+}
+
+// Wire the supersession DAG nodes into the IA: click / Enter / Space navigate to
+// the revision via the router; hover/focus traces the node and its incident
+// edges by class toggle (no re-render). The tracing cannot delegate, so this
+// stays imperative, re-run per composite paint; it scopes to the revision block
+// (the fact DAGs are non-interactive).
+function wireDagInteractions(scope: HTMLElement): void {
+  const nav = (node: Element): void => {
+    const id = node.getAttribute("data-revision-id");
+    if (id)
+      navigate({
+        selected: { kind: "revision", id },
+        diff: null,
+        diffHash: null,
+        focus: null,
+      });
+  };
+  for (const node of Array.from(
+    scope.querySelectorAll<SVGGElement>(".dag-node"),
+  )) {
+    node.addEventListener("click", () => nav(node));
+    node.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault();
+        nav(node);
+      }
+    });
+    const trace = (on: boolean): void => {
+      const id = node.getAttribute("data-revision-id");
+      node.classList.toggle("traced", on);
+      for (const edge of Array.from(
+        scope.querySelectorAll<SVGPolylineElement>(
+          `.dag-edge[data-from="${id}"], .dag-edge[data-to="${id}"]`,
+        ),
+      )) {
+        edge.classList.toggle("traced", on);
+        // Swap the arrowhead to the accent marker via the marker-end attribute
+        // (cross-browser; not CSS context paint) so it tracks the edge highlight.
+        edge.setAttribute(
+          "marker-end",
+          on ? "url(#dag-arrow-traced)" : "url(#dag-arrow)",
+        );
+      }
+    };
+    node.addEventListener("mouseenter", () => trace(true));
+    node.addEventListener("mouseleave", () => trace(false));
+    node.addEventListener("focus", () => trace(true));
+    node.addEventListener("blur", () => trace(false));
+  }
+}
+
 /** The "superseded by <successors>" context repeated near each fact section, or "". */
 export function staleFactSectionContext(revisionId: string): string {
   const successors = supersededByRevision(revisionId);
@@ -532,7 +627,7 @@ export function renderRevisionPage(d: RevisionPageDoc): void {
     <dt>head</dt><dd>${escapeHtml(ru.targetDisplay?.head?.label ?? "—")}</dd>
     <dt>supersession</dt><dd>${badge || "—"}</dd>
     <dt>snapshot</dt><dd>${linkify(ru.objectId)}</dd>
-  </dl></section>`);
+  </dl>${renderRevisionSupersessionBlock(d.revisionSupersession, revisionId)}</section>`);
 
   sections.push(
     `<section><h2>Current assessment</h2>${verdictBadge(d.currentAssessment)}${currentAssessmentSummary(d)}<p class="${CLASS.advisoryNote}">advisory — a recorded judgement, not a merge gate</p></section>`,
@@ -586,8 +681,13 @@ export function renderRevisionPage(d: RevisionPageDoc): void {
   );
 
   const el = $("#detail-body");
-  if (el)
+  if (el) {
     el.innerHTML = `<div class="${CLASS.unitPage}"><p class="${CLASS.unitPageTitle}">${escapeHtml(title)}</p>${sections.join("")}</div>`;
+    const block = el.querySelector<HTMLElement>(
+      `.${CLASS.revisionSupersession}`,
+    );
+    if (block) wireDagInteractions(block);
+  }
   projectScroll(revisionId || null);
 }
 

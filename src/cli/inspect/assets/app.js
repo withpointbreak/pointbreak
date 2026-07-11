@@ -129,6 +129,10 @@
     unitPage: "unit-page",
     unitPageTitle: "unit-page-title",
     supersessionBadges: "supersession-badges",
+    competing: "competing",
+    revisionSupersession: "revision-supersession",
+    revisionHeads: "revision-heads",
+    revisionSelf: "revision-self",
     dagEdge: "dag-edge",
     dagArrowHead: "dag-arrow-head",
     dagArrowHeadTraced: "dag-arrow-head-traced",
@@ -2921,6 +2925,67 @@
     projectScroll(e.eventId ?? null);
   }
   __name(renderDetail, "renderDetail");
+  function renderRevisionSupersessionBlock(thread, selfId) {
+    const laid = thread?.laidOut;
+    if (!thread || !laid || !(laid.nodes ?? []).length) return "";
+    const svg = renderSupersessionSvg(laid, {
+      idAttr: "data-revision-id",
+      ariaNoun: "revision",
+      interactive: true,
+      isSelected: /* @__PURE__ */ __name((id) => id === selfId, "isSelected")
+    });
+    if (!svg) return "";
+    const heads = thread.heads ?? [];
+    const chips = thread.competing ? `<div class="${CLASS.revisionHeads}"><span class="${CLASS.factStatus} ${CLASS.competing}">competing revisions (${heads.length})</span> ${heads.map(
+      (h) => linkify(h) + (h === selfId ? `<span class="${CLASS.revisionSelf}">you are here</span>` : "")
+    ).join(" ")}</div>` : "";
+    const caption = `revision supersession${thread.competing ? ` — ${heads.length} competing` : ""}`;
+    return `<figure class="${CLASS.revisionSupersession}"><figcaption>${escapeHtml(caption)}</figcaption>${chips}${svg}</figure>`;
+  }
+  __name(renderRevisionSupersessionBlock, "renderRevisionSupersessionBlock");
+  function wireDagInteractions(scope) {
+    const nav = /* @__PURE__ */ __name((node) => {
+      const id = node.getAttribute("data-revision-id");
+      if (id)
+        navigate({
+          selected: { kind: "revision", id },
+          diff: null,
+          diffHash: null,
+          focus: null
+        });
+    }, "nav");
+    for (const node of Array.from(
+      scope.querySelectorAll(".dag-node")
+    )) {
+      node.addEventListener("click", () => nav(node));
+      node.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" || ev.key === " ") {
+          ev.preventDefault();
+          nav(node);
+        }
+      });
+      const trace = /* @__PURE__ */ __name((on) => {
+        const id = node.getAttribute("data-revision-id");
+        node.classList.toggle("traced", on);
+        for (const edge of Array.from(
+          scope.querySelectorAll(
+            `.dag-edge[data-from="${id}"], .dag-edge[data-to="${id}"]`
+          )
+        )) {
+          edge.classList.toggle("traced", on);
+          edge.setAttribute(
+            "marker-end",
+            on ? "url(#dag-arrow-traced)" : "url(#dag-arrow)"
+          );
+        }
+      }, "trace");
+      node.addEventListener("mouseenter", () => trace(true));
+      node.addEventListener("mouseleave", () => trace(false));
+      node.addEventListener("focus", () => trace(true));
+      node.addEventListener("blur", () => trace(false));
+    }
+  }
+  __name(wireDagInteractions, "wireDagInteractions");
   function staleFactSectionContext(revisionId) {
     const successors = supersededByRevision(revisionId);
     if (!successors.length) return "";
@@ -2950,7 +3015,7 @@
     <dt>head</dt><dd>${escapeHtml(ru.targetDisplay?.head?.label ?? "—")}</dd>
     <dt>supersession</dt><dd>${badge || "—"}</dd>
     <dt>snapshot</dt><dd>${linkify(ru.objectId)}</dd>
-  </dl></section>`);
+  </dl>${renderRevisionSupersessionBlock(d.revisionSupersession, revisionId)}</section>`);
     sections.push(
       `<section><h2>Current assessment</h2>${verdictBadge(d.currentAssessment)}${currentAssessmentSummary(d)}<p class="${CLASS.advisoryNote}">advisory — a recorded judgement, not a merge gate</p></section>`
     );
@@ -2991,8 +3056,13 @@
       `<section><h2>Validation checks (${validationChecks.length})</h2>${staleContext}${validationBody}</section>`
     );
     const el = $("#detail-body");
-    if (el)
+    if (el) {
       el.innerHTML = `<div class="${CLASS.unitPage}"><p class="${CLASS.unitPageTitle}">${escapeHtml(title)}</p>${sections.join("")}</div>`;
+      const block = el.querySelector(
+        `.${CLASS.revisionSupersession}`
+      );
+      if (block) wireDagInteractions(block);
+    }
     projectScroll(revisionId || null);
   }
   __name(renderRevisionPage, "renderRevisionPage");

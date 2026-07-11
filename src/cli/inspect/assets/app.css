@@ -573,6 +573,16 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-directio
 .fact-dag figcaption { color: var(--fg-dim); font-size: var(--fs-xs); margin-bottom: 4px; }
 .fact-dag .dag-node { cursor: default; }
 
+/* The revision-level supersession block on the composite page: reuses the
+   .revision-dag stylesheet above. Competing heads are an unranked peer set —
+   every head a navigable chip, never a null head, no primary treatment; the
+   reader's own head carries only a quiet marker. */
+.revision-supersession { margin: 10px 0 4px; }
+.revision-supersession figcaption { color: var(--fg-dim); font-size: var(--fs-xs); margin-bottom: 4px; }
+.revision-heads { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 0 0 8px; }
+.revision-self { color: var(--fg-dim); font-size: var(--fs-xs); font-family: var(--mono); margin-left: 4px; }
+.fact-status.competing { color: var(--warning); }
+
 .error { background: var(--error-bg); color: var(--danger); padding: 8px 16px; border-top: 1px solid var(--error-border); font-family: var(--mono); font-size: var(--fs-sm); }
 
 .badge { font-family: var(--mono); font-size: var(--fs-xs); padding: 1px 6px; border-radius: var(--r-sm); background: var(--bg-row); color: var(--fg-dim); }
