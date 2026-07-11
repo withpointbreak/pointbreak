@@ -11,11 +11,17 @@
 //                              verbatim; the address bar is replace-rewritten
 //   #/revision/<revisionId>    entity-primary: the named revision is open in the detail pane
 //   #/event/<eventId>          entity-primary: the named event is open in the detail pane
+//   #/revision/<revisionId>/diff[?focus=<factId>][&file=<path>][&nav=<filter>]
+//                              the routed annotated-diff page (revision-primary;
+//                              never carries the lens/selection/filter params)
 //   ?lens=<lens>               the master lens behind an entity-primary path
 //   ?track= ?snapshot=         cross-lens scope (survive a lens switch)
 //   ?order= ?types= ?q=        per-lens timeline controls
 //   ?diff=<snapshotId> ?focus=<factId> ?diffHash=<snapshotContentHash>
-//                              the route-preserving diff overlay
+//                              legacy diff entry: forwarded to the revision-primary
+//                              page path when the snapshot maps to a loaded
+//                              revision (the address bar is replace-rewritten);
+//                              snapshot-only otherwise
 //   ?v=1                       grammar version (reserved; parsed-but-ignored)
 //   ?journal= ?asof=           reserved: reported as unsupported live-state input
 //
@@ -27,11 +33,13 @@
 // the router↔render cycle. This module imports neither render nor any lens.
 
 import { fetchRevealPage, revealPatch } from "./data";
+import { type DiffNavFilter, isDiffNavFilter } from "./diff/render";
 import { $ } from "./dom";
 import {
   eventExists,
   presentTypes,
   revisionExists,
+  revisionIdForSnapshot,
   revisionInAnyThread,
 } from "./model";
 import { refInfo, shortRef } from "./refs";
@@ -50,10 +58,13 @@ const DEFAULT_LENS = "timeline";
  */
 export interface RoutePatch {
   lens: string;
-  selected: Selection;
+  // The cursor fields are OMITTED (not defaulted) by the diff-page path: the
+  // page's identity is `diffRevision`, and an omitted field is never committed,
+  // so applying a diff-page hash leaves the parked cursor untouched.
+  selected?: Selection;
   // Openness rides the URL form: entity-primary paths parse as open, the
   // lens-primary `?sel=` cursor form (and no selection) as closed.
-  open: boolean;
+  open?: boolean;
   filterTrack: string;
   filterSnapshot: string;
   order: string;
@@ -62,6 +73,13 @@ export interface RoutePatch {
   diff: string | null;
   diffHash: string | null;
   focus: string | null;
+  // The routed annotated-diff page. `parseHash` sets `diffPage` only from the
+  // canonical path; `resolve()` additionally sets it for legacy `?diff=` links
+  // so every diff intent renders as the page.
+  diffPage: boolean;
+  diffRevision: string | null;
+  diffFile: string | null;
+  diffNav: DiffNavFilter;
   // Reserved forward-compat seam: a reserved param surfaces a live-state notice.
   unsupportedAsOf: string | boolean | null;
   unsupportedJournal: string | boolean | null;
@@ -70,7 +88,10 @@ export interface RoutePatch {
   // Set when the path was a recognized legacy form that parsed into its current
   // equivalent; applyHash replace-rewrites the address bar so Back never bounces
   // through the stale form. A parse-seam field like `unknownPath` — never State.
-  migrated: "threads-alias" | null;
+  // "threads-alias" swaps only the path segment (query kept verbatim);
+  // "legacy-diff" re-serializes to the canonical page form (the grammar changed
+  // shape) and is set by resolve() only when the snapshot maps to a revision.
+  migrated: "threads-alias" | "legacy-diff" | null;
 }
 
 /**
@@ -90,6 +111,10 @@ export interface SerializeSnapshot {
   diff: string | null;
   diffHash: string | null;
   focus: string | null;
+  diffPage: boolean;
+  diffRevision: string | null;
+  diffFile: string | null;
+  diffNav: DiffNavFilter;
 }
 
 /** Options for {@link navigate}: `replace` swaps the history entry for a refinement. */
@@ -136,8 +161,6 @@ export function parseHash(
 
   const patch: RoutePatch = {
     lens: DEFAULT_LENS,
-    selected: { kind: null, id: null },
-    open: false,
     filterTrack: p.track != null ? p.track : "",
     // The filter param is `snapshot`; legacy `object` is still parsed for old
     // bookmarks during the transition (#334).
@@ -152,6 +175,10 @@ export function parseHash(
     diff: p.diff || null,
     diffHash: p.diffHash || null,
     focus: p.focus ? p.focus : null,
+    diffPage: false,
+    diffRevision: null,
+    diffFile: p.file ? p.file : null,
+    diffNav: p.nav && isDiffNavFilter(p.nav) ? p.nav : "all",
     unsupportedAsOf: p.asof != null ? p.asof || true : null,
     unsupportedJournal: p.journal != null ? p.journal || true : null,
     unknownPath: null,
@@ -160,6 +187,16 @@ export function parseHash(
 
   const segs = path.split("/").filter(Boolean); // "/timeline" -> ["timeline"]
   const lensParam = p.lens ?? "";
+  if (segs[0] === "revision" && segs[1] && segs[2] === "diff") {
+    // The routed diff page. The page's identity is `diffRevision`; the patch
+    // deliberately omits `selected`/`open` so the parked cursor of either kind
+    // survives applying this hash (Back/forward, deep link).
+    patch.diffPage = true;
+    patch.diffRevision = decodeURIComponent(segs[1]);
+    return patch;
+  }
+  patch.selected = { kind: null, id: null };
+  patch.open = false;
   if (segs.length === 0) {
     patch.lens = DEFAULT_LENS;
   } else if (segs[0] === "revision" && segs[1]) {
@@ -194,6 +231,23 @@ export function serializeState(
   snapshot: SerializeSnapshot,
   presentTypes: readonly string[],
 ): string {
+  // The routed diff page is its own address: only the page params ride it —
+  // never the lens/selection/filter params, and never the legacy diff=/diffHash=
+  // pointers (the page derives snapshot identity from the revision). This branch
+  // takes precedence so the page never rides another lens's path. A snapshot-only
+  // page (diffPage with no diffRevision) falls through to the legacy `?diff=`
+  // query form below, which remains parseable.
+  if (snapshot.diffPage && snapshot.diffRevision) {
+    const pageParams: string[] = [];
+    if (snapshot.focus)
+      pageParams.push(`focus=${encodeURIComponent(snapshot.focus)}`);
+    if (snapshot.diffFile)
+      pageParams.push(`file=${encodeURIComponent(snapshot.diffFile)}`);
+    if (snapshot.diffNav !== "all")
+      pageParams.push(`nav=${encodeURIComponent(snapshot.diffNav)}`);
+    const pagePath = `#/revision/${encodeURIComponent(snapshot.diffRevision)}/diff`;
+    return pageParams.length ? `${pagePath}?${pageParams.join("&")}` : pagePath;
+  }
   const params: string[] = [];
   const sel = snapshot.selected ?? { kind: null, id: null };
   let path =
@@ -273,6 +327,11 @@ export function applyHash(): void {
       "",
       location.hash.replace(/^#\/threads/, "#/list"),
     );
+  } else if (parsed.migrated === "legacy-diff") {
+    // A forwarded `?diff=` link intentionally changes query grammar (the diff
+    // became a revision-primary page path), so this mode re-serializes instead
+    // of patching the original string. Replace, never push.
+    history.replaceState({}, "", serializeState(getState(), presentTypes()));
   }
   const sel = getState().selected;
   if (sel.kind === "event" && sel.id && !eventExists(sel.id)) {
@@ -321,6 +380,20 @@ export function resolve(patch: RoutePatch): Partial<State> {
     next.selected = { kind: null, id: null };
     return next;
   }
+  // A legacy `?diff=<snapshotId>` link is a diff intent: it renders as the diff
+  // page. When the snapshot maps to a loaded revision the link forwards to the
+  // revision-primary form (and applyHash canonicalizes the address bar); an
+  // unmappable snapshot-only link stays snapshot-addressed — the route must not
+  // invent a revision. A `diffRevision` absent from the loaded list is left
+  // alone: grouped-away ids resolve through the entity-primary composite fetch.
+  if (patch.diff && !patch.diffPage) {
+    next.diffPage = true;
+    const mapped = revisionIdForSnapshot(patch.diff, patch.diffHash);
+    if (mapped) {
+      next.diffRevision = mapped;
+      patch.migrated = "legacy-diff";
+    }
+  }
   const sel = patch.selected ?? { kind: null, id: null };
   if (sel.kind === "revision" && sel.id && !revisionExists(sel.id)) {
     if (revisionInAnyThread(sel.id)) {
@@ -358,10 +431,8 @@ export function resolve(patch: RoutePatch): Partial<State> {
 
 /** The committable State fields of a route patch — the transient seam is dropped here. */
 function statePatchFrom(patch: RoutePatch): Partial<State> {
-  return {
+  const next: Partial<State> = {
     lens: patch.lens,
-    selected: patch.selected,
-    open: patch.open,
     filterTrack: patch.filterTrack,
     filterSnapshot: patch.filterSnapshot,
     order: patch.order,
@@ -370,7 +441,16 @@ function statePatchFrom(patch: RoutePatch): Partial<State> {
     diff: patch.diff,
     diffHash: patch.diffHash,
     focus: patch.focus,
+    diffPage: patch.diffPage,
+    diffRevision: patch.diffRevision,
+    diffFile: patch.diffFile,
+    diffNav: patch.diffNav,
   };
+  // The cursor fields are copied only when the patch carries them: the diff-page
+  // path omits them, and committing `undefined` would clear the parked cursor.
+  if (patch.selected !== undefined) next.selected = patch.selected;
+  if (patch.open !== undefined) next.open = patch.open;
+  return next;
 }
 
 /**

@@ -115,6 +115,18 @@ export interface DiffCtx {
 /** The diff navigator's file/fact filter. */
 export type DiffNavFilter = "all" | "with-facts" | "unanchored";
 
+/** The canonical nav-filter vocabulary (this module owns the type). */
+export const DIFF_NAV_FILTERS: readonly DiffNavFilter[] = [
+  "all",
+  "with-facts",
+  "unanchored",
+];
+
+/** Whether a string names a diff navigator filter (the `?nav=` validator). */
+export function isDiffNavFilter(value: string): value is DiffNavFilter {
+  return (DIFF_NAV_FILTERS as readonly string[]).includes(value);
+}
+
 /** The file/fact/unanchored counts the navigator summarizes. */
 export interface DiffNavSummary {
   fileCount: number;

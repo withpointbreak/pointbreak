@@ -803,6 +803,10 @@
     diff: null,
     diffHash: null,
     focus: null,
+    diffPage: false,
+    diffRevision: null,
+    diffFile: null,
+    diffNav: "all",
     lastEventCount: null,
     lastCommitGraphStamp: null
   };
@@ -1749,229 +1753,6 @@
   }
   __name(noop, "noop");
 
-  // src/router.ts
-  var LENSES2 = ["timeline", "list", "attention"];
-  var DEFAULT_LENS2 = "timeline";
-  function selectionKind(id) {
-    const info = refInfo(id);
-    if (info && (info.kind === "rev" || info.kind === "review-unit"))
-      return "revision";
-    return "event";
-  }
-  __name(selectionKind, "selectionKind");
-  function parseQuery(queryString) {
-    const params = {};
-    for (const pair of queryString.split("&")) {
-      if (!pair) continue;
-      const eq = pair.indexOf("=");
-      const key = decodeURIComponent(eq < 0 ? pair : pair.slice(0, eq));
-      params[key] = eq < 0 ? "" : decodeURIComponent(pair.slice(eq + 1));
-    }
-    return params;
-  }
-  __name(parseQuery, "parseQuery");
-  function parseHash(hash, presentTypes2) {
-    const raw = hash.replace(/^#/, "");
-    const q = raw.indexOf("?");
-    const path = q < 0 ? raw : raw.slice(0, q);
-    const p = parseQuery(q < 0 ? "" : raw.slice(q + 1));
-    const patch = {
-      lens: DEFAULT_LENS2,
-      selected: { kind: null, id: null },
-      open: false,
-      filterTrack: p.track != null ? p.track : "",
-      // The filter param is `snapshot`; legacy `object` is still parsed for old
-      // bookmarks during the transition (#334).
-      filterSnapshot: p.snapshot != null ? p.snapshot : p.object != null ? p.object : "",
-      order: p.order === "asc" || p.order === "desc" ? p.order : "desc",
-      filterText: p.q != null ? p.q : "",
-      enabledTypes: p.types != null ? new Set(p.types.split(",").filter(Boolean)) : new Set(presentTypes2),
-      diff: p.diff || null,
-      diffHash: p.diffHash || null,
-      focus: p.focus ? p.focus : null,
-      unsupportedAsOf: p.asof != null ? p.asof || true : null,
-      unsupportedJournal: p.journal != null ? p.journal || true : null,
-      unknownPath: null,
-      migrated: null
-    };
-    const segs = path.split("/").filter(Boolean);
-    const lensParam = p.lens ?? "";
-    if (segs.length === 0) {
-      patch.lens = DEFAULT_LENS2;
-    } else if (segs[0] === "revision" && segs[1]) {
-      patch.selected = { kind: "revision", id: decodeURIComponent(segs[1]) };
-      patch.open = true;
-      patch.lens = LENSES2.includes(lensParam) ? lensParam : DEFAULT_LENS2;
-    } else if (segs[0] === "event" && segs[1]) {
-      patch.selected = { kind: "event", id: decodeURIComponent(segs[1]) };
-      patch.open = true;
-      patch.lens = LENSES2.includes(lensParam) ? lensParam : DEFAULT_LENS2;
-    } else if (LENSES2.includes(segs[0]) || segs[0] === "threads") {
-      patch.lens = segs[0] === "threads" ? "list" : segs[0];
-      if (segs[0] === "threads") patch.migrated = "threads-alias";
-      if (p.sel) patch.selected = { kind: selectionKind(p.sel), id: p.sel };
-    } else {
-      patch.lens = DEFAULT_LENS2;
-      patch.unknownPath = path;
-    }
-    return patch;
-  }
-  __name(parseHash, "parseHash");
-  function serializeState(snapshot, presentTypes2) {
-    const params = [];
-    const sel = snapshot.selected ?? { kind: null, id: null };
-    let path = snapshot.lens === DEFAULT_LENS2 ? "#/timeline" : `#/${snapshot.lens}`;
-    if (sel.id && snapshot.open && (sel.kind === "revision" || sel.kind === "event")) {
-      path = sel.kind === "revision" ? `#/revision/${encodeURIComponent(sel.id)}` : `#/event/${encodeURIComponent(sel.id)}`;
-      if (snapshot.lens && snapshot.lens !== DEFAULT_LENS2)
-        params.push(`lens=${encodeURIComponent(snapshot.lens)}`);
-    } else if (sel.id) {
-      params.push(`sel=${encodeURIComponent(sel.id)}`);
-    }
-    if (snapshot.filterTrack)
-      params.push(`track=${encodeURIComponent(snapshot.filterTrack)}`);
-    if (snapshot.filterSnapshot)
-      params.push(`snapshot=${encodeURIComponent(snapshot.filterSnapshot)}`);
-    if (snapshot.order && snapshot.order !== "desc")
-      params.push(`order=${encodeURIComponent(snapshot.order)}`);
-    if (presentTypes2.some((id) => !snapshot.enabledTypes.has(id))) {
-      params.push(
-        `types=${encodeURIComponent(
-          presentTypes2.filter((id) => snapshot.enabledTypes.has(id)).join(",")
-        )}`
-      );
-    }
-    if (snapshot.filterText)
-      params.push(`q=${encodeURIComponent(snapshot.filterText)}`);
-    if (snapshot.diff) params.push(`diff=${encodeURIComponent(snapshot.diff)}`);
-    if (snapshot.diff && snapshot.diffHash)
-      params.push(`diffHash=${encodeURIComponent(snapshot.diffHash)}`);
-    if (snapshot.focus)
-      params.push(`focus=${encodeURIComponent(snapshot.focus)}`);
-    return params.length ? `${path}?${params.join("&")}` : path;
-  }
-  __name(serializeState, "serializeState");
-  function navigate(patch, opts = {}) {
-    commit(patch);
-    const hash = serializeState(getState(), presentTypes());
-    if (opts.replace) history.replaceState({}, "", hash);
-    else history.pushState({}, "", hash);
-  }
-  __name(navigate, "navigate");
-  function applyHash() {
-    const parsed = parseHash(location.hash, presentTypes());
-    const patch = resolve(parsed);
-    commit(patch);
-    if (parsed.migrated === "threads-alias") {
-      history.replaceState(
-        {},
-        "",
-        location.hash.replace(/^#\/threads/, "#/list")
-      );
-    }
-    const sel = getState().selected;
-    if (sel.kind === "event" && sel.id && !eventExists(sel.id)) {
-      void revealSelectedEvent(sel.id, patch.lens ?? DEFAULT_LENS2);
-    }
-  }
-  __name(applyHash, "applyHash");
-  async function revealSelectedEvent(eventId, lens) {
-    const page = await fetchRevealPage(eventId);
-    if (!page) return;
-    if (page.present) {
-      commit(revealPatch(page, eventId));
-      clearRouteDiagnostic();
-      return;
-    }
-    commit({ selected: { kind: null, id: null } });
-    showRouteDiagnostic(
-      `fell back to the ${lens} lens — event ${shortRef(eventId)} is not in this store`
-    );
-  }
-  __name(revealSelectedEvent, "revealSelectedEvent");
-  function resolve(patch) {
-    const freshnessDiagnostic = liveStateDiagnostic(patch);
-    const next = statePatchFrom(patch);
-    if (patch.unknownPath != null) {
-      showRouteDiagnostic(
-        routeDiagnostic(
-          `fell back to the timeline — unknown route ${patch.unknownPath}`,
-          freshnessDiagnostic
-        )
-      );
-      next.lens = DEFAULT_LENS2;
-      next.selected = { kind: null, id: null };
-      return next;
-    }
-    const sel = patch.selected ?? { kind: null, id: null };
-    if (sel.kind === "revision" && sel.id && !revisionExists(sel.id)) {
-      if (revisionInAnyThread(sel.id)) {
-        next.open = true;
-      } else {
-        const lens = patch.lens || DEFAULT_LENS2;
-        showRouteDiagnostic(
-          routeDiagnostic(
-            `fell back to the ${lens} lens — revision ${shortRef(sel.id)} is not in this store`,
-            freshnessDiagnostic
-          )
-        );
-        next.lens = lens;
-        next.selected = { kind: null, id: null };
-        return next;
-      }
-    }
-    if (freshnessDiagnostic) {
-      showRouteDiagnostic(freshnessDiagnostic);
-      return next;
-    }
-    clearRouteDiagnostic();
-    return next;
-  }
-  __name(resolve, "resolve");
-  function statePatchFrom(patch) {
-    return {
-      lens: patch.lens,
-      selected: patch.selected,
-      open: patch.open,
-      filterTrack: patch.filterTrack,
-      filterSnapshot: patch.filterSnapshot,
-      order: patch.order,
-      filterText: patch.filterText,
-      enabledTypes: patch.enabledTypes,
-      diff: patch.diff,
-      diffHash: patch.diffHash,
-      focus: patch.focus
-    };
-  }
-  __name(statePatchFrom, "statePatchFrom");
-  function liveStateDiagnostic(patch) {
-    const unsupported = [];
-    if (patch.unsupportedAsOf != null)
-      unsupported.push("as-of links are not supported by this server");
-    if (patch.unsupportedJournal != null)
-      unsupported.push("journal links are not supported by this server");
-    return unsupported.length ? `showing live state — ${unsupported.join("; ")}` : "";
-  }
-  __name(liveStateDiagnostic, "liveStateDiagnostic");
-  function routeDiagnostic(primary, secondary) {
-    return secondary ? `${primary} — ${secondary}` : primary;
-  }
-  __name(routeDiagnostic, "routeDiagnostic");
-  function showRouteDiagnostic(message) {
-    const el = $("#route-diagnostic");
-    if (!el) return;
-    el.textContent = message;
-    el.classList.remove("hidden");
-  }
-  __name(showRouteDiagnostic, "showRouteDiagnostic");
-  function clearRouteDiagnostic() {
-    const el = $("#route-diagnostic");
-    if (!el) return;
-    el.textContent = "";
-    el.classList.add("hidden");
-  }
-  __name(clearRouteDiagnostic, "clearRouteDiagnostic");
-
   // src/diff/highlight.ts
   function validChannel(spans, len) {
     let cursor = 0;
@@ -2020,6 +1801,15 @@
   __name(highlightRowText, "highlightRowText");
 
   // src/diff/render.ts
+  var DIFF_NAV_FILTERS = [
+    "all",
+    "with-facts",
+    "unanchored"
+  ];
+  function isDiffNavFilter(value) {
+    return DIFF_NAV_FILTERS.includes(value);
+  }
+  __name(isDiffNavFilter, "isDiffNavFilter");
   function filePathLabel(f) {
     const oldp = f.old_path;
     const newp = f.new_path;
@@ -2265,6 +2055,264 @@
   }
   __name(unanchoredReason, "unanchoredReason");
 
+  // src/router.ts
+  var LENSES2 = ["timeline", "list", "attention"];
+  var DEFAULT_LENS2 = "timeline";
+  function selectionKind(id) {
+    const info = refInfo(id);
+    if (info && (info.kind === "rev" || info.kind === "review-unit"))
+      return "revision";
+    return "event";
+  }
+  __name(selectionKind, "selectionKind");
+  function parseQuery(queryString) {
+    const params = {};
+    for (const pair of queryString.split("&")) {
+      if (!pair) continue;
+      const eq = pair.indexOf("=");
+      const key = decodeURIComponent(eq < 0 ? pair : pair.slice(0, eq));
+      params[key] = eq < 0 ? "" : decodeURIComponent(pair.slice(eq + 1));
+    }
+    return params;
+  }
+  __name(parseQuery, "parseQuery");
+  function parseHash(hash, presentTypes2) {
+    const raw = hash.replace(/^#/, "");
+    const q = raw.indexOf("?");
+    const path = q < 0 ? raw : raw.slice(0, q);
+    const p = parseQuery(q < 0 ? "" : raw.slice(q + 1));
+    const patch = {
+      lens: DEFAULT_LENS2,
+      filterTrack: p.track != null ? p.track : "",
+      // The filter param is `snapshot`; legacy `object` is still parsed for old
+      // bookmarks during the transition (#334).
+      filterSnapshot: p.snapshot != null ? p.snapshot : p.object != null ? p.object : "",
+      order: p.order === "asc" || p.order === "desc" ? p.order : "desc",
+      filterText: p.q != null ? p.q : "",
+      enabledTypes: p.types != null ? new Set(p.types.split(",").filter(Boolean)) : new Set(presentTypes2),
+      diff: p.diff || null,
+      diffHash: p.diffHash || null,
+      focus: p.focus ? p.focus : null,
+      diffPage: false,
+      diffRevision: null,
+      diffFile: p.file ? p.file : null,
+      diffNav: p.nav && isDiffNavFilter(p.nav) ? p.nav : "all",
+      unsupportedAsOf: p.asof != null ? p.asof || true : null,
+      unsupportedJournal: p.journal != null ? p.journal || true : null,
+      unknownPath: null,
+      migrated: null
+    };
+    const segs = path.split("/").filter(Boolean);
+    const lensParam = p.lens ?? "";
+    if (segs[0] === "revision" && segs[1] && segs[2] === "diff") {
+      patch.diffPage = true;
+      patch.diffRevision = decodeURIComponent(segs[1]);
+      return patch;
+    }
+    patch.selected = { kind: null, id: null };
+    patch.open = false;
+    if (segs.length === 0) {
+      patch.lens = DEFAULT_LENS2;
+    } else if (segs[0] === "revision" && segs[1]) {
+      patch.selected = { kind: "revision", id: decodeURIComponent(segs[1]) };
+      patch.open = true;
+      patch.lens = LENSES2.includes(lensParam) ? lensParam : DEFAULT_LENS2;
+    } else if (segs[0] === "event" && segs[1]) {
+      patch.selected = { kind: "event", id: decodeURIComponent(segs[1]) };
+      patch.open = true;
+      patch.lens = LENSES2.includes(lensParam) ? lensParam : DEFAULT_LENS2;
+    } else if (LENSES2.includes(segs[0]) || segs[0] === "threads") {
+      patch.lens = segs[0] === "threads" ? "list" : segs[0];
+      if (segs[0] === "threads") patch.migrated = "threads-alias";
+      if (p.sel) patch.selected = { kind: selectionKind(p.sel), id: p.sel };
+    } else {
+      patch.lens = DEFAULT_LENS2;
+      patch.unknownPath = path;
+    }
+    return patch;
+  }
+  __name(parseHash, "parseHash");
+  function serializeState(snapshot, presentTypes2) {
+    if (snapshot.diffPage && snapshot.diffRevision) {
+      const pageParams = [];
+      if (snapshot.focus)
+        pageParams.push(`focus=${encodeURIComponent(snapshot.focus)}`);
+      if (snapshot.diffFile)
+        pageParams.push(`file=${encodeURIComponent(snapshot.diffFile)}`);
+      if (snapshot.diffNav !== "all")
+        pageParams.push(`nav=${encodeURIComponent(snapshot.diffNav)}`);
+      const pagePath = `#/revision/${encodeURIComponent(snapshot.diffRevision)}/diff`;
+      return pageParams.length ? `${pagePath}?${pageParams.join("&")}` : pagePath;
+    }
+    const params = [];
+    const sel = snapshot.selected ?? { kind: null, id: null };
+    let path = snapshot.lens === DEFAULT_LENS2 ? "#/timeline" : `#/${snapshot.lens}`;
+    if (sel.id && snapshot.open && (sel.kind === "revision" || sel.kind === "event")) {
+      path = sel.kind === "revision" ? `#/revision/${encodeURIComponent(sel.id)}` : `#/event/${encodeURIComponent(sel.id)}`;
+      if (snapshot.lens && snapshot.lens !== DEFAULT_LENS2)
+        params.push(`lens=${encodeURIComponent(snapshot.lens)}`);
+    } else if (sel.id) {
+      params.push(`sel=${encodeURIComponent(sel.id)}`);
+    }
+    if (snapshot.filterTrack)
+      params.push(`track=${encodeURIComponent(snapshot.filterTrack)}`);
+    if (snapshot.filterSnapshot)
+      params.push(`snapshot=${encodeURIComponent(snapshot.filterSnapshot)}`);
+    if (snapshot.order && snapshot.order !== "desc")
+      params.push(`order=${encodeURIComponent(snapshot.order)}`);
+    if (presentTypes2.some((id) => !snapshot.enabledTypes.has(id))) {
+      params.push(
+        `types=${encodeURIComponent(
+          presentTypes2.filter((id) => snapshot.enabledTypes.has(id)).join(",")
+        )}`
+      );
+    }
+    if (snapshot.filterText)
+      params.push(`q=${encodeURIComponent(snapshot.filterText)}`);
+    if (snapshot.diff) params.push(`diff=${encodeURIComponent(snapshot.diff)}`);
+    if (snapshot.diff && snapshot.diffHash)
+      params.push(`diffHash=${encodeURIComponent(snapshot.diffHash)}`);
+    if (snapshot.focus)
+      params.push(`focus=${encodeURIComponent(snapshot.focus)}`);
+    return params.length ? `${path}?${params.join("&")}` : path;
+  }
+  __name(serializeState, "serializeState");
+  function navigate(patch, opts = {}) {
+    commit(patch);
+    const hash = serializeState(getState(), presentTypes());
+    if (opts.replace) history.replaceState({}, "", hash);
+    else history.pushState({}, "", hash);
+  }
+  __name(navigate, "navigate");
+  function applyHash() {
+    const parsed = parseHash(location.hash, presentTypes());
+    const patch = resolve(parsed);
+    commit(patch);
+    if (parsed.migrated === "threads-alias") {
+      history.replaceState(
+        {},
+        "",
+        location.hash.replace(/^#\/threads/, "#/list")
+      );
+    } else if (parsed.migrated === "legacy-diff") {
+      history.replaceState({}, "", serializeState(getState(), presentTypes()));
+    }
+    const sel = getState().selected;
+    if (sel.kind === "event" && sel.id && !eventExists(sel.id)) {
+      void revealSelectedEvent(sel.id, patch.lens ?? DEFAULT_LENS2);
+    }
+  }
+  __name(applyHash, "applyHash");
+  async function revealSelectedEvent(eventId, lens) {
+    const page = await fetchRevealPage(eventId);
+    if (!page) return;
+    if (page.present) {
+      commit(revealPatch(page, eventId));
+      clearRouteDiagnostic();
+      return;
+    }
+    commit({ selected: { kind: null, id: null } });
+    showRouteDiagnostic(
+      `fell back to the ${lens} lens — event ${shortRef(eventId)} is not in this store`
+    );
+  }
+  __name(revealSelectedEvent, "revealSelectedEvent");
+  function resolve(patch) {
+    const freshnessDiagnostic = liveStateDiagnostic(patch);
+    const next = statePatchFrom(patch);
+    if (patch.unknownPath != null) {
+      showRouteDiagnostic(
+        routeDiagnostic(
+          `fell back to the timeline — unknown route ${patch.unknownPath}`,
+          freshnessDiagnostic
+        )
+      );
+      next.lens = DEFAULT_LENS2;
+      next.selected = { kind: null, id: null };
+      return next;
+    }
+    if (patch.diff && !patch.diffPage) {
+      next.diffPage = true;
+      const mapped = revisionIdForSnapshot(patch.diff, patch.diffHash);
+      if (mapped) {
+        next.diffRevision = mapped;
+        patch.migrated = "legacy-diff";
+      }
+    }
+    const sel = patch.selected ?? { kind: null, id: null };
+    if (sel.kind === "revision" && sel.id && !revisionExists(sel.id)) {
+      if (revisionInAnyThread(sel.id)) {
+        next.open = true;
+      } else {
+        const lens = patch.lens || DEFAULT_LENS2;
+        showRouteDiagnostic(
+          routeDiagnostic(
+            `fell back to the ${lens} lens — revision ${shortRef(sel.id)} is not in this store`,
+            freshnessDiagnostic
+          )
+        );
+        next.lens = lens;
+        next.selected = { kind: null, id: null };
+        return next;
+      }
+    }
+    if (freshnessDiagnostic) {
+      showRouteDiagnostic(freshnessDiagnostic);
+      return next;
+    }
+    clearRouteDiagnostic();
+    return next;
+  }
+  __name(resolve, "resolve");
+  function statePatchFrom(patch) {
+    const next = {
+      lens: patch.lens,
+      filterTrack: patch.filterTrack,
+      filterSnapshot: patch.filterSnapshot,
+      order: patch.order,
+      filterText: patch.filterText,
+      enabledTypes: patch.enabledTypes,
+      diff: patch.diff,
+      diffHash: patch.diffHash,
+      focus: patch.focus,
+      diffPage: patch.diffPage,
+      diffRevision: patch.diffRevision,
+      diffFile: patch.diffFile,
+      diffNav: patch.diffNav
+    };
+    if (patch.selected !== void 0) next.selected = patch.selected;
+    if (patch.open !== void 0) next.open = patch.open;
+    return next;
+  }
+  __name(statePatchFrom, "statePatchFrom");
+  function liveStateDiagnostic(patch) {
+    const unsupported = [];
+    if (patch.unsupportedAsOf != null)
+      unsupported.push("as-of links are not supported by this server");
+    if (patch.unsupportedJournal != null)
+      unsupported.push("journal links are not supported by this server");
+    return unsupported.length ? `showing live state — ${unsupported.join("; ")}` : "";
+  }
+  __name(liveStateDiagnostic, "liveStateDiagnostic");
+  function routeDiagnostic(primary, secondary) {
+    return secondary ? `${primary} — ${secondary}` : primary;
+  }
+  __name(routeDiagnostic, "routeDiagnostic");
+  function showRouteDiagnostic(message) {
+    const el = $("#route-diagnostic");
+    if (!el) return;
+    el.textContent = message;
+    el.classList.remove("hidden");
+  }
+  __name(showRouteDiagnostic, "showRouteDiagnostic");
+  function clearRouteDiagnostic() {
+    const el = $("#route-diagnostic");
+    if (!el) return;
+    el.textContent = "";
+    el.classList.add("hidden");
+  }
+  __name(clearRouteDiagnostic, "clearRouteDiagnostic");
+
   // src/diff/controller.ts
   var shownDiffSnapshot = null;
   var shownDiffHash = null;
@@ -2272,15 +2320,6 @@
   var diffFactCursor = -1;
   var diffChangeCursor = -1;
   var diffNavFilter = "all";
-  var DIFF_NAV_FILTERS = [
-    "all",
-    "with-facts",
-    "unanchored"
-  ];
-  function isDiffNavFilter(value) {
-    return DIFF_NAV_FILTERS.includes(value);
-  }
-  __name(isDiffNavFilter, "isDiffNavFilter");
   function openDiff(snapshotId, focusId = null, contentHash = null) {
     navigate({
       diff: snapshotId,

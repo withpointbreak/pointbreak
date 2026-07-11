@@ -38,6 +38,7 @@ import {
   type DiffNavSummary,
   fileFactCount,
   filePathLabel,
+  isDiffNavFilter,
   renderDiff,
   renderDiffFileBody,
   renderDiffNavFilters,
@@ -59,16 +60,6 @@ let diffCtx: DiffCtx | null = null;
 let diffFactCursor = -1;
 let diffChangeCursor = -1;
 let diffNavFilter: DiffNavFilter = "all";
-
-const DIFF_NAV_FILTERS: readonly DiffNavFilter[] = [
-  "all",
-  "with-facts",
-  "unanchored",
-];
-
-function isDiffNavFilter(value: string): value is DiffNavFilter {
-  return (DIFF_NAV_FILTERS as readonly string[]).includes(value);
-}
 
 // ---------------------------------------------------------------------------
 // Route-only open / close (the open/close DOM is the reconciler's job)

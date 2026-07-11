@@ -71,6 +71,10 @@ function routeFields(p: RoutePatch) {
     diff: p.diff,
     diffHash: p.diffHash,
     focus: p.focus,
+    diffPage: p.diffPage,
+    diffRevision: p.diffRevision,
+    diffFile: p.diffFile,
+    diffNav: p.diffNav,
   };
 }
 
@@ -78,8 +82,10 @@ function routeFields(p: RoutePatch) {
 function snapshotFrom(p: RoutePatch): SerializeSnapshot {
   return {
     lens: p.lens,
-    selected: p.selected,
-    open: p.open,
+    // The diff-page path omits the cursor fields (it never touches the parked
+    // cursor); serialization then reads the untouched defaults.
+    selected: p.selected ?? { kind: null, id: null },
+    open: p.open ?? false,
     filterTrack: p.filterTrack,
     filterSnapshot: p.filterSnapshot,
     order: p.order,
@@ -88,6 +94,10 @@ function snapshotFrom(p: RoutePatch): SerializeSnapshot {
     diff: p.diff,
     diffHash: p.diffHash,
     focus: p.focus,
+    diffPage: p.diffPage,
+    diffRevision: p.diffRevision,
+    diffFile: p.diffFile,
+    diffNav: p.diffNav,
   };
 }
 
@@ -257,6 +267,10 @@ describe("serializeState", () => {
       diff: null,
       diffHash: null,
       focus: null,
+      diffPage: false,
+      diffRevision: null,
+      diffFile: null,
+      diffNav: "all",
       ...over,
     };
   }
@@ -384,6 +398,9 @@ describe("grammar round-trip (parseHash and serializeState are inverses)", () =>
     // A parked cursor (lens-primary selection, pane closed).
     `#/timeline?sel=${encodeURIComponent(EVT)}`,
     `#/list?sel=${encodeURIComponent(REV)}`,
+    // The routed diff page (bare, and with its full param set).
+    `#/revision/${encodeURIComponent(REV)}/diff`,
+    `#/revision/${encodeURIComponent(REV)}/diff?focus=evt:9&file=src%2Fmain.rs&nav=unanchored`,
   ];
 
   for (const hash of hashes) {
@@ -394,6 +411,164 @@ describe("grammar round-trip (parseHash and serializeState are inverses)", () =>
       expect(routeFields(second)).toEqual(routeFields(first));
     });
   }
+});
+
+describe("diff page route", () => {
+  const OBJ = "obj:1";
+  const FACT =
+    "obs:sha256:2222222222222222222222222222222222222222222222222222222222222222";
+
+  function seedDiff(): void {
+    store.commit({
+      history: {
+        entries: [{ eventId: EVT, eventType: "work_object_proposed" }],
+        diagnostics: [],
+      } as unknown as HistoryDoc,
+      revisions: {
+        entries: [{ revisionId: REV, snapshotId: OBJ }],
+      } as unknown as RevisionsDoc,
+      threads: {
+        threads: [{ revisions: [REV] }],
+        revisionClassification: {},
+      } as unknown as ThreadsDoc,
+    });
+  }
+
+  it("round-trips the canonical diff-page path", () => {
+    const hash = `#/revision/${encodeURIComponent(REV)}/diff?focus=${encodeURIComponent(FACT)}&file=${encodeURIComponent("src/cli/inspect/api.rs")}&nav=with-facts`;
+    const patch = router.parseHash(hash, PT);
+    expect(patch.diffPage).toBe(true);
+    expect(patch.diffRevision).toBe(REV); // the page's own identity
+    expect(patch.selected).toBeUndefined(); // never touches the parked cursor
+    expect(patch.open).toBeUndefined();
+    expect(patch.focus).toBe(FACT);
+    expect(patch.diffFile).toBe("src/cli/inspect/api.rs");
+    expect(patch.diffNav).toBe("with-facts");
+    expect(router.serializeState(snapshotFrom(patch), PT)).toBe(hash);
+  });
+
+  it("omits nav at its default and rejects a garbage nav value", () => {
+    const bare = router.parseHash(
+      `#/revision/${encodeURIComponent(REV)}/diff`,
+      PT,
+    );
+    expect(bare.diffNav).toBe("all");
+    expect(router.serializeState(snapshotFrom(bare), PT)).toBe(
+      `#/revision/${encodeURIComponent(REV)}/diff`,
+    );
+    const garbage = router.parseHash(
+      `#/revision/${encodeURIComponent(REV)}/diff?nav=bogus`,
+      PT,
+    );
+    expect(garbage.diffNav).toBe("all");
+    expect(router.serializeState(snapshotFrom(garbage), PT)).not.toContain(
+      "nav=",
+    );
+  });
+
+  it("never emits the legacy diff params alongside the canonical path", () => {
+    const s = snapshotFrom(
+      router.parseHash(`#/revision/${encodeURIComponent(REV)}/diff`, PT),
+    );
+    s.diff = OBJ;
+    s.diffHash = "sha256:abc";
+    expect(router.serializeState(s, PT)).toBe(
+      `#/revision/${encodeURIComponent(REV)}/diff`,
+    );
+  });
+
+  it("serializes a snapshot-only page in the legacy query form", () => {
+    const s = snapshotFrom(router.parseHash("#/timeline", PT));
+    s.diffPage = true;
+    s.diff = OBJ;
+    s.diffHash = "sha256:abc";
+    expect(router.serializeState(s, PT)).toBe(
+      `#/timeline?diff=${encodeURIComponent(OBJ)}&diffHash=${encodeURIComponent("sha256:abc")}`,
+    );
+  });
+
+  it("forwards a legacy ?diff= link to the canonical path when the snapshot maps", async () => {
+    seedDiff();
+    mountInspectorDom();
+    const push = vi.spyOn(history, "pushState");
+    try {
+      history.replaceState(
+        null,
+        "",
+        `#/timeline?diff=${encodeURIComponent(OBJ)}`,
+      );
+      router.applyHash();
+      await flush();
+      expect(store.getState().diffPage).toBe(true);
+      expect(store.getState().diffRevision).toBe(REV);
+      expect(store.getState().diff).toBe(OBJ); // payload pointer retained
+      expect(store.getState().selected).toEqual({ kind: null, id: null });
+      // The address bar is replace-rewritten to the canonical page path;
+      // replace, never push, so Back does not bounce through the stale form.
+      expect(
+        location.hash.startsWith(`#/revision/${encodeURIComponent(REV)}/diff`),
+      ).toBe(true);
+      expect(push).not.toHaveBeenCalled();
+    } finally {
+      push.mockRestore();
+    }
+  });
+
+  it("keeps an unmappable snapshot-only ?diff= snapshot-addressed with no rewrite", async () => {
+    seedDiff();
+    mountInspectorDom();
+    history.replaceState(null, "", "#/timeline?diff=obj:unknown");
+    router.applyHash();
+    await flush();
+    // Every legacy diff intent renders as the page, but the route must not
+    // invent a revision — and an unmapped link keeps its original address.
+    expect(store.getState().diffPage).toBe(true);
+    expect(store.getState().diff).toBe("obj:unknown");
+    expect(store.getState().diffRevision).toBeNull();
+    expect(location.hash).toBe("#/timeline?diff=obj:unknown");
+  });
+
+  it("applies a canonical diff hash over a parked cursor without touching it", async () => {
+    seedDiff();
+    mountInspectorDom();
+    store.commit({ selected: { kind: "event", id: EVT }, open: true });
+    history.replaceState(
+      null,
+      "",
+      `#/revision/${encodeURIComponent(REV)}/diff`,
+    );
+    router.applyHash();
+    await flush();
+    expect(store.getState().diffPage).toBe(true);
+    expect(store.getState().diffRevision).toBe(REV);
+    expect(store.getState().selected).toEqual({ kind: "event", id: EVT });
+    expect(store.getState().open).toBe(true);
+  });
+
+  it("keeps a diffRevision that is absent from the loaded list", () => {
+    // Grouped-away ids resolve through the entity-primary composite fetch; the
+    // route must not clear them or fall back with a diagnostic.
+    store.commit({
+      history: { entries: [], diagnostics: [] } as unknown as HistoryDoc,
+      revisions: { entries: [] } as unknown as RevisionsDoc,
+      threads: {
+        threads: [],
+        revisionClassification: {},
+      } as unknown as ThreadsDoc,
+    });
+    mountInspectorDom();
+    history.replaceState(
+      null,
+      "",
+      `#/revision/${encodeURIComponent(REV)}/diff`,
+    );
+    router.applyHash();
+    expect(store.getState().diffPage).toBe(true);
+    expect(store.getState().diffRevision).toBe(REV);
+    expect(
+      document.querySelector("#route-diagnostic")?.classList.contains("hidden"),
+    ).toBe(true);
+  });
 });
 
 describe("selectionKind", () => {
