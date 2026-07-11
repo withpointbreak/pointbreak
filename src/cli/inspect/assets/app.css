@@ -106,7 +106,10 @@ body { display: flex; flex-direction: column; }
   line-height: 1.4;
 }
 
-#lens-switcher { display: flex; flex-wrap: wrap; gap: 4px; }
+/* Two lens families: the record group (Timeline · Revisions) reads as one
+   adjacency; the wider switcher gap sets Attention apart. No umbrella label. */
+#lens-switcher { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.lens-group-record { display: flex; flex-wrap: wrap; gap: 4px; }
 .lens-tab {
   background: transparent;
   color: var(--fg-dim);

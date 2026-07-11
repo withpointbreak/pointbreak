@@ -16,9 +16,13 @@
         <span class="brand-mark" aria-hidden="true"></span>
         <span class="brand-text">Pointbreak<span class="brand-accent">Review</span></span>
       </div>
+      <!-- Two families, no umbrella label: the record group (what happened),
+           with Attention (what needs judgment) set apart by spacing. -->
       <nav id="lens-switcher" aria-label="master pane lens">
-        <button class="lens-tab" type="button" data-lens="timeline" aria-pressed="true">Timeline</button>
-        <button class="lens-tab" type="button" data-lens="list" aria-pressed="false">Revisions</button>
+        <div class="lens-group-record">
+          <button class="lens-tab" type="button" data-lens="timeline" aria-pressed="true">Timeline</button>
+          <button class="lens-tab" type="button" data-lens="list" aria-pressed="false">Revisions</button>
+        </div>
         <button class="lens-tab" type="button" data-lens="attention" aria-pressed="false">Attention</button>
       </nav>
       <div class="stats">

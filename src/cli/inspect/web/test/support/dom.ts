@@ -17,8 +17,10 @@ const INDEX_BODY = `
     <span class="brand-text">Pointbreak<span class="brand-accent">Review</span></span>
   </div>
   <nav id="lens-switcher" aria-label="master pane lens">
-    <button class="lens-tab" type="button" data-lens="timeline" aria-pressed="true">Timeline</button>
-    <button class="lens-tab" type="button" data-lens="list" aria-pressed="false">Revisions</button>
+    <div class="lens-group-record">
+      <button class="lens-tab" type="button" data-lens="timeline" aria-pressed="true">Timeline</button>
+      <button class="lens-tab" type="button" data-lens="list" aria-pressed="false">Revisions</button>
+    </div>
     <button class="lens-tab" type="button" data-lens="attention" aria-pressed="false">Attention</button>
   </nav>
   <div class="stats">

@@ -138,6 +138,19 @@ describe("renderTypeToggles (facet distribution + aria-pressed)", () => {
 });
 
 describe("renderLensSwitcher + renderMaster (lens dispatch + scaffold)", () => {
+  it("groups the lens tabs into record + attention families", () => {
+    // Structure pin over the dom.ts mirror (which changes in lockstep with
+    // assets/index.html): the Record pair sits in one group, Attention apart,
+    // and no umbrella label names the group. The visual grouping itself is
+    // verified by eye in the dogfood pass.
+    const record = document.querySelector(".lens-group-record");
+    expect(record?.querySelectorAll(".lens-tab").length).toBe(2); // timeline, list
+    const attention = $('.lens-tab[data-lens="attention"]');
+    expect(attention).not.toBeNull();
+    expect(attention?.closest(".lens-group-record")).toBeNull(); // set apart
+    expect(document.querySelector(".lens-group-label")).toBeNull();
+  });
+
   it("marks the active lens tab and paints the timeline lens by default", () => {
     render.render();
     expect(
