@@ -467,7 +467,58 @@ See [storage-model.md](./storage-model.md#user-level-family-store-tier) for the 
 (ephemeral/sensitivity refusals, sync-managed-path warnings, and the destructive `store forget`
 verb) that this quick loop does not exercise.
 
-## J. Things to glance at after big changes
+## J. Canonical Review example pack
+
+**Goal.** Verify that the checked checkout-refactor example reconstructs both its synthetic Git
+history and its artifact-complete Pointbreak record without copying a raw store.
+
+```bash
+just review-example-verify
+
+EXAMPLE_REPO=$(mktemp -d)/checkout-refactor
+just review-example-materialize "$EXAMPLE_REPO"
+
+git -C "$EXAMPLE_REPO" log --oneline --reverse
+node "$EXAMPLE_REPO/checkout.test.js"
+cargo run -- inspect --repo "$EXAMPLE_REPO" --open
+```
+
+**Expect.**
+
+- Verification checks the pack manifest, all file-byte digests, the 13 unsigned events, the object
+  artifact, the Git bundle, and the checked history/revision documents.
+- The Git log contains the base checkout, faulty refactor, and null-user response commits.
+- The source test passes, and the inspector shows current `accepted` with the earlier
+  `needs_changes` assessment retained as `replaced`.
+- The materialized repository owns a newly ingested local store; the pack itself contains no
+  `.git/shore`, `.shore/data`, or `state.json` compatibility surface.
+
+Maintainers refresh the pack from an explicit source repository only after the source record has
+been reviewed:
+
+```bash
+just review-example-export /path/to/source-review-repository
+```
+
+The exporter reads committed Git objects plus public Pointbreak events/artifacts/documents, stages
+the complete replacement, and validates it before replacing the checked pack.
+
+To refresh the product-owned marketing capture from this exact record, start the local inspector
+against the materialized repository, then run the pack-aware capture recipe from another shell:
+
+```bash
+cargo run -- inspect --repo "$EXAMPLE_REPO" --port 7878
+just capture-marketing-review-screenshots
+```
+
+The capture script verifies the pack first, derives the revision, track, selected assessment,
+event-set hash, writer set, and unsigned classification from it, captures both themes, and writes
+`assets/marketing/review-interface-capture.json` last. The manifest deliberately distinguishes a
+publicly reproducible record from a hosted inspector: `reproducibleFromPublicPack` is true while
+`publiclyInspectable` remains false. Running `just capture-inspector-screenshots` without the pack
+options preserves the generic README screenshot defaults.
+
+## K. Things to glance at after big changes
 
 When refactoring storage, projections, or CLI surfaces, also look at:
 

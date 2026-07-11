@@ -114,3 +114,20 @@ web-verify:
 # Requires a running inspector; pass --url/--revision/--track to override the checked-in framing.
 capture-inspector-screenshots *args:
     ./scripts/capture-inspector-screenshots.sh {{ args }}
+
+# Refresh the product-owned marketing capture from the verified canonical Review example.
+# Requires an inspector serving a materialized example repository.
+capture-marketing-review-screenshots url="http://127.0.0.1:7878":
+    ./scripts/capture-inspector-screenshots.sh --url {{ url }} --example-manifest examples/review/checkout-refactor/manifest.json --manifest assets/marketing/review-interface-capture.json --out-dir assets/marketing --hide-observations
+
+# Export the canonical Review example from a source repository through public Pointbreak APIs.
+review-example-export source output="examples/review/checkout-refactor":
+    cargo +stable run --example review_example_pack -- export --repo {{ source }} --output {{ output }}
+
+# Verify the checked canonical Review example pack without depending on store layout.
+review-example-verify pack="examples/review/checkout-refactor":
+    cargo +stable run --example review_example_pack -- verify --pack {{ pack }}
+
+# Materialize the canonical Review example into an empty destination repository.
+review-example-materialize output pack="examples/review/checkout-refactor":
+    cargo +stable run --example review_example_pack -- materialize --pack {{ pack }} --output {{ output }}

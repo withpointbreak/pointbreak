@@ -1,0 +1,461 @@
+[
+  {
+    "schema": "shore.event",
+    "version": 1,
+    "eventId": "evt:sha256:84610b5d82f6b2ebb0099653fbda4ee7f34daf6d5d2896ab4ce6d10ed2b2c3ba",
+    "eventType": "t:02",
+    "idempotencyKey": "t:02:subject:sha256:9367ea59eb8fd7efd900b148bef4b5bb02e6d10249b1b124b19ca8c6c8fb3f17",
+    "target": {
+      "journalId": "journal:default",
+      "subjectId": "subject:sha256:9367ea59eb8fd7efd900b148bef4b5bb02e6d10249b1b124b19ca8c6c8fb3f17"
+    },
+    "writer": {
+      "actorId": "actor:agent:pointbreak-example-author",
+      "producer": {
+        "name": "shore",
+        "version": "0.5.0"
+      }
+    },
+    "occurredAt": "unix-ms:1783748929533",
+    "payloadHash": "sha256:dc7e110216775e0d71d9b2ea8be75f3d1eefbe23f4d83c64e057a89f17476b1b",
+    "payload": {
+      "engagementId": "engagement:sha256:9421fecbab09d8829deb2f7cb3f40b07ff64829922dbc50a4cba2d6fbddfa13a",
+      "workObject": {
+        "kind": "revision",
+        "objectArtifactContentHash": "sha256:c366c7cb8d826536573781f9136d9ccbcebc17301cc6aaba0b8a4f1c2f641327",
+        "revision": {
+          "gitProvenance": {
+            "base": {
+              "commitOid": "f1a8ed1801f669b1b846e482d198092cd6e617df",
+              "kind": "git_commit",
+              "treeOid": "777dd48a0031a8f05c39c6c2d105b7743127a1e8"
+            },
+            "source": {
+              "kind": "git_commit_range",
+              "mode": "base_tree_to_target_tree"
+            },
+            "target": {
+              "commitOid": "3e7b4b3e1e1e7cccfc14a4c724204ff381b315e4",
+              "kind": "git_commit",
+              "treeOid": "6ef338a9c41d1a8841b21ad5be5bac502fbcd92c"
+            }
+          },
+          "id": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f",
+          "objectId": "obj:sha256:296f82b6468cce5be8ec6a60206dd3de03c761409a7adcb13bb76ce9feebcd4b"
+        }
+      }
+    }
+  },
+  {
+    "schema": "shore.event",
+    "version": 1,
+    "eventId": "evt:sha256:cb93d92e6838510b9e6b9e0780d33dfb67aff6f19bf781a05c8e9c055cc1eba8",
+    "eventType": "t:08",
+    "idempotencyKey": "t:08:rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f:refs/heads/main@3e7b4b3e1e1e7cccfc14a4c724204ff381b315e4",
+    "target": {
+      "journalId": "journal:default",
+      "subjectId": "subject:sha256:9367ea59eb8fd7efd900b148bef4b5bb02e6d10249b1b124b19ca8c6c8fb3f17"
+    },
+    "writer": {
+      "actorId": "actor:agent:pointbreak-example-author",
+      "producer": {
+        "name": "shore",
+        "version": "0.5.0"
+      }
+    },
+    "occurredAt": "unix-ms:1783748929577",
+    "payloadHash": "sha256:bf9df4a316f7e8697f3af080bb223f504e34fe3e714f5cee12693b51c37223f9",
+    "payload": {
+      "headOid": "3e7b4b3e1e1e7cccfc14a4c724204ff381b315e4",
+      "refAssociationId": "assoc-ref:sha256:bdcd32a260bbcdc43953f66c8d331ee6f2b1ce86f044d22fa8ddbc8a2c06dd99",
+      "refName": "refs/heads/main",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      }
+    }
+  },
+  {
+    "schema": "shore.event",
+    "version": 1,
+    "eventId": "evt:sha256:674f016b984d65c995c72a60e80b482c9085eaa8feb711b0c2cf3d1e9ed3362f",
+    "eventType": "t:03",
+    "idempotencyKey": "t:03:rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f:example:marketing-review-proof:obs:sha256:8a9a1c1c013499512111c090e19b922bd38172ad39d3b8143a6b9b1638ec0c49",
+    "target": {
+      "journalId": "journal:default",
+      "subjectId": "subject:sha256:9367ea59eb8fd7efd900b148bef4b5bb02e6d10249b1b124b19ca8c6c8fb3f17",
+      "trackId": "example:marketing-review-proof"
+    },
+    "writer": {
+      "actorId": "actor:agent:pointbreak-example-author",
+      "producer": {
+        "name": "shore",
+        "version": "0.5.0"
+      }
+    },
+    "occurredAt": "unix-ms:1783748944398",
+    "payloadHash": "sha256:ed7e12e14edeab402ec4417f3c2c46f31a39eed137b01d076b0816684fd9b0be",
+    "payload": {
+      "body": "The existing checkout behavior remains covered by the original test.",
+      "bodyByteSize": 68,
+      "bodyContentHash": "sha256:ae507a7cd708bd2c0b4f87dcc40133652d5bcc3e71053cb03e4a9348b2759c1c",
+      "confidence": "high",
+      "observationId": "obs:sha256:8a9a1c1c013499512111c090e19b922bd38172ad39d3b8143a6b9b1638ec0c49",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "title": "Refactor preserves checkout behavior"
+    }
+  },
+  {
+    "schema": "shore.event",
+    "version": 1,
+    "eventId": "evt:sha256:fe9984ad43d229fb6072fccfd44312c589fee0e7fdabd8728a5b5b476b3d0fe3",
+    "eventType": "t:12",
+    "idempotencyKey": "t:12:rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f:example:marketing-review-proof:validation:sha256:8407251e4032821a454153e993307abe536e0237f3ff7c9d9b8f2096d36eef1a",
+    "target": {
+      "journalId": "journal:default",
+      "subjectId": "subject:sha256:9367ea59eb8fd7efd900b148bef4b5bb02e6d10249b1b124b19ca8c6c8fb3f17",
+      "trackId": "example:marketing-review-proof"
+    },
+    "writer": {
+      "actorId": "actor:agent:pointbreak-example-reviewer",
+      "producer": {
+        "name": "shore",
+        "version": "0.5.0"
+      }
+    },
+    "occurredAt": "unix-ms:1783748957041",
+    "payloadHash": "sha256:9d0262a02357a34564cea19d7fcd40d125a12c461f56d954e61dcc8f57971a0e",
+    "payload": {
+      "checkName": "null-user branch",
+      "command": "node checkout.null-user.test.js",
+      "exitCode": 1,
+      "status": "failed",
+      "summary": "Checkout throws before it can represent a missing user.",
+      "summaryByteSize": 55,
+      "summaryContentHash": "sha256:c9621ba93ebcad6a4a61d9afac6de7fedae4587a50d1912da8608189dfc7966c",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "trigger": "manual",
+      "validationCheckId": "validation:sha256:8407251e4032821a454153e993307abe536e0237f3ff7c9d9b8f2096d36eef1a"
+    }
+  },
+  {
+    "schema": "shore.event",
+    "version": 1,
+    "eventId": "evt:sha256:d3fb68ccb68de4465c84b4594730497799ee04ea31f4a25ee1d4e3a32bc51418",
+    "eventType": "t:05",
+    "idempotencyKey": "t:05:rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f:example:marketing-review-proof:input-request:sha256:7fbe2f041cc9310e53fddb74d1e875ca7d28ea2b2f32e94615720eb3beb07051",
+    "target": {
+      "journalId": "journal:default",
+      "subjectId": "subject:sha256:9367ea59eb8fd7efd900b148bef4b5bb02e6d10249b1b124b19ca8c6c8fb3f17",
+      "trackId": "example:marketing-review-proof"
+    },
+    "writer": {
+      "actorId": "actor:agent:pointbreak-example-reviewer",
+      "producer": {
+        "name": "shore",
+        "version": "0.5.0"
+      }
+    },
+    "occurredAt": "unix-ms:1783748970063",
+    "payloadHash": "sha256:114abe2f47bc3fa932576cdf06aff249073ac626a37dcf2d03715d65d86ac29c",
+    "assertionMode": "operative",
+    "payload": {
+      "body": "Should checkout explicitly preserve an absent user as a null identifier?",
+      "bodyByteSize": 72,
+      "bodyContentHash": "sha256:a73f0ae455be0c4d7336d97fa3a27934742e05af35f9847f2cf3710bd1822342",
+      "inputRequestId": "input-request:sha256:7fbe2f041cc9310e53fddb74d1e875ca7d28ea2b2f32e94615720eb3beb07051",
+      "reasonCode": "manual_decision_required",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "title": "Define the null-user invariant"
+    }
+  },
+  {
+    "schema": "shore.event",
+    "version": 1,
+    "eventId": "evt:sha256:ea0bbd486eb28b4b024ef8278944260cd195937614995622cb7ab7bb5b6afcbd",
+    "eventType": "t:04",
+    "idempotencyKey": "t:04:rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f:example:marketing-review-proof:assess:sha256:12c1b3c464be63580a18370e73dc140e6fbeaad40347e0afc2f9f6788a83ca76",
+    "target": {
+      "journalId": "journal:default",
+      "subjectId": "subject:sha256:9367ea59eb8fd7efd900b148bef4b5bb02e6d10249b1b124b19ca8c6c8fb3f17",
+      "trackId": "example:marketing-review-proof"
+    },
+    "writer": {
+      "actorId": "actor:agent:pointbreak-example-reviewer",
+      "producer": {
+        "name": "shore",
+        "version": "0.5.0"
+      }
+    },
+    "occurredAt": "unix-ms:1783748987412",
+    "payloadHash": "sha256:adfde4bb4730815df6f31736de526f5e85c4231d13db7dc60bb50725eb8bd388",
+    "assertionMode": "operative",
+    "payload": {
+      "assessment": "needs_changes",
+      "assessmentId": "assess:sha256:12c1b3c464be63580a18370e73dc140e6fbeaad40347e0afc2f9f6788a83ca76",
+      "relatedInputRequestIds": [
+        "input-request:sha256:7fbe2f041cc9310e53fddb74d1e875ca7d28ea2b2f32e94615720eb3beb07051"
+      ],
+      "summary": "The null-user path fails and the intended invariant is still unanswered.",
+      "summaryByteSize": 72,
+      "summaryContentHash": "sha256:eb9300cd8c4e5eec9417e4a905fe54d0a46c86830982e9da129153f41bb62728",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      }
+    }
+  },
+  {
+    "schema": "shore.event",
+    "version": 1,
+    "eventId": "evt:sha256:7223415b835775755ab55fe3981a7d74b333727e306f41db72350cce83014c39",
+    "eventType": "t:03",
+    "idempotencyKey": "t:03:rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f:example:marketing-review-proof:obs:sha256:110b53faaa8ab3116c0e2d865afce7a3e5b2ed5ee7cad2b0fe347e7823311115",
+    "target": {
+      "journalId": "journal:default",
+      "subjectId": "subject:sha256:9367ea59eb8fd7efd900b148bef4b5bb02e6d10249b1b124b19ca8c6c8fb3f17",
+      "trackId": "example:marketing-review-proof"
+    },
+    "writer": {
+      "actorId": "actor:agent:pointbreak-example-author",
+      "producer": {
+        "name": "shore",
+        "version": "0.5.0"
+      }
+    },
+    "occurredAt": "unix-ms:1783749027519",
+    "payloadHash": "sha256:f7f2a029b49fb9eef11c6555b3739ed16beb7dd9a6d19d05a6f69f4d231c78b4",
+    "payload": {
+      "body": "The new normalization dereferenced the user before the checkout invariant could represent an absent identity.",
+      "bodyByteSize": 109,
+      "bodyContentHash": "sha256:3e4e1812608cdc0d6772a777dafb2aaf38b0e9d23349c4bbac02adcde578e6d3",
+      "confidence": "high",
+      "observationId": "obs:sha256:110b53faaa8ab3116c0e2d865afce7a3e5b2ed5ee7cad2b0fe347e7823311115",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "title": "Null-user cause isolated"
+    }
+  },
+  {
+    "schema": "shore.event",
+    "version": 1,
+    "eventId": "evt:sha256:b4ed7750540408afe79773c3dabc5000718a152e9ed3c4d04d5daf5c26288b41",
+    "eventType": "t:03",
+    "idempotencyKey": "t:03:rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f:example:marketing-review-proof:obs:sha256:6642d468316138447fd1603779393df3c013163f28224e672b814ae167460d20",
+    "target": {
+      "journalId": "journal:default",
+      "subjectId": "subject:sha256:9367ea59eb8fd7efd900b148bef4b5bb02e6d10249b1b124b19ca8c6c8fb3f17",
+      "trackId": "example:marketing-review-proof"
+    },
+    "writer": {
+      "actorId": "actor:agent:pointbreak-example-author",
+      "producer": {
+        "name": "shore",
+        "version": "0.5.0"
+      }
+    },
+    "occurredAt": "unix-ms:1783749047269",
+    "payloadHash": "sha256:8a64146305323af95e9024888bab9c4567e75495cd41481dde91910628185f8e",
+    "payload": {
+      "body": "The checkout test now fixes the null-user behavior as an explicit invariant.",
+      "bodyByteSize": 76,
+      "bodyContentHash": "sha256:483b6d17cfd4a9ca3419ed110d7e3902b966d1f26d822925e8e2901e2133d8d5",
+      "confidence": "high",
+      "observationId": "obs:sha256:6642d468316138447fd1603779393df3c013163f28224e672b814ae167460d20",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "title": "Null-user regression test added"
+    }
+  },
+  {
+    "schema": "shore.event",
+    "version": 1,
+    "eventId": "evt:sha256:36e45654f2d21d10c458e08ed47d8eb0ef10c95711d1c3457d4833331039a532",
+    "eventType": "t:12",
+    "idempotencyKey": "t:12:rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f:example:marketing-review-proof:validation:sha256:2f2428744d9deb5f070f499b10595c3a606a4a185e590b1d8928c7d0182078f8",
+    "target": {
+      "journalId": "journal:default",
+      "subjectId": "subject:sha256:9367ea59eb8fd7efd900b148bef4b5bb02e6d10249b1b124b19ca8c6c8fb3f17",
+      "trackId": "example:marketing-review-proof"
+    },
+    "writer": {
+      "actorId": "actor:agent:pointbreak-example-author",
+      "producer": {
+        "name": "shore",
+        "version": "0.5.0"
+      }
+    },
+    "occurredAt": "unix-ms:1783749059764",
+    "payloadHash": "sha256:8fa1ab89d2bc79228b108c90fab9a6de59bb6e7589721bd9a69909ccbeb94ea2",
+    "payload": {
+      "checkName": "null-user regression test",
+      "command": "npm test",
+      "exitCode": 0,
+      "status": "passed",
+      "summary": "The original checkout case and null-user invariant both pass.",
+      "summaryByteSize": 61,
+      "summaryContentHash": "sha256:9e5678d97141cb87e34f8e7d7d9542834fa9424d6ce00bb4e61ee917f4498d6c",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "trigger": "manual",
+      "validationCheckId": "validation:sha256:2f2428744d9deb5f070f499b10595c3a606a4a185e590b1d8928c7d0182078f8"
+    }
+  },
+  {
+    "schema": "shore.event",
+    "version": 1,
+    "eventId": "evt:sha256:655fa339a808ff9c9740fff8f5b65741d9c16938235a69aaad3c9f1decfc9f81",
+    "eventType": "t:06",
+    "idempotencyKey": "t:06:input-request:sha256:7fbe2f041cc9310e53fddb74d1e875ca7d28ea2b2f32e94615720eb3beb07051:input-request-response:sha256:b5bee56b2726effed5dee9c44ef31ec92bd15fe69841c4342c0830b37d6dec16",
+    "target": {
+      "journalId": "journal:default",
+      "subjectId": "subject:sha256:d9866129a9b979488a40856bea80f31b5883c902350799200e3297d9ef39f862",
+      "trackId": "example:marketing-review-proof"
+    },
+    "writer": {
+      "actorId": "actor:agent:pointbreak-example-author",
+      "producer": {
+        "name": "shore",
+        "version": "0.5.0"
+      }
+    },
+    "occurredAt": "unix-ms:1783749074273",
+    "payloadHash": "sha256:7dc467547f41beee6833d8989b01de86e5c6389fec70c490ddcd21a584ee8725",
+    "payload": {
+      "inputRequestId": "input-request:sha256:7fbe2f041cc9310e53fddb74d1e875ca7d28ea2b2f32e94615720eb3beb07051",
+      "inputRequestResponseId": "input-request-response:sha256:b5bee56b2726effed5dee9c44ef31ec92bd15fe69841c4342c0830b37d6dec16",
+      "outcome": "approved",
+      "reason": "Checkout now preserves an absent user as a null identifier, and the regression test documents the invariant.",
+      "reasonByteSize": 108,
+      "reasonContentHash": "sha256:b5033f1e4f63ea63f3eb0a42be1276c082b06ff104283ba3a2ada01c13bff753",
+      "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+    }
+  },
+  {
+    "schema": "shore.event",
+    "version": 1,
+    "eventId": "evt:sha256:fdebd47e1e8481f7c115dd9c2a32e7a48bfe3c7da08dda3bbfb733545ffa7ca5",
+    "eventType": "t:12",
+    "idempotencyKey": "t:12:rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f:example:marketing-review-proof:validation:sha256:10c330a467aea8edc9f1cfa5ffe7359cb287bd70f41ecf50e78b4b0003ef2640",
+    "target": {
+      "journalId": "journal:default",
+      "subjectId": "subject:sha256:9367ea59eb8fd7efd900b148bef4b5bb02e6d10249b1b124b19ca8c6c8fb3f17",
+      "trackId": "example:marketing-review-proof"
+    },
+    "writer": {
+      "actorId": "actor:agent:pointbreak-example-reviewer",
+      "producer": {
+        "name": "shore",
+        "version": "0.5.0"
+      }
+    },
+    "occurredAt": "unix-ms:1783749088010",
+    "payloadHash": "sha256:9e0f97b8cb844a8780f08a33ffbdac5e64e5f0d9fe47a39fceac6fbdce6de7f9",
+    "payload": {
+      "checkName": "null-user fix and invariant",
+      "command": "npm test",
+      "exitCode": 0,
+      "status": "passed",
+      "summary": "The reviewer reproduced the fixed null-user path and confirmed the invariant test.",
+      "summaryByteSize": 82,
+      "summaryContentHash": "sha256:8daa2471484f4a2cda103d61e9a793a98ad3c0b0099408c4c900d796ab9cb351",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "trigger": "manual",
+      "validationCheckId": "validation:sha256:10c330a467aea8edc9f1cfa5ffe7359cb287bd70f41ecf50e78b4b0003ef2640"
+    }
+  },
+  {
+    "schema": "shore.event",
+    "version": 1,
+    "eventId": "evt:sha256:b412123aaad05f8355db932a4321c3b1c9bd738bf74694eaf9652e1adde589b3",
+    "eventType": "t:04",
+    "idempotencyKey": "t:04:rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f:example:marketing-review-proof:assess:sha256:131e0f06e28c0c1f688e2da745bf1539dfe0f943fdd64a066b7dc550543aca77",
+    "target": {
+      "journalId": "journal:default",
+      "subjectId": "subject:sha256:9367ea59eb8fd7efd900b148bef4b5bb02e6d10249b1b124b19ca8c6c8fb3f17",
+      "trackId": "example:marketing-review-proof"
+    },
+    "writer": {
+      "actorId": "actor:agent:pointbreak-example-reviewer",
+      "producer": {
+        "name": "shore",
+        "version": "0.5.0"
+      }
+    },
+    "occurredAt": "unix-ms:1783749102273",
+    "payloadHash": "sha256:c2e52b40090b45b63c42169bc3d5af875057dcdafb5464fada85edde36eb4b39",
+    "assertionMode": "operative",
+    "payload": {
+      "assessment": "accepted",
+      "assessmentId": "assess:sha256:131e0f06e28c0c1f688e2da745bf1539dfe0f943fdd64a066b7dc550543aca77",
+      "relatedInputRequestIds": [
+        "input-request:sha256:7fbe2f041cc9310e53fddb74d1e875ca7d28ea2b2f32e94615720eb3beb07051"
+      ],
+      "relatedObservationIds": [
+        "obs:sha256:110b53faaa8ab3116c0e2d865afce7a3e5b2ed5ee7cad2b0fe347e7823311115",
+        "obs:sha256:6642d468316138447fd1603779393df3c013163f28224e672b814ae167460d20"
+      ],
+      "replacesAssessmentIds": [
+        "assess:sha256:12c1b3c464be63580a18370e73dc140e6fbeaad40347e0afc2f9f6788a83ca76"
+      ],
+      "summary": "Accepted after the null-user invariant was defined, implemented, and independently verified.",
+      "summaryByteSize": 92,
+      "summaryContentHash": "sha256:43a67b30d5f9348b48dffc88f5dfdd7587616cefaa4ef8a810a6a14b4470bd86",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      }
+    }
+  },
+  {
+    "schema": "shore.event",
+    "version": 1,
+    "eventId": "evt:sha256:4f0f5c58d7aa8a035e745e4499eb980739f54966981ebfe72a63d3d3e69dd403",
+    "eventType": "t:10",
+    "idempotencyKey": "t:10:rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f:c4f50c2dc010f69f9080d0ad6b0999728568c3c1",
+    "target": {
+      "journalId": "journal:default",
+      "subjectId": "subject:sha256:9367ea59eb8fd7efd900b148bef4b5bb02e6d10249b1b124b19ca8c6c8fb3f17",
+      "trackId": "example:marketing-review-proof"
+    },
+    "writer": {
+      "actorId": "actor:agent:pointbreak-example-author",
+      "producer": {
+        "name": "shore",
+        "version": "0.5.0"
+      }
+    },
+    "occurredAt": "unix-ms:1783749118828",
+    "payloadHash": "sha256:21bbed194f5b93cdc41d88199c8e177f77a97167ec0728904a63e869cc0e938e",
+    "payload": {
+      "commit": {
+        "commitOid": "c4f50c2dc010f69f9080d0ad6b0999728568c3c1",
+        "kind": "git_commit",
+        "treeOid": "7eaaa3b913d161980403827b4ed91c51803ff9d6"
+      },
+      "commitAssociationId": "assoc-commit:sha256:64b5dd71c07463b0ddb34b07c69595e3f2df6f64eecff8d21dfc3635ab2015df",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      }
+    }
+  }
+]

@@ -10,6 +10,12 @@
 #     --revision 93326e73 \
 #     --track agent:codex-450
 #
+# To bind a capture to the canonical public example pack and write its provenance
+# manifest, add both of these options:
+#
+#   --example-manifest examples/review/checkout-refactor/manifest.json
+#   --manifest assets/marketing/review-interface-capture.json
+#
 set -euo pipefail
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -25,6 +31,9 @@ Options:
   --track <id>          Track filter (default: agent:codex-450)
   --assessment <value> Assessment row to select (default: accepted)
   --out-dir <dir>       Asset destination (default: <repo>/assets)
+  --example-manifest <path>
+                        Verified Review example pack manifest
+  --manifest <path>     Capture manifest to replace last (requires --example-manifest)
   --hide-observations   Hide observation rows to keep assessment transitions together
   -h, --help            Show this help
 
@@ -42,14 +51,21 @@ TRACK="agent:codex-450"
 ASSESSMENT="accepted"
 OUT_DIR="$REPO_ROOT/assets"
 HIDE_OBSERVATIONS="false"
+EXAMPLE_MANIFEST=""
+MANIFEST=""
+REVISION_SET="false"
+TRACK_SET="false"
+ASSESSMENT_SET="false"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --url) BASE_URL="$2"; shift 2 ;;
-    --revision) REVISION="$2"; shift 2 ;;
-    --track) TRACK="$2"; shift 2 ;;
-    --assessment) ASSESSMENT="$2"; shift 2 ;;
+    --revision) REVISION="$2"; REVISION_SET="true"; shift 2 ;;
+    --track) TRACK="$2"; TRACK_SET="true"; shift 2 ;;
+    --assessment) ASSESSMENT="$2"; ASSESSMENT_SET="true"; shift 2 ;;
     --out-dir) OUT_DIR="$2"; shift 2 ;;
+    --example-manifest) EXAMPLE_MANIFEST="$2"; shift 2 ;;
+    --manifest) MANIFEST="$2"; shift 2 ;;
     --hide-observations) HIDE_OBSERVATIONS="true"; shift ;;
     -h|--help) show_help; exit 0 ;;
     *) die "unknown option: $1" ;;
@@ -58,6 +74,42 @@ done
 
 command -v curl >/dev/null 2>&1 || die "curl not found"
 command -v node >/dev/null 2>&1 || die "node not found"
+
+if { [ -n "$EXAMPLE_MANIFEST" ] && [ -z "$MANIFEST" ]; } || \
+   { [ -z "$EXAMPLE_MANIFEST" ] && [ -n "$MANIFEST" ]; }; then
+  die "--example-manifest and --manifest must be supplied together"
+fi
+
+if [ -n "$EXAMPLE_MANIFEST" ]; then
+  EXAMPLE_MANIFEST="$(node -e 'process.stdout.write(require("node:path").resolve(process.argv[1]))' "$EXAMPLE_MANIFEST")"
+  MANIFEST="$(node -e 'process.stdout.write(require("node:path").resolve(process.argv[1]))' "$MANIFEST")"
+  [ -f "$EXAMPLE_MANIFEST" ] || die "example manifest not found: $EXAMPLE_MANIFEST"
+
+  cargo run --quiet --example review_example_pack -- verify \
+    --pack "$(dirname "$EXAMPLE_MANIFEST")" \
+    || die "example pack verification failed"
+
+  IFS=$'\t' read -r PACK_REVISION PACK_TRACK PACK_ASSESSMENT \
+    < <(node -e '
+const fs = require("node:fs");
+const manifest = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+process.stdout.write([
+  manifest.record.revision,
+  manifest.record.track,
+  manifest.record.selectedAssessment,
+].join("\t") + "\n");
+' "$EXAMPLE_MANIFEST")
+
+  [ "$REVISION_SET" = "false" ] || [ "$REVISION" = "$PACK_REVISION" ] \
+    || die "--revision does not match the example manifest"
+  [ "$TRACK_SET" = "false" ] || [ "$TRACK" = "$PACK_TRACK" ] \
+    || die "--track does not match the example manifest"
+  [ "$ASSESSMENT_SET" = "false" ] || [ "$ASSESSMENT" = "$PACK_ASSESSMENT" ] \
+    || die "--assessment does not match the example manifest"
+  REVISION="$PACK_REVISION"
+  TRACK="$PACK_TRACK"
+  ASSESSMENT="$PACK_ASSESSMENT"
+fi
 
 BASE_URL="${BASE_URL%/}"
 curl -fsS "$BASE_URL/" >/dev/null \
@@ -77,6 +129,9 @@ OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 
 TMP_DIR="$(mktemp -d)"
 SESSION="pointbreak-readme-$$"
+STAGED_DARK=""
+STAGED_LIGHT=""
+STAGED_MANIFEST=""
 
 run_pw() {
   (cd "$TMP_DIR" && "${PWCLI[@]}" -s="$SESSION" "$@")
@@ -84,6 +139,9 @@ run_pw() {
 
 cleanup() {
   run_pw close >/dev/null 2>&1 || true
+  [ -z "$STAGED_DARK" ] || rm -f "$STAGED_DARK"
+  [ -z "$STAGED_LIGHT" ] || rm -f "$STAGED_LIGHT"
+  [ -z "$STAGED_MANIFEST" ] || rm -f "$STAGED_MANIFEST"
   rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
@@ -124,6 +182,9 @@ page.on("console", (message) => {
 });
 
 const query = `revision:${revision} track:${track}`;
+const revisionDisplay = revision.startsWith("rev:sha256:")
+  ? revision.slice("rev:sha256:".length, "rev:sha256:".length + 8)
+  : revision;
 const escapedAssessment = assessment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const assessmentPattern = new RegExp(`\\b${escapedAssessment}\\b`, "i");
 
@@ -136,23 +197,33 @@ async function setDisplay(theme) {
   await page.reload({ waitUntil: "domcontentloaded" });
 }
 
+async function clickVisible(locator) {
+  for (const candidate of await locator.all()) {
+    if (await candidate.isVisible()) {
+      await candidate.click();
+      return true;
+    }
+  }
+  return false;
+}
+
 async function prepareFrame() {
   const search = page.getByRole("searchbox", { name: /search/i });
   await search.waitFor({ state: "visible" });
   await search.fill(query);
 
   const hideValidation = page.getByRole("button", { name: /Hide validation events/i });
-  if (await hideValidation.count()) await hideValidation.click();
+  await clickVisible(hideValidation);
 
   if (hideObservations) {
     const hideObservation = page.getByRole("button", { name: /Hide observation events/i });
-    if (await hideObservation.count()) await hideObservation.click();
+    await clickVisible(hideObservation);
   }
 
   const row = page
     .getByRole("listitem")
     .filter({ hasText: assessmentPattern })
-    .filter({ hasText: revision })
+    .filter({ hasText: revisionDisplay })
     .filter({ hasText: track })
     .first();
   await row.waitFor({ state: "visible" });
@@ -163,7 +234,7 @@ async function prepareFrame() {
 
   const rowText = await row.innerText();
   const searchValue = await search.inputValue();
-  if (!rowText.includes(revision) || !rowText.includes(track)) {
+  if (!rowText.includes(revisionDisplay) || !rowText.includes(track)) {
     throw new Error(`selected row does not match revision ${revision} and track ${track}`);
   }
   if (searchValue !== query) {
@@ -220,6 +291,104 @@ for (const file of process.argv.slice(2)) {
 }
 EOF
 
+cat > "$TMP_DIR/manifest.mjs" <<'EOF'
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+
+const [
+  repoRoot,
+  exampleManifestPath,
+  darkPath,
+  lightPath,
+  finalDarkPath,
+  finalLightPath,
+  outputPath,
+  producerVersion,
+  producerCommit,
+  hideObservations,
+] = process.argv.slice(2);
+
+const digest = bytes => crypto.createHash("sha256").update(bytes).digest("hex");
+const relative = file => {
+  const value = path.relative(repoRoot, file).split(path.sep).join("/");
+  if (!value || value === ".." || value.startsWith("../")) {
+    throw new Error(`${file} is outside ${repoRoot}`);
+  }
+  return value;
+};
+const png = file => {
+  const bytes = fs.readFileSync(file);
+  if (bytes.subarray(0, 8).toString("hex") !== "89504e470d0a1a0a") {
+    throw new Error(`${file} is not a PNG`);
+  }
+  return {
+    width: bytes.readUInt32BE(16),
+    height: bytes.readUInt32BE(20),
+    sha256: digest(bytes),
+  };
+};
+
+const exampleBytes = fs.readFileSync(exampleManifestPath);
+const example = JSON.parse(exampleBytes);
+if (example.schema !== "pointbreak.review-example-pack" || example.version !== 1) {
+  throw new Error("unsupported Review example pack manifest");
+}
+if (example.classification !== "reproducible_sample_record") {
+  throw new Error(`unsupported example classification: ${example.classification}`);
+}
+if (example.record.verificationStatus !== "unsigned") {
+  throw new Error(`expected unsigned example, got ${example.record.verificationStatus}`);
+}
+if (!Array.isArray(example.record.writerActors) || example.record.writerActors.length === 0) {
+  throw new Error("example writerActors must be a non-empty array");
+}
+if (!/^[0-9a-f]{40}$/.test(producerCommit)) {
+  throw new Error(`producer commit is not a full Git OID: ${producerCommit}`);
+}
+
+const hiddenEventTypes = ["validation"];
+if (hideObservations === "true") hiddenEventTypes.unshift("observation");
+const manifest = {
+  schema: "com.withpointbreak.review-interface-capture/v2",
+  producer: {
+    name: "shore",
+    version: producerVersion,
+    commit: producerCommit,
+  },
+  example: {
+    name: example.name,
+    classification: example.classification,
+    manifestPath: relative(exampleManifestPath),
+    manifestSha256: digest(exampleBytes),
+  },
+  record: {
+    revision: example.record.revision,
+    track: example.record.track,
+    selectedAssessment: example.record.selectedAssessment,
+    eventSetHash: example.record.eventSetHash,
+    writerActors: example.record.writerActors,
+    verificationStatus: example.record.verificationStatus,
+    reproducibleFromPublicPack: true,
+    publiclyInspectable: false,
+    redactions: [],
+  },
+  capture: {
+    viewport: { width: 900, height: 506 },
+    deviceScaleFactor: 2,
+    density: "comfortable",
+    sort: "newest_first",
+    hiddenEventTypes,
+  },
+  assets: {
+    dark: { path: relative(finalDarkPath), ...png(darkPath) },
+    light: { path: relative(finalLightPath), ...png(lightPath) },
+  },
+};
+
+fs.writeFileSync(outputPath, `${JSON.stringify(manifest, null, 2)}\n`);
+EOF
+
 echo "Capturing Pointbreak Review screenshots"
 note "inspector : $BASE_URL"
 note "query     : revision:$REVISION track:$TRACK"
@@ -240,9 +409,38 @@ DARK_CAPTURE="$TMP_DIR/shore-inspector-dark.png"
 LIGHT_CAPTURE="$TMP_DIR/shore-inspector-light.png"
 node "$TMP_DIR/verify.mjs" "$DARK_CAPTURE" "$LIGHT_CAPTURE"
 
-cp "$DARK_CAPTURE" "$OUT_DIR/shore-inspector-dark.png"
-cp "$LIGHT_CAPTURE" "$OUT_DIR/shore-inspector-light.png"
+if [ -z "$EXAMPLE_MANIFEST" ]; then
+  cp "$DARK_CAPTURE" "$OUT_DIR/shore-inspector-dark.png"
+  cp "$LIGHT_CAPTURE" "$OUT_DIR/shore-inspector-light.png"
+else
+  MANIFEST_DIR="$(dirname "$MANIFEST")"
+  mkdir -p "$MANIFEST_DIR"
+  OUT_DIR="$(cd "$OUT_DIR" && pwd)"
+  MANIFEST_DIR="$(cd "$MANIFEST_DIR" && pwd)"
+  MANIFEST="$MANIFEST_DIR/$(basename "$MANIFEST")"
+
+  PRODUCER_COMMIT="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+  PRODUCER_VERSION="$(cargo metadata --no-deps --format-version=1 \
+    | node -e 'let value=""; process.stdin.on("data", chunk => value += chunk); process.stdin.on("end", () => { const data = JSON.parse(value); const root = data.packages.find(pkg => pkg.manifest_path === process.argv[1]); if (!root) throw new Error("Pointbreak package not found"); process.stdout.write(root.version); });' "$REPO_ROOT/Cargo.toml")"
+
+  STAGED_DARK="$(mktemp "$OUT_DIR/.shore-inspector-dark.XXXXXX.png")"
+  STAGED_LIGHT="$(mktemp "$OUT_DIR/.shore-inspector-light.XXXXXX.png")"
+  STAGED_MANIFEST="$(mktemp "$MANIFEST_DIR/.review-interface-capture.XXXXXX.json")"
+  cp "$DARK_CAPTURE" "$STAGED_DARK"
+  cp "$LIGHT_CAPTURE" "$STAGED_LIGHT"
+  node "$TMP_DIR/manifest.mjs" \
+    "$REPO_ROOT" "$EXAMPLE_MANIFEST" "$STAGED_DARK" "$STAGED_LIGHT" \
+    "$OUT_DIR/shore-inspector-dark.png" "$OUT_DIR/shore-inspector-light.png" \
+    "$STAGED_MANIFEST" "$PRODUCER_VERSION" "$PRODUCER_COMMIT" "$HIDE_OBSERVATIONS"
+
+  # The lock moves last. An interruption during these three operations is
+  # detected by the integrity test rather than blessing a mixed capture.
+  mv "$STAGED_DARK" "$OUT_DIR/shore-inspector-dark.png"
+  mv "$STAGED_LIGHT" "$OUT_DIR/shore-inspector-light.png"
+  mv "$STAGED_MANIFEST" "$MANIFEST"
+fi
 
 note "dark      : $OUT_DIR/shore-inspector-dark.png"
 note "light     : $OUT_DIR/shore-inspector-light.png"
 note "result    : 1800x1012 PNG pair"
+[ -z "$MANIFEST" ] || note "manifest  : $MANIFEST"

@@ -1,0 +1,76 @@
+{
+  "schema": "pointbreak.review-example-pack",
+  "version": 1,
+  "name": "checkout-refactor",
+  "classification": "reproducible_sample_record",
+  "producer": {
+    "name": "shore",
+    "version": "0.5.0",
+    "commit": "14913c83c8ae10ce933315c3d337c47bfc5a2a50"
+  },
+  "record": {
+    "revision": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f",
+    "track": "example:marketing-review-proof",
+    "selectedAssessment": "accepted",
+    "eventSetHash": "sha256:cabdabbbdf88ab71b43faee14cc28bf8e407e5c2bfc18d07af4bba126da12243",
+    "eventCount": 13,
+    "writerActors": [
+      "actor:agent:pointbreak-example-author",
+      "actor:agent:pointbreak-example-reviewer"
+    ],
+    "verificationStatus": "unsigned"
+  },
+  "source": {
+    "bundlePath": "source.bundle",
+    "bundleSha256": "7bdb189924a2dcf4aa659edeb492462959d89a06eb7e7faf11d49141da554cda",
+    "bundleRef": "refs/heads/main",
+    "base": {
+      "commitOid": "f1a8ed1801f669b1b846e482d198092cd6e617df",
+      "treeOid": "777dd48a0031a8f05c39c6c2d105b7743127a1e8"
+    },
+    "target": {
+      "commitOid": "3e7b4b3e1e1e7cccfc14a4c724204ff381b315e4",
+      "treeOid": "6ef338a9c41d1a8841b21ad5be5bac502fbcd92c"
+    },
+    "response": {
+      "commitOid": "c4f50c2dc010f69f9080d0ad6b0999728568c3c1",
+      "treeOid": "7eaaa3b913d161980403827b4ed91c51803ff9d6"
+    }
+  },
+  "events": {
+    "path": "events.json",
+    "count": 13,
+    "sha256": "65f47d96d04a6a4797cff9cb07a8e3e5f04708a33826e8cbed5a811d359795ad"
+  },
+  "artifacts": [
+    {
+      "kind": "object",
+      "contentHash": "sha256:c366c7cb8d826536573781f9136d9ccbcebc17301cc6aaba0b8a4f1c2f641327",
+      "path": "artifacts/sha256-c366c7cb8d826536573781f9136d9ccbcebc17301cc6aaba0b8a4f1c2f641327.bin",
+      "sha256": "1a1a62fa5e52893c605fd209f0353b29a29f124db1a77d59986b66ecd55860f6"
+    }
+  ],
+  "documents": {
+    "history": {
+      "path": "exports/history.json",
+      "schema": "pointbreak.review-history",
+      "version": 1,
+      "sha256": "7887e18a2a65dab4c16ba823a7d7e1e912298d0a2073e9445e7229af4a2a3266",
+      "filters": {
+        "includeBody": true,
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      }
+    },
+    "revision": {
+      "path": "exports/revision.json",
+      "schema": "pointbreak.review-revision",
+      "version": 2,
+      "sha256": "b2566dbf5e2de0d835d936ef8f1b59163fc84624e60a1d529d90b78fcea09871",
+      "filters": {
+        "includeBody": true,
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f",
+        "trackId": "example:marketing-review-proof"
+      }
+    }
+  }
+}

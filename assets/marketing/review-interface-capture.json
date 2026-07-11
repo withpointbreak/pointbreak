@@ -1,14 +1,28 @@
 {
-  "schema": "com.withpointbreak.review-interface-capture/v1",
-  "source": {
+  "schema": "com.withpointbreak.review-interface-capture/v2",
+  "producer": {
+    "name": "shore",
+    "version": "0.5.0",
+    "commit": "14913c83c8ae10ce933315c3d337c47bfc5a2a50"
+  },
+  "example": {
+    "name": "checkout-refactor",
+    "classification": "reproducible_sample_record",
+    "manifestPath": "examples/review/checkout-refactor/manifest.json",
+    "manifestSha256": "a63e1ba5bbe3451e719ef97ed9b66ee178bbc8b0d606685bdbbe42cd7b877645"
+  },
+  "record": {
     "revision": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f",
     "track": "example:marketing-review-proof",
-    "selected_assessment": "accepted",
-    "writer_actors": [
+    "selectedAssessment": "accepted",
+    "eventSetHash": "sha256:cabdabbbdf88ab71b43faee14cc28bf8e407e5c2bfc18d07af4bba126da12243",
+    "writerActors": [
       "actor:agent:pointbreak-example-author",
       "actor:agent:pointbreak-example-reviewer"
     ],
-    "publicly_inspectable": false,
+    "verificationStatus": "unsigned",
+    "reproducibleFromPublicPack": true,
+    "publiclyInspectable": false,
     "redactions": []
   },
   "capture": {
@@ -16,10 +30,10 @@
       "width": 900,
       "height": 506
     },
-    "device_scale_factor": 2,
+    "deviceScaleFactor": 2,
     "density": "comfortable",
     "sort": "newest_first",
-    "hidden_event_types": [
+    "hiddenEventTypes": [
       "observation",
       "validation"
     ]
@@ -29,13 +43,13 @@
       "path": "assets/marketing/shore-inspector-dark.png",
       "width": 1800,
       "height": 1012,
-      "sha256": "cc3678da02a863bcafec3bb81e2aec3be29cc45c78710c0fa527e652bfce484a"
+      "sha256": "1d689585ef058e7bd63b9abd26ad9e82ee098132b587ea0ce5c36c1be3d4d452"
     },
     "light": {
       "path": "assets/marketing/shore-inspector-light.png",
       "width": 1800,
       "height": 1012,
-      "sha256": "6af22669145d2e9d02a9d61ed146e11eb392f074fd9951b225a1c64c701a512c"
+      "sha256": "58e64b4475f8f0383d219dc2f96b484d5cd06c8e26b1a7c4150204afb95ad8e6"
     }
   }
 }

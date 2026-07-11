@@ -1,0 +1,652 @@
+{
+  "schema": "pointbreak.review-revision",
+  "version": 2,
+  "eventSetHash": "sha256:cabdabbbdf88ab71b43faee14cc28bf8e407e5c2bfc18d07af4bba126da12243",
+  "eventCount": 13,
+  "revision": {
+    "id": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f",
+    "journalId": "journal:default",
+    "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f",
+    "objectId": "obj:sha256:296f82b6468cce5be8ec6a60206dd3de03c761409a7adcb13bb76ce9feebcd4b",
+    "source": {
+      "kind": "git_commit_range",
+      "mode": "base_tree_to_target_tree"
+    },
+    "base": {
+      "kind": "git_commit",
+      "commitOid": "f1a8ed1801f669b1b846e482d198092cd6e617df",
+      "treeOid": "777dd48a0031a8f05c39c6c2d105b7743127a1e8"
+    },
+    "target": {
+      "kind": "git_commit",
+      "commitOid": "3e7b4b3e1e1e7cccfc14a4c724204ff381b315e4",
+      "treeOid": "6ef338a9c41d1a8841b21ad5be5bac502fbcd92c"
+    },
+    "objectArtifactContentHash": "sha256:c366c7cb8d826536573781f9136d9ccbcebc17301cc6aaba0b8a4f1c2f641327"
+  },
+  "filters": {
+    "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f",
+    "trackId": "example:marketing-review-proof",
+    "includeBody": true
+  },
+  "summary": {
+    "fileCount": 1,
+    "rowCount": 18,
+    "narrativeRowCount": 9,
+    "snapshotRowCount": 9,
+    "snapshotRemainderRowCount": 9,
+    "observationCount": 3,
+    "inputRequestCount": 1,
+    "assessmentCount": 2,
+    "validationCheckCount": 3
+  },
+  "currentAssessment": {
+    "status": "resolved",
+    "assessmentId": "assess:sha256:131e0f06e28c0c1f688e2da745bf1539dfe0f943fdd64a066b7dc550543aca77",
+    "assessment": "accepted"
+  },
+  "observations": [
+    {
+      "id": "obs:sha256:8a9a1c1c013499512111c090e19b922bd38172ad39d3b8143a6b9b1638ec0c49",
+      "eventId": "evt:sha256:674f016b984d65c995c72a60e80b482c9085eaa8feb711b0c2cf3d1e9ed3362f",
+      "trackId": "example:marketing-review-proof",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "title": "Refactor preserves checkout behavior",
+      "body": "The existing checkout behavior remains covered by the original test.",
+      "tags": [],
+      "confidence": "high",
+      "status": "active",
+      "supersedes": [],
+      "bodyContentHash": "sha256:ae507a7cd708bd2c0b4f87dcc40133652d5bcc3e71053cb03e4a9348b2759c1c",
+      "createdAt": "unix-ms:1783748944398",
+      "writer": {
+        "actorId": "actor:agent:pointbreak-example-author",
+        "producer": {
+          "name": "shore",
+          "version": "0.5.0"
+        }
+      }
+    },
+    {
+      "id": "obs:sha256:110b53faaa8ab3116c0e2d865afce7a3e5b2ed5ee7cad2b0fe347e7823311115",
+      "eventId": "evt:sha256:7223415b835775755ab55fe3981a7d74b333727e306f41db72350cce83014c39",
+      "trackId": "example:marketing-review-proof",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "title": "Null-user cause isolated",
+      "body": "The new normalization dereferenced the user before the checkout invariant could represent an absent identity.",
+      "tags": [],
+      "confidence": "high",
+      "status": "active",
+      "supersedes": [],
+      "bodyContentHash": "sha256:3e4e1812608cdc0d6772a777dafb2aaf38b0e9d23349c4bbac02adcde578e6d3",
+      "createdAt": "unix-ms:1783749027519",
+      "writer": {
+        "actorId": "actor:agent:pointbreak-example-author",
+        "producer": {
+          "name": "shore",
+          "version": "0.5.0"
+        }
+      }
+    },
+    {
+      "id": "obs:sha256:6642d468316138447fd1603779393df3c013163f28224e672b814ae167460d20",
+      "eventId": "evt:sha256:b4ed7750540408afe79773c3dabc5000718a152e9ed3c4d04d5daf5c26288b41",
+      "trackId": "example:marketing-review-proof",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "title": "Null-user regression test added",
+      "body": "The checkout test now fixes the null-user behavior as an explicit invariant.",
+      "tags": [],
+      "confidence": "high",
+      "status": "active",
+      "supersedes": [],
+      "bodyContentHash": "sha256:483b6d17cfd4a9ca3419ed110d7e3902b966d1f26d822925e8e2901e2133d8d5",
+      "createdAt": "unix-ms:1783749047269",
+      "writer": {
+        "actorId": "actor:agent:pointbreak-example-author",
+        "producer": {
+          "name": "shore",
+          "version": "0.5.0"
+        }
+      }
+    }
+  ],
+  "inputRequests": [
+    {
+      "id": "input-request:sha256:7fbe2f041cc9310e53fddb74d1e875ca7d28ea2b2f32e94615720eb3beb07051",
+      "eventId": "evt:sha256:d3fb68ccb68de4465c84b4594730497799ee04ea31f4a25ee1d4e3a32bc51418",
+      "trackId": "example:marketing-review-proof",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "mode": "operative",
+      "reasonCode": "manual_decision_required",
+      "title": "Define the null-user invariant",
+      "body": "Should checkout explicitly preserve an absent user as a null identifier?",
+      "bodyContentHash": "sha256:a73f0ae455be0c4d7336d97fa3a27934742e05af35f9847f2cf3710bd1822342",
+      "status": "responded",
+      "responses": [
+        {
+          "id": "input-request-response:sha256:b5bee56b2726effed5dee9c44ef31ec92bd15fe69841c4342c0830b37d6dec16",
+          "eventId": "evt:sha256:655fa339a808ff9c9740fff8f5b65741d9c16938235a69aaad3c9f1decfc9f81",
+          "outcome": "approved",
+          "reason": "Checkout now preserves an absent user as a null identifier, and the regression test documents the invariant.",
+          "reasonContentHash": "sha256:b5033f1e4f63ea63f3eb0a42be1276c082b06ff104283ba3a2ada01c13bff753",
+          "createdAt": "unix-ms:1783749074273",
+          "writer": {
+            "actorId": "actor:agent:pointbreak-example-author",
+            "producer": {
+              "name": "shore",
+              "version": "0.5.0"
+            }
+          }
+        }
+      ],
+      "createdAt": "unix-ms:1783748970063",
+      "writer": {
+        "actorId": "actor:agent:pointbreak-example-reviewer",
+        "producer": {
+          "name": "shore",
+          "version": "0.5.0"
+        }
+      }
+    }
+  ],
+  "assessments": [
+    {
+      "id": "assess:sha256:12c1b3c464be63580a18370e73dc140e6fbeaad40347e0afc2f9f6788a83ca76",
+      "eventId": "evt:sha256:ea0bbd486eb28b4b024ef8278944260cd195937614995622cb7ab7bb5b6afcbd",
+      "trackId": "example:marketing-review-proof",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "assessment": "needs_changes",
+      "summary": "The null-user path fails and the intended invariant is still unanswered.",
+      "summaryContentHash": "sha256:eb9300cd8c4e5eec9417e4a905fe54d0a46c86830982e9da129153f41bb62728",
+      "status": "replaced",
+      "replaces": [],
+      "relatedObservations": [],
+      "relatedInputRequests": [
+        "input-request:sha256:7fbe2f041cc9310e53fddb74d1e875ca7d28ea2b2f32e94615720eb3beb07051"
+      ],
+      "createdAt": "unix-ms:1783748987412",
+      "writer": {
+        "actorId": "actor:agent:pointbreak-example-reviewer",
+        "producer": {
+          "name": "shore",
+          "version": "0.5.0"
+        }
+      }
+    },
+    {
+      "id": "assess:sha256:131e0f06e28c0c1f688e2da745bf1539dfe0f943fdd64a066b7dc550543aca77",
+      "eventId": "evt:sha256:b412123aaad05f8355db932a4321c3b1c9bd738bf74694eaf9652e1adde589b3",
+      "trackId": "example:marketing-review-proof",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "assessment": "accepted",
+      "summary": "Accepted after the null-user invariant was defined, implemented, and independently verified.",
+      "summaryContentHash": "sha256:43a67b30d5f9348b48dffc88f5dfdd7587616cefaa4ef8a810a6a14b4470bd86",
+      "status": "current",
+      "replaces": [
+        "assess:sha256:12c1b3c464be63580a18370e73dc140e6fbeaad40347e0afc2f9f6788a83ca76"
+      ],
+      "relatedObservations": [
+        "obs:sha256:110b53faaa8ab3116c0e2d865afce7a3e5b2ed5ee7cad2b0fe347e7823311115",
+        "obs:sha256:6642d468316138447fd1603779393df3c013163f28224e672b814ae167460d20"
+      ],
+      "relatedInputRequests": [
+        "input-request:sha256:7fbe2f041cc9310e53fddb74d1e875ca7d28ea2b2f32e94615720eb3beb07051"
+      ],
+      "createdAt": "unix-ms:1783749102273",
+      "writer": {
+        "actorId": "actor:agent:pointbreak-example-reviewer",
+        "producer": {
+          "name": "shore",
+          "version": "0.5.0"
+        }
+      }
+    }
+  ],
+  "validationChecks": [
+    {
+      "id": "validation:sha256:8407251e4032821a454153e993307abe536e0237f3ff7c9d9b8f2096d36eef1a",
+      "eventId": "evt:sha256:fe9984ad43d229fb6072fccfd44312c589fee0e7fdabd8728a5b5b476b3d0fe3",
+      "trackId": "example:marketing-review-proof",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "checkName": "null-user branch",
+      "command": "node checkout.null-user.test.js",
+      "status": "failed",
+      "exitCode": 1,
+      "trigger": "manual",
+      "summary": "Checkout throws before it can represent a missing user.",
+      "summaryContentHash": "sha256:c9621ba93ebcad6a4a61d9afac6de7fedae4587a50d1912da8608189dfc7966c",
+      "logArtifactContentHashes": [],
+      "createdAt": "unix-ms:1783748957041",
+      "writer": {
+        "actorId": "actor:agent:pointbreak-example-reviewer",
+        "producer": {
+          "name": "shore",
+          "version": "0.5.0"
+        }
+      }
+    },
+    {
+      "id": "validation:sha256:2f2428744d9deb5f070f499b10595c3a606a4a185e590b1d8928c7d0182078f8",
+      "eventId": "evt:sha256:36e45654f2d21d10c458e08ed47d8eb0ef10c95711d1c3457d4833331039a532",
+      "trackId": "example:marketing-review-proof",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "checkName": "null-user regression test",
+      "command": "npm test",
+      "status": "passed",
+      "exitCode": 0,
+      "trigger": "manual",
+      "summary": "The original checkout case and null-user invariant both pass.",
+      "summaryContentHash": "sha256:9e5678d97141cb87e34f8e7d7d9542834fa9424d6ce00bb4e61ee917f4498d6c",
+      "logArtifactContentHashes": [],
+      "createdAt": "unix-ms:1783749059764",
+      "writer": {
+        "actorId": "actor:agent:pointbreak-example-author",
+        "producer": {
+          "name": "shore",
+          "version": "0.5.0"
+        }
+      }
+    },
+    {
+      "id": "validation:sha256:10c330a467aea8edc9f1cfa5ffe7359cb287bd70f41ecf50e78b4b0003ef2640",
+      "eventId": "evt:sha256:fdebd47e1e8481f7c115dd9c2a32e7a48bfe3c7da08dda3bbfb733545ffa7ca5",
+      "trackId": "example:marketing-review-proof",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "checkName": "null-user fix and invariant",
+      "command": "npm test",
+      "status": "passed",
+      "exitCode": 0,
+      "trigger": "manual",
+      "summary": "The reviewer reproduced the fixed null-user path and confirmed the invariant test.",
+      "summaryContentHash": "sha256:8daa2471484f4a2cda103d61e9a793a98ad3c0b0099408c4c900d796ab9cb351",
+      "logArtifactContentHashes": [],
+      "createdAt": "unix-ms:1783749088010",
+      "writer": {
+        "actorId": "actor:agent:pointbreak-example-reviewer",
+        "producer": {
+          "name": "shore",
+          "version": "0.5.0"
+        }
+      }
+    }
+  ],
+  "rows": [
+    {
+      "id": "row:000000",
+      "kind": "observation",
+      "projectionPhase": "narrative",
+      "projectionOrder": 0,
+      "coverage": "reviewed",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "relatedObservationIds": [
+        "obs:sha256:8a9a1c1c013499512111c090e19b922bd38172ad39d3b8143a6b9b1638ec0c49"
+      ],
+      "relatedInputRequestIds": [],
+      "relatedAssessmentIds": [],
+      "relatedValidationCheckIds": []
+    },
+    {
+      "id": "row:000001",
+      "kind": "observation",
+      "projectionPhase": "narrative",
+      "projectionOrder": 1,
+      "coverage": "reviewed",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "relatedObservationIds": [
+        "obs:sha256:110b53faaa8ab3116c0e2d865afce7a3e5b2ed5ee7cad2b0fe347e7823311115"
+      ],
+      "relatedInputRequestIds": [],
+      "relatedAssessmentIds": [],
+      "relatedValidationCheckIds": []
+    },
+    {
+      "id": "row:000002",
+      "kind": "observation",
+      "projectionPhase": "narrative",
+      "projectionOrder": 2,
+      "coverage": "reviewed",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "relatedObservationIds": [
+        "obs:sha256:6642d468316138447fd1603779393df3c013163f28224e672b814ae167460d20"
+      ],
+      "relatedInputRequestIds": [],
+      "relatedAssessmentIds": [],
+      "relatedValidationCheckIds": []
+    },
+    {
+      "id": "row:000003",
+      "kind": "input_request",
+      "projectionPhase": "narrative",
+      "projectionOrder": 3,
+      "coverage": "reviewed",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "relatedObservationIds": [],
+      "relatedInputRequestIds": [
+        "input-request:sha256:7fbe2f041cc9310e53fddb74d1e875ca7d28ea2b2f32e94615720eb3beb07051"
+      ],
+      "relatedAssessmentIds": [],
+      "relatedValidationCheckIds": []
+    },
+    {
+      "id": "row:000004",
+      "kind": "assessment",
+      "projectionPhase": "narrative",
+      "projectionOrder": 4,
+      "coverage": "reviewed",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "relatedObservationIds": [],
+      "relatedInputRequestIds": [
+        "input-request:sha256:7fbe2f041cc9310e53fddb74d1e875ca7d28ea2b2f32e94615720eb3beb07051"
+      ],
+      "relatedAssessmentIds": [
+        "assess:sha256:12c1b3c464be63580a18370e73dc140e6fbeaad40347e0afc2f9f6788a83ca76"
+      ],
+      "relatedValidationCheckIds": []
+    },
+    {
+      "id": "row:000005",
+      "kind": "assessment",
+      "projectionPhase": "narrative",
+      "projectionOrder": 5,
+      "coverage": "reviewed",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "relatedObservationIds": [
+        "obs:sha256:110b53faaa8ab3116c0e2d865afce7a3e5b2ed5ee7cad2b0fe347e7823311115",
+        "obs:sha256:6642d468316138447fd1603779393df3c013163f28224e672b814ae167460d20"
+      ],
+      "relatedInputRequestIds": [
+        "input-request:sha256:7fbe2f041cc9310e53fddb74d1e875ca7d28ea2b2f32e94615720eb3beb07051"
+      ],
+      "relatedAssessmentIds": [
+        "assess:sha256:131e0f06e28c0c1f688e2da745bf1539dfe0f943fdd64a066b7dc550543aca77"
+      ],
+      "relatedValidationCheckIds": []
+    },
+    {
+      "id": "row:000006",
+      "kind": "validation_evidence",
+      "projectionPhase": "narrative",
+      "projectionOrder": 6,
+      "coverage": "reviewed",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "relatedObservationIds": [],
+      "relatedInputRequestIds": [],
+      "relatedAssessmentIds": [],
+      "relatedValidationCheckIds": [
+        "validation:sha256:8407251e4032821a454153e993307abe536e0237f3ff7c9d9b8f2096d36eef1a"
+      ]
+    },
+    {
+      "id": "row:000007",
+      "kind": "validation_evidence",
+      "projectionPhase": "narrative",
+      "projectionOrder": 7,
+      "coverage": "reviewed",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "relatedObservationIds": [],
+      "relatedInputRequestIds": [],
+      "relatedAssessmentIds": [],
+      "relatedValidationCheckIds": [
+        "validation:sha256:2f2428744d9deb5f070f499b10595c3a606a4a185e590b1d8928c7d0182078f8"
+      ]
+    },
+    {
+      "id": "row:000008",
+      "kind": "validation_evidence",
+      "projectionPhase": "narrative",
+      "projectionOrder": 8,
+      "coverage": "reviewed",
+      "target": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f"
+      },
+      "relatedObservationIds": [],
+      "relatedInputRequestIds": [],
+      "relatedAssessmentIds": [],
+      "relatedValidationCheckIds": [
+        "validation:sha256:10c330a467aea8edc9f1cfa5ffe7359cb287bd70f41ecf50e78b4b0003ef2640"
+      ]
+    },
+    {
+      "id": "row:000009",
+      "kind": "file_header",
+      "projectionPhase": "snapshot_remainder",
+      "projectionOrder": 9,
+      "snapshotOrder": {
+        "fileIndex": 0
+      },
+      "coverage": "unreviewed",
+      "target": {
+        "kind": "file",
+        "revisionId": "rev:sha256:fa6981d38de12a850da707b69657e7a9153120c92a0dd08f534fbb40394d885f",
+        "filePath": "checkout.js"
+      },
+      "filePath": "checkout.js",
+      "oldPath": "checkout.js",
+      "relatedObservationIds": [],
+      "relatedInputRequestIds": [],
+      "relatedAssessmentIds": [],
+      "relatedValidationCheckIds": []
+    },
+    {
+      "id": "row:000010",
+      "kind": "hunk_header",
+      "projectionPhase": "snapshot_remainder",
+      "projectionOrder": 10,
+      "snapshotOrder": {
+        "fileIndex": 0,
+        "hunkIndex": 0
+      },
+      "coverage": "unreviewed",
+      "filePath": "checkout.js",
+      "oldPath": "checkout.js",
+      "relatedObservationIds": [],
+      "relatedInputRequestIds": [],
+      "relatedAssessmentIds": [],
+      "relatedValidationCheckIds": []
+    },
+    {
+      "id": "row:000011",
+      "kind": "diff",
+      "projectionPhase": "snapshot_remainder",
+      "projectionOrder": 11,
+      "snapshotOrder": {
+        "fileIndex": 0,
+        "hunkIndex": 0,
+        "rowIndex": 0
+      },
+      "coverage": "unreviewed",
+      "filePath": "checkout.js",
+      "oldPath": "checkout.js",
+      "relatedObservationIds": [],
+      "relatedInputRequestIds": [],
+      "relatedAssessmentIds": [],
+      "relatedValidationCheckIds": []
+    },
+    {
+      "id": "row:000012",
+      "kind": "diff",
+      "projectionPhase": "snapshot_remainder",
+      "projectionOrder": 12,
+      "snapshotOrder": {
+        "fileIndex": 0,
+        "hunkIndex": 0,
+        "rowIndex": 1
+      },
+      "coverage": "unreviewed",
+      "filePath": "checkout.js",
+      "oldPath": "checkout.js",
+      "relatedObservationIds": [],
+      "relatedInputRequestIds": [],
+      "relatedAssessmentIds": [],
+      "relatedValidationCheckIds": []
+    },
+    {
+      "id": "row:000013",
+      "kind": "diff",
+      "projectionPhase": "snapshot_remainder",
+      "projectionOrder": 13,
+      "snapshotOrder": {
+        "fileIndex": 0,
+        "hunkIndex": 0,
+        "rowIndex": 2
+      },
+      "coverage": "unreviewed",
+      "filePath": "checkout.js",
+      "oldPath": "checkout.js",
+      "relatedObservationIds": [],
+      "relatedInputRequestIds": [],
+      "relatedAssessmentIds": [],
+      "relatedValidationCheckIds": []
+    },
+    {
+      "id": "row:000014",
+      "kind": "diff",
+      "projectionPhase": "snapshot_remainder",
+      "projectionOrder": 14,
+      "snapshotOrder": {
+        "fileIndex": 0,
+        "hunkIndex": 0,
+        "rowIndex": 3
+      },
+      "coverage": "unreviewed",
+      "filePath": "checkout.js",
+      "oldPath": "checkout.js",
+      "relatedObservationIds": [],
+      "relatedInputRequestIds": [],
+      "relatedAssessmentIds": [],
+      "relatedValidationCheckIds": []
+    },
+    {
+      "id": "row:000015",
+      "kind": "diff",
+      "projectionPhase": "snapshot_remainder",
+      "projectionOrder": 15,
+      "snapshotOrder": {
+        "fileIndex": 0,
+        "hunkIndex": 0,
+        "rowIndex": 4
+      },
+      "coverage": "unreviewed",
+      "filePath": "checkout.js",
+      "oldPath": "checkout.js",
+      "relatedObservationIds": [],
+      "relatedInputRequestIds": [],
+      "relatedAssessmentIds": [],
+      "relatedValidationCheckIds": []
+    },
+    {
+      "id": "row:000016",
+      "kind": "diff",
+      "projectionPhase": "snapshot_remainder",
+      "projectionOrder": 16,
+      "snapshotOrder": {
+        "fileIndex": 0,
+        "hunkIndex": 0,
+        "rowIndex": 5
+      },
+      "coverage": "unreviewed",
+      "filePath": "checkout.js",
+      "oldPath": "checkout.js",
+      "relatedObservationIds": [],
+      "relatedInputRequestIds": [],
+      "relatedAssessmentIds": [],
+      "relatedValidationCheckIds": []
+    },
+    {
+      "id": "row:000017",
+      "kind": "diff",
+      "projectionPhase": "snapshot_remainder",
+      "projectionOrder": 17,
+      "snapshotOrder": {
+        "fileIndex": 0,
+        "hunkIndex": 0,
+        "rowIndex": 6
+      },
+      "coverage": "unreviewed",
+      "filePath": "checkout.js",
+      "oldPath": "checkout.js",
+      "relatedObservationIds": [],
+      "relatedInputRequestIds": [],
+      "relatedAssessmentIds": [],
+      "relatedValidationCheckIds": []
+    }
+  ],
+  "commitRange": {
+    "anchored": true,
+    "currentCommits": [
+      {
+        "commitOid": "3e7b4b3e1e1e7cccfc14a4c724204ff381b315e4",
+        "treeOid": "6ef338a9c41d1a8841b21ad5be5bac502fbcd92c",
+        "source": "capture_target"
+      },
+      {
+        "commitOid": "c4f50c2dc010f69f9080d0ad6b0999728568c3c1",
+        "treeOid": "7eaaa3b913d161980403827b4ed91c51803ff9d6",
+        "commitAssociationId": "assoc-commit:sha256:64b5dd71c07463b0ddb34b07c69595e3f2df6f64eecff8d21dfc3635ab2015df",
+        "source": "association"
+      }
+    ],
+    "currentRefs": [
+      {
+        "refAssociationId": "assoc-ref:sha256:bdcd32a260bbcdc43953f66c8d331ee6f2b1ce86f044d22fa8ddbc8a2c06dd99",
+        "refName": "refs/heads/main",
+        "headOid": "3e7b4b3e1e1e7cccfc14a4c724204ff381b315e4"
+      }
+    ],
+    "withdrawnCommits": [],
+    "withdrawnRefs": []
+  },
+  "diagnostics": []
+}
