@@ -392,10 +392,13 @@ describe("pollFreshness", () => {
     expect(store.getState().lastCommitGraphStamp).toBe("stamp-moved");
   });
 
-  it("adopts a late stamp baseline without reloading, then detects the next move", async () => {
+  it("reloads when a stamp first appears after a degraded load, then tracks it", async () => {
     // A degraded load (server could not derive the stamp) seeds a null
-    // baseline. The first stamped poll must ADOPT the stamp silently — nothing
-    // is known to have changed — and the next stamp move must then reload.
+    // baseline, and the documents were fetched under an UNKNOWN git state —
+    // git may have moved during the outage. The first stamped poll must
+    // therefore RELOAD (re-seeding the baseline through load()), not silently
+    // adopt a stamp the displayed data may predate; a steady stamp afterwards
+    // reports unchanged.
     setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT });
     await data.load();
     expect(store.getState().lastCommitGraphStamp).toBeNull();
@@ -406,17 +409,14 @@ describe("pollFreshness", () => {
     });
     await data.pollFreshness();
     expect(document.querySelector("#refresh")?.getAttribute("data-state")).toBe(
-      "watching",
+      "updated",
     );
+    // The reload's own freshness fetch re-seeded the baseline.
     expect(store.getState().lastCommitGraphStamp).toBe("stamp-recovered");
 
-    setFreshnessResponse({
-      eventCount: HISTORY_EVENT_COUNT,
-      commitGraphStamp: "stamp-moved-again",
-    });
     await data.pollFreshness();
     expect(document.querySelector("#refresh")?.getAttribute("data-state")).toBe(
-      "updated",
+      "watching",
     );
   });
 

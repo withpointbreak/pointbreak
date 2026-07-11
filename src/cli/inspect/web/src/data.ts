@@ -386,26 +386,23 @@ export async function pollFreshness(): Promise<void> {
   try {
     const f = (await fetchJSON("/api/freshness")) as FreshnessDoc;
     const s = getState();
-    // The stamp participates only when both sides carry one: a degraded
-    // server omits it (transient git failure), and absence must not read as
-    // change — an omit↔value flap would fire spurious full reloads.
+    // An OMITTED stamp is never a signal: the server could not derive it
+    // (transient git failure), and an omit↔value flap must not fire reloads —
+    // the baseline is only written by load(), so omission leaves it intact. A
+    // PRESENT stamp against a null baseline (the load itself ran degraded) IS
+    // a signal: the displayed documents were fetched under an unknown git
+    // state and may already be stale, so recovery reloads — which re-seeds the
+    // baseline — rather than silently adopting a stamp the data may predate.
     const stampChanged =
       f.commitGraphStamp != null &&
-      s.lastCommitGraphStamp != null &&
-      f.commitGraphStamp !== s.lastCommitGraphStamp;
+      (s.lastCommitGraphStamp == null ||
+        f.commitGraphStamp !== s.lastCommitGraphStamp);
     const changed = (f.eventCount ?? null) !== s.lastEventCount || stampChanged;
     if (changed) {
       setLiveness("updated");
       await load();
       setTimeout(() => setLiveness("watching"), 1200);
     } else {
-      // Recovery from a degraded load: a baseline seeded while the stamp was
-      // unavailable is null, and a null baseline can never satisfy
-      // stampChanged — adopt the first stamp the poll sees (no reload; nothing
-      // is known to have changed) so the NEXT move is detected.
-      if (f.commitGraphStamp != null && s.lastCommitGraphStamp == null) {
-        commit({ lastCommitGraphStamp: f.commitGraphStamp });
-      }
       setLiveness("watching");
     }
   } catch {

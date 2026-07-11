@@ -1331,16 +1331,13 @@
     try {
       const f = await fetchJSON("/api/freshness");
       const s = getState();
-      const stampChanged = f.commitGraphStamp != null && s.lastCommitGraphStamp != null && f.commitGraphStamp !== s.lastCommitGraphStamp;
+      const stampChanged = f.commitGraphStamp != null && (s.lastCommitGraphStamp == null || f.commitGraphStamp !== s.lastCommitGraphStamp);
       const changed = (f.eventCount ?? null) !== s.lastEventCount || stampChanged;
       if (changed) {
         setLiveness("updated");
         await load();
         setTimeout(() => setLiveness("watching"), 1200);
       } else {
-        if (f.commitGraphStamp != null && s.lastCommitGraphStamp == null) {
-          commit({ lastCommitGraphStamp: f.commitGraphStamp });
-        }
         setLiveness("watching");
       }
     } catch {
