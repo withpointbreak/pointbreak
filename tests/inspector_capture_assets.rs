@@ -1,10 +1,13 @@
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+#[cfg(unix)]
 use std::process::Command;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
 use tempfile::tempdir;
 
 fn repo_root() -> &'static Path {
@@ -157,6 +160,7 @@ fn capture_script_supports_pack_linkage_without_changing_readme_defaults() {
 }
 
 #[test]
+#[cfg(unix)]
 fn pack_aware_capture_preserves_accepted_outputs_on_command_failure() {
     let temp = tempdir().expect("temporary directory");
     let output = temp.path().join("assets");
@@ -205,6 +209,7 @@ fn pack_aware_capture_preserves_accepted_outputs_on_command_failure() {
     assert_eq!(fs::read(manifest).unwrap(), b"accepted manifest");
 }
 
+#[cfg(unix)]
 fn make_executable(path: &Path) {
     let mut permissions = fs::metadata(path).unwrap().permissions();
     permissions.set_mode(0o755);
