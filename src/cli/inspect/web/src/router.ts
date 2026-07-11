@@ -322,28 +322,27 @@ export function resolve(patch: RoutePatch): Partial<State> {
     return next;
   }
   const sel = patch.selected ?? { kind: null, id: null };
-  // A revision absent from the loaded list but present in a supersession
-  // component is only grouped away, not missing: the detail pane's
-  // entity-primary `/api/revisions/{id}` fetch resolves the exact id, so the
-  // selection stands. Only an id in neither place falls back.
-  if (
-    sel.kind === "revision" &&
-    sel.id &&
-    !revisionExists(sel.id) &&
-    !revisionInAnyThread(sel.id)
-  ) {
-    // Keep the requested lens (only the selection was absent); name it in the
-    // diagnostic so the message matches the lens actually shown.
-    const lens = patch.lens || DEFAULT_LENS;
-    showRouteDiagnostic(
-      routeDiagnostic(
-        `fell back to the ${lens} lens — revision ${shortRef(sel.id)} is not in this store`,
-        freshnessDiagnostic,
-      ),
-    );
-    next.lens = lens;
-    next.selected = { kind: null, id: null };
-    return next;
+  if (sel.kind === "revision" && sel.id && !revisionExists(sel.id)) {
+    if (revisionInAnyThread(sel.id)) {
+      // Grouped away from the loaded list but known to the store: the detail
+      // pane's entity-primary `/api/revisions/{id}` fetch resolves the exact
+      // id, so the selection stands — and it always opens, because no list
+      // card exists for the id and a parked cursor would be invisible state.
+      next.open = true;
+    } else {
+      // Keep the requested lens (only the selection was absent); name it in the
+      // diagnostic so the message matches the lens actually shown.
+      const lens = patch.lens || DEFAULT_LENS;
+      showRouteDiagnostic(
+        routeDiagnostic(
+          `fell back to the ${lens} lens — revision ${shortRef(sel.id)} is not in this store`,
+          freshnessDiagnostic,
+        ),
+      );
+      next.lens = lens;
+      next.selected = { kind: null, id: null };
+      return next;
+    }
   }
   // An event selection is not resolved against the loaded window here (the history
   // is server-paged, so the event may be off the loaded page). `applyHash`

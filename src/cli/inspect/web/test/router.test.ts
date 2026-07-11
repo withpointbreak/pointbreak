@@ -643,6 +643,41 @@ describe("applyHash (derive the view from the fragment, repaint via the subscrip
     expect(store.getState().lens).toBe("list");
   });
 
+  it("opens an absent-but-in-thread parked cursor so the state stays visible", () => {
+    // The parked form of the same deep link (e.g. a legacy #/threads?sel=…):
+    // the list lens has no card for a grouped-away id, so a closed cursor would
+    // be invisible state — no highlighted card, no detail, no diagnostic. The
+    // selection opens as the detail page instead (the entity-primary fetch
+    // resolves the exact id).
+    store.commit({
+      history: { entries: [], diagnostics: [] } as unknown as HistoryDoc,
+      revisions: { entries: [] } as unknown as RevisionsDoc,
+      threads: {
+        threads: [{ revisions: [REV] }],
+        revisionClassification: {},
+      } as unknown as ThreadsDoc,
+    });
+    mountInspectorDom();
+    history.replaceState(
+      null,
+      "",
+      `#/threads?sel=${encodeURIComponent(REV)}`,
+    );
+    router.applyHash();
+    expect(store.getState().lens).toBe("list");
+    expect(store.getState().selected).toEqual({ kind: "revision", id: REV });
+    expect(store.getState().open).toBe(true);
+  });
+
+  it("keeps a parked cursor parked when its revision is in the loaded list", () => {
+    seed();
+    mountInspectorDom();
+    history.replaceState(null, "", `#/list?sel=${encodeURIComponent(REV)}`);
+    router.applyHash();
+    expect(store.getState().selected).toEqual({ kind: "revision", id: REV });
+    expect(store.getState().open).toBe(false); // the list card is the visible state
+  });
+
   it("still clears a revision selection that is in neither the list nor any thread", () => {
     store.commit({
       history: { entries: [], diagnostics: [] } as unknown as HistoryDoc,

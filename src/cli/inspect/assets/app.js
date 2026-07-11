@@ -1897,17 +1897,21 @@
       return next;
     }
     const sel = patch.selected ?? { kind: null, id: null };
-    if (sel.kind === "revision" && sel.id && !revisionExists(sel.id) && !revisionInAnyThread(sel.id)) {
-      const lens = patch.lens || DEFAULT_LENS2;
-      showRouteDiagnostic(
-        routeDiagnostic(
-          `fell back to the ${lens} lens — revision ${shortRef(sel.id)} is not in this store`,
-          freshnessDiagnostic
-        )
-      );
-      next.lens = lens;
-      next.selected = { kind: null, id: null };
-      return next;
+    if (sel.kind === "revision" && sel.id && !revisionExists(sel.id)) {
+      if (revisionInAnyThread(sel.id)) {
+        next.open = true;
+      } else {
+        const lens = patch.lens || DEFAULT_LENS2;
+        showRouteDiagnostic(
+          routeDiagnostic(
+            `fell back to the ${lens} lens — revision ${shortRef(sel.id)} is not in this store`,
+            freshnessDiagnostic
+          )
+        );
+        next.lens = lens;
+        next.selected = { kind: null, id: null };
+        return next;
+      }
     }
     if (freshnessDiagnostic) {
       showRouteDiagnostic(freshnessDiagnostic);
