@@ -41,7 +41,7 @@ fn served_keyboard_help_lists_shipped_shortcuts() {
         "<kbd>k</kbd>",
         "<kbd>/</kbd>",
         "<kbd>g</kbd>",
-        "<kbd>4</kbd>",
+        "<kbd>3</kbd>",
         "<kbd>Esc</kbd>",
         "<kbd>?</kbd>",
     ] {

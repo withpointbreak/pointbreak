@@ -82,44 +82,6 @@ describe("currentThreads", () => {
   });
 });
 
-describe("threadRevisionOrder", () => {
-  it("orders revisions by their laid-out node position (y, then x)", () => {
-    const thread = {
-      revisions: ["rev:a", "rev:b"],
-      laidOut: {
-        nodes: [
-          { id: "rev:b", x: 0, y: 0 },
-          { id: "rev:a", x: 0, y: 10 },
-        ],
-      },
-    };
-    expect(model.threadRevisionOrder(thread)).toEqual(["rev:b", "rev:a"]);
-  });
-
-  it("falls back to the declared revision list when there are no laid-out nodes", () => {
-    expect(
-      model.threadRevisionOrder({ revisions: ["rev:a", "rev:b"] }),
-    ).toEqual(["rev:a", "rev:b"]);
-  });
-
-  it("appends revisions missing from the layout after the laid-out order", () => {
-    const thread = {
-      revisions: ["rev:a", "rev:b", "rev:c"],
-      laidOut: {
-        nodes: [
-          { id: "rev:b", x: 0, y: 0 },
-          { id: "rev:a", x: 0, y: 5 },
-        ],
-      },
-    };
-    expect(model.threadRevisionOrder(thread)).toEqual([
-      "rev:b",
-      "rev:a",
-      "rev:c",
-    ]);
-  });
-});
-
 describe("revisionClassification family", () => {
   beforeEach(() => {
     seedObjects({
@@ -444,22 +406,6 @@ describe("annotationsForRevision", () => {
   });
 });
 
-describe("renderThreadRevisionOverview", () => {
-  beforeEach(seedFixtures);
-
-  it("renders the thread overview from the revision target and overview", () => {
-    const html = model.renderThreadRevisionOverview(REV);
-    expect(html).toContain("thread-overview");
-    expect(html).toContain(".tmplPi8eZ");
-    expect(html).toContain("current assessment");
-    expect(html).toContain("review cues");
-  });
-
-  it("renders nothing for a revision with no entry or overview", () => {
-    expect(model.renderThreadRevisionOverview("rev:missing")).toBe("");
-  });
-});
-
 describe("existence predicates", () => {
   beforeEach(seedFixtures);
 
@@ -577,14 +523,13 @@ function seedTimeline(): void {
 describe("the history filter predicates are retired (server-owned now)", () => {
   it("no longer exports the timeline query predicates", () => {
     // The server filters/searches/facets the history now; the client keeps only
-    // the revisions/threads-lens predicates.
+    // the revision-lens predicates.
     const m = model as unknown as Record<string, unknown>;
     expect(m.matchesFilters).toBeUndefined();
     expect(m.facetCounts).toBeUndefined();
     expect(m.currentClauses).toBeUndefined();
     expect(m.eventMatchesObject).toBeUndefined();
     expect(typeof model.matchesRevisionFilters).toBe("function");
-    expect(typeof model.threadMatchesRevisionFilters).toBe("function");
   });
 });
 
@@ -598,29 +543,6 @@ describe("revision filter predicates", () => {
     expect(model.matchesRevisionFilters(revA)).toBe(true);
     expect(model.matchesRevisionFilters(revB)).toBe(false);
   });
-
-  it("threadMatchesRevisionFilters keeps a thread with any matching revision", () => {
-    store.commit({ filterSnapshot: "obj:a" });
-    expect(
-      model.threadMatchesRevisionFilters({ revisions: ["rev:a", "rev:b"] }),
-    ).toBe(true);
-    expect(model.threadMatchesRevisionFilters({ revisions: ["rev:b"] })).toBe(
-      false,
-    );
-  });
-
-  it("threadMatchesRevisionFilters passes everything when no filter is set", () => {
-    expect(model.threadMatchesRevisionFilters({ revisions: ["rev:b"] })).toBe(
-      true,
-    );
-  });
-
-  it("filteredThreadRevisionIds keeps only the matching revision ids in order", () => {
-    store.commit({ filterSnapshot: "obj:a" });
-    expect(
-      model.filteredThreadRevisionIds({ revisions: ["rev:a", "rev:b"] }),
-    ).toEqual(["rev:a"]);
-  });
 });
 
 describe("lensEntryIds", () => {
@@ -630,28 +552,6 @@ describe("lensEntryIds", () => {
     expect(model.lensEntryIds()).toEqual([
       { kind: "revision", id: "rev:a" },
       { kind: "revision", id: "rev:b" },
-    ]);
-  });
-
-  it("walks each thread's laid-out revisions for the threads lens", () => {
-    seedTimeline();
-    seedObjects({
-      threads: [
-        {
-          revisions: ["rev:a", "rev:b"],
-          laidOut: {
-            nodes: [
-              { id: "rev:b", x: 0, y: 0 },
-              { id: "rev:a", x: 0, y: 10 },
-            ],
-          },
-        },
-      ],
-    });
-    store.commit({ lens: "threads" });
-    expect(model.lensEntryIds()).toEqual([
-      { kind: "revision", id: "rev:b" },
-      { kind: "revision", id: "rev:a" },
     ]);
   });
 
@@ -673,22 +573,6 @@ describe("lensEntryIds", () => {
       "rev:b",
       "rev:a",
     ]);
-  });
-
-  it("orders threads-lens cursor cards newest-first by member recency", () => {
-    store.commit({
-      lens: "threads",
-      revisions: {
-        entries: [
-          { revisionId: "rev:a", capturedAt: "unix-ms:100" },
-          { revisionId: "rev:b", capturedAt: "unix-ms:500" },
-        ],
-      } as unknown as RevisionsDoc,
-    });
-    seedObjects({
-      threads: [{ revisions: ["rev:a"] }, { revisions: ["rev:b"] }],
-    });
-    expect(model.lensEntryIds().map((e) => e.id)).toEqual(["rev:b", "rev:a"]);
   });
 
   it("lists the loaded timeline events in server order for the timeline lens", () => {
@@ -733,32 +617,5 @@ describe("newest-first ordering", () => {
     expect(
       model.orderedRevisionEntries(entries, "desc").map((r) => r.revisionId),
     ).toEqual(["big", "small", "none"]);
-  });
-
-  it("derives a thread's recency from its most-recent member revision", () => {
-    store.commit({
-      revisions: {
-        entries: [rev("a", 100), rev("b", 500)],
-      } as unknown as RevisionsDoc,
-    });
-    expect(model.threadRecencyMs({ revisions: ["a", "b"] })).toBe(500);
-    expect(model.threadRecencyMs({ revisions: [] })).toBe(
-      Number.NEGATIVE_INFINITY,
-    );
-  });
-
-  it("orders threads newest-first by member recency", () => {
-    store.commit({
-      revisions: {
-        entries: [rev("a", 100), rev("b", 500), rev("c", 300)],
-      } as unknown as RevisionsDoc,
-    });
-    const older = { revisions: ["a"] };
-    const newer = { revisions: ["b", "c"] };
-    expect(model.orderedThreads([older, newer], "desc")).toEqual([
-      newer,
-      older,
-    ]);
-    expect(model.orderedThreads([older, newer], "asc")).toEqual([older, newer]);
   });
 });

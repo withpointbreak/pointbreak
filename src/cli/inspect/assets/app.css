@@ -483,7 +483,6 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-directio
 .unit-card h3 { margin: 0 0 6px; font-size: var(--fs-md); font-family: var(--mono); }
 .unit-card .kv { display: grid; grid-template-columns: 110px 1fr; gap: 2px 10px; font-size: var(--fs-sm); font-family: var(--mono); color: var(--fg-dim); }
 .unit-card .kv b { color: var(--fg); font-weight: 500; }
-.thread-card h3 { word-break: break-all; }
 
 /* The attention lens: tiered cards over the outstanding review state. */
 .attention-tier {
@@ -529,15 +528,6 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-directio
 .overview-cue:hover, .overview-cue:focus-visible { color: var(--fg); border-color: var(--accent); }
 .overview-latest { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
 .overview-latest b { color: var(--fg); font-weight: 500; }
-.thread-overviews { display: grid; gap: 6px; margin: 0 0 10px; }
-.thread-overview { display: grid; gap: 4px; padding: 7px 8px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-row); }
-.thread-overview > div:first-child { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; font-size: var(--fs-sm); }
-.thread-overview > div:first-child span { color: var(--fg-dim); font-family: var(--mono); }
-/* The competing-heads callout on a forked thread: surface every head, never a
-   null head. */
-.thread-competing { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 0 0 8px; }
-.thread-card.competing { border-color: color-mix(in srgb, var(--warning) 30%, transparent); }
-.fact-status.competing { color: var(--warning); }
 /* The revision DAG: one node per revision, each marked head/superseded with its
    supersession edges. */
 /* The supersession DAG: a server-laid SVG the client only paints. Rendered at

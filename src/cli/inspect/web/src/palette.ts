@@ -204,12 +204,6 @@ function buildCommands(): Command[] {
   });
   cmds.push({
     kind: "Actions",
-    label: "Switch to threads lens",
-    hint: "lens",
-    run: () => navigate({ lens: "threads" }),
-  });
-  cmds.push({
-    kind: "Actions",
     label: "Switch to attention lens",
     hint: "lens",
     run: () => navigate({ lens: "attention" }),

@@ -107,8 +107,20 @@ describe("parseHash", () => {
 
   it("reads a bare lens path", () => {
     expect(router.parseHash("#/list", PT).lens).toBe("list");
-    expect(router.parseHash("#/threads", PT).lens).toBe("threads");
     expect(router.parseHash("#/attention", PT).lens).toBe("attention");
+  });
+
+  it("aliases #/threads to the list lens preserving query params", () => {
+    const patch = router.parseHash(
+      `#/threads?track=trk&sel=${encodeURIComponent(REV)}&snapshot=obj:sha256:abc`,
+      PT,
+    );
+    expect(patch.lens).toBe("list");
+    expect(patch.unknownPath).toBeNull(); // never the unknown-route fallback
+    expect(patch.migrated).toBe("threads-alias"); // the parse-seam flag
+    expect(patch.filterTrack).toBe("trk");
+    expect(patch.selected).toEqual({ kind: "revision", id: REV });
+    expect(patch.filterSnapshot).toBe("obj:sha256:abc");
   });
 
   it("defaults the enabled types to the present types when `types=` is absent", () => {
@@ -254,8 +266,8 @@ describe("serializeState", () => {
   });
 
   it("serializes a non-default lens", () => {
-    expect(router.serializeState(snap({ lens: "threads" }), PT)).toBe(
-      "#/threads",
+    expect(router.serializeState(snap({ lens: "attention" }), PT)).toBe(
+      "#/attention",
     );
   });
 
@@ -361,7 +373,7 @@ describe("grammar round-trip (parseHash and serializeState are inverses)", () =>
   const hashes = [
     "#/timeline",
     "#/list",
-    "#/threads",
+    "#/attention",
     `#/revision/${encodeURIComponent(REV)}`,
     `#/revision/${encodeURIComponent(REV)}?lens=list`,
     `#/event/${encodeURIComponent(EVT)}`,
@@ -481,7 +493,7 @@ describe("navigate (the commit + history choke point — never render)", () => {
     store.subscribe(() => {
       notifications += 1;
     });
-    router.navigate({ lens: "threads" });
+    router.navigate({ lens: "attention" });
     expect(notifications).toBe(1);
   });
 
@@ -587,7 +599,30 @@ describe("applyHash (derive the view from the fragment, repaint via the subscrip
     expect(el?.textContent).toContain("is not in this store");
   });
 
-  it("redirects an absent-but-in-thread revision to the threads lens", () => {
+  it("replace-rewrites a #/threads link's path only, query string byte-for-byte", async () => {
+    seed();
+    mountInspectorDom();
+    const push = vi.spyOn(history, "pushState");
+    try {
+      // Include a parameter the serializer does not know, to prove the rewrite
+      // preserves the original query verbatim (not serializeState output).
+      history.replaceState(null, "", "#/threads?track=trk&future=1");
+      router.applyHash();
+      await flush();
+      expect(location.hash).toBe("#/list?track=trk&future=1");
+      expect(store.getState().lens).toBe("list");
+      expect(store.getState().filterTrack).toBe("trk");
+      // Replace, never push: Back must not bounce through the stale form.
+      expect(push).not.toHaveBeenCalled();
+    } finally {
+      push.mockRestore();
+    }
+  });
+
+  it("keeps an absent-but-in-thread revision selected on its entity-primary page", () => {
+    // The revision is grouped away from the loaded list but present in a thread:
+    // the entity-primary composite fetch resolves it exactly, so the selection
+    // survives instead of being cleared or re-lensed.
     store.commit({
       history: { entries: [], diagnostics: [] } as unknown as HistoryDoc,
       revisions: { entries: [] } as unknown as RevisionsDoc,
@@ -603,10 +638,26 @@ describe("applyHash (derive the view from the fragment, repaint via the subscrip
       `#/revision/${encodeURIComponent(REV)}?lens=list`,
     );
     router.applyHash();
-    expect(store.getState().lens).toBe("threads");
+    expect(store.getState().selected).toEqual({ kind: "revision", id: REV });
+    expect(store.getState().open).toBe(true);
+    expect(store.getState().lens).toBe("list");
+  });
+
+  it("still clears a revision selection that is in neither the list nor any thread", () => {
+    store.commit({
+      history: { entries: [], diagnostics: [] } as unknown as HistoryDoc,
+      revisions: { entries: [] } as unknown as RevisionsDoc,
+      threads: {
+        threads: [],
+        revisionClassification: {},
+      } as unknown as ThreadsDoc,
+    });
+    mountInspectorDom();
+    history.replaceState(null, "", `#/revision/${encodeURIComponent(REV)}`);
+    router.applyHash();
     expect(store.getState().selected).toEqual({ kind: null, id: null });
     expect(document.querySelector("#route-diagnostic")?.textContent).toContain(
-      "not directly selectable",
+      "is not in this store",
     );
   });
 

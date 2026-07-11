@@ -19,7 +19,7 @@ import { openDiff, renderDiffOverlay } from "./diff/controller";
 import { $ } from "./dom";
 import { escapeHtml } from "./escape";
 import { renderAttention } from "./lenses/attention";
-import { renderRevisionList, renderRevisions } from "./lenses/revisions";
+import { renderRevisionList } from "./lenses/revisions";
 import {
   renderTimeline,
   scrollTimelineSelectionIntoView,
@@ -196,9 +196,7 @@ function syncControls(): void {
 
 // Master pane: swap in the active lens body and populate it. The scaffold is
 // rebuilt only on a lens change; the populate runs every render so the lens
-// reflects the current filters/selection. The lens function names are inverted vs
-// the served app.js (revision vocabulary): the list lens is `renderRevisionList`
-// (#units) and the threads lens is `renderRevisions` (#revisions).
+// reflects the current filters/selection.
 /** Mount the active lens body scaffold (on a lens change) and populate it. */
 function renderMaster(): void {
   const master = $("#master");
@@ -208,8 +206,6 @@ function renderMaster(): void {
     lastMasterLens = lens;
     if (lens === "list") {
       master.innerHTML = `<div id="units" class="${CLASS.units}"></div>`;
-    } else if (lens === "threads") {
-      master.innerHTML = `<div id="revisions" class="${CLASS.units}" aria-label="supersession threads"></div>`;
     } else if (lens === "attention") {
       master.innerHTML = `<div id="attention" class="${CLASS.units}" aria-label="attention"></div>`;
     } else {
@@ -217,7 +213,6 @@ function renderMaster(): void {
     }
   }
   if (lens === "list") renderRevisionList();
-  else if (lens === "threads") renderRevisions();
   else if (lens === "attention") renderAttention();
   else renderTimeline();
 }
@@ -321,9 +316,9 @@ function onTypeToggleClick(ev: Event): void {
 // The single master-pane delegate (replacing the served per-row / per-card
 // listeners). Order matters: ref chips fall through to the navigation delegate
 // first; the attention-cue and open-diff affordances are handled before card
-// selection (replacing the served stopPropagation). Revision selection is scoped to
-// the list `.unit-card` so DAG `<g data-revision-id>` nodes stay owned by their
-// imperative `wireDagInteractions` handler (no double-navigate).
+// selection (replacing the served stopPropagation). Revision selection is scoped
+// to the list `.unit-card` so other `data-revision-id` carriers (badges, chips)
+// never double-navigate.
 function onMasterClick(ev: Event): void {
   const t = ev.target;
   if (!(t instanceof Element)) return;

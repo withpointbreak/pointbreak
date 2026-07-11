@@ -1,35 +1,26 @@
 // The state-bound model layer: the revision / supersession / object derivations
-// over the loaded `/api/*` documents on the store, plus the revisions/threads-lens
-// filter predicates. Ported from the served app.js model/supersession cluster.
+// over the loaded `/api/*` documents on the store, plus the revision-lens filter
+// predicates. Ported from the served app.js model/supersession cluster.
 // State-reading (via `getState()`) but DOM-free — it returns ids, classifications,
 // annotation records, and ready-to-insert badge HTML strings; the render/lenses/
 // detail layers turn those into the live DOM.
 //
 // The history timeline query (search / filter / facet counts) moved to the server,
 // so the timeline lens paints the server-filtered page window rather than matching
-// client-side. The revisions/threads lenses still match over the fully-loaded
-// supersession graph, so their predicates (matchesRevisionFilters and friends) use
-// the pure `query` grammar here.
+// client-side. The revisions lens still matches over the fully-loaded list, so its
+// predicate (matchesRevisionFilters) uses the pure `query` grammar here.
 
 import { CLASS } from "./classNames";
 import type { Annotation } from "./diff/render";
-import { escapeHtml } from "./escape";
 import { parseMs } from "./format";
 import {
-  assessmentCue,
   assessmentDisplayLabel,
-  attentionCues,
   entryRevisionId,
   type Revision,
   revisionSearchIndex,
 } from "./projection";
 import { matchesQuery, parseSearchQuery } from "./query";
-import {
-  type LinkifyOptions,
-  linkify,
-  shortId,
-  targetDisplayLabel,
-} from "./refs";
+import { type LinkifyOptions, linkify } from "./refs";
 import { getState, type State } from "./store";
 import {
   type HistoryEntry,
@@ -81,7 +72,7 @@ export interface Thread {
   revisions?: string[];
   laidOut?: ThreadLayout | null;
   // The thread's current heads, its superseded members, and whether it forks
-  // (competing heads), read by the threads-lens card + DAG painter.
+  // (competing heads), read by the supersession DAG painter.
   heads?: string[];
   superseded?: string[];
   competing?: boolean;
@@ -126,25 +117,6 @@ export function presentTypes(): string[] {
 /** The laid-out supersession threads, or []. */
 export function currentThreads(): Thread[] {
   return (getState().threads?.threads ?? []) as Thread[];
-}
-
-/** A thread's revision ids in laid-out order (by node y, then x), missing ones last. */
-export function threadRevisionOrder(thread: Thread): string[] {
-  const revisions = thread.revisions ?? [];
-  const nodes = thread.laidOut?.nodes ?? [];
-  if (!nodes.length) return revisions;
-  const known = new Set(revisions);
-  const ordered = nodes
-    .filter(
-      (n): n is ThreadNode & { id: string } =>
-        typeof n.id === "string" && known.has(n.id),
-    )
-    .slice()
-    .sort((a, b) => (a.y ?? 0) - (b.y ?? 0) || (a.x ?? 0) - (b.x ?? 0))
-    .map((n) => n.id);
-  if (ordered.length === revisions.length) return ordered;
-  const seen = new Set(ordered);
-  return ordered.concat(revisions.filter((id) => !seen.has(id)));
 }
 
 /** The server supersession classification for a revision, or null. */
@@ -238,24 +210,6 @@ export function orderedRevisionEntries(
   const cmp = byOrder(order);
   return [...entries].sort((a, b) =>
     cmp(revisionCapturedMs(a), revisionCapturedMs(b)),
-  );
-}
-
-/** The most-recent capture instant among a thread's member revisions, or -Infinity. */
-export function threadRecencyMs(thread: Thread): number {
-  let max = Number.NEGATIVE_INFINITY;
-  for (const id of thread.revisions ?? []) {
-    const r = revisionForId(id);
-    if (r) max = Math.max(max, revisionCapturedMs(r));
-  }
-  return max;
-}
-
-/** Thread cards ordered by member recency; newest-first unless `order` is "asc". */
-export function orderedThreads(threads: Thread[], order: string): Thread[] {
-  const cmp = byOrder(order);
-  return [...threads].sort((a, b) =>
-    cmp(threadRecencyMs(a), threadRecencyMs(b)),
   );
 }
 
@@ -403,25 +357,13 @@ export function annotationsForRevision(revisionId: string): Annotation[] {
   return out;
 }
 
-/** The compact thread-card overview (target, id, assessment, cues) for a revision, or "". */
-export function renderThreadRevisionOverview(revisionId: string): string {
-  const revision = revisionForId(revisionId);
-  const overview = overviewForRevision(revisionId);
-  if (!revision || !overview) return "";
-  return `<div class="${CLASS.threadOverview}">
-    <div><b>${targetDisplayLabel(revision.targetDisplay)}</b> <span>${escapeHtml(shortId(revisionId))}</span></div>
-    ${assessmentCue(overview)}
-    <div class="${CLASS.overviewCues}" aria-label="review cues"><span class="${CLASS.overviewLabel}">review cues</span>${attentionCues(overview)}</div>
-  </div>`;
-}
-
 // ---------------------------------------------------------------------------
-// Revisions/threads-lens filter predicates
+// Revision-lens filter predicate
 //
 // The timeline history query is server-owned now (search / filter / facets are
 // applied to `/api/history`), so there is no client history predicate. The
-// revisions and threads lenses still filter client-side over the fully-loaded
-// supersession graph, so they parse the active `filterText` here.
+// revisions lens still filters client-side over the fully-loaded list, so it
+// parses the active `filterText` here.
 // ---------------------------------------------------------------------------
 
 /** Whether a revision passes the object filter and the query clauses. */
@@ -429,30 +371,6 @@ export function matchesRevisionFilters(r: Revision): boolean {
   const s = getState();
   if (s.filterSnapshot && r.snapshotId !== s.filterSnapshot) return false;
   return matchesQuery(revisionSearchIndex(r), parseSearchQuery(s.filterText));
-}
-
-/** Whether any of a thread's revisions passes the active filters. */
-export function threadMatchesRevisionFilters(thread: Thread): boolean {
-  const revisions = thread.revisions ?? [];
-  const s = getState();
-  if (!s.filterText && !s.filterSnapshot) return true;
-  return revisions
-    .map(revisionForId)
-    .filter((r): r is Revision => r !== null)
-    .some(matchesRevisionFilters);
-}
-
-/** A thread's revision ids that pass the active filters, in the given order. */
-export function filteredThreadRevisionIds(
-  thread: Thread,
-  revisions: string[] = thread.revisions ?? [],
-): string[] {
-  const s = getState();
-  if (!s.filterText && !s.filterSnapshot) return revisions;
-  return revisions.filter((revisionId) => {
-    const revision = revisionForId(revisionId);
-    return revision ? matchesRevisionFilters(revision) : false;
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -469,20 +387,6 @@ export function lensEntryIds(): LensEntry[] {
       (s.revisions?.entries ?? []).filter(matchesRevisionFilters),
       s.order,
     ).map((r): LensEntry => ({ kind: "revision", id: r.revisionId ?? "" }));
-  }
-  if (s.lens === "threads") {
-    const ids: LensEntry[] = [];
-    // Step thread cards in the same recency order the threads lens renders them;
-    // the within-thread DAG order (threadRevisionOrder) is unchanged.
-    for (const t of orderedThreads(
-      currentThreads().filter(threadMatchesRevisionFilters),
-      s.order,
-    )) {
-      for (const r of filteredThreadRevisionIds(t, threadRevisionOrder(t))) {
-        ids.push({ kind: "revision", id: r });
-      }
-    }
-    return ids;
   }
   // The server filtered and ordered the timeline page; step the loaded window
   // as-is (paging past its edges is handled by the keyboard stepper).

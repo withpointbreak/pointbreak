@@ -1,9 +1,9 @@
-// The generic, node-id-agnostic supersession-DAG painter shared by the revision
-// threads lens and the composite page's fact graphs. Pure: geometry in, SVG
-// string out. The SVG root keeps the `revision-dag` class so descendants inherit
-// the shared DAG stylesheet (the `--dag-edge` var, node/edge rules). What varies
-// per caller is node identity semantics — the id attribute, whether nodes are
-// interactive, the aria noun, and the selection predicate.
+// The generic, node-id-agnostic supersession-DAG painter for the composite
+// page's supersession graphs. Pure: geometry in, SVG string out. The SVG root
+// keeps the `revision-dag` class so descendants inherit the shared DAG
+// stylesheet (the `--dag-edge` var, node/edge rules). What varies per caller is
+// node identity semantics — the id attribute, whether nodes are interactive,
+// the aria noun, and the selection predicate.
 import { CLASS, dagNodeClass } from "./classNames";
 import { escapeHtml } from "./escape";
 import type { ThreadLayout } from "./model";

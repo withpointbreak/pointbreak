@@ -124,15 +124,11 @@
     emph: "emph",
     ln: "ln",
     sign: "sign",
-    // Revision list, supersession threads, and the laid-out DAG.
+    // Revision list, supersession badges, and the laid-out DAG.
     unitCard: "unit-card",
     unitPage: "unit-page",
     unitPageTitle: "unit-page-title",
     supersessionBadges: "supersession-badges",
-    threadCompeting: "thread-competing",
-    threadOverview: "thread-overview",
-    threadOverviews: "thread-overviews",
-    competing: "competing",
     dagEdge: "dag-edge",
     dagArrowHead: "dag-arrow-head",
     dagArrowHeadTraced: "dag-arrow-head-traced",
@@ -285,19 +281,6 @@
     )
   ];
 
-  // src/escape.ts
-  var ENTITIES = {
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;"
-  };
-  function escapeHtml(value) {
-    return String(value).replace(/[&<>"']/g, (char) => ENTITIES[char]);
-  }
-  __name(escapeHtml, "escapeHtml");
-
   // src/format.ts
   function parseMs(occurredAt) {
     if (typeof occurredAt !== "string") return null;
@@ -324,6 +307,19 @@
     return new Date(ms).toLocaleDateString();
   }
   __name(fmtDate, "fmtDate");
+
+  // src/escape.ts
+  var ENTITIES = {
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  };
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, (char) => ENTITIES[char]);
+  }
+  __name(escapeHtml, "escapeHtml");
 
   // src/refs.ts
   function shortId(id) {
@@ -472,12 +468,7 @@
     needs_changes: "needs-changes",
     needs_clarification: "needs-clarification"
   };
-  var LENSES = [
-    "timeline",
-    "list",
-    "threads",
-    "attention"
-  ];
+  var LENSES = ["timeline", "list", "attention"];
   var DEFAULT_LENS = "timeline";
   var QUERY_FIELDS = [
     "type",
@@ -841,19 +832,6 @@
     return getState().threads?.threads ?? [];
   }
   __name(currentThreads, "currentThreads");
-  function threadRevisionOrder(thread) {
-    const revisions = thread.revisions ?? [];
-    const nodes = thread.laidOut?.nodes ?? [];
-    if (!nodes.length) return revisions;
-    const known = new Set(revisions);
-    const ordered = nodes.filter(
-      (n) => typeof n.id === "string" && known.has(n.id)
-    ).slice().sort((a, b) => (a.y ?? 0) - (b.y ?? 0) || (a.x ?? 0) - (b.x ?? 0)).map((n) => n.id);
-    if (ordered.length === revisions.length) return ordered;
-    const seen = new Set(ordered);
-    return ordered.concat(revisions.filter((id) => !seen.has(id)));
-  }
-  __name(threadRevisionOrder, "threadRevisionOrder");
   function revisionClassification(revisionId) {
     const map = getState().threads?.revisionClassification;
     const raw = map ? map[revisionId] : void 0;
@@ -915,22 +893,6 @@
     );
   }
   __name(orderedRevisionEntries, "orderedRevisionEntries");
-  function threadRecencyMs(thread) {
-    let max = Number.NEGATIVE_INFINITY;
-    for (const id of thread.revisions ?? []) {
-      const r = revisionForId(id);
-      if (r) max = Math.max(max, revisionCapturedMs(r));
-    }
-    return max;
-  }
-  __name(threadRecencyMs, "threadRecencyMs");
-  function orderedThreads(threads, order) {
-    const cmp = byOrder(order);
-    return [...threads].sort(
-      (a, b) => cmp(threadRecencyMs(a), threadRecencyMs(b))
-    );
-  }
-  __name(orderedThreads, "orderedThreads");
   function isSupersedableFact(e) {
     return SUPERSEDABLE_FACT_TYPES.has(e.eventType);
   }
@@ -1038,39 +1000,12 @@
     return out;
   }
   __name(annotationsForRevision, "annotationsForRevision");
-  function renderThreadRevisionOverview(revisionId) {
-    const revision = revisionForId(revisionId);
-    const overview = overviewForRevision(revisionId);
-    if (!revision || !overview) return "";
-    return `<div class="${CLASS.threadOverview}">
-    <div><b>${targetDisplayLabel(revision.targetDisplay)}</b> <span>${escapeHtml(shortId(revisionId))}</span></div>
-    ${assessmentCue(overview)}
-    <div class="${CLASS.overviewCues}" aria-label="review cues"><span class="${CLASS.overviewLabel}">review cues</span>${attentionCues(overview)}</div>
-  </div>`;
-  }
-  __name(renderThreadRevisionOverview, "renderThreadRevisionOverview");
   function matchesRevisionFilters(r) {
     const s = getState();
     if (s.filterSnapshot && r.snapshotId !== s.filterSnapshot) return false;
     return matchesQuery(revisionSearchIndex(r), parseSearchQuery(s.filterText));
   }
   __name(matchesRevisionFilters, "matchesRevisionFilters");
-  function threadMatchesRevisionFilters(thread) {
-    const revisions = thread.revisions ?? [];
-    const s = getState();
-    if (!s.filterText && !s.filterSnapshot) return true;
-    return revisions.map(revisionForId).filter((r) => r !== null).some(matchesRevisionFilters);
-  }
-  __name(threadMatchesRevisionFilters, "threadMatchesRevisionFilters");
-  function filteredThreadRevisionIds(thread, revisions = thread.revisions ?? []) {
-    const s = getState();
-    if (!s.filterText && !s.filterSnapshot) return revisions;
-    return revisions.filter((revisionId) => {
-      const revision = revisionForId(revisionId);
-      return revision ? matchesRevisionFilters(revision) : false;
-    });
-  }
-  __name(filteredThreadRevisionIds, "filteredThreadRevisionIds");
   function lensEntryIds() {
     const s = getState();
     if (s.lens === "list") {
@@ -1078,18 +1013,6 @@
         (s.revisions?.entries ?? []).filter(matchesRevisionFilters),
         s.order
       ).map((r) => ({ kind: "revision", id: r.revisionId ?? "" }));
-    }
-    if (s.lens === "threads") {
-      const ids = [];
-      for (const t of orderedThreads(
-        currentThreads().filter(threadMatchesRevisionFilters),
-        s.order
-      )) {
-        for (const r of filteredThreadRevisionIds(t, threadRevisionOrder(t))) {
-          ids.push({ kind: "revision", id: r });
-        }
-      }
-      return ids;
     }
     return (s.history?.entries ?? []).map(
       (e) => ({ kind: "event", id: e.eventId ?? "" })
@@ -1816,7 +1739,7 @@
   __name(noop, "noop");
 
   // src/router.ts
-  var LENSES2 = ["timeline", "list", "threads", "attention"];
+  var LENSES2 = ["timeline", "list", "attention"];
   var DEFAULT_LENS2 = "timeline";
   function selectionKind(id) {
     const info = refInfo(id);
@@ -1857,7 +1780,8 @@
       focus: p.focus ? p.focus : null,
       unsupportedAsOf: p.asof != null ? p.asof || true : null,
       unsupportedJournal: p.journal != null ? p.journal || true : null,
-      unknownPath: null
+      unknownPath: null,
+      migrated: null
     };
     const segs = path.split("/").filter(Boolean);
     const lensParam = p.lens ?? "";
@@ -1871,8 +1795,9 @@
       patch.selected = { kind: "event", id: decodeURIComponent(segs[1]) };
       patch.open = true;
       patch.lens = LENSES2.includes(lensParam) ? lensParam : DEFAULT_LENS2;
-    } else if (LENSES2.includes(segs[0])) {
-      patch.lens = segs[0];
+    } else if (LENSES2.includes(segs[0]) || segs[0] === "threads") {
+      patch.lens = segs[0] === "threads" ? "list" : segs[0];
+      if (segs[0] === "threads") patch.migrated = "threads-alias";
       if (p.sel) patch.selected = { kind: selectionKind(p.sel), id: p.sel };
     } else {
       patch.lens = DEFAULT_LENS2;
@@ -1923,8 +1848,16 @@
   }
   __name(navigate, "navigate");
   function applyHash() {
-    const patch = resolve(parseHash(location.hash, presentTypes()));
+    const parsed = parseHash(location.hash, presentTypes());
+    const patch = resolve(parsed);
     commit(patch);
+    if (parsed.migrated === "threads-alias") {
+      history.replaceState(
+        {},
+        "",
+        location.hash.replace(/^#\/threads/, "#/list")
+      );
+    }
     const sel = getState().selected;
     if (sel.kind === "event" && sel.id && !eventExists(sel.id)) {
       void revealSelectedEvent(sel.id, patch.lens ?? DEFAULT_LENS2);
@@ -1960,25 +1893,15 @@
       return next;
     }
     const sel = patch.selected ?? { kind: null, id: null };
-    if (sel.kind === "revision" && sel.id && !revisionExists(sel.id)) {
-      if (revisionInAnyThread(sel.id)) {
-        showRouteDiagnostic(
-          routeDiagnostic(
-            `fell back to the threads lens — revision ${shortRef(sel.id)} is not directly selectable`,
-            freshnessDiagnostic
-          )
-        );
-        next.lens = "threads";
-      } else {
-        const lens = patch.lens || DEFAULT_LENS2;
-        showRouteDiagnostic(
-          routeDiagnostic(
-            `fell back to the ${lens} lens — revision ${shortRef(sel.id)} is not in this store`,
-            freshnessDiagnostic
-          )
-        );
-        next.lens = lens;
-      }
+    if (sel.kind === "revision" && sel.id && !revisionExists(sel.id) && !revisionInAnyThread(sel.id)) {
+      const lens = patch.lens || DEFAULT_LENS2;
+      showRouteDiagnostic(
+        routeDiagnostic(
+          `fell back to the ${lens} lens — revision ${shortRef(sel.id)} is not in this store`,
+          freshnessDiagnostic
+        )
+      );
+      next.lens = lens;
       next.selected = { kind: null, id: null };
       return next;
     }
@@ -3774,12 +3697,6 @@
     });
     cmds.push({
       kind: "Actions",
-      label: "Switch to threads lens",
-      hint: "lens",
-      run: /* @__PURE__ */ __name(() => navigate({ lens: "threads" }), "run")
-    });
-    cmds.push({
-      kind: "Actions",
       label: "Switch to attention lens",
       hint: "lens",
       run: /* @__PURE__ */ __name(() => navigate({ lens: "attention" }), "run")
@@ -4009,8 +3926,7 @@
   }
   __name(timelineIsActive, "timelineIsActive");
   function revisionLensIsActive() {
-    const lens = getState().lens;
-    return lens === "list" || lens === "threads";
+    return getState().lens === "list";
   }
   __name(revisionLensIsActive, "revisionLensIsActive");
   function attentionLensIsActive() {
@@ -4070,8 +3986,7 @@
   }
   __name(timelineViewportRows, "timelineViewportRows");
   function revisionLensViewportRows() {
-    const selector = getState().lens === "threads" ? "#revisions" : "#units";
-    const list = $(selector);
+    const list = $("#units");
     const item = list?.querySelector(".unit-card");
     const viewportH = list?.clientHeight ?? 0;
     const itemH = item?.getBoundingClientRect().height ?? 0;
@@ -4357,10 +4272,6 @@
         return;
       case "3":
         ev.preventDefault();
-        navigate({ lens: "threads" });
-        return;
-      case "4":
-        ev.preventDefault();
         navigate({ lens: "attention" });
         return;
       case "g":
@@ -4590,108 +4501,6 @@ click to open the revision page">
     }).join("");
   }
   __name(renderRevisionList, "renderRevisionList");
-  function renderRevisions() {
-    const el = $("#revisions");
-    if (!el) return;
-    const state2 = getState();
-    const threads = orderedThreads(
-      currentThreads().filter(threadMatchesRevisionFilters),
-      state2.order
-    );
-    if (!threads.length) {
-      el.innerHTML = `<p class="${CLASS.empty}" style="color:var(--fg-dim)">${state2.filterText || state2.filterSnapshot ? "No revision threads match the current filters." : "No captured revisions in this store."}</p>`;
-      return;
-    }
-    el.innerHTML = "";
-    for (const thread of threads) el.appendChild(renderThreadCard(thread));
-  }
-  __name(renderRevisions, "renderRevisions");
-  function threadLabel(thread) {
-    const heads = thread.heads ?? [];
-    if (thread.competing)
-      return `revision thread · ${heads.length} competing heads`;
-    if (heads.length === 1)
-      return `revision thread · current in thread ${shortId(heads[0])}`;
-    return "revision thread";
-  }
-  __name(threadLabel, "threadLabel");
-  function renderThreadCard(thread) {
-    const revisions = thread.revisions ?? [];
-    const heads = thread.heads ?? [];
-    const superseded = thread.superseded ?? [];
-    const card = document.createElement("div");
-    card.className = `unit-card thread-card${thread.competing ? " competing" : ""}`;
-    const competingBadge = thread.competing ? `<div class="${CLASS.threadCompeting}"><span class="${CLASS.factStatus} ${CLASS.competing}">competing revisions (${heads.length})</span> ${heads.map((h) => linkify(h)).join(" ")}</div>` : "";
-    const overviewBlocks = heads.map((h) => renderThreadRevisionOverview(h)).filter(Boolean).join("");
-    card.innerHTML = `
-    <h3>${escapeHtml(threadLabel(thread))}</h3>
-    ${competingBadge}
-    ${overviewBlocks ? `<div class="${CLASS.threadOverviews}">${overviewBlocks}</div>` : ""}
-    <div class="${CLASS.kv}">
-      <span>revisions</span><b>${escapeHtml(String(revisions.length))}</b>
-      <span>heads</span><b>${escapeHtml(String(heads.length))}</b>
-      <span>superseded</span><b>${escapeHtml(String(superseded.length))}</b>
-    </div>
-    ${renderThreadSvg(thread.laidOut)}`;
-    wireDagInteractions(card);
-    return card;
-  }
-  __name(renderThreadCard, "renderThreadCard");
-  function renderThreadSvg(laid) {
-    return renderSupersessionSvg(laid, {
-      idAttr: "data-revision-id",
-      ariaNoun: "revision",
-      interactive: true,
-      isSelected: /* @__PURE__ */ __name((id) => {
-        const s = getState().selected;
-        return s.kind === "revision" && s.id === id;
-      }, "isSelected")
-    });
-  }
-  __name(renderThreadSvg, "renderThreadSvg");
-  function wireDagInteractions(card) {
-    const nav = /* @__PURE__ */ __name((node) => {
-      const id = node.getAttribute("data-revision-id");
-      if (id)
-        navigate({
-          selected: { kind: "revision", id },
-          diff: null,
-          diffHash: null,
-          focus: null
-        });
-    }, "nav");
-    for (const node of Array.from(
-      card.querySelectorAll(".dag-node")
-    )) {
-      node.addEventListener("click", () => nav(node));
-      node.addEventListener("keydown", (ev) => {
-        if (ev.key === "Enter" || ev.key === " ") {
-          ev.preventDefault();
-          nav(node);
-        }
-      });
-      const trace = /* @__PURE__ */ __name((on) => {
-        const id = node.getAttribute("data-revision-id");
-        node.classList.toggle("traced", on);
-        for (const edge of Array.from(
-          card.querySelectorAll(
-            `.dag-edge[data-from="${id}"], .dag-edge[data-to="${id}"]`
-          )
-        )) {
-          edge.classList.toggle("traced", on);
-          edge.setAttribute(
-            "marker-end",
-            on ? "url(#dag-arrow-traced)" : "url(#dag-arrow)"
-          );
-        }
-      }, "trace");
-      node.addEventListener("mouseenter", () => trace(true));
-      node.addEventListener("mouseleave", () => trace(false));
-      node.addEventListener("focus", () => trace(true));
-      node.addEventListener("blur", () => trace(false));
-    }
-  }
-  __name(wireDagInteractions, "wireDagInteractions");
 
   // src/render.ts
   var INSPECTOR_TITLE = "Pointbreak Review";
@@ -4809,8 +4618,6 @@ click to open the revision page">
       lastMasterLens = lens;
       if (lens === "list") {
         master.innerHTML = `<div id="units" class="${CLASS.units}"></div>`;
-      } else if (lens === "threads") {
-        master.innerHTML = `<div id="revisions" class="${CLASS.units}" aria-label="supersession threads"></div>`;
       } else if (lens === "attention") {
         master.innerHTML = `<div id="attention" class="${CLASS.units}" aria-label="attention"></div>`;
       } else {
@@ -4818,7 +4625,6 @@ click to open the revision page">
       }
     }
     if (lens === "list") renderRevisionList();
-    else if (lens === "threads") renderRevisions();
     else if (lens === "attention") renderAttention();
     else renderTimeline();
   }

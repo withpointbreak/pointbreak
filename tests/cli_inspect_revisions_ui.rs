@@ -154,7 +154,7 @@ fn revisions_list_speaks_snapshot_vocabulary_and_member_doc_keeps_shared_keys() 
 }
 
 #[test]
-fn served_index_html_offers_the_threads_lens_not_a_lineages_tab() {
+fn served_index_html_offers_the_list_lens_not_a_lineages_tab() {
     let html = served_index_html();
 
     // The retired Lineages tab never returns.
@@ -163,14 +163,15 @@ fn served_index_html_offers_the_threads_lens_not_a_lineages_tab() {
         "the Lineages tab is replaced"
     );
     // The parallel-tab model is gone: the master pane swaps lenses instead. The
-    // supersession-thread affordance is now the `threads` lens of the one shell.
+    // revision affordance is the `list` lens; per-revision supersession renders
+    // on the detail page, not behind a lens of its own.
     assert!(
         !html.contains("data-view="),
         "the parallel-view tab model is replaced by the lens switcher"
     );
     assert!(
-        html.contains("data-lens=\"threads\"") && html.contains("data-lens=\"list\""),
-        "the lens switcher offers the threads + list lenses"
+        html.contains("data-lens=\"list\"") && !html.contains("data-lens=\"threads\""),
+        "the lens switcher offers the list lens and no threads lens"
     );
     // The retired lineage filter never returns; snapshot filtering is now a token
     // in the structured query grammar (`snapshot:`), not a dropdown.

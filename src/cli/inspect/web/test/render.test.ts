@@ -165,12 +165,11 @@ describe("renderLensSwitcher + renderMaster (lens dispatch + scaffold)", () => {
     expect(master?.querySelector("#units .unit-card")).not.toBeNull();
   });
 
-  it("dispatches the threads lens to renderRevisions (#revisions)", () => {
-    store.commit({ lens: "threads" });
+  it("dispatches the attention lens to renderAttention (#attention)", () => {
+    store.commit({ lens: "attention" });
     render.render();
     const master = $("#master");
-    expect(master?.querySelector("#revisions")).not.toBeNull();
-    expect(master?.querySelector("#revisions .thread-card")).not.toBeNull();
+    expect(master?.querySelector("#attention")).not.toBeNull();
   });
 
   it("rebuilds the lens scaffold only on a lens change (idempotent re-render)", () => {

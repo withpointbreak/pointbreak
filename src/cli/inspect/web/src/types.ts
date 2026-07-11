@@ -74,12 +74,7 @@ export const ASSESSMENT_LABELS: Record<string, string> = {
 };
 
 // The master-pane projections, serialized into the URL fragment by the router.
-export const LENSES: readonly string[] = [
-  "timeline",
-  "list",
-  "threads",
-  "attention",
-];
+export const LENSES: readonly string[] = ["timeline", "list", "attention"];
 export const DEFAULT_LENS = "timeline";
 
 // The structured-query field:value grammar fields.

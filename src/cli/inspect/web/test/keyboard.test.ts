@@ -1,11 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Thread } from "../src/model";
-import type {
-  AttentionDoc,
-  HistoryDoc,
-  RevisionsDoc,
-  ThreadsDoc,
-} from "../src/store";
+import type { AttentionDoc, HistoryDoc, RevisionsDoc } from "../src/store";
 import type { HistoryEntry } from "../src/types";
 import historyJson from "./fixtures/history.json";
 import revisionsJson from "./fixtures/revisions.json";
@@ -186,13 +180,19 @@ describe("selection stepping / activation / search", () => {
 
 describe("lens switching shortcuts", () => {
   it("1/2/3 switch lenses in tab order", () => {
-    store.commit({ lens: "threads" });
+    store.commit({ lens: "attention" });
     key({ key: "1" });
     expect(store.getState().lens).toBe("timeline");
     key({ key: "2" });
     expect(store.getState().lens).toBe("list");
     key({ key: "3" });
-    expect(store.getState().lens).toBe("threads");
+    expect(store.getState().lens).toBe("attention");
+  });
+
+  it("4 no longer maps to a lens", () => {
+    store.commit({ lens: "timeline" });
+    key({ key: "4" });
+    expect(store.getState().lens).toBe("timeline");
   });
 
   it("g no longer starts a lens chord", () => {
@@ -580,59 +580,8 @@ describe("overlay keyboard scope (#455)", () => {
   });
 });
 
-// A forked thread whose laid-out DAG order (by node y, then x) differs from its
-// insertion order, so a regression that fell back to insertion order would be
-// caught. B and C each supersede the root A; B/C sit at y=50 (B left of C), A at
-// y=150 → DAG order [B, C, A], insertion order [A, B, C].
-const FA =
-  "rev:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const FB =
-  "rev:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-const FC =
-  "rev:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-const FORK: Thread = {
-  revisions: [FA, FB, FC],
-  heads: [FB, FC],
-  superseded: [FA],
-  competing: true,
-  laidOut: {
-    bounds: { w: 300, h: 200 },
-    nodes: [
-      {
-        id: FA,
-        x: 150,
-        y: 150,
-        w: 120,
-        h: 40,
-        isHead: false,
-        isSuperseded: true,
-      },
-      {
-        id: FB,
-        x: 80,
-        y: 50,
-        w: 120,
-        h: 40,
-        isHead: true,
-        isSuperseded: false,
-      },
-      {
-        id: FC,
-        x: 220,
-        y: 50,
-        w: 120,
-        h: 40,
-        isHead: true,
-        isSuperseded: false,
-      },
-    ],
-    edges: [],
-  },
-};
-
-// Two revisions present in the loaded list, with distinct captured objects, plus a
-// thread that contains both. An object filter on the first excludes the second from
-// every lens's keyboard-stepping set.
+// Two revisions present in the loaded list, with distinct captured objects. An
+// object filter on the first excludes the second from the keyboard-stepping set.
 const KR1 =
   "rev:sha256:1111111111111111111111111111111111111111111111111111111111111111";
 const KR2 =
@@ -647,19 +596,6 @@ const FILTERED_REVISIONS = {
     { revisionId: KR2, snapshotId: KO2 },
   ],
 };
-const FILTERED_THREAD: Thread = {
-  revisions: [KR1, KR2],
-  heads: [KR2],
-  superseded: [KR1],
-  laidOut: {
-    bounds: { w: 200, h: 160 },
-    nodes: [
-      { id: KR1, x: 100, y: 50, w: 120, h: 40 },
-      { id: KR2, x: 100, y: 110, w: 120, h: 40 },
-    ],
-    edges: [],
-  },
-};
 
 // Drive `j` (next-selection) `steps` times, collecting the selection id after each.
 function stepDown(steps: number): (string | null)[] {
@@ -671,27 +607,10 @@ function stepDown(steps: number): (string | null)[] {
   return visited;
 }
 
-describe("keyboard stepping order follows the rendered DAG order", () => {
-  it("threads-lens stepping visits revisions in rendered DAG order, not insertion order", () => {
-    store.commit({
-      revisions: revisionsJson as unknown as RevisionsDoc,
-      threads: { threads: [FORK] } as unknown as ThreadsDoc,
-      lens: "threads",
-      selected: { kind: null, id: null },
-    });
-    const dagOrder = model.threadRevisionOrder(FORK);
-    expect(stepDown(3)).toEqual(dagOrder);
-    // The DAG order must genuinely differ from insertion order, or the assertion
-    // above would pass for an insertion-order regression too.
-    expect(dagOrder).not.toEqual(FORK.revisions);
-  });
-});
-
 describe("keyboard stepping visits only the filtered revision set", () => {
-  it("skips a revision excluded by the active object filter (list and threads lenses)", () => {
+  it("skips a revision excluded by the active object filter", () => {
     store.commit({
       revisions: FILTERED_REVISIONS as unknown as RevisionsDoc,
-      threads: { threads: [FILTERED_THREAD] } as unknown as ThreadsDoc,
       filterSnapshot: KO1,
       lens: "list",
       selected: { kind: null, id: null },
@@ -700,17 +619,6 @@ describe("keyboard stepping visits only the filtered revision set", () => {
     const listVisited = stepDown(3);
     expect(listVisited).toContain(KR1);
     expect(listVisited).not.toContain(KR2);
-
-    // The threads lens steps the filtered set in rendered DAG order.
-    store.commit({ lens: "threads", selected: { kind: null, id: null } });
-    const threadsVisited = stepDown(3);
-    expect(threadsVisited).not.toContain(KR2);
-    expect([...new Set(threadsVisited)]).toEqual(
-      model.filteredThreadRevisionIds(
-        FILTERED_THREAD,
-        model.threadRevisionOrder(FILTERED_THREAD),
-      ),
-    );
   });
 });
 
@@ -728,38 +636,24 @@ function revisionDoc(ids: string[]): RevisionsDoc {
   };
 }
 
-function seedRevisionNavigationLens(lens: "list" | "threads"): string[] {
+function seedRevisionNavigationLens(): string[] {
   const ids = revisionIds(8);
   store.commit({
     revisions: revisionDoc(ids),
-    threads: {
-      threads: [
-        {
-          revisions: ids,
-          heads: [ids[ids.length - 1]],
-          superseded: ids.slice(0, -1),
-        },
-      ],
-      revisionClassification: {},
-    } as unknown as ThreadsDoc,
-    lens,
+    lens: "list",
     order: "asc",
     selected: { kind: "revision", id: ids[1] },
   });
   return ids;
 }
 
-function mountRevisionViewport(
-  lens: "list" | "threads",
-  visibleRows: number,
-): void {
+function mountRevisionViewport(visibleRows: number): void {
   const master = document.querySelector<HTMLElement>("#master");
   if (!master) throw new Error("#master not mounted");
-  const id = lens === "threads" ? "revisions" : "units";
-  master.innerHTML = `<div id="${id}" class="units"><div class="unit-card"></div></div>`;
-  const list = document.querySelector<HTMLElement>(`#${id}`);
+  master.innerHTML = `<div id="units" class="units"><div class="unit-card"></div></div>`;
+  const list = document.querySelector<HTMLElement>("#units");
   const card = list?.querySelector<HTMLElement>(".unit-card");
-  if (!list || !card) throw new Error(`${id} viewport not mounted`);
+  if (!list || !card) throw new Error("units viewport not mounted");
   Object.defineProperty(list, "clientHeight", {
     configurable: true,
     value: visibleRows * 52,
@@ -771,7 +665,7 @@ function mountRevisionViewport(
 
 describe("revision-centric timeline navigation", () => {
   it("g/G jump to the revision-list bounds", () => {
-    const ids = seedRevisionNavigationLens("list");
+    const ids = seedRevisionNavigationLens();
     key({ key: "g" });
     expect(store.getState().selected.id).toBe(ids[0]);
     key({ key: "G" });
@@ -779,29 +673,8 @@ describe("revision-centric timeline navigation", () => {
   });
 
   it("f/b and u/d page through the revision list", () => {
-    const ids = seedRevisionNavigationLens("list");
-    mountRevisionViewport("list", 4);
-    key({ key: "f" });
-    expect(store.getState().selected.id).toBe(ids[5]);
-    key({ key: "b" });
-    expect(store.getState().selected.id).toBe(ids[1]);
-    key({ key: "d" });
-    expect(store.getState().selected.id).toBe(ids[3]);
-    key({ key: "u" });
-    expect(store.getState().selected.id).toBe(ids[1]);
-  });
-
-  it("g/G jump through the threads revision order", () => {
-    const ids = seedRevisionNavigationLens("threads");
-    key({ key: "g" });
-    expect(store.getState().selected.id).toBe(ids[0]);
-    key({ key: "G" });
-    expect(store.getState().selected.id).toBe(ids[ids.length - 1]);
-  });
-
-  it("f/b and u/d page through the threads revision order", () => {
-    const ids = seedRevisionNavigationLens("threads");
-    mountRevisionViewport("threads", 4);
+    const ids = seedRevisionNavigationLens();
+    mountRevisionViewport(4);
     key({ key: "f" });
     expect(store.getState().selected.id).toBe(ids[5]);
     key({ key: "b" });
@@ -1043,9 +916,9 @@ describe("the attention lens has a lens-local cursor", () => {
     );
   }
 
-  it("key 4 navigates to the attention lens", () => {
+  it("key 3 navigates to the attention lens", () => {
     store.commit({ lens: "list" });
-    key({ key: "4" });
+    key({ key: "3" });
     expect(store.getState().lens).toBe("attention");
   });
 

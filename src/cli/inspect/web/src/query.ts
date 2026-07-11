@@ -1,12 +1,12 @@
 // Structured query grammar: the tokenizer, the field:value + free-text parser,
-// and the field/predicate matchers, still used by the revisions/threads lenses.
+// and the field/predicate matchers, still used by the revisions lens.
 // Ported from the served app.js query cluster. All pure (argument-driven, no DOM,
 // no state).
 //
 // The timeline history query (its haystack, filter predicates, and facet counts)
 // moved to the server; the client no longer indexes or searches history entries.
-// The revisions/threads lenses keep matching client-side over the fully-loaded
-// supersession graph, so this grammar stays. Import direction stays downward.
+// The revisions lens keeps matching client-side over the fully-loaded list, so
+// this grammar stays. Import direction stays downward.
 
 import { QUERY_FIELDS, type SearchIndex, TYPES } from "./types";
 

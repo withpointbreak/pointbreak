@@ -28,13 +28,18 @@ fn index_html_is_one_master_detail_shell_not_four_views() {
             "the parallel `{old}` section is collapsed into the shell"
         );
     }
-    // The master pane switches between the four lenses (durable data-attr values).
-    for lens in ["timeline", "list", "threads", "attention"] {
+    // The master pane switches between the three lenses (durable data-attr values).
+    for lens in ["timeline", "list", "attention"] {
         assert!(
             html.contains(&format!("data-lens=\"{lens}\"")),
             "the lens switcher offers the `{lens}` lens"
         );
     }
+    // The threads lens is dissolved into the revision list; its tab never returns.
+    assert!(
+        !html.contains("data-lens=\"threads\""),
+        "the retired threads lens is not offered"
+    );
 }
 
 #[test]

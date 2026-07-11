@@ -118,10 +118,8 @@ describe("the single subscriber repaints on every commit", () => {
     await main.main();
     store.commit({ lens: "list" });
     expect(document.querySelector("#master #units .unit-card")).not.toBeNull();
-    store.commit({ lens: "threads" });
-    expect(
-      document.querySelector("#master #revisions .thread-card"),
-    ).not.toBeNull();
+    store.commit({ lens: "attention" });
+    expect(document.querySelector("#master #attention")).not.toBeNull();
   });
 });
 

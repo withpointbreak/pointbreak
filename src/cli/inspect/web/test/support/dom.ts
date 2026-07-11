@@ -19,7 +19,7 @@ const INDEX_BODY = `
   <nav id="lens-switcher" aria-label="master pane lens">
     <button class="lens-tab" type="button" data-lens="timeline" aria-pressed="true">Timeline</button>
     <button class="lens-tab" type="button" data-lens="list" aria-pressed="false">Revisions</button>
-    <button class="lens-tab" type="button" data-lens="threads" aria-pressed="false">Threads</button>
+    <button class="lens-tab" type="button" data-lens="attention" aria-pressed="false">Attention</button>
   </nav>
   <div class="stats">
     <div id="store-identity" class="store-identity hidden">
@@ -120,7 +120,7 @@ const INDEX_BODY = `
       <dt><kbd>Cmd</kbd> / <kbd>Ctrl</kbd> + <kbd>K</kbd></dt><dd>open the command palette</dd>
       <dt><kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>P</kbd></dt><dd>open the command palette</dd>
       <dt><kbd>j</kbd> / <kbd>k</kbd></dt><dd>move the selection down / up in the active lens</dd>
-      <dt><kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd></dt><dd>jump to the timeline / revisions / threads lens</dd>
+      <dt><kbd>1</kbd> / <kbd>2</kbd> / <kbd>3</kbd></dt><dd>jump to the timeline / revisions / attention lens</dd>
       <dt><kbd>g</kbd> / <kbd>G</kbd></dt><dd>jump to the top / bottom of the timeline</dd>
       <dt><kbd>f</kbd> / <kbd>b</kbd></dt><dd>page forward / backward through visible timeline entries</dd>
       <dt><kbd>d</kbd> / <kbd>u</kbd></dt><dd>move half a page down / up through visible timeline entries</dd>

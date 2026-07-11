@@ -89,6 +89,8 @@ describe("buildCommands (actions + contextual jumps over the loaded state)", () 
     expect(text).toContain("Copy current view link");
     expect(text).toContain("Switch to list lens");
     expect(text).toContain("Switch to attention lens");
+    // The threads lens is dissolved; its palette command must not resurface.
+    expect(text).not.toContain("Switch to threads lens");
     // Group headers for the contextual jumps built from state.revisions / history.
     expect(text).toContain("Revisions");
     expect(text).toContain("Events");
@@ -169,14 +171,14 @@ describe("the wired #cmd-input / #cmd-palette controls", () => {
     palette.open();
     const input = document.querySelector<HTMLInputElement>("#cmd-input");
     if (input) {
-      input.value = "Switch to threads lens";
+      input.value = "Switch to attention lens";
       input.dispatchEvent(new Event("input", { bubbles: true }));
     }
     expect(results()?.querySelectorAll(".cmd-item").length).toBe(1);
     input?.dispatchEvent(
       new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
     );
-    expect(store.getState().lens).toBe("threads");
+    expect(store.getState().lens).toBe("attention");
   });
 
   it("a backdrop click closes the palette", () => {

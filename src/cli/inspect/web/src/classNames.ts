@@ -114,15 +114,11 @@ export const CLASS = {
   ln: "ln",
   sign: "sign",
 
-  // Revision list, supersession threads, and the laid-out DAG.
+  // Revision list, supersession badges, and the laid-out DAG.
   unitCard: "unit-card",
   unitPage: "unit-page",
   unitPageTitle: "unit-page-title",
   supersessionBadges: "supersession-badges",
-  threadCompeting: "thread-competing",
-  threadOverview: "thread-overview",
-  threadOverviews: "thread-overviews",
-  competing: "competing",
   dagEdge: "dag-edge",
   dagArrowHead: "dag-arrow-head",
   dagArrowHeadTraced: "dag-arrow-head-traced",

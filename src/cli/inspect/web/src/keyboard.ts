@@ -74,8 +74,7 @@ function timelineIsActive(): boolean {
 }
 
 function revisionLensIsActive(): boolean {
-  const lens = getState().lens;
-  return lens === "list" || lens === "threads";
+  return getState().lens === "list";
 }
 
 function attentionLensIsActive(): boolean {
@@ -153,8 +152,7 @@ function timelineViewportRows(): number {
 }
 
 function revisionLensViewportRows(): number {
-  const selector = getState().lens === "threads" ? "#revisions" : "#units";
-  const list = $<HTMLElement>(selector);
+  const list = $<HTMLElement>("#units");
   const item = list?.querySelector<HTMLElement>(".unit-card");
   const viewportH = list?.clientHeight ?? 0;
   const itemH = item?.getBoundingClientRect().height ?? 0;
@@ -186,7 +184,7 @@ function selectLoadedLensIndex(index: number): void {
   navigate({ selected: ids[target] }, { replace: true });
 }
 
-// Step the fully-loaded revisions/threads lenses over their in-memory entries.
+// Step the fully-loaded revisions lens over its in-memory entries.
 function stepList(delta: number): void {
   const next = loadedLensIndex(delta);
   if (next !== null) selectLoadedLensIndex(next);
@@ -474,10 +472,6 @@ export function onKey(ev: KeyboardEvent): void {
       navigate({ lens: "list" });
       return;
     case "3":
-      ev.preventDefault();
-      navigate({ lens: "threads" });
-      return;
-    case "4":
       ev.preventDefault();
       navigate({ lens: "attention" });
       return;

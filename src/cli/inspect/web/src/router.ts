@@ -5,8 +5,10 @@
 // entirely client-side. Theme and density are reader-local localStorage prefs and
 // are deliberately NOT part of the fragment (not shareable view state).
 //
-//   #/<lens>                   lens-primary (lens ∈ timeline | list | threads)
+//   #/<lens>                   lens-primary (lens ∈ timeline | list | attention)
 //   #/<lens>?sel=<id>          a parked cursor within the lens (detail pane closed)
+//   #/threads                  legacy alias: parses as #/list, query preserved
+//                              verbatim; the address bar is replace-rewritten
 //   #/revision/<revisionId>    entity-primary: the named revision is open in the detail pane
 //   #/event/<eventId>          entity-primary: the named event is open in the detail pane
 //   ?lens=<lens>               the master lens behind an entity-primary path
@@ -35,7 +37,7 @@ import {
 import { refInfo, shortRef } from "./refs";
 import { commit, getState, type Selection, type State } from "./store";
 
-const LENSES = ["timeline", "list", "threads", "attention"];
+const LENSES = ["timeline", "list", "attention"];
 const DEFAULT_LENS = "timeline";
 
 /**
@@ -65,6 +67,10 @@ export interface RoutePatch {
   unsupportedJournal: string | boolean | null;
   // Set only when the path is unrecognized; resolve() surfaces a visible fallback.
   unknownPath: string | null;
+  // Set when the path was a recognized legacy form that parsed into its current
+  // equivalent; applyHash replace-rewrites the address bar so Back never bounces
+  // through the stale form. A parse-seam field like `unknownPath` — never State.
+  migrated: "threads-alias" | null;
 }
 
 /**
@@ -149,6 +155,7 @@ export function parseHash(
     unsupportedAsOf: p.asof != null ? p.asof || true : null,
     unsupportedJournal: p.journal != null ? p.journal || true : null,
     unknownPath: null,
+    migrated: null,
   };
 
   const segs = path.split("/").filter(Boolean); // "/timeline" -> ["timeline"]
@@ -163,8 +170,11 @@ export function parseHash(
     patch.selected = { kind: "event", id: decodeURIComponent(segs[1]) };
     patch.open = true;
     patch.lens = LENSES.includes(lensParam) ? lensParam : DEFAULT_LENS;
-  } else if (LENSES.includes(segs[0])) {
-    patch.lens = segs[0];
+  } else if (LENSES.includes(segs[0]) || segs[0] === "threads") {
+    // `threads` is a retired lens: old links alias to the list lens, and the
+    // query params (parsed independently of the path above) carry over verbatim.
+    patch.lens = segs[0] === "threads" ? "list" : segs[0];
+    if (segs[0] === "threads") patch.migrated = "threads-alias";
     if (p.sel) patch.selected = { kind: selectionKind(p.sel), id: p.sel };
   } else {
     patch.lens = DEFAULT_LENS;
@@ -250,8 +260,20 @@ export function navigate(
  * (the history is server-paged, so the event may simply be off the loaded page).
  */
 export function applyHash(): void {
-  const patch = resolve(parseHash(location.hash, presentTypes()));
+  const parsed = parseHash(location.hash, presentTypes());
+  const patch = resolve(parsed);
   commit(patch);
+  if (parsed.migrated === "threads-alias") {
+    // Canonicalize the address bar: swap ONLY the path segment, keeping the
+    // original query string byte-for-byte (serializeState would drop params it
+    // does not know and normalize encoding). Replace, never push, so Back does
+    // not bounce through the stale form.
+    history.replaceState(
+      {},
+      "",
+      location.hash.replace(/^#\/threads/, "#/list"),
+    );
+  }
   const sel = getState().selected;
   if (sel.kind === "event" && sel.id && !eventExists(sel.id)) {
     void revealSelectedEvent(sel.id, patch.lens ?? DEFAULT_LENS);
@@ -279,10 +301,10 @@ async function revealSelectedEvent(
 }
 
 /**
- * Resolve a parsed patch against the loaded data, falling back up the hierarchy
- * (revision → its thread → the lens → timeline) with a visible diagnostic when a
- * deep link names an absent entity — never a 404, never a blank view. Returns a
- * clean `Partial<State>` that omits the transient route seam (the "cleaning" the
+ * Resolve a parsed patch against the loaded data, falling back (absent revision →
+ * the lens, unknown route → timeline) with a visible diagnostic when a deep link
+ * names an absent entity — never a 404, never a blank view. Returns a clean
+ * `Partial<State>` that omits the transient route seam (the "cleaning" the
  * served code did by `delete`-ing fields off the patch).
  */
 export function resolve(patch: RoutePatch): Partial<State> {
@@ -300,27 +322,26 @@ export function resolve(patch: RoutePatch): Partial<State> {
     return next;
   }
   const sel = patch.selected ?? { kind: null, id: null };
-  if (sel.kind === "revision" && sel.id && !revisionExists(sel.id)) {
-    if (revisionInAnyThread(sel.id)) {
-      showRouteDiagnostic(
-        routeDiagnostic(
-          `fell back to the threads lens — revision ${shortRef(sel.id)} is not directly selectable`,
-          freshnessDiagnostic,
-        ),
-      );
-      next.lens = "threads";
-    } else {
-      // Keep the requested lens (only the selection was absent); name it in the
-      // diagnostic so the message matches the lens actually shown.
-      const lens = patch.lens || DEFAULT_LENS;
-      showRouteDiagnostic(
-        routeDiagnostic(
-          `fell back to the ${lens} lens — revision ${shortRef(sel.id)} is not in this store`,
-          freshnessDiagnostic,
-        ),
-      );
-      next.lens = lens;
-    }
+  // A revision absent from the loaded list but present in a supersession
+  // component is only grouped away, not missing: the detail pane's
+  // entity-primary `/api/revisions/{id}` fetch resolves the exact id, so the
+  // selection stands. Only an id in neither place falls back.
+  if (
+    sel.kind === "revision" &&
+    sel.id &&
+    !revisionExists(sel.id) &&
+    !revisionInAnyThread(sel.id)
+  ) {
+    // Keep the requested lens (only the selection was absent); name it in the
+    // diagnostic so the message matches the lens actually shown.
+    const lens = patch.lens || DEFAULT_LENS;
+    showRouteDiagnostic(
+      routeDiagnostic(
+        `fell back to the ${lens} lens — revision ${shortRef(sel.id)} is not in this store`,
+        freshnessDiagnostic,
+      ),
+    );
+    next.lens = lens;
     next.selected = { kind: null, id: null };
     return next;
   }

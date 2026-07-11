@@ -46,7 +46,6 @@ describe("CLASS static tokens", () => {
     expect(CLASS.dagArrowHeadTraced).toBe("dag-arrow-head-traced");
     expect(CLASS.drow).toBe("drow");
     expect(CLASS.drowMeta).toBe("drow-meta");
-    expect(CLASS.competing).toBe("competing");
   });
 
   test("every CLASS value is a single, well-formed kebab-case class token", () => {
