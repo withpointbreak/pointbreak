@@ -450,6 +450,9 @@ fn to_unit_entry_documents(
                 commit_range,
                 merge_status,
                 grouped_revision_ids,
+                // Classification-only input (already folded into mergeStatus);
+                // deliberately not a wire field.
+                merge_status_view: _,
             } = entry;
             let target_display = derive_target_display(&target, &base);
             let overview = overviews.remove(revision_id.as_str()).ok_or_else(|| {
@@ -2323,6 +2326,7 @@ mod tests {
             },
             merge_status: "unknown".to_owned(),
             grouped_revision_ids: vec![RevisionId::new("review-unit:sha256:abc")],
+            merge_status_view: None,
         }
     }
 

@@ -135,6 +135,16 @@ pub struct RevisionListEntry {
     /// ids), this lists every member. The representative `revision_id` is the
     /// lexicographically smallest member, so the choice is deterministic and re-ID-free.
     pub grouped_revision_ids: Vec<RevisionId>,
+    /// For a grouped row only: the union of every member's current commits,
+    /// which merge-status classifies in place of the representative's own
+    /// range — the row stands for every member, so a landing recorded on any
+    /// member counts (#468). `None` for a singleton (the common case pays no
+    /// clone). Never serialized: the wire `commitRange` stays the
+    /// representative's per-unit lifecycle view, which means a grouped row's
+    /// `mergeStatus` (and any liveness-derived diagnostics, which may name
+    /// member commits) is NOT re-derivable from its own `commitRange`.
+    #[serde(skip)]
+    pub merge_status_view: Option<RevisionCommitRangeView>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -277,7 +287,11 @@ fn attach_merge_status(
     liveness: Option<&LivenessBatch>,
 ) {
     for entry in &mut result.entries {
-        let (merge_status, diagnostics) = merge_status_for(&entry.commit_range, repo, liveness);
+        let view = entry
+            .merge_status_view
+            .as_ref()
+            .unwrap_or(&entry.commit_range);
+        let (merge_status, diagnostics) = merge_status_for(view, repo, liveness);
         entry.merge_status = merge_status.to_owned();
         entry.commit_range.diagnostics.extend(diagnostics);
     }
@@ -398,6 +412,36 @@ fn group_entries(
             entry.grouped_revision_ids.contains(&entry.revision_id),
             "the member set always contains the representative id"
         );
+        // The row stands for every member, so merge-status classifies the
+        // UNION of the members' current commits: a landing recorded on any
+        // member counts, instead of the representative's own view reading a
+        // shared interior commit as orphaned while a sibling demonstrably
+        // landed (#468). The wire `commitRange` stays the representative's.
+        // Dedup is by (oid, source), never oid alone: a sibling's landing
+        // ASSOCIATION on the shared capture OID is a claim the landing
+        // analysis reads (`source == Association`), and the representative's
+        // capture-target seed at the same OID must not swallow it.
+        if entry.grouped_revision_ids.len() > 1 {
+            let mut union = entry.commit_range.clone();
+            for member in &entry.grouped_revision_ids {
+                if member == &entry.revision_id {
+                    continue;
+                }
+                let view = &by_id
+                    .get(member)
+                    .expect("every member is a known entry")
+                    .commit_range;
+                for commit in &view.current_commits {
+                    if union.current_commits.iter().any(|held| {
+                        held.commit_oid == commit.commit_oid && held.source == commit.source
+                    }) {
+                        continue;
+                    }
+                    union.current_commits.push(commit.clone());
+                }
+            }
+            entry.merge_status_view = Some(union);
+        }
         grouped.push(entry);
     }
 
@@ -587,6 +631,9 @@ fn entry_from_event(
         base: provenance.base,
         target: provenance.target,
         object_artifact_content_hash,
+        // Singletons classify their own range; the grouping pass fills this
+        // with the member union for collapsed rows only.
+        merge_status_view: None,
         commit_range,
         // Filled by `attach_merge_status` after the visibility filter.
         merge_status: String::new(),
@@ -615,6 +662,7 @@ mod tests {
         EngagementId, JournalId, ReviewEndpoint, RevisionSource, TargetRef, TaskTargetRef,
         WorkObjectId, WorktreeCaptureMode,
     };
+    use crate::session::CommitEdgeSource;
     use crate::session::event::{EventTarget, GitProvenance, Revision, Writer};
 
     #[test]
@@ -1123,8 +1171,9 @@ mod tests {
         assert!(default_ids.contains(&"review-unit:sha256:mix".to_owned()));
     }
 
-    /// Surface every entry (so orphaned units are present too) and attach
-    /// merge-status, returning `(revision_id, merge_status)` pairs.
+    /// Surface every entry (so orphaned units are present too), group, and
+    /// attach merge-status — the canonical read-surface order — returning
+    /// `(revision_id, merge_status)` pairs (one per grouped row).
     fn merge_statuses(
         events: &[ShoreEvent],
         repo: &Path,
@@ -1134,6 +1183,8 @@ mod tests {
         let mut result = list_from_events(events, &projection).unwrap();
         let liveness = LivenessBatch::build(repo, integration_ref).ok();
         apply_orphan_visibility(&mut result, repo, OrphanVisibility::All, liveness.as_ref());
+        let grouping = CommitOidGroupingProjection::from_events(events).unwrap();
+        result.entries = group_entries(result.entries, &grouping);
         attach_merge_status(&mut result, repo, liveness.as_ref());
         result
             .entries
@@ -1190,6 +1241,78 @@ mod tests {
     }
 
     #[test]
+    fn grouped_row_merge_status_counts_a_landing_on_any_member() {
+        let repo = OrphanRepo::new();
+        // The shared capture OID is an interior commit of the live side branch
+        // `other`: not reachable from `main`, not a tip — narrow reads it
+        // orphaned on its own.
+        let shared = repo.oid("other~1");
+        let tip = repo.oid("main");
+        // Two sibling captures of one range (the cross-worktree shape) group on
+        // the shared OID; the landing on `main` is recorded on the
+        // NON-representative member ("b" sorts after "a").
+        let events = [
+            range_captured_event("a", "2026-05-13T10:00:00Z", &shared),
+            range_captured_event("b", "2026-05-13T10:00:01Z", &shared),
+            commit_associated_event("b", &tip),
+        ];
+
+        let statuses = merge_statuses(&events, repo.path(), Some("refs/heads/main"));
+        assert_eq!(statuses.len(), 1, "the siblings collapse into one row");
+        assert_eq!(
+            statuses[0].0, "review-unit:sha256:a",
+            "smallest id represents"
+        );
+        // The row stands for every member (it lists every member id), so a
+        // landing recorded on any member counts: the union of the members'
+        // current commits classifies merged, not the representative's
+        // orphaned-on-its-own view (#468).
+        assert_eq!(statuses[0].1, "merged");
+    }
+
+    #[test]
+    fn grouped_union_keeps_a_landing_claim_at_the_shared_oid() {
+        // Siblings a and b share capture OID X; b's landing was a fast-forward
+        // whose landed commit IS X, recorded as an association on b. The union
+        // must keep BOTH flavors of X — the association is the landing claim
+        // `landing_analysis` reads (`source == Association`), and the
+        // representative's capture-target seed at the same OID must not
+        // swallow it.
+        let repo = OrphanRepo::new();
+        let shared = repo.oid("main");
+        let events = [
+            range_captured_event("a", "2026-05-13T10:00:00Z", &shared),
+            range_captured_event("b", "2026-05-13T10:00:01Z", &shared),
+            commit_associated_event("b", &shared),
+        ];
+        let projection = RevisionCommitRangeProjection::from_events(&events).unwrap();
+        let result = list_from_events(&events, &projection).unwrap();
+        let grouping = CommitOidGroupingProjection::from_events(&events).unwrap();
+        let grouped = group_entries(result.entries, &grouping);
+
+        assert_eq!(grouped.len(), 1);
+        let view = grouped[0]
+            .merge_status_view
+            .as_ref()
+            .expect("a multi-member row carries the union view");
+        let mut sources: Vec<CommitEdgeSource> = view
+            .current_commits
+            .iter()
+            .filter(|commit| commit.commit_oid == shared)
+            .map(|commit| commit.source)
+            .collect();
+        sources.sort_by_key(|source| format!("{source:?}"));
+        assert_eq!(
+            sources,
+            vec![
+                CommitEdgeSource::Association,
+                CommitEdgeSource::CaptureTarget
+            ],
+            "both flavors of the shared OID survive the union"
+        );
+    }
+
+    #[test]
     fn repo_unavailable_merge_status_is_unknown_not_error() {
         let non_repo = TempDir::new().unwrap();
         let events = [range_captured_event(
@@ -1220,6 +1343,10 @@ mod tests {
         let json = serde_json::to_string(&result.entries[0]).unwrap();
         assert!(json.contains("\"mergeStatus\""));
         assert!(json.contains("\"open\""));
+        // The classification view is internal: the wire carries only the
+        // representative's commitRange.
+        assert!(!json.contains("mergeStatusView"));
+        assert!(!json.contains("merge_status_view"));
     }
 
     /// A worktree capture (floating until a commit is associated) for an explicit id,
