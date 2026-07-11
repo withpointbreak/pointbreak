@@ -4,7 +4,8 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
+const scriptPath = fileURLToPath(import.meta.url);
+const scriptDirectory = path.dirname(scriptPath);
 const tokenPath = path.resolve(scriptDirectory, "../assets/tokens.css");
 
 const requiredTokens = [
@@ -62,7 +63,7 @@ function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
 
-function declarations(block, label) {
+export function declarations(block, label) {
   const values = new Map();
   for (const match of block.matchAll(/(--[a-z0-9-]+)\s*:\s*([^;]+);/gi)) {
     assert(!values.has(match[1]), `${label}: duplicate token ${match[1]}`);
@@ -71,7 +72,7 @@ function declarations(block, label) {
   return values;
 }
 
-function themeBlocks(css) {
+export function themeBlocks(css) {
   const withoutComments = css.replace(/\/\*[\s\S]*?\*\//g, "");
   const dark = withoutComments.match(
     /:root\s*,\s*\[data-theme\s*=\s*["']dark["']\]\s*\{([\s\S]*?)\}/i,
@@ -158,7 +159,7 @@ function contrast(foreground, background) {
   return (lighter + 0.05) / (darker + 0.05);
 }
 
-function auditTheme(theme, tokens) {
+export function auditTheme(theme, tokens) {
   for (const name of requiredTokens) resolvedValue(tokens, name);
 
   const checks = [];
@@ -300,7 +301,9 @@ async function main() {
   if (failures.length > 0) process.exitCode = 1;
 }
 
-main().catch((error) => {
-  console.error(`Review contrast audit failed: ${error.message}`);
-  process.exitCode = 1;
-});
+if (path.resolve(process.argv[1] ?? "") === scriptPath) {
+  main().catch((error) => {
+    console.error(`Review contrast audit failed: ${error.message}`);
+    process.exitCode = 1;
+  });
+}

@@ -49,32 +49,31 @@
   /* Surfaces — a low-chroma instrument register. The lightness ladder carries
      hierarchy while the restrained green cast relates the product to the
      marketing system without importing its editorial composition. */
-  --bg: #080c0d;
-  --bg-elev: #0e1416;
-  --bg-row: #151e20;
-  --bg-row-sel: #1b2729;
-  --border: #354540;
-  --fg: #f0f5f1;
-  --fg-dim: #a5b2ad;
+  --bg: #101817;
+  --bg-elev: #151f1e;
+  --bg-row: #1b2725;
+  --bg-row-sel: #243331;
+  --border: #2d3d39;
+  --fg: #e5ebe7;
+  --fg-dim: #9eaaa5;
 
-  /* Header chrome — a dedicated deeper tone so the topbar reads as a distinct
-     band over the page (page/topbar/field sat within ~1.06 when the topbar
-     borrowed --bg-elev). Its own token so --bg-elev keeps serving cards/code
-     blocks unchanged. */
-  --bg-topbar: #101716;
+  /* Header chrome — a dedicated tone so the topbar can read as a distinct band
+     without borrowing the brighter elevated/card surface. Its separation also
+     comes from content hierarchy and the bottom rule, not brightness alone. */
+  --bg-topbar: #131d1b;
 
   /* List selection — a light wash paired with an --accent left bar (app.css).
      The bar carries the selected signal, so the wash stays light enough that
      the colored event-type labels on a selected row clear AA (a strong fill
      cannot back dark colored text at AA). Distinct from --bg-row-sel, which
      still fills the fill-based selections (command palette, DAG node). */
-  --sel-bg: #1b2729;
+  --sel-bg: #243331;
 
   /* Read-only code/JSON readout surface — a quiet panel, distinct from the
      functional --bg-elev overlays (command palette, diff headers) that should
      stand out. Dark keeps the recessive navy; light is a barely-there near-white
      (ocean-foam --bg-elev read as too strong a blue card on the white page). */
-  --bg-code: #0e1416;
+  --bg-code: #121c1a;
 
   /* Accent — a luminous cyan working signal. --accent is the text/icon/glow
      register; --accent-strong is the fill register;

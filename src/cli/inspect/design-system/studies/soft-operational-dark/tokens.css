@@ -1,0 +1,28 @@
+/* Frozen pre-trial baseline. Keeps the accepted comparison reproducible after
+   the candidate is applied to the live token sheet for owner evaluation. */
+[data-theme="dark"][data-tone="study-baseline"] {
+  --bg: #080c0d;
+  --bg-elev: #0e1416;
+  --bg-row: #151e20;
+  --bg-row-sel: #1b2729;
+  --bg-topbar: #101716;
+  --sel-bg: #1b2729;
+  --bg-code: #0e1416;
+  --border: #354540;
+  --fg: #f0f5f1;
+  --fg-dim: #a5b2ad;
+}
+
+/* Gallery-only dark treatment. Never imported by the live inspector. */
+[data-theme="dark"][data-tone="soft-operational"] {
+  --bg: #101817;
+  --bg-elev: #151f1e;
+  --bg-row: #1b2725;
+  --bg-row-sel: #243331;
+  --bg-topbar: #131d1b;
+  --sel-bg: #243331;
+  --bg-code: #121c1a;
+  --border: #2d3d39;
+  --fg: #e5ebe7;
+  --fg-dim: #9eaaa5;
+}

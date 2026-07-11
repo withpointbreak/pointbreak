@@ -72,3 +72,12 @@ repository or a sibling `pointbreak-brand` checkout. Brand updates land in the
 central repository first, then Review deliberately vendors the selected files
 and updates `pointbreak-brand.lock.json`; normal verification reads only that
 lock and committed local assets.
+
+## Local studies
+
+Noncanonical visual studies live under `studies/`. They may compose authored
+token overrides into generated, ignored comparison cards, but they are never
+served by the inspector or included in the canonical Claude Design sync set.
+The current [soft operational dark study](./studies/soft-operational-dark/README.md)
+tests whether a lifted surface ladder and quieter text can reduce glare while
+holding the light theme and operational colors constant.

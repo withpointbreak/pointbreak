@@ -36,3 +36,7 @@
 /_ds_*
 /_adherence.oxlintrc.json
 templates/**/.thumbnail
+
+# Local, unserved study output. The authored study sources are tracked; these
+# self-contained comparison cards are regenerated on demand.
+/studies/soft-operational-dark/output/

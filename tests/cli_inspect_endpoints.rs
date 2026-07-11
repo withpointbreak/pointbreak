@@ -892,21 +892,21 @@ fn design_system_gallery_covers_the_shipped_attention_lens() {
 }
 
 #[test]
-fn design_system_promotes_only_the_selected_review_visual_treatments() {
+fn design_system_promotes_selected_review_treatments_and_soft_operational_dark() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let tokens = std::fs::read_to_string(root.join("src/cli/inspect/assets/tokens.css"))
         .expect("live Review tokens exist");
     for declaration in [
-        "--bg: #080c0d;",
-        "--bg-elev: #0e1416;",
-        "--bg-row: #151e20;",
-        "--bg-row-sel: #1b2729;",
-        "--bg-topbar: #101716;",
-        "--sel-bg: #1b2729;",
-        "--bg-code: #0e1416;",
-        "--border: #354540;",
-        "--fg: #f0f5f1;",
-        "--fg-dim: #a5b2ad;",
+        "--bg: #101817;",
+        "--bg-elev: #151f1e;",
+        "--bg-row: #1b2725;",
+        "--bg-row-sel: #243331;",
+        "--bg-topbar: #131d1b;",
+        "--sel-bg: #243331;",
+        "--bg-code: #121c1a;",
+        "--border: #2d3d39;",
+        "--fg: #e5ebe7;",
+        "--fg-dim: #9eaaa5;",
         "--accent: #5ce5f4;",
         "--accent-strong: #1fc4d6;",
         "--on-accent: #071012;",
@@ -1014,6 +1014,49 @@ fn design_system_final_state_has_no_temporary_visual_system() {
         large_identity.contains("<svg class=\"large-identity-mark large-identity-mark-multiband\"")
     );
     assert!(!large_identity.contains("<img"));
+}
+
+#[test]
+fn design_system_soft_operational_dark_study_stays_gallery_only() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let study = root.join("src/cli/inspect/design-system/studies/soft-operational-dark");
+    for required in ["README.md", "tokens.css", "audit.mjs", "bake.sh"] {
+        assert!(
+            study.join(required).is_file(),
+            "soft operational study must include {required}"
+        );
+    }
+
+    let study_tokens = std::fs::read_to_string(study.join("tokens.css"))
+        .expect("soft operational study tokens exist");
+    assert!(
+        study_tokens.contains("data-tone=\"study-baseline\""),
+        "study must retain the accepted pre-trial baseline"
+    );
+    for held_constant in [
+        "--accent",
+        "--success",
+        "--warning",
+        "--danger",
+        "--diff-add-bg",
+        "--tok-keyword",
+        "--row-pad",
+    ] {
+        assert!(
+            !study_tokens.contains(held_constant),
+            "study must not override held-constant token {held_constant}"
+        );
+    }
+
+    let live_tokens = include_str!("../src/cli/inspect/assets/tokens.css");
+    let live_styles = include_str!("../src/cli/inspect/assets/app.css");
+    let canonical_bake = include_str!("../src/cli/inspect/design-system/_bodies/bake.sh");
+    for live_source in [live_tokens, live_styles, canonical_bake] {
+        assert!(
+            !live_source.contains("soft-operational"),
+            "the gallery-only study must not enter live tokens, styles, or the canonical bake"
+        );
+    }
 }
 
 #[test]
