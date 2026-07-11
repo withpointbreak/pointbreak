@@ -8,6 +8,10 @@ const LOCK_SCHEMA = "com.withpointbreak.brand-lock/v1";
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(scriptDirectory, "../../../..");
 const lockPath = path.join(scriptDirectory, "pointbreak-brand.lock.json");
+const inlineIdentityPath = path.join(
+  scriptDirectory,
+  "_bodies/identity-large.body.html",
+);
 
 const fontFiles = [
   "JetBrainsMono-Bold.woff2",
@@ -216,6 +220,22 @@ async function verifyArtifact(artifact) {
   }
 }
 
+async function verifyInlineIdentityGeometry(lock) {
+  const lockedLogo = lock.artifacts.find(
+    (artifact) => artifact.id === "logo.full-color.svg",
+  );
+  assert(
+    lockedLogo?.geometrySha256,
+    "inline identity geometry: full-color logo digest is missing from the lock",
+  );
+  const source = await readFile(inlineIdentityPath, "utf8");
+  const actualGeometry = sha256(normalizedSvgGeometry(source));
+  assert(
+    actualGeometry === lockedLogo.geometrySha256,
+    `inline identity geometry: ${actualGeometry} != ${lockedLogo.geometrySha256}`,
+  );
+}
+
 async function main() {
   let lock;
   try {
@@ -224,7 +244,10 @@ async function main() {
     throw new Error(`${lockPath}: ${error.message}`);
   }
   validateLock(lock);
-  await Promise.all(lock.artifacts.map(verifyArtifact));
+  await Promise.all([
+    ...lock.artifacts.map(verifyArtifact),
+    verifyInlineIdentityGeometry(lock),
+  ]);
   console.log(`Verified ${lock.artifacts.length} vendored Pointbreak brand artifacts.`);
 }
 

@@ -600,6 +600,10 @@ fn design_system_gallery_is_claude_design_sync_ready() {
         .expect("design-system README is readable");
     let gitignore = std::fs::read_to_string(design_system.join(".gitignore"))
         .expect("design-system gitignore is readable");
+    let identity = std::fs::read_to_string(design_system.join("_bodies/identity-large.body.html"))
+        .expect("large identity body is readable");
+    let brand_check = std::fs::read_to_string(design_system.join("brand-check.mjs"))
+        .expect("design-system brand checker is readable");
 
     assert!(
         !styles.contains("url(\"/pointbreak-logo-mono") && !styles.contains("../../assets/"),
@@ -622,6 +626,28 @@ fn design_system_gallery_is_claude_design_sync_ready() {
     assert!(
         readme.contains("pointbreak-product-ds"),
         "README names the active Claude Design project"
+    );
+    assert!(
+        identity.contains("<svg class=\"large-identity-mark large-identity-mark-multiband\"")
+            && !identity.contains("<img"),
+        "large identity must inline multiband geometry so SVG sanitization cannot remove its fills"
+    );
+    for fill in [
+        "var(--wave-deep)",
+        "var(--wave-trough)",
+        "var(--wave-face)",
+        "var(--wave-mid)",
+        "var(--wave-crest)",
+    ] {
+        assert!(
+            styles.contains(fill),
+            "large identity styles must use {fill}"
+        );
+    }
+    assert!(
+        brand_check.contains("_bodies/identity-large.body.html")
+            && brand_check.contains("inline identity geometry"),
+        "brand check must validate inline identity geometry against the brand lock"
     );
     for ignored in [
         "/logo/pointbreak-logo-mono.svg",
@@ -984,7 +1010,10 @@ fn design_system_final_state_has_no_temporary_visual_system() {
 
     let large_identity =
         include_str!("../src/cli/inspect/design-system/_bodies/identity-large.body.html");
-    assert!(large_identity.contains("../logo/pointbreak-logo.svg"));
+    assert!(
+        large_identity.contains("<svg class=\"large-identity-mark large-identity-mark-multiband\"")
+    );
+    assert!(!large_identity.contains("<img"));
 }
 
 #[test]

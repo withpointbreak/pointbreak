@@ -529,7 +529,13 @@ body {
   -webkit-mask: url("logo/pointbreak-logo-mono.svg") center / contain no-repeat;
   mask: url("logo/pointbreak-logo-mono.svg") center / contain no-repeat;
 }
-.large-identity-mark-multiband { display: block; object-fit: contain; }
+.large-identity-mark-multiband { display: block; }
+.large-identity-mark-multiband .logo-deep { fill: var(--wave-deep); }
+.large-identity-mark-multiband .logo-trough { fill: var(--wave-trough); }
+.large-identity-mark-multiband .logo-face { fill: var(--wave-face); }
+.large-identity-mark-multiband .logo-mid { fill: var(--wave-mid); }
+.large-identity-mark-multiband .logo-clear { fill: none; }
+.large-identity-mark-multiband .logo-crest { fill: var(--wave-crest); }
 .large-identity p {
   margin: 0 0 8px;
   color: var(--accent);
