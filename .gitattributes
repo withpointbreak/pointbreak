@@ -14,3 +14,10 @@ tests/fixtures/event_signatures/*.json text eol=lf
 # freshness gate; pin LF so a CRLF checkout (Windows git autocrlf) cannot flap the
 # diff.
 src/cli/inspect/assets/app.js text eol=lf
+
+# The canonical Review example and its capture lock carry SHA-256 digests of
+# JSON bytes. Pin those digest-bearing files to LF so Windows autocrlf checkouts
+# verify the same public pack bytes as Unix checkouts.
+examples/review/checkout-refactor/*.json text eol=lf
+examples/review/checkout-refactor/exports/*.json text eol=lf
+assets/marketing/review-interface-capture.json text eol=lf
