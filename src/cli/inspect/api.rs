@@ -2678,6 +2678,95 @@ mod tests {
     }
 
     #[test]
+    fn revision_json_resolves_a_grouped_away_revision_id() {
+        // Two worktree captures anchored to one commit converge on a shared OID
+        // and fold into a single representative list entry, while their revision
+        // ids stay distinct (the identity fold is per-worktree).
+        let root = tempfile::tempdir().expect("create temp repo");
+        let path = root.path();
+        git(path, &["init"]);
+        git(path, &["config", "user.name", "Shore Tests"]);
+        git(path, &["config", "user.email", "shore-tests@example.com"]);
+        git(path, &["config", "commit.gpgsign", "false"]);
+        std::fs::write(path.join("src.txt"), "base\n").unwrap();
+        git(path, &["add", "--all"]);
+        git(path, &["commit", "-m", "base"]);
+
+        std::fs::write(path.join("src.txt"), "changed here\n").unwrap();
+        let main_capture = pointbreak::session::capture_worktree_review(
+            pointbreak::session::CaptureOptions::new(path),
+        )
+        .expect("capture main worktree revision");
+        let main_revision = main_capture.revision_id.as_str().to_owned();
+        pointbreak::session::associate_commit(
+            pointbreak::session::AssociateCommitOptions::new(path, "HEAD")
+                .with_track("agent:tests")
+                .with_revision_id(main_capture.revision_id.clone()),
+        )
+        .expect("associate main revision with the landing commit");
+
+        let sibling = tempfile::tempdir().expect("create sibling worktree dir");
+        let sibling_path = sibling.path().join("wt");
+        git(
+            path,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                sibling_path.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        std::fs::write(sibling_path.join("src.txt"), "changed elsewhere\n").unwrap();
+        let sibling_capture = pointbreak::session::capture_worktree_review(
+            pointbreak::session::CaptureOptions::new(&sibling_path),
+        )
+        .expect("capture sibling worktree revision");
+        let sibling_revision = sibling_capture.revision_id.as_str().to_owned();
+        assert_ne!(main_revision, sibling_revision);
+        pointbreak::session::associate_commit(
+            pointbreak::session::AssociateCommitOptions::new(&sibling_path, "HEAD")
+                .with_track("agent:tests")
+                .with_revision_id(sibling_capture.revision_id.clone()),
+        )
+        .expect("associate sibling revision with the same commit");
+        let repo = root;
+
+        // Arrange check (non-vacuity): the list really does fold the pair — one
+        // entry whose grouped member set carries BOTH ids, so exactly one of the
+        // two is absent from the top-level entries.
+        let cache = super::super::cache::RevisionsResponseCache::new();
+        let summaries = Arc::new(SnapshotSummaryCache::new());
+        let listed: serde_json::Value =
+            serde_json::from_str(&revisions_json(repo.path(), &cache, &summaries).unwrap())
+                .unwrap();
+        let entries = listed["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1, "the two captures fold into one entry");
+        let grouped: Vec<&str> = entries[0]["groupedRevisionIds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().unwrap())
+            .collect();
+        assert!(
+            grouped.contains(&main_revision.as_str())
+                && grouped.contains(&sibling_revision.as_str())
+        );
+        let representative = entries[0]["revisionId"].as_str().unwrap().to_owned();
+        let grouped_away = if representative == main_revision {
+            sibling_revision
+        } else {
+            main_revision
+        };
+
+        // The composite endpoint resolves the grouped-away id exactly
+        // (event-derived resolution, independent of list grouping/visibility).
+        let doc: serde_json::Value =
+            serde_json::from_str(&revision_json(repo.path(), &grouped_away).unwrap()).unwrap();
+        assert_eq!(doc["revision"]["id"], serde_json::json!(grouped_away));
+    }
+
+    #[test]
     fn revision_json_carries_fork_gated_revision_supersession() {
         let (repo, root_id, head_b, head_c) = captured_fork_repo();
 
