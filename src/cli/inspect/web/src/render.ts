@@ -212,21 +212,48 @@ function renderAttentionBadge(tab: HTMLElement): void {
   tab.appendChild(badge);
 }
 
-// Reflect the current filter/order state into the toolbar controls (the option
-// lists are rebuilt only on load, so a navigation that changes a filter syncs the
-// displayed value here). The toolbar filters the event timeline, so it is shown
-// only for that lens.
-/** Sync the toolbar's search text, order label, and timeline-only visibility. */
+// Reflect the current filter/order/sort state into the toolbar controls (the
+// option lists are rebuilt only on load, so a navigation that changes a filter
+// syncs the displayed value here). Each control is gated to the lens(es) that
+// actually consume its state — a control visible where nothing reads it would
+// let a click silently mutate another lens's view.
+/** Sync the toolbar's control values and their per-lens visibility. */
 function syncControls(): void {
   const state = getState();
   const text = $<HTMLInputElement>("#filter-text");
   if (text && text.value !== state.filterText) text.value = state.filterText;
+
+  // Only the timeline consumes enabledTypes — leaving this visible on the
+  // revision list would let a click silently mutate the timeline's ?type=
+  // with no visible effect where the click happened.
+  const onTimeline = state.lens === "timeline";
+  $("#filter-types")?.classList.toggle("hidden", !onTimeline);
+
   const order = $("#order-toggle");
-  if (order)
+  if (order) {
     order.textContent =
-      state.order === "desc" ? "newest first" : "oldest first";
+      state.order === "desc" ? "↓ newest first" : "↑ oldest first";
+    order.setAttribute(
+      "title",
+      state.lens === "list" ? "toggle revision order" : "toggle timeline order",
+    );
+  }
+
+  // The sort-key picker belongs to the revision list alone; the timeline's
+  // order is server-applied and the attention queue's order is fixed.
+  const onList = state.lens === "list";
+  $("#sort-label")?.classList.toggle("hidden", !onList);
+  const picker = $<HTMLSelectElement>("#sort-picker");
+  if (picker) {
+    picker.classList.toggle("hidden", !onList);
+    if (picker.value !== state.sortKey) picker.value = state.sortKey;
+  }
+
+  // The toolbar shell's own gate is coarser (hidden only on the attention lens,
+  // which consumes none of these controls) and sits underneath the per-control
+  // gates above — necessary but not sufficient.
   const toolbar = $("#toolbar");
-  if (toolbar) toolbar.classList.toggle("hidden", state.lens !== "timeline");
+  if (toolbar) toolbar.classList.toggle("hidden", state.lens === "attention");
 }
 
 // Master pane: swap in the active lens body and populate it. The scaffold is

@@ -36,6 +36,8 @@ const FIXED_IDS = [
   "toolbar",
   "filter-text",
   "filter-types",
+  "sort-label",
+  "sort-picker",
   "order-toggle",
   "filter-clear",
   "master",

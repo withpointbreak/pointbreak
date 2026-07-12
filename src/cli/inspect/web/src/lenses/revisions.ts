@@ -34,6 +34,7 @@ export function renderRevisionList(): void {
   const entries = orderedRevisionEntries(
     (state.revisions?.entries ?? []).filter(matchesRevisionFilters),
     state.order,
+    state.sortKey,
   );
   if (!entries.length) {
     el.innerHTML = `<p class="${CLASS.empty}" style="color:var(--fg-dim)">${

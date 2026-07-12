@@ -64,6 +64,11 @@
           placeholder="search — text, or field:value (type: track: revision: snapshot: status:)"
         />
         <div id="filter-types" class="type-toggles"></div>
+        <label id="sort-label" for="sort-picker" class="toolbar-label hidden">sort by</label>
+        <select id="sort-picker" class="hidden" aria-label="sort revisions by">
+          <option value="captured">captured</option>
+          <option value="activity">latest activity</option>
+        </select>
         <button id="order-toggle" class="ghost" title="toggle timeline order">newest first</button>
         <button id="filter-clear" class="ghost">clear</button>
       </div>

@@ -545,6 +545,17 @@ describe("revision filter predicates", () => {
   });
 });
 
+/** A synthetic revision with a captured instant and an optional latest-activity instant. */
+const revWithActivity = (id: string, capturedMs: number, activityMs?: number) =>
+  ({
+    revisionId: id,
+    capturedAt: `unix-ms:${capturedMs}`,
+    overview:
+      activityMs == null
+        ? undefined
+        : { latestActivity: { at: `unix-ms:${activityMs}` } },
+  }) as unknown as Revision;
+
 describe("lensEntryIds", () => {
   it("lists the filtered revisions in order for the list lens", () => {
     seedTimeline();
@@ -575,6 +586,29 @@ describe("lensEntryIds", () => {
     ]);
   });
 
+  it("keeps the list-lens cursor in lockstep with the rendered card order under sortKey activity", () => {
+    // The captured order (desc) is rev:c, rev:b, rev:a — the activity order
+    // deliberately differs, so a call site that ignores the sort key visibly
+    // diverges from the rendered cards.
+    store.commit({
+      lens: "list",
+      order: "desc",
+      sortKey: "activity",
+      revisions: {
+        entries: [
+          revWithActivity("rev:a", 100, 300),
+          revWithActivity("rev:b", 200, 100),
+          revWithActivity("rev:c", 300, 200),
+        ],
+      } as unknown as RevisionsDoc,
+    });
+    expect(model.lensEntryIds().map((e) => e.id)).toEqual([
+      "rev:a",
+      "rev:c",
+      "rev:b",
+    ]);
+  });
+
   it("lists the loaded timeline events in server order for the timeline lens", () => {
     // The server pre-filters and pre-orders the page; the lens paints the loaded
     // window as-is, so the order toggle no longer reorders it client-side.
@@ -601,10 +635,14 @@ describe("newest-first ordering", () => {
   it("orders revision entries newest-first for desc and oldest-first for asc", () => {
     const entries = [rev("a", 100), rev("c", 300), rev("b", 200)];
     expect(
-      model.orderedRevisionEntries(entries, "desc").map((r) => r.revisionId),
+      model
+        .orderedRevisionEntries(entries, "desc", "captured")
+        .map((r) => r.revisionId),
     ).toEqual(["c", "b", "a"]);
     expect(
-      model.orderedRevisionEntries(entries, "asc").map((r) => r.revisionId),
+      model
+        .orderedRevisionEntries(entries, "asc", "captured")
+        .map((r) => r.revisionId),
     ).toEqual(["a", "b", "c"]);
   });
 
@@ -615,7 +653,27 @@ describe("newest-first ordering", () => {
       { revisionId: "none" } as Revision,
     ];
     expect(
-      model.orderedRevisionEntries(entries, "desc").map((r) => r.revisionId),
+      model
+        .orderedRevisionEntries(entries, "desc", "captured")
+        .map((r) => r.revisionId),
     ).toEqual(["big", "small", "none"]);
+  });
+
+  it("orders by latestActivity.at when sortKey is activity, missing-activity last (desc)", () => {
+    const entries = [
+      revWithActivity("rev:a", 100, 500), // captured oldest, activity newest
+      revWithActivity("rev:b", 300, 200),
+      revWithActivity("rev:c", 200), // carries no activity at all
+    ];
+    expect(
+      model
+        .orderedRevisionEntries(entries, "desc", "activity")
+        .map((r) => r.revisionId),
+    ).toEqual(["rev:a", "rev:b", "rev:c"]);
+    expect(
+      model
+        .orderedRevisionEntries(entries, "desc", "captured")
+        .map((r) => r.revisionId),
+    ).toEqual(["rev:b", "rev:c", "rev:a"]); // the existing captured-key behavior
   });
 });

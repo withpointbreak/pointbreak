@@ -254,6 +254,9 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-directio
   font: inherit;
 }
 .toolbar input[type="search"] { flex: 1; min-width: 180px; }
+/* The static label beside the sort picker — quiet chrome, like the styled
+   select it names. */
+.toolbar-label { color: var(--fg-dim); font-size: var(--fs-xs); }
 /* Browsers render an unstyled placeholder as the input color at ~54% opacity,
    which falls under AA on --bg-row. Pin it to --fg-dim at full opacity so the
    hint text stays legible (5.7:1 light) while reading as placeholder. */
@@ -502,6 +505,7 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-directio
 .unit-card .kv b { color: var(--fg); font-weight: 500; }
 
 /* The attention lens: tiered cards over the outstanding review state. */
+.attention-order-label { color: var(--fg-dim); font-size: var(--fs-xs); padding: 2px 0 8px; }
 .attention-tier {
   margin: 12px 0 6px;
   font-size: var(--fs-sm);
@@ -510,7 +514,8 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-directio
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
-.attention-tier:first-child { margin-top: 0; }
+/* first-of-type, not first-child: the static order label precedes the tiers. */
+.attention-tier:first-of-type { margin-top: 0; }
 .attention-card { margin: 0 0 8px; }
 .attention-card h3 { word-break: break-all; }
 .attention-kind {

@@ -197,19 +197,35 @@ function revisionCapturedMs(r: Revision): number {
   return parseMs(r.capturedAt) ?? Number.NEGATIVE_INFINITY;
 }
 
+/** The latest-activity instant (ms) for a revision, or -Infinity when it carries none. */
+function revisionActivityMs(r: Revision): number {
+  return parseMs(r.overview?.latestActivity?.at) ?? Number.NEGATIVE_INFINITY;
+}
+
 /** Compare by ms honoring `order` ("desc" = newest-first default). Stable for equal instants. */
 function byOrder(order: string): (a: number, b: number) => number {
   return order === "asc" ? (a, b) => a - b : (a, b) => b - a;
 }
 
-/** Revision entries ordered by capture instant; newest-first unless `order` is "asc". */
+/** The instant `sortKey` selects: latest activity, or the capture instant. */
+function revisionSortMs(r: Revision, sortKey: string): number {
+  return sortKey === "activity" ? revisionActivityMs(r) : revisionCapturedMs(r);
+}
+
+/**
+ * Revision entries ordered by the `sortKey` instant; newest-first unless `order`
+ * is "asc". The one ordering function for the revision list — the renderer and
+ * the keyboard cursor must both call it with the same (order, sortKey), or
+ * stepping walks a different sequence than the eye sees.
+ */
 export function orderedRevisionEntries(
   entries: Revision[],
   order: string,
+  sortKey: string,
 ): Revision[] {
   const cmp = byOrder(order);
   return [...entries].sort((a, b) =>
-    cmp(revisionCapturedMs(a), revisionCapturedMs(b)),
+    cmp(revisionSortMs(a, sortKey), revisionSortMs(b, sortKey)),
   );
 }
 
@@ -386,6 +402,7 @@ export function lensEntryIds(): LensEntry[] {
     return orderedRevisionEntries(
       (s.revisions?.entries ?? []).filter(matchesRevisionFilters),
       s.order,
+      s.sortKey,
     ).map((r): LensEntry => ({ kind: "revision", id: r.revisionId ?? "" }));
   }
   // The server filtered and ordered the timeline page; step the loaded window

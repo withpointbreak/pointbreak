@@ -73,6 +73,13 @@ function wireToolbar(): void {
       { replace: true },
     );
   });
+  $<HTMLSelectElement>("#sort-picker")?.addEventListener("change", (e) => {
+    const value = (e.target as HTMLSelectElement).value;
+    navigate(
+      { sortKey: value === "activity" ? "activity" : "captured" },
+      { replace: true },
+    );
+  });
   // Cross-module trigger the composition root owns: a density flip changes row
   // heights without resizing the #timeline box, so the timeline's own size
   // observer can never see it. The toggle itself stays prefs-owned; the settle

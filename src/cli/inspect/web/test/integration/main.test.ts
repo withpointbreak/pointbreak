@@ -147,6 +147,19 @@ describe("wired interactions drive the DOM/route through the delegates", () => {
     ).toBe(false);
   });
 
+  it("a sort-picker change on the list lens navigates with the new sortKey", async () => {
+    await main.main();
+    document
+      .querySelector<HTMLElement>('.lens-tab[data-lens="list"]')
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    const picker = document.querySelector<HTMLSelectElement>("#sort-picker");
+    expect(picker).not.toBeNull();
+    if (picker) picker.value = "activity";
+    picker?.dispatchEvent(new Event("change", { bubbles: true }));
+    expect(store.getState().sortKey).toBe("activity");
+    expect(location.hash).toBe("#/list?sort=activity");
+  });
+
   it("a timeline-row click selects the event and paints the detail", async () => {
     await main.main();
     const row = document.querySelector<HTMLElement>(

@@ -44,7 +44,10 @@ export function renderAttention(): void {
   const { primary, secondary } = partitionAttentionTiers(items);
   // Re-apply the lens-local cursor from state so it survives this repaint.
   const focus = getState().attentionFocus;
+  // The queue's order is fixed (no user sort control anywhere on this lens),
+  // so the order is stated as a static label instead.
   el.innerHTML =
+    `<div class="${CLASS.attentionOrderLabel}">longest waiting first</div>` +
     renderTier("Needs input", primary, focus) +
     renderTier("Advisory", secondary, focus);
 }

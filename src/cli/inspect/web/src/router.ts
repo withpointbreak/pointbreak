@@ -17,6 +17,7 @@
 //   ?lens=<lens>               the master lens behind an entity-primary path
 //   ?track= ?snapshot=         cross-lens scope (survive a lens switch)
 //   ?order= ?types= ?q=        per-lens timeline controls
+//   ?sort=<key>                the revision list's sort key (list lens only)
 //   ?diff=<snapshotId> ?focus=<factId> ?diffHash=<snapshotContentHash>
 //                              legacy diff entry: forwarded to the revision-primary
 //                              page path when the snapshot maps to a loaded
@@ -68,6 +69,7 @@ export interface RoutePatch {
   filterTrack: string;
   filterSnapshot: string;
   order: string;
+  sortKey: "captured" | "activity";
   filterText: string;
   enabledTypes: Set<string>;
   diff: string | null;
@@ -106,6 +108,7 @@ export interface SerializeSnapshot {
   filterTrack: string;
   filterSnapshot: string;
   order: string;
+  sortKey: "captured" | "activity";
   enabledTypes: Set<string>;
   filterText: string;
   diff: string | null;
@@ -167,6 +170,7 @@ export function parseHash(
     filterSnapshot:
       p.snapshot != null ? p.snapshot : p.object != null ? p.object : "",
     order: p.order === "asc" || p.order === "desc" ? p.order : "desc",
+    sortKey: p.sort === "activity" ? "activity" : "captured",
     filterText: p.q != null ? p.q : "",
     enabledTypes:
       p.types != null
@@ -274,6 +278,11 @@ export function serializeState(
     params.push(`snapshot=${encodeURIComponent(snapshot.filterSnapshot)}`);
   if (snapshot.order && snapshot.order !== "desc")
     params.push(`order=${encodeURIComponent(snapshot.order)}`);
+  // The sort key is consumed only by the revision list, so only that lens
+  // round-trips it — everywhere else the param is deliberately elided (the
+  // serializer re-emits state on every lens switch and drops what it omits).
+  if (snapshot.lens === "list" && snapshot.sortKey !== "captured")
+    params.push(`sort=${encodeURIComponent(snapshot.sortKey)}`);
   if (presentTypes.some((id) => !snapshot.enabledTypes.has(id))) {
     params.push(
       `types=${encodeURIComponent(
@@ -436,6 +445,11 @@ function statePatchFrom(patch: RoutePatch): Partial<State> {
     filterTrack: patch.filterTrack,
     filterSnapshot: patch.filterSnapshot,
     order: patch.order,
+    // sortKey, like order/filterText, is set in parseHash's base patch object
+    // before any path-arm branches (including the diff-page early return), so it
+    // is always present on a full parse — unlike selected/open, which the
+    // diff-page branch deliberately omits. Unconditional copy is therefore correct.
+    sortKey: patch.sortKey,
     filterText: patch.filterText,
     enabledTypes: patch.enabledTypes,
     diff: patch.diff,

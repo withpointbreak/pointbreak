@@ -203,6 +203,72 @@ describe("renderLensSwitcher + renderMaster (lens dispatch + scaffold)", () => {
   });
 });
 
+describe("toolbar controls are gated per lens (each shows only where its state is consumed)", () => {
+  it("shows the toolbar on both Timeline and Revisions, hides it on Attention", () => {
+    store.commit({ lens: "timeline" });
+    render.render();
+    expect($("#toolbar")?.classList.contains("hidden")).toBe(false);
+    store.commit({ lens: "list" });
+    render.render();
+    expect($("#toolbar")?.classList.contains("hidden")).toBe(false);
+    store.commit({ lens: "attention" });
+    render.render();
+    expect($("#toolbar")?.classList.contains("hidden")).toBe(true);
+  });
+
+  it("hides the type page-set control on the Revisions lens (inert there — a click would silently mutate Timeline's ?type=)", () => {
+    store.commit({ lens: "timeline" });
+    render.render();
+    expect($("#filter-types")?.classList.contains("hidden")).toBe(false);
+    store.commit({ lens: "list" });
+    render.render();
+    expect($("#filter-types")?.classList.contains("hidden")).toBe(true);
+  });
+
+  it("shows the sort picker only on the list lens, reflecting state.sortKey", () => {
+    store.commit({ lens: "timeline" });
+    render.render();
+    expect($("#sort-picker")?.classList.contains("hidden")).toBe(true);
+    expect($("#sort-label")?.classList.contains("hidden")).toBe(true);
+    store.commit({ lens: "list", sortKey: "activity" });
+    render.render();
+    expect($("#sort-picker")?.classList.contains("hidden")).toBe(false);
+    expect($("#sort-label")?.classList.contains("hidden")).toBe(false);
+    expect($<HTMLSelectElement>("#sort-picker")?.value).toBe("activity");
+  });
+
+  it("relabels the order-toggle title per lens and keeps a directional glyph", () => {
+    store.commit({ lens: "timeline", order: "desc" });
+    render.render();
+    expect($("#order-toggle")?.getAttribute("title")).toBe(
+      "toggle timeline order",
+    );
+    expect($("#order-toggle")?.textContent).toBe("↓ newest first");
+    store.commit({ lens: "list" });
+    render.render();
+    expect($("#order-toggle")?.getAttribute("title")).toBe(
+      "toggle revision order",
+    );
+    store.commit({ order: "asc" });
+    render.render();
+    expect($("#order-toggle")?.textContent).toBe("↑ oldest first");
+  });
+
+  it("labels the Attention lens with its fixed order, and offers no sort control", () => {
+    store.commit({
+      lens: "attention",
+      attention: {
+        items: [{ id: "a", kind: "open_input_request", tier: "primary" }],
+        eventSetHash: "sha256:order-label-test",
+      } as AttentionDoc,
+    });
+    render.render();
+    expect($("#attention")?.textContent).toContain("longest waiting first");
+    expect($("#sort-picker")).not.toBeNull(); // exists in the DOM, just hidden
+    expect($("#sort-picker")?.classList.contains("hidden")).toBe(true);
+  });
+});
+
 describe("the attention tab count badge (global judgment-queue counts)", () => {
   // The badge is a pure projection of the already-loaded /api/attention items:
   // the needs-input count as the number, the advisory count muted beside it.

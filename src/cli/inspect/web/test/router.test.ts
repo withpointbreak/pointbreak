@@ -66,6 +66,7 @@ function routeFields(p: RoutePatch) {
     filterTrack: p.filterTrack,
     filterSnapshot: p.filterSnapshot,
     order: p.order,
+    sortKey: p.sortKey,
     enabledTypes: p.enabledTypes,
     filterText: p.filterText,
     diff: p.diff,
@@ -89,6 +90,7 @@ function snapshotFrom(p: RoutePatch): SerializeSnapshot {
     filterTrack: p.filterTrack,
     filterSnapshot: p.filterSnapshot,
     order: p.order,
+    sortKey: p.sortKey,
     enabledTypes: p.enabledTypes,
     filterText: p.filterText,
     diff: p.diff,
@@ -118,6 +120,19 @@ describe("parseHash", () => {
   it("reads a bare lens path", () => {
     expect(router.parseHash("#/list", PT).lens).toBe("list");
     expect(router.parseHash("#/attention", PT).lens).toBe("attention");
+  });
+
+  it("reads `?sort=` on the list lens, defaulting to captured", () => {
+    expect(router.parseHash("#/list", PT).sortKey).toBe("captured");
+    expect(router.parseHash("#/list?sort=activity", PT).sortKey).toBe(
+      "activity",
+    );
+  });
+
+  it("ignores an invalid sort value, falling back to captured", () => {
+    expect(router.parseHash("#/list?sort=sideways", PT).sortKey).toBe(
+      "captured",
+    );
   });
 
   it("aliases #/threads to the list lens preserving query params", () => {
@@ -262,6 +277,7 @@ describe("serializeState", () => {
       filterTrack: "",
       filterSnapshot: "",
       order: "desc",
+      sortKey: "captured",
       enabledTypes: new Set(PT),
       filterText: "",
       diff: null,
@@ -277,6 +293,23 @@ describe("serializeState", () => {
 
   it("serializes the default lens without params", () => {
     expect(router.serializeState(snap(), PT)).toBe("#/timeline");
+  });
+
+  it("emits sort= only on the list lens and only when non-default", () => {
+    expect(
+      router.serializeState(snap({ lens: "list", sortKey: "activity" }), PT),
+    ).toContain("sort=activity");
+    expect(
+      router.serializeState(snap({ lens: "list", sortKey: "captured" }), PT),
+    ).not.toContain("sort=");
+    // Off-lens elision: a non-default sortKey stays in memory, but the timeline
+    // never round-trips it — the same deliberate elision `order` gets.
+    expect(
+      router.serializeState(
+        snap({ lens: "timeline", sortKey: "activity" }),
+        PT,
+      ),
+    ).not.toContain("sort=");
   });
 
   it("serializes a non-default lens", () => {
@@ -445,6 +478,17 @@ describe("diff page route", () => {
     expect(patch.diffFile).toBe("src/cli/inspect/api.rs");
     expect(patch.diffNav).toBe("with-facts");
     expect(router.serializeState(snapshotFrom(patch), PT)).toBe(hash);
+  });
+
+  it("copies sortKey unconditionally, even on the diff-page patch that omits selected/open", () => {
+    const patch = router.parseHash(
+      `#/revision/${encodeURIComponent(REV)}/diff`,
+      PT,
+    );
+    expect(patch.selected).toBeUndefined(); // the omission this guards against
+    expect(patch.sortKey).toBe("captured"); // present regardless of the path arm
+    const next = router.resolve(patch);
+    expect(next.sortKey).toBe("captured");
   });
 
   it("omits nav at its default and rejects a garbage nav value", () => {

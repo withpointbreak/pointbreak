@@ -190,6 +190,9 @@ export interface State {
   filterSnapshot: string;
   // "desc" = newest first (default), "asc" = chronological.
   order: string;
+  // Which instant the revision list sorts by: the capture instant (default) or
+  // the latest recorded activity. Direction stays `order`'s job.
+  sortKey: "captured" | "activity";
   // The route-preserving diff overlay: the object id shown, its optional
   // event-bound artifact hash, and the single in-diff fact highlight.
   diff: string | null;
@@ -231,6 +234,7 @@ const state: State = {
   filterTrack: "",
   filterSnapshot: "",
   order: "desc",
+  sortKey: "captured",
   diff: null,
   diffHash: null,
   focus: null,

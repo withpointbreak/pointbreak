@@ -155,6 +155,7 @@
     attentionCard: "attention-card",
     attentionTier: "attention-tier",
     attentionEmpty: "attention-empty",
+    attentionOrderLabel: "attention-order-label",
     attentionKind: "attention-kind",
     attentionMeta: "attention-meta",
     attentionFreshness: "attention-freshness",
@@ -799,6 +800,7 @@
     filterTrack: "",
     filterSnapshot: "",
     order: "desc",
+    sortKey: "captured",
     diff: null,
     diffHash: null,
     focus: null,
@@ -896,14 +898,22 @@
     return parseMs(r.capturedAt) ?? Number.NEGATIVE_INFINITY;
   }
   __name(revisionCapturedMs, "revisionCapturedMs");
+  function revisionActivityMs(r) {
+    return parseMs(r.overview?.latestActivity?.at) ?? Number.NEGATIVE_INFINITY;
+  }
+  __name(revisionActivityMs, "revisionActivityMs");
   function byOrder(order) {
     return order === "asc" ? (a, b) => a - b : (a, b) => b - a;
   }
   __name(byOrder, "byOrder");
-  function orderedRevisionEntries(entries, order) {
+  function revisionSortMs(r, sortKey) {
+    return sortKey === "activity" ? revisionActivityMs(r) : revisionCapturedMs(r);
+  }
+  __name(revisionSortMs, "revisionSortMs");
+  function orderedRevisionEntries(entries, order, sortKey) {
     const cmp = byOrder(order);
     return [...entries].sort(
-      (a, b) => cmp(revisionCapturedMs(a), revisionCapturedMs(b))
+      (a, b) => cmp(revisionSortMs(a, sortKey), revisionSortMs(b, sortKey))
     );
   }
   __name(orderedRevisionEntries, "orderedRevisionEntries");
@@ -980,7 +990,8 @@
     if (s.lens === "list") {
       return orderedRevisionEntries(
         (s.revisions?.entries ?? []).filter(matchesRevisionFilters),
-        s.order
+        s.order,
+        s.sortKey
       ).map((r) => ({ kind: "revision", id: r.revisionId ?? "" }));
     }
     return (s.history?.entries ?? []).map(
@@ -1933,6 +1944,7 @@
       // bookmarks during the transition (#334).
       filterSnapshot: p.snapshot != null ? p.snapshot : p.object != null ? p.object : "",
       order: p.order === "asc" || p.order === "desc" ? p.order : "desc",
+      sortKey: p.sort === "activity" ? "activity" : "captured",
       filterText: p.q != null ? p.q : "",
       enabledTypes: p.types != null ? new Set(p.types.split(",").filter(Boolean)) : new Set(presentTypes2),
       diff: p.diff || null,
@@ -2005,6 +2017,8 @@
       params.push(`snapshot=${encodeURIComponent(snapshot.filterSnapshot)}`);
     if (snapshot.order && snapshot.order !== "desc")
       params.push(`order=${encodeURIComponent(snapshot.order)}`);
+    if (snapshot.lens === "list" && snapshot.sortKey !== "captured")
+      params.push(`sort=${encodeURIComponent(snapshot.sortKey)}`);
     if (presentTypes2.some((id) => !snapshot.enabledTypes.has(id))) {
       params.push(
         `types=${encodeURIComponent(
@@ -2115,6 +2129,11 @@
       filterTrack: patch.filterTrack,
       filterSnapshot: patch.filterSnapshot,
       order: patch.order,
+      // sortKey, like order/filterText, is set in parseHash's base patch object
+      // before any path-arm branches (including the diff-page early return), so it
+      // is always present on a full parse — unlike selected/open, which the
+      // diff-page branch deliberately omits. Unconditional copy is therefore correct.
+      sortKey: patch.sortKey,
       filterText: patch.filterText,
       enabledTypes: patch.enabledTypes,
       diff: patch.diff,
@@ -2618,7 +2637,7 @@
     }
     const { primary, secondary } = partitionAttentionTiers(items);
     const focus = getState().attentionFocus;
-    el.innerHTML = renderTier("Needs input", primary, focus) + renderTier("Advisory", secondary, focus);
+    el.innerHTML = `<div class="${CLASS.attentionOrderLabel}">longest waiting first</div>` + renderTier("Needs input", primary, focus) + renderTier("Advisory", secondary, focus);
   }
   __name(renderAttention, "renderAttention");
   function renderTier(label, items, focus) {
@@ -4750,7 +4769,8 @@
     const state2 = getState();
     const entries = orderedRevisionEntries(
       (state2.revisions?.entries ?? []).filter(matchesRevisionFilters),
-      state2.order
+      state2.order,
+      state2.sortKey
     );
     if (!entries.length) {
       el.innerHTML = `<p class="${CLASS.empty}" style="color:var(--fg-dim)">${state2.filterText || state2.filterSnapshot ? "No revisions match the current filters." : "No captured revisions in this store."}</p>`;
@@ -4907,11 +4927,25 @@ click to open the revision page">
     const state2 = getState();
     const text = $("#filter-text");
     if (text && text.value !== state2.filterText) text.value = state2.filterText;
+    const onTimeline = state2.lens === "timeline";
+    $("#filter-types")?.classList.toggle("hidden", !onTimeline);
     const order = $("#order-toggle");
-    if (order)
-      order.textContent = state2.order === "desc" ? "newest first" : "oldest first";
+    if (order) {
+      order.textContent = state2.order === "desc" ? "↓ newest first" : "↑ oldest first";
+      order.setAttribute(
+        "title",
+        state2.lens === "list" ? "toggle revision order" : "toggle timeline order"
+      );
+    }
+    const onList = state2.lens === "list";
+    $("#sort-label")?.classList.toggle("hidden", !onList);
+    const picker = $("#sort-picker");
+    if (picker) {
+      picker.classList.toggle("hidden", !onList);
+      if (picker.value !== state2.sortKey) picker.value = state2.sortKey;
+    }
     const toolbar = $("#toolbar");
-    if (toolbar) toolbar.classList.toggle("hidden", state2.lens !== "timeline");
+    if (toolbar) toolbar.classList.toggle("hidden", state2.lens === "attention");
   }
   __name(syncControls, "syncControls");
   function renderMaster() {
@@ -5095,6 +5129,13 @@ click to open the revision page">
     $("#order-toggle")?.addEventListener("click", () => {
       navigate(
         { order: getState().order === "desc" ? "asc" : "desc" },
+        { replace: true }
+      );
+    });
+    $("#sort-picker")?.addEventListener("change", (e) => {
+      const value = e.target.value;
+      navigate(
+        { sortKey: value === "activity" ? "activity" : "captured" },
         { replace: true }
       );
     });

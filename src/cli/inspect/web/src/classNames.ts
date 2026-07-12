@@ -147,6 +147,7 @@ export const CLASS = {
   attentionCard: "attention-card",
   attentionTier: "attention-tier",
   attentionEmpty: "attention-empty",
+  attentionOrderLabel: "attention-order-label",
   attentionKind: "attention-kind",
   attentionMeta: "attention-meta",
   attentionFreshness: "attention-freshness",
