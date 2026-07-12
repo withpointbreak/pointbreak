@@ -11,7 +11,7 @@
 
 import type { DiffNavFilter } from "./diff/render";
 import type { Revision } from "./projection";
-import type { HistoryEntry } from "./types";
+import type { HistoryEntry, QueryDiagnostic } from "./types";
 import { TYPES } from "./types";
 
 // The loaded `/api/*` documents the container holds. These are the fields the
@@ -48,6 +48,9 @@ export interface HistoryDoc {
   // The query string the loaded page was fetched under; a mismatch with the
   // active query resets paging and re-fetches page 1.
   queryKey?: string;
+  // Parse diagnostics for the applied `q` (deprecation hints on a 200) — a
+  // sibling of the store-integrity `diagnostics`, never mixed in.
+  queryNotices?: QueryDiagnostic[];
 }
 
 /** The `/api/revisions` document: one entry per captured revision. */

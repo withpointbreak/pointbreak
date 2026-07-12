@@ -77,15 +77,75 @@ export const ASSESSMENT_LABELS: Record<string, string> = {
 export const LENSES: readonly string[] = ["timeline", "list", "attention"];
 export const DEFAULT_LENS = "timeline";
 
-// The structured-query field:value grammar fields.
-export const QUERY_FIELDS: readonly string[] = [
+// The surface a query is parsed for — the per-surface key sets and value sets
+// hang off this. Mirrors the Rust QuerySurface.
+export type QuerySurface = "event" | "revision";
+
+// One parse diagnostic: the code, the user-typed key it concerns, and a
+// human-readable message. Mirrors the Rust QueryDiagnostic (kebab-case codes).
+export interface QueryDiagnostic {
+  code: "unsupported-qualifier" | "deprecated-qualifier" | "unsupported-value";
+  key: string;
+  message: string;
+}
+
+// The per-surface qualifier sets — the single authority every consumer (both
+// client surfaces, autocomplete) resolves supported keys from. Parity-tested
+// against the Rust arrays.
+export const EVENT_QUERY_FIELDS: readonly string[] = [
   "type",
   "track",
+  "actor",
   "revision",
   "snapshot",
-  "status",
-  "attention",
+  "check",
+  "assessment",
+  "is",
+  "tag",
+  "before",
+  "after",
 ];
+// Transitional: only the qualifiers the revision index can actually match
+// today — track/actor/is/tag are deferred (diagnosed, never silent-empty)
+// until the index extension populates their slots, and return here when it does.
+export const REVISION_QUERY_FIELDS: readonly string[] = [
+  "revision",
+  "snapshot",
+  "assessment",
+  "attention",
+  "before",
+  "after",
+];
+// Every key the grammar knows across surfaces plus the aliases — the
+// known-but-unsupported distinction: a key here but not in a surface's set
+// diagnoses instead of falling back to free text.
+export const KNOWN_QUERY_KEYS: readonly string[] = [
+  "type",
+  "track",
+  "actor",
+  "revision",
+  "snapshot",
+  "check",
+  "assessment",
+  "is",
+  "tag",
+  "attention",
+  "before",
+  "after",
+  "status",
+  "object",
+];
+// The revision attention: value set — single source for the validator, the revision
+// index builder, and autocomplete. Exactly the projection.ts attentionTokens tokens.
+export const REVISION_ATTENTION_VALUES: readonly string[] = [
+  "open-request",
+  "unassessed",
+  "validation-context",
+  "follow-up",
+  "stale-fact",
+];
+// Legacy alias: the exported event field set. Existing importers keep working.
+export const QUERY_FIELDS: readonly string[] = EVENT_QUERY_FIELDS;
 
 // How many diff file bodies render eagerly; the rest stay collapsed until opened.
 export const DEFAULT_OPEN_FILES = 10;

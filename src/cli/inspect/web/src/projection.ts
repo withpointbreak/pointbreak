@@ -11,6 +11,7 @@ import {
 } from "./classNames";
 import { escapeHtml } from "./escape";
 import { fmtDateTime } from "./format";
+import { normalizeTimeSlot, RANGE_ANCHOR_FIELD } from "./query";
 import { shortId, type TargetDisplay, type TargetHead } from "./refs";
 import {
   ASSESSMENT_LABELS,
@@ -321,8 +322,14 @@ export function revisionSearchIndex(r: Revision): SearchIndex {
     // The search-index key is `snapshot` (grammar renamed from `object`, #334);
     // the value is the revision's snapshot/content-object id.
     snapshot: r.snapshotId,
-    status: currentAssessment.assessment || currentAssessment.status || "",
-    attention: cues.map((cue) => cue.token).join(" "),
+    // The revision grammar's assessment: field (renamed from the legacy
+    // status key); same value precedence as before.
+    assessment: currentAssessment.assessment || currentAssessment.status || "",
+    // The attention token set in the space-wrapped membership encoding.
+    attention: cues.length ? ` ${cues.map((cue) => cue.token).join(" ")} ` : "",
+    // The range anchor: the revision's capturedAt, normalized to the shared
+    // fixed-width form under the one canonical occurred_at key.
+    [RANGE_ANCHOR_FIELD]: normalizeTimeSlot(r.capturedAt),
   };
 }
 

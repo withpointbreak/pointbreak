@@ -73,6 +73,14 @@ pub(crate) fn parse_rfc3339_utc_millis(value: &str) -> Option<i64> {
     Some(seconds * 1_000 + fraction_millis)
 }
 
+/// Normalize a minted `occurredAt`/`capturedAt` token (either `unix-ms:<millis>` or
+/// an RFC 3339 UTC `Z` string) to the canonical fixed-width ISO-8601 UTC form
+/// `YYYY-MM-DDTHH:MM:SS.mmmZ` (millisecond fraction always present), for lexical
+/// range compare. `None` when the token is unparseable.
+pub(crate) fn normalize_instant_to_iso_millis(value: &str) -> Option<String> {
+    parse_event_instant(value).map(format_rfc3339_utc_millis)
+}
+
 /// Format epoch milliseconds as an RFC 3339 UTC instant
 /// `YYYY-MM-DDTHH:MM:SS.mmmZ`. The crate carries no time dependency, so this
 /// hand-rolls the civil-date math symmetric to the parser above.
@@ -238,6 +246,26 @@ mod tests {
         let unix_ms = parse_event_instant("unix-ms:1781136000000").unwrap();
         assert_eq!(rfc3339, unix_ms);
         assert_eq!(unix_ms, 1_781_136_000_000);
+    }
+
+    #[test]
+    fn normalize_instant_emits_fixed_width_iso_millis_from_both_forms() {
+        // An RFC 3339 `Z` input round-trips to the canonical fixed-width form.
+        assert_eq!(
+            normalize_instant_to_iso_millis("2025-05-13T09:20:01.250Z").as_deref(),
+            Some("2025-05-13T09:20:01.250Z"),
+        );
+        // A unix-ms input normalizes to the same `.mmm` form.
+        let from_ms = normalize_instant_to_iso_millis("unix-ms:1747130401250").unwrap();
+        assert!(
+            from_ms.starts_with("2025-") && from_ms.ends_with(".250Z"),
+            "{from_ms}"
+        );
+        // Same-second, different-millis order is preserved (fractional boundary).
+        let a = normalize_instant_to_iso_millis("unix-ms:1747130401000").unwrap();
+        let b = normalize_instant_to_iso_millis("unix-ms:1747130401250").unwrap();
+        assert!(a < b);
+        assert_eq!(normalize_instant_to_iso_millis("garbage"), None);
     }
 
     #[test]

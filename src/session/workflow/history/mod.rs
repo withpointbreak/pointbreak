@@ -20,7 +20,10 @@ pub use self::query::{
 };
 pub use self::result::ReviewHistoryResult;
 pub use self::search::{
-    QueryClause, SearchRecord, build_haystack, matches_query, parse_search_query,
+    EVENT_QUERY_FIELDS, EventRecordExtras, KNOWN_QUERY_KEYS, ParsedQuery, QueryClause,
+    QueryDiagnostic, QueryDiagnosticCode, QuerySurface, RANGE_ANCHOR_FIELD,
+    REVISION_ATTENTION_VALUES, REVISION_QUERY_FIELDS, SearchRecord, build_haystack, matches_query,
+    parse_search_query, parse_search_query_for,
 };
 pub use self::summary::ReviewHistoryEntry;
 use crate::error::Result;
@@ -1292,6 +1295,44 @@ mod tests {
         // Identity describes the full replayed set (plan 0092 INV-5).
         assert_eq!(base.event_count, 2);
         assert!(base.event_set_hash.starts_with("sha256:"));
+    }
+
+    /// The opened entry in a base projection (there is exactly one per fixture).
+    fn opened_is_field(base: &BaseHistoryProjection) -> Option<&str> {
+        base.entries
+            .iter()
+            .find(|e| e.entry.event_type == EventType::InputRequestOpened)
+            .and_then(|e| e.record.field("is"))
+    }
+
+    #[test]
+    fn base_marks_a_still_open_request_is_open() {
+        let events = vec![input_request_opened_event()];
+        let base =
+            history_base_from_events(&events, &BaseProjectionConfig::default(), None).unwrap();
+        assert_eq!(opened_is_field(&base), Some(" open ")); // space-wrapped set
+    }
+
+    #[test]
+    fn base_marks_a_responded_request_is_answered() {
+        let events = vec![
+            input_request_opened_event(),
+            input_request_responded_event(),
+        ];
+        let base =
+            history_base_from_events(&events, &BaseProjectionConfig::default(), None).unwrap();
+        assert_eq!(opened_is_field(&base), Some(" answered "));
+    }
+
+    #[test]
+    fn is_open_derives_from_the_lifecycle_not_from_attention() {
+        // An assessment can clear/subsume attention items, but the request's `is:`
+        // standing depends only on whether a response exists. The open request stays
+        // `is:open` after an unrelated assessment lands.
+        let events = vec![input_request_opened_event(), assessment_event()];
+        let base =
+            history_base_from_events(&events, &BaseProjectionConfig::default(), None).unwrap();
+        assert_eq!(opened_is_field(&base), Some(" open "));
     }
 
     #[test]

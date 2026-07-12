@@ -543,6 +543,54 @@ describe("revision filter predicates", () => {
     expect(model.matchesRevisionFilters(revA)).toBe(true);
     expect(model.matchesRevisionFilters(revB)).toBe(false);
   });
+
+  it("parses the filter on the revision surface (attention and the status alias)", () => {
+    const revA = {
+      revisionId: "rev:a",
+      snapshotId: "obj:a",
+      overview: {
+        currentAssessment: { assessment: "accepted" },
+        attention: { openInputRequestCount: 1 },
+      },
+    } as unknown as Revision;
+    const revB = {
+      revisionId: "rev:b",
+      snapshotId: "obj:b",
+    } as unknown as Revision;
+
+    // attention: is a supported revision qualifier (the attention-cue buttons
+    // append exactly this clause) — it must narrow, never no-op.
+    store.commit({ filterText: "attention:open-request" });
+    expect(model.matchesRevisionFilters(revA)).toBe(true);
+    expect(model.matchesRevisionFilters(revB)).toBe(false);
+
+    // status: aliases to assessment: on the revision surface.
+    store.commit({ filterText: "status:accepted" });
+    expect(model.matchesRevisionFilters(revA)).toBe(true);
+    expect(model.matchesRevisionFilters(revB)).toBe(false);
+
+    // The canonical spelling and the display label match too.
+    store.commit({ filterText: "assessment:accepted" });
+    expect(model.matchesRevisionFilters(revA)).toBe(true);
+    expect(model.matchesRevisionFilters(revB)).toBe(false);
+  });
+
+  it("ranges over the captured instant with before:/after:", () => {
+    const older = {
+      revisionId: "rev:old",
+      capturedAt: "2026-05-13T10:00:00Z",
+    } as unknown as Revision;
+    const newer = {
+      revisionId: "rev:new",
+      capturedAt: "unix-ms:1782000000000", // ~2026-06-21
+    } as unknown as Revision;
+    store.commit({ filterText: "before:2026-06-01" });
+    expect(model.matchesRevisionFilters(older)).toBe(true);
+    expect(model.matchesRevisionFilters(newer)).toBe(false);
+    store.commit({ filterText: "after:2026-06-01" });
+    expect(model.matchesRevisionFilters(older)).toBe(false);
+    expect(model.matchesRevisionFilters(newer)).toBe(true);
+  });
 });
 
 /** A synthetic revision with a captured instant and an optional latest-activity instant. */

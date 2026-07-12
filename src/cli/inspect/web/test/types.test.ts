@@ -2,10 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_LENS,
   DEFAULT_OPEN_FILES,
+  EVENT_QUERY_FIELDS,
+  KNOWN_QUERY_KEYS,
   LARGE_FILE_ROWS,
   LENSES,
   OVERLAY_SELECTORS,
   QUERY_FIELDS,
+  REVISION_QUERY_FIELDS,
   SUPERSEDABLE_FACT_TYPES,
   TYPE_MAP,
   TYPES,
@@ -75,15 +78,50 @@ describe("shared constants", () => {
     expect(DEFAULT_LENS).toBe("timeline");
   });
 
-  it("declares the query grammar fields including attention", () => {
-    expect(QUERY_FIELDS).toEqual([
+  it("declares the per-surface query grammar key sets (Rust parity)", () => {
+    // Mirrors the Rust EVENT_QUERY_FIELDS / REVISION_QUERY_FIELDS /
+    // KNOWN_QUERY_KEYS spellings exactly.
+    expect(EVENT_QUERY_FIELDS).toEqual([
       "type",
       "track",
+      "actor",
       "revision",
       "snapshot",
-      "status",
-      "attention",
+      "check",
+      "assessment",
+      "is",
+      "tag",
+      "before",
+      "after",
     ]);
+    // Transitional: only the qualifiers the revision index can actually match;
+    // track/actor/is/tag return when the index extension populates their slots.
+    expect(REVISION_QUERY_FIELDS).toEqual([
+      "revision",
+      "snapshot",
+      "assessment",
+      "attention",
+      "before",
+      "after",
+    ]);
+    expect(KNOWN_QUERY_KEYS).toEqual([
+      "type",
+      "track",
+      "actor",
+      "revision",
+      "snapshot",
+      "check",
+      "assessment",
+      "is",
+      "tag",
+      "attention",
+      "before",
+      "after",
+      "status",
+      "object",
+    ]);
+    // The legacy exported name is the event alias.
+    expect(QUERY_FIELDS).toBe(EVENT_QUERY_FIELDS);
   });
 
   it("declares the diff sizing thresholds", () => {

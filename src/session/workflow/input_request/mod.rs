@@ -19,7 +19,7 @@ pub use self::target::InputRequestTargetSelector;
 use self::view::sort_input_request_views;
 pub(crate) use self::view::{
     InputRequestProjectionOptions, InputRequestProjectionRecords,
-    collect_input_request_projection_records, project_input_requests,
+    collect_input_request_projection_records, open_input_request_ids, project_input_requests,
 };
 pub use self::view::{
     InputRequestResponseView, InputRequestStatus, InputRequestStatusFilter, InputRequestView,

@@ -1469,6 +1469,38 @@ fn api_history_q_full_text_search_narrows_the_page() {
 }
 
 #[test]
+fn api_history_rejects_an_unsupported_qualifier_with_400() {
+    let store = representative_store();
+    let inspector = Inspector::spawn(store.repo.path());
+    // attention: is a revision qualifier; on the event timeline it is a 400, never
+    // a silently-empty page.
+    let (status, body) = inspector.get_error("/api/history?q=attention%3Ax");
+    assert!(status.contains("400"), "status: {status}");
+    assert!(body.get("error").is_some(), "body: {body}");
+}
+
+#[test]
+fn api_history_aliases_status_to_check_and_reports_a_deprecation_notice() {
+    let store = representative_store();
+    let inspector = Inspector::spawn(store.repo.path());
+    // status:passed runs as check:passed AND rides a deprecation hint back on
+    // queryNotices — not a 400.
+    let filtered = inspector.get_json("/api/history?q=status%3Apassed");
+    let notices = filtered["queryNotices"]
+        .as_array()
+        .expect("queryNotices array");
+    assert!(
+        !notices.is_empty(),
+        "expected a deprecation notice: {filtered}"
+    );
+    assert!(filtered["matchCount"].as_u64().unwrap() >= 1);
+    for entry in filtered["entries"].as_array().unwrap() {
+        assert_eq!(entry["eventType"], "validation_check_recorded");
+        assert_eq!(entry["summary"]["status"], "passed"); // the aliased filter narrowed
+    }
+}
+
+#[test]
 fn api_history_offset_windows_the_filtered_set() {
     let store = representative_store();
     let inspector = Inspector::spawn(store.repo.path());

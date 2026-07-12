@@ -19,7 +19,7 @@ import {
   type Revision,
   revisionSearchIndex,
 } from "./projection";
-import { matchesQuery, parseSearchQuery } from "./query";
+import { matchesQuery, parseSearchQueryFor } from "./query";
 import { type LinkifyOptions, linkify } from "./refs";
 import { getState, type State } from "./store";
 import {
@@ -386,7 +386,12 @@ export function annotationsForRevision(revisionId: string): Annotation[] {
 export function matchesRevisionFilters(r: Revision): boolean {
   const s = getState();
   if (s.filterSnapshot && r.snapshotId !== s.filterSnapshot) return false;
-  return matchesQuery(revisionSearchIndex(r), parseSearchQuery(s.filterText));
+  // The list lens parses on the revision surface (its own key set + aliases);
+  // diagnostics for the same text render via the query-notice region.
+  return matchesQuery(
+    revisionSearchIndex(r),
+    parseSearchQueryFor(s.filterText, "revision").clauses,
+  );
 }
 
 // ---------------------------------------------------------------------------

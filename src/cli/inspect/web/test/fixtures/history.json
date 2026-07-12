@@ -285,5 +285,6 @@
   "historyCount": 8,
   "matchCount": 8,
   "offset": 0,
+  "queryNotices": [],
   "schema": "pointbreak.inspect-history"
 }

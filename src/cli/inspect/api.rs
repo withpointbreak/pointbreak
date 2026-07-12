@@ -20,11 +20,11 @@ use pointbreak::session::{
     AssessmentRecordStatus, AssessmentView, AttentionItem, AttentionListOptions,
     BaseHistoryProjection, BaseProjectionConfig, CurrentAssessmentStatus, EventVerificationPolicy,
     HistoryPage, HistoryQuery, InputRequestStatus, LivenessEnrichment, ObservationStatus,
-    ObservationView, ProjectionDiagnostic, ReviewHistoryEntry, RevisionCommitRangeView,
-    RevisionListEntry, RevisionListOptions, RevisionOverview, RevisionOverviewsOptions,
-    RevisionProjectionSummary, RevisionShowOptions, RevisionShowResult, SessionState,
-    SnapshotSummaryCache, StoreIdentity, StoreIdentityOptions, SupersessionView, TrustSet,
-    apply_history_query, commit_graph_stamp, compare_event_instants,
+    ObservationView, ProjectionDiagnostic, QueryDiagnostic, ReviewHistoryEntry,
+    RevisionCommitRangeView, RevisionListEntry, RevisionListOptions, RevisionOverview,
+    RevisionOverviewsOptions, RevisionProjectionSummary, RevisionShowOptions, RevisionShowResult,
+    SessionState, SnapshotSummaryCache, StoreIdentity, StoreIdentityOptions, SupersessionView,
+    TrustSet, apply_history_query, commit_graph_stamp, compare_event_instants,
     default_history_page_projection, enrich_liveness, event_log_head_marker,
     history_base_projection, list_attention, list_revisions, read_bound_object_artifact,
     read_events_for_display, read_object_artifact, show_revision, show_revision_overviews,
@@ -59,6 +59,9 @@ struct HistoryPayload {
     #[serde(skip_serializing_if = "Option::is_none")]
     match_index: Option<usize>,
     diagnostics: Vec<ProjectionDiagnostic>,
+    /// Parse diagnostics for the applied `q` (deprecation hints on a 200) — a
+    /// sibling of the store-integrity `diagnostics`, never mixed in.
+    query_notices: Vec<QueryDiagnostic>,
 }
 
 #[derive(Serialize)]
@@ -757,6 +760,7 @@ fn serialize_history_payload(out: pointbreak::session::QueriedHistory) -> Result
         offset: out.offset,
         match_index: out.match_index,
         diagnostics: out.diagnostics,
+        query_notices: out.query_notices,
     };
     let span = tracing::debug_span!("shore.inspect.history.serialize_json");
     let _guard = span.enter();

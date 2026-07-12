@@ -456,8 +456,14 @@ describe("revisionSearchIndex", () => {
     expect(idx.type).toBe("revision");
     expect(idx.revision).toBe(revision.revisionId);
     expect(idx.snapshot).toBe(revision.snapshotId);
-    expect(idx.status).toBe("accepted");
-    expect(idx.attention).toBe("open-request validation-context");
+    // The revision grammar's assessment: field (renamed from the legacy status),
+    // and the attention token set in the space-wrapped membership encoding.
+    expect(idx.assessment).toBe("accepted");
+    expect(idx.status).toBeUndefined();
+    expect(idx.attention).toBe(" open-request validation-context ");
+    // The range anchor: capturedAt normalized to the fixed-width form under the
+    // shared occurred_at key.
+    expect(idx.occurred_at).toBe("2026-06-29T02:13:05.391Z");
   });
 
   it("builds a lowercased haystack of the human-relevant fields", () => {

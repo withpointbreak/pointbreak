@@ -1,13 +1,13 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::cursor::{HistoryCursor, HistoryWindow, cmp_key};
 use super::options::ResolvedHistoryFilters;
 use super::query::{HistoryOrder, QueriedHistory};
 use super::result::ReviewHistoryResult;
-use super::search::{SearchRecord, entry_revision_id};
+use super::search::{EventRecordExtras, SearchRecord, entry_revision_id};
 use super::summary::{ReviewHistoryEntry, ReviewHistorySummary};
 use crate::error::{Result, ShoreError};
-use crate::model::{ReviewEndpoint, ReviewTargetRef, RevisionId, TargetRef};
+use crate::model::{InputRequestId, ReviewEndpoint, ReviewTargetRef, RevisionId, TargetRef};
 use crate::session::body_artifact::load_body_artifact;
 use crate::session::event::{
     EventType, InputRequestRespondedPayload, ReviewAssessmentRecordedPayload,
@@ -24,6 +24,9 @@ use crate::session::projection::cosignature::{
 };
 use crate::session::state::SessionState;
 use crate::session::store::backend::StoreBackend;
+use crate::session::workflow::input_request::{
+    collect_input_request_projection_records, open_input_request_ids,
+};
 use crate::session::{
     ActorAttributesMap, ArtifactRemovalProjection, BodyContentState, DelegationMap,
     EventVerificationPolicy, ProjectionDiagnostic, TrustSet, principal_view_for,
@@ -296,6 +299,12 @@ pub(super) fn history_base_from_events(
         let _guard = span.enter();
         revision_object_map(&built)
     };
+    // The open-request set for the `is:` field — from the request lifecycle, never
+    // from list_attention. One pass over the full event set.
+    let open_request_ids = {
+        let records = collect_input_request_projection_records(events)?;
+        open_input_request_ids(&records)
+    };
     let entries = {
         let span = tracing::debug_span!("shore.history.search_records", entry_count = built.len());
         let _guard = span.enter();
@@ -303,7 +312,8 @@ pub(super) fn history_base_from_events(
             .into_iter()
             .map(|entry| {
                 let object = entry_object(&entry, &object_by_revision);
-                let record = SearchRecord::from_entry(&entry, object);
+                let extras = event_record_extras(&entry, &open_request_ids);
+                let record = SearchRecord::from_entry(&entry, object, &extras);
                 BaseEntry { entry, record }
             })
             .collect()
@@ -437,7 +447,23 @@ pub(super) fn history_default_page_from_events(
         event_set_hash,
         event_count: events.len(),
         diagnostics,
+        query_notices: Vec::new(),
     })
+}
+
+/// The per-entry `is:` lifecycle standing: an input-request-opened entry carries
+/// `Some(open)`; every other kind carries `None` (empty `is` set).
+fn event_record_extras(
+    entry: &ReviewHistoryEntry,
+    open_request_ids: &BTreeSet<InputRequestId>,
+) -> EventRecordExtras {
+    let is_open = match &entry.summary {
+        ReviewHistorySummary::InputRequestOpened {
+            input_request_id, ..
+        } => Some(open_request_ids.contains(input_request_id)),
+        _ => None,
+    };
+    EventRecordExtras { is_open }
 }
 
 /// The captured-object id for each revision, keyed by the capture's subject

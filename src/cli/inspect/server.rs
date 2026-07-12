@@ -16,7 +16,10 @@ use std::thread;
 use std::time::Duration;
 
 use pointbreak::model::EventId;
-use pointbreak::session::{HistoryOrder, HistoryPage, HistoryQuery, SnapshotSummaryCache};
+use pointbreak::session::{
+    HistoryOrder, HistoryPage, HistoryQuery, QueryDiagnosticCode, QuerySurface,
+    SnapshotSummaryCache, parse_search_query_for,
+};
 
 use super::api;
 
@@ -407,6 +410,18 @@ struct HistoryRequest {
 /// legacy `object=` param aliases to `snapshot=` for old bookmarks (#334).
 fn history_query(query: Option<&str>) -> Result<HistoryRequest, String> {
     let q = query_param(query, "q").unwrap_or_default();
+    // A known-but-unsupported qualifier or out-of-set value in `q` is a usage
+    // error (400), never a silently-empty page; a deprecation hint is not fatal
+    // and rides back on `queryNotices`.
+    let parsed = parse_search_query_for(&q, QuerySurface::Event);
+    if let Some(fatal) = parsed.diagnostics.iter().find(|d| {
+        matches!(
+            d.code,
+            QueryDiagnosticCode::UnsupportedQualifier | QueryDiagnosticCode::UnsupportedValue
+        )
+    }) {
+        return Err(fatal.message.clone());
+    }
     let track = query_param(query, "track").filter(|value| !value.is_empty());
     let snapshot = query_param(query, "snapshot")
         .or_else(|| query_param(query, "object"))

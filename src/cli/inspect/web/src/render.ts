@@ -25,10 +25,18 @@ import {
   scrollTimelineSelectionIntoView,
 } from "./lenses/timeline";
 import { presentTypes } from "./model";
+import { parseSearchQueryFor } from "./query";
 import { shortId } from "./refs";
-import { navigate } from "./router";
+import { clearRouteDiagnostic, navigate, showRouteDiagnostic } from "./router";
 import { commit, getState } from "./store";
-import { typeColor, typeLabel } from "./types";
+import {
+  EVENT_QUERY_FIELDS,
+  type QueryDiagnostic,
+  type QuerySurface,
+  REVISION_QUERY_FIELDS,
+  typeColor,
+  typeLabel,
+} from "./types";
 
 const INSPECTOR_TITLE = "Pointbreak Review";
 
@@ -222,6 +230,10 @@ function syncControls(): void {
   const state = getState();
   const text = $<HTMLInputElement>("#filter-text");
   if (text && text.value !== state.filterText) text.value = state.filterText;
+  if (text)
+    text.placeholder = `search — text or field:value (${keysFor(state.lens)
+      .map((k) => `${k}:`)
+      .join(" ")})`;
 
   // Only the timeline consumes enabledTypes — leaving this visible on the
   // revision list would let a click silently mutate the timeline's ?type=
@@ -254,6 +266,54 @@ function syncControls(): void {
   // gates above — necessary but not sufficient.
   const toolbar = $("#toolbar");
   if (toolbar) toolbar.classList.toggle("hidden", state.lens === "attention");
+}
+
+/** The advertised qualifier set for a lens's search surface. */
+function keysFor(lens: string): readonly string[] {
+  return lens === "list" ? REVISION_QUERY_FIELDS : EVENT_QUERY_FIELDS;
+}
+
+// The exact string this module last wrote to the region; "" when it wrote nothing.
+// Ownership is by CONTENT: if the region no longer holds our string, a router write
+// owns it and we must not touch it.
+let lastQueryNotice = "";
+
+// Surface the active query's parse diagnostics (client parse + server
+// queryNotices, deduped) in the route-diagnostic live region without clobbering
+// a router-owned message — route diagnostics are higher priority.
+function syncQueryNotices(): void {
+  const el = $("#route-diagnostic");
+  if (!el) return;
+  const state = getState();
+  const surface: QuerySurface = state.lens === "list" ? "revision" : "event";
+  const parsed = parseSearchQueryFor(state.filterText, surface);
+  const server = (state.history?.queryNotices ?? []) as QueryDiagnostic[];
+  const message = dedupeNotices([...parsed.diagnostics, ...server])
+    .map((d) => d.message)
+    .join(" · ");
+
+  const current = el.classList.contains("hidden") ? "" : (el.textContent ?? "");
+  // A router (or any non-us) write owns the region — never clobber it.
+  if (current !== "" && current !== lastQueryNotice) return;
+  if (message) {
+    showRouteDiagnostic(message);
+    lastQueryNotice = message;
+  } else if (lastQueryNotice) {
+    clearRouteDiagnostic();
+    lastQueryNotice = "";
+  }
+}
+
+/** Collapse notices identical in (code, key, message) — a client hint and its
+ *  server twin render once. */
+function dedupeNotices(notices: QueryDiagnostic[]): QueryDiagnostic[] {
+  const seen = new Set<string>();
+  return notices.filter((n) => {
+    const key = `${n.code}\u0000${n.key}\u0000${n.message}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 // Master pane: swap in the active lens body and populate it. The scaffold is
@@ -374,6 +434,7 @@ export function render(): void {
     return;
   }
   syncControls();
+  syncQueryNotices();
   renderTypeToggles();
   applySplitMode();
   renderMaster();

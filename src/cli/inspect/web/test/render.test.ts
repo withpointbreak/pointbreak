@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { parseSearchQueryFor } from "../src/query";
 import type {
   AttentionDoc,
   AttentionItem,
@@ -547,5 +548,97 @@ describe("the diff page branch (no lens renders underneath)", () => {
     expect($("#diff-page")?.classList.contains("hidden")).toBe(true);
     expect($("#master")?.classList.contains("hidden")).toBe(false);
     expect($("#detail")?.classList.contains("hidden")).toBe(false);
+  });
+});
+
+describe("lens-aware search placeholder and query notices", () => {
+  let router: typeof import("../src/router");
+
+  beforeEach(async () => {
+    router = await import("../src/router");
+  });
+
+  it("advertises event keys on the timeline and drops status:", () => {
+    store.commit({ lens: "timeline" });
+    render.render();
+    const ph = $<HTMLInputElement>("#filter-text")?.placeholder ?? "";
+    expect(ph).toContain("check:");
+    expect(ph).not.toContain("status:");
+  });
+
+  it("advertises revision keys on the list lens", () => {
+    store.commit({ lens: "list" });
+    render.render();
+    const ph = $<HTMLInputElement>("#filter-text")?.placeholder ?? "";
+    expect(ph).toContain("attention:");
+    // Deferred qualifiers (no index slot yet) must not be advertised.
+    expect(ph).not.toContain("track:");
+    expect(ph).not.toContain("is:");
+  });
+
+  it("renders a client parse diagnostic in the route-diagnostic region", () => {
+    store.commit({ lens: "timeline", filterText: "attention:x" });
+    render.render();
+    const diag = $("#route-diagnostic");
+    expect(diag?.classList.contains("hidden")).toBe(false);
+    expect(diag?.textContent ?? "").not.toBe("");
+  });
+
+  it("surfaces a server queryNotice from the history payload", () => {
+    store.commit({
+      lens: "timeline",
+      filterText: "",
+      history: {
+        ...(historyJson as unknown as HistoryDoc),
+        queryNotices: [
+          {
+            code: "deprecated-qualifier",
+            key: "status",
+            message: "use check:",
+          },
+        ],
+      },
+    });
+    render.render();
+    expect($("#route-diagnostic")?.textContent ?? "").toContain("use check:");
+  });
+
+  it("dedupes an equivalent client and server deprecation hint", () => {
+    // The client parse of status:passed and a server queryNotice for the same clause
+    // carry identical (code,key,message) — they must render once, not twice.
+    const clientMsg = parseSearchQueryFor("status:passed", "event")
+      .diagnostics[0].message;
+    store.commit({
+      lens: "timeline",
+      filterText: "status:passed",
+      history: {
+        ...(historyJson as unknown as HistoryDoc),
+        queryNotices: [
+          { code: "deprecated-qualifier", key: "status", message: clientMsg },
+        ],
+      },
+    });
+    render.render();
+    const hits = (
+      $("#route-diagnostic")?.textContent?.match(/deprecated/g) ?? []
+    ).length;
+    expect(hits).toBe(1);
+  });
+
+  it("never clobbers a router-written diagnostic", () => {
+    // A router message with no active query notice must survive the render.
+    store.commit({ lens: "timeline", filterText: "" });
+    router.showRouteDiagnostic("fell back to the timeline — unknown route /x");
+    render.render();
+    expect($("#route-diagnostic")?.textContent).toContain("unknown route");
+
+    // A router message written AFTER a query notice is shown also survives.
+    store.commit({ filterText: "attention:x" });
+    render.render(); // shows the client parse notice
+    router.showRouteDiagnostic("newer route diagnostic");
+    render.render(); // must not overwrite the router's newer message
+    expect($("#route-diagnostic")?.textContent).toContain(
+      "newer route diagnostic",
+    );
   });
 });

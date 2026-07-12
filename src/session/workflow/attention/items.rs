@@ -20,7 +20,7 @@ use crate::session::projection::supersession::SupersessionView;
 use crate::session::state::ProjectionDiagnostic;
 use crate::session::workflow::assessment::collect_assessment_records_by_revision;
 use crate::session::workflow::input_request::{
-    InputRequestProjectionRecords, collect_input_request_projection_records,
+    InputRequestProjectionRecords, collect_input_request_projection_records, open_input_request_ids,
 };
 use crate::session::workflow::util::sorted_unique;
 
@@ -255,18 +255,6 @@ fn tier_rank(tier: AttentionTier) -> u8 {
         AttentionTier::Primary => 0,
         AttentionTier::Secondary => 1,
     }
-}
-
-/// The ids of every open (recorded, un-responded) input request, regardless of
-/// domain. An id absent from `request_records` cannot be open (it does not
-/// exist); an id present in `responses` has been answered.
-fn open_input_request_ids(records: &InputRequestProjectionRecords<'_>) -> BTreeSet<InputRequestId> {
-    records
-        .request_records
-        .keys()
-        .filter(|id| !records.responses.contains_key(*id))
-        .cloned()
-        .collect()
 }
 
 /// One `follow_up_outstanding` item per current `accepted_with_follow_up`

@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use super::projection::{BaseEntry, BaseHistoryProjection};
-use super::search::{event_type_wire, matches_query, parse_search_query};
+use super::search::{
+    QueryDiagnostic, QuerySurface, event_type_wire, matches_query, parse_search_query_for,
+};
 use super::summary::ReviewHistoryEntry;
 use crate::model::EventId;
 use crate::session::ProjectionDiagnostic;
@@ -54,6 +56,9 @@ pub struct QueriedHistory {
     pub event_set_hash: String,
     pub event_count: usize,
     pub diagnostics: Vec<ProjectionDiagnostic>,
+    /// Parse diagnostics for the applied `q` (deprecation hints on a 200) — a
+    /// sibling of the store-integrity `diagnostics`, never mixed in.
+    pub query_notices: Vec<QueryDiagnostic>,
 }
 
 /// Run the query over the cached base projection, purely (no I/O): filter (q +
@@ -72,11 +77,12 @@ pub fn apply_history_query(
     );
     let _guard = span.enter();
 
-    let clauses = {
+    let parsed = {
         let span = tracing::debug_span!("shore.history.query.parse_search_query");
         let _guard = span.enter();
-        parse_search_query(&query.q)
+        parse_search_query_for(&query.q, QuerySurface::Event)
     };
+    let clauses = parsed.clauses;
     // The facet predicate is q + track + snapshot, EXCLUDING the `types` page filter
     // (INV-3). The page predicate additionally applies the `types` set.
     let facet_match = |entry: &BaseEntry| {
@@ -136,16 +142,22 @@ pub fn apply_history_query(
         event_set_hash: base.event_set_hash.clone(),
         event_count: base.event_count,
         diagnostics: base.diagnostics.clone(),
+        query_notices: parsed.diagnostics,
     }
 }
 
-/// The `track=` and `snapshot=` params: exact matches against the entry's record
-/// fields (mirrors the client's `entryTrack === filterTrack` / snapshot equality).
-/// An absent param does not constrain. The `snapshot` field value is sourced from
+/// The `track=` and `snapshot=` params. The record's `track` field is a
+/// space-wrapped token set, so the track param matches by whole-token membership
+/// (aligned with the `track:` grammar kind); `snapshot` stays raw equality. An
+/// absent param does not constrain. The `snapshot` field value is sourced from
 /// the shared `object_id` document field (renamed grammar key, #334).
 fn track_snapshot_match(entry: &BaseEntry, query: &HistoryQuery) -> bool {
     if let Some(track) = &query.track
-        && entry.record.field("track") != Some(track.as_str())
+        && !entry
+            .record
+            .field("track")
+            .unwrap_or("")
+            .contains(&format!(" {} ", track.to_lowercase()))
     {
         return false;
     }
@@ -207,7 +219,7 @@ fn resolve_window(filtered: &[&BaseEntry], page: &HistoryPage) -> (Range<usize>,
 
 #[cfg(test)]
 mod tests {
-    use super::super::search::{SearchRecord, build_haystack};
+    use super::super::search::{EventRecordExtras, SearchRecord, build_haystack};
     use super::super::summary::ReviewHistorySummary;
     use super::*;
     use crate::model::{ObservationId, ReviewTargetRef, RevisionId};
@@ -277,7 +289,8 @@ mod tests {
         let base_entries = entries
             .into_iter()
             .map(|(entry, object)| {
-                let record = SearchRecord::from_entry(&entry, object);
+                let record =
+                    SearchRecord::from_entry(&entry, object, &EventRecordExtras::default());
                 BaseEntry { entry, record }
             })
             .collect();
@@ -383,6 +396,17 @@ mod tests {
             offset: Some(offset),
             at: None,
         }
+    }
+
+    #[test]
+    fn track_param_matches_an_explicit_track_by_whole_token() {
+        let base = base_of(3); // three entries on track agent:codex
+        let q = HistoryQuery {
+            track: Some("agent:codex".to_owned()),
+            ..Default::default()
+        };
+        let out = apply_history_query(&base, &q, &HistoryPage::default());
+        assert_eq!(out.match_count, 3);
     }
 
     #[test]

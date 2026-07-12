@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{Result, ShoreError};
 use crate::model::{EventId, InputRequestId, InputRequestResponseId, ReviewTargetRef, TrackId};
@@ -260,6 +260,19 @@ pub(crate) fn collect_input_request_projection_records<'a>(
         request_records,
         responses,
     })
+}
+
+/// The ids of every open (recorded, un-responded) input request. An id absent from
+/// `request_records` cannot be open; an id present in `responses` is answered.
+pub(crate) fn open_input_request_ids(
+    records: &InputRequestProjectionRecords<'_>,
+) -> BTreeSet<InputRequestId> {
+    records
+        .request_records
+        .keys()
+        .filter(|id| !records.responses.contains_key(*id))
+        .cloned()
+        .collect()
 }
 
 /// Build the response views for one request this surface will return,

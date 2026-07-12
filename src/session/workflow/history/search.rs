@@ -5,6 +5,7 @@ use serde::Serialize;
 use super::summary::{ReviewHistoryEntry, ReviewHistorySummary};
 use crate::model::{ReviewEndpoint, ReviewTargetRef};
 use crate::session::event::EventType;
+use crate::session::identity::instant::normalize_instant_to_iso_millis;
 
 /// A once-built search record for one history entry: a lowercased free-text
 /// haystack plus the small structured field projection the query grammar matches
@@ -20,14 +21,27 @@ impl SearchRecord {
     /// entry's revision captured (resolved by the caller against the
     /// revision->object map); "" when the entry addresses no captured object.
     /// The grammar key is `snapshot` (renamed from `object` in #334); the value is
-    /// still sourced from the shared `object_id` document field.
-    pub fn from_entry(entry: &ReviewHistoryEntry, snapshot: &str) -> Self {
+    /// still sourced from the shared `object_id` document field. `extras` carries
+    /// the per-entry inputs the build cannot derive from the entry alone.
+    pub fn from_entry(
+        entry: &ReviewHistoryEntry,
+        snapshot: &str,
+        extras: &EventRecordExtras,
+    ) -> Self {
         let mut fields = BTreeMap::new();
         fields.insert("type".to_owned(), event_type_wire(entry));
-        fields.insert("track".to_owned(), entry_track(entry));
+        fields.insert("track".to_owned(), wrap_token(entry_track(entry)));
+        fields.insert("actor".to_owned(), wrap_token(entry_actor(entry)));
         fields.insert("revision".to_owned(), entry_revision_id(entry));
         fields.insert("snapshot".to_owned(), snapshot.to_owned());
-        fields.insert("status".to_owned(), summary_status(entry));
+        fields.insert("check".to_owned(), summary_status(entry));
+        fields.insert("assessment".to_owned(), entry_assessment(entry));
+        fields.insert("tag".to_owned(), entry_tag_set(entry));
+        fields.insert("is".to_owned(), extras.is_set());
+        fields.insert(
+            RANGE_ANCHOR_FIELD.to_owned(),
+            normalize_instant_to_iso_millis(&entry.occurred_at).unwrap_or_default(),
+        );
         Self {
             text: build_haystack(entry),
             fields,
@@ -36,6 +50,27 @@ impl SearchRecord {
 
     pub fn field(&self, key: &str) -> Option<&str> {
         self.fields.get(key).map(String::as_str)
+    }
+}
+
+/// Per-entry inputs the record build cannot derive from the entry alone. Today:
+/// the input-request lifecycle standing for the `is:` set, computed once per base
+/// in the projection loop and passed in. `Default` yields an empty set.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EventRecordExtras {
+    /// `Some(true)` = an open input-request-opened entry (→ `is:open`);
+    /// `Some(false)` = a responded one (→ `is:answered`); `None` = any other kind.
+    pub is_open: Option<bool>,
+}
+
+impl EventRecordExtras {
+    /// The space-wrapped `is:` set for this entry: `" open "`, `" answered "`, or "".
+    fn is_set(&self) -> String {
+        match self.is_open {
+            Some(true) => " open ".to_owned(),
+            Some(false) => " answered ".to_owned(),
+            None => String::new(),
+        }
     }
 }
 
@@ -50,6 +85,7 @@ pub fn build_haystack(entry: &ReviewHistoryEntry) -> String {
         entry.event_id.as_str().to_owned(),
         entry_revision_id(entry),
         entry_track(entry),
+        entry_actor(entry),
         entry_anchor(entry),
     ];
     push_summary_searchables(&mut parts, entry);
@@ -72,12 +108,48 @@ pub enum QueryClause {
     },
 }
 
-/// Tokenize a raw query string, then classify each token into a negatable field
-/// or free-text clause — parity with `web/src/query.ts parseSearchQuery` (INV-4).
-/// A `field:value` whose field is in `QUERY_FIELDS` is a field clause (value
-/// lowercased, surrounding quotes stripped); everything else is free text.
-pub fn parse_search_query(query: &str) -> Vec<QueryClause> {
+/// The surface a query is parsed for — the per-surface key sets and value sets
+/// hang off this. Mirrors `web/src/types.ts QuerySurface`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QuerySurface {
+    Event,
+    Revision,
+}
+
+/// Why a clause was diagnosed. Serializes kebab-case, matching the TS union
+/// (`unsupported-qualifier` / `deprecated-qualifier` / `unsupported-value`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum QueryDiagnosticCode {
+    UnsupportedQualifier,
+    DeprecatedQualifier,
+    UnsupportedValue,
+}
+
+/// One parse diagnostic: the code, the user-typed key it concerns, and a
+/// human-readable message. Mirrors `web/src/types.ts QueryDiagnostic`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueryDiagnostic {
+    pub code: QueryDiagnosticCode,
+    pub key: String,
+    pub message: String,
+}
+
+/// The surface-aware parse result: the surviving clauses plus any diagnostics.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ParsedQuery {
+    pub clauses: Vec<QueryClause>,
+    pub diagnostics: Vec<QueryDiagnostic>,
+}
+
+/// Parse a query for a surface. A supported qualifier becomes a field clause
+/// (aliases applied); a known-but-unsupported one, or an out-of-set `is:`/`attention:`
+/// value, yields a diagnostic and drops the clause (never a silent-empty match); an
+/// unknown key stays free text.
+pub fn parse_search_query_for(query: &str, surface: QuerySurface) -> ParsedQuery {
     let mut clauses = Vec::new();
+    let mut diagnostics = Vec::new();
     for raw in tokenize_query(query) {
         let mut token = raw.as_str();
         let mut negate = false;
@@ -87,33 +159,130 @@ pub fn parse_search_query(query: &str) -> Vec<QueryClause> {
             token = &token[1..];
         }
         let colon = token.find(':');
-        let field = match colon {
+        let key = match colon {
             Some(index) if index > 0 => token[..index].to_lowercase(),
             _ => String::new(),
         };
-        // Legacy `object:` aliases to the renamed `snapshot` field during the
-        // transition (#334); the token is user-typed, so old queries keep working.
-        let field = if field == "object" {
-            "snapshot".to_owned()
-        } else {
-            field
-        };
-        if !field.is_empty() && QUERY_FIELDS.contains(&field.as_str()) {
-            let value = strip_wrapping_quotes(&token[colon.expect("field implies a colon") + 1..])
-                .to_lowercase();
+        if key.is_empty() {
+            push_text(&mut clauses, token, negate);
+            continue;
+        }
+        let value =
+            strip_wrapping_quotes(&token[colon.expect("key implies a colon") + 1..]).to_lowercase();
+        let (field, deprecated_from) = resolve_alias(&key, surface);
+        if surface_fields(surface).contains(&field.as_str()) {
+            if let Some(allowed) = value_set(surface, &field)
+                && !allowed.contains(&value.as_str())
+            {
+                diagnostics.push(QueryDiagnostic::unsupported_value(&field, &value, allowed));
+                continue;
+            }
+            if let Some(from) = deprecated_from {
+                diagnostics.push(QueryDiagnostic::deprecated(&from, &field));
+            }
             clauses.push(QueryClause::Field {
                 field,
                 value,
                 negate,
             });
+        } else if KNOWN_QUERY_KEYS.contains(&key.as_str()) {
+            diagnostics.push(QueryDiagnostic::unsupported_qualifier(&key, surface));
         } else {
-            let value = strip_wrapping_quotes(token).to_lowercase();
-            if !value.is_empty() {
-                clauses.push(QueryClause::Text { value, negate });
-            }
+            push_text(&mut clauses, token, negate);
         }
     }
-    clauses
+    ParsedQuery {
+        clauses,
+        diagnostics,
+    }
+}
+
+/// The legacy event-surface parse — delegates to [`parse_search_query_for`],
+/// discarding diagnostics, so existing callers keep compiling.
+pub fn parse_search_query(query: &str) -> Vec<QueryClause> {
+    parse_search_query_for(query, QuerySurface::Event).clauses
+}
+
+fn push_text(clauses: &mut Vec<QueryClause>, token: &str, negate: bool) {
+    let value = strip_wrapping_quotes(token).to_lowercase();
+    if !value.is_empty() {
+        clauses.push(QueryClause::Text { value, negate });
+    }
+}
+
+fn surface_fields(surface: QuerySurface) -> &'static [&'static str] {
+    match surface {
+        QuerySurface::Event => EVENT_QUERY_FIELDS,
+        QuerySurface::Revision => REVISION_QUERY_FIELDS,
+    }
+}
+
+/// Rewrite a user-typed key to its canonical field. `object:`→`snapshot:` is
+/// silent; `status:`→`check:`/`assessment:` carries a deprecation hint.
+fn resolve_alias(key: &str, surface: QuerySurface) -> (String, Option<String>) {
+    match key {
+        "object" => ("snapshot".to_owned(), None),
+        "status" => {
+            let target = match surface {
+                QuerySurface::Event => "check",
+                QuerySurface::Revision => "assessment",
+            };
+            (target.to_owned(), Some("status".to_owned()))
+        }
+        other => (other.to_owned(), None),
+    }
+}
+
+/// The closed value set a set-membership qualifier is validated against, per
+/// surface; `None` means the qualifier's value is not enumerated.
+fn value_set(surface: QuerySurface, field: &str) -> Option<&'static [&'static str]> {
+    match (surface, field) {
+        (QuerySurface::Event, "is") => Some(&["open", "answered"]),
+        (QuerySurface::Revision, "is") => Some(&[
+            "open",
+            "answered",
+            "unassessed",
+            "stale",
+            "follow-up",
+            "contested",
+            "superseded",
+        ]),
+        (QuerySurface::Revision, "attention") => Some(REVISION_ATTENTION_VALUES),
+        _ => None,
+    }
+}
+
+impl QuerySurface {
+    fn label(self) -> &'static str {
+        match self {
+            QuerySurface::Event => "timeline",
+            QuerySurface::Revision => "revisions",
+        }
+    }
+}
+
+impl QueryDiagnostic {
+    fn unsupported_qualifier(key: &str, surface: QuerySurface) -> Self {
+        Self {
+            code: QueryDiagnosticCode::UnsupportedQualifier,
+            key: key.to_owned(),
+            message: format!("`{key}:` is not a filter on the {} view", surface.label()),
+        }
+    }
+    fn deprecated(from: &str, to: &str) -> Self {
+        Self {
+            code: QueryDiagnosticCode::DeprecatedQualifier,
+            key: from.to_owned(),
+            message: format!("`{from}:` is deprecated; use `{to}:`"),
+        }
+    }
+    fn unsupported_value(key: &str, value: &str, allowed: &[&str]) -> Self {
+        Self {
+            code: QueryDiagnosticCode::UnsupportedValue,
+            key: key.to_owned(),
+            message: format!("`{key}:{value}` — expected one of: {}", allowed.join(", ")),
+        }
+    }
 }
 
 /// AND every clause against a record, honoring negation — parity with
@@ -136,16 +305,66 @@ pub fn matches_query(record: &SearchRecord, clauses: &[QueryClause]) -> bool {
     true
 }
 
-/// The grammar fields a `field:value` clause may address (mirrors web
-/// `QUERY_FIELDS`). `attention` is in the client list but is never populated in a
-/// history record, so a bare `attention:` clause matches "" — preserved.
-const QUERY_FIELDS: &[&str] = &[
+/// The event-surface qualifier set (mirrors web `EVENT_QUERY_FIELDS`). The
+/// per-surface sets are the single authority every consumer (server validator,
+/// CLI, client surfaces, autocomplete) resolves supported keys from.
+pub const EVENT_QUERY_FIELDS: &[&str] = &[
     "type",
     "track",
+    "actor",
     "revision",
     "snapshot",
-    "status",
+    "check",
+    "assessment",
+    "is",
+    "tag",
+    "before",
+    "after",
+];
+
+/// The revision-surface qualifier set (mirrors web `REVISION_QUERY_FIELDS`).
+/// Transitional: only the qualifiers the revision record can actually match
+/// today — `track`/`actor`/`is`/`tag` are deferred (diagnosed, never
+/// silent-empty) until the revision record carries their slots, and return
+/// here when it does.
+pub const REVISION_QUERY_FIELDS: &[&str] = &[
+    "revision",
+    "snapshot",
+    "assessment",
     "attention",
+    "before",
+    "after",
+];
+
+/// Every key the grammar knows across surfaces plus the aliases — the
+/// known-but-unsupported distinction: a key here but not in a surface's set
+/// diagnoses instead of falling back to free text.
+pub const KNOWN_QUERY_KEYS: &[&str] = &[
+    "type",
+    "track",
+    "actor",
+    "revision",
+    "snapshot",
+    "check",
+    "assessment",
+    "is",
+    "tag",
+    "attention",
+    "before",
+    "after",
+    "status",
+    "object",
+];
+
+/// The revision `attention:` value set — the single source shared by the validator,
+/// the revision record builders, and autocomplete. These are exactly the
+/// projection.ts attentionTokens vocabulary.
+pub const REVISION_ATTENTION_VALUES: &[&str] = &[
+    "open-request",
+    "unassessed",
+    "validation-context",
+    "follow-up",
+    "stale-fact",
 ];
 
 /// The event-type human-label ↔ wire-id table (mirrors `web/src/types.ts TYPES`).
@@ -160,20 +379,117 @@ const TYPE_LABELS: &[(&str, &str)] = &[
     ("validation", "validation_check_recorded"),
 ];
 
-/// Match one field clause against a record (mirrors `fieldMatches`). The `type`
-/// field compares exactly to the resolved wire id (label-or-id); every other
-/// field substring-matches the record's value lowercased at match time (the
-/// value is already lowercased by `parse_search_query`).
-fn field_matches(record: &SearchRecord, field: &str, value: &str) -> bool {
-    if field == "type" {
-        return record.field("type").unwrap_or("") == resolve_type_value(value);
-    }
-    record
-        .field(field)
-        .unwrap_or("")
-        .to_lowercase()
-        .contains(value)
+/// How a resolved qualifier compares its value against a record field, resolved
+/// per key by [`match_kind_for`]; [`field_matches`] dispatches on it.
+enum MatchKind {
+    Exact,
+    Substring,
+    SetMember,
+    RangeBefore,
+    RangeAfter,
 }
+
+fn match_kind_for(field: &str) -> MatchKind {
+    match field {
+        "type" | "check" | "assessment" => MatchKind::Exact,
+        "revision" | "snapshot" => MatchKind::Substring,
+        "track" | "actor" | "is" | "tag" | "attention" => MatchKind::SetMember,
+        "before" => MatchKind::RangeBefore,
+        "after" => MatchKind::RangeAfter,
+        _ => MatchKind::Substring,
+    }
+}
+
+/// The record field the `before:`/`after:` range kinds compare against, holding the
+/// entry's normalized ISO-8601 UTC time (event: `occurred_at`; revision: `capturedAt`).
+/// One canonical key across both runtimes and both records — not itself a query key.
+pub const RANGE_ANCHOR_FIELD: &str = "occurred_at";
+
+/// Match one field clause against a record (mirrors `fieldMatches`), dispatching
+/// per key on the resolved [`MatchKind`] (the value is already lowercased by the
+/// parser). Set-membership fields store space-wrapped token lists; the range
+/// kinds compare lexically over the normalized time anchor.
+fn field_matches(record: &SearchRecord, field: &str, value: &str) -> bool {
+    match match_kind_for(field) {
+        MatchKind::Exact => exact_matches(record, field, value),
+        MatchKind::Substring => record
+            .field(field)
+            .unwrap_or("")
+            .to_lowercase()
+            .contains(value),
+        MatchKind::SetMember => record
+            .field(field)
+            .unwrap_or("")
+            .contains(&format!(" {value} ")),
+        MatchKind::RangeAfter => {
+            let anchor = record
+                .field(RANGE_ANCHOR_FIELD)
+                .unwrap_or("")
+                .to_lowercase();
+            !anchor.is_empty() && anchor > range_bound(value)
+        }
+        MatchKind::RangeBefore => {
+            let anchor = record
+                .field(RANGE_ANCHOR_FIELD)
+                .unwrap_or("")
+                .to_lowercase();
+            !anchor.is_empty() && anchor < range_bound(value)
+        }
+    }
+}
+
+/// The lexical bound a `before:`/`after:` value compares as. A value that parses
+/// as a full RFC 3339 instant normalizes to the anchor's fixed-width `.mmm` form
+/// (a whole-second bound would otherwise misorder against millisecond anchors —
+/// `.` sorts before `z`); a date/datetime prefix passes through and keeps raw
+/// lexical prefix-compare semantics. The parser lowercased the value, so restore
+/// ASCII case for the strict instant parse and re-lowercase the result.
+fn range_bound(value: &str) -> String {
+    let upper = value.to_ascii_uppercase();
+    normalize_instant_to_iso_millis(&upper)
+        // Round-trip guard: only a bound the normalizer re-emits verbatim
+        // (through the seconds) counts as a recognized instant — anything the
+        // normalization would MOVE (e.g. a leap-second roll-over) falls back to
+        // the raw compare, keeping both runtimes' accepted value sets identical.
+        .filter(|iso| iso.as_bytes()[..19] == upper.as_bytes()[..19])
+        .map(|iso| iso.to_lowercase())
+        .unwrap_or_else(|| value.to_owned())
+}
+
+/// Exact-match arm: `type` and `assessment` resolve label-or-wire (type also
+/// comma-OR); every other exact field compares the lowercased record value.
+fn exact_matches(record: &SearchRecord, field: &str, value: &str) -> bool {
+    match field {
+        "type" => {
+            let record_type = record.field("type").unwrap_or("");
+            value
+                .split(',')
+                .any(|v| resolve_type_value(v) == record_type)
+        }
+        "assessment" => record.field("assessment").unwrap_or("") == resolve_assessment_value(value),
+        _ => record.field(field).unwrap_or("").to_lowercase() == value,
+    }
+}
+
+/// Resolve an `assessment:` value to its wire form (display label or wire → wire),
+/// mirroring `resolve_type_value`; passes unknowns through.
+fn resolve_assessment_value(value: &str) -> &str {
+    for (wire, label) in ASSESSMENT_LABEL_TABLE {
+        if *wire == value || *label == value {
+            return wire;
+        }
+    }
+    value
+}
+
+/// The assessment wire-value ↔ display-label table, shared by the `assessment:`
+/// value resolution and `assessment_display_label`.
+const ASSESSMENT_LABEL_TABLE: &[(&str, &str)] = &[
+    ("accepted", "accepted"),
+    ("accepted_with_follow_up", "accepted-with-follow-up"),
+    ("needs_changes", "needs-changes"),
+    ("needs_clarification", "needs-clarification"),
+];
 
 /// Resolve a `type:` clause value: the wire id when the value names a known label
 /// or wire id, else the raw value (mirrors `TYPES.find(t => t.label === value ||
@@ -280,6 +596,55 @@ pub(super) fn entry_track(entry: &ReviewHistoryEntry) -> String {
     }
 }
 
+/// The writer actor id — the actor slot, distinct from the lane. Mirrors
+/// `web/src/projection.ts entryActor`.
+pub(super) fn entry_actor(entry: &ReviewHistoryEntry) -> String {
+    entry.writer.actor_id.as_str().to_owned()
+}
+
+/// Wrap a single field value as a one-token space-wrapped set (lowercased so a
+/// lowercased query value matches by whole-token membership); "" stays "".
+fn wrap_token(value: String) -> String {
+    if value.is_empty() {
+        value
+    } else {
+        format!(" {} ", value.to_lowercase())
+    }
+}
+
+/// The `assessment` field — the verdict wire value on assessment entries, else "".
+fn entry_assessment(entry: &ReviewHistoryEntry) -> String {
+    match &entry.summary {
+        ReviewHistorySummary::ReviewAssessmentRecorded { assessment, .. } => enum_wire(assessment),
+        _ => String::new(),
+    }
+}
+
+/// The `tag` field — each observation tag contributes BOTH its full string and
+/// its first-colon key, lowercased, in the space-wrapped set encoding. "" when
+/// the entry carries no tags.
+fn entry_tag_set(entry: &ReviewHistoryEntry) -> String {
+    let tags = match &entry.summary {
+        ReviewHistorySummary::ReviewObservationRecorded { tags, .. } => tags,
+        _ => return String::new(),
+    };
+    let mut tokens: Vec<String> = Vec::new();
+    for tag in tags {
+        let tag = tag.to_lowercase();
+        if let Some((key, _)) = tag.split_once(':')
+            && !key.is_empty()
+        {
+            tokens.push(key.to_owned());
+        }
+        tokens.push(tag);
+    }
+    if tokens.is_empty() {
+        String::new()
+    } else {
+        format!(" {} ", tokens.join(" "))
+    }
+}
+
 /// The revision id an entry addresses, read through its subject (mirrors
 /// `web/src/projection.ts entryRevisionId`), or "". `pub(super)` for reuse by
 /// the object-map join (2.1) and the query path (3.1).
@@ -290,7 +655,7 @@ pub(super) fn entry_revision_id(entry: &ReviewHistoryEntry) -> String {
     }
 }
 
-/// The `status` record field — the validation status wire string, else ""
+/// The `check` record field — the validation status wire string, else ""
 /// (mirrors `e.summary?.status ?? ""`; only validation entries carry one).
 fn summary_status(entry: &ReviewHistoryEntry) -> String {
     match &entry.summary {
@@ -357,14 +722,12 @@ fn entry_title(entry: &ReviewHistoryEntry) -> String {
 /// Map an assessment wire value to its hyphenated display label (mirrors
 /// `assessmentDisplayLabel` / `ASSESSMENT_LABELS`, passing through unknowns).
 fn assessment_display_label(value: &str) -> String {
-    match value {
-        "accepted" => "accepted",
-        "accepted_with_follow_up" => "accepted-with-follow-up",
-        "needs_changes" => "needs-changes",
-        "needs_clarification" => "needs-clarification",
-        other => other,
+    for (wire, label) in ASSESSMENT_LABEL_TABLE {
+        if *wire == value {
+            return (*label).to_owned();
+        }
     }
-    .to_owned()
+    value.to_owned()
 }
 
 /// The short tail of an id (mirrors `web/src/refs.ts shortId`): the segment after
@@ -628,9 +991,10 @@ mod tests {
     #[test]
     fn search_record_carries_type_track_revision_status_fields() {
         let entry = validation_entry("cargo test", None, "passed");
-        let record = SearchRecord::from_entry(&entry, "");
+        let record = SearchRecord::from_entry(&entry, "", &EventRecordExtras::default());
         assert_eq!(record.field("type"), Some("validation_check_recorded"));
-        assert_eq!(record.field("status"), Some("passed"));
+        assert_eq!(record.field("check"), Some("passed"));
+        assert_eq!(record.field("track"), Some(" agent:codex "));
         assert!(record.field("revision").is_some());
         // The grammar key is `snapshot` (renamed from `object` in #334); the value
         // is supplied by the caller (the revision->object map), empty here.
@@ -640,6 +1004,108 @@ mod tests {
             None,
             "the legacy key is gone from the record"
         );
+    }
+
+    #[test]
+    fn entry_actor_returns_the_writer_actor_id() {
+        // The actor gets its own slot at the record layer. (entry_track's fold is
+        // untouched here; a later change removes it.)
+        let entry = observation_entry_with_body_tags("t", "b", &[]);
+        assert_eq!(entry_actor(&entry), "actor:local"); // Writer::shore_local -> "actor:local"
+    }
+
+    #[test]
+    fn field_matches_before_after_are_lexical_over_the_range_anchor() {
+        // ISO-8601 is lexically orderable; the anchor is lowercased at compare time so
+        // it matches the lowercased query value.
+        let record = record(
+            "review_observation_recorded",
+            &[(RANGE_ANCHOR_FIELD, "2026-05-13T10:00:01Z")],
+            "",
+        );
+        assert!(field_matches(&record, "after", "2026-05-13t10:00:00z"));
+        assert!(!field_matches(&record, "after", "2026-05-13t10:00:02z"));
+        assert!(field_matches(&record, "before", "2026-05-13t10:00:02z"));
+        assert!(!field_matches(&record, "before", "2026-05-13t10:00:00z"));
+    }
+
+    #[test]
+    fn search_record_carries_actor_check_assessment_tag_and_is_fields() {
+        // A validation entry: the check field is today's `status` source, renamed.
+        let validation = validation_entry("cargo test", None, "passed");
+        let record = SearchRecord::from_entry(&validation, "", &EventRecordExtras::default());
+        assert_eq!(record.field("type"), Some("validation_check_recorded"));
+        assert_eq!(record.field("check"), Some("passed"));
+        assert_eq!(
+            record.field("status"),
+            None,
+            "the status key is renamed to check"
+        );
+        assert_eq!(record.field("actor"), Some(" actor:local ")); // space-wrapped token set
+        assert_eq!(record.field("is"), Some("")); // not a request entry, default extras
+
+        // An observation with tags: the dual index carries both the full string and key.
+        let obs = observation_entry_with_body_tags("Pinned", "body", &["issue:191"]);
+        let record = SearchRecord::from_entry(&obs, "", &EventRecordExtras::default());
+        assert!(field_matches(&record, "tag", "issue:191"));
+        assert!(field_matches(&record, "tag", "issue"));
+        assert_eq!(record.field("track"), Some(" agent:codex "));
+        assert_eq!(record.field("actor"), Some(" actor:local "));
+    }
+
+    #[test]
+    fn from_entry_encodes_the_is_set_from_extras() {
+        // This exercises the is-set ENCODING only; which entries actually carry a value
+        // is decided at the build loop, not here.
+        let entry = observation_entry_with_body_tags("t", "b", &[]);
+        let open = SearchRecord::from_entry(
+            &entry,
+            "",
+            &EventRecordExtras {
+                is_open: Some(true),
+            },
+        );
+        assert_eq!(open.field("is"), Some(" open "));
+        let answered = SearchRecord::from_entry(
+            &entry,
+            "",
+            &EventRecordExtras {
+                is_open: Some(false),
+            },
+        );
+        assert_eq!(answered.field("is"), Some(" answered "));
+    }
+
+    #[test]
+    fn from_entry_normalizes_the_time_slot_for_range_compare() {
+        // The store mints BOTH unix-ms and RFC 3339 tokens; the record's range anchor is
+        // the canonical fixed-width `.mmm` ISO form so before:/after: prefix-compare.
+        let mut entry = observation_entry_with_body_tags("t", "b", &[]);
+        entry.occurred_at = "unix-ms:1747130401250".to_owned(); // ~ 2025-05-13, .250 frac
+        let record = SearchRecord::from_entry(&entry, "", &EventRecordExtras::default());
+        let iso = record.field(RANGE_ANCHOR_FIELD).unwrap();
+        assert!(
+            iso.starts_with("2025-") && iso.ends_with(".250Z"),
+            "got {iso}"
+        );
+        assert!(field_matches(&record, "after", "2025-01-01"));
+        assert!(field_matches(&record, "before", "2027-01-01"));
+
+        // An adapter-minted RFC 3339 token normalizes on this side too (round-trip).
+        entry.occurred_at = "2026-05-13T10:00:01.500Z".to_owned();
+        let record = SearchRecord::from_entry(&entry, "", &EventRecordExtras::default());
+        assert_eq!(
+            record.field(RANGE_ANCHOR_FIELD),
+            Some("2026-05-13T10:00:01.500Z")
+        );
+    }
+
+    #[test]
+    fn build_haystack_folds_the_writer_actor_id() {
+        // The actor id used to reach free text via the track fold; keep it discoverable
+        // now that the lane no longer folds it.
+        let entry = observation_entry_with_body_tags("t", "b", &[]);
+        assert!(build_haystack(&entry).contains("actor:local"));
     }
 
     #[test]
@@ -658,6 +1124,163 @@ mod tests {
             parse_search_query("object:obj-1"),
             snap,
             "legacy object: token aliases to the snapshot field"
+        );
+    }
+
+    #[test]
+    fn event_surface_flags_unsupported_qualifier_and_drops_the_clause() {
+        // attention: is revision-only → diagnosed and dropped; the free text survives.
+        let parsed = parse_search_query_for("attention:open free", QuerySurface::Event);
+        assert_eq!(
+            parsed.clauses,
+            vec![QueryClause::Text {
+                value: "free".into(),
+                negate: false,
+            }]
+        );
+        assert_eq!(parsed.diagnostics.len(), 1);
+        assert_eq!(
+            parsed.diagnostics[0].code,
+            QueryDiagnosticCode::UnsupportedQualifier
+        );
+        assert_eq!(parsed.diagnostics[0].key, "attention");
+    }
+
+    #[test]
+    fn status_aliases_to_check_on_event_with_a_deprecation_hint() {
+        let parsed = parse_search_query_for("status:passed", QuerySurface::Event);
+        assert_eq!(
+            parsed.clauses,
+            vec![QueryClause::Field {
+                field: "check".into(),
+                value: "passed".into(),
+                negate: false,
+            }],
+        );
+        assert_eq!(parsed.diagnostics.len(), 1);
+        assert_eq!(
+            parsed.diagnostics[0].code,
+            QueryDiagnosticCode::DeprecatedQualifier
+        );
+    }
+
+    #[test]
+    fn status_aliases_to_assessment_on_revision() {
+        let parsed = parse_search_query_for("status:accepted", QuerySurface::Revision);
+        assert_eq!(
+            parsed.clauses,
+            vec![QueryClause::Field {
+                field: "assessment".into(),
+                value: "accepted".into(),
+                negate: false,
+            }],
+        );
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|d| d.code == QueryDiagnosticCode::DeprecatedQualifier)
+        );
+    }
+
+    #[test]
+    fn object_aliases_to_snapshot_silently() {
+        let parsed = parse_search_query_for("object:obj-1", QuerySurface::Event);
+        assert_eq!(
+            parsed.clauses,
+            vec![QueryClause::Field {
+                field: "snapshot".into(),
+                value: "obj-1".into(),
+                negate: false,
+            }],
+        );
+        assert!(parsed.diagnostics.is_empty()); // silent alias, unchanged
+    }
+
+    #[test]
+    fn unknown_key_stays_free_text_no_diagnostic() {
+        let parsed = parse_search_query_for("foo:bar", QuerySurface::Event);
+        assert_eq!(
+            parsed.clauses,
+            vec![QueryClause::Text {
+                value: "foo:bar".into(),
+                negate: false,
+            }]
+        );
+        assert!(parsed.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn is_value_is_validated_per_surface() {
+        let bad = parse_search_query_for("is:contested", QuerySurface::Event); // event: open|answered
+        assert!(bad.clauses.is_empty());
+        assert_eq!(
+            bad.diagnostics[0].code,
+            QueryDiagnosticCode::UnsupportedValue
+        );
+        // `is:` is deferred from the revision surface until its index slot exists
+        // (advertising it would silent-empty) — a diagnostic, not a dropped match.
+        let deferred = parse_search_query_for("is:contested", QuerySurface::Revision);
+        assert!(deferred.clauses.is_empty());
+        assert_eq!(
+            deferred.diagnostics[0].code,
+            QueryDiagnosticCode::UnsupportedQualifier
+        );
+        // The revision surface still validates enumerated values via attention:.
+        let bad_attention = parse_search_query_for("attention:bogus", QuerySurface::Revision);
+        assert!(bad_attention.clauses.is_empty());
+        assert_eq!(
+            bad_attention.diagnostics[0].code,
+            QueryDiagnosticCode::UnsupportedValue
+        );
+        let ok = parse_search_query_for("attention:open-request", QuerySurface::Revision);
+        assert_eq!(
+            ok.clauses,
+            vec![QueryClause::Field {
+                field: "attention".into(),
+                value: "open-request".into(),
+                negate: false,
+            }],
+        );
+        assert!(ok.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn revision_surface_defers_unindexed_qualifiers_with_a_diagnostic() {
+        // track/actor/tag/is are deferred from the revision surface until the
+        // revision record carries their slots — diagnosed, never silent-empty.
+        for query in [
+            "track:agent:codex",
+            "actor:actor:local",
+            "tag:issue",
+            "is:open",
+        ] {
+            let parsed = parse_search_query_for(query, QuerySurface::Revision);
+            assert!(
+                parsed.clauses.is_empty(),
+                "{query} must not produce a clause"
+            );
+            assert_eq!(
+                parsed.diagnostics[0].code,
+                QueryDiagnosticCode::UnsupportedQualifier,
+                "{query}"
+            );
+        }
+        // before:/after: stay supported — the revision index carries the anchor.
+        let ranged = parse_search_query_for("after:2026-01-01", QuerySurface::Revision);
+        assert_eq!(ranged.clauses.len(), 1);
+        assert!(ranged.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn legacy_parse_search_query_delegates_to_the_event_surface() {
+        assert_eq!(
+            parse_search_query("status:passed"),
+            vec![QueryClause::Field {
+                field: "check".into(),
+                value: "passed".into(),
+                negate: false,
+            }],
         );
     }
 
@@ -748,10 +1371,11 @@ mod tests {
 
     #[test]
     fn parses_leading_dash_as_negation_for_field_and_text() {
+        // `status:` aliases to `check:` on the event surface; negation rides along.
         assert_eq!(
             parse_search_query("-status:failed"),
             vec![QueryClause::Field {
-                field: "status".into(),
+                field: "check".into(),
                 value: "failed".into(),
                 negate: true,
             }]
@@ -822,6 +1446,83 @@ mod tests {
     }
 
     #[test]
+    fn field_matches_track_and_actor_by_whole_token_not_substring() {
+        // The record stores track/actor space-wrapped, matched as whole tokens.
+        let record = record(
+            "review_observation_recorded",
+            &[
+                ("track", " agent:codex "),
+                ("actor", " actor:agent:codex-loop "),
+            ],
+            "",
+        );
+        assert!(field_matches(&record, "track", "agent:codex"));
+        assert!(!field_matches(&record, "track", "codex")); // a substring, not a whole token
+        assert!(field_matches(&record, "actor", "actor:agent:codex-loop"));
+        assert!(!field_matches(&record, "actor", "codex-loop"));
+    }
+
+    #[test]
+    fn field_matches_is_and_tag_are_set_membership_not_substring() {
+        // The space-wrapped token set: a value matches only as a whole token.
+        let record = record(
+            "input_request_opened",
+            &[("is", " open answered "), ("tag", " issue issue:191 ")],
+            "",
+        );
+        assert!(field_matches(&record, "is", "open"));
+        assert!(field_matches(&record, "is", "answered"));
+        assert!(!field_matches(&record, "is", "pen")); // a substring of "open", not a member
+        assert!(field_matches(&record, "tag", "issue:191"));
+        assert!(field_matches(&record, "tag", "issue")); // the first-colon key
+        assert!(!field_matches(&record, "tag", "issues"));
+    }
+
+    #[test]
+    fn field_matches_normalizes_full_rfc3339_range_bounds() {
+        // A whole-second RFC 3339 bound must compare against the fixed-width
+        // millisecond anchor by instant, not raw bytes ('.' sorts before 'z').
+        let later = record(
+            "review_observation_recorded",
+            &[(RANGE_ANCHOR_FIELD, "2026-05-13T10:00:01.500Z")],
+            "",
+        );
+        assert!(!field_matches(&later, "before", "2026-05-13t10:00:01z"));
+        assert!(field_matches(&later, "after", "2026-05-13t10:00:01z"));
+        // An anchor equal to the bound matches neither strict range.
+        let equal = record(
+            "review_observation_recorded",
+            &[(RANGE_ANCHOR_FIELD, "2026-05-13T10:00:01.000Z")],
+            "",
+        );
+        assert!(!field_matches(&equal, "before", "2026-05-13t10:00:01z"));
+        assert!(!field_matches(&equal, "after", "2026-05-13t10:00:01z"));
+        // A date/datetime prefix keeps raw lexical prefix-compare semantics.
+        assert!(field_matches(&later, "before", "2026-05-14"));
+        assert!(field_matches(&later, "after", "2026-05-13"));
+    }
+
+    #[test]
+    fn field_matches_type_is_comma_list_or() {
+        // The only comma-OR key: any listed type resolves-and-matches.
+        let record = record("review_observation_recorded", &[], "");
+        assert!(field_matches(&record, "type", "observation,assessment"));
+        assert!(!field_matches(&record, "type", "assessment,response"));
+    }
+
+    #[test]
+    fn field_matches_assessment_by_display_label_or_wire() {
+        let record = record(
+            "review_assessment_recorded",
+            &[("assessment", "needs_changes")],
+            "",
+        );
+        assert!(field_matches(&record, "assessment", "needs-changes")); // display label
+        assert!(field_matches(&record, "assessment", "needs_changes")); // wire value
+        assert!(!field_matches(&record, "assessment", "accepted"));
+    }
+
+    #[test]
     fn field_matches_type_by_label_or_raw_id_exactly() {
         let record = record(
             "review_observation_recorded",
@@ -841,11 +1542,16 @@ mod tests {
     fn field_matches_non_type_as_substring_of_lowercased_record() {
         let record = record(
             "review_observation_recorded",
-            &[("track", "agent:codex"), ("revision", "rev:sha256:abcdef")],
+            &[
+                ("track", " agent:codex "),
+                ("revision", "rev:sha256:abcdef"),
+            ],
             "",
         );
         assert!(field_matches(&record, "revision", "abcd"));
-        assert!(field_matches(&record, "track", "codex"));
+        // track is whole-token membership over the wrapped field, not substring.
+        assert!(field_matches(&record, "track", "agent:codex"));
+        assert!(!field_matches(&record, "track", "codex"));
         assert!(!field_matches(&record, "revision", "zzz"));
     }
 
@@ -914,22 +1620,24 @@ mod tests {
     fn non_type_field_substring_matches_record_field() {
         let record = record(
             "review_observation_recorded",
-            &[("track", "agent:codex")],
+            &[("track", " agent:codex ")],
             "",
         );
-        assert!(matches_query(&record, &parse_search_query("track:codex")));
+        assert!(matches_query(
+            &record,
+            &parse_search_query("track:agent:codex")
+        ));
+        assert!(!matches_query(&record, &parse_search_query("track:codex")));
         assert!(!matches_query(&record, &parse_search_query("track:claude")));
     }
 
     #[test]
     fn non_type_field_match_is_case_insensitive_on_the_record_value() {
-        // A mixed-case stored field still matches a lowercased query value (parity
-        // with the TS `idx[field].toLowerCase().includes(value)`).
-        let record = record(
-            "review_observation_recorded",
-            &[("track", "agent:Codex")],
-            "",
-        );
-        assert!(matches_query(&record, &parse_search_query("track:codex")));
+        // Case-folding happens at BUILD time: membership compares the record
+        // byte-for-byte, so a mixed-case track id lowercases into the wrapped token.
+        let mut entry = observation_entry_with_body_tags("t", "b", &[]);
+        entry.track_id = Some(TrackId::new("agent:Codex"));
+        let record = SearchRecord::from_entry(&entry, "", &EventRecordExtras::default());
+        assert!(field_matches(&record, "track", "agent:codex"));
     }
 }

@@ -56,7 +56,7 @@ const INDEX_BODY = `
     <input
       id="filter-text"
       type="search"
-      placeholder="search — text, or field:value (type: track: revision: snapshot: status:)"
+      placeholder="search — text or field:value"
     />
     <div id="filter-types" class="type-toggles"></div>
     <label id="sort-label" for="sort-picker" class="toolbar-label hidden">sort by</label>

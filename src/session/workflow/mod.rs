@@ -57,11 +57,13 @@ pub use event_signature::{
     EventSignatureRecordOptions, EventSignatureRecordResult, record_event_signature,
 };
 pub use history::{
-    BaseEntry, BaseHistoryProjection, BaseProjectionConfig, HistoryCursor, HistoryOrder,
-    HistoryPage, HistoryQuery, HistoryWindow, QueriedHistory, QueryClause, ReviewHistoryEntry,
+    BaseEntry, BaseHistoryProjection, BaseProjectionConfig, EVENT_QUERY_FIELDS, EventRecordExtras,
+    HistoryCursor, HistoryOrder, HistoryPage, HistoryQuery, HistoryWindow, KNOWN_QUERY_KEYS,
+    ParsedQuery, QueriedHistory, QueryClause, QueryDiagnostic, QueryDiagnosticCode, QuerySurface,
+    RANGE_ANCHOR_FIELD, REVISION_ATTENTION_VALUES, REVISION_QUERY_FIELDS, ReviewHistoryEntry,
     ReviewHistoryFilters, ReviewHistoryOptions, ReviewHistoryResult, SearchRecord,
     apply_history_query, build_haystack, default_history_page_projection, history_base_projection,
-    matches_query, parse_search_query, review_history,
+    matches_query, parse_search_query, parse_search_query_for, review_history,
 };
 pub use ingest::{
     ImportEventOptions, IngestEventsOptions, IngestEventsResult, import_event, ingest_events,
