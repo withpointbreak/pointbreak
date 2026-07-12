@@ -17,7 +17,7 @@ pub use delegates::{
     DelegationStageOutcome, DelegationWriteRecord, PrincipalResolution, UnresolvedReason,
     delegation_map_from_value, stage_delegation,
 };
-pub use instant::format_rfc3339_utc_millis;
+pub use instant::{compare_event_instants, format_rfc3339_utc_millis, parse_event_instant};
 pub use principal::{
     PrincipalSource, PrincipalStatus, PrincipalView, principal_display_label,
     principal_resolution_for_writer, principal_view_for,

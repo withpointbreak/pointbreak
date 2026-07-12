@@ -626,13 +626,14 @@ mod tests {
     }
 
     #[test]
-    fn history_sorts_by_occurred_at_then_event_id() {
+    fn history_sorts_mixed_timestamps_by_instant_then_event_id() {
         let late = event_with_time_and_key("2026-05-13T10:00:02Z", "late");
         let tie_b = event_with_time_and_key("2026-05-13T10:00:01Z", "b");
         let tie_a = event_with_time_and_key("2026-05-13T10:00:01Z", "a");
+        let earliest = event_with_time_and_key("unix-ms:0", "earliest");
 
         let result = history_from_events(
-            &[late, tie_b, tie_a],
+            &[late, tie_b, tie_a, earliest],
             ResolvedHistoryFilters::default(),
             HistoryWindow::default(),
             None,
@@ -646,6 +647,7 @@ mod tests {
                 .map(|entry| entry.occurred_at.as_str())
                 .collect::<Vec<_>>(),
             vec![
+                "unix-ms:0",
                 "2026-05-13T10:00:01Z",
                 "2026-05-13T10:00:01Z",
                 "2026-05-13T10:00:02Z",
@@ -1293,13 +1295,31 @@ mod tests {
     }
 
     #[test]
-    fn base_projection_sorts_ascending_occurred_at_event_id() {
+    fn base_projection_sorts_mixed_timestamps_by_instant_then_event_id() {
         let late = event_with_time_and_key("2026-05-13T10:00:02Z", "late");
-        let early = event_with_time_and_key("2026-05-13T10:00:01Z", "early");
+        let early = event_with_time_and_key("unix-ms:0", "early");
         let base = history_base_from_events(&[late, early], &BaseProjectionConfig::default(), None)
             .unwrap();
 
-        assert!(base.entries[0].entry.occurred_at < base.entries[1].entry.occurred_at);
+        assert_eq!(base.entries[0].entry.occurred_at, "unix-ms:0");
+        assert_eq!(base.entries[1].entry.occurred_at, "2026-05-13T10:00:02Z");
+    }
+
+    #[test]
+    fn default_page_projection_sorts_mixed_timestamp_forms_by_instant() {
+        let late = event_with_time_and_key("2026-05-13T10:00:02Z", "late");
+        let early = event_with_time_and_key("unix-ms:0", "early");
+        let page = history_default_page_from_events(
+            &[late, early],
+            &BaseProjectionConfig::default(),
+            None,
+            2,
+            HistoryOrder::Asc,
+        )
+        .unwrap();
+
+        assert_eq!(page.entries[0].occurred_at, "unix-ms:0");
+        assert_eq!(page.entries[1].occurred_at, "2026-05-13T10:00:02Z");
     }
 
     #[test]

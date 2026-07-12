@@ -3,6 +3,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
 use crate::error::{Result, ShoreError};
 use crate::model::EventId;
+use crate::session::identity::instant::parse_event_instant;
 
 /// An opaque, deterministic continuation token for the review-history read path.
 ///
@@ -47,12 +48,25 @@ fn invalid_cursor() -> ShoreError {
     ShoreError::Message("invalid history cursor".to_owned())
 }
 
-/// The total order over the review-history stream: ascending `occurred_at`, then
-/// ascending `event_id`. The projection sort and the window slicer both key on
-/// this, so a continuation cursor lands between exactly the neighbours the sort
-/// produced.
-pub(super) fn cmp_key<'a>(occurred_at: &'a str, event_id: &'a str) -> (&'a str, &'a str) {
-    (occurred_at, event_id)
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) enum EventInstantKey<'a> {
+    Unparseable(&'a str),
+    Parsed(i64),
+}
+
+/// The total order over the review-history stream: ascending normalized
+/// `occurred_at`, then ascending `event_id`. The projection sort and the window
+/// slicer both key on this, so a continuation cursor lands between exactly the
+/// neighbours the sort produced. Unparseable legacy values retain a stable raw
+/// ordering before legal timestamps.
+pub(super) fn cmp_key<'a>(
+    occurred_at: &'a str,
+    event_id: &'a str,
+) -> (EventInstantKey<'a>, &'a str) {
+    let instant = parse_event_instant(occurred_at)
+        .map(EventInstantKey::Parsed)
+        .unwrap_or(EventInstantKey::Unparseable(occurred_at));
+    (instant, event_id)
 }
 
 /// A forward window over the filtered + sorted history stream: take at most

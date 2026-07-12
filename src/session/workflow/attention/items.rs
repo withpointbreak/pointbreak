@@ -15,7 +15,7 @@ use crate::session::event::{
     AssertionMode, EventType, InputRequestReasonCode, ReviewAssessment, ShoreEvent,
     ValidationCheckRecordedPayload, WorkObjectProposal, WorkObjectProposedPayload,
 };
-use crate::session::identity::instant::parse_event_instant;
+use crate::session::identity::instant::{compare_event_instants, parse_event_instant};
 use crate::session::projection::supersession::SupersessionView;
 use crate::session::state::ProjectionDiagnostic;
 use crate::session::workflow::assessment::collect_assessment_records_by_revision;
@@ -245,7 +245,7 @@ fn sort_items(items: &mut [AttentionItem]) {
     items.sort_by(|left, right| {
         tier_rank(left.tier)
             .cmp(&tier_rank(right.tier))
-            .then_with(|| left.observed_at.cmp(&right.observed_at))
+            .then_with(|| compare_event_instants(&left.observed_at, &right.observed_at))
             .then_with(|| left.id.cmp(&right.id))
     });
 }
@@ -1904,7 +1904,7 @@ mod tests {
     }
 
     #[test]
-    fn items_sort_by_tier_then_observed_at_then_id() {
+    fn items_sort_mixed_timestamps_by_tier_then_instant_then_id() {
         let a = rev("a");
         let events = vec![
             revision_event("a", vec![], "2026-06-04T00:00:00Z"),
@@ -1930,7 +1930,7 @@ mod tests {
                 AssertionMode::Operative,
                 "2026-06-04T00:03:00Z",
             ),
-            // operative (primary), oldest observed_at.
+            // operative (primary), oldest observed_at in the other legal form.
             open_request_event(
                 &a,
                 "human:kevin",
@@ -1939,7 +1939,18 @@ mod tests {
                 InputRequestReasonCode::ManualDecisionRequired,
                 "Operative earliest",
                 AssertionMode::Operative,
-                "2026-06-04T00:01:00Z",
+                "unix-ms:0",
+            ),
+            // operative (primary), malformed and deterministically before legal instants.
+            open_request_event(
+                &a,
+                "human:kevin",
+                "actor:human:kevin",
+                "malformed",
+                InputRequestReasonCode::ManualDecisionRequired,
+                "Operative malformed",
+                AssertionMode::Operative,
+                "malformed",
             ),
         ];
 
@@ -1952,6 +1963,7 @@ mod tests {
         assert_eq!(
             order,
             vec![
+                "open_input_request:input-request:sha256:malformed",
                 "open_input_request:input-request:sha256:op1",
                 "open_input_request:input-request:sha256:op2",
                 "open_input_request:input-request:sha256:adv",

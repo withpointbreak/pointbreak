@@ -4,6 +4,17 @@ import { fmtDate, fmtDateTime, fmtTime, parseMs } from "../src/format";
 describe("parseMs", () => {
   it("extracts the trailing millisecond count from a unix-ms token", () => {
     expect(parseMs("unix-ms:1782698716556")).toBe(1782698716556);
+    expect(parseMs("unix-ms:-1")).toBe(-1);
+  });
+
+  it("parses an RFC 3339 timestamp", () => {
+    expect(parseMs("2026-06-28T18:05:16.556Z")).toBe(1782669916556);
+  });
+
+  it("accepts leap seconds and rejects malformed RFC 3339 fields", () => {
+    expect(parseMs("1990-12-31T23:59:60Z")).toBe(Date.UTC(1991, 0, 1));
+    expect(parseMs("2026-02-31T00:00:00Z")).toBeNull();
+    expect(parseMs("2026-02-28T00:00:00+01:00")).toBeNull();
   });
 
   it("reads trailing digits regardless of prefix or trailing whitespace", () => {

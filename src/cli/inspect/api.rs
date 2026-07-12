@@ -24,10 +24,11 @@ use pointbreak::session::{
     RevisionListEntry, RevisionListOptions, RevisionOverview, RevisionOverviewsOptions,
     RevisionProjectionSummary, RevisionShowOptions, RevisionShowResult, SessionState,
     SnapshotSummaryCache, StoreIdentity, StoreIdentityOptions, SupersessionView, TrustSet,
-    apply_history_query, commit_graph_stamp, default_history_page_projection, enrich_liveness,
-    event_log_head_marker, history_base_projection, list_attention, list_revisions,
-    read_bound_object_artifact, read_events_for_display, read_object_artifact, show_revision,
-    show_revision_overviews, store_identity,
+    apply_history_query, commit_graph_stamp, compare_event_instants,
+    default_history_page_projection, enrich_liveness, event_log_head_marker,
+    history_base_projection, list_attention, list_revisions, read_bound_object_artifact,
+    read_events_for_display, read_object_artifact, show_revision, show_revision_overviews,
+    store_identity,
 };
 use serde::Serialize;
 
@@ -679,10 +680,10 @@ fn set_latest_activity(
     title: String,
     at: String,
 ) {
-    if latest
+    let is_later = latest
         .as_ref()
-        .is_none_or(|current| at.as_str() > current.at.as_str())
-    {
+        .is_none_or(|current| compare_event_instants(&at, &current.at).is_gt());
+    if is_later {
         *latest = Some(RevisionLatestActivityDocument { kind, title, at });
     }
 }
@@ -1707,6 +1708,52 @@ mod tests {
 
         // Head (empty superseders) ⇒ zero, regardless of fact counts.
         assert_eq!(stale_review_fact_count(&BTreeSet::new(), &summary), 0);
+    }
+
+    #[test]
+    fn latest_activity_compares_mixed_timestamp_forms_by_instant() {
+        let mut latest = Some(RevisionLatestActivityDocument {
+            kind: "revision",
+            title: "Revision captured".to_owned(),
+            at: "unix-ms:0".to_owned(),
+        });
+
+        set_latest_activity(
+            &mut latest,
+            "observation",
+            "Later observation".to_owned(),
+            "1970-01-01T00:00:01Z".to_owned(),
+        );
+
+        let latest = latest.expect("latest activity");
+        assert_eq!(latest.kind, "observation");
+        assert_eq!(latest.at, "1970-01-01T00:00:01Z");
+    }
+
+    #[test]
+    fn latest_activity_prefers_legal_instants_and_keeps_first_equal_instant() {
+        let mut latest = Some(RevisionLatestActivityDocument {
+            kind: "revision",
+            title: "Malformed activity".to_owned(),
+            at: "malformed".to_owned(),
+        });
+
+        set_latest_activity(
+            &mut latest,
+            "observation",
+            "Legal activity".to_owned(),
+            "unix-ms:1000".to_owned(),
+        );
+        set_latest_activity(
+            &mut latest,
+            "assessment",
+            "Equal activity".to_owned(),
+            "1970-01-01T00:00:01Z".to_owned(),
+        );
+
+        let latest = latest.expect("latest activity");
+        assert_eq!(latest.kind, "observation");
+        assert_eq!(latest.at, "unix-ms:1000");
     }
 
     #[test]

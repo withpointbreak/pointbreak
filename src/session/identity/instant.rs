@@ -4,12 +4,14 @@
 //! `occurredAt` forms the store mints — `unix-ms:<millis>` from the local clock
 //! and the RFC 3339 instants adapters ingest — to one comparable instant.
 
+use std::cmp::Ordering;
+
 /// Normalize an event `occurredAt` to epoch milliseconds. The store mints two
 /// forms in practice — `unix-ms:<millis>` (the local clock) and RFC 3339 UTC
 /// (adapter-ingested and signature events) — and this collapses both to one
 /// comparable instant. Returns `None` for any other shape so resolution can
 /// report `UnparseableTimestamp` rather than guess.
-pub(crate) fn parse_event_instant(value: &str) -> Option<i64> {
+pub fn parse_event_instant(value: &str) -> Option<i64> {
     if let Some(millis) = value.strip_prefix("unix-ms:") {
         if millis.is_empty() {
             return None;
@@ -17,6 +19,19 @@ pub(crate) fn parse_event_instant(value: &str) -> Option<i64> {
         return millis.parse().ok();
     }
     parse_rfc3339_utc_millis(value)
+}
+
+/// Compare event instants under one total order. Legal timestamp forms compare
+/// by normalized epoch milliseconds; malformed values compare lexically before
+/// legal instants. Equivalent legal forms compare equal so callers can apply
+/// their domain-specific tie-break or retain the first value.
+pub fn compare_event_instants(left: &str, right: &str) -> Ordering {
+    match (parse_event_instant(left), parse_event_instant(right)) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (None, None) => left.cmp(right),
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+    }
 }
 
 /// Parse an RFC 3339 UTC instant — `YYYY-MM-DDTHH:MM:SS[.fraction]Z` — to epoch
@@ -231,5 +246,22 @@ mod tests {
         assert_eq!(parse_event_instant("unix-ms:"), None);
         assert_eq!(parse_event_instant("unix-ms:not-a-number"), None);
         assert_eq!(parse_event_instant("2026-06-11T00:00:00+02:00"), None);
+    }
+
+    #[test]
+    fn event_instant_comparison_is_total_for_mixed_and_malformed_values() {
+        use std::cmp::Ordering;
+
+        let malformed = "malformed";
+        let unix_ms = "unix-ms:1000";
+        let rfc3339 = "1970-01-01T00:00:02Z";
+
+        assert_eq!(compare_event_instants(malformed, unix_ms), Ordering::Less);
+        assert_eq!(compare_event_instants(unix_ms, rfc3339), Ordering::Less);
+        assert_eq!(compare_event_instants(malformed, rfc3339), Ordering::Less);
+        assert_eq!(
+            compare_event_instants("unix-ms:2000", rfc3339),
+            Ordering::Equal
+        );
     }
 }
