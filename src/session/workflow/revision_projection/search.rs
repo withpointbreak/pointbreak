@@ -236,7 +236,8 @@ mod tests {
     use super::*;
     use crate::model::{
         ActorId, EventId, InputRequestId, ObjectId, ObservationId, ReviewEndpoint, ReviewTargetRef,
-        RevisionId, RevisionSource, TrackId, WorktreeCaptureMode,
+        RevisionId, RevisionSource, TrackId, ValidationCheckId, ValidationTarget,
+        ValidationTrigger, WorktreeCaptureMode,
     };
     use crate::session::event::{AssertionMode, InputRequestReasonCode, ReviewAssessment, Writer};
     use crate::session::identity::instant::normalize_instant_to_iso_millis;
@@ -245,7 +246,7 @@ mod tests {
         CurrentAssessmentStatus, CurrentAssessmentView, InputRequestStatus, InputRequestView,
         ObservationStatus, ObservationView, QuerySurface, RANGE_ANCHOR_FIELD,
         REVISION_ATTENTION_VALUES, RevisionCommitRangeView, RevisionListEntry, RevisionOverview,
-        SearchRecord, matches_query, parse_search_query_for,
+        SearchRecord, ValidationCheckView, matches_query, parse_search_query_for,
     };
 
     fn entry(revision: &str, snapshot: &str, captured_at: &str) -> RevisionListEntry {
@@ -326,6 +327,33 @@ mod tests {
             responses: vec![],
             created_at: "2026-05-13T10:00:02Z".to_owned(),
             writer: Writer::shore_local("test"),
+        }
+    }
+
+    fn validation_check(status: ValidationStatus) -> ValidationCheckView {
+        ValidationCheckView {
+            id: ValidationCheckId::new("validation-check:sha256:x"),
+            event_id: EventId::new("evt:sha256:val"),
+            track_id: TrackId::new("agent:codex"),
+            target: ValidationTarget::Revision {
+                revision_id: RevisionId::new("rev:sha256:one"),
+            },
+            check_name: "cargo test".to_owned(),
+            command: None,
+            status,
+            exit_code: Some(1),
+            trigger: ValidationTrigger::Manual,
+            source_fingerprint: None,
+            summary: None,
+            summary_content_type: Default::default(),
+            summary_content_hash: None,
+            summary_content_state: Default::default(),
+            started_at: None,
+            completed_at: None,
+            log_artifact_content_hashes: Vec::new(),
+            created_at: "2026-05-13T10:00:03Z".to_owned(),
+            writer: Writer::shore_local("test"),
+            superseded_by_revisions: Default::default(),
         }
     }
 
@@ -455,6 +483,40 @@ mod tests {
         let record = record_of(&e, &overview, "head", false);
         let attention = record.field("attention").unwrap();
         assert!(attention.contains(" open-request "), "{attention}");
+    }
+
+    #[test]
+    fn attention_set_carries_validation_context_follow_up_and_stale_cues() {
+        let e = entry("rev:sha256:one", "snap:sha256:one", "2026-05-13T10:00:00Z");
+
+        // A failed validation check raises the validation-context cue.
+        let mut failing = overview_with_observations(vec![]);
+        failing.validation_checks = vec![validation_check(ValidationStatus::Failed)];
+        let record = record_of(&e, &failing, "head", false);
+        assert!(
+            record
+                .field("attention")
+                .unwrap()
+                .contains(" validation-context "),
+            "{:?}",
+            record.field("attention")
+        );
+
+        // A resolved accepted-with-follow-up assessment raises the follow-up cue.
+        let mut follow_up = overview_with_observations(vec![]);
+        follow_up.current_assessment = CurrentAssessmentView {
+            status: CurrentAssessmentStatus::Resolved(ReviewAssessment::AcceptedWithFollowUp),
+            records: vec![],
+        };
+        let record = record_of(&e, &follow_up, "head", false);
+        assert!(record.field("attention").unwrap().contains(" follow-up "));
+
+        // A superseded revision with review facts raises the stale-fact cue.
+        let mut stale = overview_with_observations(vec![]);
+        stale.superseded_by = [RevisionId::new("rev:sha256:two")].into_iter().collect();
+        stale.summary.observation_count = 1;
+        let record = record_of(&e, &stale, "superseded", false);
+        assert!(record.field("attention").unwrap().contains(" stale-fact "));
     }
 
     #[test]

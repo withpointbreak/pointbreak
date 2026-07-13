@@ -648,6 +648,63 @@ describe("revisionSearchIndex — track/actor/tag/is/assessment/capturedAt (pair
     expect(idx.is).not.toContain(" follow-up ");
   });
 
+  it("derives is: unassessed/follow-up/stale when the rollup raises them", () => {
+    // Positive counterparts to the absence assertions above, mirroring the
+    // Rust record's flag derivation case for case.
+    const withAttention = (
+      attention: Record<string, unknown>,
+      currentAssessment: Record<string, unknown>,
+    ) =>
+      ({
+        revisionId: "rev:u",
+        snapshotId: "obj:u",
+        capturedAt: "unix-ms:1782699185391",
+        overview: {
+          currentAssessment,
+          attention: {
+            unassessed: false,
+            acceptedWithFollowUp: false,
+            openInputRequestCount: 0,
+            respondedInputRequestCount: 0,
+            failedValidationCount: 0,
+            erroredValidationCount: 0,
+            staleFactCount: 0,
+            ...attention,
+          },
+          counts: {
+            files: 1,
+            rows: 1,
+            observations: 1,
+            inputRequests: 0,
+            assessments: 0,
+            validationChecks: 0,
+          },
+          tracks: [],
+          actors: [],
+          tags: [],
+        },
+      }) as unknown as Revision;
+
+    const unassessed = revisionSearchIndex(
+      withAttention({ unassessed: true }, { status: "unassessed" }),
+    );
+    expect(unassessed.is).toContain(" unassessed ");
+
+    const followUp = revisionSearchIndex(
+      withAttention(
+        { acceptedWithFollowUp: true },
+        { status: "resolved", assessment: "accepted-with-follow-up" },
+      ),
+    );
+    expect(followUp.is).toContain(" follow-up ");
+    expect(followUp.is).not.toContain(" unassessed ");
+
+    const stale = revisionSearchIndex(
+      withAttention({ staleFactCount: 2 }, { status: "unassessed" }),
+    );
+    expect(stale.is).toContain(" stale ");
+  });
+
   it("never counts an ambiguous request as answered", () => {
     // One request in the total count that is neither open nor responded
     // (InputRequestStatus::Ambiguous): the Rust record emits no lifecycle
