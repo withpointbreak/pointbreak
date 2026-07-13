@@ -1,9 +1,9 @@
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::cursor::{HistoryCursor, HistoryWindow};
+use super::cursor::HistoryCursor;
+use super::query::HistoryOrder;
 use crate::model::{RevisionId, TrackId};
 use crate::session::event::EventType;
 use crate::session::{
@@ -25,6 +25,8 @@ pub struct ReviewHistoryOptions {
     pub(super) actor_attributes: Option<ActorAttributesMap>,
     pub(super) delegation_map: Option<DelegationMap>,
     pub(super) read_for_display: bool,
+    pub(super) order: HistoryOrder,
+    pub(super) filter: Option<String>,
     pub(super) limit: Option<usize>,
     pub(super) cursor: Option<HistoryCursor>,
 }
@@ -44,6 +46,8 @@ impl ReviewHistoryOptions {
             actor_attributes: None,
             delegation_map: None,
             read_for_display: false,
+            order: HistoryOrder::Asc,
+            filter: None,
             limit: None,
             cursor: None,
         }
@@ -119,6 +123,16 @@ impl ReviewHistoryOptions {
         self
     }
 
+    pub fn with_order(mut self, order: HistoryOrder) -> Self {
+        self.order = order;
+        self
+    }
+
+    pub fn with_filter(mut self, filter: impl Into<String>) -> Self {
+        self.filter = Some(filter.into());
+        self
+    }
+
     /// Bound the rendered output to at most `limit` entries (the first page when
     /// no cursor is set). Absent by default — the full unbounded result.
     pub fn with_limit(mut self, limit: usize) -> Self {
@@ -132,14 +146,6 @@ impl ReviewHistoryOptions {
         self.cursor = Some(cursor);
         self
     }
-
-    /// Resolve the requested limit/cursor into the window the projection applies.
-    pub(super) fn window(&self) -> HistoryWindow {
-        HistoryWindow {
-            limit: self.limit,
-            after: self.cursor.clone(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -152,33 +158,6 @@ pub struct ReviewHistoryFilters {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub event_types: Vec<EventType>,
     pub include_body: bool,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(super) struct ResolvedHistoryFilters {
-    pub(super) revision_id: Option<RevisionId>,
-    pub(super) track_id: Option<TrackId>,
-    pub(super) event_types: Vec<EventType>,
-    /// When a `--ref` filter resolves, the review-unit ids that match it. An
-    /// event passes only if its target unit is in this set.
-    pub(super) ref_matched_units: Option<BTreeSet<RevisionId>>,
-    pub(super) include_body: bool,
-    pub(super) verification_policy: Option<EventVerificationPolicy>,
-    pub(super) trust_set: TrustSet,
-    pub(super) removal_policy: RemovalPolicy,
-    pub(super) actor_attributes: Option<ActorAttributesMap>,
-    pub(super) delegation_map: Option<DelegationMap>,
-}
-
-impl From<ResolvedHistoryFilters> for ReviewHistoryFilters {
-    fn from(filters: ResolvedHistoryFilters) -> Self {
-        Self {
-            revision_id: filters.revision_id,
-            track_id: filters.track_id,
-            event_types: filters.event_types,
-            include_body: filters.include_body,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -195,14 +174,24 @@ mod tests {
         let opts = ReviewHistoryOptions::new("/repo")
             .with_limit(10)
             .with_cursor(cursor.clone());
-        let window = opts.window();
-        assert_eq!(window.limit, Some(10));
-        assert_eq!(window.after, Some(cursor));
+        assert_eq!(opts.limit, Some(10));
+        assert_eq!(opts.cursor, Some(cursor));
     }
 
     #[test]
     fn options_default_to_no_window() {
         let opts = ReviewHistoryOptions::new("/repo");
-        assert_eq!(opts.window(), HistoryWindow::default());
+        assert_eq!(opts.limit, None);
+        assert_eq!(opts.cursor, None);
+    }
+
+    #[test]
+    fn options_carry_order_and_filter() {
+        let opts = ReviewHistoryOptions::new("/repo")
+            .with_order(HistoryOrder::Desc)
+            .with_filter("type:observation");
+
+        assert_eq!(opts.order, HistoryOrder::Desc);
+        assert_eq!(opts.filter.as_deref(), Some("type:observation"));
     }
 }

@@ -1,14 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
-use super::cursor::{HistoryCursor, cmp_key};
+use super::cursor::{HistoryCursor, cmp_key, next_cursor_for};
 use super::projection::{BaseEntry, BaseHistoryProjection};
 use super::search::{
     QueryClause, QueryDiagnostic, QuerySurface, entry_actor, entry_track, event_type_wire,
     matches_query, parse_search_query_for, tag_completion_key,
 };
 use super::summary::{ReviewHistoryEntry, ReviewHistorySummary};
-use crate::model::EventId;
+use crate::model::{EventId, ReviewTargetRef, RevisionId};
 use crate::session::ProjectionDiagnostic;
 
 /// The display order of the queried history page. The base is stored ascending
@@ -28,19 +28,26 @@ pub struct HistoryQuery {
     pub q: String,
     pub track: Option<String>,
     pub snapshot: Option<String>,
+    /// An exact, already-resolved revision identity. Resolution never happens
+    /// inside the query engine.
+    pub revision: Option<RevisionId>,
+    /// An already-resolved revision set. `Some(empty)` matches nothing while
+    /// `None` leaves the revision dimension unconstrained.
+    pub revisions: Option<BTreeSet<RevisionId>>,
     pub types: Option<BTreeSet<String>>,
     pub order: HistoryOrder,
 }
 
-/// The query-path window spec. Precedence `at` › `offset`; a bare `limit`
-/// (offset/at both `None`) is the first page. Positional by design — the
-/// inspector is a random-access virtual list that needs backward paging and
-/// reveal-to-position, which a forward-only cursor cannot express. The CLI keeps
-/// the opaque `HistoryCursor` (plan 0092 `HistoryWindow`), which this path does
-/// not touch.
+/// The query-path window spec. Precedence `after` › `at` › `offset`; a bare
+/// `limit` is the first page. The inspector uses `at`/`offset` for random access,
+/// while the CLI uses the forward-only opaque cursor.
 #[derive(Clone, Debug, Default)]
 pub struct HistoryPage {
     pub limit: Option<usize>,
+    /// Start strictly after this ascending stream key. Callers must reject
+    /// `HistoryOrder::Desc` before the engine because the ascending partition
+    /// predicate is not partitioned over a reversed slice.
+    pub after: Option<HistoryCursor>,
     pub offset: Option<usize>,
     pub at: Option<EventId>,
 }
@@ -74,6 +81,7 @@ pub struct DistinctValues {
 /// filtered set — plan 0092 INV-5).
 pub struct QueriedHistory {
     pub entries: Vec<ReviewHistoryEntry>,
+    pub next_cursor: Option<HistoryCursor>,
     pub facets: BTreeMap<String, usize>,
     pub match_count: usize,
     pub offset: usize,
@@ -98,6 +106,10 @@ pub fn apply_history_query(
     query: &HistoryQuery,
     page: &HistoryPage,
 ) -> QueriedHistory {
+    debug_assert!(
+        !(matches!(query.order, HistoryOrder::Desc) && page.after.is_some()),
+        "history cursor windowing requires ascending order"
+    );
     let span = tracing::debug_span!(
         "shore.history.apply_query",
         base_entry_count = base.entries.len(),
@@ -114,7 +126,9 @@ pub fn apply_history_query(
     // The facet predicate is q + track + snapshot, EXCLUDING the `types` page filter
     // (INV-3). The page predicate additionally applies the `types` set.
     let facet_match = |entry: &BaseEntry| {
-        track_snapshot_match(entry, query) && matches_query(&entry.record, &clauses)
+        track_snapshot_match(entry, query)
+            && revision_dims_match(entry, query)
+            && matches_query(&entry.record, &clauses)
     };
 
     let facets = {
@@ -186,6 +200,18 @@ pub fn apply_history_query(
         let _guard = span.enter();
         resolve_window(&filtered, page)
     };
+    let next_cursor = if matches!(query.order, HistoryOrder::Asc) {
+        let keys: Vec<HistoryCursor> = filtered
+            .iter()
+            .map(|entry| HistoryCursor {
+                occurred_at: entry.entry.occurred_at.clone(),
+                event_id: entry.entry.event_id.clone(),
+            })
+            .collect();
+        next_cursor_for(&keys, &range)
+    } else {
+        None
+    };
     let entries = {
         let span = tracing::debug_span!(
             "shore.history.query.clone_window_entries",
@@ -200,6 +226,7 @@ pub fn apply_history_query(
 
     QueriedHistory {
         entries,
+        next_cursor,
         facets,
         match_count,
         offset: range.start,
@@ -239,8 +266,35 @@ fn track_snapshot_match(entry: &BaseEntry, query: &HistoryQuery) -> bool {
 /// enabled event-type set. Facets intentionally use their separate predicate.
 fn passes_page_filter(entry: &BaseEntry, query: &HistoryQuery, clauses: &[QueryClause]) -> bool {
     track_snapshot_match(entry, query)
+        && revision_dims_match(entry, query)
         && matches_query(&entry.record, clauses)
         && type_set_match(entry, query.types.as_ref())
+}
+
+/// The exact typed revision dimensions shared by page filtering and facets.
+fn revision_dims_match(entry: &BaseEntry, query: &HistoryQuery) -> bool {
+    let revision_id = entry.entry.subject.as_ref().map(review_target_revision_id);
+    if let Some(expected) = query.revision.as_ref()
+        && revision_id != Some(expected)
+    {
+        return false;
+    }
+    match &query.revisions {
+        None => true,
+        Some(revisions) => revision_id.is_some_and(|revision_id| revisions.contains(revision_id)),
+    }
+}
+
+fn review_target_revision_id(target: &ReviewTargetRef) -> &RevisionId {
+    match target {
+        ReviewTargetRef::Revision { revision_id }
+        | ReviewTargetRef::File { revision_id, .. }
+        | ReviewTargetRef::Range { revision_id, .. }
+        | ReviewTargetRef::Observation { revision_id, .. }
+        | ReviewTargetRef::InputRequest { revision_id, .. }
+        | ReviewTargetRef::Assessment { revision_id, .. }
+        | ReviewTargetRef::Event { revision_id, .. } => revision_id,
+    }
 }
 
 /// Count filtered entries strictly newer than `since` in the ascending
@@ -286,10 +340,17 @@ fn page_end(start: usize, limit: Option<usize>, len: usize) -> usize {
 }
 
 /// Resolve the window over the filtered + display-ordered set. Precedence
-/// `at` › `offset` (a bare `limit` is the first page). Returns the index range
-/// and, for an `at` request, the located index (`match_index`).
+/// `after` › `at` › `offset` (a bare `limit` is the first page). Returns the
+/// index range and, for an `at` request, the located index (`match_index`).
 fn resolve_window(filtered: &[&BaseEntry], page: &HistoryPage) -> (Range<usize>, Option<usize>) {
     let len = filtered.len();
+    if let Some(after) = &page.after {
+        let start = filtered.partition_point(|entry| {
+            cmp_key(&entry.entry.occurred_at, entry.entry.event_id.as_str())
+                <= cmp_key(&after.occurred_at, after.event_id.as_str())
+        });
+        return (start..page_end(start, page.limit, len), None);
+    }
     if let Some(at) = &page.at {
         let Some(index) = filtered
             .iter()
@@ -508,6 +569,7 @@ mod tests {
     fn page(limit: Option<usize>) -> HistoryPage {
         HistoryPage {
             limit,
+            after: None,
             offset: None,
             at: None,
         }
@@ -516,8 +578,16 @@ mod tests {
     fn offset_page(limit: usize, offset: usize) -> HistoryPage {
         HistoryPage {
             limit: Some(limit),
+            after: None,
             offset: Some(offset),
             at: None,
+        }
+    }
+
+    fn cursor_for(entry: &ReviewHistoryEntry) -> HistoryCursor {
+        HistoryCursor {
+            occurred_at: entry.occurred_at.clone(),
+            event_id: entry.event_id.clone(),
         }
     }
 
@@ -603,6 +673,178 @@ mod tests {
             event_id: EventId::new("evt:sha256:absent"),
         };
 
+        assert_eq!(count_new_since(&base, &HistoryQuery::default(), &since), 2);
+    }
+
+    #[test]
+    fn revision_dimension_is_exact_typed_identity() {
+        let base = base_from(vec![
+            (
+                entry(
+                    "2026-05-13T10:00:01Z",
+                    "evt:sha256:01",
+                    EventType::ReviewObservationRecorded,
+                    "first revision",
+                    "agent:codex",
+                    "rev:sha256:one",
+                ),
+                "obj:sha256:one",
+            ),
+            (
+                entry(
+                    "2026-05-13T10:00:02Z",
+                    "evt:sha256:02",
+                    EventType::ReviewObservationRecorded,
+                    "second revision",
+                    "agent:codex",
+                    "rev:sha256:two",
+                ),
+                "obj:sha256:two",
+            ),
+        ]);
+        let query = HistoryQuery {
+            revision: Some(RevisionId::new("rev:sha256:two")),
+            ..Default::default()
+        };
+
+        let out = apply_history_query(&base, &query, &HistoryPage::default());
+
+        assert_eq!(out.match_count, 1);
+        assert_eq!(
+            out.entries[0].subject,
+            Some(ReviewTargetRef::Revision {
+                revision_id: RevisionId::new("rev:sha256:two"),
+            })
+        );
+    }
+
+    #[test]
+    fn revisions_set_is_membership_and_empty_means_match_nothing() {
+        let base = base_of(3);
+        let empty = HistoryQuery {
+            revisions: Some(BTreeSet::new()),
+            ..Default::default()
+        };
+        assert_eq!(
+            apply_history_query(&base, &empty, &HistoryPage::default()).match_count,
+            0
+        );
+
+        let matching = HistoryQuery {
+            revisions: Some([RevisionId::new("rev:sha256:one")].into_iter().collect()),
+            ..Default::default()
+        };
+        assert_eq!(
+            apply_history_query(&base, &matching, &HistoryPage::default()).match_count,
+            3
+        );
+        assert_eq!(
+            apply_history_query(&base, &HistoryQuery::default(), &HistoryPage::default())
+                .match_count,
+            3
+        );
+    }
+
+    #[test]
+    fn facets_honor_revision_dimensions_and_distinct_values_stay_independent() {
+        let base = base_from(vec![
+            (
+                entry(
+                    "2026-05-13T10:00:01Z",
+                    "evt:sha256:01",
+                    EventType::ReviewObservationRecorded,
+                    "first observation",
+                    "agent:codex",
+                    "rev:sha256:one",
+                ),
+                "obj:sha256:one",
+            ),
+            (
+                entry(
+                    "2026-05-13T10:00:02Z",
+                    "evt:sha256:02",
+                    EventType::ReviewObservationRecorded,
+                    "second observation",
+                    "agent:other",
+                    "rev:sha256:two",
+                ),
+                "obj:sha256:two",
+            ),
+            (
+                entry(
+                    "2026-05-13T10:00:03Z",
+                    "evt:sha256:03",
+                    EventType::ReviewAssessmentRecorded,
+                    "second assessment",
+                    "human:kevin",
+                    "rev:sha256:two",
+                ),
+                "obj:sha256:two",
+            ),
+        ]);
+        let baseline =
+            apply_history_query(&base, &HistoryQuery::default(), &HistoryPage::default());
+        let query = HistoryQuery {
+            revisions: Some([RevisionId::new("rev:sha256:two")].into_iter().collect()),
+            ..Default::default()
+        };
+
+        let out = apply_history_query(&base, &query, &HistoryPage::default());
+
+        assert_eq!(out.match_count, 2);
+        assert_eq!(out.facets.get("review_observation_recorded"), Some(&1));
+        assert_eq!(out.facets.get("review_assessment_recorded"), Some(&1));
+        assert_eq!(out.distinct_values, baseline.distinct_values);
+    }
+
+    #[test]
+    fn count_new_since_inherits_revision_dimensions() {
+        let base = base_from(vec![
+            (
+                entry(
+                    "2026-05-13T10:00:01Z",
+                    "evt:sha256:01",
+                    EventType::ReviewObservationRecorded,
+                    "anchor",
+                    "agent:codex",
+                    "rev:sha256:one",
+                ),
+                "obj:sha256:one",
+            ),
+            (
+                entry(
+                    "2026-05-13T10:00:02Z",
+                    "evt:sha256:02",
+                    EventType::ReviewObservationRecorded,
+                    "matching newer",
+                    "agent:codex",
+                    "rev:sha256:two",
+                ),
+                "obj:sha256:two",
+            ),
+            (
+                entry(
+                    "2026-05-13T10:00:03Z",
+                    "evt:sha256:03",
+                    EventType::ReviewAssessmentRecorded,
+                    "non-matching newer",
+                    "human:kevin",
+                    "rev:sha256:one",
+                ),
+                "obj:sha256:one",
+            ),
+        ]);
+        let anchor = &base.entries[0].entry;
+        let since = HistoryCursor {
+            occurred_at: anchor.occurred_at.clone(),
+            event_id: anchor.event_id.clone(),
+        };
+        let query = HistoryQuery {
+            revisions: Some([RevisionId::new("rev:sha256:two")].into_iter().collect()),
+            ..Default::default()
+        };
+
+        assert_eq!(count_new_since(&base, &query, &since), 1);
         assert_eq!(count_new_since(&base, &HistoryQuery::default(), &since), 2);
     }
 
@@ -802,6 +1044,128 @@ mod tests {
     }
 
     #[test]
+    fn no_window_takes_all_without_a_cursor() {
+        let base = base_of(5);
+
+        let out = apply_history_query(&base, &HistoryQuery::default(), &HistoryPage::default());
+
+        assert_eq!(out.entries.len(), 5);
+        assert!(out.next_cursor.is_none());
+    }
+
+    #[test]
+    fn limit_takes_prefix_and_emits_next_cursor() {
+        let base = base_of(5);
+
+        let out = apply_history_query(&base, &HistoryQuery::default(), &page(Some(2)));
+
+        assert_eq!(out.entries.len(), 2);
+        assert_eq!(out.next_cursor, Some(cursor_for(&base.entries[1].entry)));
+    }
+
+    #[test]
+    fn after_skips_through_and_past_the_cursor_key() {
+        let base = base_of(5);
+        let page = HistoryPage {
+            limit: Some(2),
+            after: Some(cursor_for(&base.entries[1].entry)),
+            ..Default::default()
+        };
+
+        let out = apply_history_query(&base, &HistoryQuery::default(), &page);
+
+        assert_eq!(out.offset, 2);
+        assert_eq!(out.entries.len(), 2);
+        assert_eq!(out.entries[0].event_id, base.entries[2].entry.event_id);
+        assert_eq!(out.next_cursor, Some(cursor_for(&base.entries[3].entry)));
+    }
+
+    #[test]
+    fn after_takes_precedence_over_at_and_offset() {
+        let base = base_of(5);
+        let page = HistoryPage {
+            limit: Some(1),
+            after: Some(cursor_for(&base.entries[1].entry)),
+            offset: Some(4),
+            at: Some(base.entries[4].entry.event_id.clone()),
+        };
+
+        let out = apply_history_query(&base, &HistoryQuery::default(), &page);
+
+        assert_eq!(out.offset, 2);
+        assert_eq!(out.match_index, None);
+        assert_eq!(out.entries[0].event_id, base.entries[2].entry.event_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "history cursor windowing requires ascending order")]
+    fn after_under_desc_is_a_stated_precondition() {
+        let base = base_of(2);
+        let query = HistoryQuery {
+            order: HistoryOrder::Desc,
+            ..Default::default()
+        };
+        let page = HistoryPage {
+            after: Some(cursor_for(&base.entries[0].entry)),
+            ..Default::default()
+        };
+
+        let _ = apply_history_query(&base, &query, &page);
+    }
+
+    #[test]
+    fn last_page_emits_no_next_cursor() {
+        let base = base_of(3);
+
+        let out = apply_history_query(&base, &HistoryQuery::default(), &page(Some(10)));
+
+        assert_eq!(out.entries.len(), 3);
+        assert!(out.next_cursor.is_none());
+    }
+
+    #[test]
+    fn cursor_past_end_is_empty() {
+        let base = base_of(2);
+        let page = HistoryPage {
+            limit: Some(5),
+            after: Some(cursor_for(&base.entries[1].entry)),
+            ..Default::default()
+        };
+
+        let out = apply_history_query(&base, &HistoryQuery::default(), &page);
+
+        assert_eq!(out.offset, 2);
+        assert!(out.entries.is_empty());
+        assert!(out.next_cursor.is_none());
+    }
+
+    #[test]
+    fn limit_zero_is_an_empty_window() {
+        let base = base_of(3);
+
+        let out = apply_history_query(&base, &HistoryQuery::default(), &page(Some(0)));
+
+        assert!(out.entries.is_empty());
+        assert!(out.next_cursor.is_none());
+    }
+
+    #[test]
+    fn huge_limit_after_cursor_does_not_overflow() {
+        let base = base_of(3);
+        let page = HistoryPage {
+            limit: Some(usize::MAX),
+            after: Some(cursor_for(&base.entries[1].entry)),
+            ..Default::default()
+        };
+
+        let out = apply_history_query(&base, &HistoryQuery::default(), &page);
+
+        assert_eq!(out.entries.len(), 1);
+        assert_eq!(out.entries[0].event_id, base.entries[2].entry.event_id);
+        assert!(out.next_cursor.is_none());
+    }
+
+    #[test]
     fn at_locates_the_page_containing_an_event_and_sets_match_index() {
         let base = base_of(10);
         let target = base.entries[7].entry.event_id.clone();
@@ -810,6 +1174,7 @@ mod tests {
             &HistoryQuery::default(),
             &HistoryPage {
                 limit: Some(3),
+                after: None,
                 offset: None,
                 at: Some(target.clone()),
             },
@@ -832,6 +1197,7 @@ mod tests {
             &q,
             &HistoryPage {
                 limit: Some(5),
+                after: None,
                 offset: None,
                 at: Some(missing),
             },
@@ -848,6 +1214,7 @@ mod tests {
             &HistoryQuery::default(),
             &HistoryPage {
                 limit: Some(0),
+                after: None,
                 offset: None,
                 at: Some(target),
             },

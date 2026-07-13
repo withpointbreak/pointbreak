@@ -587,6 +587,106 @@ fn review_history_rejects_malformed_cursor() {
 }
 
 #[test]
+fn tail_prints_the_newest_n_oldest_first() {
+    let repo = modified_repo();
+    let path = repo.path().to_str().unwrap();
+    shore(["capture", "--repo", path]);
+    add_observation(&repo, "agent:codex", "first");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    add_observation(&repo, "agent:codex", "second");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    add_observation(&repo, "agent:codex", "third");
+
+    let output = shore([
+        "history",
+        "--repo",
+        path,
+        "--filter",
+        "type:observation",
+        "--tail",
+        "2",
+    ]);
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document = parse_json(&output.stdout);
+    let entries = document["entries"].as_array().unwrap();
+    let titles: Vec<&str> = entries
+        .iter()
+        .map(|entry| entry["summary"]["title"].as_str().unwrap())
+        .collect();
+
+    assert_eq!(titles, ["second", "third"]);
+    assert!(occurred_instant(&entries[0]) <= occurred_instant(&entries[1]));
+    assert!(document["nextCursor"].is_null());
+}
+
+#[test]
+fn tail_conflicts_with_limit_and_cursor() {
+    let repo = modified_repo();
+    let path = repo.path().to_str().unwrap();
+
+    for conflicting in [["--limit", "1"], ["--cursor", "opaque"]] {
+        let output = shore([
+            "history",
+            "--repo",
+            path,
+            "--tail",
+            "1",
+            conflicting[0],
+            conflicting[1],
+        ]);
+
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("--tail"), "stderr names --tail: {stderr}");
+        assert!(
+            stderr.contains(conflicting[0]),
+            "stderr names {}: {stderr}",
+            conflicting[0]
+        );
+    }
+}
+
+#[test]
+fn tail_composes_with_filter() {
+    let repo = modified_repo();
+    let path = repo.path().to_str().unwrap();
+    shore(["capture", "--repo", path]);
+    add_observation(&repo, "agent:codex", "oldest observation");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    add_validation_check(&repo);
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    add_observation(&repo, "agent:codex", "middle observation");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    add_observation(&repo, "agent:codex", "newest observation");
+
+    let document = parse_json(
+        &shore([
+            "history",
+            "--repo",
+            path,
+            "--filter",
+            "type:observation",
+            "--tail",
+            "2",
+        ])
+        .stdout,
+    );
+
+    let entries = document["entries"].as_array().unwrap();
+    let titles: Vec<&str> = entries
+        .iter()
+        .map(|entry| entry["summary"]["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, ["middle observation", "newest observation"]);
+    assert!(occurred_instant(&entries[0]) <= occurred_instant(&entries[1]));
+    assert!(document["nextCursor"].is_null());
+}
+
+#[test]
 fn history_filter_narrows_by_type() {
     let repo = modified_repo();
     let path = repo.path().to_str().unwrap();
@@ -861,6 +961,14 @@ fn history_filter_body_visibility_follows_include_body_flag() {
 
 fn parse_json(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes).expect("parse CLI JSON")
+}
+
+fn occurred_instant(entry: &Value) -> i64 {
+    let raw = entry["occurredAt"]
+        .as_str()
+        .expect("occurredAt is a string");
+    pointbreak::session::parse_event_instant(raw)
+        .unwrap_or_else(|| panic!("occurredAt is not a legal instant: {raw}"))
 }
 
 fn modified_repo() -> GitRepo {

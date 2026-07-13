@@ -69,58 +69,17 @@ pub(super) fn cmp_key<'a>(
     (instant, event_id)
 }
 
-/// A forward window over the filtered + sorted history stream: take at most
-/// `limit` entries starting strictly after `after`. `None`/`None` (the default)
-/// is the full unbounded result.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct HistoryWindow {
-    pub limit: Option<usize>,
-    pub after: Option<HistoryCursor>,
-}
-
-/// The result of applying a [`HistoryWindow`]: the index range to hydrate and the
-/// continuation token for the next page (if any entries remain after this one).
-pub struct WindowSlice {
-    pub range: std::ops::Range<usize>,
-    pub next_cursor: Option<String>,
-}
-
-impl HistoryWindow {
-    /// Apply the window to `keys`, the filtered set already sorted ascending by
-    /// `(occurred_at, event_id)`. Pure: no I/O, no body hydration — the caller
-    /// hydrates only the returned `range`.
-    pub fn apply(&self, keys: &[HistoryCursor]) -> WindowSlice {
-        // `start` is the first index strictly after `after` (0 when unset).
-        let start = match &self.after {
-            None => 0,
-            Some(after) => keys.partition_point(|key| {
-                cmp_key(&key.occurred_at, key.event_id.as_str())
-                    <= cmp_key(&after.occurred_at, after.event_id.as_str())
-            }),
-        };
-        let end = match self.limit {
-            None => keys.len(),
-            // `limit` is an attacker-controllable public query param, so a huge
-            // value after a nonzero `start` must saturate rather than overflow.
-            Some(limit) => start.saturating_add(limit).min(keys.len()),
-        };
-        let range = start..end;
-        let next_cursor = next_cursor_for(keys, &range);
-        WindowSlice { range, next_cursor }
-    }
-}
-
 /// The forward continuation token for a windowed `range` over display-ordered
 /// `keys`: emit only when at least one entry was taken AND at least one remains
 /// after it (a full/last page, an empty window, and a cursor past the end all
 /// yield `None`). `keys[range.end - 1]` is the display-ordered last entry, so the
-/// token continues in the requested order (ascending or descending). This is
-/// INV-1's single source for both the CLI window and the inspector query path.
+/// token continues in ascending display order. Descending pages do not expose
+/// continuation cursors.
 pub(super) fn next_cursor_for(
     keys: &[HistoryCursor],
     range: &std::ops::Range<usize>,
-) -> Option<String> {
-    (range.end > range.start && range.end < keys.len()).then(|| keys[range.end - 1].encode())
+) -> Option<HistoryCursor> {
+    (range.end > range.start && range.end < keys.len()).then(|| keys[range.end - 1].clone())
 }
 
 #[cfg(test)]
@@ -151,98 +110,5 @@ mod tests {
     fn cursor_decode_rejects_malformed() {
         assert!(HistoryCursor::decode("not-base64!!").is_err());
         assert!(HistoryCursor::decode("").is_err());
-    }
-
-    fn keys(n: usize) -> Vec<HistoryCursor> {
-        (0..n)
-            .map(|i| HistoryCursor {
-                occurred_at: format!("unix-ms:{i}"),
-                event_id: EventId::new(format!("evt:sha256:{i}")),
-            })
-            .collect()
-    }
-
-    #[test]
-    fn no_window_takes_all_no_cursor() {
-        let k = keys(5);
-        let window = HistoryWindow {
-            limit: None,
-            after: None,
-        };
-        let slice = window.apply(&k);
-        assert_eq!(slice.range, 0..5);
-        assert!(slice.next_cursor.is_none());
-    }
-
-    #[test]
-    fn limit_takes_prefix_and_emits_next_cursor() {
-        let k = keys(5);
-        let window = HistoryWindow {
-            limit: Some(2),
-            after: None,
-        };
-        let slice = window.apply(&k);
-        assert_eq!(slice.range, 0..2);
-        assert_eq!(slice.next_cursor, Some(k[1].encode()));
-    }
-
-    #[test]
-    fn cursor_skips_through_and_past_it() {
-        let k = keys(5);
-        let window = HistoryWindow {
-            limit: Some(2),
-            after: Some(k[1].clone()),
-        };
-        let slice = window.apply(&k);
-        assert_eq!(slice.range, 2..4);
-        assert_eq!(slice.next_cursor, Some(k[3].encode()));
-    }
-
-    #[test]
-    fn last_page_has_no_next_cursor() {
-        let k = keys(3);
-        let window = HistoryWindow {
-            limit: Some(10),
-            after: None,
-        };
-        let slice = window.apply(&k);
-        assert_eq!(slice.range, 0..3);
-        assert!(slice.next_cursor.is_none());
-    }
-
-    #[test]
-    fn cursor_past_end_is_empty() {
-        let k = keys(2);
-        let window = HistoryWindow {
-            limit: Some(5),
-            after: Some(k[1].clone()),
-        };
-        let slice = window.apply(&k);
-        assert_eq!(slice.range, 2..2);
-        assert!(slice.next_cursor.is_none());
-    }
-
-    #[test]
-    fn limit_zero_is_empty_window() {
-        let k = keys(3);
-        let window = HistoryWindow {
-            limit: Some(0),
-            after: None,
-        };
-        let slice = window.apply(&k);
-        assert_eq!(slice.range, 0..0);
-        assert!(slice.next_cursor.is_none());
-    }
-
-    #[test]
-    fn huge_limit_after_cursor_does_not_overflow() {
-        let k = keys(3);
-        let window = HistoryWindow {
-            limit: Some(usize::MAX),
-            after: Some(k[1].clone()),
-        };
-        let slice = window.apply(&k);
-        assert_eq!(slice.range, 2..3);
-        assert!(slice.next_cursor.is_none());
     }
 }

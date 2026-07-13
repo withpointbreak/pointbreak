@@ -1,13 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::cursor::{HistoryCursor, HistoryWindow, cmp_key};
-use super::options::ResolvedHistoryFilters;
+use super::cursor::{HistoryCursor, cmp_key, next_cursor_for};
 use super::query::{DistinctValues, HistoryOrder, QueriedHistory};
-use super::result::ReviewHistoryResult;
 use super::search::{EventRecordExtras, SearchRecord, entry_revision_id, tag_completion_key};
 use super::summary::{ReviewHistoryEntry, ReviewHistorySummary};
 use crate::error::{Result, ShoreError};
-use crate::model::{InputRequestId, ReviewEndpoint, ReviewTargetRef, RevisionId, TargetRef};
+use crate::model::{InputRequestId, ReviewEndpoint, TargetRef};
 use crate::session::body_artifact::load_body_artifact;
 use crate::session::event::{
     EventType, InputRequestRespondedPayload, ReviewAssessmentRecordedPayload,
@@ -33,95 +31,12 @@ use crate::session::{
     verify_event_signature,
 };
 
-pub(super) fn history_from_events(
-    events: &[ShoreEvent],
-    filters: ResolvedHistoryFilters,
-    window: HistoryWindow,
-    backend: Option<&StoreBackend>,
-) -> Result<ReviewHistoryResult> {
-    let state = SessionState::from_events(events)?;
-    let event_set_hash = state
-        .event_set_hash
-        .clone()
-        .expect("SessionState::from_events sets event_set_hash");
-    // Build the co-signature index once per document. It indexes the full event
-    // set (correctness), independent of any window; endorsement readbacks read
-    // it only when a verification policy is set, the removal lens always does.
-    let cosig_index = CosignatureIndex::build(events)?;
-    let readback_index = filters
-        .verification_policy
-        .is_some()
-        .then_some(&cosig_index);
-    let removal = ArtifactRemovalProjection::from_events(events)?;
-    // The lens pairs with a live backend (no backend, no byte reads, no state).
-    let removal_lens = backend.map(|_| {
-        BodyRemovalLens::new(
-            &removal,
-            &filters.trust_set,
-            filters.removal_policy,
-            &cosig_index,
-        )
-    });
-
-    // Filter to the matching event references and sort them by the envelope
-    // (occurred_at, event_id) — the same ordering as before — without hydrating
-    // any bodies yet.
-    let mut matched: Vec<&ShoreEvent> = events
-        .iter()
-        .filter(|event| event_matches_filters(event, &filters))
-        .collect();
-    matched.sort_by(|left, right| {
-        cmp_key(&left.occurred_at, left.event_id.as_str())
-            .cmp(&cmp_key(&right.occurred_at, right.event_id.as_str()))
-    });
-
-    // Window over the cheap envelope keys, then hydrate full entries (bodies
-    // included) only for the windowed slice. This is what cuts body hydration:
-    // out-of-window bodies are never loaded.
-    let keys: Vec<HistoryCursor> = matched
-        .iter()
-        .map(|event| HistoryCursor {
-            occurred_at: event.occurred_at.clone(),
-            event_id: event.event_id.clone(),
-        })
-        .collect();
-    let slice = window.apply(&keys);
-    let entries = matched[slice.range.clone()]
-        .iter()
-        .map(|event| {
-            history_entry_from_event(
-                event,
-                &filters,
-                readback_index,
-                backend,
-                removal_lens.as_ref(),
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    // Body-content diagnostics are rendered-entry scoped: state resolution only
-    // happens for entries that survive the window, so out-of-window removals
-    // yield no diagnostic on this page (read/skip diagnostics keep describing
-    // the full replayed set).
-    let mut diagnostics = state.diagnostics;
-    diagnostics.extend(body_content_diagnostics(
-        entries.iter().flat_map(entry_body_states),
-    ));
-
-    Ok(ReviewHistoryResult {
-        event_set_hash,
-        event_count: events.len(),
-        filters: filters.into(),
-        entries,
-        next_cursor: slice.next_cursor,
-        diagnostics,
-    })
-}
-
 /// The (state, removal-key) pairs a rendered entry contributes to the
 /// body-content diagnostics. Imported notes carry their key in
 /// `removed_body_content_hash` (their payload has no body hash).
-fn entry_body_states(entry: &ReviewHistoryEntry) -> Vec<(BodyContentState, Option<&str>)> {
+pub(super) fn entry_body_states(
+    entry: &ReviewHistoryEntry,
+) -> Vec<(BodyContentState, Option<&str>)> {
     match &entry.summary {
         ReviewHistorySummary::ReviewObservationRecorded {
             body_content_state,
@@ -150,6 +65,18 @@ fn entry_body_states(entry: &ReviewHistoryEntry) -> Vec<(BodyContentState, Optio
         } => vec![(*summary_content_state, summary_content_hash.as_deref())],
         _ => Vec::new(),
     }
+}
+
+/// Entry hydration and reader-relative enrichment for the base builders. Page
+/// filtering belongs exclusively to `apply_history_query`.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct HistoryProjectionOptions {
+    pub(super) include_body: bool,
+    pub(super) verification_policy: Option<EventVerificationPolicy>,
+    pub(super) trust_set: TrustSet,
+    pub(super) removal_policy: crate::session::RemovalPolicy,
+    pub(super) actor_attributes: Option<ActorAttributesMap>,
+    pub(super) delegation_map: Option<DelegationMap>,
 }
 
 /// Caller-supplied advisory verification + reader enrichment for the base build.
@@ -191,13 +118,33 @@ pub struct BaseHistoryProjection {
 
 /// Build the cacheable base from an in-memory event set: filter to the review
 /// domain, sort by the envelope key, hydrate every body, and attach each entry's
-/// `SearchRecord` (with `object` resolved via the revision->object map). Unlike
-/// `history_from_events` it never windows — one base serves all queries for a
-/// store version (task 3.1 filters/windows it purely, in memory).
+/// `SearchRecord` (with `object` resolved via the revision->object map). It never
+/// windows — one base serves every pure query for a store version.
 pub(super) fn history_base_from_events(
     events: &[ShoreEvent],
     config: &BaseProjectionConfig,
     backend: Option<&StoreBackend>,
+) -> Result<BaseHistoryProjection> {
+    history_base_from_events_with_hydration(events, config, backend, true)
+}
+
+/// Compatibility recovery for a no-body read whose hydrated base encountered
+/// unavailable body bytes. Searchable bases stay fully hydrated; this variant
+/// preserves the pre-convergence ability to render envelope metadata from an
+/// event-only transfer.
+pub(super) fn history_base_from_events_without_bodies(
+    events: &[ShoreEvent],
+    config: &BaseProjectionConfig,
+    backend: Option<&StoreBackend>,
+) -> Result<BaseHistoryProjection> {
+    history_base_from_events_with_hydration(events, config, backend, false)
+}
+
+fn history_base_from_events_with_hydration(
+    events: &[ShoreEvent],
+    config: &BaseProjectionConfig,
+    backend: Option<&StoreBackend>,
+    include_body: bool,
 ) -> Result<BaseHistoryProjection> {
     let span = tracing::debug_span!("shore.history.base_from_events", event_count = events.len());
     let _guard = span.enter();
@@ -213,17 +160,17 @@ pub(super) fn history_base_from_events(
         .expect("SessionState::from_events sets event_set_hash");
 
     // The base carries no revision/track/type filter — those are query params
-    // (task 3.1). Bodies are always hydrated (`q` search needs them); advisory
-    // verification + reader enrichment come from the caller's config (the binary
-    // fills it from `discover_*` — the library cannot reach those helpers, INV-8).
-    let filters = ResolvedHistoryFilters {
-        include_body: true,
+    // (task 3.1). Normal/searchable bases hydrate bodies (`q` needs them); the
+    // compatibility recovery deliberately does not. Advisory verification and
+    // reader enrichment come from the caller's config (the binary fills it from
+    // `discover_*` — the library cannot reach those helpers, INV-8).
+    let filters = HistoryProjectionOptions {
+        include_body,
         verification_policy: config.verification_policy,
         trust_set: config.trust_set.clone(),
         actor_attributes: config.actor_attributes.clone(),
         delegation_map: config.delegation_map.clone(),
         removal_policy: config.removal_policy,
-        ..Default::default()
     };
 
     // One co-signature index per build: endorsement readbacks read it only when
@@ -256,7 +203,7 @@ pub(super) fn history_base_from_events(
         let _guard = span.enter();
         let mut matched: Vec<&ShoreEvent> = events
             .iter()
-            .filter(|event| event_matches_filters(event, &filters))
+            .filter(|event| event_is_review_history(event))
             .collect();
         matched.sort_by(|left, right| {
             cmp_key(&left.occurred_at, left.event_id.as_str())
@@ -347,14 +294,13 @@ pub(super) fn history_default_page_from_events(
         .clone()
         .expect("SessionState::from_events sets event_set_hash");
 
-    let filters = ResolvedHistoryFilters {
+    let filters = HistoryProjectionOptions {
         include_body: true,
         verification_policy: config.verification_policy,
         trust_set: config.trust_set.clone(),
         actor_attributes: config.actor_attributes.clone(),
         delegation_map: config.delegation_map.clone(),
         removal_policy: config.removal_policy,
-        ..Default::default()
     };
 
     let cosig_index = {
@@ -385,7 +331,7 @@ pub(super) fn history_default_page_from_events(
         let _guard = span.enter();
         let mut matched: Vec<&ShoreEvent> = events
             .iter()
-            .filter(|event| event_matches_filters(event, &filters))
+            .filter(|event| event_is_review_history(event))
             .collect();
         matched.sort_by(|left, right| {
             cmp_key(&left.occurred_at, left.event_id.as_str())
@@ -455,6 +401,18 @@ pub(super) fn history_default_page_from_events(
     };
     let match_count = matched.len();
     let end = limit.min(matched.len());
+    let next_cursor = if matches!(order, HistoryOrder::Asc) {
+        let keys: Vec<HistoryCursor> = matched
+            .iter()
+            .map(|event| HistoryCursor {
+                occurred_at: event.occurred_at.clone(),
+                event_id: event.event_id.clone(),
+            })
+            .collect();
+        next_cursor_for(&keys, &(0..end))
+    } else {
+        None
+    };
 
     let entries = {
         let span = tracing::debug_span!("shore.history.default_page.hydrate_window");
@@ -483,6 +441,7 @@ pub(super) fn history_default_page_from_events(
 
     Ok(QueriedHistory {
         entries,
+        next_cursor,
         facets,
         match_count,
         offset: 0,
@@ -538,7 +497,7 @@ fn entry_object<'a>(entry: &ReviewHistoryEntry, map: &'a BTreeMap<String, String
 
 pub(super) fn history_entry_from_event(
     event: &ShoreEvent,
-    filters: &ResolvedHistoryFilters,
+    filters: &HistoryProjectionOptions,
     cosig_index: Option<&CosignatureIndex<'_>>,
     backend: Option<&StoreBackend>,
     removal_lens: Option<&BodyRemovalLens<'_>>,
@@ -844,7 +803,7 @@ fn optional_text(
     }
 }
 
-fn event_matches_filters(event: &ShoreEvent, filters: &ResolvedHistoryFilters) -> bool {
+fn event_is_review_history(event: &ShoreEvent) -> bool {
     // Review history is a review-domain content projection by name and contract. Task-domain
     // events have a sibling projection; detached co-signatures are read through the dedicated
     // co-signature-set projection; content-removal facts are session-anchored store maintenance
@@ -870,45 +829,5 @@ fn event_matches_filters(event: &ShoreEvent, filters: &ResolvedHistoryFilters) -
     if matches!(subject, TargetRef::Task(_)) {
         return false;
     }
-    let subject_revision_id = subject_revision_id(&subject);
-    if filters
-        .revision_id
-        .as_ref()
-        .is_some_and(|revision_id| subject_revision_id != Some(revision_id))
-    {
-        return false;
-    }
-    if filters
-        .track_id
-        .as_ref()
-        .is_some_and(|track_id| event.target.track_id.as_ref() != Some(track_id))
-    {
-        return false;
-    }
-    if !filters.event_types.is_empty() && !filters.event_types.contains(&event.event_type) {
-        return false;
-    }
-    if let Some(ref_matched_units) = filters.ref_matched_units.as_ref()
-        && !subject_revision_id.is_some_and(|revision_id| ref_matched_units.contains(revision_id))
-    {
-        return false;
-    }
     true
-}
-
-/// The revision a subject addresses, if any. Every review-domain variant keys on
-/// a `revision_id`; the journal carrier and task subjects address no revision.
-fn subject_revision_id(subject: &TargetRef) -> Option<&RevisionId> {
-    match subject {
-        TargetRef::Review(review) => match review {
-            ReviewTargetRef::Revision { revision_id }
-            | ReviewTargetRef::File { revision_id, .. }
-            | ReviewTargetRef::Range { revision_id, .. }
-            | ReviewTargetRef::Observation { revision_id, .. }
-            | ReviewTargetRef::InputRequest { revision_id, .. }
-            | ReviewTargetRef::Assessment { revision_id, .. }
-            | ReviewTargetRef::Event { revision_id, .. } => Some(revision_id),
-        },
-        TargetRef::Task(_) | TargetRef::Journal => None,
-    }
 }

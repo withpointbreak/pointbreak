@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use serde_json::Value;
 use support::git_repo::GitRepo;
 use support::inspect::capture;
 use support::shore;
@@ -25,15 +26,21 @@ struct Watcher {
 
 impl Watcher {
     fn spawn(repo: &Path, poll_ms: u64) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_shore"))
-            .args([
-                "history",
-                "--repo",
-                repo.to_str().unwrap(),
-                "--watch",
-                "--poll-ms",
-                &poll_ms.to_string(),
-            ])
+        Self::spawn_with_args(repo, poll_ms, &[])
+    }
+
+    fn spawn_with_args(repo: &Path, poll_ms: u64, extra_args: &[&str]) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_shore"));
+        command.args([
+            "history",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--watch",
+            "--poll-ms",
+            &poll_ms.to_string(),
+        ]);
+        let mut child = command
+            .args(extra_args)
             .env_remove("SHORE_LOG")
             .env_remove("RUST_LOG")
             .env_remove("SHORE_FORMAT")
@@ -73,6 +80,19 @@ impl Watcher {
             .lock()
             .map(|guard| guard.lines().filter(|line| !line.trim().is_empty()).count())
             .unwrap_or(0)
+    }
+
+    fn renders(&self) -> Vec<Value> {
+        self.stdout
+            .lock()
+            .map(|guard| {
+                guard
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .map(|line| serde_json::from_str(line).expect("watch render is JSON"))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Poll until at least `target` renders have appeared (or the timeout
@@ -154,4 +174,50 @@ fn watch_reprints_only_when_event_set_hash_changes() {
         2,
         "watch must not reprint again once the change is rendered"
     );
+}
+
+#[test]
+fn watch_tail_renders_the_newest_n_and_appends() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    capture(repo.path());
+    let path = repo.path().to_str().unwrap();
+    add_observation(path, "first");
+    thread::sleep(Duration::from_millis(2));
+    add_observation(path, "second");
+
+    let watcher = Watcher::spawn_with_args(repo.path(), 50, &["--tail", "2"]);
+    assert_eq!(watcher.wait_for_renders(1, Duration::from_secs(10)), 1);
+    assert_eq!(render_titles(&watcher.renders()[0]), ["first", "second"]);
+
+    thread::sleep(Duration::from_millis(2));
+    add_observation(path, "third");
+
+    assert_eq!(watcher.wait_for_renders(2, Duration::from_secs(10)), 2);
+    assert_eq!(render_titles(&watcher.renders()[1]), ["second", "third"]);
+}
+
+fn add_observation(repo: &str, title: &str) {
+    let output = shore([
+        "observation",
+        "add",
+        "--repo",
+        repo,
+        "--track",
+        "agent:codex",
+        "--title",
+        title,
+    ]);
+    assert!(output.status.success());
+}
+
+fn render_titles(render: &Value) -> Vec<&str> {
+    render["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["summary"]["title"].as_str().unwrap())
+        .collect()
 }

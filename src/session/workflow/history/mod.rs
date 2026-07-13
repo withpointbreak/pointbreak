@@ -6,14 +6,15 @@ mod result;
 mod search;
 mod summary;
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
-pub use self::cursor::{HistoryCursor, HistoryWindow};
-use self::options::ResolvedHistoryFilters;
+pub use self::cursor::HistoryCursor;
 pub use self::options::{ReviewHistoryFilters, ReviewHistoryOptions};
 pub use self::projection::{BaseEntry, BaseHistoryProjection, BaseProjectionConfig};
 use self::projection::{
-    history_base_from_events, history_default_page_from_events, history_from_events,
+    entry_body_states, history_base_from_events, history_base_from_events_without_bodies,
+    history_default_page_from_events,
 };
 pub use self::query::{
     DistinctValues, HistoryOrder, HistoryPage, HistoryQuery, QueriedHistory, apply_history_query,
@@ -28,15 +29,22 @@ pub use self::search::{
 };
 pub(crate) use self::search::{enum_wire, tag_index_tokens, wrap_set};
 pub use self::summary::ReviewHistoryEntry;
-use crate::error::Result;
+use self::summary::ReviewHistorySummary;
+use crate::error::{Result, ShoreError};
 use crate::session::EventStore;
 use crate::session::observation::validated_track_id;
+use crate::session::projection::body_content::body_content_diagnostics;
 use crate::session::projection::skipped_to_diagnostics;
+use crate::session::state::ProjectionDiagnostic;
+use crate::session::store::backend::StoreBackend;
 use crate::session::store::resolution::resolve_read_store;
 
+/// Read review events with the caller's strictness policy, build the shared
+/// hydrated base, and adapt one pure `apply_history_query` result for the public
+/// history surface.
 pub fn review_history(options: ReviewHistoryOptions) -> Result<ReviewHistoryResult> {
     let read_store = resolve_read_store(&options.repo)?;
-    let track_id = options
+    options
         .track
         .as_deref()
         .map(validated_track_id)
@@ -49,9 +57,37 @@ pub fn review_history(options: ReviewHistoryOptions) -> Result<ReviewHistoryResu
         (store.list_events()?, Vec::new())
     };
 
+    apply_review_history_options(
+        options,
+        &events,
+        Some(read_store.backend()),
+        skip_diagnostics,
+    )
+}
+
+/// Adapt one already-read event set through the shared query engine. Store-read
+/// strictness stays in [`review_history`]; this core owns projection config,
+/// pre-resolution, query mapping, visibility, and result diagnostics.
+fn apply_review_history_options(
+    options: ReviewHistoryOptions,
+    events: &[crate::session::event::ShoreEvent],
+    backend: Option<&StoreBackend>,
+    skip_diagnostics: Vec<ProjectionDiagnostic>,
+) -> Result<ReviewHistoryResult> {
+    if matches!(options.order, HistoryOrder::Desc) && options.cursor.is_some() {
+        return Err(ShoreError::Message(
+            "descending history does not support continuation cursors".to_owned(),
+        ));
+    }
+
+    let track_id = options
+        .track
+        .as_deref()
+        .map(validated_track_id)
+        .transpose()?;
     let ref_matched_units = match &options.ref_filter {
         Some((name, mode)) => {
-            let projection = crate::session::RevisionCommitRangeProjection::from_events(&events)?;
+            let projection = crate::session::RevisionCommitRangeProjection::from_events(events)?;
             Some(super::revision_list::revisions_matching_ref(
                 &projection,
                 name,
@@ -62,22 +98,103 @@ pub fn review_history(options: ReviewHistoryOptions) -> Result<ReviewHistoryResu
         None => None,
     };
 
-    let window = options.window();
-    let filters = ResolvedHistoryFilters {
-        revision_id: options.revision_id,
-        track_id,
-        event_types: options.event_types,
-        ref_matched_units,
-        include_body: options.include_body,
+    let can_recover_without_bodies = !options.include_body
+        && options
+            .filter
+            .as_deref()
+            .is_none_or(|filter| filter.trim().is_empty());
+    let config = BaseProjectionConfig {
         verification_policy: options.verification_policy,
         trust_set: options.trust_set,
         removal_policy: options.removal_policy,
         actor_attributes: options.actor_attributes,
         delegation_map: options.delegation_map,
     };
-    let mut result = history_from_events(&events, filters, window, Some(read_store.backend()))?;
-    result.diagnostics.extend(skip_diagnostics);
-    Ok(result)
+    let base = match history_base_from_events(events, &config, backend) {
+        Err(_) if can_recover_without_bodies => {
+            history_base_from_events_without_bodies(events, &config, backend)?
+        }
+        result => result?,
+    };
+
+    let query = HistoryQuery {
+        q: options.filter.unwrap_or_default(),
+        track: track_id
+            .as_ref()
+            .map(|track_id| track_id.as_str().to_owned()),
+        snapshot: None,
+        revision: options.revision_id.clone(),
+        revisions: ref_matched_units,
+        types: (!options.event_types.is_empty()).then(|| {
+            options
+                .event_types
+                .iter()
+                .map(|event_type| event_type.as_str().to_owned())
+                .collect::<BTreeSet<_>>()
+        }),
+        order: options.order,
+    };
+    let page = HistoryPage {
+        limit: options.limit,
+        after: options.cursor,
+        offset: None,
+        at: None,
+    };
+    let queried = apply_history_query(&base, &query, &page);
+    if let Some(fatal) = queried.query_notices.iter().find(|diagnostic| {
+        matches!(
+            diagnostic.code,
+            QueryDiagnosticCode::UnsupportedQualifier | QueryDiagnosticCode::UnsupportedValue
+        )
+    }) {
+        return Err(ShoreError::Message(fatal.message.clone()));
+    }
+
+    let filters = ReviewHistoryFilters {
+        revision_id: options.revision_id,
+        track_id,
+        event_types: options.event_types,
+        include_body: options.include_body,
+    };
+    let mut entries = queried.entries;
+    let mut diagnostics = queried.diagnostics;
+    diagnostics.retain(|diagnostic| {
+        !matches!(
+            diagnostic.code.as_str(),
+            "body_content_suppressed_present" | "body_content_physically_removed"
+        )
+    });
+    diagnostics.extend(body_content_diagnostics(
+        entries.iter().flat_map(entry_body_states),
+    ));
+    diagnostics.extend(skip_diagnostics);
+
+    if !options.include_body {
+        for entry in &mut entries {
+            redact_hydrated_bodies(entry);
+        }
+    }
+
+    Ok(ReviewHistoryResult {
+        event_set_hash: queried.event_set_hash,
+        event_count: queried.event_count,
+        filters,
+        entries,
+        next_cursor: queried.next_cursor.map(|cursor| cursor.encode()),
+        query_notices: queried.query_notices,
+        diagnostics,
+    })
+}
+
+fn redact_hydrated_bodies(entry: &mut ReviewHistoryEntry) {
+    match &mut entry.summary {
+        ReviewHistorySummary::ReviewObservationRecorded { body, .. }
+        | ReviewHistorySummary::InputRequestOpened { body, .. } => *body = None,
+        ReviewHistorySummary::ReviewAssessmentRecorded { summary, .. }
+        | ReviewHistorySummary::ValidationCheckRecorded { summary, .. } => *summary = None,
+        ReviewHistorySummary::InputRequestResponded { reason, .. } => *reason = None,
+        _ => {}
+    }
 }
 
 /// Read the store and build the full body-hydrated base projection the inspector
@@ -156,7 +273,7 @@ pub fn default_history_page_projection(
 #[cfg(test)]
 mod tests {
     use super::projection::{
-        history_base_from_events, history_entry_from_event, history_from_events,
+        HistoryProjectionOptions, history_base_from_events, history_entry_from_event,
     };
     use super::summary::ReviewHistorySummary;
     use super::*;
@@ -175,6 +292,66 @@ mod tests {
     };
     use crate::session::state::DUPLICATE_SEMANTIC_OBSERVATION_EVENT_CODE;
     use crate::session::store::backend::StoreBackend;
+    use crate::session::{
+        ActorAttributesMap, DelegationMap, EventVerificationPolicy, RemovalPolicy, TrustSet,
+    };
+
+    #[derive(Clone, Debug, Default)]
+    struct TestHistoryOptions {
+        revision_id: Option<RevisionId>,
+        track_id: Option<TrackId>,
+        event_types: Vec<EventType>,
+        include_body: bool,
+        verification_policy: Option<EventVerificationPolicy>,
+        trust_set: TrustSet,
+        removal_policy: RemovalPolicy,
+        actor_attributes: Option<ActorAttributesMap>,
+        delegation_map: Option<DelegationMap>,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct TestHistoryPage {
+        limit: Option<usize>,
+        after: Option<HistoryCursor>,
+    }
+
+    /// Compatibility-shaped test input routed through the real converged
+    /// adapter. This keeps the long-standing projection cases focused on their
+    /// original assertions without preserving a second production windower.
+    fn adapt_test_history(
+        events: &[ShoreEvent],
+        filters: TestHistoryOptions,
+        window: TestHistoryPage,
+        backend: Option<&StoreBackend>,
+    ) -> Result<ReviewHistoryResult> {
+        let mut options = ReviewHistoryOptions::new("/repo")
+            .with_include_body(filters.include_body)
+            .with_trust_set(filters.trust_set)
+            .with_removal_policy(filters.removal_policy)
+            .with_actor_attributes(filters.actor_attributes);
+        if let Some(revision_id) = filters.revision_id {
+            options = options.with_revision_id(revision_id);
+        }
+        if let Some(track_id) = filters.track_id {
+            options = options.with_track(track_id.as_str());
+        }
+        for event_type in filters.event_types {
+            options = options.with_event_type(event_type);
+        }
+        if let Some(policy) = filters.verification_policy {
+            options = options.with_verification_policy(policy);
+        }
+        if let Some(delegation_map) = filters.delegation_map {
+            options = options.with_delegation_map(delegation_map);
+        }
+        if let Some(limit) = window.limit {
+            options = options.with_limit(limit);
+        }
+        if let Some(cursor) = window.after {
+            options = options.with_cursor(cursor);
+        }
+        apply_review_history_options(options, events, backend, Vec::new())
+    }
 
     /// A content-addressed note path + normalized hash + a Local backend, with
     /// the blob optionally written (the removed-body fixtures).
@@ -254,13 +431,13 @@ mod tests {
             artifact_removed_event(&hash),
         ];
 
-        let result = history_from_events(
+        let result = adapt_test_history(
             &events,
-            ResolvedHistoryFilters {
+            TestHistoryOptions {
                 include_body: true,
-                ..ResolvedHistoryFilters::default()
+                ..TestHistoryOptions::default()
             },
-            HistoryWindow::default(),
+            TestHistoryPage::default(),
             Some(&backend),
         )
         .expect("swept observation body must not hard-error the history read");
@@ -322,13 +499,13 @@ mod tests {
         );
         let events = vec![responded, artifact_removed_event(&hash)];
 
-        let result = history_from_events(
+        let result = adapt_test_history(
             &events,
-            ResolvedHistoryFilters {
+            TestHistoryOptions {
                 include_body: true,
-                ..ResolvedHistoryFilters::default()
+                ..TestHistoryOptions::default()
             },
-            HistoryWindow::default(),
+            TestHistoryPage::default(),
             Some(&backend),
         )
         .expect("swept response reason must not hard-error the history read");
@@ -376,13 +553,13 @@ mod tests {
             artifact_removed_event(&hash),
         ];
 
-        let result = history_from_events(
+        let result = adapt_test_history(
             &events,
-            ResolvedHistoryFilters {
+            TestHistoryOptions {
                 include_body: true,
-                ..ResolvedHistoryFilters::default()
+                ..TestHistoryOptions::default()
             },
-            HistoryWindow {
+            TestHistoryPage {
                 limit: Some(1),
                 after: None,
             },
@@ -442,10 +619,10 @@ mod tests {
 
     #[test]
     fn review_history_returns_empty_freshness_metadata_without_events() {
-        let result = history_from_events(
+        let result = adapt_test_history(
             &[],
-            ResolvedHistoryFilters::default(),
-            HistoryWindow::default(),
+            TestHistoryOptions::default(),
+            TestHistoryPage::default(),
             None,
         )
         .unwrap();
@@ -462,13 +639,13 @@ mod tests {
         let first = review_initialized_event("one");
         let second = review_initialized_event("two");
 
-        let result = history_from_events(
+        let result = adapt_test_history(
             &[first, second],
-            ResolvedHistoryFilters {
+            TestHistoryOptions {
                 event_types: vec![EventType::ReviewInitialized],
-                ..ResolvedHistoryFilters::default()
+                ..TestHistoryOptions::default()
             },
-            HistoryWindow::default(),
+            TestHistoryPage::default(),
             None,
         )
         .unwrap();
@@ -512,6 +689,215 @@ mod tests {
                 .iter()
                 .any(|d| d.code == "unsupported_event_type")
         );
+    }
+
+    #[test]
+    fn no_body_history_tolerates_a_missing_external_body() {
+        let (_dir, backend, path, hash) = note_blob_fixture(false);
+        let event = observation_event_with_artifact(&path, &hash);
+
+        let result = apply_review_history_options(
+            ReviewHistoryOptions::new("/repo"),
+            std::slice::from_ref(&event),
+            Some(&backend),
+            Vec::new(),
+        )
+        .unwrap();
+
+        assert_eq!(result.entries.len(), 1);
+        let ReviewHistorySummary::ReviewObservationRecorded {
+            body,
+            body_content_hash,
+            ..
+        } = &result.entries[0].summary
+        else {
+            panic!("expected an observation summary");
+        };
+        assert!(body.is_none());
+        assert_eq!(body_content_hash.as_deref(), Some(hash.as_str()));
+
+        assert!(
+            apply_review_history_options(
+                ReviewHistoryOptions::new("/repo").with_include_body(true),
+                &[event],
+                Some(&backend),
+                Vec::new(),
+            )
+            .is_err(),
+            "requesting body content keeps missing-artifact errors visible"
+        );
+    }
+
+    #[test]
+    fn desc_selection_takes_the_newest_at_offset_zero() {
+        let events = windowing_events(5);
+        let result = apply_review_history_options(
+            ReviewHistoryOptions::new("/repo")
+                .with_order(HistoryOrder::Desc)
+                .with_limit(2),
+            &events,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+
+        assert_eq!(result.entries.len(), 2);
+        assert!(result.entries[0].occurred_at > result.entries[1].occurred_at);
+        assert_eq!(result.entries[0].event_id, events[4].event_id);
+        assert_eq!(result.entries[1].event_id, events[3].event_id);
+        assert!(result.next_cursor.is_none());
+    }
+
+    #[test]
+    fn desc_with_a_continuation_cursor_is_rejected() {
+        let cursor = HistoryCursor {
+            occurred_at: "2026-05-13T10:00:01Z".to_owned(),
+            event_id: EventId::new("evt:sha256:cursor"),
+        };
+
+        let error = apply_review_history_options(
+            ReviewHistoryOptions::new("/repo")
+                .with_order(HistoryOrder::Desc)
+                .with_cursor(cursor),
+            &windowing_events(2),
+            None,
+            Vec::new(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("descending history"));
+    }
+
+    #[test]
+    fn filter_option_runs_the_grammar_with_fatal_diagnostics_as_errors() {
+        let events = vec![
+            observation_event("rev:sha256:one", "agent:codex", "observation"),
+            assessment_event(),
+            validation_check_recorded_event(),
+        ];
+
+        let filtered = apply_review_history_options(
+            ReviewHistoryOptions::new("/repo").with_filter("type:observation"),
+            &events,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(filtered.entries.len(), 1);
+        assert!(matches!(
+            filtered.entries[0].summary,
+            ReviewHistorySummary::ReviewObservationRecorded { .. }
+        ));
+
+        let fatal = apply_review_history_options(
+            ReviewHistoryOptions::new("/repo").with_filter("attention:open"),
+            &events,
+            None,
+            Vec::new(),
+        )
+        .unwrap_err();
+        assert!(fatal.to_string().contains("not a filter"));
+
+        let deprecated = apply_review_history_options(
+            ReviewHistoryOptions::new("/repo").with_filter("status:passed"),
+            &events,
+            None,
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(deprecated.entries.len(), 1);
+        assert_eq!(deprecated.query_notices.len(), 1);
+        assert_eq!(
+            deprecated.query_notices[0].code,
+            QueryDiagnosticCode::DeprecatedQualifier
+        );
+    }
+
+    #[test]
+    fn include_body_false_strips_every_hydrated_body_variant() {
+        let cases = [
+            (observation_event_with_body("observation body"), "body"),
+            (assessment_event(), "summary"),
+            (input_request_opened_event(), "body"),
+            (input_request_responded_event(), "reason"),
+            (validation_check_recorded_event(), "summary"),
+        ];
+        for (event, text_field) in cases {
+            let hydrated = history_entry_from_event(
+                &event,
+                &HistoryProjectionOptions {
+                    include_body: true,
+                    ..HistoryProjectionOptions::default()
+                },
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let before = serde_json::to_value(&hydrated.summary).unwrap();
+            assert!(before["kind"].is_string());
+            let body_term = before[text_field].as_str().unwrap();
+
+            let result = apply_review_history_options(
+                ReviewHistoryOptions::new("/repo").with_filter(body_term),
+                &[event],
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(
+                result.entries.len(),
+                1,
+                "body search must match {text_field}"
+            );
+
+            let mut expected = before.as_object().unwrap().clone();
+            expected.remove(text_field);
+            let after = serde_json::to_value(&result.entries[0].summary).unwrap();
+            assert_eq!(after, serde_json::Value::Object(expected));
+        }
+    }
+
+    #[test]
+    fn removal_diagnostics_stay_page_scoped_in_both_directions() {
+        let (_dir, backend, path, hash) = note_blob_fixture(false);
+        let events = vec![
+            review_initialized_event("0"),
+            observation_event_with_artifact(&path, &hash),
+            artifact_removed_event(&hash),
+        ];
+
+        let outside = apply_review_history_options(
+            ReviewHistoryOptions::new("/repo")
+                .with_include_body(true)
+                .with_limit(1),
+            &events,
+            Some(&backend),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(outside.entries.len(), 1);
+        assert!(
+            !outside
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.starts_with("body_content_"))
+        );
+
+        let inside = apply_review_history_options(
+            ReviewHistoryOptions::new("/repo")
+                .with_include_body(true)
+                .with_limit(2),
+            &events,
+            Some(&backend),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(inside.entries.len(), 2);
+        assert!(inside.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "body_content_physically_removed"
+                && diagnostic.message.contains(&hash)
+        }));
     }
 
     #[test]
@@ -562,7 +948,7 @@ mod tests {
         for (event, event_type, summary_kind) in cases {
             let entry = history_entry_from_event(
                 &event,
-                &ResolvedHistoryFilters::default(),
+                &HistoryProjectionOptions::default(),
                 None,
                 None,
                 None,
@@ -583,9 +969,14 @@ mod tests {
         };
         let event = assessment_event_with_target(target.clone());
 
-        let entry =
-            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None, None)
-                .unwrap();
+        let entry = history_entry_from_event(
+            &event,
+            &HistoryProjectionOptions::default(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let json = serde_json::to_value(&entry).unwrap();
 
         match entry.summary {
@@ -606,9 +997,14 @@ mod tests {
     fn history_includes_validation_check_recorded_summary() {
         let event = validation_check_recorded_event();
 
-        let entry =
-            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None, None)
-                .unwrap();
+        let entry = history_entry_from_event(
+            &event,
+            &HistoryProjectionOptions::default(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let json = serde_json::to_value(&entry.summary).unwrap();
 
         assert_eq!(json["kind"], "validation_check_recorded");
@@ -621,9 +1017,14 @@ mod tests {
     fn history_entry_omits_internal_artifact_paths() {
         let event = observation_event_with_artifact_path("artifacts/notes/body.json");
 
-        let entry =
-            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None, None)
-                .unwrap();
+        let entry = history_entry_from_event(
+            &event,
+            &HistoryProjectionOptions::default(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let json = serde_json::to_string(&entry).unwrap();
 
         assert!(!json.contains("bodyArtifactPath"));
@@ -637,10 +1038,10 @@ mod tests {
         let tie_a = event_with_time_and_key("2026-05-13T10:00:01Z", "a");
         let earliest = event_with_time_and_key("unix-ms:0", "earliest");
 
-        let result = history_from_events(
+        let result = adapt_test_history(
             &[late, tie_b, tie_a, earliest],
-            ResolvedHistoryFilters::default(),
-            HistoryWindow::default(),
+            TestHistoryOptions::default(),
+            TestHistoryPage::default(),
             None,
         )
         .unwrap();
@@ -665,9 +1066,14 @@ mod tests {
     fn review_history_entry_subject_round_trips_review_target_ref_after_envelope_widening() {
         let event = observation_event("review-unit:sha256:one", "agent:codex", "Pinned");
 
-        let entry =
-            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None, None)
-                .unwrap();
+        let entry = history_entry_from_event(
+            &event,
+            &HistoryProjectionOptions::default(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(
             entry.subject,
@@ -686,9 +1092,14 @@ mod tests {
         // subject would.
         let event = review_initialized_event("narrow");
 
-        let entry =
-            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None, None)
-                .unwrap();
+        let entry = history_entry_from_event(
+            &event,
+            &HistoryProjectionOptions::default(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         assert!(entry.subject.is_none());
     }
@@ -716,10 +1127,10 @@ mod tests {
             payload: serde_json::Value::Null,
         };
 
-        let result = history_from_events(
+        let result = adapt_test_history(
             &[init, task_event],
-            ResolvedHistoryFilters::default(),
-            HistoryWindow::default(),
+            TestHistoryOptions::default(),
+            TestHistoryPage::default(),
             None,
         )
         .unwrap();
@@ -760,10 +1171,10 @@ mod tests {
         let mut events: Vec<ShoreEvent> = vec![init];
         events.extend(task_events);
 
-        let result = history_from_events(
+        let result = adapt_test_history(
             &events,
-            ResolvedHistoryFilters::default(),
-            HistoryWindow::default(),
+            TestHistoryOptions::default(),
+            TestHistoryPage::default(),
             None,
         )
         .unwrap();
@@ -807,10 +1218,10 @@ mod tests {
         )
         .unwrap();
 
-        let result = history_from_events(
+        let result = adapt_test_history(
             &[init, task_attempt],
-            ResolvedHistoryFilters::default(),
-            HistoryWindow::default(),
+            TestHistoryOptions::default(),
+            TestHistoryPage::default(),
             None,
         )
         .unwrap();
@@ -841,9 +1252,14 @@ mod tests {
             payload: serde_json::Value::Null,
         };
 
-        let error =
-            history_entry_from_event(&event, &ResolvedHistoryFilters::default(), None, None, None)
-                .expect_err("task events must not project to review-history");
+        let error = history_entry_from_event(
+            &event,
+            &HistoryProjectionOptions::default(),
+            None,
+            None,
+            None,
+        )
+        .expect_err("task events must not project to review-history");
         let message = error.to_string();
 
         assert!(
@@ -859,18 +1275,18 @@ mod tests {
         let other_unit = observation_event("review-unit:sha256:two", "agent:codex", "Drop unit");
         let capture = revision_captured_event_for("review-unit:sha256:one");
 
-        let filters = ResolvedHistoryFilters {
+        let filters = TestHistoryOptions {
             revision_id: Some(RevisionId::new("review-unit:sha256:one")),
             track_id: Some(TrackId::new("agent:codex")),
             event_types: vec![EventType::ReviewObservationRecorded],
             include_body: false,
-            ..ResolvedHistoryFilters::default()
+            ..TestHistoryOptions::default()
         };
 
-        let result = history_from_events(
+        let result = adapt_test_history(
             &[keep, other_track, other_unit, capture],
             filters,
-            HistoryWindow::default(),
+            TestHistoryPage::default(),
             None,
         )
         .unwrap();
@@ -917,17 +1333,17 @@ mod tests {
             observation_event("review-unit:sha256:one", "agent:codex", "Human obs");
         human_event.writer.actor_id = ActorId::new("actor:git-email:kevin@swiber.dev");
 
-        let filters = ResolvedHistoryFilters {
+        let filters = TestHistoryOptions {
             delegation_map: Some(claude_code_delegates(
                 "2026-05-01T00:00:00Z",
                 serde_json::Value::Null,
             )),
-            ..ResolvedHistoryFilters::default()
+            ..TestHistoryOptions::default()
         };
-        let result = history_from_events(
+        let result = adapt_test_history(
             &[agent_event, human_event],
             filters,
-            HistoryWindow::default(),
+            TestHistoryPage::default(),
             None,
         )
         .unwrap();
@@ -961,10 +1377,10 @@ mod tests {
 
     #[test]
     fn history_without_map_emits_none_principal_for_agent_writers() {
-        let result = history_from_events(
+        let result = adapt_test_history(
             &[agent_written_observation()],
-            ResolvedHistoryFilters::default(),
-            HistoryWindow::default(),
+            TestHistoryOptions::default(),
+            TestHistoryPage::default(),
             None,
         )
         .unwrap();
@@ -978,17 +1394,17 @@ mod tests {
     #[test]
     fn history_principal_is_occurred_at_scoped() {
         // observation_event's occurredAt is 2026-05-13T10:00:01Z.
-        let closed = ResolvedHistoryFilters {
+        let closed = TestHistoryOptions {
             delegation_map: Some(claude_code_delegates(
                 "2026-01-01T00:00:00Z",
                 serde_json::json!("2026-02-01T00:00:00Z"),
             )),
-            ..ResolvedHistoryFilters::default()
+            ..TestHistoryOptions::default()
         };
-        let closed_result = history_from_events(
+        let closed_result = adapt_test_history(
             &[agent_written_observation()],
             closed,
-            HistoryWindow::default(),
+            TestHistoryPage::default(),
             None,
         )
         .unwrap();
@@ -998,17 +1414,17 @@ mod tests {
             "a window that closed before the event resolves none"
         );
 
-        let covering = ResolvedHistoryFilters {
+        let covering = TestHistoryOptions {
             delegation_map: Some(claude_code_delegates(
                 "2026-05-01T00:00:00Z",
                 serde_json::Value::Null,
             )),
-            ..ResolvedHistoryFilters::default()
+            ..TestHistoryOptions::default()
         };
-        let covering_result = history_from_events(
+        let covering_result = adapt_test_history(
             &[agent_written_observation()],
             covering,
-            HistoryWindow::default(),
+            TestHistoryPage::default(),
             None,
         )
         .unwrap();
@@ -1020,10 +1436,10 @@ mod tests {
     fn history_omits_body_text_by_default() {
         let event = observation_event_with_body("inline body");
 
-        let result = history_from_events(
+        let result = adapt_test_history(
             &[event],
-            ResolvedHistoryFilters::default(),
-            HistoryWindow::default(),
+            TestHistoryOptions::default(),
+            TestHistoryPage::default(),
             None,
         )
         .unwrap();
@@ -1035,9 +1451,9 @@ mod tests {
 
     #[test]
     fn history_include_body_hydrates_inline_body_like_fields() {
-        let filters = ResolvedHistoryFilters {
+        let filters = TestHistoryOptions {
             include_body: true,
-            ..ResolvedHistoryFilters::default()
+            ..TestHistoryOptions::default()
         };
         let events = [
             observation_event_with_body("observation body"),
@@ -1047,7 +1463,8 @@ mod tests {
             review_note_imported_event(),
         ];
 
-        let result = history_from_events(&events, filters, HistoryWindow::default(), None).unwrap();
+        let result =
+            adapt_test_history(&events, filters, TestHistoryPage::default(), None).unwrap();
         let entries = result
             .entries
             .iter()
@@ -1088,16 +1505,16 @@ mod tests {
             r#"{"schema":"shore.note-body","version":1,"body":"artifact body"}"#,
         )
         .unwrap();
-        let filters = ResolvedHistoryFilters {
+        let filters = TestHistoryOptions {
             include_body: true,
-            ..ResolvedHistoryFilters::default()
+            ..TestHistoryOptions::default()
         };
 
         let backend = StoreBackend::Local(dir.path().to_path_buf());
-        let result = history_from_events(
+        let result = adapt_test_history(
             &[observation_event_with_artifact_path(artifact_path)],
             filters,
-            HistoryWindow::default(),
+            TestHistoryPage::default(),
             Some(&backend),
         )
         .unwrap();
@@ -1112,10 +1529,10 @@ mod tests {
     #[test]
     fn window_unset_hydrates_all_and_emits_no_cursor() {
         let events = windowing_events(5);
-        let result = history_from_events(
+        let result = adapt_test_history(
             &events,
-            ResolvedHistoryFilters::default(),
-            HistoryWindow::default(),
+            TestHistoryOptions::default(),
+            TestHistoryPage::default(),
             None,
         )
         .unwrap();
@@ -1128,10 +1545,10 @@ mod tests {
     #[test]
     fn window_limit_takes_prefix_and_keeps_full_identity() {
         let events = windowing_events(5);
-        let result = history_from_events(
+        let result = adapt_test_history(
             &events,
-            ResolvedHistoryFilters::default(),
-            HistoryWindow {
+            TestHistoryOptions::default(),
+            TestHistoryPage {
                 limit: Some(2),
                 after: None,
             },
@@ -1149,10 +1566,10 @@ mod tests {
     #[test]
     fn window_cursor_continues_without_overlap() {
         let events = windowing_events(5);
-        let page1 = history_from_events(
+        let page1 = adapt_test_history(
             &events,
-            ResolvedHistoryFilters::default(),
-            HistoryWindow {
+            TestHistoryOptions::default(),
+            TestHistoryPage {
                 limit: Some(2),
                 after: None,
             },
@@ -1161,10 +1578,10 @@ mod tests {
         .unwrap();
         let token = page1.next_cursor.clone().unwrap();
 
-        let page2 = history_from_events(
+        let page2 = adapt_test_history(
             &events,
-            ResolvedHistoryFilters::default(),
-            HistoryWindow {
+            TestHistoryOptions::default(),
+            TestHistoryPage {
                 limit: Some(2),
                 after: Some(HistoryCursor::decode(&token).unwrap()),
             },
@@ -1183,58 +1600,14 @@ mod tests {
     }
 
     #[test]
-    fn window_excludes_out_of_window_body_hydration() {
-        let dir = tempfile::tempdir().unwrap();
-        // The first event carries an inline body that hydrates cleanly.
-        let mut head = observation_event_with_body("in-window body");
-        head.occurred_at = "2026-05-13T10:00:01Z".to_owned();
-        // A later event whose body lives in an artifact absent from the store:
-        // loading it errors. It sorts last, so a single-entry window must never
-        // reach it.
-        let mut tail = observation_event_with_artifact_path("artifacts/missing/body.json");
-        tail.occurred_at = "2026-05-13T10:00:09Z".to_owned();
-        let backend = StoreBackend::Local(dir.path().to_path_buf());
-        let with_bodies = || ResolvedHistoryFilters {
-            include_body: true,
-            ..ResolvedHistoryFilters::default()
-        };
-
-        // Slicing before hydration: the window excludes the unreadable tail body,
-        // so the read succeeds — proof the out-of-window body was never loaded. A
-        // hydrate-all-then-slice projection would have errored on it first.
-        let windowed = history_from_events(
-            &[head.clone(), tail.clone()],
-            with_bodies(),
-            HistoryWindow {
-                limit: Some(1),
-                after: None,
-            },
-            Some(&backend),
-        )
-        .unwrap();
-        assert_eq!(windowed.entries.len(), 1);
-
-        // The poison is real: hydrating the full set over the same store errors.
-        assert!(
-            history_from_events(
-                &[head, tail],
-                with_bodies(),
-                HistoryWindow::default(),
-                Some(&backend),
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
     fn history_includes_duplicate_semantic_diagnostics() {
         let first = observation_event_with_id_and_key("obs:sha256:same", "retry-a");
         let second = observation_event_with_id_and_key("obs:sha256:same", "retry-b");
 
-        let result = history_from_events(
+        let result = adapt_test_history(
             &[first, second],
-            ResolvedHistoryFilters::default(),
-            HistoryWindow::default(),
+            TestHistoryOptions::default(),
+            TestHistoryPage::default(),
             None,
         )
         .unwrap();
@@ -1254,15 +1627,15 @@ mod tests {
     fn history_diagnostics_are_not_suppressed_by_filters() {
         let duplicate_a = observation_event_with_id_and_key("obs:sha256:same", "retry-a");
         let duplicate_b = observation_event_with_id_and_key("obs:sha256:same", "retry-b");
-        let filters = ResolvedHistoryFilters {
+        let filters = TestHistoryOptions {
             event_types: vec![EventType::WorkObjectProposed],
-            ..ResolvedHistoryFilters::default()
+            ..TestHistoryOptions::default()
         };
 
-        let result = history_from_events(
+        let result = adapt_test_history(
             &[duplicate_a, duplicate_b],
             filters,
-            HistoryWindow::default(),
+            TestHistoryPage::default(),
             None,
         )
         .unwrap();

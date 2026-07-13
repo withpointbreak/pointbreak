@@ -705,10 +705,17 @@ fn history_query(query: Option<&str>) -> Result<HistoryRequest, String> {
             q,
             track,
             snapshot,
+            revision: None,
+            revisions: None,
             types,
             order,
         },
-        page: HistoryPage { limit, offset, at },
+        page: HistoryPage {
+            limit,
+            after: None,
+            offset,
+            at,
+        },
     })
 }
 

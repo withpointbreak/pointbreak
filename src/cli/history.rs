@@ -1,17 +1,14 @@
-use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Args, ValueEnum};
 use pointbreak::documents::history_document;
-use pointbreak::model::{EventId, RevisionId};
+use pointbreak::model::RevisionId;
 use pointbreak::session::event::EventType;
 use pointbreak::session::{
-    BaseProjectionConfig, EventVerificationPolicy, HistoryCursor, HistoryWindow, LivenessToken,
-    QueryDiagnosticCode, QuerySurface, RefFilterMode, RemovalPolicy, ReviewHistoryEntry,
-    ReviewHistoryOptions, ReviewHistoryResult, history_base_projection, matches_query,
-    parse_search_query_for, read_events_for_display, review_history,
+    EventVerificationPolicy, HistoryCursor, HistoryOrder, LivenessToken, RefFilterMode,
+    ReviewHistoryOptions, read_events_for_display, review_history,
 };
 
 use crate::cli::output;
@@ -55,10 +52,16 @@ pub(super) struct HistoryArgs {
     include_body: bool,
 
     /// Return at most N entries (a forward page from the start, or from --cursor);
-    /// omit for the full history. The response carries a `nextCursor` to continue.
-    /// With --watch, the same page is re-rendered on each liveness change.
+    /// omit for the full history. For the last N, use `--tail N`. The response
+    /// carries a `nextCursor` to continue. With --watch, the same page is
+    /// re-rendered on each liveness change.
     #[arg(long)]
     limit: Option<usize>,
+
+    /// Print the newest N entries, ordered oldest to newest for append-friendly output.
+    /// Composes with all filters and with --watch; cannot be used with --limit/--cursor.
+    #[arg(long, value_name = "N", conflicts_with_all = ["limit", "cursor"])]
+    tail: Option<usize>,
 
     /// Continue from a previous response's opaque `nextCursor`. Omit to start from
     /// the beginning.
@@ -128,100 +131,16 @@ fn render_once(
     args: &HistoryArgs,
     stdout: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let result = match &args.filter {
-        Some(filter) => filtered_history_result(args, filter)?,
-        None => review_history(history_options(args)?)?,
-    };
+    let mut result = review_history(history_options(args)?)?;
+    for notice in &result.query_notices {
+        eprintln!("hint: {}", notice.message);
+    }
+    if present_reverse(args) {
+        result.entries.reverse();
+    }
     let document = history_document(result);
     let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
     output::write_document_json_fallback(stdout, format, &document)
-}
-
-/// Run the review filter grammar over the review history and window the result.
-///
-/// The shared record-build seam is the grammar oracle only: a full, body-hydrated
-/// base with a per-entry search record (snapshot and normalized occurred_at
-/// resolved), the same records the inspector's history query reads. Bodies are
-/// hydrated so a free-text term hits body content even when --include-body is
-/// absent. The output entries ride the flagless typed path run unbounded — so the
-/// grammar filter precedes windowing and every typed flag (--revision/--track/
-/// --event-type/--ref/--by) plus --include-body visibility composes natively,
-/// without re-implementing any typed predicate or body redaction here.
-fn filtered_history_result(
-    args: &HistoryArgs,
-    filter: &str,
-) -> Result<ReviewHistoryResult, Box<dyn std::error::Error>> {
-    let config = BaseProjectionConfig {
-        verification_policy: Some(EventVerificationPolicy::advisory()),
-        trust_set: crate::cli::common::discover_trust_set(&args.repo),
-        actor_attributes: crate::cli::common::discover_actor_attributes(&args.repo),
-        delegation_map: crate::cli::common::discover_delegation_map(&args.repo),
-        removal_policy: RemovalPolicy::default(),
-    };
-    let base = history_base_projection(&args.repo, &config)?;
-
-    // Parse on the event surface. A known-but-unsupported qualifier or value is a
-    // usage error (non-zero exit carrying the message); a deprecated qualifier
-    // keeps running behind a stderr hint.
-    let parsed = parse_search_query_for(filter, QuerySurface::Event);
-    for diagnostic in &parsed.diagnostics {
-        match diagnostic.code {
-            QueryDiagnosticCode::UnsupportedQualifier | QueryDiagnosticCode::UnsupportedValue => {
-                return Err(diagnostic.message.clone().into());
-            }
-            QueryDiagnosticCode::DeprecatedQualifier => eprintln!("hint: {}", diagnostic.message),
-        }
-    }
-    // The event ids that pass the grammar, over the hydrated records.
-    let grammar_pass: BTreeSet<EventId> = base
-        .entries
-        .iter()
-        .filter(|e| matches_query(&e.record, &parsed.clauses))
-        .map(|e| e.entry.event_id.clone())
-        .collect();
-
-    // Output entries from the flagless typed path, run unbounded so the grammar
-    // filter applies before windowing.
-    let typed = review_history(history_options_unbounded(args)?)?;
-    let filtered: Vec<ReviewHistoryEntry> = typed
-        .entries
-        .into_iter()
-        .filter(|entry| grammar_pass.contains(&entry.event_id))
-        .collect();
-
-    // Window the (typed and grammar) set with the opaque cursor path, unchanged.
-    let after = match &args.cursor {
-        Some(token) => Some(
-            HistoryCursor::decode(token)
-                .map_err(|_| "invalid --cursor: pass an opaque nextCursor from a prior response")?,
-        ),
-        None => None,
-    };
-    let window = HistoryWindow {
-        limit: args.limit,
-        after,
-    };
-    let keys: Vec<HistoryCursor> = filtered
-        .iter()
-        .map(|e| HistoryCursor {
-            occurred_at: e.occurred_at.clone(),
-            event_id: e.event_id.clone(),
-        })
-        .collect();
-    let slice = window.apply(&keys);
-    let entries = filtered[slice.range].to_vec();
-
-    // Identity, the filters echo, and diagnostics come from the flagless
-    // projection, so the filtered output is shape-identical to the typed path —
-    // only the entry set differs.
-    Ok(ReviewHistoryResult {
-        event_set_hash: typed.event_set_hash,
-        event_count: typed.event_count,
-        filters: typed.filters,
-        entries,
-        next_cursor: slice.next_cursor,
-        diagnostics: typed.diagnostics,
-    })
 }
 
 /// Client-side liveness poll: re-render only when the store's liveness moves —
@@ -257,8 +176,11 @@ fn watch_fingerprint(
 }
 
 fn history_options(args: &HistoryArgs) -> Result<ReviewHistoryOptions, Box<dyn std::error::Error>> {
-    let mut options = history_options_unbounded(args)?;
-    if let Some(limit) = args.limit {
+    let mut options = ReviewHistoryOptions::new(&args.repo)
+        .with_include_body(args.include_body)
+        .with_read_for_display(true)
+        .with_order(effective_order(args));
+    if let Some(limit) = effective_limit(args) {
         options = options.with_limit(limit);
     }
     if let Some(token) = &args.cursor {
@@ -266,20 +188,9 @@ fn history_options(args: &HistoryArgs) -> Result<ReviewHistoryOptions, Box<dyn s
             .map_err(|_| "invalid --cursor: pass an opaque nextCursor from a prior response")?;
         options = options.with_cursor(cursor);
     }
-    Ok(options)
-}
-
-/// The typed history options minus the `--limit`/`--cursor` window: repo,
-/// `--revision`/`--track`/`--event-type`/`--ref`/`--by`, `--include-body`, and the
-/// reader-supplied trust/attributes/delegation wiring. The flagless path adds the
-/// window on top; the `--filter` path uses this unbounded form so the grammar
-/// filter precedes windowing.
-fn history_options_unbounded(
-    args: &HistoryArgs,
-) -> Result<ReviewHistoryOptions, Box<dyn std::error::Error>> {
-    let mut options = ReviewHistoryOptions::new(&args.repo)
-        .with_include_body(args.include_body)
-        .with_read_for_display(true);
+    if let Some(filter) = &args.filter {
+        options = options.with_filter(filter.clone());
+    }
     if let Some(revision) = &args.revision {
         let ids = crate::cli::id_resolver::IdResolver::new(&args.repo);
         options = options.with_revision_id(RevisionId::new(ids.rev(revision)?));
@@ -303,6 +214,22 @@ fn history_options_unbounded(
     options =
         options.with_actor_attributes(crate::cli::common::discover_actor_attributes(&args.repo));
     Ok(options)
+}
+
+fn effective_order(args: &HistoryArgs) -> HistoryOrder {
+    if args.tail.is_some() {
+        HistoryOrder::Desc
+    } else {
+        HistoryOrder::Asc
+    }
+}
+
+fn effective_limit(args: &HistoryArgs) -> Option<usize> {
+    args.tail.or(args.limit)
+}
+
+fn present_reverse(args: &HistoryArgs) -> bool {
+    args.tail.is_some()
 }
 
 impl From<HistoryEventTypeArg> for EventType {
