@@ -231,6 +231,7 @@ describe("reveal helpers fetch the target page and select through the router", (
       "evt:sha256:0000000000000000000000000000000000000000000000000000000000000abc";
     let atUrl = "";
     const inner = globalThis.fetch;
+    const oldHead = store.getState().history?.entries?.[0];
     globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
       const url =
         typeof input === "string"
@@ -262,6 +263,11 @@ describe("reveal helpers fetch the target page and select through the router", (
       true,
     );
     expect(store.getState().history?.offset).toBe(120);
+    expect(store.getState().followByLens.timeline).toBe(false);
+    expect(store.getState().timelineHeadAnchor).toEqual({
+      occurredAt: oldHead?.occurredAt,
+      eventId: oldHead?.eventId,
+    });
   });
 
   it("revealEvent leaves the view unchanged for a genuinely absent event", async () => {
@@ -277,6 +283,7 @@ describe("reveal helpers fetch the target page and select through the router", (
     await navigation.revealEvent("evt:sha256:absent");
     // No matching page → the selection is not switched to the absent event.
     expect(store.getState().selected).toEqual({ kind: "revision", id: REV });
+    expect(store.getState().followByLens.timeline).toBe(true);
   });
 
   it("navigateToRevision filters the timeline to that revision", () => {

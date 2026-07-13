@@ -18,6 +18,7 @@
 
 import { fetchEventIdForQuery, fetchRevealPage, revealPatch } from "./data";
 import { DIFF_ROUTE_CLEARED, openDiff } from "./diff/controller";
+import { endTimelineFollow } from "./follow";
 import { parseSearchQueryFor } from "./query";
 import { navigate } from "./router";
 import { getState } from "./store";
@@ -75,6 +76,9 @@ export function navigateToActor(id: string): void {
 export async function revealEvent(eventId: string): Promise<void> {
   const page = await fetchRevealPage(eventId);
   if (!page?.present) return;
+  // A successful reveal engages a parked read; freeze the anchor before the
+  // fetched window is committed, while a genuinely absent target stays a no-op.
+  endTimelineFollow();
   // A chip reveal names a record destination: it exits the diff page too.
   // (`revealPatch` itself stays page-neutral — it also runs in applyHash's
   // deep-link reveal, which must not close a page the hash addressed.)

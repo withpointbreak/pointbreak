@@ -473,6 +473,49 @@ describe("density field tiers", () => {
 });
 
 describe("toolbar controls are gated per lens (each shows only where its state is consumed)", () => {
+  it("shows start and end on every lens, with follow only on the descending timeline", () => {
+    for (const lens of ["timeline", "list", "attention"]) {
+      store.commit({ lens, order: "desc" });
+      render.render();
+      expect($("#jump-start")?.classList.contains("hidden"), lens).toBe(false);
+      expect($("#jump-end")?.classList.contains("hidden"), lens).toBe(false);
+      expect($("#follow-toggle")?.classList.contains("hidden"), lens).toBe(
+        lens !== "timeline",
+      );
+    }
+
+    store.commit({ lens: "timeline", order: "asc" });
+    render.render();
+    expect($("#follow-toggle")?.classList.contains("hidden")).toBe(true);
+  });
+
+  it("shows the new-events pill only when parked on the descending timeline", () => {
+    store.commit({
+      lens: "timeline",
+      order: "desc",
+      followByLens: { timeline: false, list: false, attention: false },
+      timelineNewCount: 3,
+    });
+    render.render();
+    const pill = $("#timeline-new-pill");
+    expect(pill?.classList.contains("hidden")).toBe(false);
+    expect(pill?.textContent).toBe("3 new ↑");
+
+    for (const patch of [
+      { followByLens: { timeline: true, list: false, attention: false } },
+      {
+        followByLens: { timeline: false, list: false, attention: false },
+        timelineNewCount: 0,
+      },
+      { lens: "list", timelineNewCount: 3 },
+      { lens: "timeline", order: "asc", timelineNewCount: 3 },
+    ]) {
+      store.commit(patch);
+      render.render();
+      expect($("#timeline-new-pill")?.classList.contains("hidden")).toBe(true);
+    }
+  });
+
   it("shows the toolbar on both Timeline and Revisions, hides it on Attention", () => {
     store.commit({ lens: "timeline" });
     render.render();
@@ -616,6 +659,25 @@ describe("the attention tab count badge (global judgment-queue counts)", () => {
     const label = badge?.getAttribute("aria-label") ?? "";
     expect(label).toMatch(/input/);
     expect(label).toContain("advisory");
+  });
+
+  it("renders a transient signed changed delta, never a new-events label", () => {
+    store.commit({
+      attention: attentionOf([item("a", "primary")]),
+      attentionDelta: -2,
+    });
+    render.render();
+    const delta = $(".attention-delta");
+    expect(delta?.textContent).toBe("changed −2");
+    expect(delta?.textContent).not.toContain("new");
+
+    store.commit({ attentionDelta: 3 });
+    render.render();
+    expect($(".attention-delta")?.textContent).toBe("changed +3");
+
+    store.commit({ attentionDelta: null });
+    render.render();
+    expect($(".attention-delta")).toBeNull();
   });
 });
 

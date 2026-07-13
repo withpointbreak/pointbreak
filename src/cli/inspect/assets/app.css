@@ -141,10 +141,32 @@ body { display: flex; flex-direction: column; }
   color: var(--accent);
 }
 .attention-badge-secondary { color: var(--fg-dim); margin-left: 2px; }
+.attention-delta {
+  margin-left: 6px;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--fg-dim);
+}
 
 .stats { margin-left: auto; display: flex; flex-wrap: wrap; gap: 14px; align-items: center; min-width: 0; }
 .stat { color: var(--fg-dim); font-size: var(--fs-sm); }
 .stat.mono { font-family: var(--mono); }
+.timeline-boundary-controls {
+  display: flex;
+  gap: 2px;
+  align-items: center;
+}
+.timeline-boundary-controls .ghost { font-size: var(--fs-sm); }
+.timeline-boundary-controls .ghost[aria-pressed="true"] {
+  color: var(--accent);
+  background: var(--bg-row);
+}
+.timeline-new-pill {
+  color: var(--accent);
+  border: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+}
 
 /* Auto-refresh liveness, folded onto the store chip (issue #257): a calm status
    dot that pulses when new data lands and turns amber when refresh degrades. The

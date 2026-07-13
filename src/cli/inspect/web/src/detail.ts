@@ -51,6 +51,7 @@ import { fetchJSON } from "./http";
 import { anchorRevision, askLabel } from "./lenses/attention";
 import { renderBodyContent } from "./markdown";
 import {
+  eventForId,
   selectedEventId,
   snapshotContentHashForRevision,
   snapshotIdForRevision,
@@ -521,8 +522,8 @@ export function renderDetail(): void {
   const el = $("#detail-body");
   if (!el) return;
   rememberScroll();
-  const entries = getState().history?.entries ?? [];
-  const e = entries.find((x) => x.eventId === selectedEventId());
+  const selected = selectedEventId();
+  const e = selected ? eventForId(selected) : undefined;
   if (!e) {
     el.innerHTML = `<p class="${CLASS.empty}">Select an event or revision to inspect.</p>`;
     projectScroll(null);

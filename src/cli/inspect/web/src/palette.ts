@@ -16,7 +16,8 @@ import { CLASS, cmdItemClass } from "./classNames";
 import { DIFF_ROUTE_CLEARED, openDiff } from "./diff/controller";
 import { $ } from "./dom";
 import { escapeHtml } from "./escape";
-import { presentTypes, revisionForId } from "./model";
+import { endTimelineFollow } from "./follow";
+import { eventForId, presentTypes, revisionForId } from "./model";
 import {
   close as closeOverlay,
   type OverlayCloseOptions,
@@ -85,9 +86,7 @@ function selectedRevisionId(): string {
   const sel = getState().selected;
   if (sel.kind === "revision") return sel.id ?? "";
   if (sel.kind === "event") {
-    const event = (getState().history?.entries ?? []).find(
-      (e) => e.eventId === sel.id,
-    );
+    const event = sel.id ? eventForId(sel.id) : undefined;
     return event ? entryRevisionId(event) : "";
   }
   return "";
@@ -130,9 +129,7 @@ function currentSelectionCommand(): Command | null {
     };
   }
   if (sel.kind === "event") {
-    const event = (getState().history?.entries ?? []).find(
-      (e) => e.eventId === sel.id,
-    );
+    const event = sel.id ? eventForId(sel.id) : undefined;
     return {
       kind: "Current",
       label: "Open current selection",
@@ -287,11 +284,13 @@ function buildCommands(): Command[] {
       kind: "Events",
       label: entryTitle(e),
       hint: typeLabel(e.eventType),
-      run: () =>
+      run: () => {
+        endTimelineFollow();
         navigate({
           selected: { kind: "event", id: e.eventId ?? "" },
           ...DIFF_ROUTE_CLEARED,
-        }),
+        });
+      },
     });
   }
   return assignCommandOptionIds(cmds);

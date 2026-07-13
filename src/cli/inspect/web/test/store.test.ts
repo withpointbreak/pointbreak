@@ -36,6 +36,18 @@ describe("getState defaults", () => {
     expect(s.reading).toBe(false);
   });
 
+  it("defaults follow to timeline-only true, with empty stream-position state", () => {
+    const s = store.getState();
+    expect(s.followByLens).toEqual({
+      timeline: true,
+      list: false,
+      attention: false,
+    });
+    expect(s.timelineHeadAnchor).toBeNull();
+    expect(s.timelineNewCount).toBe(0);
+    expect(s.attentionDelta).toBeNull();
+  });
+
   it("seeds enabledTypes and seenTypes from every known event type", () => {
     const s = store.getState();
     const ids = TYPES.map((t) => t.id).sort();

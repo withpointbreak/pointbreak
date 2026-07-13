@@ -19,6 +19,7 @@ import { renderDetail, showComposite } from "./detail";
 import { openDiff, renderDiffPage } from "./diff/controller";
 import { $ } from "./dom";
 import { escapeHtml } from "./escape";
+import { endTimelineFollow } from "./follow";
 import { partitionAttentionTiers, renderAttention } from "./lenses/attention";
 import { renderRevisionList } from "./lenses/revisions";
 import {
@@ -251,26 +252,61 @@ function renderAttentionBadge(tab: HTMLElement): void {
     getState().attention?.items ?? [],
   );
   tab.querySelector(`.${CLASS.attentionBadge}`)?.remove();
-  if (!primary.length && !secondary.length) return;
-  const badge = document.createElement("span");
-  badge.className = CLASS.attentionBadge;
-  // The aria-label replaces the badge's text in the tab's accessible name, so
-  // the counts are announced with their meaning, not read as bare digits.
-  const needsInput =
-    primary.length === 1
-      ? "1 item needs input"
-      : `${primary.length} items need input`;
-  badge.setAttribute(
-    "aria-label",
-    [
-      primary.length ? needsInput : "",
-      secondary.length ? `${secondary.length} advisory` : "",
-    ]
-      .filter(Boolean)
-      .join(", "),
-  );
-  badge.innerHTML = `${primary.length ? primary.length : ""}${secondary.length ? `<span class="${CLASS.attentionBadgeSecondary}">+${secondary.length}</span>` : ""}`;
-  tab.appendChild(badge);
+  tab.querySelector(`.${CLASS.attentionDelta}`)?.remove();
+  if (primary.length || secondary.length) {
+    const badge = document.createElement("span");
+    badge.className = CLASS.attentionBadge;
+    // The aria-label replaces the badge's text in the tab's accessible name, so
+    // the counts are announced with their meaning, not read as bare digits.
+    const needsInput =
+      primary.length === 1
+        ? "1 item needs input"
+        : `${primary.length} items need input`;
+    badge.setAttribute(
+      "aria-label",
+      [
+        primary.length ? needsInput : "",
+        secondary.length ? `${secondary.length} advisory` : "",
+      ]
+        .filter(Boolean)
+        .join(", "),
+    );
+    badge.innerHTML = `${primary.length ? primary.length : ""}${secondary.length ? `<span class="${CLASS.attentionBadgeSecondary}">+${secondary.length}</span>` : ""}`;
+    tab.appendChild(badge);
+  }
+
+  const delta = getState().attentionDelta;
+  if (delta == null || delta === 0) return;
+  const chip = document.createElement("span");
+  chip.className = CLASS.attentionDelta;
+  chip.textContent = `changed ${delta > 0 ? `+${delta}` : `−${Math.abs(delta)}`}`;
+  chip.setAttribute("role", "status");
+  tab.appendChild(chip);
+}
+
+/** Project stream-position state onto the topbar-resident controls. */
+function syncStreamPositionControls(): void {
+  const state = getState();
+  $("#jump-start")?.classList.remove("hidden");
+  $("#jump-end")?.classList.remove("hidden");
+  const follow = $("#follow-toggle");
+  if (follow) {
+    follow.classList.toggle(
+      "hidden",
+      state.lens !== "timeline" || state.order !== "desc",
+    );
+    follow.setAttribute("aria-pressed", String(state.followByLens.timeline));
+  }
+
+  const pill = $("#timeline-new-pill");
+  if (!pill) return;
+  const visible =
+    state.lens === "timeline" &&
+    state.order === "desc" &&
+    !state.followByLens.timeline &&
+    state.timelineNewCount > 0;
+  pill.classList.toggle("hidden", !visible);
+  pill.textContent = `${state.timelineNewCount} new ↑`;
 }
 
 // Reflect the current filter/order/sort state into the toolbar controls (the
@@ -512,6 +548,7 @@ export function render(): void {
   renderStats();
   renderDiagnostics();
   renderLensSwitcher();
+  syncStreamPositionControls();
   if (applyDiffPageMode()) {
     void renderDiffPage();
     return;
@@ -628,7 +665,10 @@ function onMasterClick(ev: Event): void {
   const eventEl = t.closest<HTMLElement>("[data-event-id]");
   if (eventEl) {
     const id = eventEl.dataset.eventId;
-    if (id) navigate({ selected: { kind: "event", id }, open: true });
+    if (id) {
+      endTimelineFollow();
+      navigate({ selected: { kind: "event", id }, open: true });
+    }
     return;
   }
   const revEl = t.closest<HTMLElement>(".unit-card[data-revision-id]");

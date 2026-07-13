@@ -295,6 +295,28 @@ describe("serializeState", () => {
     expect(router.serializeState(snap(), PT)).toBe("#/timeline");
   });
 
+  it("never serializes or applies follow and stream-position state", () => {
+    store.commit({
+      followByLens: { timeline: false, list: false, attention: false },
+      timelineHeadAnchor: {
+        occurredAt: "2026-07-13T20:00:00Z",
+        eventId: EVT,
+      },
+      timelineNewCount: 4,
+      attentionDelta: -2,
+    });
+    const serialized = router.serializeState(store.getState(), PT);
+    expect(serialized).not.toMatch(/follow|anchor|newCount|attentionDelta/i);
+
+    history.replaceState(null, "", "#/list?q=kept");
+    router.applyHash();
+    const s = store.getState();
+    expect(s.followByLens.timeline).toBe(false);
+    expect(s.timelineHeadAnchor?.eventId).toBe(EVT);
+    expect(s.timelineNewCount).toBe(4);
+    expect(s.attentionDelta).toBe(-2);
+  });
+
   it("emits sort= only on the list lens and only when non-default", () => {
     expect(
       router.serializeState(snap({ lens: "list", sortKey: "activity" }), PT),
@@ -454,7 +476,13 @@ describe("diff page route", () => {
   function seedDiff(): void {
     store.commit({
       history: {
-        entries: [{ eventId: EVT, eventType: "work_object_proposed" }],
+        entries: [
+          {
+            eventId: EVT,
+            eventType: "work_object_proposed",
+            occurredAt: "2026-07-13T19:00:00Z",
+          },
+        ],
         diagnostics: [],
       } as unknown as HistoryDoc,
       revisions: {
@@ -833,7 +861,13 @@ describe("applyHash (derive the view from the fragment, repaint via the subscrip
   function seed(): void {
     store.commit({
       history: {
-        entries: [{ eventId: EVT, eventType: "work_object_proposed" }],
+        entries: [
+          {
+            eventId: EVT,
+            eventType: "work_object_proposed",
+            occurredAt: "2026-07-13T19:00:00Z",
+          },
+        ],
         diagnostics: [],
       } as unknown as HistoryDoc,
       revisions: {
@@ -875,6 +909,11 @@ describe("applyHash (derive the view from the fragment, repaint via the subscrip
     router.applyHash();
     await flush();
     expect(store.getState().selected).toEqual({ kind: "event", id: X });
+    expect(store.getState().followByLens.timeline).toBe(false);
+    expect(store.getState().timelineHeadAnchor).toEqual({
+      occurredAt: "2026-07-13T19:00:00Z",
+      eventId: EVT,
+    });
     // No "not in this store" fallback — the event was fetched, not reported absent.
     const el = document.querySelector("#route-diagnostic");
     expect(el?.textContent ?? "").not.toContain("is not in this store");

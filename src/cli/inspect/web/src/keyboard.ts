@@ -24,8 +24,9 @@ import {
   openRevisionDiff,
 } from "./diff/controller";
 import { $ } from "./dom";
+import { endTimelineFollow } from "./follow";
 import { loadedWindow, timelineRowHeight } from "./lenses/timeline";
-import { attentionEntryKeys, lensEntryIds } from "./model";
+import { attentionEntryKeys, eventForId, lensEntryIds } from "./model";
 import { resolveRef } from "./navigation";
 import {
   activeName,
@@ -212,6 +213,8 @@ function pageLoadedLens(deltaRows: number): void {
 // step past either edge fetches the adjacent page (offset-addressed) and then
 // selects the target's global index; an in-window step selects directly.
 async function stepTimeline(delta: number): Promise<void> {
+  // Any timeline step is an explicit departure from auto-advancing follow.
+  endTimelineFollow();
   const state = getState();
   const { offset, count, matchCount } = loadedWindow(state);
   const ids = lensEntryIds();
@@ -254,6 +257,8 @@ function pageOffsetContaining(target: number): number {
 }
 
 async function selectTimelineIndex(targetIndex: number): Promise<void> {
+  // Page and boundary motion both select an engaged timeline destination.
+  endTimelineFollow();
   const state = getState();
   const { offset, count, matchCount } = loadedWindow(state);
   const ids = lensEntryIds();
@@ -291,7 +296,7 @@ async function pageTimeline(deltaRows: number): Promise<void> {
   await selectTimelineIndex(cur + deltaRows);
 }
 
-function jumpLensBoundary(target: "first" | "last"): void {
+export function jumpLensBoundary(target: "first" | "last"): void {
   if (timelineIsActive()) void jumpTimelineBoundary(target);
   else if (revisionLensIsActive()) jumpLoadedLensBoundary(target);
   else if (attentionLensIsActive()) jumpAttentionBoundary(target);
@@ -370,9 +375,7 @@ function activateSelection(): void {
   if (sel.kind === "revision" && sel.id) {
     openRevisionDiff(sel.id);
   } else if (sel.kind === "event" && sel.id) {
-    const event = (getState().history?.entries ?? []).find(
-      (e) => e.eventId === sel.id,
-    );
+    const event = eventForId(sel.id);
     const rev = event ? entryRevisionId(event) : "";
     if (rev) openRevisionDiff(rev);
   }

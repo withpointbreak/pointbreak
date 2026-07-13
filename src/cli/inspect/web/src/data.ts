@@ -16,6 +16,10 @@
 
 import { setRefreshState } from "./connection";
 import { $ } from "./dom";
+import {
+  resetTimelineFollowForQueryChange,
+  timelineFollowGeneration,
+} from "./follow";
 import { fetchJSON } from "./http";
 import { presentTypes } from "./model";
 import {
@@ -37,6 +41,10 @@ import type { HistoryEntry } from "./types";
 interface FreshnessDoc {
   eventCount?: number;
   commitGraphStamp?: string;
+}
+
+interface NewCountDoc {
+  newCount?: number;
 }
 
 /** The first-page size — large enough to fill a viewport, small enough to keep the transfer cheap. */
@@ -61,6 +69,40 @@ export function historyQueryParams(s: State): string {
   }
   p.set("limit", String(HISTORY_PAGE));
   return p.toString();
+}
+
+/**
+ * Probe the filter-aware count newer than the frozen parked-head anchor. Ascending
+ * timelines and anchorless parked windows preserve their window without a probe.
+ */
+export async function probeNewCount(): Promise<void> {
+  const s = getState();
+  const generation = timelineFollowGeneration();
+  const anchor = s.timelineHeadAnchor;
+  const queryKey = historyQueryParams(s);
+  if (s.followByLens.timeline || s.order !== "desc" || !anchor) return;
+
+  const params = new URLSearchParams(queryKey);
+  params.delete("limit");
+  params.delete("offset");
+  params.delete("at");
+  params.set("sinceOccurredAt", anchor.occurredAt);
+  params.set("sinceEventId", anchor.eventId);
+  const doc = (await fetchJSON(
+    `/api/history/new-count?${params.toString()}`,
+  )) as NewCountDoc;
+  const current = getState();
+  const currentAnchor = current.timelineHeadAnchor;
+  if (
+    timelineFollowGeneration() !== generation ||
+    current.followByLens.timeline ||
+    current.order !== "desc" ||
+    historyQueryParams(current) !== queryKey ||
+    currentAnchor?.occurredAt !== anchor.occurredAt ||
+    currentAnchor?.eventId !== anchor.eventId
+  )
+    return;
+  commit({ timelineNewCount: doc.newCount ?? 0 });
 }
 
 /**
@@ -94,8 +136,11 @@ function commitFreshnessBaseline(freshness: FreshnessDoc): void {
  * Load page 1 of the history for the current query and commit it with the
  * freshness baseline. Resolves true only after the page has been committed.
  */
-export async function loadHistoryHead(): Promise<boolean> {
+export async function loadHistoryHead(
+  isCurrent: () => boolean = () => true,
+): Promise<boolean> {
   try {
+    const params = historyQueryParams(getState());
     // Take the freshness marker BEFORE the documents, so the baseline can never be
     // newer than what was loaded. If an event lands during the document fetch, the
     // marker the next poll reads is higher than this baseline and triggers a reload
@@ -105,8 +150,8 @@ export async function loadHistoryHead(): Promise<boolean> {
     // `history.eventCount`) also keeps a retired/skipped event — where the event-file
     // marker exceeds the post-skip history count — from forcing a reload every tick.
     const freshness = (await fetchJSON("/api/freshness")) as FreshnessDoc;
-    const params = historyQueryParams(getState());
     const historyRaw = await fetchJSON(`/api/history?${params}`);
+    if (!isCurrent()) return false;
     showError(null);
     commit({
       history: { ...(historyRaw as HistoryDoc), queryKey: params },
@@ -122,17 +167,28 @@ export async function loadHistoryHead(): Promise<boolean> {
 /** Fetch and commit the full revisions, threads, and attention documents. */
 export async function loadWholeDocuments(): Promise<boolean> {
   try {
+    const previousAttentionCount = getState().attention?.items?.length;
+    const revisionsScrollTop = $<HTMLElement>("#units")?.scrollTop;
     const [revisionsRaw, threadsRaw, attentionRaw] = await Promise.all([
       fetchJSON("/api/revisions"),
       fetchJSON("/api/threads"),
       fetchJSON("/api/attention"),
     ]);
+    const attention = attentionRaw as AttentionDoc;
     showError(null);
     commit({
       revisions: revisionsRaw as RevisionsDoc,
       threads: threadsRaw as ThreadsDoc,
-      attention: attentionRaw as AttentionDoc,
+      attention,
+      attentionDelta:
+        previousAttentionCount == null
+          ? null
+          : attention.items.length - previousAttentionCount,
     });
+    if (revisionsScrollTop != null) {
+      const units = $<HTMLElement>("#units");
+      if (units) units.scrollTop = revisionsScrollTop;
+    }
     return true;
   } catch (err) {
     showLoadError(err);
@@ -174,6 +230,7 @@ async function reloadHistoryForQuery(): Promise<boolean> {
   if (!doc) return false;
   showError(null);
   commitHistoryPage(doc, queryKey);
+  resetTimelineFollowForQueryChange();
   return true;
 }
 
@@ -273,12 +330,25 @@ function commitHistoryPage(page: HistoryDoc, requestedQueryKey?: string): void {
     prev && prev.queryKey === queryKey
       ? mergeWindows(prev, page)
       : { entries: page.entries ?? [], offset: page.offset ?? 0 };
+  const selected =
+    s.selected.kind === "event" && s.selected.id ? s.selected.id : null;
+  const selectedIsVisible =
+    selected != null &&
+    merged.entries.some((entry) => entry.eventId === selected);
+  const retainedEntry =
+    selected != null && !selectedIsVisible
+      ? (prev?.entries.find((entry) => entry.eventId === selected) ??
+        (prev?.retainedEntry?.eventId === selected
+          ? prev.retainedEntry
+          : undefined))
+      : undefined;
   commit({
     history: {
       ...page,
       entries: merged.entries,
       offset: merged.offset,
       queryKey,
+      retainedEntry,
     },
   });
 }
@@ -380,6 +450,16 @@ export async function fetchEventIdForQuery(q: string): Promise<string | null> {
   return doc?.entries?.[0]?.eventId ?? null;
 }
 
+let pollSettleTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** Clear transient poll chrome without letting a failed reload look healthy. */
+function settlePoll(markWatching: boolean): void {
+  clearTimeout(pollSettleTimer);
+  pollSettleTimer = setTimeout(() => {
+    commit({ attentionDelta: null });
+    if (markWatching) setRefreshState("watching");
+  }, 1200);
+}
 /**
  * Probe `/api/freshness` and reload when the event-log head marker or the
  * commit-graph stamp changed, updating the liveness indicator. The stamp
@@ -389,6 +469,7 @@ export async function fetchEventIdForQuery(q: string): Promise<string | null> {
  * degrades refresh independently of the classified connection state.
  */
 export async function pollFreshness(): Promise<void> {
+  let documentsLoaded = false;
   try {
     const f = (await fetchJSON("/api/freshness")) as FreshnessDoc;
     const s = getState();
@@ -405,21 +486,52 @@ export async function pollFreshness(): Promise<void> {
         f.commitGraphStamp !== s.lastCommitGraphStamp);
     const changed = (f.eventCount ?? null) !== s.lastEventCount || stampChanged;
     if (changed) {
+      clearTimeout(pollSettleTimer);
       setRefreshState("updated");
-      const documentsLoaded = await loadWholeDocuments();
-      // Follow mode will replace this geometric gate with its explicit follow flag.
-      const historyLoaded =
-        (getState().history?.offset ?? 0) !== 0 || (await loadHistoryHead());
-      if (!documentsLoaded || !historyLoaded) {
+      documentsLoaded = await loadWholeDocuments();
+      if (!documentsLoaded) {
         setRefreshState("degraded");
+        commit({ attentionDelta: null });
         return;
       }
+      let historyLoaded = true;
+      if (getState().followByLens.timeline) {
+        const generation = timelineFollowGeneration();
+        const queryKey = historyQueryParams(getState());
+        const isCurrent = (): boolean => {
+          const current = getState();
+          return (
+            timelineFollowGeneration() === generation &&
+            current.followByLens.timeline &&
+            historyQueryParams(current) === queryKey
+          );
+        };
+        historyLoaded = await loadHistoryHead(isCurrent);
+        if (!historyLoaded && !isCurrent()) {
+          historyLoaded = true;
+          await probeNewCount();
+        }
+      } else {
+        await probeNewCount();
+      }
+      if (!historyLoaded) {
+        setRefreshState("degraded");
+        settlePoll(false);
+        return;
+      }
+      // The original probe remains final after a nested head load: its later
+      // freshness sample cannot outrun the whole documents accepted this tick.
       commitFreshnessBaseline(f);
-      setTimeout(() => setRefreshState("watching"), 1200);
+      settlePoll(true);
     } else {
       setRefreshState("watching");
     }
   } catch {
     setRefreshState("degraded");
+    if (documentsLoaded) settlePoll(false);
+    else {
+      clearTimeout(pollSettleTimer);
+      commit({ attentionDelta: null });
+    }
   }
 }

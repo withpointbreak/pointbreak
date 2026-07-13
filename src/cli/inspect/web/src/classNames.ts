@@ -38,6 +38,8 @@ export const CLASS = {
   kv: "kv",
   ghost: "ghost",
   actions: "actions",
+  timelineBoundaryControls: "timeline-boundary-controls",
+  timelineNewPill: "timeline-new-pill",
 
   // (The app-shell store-identity chip + detail popover is static markup in
   // index.html — `store-identity*` classes live there and in app.css, not here —
@@ -170,6 +172,7 @@ export const CLASS = {
   attentionMeta: "attention-meta",
   attentionFreshness: "attention-freshness",
   attentionFocus: "attention-focus",
+  attentionDelta: "attention-delta",
 
   // The attention tab's judgment-queue count badge (absent when both tiers are
   // empty) and the muted advisory count beside the needs-input number.

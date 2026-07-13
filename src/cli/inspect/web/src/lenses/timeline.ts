@@ -19,6 +19,7 @@ import { CLASS } from "../classNames";
 import { fetchHistoryPage, HISTORY_PAGE } from "../data";
 import { $ } from "../dom";
 import { escapeHtml } from "../escape";
+import { endTimelineFollow, isFollowingTimeline } from "../follow";
 import { fmtDate, fmtTime } from "../format";
 import {
   captureSupersedesBadge,
@@ -248,7 +249,17 @@ function eventRow(e: HistoryEntry, selected: string | null): HTMLLIElement {
 function ensureScrollListener(list: HTMLElement): void {
   if (list.dataset.virtualized) return;
   list.dataset.virtualized = "1";
-  list.addEventListener("scroll", () => renderTimeline());
+  list.addEventListener("scroll", () => {
+    // Under descending order, any manual movement below the live edge parks the
+    // reader. Guard the transition so a scroll burst commits only once.
+    if (
+      list.scrollTop > 0 &&
+      getState().order === "desc" &&
+      isFollowingTimeline()
+    )
+      endTimelineFollow();
+    renderTimeline();
+  });
   if (typeof ResizeObserver !== "undefined")
     new ResizeObserver(scheduleTimelineRemeasure).observe(list);
 }

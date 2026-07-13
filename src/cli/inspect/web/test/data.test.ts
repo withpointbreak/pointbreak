@@ -1,12 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import attentionJson from "./fixtures/attention.json";
 import historyJson from "./fixtures/history.json";
 import revisionsJson from "./fixtures/revisions.json";
 import threadsJson from "./fixtures/threads.json";
 import { mountInspectorDom, resetDom } from "./support/dom";
 import {
   installFetchMock,
+  resetAttentionResponse,
   resetFreshnessResponse,
+  resetHistoryResponse,
+  resetNewCountResponse,
+  setAttentionResponse,
   setFreshnessResponse,
+  setHistoryError,
+  setHistoryResponse,
+  setNewCountResponse,
   uninstallFetchMock,
 } from "./support/fetch";
 
@@ -17,13 +25,19 @@ import {
 // sharing one `state`, so reset the registry and remount the DOM each test.
 type Store = typeof import("../src/store");
 type Data = typeof import("../src/data");
+type Follow = typeof import("../src/follow");
+type Router = typeof import("../src/router");
 let store: Store;
 let data: Data;
+let follow: Follow;
+let router: Router;
 
 beforeEach(async () => {
   vi.resetModules();
   store = await import("../src/store");
   data = await import("../src/data");
+  follow = await import("../src/follow");
+  router = await import("../src/router");
   mountInspectorDom();
   installFetchMock();
 });
@@ -31,6 +45,9 @@ beforeEach(async () => {
 afterEach(() => {
   uninstallFetchMock();
   resetFreshnessResponse();
+  resetAttentionResponse();
+  resetHistoryResponse();
+  resetNewCountResponse();
   resetDom();
 });
 
@@ -216,6 +233,49 @@ describe("load", () => {
     }
   });
 
+  it("recovers when the query changes during the initial history request", async () => {
+    const firstHistory = deferredResponse(historyJson);
+    let historyRequested!: () => void;
+    const requested = new Promise<void>((resolve) => {
+      historyRequested = resolve;
+    });
+    let deferFirstHistory = true;
+    const inner = globalThis.fetch;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      if (
+        deferFirstHistory &&
+        new URL(url, "http://inspector.test").pathname === "/api/history"
+      ) {
+        deferFirstHistory = false;
+        historyRequested();
+        return firstHistory.promise;
+      }
+      return inner(input as RequestInfo, init);
+    }) as typeof fetch;
+    store.subscribe(data.maybeReloadForQuery);
+    try {
+      const loading = data.load();
+      await requested;
+      store.commit({ filterText: "pinned" });
+      firstHistory.resolve();
+      await loading;
+      await flush();
+    } finally {
+      globalThis.fetch = inner;
+    }
+
+    const state = store.getState();
+    expect(state.history).not.toBeNull();
+    expect(state.history?.queryKey).toBe(data.historyQueryParams(state));
+    expect(state.history?.queryKey).toContain("q=pinned");
+  });
+
   it("a poll reload re-fetches page 1 of the CURRENT query", async () => {
     await data.load();
     const restore = captureHistoryUrls();
@@ -337,9 +397,376 @@ describe("load", () => {
       globalThis.fetch = restore;
     }
   });
+
+  it("ending follow freezes the anchor from the newest loaded entry", async () => {
+    await data.load();
+    const head = store.getState().history?.entries?.[0];
+
+    follow.endTimelineFollow();
+
+    const s = store.getState();
+    expect(s.followByLens.timeline).toBe(false);
+    expect(s.timelineHeadAnchor).toEqual({
+      occurredAt: head?.occurredAt,
+      eventId: head?.eventId,
+    });
+  });
+
+  it("resume reloads the head, clears stream position and selection, and re-enables follow", async () => {
+    await data.load();
+    const selected = store.getState().history?.entries?.[2]?.eventId ?? null;
+    store.commit({
+      selected: { kind: "event", id: selected },
+      open: true,
+    });
+    follow.endTimelineFollow();
+    store.commit({ timelineNewCount: 7 });
+
+    await follow.resumeTimelineFollow();
+
+    const s = store.getState();
+    expect(s.followByLens.timeline).toBe(true);
+    expect(s.timelineHeadAnchor).toBeNull();
+    expect(s.timelineNewCount).toBe(0);
+    expect(s.selected.id).toBeNull();
+  });
+
+  it("a failed head reload leaves the reader parked with the count intact", async () => {
+    await data.load();
+    follow.endTimelineFollow();
+    store.commit({ timelineNewCount: 7 });
+    setHistoryError(503, "history offline");
+
+    await follow.resumeTimelineFollow();
+
+    const s = store.getState();
+    expect(s.followByLens.timeline).toBe(false);
+    expect(s.timelineNewCount).toBe(7);
+  });
+
+  it("an in-window sel application ends follow and freezes the anchor", async () => {
+    await data.load();
+    const head = store.getState().history?.entries?.[0];
+    const selected = store.getState().history?.entries?.[2]?.eventId;
+    history.replaceState(
+      null,
+      "",
+      `#/timeline?sel=${encodeURIComponent(selected ?? "")}`,
+    );
+
+    router.applyHash();
+
+    expect(store.getState().followByLens.timeline).toBe(false);
+    expect(store.getState().timelineHeadAnchor).toEqual({
+      occurredAt: head?.occurredAt,
+      eventId: head?.eventId,
+    });
+  });
+
+  it("a query change with no engaged selection restores follow", async () => {
+    await data.load();
+    follow.endTimelineFollow();
+    store.subscribe(data.maybeReloadForQuery);
+
+    router.navigate({ filterText: "pinned" }, { replace: true });
+    await flush();
+
+    const s = store.getState();
+    expect(s.followByLens.timeline).toBe(true);
+    expect(s.timelineHeadAnchor).toBeNull();
+    expect(s.timelineNewCount).toBe(0);
+  });
+
+  it("a query change with an engaged selection stays parked and re-freezes from the new head", async () => {
+    await data.load();
+    const selected = store.getState().history?.entries?.[2]?.eventId ?? null;
+    store.commit({ selected: { kind: "event", id: selected }, open: true });
+    const detail = await import("../src/detail");
+    detail.renderDetail();
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      selected,
+    );
+    follow.endTimelineFollow();
+    store.commit({ timelineNewCount: 7 });
+    const newHead = {
+      eventId: "evt:sha256:new-query-head",
+      eventType: "review_observation_recorded",
+      occurredAt: "2026-07-13T20:00:00Z",
+    };
+    setHistoryResponse({
+      ...(historyJson as unknown as Record<string, unknown>),
+      entries: [newHead],
+      offset: 0,
+      matchCount: 1,
+    });
+    store.subscribe(data.maybeReloadForQuery);
+
+    router.navigate({ filterText: "pinned" }, { replace: true });
+    await flush();
+
+    const s = store.getState();
+    expect(s.followByLens.timeline).toBe(false);
+    expect(s.selected).toEqual({ kind: "event", id: selected });
+    expect(s.timelineHeadAnchor).toEqual({
+      occurredAt: newHead.occurredAt,
+      eventId: newHead.eventId,
+    });
+    expect(s.timelineNewCount).toBe(0);
+    detail.renderDetail();
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      selected,
+    );
+  });
 });
 
 describe("pollFreshness", () => {
+  it("computes a signed attention delta across a poll reload", async () => {
+    await data.load();
+    const fewer = {
+      ...(attentionJson as unknown as Record<string, unknown>),
+      items: attentionJson.items.slice(0, -2),
+    };
+    setAttentionResponse(fewer);
+    setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT + 1 });
+
+    await data.pollFreshness();
+
+    expect(store.getState().attentionDelta).toBe(-2);
+  });
+
+  it("clears the attention delta on the liveness settle", async () => {
+    await data.load();
+    setAttentionResponse({
+      ...(attentionJson as unknown as Record<string, unknown>),
+      items: attentionJson.items.slice(0, -1),
+    });
+    setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT + 1 });
+    vi.useFakeTimers();
+    try {
+      await data.pollFreshness();
+      expect(store.getState().attentionDelta).toBe(-1);
+      vi.advanceTimersByTime(1200);
+      expect(store.getState().attentionDelta).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an unchanged tick leaves the attention delta null", async () => {
+    await data.load();
+    await data.pollFreshness();
+    expect(store.getState().attentionDelta).toBeNull();
+  });
+
+  it("preserves the revisions scroll position across a poll reload", async () => {
+    await data.load();
+    const units = document.createElement("div");
+    units.id = "units";
+    units.scrollTop = 120;
+    document.querySelector("#master")?.appendChild(units);
+    setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT + 1 });
+
+    await data.pollFreshness();
+
+    // happy-dom has no layout/repaint scroll reset; this remains a contract pin
+    // while the live browser gate verifies the observable behavior.
+    expect(document.querySelector<HTMLElement>("#units")?.scrollTop).toBe(120);
+  });
+
+  it("a parked changed tick probes new-count instead of refetching page 1", async () => {
+    await data.load();
+    follow.endTimelineFollow();
+    setNewCountResponse({
+      schema: "pointbreak.inspect-history-new-count",
+      newCount: 4,
+    });
+    setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT + 1 });
+    const { paths, restore } = captureRequestPaths();
+    try {
+      await data.pollFreshness();
+    } finally {
+      restore();
+    }
+    expect(paths).toContain("/api/history/new-count");
+    expect(paths).not.toContain("/api/history");
+    expect(store.getState().timelineNewCount).toBe(4);
+  });
+
+  it("the parked probe sends the frozen anchor and active filter params", async () => {
+    store.commit({ filterText: "pinned" });
+    await data.load();
+    follow.endTimelineFollow();
+    const anchor = store.getState().timelineHeadAnchor;
+    setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT + 1 });
+    let newCountUrl = "";
+    const inner = globalThis.fetch;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      if (
+        new URL(url, "http://inspector.test").pathname ===
+        "/api/history/new-count"
+      )
+        newCountUrl = url;
+      return inner(input as RequestInfo, init);
+    }) as typeof fetch;
+    try {
+      await data.pollFreshness();
+    } finally {
+      globalThis.fetch = inner;
+    }
+    const target = new URL(newCountUrl, "http://inspector.test");
+    expect(target.searchParams.get("sinceOccurredAt")).toBe(anchor?.occurredAt);
+    expect(target.searchParams.get("sinceEventId")).toBe(anchor?.eventId);
+    expect(target.searchParams.get("q")).toBe("pinned");
+    expect(target.searchParams.has("limit")).toBe(false);
+  });
+
+  it("a following changed tick replaces the head without creating an anchor", async () => {
+    await data.load();
+    setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT + 1 });
+    const { paths, restore } = captureRequestPaths();
+    try {
+      await data.pollFreshness();
+    } finally {
+      restore();
+    }
+    expect(paths).toContain("/api/history");
+    expect(paths).not.toContain("/api/history/new-count");
+    expect(store.getState().timelineHeadAnchor).toBeNull();
+  });
+
+  it("an in-flight following reload cannot replace history after the reader parks", async () => {
+    await data.load();
+    const selected = store.getState().history?.entries?.[2]?.eventId ?? null;
+    const deferred = deferredResponse({
+      ...(historyJson as unknown as Record<string, unknown>),
+      entries: [
+        {
+          eventId: "evt:sha256:late-poll-head",
+          eventType: "review_observation_recorded",
+          occurredAt: "2026-07-13T21:00:00Z",
+        },
+      ],
+    });
+    let historyRequested!: () => void;
+    const requested = new Promise<void>((resolve) => {
+      historyRequested = resolve;
+    });
+    const inner = globalThis.fetch;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      if (new URL(url, "http://inspector.test").pathname === "/api/history") {
+        historyRequested();
+        return deferred.promise;
+      }
+      return inner(input as RequestInfo, init);
+    }) as typeof fetch;
+    setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT + 1 });
+    try {
+      const poll = data.pollFreshness();
+      await requested;
+      follow.endTimelineFollow();
+      store.commit({ selected: { kind: "event", id: selected }, open: true });
+      deferred.resolve();
+      await poll;
+    } finally {
+      globalThis.fetch = inner;
+    }
+
+    expect(store.getState().followByLens.timeline).toBe(false);
+    expect(
+      store
+        .getState()
+        .history?.entries.some((entry) => entry.eventId === selected),
+    ).toBe(true);
+    expect(store.getState().selected.id).toBe(selected);
+  });
+
+  it("a stale parked count response cannot repopulate the count after catch-up", async () => {
+    await data.load();
+    follow.endTimelineFollow();
+    const deferred = deferredResponse({
+      schema: "pointbreak.inspect-history-new-count",
+      newCount: 7,
+    });
+    let probeRequested!: () => void;
+    const requested = new Promise<void>((resolve) => {
+      probeRequested = resolve;
+    });
+    const inner = globalThis.fetch;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      if (
+        new URL(url, "http://inspector.test").pathname ===
+        "/api/history/new-count"
+      ) {
+        probeRequested();
+        return deferred.promise;
+      }
+      return inner(input as RequestInfo, init);
+    }) as typeof fetch;
+    setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT + 1 });
+    try {
+      const poll = data.pollFreshness();
+      await requested;
+      await follow.resumeTimelineFollow();
+      deferred.resolve();
+      await poll;
+    } finally {
+      globalThis.fetch = inner;
+    }
+
+    expect(store.getState().followByLens.timeline).toBe(true);
+    expect(store.getState().timelineNewCount).toBe(0);
+  });
+
+  it("does not probe or replace while parked under ascending order", async () => {
+    await data.load();
+    follow.endTimelineFollow();
+    store.commit({ order: "asc", timelineNewCount: 0 });
+    setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT + 1 });
+    const { paths, restore } = captureRequestPaths();
+    try {
+      await data.pollFreshness();
+    } finally {
+      restore();
+    }
+    expect(paths).not.toContain("/api/history");
+    expect(paths).not.toContain("/api/history/new-count");
+    expect(store.getState().timelineNewCount).toBe(0);
+  });
+
+  it("does not probe or replace while parked without an anchor", async () => {
+    await data.load();
+    follow.endTimelineFollow();
+    store.commit({ timelineHeadAnchor: null, timelineNewCount: 0 });
+    setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT + 1 });
+    const { paths, restore } = captureRequestPaths();
+    try {
+      await data.pollFreshness();
+    } finally {
+      restore();
+    }
+    expect(paths).not.toContain("/api/history");
+    expect(paths).not.toContain("/api/history/new-count");
+    expect(store.getState().timelineNewCount).toBe(0);
+  });
+
   it("preserves a parked-away window and its selection on a changed tick", async () => {
     await data.load();
     const history = store.getState().history;
@@ -359,6 +786,7 @@ describe("pollFreshness", () => {
       selected: { kind: "event", id: "evt:sha256:parked" },
       open: true,
     });
+    follow.endTimelineFollow();
     setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT + 1 });
 
     await data.pollFreshness();
@@ -429,6 +857,7 @@ describe("pollFreshness", () => {
     store.commit({
       history: { ...history, offset: 200 },
     });
+    follow.endTimelineFollow();
     setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT + 1 });
     const { paths, restore } = captureRequestPaths();
     try {

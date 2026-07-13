@@ -41,6 +41,10 @@ export interface DistinctValues {
 export interface HistoryDoc {
   entries: HistoryEntry[];
   diagnostics: unknown[];
+  // Client-only carrier for an engaged event that a query-driven page-one
+  // replacement moved outside the visible window. It keeps the detail pane
+  // resolvable without inserting a non-matching row into the filtered timeline.
+  retainedEntry?: HistoryEntry;
   // The event-set hash the stat row displays (present in the committed fixture).
   // It is the authoritative confirm stamp on this full-read endpoint; the cheap
   // freshness poll keys on the event-count marker instead.
@@ -200,6 +204,12 @@ export interface State {
   // `commit` directly (a navigate would push a history entry for a non-URL
   // change).
   reading: boolean;
+  // Stream position is session-only, like reading mode: the router never sees
+  // these fields, and follow.ts is their only writer after initialization.
+  followByLens: Record<string, boolean>;
+  timelineHeadAnchor: { occurredAt: string; eventId: string } | null;
+  timelineNewCount: number;
+  attentionDelta: number | null;
   enabledTypes: Set<string>;
   seenTypes: Set<string>;
   // The structured query string (serialized as q=): free-text terms plus
@@ -247,6 +257,10 @@ const state: State = {
   open: false,
   attentionFocus: null,
   reading: false,
+  followByLens: { timeline: true, list: false, attention: false },
+  timelineHeadAnchor: null,
+  timelineNewCount: 0,
+  attentionDelta: null,
   enabledTypes: new Set(TYPES.map((t) => t.id)),
   seenTypes: new Set(TYPES.map((t) => t.id)),
   filterText: "",

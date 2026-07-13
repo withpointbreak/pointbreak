@@ -19,15 +19,27 @@ import threadsJson from "../fixtures/threads.json";
 const FIXTURES: Record<string, unknown> = {
   "/api/revisions": revisionsJson,
   "/api/threads": threadsJson,
-  "/api/attention": attentionJson,
   "/api/identity": identityJson,
 };
+
+let attentionResponse: unknown = attentionJson;
+
+/** Override the unscoped `/api/attention` response the mock returns. */
+export function setAttentionResponse(payload: unknown): void {
+  attentionResponse = payload;
+}
+
+/** Restore the committed unscoped attention fixture. */
+export function resetAttentionResponse(): void {
+  attentionResponse = attentionJson;
+}
 
 // `/api/history` is now query-parameterized (page/facets/matchCount) but the mock
 // ignores the query string (matches on pathname), defaulting to the committed
 // fixture. A paging/reveal test overrides it to drive a synthetic window (a later
 // page, an `at=` reveal page) the single-page fixture cannot exercise.
 let historyResponse: unknown = historyJson;
+let historyError: { status: number; message: string } | null = null;
 
 /** Override the `/api/history` response the mock returns (paging / reveal tests). */
 export function setHistoryResponse(payload: unknown): void {
@@ -37,9 +49,15 @@ export function setHistoryResponse(payload: unknown): void {
   };
 }
 
+/** Make the `/api/history` read fail (resume/query-reload degradation tests). */
+export function setHistoryError(status: number, message: string): void {
+  historyError = { status, message };
+}
+
 /** Restore the default `/api/history` response (the committed history fixture). */
 export function resetHistoryResponse(): void {
   historyResponse = historyJson;
+  historyError = null;
 }
 
 // The freshness probe is not a captured fixture (it is the cheap event-count
@@ -56,6 +74,24 @@ const DEFAULT_FRESHNESS: unknown = {
   commitGraphStamp: "stamp-fixture",
 };
 let freshness: unknown = DEFAULT_FRESHNESS;
+
+let newCountResponse: unknown = {
+  schema: "pointbreak.inspect-history-new-count",
+  newCount: 0,
+};
+
+/** Override the `/api/history/new-count` response the mock returns. */
+export function setNewCountResponse(payload: unknown): void {
+  newCountResponse = payload;
+}
+
+/** Restore the default zero new-count response. */
+export function resetNewCountResponse(): void {
+  newCountResponse = {
+    schema: "pointbreak.inspect-history-new-count",
+    newCount: 0,
+  };
+}
 
 /** Override the `/api/freshness` response the mock returns (changed-marker tests). */
 export function setFreshnessResponse(payload: unknown): void {
@@ -198,7 +234,12 @@ const mockFetch: typeof fetch = (input) => {
   const target = targetOf(input);
   const pathname = target.pathname;
   if (pathname === "/api/freshness") return json(freshness);
-  if (pathname === "/api/history") return json(historyResponse);
+  if (pathname === "/api/history/new-count") return json(newCountResponse);
+  if (pathname === "/api/history") {
+    if (historyError)
+      return errorResponse(historyError.status, historyError.message);
+    return json(historyResponse);
+  }
   if (pathname === "/api/attention") {
     attentionRequestLog.push(pathname + target.search);
     if (target.searchParams.get("revision") !== null) {
@@ -209,7 +250,7 @@ const mockFetch: typeof fetch = (input) => {
         );
       return json(scopedAttentionResponse);
     }
-    // The unscoped form falls through to the fixture table below.
+    return json(attentionResponse);
   }
   for (const [prefix, fixture] of [
     ["/api/snapshots/", snapshotResponse],

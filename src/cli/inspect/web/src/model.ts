@@ -443,6 +443,15 @@ export function selectedEventId(): string | null {
   return selected && selected.kind === "event" ? selected.id : null;
 }
 
+/** Resolve an event from the visible window or its client-retained parked read. */
+export function eventForId(id: string): HistoryEntry | undefined {
+  const history = getState().history;
+  return (
+    history?.entries.find((entry) => entry.eventId === id) ??
+    (history?.retainedEntry?.eventId === id ? history.retainedEntry : undefined)
+  );
+}
+
 /** Whether a revision id exists in the loaded revisions list. */
 export function revisionExists(id: string): boolean {
   return (getState().revisions?.entries ?? []).some((r) => r.revisionId === id);
@@ -455,5 +464,5 @@ export function revisionInAnyThread(id: string): boolean {
 
 /** Whether an event id exists in the loaded history. */
 export function eventExists(id: string): boolean {
-  return (getState().history?.entries ?? []).some((e) => e.eventId === id);
+  return eventForId(id) != null;
 }

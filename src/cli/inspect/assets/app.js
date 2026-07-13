@@ -236,6 +236,8 @@
     kv: "kv",
     ghost: "ghost",
     actions: "actions",
+    timelineBoundaryControls: "timeline-boundary-controls",
+    timelineNewPill: "timeline-new-pill",
     // (The app-shell store-identity chip + detail popover is static markup in
     // index.html — `store-identity*` classes live there and in app.css, not here —
     // and its rows are `renderIdentity`-filled <dt>/<dd> styled via element selectors.
@@ -356,6 +358,7 @@
     attentionMeta: "attention-meta",
     attentionFreshness: "attention-freshness",
     attentionFocus: "attention-focus",
+    attentionDelta: "attention-delta",
     // The attention tab's judgment-queue count badge (absent when both tiers are
     // empty) and the muted advisory count beside the needs-input number.
     attentionBadge: "attention-badge",
@@ -1272,6 +1275,10 @@
     open: false,
     attentionFocus: null,
     reading: false,
+    followByLens: { timeline: true, list: false, attention: false },
+    timelineHeadAnchor: null,
+    timelineNewCount: 0,
+    attentionDelta: null,
     enabledTypes: new Set(TYPES.map((t) => t.id)),
     seenTypes: new Set(TYPES.map((t) => t.id)),
     filterText: "",
@@ -1494,6 +1501,11 @@
     return selected && selected.kind === "event" ? selected.id : null;
   }
   __name(selectedEventId, "selectedEventId");
+  function eventForId(id) {
+    const history2 = getState().history;
+    return history2?.entries.find((entry) => entry.eventId === id) ?? (history2?.retainedEntry?.eventId === id ? history2.retainedEntry : void 0);
+  }
+  __name(eventForId, "eventForId");
   function revisionExists(id) {
     return (getState().revisions?.entries ?? []).some((r) => r.revisionId === id);
   }
@@ -1503,7 +1515,7 @@
   }
   __name(revisionInAnyThread, "revisionInAnyThread");
   function eventExists(id) {
-    return (getState().history?.entries ?? []).some((e) => e.eventId === id);
+    return eventForId(id) != null;
   }
   __name(eventExists, "eventExists");
 
@@ -1616,6 +1628,67 @@
     }
   }
   __name(renderConnectionChrome, "renderConnectionChrome");
+
+  // src/follow.ts
+  function followState(timeline) {
+    return { ...getState().followByLens, timeline };
+  }
+  __name(followState, "followState");
+  var intentGeneration = 0;
+  function timelineFollowGeneration() {
+    return intentGeneration;
+  }
+  __name(timelineFollowGeneration, "timelineFollowGeneration");
+  function headAnchor() {
+    const head = getState().history?.entries?.[0];
+    const occurredAt = head?.occurredAt;
+    const eventId = head?.eventId;
+    return occurredAt && eventId ? { occurredAt, eventId } : null;
+  }
+  __name(headAnchor, "headAnchor");
+  function isFollowingTimeline() {
+    return getState().followByLens.timeline === true;
+  }
+  __name(isFollowingTimeline, "isFollowingTimeline");
+  function endTimelineFollow() {
+    intentGeneration += 1;
+    if (!isFollowingTimeline()) return;
+    commit({
+      followByLens: followState(false),
+      timelineHeadAnchor: headAnchor(),
+      timelineNewCount: 0
+    });
+  }
+  __name(endTimelineFollow, "endTimelineFollow");
+  async function resumeTimelineFollow() {
+    if (isFollowingTimeline()) return;
+    const generation = timelineFollowGeneration();
+    const queryKey = historyQueryParams(getState());
+    if (!await loadHistoryHead(
+      () => timelineFollowGeneration() === generation && historyQueryParams(getState()) === queryKey
+    ))
+      return;
+    navigate({ selected: { kind: null, id: null } });
+    intentGeneration += 1;
+    commit({
+      followByLens: followState(true),
+      timelineHeadAnchor: null,
+      timelineNewCount: 0
+    });
+    const timeline = $("#timeline");
+    if (timeline) timeline.scrollTop = 0;
+  }
+  __name(resumeTimelineFollow, "resumeTimelineFollow");
+  function resetTimelineFollowForQueryChange() {
+    intentGeneration += 1;
+    const engaged = getState().selected.kind === "event" && Boolean(getState().selected.id);
+    commit({
+      followByLens: followState(!engaged),
+      timelineHeadAnchor: engaged ? headAnchor() : null,
+      timelineNewCount: 0
+    });
+  }
+  __name(resetTimelineFollowForQueryChange, "resetTimelineFollowForQueryChange");
 
   // src/http.ts
   var RequestFailure = class extends Error {
@@ -1752,6 +1825,28 @@
     return p.toString();
   }
   __name(historyQueryParams, "historyQueryParams");
+  async function probeNewCount() {
+    const s = getState();
+    const generation = timelineFollowGeneration();
+    const anchor = s.timelineHeadAnchor;
+    const queryKey = historyQueryParams(s);
+    if (s.followByLens.timeline || s.order !== "desc" || !anchor) return;
+    const params = new URLSearchParams(queryKey);
+    params.delete("limit");
+    params.delete("offset");
+    params.delete("at");
+    params.set("sinceOccurredAt", anchor.occurredAt);
+    params.set("sinceEventId", anchor.eventId);
+    const doc = await fetchJSON(
+      `/api/history/new-count?${params.toString()}`
+    );
+    const current = getState();
+    const currentAnchor = current.timelineHeadAnchor;
+    if (timelineFollowGeneration() !== generation || current.followByLens.timeline || current.order !== "desc" || historyQueryParams(current) !== queryKey || currentAnchor?.occurredAt !== anchor.occurredAt || currentAnchor?.eventId !== anchor.eventId)
+      return;
+    commit({ timelineNewCount: doc.newCount ?? 0 });
+  }
+  __name(probeNewCount, "probeNewCount");
   function showError(message) {
     const el = $("#error");
     if (!el) return;
@@ -1775,11 +1870,12 @@
     });
   }
   __name(commitFreshnessBaseline, "commitFreshnessBaseline");
-  async function loadHistoryHead() {
+  async function loadHistoryHead(isCurrent = () => true) {
     try {
-      const freshness = await fetchJSON("/api/freshness");
       const params = historyQueryParams(getState());
+      const freshness = await fetchJSON("/api/freshness");
       const historyRaw = await fetchJSON(`/api/history?${params}`);
+      if (!isCurrent()) return false;
       showError(null);
       commit({
         history: { ...historyRaw, queryKey: params }
@@ -1794,17 +1890,25 @@
   __name(loadHistoryHead, "loadHistoryHead");
   async function loadWholeDocuments() {
     try {
+      const previousAttentionCount = getState().attention?.items?.length;
+      const revisionsScrollTop = $("#units")?.scrollTop;
       const [revisionsRaw, threadsRaw, attentionRaw] = await Promise.all([
         fetchJSON("/api/revisions"),
         fetchJSON("/api/threads"),
         fetchJSON("/api/attention")
       ]);
+      const attention = attentionRaw;
       showError(null);
       commit({
         revisions: revisionsRaw,
         threads: threadsRaw,
-        attention: attentionRaw
+        attention,
+        attentionDelta: previousAttentionCount == null ? null : attention.items.length - previousAttentionCount
       });
+      if (revisionsScrollTop != null) {
+        const units = $("#units");
+        if (units) units.scrollTop = revisionsScrollTop;
+      }
       return true;
     } catch (err) {
       showLoadError(err);
@@ -1832,6 +1936,7 @@
     if (!doc) return false;
     showError(null);
     commitHistoryPage(doc, queryKey);
+    resetTimelineFollowForQueryChange();
     return true;
   }
   __name(reloadHistoryForQuery, "reloadHistoryForQuery");
@@ -1890,12 +1995,16 @@
     const queryKey = requestedQueryKey ?? historyQueryParams(s);
     const prev = s.history;
     const merged = prev && prev.queryKey === queryKey ? mergeWindows(prev, page) : { entries: page.entries ?? [], offset: page.offset ?? 0 };
+    const selected = s.selected.kind === "event" && s.selected.id ? s.selected.id : null;
+    const selectedIsVisible = selected != null && merged.entries.some((entry) => entry.eventId === selected);
+    const retainedEntry = selected != null && !selectedIsVisible ? prev?.entries.find((entry) => entry.eventId === selected) ?? (prev?.retainedEntry?.eventId === selected ? prev.retainedEntry : void 0) : void 0;
     commit({
       history: {
         ...page,
         entries: merged.entries,
         offset: merged.offset,
-        queryKey
+        queryKey,
+        retainedEntry
       }
     });
   }
@@ -1956,27 +2065,64 @@
     return doc?.entries?.[0]?.eventId ?? null;
   }
   __name(fetchEventIdForQuery, "fetchEventIdForQuery");
+  var pollSettleTimer;
+  function settlePoll(markWatching) {
+    clearTimeout(pollSettleTimer);
+    pollSettleTimer = setTimeout(() => {
+      commit({ attentionDelta: null });
+      if (markWatching) setRefreshState("watching");
+    }, 1200);
+  }
+  __name(settlePoll, "settlePoll");
   async function pollFreshness() {
+    let documentsLoaded = false;
     try {
       const f = await fetchJSON("/api/freshness");
       const s = getState();
       const stampChanged = f.commitGraphStamp != null && (s.lastCommitGraphStamp == null || f.commitGraphStamp !== s.lastCommitGraphStamp);
       const changed = (f.eventCount ?? null) !== s.lastEventCount || stampChanged;
       if (changed) {
+        clearTimeout(pollSettleTimer);
         setRefreshState("updated");
-        const documentsLoaded = await loadWholeDocuments();
-        const historyLoaded = (getState().history?.offset ?? 0) !== 0 || await loadHistoryHead();
-        if (!documentsLoaded || !historyLoaded) {
+        documentsLoaded = await loadWholeDocuments();
+        if (!documentsLoaded) {
           setRefreshState("degraded");
+          commit({ attentionDelta: null });
+          return;
+        }
+        let historyLoaded = true;
+        if (getState().followByLens.timeline) {
+          const generation = timelineFollowGeneration();
+          const queryKey = historyQueryParams(getState());
+          const isCurrent = /* @__PURE__ */ __name(() => {
+            const current = getState();
+            return timelineFollowGeneration() === generation && current.followByLens.timeline && historyQueryParams(current) === queryKey;
+          }, "isCurrent");
+          historyLoaded = await loadHistoryHead(isCurrent);
+          if (!historyLoaded && !isCurrent()) {
+            historyLoaded = true;
+            await probeNewCount();
+          }
+        } else {
+          await probeNewCount();
+        }
+        if (!historyLoaded) {
+          setRefreshState("degraded");
+          settlePoll(false);
           return;
         }
         commitFreshnessBaseline(f);
-        setTimeout(() => setRefreshState("watching"), 1200);
+        settlePoll(true);
       } else {
         setRefreshState("watching");
       }
     } catch {
       setRefreshState("degraded");
+      if (documentsLoaded) settlePoll(false);
+      else {
+        clearTimeout(pollSettleTimer);
+        commit({ attentionDelta: null });
+      }
     }
   }
   __name(pollFreshness, "pollFreshness");
@@ -2135,6 +2281,8 @@
   function applyHash() {
     const parsed = parseHash(location.hash, presentTypes());
     const patch = resolve(parsed);
+    if (patch.selected?.kind === "event" && patch.selected.id)
+      endTimelineFollow();
     commit(patch);
     if (parsed.migrated === "threads-alias") {
       history.replaceState(
@@ -4075,8 +4223,8 @@
     const el = $("#detail-body");
     if (!el) return;
     rememberScroll();
-    const entries = getState().history?.entries ?? [];
-    const e = entries.find((x) => x.eventId === selectedEventId());
+    const selected = selectedEventId();
+    const e = selected ? eventForId(selected) : void 0;
     if (!e) {
       el.innerHTML = `<p class="${CLASS.empty}">Select an event or revision to inspect.</p>`;
       projectScroll(null);
@@ -4777,7 +4925,11 @@
   function ensureScrollListener(list) {
     if (list.dataset.virtualized) return;
     list.dataset.virtualized = "1";
-    list.addEventListener("scroll", () => renderTimeline());
+    list.addEventListener("scroll", () => {
+      if (list.scrollTop > 0 && getState().order === "desc" && isFollowingTimeline())
+        endTimelineFollow();
+      renderTimeline();
+    });
     if (typeof ResizeObserver !== "undefined")
       new ResizeObserver(scheduleTimelineRemeasure).observe(list);
   }
@@ -4873,6 +5025,7 @@
   async function revealEvent(eventId) {
     const page = await fetchRevealPage(eventId);
     if (!page?.present) return;
+    endTimelineFollow();
     navigate({ ...revealPatch(page, eventId), ...DIFF_ROUTE_CLEARED });
   }
   __name(revealEvent, "revealEvent");
@@ -5051,9 +5204,7 @@
     const sel = getState().selected;
     if (sel.kind === "revision") return sel.id ?? "";
     if (sel.kind === "event") {
-      const event = (getState().history?.entries ?? []).find(
-        (e) => e.eventId === sel.id
-      );
+      const event = sel.id ? eventForId(sel.id) : void 0;
       return event ? entryRevisionId(event) : "";
     }
     return "";
@@ -5091,9 +5242,7 @@
       };
     }
     if (sel.kind === "event") {
-      const event = (getState().history?.entries ?? []).find(
-        (e) => e.eventId === sel.id
-      );
+      const event = sel.id ? eventForId(sel.id) : void 0;
       return {
         kind: "Current",
         label: "Open current selection",
@@ -5233,10 +5382,13 @@
         kind: "Events",
         label: entryTitle(e),
         hint: typeLabel(e.eventType),
-        run: /* @__PURE__ */ __name(() => navigate({
-          selected: { kind: "event", id: e.eventId ?? "" },
-          ...DIFF_ROUTE_CLEARED
-        }), "run")
+        run: /* @__PURE__ */ __name(() => {
+          endTimelineFollow();
+          navigate({
+            selected: { kind: "event", id: e.eventId ?? "" },
+            ...DIFF_ROUTE_CLEARED
+          });
+        }, "run")
       });
     }
     return assignCommandOptionIds(cmds);
@@ -5488,6 +5640,7 @@
   }
   __name(pageLoadedLens, "pageLoadedLens");
   async function stepTimeline(delta) {
+    endTimelineFollow();
     const state2 = getState();
     const { offset, count, matchCount } = loadedWindow(state2);
     const ids = lensEntryIds();
@@ -5526,6 +5679,7 @@
   }
   __name(pageOffsetContaining, "pageOffsetContaining");
   async function selectTimelineIndex(targetIndex) {
+    endTimelineFollow();
     const state2 = getState();
     const { offset, count, matchCount } = loadedWindow(state2);
     const ids = lensEntryIds();
@@ -5639,9 +5793,7 @@
     if (sel.kind === "revision" && sel.id) {
       openRevisionDiff(sel.id);
     } else if (sel.kind === "event" && sel.id) {
-      const event = (getState().history?.entries ?? []).find(
-        (e) => e.eventId === sel.id
-      );
+      const event = eventForId(sel.id);
       const rev = event ? entryRevisionId(event) : "";
       if (rev) openRevisionDiff(rev);
     }
@@ -6051,21 +6203,49 @@ click to open the revision page">
       getState().attention?.items ?? []
     );
     tab.querySelector(`.${CLASS.attentionBadge}`)?.remove();
-    if (!primary.length && !secondary.length) return;
-    const badge = document.createElement("span");
-    badge.className = CLASS.attentionBadge;
-    const needsInput = primary.length === 1 ? "1 item needs input" : `${primary.length} items need input`;
-    badge.setAttribute(
-      "aria-label",
-      [
-        primary.length ? needsInput : "",
-        secondary.length ? `${secondary.length} advisory` : ""
-      ].filter(Boolean).join(", ")
-    );
-    badge.innerHTML = `${primary.length ? primary.length : ""}${secondary.length ? `<span class="${CLASS.attentionBadgeSecondary}">+${secondary.length}</span>` : ""}`;
-    tab.appendChild(badge);
+    tab.querySelector(`.${CLASS.attentionDelta}`)?.remove();
+    if (primary.length || secondary.length) {
+      const badge = document.createElement("span");
+      badge.className = CLASS.attentionBadge;
+      const needsInput = primary.length === 1 ? "1 item needs input" : `${primary.length} items need input`;
+      badge.setAttribute(
+        "aria-label",
+        [
+          primary.length ? needsInput : "",
+          secondary.length ? `${secondary.length} advisory` : ""
+        ].filter(Boolean).join(", ")
+      );
+      badge.innerHTML = `${primary.length ? primary.length : ""}${secondary.length ? `<span class="${CLASS.attentionBadgeSecondary}">+${secondary.length}</span>` : ""}`;
+      tab.appendChild(badge);
+    }
+    const delta = getState().attentionDelta;
+    if (delta == null || delta === 0) return;
+    const chip = document.createElement("span");
+    chip.className = CLASS.attentionDelta;
+    chip.textContent = `changed ${delta > 0 ? `+${delta}` : `−${Math.abs(delta)}`}`;
+    chip.setAttribute("role", "status");
+    tab.appendChild(chip);
   }
   __name(renderAttentionBadge, "renderAttentionBadge");
+  function syncStreamPositionControls() {
+    const state2 = getState();
+    $("#jump-start")?.classList.remove("hidden");
+    $("#jump-end")?.classList.remove("hidden");
+    const follow = $("#follow-toggle");
+    if (follow) {
+      follow.classList.toggle(
+        "hidden",
+        state2.lens !== "timeline" || state2.order !== "desc"
+      );
+      follow.setAttribute("aria-pressed", String(state2.followByLens.timeline));
+    }
+    const pill = $("#timeline-new-pill");
+    if (!pill) return;
+    const visible = state2.lens === "timeline" && state2.order === "desc" && !state2.followByLens.timeline && state2.timelineNewCount > 0;
+    pill.classList.toggle("hidden", !visible);
+    pill.textContent = `${state2.timelineNewCount} new ↑`;
+  }
+  __name(syncStreamPositionControls, "syncStreamPositionControls");
   function syncControls() {
     const state2 = getState();
     const text = $("#filter-text");
@@ -6214,6 +6394,7 @@ click to open the revision page">
     renderStats();
     renderDiagnostics();
     renderLensSwitcher();
+    syncStreamPositionControls();
     if (applyDiffPageMode()) {
       void renderDiffPage();
       return;
@@ -6292,7 +6473,10 @@ click to open the revision page">
     const eventEl = t.closest("[data-event-id]");
     if (eventEl) {
       const id = eventEl.dataset.eventId;
-      if (id) navigate({ selected: { kind: "event", id }, open: true });
+      if (id) {
+        endTimelineFollow();
+        navigate({ selected: { kind: "event", id }, open: true });
+      }
       return;
     }
     const revEl = t.closest(".unit-card[data-revision-id]");
@@ -6396,6 +6580,14 @@ click to open the revision page">
       );
     });
     $("#density-toggle")?.addEventListener("click", notifyDensityListeners);
+    $("#timeline-new-pill")?.addEventListener("click", () => {
+      void resumeTimelineFollow();
+    });
+    $("#jump-start")?.addEventListener("click", () => jumpLensBoundary("first"));
+    $("#jump-end")?.addEventListener("click", () => jumpLensBoundary("last"));
+    $("#follow-toggle")?.addEventListener("click", () => {
+      void resumeTimelineFollow();
+    });
   }
   __name(wireToolbar, "wireToolbar");
   function main() {
