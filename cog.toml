@@ -33,6 +33,7 @@ post_bump_hooks = [
     "git push origin HEAD:main",
     "git push origin refs/tags/v{{version}}",
     "gh workflow run release.yml -f tag=v{{version}}",
+    "gh workflow run release-binaries.yml -f tag=v{{version}}",
 ]
 
 [git_hooks.commit-msg]
