@@ -78,13 +78,22 @@ export function showError(message: string | null): void {
   el.classList.remove("hidden");
 }
 
+function showLoadError(err: unknown): void {
+  showError(err instanceof Error ? err.message : String(err));
+}
+
+function commitFreshnessBaseline(freshness: FreshnessDoc): void {
+  commit({
+    lastEventCount: freshness.eventCount ?? null,
+    lastCommitGraphStamp: freshness.commitGraphStamp ?? null,
+  });
+}
+
 /**
- * Load page 1 of the history for the current query, commit it with the freshness
- * baseline as soon as it lands, then load the (still full) revisions and threads
- * documents on a second commit. Never calls render — the store subscriber repaints.
- * A load failure surfaces in `#error` rather than throwing.
+ * Load page 1 of the history for the current query and commit it with the
+ * freshness baseline. Resolves true only after the page has been committed.
  */
-export async function load(): Promise<void> {
+export async function loadHistoryHead(): Promise<boolean> {
   try {
     // Take the freshness marker BEFORE the documents, so the baseline can never be
     // newer than what was loaded. If an event lands during the document fetch, the
@@ -100,10 +109,18 @@ export async function load(): Promise<void> {
     showError(null);
     commit({
       history: { ...(historyRaw as HistoryDoc), queryKey: params },
-      lastEventCount: freshness.eventCount ?? null,
-      lastCommitGraphStamp: freshness.commitGraphStamp ?? null,
     });
+    commitFreshnessBaseline(freshness);
+    return true;
+  } catch (err) {
+    showLoadError(err);
+    return false;
+  }
+}
 
+/** Fetch and commit the full revisions, threads, and attention documents. */
+export async function loadWholeDocuments(): Promise<void> {
+  try {
     const [revisionsRaw, threadsRaw, attentionRaw] = await Promise.all([
       fetchJSON("/api/revisions"),
       fetchJSON("/api/threads"),
@@ -116,8 +133,17 @@ export async function load(): Promise<void> {
       attention: attentionRaw as AttentionDoc,
     });
   } catch (err) {
-    showError(err instanceof Error ? err.message : String(err));
+    showLoadError(err);
   }
+}
+
+/**
+ * Bootstrap both loader halves in their existing order. Never calls render — the
+ * store subscriber repaints. A load failure surfaces in `#error` rather than throwing.
+ */
+export async function load(): Promise<void> {
+  if (!(await loadHistoryHead())) return;
+  await loadWholeDocuments();
 }
 
 /**
@@ -380,7 +406,9 @@ export function setLiveness(state: Liveness): void {
  * Probe `/api/freshness` and reload when the event-log head marker or the
  * commit-graph stamp changed, updating the liveness indicator. The stamp
  * catches a pure-git landing — a fast-forward flips merge statuses without
- * appending an event (#467). A probe failure marks it stalled.
+ * appending an event (#467). A parked timeline window is preserved so its
+ * selected event remains available to the detail pane (#461). A probe failure
+ * marks it stalled.
  */
 export async function pollFreshness(): Promise<void> {
   try {
@@ -400,7 +428,10 @@ export async function pollFreshness(): Promise<void> {
     const changed = (f.eventCount ?? null) !== s.lastEventCount || stampChanged;
     if (changed) {
       setLiveness("updated");
-      await load();
+      await loadWholeDocuments();
+      // Follow mode will replace this geometric gate with its explicit follow flag.
+      if ((getState().history?.offset ?? 0) === 0) await loadHistoryHead();
+      commitFreshnessBaseline(f);
       setTimeout(() => setLiveness("watching"), 1200);
     } else {
       setLiveness("watching");

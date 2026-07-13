@@ -1347,17 +1347,36 @@
     el.classList.remove("hidden");
   }
   __name(showError, "showError");
-  async function load() {
+  function showLoadError(err) {
+    showError(err instanceof Error ? err.message : String(err));
+  }
+  __name(showLoadError, "showLoadError");
+  function commitFreshnessBaseline(freshness) {
+    commit({
+      lastEventCount: freshness.eventCount ?? null,
+      lastCommitGraphStamp: freshness.commitGraphStamp ?? null
+    });
+  }
+  __name(commitFreshnessBaseline, "commitFreshnessBaseline");
+  async function loadHistoryHead() {
     try {
       const freshness = await fetchJSON("/api/freshness");
       const params = historyQueryParams(getState());
       const historyRaw = await fetchJSON(`/api/history?${params}`);
       showError(null);
       commit({
-        history: { ...historyRaw, queryKey: params },
-        lastEventCount: freshness.eventCount ?? null,
-        lastCommitGraphStamp: freshness.commitGraphStamp ?? null
+        history: { ...historyRaw, queryKey: params }
       });
+      commitFreshnessBaseline(freshness);
+      return true;
+    } catch (err) {
+      showLoadError(err);
+      return false;
+    }
+  }
+  __name(loadHistoryHead, "loadHistoryHead");
+  async function loadWholeDocuments() {
+    try {
       const [revisionsRaw, threadsRaw, attentionRaw] = await Promise.all([
         fetchJSON("/api/revisions"),
         fetchJSON("/api/threads"),
@@ -1370,8 +1389,13 @@
         attention: attentionRaw
       });
     } catch (err) {
-      showError(err instanceof Error ? err.message : String(err));
+      showLoadError(err);
     }
+  }
+  __name(loadWholeDocuments, "loadWholeDocuments");
+  async function load() {
+    if (!await loadHistoryHead()) return;
+    await loadWholeDocuments();
   }
   __name(load, "load");
   async function loadIdentity() {
@@ -1536,7 +1560,9 @@
       const changed = (f.eventCount ?? null) !== s.lastEventCount || stampChanged;
       if (changed) {
         setLiveness("updated");
-        await load();
+        await loadWholeDocuments();
+        if ((getState().history?.offset ?? 0) === 0) await loadHistoryHead();
+        commitFreshnessBaseline(f);
         setTimeout(() => setLiveness("watching"), 1200);
       } else {
         setLiveness("watching");

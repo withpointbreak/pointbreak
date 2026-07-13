@@ -340,6 +340,106 @@ describe("load", () => {
 });
 
 describe("pollFreshness", () => {
+  it("preserves a parked-away window and its selection on a changed tick", async () => {
+    await data.load();
+    const history = store.getState().history;
+    if (!history) throw new Error("expected load to commit history");
+    store.commit({
+      history: {
+        ...history,
+        offset: 200,
+        entries: [
+          {
+            eventId: "evt:sha256:parked",
+            eventType: "review_observation_recorded",
+            occurredAt: "2026-07-01T10:00:00.000Z",
+          },
+        ],
+      },
+      selected: { kind: "event", id: "evt:sha256:parked" },
+      open: true,
+    });
+    setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT + 1 });
+
+    await data.pollFreshness();
+
+    const s = store.getState();
+    expect(s.history?.offset).toBe(200);
+    expect(
+      s.history?.entries?.some(
+        (entry) => entry.eventId === "evt:sha256:parked",
+      ),
+    ).toBe(true);
+    expect(s.selected).toEqual({ kind: "event", id: "evt:sha256:parked" });
+    expect(s.open).toBe(true);
+  });
+
+  it("still replaces page 1 when the window is at the head", async () => {
+    await data.load();
+    setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT + 1 });
+    const { paths, restore } = captureRequestPaths();
+    try {
+      await data.pollFreshness();
+    } finally {
+      restore();
+    }
+    expect(paths).toContain("/api/history");
+  });
+
+  it("does not advance the baseline past whole documents during a head reload", async () => {
+    await data.load();
+    const inner = globalThis.fetch;
+    let freshnessRequests = 0;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      if (new URL(url, "http://inspector.test").pathname === "/api/freshness") {
+        freshnessRequests += 1;
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              eventCount: HISTORY_EVENT_COUNT + freshnessRequests,
+              commitGraphStamp: "stamp-fixture",
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        );
+      }
+      return inner(input as RequestInfo, init);
+    }) as typeof fetch;
+    try {
+      await data.pollFreshness();
+    } finally {
+      globalThis.fetch = inner;
+    }
+    expect(freshnessRequests).toBe(2);
+    expect(store.getState().lastEventCount).toBe(HISTORY_EVENT_COUNT + 1);
+  });
+
+  it("refreshes the whole documents and re-seeds the baseline even when parked", async () => {
+    await data.load();
+    const history = store.getState().history;
+    if (!history) throw new Error("expected load to commit history");
+    store.commit({
+      history: { ...history, offset: 200 },
+    });
+    setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT + 1 });
+    const { paths, restore } = captureRequestPaths();
+    try {
+      await data.pollFreshness();
+    } finally {
+      restore();
+    }
+    expect(paths).toContain("/api/revisions");
+    expect(paths).toContain("/api/attention");
+    expect(paths).not.toContain("/api/history");
+    expect(store.getState().lastEventCount).toBe(HISTORY_EVENT_COUNT + 1);
+  });
+
   it("marks the refresh indicator watching when nothing changed", async () => {
     await data.load();
     await data.pollFreshness();
