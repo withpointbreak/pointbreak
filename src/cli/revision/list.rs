@@ -1,9 +1,14 @@
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
 use pointbreak::documents::revision_list_document;
-use pointbreak::session::{OrphanVisibility, RefFilterMode, RevisionListOptions, list_revisions};
+use pointbreak::session::{
+    OrphanVisibility, QueryDiagnosticCode, QuerySurface, RefFilterMode, RevisionListOptions,
+    RevisionOverviewsOptions, RevisionRecordInputs, SupersessionView, build_revision_search_record,
+    list_revisions, matches_query, parse_search_query_for, read_events_for_display,
+    revision_supersession_classification, show_revision_overviews,
+};
 
 use crate::cli::output;
 
@@ -18,6 +23,12 @@ pub(super) struct RevisionListArgs {
     /// coincident content may span threads; never a head-selector).
     #[arg(long)]
     object: Option<String>,
+
+    /// Filter with the review filter grammar (e.g. `is:superseded tag:state-change`).
+    /// When set, builds per-revision overviews + supersession classification for the
+    /// listed revisions; the flagless listing pays no such cost.
+    #[arg(long)]
+    filter: Option<String>,
 
     /// Filter to revisions associated with this ref; a short branch name is
     /// normalized to its full ref before matching.
@@ -115,7 +126,64 @@ pub(super) fn run(
         result.revision_count = result.entries.len();
     }
 
+    apply_revision_filter(&args.repo, args.filter.as_deref(), &mut result)?;
+
     let document = revision_list_document(result);
     let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
     output::write_document_json_fallback(stdout, format, &document)
+}
+
+/// Apply the review filter grammar on the revision surface, in place. A no-op
+/// unless `--filter` is set, so the flagless listing pays no new cost and stays
+/// byte-identical: the per-revision overviews and supersession classification are
+/// built only inside this branch. Overviews are keyed by the representative
+/// `revision_id`, so a grouped row filters on its representative's
+/// overview/classification (the row stands for the group).
+fn apply_revision_filter(
+    repo: &Path,
+    filter: Option<&str>,
+    result: &mut pointbreak::session::RevisionListResult,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(filter) = filter else {
+        return Ok(());
+    };
+
+    let overviews = show_revision_overviews(
+        RevisionOverviewsOptions::new(repo)
+            .with_revisions(result.entries.iter().map(|e| e.revision_id.clone()))
+            .with_trust_set(crate::cli::common::discover_trust_set(repo))
+            .with_read_for_display(true),
+    )?;
+    let (events, _) = read_events_for_display(repo)?;
+    let classification =
+        revision_supersession_classification(&SupersessionView::from_events(&events)?);
+
+    // Parse on the revision surface. A known-but-unsupported qualifier or value is
+    // a usage error (non-zero exit carrying the message); a deprecated qualifier
+    // keeps running behind a stderr hint.
+    let parsed = parse_search_query_for(filter, QuerySurface::Revision);
+    for diagnostic in &parsed.diagnostics {
+        match diagnostic.code {
+            QueryDiagnosticCode::UnsupportedQualifier | QueryDiagnosticCode::UnsupportedValue => {
+                return Err(diagnostic.message.clone().into());
+            }
+            QueryDiagnosticCode::DeprecatedQualifier => eprintln!("hint: {}", diagnostic.message),
+        }
+    }
+
+    result.entries.retain(|entry| {
+        let Some(overview) = overviews.get(&entry.revision_id) else {
+            return false;
+        };
+        let facet = classification.get(&entry.revision_id);
+        let record = build_revision_search_record(RevisionRecordInputs {
+            entry,
+            overview,
+            classification_state: facet.map(|f| f.state).unwrap_or("isolated"),
+            competing: facet.is_some_and(|f| f.competing),
+        });
+        matches_query(&record.0, &parsed.clauses)
+    });
+    result.revision_count = result.entries.len();
+    Ok(())
 }

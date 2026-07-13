@@ -536,6 +536,210 @@ fn unit_list_ids(repo: &GitRepo, extra: &[&str]) -> Vec<String> {
         .collect()
 }
 
+#[test]
+fn revision_list_filter_by_is_superseded() {
+    let repo = modified_repo();
+    let path = repo.path().to_str().unwrap();
+    let first = parse_json(&shore(["capture", "--repo", path]).stdout);
+    let predecessor = first["revision"]["id"].as_str().unwrap().to_owned();
+    // A successor must carry different content or it collapses to the same snapshot id.
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    shore(["capture", "--repo", path, "--supersedes", &predecessor]);
+
+    let json = parse_json(
+        &shore([
+            "revision",
+            "list",
+            "--repo",
+            path,
+            "--filter",
+            "is:superseded",
+        ])
+        .stdout,
+    );
+    let ids: Vec<&str> = json["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["revisionId"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![predecessor.as_str()],
+        "only the superseded revision matches"
+    );
+    assert_eq!(json["revisionCount"], 1);
+}
+
+#[test]
+fn revision_list_filter_by_tag_key() {
+    let repo = modified_repo();
+    let path = repo.path().to_str().unwrap();
+    shore(["capture", "--repo", path]);
+    shore([
+        "observation",
+        "add",
+        "--repo",
+        path,
+        "--track",
+        "agent:codex",
+        "--title",
+        "Landed",
+        "--tag",
+        "state-change:landed",
+    ]);
+
+    // First-colon key facet matches the revision whose observation carries the tag.
+    let json = parse_json(
+        &shore([
+            "revision",
+            "list",
+            "--repo",
+            path,
+            "--filter",
+            "tag:state-change",
+        ])
+        .stdout,
+    );
+    assert_eq!(json["revisionCount"], 1);
+}
+
+#[test]
+fn revision_list_filter_rejects_type_qualifier_on_revision_surface() {
+    let repo = modified_repo();
+    let path = repo.path().to_str().unwrap();
+    shore(["capture", "--repo", path]);
+
+    // `type:` is a known-but-unsupported qualifier on the revision surface:
+    // a diagnostic and a non-zero exit, never a silent-empty match.
+    let out = shore([
+        "revision",
+        "list",
+        "--repo",
+        path,
+        "--filter",
+        "type:observation",
+    ]);
+    assert!(
+        !out.status.success(),
+        "type: is unsupported on the revision surface"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("type"),
+        "the message names the qualifier: {stderr}"
+    );
+}
+
+#[test]
+fn revision_list_flagless_output_unchanged() {
+    let repo = modified_repo();
+    let path = repo.path().to_str().unwrap();
+    shore(["capture", "--repo", path]);
+    // An observation would appear in an overview build; the flagless path builds none,
+    // so its bytes are the shared list document with no filter-added fields.
+    shore([
+        "observation",
+        "add",
+        "--repo",
+        path,
+        "--track",
+        "agent:codex",
+        "--title",
+        "Noise",
+        "--tag",
+        "state-change:landed",
+    ]);
+
+    let out = shore(["revision", "list", "--repo", path]);
+    let json = parse_json(&out.stdout);
+    assert_eq!(json["schema"], "pointbreak.review-revision-list");
+    let entry = &json["entries"][0];
+    assert!(
+        entry.get("overview").is_none(),
+        "flagless path builds no overview (zero new cost)"
+    );
+    assert!(
+        entry.get("attention").is_none(),
+        "no filter-derived fields leak into the flagless doc"
+    );
+}
+
+/// `observation list --tag` stays byte-exact whole-string AND the same store is
+/// matched by `revision list --filter 'tag:<key>'` via the shared first-colon key facet.
+#[test]
+fn tag_shared_convention_holds_across_observation_list_and_revision_filter() {
+    let repo = modified_repo();
+    let path = repo.path().to_str().unwrap();
+    shore(["capture", "--repo", path]);
+    shore([
+        "observation",
+        "add",
+        "--repo",
+        path,
+        "--track",
+        "agent:codex",
+        "--title",
+        "Landed",
+        "--tag",
+        "state-change:landed",
+    ]);
+
+    // `observation list --tag` is exact whole-string (byte-untouched).
+    let obs = parse_json(
+        &shore([
+            "observation",
+            "list",
+            "--repo",
+            path,
+            "--tag",
+            "state-change:landed",
+        ])
+        .stdout,
+    );
+    assert!(
+        obs["observations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["tags"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t == "state-change:landed")),
+        "exact whole-string --tag still matches"
+    );
+    // A partial key is NOT a whole-string tag, so `observation list --tag` finds nothing.
+    let partial = parse_json(
+        &shore([
+            "observation",
+            "list",
+            "--repo",
+            path,
+            "--tag",
+            "state-change",
+        ])
+        .stdout,
+    );
+    assert!(
+        partial["observations"].as_array().unwrap().is_empty(),
+        "--tag stays exact whole-string (never the key facet)"
+    );
+    // But the revision grammar's key facet matches the same store (dual index).
+    let rev = parse_json(
+        &shore([
+            "revision",
+            "list",
+            "--repo",
+            path,
+            "--filter",
+            "tag:state-change",
+        ])
+        .stdout,
+    );
+    assert_eq!(rev["revisionCount"], 1);
+}
+
 fn parse_json(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes).expect("parse CLI JSON")
 }

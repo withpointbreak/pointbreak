@@ -943,7 +943,7 @@ render-only and never gate a write.
 ```bash
 shore history [--repo <path>] [--revision <id>] [--track <track-id>] \
   [--event-type <event-type>]... [--ref <name> [--by label|liveness]] \
-  [--limit <n>] [--cursor <cursor>] [--watch [--poll-ms <ms>]] \
+  [--filter <query>] [--limit <n>] [--cursor <cursor>] [--watch [--poll-ms <ms>]] \
   [--include-body] [--format <fmt>]
 ```
 
@@ -959,6 +959,17 @@ shore history [--repo <path>] [--revision <id>] [--track <track-id>] \
 - `--ref <name>` filters to events of revisions associated with a ref (a short branch name is
   normalized to its full ref). `--by` chooses how `--ref` matches: `label` (the recorded label,
   offline; the default) or `liveness` (reachability from the ref's live tip).
+- `--filter <query>` runs the review filter grammar over the same per-event search records the
+  inspector's timeline queries. Event-surface qualifiers: `type:` (label or wire id; a comma list
+  ORs values, e.g. `type:observation,assessment`), `track:`, `actor:` (the `actor:` id prefix is
+  optional), `revision:`, `snapshot:`, `check:` (`passed|failed|errored|skipped`), `assessment:`,
+  `is:` (`open|answered`), `tag:` (a full tag string or its first-colon key — `tag:issue:191` or
+  `tag:issue`), and `before:`/`after:` (ISO-8601 date/datetime prefixes). Bare terms match free
+  text — including body content even without `--include-body` — and a leading `-` negates a
+  clause. The filter applies before `--limit`/`--cursor` windowing and composes with all the typed
+  flags above. A known-but-unsupported qualifier or value (for example `attention:` here) exits
+  non-zero with the diagnostic; the deprecated `status:` alias for `check:` still runs behind a
+  stderr hint.
 - `--limit <n>` returns at most N entries as a forward page (from the start, or from `--cursor`); the
   response carries a `nextCursor` to continue. `--cursor <cursor>` continues from a previous
   response's opaque `nextCursor`. Omit both for the full history.
@@ -1024,7 +1035,7 @@ narrative-first plus snapshot-complete view of one captured revision.
 
 ```bash
 shore revision list [--repo <path>] [--object <object-id>] [--ref <name> [--by label|liveness]] \
-  [--integration-ref <name>] [--worktree <path>] [--all | --orphans] [--format <fmt>]
+  [--filter <query>] [--integration-ref <name>] [--worktree <path>] [--all | --orphans] [--format <fmt>]
 ```
 
 `shore revision list` is the discovery surface for captured revisions. It emits
@@ -1039,6 +1050,18 @@ endpoints, and `objectArtifactContentHash`.
   default) or `liveness` (reachability from the ref's live tip). The succession view (the
   supersession DAG and a thread's competing heads) is reported by this same projection; there is no
   separate lineage surface.
+- `--filter <query>` runs the same review filter grammar on the revision surface, over per-revision
+  records aggregated from each revision's review facts. Revision-surface qualifiers: `track:` and
+  `actor:` (the union across the revision's facts; the `actor:` id prefix is optional),
+  `revision:`, `snapshot:`, `assessment:` (the resolved current assessment), `is:`
+  (`open|answered|unassessed|stale|follow-up|contested|superseded`), `tag:` (full string or
+  first-colon key), `attention:` (`open-request|unassessed|validation-context|follow-up|stale-fact`),
+  and `before:`/`after:` (ISO-8601 prefixes over the capture time); bare terms match the revision's
+  human text, and a leading `-` negates a clause. Only a filtered listing builds the per-revision
+  overviews and supersession classification — a plain listing pays no new cost — and a grouped row
+  filters on its representative revision. A known-but-unsupported qualifier (`type:`/`check:` on
+  this surface) exits non-zero with the diagnostic; the deprecated `status:` alias for
+  `assessment:` still runs behind a stderr hint.
 - `--integration-ref <name>` sets the reachability target for the `merged` status: a revision is
   `merged` only when it is an ancestor of this ref (equality counts). It defaults to the repository's
   detected default branch (`origin/HEAD`, else local `main`/`master`) — the same narrow default

@@ -586,6 +586,279 @@ fn review_history_rejects_malformed_cursor() {
     );
 }
 
+#[test]
+fn history_filter_narrows_by_type() {
+    let repo = modified_repo();
+    let path = repo.path().to_str().unwrap();
+    shore(["capture", "--repo", path]);
+    add_observation(&repo, "agent:codex", "an observation");
+    shore([
+        "assessment",
+        "add",
+        "--repo",
+        path,
+        "--track",
+        "agent:codex",
+        "--assessment",
+        "accepted",
+    ]);
+
+    let out = shore(["history", "--repo", path, "--filter", "type:assessment"]);
+    assert!(
+        out.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = parse_json(&out.stdout);
+    let kinds: Vec<&str> = json["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["summary"]["kind"].as_str().unwrap())
+        .collect();
+    assert!(!kinds.is_empty());
+    assert!(
+        kinds.iter().all(|k| *k == "review_assessment_recorded"),
+        "type:assessment keeps only assessment entries, got {kinds:?}"
+    );
+    // Identity still describes the full replayed set, never the filtered set.
+    assert_eq!(json["eventCount"], 4);
+}
+
+#[test]
+fn history_filter_tag_matches_first_colon_key_and_full_string() {
+    let repo = modified_repo();
+    let path = repo.path().to_str().unwrap();
+    shore(["capture", "--repo", path]);
+    shore([
+        "observation",
+        "add",
+        "--repo",
+        path,
+        "--track",
+        "agent:codex",
+        "--title",
+        "Tagged",
+        "--tag",
+        "issue:191",
+    ]);
+
+    // The full tag string matches the dual index.
+    let full = parse_json(&shore(["history", "--repo", path, "--filter", "tag:issue:191"]).stdout);
+    assert!(
+        full["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["summary"]["title"] == "Tagged")
+    );
+    // The first-colon key matches the same record.
+    let key = parse_json(&shore(["history", "--repo", path, "--filter", "tag:issue"]).stdout);
+    assert!(
+        key["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["summary"]["title"] == "Tagged")
+    );
+}
+
+#[test]
+fn history_filter_rejects_unsupported_qualifier_nonzero() {
+    let repo = modified_repo();
+    let path = repo.path().to_str().unwrap();
+    shore(["capture", "--repo", path]);
+
+    // `attention:` is known-but-unsupported on the event surface: a
+    // diagnostic and a non-zero exit, never a silent-empty match.
+    let out = shore(["history", "--repo", path, "--filter", "attention:x"]);
+    assert!(
+        !out.status.success(),
+        "an unsupported qualifier is a usage error"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("attention"),
+        "the message names the qualifier: {stderr}"
+    );
+}
+
+#[test]
+fn history_filter_status_alias_runs_and_hints_on_stderr() {
+    let repo = modified_repo();
+    let path = repo.path().to_str().unwrap();
+    shore(["capture", "--repo", path]);
+    add_validation_check(&repo); // records a passed validation check on agent:codex
+
+    // `status:` aliases to `check:` on the event surface — the command
+    // runs (exit 0) and emits a deprecation hint on stderr.
+    let out = shore(["history", "--repo", path, "--filter", "status:passed"]);
+    assert!(
+        out.status.success(),
+        "the deprecated alias still runs: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("status"),
+        "a deprecation hint names status: {stderr}"
+    );
+    let json = parse_json(&out.stdout);
+    assert!(
+        json["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["summary"]["kind"] == "validation_check_recorded")
+    );
+}
+
+#[test]
+fn history_filter_applies_before_windowing() {
+    let repo = modified_repo();
+    let path = repo.path().to_str().unwrap();
+    shore(["capture", "--repo", path]);
+    add_observation(&repo, "agent:codex", "first");
+    add_observation(&repo, "agent:codex", "second");
+    add_validation_check(&repo);
+
+    // Filter to observations, then take the first page of ONE. The window sees the
+    // filtered set: the single entry is an observation (never the capture/validation),
+    // and a nextCursor remains because two observations matched.
+    let page = parse_json(
+        &shore([
+            "history",
+            "--repo",
+            path,
+            "--filter",
+            "type:observation",
+            "--limit",
+            "1",
+        ])
+        .stdout,
+    );
+    let entries = page["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["summary"]["kind"], "review_observation_recorded");
+    assert!(
+        page["nextCursor"].is_string(),
+        "a second observation remains after the window"
+    );
+    assert_eq!(page["eventCount"], 5, "identity stays the full set");
+}
+
+#[test]
+fn history_filter_composes_with_ref() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    repo.commit_all("change");
+    repo.git(["branch", "-M", "main"]);
+    let path = repo.path().to_str().unwrap();
+    // A commit-range capture anchors the target (HEAD) commit under refs/heads/main.
+    shore(["capture", "--repo", path, "--base", "HEAD~1"]);
+
+    // --ref and --filter compose: the ref narrows to the capture's revision, grammar to captures.
+    let matched = parse_json(
+        &shore([
+            "history",
+            "--repo",
+            path,
+            "--ref",
+            "refs/heads/main",
+            "--by",
+            "liveness",
+            "--filter",
+            "type:capture",
+        ])
+        .stdout,
+    );
+    assert!(
+        matched["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["summary"]["kind"] == "revision_captured"),
+        "the ref-matched capture survives the grammar filter"
+    );
+    // A ref matching no unit yields nothing, even though type:capture would otherwise match —
+    // proof --ref applies alongside --filter before windowing.
+    let unmatched = parse_json(
+        &shore([
+            "history",
+            "--repo",
+            path,
+            "--ref",
+            "refs/heads/other",
+            "--filter",
+            "type:capture",
+        ])
+        .stdout,
+    );
+    assert!(unmatched["entries"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn history_filter_body_visibility_follows_include_body_flag() {
+    let repo = modified_repo();
+    let path = repo.path().to_str().unwrap();
+    shore(["capture", "--repo", path]);
+    add_observation_with_body(&repo, "agent:codex", "Body", "searchable detail");
+
+    // Without --include-body: output rides the flagless path, which omits body text.
+    let plain =
+        parse_json(&shore(["history", "--repo", path, "--filter", "type:observation"]).stdout);
+    let obs = plain["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["summary"]["title"] == "Body")
+        .expect("the observation is in the page");
+    assert!(
+        obs["summary"].get("body").is_none(),
+        "body text omitted without --include-body"
+    );
+    assert!(
+        !String::from_utf8_lossy(
+            &shore(["history", "--repo", path, "--filter", "type:observation"]).stdout
+        )
+        .contains("artifacts/notes/"),
+        "no artifact paths leak"
+    );
+
+    // A body-word free-text term still MATCHES (the oracle hydrates), body still not shown.
+    let searched = parse_json(&shore(["history", "--repo", path, "--filter", "searchable"]).stdout);
+    assert!(
+        searched["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["summary"]["title"] == "Body"),
+        "free-text hits body content even without --include-body"
+    );
+
+    // With --include-body: the body text is hydrated in the output.
+    let hydrated = parse_json(
+        &shore([
+            "history",
+            "--repo",
+            path,
+            "--filter",
+            "type:observation",
+            "--include-body",
+        ])
+        .stdout,
+    );
+    let obs = hydrated["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["summary"]["title"] == "Body")
+        .unwrap();
+    assert_eq!(obs["summary"]["body"], "searchable detail");
+}
+
 fn parse_json(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes).expect("parse CLI JSON")
 }
