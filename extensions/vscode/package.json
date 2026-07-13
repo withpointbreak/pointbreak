@@ -17,6 +17,7 @@
   "extensionKind": ["workspace"],
   "main": "./out/extension.js",
   "activationEvents": [
+    "onStartupFinished",
     "onView:pointbreak.attention",
     "onCommand:pointbreak.refreshAttention",
     "onCommand:pointbreak.capture",
@@ -72,8 +73,9 @@
         },
         "pointbreak.reviewUrl": {
           "type": "string",
-          "default": "http://127.0.0.1:7878",
-          "description": "URL of the local Pointbreak Review server."
+          "scope": "resource",
+          "default": "",
+          "description": "Optional URL for an externally managed Pointbreak Review server for this folder. Leave empty to let the extension restore its last verified port."
         }
       }
     }

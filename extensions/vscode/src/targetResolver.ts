@@ -9,6 +9,8 @@ import {
 export interface ReviewTarget {
   key: string;
   label: string;
+  storeIdentity: string;
+  contextIdentity: string;
 }
 
 export type TargetResolution =
@@ -60,6 +62,8 @@ export function reviewTargetFromStatus(status: StoreStatusDoc): ReviewTarget {
   return {
     key: `${status.storeIdentity}/${status.contextIdentity}`,
     label: status.repositoryFamilyRef ?? status.storeRef ?? "Pointbreak",
+    storeIdentity: status.storeIdentity,
+    contextIdentity: status.contextIdentity,
   };
 }
 

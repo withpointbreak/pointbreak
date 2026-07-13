@@ -118,6 +118,10 @@ describe("deriveTree", () => {
       "Review this",
       "stale_assessment",
     ]);
+    expect(section?.children).toMatchObject([
+      { lens: "attention" },
+      { lens: "attention" },
+    ]);
   });
 
   it("counts attention items across targets for the badge", () => {
@@ -195,7 +199,12 @@ function resolved(
   return {
     kind: "resolved",
     folder: workspaceFolder(path, key) as WorkspaceFolder,
-    target: { key, label: key.toUpperCase() },
+    target: {
+      key,
+      label: key.toUpperCase(),
+      storeIdentity: `store:${key}`,
+      contextIdentity: `context:${key}`,
+    },
     emptyInventory,
   };
 }

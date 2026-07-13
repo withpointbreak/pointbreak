@@ -9,6 +9,7 @@
 
 mod support;
 
+use pointbreak::session::{StoreStatusOptions, store_status};
 use support::git_repo::GitRepo;
 use support::inspect::{Inspector, WorktreeCapture, capture};
 
@@ -28,6 +29,9 @@ fn identity_reports_clone_placement_and_repo_basename() {
     assert_eq!(id["repository"], expected);
     assert_eq!(id["placement"]["tier"], "clone");
     assert_eq!(id["placement"]["label"], "clone store");
+    let status = store_status(StoreStatusOptions::new(repo.path())).unwrap();
+    assert_eq!(id["storeIdentity"], status.store_identity);
+    assert_eq!(id["contextIdentity"], status.context_identity);
     // No family under the clone-local tier; no worktree row in the main worktree.
     assert!(id.get("family").is_none() || id["family"].is_null());
     assert!(id.get("worktree").is_none() || id["worktree"].is_null());
@@ -60,4 +64,7 @@ fn identity_distinguishes_repository_from_a_linked_worktree() {
     assert_eq!(id["worktree"], "feat-foo");
     // A linked worktree resolves the shared common-dir store: still the clone tier.
     assert_eq!(id["placement"]["tier"], "clone");
+    let status = store_status(StoreStatusOptions::new(&capture.worktree)).unwrap();
+    assert_eq!(id["storeIdentity"], status.store_identity);
+    assert_eq!(id["contextIdentity"], status.context_identity);
 }

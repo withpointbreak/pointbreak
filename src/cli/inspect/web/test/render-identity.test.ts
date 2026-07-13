@@ -15,6 +15,8 @@ let store: Store;
 let render: Render;
 
 const CLONE: IdentityDoc = {
+  storeIdentity: "store:sha256:fixture",
+  contextIdentity: "context:sha256:fixture",
   repository: "pointbreak",
   placement: { tier: "clone", label: "clone store" },
 };
@@ -66,6 +68,7 @@ it("omits family and worktree rows when absent", () => {
 it("shows the family row under the user-level tier", () => {
   store.commit({
     identity: {
+      ...CLONE,
       repository: "pointbreak",
       placement: { tier: "family", label: "family store" },
       family: { id: "acme-web" },
@@ -80,6 +83,7 @@ it("shows the family row under the user-level tier", () => {
 it("shows the worktree row when present", () => {
   store.commit({
     identity: {
+      ...CLONE,
       repository: "pointbreak",
       worktree: "feat-foo",
       placement: { tier: "clone", label: "clone store" },
@@ -94,6 +98,7 @@ it("shows the worktree row when present", () => {
 it("exposes the full identity as the chip's accessible label", () => {
   store.commit({
     identity: {
+      ...CLONE,
       repository: "pointbreak",
       placement: { tier: "family", label: "family store" },
       family: { id: "acme-web" },

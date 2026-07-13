@@ -48,6 +48,7 @@ export interface AttentionItemNode extends NodeBase {
   folder: WorkspaceFolder;
   description: string;
   revisionId?: string;
+  lens: "attention";
   command?: "pointbreak.openInReview";
 }
 
@@ -327,6 +328,7 @@ function deriveTargetChildren(
       folder: resolution.folder,
       description: item.tier,
       revisionId: item.revisionId,
+      lens: "attention",
       command: item.revisionId ? "pointbreak.openInReview" : undefined,
     }),
   );

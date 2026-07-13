@@ -125,6 +125,8 @@ it("derives a review target from both opaque identities", () => {
     {
       key: "store:one/context:two",
       label: "pointbreak",
+      storeIdentity: "store:one",
+      contextIdentity: "context:two",
     },
   );
 });

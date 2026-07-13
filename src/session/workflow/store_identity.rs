@@ -6,18 +6,21 @@
 //! chrome cue, so it stays cheap.
 //!
 //! Path-privacy is the load-bearing constraint (issue #391): no field ever carries an
-//! absolute or repo-relative filesystem path. Only path **basenames** (final
-//! components) and the opaque family slug cross the boundary — the same convention the
-//! inspector's revision endpoints already follow (`src/cli/inspect/api.rs` target
-//! labels).
+//! absolute or repo-relative filesystem path. Path **basenames** (final components),
+//! the opaque family slug, and one-way store/context path hashes cross the boundary —
+//! the same label convention the inspector's revision endpoints already follow, plus
+//! opaque equality keys that reveal no path (`src/cli/inspect/api.rs`).
 //!
 //! [`store_status`]: super::store_status::store_status
 
+use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
-use crate::error::Result;
+use crate::error::{Result, ShoreError};
 use crate::git::{git_common_dir, git_worktree_root};
 use crate::session::store::resolution::resolve_store;
 
@@ -43,6 +46,12 @@ impl StoreIdentityOptions {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoreIdentity {
+    /// Opaque identity of the resolved store directory. Equality is the contract;
+    /// callers must not parse the digest.
+    pub store_identity: String,
+    /// Opaque identity of the current Git worktree root. Distinguishes contexts
+    /// that share one store without exposing either path.
+    pub context_identity: String,
     /// Stable repository label: the main-worktree-root basename (path-free).
     pub repository: String,
     /// The current worktree-root basename; present ONLY when it differs from
@@ -77,7 +86,10 @@ pub struct StoreFamily {
 /// Derive the [`StoreIdentity`] for `repo`. Reuses the same store resolver every read
 /// surface uses, plus git basenames; performs no store-inventory or sensitivity scan.
 pub fn store_identity(options: StoreIdentityOptions) -> Result<StoreIdentity> {
+    let worktree_root = git_worktree_root(&options.repo)?;
     let resolution = resolve_store(&options.repo)?;
+    let store_identity = opaque_path_identity("store", resolution.store_dir())?;
+    let context_identity = opaque_path_identity("context", &worktree_root)?;
     let view = resolution.command_view();
     let placement = placement_for(view.mode);
     let family = view.repository_family_ref.map(|id| StoreFamily { id });
@@ -85,11 +97,13 @@ pub fn store_identity(options: StoreIdentityOptions) -> Result<StoreIdentity> {
     // `repository` is the stable main-clone basename; `worktree` names the current
     // checkout only when it differs (a linked worktree — the shared store serves
     // several). Both are basenames, never paths.
-    let current = current_worktree_basename(&options.repo);
+    let current = basename(&worktree_root).unwrap_or_else(|| REPOSITORY_FLOOR.to_owned());
     let repository = main_worktree_basename(&options.repo).unwrap_or_else(|| current.clone());
     let worktree = (current != repository).then_some(current);
 
     Ok(StoreIdentity {
+        store_identity,
+        context_identity,
         repository,
         worktree,
         placement,
@@ -123,21 +137,69 @@ fn main_worktree_basename(repo: &Path) -> Option<String> {
     basename(common.parent()?) // <main>
 }
 
-/// The current worktree-root basename, or the floor when none is derivable.
-fn current_worktree_basename(repo: &Path) -> String {
-    git_worktree_root(repo)
-        .ok()
-        .as_deref()
-        .and_then(basename)
-        .unwrap_or_else(|| REPOSITORY_FLOOR.to_owned())
-}
-
 /// Final non-empty path component, or `None` when the path has none.
 fn basename(path: &Path) -> Option<String> {
     path.file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
+}
+
+/// Hash a normalized path into the opaque identity shared by `store status` and
+/// `/api/identity`. This stays workflow-private: equality, not path recovery or
+/// digest parsing, is the public contract.
+pub(super) fn opaque_path_identity(namespace: &str, path: &Path) -> Result<String> {
+    let normalized = normalize_path_without_requiring_leaf(path)?;
+    let digest = Sha256::digest(normalized.as_os_str().as_encoded_bytes());
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut hex, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    Ok(format!("{namespace}:sha256:{hex}"))
+}
+
+fn normalize_path_without_requiring_leaf(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| ShoreError::Message(format!("resolve current directory: {error}")))?
+            .join(path)
+    };
+    let mut existing = absolute.as_path();
+    let mut missing = Vec::<OsString>::new();
+
+    while !existing.try_exists().map_err(|error| {
+        ShoreError::Message(format!(
+            "inspect identity path {}: {error}",
+            existing.display()
+        ))
+    })? {
+        let name = existing.file_name().ok_or_else(|| {
+            ShoreError::Message(format!(
+                "cannot find an existing ancestor for identity path {}",
+                absolute.display()
+            ))
+        })?;
+        missing.push(name.to_owned());
+        existing = existing.parent().ok_or_else(|| {
+            ShoreError::Message(format!(
+                "cannot find an existing ancestor for identity path {}",
+                absolute.display()
+            ))
+        })?;
+    }
+
+    let mut normalized = existing.canonicalize().map_err(|error| {
+        ShoreError::Message(format!(
+            "canonicalize identity path ancestor {}: {error}",
+            existing.display()
+        ))
+    })?;
+    for component in missing.into_iter().rev() {
+        normalized.push(component);
+    }
+    Ok(normalized)
 }
 
 #[cfg(test)]

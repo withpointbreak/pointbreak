@@ -80,6 +80,8 @@ export interface RevisionsDoc {
  * Static per inspector session (fetched once at bootstrap, never on the reload path).
  */
 export interface IdentityDoc {
+  storeIdentity: string;
+  contextIdentity: string;
   repository: string;
   worktree?: string;
   placement: { tier: string; label: string };

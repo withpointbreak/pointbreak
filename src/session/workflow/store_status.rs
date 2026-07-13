@@ -1,11 +1,9 @@
-use std::ffi::OsString;
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
-use crate::error::{Result, ShoreError};
+use super::store_identity::opaque_path_identity;
+use crate::error::Result;
 use crate::git::git_worktree_root;
 use crate::session::store::inventory::{
     ArtifactInventoryEntry, RevisionObjectInventory, StoreInventory, scan_store_inventory,
@@ -143,60 +141,6 @@ pub fn store_status(options: StoreStatusOptions) -> Result<StoreStatusResult> {
         inventory: StoreStatusInventory::from(inventory),
         sensitivity: StoreStatusSensitivity::from(sensitivity),
     })
-}
-
-fn opaque_path_identity(namespace: &str, path: &Path) -> Result<String> {
-    let normalized = normalize_path_without_requiring_leaf(path)?;
-    let digest = Sha256::digest(normalized.as_os_str().as_encoded_bytes());
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        write!(&mut hex, "{byte:02x}").expect("writing to a string cannot fail");
-    }
-    Ok(format!("{namespace}:sha256:{hex}"))
-}
-
-fn normalize_path_without_requiring_leaf(path: &Path) -> Result<PathBuf> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|error| ShoreError::Message(format!("resolve current directory: {error}")))?
-            .join(path)
-    };
-    let mut existing = absolute.as_path();
-    let mut missing = Vec::<OsString>::new();
-
-    while !existing.try_exists().map_err(|error| {
-        ShoreError::Message(format!(
-            "inspect identity path {}: {error}",
-            existing.display()
-        ))
-    })? {
-        let name = existing.file_name().ok_or_else(|| {
-            ShoreError::Message(format!(
-                "cannot find an existing ancestor for identity path {}",
-                absolute.display()
-            ))
-        })?;
-        missing.push(name.to_owned());
-        existing = existing.parent().ok_or_else(|| {
-            ShoreError::Message(format!(
-                "cannot find an existing ancestor for identity path {}",
-                absolute.display()
-            ))
-        })?;
-    }
-
-    let mut normalized = existing.canonicalize().map_err(|error| {
-        ShoreError::Message(format!(
-            "canonicalize identity path ancestor {}: {error}",
-            existing.display()
-        ))
-    })?;
-    for component in missing.into_iter().rev() {
-        normalized.push(component);
-    }
-    Ok(normalized)
 }
 
 /// Per-finding real matched paths for the local-only `store status --show-paths`

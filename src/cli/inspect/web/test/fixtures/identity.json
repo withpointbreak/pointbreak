@@ -1,5 +1,7 @@
 {
   "schema": "pointbreak.inspect-identity",
+  "storeIdentity": "store:sha256:fixture",
+  "contextIdentity": "context:sha256:fixture",
   "repository": "pointbreak",
   "placement": { "tier": "clone", "label": "clone store" }
 }

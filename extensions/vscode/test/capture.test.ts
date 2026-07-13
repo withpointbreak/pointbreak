@@ -152,7 +152,12 @@ function resolved(emptyInventory = false): TargetResolution {
   return {
     kind: "resolved",
     folder: workspaceFolder("/repo", "repo") as WorkspaceFolder,
-    target: { key: "store/context", label: "repo" },
+    target: {
+      key: "store/context",
+      label: "repo",
+      storeIdentity: "store",
+      contextIdentity: "context",
+    },
     emptyInventory,
   };
 }

@@ -3,8 +3,12 @@ import { AttentionTreeProvider } from "./attentionView";
 import { resolveBinary } from "./binary";
 import { PointbreakCli } from "./cli";
 import { runCaptureCommand } from "./commands/capture";
-import { runOpenInReviewCommand } from "./commands/openInReview";
+import {
+  restoreReviewServers,
+  runOpenInReviewCommand,
+} from "./commands/openInReview";
 import { Logger } from "./logger";
+import { ReviewServerRegistry } from "./reviewServerRegistry";
 import { resolveTargets } from "./targetResolver";
 
 export async function activate(context: ExtensionContext): Promise<void> {
@@ -36,6 +40,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
     cli,
     workspace.workspaceFolders ?? [],
   );
+  const reviewServers = new ReviewServerRegistry(context.workspaceState);
   const provider = new AttentionTreeProvider(cli, resolutions);
   const treeView = window.createTreeView("pointbreak.attention", {
     treeDataProvider: provider,
@@ -51,9 +56,18 @@ export async function activate(context: ExtensionContext): Promise<void> {
       runCaptureCommand(cli, resolutions),
     ),
     commands.registerCommand("pointbreak.openInReview", (node) =>
-      runOpenInReviewCommand(cli, binary, resolutions, node),
+      runOpenInReviewCommand(cli, binary, resolutions, node, {
+        registry: reviewServers,
+      }),
     ),
   );
+
+  void restoreReviewServers(binary, resolutions, reviewServers, {
+    onError: (message) => logger.warn(message),
+  }).catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn(`Pointbreak could not restore Review servers: ${message}`);
+  });
 }
 
 export function deactivate(): void {}

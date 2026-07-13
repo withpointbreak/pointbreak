@@ -1678,7 +1678,8 @@ struct IdentityPayload {
 }
 
 /// The path-private repo/store identity the inspector chrome renders (issue #391):
-/// the served repository, store placement, family, and current worktree. Derived
+/// the served repository, store placement, family, current worktree, and the opaque
+/// store/context identities clients use for an exact local-server handshake. Derived
 /// through the shared `store_identity` workflow, so it never leaks absolute paths.
 pub(super) fn identity_json(repo: &Path) -> Result<String, String> {
     let identity =

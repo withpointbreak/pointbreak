@@ -1,8 +1,8 @@
 import { expect, it } from "vitest";
 import pkg from "../package.json";
 
-it("never activates on startup (lazy activation only)", () => {
-  expect(pkg.activationEvents ?? []).not.toContain("onStartupFinished");
+it("restores managed Review servers after startup without eager activation", () => {
+  expect(pkg.activationEvents ?? []).toContain("onStartupFinished");
   expect(pkg.activationEvents ?? []).not.toContain("*");
 });
 
@@ -12,8 +12,9 @@ it("carries the untouchable identity and license", () => {
   expect(pkg.license).toBe("Apache-2.0");
 });
 
-it("contributes the lazy Review view and its commands", () => {
+it("contributes the Review view and its commands", () => {
   expect(pkg.activationEvents).toEqual([
+    "onStartupFinished",
     "onView:pointbreak.attention",
     "onCommand:pointbreak.refreshAttention",
     "onCommand:pointbreak.capture",
@@ -31,6 +32,7 @@ it("contributes the lazy Review view and its commands", () => {
   expect(
     pkg.contributes.configuration.properties["pointbreak.reviewUrl"],
   ).toMatchObject({
-    default: "http://127.0.0.1:7878",
+    default: "",
+    scope: "resource",
   });
 });
