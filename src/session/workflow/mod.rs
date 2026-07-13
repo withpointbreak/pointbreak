@@ -86,9 +86,11 @@ pub use revision_list::{
 };
 pub use revision_projection::{
     MemberReadback, RevisionOverview, RevisionOverviewsOptions, RevisionProjectionIdentity,
-    RevisionProjectionRow, RevisionProjectionSummary, RevisionShowFilters, RevisionShowOptions,
-    RevisionShowResult, SnapshotContentState, SnapshotOrder, SnapshotSummaryCache,
-    SnapshotSummaryCounts, show_revision, show_revision_overviews,
+    RevisionProjectionRow, RevisionProjectionSummary, RevisionRecordInputs, RevisionSearchRecord,
+    RevisionShowFilters, RevisionShowOptions, RevisionShowResult, SnapshotContentState,
+    SnapshotOrder, SnapshotSummaryCache, SnapshotSummaryCounts, build_revision_search_record,
+    current_assessment_includes_follow_up, show_revision, show_revision_overviews,
+    stale_review_fact_count,
 };
 pub use store_family::{
     StoreForgetOptions, StoreForgetResult, StoreListEntry, StoreListResult, forget_family_store,

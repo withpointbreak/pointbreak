@@ -94,12 +94,15 @@ describe("shared constants", () => {
       "before",
       "after",
     ]);
-    // Transitional: only the qualifiers the revision index can actually match;
-    // track/actor/is/tag return when the index extension populates their slots.
+    // type:/check: are event-only; every other key matches a revision-index slot.
     expect(REVISION_QUERY_FIELDS).toEqual([
+      "track",
+      "actor",
       "revision",
       "snapshot",
       "assessment",
+      "is",
+      "tag",
       "attention",
       "before",
       "after",

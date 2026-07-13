@@ -342,14 +342,16 @@ pub const EVENT_QUERY_FIELDS: &[&str] = &[
 ];
 
 /// The revision-surface qualifier set (mirrors web `REVISION_QUERY_FIELDS`).
-/// Transitional: only the qualifiers the revision record can actually match
-/// today — `track`/`actor`/`is`/`tag` are deferred (diagnosed, never
-/// silent-empty) until the revision record carries their slots, and return
-/// here when it does.
+/// `type:`/`check:` are event-only (known-but-unsupported here — diagnosed,
+/// never silent-empty); every other key matches a revision-record slot.
 pub const REVISION_QUERY_FIELDS: &[&str] = &[
+    "track",
+    "actor",
     "revision",
     "snapshot",
     "assessment",
+    "is",
+    "tag",
     "attention",
     "before",
     "after",
@@ -590,8 +592,9 @@ fn match_quoted_token(chars: &[char], start: usize) -> Option<usize> {
 
 /// The serde wire string for a small string-serializing enum (assessment,
 /// outcome, reason code, validation status), so the haystack and the `status`
-/// field fold exactly what the TS client received over the wire.
-fn enum_wire<T: Serialize>(value: &T) -> String {
+/// field fold exactly what the TS client received over the wire. `pub(crate)`
+/// so the revision record builder derives its wire values the same way.
+pub(crate) fn enum_wire<T: Serialize>(value: &T) -> String {
     serde_json::to_value(value)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
@@ -631,6 +634,39 @@ fn wrap_token(value: String) -> String {
     }
 }
 
+/// The one space-wrapped set encoding every multi-valued record field stores:
+/// tokens lowercased and space-joined with a leading/trailing space, so the
+/// set-membership match kind hits by whole token; "" when there are no tokens.
+/// `pub(crate)` so the revision record builder shares the encoding.
+pub(crate) fn wrap_set(tokens: impl IntoIterator<Item = String>) -> String {
+    let tokens: Vec<String> = tokens
+        .into_iter()
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_lowercase())
+        .collect();
+    if tokens.is_empty() {
+        String::new()
+    } else {
+        format!(" {} ", tokens.join(" "))
+    }
+}
+
+/// The tag dual-index convention, defined once for every surface: each tag
+/// contributes BOTH its first-colon key (`issue`) and its full string
+/// (`issue:191`). Case is left to [`wrap_set`], which lowercases at wrap time.
+pub(crate) fn tag_index_tokens<'a>(tags: impl IntoIterator<Item = &'a String>) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for tag in tags {
+        if let Some((key, _)) = tag.split_once(':')
+            && !key.is_empty()
+        {
+            tokens.push(key.to_owned());
+        }
+        tokens.push(tag.clone());
+    }
+    tokens
+}
+
 /// The `assessment` field — the verdict wire value on assessment entries, else "".
 fn entry_assessment(entry: &ReviewHistoryEntry) -> String {
     match &entry.summary {
@@ -643,24 +679,11 @@ fn entry_assessment(entry: &ReviewHistoryEntry) -> String {
 /// its first-colon key, lowercased, in the space-wrapped set encoding. "" when
 /// the entry carries no tags.
 fn entry_tag_set(entry: &ReviewHistoryEntry) -> String {
-    let tags = match &entry.summary {
-        ReviewHistorySummary::ReviewObservationRecorded { tags, .. } => tags,
-        _ => return String::new(),
-    };
-    let mut tokens: Vec<String> = Vec::new();
-    for tag in tags {
-        let tag = tag.to_lowercase();
-        if let Some((key, _)) = tag.split_once(':')
-            && !key.is_empty()
-        {
-            tokens.push(key.to_owned());
+    match &entry.summary {
+        ReviewHistorySummary::ReviewObservationRecorded { tags, .. } => {
+            wrap_set(tag_index_tokens(tags))
         }
-        tokens.push(tag);
-    }
-    if tokens.is_empty() {
-        String::new()
-    } else {
-        format!(" {} ", tokens.join(" "))
+        _ => String::new(),
     }
 }
 
@@ -1296,14 +1319,18 @@ mod tests {
             bad.diagnostics[0].code,
             QueryDiagnosticCode::UnsupportedValue
         );
-        // `is:` is deferred from the revision surface until its index slot exists
-        // (advertising it would silent-empty) — a diagnostic, not a dropped match.
-        let deferred = parse_search_query_for("is:contested", QuerySurface::Revision);
-        assert!(deferred.clauses.is_empty());
+        // The revision surface enumerates the full lifecycle set — contested is a
+        // member there (the revision record carries the `is` slot).
+        let contested = parse_search_query_for("is:contested", QuerySurface::Revision);
         assert_eq!(
-            deferred.diagnostics[0].code,
-            QueryDiagnosticCode::UnsupportedQualifier
+            contested.clauses,
+            vec![QueryClause::Field {
+                field: "is".into(),
+                value: "contested".into(),
+                negate: false,
+            }],
         );
+        assert!(contested.diagnostics.is_empty());
         // The revision surface still validates enumerated values via attention:.
         let bad_attention = parse_search_query_for("attention:bogus", QuerySurface::Revision);
         assert!(bad_attention.clauses.is_empty());
@@ -1324,15 +1351,32 @@ mod tests {
     }
 
     #[test]
-    fn revision_surface_defers_unindexed_qualifiers_with_a_diagnostic() {
-        // track/actor/tag/is are deferred from the revision surface until the
-        // revision record carries their slots — diagnosed, never silent-empty.
-        for query in [
-            "track:agent:codex",
-            "actor:actor:local",
-            "tag:issue",
-            "is:open",
+    fn revision_surface_supports_indexed_qualifiers_and_rejects_type_and_check() {
+        // The revision record carries track/actor/tag/is slots now, so the
+        // qualifiers parse to clauses (actor: canonicalizes its prefix-less
+        // spelling, same as the event surface).
+        for (query, field, value) in [
+            ("track:agent:codex", "track", "agent:codex"),
+            ("actor:actor:local", "actor", "actor:local"),
+            ("actor:local", "actor", "actor:local"),
+            ("tag:issue", "tag", "issue"),
+            ("is:open", "is", "open"),
         ] {
+            let parsed = parse_search_query_for(query, QuerySurface::Revision);
+            assert_eq!(
+                parsed.clauses,
+                vec![QueryClause::Field {
+                    field: field.into(),
+                    value: value.into(),
+                    negate: false,
+                }],
+                "{query}"
+            );
+            assert!(parsed.diagnostics.is_empty(), "{query}");
+        }
+        // type:/check: stay event-only — known-but-unsupported here, diagnosed,
+        // never silent-empty.
+        for query in ["type:observation", "check:passed"] {
             let parsed = parse_search_query_for(query, QuerySurface::Revision);
             assert!(
                 parsed.clauses.is_empty(),

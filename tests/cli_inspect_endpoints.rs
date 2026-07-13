@@ -265,6 +265,10 @@ fn api_units_include_additive_overview_summary() {
     assert_eq!(attention["unassessed"], false);
     assert_eq!(attention["acceptedWithFollowUp"], false);
     assert_eq!(attention["openInputRequestCount"], 1);
+    // The fixture's one request is open, not responded — the responded count
+    // is the client's `is:answered` source and must not fold non-responded
+    // states.
+    assert_eq!(attention["respondedInputRequestCount"], 0);
     assert_eq!(attention["failedValidationCount"], 1);
     assert_eq!(attention["erroredValidationCount"], 0);
     assert_eq!(attention["staleFactCount"], 0);
@@ -295,6 +299,29 @@ fn api_units_include_additive_overview_summary() {
         assert!(latest_activity["title"].is_string());
         assert!(latest_activity["at"].is_string());
     }
+
+    // The additive per-revision fact-meta aggregation: track ids, writer actor
+    // ids, and observation tags unioned across the four fact families.
+    let tracks = overview["tracks"]
+        .as_array()
+        .expect("tracks is an array")
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(tracks.contains(&"agent:codex"));
+    assert!(tracks.contains(&"human:kevin"));
+
+    let actors = overview["actors"].as_array().expect("actors is an array");
+    assert!(!actors.is_empty());
+    assert!(
+        actors
+            .iter()
+            .all(|v| v.as_str().unwrap().starts_with("actor:"))
+    );
+
+    // representative_store() never tags an observation, so this fixture's union
+    // is empty — the shape (a present, empty array) is what this pins.
+    assert_eq!(overview["tags"], serde_json::json!([]));
 }
 
 /// `/api/revisions` is served from a head-marker-keyed response cache (#426):

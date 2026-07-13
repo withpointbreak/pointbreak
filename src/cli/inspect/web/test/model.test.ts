@@ -545,11 +545,13 @@ describe("revision filter predicates", () => {
   });
 
   it("parses the filter on the revision surface (attention and the status alias)", () => {
+    // The assessment slot is resolved-only now, so the fixture carries the
+    // resolved status alongside its wire value.
     const revA = {
       revisionId: "rev:a",
       snapshotId: "obj:a",
       overview: {
-        currentAssessment: { assessment: "accepted" },
+        currentAssessment: { status: "resolved", assessment: "accepted" },
         attention: { openInputRequestCount: 1 },
       },
     } as unknown as Revision;
@@ -590,6 +592,121 @@ describe("revision filter predicates", () => {
     store.commit({ filterText: "after:2026-06-01" });
     expect(model.matchesRevisionFilters(older)).toBe(false);
     expect(model.matchesRevisionFilters(newer)).toBe(true);
+  });
+});
+
+describe("matchesRevisionFilters — the revision-surface grammar (pair 2 wiring)", () => {
+  /** A revision whose overview carries the fact-meta wire fields. */
+  const filterable = {
+    revisionId: "rev:a",
+    snapshotId: "obj:a",
+    capturedAt: "unix-ms:100",
+    overview: {
+      currentAssessment: { status: "resolved", assessment: "accepted" },
+      attention: {
+        unassessed: false,
+        acceptedWithFollowUp: false,
+        openInputRequestCount: 0,
+        failedValidationCount: 0,
+        erroredValidationCount: 0,
+        staleFactCount: 0,
+      },
+      counts: {
+        files: 1,
+        rows: 1,
+        observations: 1,
+        inputRequests: 0,
+        assessments: 1,
+        validationChecks: 0,
+      },
+      tracks: ["agent:codex"],
+      actors: ["actor:agent:codex"],
+      tags: ["issue:191"],
+    },
+  } as unknown as Revision;
+
+  it("matches is:superseded from the classification map, not is:contested", () => {
+    store.commit({
+      threads: {
+        threads: [],
+        revisionClassification: {
+          "rev:a": { state: "superseded", supersededBy: [], supersedes: [] },
+        },
+      } as unknown as ThreadsDoc,
+    });
+    store.commit({ filterText: "is:superseded" });
+    expect(model.matchesRevisionFilters(filterable)).toBe(true);
+    store.commit({ filterText: "is:contested" });
+    expect(model.matchesRevisionFilters(filterable)).toBe(false);
+  });
+
+  it("matches is:contested for every member of a competing thread", () => {
+    store.commit({
+      threads: {
+        threads: [
+          {
+            revisions: ["rev:a", "rev:b"],
+            competing: true,
+            heads: ["rev:a", "rev:b"],
+            superseded: [],
+          },
+        ],
+        revisionClassification: {},
+      } as unknown as ThreadsDoc,
+    });
+    store.commit({ filterText: "is:contested" });
+    expect(model.matchesRevisionFilters(filterable)).toBe(true);
+  });
+
+  it("matches actor: as a whole token in the space-wrapped set, never a partial substring", () => {
+    store.commit({ filterText: "actor:actor:agent:codex" });
+    expect(model.matchesRevisionFilters(filterable)).toBe(true);
+    store.commit({ filterText: "actor:actor:agent:cod" });
+    expect(model.matchesRevisionFilters(filterable)).toBe(false);
+  });
+
+  it("matches a tag key qualifier via the dual index", () => {
+    store.commit({ filterText: "tag:issue" });
+    expect(model.matchesRevisionFilters(filterable)).toBe(true);
+  });
+
+  it("matches a mixed-case source track against a lowercased track: query end to end", () => {
+    const mixedCase = {
+      revisionId: "rev:b",
+      snapshotId: "obj:b",
+      capturedAt: "unix-ms:100",
+      overview: {
+        currentAssessment: { status: "resolved", assessment: "accepted" },
+        attention: {
+          unassessed: false,
+          acceptedWithFollowUp: false,
+          openInputRequestCount: 0,
+          failedValidationCount: 0,
+          erroredValidationCount: 0,
+          staleFactCount: 0,
+        },
+        counts: {
+          files: 1,
+          rows: 1,
+          observations: 1,
+          inputRequests: 0,
+          assessments: 1,
+          validationChecks: 0,
+        },
+        tracks: ["Agent:Codex"],
+        actors: ["Actor:Agent:Codex"],
+        tags: [],
+      },
+    } as unknown as Revision;
+    // The parser lowercases every query value (existing behavior); the record
+    // must be lowercased at build time too, or this never matches live.
+    store.commit({ filterText: "track:agent:codex" });
+    expect(model.matchesRevisionFilters(mixedCase)).toBe(true);
+    store.commit({ filterText: "actor:actor:agent:codex" });
+    expect(model.matchesRevisionFilters(mixedCase)).toBe(true);
+    // The prefix-less actor spelling canonicalizes to the same clause.
+    store.commit({ filterText: "actor:agent:codex" });
+    expect(model.matchesRevisionFilters(mixedCase)).toBe(true);
   });
 });
 

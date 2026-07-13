@@ -23,7 +23,11 @@ import {
   revisionSearchIndex,
   verificationChip,
 } from "../src/projection";
-import type { HistoryEntry } from "../src/types";
+import {
+  type HistoryEntry,
+  type Overview,
+  REVISION_ATTENTION_VALUES,
+} from "../src/types";
 import historyJson from "./fixtures/history.json";
 import revisionsJson from "./fixtures/revisions.json";
 
@@ -495,6 +499,229 @@ describe("revisionSearchIndex", () => {
       expect(text).toContain(piece);
     }
     expect(text).toBe(text.toLowerCase());
+  });
+});
+
+describe("revisionSearchIndex — track/actor/tag/is/assessment/capturedAt (pair 2)", () => {
+  const withFacts = {
+    revisionId: "rev:x",
+    snapshotId: "obj:x",
+    capturedAt: "unix-ms:1782699185391",
+    overview: {
+      currentAssessment: { status: "resolved", assessment: "accepted" },
+      attention: {
+        unassessed: false,
+        acceptedWithFollowUp: false,
+        openInputRequestCount: 1,
+        respondedInputRequestCount: 1,
+        failedValidationCount: 0,
+        erroredValidationCount: 0,
+        staleFactCount: 0,
+      },
+      counts: {
+        files: 1,
+        rows: 10,
+        observations: 1,
+        inputRequests: 2,
+        assessments: 1,
+        validationChecks: 0,
+      },
+      tracks: ["agent:codex", "human:kevin"],
+      actors: ["actor:agent:codex", "actor:human:kevin"],
+      tags: ["issue:191", "priority:high"],
+    },
+  } as unknown as Revision;
+
+  it("carries the new track/actor/tag tokens, space-wrapped", () => {
+    const idx = revisionSearchIndex(withFacts);
+    expect(idx.track).toBe(" agent:codex human:kevin ");
+    expect(idx.actor).toBe(" actor:agent:codex actor:human:kevin ");
+    // Dual-indexed: the full tag string AND its first-colon key.
+    expect(idx.tag).toContain(" issue:191 ");
+    expect(idx.tag).toContain(" issue ");
+    expect(idx.tag).toContain(" priority:high ");
+    expect(idx.tag).toContain(" priority ");
+  });
+
+  it("emits an empty assessment when unassessed, never falling back to the status string", () => {
+    const unassessed = {
+      revisionId: "rev:y",
+      snapshotId: "obj:y",
+      capturedAt: "unix-ms:1782699185391",
+      overview: {
+        currentAssessment: { status: "unassessed" },
+        attention: {
+          unassessed: true,
+          acceptedWithFollowUp: false,
+          openInputRequestCount: 0,
+          failedValidationCount: 0,
+          erroredValidationCount: 0,
+          staleFactCount: 0,
+        },
+        counts: {
+          files: 1,
+          rows: 1,
+          observations: 0,
+          inputRequests: 0,
+          assessments: 0,
+          validationChecks: 0,
+        },
+      },
+    } as unknown as Revision;
+    expect(revisionSearchIndex(unassessed).assessment).toBe("");
+  });
+
+  it("emits an empty assessment when ambiguous, even if a stale assessment value is present", () => {
+    const ambiguous = {
+      revisionId: "rev:z",
+      snapshotId: "obj:z",
+      capturedAt: "unix-ms:1782699185391",
+      overview: {
+        // A stale `assessment` value alongside a non-resolved status must never
+        // leak through — only status === "resolved" may populate the field.
+        currentAssessment: { status: "ambiguous", assessment: "accepted" },
+        attention: {
+          unassessed: false,
+          acceptedWithFollowUp: false,
+          openInputRequestCount: 0,
+          failedValidationCount: 0,
+          erroredValidationCount: 0,
+          staleFactCount: 0,
+        },
+        counts: {
+          files: 1,
+          rows: 1,
+          observations: 0,
+          inputRequests: 0,
+          assessments: 2,
+          validationChecks: 0,
+        },
+      },
+    } as unknown as Revision;
+    expect(revisionSearchIndex(ambiguous).assessment).toBe("");
+  });
+
+  it("lowercases track/actor/tag tokens at build time so a mixed-case source id still matches", () => {
+    const mixedCase = {
+      revisionId: "rev:w",
+      snapshotId: "obj:w",
+      capturedAt: "unix-ms:1782699185391",
+      overview: {
+        currentAssessment: { status: "resolved", assessment: "accepted" },
+        attention: {
+          unassessed: false,
+          acceptedWithFollowUp: false,
+          openInputRequestCount: 0,
+          failedValidationCount: 0,
+          erroredValidationCount: 0,
+          staleFactCount: 0,
+        },
+        counts: {
+          files: 1,
+          rows: 1,
+          observations: 1,
+          inputRequests: 0,
+          assessments: 1,
+          validationChecks: 0,
+        },
+        tracks: ["Agent:Codex"],
+        actors: ["Actor:Agent:Codex"],
+        tags: ["Issue:191"],
+      },
+    } as unknown as Revision;
+    const idx = revisionSearchIndex(mixedCase);
+    expect(idx.track).toBe(" agent:codex ");
+    expect(idx.actor).toBe(" actor:agent:codex ");
+    expect(idx.tag).toContain(" issue:191 ");
+    expect(idx.tag).toContain(" issue ");
+  });
+
+  it("derives is: open/answered from the attention rollup lifecycle counts", () => {
+    const idx = revisionSearchIndex(withFacts);
+    // openInputRequestCount (1) > 0
+    expect(idx.is).toContain(" open ");
+    // respondedInputRequestCount (1) > 0 — answered mirrors the Rust record's
+    // responded-only rule, never a total-minus-open subtraction.
+    expect(idx.is).toContain(" answered ");
+    expect(idx.is).not.toContain(" unassessed ");
+    expect(idx.is).not.toContain(" stale ");
+    expect(idx.is).not.toContain(" follow-up ");
+  });
+
+  it("never counts an ambiguous request as answered", () => {
+    // One request in the total count that is neither open nor responded
+    // (InputRequestStatus::Ambiguous): the Rust record emits no lifecycle
+    // token for it, so the client must not synthesize `answered` from
+    // total-minus-open.
+    const ambiguousRequest = {
+      revisionId: "rev:v",
+      snapshotId: "obj:v",
+      capturedAt: "unix-ms:1782699185391",
+      overview: {
+        currentAssessment: { status: "resolved", assessment: "accepted" },
+        attention: {
+          unassessed: false,
+          acceptedWithFollowUp: false,
+          openInputRequestCount: 0,
+          respondedInputRequestCount: 0,
+          failedValidationCount: 0,
+          erroredValidationCount: 0,
+          staleFactCount: 0,
+        },
+        counts: {
+          files: 1,
+          rows: 1,
+          observations: 0,
+          inputRequests: 1,
+          assessments: 1,
+          validationChecks: 0,
+        },
+      },
+    } as unknown as Revision;
+    const idx = revisionSearchIndex(ambiguousRequest);
+    expect(idx.is).not.toContain(" answered ");
+    expect(idx.is).not.toContain(" open ");
+  });
+
+  it("derives is:contested / is:superseded from the passed classification, never from Overview", () => {
+    expect(revisionSearchIndex(withFacts, { competing: true }).is).toContain(
+      " contested ",
+    );
+    expect(
+      revisionSearchIndex(withFacts, { state: "superseded" }).is,
+    ).toContain(" superseded ");
+    const plain = revisionSearchIndex(withFacts);
+    expect(plain.is).not.toContain(" contested ");
+    expect(plain.is).not.toContain(" superseded ");
+  });
+
+  it("stores the normalized capturedAt value under the shared occurred_at anchor key, not the raw wire token", () => {
+    const idx = revisionSearchIndex(withFacts);
+    // The shared anchor key is occurred_at, holding the normalized capturedAt
+    // VALUE — never a "capturedAt" key, never the raw token.
+    expect(idx.occurred_at).toBe(new Date(1782699185391).toISOString());
+    expect(idx.occurred_at).not.toContain("unix-ms:");
+    expect(idx.capturedAt).toBeUndefined();
+  });
+});
+
+describe("attentionTokens — token/constant parity", () => {
+  it("only emits tokens that are members of REVISION_ATTENTION_VALUES", () => {
+    const overview = {
+      attention: {
+        openInputRequestCount: 1,
+        unassessed: true,
+        failedValidationCount: 1,
+        erroredValidationCount: 1,
+        acceptedWithFollowUp: true,
+        staleFactCount: 1,
+      },
+    } as unknown as Overview;
+    const tokens = attentionTokens(overview).map((t) => t.token);
+    expect(tokens.length).toBeGreaterThan(0);
+    for (const token of tokens) {
+      expect(REVISION_ATTENTION_VALUES).toContain(token);
+    }
   });
 });
 

@@ -386,10 +386,18 @@ export function annotationsForRevision(revisionId: string): Annotation[] {
 export function matchesRevisionFilters(r: Revision): boolean {
   const s = getState();
   if (s.filterSnapshot && r.snapshotId !== s.filterSnapshot) return false;
+  // The classification inputs for is:contested/is:superseded are read here
+  // (this module owns state access) and passed in — revisionSearchIndex stays
+  // a pure leaf. Contested marks every member of a competing thread.
+  const revisionId = r.revisionId ?? "";
+  const classification = revisionClassification(revisionId);
+  const competing = currentThreads().some(
+    (t) => t.competing && (t.revisions ?? []).includes(revisionId),
+  );
   // The list lens parses on the revision surface (its own key set + aliases);
   // diagnostics for the same text render via the query-notice region.
   return matchesQuery(
-    revisionSearchIndex(r),
+    revisionSearchIndex(r, { state: classification?.state, competing }),
     parseSearchQueryFor(s.filterText, "revision").clauses,
   );
 }

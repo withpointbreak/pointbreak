@@ -22,13 +22,14 @@ use pointbreak::session::{
     HistoryPage, HistoryQuery, InputRequestStatus, LivenessEnrichment, ObservationStatus,
     ObservationView, ProjectionDiagnostic, QueryDiagnostic, ReviewHistoryEntry,
     RevisionCommitRangeView, RevisionListEntry, RevisionListOptions, RevisionOverview,
-    RevisionOverviewsOptions, RevisionProjectionSummary, RevisionShowOptions, RevisionShowResult,
-    SessionState, SnapshotSummaryCache, StoreIdentity, StoreIdentityOptions, SupersessionView,
-    TrustSet, apply_history_query, commit_graph_stamp, compare_event_instants,
-    default_history_page_projection, enrich_liveness, event_log_head_marker,
-    history_base_projection, list_attention, list_revisions, read_bound_object_artifact,
-    read_events_for_display, read_object_artifact, show_revision, show_revision_overviews,
-    store_identity,
+    RevisionOverviewsOptions, RevisionShowOptions, RevisionShowResult, SessionState,
+    SnapshotSummaryCache, StoreIdentity, StoreIdentityOptions, SupersessionView, TrustSet,
+    apply_history_query, commit_graph_stamp, compare_event_instants,
+    current_assessment_includes_follow_up, default_history_page_projection, enrich_liveness,
+    event_log_head_marker, history_base_projection, list_attention, list_revisions,
+    read_bound_object_artifact, read_events_for_display, read_object_artifact,
+    revision_supersession_classification, show_revision, show_revision_overviews,
+    stale_review_fact_count, store_identity,
 };
 use serde::Serialize;
 
@@ -244,6 +245,12 @@ struct RevisionOverviewDocument {
     attention: RevisionAttentionDocument,
     counts: RevisionOverviewCounts,
     latest_activity: Option<RevisionLatestActivityDocument>,
+    /// The per-revision fact-meta aggregation the client's revision search
+    /// index folds: track ids, writer actor ids, and observation tags unioned
+    /// across the four fact families. Additive, always present.
+    tracks: Vec<String>,
+    actors: Vec<String>,
+    tags: Vec<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -259,6 +266,10 @@ struct RevisionAttentionDocument {
     unassessed: bool,
     accepted_with_follow_up: bool,
     open_input_request_count: usize,
+    /// Requests with a resolved response only — the client's `is:answered`
+    /// source. Ambiguous (multi-response) requests count in neither this nor
+    /// the open count. Additive, always present.
+    responded_input_request_count: usize,
     failed_validation_count: usize,
     errored_validation_count: usize,
     stale_fact_count: usize,
@@ -540,29 +551,31 @@ fn revision_overviews(
     Ok(documents)
 }
 
-/// Advisory count of a revision's review facts that target a now-superseded revision. Non-zero only
-/// when the revision itself is superseded; sums the four review-fact families (observations, input
-/// requests, assessments, validation checks). Adapter notes are excluded (ingestion provenance, not a
-/// review assertion). Never gates — it feeds an attention badge only.
-fn stale_review_fact_count(
-    superseded_by: &BTreeSet<RevisionId>,
-    summary: &RevisionProjectionSummary,
-) -> usize {
-    if superseded_by.is_empty() {
-        0
-    } else {
-        summary.observation_count
-            + summary.input_request_count
-            + summary.assessment_count
-            + summary.validation_check_count
-    }
-}
-
 fn revision_overview_document(
     result: &RevisionOverview,
     captured_at: &str,
 ) -> RevisionOverviewDocument {
     let summary = &result.summary;
+    let mut tracks: BTreeSet<String> = BTreeSet::new();
+    let mut actors: BTreeSet<String> = BTreeSet::new();
+    let mut tags: BTreeSet<String> = BTreeSet::new();
+    for observation in &result.observations {
+        tracks.insert(observation.track_id.as_str().to_owned());
+        actors.insert(observation.writer.actor_id.as_str().to_owned());
+        tags.extend(observation.tags.iter().cloned());
+    }
+    for request in &result.input_requests {
+        tracks.insert(request.track_id.as_str().to_owned());
+        actors.insert(request.writer.actor_id.as_str().to_owned());
+    }
+    for assessment in &result.assessments {
+        tracks.insert(assessment.track_id.as_str().to_owned());
+        actors.insert(assessment.writer.actor_id.as_str().to_owned());
+    }
+    for check in &result.validation_checks {
+        tracks.insert(check.track_id.as_str().to_owned());
+        actors.insert(check.writer.actor_id.as_str().to_owned());
+    }
     RevisionOverviewDocument {
         current_assessment: overview_current_assessment(&result.current_assessment.status),
         attention: RevisionAttentionDocument {
@@ -574,6 +587,11 @@ fn revision_overview_document(
                 .input_requests
                 .iter()
                 .filter(|request| request.status == InputRequestStatus::Open)
+                .count(),
+            responded_input_request_count: result
+                .input_requests
+                .iter()
+                .filter(|request| request.status == InputRequestStatus::Responded)
                 .count(),
             failed_validation_count: result
                 .validation_checks
@@ -596,6 +614,9 @@ fn revision_overview_document(
             validation_checks: summary.validation_check_count,
         },
         latest_activity: latest_revision_activity(result, captured_at),
+        tracks: tracks.into_iter().collect(),
+        actors: actors.into_iter().collect(),
+        tags: tags.into_iter().collect(),
     }
 }
 
@@ -608,16 +629,6 @@ fn overview_current_assessment(
             CurrentAssessmentStatus::Resolved(assessment) => Some(*assessment),
             CurrentAssessmentStatus::Unassessed | CurrentAssessmentStatus::Ambiguous(_) => None,
         },
-    }
-}
-
-fn current_assessment_includes_follow_up(status: &CurrentAssessmentStatus) -> bool {
-    match status {
-        CurrentAssessmentStatus::Resolved(ReviewAssessment::AcceptedWithFollowUp) => true,
-        CurrentAssessmentStatus::Ambiguous(assessments) => {
-            assessments.contains(&ReviewAssessment::AcceptedWithFollowUp)
-        }
-        CurrentAssessmentStatus::Unassessed | CurrentAssessmentStatus::Resolved(_) => false,
     }
 }
 
@@ -1266,41 +1277,35 @@ fn content_bounds(laid: &LaidOutGraph) -> (f64, f64, f64, f64) {
 }
 
 /// Classify every known revision (head / superseded / isolated) with its direct
-/// superseders and predecessors, from the supersession projection. Iterates the
-/// components so isolated roots (no edges) are still classified. Deterministic:
-/// built from `BTreeMap`/`BTreeSet`, keyed into a `BTreeMap<String, _>`.
+/// superseders and predecessors, from the supersession projection. The state
+/// derivation is the shared `revision_supersession_classification`; this wire
+/// map keeps only the edge-list shaping and `RevisionId -> String` keying.
+/// Deterministic: built from `BTreeMap`/`BTreeSet`, keyed into a
+/// `BTreeMap<String, _>`.
 fn revision_classification(view: &SupersessionView) -> BTreeMap<String, RevisionClassification> {
-    let mut map = BTreeMap::new();
-    for component in &view.components {
-        for revision in component {
+    revision_supersession_classification(view)
+        .into_iter()
+        .map(|(revision, facet)| {
             let superseded_by = view
                 .superseded_by
-                .get(revision)
+                .get(&revision)
                 .map(|s| s.iter().map(|r| r.as_str().to_owned()).collect())
                 .unwrap_or_default();
             let supersedes = view
                 .supersedes
-                .get(revision)
+                .get(&revision)
                 .map(|s| s.iter().map(|r| r.as_str().to_owned()).collect())
                 .unwrap_or_default();
-            let state = if view.superseded.contains(revision) {
-                "superseded"
-            } else if view.supersedes.contains_key(revision) {
-                "head" // a current head that supersedes at least one predecessor
-            } else {
-                "isolated" // a lone root: a current head with no incident edges
-            };
-            map.insert(
+            (
                 revision.as_str().to_owned(),
                 RevisionClassification {
-                    state,
+                    state: facet.state,
                     superseded_by,
                     supersedes,
                 },
-            );
-        }
-    }
-    map
+            )
+        })
+        .collect()
 }
 
 /// Flatten the projection's `RevisionId -> {RevisionId}` adjacency into a wire
@@ -1691,28 +1696,6 @@ mod tests {
     };
 
     use super::*;
-
-    #[test]
-    fn stale_review_fact_count_sums_review_facts_only_when_superseded() {
-        use pointbreak::session::RevisionProjectionSummary;
-
-        let summary = RevisionProjectionSummary {
-            observation_count: 2,
-            input_request_count: 1,
-            assessment_count: 1,
-            validation_check_count: 3,
-            ..Default::default()
-        };
-
-        // Superseded ⇒ the four review families (2 + 1 + 1 + 3 = 7).
-        let superseded: BTreeSet<RevisionId> = [RevisionId::new("rev:sha256:successor")]
-            .into_iter()
-            .collect();
-        assert_eq!(stale_review_fact_count(&superseded, &summary), 7);
-
-        // Head (empty superseders) ⇒ zero, regardless of fact counts.
-        assert_eq!(stale_review_fact_count(&BTreeSet::new(), &summary), 0);
-    }
 
     #[test]
     fn latest_activity_compares_mixed_timestamp_forms_by_instant() {
@@ -2579,6 +2562,7 @@ mod tests {
                 unassessed: false,
                 accepted_with_follow_up: false,
                 open_input_request_count: 0,
+                responded_input_request_count: 0,
                 failed_validation_count: 0,
                 errored_validation_count: 0,
                 stale_fact_count: 0,
@@ -2592,6 +2576,9 @@ mod tests {
                 validation_checks: 0,
             },
             latest_activity: None,
+            tracks: Vec::new(),
+            actors: Vec::new(),
+            tags: Vec::new(),
         }
     }
 

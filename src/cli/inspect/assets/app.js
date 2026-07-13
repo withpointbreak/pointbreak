@@ -454,9 +454,13 @@
     "after"
   ];
   var REVISION_QUERY_FIELDS = [
+    "track",
+    "actor",
     "revision",
     "snapshot",
     "assessment",
+    "is",
+    "tag",
     "attention",
     "before",
     "after"
@@ -891,28 +895,35 @@
     return `${n} ${n === 1 ? singular : pluralLabel}`;
   }
   __name(plural, "plural");
+  var [
+    ATTENTION_OPEN_REQUEST,
+    ATTENTION_UNASSESSED,
+    ATTENTION_VALIDATION_CONTEXT,
+    ATTENTION_FOLLOW_UP,
+    ATTENTION_STALE_FACT
+  ] = REVISION_ATTENTION_VALUES;
   function attentionTokens(overview) {
     const attention = overview?.attention || {};
     const tokens = [];
     if (attention.openInputRequestCount) {
       tokens.push({
-        token: "open-request",
-        query: "attention:open-request",
+        token: ATTENTION_OPEN_REQUEST,
+        query: `attention:${ATTENTION_OPEN_REQUEST}`,
         label: plural(attention.openInputRequestCount, "open request")
       });
     }
     if (attention.unassessed) {
       tokens.push({
-        token: "unassessed",
-        query: "attention:unassessed",
+        token: ATTENTION_UNASSESSED,
+        query: `attention:${ATTENTION_UNASSESSED}`,
         label: "unassessed"
       });
     }
     const validationCount = (attention.failedValidationCount || 0) + (attention.erroredValidationCount || 0);
     if (validationCount) {
       tokens.push({
-        token: "validation-context",
-        query: "attention:validation-context",
+        token: ATTENTION_VALIDATION_CONTEXT,
+        query: `attention:${ATTENTION_VALIDATION_CONTEXT}`,
         label: plural(
           validationCount,
           "validation context",
@@ -922,15 +933,15 @@
     }
     if (attention.acceptedWithFollowUp) {
       tokens.push({
-        token: "follow-up",
-        query: "attention:follow-up",
+        token: ATTENTION_FOLLOW_UP,
+        query: `attention:${ATTENTION_FOLLOW_UP}`,
         label: "follow-up"
       });
     }
     if (attention.staleFactCount) {
       tokens.push({
-        token: "stale-fact",
-        query: "attention:stale-fact",
+        token: ATTENTION_STALE_FACT,
+        query: `attention:${ATTENTION_STALE_FACT}`,
         label: plural(attention.staleFactCount, "stale fact")
       });
     }
@@ -960,9 +971,26 @@
     return `<div class="${CLASS.overviewLatest}"><span>latest</span><b>${escapeHtml(title)}</b><span>${escapeHtml(fmtDateTime(latest.at || ""))}</span></div>`;
   }
   __name(latestActivityLine, "latestActivityLine");
-  function revisionSearchIndex(r) {
+  function tokenSet(values) {
+    return values.length ? ` ${values.map((v) => v.toLowerCase()).join(" ")} ` : "";
+  }
+  __name(tokenSet, "tokenSet");
+  function tagTokenSet(tags) {
+    const tokens = /* @__PURE__ */ new Set();
+    for (const tag of tags) {
+      if (!tag) continue;
+      const lowered = tag.toLowerCase();
+      const colon = lowered.indexOf(":");
+      if (colon > 0) tokens.add(lowered.slice(0, colon));
+      tokens.add(lowered);
+    }
+    return tokens.size ? ` ${[...tokens].join(" ")} ` : "";
+  }
+  __name(tagTokenSet, "tagTokenSet");
+  function revisionSearchIndex(r, classification = null) {
     const overview = r.overview || {};
     const currentAssessment = overview.currentAssessment || {};
+    const attention = overview.attention || {};
     const latest = overview.latestActivity || {};
     const target = r.targetDisplay || {};
     const head = target.head || {};
@@ -980,6 +1008,15 @@
       "review cues",
       "attention"
     ].filter(Boolean).join(" ").toLowerCase();
+    const isTokens = [];
+    if ((attention.openInputRequestCount ?? 0) > 0) isTokens.push("open");
+    if ((attention.respondedInputRequestCount ?? 0) > 0)
+      isTokens.push("answered");
+    if (attention.unassessed) isTokens.push("unassessed");
+    if ((attention.staleFactCount ?? 0) > 0) isTokens.push("stale");
+    if (attention.acceptedWithFollowUp) isTokens.push("follow-up");
+    if (classification?.competing) isTokens.push("contested");
+    if (classification?.state === "superseded") isTokens.push("superseded");
     return {
       text,
       type: "revision",
@@ -987,11 +1024,18 @@
       // The search-index key is `snapshot` (grammar renamed from `object`, #334);
       // the value is the revision's snapshot/content-object id.
       snapshot: r.snapshotId,
-      // The revision grammar's assessment: field (renamed from the legacy
-      // status key); same value precedence as before.
-      assessment: currentAssessment.assessment || currentAssessment.status || "",
+      // The revision grammar's assessment: field. Resolved-only, mirroring the
+      // Rust revision-record builder: the wire value ONLY when the current
+      // assessment is resolved; unassessed and ambiguous both emit "" — an
+      // ambiguous revision can carry a stale assessment value that must not
+      // leak through here.
+      assessment: currentAssessment.status === "resolved" ? currentAssessment.assessment || "" : "",
       // The attention token set in the space-wrapped membership encoding.
       attention: cues.length ? ` ${cues.map((cue) => cue.token).join(" ")} ` : "",
+      track: tokenSet(overview.tracks ?? []),
+      actor: tokenSet(overview.actors ?? []),
+      tag: tagTokenSet(overview.tags ?? []),
+      is: tokenSet(isTokens),
       // The range anchor: the revision's capturedAt, normalized to the shared
       // fixed-width form under the one canonical occurred_at key.
       [RANGE_ANCHOR_FIELD]: normalizeTimeSlot(r.capturedAt)
@@ -1207,8 +1251,13 @@
   function matchesRevisionFilters(r) {
     const s = getState();
     if (s.filterSnapshot && r.snapshotId !== s.filterSnapshot) return false;
+    const revisionId = r.revisionId ?? "";
+    const classification = revisionClassification(revisionId);
+    const competing = currentThreads().some(
+      (t) => t.competing && (t.revisions ?? []).includes(revisionId)
+    );
     return matchesQuery(
-      revisionSearchIndex(r),
+      revisionSearchIndex(r, { state: classification?.state, competing }),
       parseSearchQueryFor(s.filterText, "revision").clauses
     );
   }

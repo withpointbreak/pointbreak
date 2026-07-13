@@ -30,4 +30,6 @@ pub(crate) use read::skipped_to_diagnostics;
 pub use read::{read_events, read_events_for_display, rebuild_state};
 pub use revisions_by_base::RevisionsByBase;
 pub use state::{ProjectionDiagnostic, SessionState};
-pub use supersession::SupersessionView;
+pub use supersession::{
+    RevisionClassificationFacet, SupersessionView, revision_supersession_classification,
+};

@@ -46,6 +46,46 @@ pub struct SupersessionView {
     pub diagnostics: Vec<ProjectionDiagnostic>,
 }
 
+/// One revision's supersession standing for readbacks and the filter grammar:
+/// its head/superseded/isolated state and whether its component has more than
+/// one current head. `competing` marks ALL members of such a component,
+/// symmetrically — never a head-selecting predicate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RevisionClassificationFacet {
+    /// `"head"` | `"superseded"` | `"isolated"`.
+    pub state: &'static str,
+    /// The revision's component has more than one current head.
+    pub competing: bool,
+}
+
+/// Classify every known revision (head / superseded / isolated, plus the
+/// symmetric competing flag) from the supersession projection — the one
+/// spelling of that derivation, shared by the inspector's classification
+/// payload and the revision search record. Iterates the components so isolated
+/// roots (no edges) are still classified.
+pub fn revision_supersession_classification(
+    view: &SupersessionView,
+) -> BTreeMap<RevisionId, RevisionClassificationFacet> {
+    let mut map = BTreeMap::new();
+    for component in &view.components {
+        let competing = component.intersection(&view.heads).count() > 1;
+        for revision in component {
+            let state = if view.superseded.contains(revision) {
+                "superseded"
+            } else if view.supersedes.contains_key(revision) {
+                "head" // a current head that supersedes at least one predecessor
+            } else {
+                "isolated" // a lone root: a current head with no incident edges
+            };
+            map.insert(
+                revision.clone(),
+                RevisionClassificationFacet { state, competing },
+            );
+        }
+    }
+    map
+}
+
 impl SupersessionView {
     /// Builds the view from synthetic `revision -> supersedes` edges.
     ///
@@ -307,6 +347,30 @@ mod tests {
 
     fn set<const N: usize>(items: [RevisionId; N]) -> BTreeSet<RevisionId> {
         items.into_iter().collect()
+    }
+
+    #[test]
+    fn revision_supersession_classification_matches_head_superseded_isolated_and_competing() {
+        // A supersedes B (A head, B superseded), C isolated, and D/E both
+        // superseding F (a competing component).
+        let view = SupersessionView::from_edges([
+            (rev("A"), vec![rev("B")]),
+            (rev("B"), vec![]),
+            (rev("C"), vec![]),
+            (rev("D"), vec![rev("F")]),
+            (rev("E"), vec![rev("F")]),
+            (rev("F"), vec![]),
+        ]);
+        let map = revision_supersession_classification(&view);
+        assert_eq!(map[&rev("A")].state, "head");
+        assert_eq!(map[&rev("B")].state, "superseded");
+        assert_eq!(map[&rev("C")].state, "isolated");
+        assert!(!map[&rev("A")].competing);
+        assert!(!map[&rev("B")].competing);
+        assert!(!map[&rev("C")].competing);
+        // The D/E/F component has two heads (D, E): every member is competing,
+        // symmetric — never a head-selecting predicate.
+        assert!(map[&rev("D")].competing && map[&rev("E")].competing && map[&rev("F")].competing);
     }
 
     #[test]

@@ -25,6 +25,7 @@ pub use self::search::{
     REVISION_ATTENTION_VALUES, REVISION_QUERY_FIELDS, SearchRecord, build_haystack, matches_query,
     parse_search_query, parse_search_query_for,
 };
+pub(crate) use self::search::{enum_wire, tag_index_tokens, wrap_set};
 pub use self::summary::ReviewHistoryEntry;
 use crate::error::Result;
 use crate::session::EventStore;

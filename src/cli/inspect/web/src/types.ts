@@ -105,13 +105,16 @@ export const EVENT_QUERY_FIELDS: readonly string[] = [
   "before",
   "after",
 ];
-// Transitional: only the qualifiers the revision index can actually match
-// today — track/actor/is/tag are deferred (diagnosed, never silent-empty)
-// until the index extension populates their slots, and return here when it does.
+// `type:`/`check:` are event-only (known-but-unsupported here — diagnosed,
+// never silent-empty); every other key matches a revision-index slot.
 export const REVISION_QUERY_FIELDS: readonly string[] = [
+  "track",
+  "actor",
   "revision",
   "snapshot",
   "assessment",
+  "is",
+  "tag",
   "attention",
   "before",
   "after",
@@ -345,6 +348,9 @@ export interface CurrentAssessment {
 /** A revision's attention rollup (open requests, validation context, etc.). */
 export interface OverviewAttention {
   openInputRequestCount?: number;
+  // Requests with a resolved response only — the `is:answered` source.
+  // Ambiguous requests count in neither this nor the open count.
+  respondedInputRequestCount?: number;
   unassessed?: boolean;
   failedValidationCount?: number;
   erroredValidationCount?: number;
@@ -375,6 +381,12 @@ export interface Overview {
   attention?: OverviewAttention;
   counts?: OverviewCounts;
   latestActivity?: LatestActivity;
+  // The per-revision fact-meta aggregation (track ids, writer actor ids,
+  // observation tags across the four fact families) the revision search
+  // index folds into its token sets.
+  tracks?: string[];
+  actors?: string[];
+  tags?: string[];
 }
 
 /**

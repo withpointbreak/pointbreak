@@ -38,6 +38,7 @@ use crate::session::{
 mod identity;
 mod resolving;
 mod rows;
+mod search;
 mod snapshot;
 mod summary_cache;
 
@@ -51,6 +52,10 @@ pub use self::rows::{RevisionProjectionRow, SnapshotOrder};
 use self::rows::{
     build_assessment_rows, build_input_request_rows, build_observation_rows, build_snapshot_rows,
     build_validation_rows, renumber_projection_rows,
+};
+pub use self::search::{
+    RevisionRecordInputs, RevisionSearchRecord, build_revision_search_record,
+    current_assessment_includes_follow_up, stale_review_fact_count,
 };
 use self::snapshot::{
     SnapshotContent, load_bound_object_artifact_from_backend, resolve_snapshot_content,

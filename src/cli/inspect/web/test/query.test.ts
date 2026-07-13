@@ -271,11 +271,13 @@ describe("parseSearchQueryFor (mirror of the Rust parse_search_query_for corpus)
     expect(
       parseSearchQueryFor("is:contested", "event").diagnostics[0].code,
     ).toBe("unsupported-value");
-    // is: is deferred from the revision surface until its index slot exists —
-    // a diagnostic, not a silently dropped match.
-    expect(
-      parseSearchQueryFor("is:contested", "revision").diagnostics[0].code,
-    ).toBe("unsupported-qualifier");
+    // The revision surface enumerates the full lifecycle set — contested is a
+    // member there (the revision index carries the `is` slot).
+    const contested = parseSearchQueryFor("is:contested", "revision");
+    expect(contested.clauses).toEqual([
+      { kind: "field", field: "is", value: "contested", negate: false },
+    ]);
+    expect(contested.diagnostics).toEqual([]);
     // The revision surface still validates enumerated values via attention:.
     expect(
       parseSearchQueryFor("attention:bogus", "revision").diagnostics[0].code,
@@ -285,15 +287,26 @@ describe("parseSearchQueryFor (mirror of the Rust parse_search_query_for corpus)
     ).toEqual([]);
   });
 
-  it("defers unindexed revision qualifiers with a diagnostic", () => {
-    // track/actor/tag/is are deferred from the revision surface until the
-    // revision index carries their slots — diagnosed, never silent-empty.
-    for (const q of [
-      "track:agent:codex",
-      "actor:actor:local",
-      "tag:issue",
-      "is:open",
+  it("supports the indexed revision qualifiers and rejects type: and check:", () => {
+    // The revision index carries track/actor/tag/is slots now, so the
+    // qualifiers parse to clauses (actor: canonicalizes its prefix-less
+    // spelling, same as the event surface).
+    for (const [q, field, value] of [
+      ["track:agent:codex", "track", "agent:codex"],
+      ["actor:actor:local", "actor", "actor:local"],
+      ["actor:local", "actor", "actor:local"],
+      ["tag:issue", "tag", "issue"],
+      ["is:open", "is", "open"],
     ]) {
+      const parsed = parseSearchQueryFor(q, "revision");
+      expect(parsed.clauses).toEqual([
+        { kind: "field", field, value, negate: false },
+      ]);
+      expect(parsed.diagnostics).toEqual([]);
+    }
+    // type:/check: stay event-only — known-but-unsupported here, diagnosed,
+    // never silent-empty.
+    for (const q of ["type:observation", "check:passed"]) {
       const parsed = parseSearchQueryFor(q, "revision");
       expect(parsed.clauses).toEqual([]);
       expect(parsed.diagnostics[0].code).toBe("unsupported-qualifier");

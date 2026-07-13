@@ -25,6 +25,7 @@ import {
   type Overview,
   type OverviewAttention,
   type OverviewCounts,
+  REVISION_ATTENTION_VALUES,
   type SearchIndex,
   typeLabel,
   VERIFICATION_LABELS,
@@ -214,21 +215,33 @@ export function plural(
   return `${n} ${n === 1 ? singular : pluralLabel}`;
 }
 
+// The token/query spellings come from the shared REVISION_ATTENTION_VALUES
+// constant (the attention: value vocabulary), destructured in its declared
+// order; the human-facing labels stay local — they are display strings, not
+// query tokens.
+const [
+  ATTENTION_OPEN_REQUEST,
+  ATTENTION_UNASSESSED,
+  ATTENTION_VALIDATION_CONTEXT,
+  ATTENTION_FOLLOW_UP,
+  ATTENTION_STALE_FACT,
+] = REVISION_ATTENTION_VALUES;
+
 /** The attention cues an overview surfaces (open requests, validation context, etc.). */
 export function attentionTokens(overview?: Overview | null): AttentionToken[] {
   const attention: OverviewAttention = overview?.attention || {};
   const tokens: AttentionToken[] = [];
   if (attention.openInputRequestCount) {
     tokens.push({
-      token: "open-request",
-      query: "attention:open-request",
+      token: ATTENTION_OPEN_REQUEST,
+      query: `attention:${ATTENTION_OPEN_REQUEST}`,
       label: plural(attention.openInputRequestCount, "open request"),
     });
   }
   if (attention.unassessed) {
     tokens.push({
-      token: "unassessed",
-      query: "attention:unassessed",
+      token: ATTENTION_UNASSESSED,
+      query: `attention:${ATTENTION_UNASSESSED}`,
       label: "unassessed",
     });
   }
@@ -237,8 +250,8 @@ export function attentionTokens(overview?: Overview | null): AttentionToken[] {
     (attention.erroredValidationCount || 0);
   if (validationCount) {
     tokens.push({
-      token: "validation-context",
-      query: "attention:validation-context",
+      token: ATTENTION_VALIDATION_CONTEXT,
+      query: `attention:${ATTENTION_VALIDATION_CONTEXT}`,
       label: plural(
         validationCount,
         "validation context",
@@ -248,15 +261,15 @@ export function attentionTokens(overview?: Overview | null): AttentionToken[] {
   }
   if (attention.acceptedWithFollowUp) {
     tokens.push({
-      token: "follow-up",
-      query: "attention:follow-up",
+      token: ATTENTION_FOLLOW_UP,
+      query: `attention:${ATTENTION_FOLLOW_UP}`,
       label: "follow-up",
     });
   }
   if (attention.staleFactCount) {
     tokens.push({
-      token: "stale-fact",
-      query: "attention:stale-fact",
+      token: ATTENTION_STALE_FACT,
+      query: `attention:${ATTENTION_STALE_FACT}`,
       label: plural(attention.staleFactCount, "stale fact"),
     });
   }
@@ -297,10 +310,45 @@ export function latestActivityLine(overview?: Overview | null): string {
   return `<div class="${CLASS.overviewLatest}"><span>latest</span><b>${escapeHtml(title)}</b><span>${escapeHtml(fmtDateTime(latest.at || ""))}</span></div>`;
 }
 
+/** The classification facts `is:contested`/`is:superseded` need — passed by the
+ *  caller (which reads state), never read here. */
+export interface RevisionClassificationInput {
+  state?: string;
+  competing?: boolean;
+}
+
+// Lowercased at build time, mirroring the Rust record builders: the
+// set-membership match kind compares the field to an already-lowercased query
+// value with no compare-time lowercasing of its own, so a mixed-case source id
+// would otherwise never match.
+function tokenSet(values: string[]): string {
+  return values.length
+    ? ` ${values.map((v) => v.toLowerCase()).join(" ")} `
+    : "";
+}
+
+// The tag dual index: each tag contributes BOTH its full string and its
+// first-colon key, lowercased and deduplicated.
+function tagTokenSet(tags: string[]): string {
+  const tokens = new Set<string>();
+  for (const tag of tags) {
+    if (!tag) continue;
+    const lowered = tag.toLowerCase();
+    const colon = lowered.indexOf(":");
+    if (colon > 0) tokens.add(lowered.slice(0, colon));
+    tokens.add(lowered);
+  }
+  return tokens.size ? ` ${[...tokens].join(" ")} ` : "";
+}
+
 /** A once-per-load search record over a revision. */
-export function revisionSearchIndex(r: Revision): SearchIndex {
+export function revisionSearchIndex(
+  r: Revision,
+  classification: RevisionClassificationInput | null = null,
+): SearchIndex {
   const overview: Overview = r.overview || {};
   const currentAssessment: CurrentAssessment = overview.currentAssessment || {};
+  const attention: OverviewAttention = overview.attention || {};
   const latest: LatestActivity = overview.latestActivity || {};
   const target: TargetDisplay = r.targetDisplay || {};
   const head: TargetHead = target.head || {};
@@ -321,6 +369,20 @@ export function revisionSearchIndex(r: Revision): SearchIndex {
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
+
+  const isTokens: string[] = [];
+  if ((attention.openInputRequestCount ?? 0) > 0) isTokens.push("open");
+  // Responded-only, mirroring the Rust record: an ambiguous request counts in
+  // the total but is neither open nor answered, so total-minus-open would
+  // over-match.
+  if ((attention.respondedInputRequestCount ?? 0) > 0)
+    isTokens.push("answered");
+  if (attention.unassessed) isTokens.push("unassessed");
+  if ((attention.staleFactCount ?? 0) > 0) isTokens.push("stale");
+  if (attention.acceptedWithFollowUp) isTokens.push("follow-up");
+  if (classification?.competing) isTokens.push("contested");
+  if (classification?.state === "superseded") isTokens.push("superseded");
+
   return {
     text,
     type: "revision",
@@ -328,11 +390,21 @@ export function revisionSearchIndex(r: Revision): SearchIndex {
     // The search-index key is `snapshot` (grammar renamed from `object`, #334);
     // the value is the revision's snapshot/content-object id.
     snapshot: r.snapshotId,
-    // The revision grammar's assessment: field (renamed from the legacy
-    // status key); same value precedence as before.
-    assessment: currentAssessment.assessment || currentAssessment.status || "",
+    // The revision grammar's assessment: field. Resolved-only, mirroring the
+    // Rust revision-record builder: the wire value ONLY when the current
+    // assessment is resolved; unassessed and ambiguous both emit "" — an
+    // ambiguous revision can carry a stale assessment value that must not
+    // leak through here.
+    assessment:
+      currentAssessment.status === "resolved"
+        ? currentAssessment.assessment || ""
+        : "",
     // The attention token set in the space-wrapped membership encoding.
     attention: cues.length ? ` ${cues.map((cue) => cue.token).join(" ")} ` : "",
+    track: tokenSet(overview.tracks ?? []),
+    actor: tokenSet(overview.actors ?? []),
+    tag: tagTokenSet(overview.tags ?? []),
+    is: tokenSet(isTokens),
     // The range anchor: the revision's capturedAt, normalized to the shared
     // fixed-width form under the one canonical occurred_at key.
     [RANGE_ANCHOR_FIELD]: normalizeTimeSlot(r.capturedAt),

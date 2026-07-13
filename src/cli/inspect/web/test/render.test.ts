@@ -571,9 +571,12 @@ describe("lens-aware search placeholder and query notices", () => {
     render.render();
     const ph = $<HTMLInputElement>("#filter-text")?.placeholder ?? "";
     expect(ph).toContain("attention:");
-    // Deferred qualifiers (no index slot yet) must not be advertised.
-    expect(ph).not.toContain("track:");
-    expect(ph).not.toContain("is:");
+    // The revision index carries track/actor/is/tag slots, so their keys are
+    // advertised; type:/check: stay event-only.
+    expect(ph).toContain("track:");
+    expect(ph).toContain("is:");
+    expect(ph).not.toContain("type:");
+    expect(ph).not.toContain("check:");
   });
 
   it("renders a client parse diagnostic in the route-diagnostic region", () => {
