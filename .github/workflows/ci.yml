@@ -64,6 +64,23 @@ jobs:
           git diff --exit-code ../assets/app.js \
             || { echo "::error::assets/app.js is stale — run 'just web-build' and commit the result."; exit 1; }
 
+  extension-check:
+    name: extension check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: extensions/vscode/.nvmrc
+          cache: npm
+          cache-dependency-path: extensions/vscode/package-lock.json
+      - name: npm ci
+        working-directory: extensions/vscode
+        run: npm ci
+      - name: biome + tsc + vitest
+        working-directory: extensions/vscode
+        run: npm run check
+
   test:
     name: ${{ matrix.name }}
     # Windows is the CI long pole and is spawn-bound (per-CreateProcess cost), so its

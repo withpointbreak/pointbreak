@@ -1,4 +1,8 @@
 /target
+/extensions/vscode/out/
+/extensions/vscode/bin/
+/extensions/vscode/*.vsix
+/extensions/vscode/node_modules/
 
 # Local project-management state
 /.gumbo

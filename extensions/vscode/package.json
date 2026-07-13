@@ -1,0 +1,53 @@
+{
+  "name": "pointbreak",
+  "displayName": "Pointbreak",
+  "publisher": "pointbreak",
+  "version": "1.0.0",
+  "description": "Pointbreak Review companion for Visual Studio Code.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kevinswiber/pointbreak.git",
+    "directory": "extensions/vscode"
+  },
+  "engines": {
+    "node": ">=20",
+    "vscode": "^1.74.0"
+  },
+  "extensionKind": ["workspace"],
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "configuration": {
+      "title": "Pointbreak",
+      "properties": {
+        "pointbreak.binaryPath": {
+          "type": "string",
+          "default": "",
+          "description": "Absolute path to a shore CLI binary (overrides the bundled one)."
+        },
+        "pointbreak.useGlobalCli": {
+          "type": "boolean",
+          "default": false,
+          "description": "Resolve the shore CLI from PATH instead of the bundled binary."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "format-check": "biome check ./src ./test",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "node build.mjs",
+    "check": "npm run format-check && npm run typecheck && npm run test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.1",
+    "@types/node": "26.0.1",
+    "@types/vscode": "1.74.0",
+    "@vscode/vsce": "3.9.2",
+    "esbuild": "0.28.1",
+    "typescript": "6.0.3",
+    "vitest": "4.1.9"
+  }
+}

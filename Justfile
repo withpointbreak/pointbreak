@@ -131,6 +131,18 @@ migrate-store-common-dir repo="." include-ephemeral="false":
 # Check commit messages, compile, lint, and tests.
 check: commit-check build lint test
 
+# Install the Visual Studio Code extension toolchain from its committed lockfile.
+extension-install:
+    cd extensions/vscode && npm ci
+
+# Node-only; intentionally not part of `just check` so the Rust gate stays Node-free.
+extension-check:
+    cd extensions/vscode && npm run check
+
+# Bundled-binary packaging is introduced separately.
+extension-package:
+    @echo "extension packaging is not available yet"
+
 # Install the inspector front-end dev toolchain (Node) from the committed lockfile.
 web-install:
     cd src/cli/inspect/web && npm ci

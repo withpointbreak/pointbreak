@@ -1,0 +1,9 @@
+.gitignore
+.nvmrc
+biome.json
+build.mjs
+src/**
+test/**
+tsconfig.json
+node_modules/**
+*.vsix
