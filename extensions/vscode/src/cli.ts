@@ -82,7 +82,12 @@ export const REQUIRED_DOCUMENTS: Record<string, number> = {
   "pointbreak.version": 1,
   "pointbreak.attention-list": 1,
   "pointbreak.review-revision-list": 1,
+  "pointbreak.review-revision": 2,
   "pointbreak.review-capture": 1,
+  "pointbreak.review-observation-add": 1,
+  "pointbreak.review-snapshot": 1,
+  "pointbreak.inspect-freshness": 1,
+  "pointbreak.inspect-startup": 1,
   "pointbreak.store-status": 1,
 };
 

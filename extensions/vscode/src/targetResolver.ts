@@ -22,7 +22,12 @@ export type TargetResolution =
     }
   | { kind: "error"; folder: WorkspaceFolder; message: string };
 
-type ResolvedTarget = TargetResolution & { kind: "resolved" };
+export type ResolvedTargetResolution = Extract<
+  TargetResolution,
+  { kind: "resolved" }
+>;
+
+type ResolvedTarget = ResolvedTargetResolution;
 
 interface FolderPickItem extends QuickPickItem {
   resolution: ResolvedTarget;

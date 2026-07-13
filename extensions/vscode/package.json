@@ -17,11 +17,11 @@
   "extensionKind": ["workspace"],
   "main": "./out/extension.js",
   "activationEvents": [
-    "onStartupFinished",
     "onView:pointbreak.attention",
     "onCommand:pointbreak.refreshAttention",
     "onCommand:pointbreak.capture",
-    "onCommand:pointbreak.openInReview"
+    "onCommand:pointbreak.openInReview",
+    "onCommand:pointbreak.stopInspect"
   ],
   "contributes": {
     "commands": [
@@ -38,6 +38,11 @@
       {
         "command": "pointbreak.openInReview",
         "title": "Open in Review",
+        "category": "Pointbreak"
+      },
+      {
+        "command": "pointbreak.stopInspect",
+        "title": "Stop Local Review Service",
         "category": "Pointbreak"
       }
     ],
@@ -75,7 +80,7 @@
           "type": "string",
           "scope": "resource",
           "default": "",
-          "description": "Optional URL for an externally managed Pointbreak Review server for this folder. Leave empty to let the extension restore its last verified port."
+          "description": "Optional URL for an externally managed Pointbreak Review server for this folder."
         }
       }
     }

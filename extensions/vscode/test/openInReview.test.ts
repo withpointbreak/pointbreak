@@ -1,20 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Memento, WorkspaceFolder } from "vscode";
+import type { WorkspaceFolder } from "vscode";
 import type { ResolvedBinary } from "../src/binary";
 import type { PointbreakCli } from "../src/cli";
 import {
   probeReview,
   type ReviewIdentity,
   type ReviewProbeResult,
-  restoreReviewServers,
   reviewDeepLink,
   runOpenInReviewCommand,
 } from "../src/commands/openInReview";
-import {
-  type ReviewServerRecord,
-  ReviewServerRegistry,
-} from "../src/reviewServerRegistry";
+import type { FetchFn } from "../src/inspectClient";
+import type { ReviewCapability } from "../src/reviewTerminal";
 import type { TargetResolution } from "../src/targetResolver";
+import { VERSION_DOC } from "./fixtures";
 import { workspaceFolder } from "./helpers/vscodeMock";
 
 const vscodeMocks = vi.hoisted(() => ({
@@ -57,14 +55,16 @@ vi.mock("vscode", () => ({
   },
 }));
 
-const EXPECTED_IDENTITY: ReviewIdentity = {
+const IDENTITY: ReviewIdentity = {
   storeIdentity: "store:sha256:store",
   contextIdentity: "context:sha256:repo",
 };
+const CAPABILITY: ReviewCapability = {
+  origin: "http://127.0.0.1:63831",
+  token: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-",
+};
 const MATCH: ReviewProbeResult = { kind: "match" };
 const UNAVAILABLE: ReviewProbeResult = { kind: "unavailable" };
-const INCOMPATIBLE: ReviewProbeResult = { kind: "incompatible" };
-const MISMATCH: ReviewProbeResult = { kind: "mismatch" };
 
 beforeEach(() => {
   vscodeMocks.executeCommand.mockReset();
@@ -82,524 +82,183 @@ afterEach(() => {
 });
 
 describe("reviewDeepLink", () => {
-  it("builds the revision deep link exactly", () => {
-    expect(reviewDeepLink("http://127.0.0.1:7878", "rev:sha256:abc")).toBe(
-      "http://127.0.0.1:7878/#/revision/rev:sha256:abc",
+  it("builds one route-preserving fragment carrying the browser bearer", () => {
+    const link = reviewDeepLink(
+      CAPABILITY.origin,
+      "rev:sha256:abc",
+      "attention",
+      CAPABILITY.token,
     );
-  });
 
-  it("preserves the attention lens for an attention-item link", () => {
-    expect(
-      reviewDeepLink("http://127.0.0.1:7878", "rev:sha256:abc", "attention"),
-    ).toBe("http://127.0.0.1:7878/#/revision/rev:sha256:abc?lens=attention");
+    expect(link).toBe(
+      `${CAPABILITY.origin}/#/revision/rev:sha256:abc?lens=attention&token=${CAPABILITY.token}`,
+    );
+    expect(link.match(/#/g)).toHaveLength(1);
   });
 });
 
 describe("probeReview", () => {
-  it("accepts only an inspector serving the expected store and context", async () => {
-    const fetch = vi.fn(async () => ({
-      ok: true,
-      json: async () => ({
-        schema: "pointbreak.inspect-identity",
-        ...EXPECTED_IDENTITY,
-      }),
+  it("uses only the secret-free origin for authenticated version and identity requests", async () => {
+    const fetch = vi
+      .fn<FetchFn>()
+      .mockResolvedValueOnce(response(VERSION_DOC))
+      .mockResolvedValueOnce(
+        response({ schema: "pointbreak.inspect-identity", ...IDENTITY }),
+      );
+
+    await expect(probeReview(CAPABILITY, IDENTITY, fetch)).resolves.toEqual(
+      MATCH,
+    );
+
+    expect(fetch.mock.calls.map(([url]) => url.toString())).toEqual([
+      `${CAPABILITY.origin}/api/version`,
+      `${CAPABILITY.origin}/api/identity`,
+    ]);
+    for (const [, init] of fetch.mock.calls) {
+      expect(init.headers.Authorization).toBe(`Bearer ${CAPABILITY.token}`);
+    }
+  });
+
+  it("classifies authenticated failures without returning credentials", async () => {
+    const fetch = vi.fn<FetchFn>(async () => ({
+      status: 401,
+      text: async () => CAPABILITY.token,
     }));
-    vi.stubGlobal("fetch", fetch);
 
-    await expect(
-      probeReview("http://127.0.0.1:63831", EXPECTED_IDENTITY),
-    ).resolves.toEqual(MATCH);
-    expect(fetch).toHaveBeenCalledWith(
-      "http://127.0.0.1:63831/api/identity",
-      expect.objectContaining({ method: "GET" }),
-    );
-  });
+    const result = await probeReview(CAPABILITY, IDENTITY, fetch);
 
-  it("rejects a reachable inspector for a different context", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => ({
-        ok: true,
-        json: async () => ({
-          schema: "pointbreak.inspect-identity",
-          storeIdentity: EXPECTED_IDENTITY.storeIdentity,
-          contextIdentity: "context:sha256:other",
-        }),
-      })),
-    );
-
-    await expect(
-      probeReview("http://127.0.0.1:7878", EXPECTED_IDENTITY),
-    ).resolves.toEqual(MISMATCH);
-  });
-
-  it("identifies an older inspector that omits repository identities", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => ({
-        ok: true,
-        json: async () => ({
-          schema: "pointbreak.inspect-identity",
-          repository: "/repo",
-        }),
-      })),
-    );
-
-    await expect(
-      probeReview("http://127.0.0.1:7878", EXPECTED_IDENTITY),
-    ).resolves.toEqual(INCOMPATIBLE);
+    expect(result).toEqual({ kind: "unauthorized" });
+    expect(JSON.stringify(result)).not.toContain(CAPABILITY.token);
   });
 });
 
 describe("runOpenInReviewCommand", () => {
-  it("opens externally when the configured endpoint has the expected identity", async () => {
+  it("opens a verified running text-web capability without starting another process", async () => {
     const probe = vi.fn(async () => MATCH);
     const start = vi.fn();
 
     await runOpenInReviewCommand(cli(), binary(), [resolved()], reviewNode(), {
       probe,
-      reviewUrl: "http://127.0.0.1:7878",
+      running: () => Promise.resolve(CAPABILITY),
+      start,
+    });
+
+    expect(probe).toHaveBeenCalledWith(CAPABILITY, IDENTITY);
+    expect(start).not.toHaveBeenCalled();
+    expect(vscodeMocks.openExternal).toHaveBeenCalledWith(
+      `${CAPABILITY.origin}/#/revision/rev:sha256:abc?token=${CAPABILITY.token}`,
+    );
+  });
+
+  it("starts only the explicit text-web surface and cleans it up when probing fails", async () => {
+    vscodeMocks.showInformationMessage.mockResolvedValue(
+      "Start `shore inspect` here",
+    );
+    const probe = vi.fn(async () => UNAVAILABLE);
+    const start = vi.fn(async () => CAPABILITY);
+    const stop = vi.fn();
+
+    await runOpenInReviewCommand(cli(), binary(), [resolved()], reviewNode(), {
+      probe,
+      running: () => undefined,
+      sleep: vi.fn(),
+      start,
+      stop,
+    });
+
+    expect(start).toHaveBeenCalledWith(
+      binary(),
+      expect.objectContaining({ name: "repo" }),
+      resolvedTargetKey(),
+    );
+    expect(probe).toHaveBeenCalledTimes(10);
+    expect(stop).toHaveBeenCalledWith(resolvedTargetKey());
+    expect(vscodeMocks.openExternal).not.toHaveBeenCalled();
+    expect(
+      vscodeMocks.showErrorMessage.mock.calls.flat().join(" "),
+    ).not.toMatch(/secret|127\.0\.0\.1|63831|file:|\/repo/);
+  });
+
+  it("opens an optional externally managed browser URL without restoring or persisting it", async () => {
+    const probe = vi.fn();
+    const start = vi.fn();
+
+    await runOpenInReviewCommand(cli(), binary(), [resolved()], reviewNode(), {
+      probe,
+      reviewUrl: "https://review.example.com",
       running: () => undefined,
       start,
     });
 
-    expect(probe).toHaveBeenCalledWith(
-      "http://127.0.0.1:7878",
-      EXPECTED_IDENTITY,
-    );
-    expect(vscodeMocks.openExternal).toHaveBeenCalledWith(
-      "http://127.0.0.1:7878/#/revision/rev:sha256:abc",
-    );
+    expect(probe).not.toHaveBeenCalled();
     expect(start).not.toHaveBeenCalled();
-  });
-
-  it("uses the integrated browser when the localhost preference is enabled", async () => {
-    vscodeMocks.openLocalhostLinks = true;
-
-    await runOpenInReviewCommand(cli(), binary(), [resolved()], reviewNode(), {
-      probe: vi.fn(async () => MATCH),
-      reviewUrl: "http://127.0.0.1:7878",
-      running: () => undefined,
-    });
-
-    expect(vscodeMocks.executeCommand).toHaveBeenCalledWith(
-      "workbench.action.browser.open",
-      "http://127.0.0.1:7878/#/revision/rev:sha256:abc",
-    );
-    expect(vscodeMocks.openExternal).not.toHaveBeenCalled();
-  });
-
-  it("falls back externally when the integrated browser command is unavailable", async () => {
-    vscodeMocks.openLocalhostLinks = true;
-    vscodeMocks.executeCommand.mockRejectedValue(
-      new Error("command not found"),
-    );
-
-    await runOpenInReviewCommand(cli(), binary(), [resolved()], reviewNode(), {
-      probe: vi.fn(async () => MATCH),
-      reviewUrl: "http://127.0.0.1:7878",
-      running: () => undefined,
-    });
-
     expect(vscodeMocks.openExternal).toHaveBeenCalledWith(
-      "http://127.0.0.1:7878/#/revision/rev:sha256:abc",
+      "https://review.example.com/#/revision/rev:sha256:abc",
     );
+  });
+
+  it("rejects a token-bearing configured URL instead of retaining or probing it", async () => {
+    const probe = vi.fn();
+    const start = vi.fn();
+
+    await runOpenInReviewCommand(cli(), binary(), [resolved()], reviewNode(), {
+      probe,
+      reviewUrl: `${CAPABILITY.origin}/#/timeline?token=${CAPABILITY.token}`,
+      running: () => undefined,
+      start,
+    });
+
+    expect(probe).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
+    expect(vscodeMocks.openExternal).not.toHaveBeenCalled();
+    expect(vscodeMocks.showErrorMessage).toHaveBeenCalledWith(
+      expect.not.stringContaining(CAPABILITY.token),
+    );
+  });
+
+  it("never treats the API-only child manager as a browser destination", async () => {
+    vscodeMocks.showInformationMessage.mockResolvedValue(undefined);
+    const start = vi.fn();
+
+    await runOpenInReviewCommand(cli(), binary(), [resolved()], reviewNode(), {
+      probe: vi.fn(),
+      running: () => undefined,
+      start,
+    });
+
+    expect(start).not.toHaveBeenCalled();
+    expect(vscodeMocks.openExternal).not.toHaveBeenCalled();
   });
 
   it("keeps configured non-local Review servers in the external browser", async () => {
     vscodeMocks.openLocalhostLinks = true;
 
     await runOpenInReviewCommand(cli(), binary(), [resolved()], reviewNode(), {
-      probe: vi.fn(async () => MATCH),
       reviewUrl: "https://review.example.com",
       running: () => undefined,
     });
 
     expect(vscodeMocks.executeCommand).not.toHaveBeenCalled();
-    expect(vscodeMocks.openExternal).toHaveBeenCalledWith(
-      "https://review.example.com/#/revision/rev:sha256:abc",
-    );
-  });
-
-  it("reuses an extension-started ephemeral server without prompting", async () => {
-    const probe = vi.fn(async () => MATCH);
-
-    await runOpenInReviewCommand(cli(), binary(), [resolved()], reviewNode(), {
-      probe,
-      running: () => Promise.resolve("http://127.0.0.1:63831/"),
-    });
-
-    expect(probe).toHaveBeenCalledOnce();
-    expect(probe).toHaveBeenCalledWith(
-      "http://127.0.0.1:63831",
-      EXPECTED_IDENTITY,
-    );
-    expect(vscodeMocks.showInformationMessage).not.toHaveBeenCalled();
-    expect(vscodeMocks.openExternal).toHaveBeenCalledWith(
-      "http://127.0.0.1:63831/#/revision/rev:sha256:abc",
-    );
-  });
-
-  it("reuses a remembered workspace port when its identity still matches", async () => {
-    const { registry } = registryWith([rememberedRecord()]);
-    const probe = vi.fn(async () => MATCH);
-
-    await runOpenInReviewCommand(cli(), binary(), [resolved()], reviewNode(), {
-      probe,
-      registry,
-      running: () => undefined,
-    });
-
-    expect(probe).toHaveBeenCalledWith(
-      "http://127.0.0.1:63831",
-      EXPECTED_IDENTITY,
-    );
-    expect(vscodeMocks.showInformationMessage).not.toHaveBeenCalled();
-    expect(vscodeMocks.openExternal).toHaveBeenCalledWith(
-      "http://127.0.0.1:63831/#/revision/rev:sha256:abc",
-    );
-  });
-
-  it("restarts a missing remembered server on the same port", async () => {
-    vscodeMocks.showInformationMessage.mockResolvedValue(
-      "Start `shore inspect` here",
-    );
-    const { registry, update } = registryWith([rememberedRecord()]);
-    const probe = vi
-      .fn<
-        (
-          baseUrl: string,
-          identity: ReviewIdentity,
-        ) => Promise<ReviewProbeResult>
-      >()
-      .mockResolvedValueOnce(UNAVAILABLE)
-      .mockResolvedValueOnce(MATCH);
-    const start = vi.fn(async () => "http://127.0.0.1:63831/");
-
-    await runOpenInReviewCommand(cli(), binary(), [resolved()], reviewNode(), {
-      probe,
-      registry,
-      running: () => undefined,
-      sleep: vi.fn(),
-      start,
-    });
-
-    expect(start).toHaveBeenCalledWith(
-      binary(),
-      expectWorkspaceFolder(),
-      rememberedRecord().targetKey,
-      { port: 63831 },
-    );
-    expect(update).toHaveBeenCalledOnce();
-    expect(registry.get(rememberedRecord().targetKey)?.port).toBe(63831);
-    expect(vscodeMocks.openExternal).toHaveBeenCalledWith(
-      "http://127.0.0.1:63831/#/revision/rev:sha256:abc",
-    );
-  });
-
-  it("does not commandeer a remembered port serving another repository", async () => {
-    vscodeMocks.showInformationMessage.mockResolvedValue(
-      "Start `shore inspect` here",
-    );
-    const { registry } = registryWith([rememberedRecord()]);
-    const probe = vi
-      .fn<
-        (
-          baseUrl: string,
-          identity: ReviewIdentity,
-        ) => Promise<ReviewProbeResult>
-      >()
-      .mockResolvedValueOnce(MISMATCH)
-      .mockResolvedValueOnce(MATCH);
-    const start = vi.fn(async () => "http://127.0.0.1:64000/");
-
-    await runOpenInReviewCommand(cli(), binary(), [resolved()], reviewNode(), {
-      probe,
-      registry,
-      running: () => undefined,
-      sleep: vi.fn(),
-      start,
-    });
-
-    expect(start).toHaveBeenCalledWith(
-      binary(),
-      expectWorkspaceFolder(),
-      rememberedRecord().targetKey,
-      { port: 0 },
-    );
-    expect(registry.get(rememberedRecord().targetKey)?.port).toBe(64000);
-  });
-
-  it("opens an attention item over the attention lens", async () => {
-    const probe = vi.fn(async () => MATCH);
-    const node = { ...reviewNode(), lens: "attention" as const };
-
-    await runOpenInReviewCommand(cli(), binary(), [resolved()], node, {
-      probe,
-      reviewUrl: "http://127.0.0.1:7878",
-      running: () => undefined,
-    });
-
-    expect(vscodeMocks.openExternal).toHaveBeenCalledWith(
-      "http://127.0.0.1:7878/#/revision/rev:sha256:abc?lens=attention",
-    );
-  });
-
-  it("starts an ephemeral-port terminal and opens the announced endpoint", async () => {
-    vscodeMocks.showInformationMessage.mockResolvedValue(
-      "Start `shore inspect` here",
-    );
-    const announcedUrl = "http://127.0.0.1:63831/";
-    const start = vi.fn(async () => announcedUrl);
-    const probe = vi
-      .fn<
-        (
-          baseUrl: string,
-          identity: ReviewIdentity,
-        ) => Promise<ReviewProbeResult>
-      >()
-      .mockResolvedValueOnce(UNAVAILABLE)
-      .mockResolvedValueOnce(MATCH);
-
-    const { registry } = registryWith();
-    await runOpenInReviewCommand(cli(), binary(), [resolved()], reviewNode(), {
-      probe,
-      registry,
-      running: () => undefined,
-      sleep: vi.fn(),
-      start,
-    });
-
-    expect(start).toHaveBeenCalledWith(
-      binary(),
-      expectWorkspaceFolder(),
-      "store:sha256:store/context:sha256:repo",
-      { port: 0 },
-    );
-    expect(probe).toHaveBeenNthCalledWith(
-      2,
-      "http://127.0.0.1:63831",
-      EXPECTED_IDENTITY,
-    );
-    expect(vscodeMocks.openExternal).toHaveBeenCalledWith(
-      "http://127.0.0.1:63831/#/revision/rev:sha256:abc",
-    );
-    expect(registry.get(rememberedRecord().targetKey)).toEqual(
-      rememberedRecord(),
-    );
-  });
-
-  it("does not replace an explicit configured endpoint for another repository", async () => {
-    const probe = vi.fn(async () => MISMATCH);
-    const start = vi.fn();
-
-    await runOpenInReviewCommand(cli(), binary(), [resolved()], reviewNode(), {
-      probe,
-      reviewUrl: "http://127.0.0.1:7878",
-      running: () => undefined,
-      start,
-    });
-
-    expect(vscodeMocks.showErrorMessage).toHaveBeenCalledWith(
-      expect.stringMatching(/configured.*serves a different repository/i),
-    );
-    expect(vscodeMocks.showInformationMessage).not.toHaveBeenCalled();
-    expect(start).not.toHaveBeenCalled();
-    expect(vscodeMocks.openExternal).not.toHaveBeenCalled();
-  });
-
-  it("gives up honestly after the announced server fails identity probes", async () => {
-    vscodeMocks.showInformationMessage.mockResolvedValue(
-      "Start `shore inspect` here",
-    );
-    const probe = vi.fn(async () => UNAVAILABLE);
-    const sleep = vi.fn(async () => undefined);
-
-    await runOpenInReviewCommand(cli(), binary(), [resolved()], reviewNode(), {
-      probe,
-      running: () => undefined,
-      sleep,
-      start: vi.fn(async () => "http://127.0.0.1:63831/"),
-    });
-
-    expect(probe).toHaveBeenCalledTimes(10);
-    expect(sleep).toHaveBeenCalledTimes(10);
-    expect(vscodeMocks.openExternal).not.toHaveBeenCalled();
-    expect(vscodeMocks.showErrorMessage).toHaveBeenCalledWith(
-      expect.stringMatching(/terminal.*did not become available/i),
-    );
-  });
-
-  it("reports an incompatible launched CLI without retrying a static identity document", async () => {
-    vscodeMocks.showInformationMessage.mockResolvedValue(
-      "Start `shore inspect` here",
-    );
-    const probe = vi
-      .fn<
-        (
-          baseUrl: string,
-          identity: ReviewIdentity,
-        ) => Promise<ReviewProbeResult>
-      >(async () => INCOMPATIBLE)
-      .mockResolvedValueOnce(UNAVAILABLE);
-    const sleep = vi.fn(async () => undefined);
-
-    await runOpenInReviewCommand(cli(), binary(), [resolved()], reviewNode(), {
-      probe,
-      running: () => undefined,
-      sleep,
-      start: vi.fn(async () => "http://127.0.0.1:63831/"),
-    });
-
-    expect(probe).toHaveBeenCalledTimes(2);
-    expect(sleep).toHaveBeenCalledTimes(2);
-    expect(vscodeMocks.openExternal).not.toHaveBeenCalled();
-    expect(vscodeMocks.showErrorMessage).toHaveBeenCalledWith(
-      expect.stringMatching(/shore CLI.*incompatible.*versions match/i),
-    );
-  });
-
-  it("reports terminal startup failures without probing a guessed port", async () => {
-    vscodeMocks.showInformationMessage.mockResolvedValue(
-      "Start `shore inspect` here",
-    );
-    const probe = vi.fn(async () => UNAVAILABLE);
-
-    await runOpenInReviewCommand(cli(), binary(), [resolved()], reviewNode(), {
-      probe,
-      running: () => undefined,
-      start: vi.fn(async () => {
-        throw new Error("no URL announced");
-      }),
-    });
-
-    expect(probe).not.toHaveBeenCalled();
-    expect(vscodeMocks.showErrorMessage).toHaveBeenCalledWith(
-      expect.stringContaining("no URL announced"),
-    );
-  });
-
-  it("stops when the selected target is no longer resolved", async () => {
-    const probe = vi.fn(async () => MATCH);
-    const node = reviewNode();
-    node.targetKey = "missing";
-
-    await runOpenInReviewCommand(cli(), binary(), [resolved()], node, {
-      probe,
-    });
-
-    expect(probe).not.toHaveBeenCalled();
-    expect(vscodeMocks.showErrorMessage).toHaveBeenCalledWith(
-      expect.stringMatching(/identify.*refresh/i),
-    );
+    expect(vscodeMocks.openExternal).toHaveBeenCalledOnce();
   });
 
   it("disables itself honestly in remote workspaces", async () => {
     vscodeMocks.remoteName = "ssh-remote";
-    const probe = vi.fn(async () => MATCH);
+    const start = vi.fn();
 
     await runOpenInReviewCommand(cli(), binary(), [resolved()], reviewNode(), {
-      probe,
-      reviewUrl: "http://127.0.0.1:7878",
+      running: () => undefined,
+      start,
     });
 
-    expect(vscodeMocks.showInformationMessage).toHaveBeenCalledWith(
-      expect.stringMatching(/not available in remote workspaces yet/i),
-    );
-    expect(probe).not.toHaveBeenCalled();
+    expect(start).not.toHaveBeenCalled();
     expect(vscodeMocks.openExternal).not.toHaveBeenCalled();
   });
 });
 
-describe("restoreReviewServers", () => {
-  it("leaves a matching remembered server running", async () => {
-    const { registry } = registryWith([rememberedRecord()]);
-    const probe = vi.fn(async () => MATCH);
-    const start = vi.fn();
-
-    await restoreReviewServers(binary(), [resolved()], registry, {
-      probe,
-      start,
-    });
-
-    expect(probe).toHaveBeenCalledWith(
-      "http://127.0.0.1:63831",
-      EXPECTED_IDENTITY,
-    );
-    expect(start).not.toHaveBeenCalled();
-  });
-
-  it("restores a missing server on its remembered port without revealing it", async () => {
-    const { registry } = registryWith([rememberedRecord()]);
-    const probe = vi
-      .fn<
-        (
-          baseUrl: string,
-          identity: ReviewIdentity,
-        ) => Promise<ReviewProbeResult>
-      >()
-      .mockResolvedValueOnce(UNAVAILABLE)
-      .mockResolvedValueOnce(MATCH);
-    const start = vi.fn(async () => "http://127.0.0.1:63831/");
-
-    await restoreReviewServers(binary(), [resolved()], registry, {
-      probe,
-      sleep: vi.fn(),
-      start,
-    });
-
-    expect(start).toHaveBeenCalledWith(
-      binary(),
-      expectWorkspaceFolder(),
-      rememberedRecord().targetKey,
-      { port: 63831, reveal: false },
-    );
-    expect(registry.get(rememberedRecord().targetKey)?.port).toBe(63831);
-  });
-
-  it("uses an ephemeral port when the remembered port has another identity", async () => {
-    const { registry } = registryWith([rememberedRecord()]);
-    const probe = vi
-      .fn<
-        (
-          baseUrl: string,
-          identity: ReviewIdentity,
-        ) => Promise<ReviewProbeResult>
-      >()
-      .mockResolvedValueOnce(MISMATCH)
-      .mockResolvedValueOnce(MATCH);
-    const start = vi.fn(async () => "http://127.0.0.1:64000/");
-
-    await restoreReviewServers(binary(), [resolved()], registry, {
-      probe,
-      sleep: vi.fn(),
-      start,
-    });
-
-    expect(start).toHaveBeenCalledWith(
-      binary(),
-      expectWorkspaceFolder(),
-      rememberedRecord().targetKey,
-      { port: 0, reveal: false },
-    );
-    expect(registry.get(rememberedRecord().targetKey)?.port).toBe(64000);
-  });
-
-  it("does not restore a folder with an explicit Review URL override", async () => {
-    vscodeMocks.reviewUrl = "http://127.0.0.1:7878";
-    const { registry } = registryWith([rememberedRecord()]);
-    const probe = vi.fn();
-    const start = vi.fn();
-
-    await restoreReviewServers(binary(), [resolved()], registry, {
-      probe,
-      start,
-    });
-
-    expect(probe).not.toHaveBeenCalled();
-    expect(start).not.toHaveBeenCalled();
-  });
-});
+function response(document: unknown) {
+  return { status: 200, text: async () => JSON.stringify(document) };
+}
 
 function binary(): ResolvedBinary {
   return { path: "/usr/local/bin/shore", source: "path" };
@@ -614,53 +273,22 @@ function resolved(): TargetResolution {
     kind: "resolved",
     folder: workspaceFolder("/repo", "repo") as WorkspaceFolder,
     target: {
-      key: "store:sha256:store/context:sha256:repo",
+      key: resolvedTargetKey(),
       label: "repo",
-      ...EXPECTED_IDENTITY,
+      ...IDENTITY,
     },
     emptyInventory: false,
   };
 }
 
+function resolvedTargetKey(): string {
+  return "store:sha256:store/context:sha256:repo";
+}
+
 function reviewNode() {
   return {
     revisionId: "rev:sha256:abc",
-    targetKey: "store:sha256:store/context:sha256:repo",
+    targetKey: resolvedTargetKey(),
     folder: workspaceFolder("/repo", "repo") as WorkspaceFolder,
-  };
-}
-
-function expectWorkspaceFolder() {
-  return expect.objectContaining({
-    name: "repo",
-    uri: expect.objectContaining({ fsPath: "/repo" }),
-  });
-}
-
-function rememberedRecord(
-  overrides: Partial<ReviewServerRecord> = {},
-): ReviewServerRecord {
-  return {
-    targetKey: "store:sha256:store/context:sha256:repo",
-    ...EXPECTED_IDENTITY,
-    folderUri: "file:///repo",
-    port: 63831,
-    ...overrides,
-  };
-}
-
-function registryWith(records: ReviewServerRecord[] = []): {
-  registry: ReviewServerRegistry;
-  update: ReturnType<typeof vi.fn>;
-} {
-  const update = vi.fn(async () => undefined);
-  const state = {
-    keys: () => ["pointbreak.reviewServers"],
-    get: vi.fn(() => ({ version: 1, servers: records })) as Memento["get"],
-    update,
-  };
-  return {
-    registry: new ReviewServerRegistry(state),
-    update,
   };
 }

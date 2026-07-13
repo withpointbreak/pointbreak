@@ -1,8 +1,8 @@
 import { expect, it } from "vitest";
 import pkg from "../package.json";
 
-it("restores managed Review servers after startup without eager activation", () => {
-  expect(pkg.activationEvents ?? []).toContain("onStartupFinished");
+it("activates only for explicit Pointbreak surfaces", () => {
+  expect(pkg.activationEvents ?? []).not.toContain("onStartupFinished");
   expect(pkg.activationEvents ?? []).not.toContain("*");
 });
 
@@ -14,11 +14,11 @@ it("carries the untouchable identity and license", () => {
 
 it("contributes the Review view and its commands", () => {
   expect(pkg.activationEvents).toEqual([
-    "onStartupFinished",
     "onView:pointbreak.attention",
     "onCommand:pointbreak.refreshAttention",
     "onCommand:pointbreak.capture",
     "onCommand:pointbreak.openInReview",
+    "onCommand:pointbreak.stopInspect",
   ]);
   expect(pkg.contributes.views.pointbreak).toContainEqual({
     id: "pointbreak.attention",
@@ -28,11 +28,18 @@ it("contributes the Review view and its commands", () => {
     "pointbreak.refreshAttention",
     "pointbreak.capture",
     "pointbreak.openInReview",
+    "pointbreak.stopInspect",
   ]);
   expect(
     pkg.contributes.configuration.properties["pointbreak.reviewUrl"],
   ).toMatchObject({
     default: "",
     scope: "resource",
+    description:
+      "Optional URL for an externally managed Pointbreak Review server for this folder.",
   });
+  expect(
+    pkg.contributes.configuration.properties["pointbreak.reviewUrl"]
+      .description,
+  ).not.toMatch(/restore|remember|port/i);
 });

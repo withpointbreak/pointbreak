@@ -9,11 +9,16 @@ import {
 import type { ResolvedBinary } from "../binary";
 import type { PointbreakCli } from "../cli";
 import {
-  type ReviewServerRecord,
-  type ReviewServerRegistry,
-  reviewServerUrl,
-} from "../reviewServerRegistry";
-import { runningReviewUrl, startReviewTerminal } from "../reviewTerminal";
+  type FetchFn,
+  InspectClient,
+  InspectClientError,
+} from "../inspectClient";
+import {
+  type ReviewCapability,
+  runningReviewCapability,
+  startReviewTerminal,
+  stopReviewTerminal,
+} from "../reviewTerminal";
 import { pickFolder, type TargetResolution } from "../targetResolver";
 
 const RETRY_ATTEMPTS = 10;
@@ -43,38 +48,41 @@ export interface ReviewIdentity {
 export type ReviewProbeResult =
   | { kind: "match" }
   | { kind: "unavailable" }
+  | { kind: "unauthorized" }
   | { kind: "incompatible" }
+  | { kind: "protocol" }
   | { kind: "mismatch" };
 
 type ReviewProbe = (
-  baseUrl: string,
+  capability: ReviewCapability,
   identity: ReviewIdentity,
 ) => Promise<ReviewProbeResult>;
 
 interface OpenInReviewDependencies {
   pick?: typeof pickFolder;
   probe?: ReviewProbe;
-  registry?: ReviewServerRegistry;
   reviewUrl?: string;
-  running?: typeof runningReviewUrl;
+  running?: typeof runningReviewCapability;
   sleep?: (milliseconds: number) => Promise<void>;
   start?: typeof startReviewTerminal;
-}
-
-interface RestoreReviewServersDependencies {
-  onError?: (message: string) => void;
-  probe?: ReviewProbe;
-  sleep?: (milliseconds: number) => Promise<void>;
-  start?: typeof startReviewTerminal;
+  stop?: typeof stopReviewTerminal;
 }
 
 export function reviewDeepLink(
-  baseUrl: string,
+  origin: string,
   revisionId: string,
   lens?: "attention",
+  token?: string,
 ): string {
-  const query = lens ? `?lens=${lens}` : "";
-  return `${trimTrailingSlash(baseUrl)}/#/revision/${revisionId}${query}`;
+  const params = new URLSearchParams();
+  if (lens) {
+    params.set("lens", lens);
+  }
+  if (token) {
+    params.set("token", token);
+  }
+  const query = params.size > 0 ? `?${params.toString()}` : "";
+  return `${trimTrailingSlash(origin)}/#/revision/${revisionId}${query}`;
 }
 
 export async function runOpenInReviewCommand(
@@ -97,50 +105,41 @@ export async function runOpenInReviewCommand(
   if (!selection) {
     return;
   }
-
   const resolution = await selectedResolution(selection, resolutions);
   if (!resolution) {
     return;
   }
-  const identity = identityFor(resolution);
 
-  const configuredUrl = normalizeOptionalUrl(
-    dependencies.reviewUrl ?? configuredReviewUrl(selection.folder),
-  );
-  const probe = dependencies.probe ?? probeReview;
-  if (configuredUrl) {
-    const configuredResult = await probe(configuredUrl, identity);
-    if (configuredResult.kind === "match") {
-      await openRevision(configuredUrl, selection);
-    } else {
+  const configuredValue =
+    dependencies.reviewUrl ?? configuredReviewUrl(selection.folder);
+  if (configuredValue.trim()) {
+    const configured = normalizeExternalReviewUrl(configuredValue);
+    if (!configured) {
       await window.showErrorMessage(
-        configuredServerFailureMessage(configuredUrl, configuredResult),
+        "The configured Pointbreak Review URL must be an HTTP or HTTPS server origin without credentials or fragments.",
       );
-    }
-    return;
-  }
-
-  const runningUrl = await knownRunningUrl(
-    (dependencies.running ?? runningReviewUrl)(identityKey(identity)),
-  );
-  if (runningUrl && (await probe(runningUrl, identity)).kind === "match") {
-    await rememberReviewServer(dependencies.registry, resolution, runningUrl);
-    await openRevision(runningUrl, selection);
-    return;
-  }
-
-  let preferredPort = 0;
-  const remembered = dependencies.registry?.get(selection.targetKey);
-  if (remembered) {
-    const rememberedUrl = reviewServerUrl(remembered);
-    const rememberedResult = await probe(rememberedUrl, identity);
-    if (rememberedResult.kind === "match") {
-      await openRevision(rememberedUrl, selection);
       return;
     }
-    if (rememberedResult.kind === "unavailable") {
-      preferredPort = remembered.port;
+    await openReviewUrl(
+      reviewDeepLink(configured, selection.revisionId, selection.lens),
+    );
+    return;
+  }
+
+  const targetKey = resolution.target.key;
+  const identity = identityFor(resolution);
+  const probe = dependencies.probe ?? probeReview;
+  const stop = dependencies.stop ?? stopReviewTerminal;
+  const running = await knownRunningCapability(
+    (dependencies.running ?? runningReviewCapability)(targetKey),
+  );
+  if (running) {
+    const result = await probe(running, identity);
+    if (result.kind === "match") {
+      await openCapability(running, selection);
+      return;
     }
+    await Promise.resolve(stop(targetKey));
   }
 
   const action = await window.showInformationMessage(
@@ -151,103 +150,68 @@ export async function runOpenInReviewCommand(
     return;
   }
 
-  let startedUrl: string;
+  let capability: ReviewCapability;
   try {
-    startedUrl = trimTrailingSlash(
-      await (dependencies.start ?? startReviewTerminal)(
-        binary,
-        selection.folder,
-        identityKey(identity),
-        { port: preferredPort },
-      ),
+    capability = await (dependencies.start ?? startReviewTerminal)(
+      binary,
+      selection.folder,
+      targetKey,
     );
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+  } catch {
+    await Promise.resolve(stop(targetKey));
     await window.showErrorMessage(
-      `Pointbreak could not start Review: ${detail}`,
+      "Pointbreak could not start the local Review service.",
     );
     return;
   }
 
   const result = await retryProbe(
-    startedUrl,
+    capability,
     identity,
     probe,
     dependencies.sleep ?? delay,
   );
   if (result.kind === "match") {
-    await rememberReviewServer(dependencies.registry, resolution, startedUrl);
-    await openRevision(startedUrl, selection);
+    await openCapability(capability, selection);
     return;
   }
 
+  await Promise.resolve(stop(targetKey));
   await window.showErrorMessage(startedServerFailureMessage(result));
 }
 
-async function openRevision(
-  baseUrl: string,
+export async function probeReview(
+  capability: ReviewCapability,
+  identity: ReviewIdentity,
+  fetch?: FetchFn,
+): Promise<ReviewProbeResult> {
+  try {
+    const client = new InspectClient(
+      capability.origin,
+      capability.token,
+      fetch,
+    );
+    await client.verify(identity);
+    return { kind: "match" };
+  } catch (error) {
+    if (!(error instanceof InspectClientError)) {
+      return { kind: "protocol" };
+    }
+    return { kind: error.kind };
+  }
+}
+
+async function openCapability(
+  capability: ReviewCapability,
   selection: ReviewNode,
 ): Promise<void> {
   await openReviewUrl(
-    reviewDeepLink(baseUrl, selection.revisionId, selection.lens),
-  );
-}
-
-export async function restoreReviewServers(
-  binary: ResolvedBinary,
-  resolutions: TargetResolution[],
-  registry: ReviewServerRegistry,
-  dependencies: RestoreReviewServersDependencies = {},
-): Promise<void> {
-  if (env.remoteName) {
-    return;
-  }
-  const probe = dependencies.probe ?? probeReview;
-  const start = dependencies.start ?? startReviewTerminal;
-  const sleep = dependencies.sleep ?? delay;
-  await Promise.all(
-    registry.entries().map(async (record) => {
-      const resolution = restoredResolution(record, resolutions);
-      if (
-        !resolution ||
-        normalizeOptionalUrl(configuredReviewUrl(resolution.folder))
-      ) {
-        return;
-      }
-
-      const identity = identityFor(resolution);
-      const rememberedUrl = reviewServerUrl(record);
-      const rememberedResult = await probe(rememberedUrl, identity);
-      if (rememberedResult.kind === "match") {
-        return;
-      }
-
-      const preferredPort =
-        rememberedResult.kind === "unavailable" ? record.port : 0;
-      let startedUrl: string;
-      try {
-        startedUrl = trimTrailingSlash(
-          await start(binary, resolution.folder, record.targetKey, {
-            port: preferredPort,
-            reveal: false,
-          }),
-        );
-      } catch (error) {
-        dependencies.onError?.(
-          restoreFailureMessage(resolution.folder.name, error),
-        );
-        return;
-      }
-
-      const result = await retryProbe(startedUrl, identity, probe, sleep);
-      if (result.kind === "match") {
-        await rememberReviewServer(registry, resolution, startedUrl);
-        return;
-      }
-      dependencies.onError?.(
-        `Pointbreak could not restore Review for ${resolution.folder.name}: ${startedServerFailureMessage(result)}`,
-      );
-    }),
+    reviewDeepLink(
+      capability.origin,
+      selection.revisionId,
+      selection.lens,
+      capability.token,
+    ),
   );
 }
 
@@ -257,12 +221,10 @@ async function openReviewUrl(url: string): Promise<void> {
     .get<boolean>("openLocalhostLinks", false);
   if (openLocalhostLinks && isLocalBrowserUrl(url)) {
     try {
-      // The integrated browser has no dedicated extension API. Current VS Code
-      // exposes this command; older supported hosts fall back to openExternal.
       await commands.executeCommand(OPEN_INTEGRATED_BROWSER_COMMAND, url);
       return;
     } catch {
-      // Fall through for VS Code versions without the integrated browser.
+      // Older supported hosts fall back to the external browser.
     }
   }
   await env.openExternal(Uri.parse(url));
@@ -280,55 +242,14 @@ function isLocalBrowserUrl(value: string): boolean {
   }
 }
 
-async function knownRunningUrl(
-  pending: Promise<string> | undefined,
-): Promise<string | undefined> {
+async function knownRunningCapability(
+  pending: Promise<ReviewCapability> | undefined,
+): Promise<ReviewCapability | undefined> {
   try {
-    return pending ? trimTrailingSlash(await pending) : undefined;
+    return pending ? await pending : undefined;
   } catch {
     return undefined;
   }
-}
-
-export async function probeReview(
-  baseUrl: string,
-  identity: ReviewIdentity,
-): Promise<ReviewProbeResult> {
-  let response: Response;
-  try {
-    response = await fetch(`${trimTrailingSlash(baseUrl)}/api/identity`, {
-      method: "GET",
-      signal: AbortSignal.timeout(1_000),
-    });
-  } catch {
-    return { kind: "unavailable" };
-  }
-  if (!response.ok) {
-    return { kind: "unavailable" };
-  }
-
-  let document: Partial<ReviewIdentity & { schema: string }>;
-  try {
-    document = (await response.json()) as Partial<
-      ReviewIdentity & { schema: string }
-    >;
-  } catch {
-    return { kind: "incompatible" };
-  }
-  if (
-    document.schema !== "pointbreak.inspect-identity" ||
-    typeof document.storeIdentity !== "string" ||
-    typeof document.contextIdentity !== "string"
-  ) {
-    return { kind: "incompatible" };
-  }
-  if (
-    document.storeIdentity !== identity.storeIdentity ||
-    document.contextIdentity !== identity.contextIdentity
-  ) {
-    return { kind: "mismatch" };
-  }
-  return { kind: "match" };
 }
 
 type ResolvedTarget = TargetResolution & { kind: "resolved" };
@@ -358,70 +279,29 @@ function identityFor(resolution: ResolvedTarget): ReviewIdentity {
   };
 }
 
-function restoredResolution(
-  record: ReviewServerRecord,
-  resolutions: TargetResolution[],
-): ResolvedTarget | undefined {
-  const matches = resolutions.filter(
-    (resolution): resolution is ResolvedTarget =>
-      resolution.kind === "resolved" &&
-      resolution.target.key === record.targetKey &&
-      resolution.target.storeIdentity === record.storeIdentity &&
-      resolution.target.contextIdentity === record.contextIdentity,
-  );
-  return (
-    matches.find(
-      (resolution) => resolution.folder.uri.toString() === record.folderUri,
-    ) ?? matches[0]
-  );
-}
-
-async function rememberReviewServer(
-  registry: ReviewServerRegistry | undefined,
-  resolution: ResolvedTarget,
-  baseUrl: string,
-): Promise<void> {
-  const port = reviewServerPort(baseUrl);
-  if (!registry || !port) {
-    return;
-  }
-  try {
-    await registry.remember({
-      targetKey: resolution.target.key,
-      storeIdentity: resolution.target.storeIdentity,
-      contextIdentity: resolution.target.contextIdentity,
-      folderUri: resolution.folder.uri.toString(),
-      port,
-    });
-  } catch {
-    // Persistence is a convenience; a healthy server should still open.
-  }
-}
-
-function reviewServerPort(baseUrl: string): number | undefined {
-  try {
-    const port = Number(new URL(baseUrl).port);
-    return Number.isInteger(port) && port > 0 && port <= 65_535
-      ? port
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 function configuredReviewUrl(folder: WorkspaceFolder): string {
   return workspace
     .getConfiguration("pointbreak", folder.uri)
     .get<string>("reviewUrl", "");
 }
 
-function normalizeOptionalUrl(value: string): string {
+function normalizeExternalReviewUrl(value: string): string | undefined {
   const trimmed = value.trim();
-  return trimmed ? trimTrailingSlash(trimmed) : "";
-}
-
-function identityKey(identity: ReviewIdentity): string {
-  return `${identity.storeIdentity}/${identity.contextIdentity}`;
+  try {
+    const url = new URL(trimmed);
+    if (
+      (url.protocol !== "http:" && url.protocol !== "https:") ||
+      url.username ||
+      url.password ||
+      url.search ||
+      url.hash
+    ) {
+      return undefined;
+    }
+    return url.origin;
+  } catch {
+    return undefined;
+  }
 }
 
 async function pickRevision(
@@ -457,57 +337,46 @@ async function pickRevision(
           folder: resolution.folder,
         }
       : undefined;
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+  } catch {
     await window.showErrorMessage(
-      `Pointbreak could not list revisions: ${detail}`,
+      "Pointbreak could not list revisions for this review target.",
     );
     return undefined;
   }
 }
 
 async function retryProbe(
-  baseUrl: string,
+  capability: ReviewCapability,
   identity: ReviewIdentity,
   probe: ReviewProbe,
   sleep: (milliseconds: number) => Promise<void>,
 ): Promise<ReviewProbeResult> {
   for (let attempt = 0; attempt < RETRY_ATTEMPTS; attempt += 1) {
-    await sleep(RETRY_DELAY_MS);
-    const result = await probe(baseUrl, identity);
+    const result = await probe(capability, identity);
     if (result.kind !== "unavailable") {
       return result;
+    }
+    if (attempt + 1 < RETRY_ATTEMPTS) {
+      await sleep(RETRY_DELAY_MS);
     }
   }
   return { kind: "unavailable" };
 }
 
 function startedServerFailureMessage(result: ReviewProbeResult): string {
+  if (result.kind === "unauthorized") {
+    return "Pointbreak Review rejected its startup credential.";
+  }
   if (result.kind === "incompatible") {
-    return "The Pointbreak Review terminal started, but the shore CLI it launched is incompatible with this extension. Rebuild or update the extension bundle so its JavaScript and CLI versions match.";
+    return "Pointbreak Review is incompatible with this extension.";
   }
   if (result.kind === "mismatch") {
-    return "The Pointbreak Review terminal started, but its server belongs to a different repository.";
+    return "Pointbreak Review belongs to a different review target.";
   }
-  return "The Pointbreak Review terminal started, but its server did not become available.";
-}
-
-function configuredServerFailureMessage(
-  baseUrl: string,
-  result: ReviewProbeResult,
-): string {
-  if (result.kind === "incompatible") {
-    return `Configured Pointbreak Review at ${baseUrl} is incompatible with this extension.`;
+  if (result.kind === "protocol") {
+    return "Pointbreak Review returned an invalid startup response.";
   }
-  if (result.kind === "mismatch") {
-    return `Configured Pointbreak Review at ${baseUrl} serves a different repository.`;
-  }
-  return `Configured Pointbreak Review at ${baseUrl} is unavailable.`;
-}
-
-function restoreFailureMessage(folderName: string, error: unknown): string {
-  const detail = error instanceof Error ? error.message : String(error);
-  return `Pointbreak could not restore Review for ${folderName}: ${detail}`;
+  return "Pointbreak Review did not become available.";
 }
 
 function trimTrailingSlash(value: string): string {

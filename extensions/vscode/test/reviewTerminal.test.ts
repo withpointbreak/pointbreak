@@ -10,8 +10,11 @@ vi.mock("vscode", () => ({
   window: { createTerminal: vi.fn() },
 }));
 
+const TOKEN =
+  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
+
 describe("inspectInvocation", () => {
-  it("requests an ephemeral port without shell interpolation", () => {
+  it("starts only an ephemeral text-web server with sanitized spawn arguments", () => {
     const binary: ResolvedBinary = {
       path: "/Pointbreak & Dev/$shore",
       source: "setting",
@@ -21,40 +24,41 @@ describe("inspectInvocation", () => {
       file: "/Pointbreak & Dev/$shore",
       args: ["inspect", "--port", "0"],
     });
-    expect(inspectInvocation(binary, 63831)).toEqual({
-      file: "/Pointbreak & Dev/$shore",
-      args: ["inspect", "--port", "63831"],
-    });
   });
 });
 
 describe("ReviewUrlParser", () => {
-  it("extracts the announced loopback URL from inspector output", () => {
+  it("splits a fragment capability into a secret-free origin and private bearer", () => {
     const parser = new ReviewUrlParser();
 
     expect(
       parser.push(`Pointbreak Review inspector
   store: .
-  url:   http://127.0.0.1:63831/
+  url:   http://127.0.0.1:63831/#/timeline?token=${TOKEN}
   stop:  Ctrl-C
 `),
-    ).toBe("http://127.0.0.1:63831");
+    ).toEqual({ origin: "http://127.0.0.1:63831", token: TOKEN });
   });
 
-  it("handles an announced URL split across output chunks", () => {
+  it("handles a capability split across chunks", () => {
     const parser = new ReviewUrlParser();
 
     expect(
       parser.push("Pointbreak Review inspector\n  url: http://127.0."),
     ).toBeUndefined();
-    expect(parser.push("0.1:63831/\n  stop: Ctrl-C\n")).toBe(
-      "http://127.0.0.1:63831",
-    );
+    expect(parser.push(`0.1:63831/#/timeline?token=${TOKEN}\n`)).toEqual({
+      origin: "http://127.0.0.1:63831",
+      token: TOKEN,
+    });
   });
 
-  it("ignores non-loopback URLs", () => {
+  it.each([
+    `http://example.com:63831/#/timeline?token=${TOKEN}`,
+    `http://localhost:63831/#/timeline?token=${TOKEN}`,
+    "http://127.0.0.1:63831/#/timeline",
+    "http://127.0.0.1:63831/#/timeline?token=short",
+  ])("ignores an invalid or non-IP-loopback capability", (url) => {
     const parser = new ReviewUrlParser();
-
-    expect(parser.push("  url: http://example.com:63831/\n")).toBeUndefined();
+    expect(parser.push(`  url: ${url}\n`)).toBeUndefined();
   });
 });

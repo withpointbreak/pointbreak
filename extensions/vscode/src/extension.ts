@@ -3,13 +3,13 @@ import { AttentionTreeProvider } from "./attentionView";
 import { resolveBinary } from "./binary";
 import { PointbreakCli } from "./cli";
 import { runCaptureCommand } from "./commands/capture";
-import {
-  restoreReviewServers,
-  runOpenInReviewCommand,
-} from "./commands/openInReview";
+import { runOpenInReviewCommand } from "./commands/openInReview";
+import { InspectChildManager } from "./inspectChild";
+import { InspectConnectionStore } from "./inspectConnectionStore";
 import { Logger } from "./logger";
-import { ReviewServerRegistry } from "./reviewServerRegistry";
 import { resolveTargets } from "./targetResolver";
+
+let activeInspectManager: InspectChildManager | undefined;
 
 export async function activate(context: ExtensionContext): Promise<void> {
   const output = window.createOutputChannel("Pointbreak");
@@ -40,7 +40,12 @@ export async function activate(context: ExtensionContext): Promise<void> {
     cli,
     workspace.workspaceFolders ?? [],
   );
-  const reviewServers = new ReviewServerRegistry(context.workspaceState);
+  const inspectConnections = new InspectConnectionStore(
+    context.workspaceState,
+    context.secrets,
+  );
+  const inspectManager = new InspectChildManager(binary, inspectConnections);
+  activeInspectManager = inspectManager;
   const provider = new AttentionTreeProvider(cli, resolutions);
   const treeView = window.createTreeView("pointbreak.attention", {
     treeDataProvider: provider,
@@ -49,6 +54,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
     provider,
     treeView,
     provider.attachTreeView(treeView),
+    inspectManager,
     commands.registerCommand("pointbreak.refreshAttention", () =>
       provider.refresh(),
     ),
@@ -56,18 +62,16 @@ export async function activate(context: ExtensionContext): Promise<void> {
       runCaptureCommand(cli, resolutions),
     ),
     commands.registerCommand("pointbreak.openInReview", (node) =>
-      runOpenInReviewCommand(cli, binary, resolutions, node, {
-        registry: reviewServers,
-      }),
+      runOpenInReviewCommand(cli, binary, resolutions, node),
+    ),
+    commands.registerCommand("pointbreak.stopInspect", () =>
+      inspectManager.stop(),
     ),
   );
-
-  void restoreReviewServers(binary, resolutions, reviewServers, {
-    onError: (message) => logger.warn(message),
-  }).catch((error) => {
-    const message = error instanceof Error ? error.message : String(error);
-    logger.warn(`Pointbreak could not restore Review servers: ${message}`);
-  });
 }
 
-export function deactivate(): void {}
+export async function deactivate(): Promise<void> {
+  const manager = activeInspectManager;
+  activeInspectManager = undefined;
+  await manager?.stop();
+}
