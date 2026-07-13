@@ -1,10 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
+use super::cursor::{HistoryCursor, cmp_key};
 use super::projection::{BaseEntry, BaseHistoryProjection};
 use super::search::{
-    QueryDiagnostic, QuerySurface, entry_actor, entry_track, event_type_wire, matches_query,
-    parse_search_query_for, tag_completion_key,
+    QueryClause, QueryDiagnostic, QuerySurface, entry_actor, entry_track, event_type_wire,
+    matches_query, parse_search_query_for, tag_completion_key,
 };
 use super::summary::{ReviewHistoryEntry, ReviewHistorySummary};
 use crate::model::EventId;
@@ -168,7 +169,7 @@ pub fn apply_history_query(
         let _guard = span.enter();
         base.entries
             .iter()
-            .filter(|&entry| facet_match(entry) && type_set_match(entry, query.types.as_ref()))
+            .filter(|&entry| passes_page_filter(entry, query, &clauses))
             .collect()
     };
     // The base is ascending `(occurred_at, event_id)`; `Desc` reverses the ordered
@@ -232,6 +233,37 @@ fn track_snapshot_match(entry: &BaseEntry, query: &HistoryQuery) -> bool {
         return false;
     }
     true
+}
+
+/// The page's per-entry filter: exact params, parsed `q` clauses, and the
+/// enabled event-type set. Facets intentionally use their separate predicate.
+fn passes_page_filter(entry: &BaseEntry, query: &HistoryQuery, clauses: &[QueryClause]) -> bool {
+    track_snapshot_match(entry, query)
+        && matches_query(&entry.record, clauses)
+        && type_set_match(entry, query.types.as_ref())
+}
+
+/// Count filtered entries strictly newer than `since` in the ascending
+/// `(occurred_at, event_id)` key space.
+///
+/// Unlike `HistoryPage.at`, this positions by key rather than requiring the
+/// anchor event to remain in the filtered set.
+pub fn count_new_since(
+    base: &BaseHistoryProjection,
+    query: &HistoryQuery,
+    since: &HistoryCursor,
+) -> usize {
+    let parsed = parse_search_query_for(&query.q, QuerySurface::Event);
+    let filtered: Vec<&BaseEntry> = base
+        .entries
+        .iter()
+        .filter(|entry| passes_page_filter(entry, query, &parsed.clauses))
+        .collect();
+    let seen = filtered.partition_point(|entry| {
+        cmp_key(&entry.entry.occurred_at, entry.entry.event_id.as_str())
+            <= cmp_key(&since.occurred_at, since.event_id.as_str())
+    });
+    filtered.len() - seen
 }
 
 /// The `types` page filter (the enabled event-type set): `None` => all types;
@@ -532,6 +564,46 @@ mod tests {
         assert_eq!(out.offset, 0);
         assert_eq!(out.event_count, base.event_count);
         assert_eq!(out.event_set_hash, base.event_set_hash);
+    }
+
+    #[test]
+    fn count_new_since_counts_entries_strictly_newer_than_the_anchor() {
+        let base = base_of(5);
+        let anchor = &base.entries[2].entry;
+        let since = HistoryCursor {
+            occurred_at: anchor.occurred_at.clone(),
+            event_id: anchor.event_id.clone(),
+        };
+
+        assert_eq!(count_new_since(&base, &HistoryQuery::default(), &since), 2);
+    }
+
+    #[test]
+    fn count_new_since_is_filter_aware() {
+        let base = mixed_base();
+        let anchor = &base.entries[0].entry;
+        let since = HistoryCursor {
+            occurred_at: anchor.occurred_at.clone(),
+            event_id: anchor.event_id.clone(),
+        };
+        let query = HistoryQuery {
+            q: "type:observation".to_owned(),
+            ..Default::default()
+        };
+
+        assert_eq!(count_new_since(&base, &query, &since), 1);
+        assert_eq!(count_new_since(&base, &HistoryQuery::default(), &since), 2);
+    }
+
+    #[test]
+    fn count_new_since_survives_an_anchor_absent_from_the_filtered_set() {
+        let base = base_of(5);
+        let since = HistoryCursor {
+            occurred_at: "2026-05-13T10:00:03.500Z".to_owned(),
+            event_id: EventId::new("evt:sha256:absent"),
+        };
+
+        assert_eq!(count_new_since(&base, &HistoryQuery::default(), &since), 2);
     }
 
     #[test]

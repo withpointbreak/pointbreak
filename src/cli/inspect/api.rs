@@ -14,17 +14,19 @@ use mmdflux::graph::{Direction, Edge, Graph, Node};
 use mmdflux::layout::{LaidOutGraph, LayoutOptions, layout_graph};
 use pointbreak::documents::revision_show_document;
 use pointbreak::highlight::{emphasis_file, highlight_file};
-use pointbreak::model::{ObjectId, ReviewEndpoint, RevisionId, RevisionSource, ValidationStatus};
+use pointbreak::model::{
+    EventId, ObjectId, ReviewEndpoint, RevisionId, RevisionSource, ValidationStatus,
+};
 use pointbreak::session::event::ReviewAssessment;
 use pointbreak::session::{
     AssessmentRecordStatus, AssessmentView, AttentionItem, AttentionListOptions,
     BaseHistoryProjection, BaseProjectionConfig, CurrentAssessmentStatus, DistinctValues,
-    EventVerificationPolicy, HistoryPage, HistoryQuery, InputRequestStatus, LivenessEnrichment,
-    ObservationStatus, ObservationView, ProjectionDiagnostic, QueryDiagnostic, ReviewHistoryEntry,
-    RevisionCommitRangeView, RevisionListEntry, RevisionListOptions, RevisionOverview,
-    RevisionOverviewsOptions, RevisionShowOptions, RevisionShowResult, SessionState,
-    SnapshotSummaryCache, StoreIdentity, StoreIdentityOptions, SupersessionView, TrustSet,
-    apply_history_query, commit_graph_stamp, compare_event_instants,
+    EventVerificationPolicy, HistoryCursor, HistoryPage, HistoryQuery, InputRequestStatus,
+    LivenessEnrichment, ObservationStatus, ObservationView, ProjectionDiagnostic, QueryDiagnostic,
+    ReviewHistoryEntry, RevisionCommitRangeView, RevisionListEntry, RevisionListOptions,
+    RevisionOverview, RevisionOverviewsOptions, RevisionShowOptions, RevisionShowResult,
+    SessionState, SnapshotSummaryCache, StoreIdentity, StoreIdentityOptions, SupersessionView,
+    TrustSet, apply_history_query, commit_graph_stamp, compare_event_instants, count_new_since,
     current_assessment_includes_follow_up, default_history_page_projection, enrich_liveness,
     event_log_head_marker, history_base_projection, list_attention, list_revisions,
     read_bound_object_artifact, read_events_for_display, read_object_artifact,
@@ -66,6 +68,13 @@ struct HistoryPayload {
     /// Store-wide completion vocabulary — always the unfiltered base's values,
     /// never the matched set's. Additive, always present.
     distinct_values: DistinctValues,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HistoryNewCountPayload {
+    schema: &'static str,
+    new_count: usize,
 }
 
 #[derive(Serialize)]
@@ -760,6 +769,35 @@ pub(super) fn history_json(
     let base = cached_history_base(repo, cache)?;
     let out = apply_history_query(&base, query, page);
     serialize_history_payload(out)
+}
+
+/// Count filtered history entries newer than a cursor over the same cached,
+/// body-hydrated base used by `/api/history`, without serializing any entries.
+pub(super) fn new_count_json(
+    repo: &Path,
+    cache: &super::cache::HistoryProjectionCache,
+    query: &HistoryQuery,
+    since_occurred_at: &str,
+    since_event_id: &str,
+) -> Result<String, String> {
+    let base = cached_history_base(repo, cache)?;
+    let since = HistoryCursor {
+        occurred_at: since_occurred_at.to_owned(),
+        event_id: EventId::new(since_event_id),
+    };
+    serialize_new_count(count_new_since(&base, query, &since))
+}
+
+pub(super) fn zero_new_count_json() -> Result<String, String> {
+    serialize_new_count(0)
+}
+
+fn serialize_new_count(new_count: usize) -> Result<String, String> {
+    serde_json::to_string(&HistoryNewCountPayload {
+        schema: "pointbreak.inspect-history-new-count",
+        new_count,
+    })
+    .map_err(|error| error.to_string())
 }
 
 fn serialize_history_payload(out: pointbreak::session::QueriedHistory) -> Result<String, String> {

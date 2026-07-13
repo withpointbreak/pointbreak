@@ -62,7 +62,7 @@ pub use history::{
     KNOWN_QUERY_KEYS, ParsedQuery, QueriedHistory, QueryClause, QueryDiagnostic,
     QueryDiagnosticCode, QuerySurface, RANGE_ANCHOR_FIELD, REVISION_ATTENTION_VALUES,
     REVISION_QUERY_FIELDS, ReviewHistoryEntry, ReviewHistoryFilters, ReviewHistoryOptions,
-    ReviewHistoryResult, SearchRecord, apply_history_query, build_haystack,
+    ReviewHistoryResult, SearchRecord, apply_history_query, build_haystack, count_new_since,
     default_history_page_projection, history_base_projection, matches_query, parse_search_query,
     parse_search_query_for, review_history,
 };

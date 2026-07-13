@@ -100,7 +100,7 @@ pub use workflow::{
     ValidationListResult, WithdrawCommitOptions, WithdrawCommitResult, WithdrawRefOptions,
     WithdrawRefResult, WorktreeSpec, apply_history_query, associate_commit, associate_ref,
     build_haystack, build_revision_search_record, capture_review, capture_worktree_review,
-    commit_graph_stamp, compact_store, current_assessment_includes_follow_up,
+    commit_graph_stamp, compact_store, count_new_since, current_assessment_includes_follow_up,
     default_history_page_projection, diffstat_from_files, effective_integration_ref,
     enrich_liveness, explain_store_sensitivity, export_artifact, fetch_input_request,
     forget_family_store, history_base_projection, import_artifact, import_event, ingest_events,

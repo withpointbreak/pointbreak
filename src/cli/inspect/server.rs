@@ -301,6 +301,25 @@ fn route(state: &Arc<InspectState>, method: &str, path: &str, query: Option<&str
         "/favicon.svg" => Response::asset_bytes("image/svg+xml; charset=utf-8", FAVICON_SVG),
         "/favicon.png" => Response::asset_bytes("image/png", FAVICON_PNG),
         "/favicon-dark.png" => Response::asset_bytes("image/png", FAVICON_DARK_PNG),
+        // The poll probe shares `/api/history` filtering but returns no entries.
+        "/api/history/new-count" => match history_query(query) {
+            Ok(request) => {
+                let since_occurred_at = query_param(query, "sinceOccurredAt");
+                let since_event_id = query_param(query, "sinceEventId");
+                match (since_occurred_at, since_event_id) {
+                    (None, None) => api_response(api::zero_new_count_json()),
+                    (Some(occurred_at), Some(event_id)) => api_response(api::new_count_json(
+                        repo,
+                        &state.history_cache,
+                        &request.query,
+                        &occurred_at,
+                        &event_id,
+                    )),
+                    _ => Response::json_error("400 Bad Request", "incomplete history cursor"),
+                }
+            }
+            Err(message) => Response::json_error("400 Bad Request", &message),
+        },
         "/api/history" => match history_query(query) {
             Ok(request) => api_response(api::history_json(
                 repo,

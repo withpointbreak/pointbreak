@@ -17,6 +17,7 @@ use self::projection::{
 };
 pub use self::query::{
     DistinctValues, HistoryOrder, HistoryPage, HistoryQuery, QueriedHistory, apply_history_query,
+    count_new_since,
 };
 pub use self::result::ReviewHistoryResult;
 pub use self::search::{

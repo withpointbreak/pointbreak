@@ -40,6 +40,68 @@ fn entries_of_type<'a>(history: &'a Value, event_type: &str) -> Vec<&'a Value> {
         .collect()
 }
 
+fn newest_history_anchor(inspector: &Inspector) -> (String, String) {
+    let history = inspector.get_json("/api/history");
+    let newest = history["entries"]
+        .as_array()
+        .expect("history entries")
+        .last()
+        .expect("at least one history entry");
+    (
+        newest["occurredAt"]
+            .as_str()
+            .expect("occurredAt string")
+            .to_owned(),
+        newest["eventId"]
+            .as_str()
+            .expect("eventId string")
+            .to_owned(),
+    )
+}
+
+fn append_count_probe_events(repo: &std::path::Path, revision_id: &str) {
+    // Writes mint RFC 3339 instants through the real CLI. Ensure the first write
+    // cannot share the anchor's millisecond and leave ordering to the event-id tie-break.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let repo_arg = repo.to_str().unwrap();
+    let observation = support::shore([
+        "observation",
+        "add",
+        "--repo",
+        repo_arg,
+        "--revision",
+        revision_id,
+        "--track",
+        "agent:count-probe",
+        "--title",
+        "new count probe observation",
+    ]);
+    assert!(
+        observation.status.success(),
+        "observation add failed:\n{}",
+        String::from_utf8_lossy(&observation.stderr)
+    );
+    let validation = support::shore([
+        "validation",
+        "add",
+        "--repo",
+        repo_arg,
+        "--revision",
+        revision_id,
+        "--track",
+        "agent:count-probe",
+        "--check-name",
+        "new count probe validation",
+        "--status",
+        "passed",
+    ]);
+    assert!(
+        validation.status.success(),
+        "validation add failed:\n{}",
+        String::from_utf8_lossy(&validation.stderr)
+    );
+}
+
 /// Spawn the inspector against a throwaway repo for served-asset contract checks.
 /// The static asset routes never read the store, so a bare repo keeps the
 /// served-copy assertions cheap. The returned [`GitRepo`] must be held for the
@@ -1750,6 +1812,80 @@ fn api_history_reflects_a_new_event_after_an_append() {
         after > before,
         "the cache invalidates on a new event (marker changed): {before} -> {after}"
     );
+}
+
+#[test]
+fn new_count_endpoint_counts_events_newer_than_the_since_anchor() {
+    let store = representative_store();
+    let inspector = Inspector::spawn(store.repo.path());
+    let (occurred_at, event_id) = newest_history_anchor(&inspector);
+
+    append_count_probe_events(store.repo.path(), &store.revision_id);
+
+    let count = inspector.get_json(&format!(
+        "/api/history/new-count?sinceOccurredAt={}&sinceEventId={}",
+        urlencode(&occurred_at),
+        urlencode(&event_id)
+    ));
+    assert_eq!(count["schema"], "pointbreak.inspect-history-new-count");
+    assert_eq!(count["newCount"], 2);
+}
+
+#[test]
+fn new_count_respects_the_active_query() {
+    let store = representative_store();
+    let inspector = Inspector::spawn(store.repo.path());
+    let (occurred_at, event_id) = newest_history_anchor(&inspector);
+
+    append_count_probe_events(store.repo.path(), &store.revision_id);
+
+    let anchor = format!(
+        "sinceOccurredAt={}&sinceEventId={}",
+        urlencode(&occurred_at),
+        urlencode(&event_id)
+    );
+    let observation_query = inspector.get_json(&format!(
+        "/api/history/new-count?{anchor}&q=type%3Aobservation"
+    ));
+    assert_eq!(observation_query["newCount"], 1);
+
+    let type_filter = inspector.get_json(&format!(
+        "/api/history/new-count?{anchor}&type=review_observation_recorded"
+    ));
+    assert_eq!(type_filter["newCount"], 1);
+
+    let track_filter = inspector.get_json(&format!(
+        "/api/history/new-count?{anchor}&track=agent%3Acount-probe"
+    ));
+    assert_eq!(track_filter["newCount"], 2);
+
+    let snapshot_filter = inspector.get_json(&format!(
+        "/api/history/new-count?{anchor}&snapshot={}",
+        urlencode(&store.snapshot_id)
+    ));
+    assert_eq!(snapshot_filter["newCount"], 2);
+
+    let descending = inspector.get_json(&format!("/api/history/new-count?{anchor}&order=desc"));
+    assert_eq!(descending["newCount"], 2);
+}
+
+#[test]
+fn new_count_without_an_anchor_is_zero() {
+    let repo = GitRepo::new();
+    let inspector = Inspector::spawn(repo.path());
+
+    let count = inspector.get_json("/api/history/new-count");
+    assert_eq!(count["schema"], "pointbreak.inspect-history-new-count");
+    assert_eq!(count["newCount"], 0);
+}
+
+#[test]
+fn new_count_with_half_an_anchor_is_a_400() {
+    let store = representative_store();
+    let inspector = Inspector::spawn(store.repo.path());
+
+    let (status, _) = inspector.get_error("/api/history/new-count?sinceEventId=evt%3Asha256%3Ax");
+    assert!(status.contains("400"), "unexpected status: {status}");
 }
 
 /// A swept note body must not kill the inspector: the revision detail hydrates
