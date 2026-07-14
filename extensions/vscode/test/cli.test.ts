@@ -4,6 +4,8 @@ import {
   type CaptureOptions,
   captureArgs,
   type ExecFn,
+  type ObservationOptions,
+  observationArgs,
   PointbreakCli,
 } from "../src/cli";
 import { ATTENTION_JSON, REVISION_LIST_JSON, VERSION_JSON } from "./fixtures";
@@ -92,6 +94,71 @@ describe("captureArgs", () => {
     expect(() =>
       args({ choice: "staged", includeUntracked: true, allowEmpty: false }),
     ).toThrow(/staged/i);
+  });
+});
+
+describe("observationArgs", () => {
+  const options: ObservationOptions = {
+    revisionId: "rev:sha256:one",
+    track: "human:local",
+    title: "Check this range",
+    file: "src/lib.rs",
+    side: "new",
+    startLine: 7,
+    endLine: 9,
+  };
+
+  it("always emits the complete explicit range target", () => {
+    expect(observationArgs(options)).toEqual([
+      "observation",
+      "add",
+      "--revision",
+      "rev:sha256:one",
+      "--track",
+      "human:local",
+      "--title",
+      "Check this range",
+      "--file",
+      "src/lib.rs",
+      "--side",
+      "new",
+      "--start-line",
+      "7",
+      "--end-line",
+      "9",
+    ]);
+    expect(observationArgs(options)).not.toContain("--actor");
+  });
+
+  it("decodes observation-add through the cold handshake", async () => {
+    const calls: string[][] = [];
+    const exec: ExecFn = async (_file, args) => {
+      calls.push(args);
+      return {
+        stdout:
+          args[0] === "version"
+            ? VERSION_JSON
+            : JSON.stringify({
+                schema: "pointbreak.review-observation-add",
+                version: 1,
+                revisionId: "rev:sha256:one",
+                observationId: "obs:sha256:one",
+                eventId: "evt:sha256:one",
+                trackId: "human:local",
+                target: { kind: "range" },
+                diagnostics: [],
+              }),
+        stderr: "",
+        exitCode: 0,
+      };
+    };
+    const cli = new PointbreakCli(binary, exec);
+
+    await expect(cli.addObservation("/repo", options)).resolves.toMatchObject({
+      schema: "pointbreak.review-observation-add",
+      observationId: "obs:sha256:one",
+    });
+    expect(calls).toEqual([["version"], observationArgs(options)]);
   });
 });
 

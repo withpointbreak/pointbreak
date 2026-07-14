@@ -9,6 +9,7 @@ import {
   type WebviewPanel,
   window,
 } from "vscode";
+import type { SourceOpener } from "./commands/openInSource";
 import type { DiffDataSource } from "./diffDataSource";
 import type { ResolvedTargetResolution } from "./targetResolver";
 import {
@@ -40,6 +41,7 @@ interface PanelSession {
   ready: boolean;
   pendingState: HostToWebview | undefined;
   visible: boolean;
+  snapshot: import("./cli").ReviewSnapshotDoc | undefined;
 }
 
 /** Owns one annotated-diff presentation surface per review document. */
@@ -55,6 +57,7 @@ export class ReviewPanelManager implements Disposable {
   constructor(
     private readonly extensionUri: Uri,
     private readonly dataSource: DiffDataSource,
+    private readonly sourceOpener?: SourceOpener,
   ) {}
 
   async open(
@@ -134,6 +137,7 @@ export class ReviewPanelManager implements Disposable {
       ready: false,
       pendingState: undefined,
       visible: panel.visible,
+      snapshot: undefined,
     };
     this.sessions.set(key, session);
     this.emitVisibilityChange();
@@ -155,6 +159,7 @@ export class ReviewPanelManager implements Disposable {
     const location = session.location;
     session.ready = false;
     session.pendingState = undefined;
+    session.snapshot = undefined;
     session.panel.webview.html = webviewHtml(
       this.extensionUri,
       session.panel.webview,
@@ -182,6 +187,7 @@ export class ReviewPanelManager implements Disposable {
         return;
       }
       session.panel.title = reviewDocumentTitle(location);
+      session.snapshot = data.artifact;
       this.queueState(session, message);
     } catch {
       if (!this.isCurrent(session, generation)) {
@@ -208,8 +214,21 @@ export class ReviewPanelManager implements Disposable {
     }
     if (message.type === "reload") {
       await this.load(session);
+      return;
     }
-    // openSource is reserved for the source-crossing command.
+    if (
+      message.type === "openSource" &&
+      session.snapshot &&
+      this.sourceOpener
+    ) {
+      await this.sourceOpener.open({
+        repoRoot: session.location.resolution.folder.uri.fsPath,
+        targetKey: session.location.resolution.target.key,
+        revisionId: session.location.revisionId,
+        snapshot: session.snapshot,
+        target: message.target,
+      });
+    }
   }
 
   private queueState(session: PanelSession, message: HostToWebview): void {

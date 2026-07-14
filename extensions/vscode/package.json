@@ -22,7 +22,8 @@
     "onCommand:pointbreak.capture",
     "onCommand:pointbreak.openAnnotatedDiff",
     "onCommand:pointbreak.openInReview",
-    "onCommand:pointbreak.stopInspect"
+    "onCommand:pointbreak.stopInspect",
+    "onCommand:pointbreak.addObservationFromSelection"
   ],
   "contributes": {
     "commands": [
@@ -50,6 +51,12 @@
         "command": "pointbreak.stopInspect",
         "title": "Stop Local Review Service",
         "category": "Pointbreak"
+      },
+      {
+        "command": "pointbreak.addObservationFromSelection",
+        "title": "Add Observation from Selection",
+        "category": "Pointbreak",
+        "enablement": "pointbreak.hasSourceReviewContext"
       }
     ],
     "menus": {
@@ -96,6 +103,12 @@
           "scope": "resource",
           "default": "",
           "description": "Optional URL for an externally managed Pointbreak Review server for this folder."
+        },
+        "pointbreak.observationTrack": {
+          "type": "string",
+          "scope": "resource",
+          "default": "human:local",
+          "description": "Track used for observations added from a source selection."
         }
       }
     }

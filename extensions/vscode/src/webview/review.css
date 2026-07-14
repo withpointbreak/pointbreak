@@ -379,8 +379,24 @@ body {
 
 .drow {
   display: grid;
-  grid-template-columns: 52px 52px 16px 1fr;
+  grid-template-columns: 52px 52px 16px minmax(0, 1fr) 24px;
   font: var(--fs-sm) / 1.5 var(--mono);
+}
+
+.source-action {
+  align-self: center;
+  min-width: 1.5rem;
+  border: 0;
+  color: var(--vscode-textLink-foreground);
+  background: transparent;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.drow:hover > .source-action,
+.anno:hover > .source-action,
+.source-action:focus-visible {
+  opacity: 1;
 }
 
 .drow .ln {

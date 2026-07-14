@@ -5,6 +5,7 @@ import {
   type FetchFn,
   InspectClient,
   InspectClientError,
+  revisionIsCurrent,
 } from "../src/inspectClient";
 import { VERSION_DOC } from "./fixtures";
 
@@ -264,6 +265,47 @@ describe("InspectClient", () => {
           vi.fn<FetchFn>(),
         ),
     ).toThrow("Pointbreak Review returned an invalid response.");
+  });
+});
+
+describe("revisionIsCurrent", () => {
+  const revision = {
+    schema: "pointbreak.review-revision" as const,
+    version: 2 as const,
+    revision: { id: "rev:one" },
+    observations: [],
+    inputRequests: [],
+    assessments: [],
+    diagnostics: [],
+  };
+
+  it("treats an isolated exact revision as current", () => {
+    expect(revisionIsCurrent(revision, "rev:one")).toBe(true);
+  });
+
+  it("requires a supersession component to name the exact revision as a head", () => {
+    expect(
+      revisionIsCurrent(
+        { ...revision, revisionSupersession: { heads: ["rev:two"] } },
+        "rev:one",
+      ),
+    ).toBe(false);
+    expect(
+      revisionIsCurrent(
+        { ...revision, revisionSupersession: { heads: ["rev:one"] } },
+        "rev:one",
+      ),
+    ).toBe(true);
+  });
+
+  it("fails closed on malformed supersession data or identity mismatch", () => {
+    expect(
+      revisionIsCurrent(
+        { ...revision, revisionSupersession: { heads: "rev:one" } },
+        "rev:one",
+      ),
+    ).toBe(false);
+    expect(revisionIsCurrent(revision, "rev:two")).toBe(false);
   });
 });
 

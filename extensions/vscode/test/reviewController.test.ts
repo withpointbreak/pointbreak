@@ -146,6 +146,58 @@ describe("ReviewWebviewController", () => {
         .anno,
     ).toBe("request:sha256:one");
   });
+
+  it("emits a typed source target from a rendered snapshot row", () => {
+    const postMessage = vi.fn();
+    const root = requiredRoot();
+    const controller = new ReviewWebviewController(root, {
+      getState: () => undefined,
+      setState: vi.fn(),
+      postMessage,
+    });
+    controller.render(renderData("rev:one"));
+
+    const action = root.querySelector<HTMLButtonElement>(
+      '[data-open-source="true"][data-source-line="2"][data-source-side="new"]',
+    );
+    expect(action).not.toBeNull();
+    action?.click();
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: "openSource",
+      target: {
+        filePath: "src/lib.rs",
+        side: "new",
+        startLine: 2,
+        endLine: 2,
+      },
+    });
+  });
+
+  it("binds source actions when a collapsed file renders lazily", () => {
+    const postMessage = vi.fn();
+    const root = requiredRoot();
+    const controller = new ReviewWebviewController(root, {
+      getState: () => undefined,
+      setState: vi.fn(),
+      postMessage,
+    });
+    const data = { ...renderData("rev:one"), annotations: [] };
+    const firstFile = data.artifact.snapshot.files[0];
+    firstFile.is_binary = true;
+    controller.render(data);
+
+    expect(root.querySelector("[data-open-source]")).toBeNull();
+    root.querySelector<HTMLElement>(".dfile-head")?.click();
+    const action = root.querySelector<HTMLButtonElement>(
+      '[data-open-source="true"][data-source-side="new"]',
+    );
+    expect(action).not.toBeNull();
+    action?.click();
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "openSource" }),
+    );
+  });
 });
 
 function renderData(revisionId: string): DiffRenderData {

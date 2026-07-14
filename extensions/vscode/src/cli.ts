@@ -196,6 +196,16 @@ export interface CaptureOptions {
   allowEmpty: boolean;
 }
 
+export interface ObservationOptions {
+  revisionId: string;
+  track: string;
+  title: string;
+  file: string;
+  side: "old" | "new";
+  startLine: number;
+  endLine: number;
+}
+
 export const REQUIRED_DOCUMENTS: Record<string, number> = {
   "pointbreak.version": 1,
   "pointbreak.attention-list": 1,
@@ -324,6 +334,17 @@ export class PointbreakCli {
     );
   }
 
+  async addObservation(
+    repo: string,
+    options: ObservationOptions,
+  ): Promise<ObservationAddDoc> {
+    return this.runDocument(
+      repo,
+      observationArgs(options),
+      "pointbreak.review-observation-add",
+    );
+  }
+
   private async ensureHandshake(repo: string): Promise<void> {
     this.handshake ??= this.readVersion(repo).then(() => undefined);
     return this.handshake;
@@ -420,6 +441,27 @@ export function captureArgs(opts: CaptureOptions): string[] {
     args.push("--allow-empty");
   }
   return args;
+}
+
+export function observationArgs(options: ObservationOptions): string[] {
+  return [
+    "observation",
+    "add",
+    "--revision",
+    options.revisionId,
+    "--track",
+    options.track,
+    "--title",
+    options.title,
+    "--file",
+    options.file,
+    "--side",
+    options.side,
+    "--start-line",
+    String(options.startLine),
+    "--end-line",
+    String(options.endLine),
+  ];
 }
 
 const defaultExec: ExecFn = (file, args, opts) =>

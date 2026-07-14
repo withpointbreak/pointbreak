@@ -32,6 +32,23 @@ export type InspectClientErrorKind =
   | "version-incompatible"
   | "identity-mismatch";
 
+/** Checks whether an exact inspector revision is still a writable thread head. */
+export function revisionIsCurrent(
+  document: RevisionDoc,
+  revisionId: string,
+): boolean {
+  if (document.revision.id !== revisionId) return false;
+  const supersession = document.revisionSupersession;
+  if (supersession === undefined) return true;
+  if (!isObject(supersession) || !Array.isArray(supersession.heads)) {
+    return false;
+  }
+  return (
+    supersession.heads.every((head) => typeof head === "string") &&
+    supersession.heads.includes(revisionId)
+  );
+}
+
 export class InspectClientError extends Error {
   constructor(readonly kind: InspectClientErrorKind) {
     super(errorMessage(kind));

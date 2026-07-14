@@ -20,6 +20,7 @@ it("contributes the Review view and its commands", () => {
     "onCommand:pointbreak.openAnnotatedDiff",
     "onCommand:pointbreak.openInReview",
     "onCommand:pointbreak.stopInspect",
+    "onCommand:pointbreak.addObservationFromSelection",
   ]);
   expect(pkg.contributes.views.pointbreak).toContainEqual({
     id: "pointbreak.attention",
@@ -31,7 +32,15 @@ it("contributes the Review view and its commands", () => {
     "pointbreak.openAnnotatedDiff",
     "pointbreak.openInReview",
     "pointbreak.stopInspect",
+    "pointbreak.addObservationFromSelection",
   ]);
+  expect(
+    pkg.contributes.commands.find(
+      ({ command }) => command === "pointbreak.addObservationFromSelection",
+    ),
+  ).toMatchObject({
+    enablement: "pointbreak.hasSourceReviewContext",
+  });
   expect(pkg.contributes.menus["view/item/context"]).toContainEqual({
     command: "pointbreak.openInReview",
     when: "view == pointbreak.attention && (viewItem == pointbreak.revision || viewItem == pointbreak.attentionItem)",
@@ -49,4 +58,10 @@ it("contributes the Review view and its commands", () => {
     pkg.contributes.configuration.properties["pointbreak.reviewUrl"]
       .description,
   ).not.toMatch(/restore|remember|port/i);
+  expect(
+    pkg.contributes.configuration.properties["pointbreak.observationTrack"],
+  ).toMatchObject({
+    type: "string",
+    default: "human:local",
+  });
 });

@@ -1,7 +1,11 @@
 /// <reference lib="dom" />
 
 import type { DiffRenderData } from "../diffDataSource";
-import type { ReviewPanelFocus } from "../webviewProtocol";
+import type {
+  ReviewPanelFocus,
+  SnapshotRangeTarget,
+  WebviewToHost,
+} from "../webviewProtocol";
 import { diffStatusClass } from "./diff/classNames";
 import { escapeHtml } from "./diff/escape";
 import {
@@ -20,6 +24,7 @@ import {
 interface ControllerStateApi {
   getState(): unknown;
   setState(state: unknown): void;
+  postMessage?(message: WebviewToHost): void;
 }
 
 interface ControllerState {
@@ -76,6 +81,7 @@ export class ReviewWebviewController {
     if (saved) {
       this.restoreExpanded(saved.expanded);
     }
+    this.bindSourceActions();
     this.renderNavigator();
     this.persist();
     this.focus(focus);
@@ -119,6 +125,18 @@ export class ReviewWebviewController {
   private onClick(event: Event): void {
     const target = event.target;
     if (!(target instanceof Element)) return;
+
+    const sourceAction = target.closest<HTMLElement>("[data-open-source]");
+    if (sourceAction) {
+      const sourceTarget = targetFromAction(sourceAction);
+      if (sourceTarget) {
+        this.stateApi.postMessage?.({
+          type: "openSource",
+          target: sourceTarget,
+        });
+      }
+      return;
+    }
 
     const renderAll = target.closest("[data-render-diff-file]");
     if (renderAll) {
@@ -283,6 +301,60 @@ export class ReviewWebviewController {
     body.innerHTML = renderDiffFileBody(file, this.context.anchored);
     body.removeAttribute("data-fact-vicinity");
     body.dataset.rendered = "1";
+    this.bindSourceActions(section);
+  }
+
+  private bindSourceActions(scope: ParentNode = this.root): void {
+    if (!this.context) return;
+    const sections =
+      scope instanceof HTMLElement && scope.matches(".dfile[data-dfile]")
+        ? [scope]
+        : [...scope.querySelectorAll<HTMLElement>(".dfile[data-dfile]")];
+    for (const section of sections) {
+      const file = this.context.files[Number(section.dataset.dfile)];
+      if (!file) continue;
+      const rows = (file.hunks ?? []).flatMap((hunk) => hunk.rows ?? []);
+      const elements = section.querySelectorAll<HTMLElement>(
+        ".dfile-body .drow:not(.drow-meta)",
+      );
+      elements.forEach((element, index) => {
+        const row = rows[index];
+        if (!row) return;
+        const side = row.kind === "removed" ? "old" : "new";
+        const line = side === "old" ? row.old_line : row.new_line;
+        const filePath = side === "old" ? file.old_path : file.new_path;
+        if (line != null && filePath) {
+          addSourceAction(element, {
+            filePath,
+            side,
+            startLine: line,
+            endLine: line,
+          });
+        }
+      });
+    }
+
+    for (const annotation of scope.querySelectorAll<HTMLElement>(
+      ".anno[data-anno]",
+    )) {
+      const id = annotation.dataset.anno;
+      const fact = this.context.anchored.find((item) => item.id === id);
+      const target = fact?.target;
+      if (
+        target?.kind === "range" &&
+        target.filePath &&
+        (target.side === "old" || target.side === "new") &&
+        Number.isInteger(target.startLine) &&
+        Number.isInteger(target.endLine ?? target.startLine)
+      ) {
+        addSourceAction(annotation, {
+          filePath: target.filePath,
+          side: target.side,
+          startLine: target.startLine as number,
+          endLine: (target.endLine ?? target.startLine) as number,
+        });
+      }
+    }
   }
 
   private restoreExpanded(expanded: readonly boolean[]): void {
@@ -328,6 +400,45 @@ export class ReviewWebviewController {
       (element) => !!element.dataset.anno && ids.includes(element.dataset.anno),
     );
   }
+}
+
+function addSourceAction(
+  container: HTMLElement,
+  target: SnapshotRangeTarget,
+): void {
+  if (container.querySelector(":scope > [data-open-source]")) return;
+  const action = document.createElement("button");
+  action.type = "button";
+  action.className = "source-action";
+  action.dataset.openSource = "true";
+  action.dataset.sourceFile = target.filePath;
+  action.dataset.sourceSide = target.side;
+  action.dataset.sourceLine = String(target.startLine);
+  action.dataset.sourceEndLine = String(target.endLine);
+  action.ariaLabel = "Open captured range in source";
+  action.title = "Open in source";
+  action.textContent = "↗";
+  container.append(action);
+}
+
+function targetFromAction(
+  action: HTMLElement,
+): SnapshotRangeTarget | undefined {
+  const filePath = action.dataset.sourceFile;
+  const side = action.dataset.sourceSide;
+  const startLine = Number(action.dataset.sourceLine);
+  const endLine = Number(action.dataset.sourceEndLine);
+  if (
+    !filePath ||
+    (side !== "old" && side !== "new") ||
+    !Number.isInteger(startLine) ||
+    startLine <= 0 ||
+    !Number.isInteger(endLine) ||
+    endLine < startLine
+  ) {
+    return undefined;
+  }
+  return { filePath, side, startLine, endLine };
 }
 
 export function focusCandidateIds(attentionId: string): string[] {

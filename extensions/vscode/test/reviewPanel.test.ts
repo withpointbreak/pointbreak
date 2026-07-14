@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceFolder } from "vscode";
 import snapshotFixture from "../../../src/cli/inspect/web/test/fixtures/snapshot.json";
 import type { ReviewSnapshotDoc } from "../src/cli";
+import type { SourceOpener } from "../src/commands/openInSource";
 import type { DiffDataSource, DiffRenderData } from "../src/diffDataSource";
 import {
   type ReviewPanelLocation,
@@ -103,6 +104,53 @@ beforeEach(() => {
 });
 
 describe("ReviewPanelManager", () => {
+  it("routes only a validated source target with the loaded review context", async () => {
+    const sourceOpener = { open: vi.fn(async () => undefined) };
+    const current = location("a", "rev:sha256:one");
+    const manager = createManager(
+      { load: vi.fn(async () => data(current.revisionId)) },
+      sourceOpener,
+    );
+
+    await manager.open(current);
+    const panel = vscodeMocks.panels[0];
+    panel.emitMessage({
+      type: "openSource",
+      target: {
+        filePath: "src/lib.rs",
+        side: "new",
+        startLine: 2,
+        endLine: 2,
+      },
+    });
+    panel.emitMessage({
+      type: "openSource",
+      target: {
+        filePath: "/private/repo/src/lib.rs",
+        side: "new",
+        startLine: 2,
+        endLine: 2,
+      },
+    });
+    await settled();
+
+    expect(sourceOpener.open).toHaveBeenCalledTimes(1);
+    expect(sourceOpener.open).toHaveBeenCalledWith({
+      repoRoot: "/private/a",
+      targetKey: "a",
+      revisionId: current.revisionId,
+      snapshot: expect.objectContaining({
+        schema: "pointbreak.review-snapshot",
+      }),
+      target: {
+        filePath: "src/lib.rs",
+        side: "new",
+        startLine: 2,
+        endLine: 2,
+      },
+    });
+  });
+
   it("keys one reusable panel by target and revision while focus stays presentation-only", async () => {
     const load = vi.fn(async ({ revisionId }) => data(revisionId));
     const manager = createManager({ load });
@@ -406,10 +454,14 @@ describe("ReviewPanelManager", () => {
   });
 });
 
-function createManager(source: DiffDataSource): ReviewPanelManager {
+function createManager(
+  source: DiffDataSource,
+  sourceOpener?: SourceOpener,
+): ReviewPanelManager {
   return new ReviewPanelManager(
     new vscodeMocks.Uri("/extension") as never,
     source,
+    sourceOpener,
   );
 }
 
