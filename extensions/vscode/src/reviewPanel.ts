@@ -32,16 +32,24 @@ export interface ReviewPanelOpenOptions {
   readonly preserveFocus?: boolean;
 }
 
-/** Owns the one annotated-diff presentation surface for this VS Code window. */
+interface PanelSession {
+  readonly key: string;
+  readonly panel: WebviewPanel;
+  location: ReviewPanelLocation;
+  generation: number;
+  ready: boolean;
+  pendingState: HostToWebview | undefined;
+  visible: boolean;
+}
+
+/** Owns one annotated-diff presentation surface per review document. */
 export class ReviewPanelManager implements Disposable {
   private readonly visibilityEmitter = new EventEmitter<boolean>();
   readonly onDidChangeVisibility: Event<boolean> = this.visibilityEmitter.event;
 
-  private panel: WebviewPanel | undefined;
-  private currentLocation: ReviewPanelLocation | undefined;
-  private generation = 0;
-  private ready = false;
-  private pendingState: HostToWebview | undefined;
+  private readonly sessions = new Map<string, PanelSession>();
+  private lastOpenedKey: string | undefined;
+  private reportedVisibility = false;
   private disposed = false;
 
   constructor(
@@ -57,34 +65,33 @@ export class ReviewPanelManager implements Disposable {
       throw new Error("Pointbreak Review is no longer available.");
     }
 
-    const existingPanel = this.panel;
-    const panel = existingPanel ?? this.createPanel(!!options.preserveFocus);
-    if (existingPanel) {
-      panel.reveal(ViewColumn.Active, !!options.preserveFocus);
-    }
+    const key = reviewDocumentKey(location);
+    const existing = this.sessions.get(key);
+    this.lastOpenedKey = key;
 
-    const previous = this.currentLocation;
-    const sameData = previous ? sameDataLocation(previous, location) : false;
-    const sameFocus = previous
-      ? equalFocus(previous.focus, location.focus)
-      : false;
-    this.currentLocation = location;
-
-    if (sameData && sameFocus) {
+    if (existing) {
+      this.markMostRecentlyOpened(existing);
+      existing.panel.reveal(ViewColumn.Active, !!options.preserveFocus);
+      const sameFocus = equalFocus(existing.location.focus, location.focus);
+      existing.location = location;
+      if (!sameFocus) {
+        this.sendFocus(existing, location.focus);
+      }
       return;
     }
-    if (sameData) {
-      this.sendFocus(location.focus);
-      return;
-    }
-    await this.load(location, panel);
+
+    const session = this.createSession(key, location, !!options.preserveFocus);
+    await this.load(session);
   }
 
   async reloadActive(): Promise<void> {
-    if (!this.panel || !this.currentLocation) {
+    const session = this.lastOpenedKey
+      ? this.sessions.get(this.lastOpenedKey)
+      : undefined;
+    if (!session) {
       return;
     }
-    await this.load(this.currentLocation, this.panel);
+    await this.load(session);
   }
 
   dispose(): void {
@@ -92,14 +99,21 @@ export class ReviewPanelManager implements Disposable {
       return;
     }
     this.disposed = true;
-    this.generation += 1;
-    const panel = this.panel;
-    this.clearPanel(panel);
-    panel?.dispose();
+    const sessions = [...this.sessions.values()];
+    this.sessions.clear();
+    this.lastOpenedKey = undefined;
+    for (const session of sessions) {
+      session.generation += 1;
+      session.panel.dispose();
+    }
     this.visibilityEmitter.dispose();
   }
 
-  private createPanel(preserveFocus: boolean): WebviewPanel {
+  private createSession(
+    key: string,
+    location: ReviewPanelLocation,
+    preserveFocus: boolean,
+  ): PanelSession {
     const outputRoot = Uri.joinPath(this.extensionUri, "out");
     const panel = window.createWebviewPanel(
       VIEW_TYPE,
@@ -111,30 +125,39 @@ export class ReviewPanelManager implements Disposable {
         localResourceRoots: [outputRoot],
       },
     );
-    this.panel = panel;
-    panel.onDidDispose(() => this.clearPanel(panel));
+    const session: PanelSession = {
+      key,
+      panel,
+      location,
+      generation: 0,
+      ready: false,
+      pendingState: undefined,
+      visible: panel.visible,
+    };
+    this.sessions.set(key, session);
+    this.emitVisibilityChange();
+    panel.onDidDispose(() => this.clearSession(session));
     panel.onDidChangeViewState(({ webviewPanel }) => {
-      if (this.panel === webviewPanel) {
-        this.visibilityEmitter.fire(webviewPanel.visible);
+      if (this.sessions.get(key) === session) {
+        session.visible = webviewPanel.visible;
+        this.emitVisibilityChange();
       }
     });
     panel.webview.onDidReceiveMessage((message: unknown) => {
-      void this.receive(panel, message);
+      void this.receive(session, message);
     });
-    return panel;
+    return session;
   }
 
-  private async load(
-    location: ReviewPanelLocation,
-    panel: WebviewPanel,
-  ): Promise<void> {
-    const generation = ++this.generation;
-    this.ready = false;
-    this.pendingState = undefined;
-    panel.title = `${PANEL_TITLE}: loading`;
-    panel.webview.html = webviewHtml(
+  private async load(session: PanelSession): Promise<void> {
+    const generation = ++session.generation;
+    const location = session.location;
+    session.ready = false;
+    session.pendingState = undefined;
+    session.panel.title = `${PANEL_TITLE}: loading`;
+    session.panel.webview.html = webviewHtml(
       this.extensionUri,
-      panel.webview,
+      session.panel.webview,
       location,
     );
 
@@ -143,97 +166,118 @@ export class ReviewPanelManager implements Disposable {
         resolution: location.resolution,
         revisionId: location.revisionId,
       });
-      if (!this.isCurrent(panel, generation, location)) {
+      if (!this.isCurrent(session, generation)) {
         return;
       }
       const message: HostToWebview = {
         type: "render",
         data,
-        focus: this.currentLocation?.focus,
+        focus: session.location.focus,
       };
       if (
         data.revisionId !== location.revisionId ||
         !isHostToWebview(message)
       ) {
-        this.queueState({ type: "error", message: LOAD_ERROR });
+        this.queueState(session, { type: "error", message: LOAD_ERROR });
         return;
       }
-      panel.title = `${PANEL_TITLE}: ${shortRevisionId(location.revisionId)}`;
-      this.queueState(message);
+      session.panel.title = `${PANEL_TITLE}: ${shortRevisionId(location.revisionId)}`;
+      this.queueState(session, message);
     } catch {
-      if (!this.isCurrent(panel, generation, location)) {
+      if (!this.isCurrent(session, generation)) {
         return;
       }
-      panel.title = `${PANEL_TITLE}: unavailable`;
-      this.queueState({ type: "error", message: LOAD_ERROR });
+      session.panel.title = `${PANEL_TITLE}: unavailable`;
+      this.queueState(session, { type: "error", message: LOAD_ERROR });
     }
   }
 
-  private async receive(panel: WebviewPanel, message: unknown): Promise<void> {
-    if (panel !== this.panel || !isWebviewToHost(message)) {
+  private async receive(
+    session: PanelSession,
+    message: unknown,
+  ): Promise<void> {
+    if (
+      this.sessions.get(session.key) !== session ||
+      !isWebviewToHost(message)
+    ) {
       return;
     }
     if (message.type === "ready") {
-      this.ready = true;
-      this.flushState();
+      session.ready = true;
+      this.flushState(session);
       return;
     }
     if (message.type === "reload") {
-      await this.reloadActive();
+      await this.load(session);
     }
     // openSource is reserved for the source-crossing command.
   }
 
-  private queueState(message: HostToWebview): void {
-    this.pendingState = message;
-    this.flushState();
+  private queueState(session: PanelSession, message: HostToWebview): void {
+    session.pendingState = message;
+    this.flushState(session);
   }
 
-  private flushState(): void {
-    if (!this.ready || !this.panel || !this.pendingState) {
+  private flushState(session: PanelSession): void {
+    if (!session.ready || !session.pendingState) {
       return;
     }
-    const message = this.pendingState;
-    this.pendingState = undefined;
-    void this.panel.webview.postMessage(message);
+    const message = session.pendingState;
+    session.pendingState = undefined;
+    void session.panel.webview.postMessage(message);
   }
 
-  private sendFocus(focus: ReviewPanelFocus | undefined): void {
-    if (this.pendingState?.type === "render") {
-      this.pendingState = { ...this.pendingState, focus };
-      this.flushState();
+  private sendFocus(
+    session: PanelSession,
+    focus: ReviewPanelFocus | undefined,
+  ): void {
+    if (session.pendingState?.type === "render") {
+      session.pendingState = { ...session.pendingState, focus };
+      this.flushState(session);
       return;
     }
-    if (this.ready && this.panel) {
-      void this.panel.webview.postMessage({ type: "focus", focus });
+    if (session.ready) {
+      void session.panel.webview.postMessage({ type: "focus", focus });
     }
   }
 
-  private isCurrent(
-    panel: WebviewPanel,
-    generation: number,
-    location: ReviewPanelLocation,
-  ): boolean {
+  private isCurrent(session: PanelSession, generation: number): boolean {
     return (
-      this.panel === panel &&
-      this.generation === generation &&
-      !!this.currentLocation &&
-      sameDataLocation(this.currentLocation, location)
+      this.sessions.get(session.key) === session &&
+      session.generation === generation
     );
   }
 
-  private clearPanel(panel: WebviewPanel | undefined): void {
-    if (!panel || this.panel !== panel) {
+  private clearSession(session: PanelSession): void {
+    if (this.sessions.get(session.key) !== session) {
       return;
     }
-    this.generation += 1;
-    this.panel = undefined;
-    this.currentLocation = undefined;
-    this.ready = false;
-    this.pendingState = undefined;
-    if (!this.disposed) {
-      this.visibilityEmitter.fire(false);
+    session.generation += 1;
+    this.sessions.delete(session.key);
+    if (this.lastOpenedKey === session.key) {
+      this.lastOpenedKey = [...this.sessions.keys()].at(-1);
     }
+    if (!this.disposed) {
+      this.emitVisibilityChange();
+    }
+  }
+
+  private markMostRecentlyOpened(session: PanelSession): void {
+    this.sessions.delete(session.key);
+    this.sessions.set(session.key, session);
+  }
+
+  private hasVisibleSession(): boolean {
+    return [...this.sessions.values()].some((session) => session.visible);
+  }
+
+  private emitVisibilityChange(): void {
+    const anyVisible = this.hasVisibleSession();
+    if (anyVisible === this.reportedVisibility) {
+      return;
+    }
+    this.reportedVisibility = anyVisible;
+    this.visibilityEmitter.fire(anyVisible);
   }
 }
 
@@ -243,11 +287,7 @@ function webviewHtml(
   location: ReviewPanelLocation,
 ): string {
   const nonce = randomBytes(18).toString("base64");
-  const locationKey = createHash("sha256")
-    .update(location.resolution.target.key)
-    .update("\0")
-    .update(location.revisionId)
-    .digest("hex");
+  const locationKey = reviewDocumentKey(location);
   const script = webview.asWebviewUri(
     Uri.joinPath(extensionUri, "out", "review.js"),
   );
@@ -270,14 +310,12 @@ function webviewHtml(
 </html>`;
 }
 
-function sameDataLocation(
-  left: ReviewPanelLocation,
-  right: ReviewPanelLocation,
-): boolean {
-  return (
-    left.resolution.target.key === right.resolution.target.key &&
-    left.revisionId === right.revisionId
-  );
+function reviewDocumentKey(location: ReviewPanelLocation): string {
+  return createHash("sha256")
+    .update(location.resolution.target.key)
+    .update("\0")
+    .update(location.revisionId)
+    .digest("hex");
 }
 
 function equalFocus(

@@ -103,7 +103,7 @@ beforeEach(() => {
 });
 
 describe("ReviewPanelManager", () => {
-  it("creates one lazy panel and separates reveal, focus, and data navigation", async () => {
+  it("keys one reusable panel by target and revision while focus stays presentation-only", async () => {
     const load = vi.fn(async ({ revisionId }) => data(revisionId));
     const manager = createManager({ load });
     const first = location("a", "rev:sha256:one");
@@ -138,89 +138,204 @@ describe("ReviewPanelManager", () => {
     });
 
     const second = location("a", "rev:sha256:two");
-    const navigation = manager.open(second);
-    panel.emitMessage({ type: "ready" });
-    await navigation;
+    const secondOpen = manager.open(second);
+    expect(vscodeMocks.createWebviewPanel).toHaveBeenCalledTimes(2);
+    const secondPanel = vscodeMocks.panels[1];
+    secondPanel.emitMessage({ type: "ready" });
+    await secondOpen;
     await settled();
-    expect(vscodeMocks.createWebviewPanel).toHaveBeenCalledTimes(1);
     expect(load).toHaveBeenCalledTimes(2);
-    expect(panel.webview.postMessage).toHaveBeenLastCalledWith(
+    expect(secondPanel.webview.postMessage).toHaveBeenLastCalledWith(
       expect.objectContaining({
         type: "render",
         data: expect.objectContaining({ revisionId: second.revisionId }),
       }),
     );
+
+    await manager.open(first, { preserveFocus: true });
+    expect(vscodeMocks.createWebviewPanel).toHaveBeenCalledTimes(2);
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(panel.reveal).toHaveBeenLastCalledWith(-1, true);
+
+    const sameRevisionOnAnotherTarget = location("b", first.revisionId);
+    const thirdOpen = manager.open(sameRevisionOnAnotherTarget);
+    expect(vscodeMocks.createWebviewPanel).toHaveBeenCalledTimes(3);
+    const thirdPanel = vscodeMocks.panels[2];
+    thirdPanel.emitMessage({ type: "ready" });
+    await thirdOpen;
+    expect(load).toHaveBeenCalledTimes(3);
   });
 
-  it("lets only the latest overlapping location render or fail", async () => {
-    const oldLoad = deferred<DiffRenderData>();
-    const newLoad = deferred<DiffRenderData>();
+  it("keeps overlapping document loads independent and errors path-free", async () => {
+    const firstLoad = deferred<DiffRenderData>();
+    const secondLoad = deferred<DiffRenderData>();
     const load = vi
       .fn<DiffDataSource["load"]>()
-      .mockReturnValueOnce(oldLoad.promise)
-      .mockReturnValueOnce(newLoad.promise);
+      .mockReturnValueOnce(firstLoad.promise)
+      .mockReturnValueOnce(secondLoad.promise);
     const manager = createManager({ load });
 
-    const oldOpen = manager.open(location("a", "rev:sha256:old"));
-    const panel = vscodeMocks.panels[0];
-    const newLocation = {
+    const firstOpen = manager.open(location("a", "rev:sha256:first"));
+    const firstPanel = vscodeMocks.panels[0];
+    const secondLocation = {
       ...location("b", "rev:sha256:new"),
       focus: { kind: "attention", id: "stale_assessment:assess:new" } as const,
     };
-    const newOpen = manager.open(newLocation);
-    panel.emitMessage({ type: "ready" });
-    oldLoad.reject(new Error("/private/repo token=secret 127.0.0.1:7878"));
-    newLoad.resolve(data(newLocation.revisionId));
-    await Promise.all([oldOpen, newOpen]);
+    const secondOpen = manager.open(secondLocation);
+    expect(vscodeMocks.panels).toHaveLength(2);
+    const secondPanel = vscodeMocks.panels[1];
+    firstPanel.emitMessage({ type: "ready" });
+    secondPanel.emitMessage({ type: "ready" });
+    firstLoad.reject(new Error("/private/repo token=secret 127.0.0.1:7878"));
+    secondLoad.resolve(data(secondLocation.revisionId));
+    await Promise.all([firstOpen, secondOpen]);
     await settled();
 
-    expect(panel.webview.postMessage).toHaveBeenCalledTimes(1);
-    expect(panel.webview.postMessage).toHaveBeenCalledWith({
-      type: "render",
-      data: expect.objectContaining({ revisionId: newLocation.revisionId }),
-      focus: newLocation.focus,
+    expect(firstPanel.webview.postMessage).toHaveBeenCalledWith({
+      type: "error",
+      message: "Pointbreak could not load this annotated diff.",
     });
-    expect(JSON.stringify(panel.webview.postMessage.mock.calls)).not.toMatch(
+    expect(secondPanel.webview.postMessage).toHaveBeenCalledWith({
+      type: "render",
+      data: expect.objectContaining({ revisionId: secondLocation.revisionId }),
+      focus: secondLocation.focus,
+    });
+    expect(JSON.stringify(vscodeMocks.panels)).not.toMatch(
       /private|secret|127\.0\.0\.1|7878/,
     );
   });
 
-  it("clears active work on close, recreates cleanly, and reloads only when active", async () => {
+  it("pairs a pending document load with its latest attention focus", async () => {
+    const pending = deferred<DiffRenderData>();
+    const load = vi
+      .fn<DiffDataSource["load"]>()
+      .mockReturnValue(pending.promise);
+    const manager = createManager({ load });
+    const initial = location("a", "rev:sha256:pending");
+    const firstOpen = manager.open(initial);
+    const panel = vscodeMocks.panels[0];
+
+    await manager.open({
+      ...initial,
+      focus: { kind: "attention", id: "open_input_request:request:pending" },
+    });
+    panel.emitMessage({ type: "ready" });
+    pending.resolve(data(initial.revisionId));
+    await firstOpen;
+    await settled();
+
+    expect(vscodeMocks.createWebviewPanel).toHaveBeenCalledTimes(1);
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(panel.webview.postMessage).toHaveBeenCalledWith({
+      type: "render",
+      data: expect.objectContaining({ revisionId: initial.revisionId }),
+      focus: {
+        kind: "attention",
+        id: "open_input_request:request:pending",
+      },
+    });
+  });
+
+  it("lets only the latest reload update one document session", async () => {
+    const stale = deferred<DiffRenderData>();
+    const current = deferred<DiffRenderData>();
+    const revisionId = "rev:sha256:reload";
+    const load = vi
+      .fn<DiffDataSource["load"]>()
+      .mockResolvedValueOnce(data(revisionId))
+      .mockReturnValueOnce(stale.promise)
+      .mockReturnValueOnce(current.promise);
+    const manager = createManager({ load });
+
+    await manager.open(location("a", revisionId));
+    const panel = vscodeMocks.panels[0];
+    panel.emitMessage({ type: "ready" });
+    await settled();
+    panel.webview.postMessage.mockClear();
+
+    panel.emitMessage({ type: "reload" });
+    panel.emitMessage({ type: "reload" });
+    panel.emitMessage({ type: "ready" });
+    current.resolve({ ...data(revisionId), snapshotId: "obj:current" });
+    await settled();
+    stale.reject(new Error("stale /private/path token=secret"));
+    await settled();
+
+    expect(panel.webview.postMessage).toHaveBeenCalledTimes(1);
+    expect(panel.webview.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "render",
+        data: expect.objectContaining({ snapshotId: "obj:current" }),
+      }),
+    );
+    expect(JSON.stringify(panel.webview.postMessage.mock.calls)).not.toMatch(
+      /private|secret/,
+    );
+  });
+
+  it("closes and recreates only one document while reloadActive follows the latest open", async () => {
     const pending = deferred<DiffRenderData>();
     const load = vi
       .fn<DiffDataSource["load"]>()
       .mockReturnValueOnce(pending.promise)
-      .mockResolvedValue(data("rev:sha256:reopened"));
+      .mockImplementation(async ({ revisionId }) => data(revisionId));
     const manager = createManager({ load });
-    const firstOpen = manager.open(location("a", "rev:sha256:first"));
+    const first = location("a", "rev:sha256:first");
+    const second = location("a", "rev:sha256:second");
+    const firstOpen = manager.open(first);
     const firstPanel = vscodeMocks.panels[0];
+    const secondOpen = manager.open(second);
+    const secondPanel = vscodeMocks.panels[1];
+    secondPanel.emitMessage({ type: "ready" });
+    await secondOpen;
+
     firstPanel.dispose();
     pending.resolve(data("rev:sha256:first"));
     await firstOpen;
+    expect(firstPanel.webview.postMessage).not.toHaveBeenCalled();
 
     await manager.reloadActive();
-    expect(load).toHaveBeenCalledTimes(1);
+    expect(load).toHaveBeenLastCalledWith({
+      resolution: second.resolution,
+      revisionId: second.revisionId,
+    });
 
-    const reopen = manager.open(location("a", "rev:sha256:reopened"));
-    const secondPanel = vscodeMocks.panels[1];
-    secondPanel.emitMessage({ type: "ready" });
+    const reopen = manager.open(first);
+    const reopenedPanel = vscodeMocks.panels[2];
+    reopenedPanel.emitMessage({ type: "ready" });
     await reopen;
     await settled();
-    expect(vscodeMocks.createWebviewPanel).toHaveBeenCalledTimes(2);
+    expect(vscodeMocks.createWebviewPanel).toHaveBeenCalledTimes(3);
+    expect(reopenedPanel.webview.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "render" }),
+    );
+
+    secondPanel.webview.postMessage.mockClear();
+    secondPanel.emitMessage({ type: "reload" });
+    secondPanel.emitMessage({ type: "ready" });
+    await settled();
+    expect(load).toHaveBeenLastCalledWith({
+      resolution: second.resolution,
+      revisionId: second.revisionId,
+    });
     expect(secondPanel.webview.postMessage).toHaveBeenCalledWith(
       expect.objectContaining({ type: "render" }),
     );
 
     await manager.reloadActive();
-    expect(load).toHaveBeenCalledTimes(3);
+    expect(load).toHaveBeenLastCalledWith({
+      resolution: first.resolution,
+      revisionId: first.revisionId,
+    });
   });
 
-  it("uses a local-only CSP and exposes stamped visibility without panel internals", async () => {
+  it("uses local-only CSP and reports aggregate keyed-panel visibility", async () => {
     const manager = createManager({ load: vi.fn(async () => data("rev:one")) });
     const visible: boolean[] = [];
     manager.onDidChangeVisibility((value) => visible.push(value));
     await manager.open(location("a", "rev:one"));
-    const panel = vscodeMocks.panels[0];
+    await manager.open(location("a", "rev:two"));
+    const [panel, secondPanel] = vscodeMocks.panels;
     const options = vscodeMocks.createWebviewPanel.mock.calls[0]?.[3];
 
     expect(options).toMatchObject({
@@ -238,9 +353,12 @@ describe("ReviewPanelManager", () => {
       /https?:|127\.0\.0\.1|token|\/private\/repo/,
     );
 
+    expect(visible).toEqual([true]);
     panel.setVisible(false);
+    expect(visible).toEqual([true]);
+    secondPanel.setVisible(false);
     panel.setVisible(true);
-    expect(visible).toEqual([false, true]);
+    expect(visible).toEqual([true, false, true]);
   });
 
   it("keys persisted controller state by the complete host data location", async () => {
@@ -248,20 +366,38 @@ describe("ReviewPanelManager", () => {
       load: vi.fn(async ({ revisionId }) => data(revisionId)),
     });
     await manager.open(location("a", "rev:same"));
-    const panel = vscodeMocks.panels[0];
-    const firstKey = panel.webview.html.match(
+    const firstPanel = vscodeMocks.panels[0];
+    const firstKey = firstPanel.webview.html.match(
       /data-location-key="([^"]+)"/,
     )?.[1];
 
     await manager.open(location("b", "rev:same"));
-    const secondKey = panel.webview.html.match(
+    const secondPanel = vscodeMocks.panels[1];
+    const secondKey = secondPanel.webview.html.match(
       /data-location-key="([^"]+)"/,
     )?.[1];
 
     expect(firstKey).toMatch(/^[a-f0-9]{64}$/);
     expect(secondKey).toMatch(/^[a-f0-9]{64}$/);
     expect(secondKey).not.toBe(firstKey);
-    expect(panel.webview.html).not.toContain("store:b/context:b");
+    expect(firstPanel.webview.html).not.toContain("store:a/context:a");
+    expect(secondPanel.webview.html).not.toContain("store:b/context:b");
+  });
+
+  it("disposes every keyed document session with the manager", async () => {
+    const manager = createManager({
+      load: vi.fn(async ({ revisionId }) => data(revisionId)),
+    });
+    await manager.open(location("a", "rev:one"));
+    await manager.open(location("a", "rev:two"));
+
+    manager.dispose();
+
+    expect(vscodeMocks.panels[0].dispose).toHaveBeenCalledOnce();
+    expect(vscodeMocks.panels[1].dispose).toHaveBeenCalledOnce();
+    await expect(manager.open(location("a", "rev:three"))).rejects.toThrow(
+      "Pointbreak Review is no longer available.",
+    );
   });
 });
 
