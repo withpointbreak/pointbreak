@@ -142,7 +142,7 @@ cleanup() {
   [ -z "$STAGED_DARK" ] || rm -f "$STAGED_DARK"
   [ -z "$STAGED_LIGHT" ] || rm -f "$STAGED_LIGHT"
   [ -z "$STAGED_MANIFEST" ] || rm -f "$STAGED_MANIFEST"
-  rm -rf "$TMP_DIR"
+  # rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
 
@@ -212,13 +212,19 @@ async function prepareFrame() {
   await search.waitFor({ state: "visible" });
   await search.fill(query);
 
+  const filters = page.getByRole("button", { name: /Filters/i });
+  await clickVisible(filters);
   const hideValidation = page.getByRole("button", { name: /Hide validation events/i });
   await clickVisible(hideValidation);
+  const hideCommitAssociated = page.getByRole("button", { name: /Hide revision_commit_associated events/i });
+  await clickVisible(hideCommitAssociated);
 
   if (hideObservations) {
     const hideObservation = page.getByRole("button", { name: /Hide observation events/i });
     await clickVisible(hideObservation);
   }
+
+  await clickVisible(filters);
 
   const row = page
     .getByRole("listitem")
@@ -440,6 +446,7 @@ else
   mv "$STAGED_MANIFEST" "$MANIFEST"
 fi
 
+note "tmp dir   : $TMP_DIR"
 note "dark      : $OUT_DIR/shore-inspector-dark.png"
 note "light     : $OUT_DIR/shore-inspector-light.png"
 note "result    : 1800x1012 PNG pair"

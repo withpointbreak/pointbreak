@@ -2,8 +2,8 @@
   "schema": "com.withpointbreak.review-interface-capture/v2",
   "producer": {
     "name": "shore",
-    "version": "0.5.0",
-    "commit": "141dac944a3a0f0e3cd23580b1d6ca0965fd1436"
+    "version": "0.6.0",
+    "commit": "0aa26a8911c07294d10c728cd6068dc53ecfa34b"
   },
   "example": {
     "name": "checkout-refactor",
@@ -43,13 +43,13 @@
       "path": "assets/marketing/shore-inspector-dark.png",
       "width": 1800,
       "height": 1012,
-      "sha256": "1d689585ef058e7bd63b9abd26ad9e82ee098132b587ea0ce5c36c1be3d4d452"
+      "sha256": "0834a7fb0436487714795d8a99f57571c969210464e7daa68b3c6a74cabe6de2"
     },
     "light": {
       "path": "assets/marketing/shore-inspector-light.png",
       "width": 1800,
       "height": 1012,
-      "sha256": "58e64b4475f8f0383d219dc2f96b484d5cd06c8e26b1a7c4150204afb95ad8e6"
+      "sha256": "048b6c6f863beef27c94c2924ec07d629aa30be62ffeb852e1e7786b4da7f64a"
     }
   }
 }
