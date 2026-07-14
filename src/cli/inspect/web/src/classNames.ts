@@ -39,6 +39,7 @@ export const CLASS = {
   ghost: "ghost",
   actions: "actions",
   timelineBoundaryControls: "timeline-boundary-controls",
+  timelineShell: "timeline-shell",
   timelineNewPill: "timeline-new-pill",
 
   // (The app-shell store-identity chip + detail popover is static markup in

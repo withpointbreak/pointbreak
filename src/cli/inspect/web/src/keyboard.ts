@@ -24,7 +24,7 @@ import {
   openRevisionDiff,
 } from "./diff/controller";
 import { $ } from "./dom";
-import { endTimelineFollow } from "./follow";
+import { parkTimelineRead } from "./follow";
 import { loadedWindow, timelineRowHeight } from "./lenses/timeline";
 import { attentionEntryKeys, eventForId, lensEntryIds } from "./model";
 import { resolveRef } from "./navigation";
@@ -213,8 +213,8 @@ function pageLoadedLens(deltaRows: number): void {
 // step past either edge fetches the adjacent page (offset-addressed) and then
 // selects the target's global index; an in-window step selects directly.
 async function stepTimeline(delta: number): Promise<void> {
-  // Any timeline step is an explicit departure from auto-advancing follow.
-  endTimelineFollow();
+  // Movement parks the read window while explicit follow intent stays enabled.
+  parkTimelineRead();
   const state = getState();
   const { offset, count, matchCount } = loadedWindow(state);
   const ids = lensEntryIds();
@@ -257,8 +257,8 @@ function pageOffsetContaining(target: number): number {
 }
 
 async function selectTimelineIndex(targetIndex: number): Promise<void> {
-  // Page and boundary motion both select an engaged timeline destination.
-  endTimelineFollow();
+  // Page and boundary motion park the read without changing follow intent.
+  parkTimelineRead();
   const state = getState();
   const { offset, count, matchCount } = loadedWindow(state);
   const ids = lensEntryIds();

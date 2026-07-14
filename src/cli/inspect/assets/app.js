@@ -237,6 +237,7 @@
     ghost: "ghost",
     actions: "actions",
     timelineBoundaryControls: "timeline-boundary-controls",
+    timelineShell: "timeline-shell",
     timelineNewPill: "timeline-new-pill",
     // (The app-shell store-identity chip + detail popover is static markup in
     // index.html — `store-identity*` classes live there and in app.css, not here —
@@ -1280,7 +1281,10 @@
     timelineNewCount: 0,
     attentionDelta: null,
     enabledTypes: new Set(TYPES.map((t) => t.id)),
-    seenTypes: new Set(TYPES.map((t) => t.id)),
+    // A type is "seen" only after it has actually appeared in the loaded facet
+    // distribution. That lets a type which first arrives while follow is enabled
+    // become visible without re-enabling a type the reader deliberately hid earlier.
+    seenTypes: /* @__PURE__ */ new Set(),
     filterText: "",
     filterTrack: "",
     filterSnapshot: "",
@@ -1650,45 +1654,67 @@
     return getState().followByLens.timeline === true;
   }
   __name(isFollowingTimeline, "isFollowingTimeline");
-  function endTimelineFollow() {
+  function parkTimelineRead() {
+    const state2 = getState();
+    if (state2.timelineHeadAnchor) return;
+    const anchor = headAnchor();
+    if (!anchor) return;
     intentGeneration += 1;
-    if (!isFollowingTimeline()) return;
-    commit({
-      followByLens: followState(false),
-      timelineHeadAnchor: headAnchor(),
-      timelineNewCount: 0
-    });
+    commit({ timelineHeadAnchor: anchor, timelineNewCount: 0 });
   }
-  __name(endTimelineFollow, "endTimelineFollow");
-  async function resumeTimelineFollow() {
-    if (isFollowingTimeline()) return;
-    const generation = timelineFollowGeneration();
-    const queryKey = historyQueryParams(getState());
-    if (!await loadHistoryHead(
-      () => timelineFollowGeneration() === generation && historyQueryParams(getState()) === queryKey
-    ))
+  __name(parkTimelineRead, "parkTimelineRead");
+  async function catchUpTimeline() {
+    const state2 = getState();
+    if (!state2.followByLens.timeline || state2.order !== "desc" || !state2.timelineHeadAnchor)
       return;
-    navigate({ selected: { kind: null, id: null } });
+    const generation = timelineFollowGeneration();
+    const queryKey = historyQueryParams(state2);
+    if (!await loadHistoryHead(() => {
+      const current = getState();
+      return timelineFollowGeneration() === generation && current.followByLens.timeline && current.order === "desc" && current.timelineHeadAnchor != null && historyQueryParams(current) === queryKey;
+    }))
+      return;
     intentGeneration += 1;
-    commit({
-      followByLens: followState(true),
-      timelineHeadAnchor: null,
-      timelineNewCount: 0
-    });
+    commit({ timelineHeadAnchor: null, timelineNewCount: 0 });
     const timeline = $("#timeline");
     if (timeline) timeline.scrollTop = 0;
   }
-  __name(resumeTimelineFollow, "resumeTimelineFollow");
-  function resetTimelineFollowForQueryChange() {
+  __name(catchUpTimeline, "catchUpTimeline");
+  async function toggleTimelineFollow() {
     intentGeneration += 1;
-    const engaged = getState().selected.kind === "event" && Boolean(getState().selected.id);
+    if (isFollowingTimeline()) {
+      commit({
+        followByLens: followState(false),
+        timelineNewCount: 0
+      });
+      return;
+    }
+    commit({ followByLens: followState(true) });
+    const state2 = getState();
+    if (state2.order !== "desc") return;
+    if (state2.timelineHeadAnchor) {
+      await probeNewCount();
+      return;
+    }
+    const generation = timelineFollowGeneration();
+    const queryKey = historyQueryParams(state2);
+    await loadHistoryHead(() => {
+      const current = getState();
+      return timelineFollowGeneration() === generation && current.followByLens.timeline && current.order === "desc" && current.timelineHeadAnchor == null && historyQueryParams(current) === queryKey;
+    });
+  }
+  __name(toggleTimelineFollow, "toggleTimelineFollow");
+  function resetTimelineReadForQueryChange() {
+    intentGeneration += 1;
+    const state2 = getState();
+    const engaged = state2.selected.kind === "event" && Boolean(state2.selected.id);
+    const atDescendingHead = state2.order === "desc" && !engaged;
     commit({
-      followByLens: followState(!engaged),
-      timelineHeadAnchor: engaged ? headAnchor() : null,
+      timelineHeadAnchor: atDescendingHead ? null : headAnchor(),
       timelineNewCount: 0
     });
   }
-  __name(resetTimelineFollowForQueryChange, "resetTimelineFollowForQueryChange");
+  __name(resetTimelineReadForQueryChange, "resetTimelineReadForQueryChange");
 
   // src/http.ts
   var RequestFailure = class extends Error {
@@ -1830,21 +1856,28 @@
     const generation = timelineFollowGeneration();
     const anchor = s.timelineHeadAnchor;
     const queryKey = historyQueryParams(s);
-    if (s.followByLens.timeline || s.order !== "desc" || !anchor) return;
+    if (!s.followByLens.timeline || s.order !== "desc" || !anchor) return true;
     const params = new URLSearchParams(queryKey);
     params.delete("limit");
     params.delete("offset");
     params.delete("at");
     params.set("sinceOccurredAt", anchor.occurredAt);
     params.set("sinceEventId", anchor.eventId);
-    const doc = await fetchJSON(
-      `/api/history/new-count?${params.toString()}`
-    );
+    let doc;
+    try {
+      doc = await fetchJSON(
+        `/api/history/new-count?${params.toString()}`
+      );
+    } catch (err) {
+      showLoadError(err);
+      return false;
+    }
     const current = getState();
     const currentAnchor = current.timelineHeadAnchor;
-    if (timelineFollowGeneration() !== generation || current.followByLens.timeline || current.order !== "desc" || historyQueryParams(current) !== queryKey || currentAnchor?.occurredAt !== anchor.occurredAt || currentAnchor?.eventId !== anchor.eventId)
-      return;
+    if (timelineFollowGeneration() !== generation || !current.followByLens.timeline || current.order !== "desc" || historyQueryParams(current) !== queryKey || currentAnchor?.occurredAt !== anchor.occurredAt || currentAnchor?.eventId !== anchor.eventId)
+      return true;
     commit({ timelineNewCount: doc.newCount ?? 0 });
+    return true;
   }
   __name(probeNewCount, "probeNewCount");
   function showError(message) {
@@ -1877,9 +1910,7 @@
       const historyRaw = await fetchJSON(`/api/history?${params}`);
       if (!isCurrent()) return false;
       showError(null);
-      commit({
-        history: { ...historyRaw, queryKey: params }
-      });
+      commitHistoryHead(historyRaw, params);
       commitFreshnessBaseline(freshness);
       return true;
     } catch (err) {
@@ -1936,7 +1967,7 @@
     if (!doc) return false;
     showError(null);
     commitHistoryPage(doc, queryKey);
-    resetTimelineFollowForQueryChange();
+    resetTimelineReadForQueryChange();
     return true;
   }
   __name(reloadHistoryForQuery, "reloadHistoryForQuery");
@@ -2009,6 +2040,14 @@
     });
   }
   __name(commitHistoryPage, "commitHistoryPage");
+  function commitHistoryHead(page, queryKey) {
+    const state2 = getState();
+    const selected = state2.selected.kind === "event" && state2.selected.id ? state2.selected.id : null;
+    const selectedIsVisible = selected != null && (page.entries ?? []).some((entry) => entry.eventId === selected);
+    const retainedEntry = selected != null && !selectedIsVisible ? state2.history?.entries.find((entry) => entry.eventId === selected) ?? (state2.history?.retainedEntry?.eventId === selected ? state2.history.retainedEntry : void 0) : void 0;
+    commit({ history: { ...page, queryKey, retainedEntry } });
+  }
+  __name(commitHistoryHead, "commitHistoryHead");
   function fetchHistoryPage(selector) {
     const s = getState();
     if (!s.history) return Promise.resolve();
@@ -2091,20 +2130,21 @@
           return;
         }
         let historyLoaded = true;
-        if (getState().followByLens.timeline) {
+        const timeline = getState();
+        if (timeline.followByLens.timeline && timeline.order === "desc" && timeline.timelineHeadAnchor == null) {
           const generation = timelineFollowGeneration();
           const queryKey = historyQueryParams(getState());
           const isCurrent = /* @__PURE__ */ __name(() => {
             const current = getState();
-            return timelineFollowGeneration() === generation && current.followByLens.timeline && historyQueryParams(current) === queryKey;
+            return timelineFollowGeneration() === generation && current.followByLens.timeline && current.order === "desc" && current.timelineHeadAnchor == null && historyQueryParams(current) === queryKey;
           }, "isCurrent");
           historyLoaded = await loadHistoryHead(isCurrent);
           if (!historyLoaded && !isCurrent()) {
             historyLoaded = true;
-            await probeNewCount();
+            historyLoaded = await probeNewCount();
           }
-        } else {
-          await probeNewCount();
+        } else if (timeline.followByLens.timeline && timeline.order === "desc" && timeline.timelineHeadAnchor != null) {
+          historyLoaded = await probeNewCount();
         }
         if (!historyLoaded) {
           setRefreshState("degraded");
@@ -2281,8 +2321,7 @@
   function applyHash() {
     const parsed = parseHash(location.hash, presentTypes());
     const patch = resolve(parsed);
-    if (patch.selected?.kind === "event" && patch.selected.id)
-      endTimelineFollow();
+    if (patch.selected?.kind === "event" && patch.selected.id) parkTimelineRead();
     commit(patch);
     if (parsed.migrated === "threads-alias") {
       history.replaceState(
@@ -4926,8 +4965,10 @@
     if (list.dataset.virtualized) return;
     list.dataset.virtualized = "1";
     list.addEventListener("scroll", () => {
-      if (list.scrollTop > 0 && getState().order === "desc" && isFollowingTimeline())
-        endTimelineFollow();
+      if (getState().order === "desc") {
+        if (list.scrollTop > 0) parkTimelineRead();
+        else if (isFollowingTimeline()) void catchUpTimeline();
+      }
       renderTimeline();
     });
     if (typeof ResizeObserver !== "undefined")
@@ -5025,7 +5066,7 @@
   async function revealEvent(eventId) {
     const page = await fetchRevealPage(eventId);
     if (!page?.present) return;
-    endTimelineFollow();
+    parkTimelineRead();
     navigate({ ...revealPatch(page, eventId), ...DIFF_ROUTE_CLEARED });
   }
   __name(revealEvent, "revealEvent");
@@ -5383,7 +5424,7 @@
         label: entryTitle(e),
         hint: typeLabel(e.eventType),
         run: /* @__PURE__ */ __name(() => {
-          endTimelineFollow();
+          parkTimelineRead();
           navigate({
             selected: { kind: "event", id: e.eventId ?? "" },
             ...DIFF_ROUTE_CLEARED
@@ -5640,7 +5681,7 @@
   }
   __name(pageLoadedLens, "pageLoadedLens");
   async function stepTimeline(delta) {
-    endTimelineFollow();
+    parkTimelineRead();
     const state2 = getState();
     const { offset, count, matchCount } = loadedWindow(state2);
     const ids = lensEntryIds();
@@ -5679,7 +5720,7 @@
   }
   __name(pageOffsetContaining, "pageOffsetContaining");
   async function selectTimelineIndex(targetIndex) {
-    endTimelineFollow();
+    parkTimelineRead();
     const state2 = getState();
     const { offset, count, matchCount } = loadedWindow(state2);
     const ids = lensEntryIds();
@@ -6066,6 +6107,7 @@ click to open the revision page">
   // src/render.ts
   var INSPECTOR_TITLE = "Pointbreak Review";
   var lastMasterLens = null;
+  var lastSelectionScrollKey = null;
   function renderIdentity() {
     const root = $("#store-identity");
     if (!root) return;
@@ -6239,13 +6281,17 @@ click to open the revision page">
       );
       follow.setAttribute("aria-pressed", String(state2.followByLens.timeline));
     }
-    const pill = $("#timeline-new-pill");
-    if (!pill) return;
-    const visible = state2.lens === "timeline" && state2.order === "desc" && !state2.followByLens.timeline && state2.timelineNewCount > 0;
-    pill.classList.toggle("hidden", !visible);
-    pill.textContent = `${state2.timelineNewCount} new ↑`;
   }
   __name(syncStreamPositionControls, "syncStreamPositionControls");
+  function syncTimelineNewPill() {
+    const state2 = getState();
+    const pill = $("#timeline-new-pill");
+    if (!pill) return;
+    const visible = state2.order === "desc" && state2.followByLens.timeline && state2.timelineHeadAnchor != null && state2.timelineNewCount > 0;
+    pill.classList.toggle("hidden", !visible);
+    pill.textContent = `Show ${state2.timelineNewCount} new ${state2.timelineNewCount === 1 ? "event" : "events"}`;
+  }
+  __name(syncTimelineNewPill, "syncTimelineNewPill");
   function syncControls() {
     const state2 = getState();
     const text = $("#filter-text");
@@ -6330,12 +6376,15 @@ click to open the revision page">
       } else if (lens === "attention") {
         master.innerHTML = `<div id="attention" class="${CLASS.units}" aria-label="attention"></div>`;
       } else {
-        master.innerHTML = `<ol id="timeline" class="${CLASS.timeline}" aria-label="event timeline" tabindex="0"></ol>`;
+        master.innerHTML = `<div class="${CLASS.timelineShell}"><button id="timeline-new-pill" class="ghost ${CLASS.timelineNewPill} hidden" type="button" aria-live="polite">Show 0 new events</button><ol id="timeline" class="${CLASS.timeline}" aria-label="event timeline" tabindex="0"></ol></div>`;
       }
     }
     if (lens === "list") renderRevisionList();
     else if (lens === "attention") renderAttention();
-    else renderTimeline();
+    else {
+      syncTimelineNewPill();
+      renderTimeline();
+    }
   }
   __name(renderMaster, "renderMaster");
   function applySplitMode() {
@@ -6374,6 +6423,30 @@ click to open the revision page">
     if (el) el.scrollIntoView({ block: "center" });
   }
   __name(scrollSelectionIntoView, "scrollSelectionIntoView");
+  function selectionScrollKey() {
+    const state2 = getState();
+    const selected = state2.selected;
+    if (!selected.id) return `${state2.lens}:none`;
+    let present = false;
+    if (selected.kind === "event") {
+      present = (state2.history?.entries ?? []).some(
+        (entry) => entry.eventId === selected.id
+      );
+    } else if (selected.kind === "revision") {
+      present = (state2.revisions?.entries ?? []).some(
+        (revision) => revision.revisionId === selected.id
+      );
+    }
+    return `${state2.lens}:${selected.kind}:${selected.id}:${present ? "present" : "absent"}`;
+  }
+  __name(selectionScrollKey, "selectionScrollKey");
+  function scrollChangedSelectionIntoView() {
+    const key = selectionScrollKey();
+    if (key === lastSelectionScrollKey) return;
+    lastSelectionScrollKey = key;
+    scrollSelectionIntoView();
+  }
+  __name(scrollChangedSelectionIntoView, "scrollChangedSelectionIntoView");
   function applyDiffPageMode() {
     const onPage = getState().diffPage;
     $("#diff-page")?.classList.toggle("hidden", !onPage);
@@ -6406,7 +6479,7 @@ click to open the revision page">
     applySplitMode();
     renderMaster();
     renderSelected();
-    scrollSelectionIntoView();
+    scrollChangedSelectionIntoView();
     void renderDiffPage();
   }
   __name(render, "render");
@@ -6456,6 +6529,10 @@ click to open the revision page">
   function onMasterClick(ev) {
     const t = ev.target;
     if (!(t instanceof Element)) return;
+    if (t.closest("#timeline-new-pill")) {
+      void catchUpTimeline();
+      return;
+    }
     if (t.closest("[data-ref-kind]")) return;
     const cue = t.closest("[data-attention-query]");
     if (cue) {
@@ -6474,7 +6551,7 @@ click to open the revision page">
     if (eventEl) {
       const id = eventEl.dataset.eventId;
       if (id) {
-        endTimelineFollow();
+        parkTimelineRead();
         navigate({ selected: { kind: "event", id }, open: true });
       }
       return;
@@ -6580,13 +6657,10 @@ click to open the revision page">
       );
     });
     $("#density-toggle")?.addEventListener("click", notifyDensityListeners);
-    $("#timeline-new-pill")?.addEventListener("click", () => {
-      void resumeTimelineFollow();
-    });
     $("#jump-start")?.addEventListener("click", () => jumpLensBoundary("first"));
     $("#jump-end")?.addEventListener("click", () => jumpLensBoundary("last"));
     $("#follow-toggle")?.addEventListener("click", () => {
-      void resumeTimelineFollow();
+      void toggleTimelineFollow();
     });
   }
   __name(wireToolbar, "wireToolbar");

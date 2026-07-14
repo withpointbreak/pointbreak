@@ -398,53 +398,107 @@ describe("load", () => {
     }
   });
 
-  it("ending follow freezes the anchor from the newest loaded entry", async () => {
+  it("parking freezes the anchor without changing follow intent", async () => {
     await data.load();
     const head = store.getState().history?.entries?.[0];
 
-    follow.endTimelineFollow();
+    follow.parkTimelineRead();
 
     const s = store.getState();
-    expect(s.followByLens.timeline).toBe(false);
+    expect(s.followByLens.timeline).toBe(true);
     expect(s.timelineHeadAnchor).toEqual({
       occurredAt: head?.occurredAt,
       eventId: head?.eventId,
     });
   });
 
-  it("resume reloads the head, clears stream position and selection, and re-enables follow", async () => {
+  it("catch-up reloads the head and clears stream position without clearing selection", async () => {
     await data.load();
     const selected = store.getState().history?.entries?.[2]?.eventId ?? null;
     store.commit({
       selected: { kind: "event", id: selected },
       open: true,
     });
-    follow.endTimelineFollow();
+    follow.parkTimelineRead();
     store.commit({ timelineNewCount: 7 });
 
-    await follow.resumeTimelineFollow();
+    await follow.catchUpTimeline();
 
     const s = store.getState();
     expect(s.followByLens.timeline).toBe(true);
     expect(s.timelineHeadAnchor).toBeNull();
     expect(s.timelineNewCount).toBe(0);
-    expect(s.selected.id).toBeNull();
+    expect(s.selected.id).toBe(selected);
   });
 
-  it("a failed head reload leaves the reader parked with the count intact", async () => {
+  it("catch-up replaces shifted offsets while retaining an off-page selection", async () => {
     await data.load();
-    follow.endTimelineFollow();
+    const parked = {
+      eventId: "evt:sha256:parked-selection",
+      eventType: "review_observation_recorded",
+      occurredAt: "2026-07-01T10:00:00.000Z",
+    };
+    const loaded = store.getState().history;
+    if (!loaded) throw new Error("expected loaded history");
+    store.commit({
+      history: { ...loaded, entries: [parked], offset: 200 },
+      selected: { kind: "event", id: parked.eventId },
+      open: true,
+    });
+    follow.parkTimelineRead();
+    const newHead = {
+      eventId: "evt:sha256:new-live-head",
+      eventType: "review_observation_recorded",
+      occurredAt: "2026-07-13T21:00:00.000Z",
+    };
+    setHistoryResponse({
+      entries: [newHead],
+      diagnostics: [],
+      offset: 0,
+      matchCount: 1,
+      facets: {},
+    });
+
+    await follow.catchUpTimeline();
+
+    const state = store.getState();
+    expect(state.history?.entries).toEqual([newHead]);
+    expect(state.history?.retainedEntry).toEqual(parked);
+    expect(state.selected.id).toBe(parked.eventId);
+  });
+
+  it("a failed catch-up leaves the reader parked with the count intact", async () => {
+    await data.load();
+    follow.parkTimelineRead();
     store.commit({ timelineNewCount: 7 });
     setHistoryError(503, "history offline");
 
-    await follow.resumeTimelineFollow();
+    await follow.catchUpTimeline();
 
     const s = store.getState();
-    expect(s.followByLens.timeline).toBe(false);
+    expect(s.followByLens.timeline).toBe(true);
     expect(s.timelineNewCount).toBe(7);
   });
 
-  it("an in-window sel application ends follow and freezes the anchor", async () => {
+  it("re-enabling a parked follow probes unseen events without clearing selection", async () => {
+    await data.load();
+    const selected = store.getState().history?.entries?.[2]?.eventId ?? null;
+    store.commit({ selected: { kind: "event", id: selected }, open: true });
+    follow.parkTimelineRead();
+    await follow.toggleTimelineFollow();
+    setNewCountResponse({
+      schema: "pointbreak.inspect-history-new-count",
+      newCount: 4,
+    });
+
+    await follow.toggleTimelineFollow();
+
+    expect(store.getState().followByLens.timeline).toBe(true);
+    expect(store.getState().timelineNewCount).toBe(4);
+    expect(store.getState().selected.id).toBe(selected);
+  });
+
+  it("an in-window sel application parks without changing follow intent", async () => {
     await data.load();
     const head = store.getState().history?.entries?.[0];
     const selected = store.getState().history?.entries?.[2]?.eventId;
@@ -456,28 +510,28 @@ describe("load", () => {
 
     router.applyHash();
 
-    expect(store.getState().followByLens.timeline).toBe(false);
+    expect(store.getState().followByLens.timeline).toBe(true);
     expect(store.getState().timelineHeadAnchor).toEqual({
       occurredAt: head?.occurredAt,
       eventId: head?.eventId,
     });
   });
 
-  it("a query change with no engaged selection restores follow", async () => {
+  it("a query change with no engaged selection preserves disabled follow", async () => {
     await data.load();
-    follow.endTimelineFollow();
+    await follow.toggleTimelineFollow();
     store.subscribe(data.maybeReloadForQuery);
 
     router.navigate({ filterText: "pinned" }, { replace: true });
     await flush();
 
     const s = store.getState();
-    expect(s.followByLens.timeline).toBe(true);
+    expect(s.followByLens.timeline).toBe(false);
     expect(s.timelineHeadAnchor).toBeNull();
     expect(s.timelineNewCount).toBe(0);
   });
 
-  it("a query change with an engaged selection stays parked and re-freezes from the new head", async () => {
+  it("a query change with an engaged selection re-parks without changing follow intent", async () => {
     await data.load();
     const selected = store.getState().history?.entries?.[2]?.eventId ?? null;
     store.commit({ selected: { kind: "event", id: selected }, open: true });
@@ -486,7 +540,7 @@ describe("load", () => {
     expect(document.querySelector("#detail-body")?.textContent).toContain(
       selected,
     );
-    follow.endTimelineFollow();
+    follow.parkTimelineRead();
     store.commit({ timelineNewCount: 7 });
     const newHead = {
       eventId: "evt:sha256:new-query-head",
@@ -505,7 +559,7 @@ describe("load", () => {
     await flush();
 
     const s = store.getState();
-    expect(s.followByLens.timeline).toBe(false);
+    expect(s.followByLens.timeline).toBe(true);
     expect(s.selected).toEqual({ kind: "event", id: selected });
     expect(s.timelineHeadAnchor).toEqual({
       occurredAt: newHead.occurredAt,
@@ -573,9 +627,9 @@ describe("pollFreshness", () => {
     expect(document.querySelector<HTMLElement>("#units")?.scrollTop).toBe(120);
   });
 
-  it("a parked changed tick probes new-count instead of refetching page 1", async () => {
+  it("a followed parked tick probes new-count instead of refetching page 1", async () => {
     await data.load();
-    follow.endTimelineFollow();
+    follow.parkTimelineRead();
     setNewCountResponse({
       schema: "pointbreak.inspect-history-new-count",
       newCount: 4,
@@ -595,7 +649,7 @@ describe("pollFreshness", () => {
   it("the parked probe sends the frozen anchor and active filter params", async () => {
     store.commit({ filterText: "pinned" });
     await data.load();
-    follow.endTimelineFollow();
+    follow.parkTimelineRead();
     const anchor = store.getState().timelineHeadAnchor;
     setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT + 1 });
     let newCountUrl = "";
@@ -675,7 +729,7 @@ describe("pollFreshness", () => {
     try {
       const poll = data.pollFreshness();
       await requested;
-      follow.endTimelineFollow();
+      follow.parkTimelineRead();
       store.commit({ selected: { kind: "event", id: selected }, open: true });
       deferred.resolve();
       await poll;
@@ -683,7 +737,7 @@ describe("pollFreshness", () => {
       globalThis.fetch = inner;
     }
 
-    expect(store.getState().followByLens.timeline).toBe(false);
+    expect(store.getState().followByLens.timeline).toBe(true);
     expect(
       store
         .getState()
@@ -694,7 +748,7 @@ describe("pollFreshness", () => {
 
   it("a stale parked count response cannot repopulate the count after catch-up", async () => {
     await data.load();
-    follow.endTimelineFollow();
+    follow.parkTimelineRead();
     const deferred = deferredResponse({
       schema: "pointbreak.inspect-history-new-count",
       newCount: 7,
@@ -724,7 +778,7 @@ describe("pollFreshness", () => {
     try {
       const poll = data.pollFreshness();
       await requested;
-      await follow.resumeTimelineFollow();
+      await follow.catchUpTimeline();
       deferred.resolve();
       await poll;
     } finally {
@@ -737,7 +791,7 @@ describe("pollFreshness", () => {
 
   it("does not probe or replace while parked under ascending order", async () => {
     await data.load();
-    follow.endTimelineFollow();
+    follow.parkTimelineRead();
     store.commit({ order: "asc", timelineNewCount: 0 });
     setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT + 1 });
     const { paths, restore } = captureRequestPaths();
@@ -751,10 +805,9 @@ describe("pollFreshness", () => {
     expect(store.getState().timelineNewCount).toBe(0);
   });
 
-  it("does not probe or replace while parked without an anchor", async () => {
+  it("does not probe or replace while follow is explicitly disabled", async () => {
     await data.load();
-    follow.endTimelineFollow();
-    store.commit({ timelineHeadAnchor: null, timelineNewCount: 0 });
+    await follow.toggleTimelineFollow();
     setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT + 1 });
     const { paths, restore } = captureRequestPaths();
     try {
@@ -764,6 +817,7 @@ describe("pollFreshness", () => {
     }
     expect(paths).not.toContain("/api/history");
     expect(paths).not.toContain("/api/history/new-count");
+    expect(store.getState().followByLens.timeline).toBe(false);
     expect(store.getState().timelineNewCount).toBe(0);
   });
 
@@ -786,7 +840,7 @@ describe("pollFreshness", () => {
       selected: { kind: "event", id: "evt:sha256:parked" },
       open: true,
     });
-    follow.endTimelineFollow();
+    follow.parkTimelineRead();
     setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT + 1 });
 
     await data.pollFreshness();
@@ -857,7 +911,7 @@ describe("pollFreshness", () => {
     store.commit({
       history: { ...history, offset: 200 },
     });
-    follow.endTimelineFollow();
+    follow.parkTimelineRead();
     setFreshnessResponse({ eventCount: HISTORY_EVENT_COUNT + 1 });
     const { paths, restore } = captureRequestPaths();
     try {

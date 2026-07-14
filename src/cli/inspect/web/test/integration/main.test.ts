@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import revisionsJson from "../fixtures/revisions.json";
 import threadsJson from "../fixtures/threads.json";
 import { mountInspectorDom, resetDom } from "../support/dom";
-import { installFetchMock, uninstallFetchMock } from "../support/fetch";
+import {
+  installFetchMock,
+  resetHistoryResponse,
+  setHistoryResponse,
+  uninstallFetchMock,
+} from "../support/fetch";
 
 // End-to-end composition tests: drive the real `main()` bootstrap over the fixtures
 // and exercise the wired interactions through the delegates, asserting the painted
@@ -52,6 +57,7 @@ beforeEach(async () => {
 afterEach(() => {
   main.stopPolling();
   uninstallFetchMock();
+  resetHistoryResponse();
   vi.restoreAllMocks();
   localStorage.clear();
   sessionStorage.clear();
@@ -401,18 +407,19 @@ describe("wired interactions drive the DOM/route through the delegates", () => {
     expect(location.hash).toBe("#/list?sort=activity");
   });
 
-  it("a timeline-row click selects the event and paints the detail", async () => {
+  it("a timeline-row click selects the event without disabling follow", async () => {
     await main.main();
     const row = document.querySelector<HTMLElement>(
       "#master #timeline .event[data-event-id]",
     );
     row?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(store.getState().selected.kind).toBe("event");
-    expect(store.getState().followByLens.timeline).toBe(false);
+    expect(store.getState().followByLens.timeline).toBe(true);
+    expect(store.getState().timelineHeadAnchor).not.toBeNull();
     expect(document.querySelector("#detail dl.kv")).not.toBeNull();
   });
 
-  it("a palette Events navigation ends follow", async () => {
+  it("a palette Events navigation parks the read without disabling follow", async () => {
     await main.main();
     const event = store.getState().history?.entries?.[0];
     const { entryTitle } = await import("../../src/projection");
@@ -427,10 +434,11 @@ describe("wired interactions drive the DOM/route through the delegates", () => {
       new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
     );
     expect(store.getState().selected.id).toBe(event.eventId);
-    expect(store.getState().followByLens.timeline).toBe(false);
+    expect(store.getState().followByLens.timeline).toBe(true);
+    expect(store.getState().timelineHeadAnchor).not.toBeNull();
   });
 
-  it("timeline step, page, and both boundary key paths end follow", async () => {
+  it("timeline step, page, and boundary keys leave follow enabled", async () => {
     await main.main();
     for (const key of ["j", "f", "b", "d", "u", "g", "G"]) {
       store.commit({
@@ -444,36 +452,78 @@ describe("wired interactions drive the DOM/route through the delegates", () => {
         new KeyboardEvent("keydown", { key, bubbles: true }),
       );
       await flush();
-      expect(store.getState().followByLens.timeline, key).toBe(false);
+      expect(store.getState().followByLens.timeline, key).toBe(true);
+      expect(store.getState().timelineHeadAnchor, key).not.toBeNull();
     }
   });
 
-  it("scrolling off the descending timeline edge ends follow", async () => {
+  it("scrolling off the descending live edge parks without disabling follow", async () => {
     await main.main();
     const timeline = document.querySelector<HTMLElement>("#timeline");
     if (!timeline) throw new Error("expected timeline");
     timeline.scrollTop = 12;
     timeline.dispatchEvent(new Event("scroll"));
-    expect(store.getState().followByLens.timeline).toBe(false);
+    expect(store.getState().followByLens.timeline).toBe(true);
+    expect(store.getState().timelineHeadAnchor).not.toBeNull();
   });
 
-  it("clicking the new-events pill catches up and follows", async () => {
+  it("scrolling back to the displayed head verifies catch-up before going live", async () => {
     await main.main();
-    const follow = await import("../../src/follow");
-    follow.endTimelineFollow();
+    const timeline = document.querySelector<HTMLElement>("#timeline");
+    if (!timeline) throw new Error("expected timeline");
+    timeline.scrollTop = 12;
+    timeline.dispatchEvent(new Event("scroll"));
+    const newHead = {
+      eventId: "evt:sha256:new-live-head",
+      eventType: "review_observation_recorded",
+      occurredAt: "2026-07-13T21:00:00.000Z",
+    };
+    setHistoryResponse({
+      entries: [newHead],
+      diagnostics: [],
+      offset: 0,
+      matchCount: 1,
+      facets: {},
+    });
+
+    timeline.scrollTop = 0;
+    timeline.dispatchEvent(new Event("scroll"));
+
+    await vi.waitFor(() => {
+      expect(store.getState().timelineHeadAnchor).toBeNull();
+      expect(store.getState().history?.entries[0]?.eventId).toBe(
+        newHead.eventId,
+      );
+    });
+  });
+
+  it("renders catch-up at the top of the timeline and preserves follow and selection", async () => {
+    await main.main();
+    const row = document.querySelectorAll<HTMLElement>(
+      "#timeline .event[data-event-id]",
+    )[2];
+    const selected = row?.dataset.eventId ?? null;
+    row?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     store.commit({ timelineNewCount: 4 });
 
-    document
-      .querySelector<HTMLElement>("#timeline-new-pill")
-      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    const pill = document.querySelector<HTMLElement>(
+      "#master > .timeline-shell > #timeline-new-pill",
+    );
+    expect(pill?.textContent).toBe("Show 4 new events");
+    expect(document.querySelector("header #timeline-new-pill")).toBeNull();
+    expect(store.getState().selected.id).toBe(selected);
+
+    pill?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(store.getState().selected.id).toBe(selected);
     await flush();
 
     expect(store.getState().followByLens.timeline).toBe(true);
     expect(store.getState().timelineNewCount).toBe(0);
     expect(store.getState().history?.offset).toBe(0);
+    expect(store.getState().selected.id).toBe(selected);
   });
 
-  it("the start and end controls drive timeline boundaries and end follow", async () => {
+  it("the start and end controls drive boundaries without disabling follow", async () => {
     await main.main();
     const entries = store.getState().history?.entries ?? [];
     const later = entries[2]?.eventId ?? null;
@@ -484,7 +534,7 @@ describe("wired interactions drive the DOM/route through the delegates", () => {
       ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flush();
     expect(store.getState().selected.id).toBe(entries[0]?.eventId ?? null);
-    expect(store.getState().followByLens.timeline).toBe(false);
+    expect(store.getState().followByLens.timeline).toBe(true);
 
     store.commit({
       followByLens: { ...store.getState().followByLens, timeline: true },
@@ -495,23 +545,35 @@ describe("wired interactions drive the DOM/route through the delegates", () => {
       ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flush();
     expect(store.getState().selected.id).toBe(entries.at(-1)?.eventId ?? null);
-    expect(store.getState().followByLens.timeline).toBe(false);
+    expect(store.getState().followByLens.timeline).toBe(true);
   });
 
-  it("the follow control resumes with pressed state and is idempotent", async () => {
+  it("the follow control explicitly toggles streaming off and on", async () => {
     await main.main();
-    const follow = await import("../../src/follow");
-    follow.endTimelineFollow();
     const control = document.querySelector<HTMLElement>("#follow-toggle");
+
+    control?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flush();
+    expect(store.getState().followByLens.timeline).toBe(false);
+    expect(control?.getAttribute("aria-pressed")).toBe("false");
 
     control?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await flush();
     expect(store.getState().followByLens.timeline).toBe(true);
     expect(control?.getAttribute("aria-pressed")).toBe("true");
+  });
 
-    control?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    await flush();
-    expect(store.getState().followByLens.timeline).toBe(true);
+  it("a background repaint does not recenter an unchanged selection", async () => {
+    await main.main();
+    const selected = store.getState().history?.entries?.[2]?.eventId ?? null;
+    store.commit({ selected: { kind: "event", id: selected }, open: true });
+    const timeline = document.querySelector<HTMLElement>("#timeline");
+    if (!timeline) throw new Error("expected timeline");
+    timeline.scrollTop = 42;
+
+    store.commit({ attentionDelta: 1 });
+
+    expect(timeline.scrollTop).toBe(42);
   });
 
   it("a ref-chip click anywhere routes through the document delegate", async () => {

@@ -262,7 +262,10 @@ const state: State = {
   timelineNewCount: 0,
   attentionDelta: null,
   enabledTypes: new Set(TYPES.map((t) => t.id)),
-  seenTypes: new Set(TYPES.map((t) => t.id)),
+  // A type is "seen" only after it has actually appeared in the loaded facet
+  // distribution. That lets a type which first arrives while follow is enabled
+  // become visible without re-enabling a type the reader deliberately hid earlier.
+  seenTypes: new Set(),
   filterText: "",
   filterTrack: "",
   filterSnapshot: "",

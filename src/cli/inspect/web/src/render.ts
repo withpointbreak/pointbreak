@@ -19,7 +19,7 @@ import { renderDetail, showComposite } from "./detail";
 import { openDiff, renderDiffPage } from "./diff/controller";
 import { $ } from "./dom";
 import { escapeHtml } from "./escape";
-import { endTimelineFollow } from "./follow";
+import { catchUpTimeline, parkTimelineRead } from "./follow";
 import { partitionAttentionTiers, renderAttention } from "./lenses/attention";
 import { renderRevisionList } from "./lenses/revisions";
 import {
@@ -53,6 +53,7 @@ interface Diagnostic {
 // rebuilt only on a lens change (the populate runs every render). Transient
 // view-cache — never on the store.
 let lastMasterLens: string | null = null;
+let lastSelectionScrollKey: string | null = null;
 
 // ---------------------------------------------------------------------------
 // Data-driven surfaces (stats, diagnostics, type facets)
@@ -284,7 +285,7 @@ function renderAttentionBadge(tab: HTMLElement): void {
   tab.appendChild(chip);
 }
 
-/** Project stream-position state onto the topbar-resident controls. */
+/** Project explicit stream intent onto the topbar-resident controls. */
 function syncStreamPositionControls(): void {
   const state = getState();
   $("#jump-start")?.classList.remove("hidden");
@@ -297,16 +298,20 @@ function syncStreamPositionControls(): void {
     );
     follow.setAttribute("aria-pressed", String(state.followByLens.timeline));
   }
+}
 
+/** Project unseen arrivals onto the timeline-local catch-up row. */
+function syncTimelineNewPill(): void {
+  const state = getState();
   const pill = $("#timeline-new-pill");
   if (!pill) return;
   const visible =
-    state.lens === "timeline" &&
     state.order === "desc" &&
-    !state.followByLens.timeline &&
+    state.followByLens.timeline &&
+    state.timelineHeadAnchor != null &&
     state.timelineNewCount > 0;
   pill.classList.toggle("hidden", !visible);
-  pill.textContent = `${state.timelineNewCount} new ↑`;
+  pill.textContent = `Show ${state.timelineNewCount} new ${state.timelineNewCount === 1 ? "event" : "events"}`;
 }
 
 // Reflect the current filter/order/sort state into the toolbar controls (the
@@ -450,12 +455,15 @@ function renderMaster(): void {
     } else if (lens === "attention") {
       master.innerHTML = `<div id="attention" class="${CLASS.units}" aria-label="attention"></div>`;
     } else {
-      master.innerHTML = `<ol id="timeline" class="${CLASS.timeline}" aria-label="event timeline" tabindex="0"></ol>`;
+      master.innerHTML = `<div class="${CLASS.timelineShell}"><button id="timeline-new-pill" class="ghost ${CLASS.timelineNewPill} hidden" type="button" aria-live="polite">Show 0 new events</button><ol id="timeline" class="${CLASS.timeline}" aria-label="event timeline" tabindex="0"></ol></div>`;
     }
   }
   if (lens === "list") renderRevisionList();
   else if (lens === "attention") renderAttention();
-  else renderTimeline();
+  else {
+    syncTimelineNewPill();
+    renderTimeline();
+  }
 }
 
 // Project the open state onto the split grid: `split-closed` is a string-literal
@@ -511,6 +519,34 @@ function scrollSelectionIntoView(): void {
   if (el) el.scrollIntoView({ block: "center" });
 }
 
+// Selection movement is an explicit navigation effect, not a consequence of
+// every store repaint. Include presence so an off-window deep link scrolls once
+// its reveal page arrives, while background refreshes of a visible selection do
+// not recenter the reader.
+function selectionScrollKey(): string {
+  const state = getState();
+  const selected = state.selected;
+  if (!selected.id) return `${state.lens}:none`;
+  let present = false;
+  if (selected.kind === "event") {
+    present = (state.history?.entries ?? []).some(
+      (entry) => entry.eventId === selected.id,
+    );
+  } else if (selected.kind === "revision") {
+    present = (state.revisions?.entries ?? []).some(
+      (revision) => revision.revisionId === selected.id,
+    );
+  }
+  return `${state.lens}:${selected.kind}:${selected.id}:${present ? "present" : "absent"}`;
+}
+
+function scrollChangedSelectionIntoView(): void {
+  const key = selectionScrollKey();
+  if (key === lastSelectionScrollKey) return;
+  lastSelectionScrollKey = key;
+  scrollSelectionIntoView();
+}
+
 // ---------------------------------------------------------------------------
 // The single render entry (the store subscriber)
 // ---------------------------------------------------------------------------
@@ -560,7 +596,7 @@ export function render(): void {
   applySplitMode();
   renderMaster();
   renderSelected();
-  scrollSelectionIntoView();
+  scrollChangedSelectionIntoView();
   void renderDiffPage();
 }
 
@@ -646,6 +682,10 @@ function onFilterChipsClick(ev: Event): void {
 function onMasterClick(ev: Event): void {
   const t = ev.target;
   if (!(t instanceof Element)) return;
+  if (t.closest("#timeline-new-pill")) {
+    void catchUpTimeline();
+    return;
+  }
   if (t.closest("[data-ref-kind]")) return;
   const cue = t.closest<HTMLElement>("[data-attention-query]");
   if (cue) {
@@ -666,7 +706,7 @@ function onMasterClick(ev: Event): void {
   if (eventEl) {
     const id = eventEl.dataset.eventId;
     if (id) {
-      endTimelineFollow();
+      parkTimelineRead();
       navigate({ selected: { kind: "event", id }, open: true });
     }
     return;

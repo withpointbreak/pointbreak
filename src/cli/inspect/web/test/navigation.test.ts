@@ -263,7 +263,7 @@ describe("reveal helpers fetch the target page and select through the router", (
       true,
     );
     expect(store.getState().history?.offset).toBe(120);
-    expect(store.getState().followByLens.timeline).toBe(false);
+    expect(store.getState().followByLens.timeline).toBe(true);
     expect(store.getState().timelineHeadAnchor).toEqual({
       occurredAt: oldHead?.occurredAt,
       eventId: oldHead?.eventId,

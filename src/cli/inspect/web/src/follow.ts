@@ -1,10 +1,9 @@
-// Timeline follow is session-only stream-position state. This module is its sole
-// writer: movement/engagement callers end follow here, while the explicit pill
-// and control resume through the success-gated head reload.
+// Timeline streaming has three independent session-only concerns: explicit
+// follow intent, whether the reader is parked away from the live edge, and the
+// unseen count accumulated while parked. This module is their sole writer.
 
-import { historyQueryParams, loadHistoryHead } from "./data";
+import { historyQueryParams, loadHistoryHead, probeNewCount } from "./data";
 import { $ } from "./dom";
-import { navigate } from "./router";
 import { commit, getState, type State } from "./store";
 
 function followState(timeline: boolean): Record<string, boolean> {
@@ -27,56 +26,93 @@ function headAnchor(): State["timelineHeadAnchor"] {
   return occurredAt && eventId ? { occurredAt, eventId } : null;
 }
 
-/** Whether the descending timeline is currently auto-advancing at its live edge. */
+/** Whether timeline ingestion is enabled by explicit user intent. */
 export function isFollowingTimeline(): boolean {
   return getState().followByLens.timeline === true;
 }
 
-/** End follow once and freeze the newest loaded entry as the count-since anchor. */
-export function endTimelineFollow(): void {
+/** Freeze the displayed head for unseen counting without changing follow intent. */
+export function parkTimelineRead(): void {
+  const state = getState();
+  if (state.timelineHeadAnchor) return;
+  const anchor = headAnchor();
+  if (!anchor) return;
   intentGeneration += 1;
-  if (!isFollowingTimeline()) return;
-  commit({
-    followByLens: followState(false),
-    timelineHeadAnchor: headAnchor(),
-    timelineNewCount: 0,
-  });
+  commit({ timelineHeadAnchor: anchor, timelineNewCount: 0 });
 }
 
-/** Reload the head, then explicitly leave the parked read and resume following. */
-export async function resumeTimelineFollow(): Promise<void> {
-  if (isFollowingTimeline()) return;
-  const generation = timelineFollowGeneration();
-  const queryKey = historyQueryParams(getState());
+/** Reload the head and expose queued arrivals without changing selection or follow. */
+export async function catchUpTimeline(): Promise<void> {
+  const state = getState();
   if (
-    !(await loadHistoryHead(
-      () =>
+    !state.followByLens.timeline ||
+    state.order !== "desc" ||
+    !state.timelineHeadAnchor
+  )
+    return;
+  const generation = timelineFollowGeneration();
+  const queryKey = historyQueryParams(state);
+  if (
+    !(await loadHistoryHead(() => {
+      const current = getState();
+      return (
         timelineFollowGeneration() === generation &&
-        historyQueryParams(getState()) === queryKey,
-    ))
+        current.followByLens.timeline &&
+        current.order === "desc" &&
+        current.timelineHeadAnchor != null &&
+        historyQueryParams(current) === queryKey
+      );
+    }))
   )
     return;
 
-  // Selection is routed state: navigate first so Back can restore the parked read.
-  navigate({ selected: { kind: null, id: null } });
   intentGeneration += 1;
-  commit({
-    followByLens: followState(true),
-    timelineHeadAnchor: null,
-    timelineNewCount: 0,
-  });
+  commit({ timelineHeadAnchor: null, timelineNewCount: 0 });
   const timeline = $<HTMLElement>("#timeline");
   if (timeline) timeline.scrollTop = 0;
 }
 
-/** Reconcile follow after a query-driven page-one commit. */
-export function resetTimelineFollowForQueryChange(): void {
+/** Toggle timeline ingestion explicitly, preserving the current read and selection. */
+export async function toggleTimelineFollow(): Promise<void> {
   intentGeneration += 1;
-  const engaged =
-    getState().selected.kind === "event" && Boolean(getState().selected.id);
+  if (isFollowingTimeline()) {
+    commit({
+      followByLens: followState(false),
+      timelineNewCount: 0,
+    });
+    return;
+  }
+
+  commit({ followByLens: followState(true) });
+  const state = getState();
+  if (state.order !== "desc") return;
+  if (state.timelineHeadAnchor) {
+    await probeNewCount();
+    return;
+  }
+
+  const generation = timelineFollowGeneration();
+  const queryKey = historyQueryParams(state);
+  await loadHistoryHead(() => {
+    const current = getState();
+    return (
+      timelineFollowGeneration() === generation &&
+      current.followByLens.timeline &&
+      current.order === "desc" &&
+      current.timelineHeadAnchor == null &&
+      historyQueryParams(current) === queryKey
+    );
+  });
+}
+
+/** Re-anchor a newly loaded query without changing explicit follow intent. */
+export function resetTimelineReadForQueryChange(): void {
+  intentGeneration += 1;
+  const state = getState();
+  const engaged = state.selected.kind === "event" && Boolean(state.selected.id);
+  const atDescendingHead = state.order === "desc" && !engaged;
   commit({
-    followByLens: followState(!engaged),
-    timelineHeadAnchor: engaged ? headAnchor() : null,
+    timelineHeadAnchor: atDescendingHead ? null : headAnchor(),
     timelineNewCount: 0,
   });
 }

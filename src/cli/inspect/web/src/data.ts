@@ -17,7 +17,7 @@
 import { setRefreshState } from "./connection";
 import { $ } from "./dom";
 import {
-  resetTimelineFollowForQueryChange,
+  resetTimelineReadForQueryChange,
   timelineFollowGeneration,
 } from "./follow";
 import { fetchJSON } from "./http";
@@ -72,15 +72,15 @@ export function historyQueryParams(s: State): string {
 }
 
 /**
- * Probe the filter-aware count newer than the frozen parked-head anchor. Ascending
- * timelines and anchorless parked windows preserve their window without a probe.
+ * Probe the filter-aware count newer than the frozen parked-head anchor while
+ * follow remains enabled. Disabled, ascending, and live-edge timelines do not probe.
  */
-export async function probeNewCount(): Promise<void> {
+export async function probeNewCount(): Promise<boolean> {
   const s = getState();
   const generation = timelineFollowGeneration();
   const anchor = s.timelineHeadAnchor;
   const queryKey = historyQueryParams(s);
-  if (s.followByLens.timeline || s.order !== "desc" || !anchor) return;
+  if (!s.followByLens.timeline || s.order !== "desc" || !anchor) return true;
 
   const params = new URLSearchParams(queryKey);
   params.delete("limit");
@@ -88,21 +88,28 @@ export async function probeNewCount(): Promise<void> {
   params.delete("at");
   params.set("sinceOccurredAt", anchor.occurredAt);
   params.set("sinceEventId", anchor.eventId);
-  const doc = (await fetchJSON(
-    `/api/history/new-count?${params.toString()}`,
-  )) as NewCountDoc;
+  let doc: NewCountDoc;
+  try {
+    doc = (await fetchJSON(
+      `/api/history/new-count?${params.toString()}`,
+    )) as NewCountDoc;
+  } catch (err) {
+    showLoadError(err);
+    return false;
+  }
   const current = getState();
   const currentAnchor = current.timelineHeadAnchor;
   if (
     timelineFollowGeneration() !== generation ||
-    current.followByLens.timeline ||
+    !current.followByLens.timeline ||
     current.order !== "desc" ||
     historyQueryParams(current) !== queryKey ||
     currentAnchor?.occurredAt !== anchor.occurredAt ||
     currentAnchor?.eventId !== anchor.eventId
   )
-    return;
+    return true;
   commit({ timelineNewCount: doc.newCount ?? 0 });
+  return true;
 }
 
 /**
@@ -153,9 +160,7 @@ export async function loadHistoryHead(
     const historyRaw = await fetchJSON(`/api/history?${params}`);
     if (!isCurrent()) return false;
     showError(null);
-    commit({
-      history: { ...(historyRaw as HistoryDoc), queryKey: params },
-    });
+    commitHistoryHead(historyRaw as HistoryDoc, params);
     commitFreshnessBaseline(freshness);
     return true;
   } catch (err) {
@@ -230,7 +235,7 @@ async function reloadHistoryForQuery(): Promise<boolean> {
   if (!doc) return false;
   showError(null);
   commitHistoryPage(doc, queryKey);
-  resetTimelineFollowForQueryChange();
+  resetTimelineReadForQueryChange();
   return true;
 }
 
@@ -351,6 +356,28 @@ function commitHistoryPage(page: HistoryDoc, requestedQueryKey?: string): void {
       retainedEntry,
     },
   });
+}
+
+// A live-edge reload deliberately adopts the new page-one window rather than
+// merging by positional offsets: prepended events shift every old global index.
+// Keep an engaged off-page event only as the detail pane's retained carrier.
+function commitHistoryHead(page: HistoryDoc, queryKey: string): void {
+  const state = getState();
+  const selected =
+    state.selected.kind === "event" && state.selected.id
+      ? state.selected.id
+      : null;
+  const selectedIsVisible =
+    selected != null &&
+    (page.entries ?? []).some((entry) => entry.eventId === selected);
+  const retainedEntry =
+    selected != null && !selectedIsVisible
+      ? (state.history?.entries.find((entry) => entry.eventId === selected) ??
+        (state.history?.retainedEntry?.eventId === selected
+          ? state.history.retainedEntry
+          : undefined))
+      : undefined;
+  commit({ history: { ...page, queryKey, retainedEntry } });
 }
 
 /**
@@ -495,7 +522,12 @@ export async function pollFreshness(): Promise<void> {
         return;
       }
       let historyLoaded = true;
-      if (getState().followByLens.timeline) {
+      const timeline = getState();
+      if (
+        timeline.followByLens.timeline &&
+        timeline.order === "desc" &&
+        timeline.timelineHeadAnchor == null
+      ) {
         const generation = timelineFollowGeneration();
         const queryKey = historyQueryParams(getState());
         const isCurrent = (): boolean => {
@@ -503,16 +535,22 @@ export async function pollFreshness(): Promise<void> {
           return (
             timelineFollowGeneration() === generation &&
             current.followByLens.timeline &&
+            current.order === "desc" &&
+            current.timelineHeadAnchor == null &&
             historyQueryParams(current) === queryKey
           );
         };
         historyLoaded = await loadHistoryHead(isCurrent);
         if (!historyLoaded && !isCurrent()) {
           historyLoaded = true;
-          await probeNewCount();
+          historyLoaded = await probeNewCount();
         }
-      } else {
-        await probeNewCount();
+      } else if (
+        timeline.followByLens.timeline &&
+        timeline.order === "desc" &&
+        timeline.timelineHeadAnchor != null
+      ) {
+        historyLoaded = await probeNewCount();
       }
       if (!historyLoaded) {
         setRefreshState("degraded");

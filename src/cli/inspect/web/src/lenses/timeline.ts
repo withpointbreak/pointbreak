@@ -19,7 +19,11 @@ import { CLASS } from "../classNames";
 import { fetchHistoryPage, HISTORY_PAGE } from "../data";
 import { $ } from "../dom";
 import { escapeHtml } from "../escape";
-import { endTimelineFollow, isFollowingTimeline } from "../follow";
+import {
+  catchUpTimeline,
+  isFollowingTimeline,
+  parkTimelineRead,
+} from "../follow";
 import { fmtDate, fmtTime } from "../format";
 import {
   captureSupersedesBadge,
@@ -250,14 +254,12 @@ function ensureScrollListener(list: HTMLElement): void {
   if (list.dataset.virtualized) return;
   list.dataset.virtualized = "1";
   list.addEventListener("scroll", () => {
-    // Under descending order, any manual movement below the live edge parks the
-    // reader. Guard the transition so a scroll burst commits only once.
-    if (
-      list.scrollTop > 0 &&
-      getState().order === "desc" &&
-      isFollowingTimeline()
-    )
-      endTimelineFollow();
+    // Read position is independent of follow intent: scrolling away freezes the
+    // count anchor, while returning to an unchanged head resumes live-edge loads.
+    if (getState().order === "desc") {
+      if (list.scrollTop > 0) parkTimelineRead();
+      else if (isFollowingTimeline()) void catchUpTimeline();
+    }
     renderTimeline();
   });
   if (typeof ResizeObserver !== "undefined")

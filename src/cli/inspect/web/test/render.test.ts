@@ -171,6 +171,32 @@ describe("the type facet menu (facet distribution + aria-pressed, moved off the 
     expect($("#filter-types-toggle")?.textContent).toMatch(/\d+\/\d+/);
   });
 
+  it("enables a type when it first appears without reviving a type the reader hid", () => {
+    render.render();
+    const initiallyPresent = Object.keys(
+      store.getState().history?.facets ?? {},
+    );
+    store.commit({ enabledTypes: new Set(initiallyPresent) });
+    const hidden = initiallyPresent[0];
+    store.getState().enabledTypes.delete(hidden);
+
+    const arriving = "review_validation_recorded";
+    expect(store.getState().seenTypes.has(arriving)).toBe(false);
+    store.commit({
+      history: {
+        ...(store.getState().history as HistoryDoc),
+        facets: {
+          ...store.getState().history?.facets,
+          [arriving]: 1,
+        },
+      },
+    });
+    render.render();
+
+    expect(store.getState().enabledTypes.has(arriving)).toBe(true);
+    expect(store.getState().enabledTypes.has(hidden)).toBe(false);
+  });
+
   it("opens the popover on click, closes on outside click without committing anything", () => {
     render.render();
     const toggle = $<HTMLElement>("#filter-types-toggle");
@@ -489,22 +515,30 @@ describe("toolbar controls are gated per lens (each shows only where its state i
     expect($("#follow-toggle")?.classList.contains("hidden")).toBe(true);
   });
 
-  it("shows the new-events pill only when parked on the descending timeline", () => {
+  it("shows new-event catch-up at the top of a followed parked timeline", () => {
     store.commit({
       lens: "timeline",
       order: "desc",
-      followByLens: { timeline: false, list: false, attention: false },
+      followByLens: { timeline: true, list: false, attention: false },
+      timelineHeadAnchor: {
+        occurredAt: "2026-07-13T20:00:00Z",
+        eventId: "evt:sha256:head",
+      },
       timelineNewCount: 3,
     });
     render.render();
     const pill = $("#timeline-new-pill");
     expect(pill?.classList.contains("hidden")).toBe(false);
-    expect(pill?.textContent).toBe("3 new ↑");
+    expect(pill?.textContent).toBe("Show 3 new events");
+    expect(pill?.parentElement?.classList.contains("timeline-shell")).toBe(
+      true,
+    );
+    expect($("header #timeline-new-pill")).toBeNull();
 
     for (const patch of [
-      { followByLens: { timeline: true, list: false, attention: false } },
+      { followByLens: { timeline: false, list: false, attention: false } },
       {
-        followByLens: { timeline: false, list: false, attention: false },
+        followByLens: { timeline: true, list: false, attention: false },
         timelineNewCount: 0,
       },
       { lens: "list", timelineNewCount: 3 },
@@ -512,7 +546,10 @@ describe("toolbar controls are gated per lens (each shows only where its state i
     ]) {
       store.commit(patch);
       render.render();
-      expect($("#timeline-new-pill")?.classList.contains("hidden")).toBe(true);
+      const current = $("#timeline-new-pill");
+      expect(current == null || current.classList.contains("hidden")).toBe(
+        true,
+      );
     }
   });
 

@@ -48,11 +48,11 @@ describe("getState defaults", () => {
     expect(s.attentionDelta).toBeNull();
   });
 
-  it("seeds enabledTypes and seenTypes from every known event type", () => {
+  it("enables every known event type but waits to mark types seen until they appear", () => {
     const s = store.getState();
     const ids = TYPES.map((t) => t.id).sort();
     expect([...s.enabledTypes].sort()).toEqual(ids);
-    expect([...s.seenTypes].sort()).toEqual(ids);
+    expect(s.seenTypes.size).toBe(0);
   });
 
   it("returns the live singleton — the same reference reflects later commits", () => {

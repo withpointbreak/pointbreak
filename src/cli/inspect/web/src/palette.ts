@@ -16,7 +16,7 @@ import { CLASS, cmdItemClass } from "./classNames";
 import { DIFF_ROUTE_CLEARED, openDiff } from "./diff/controller";
 import { $ } from "./dom";
 import { escapeHtml } from "./escape";
-import { endTimelineFollow } from "./follow";
+import { parkTimelineRead } from "./follow";
 import { eventForId, presentTypes, revisionForId } from "./model";
 import {
   close as closeOverlay,
@@ -285,7 +285,7 @@ function buildCommands(): Command[] {
       label: entryTitle(e),
       hint: typeLabel(e.eventType),
       run: () => {
-        endTimelineFollow();
+        parkTimelineRead();
         navigate({
           selected: { kind: "event", id: e.eventId ?? "" },
           ...DIFF_ROUTE_CLEARED,

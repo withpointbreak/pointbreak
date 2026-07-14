@@ -909,7 +909,7 @@ describe("applyHash (derive the view from the fragment, repaint via the subscrip
     router.applyHash();
     await flush();
     expect(store.getState().selected).toEqual({ kind: "event", id: X });
-    expect(store.getState().followByLens.timeline).toBe(false);
+    expect(store.getState().followByLens.timeline).toBe(true);
     expect(store.getState().timelineHeadAnchor).toEqual({
       occurredAt: "2026-07-13T19:00:00Z",
       eventId: EVT,

@@ -32,7 +32,7 @@ import {
   initControls as initDiff,
 } from "./diff/controller";
 import { $ } from "./dom";
-import { resumeTimelineFollow } from "./follow";
+import { toggleTimelineFollow } from "./follow";
 import { initControls as initHelp } from "./help-overlay";
 import { jumpLensBoundary, onKey } from "./keyboard";
 import { presentTypes } from "./model";
@@ -115,13 +115,10 @@ function wireToolbar(): void {
   // Density can change consumer geometry without resizing its container, so the
   // preference toggle explicitly notifies every registered layout consumer.
   $("#density-toggle")?.addEventListener("click", notifyDensityListeners);
-  $("#timeline-new-pill")?.addEventListener("click", () => {
-    void resumeTimelineFollow();
-  });
   $("#jump-start")?.addEventListener("click", () => jumpLensBoundary("first"));
   $("#jump-end")?.addEventListener("click", () => jumpLensBoundary("last"));
   $("#follow-toggle")?.addEventListener("click", () => {
-    void resumeTimelineFollow();
+    void toggleTimelineFollow();
   });
 }
 

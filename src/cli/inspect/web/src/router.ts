@@ -38,7 +38,7 @@
 
 import { fetchRevealPage, revealPatch } from "./data";
 import { $ } from "./dom";
-import { endTimelineFollow } from "./follow";
+import { parkTimelineRead } from "./follow";
 import {
   eventExists,
   presentTypes,
@@ -361,8 +361,7 @@ export function applyHash(): void {
   const patch = resolve(parsed);
   // Applying any event selection parks the timeline before an off-window reveal
   // can replace its loaded window, preserving the pre-swap count anchor.
-  if (patch.selected?.kind === "event" && patch.selected.id)
-    endTimelineFollow();
+  if (patch.selected?.kind === "event" && patch.selected.id) parkTimelineRead();
   commit(patch);
   if (parsed.migrated === "threads-alias") {
     // Canonicalize the address bar: swap ONLY the path segment, keeping the
