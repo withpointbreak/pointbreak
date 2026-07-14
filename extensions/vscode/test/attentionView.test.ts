@@ -119,8 +119,49 @@ describe("deriveTree", () => {
       "stale_assessment",
     ]);
     expect(section?.children).toMatchObject([
-      { lens: "attention" },
-      { lens: "attention" },
+      {
+        lens: "attention",
+        attentionId: "with-title",
+        command: "pointbreak.openAnnotatedDiff",
+      },
+      {
+        lens: "attention",
+        attentionId: "without-title",
+        command: "pointbreak.openAnnotatedDiff",
+      },
+    ]);
+  });
+
+  it("opens revision and eligible attention nodes in one annotated diff panel", () => {
+    const nodes = deriveTree(
+      [resolved("/a", "a")],
+      new Map([
+        [
+          "a",
+          attentionItems([
+            attentionItem("with-revision", "open_input_request"),
+            {
+              ...attentionItem("without-revision", "competing_heads"),
+              revisionId: undefined,
+            },
+          ]),
+        ],
+      ]),
+      new Map([["a", revisions("rev:sha256:a")]]),
+    );
+    const attentionSection = nodes.find(
+      (node) => node.kind === "attention-section",
+    );
+    const revisionsSection = nodes.find(
+      (node) => node.kind === "revisions-section",
+    );
+
+    expect(attentionSection?.children).toMatchObject([
+      { command: "pointbreak.openAnnotatedDiff" },
+      { command: undefined },
+    ]);
+    expect(revisionsSection?.children).toMatchObject([
+      { command: "pointbreak.openAnnotatedDiff" },
     ]);
   });
 

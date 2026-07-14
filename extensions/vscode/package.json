@@ -20,6 +20,7 @@
     "onView:pointbreak.attention",
     "onCommand:pointbreak.refreshAttention",
     "onCommand:pointbreak.capture",
+    "onCommand:pointbreak.openAnnotatedDiff",
     "onCommand:pointbreak.openInReview",
     "onCommand:pointbreak.stopInspect"
   ],
@@ -36,6 +37,11 @@
         "category": "Pointbreak"
       },
       {
+        "command": "pointbreak.openAnnotatedDiff",
+        "title": "Open Annotated Diff",
+        "category": "Pointbreak"
+      },
+      {
         "command": "pointbreak.openInReview",
         "title": "Open in Review",
         "category": "Pointbreak"
@@ -46,6 +52,15 @@
         "category": "Pointbreak"
       }
     ],
+    "menus": {
+      "view/item/context": [
+        {
+          "command": "pointbreak.openInReview",
+          "when": "view == pointbreak.attention && (viewItem == pointbreak.revision || viewItem == pointbreak.attentionItem)",
+          "group": "navigation@2"
+        }
+      ]
+    },
     "viewsContainers": {
       "activitybar": [
         {
@@ -99,6 +114,7 @@
     "@types/vscode": "1.74.0",
     "@vscode/vsce": "3.9.2",
     "esbuild": "0.28.1",
+    "happy-dom": "20.10.6",
     "typescript": "6.0.3",
     "vitest": "4.1.9"
   }

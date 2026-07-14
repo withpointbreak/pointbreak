@@ -1,17 +1,17 @@
 /// <reference lib="dom" />
 
-import { escapeHtml } from "./diff/escape";
-import type { Annotation, DiffArtifact } from "./diff/render";
-import { renderDiff } from "./diff/render";
 import "./review.css";
 import {
   type HostToWebview,
   isHostToWebview,
   type WebviewToHost,
 } from "../webviewProtocol";
+import { ReviewWebviewController } from "./reviewController";
 
 interface VsCodeApi {
   postMessage(message: WebviewToHost): void;
+  getState(): unknown;
+  setState(state: unknown): void;
 }
 
 declare function acquireVsCodeApi(): VsCodeApi;
@@ -29,32 +29,31 @@ function start(): void {
   if (!root) {
     return;
   }
+  const controller = new ReviewWebviewController(root, vscode);
   window.addEventListener("message", ({ data }: MessageEvent<unknown>) => {
     if (isHostToWebview(data)) {
-      renderMessage(root, data);
+      renderMessage(controller, data);
     }
   });
   vscode.postMessage({ type: "ready" });
 }
 
-function renderMessage(container: HTMLElement, message: HostToWebview): void {
+function renderMessage(
+  controller: ReviewWebviewController,
+  message: HostToWebview,
+): void {
   switch (message.type) {
-    case "render": {
-      const result = renderDiff(
-        message.data.snapshotId,
-        message.data.artifact as DiffArtifact,
-        message.data.annotations as Annotation[],
-      );
-      container.innerHTML = result.html;
+    case "render":
+      controller.render(message.data, message.focus);
       return;
-    }
     case "error":
-      container.innerHTML = `<p class="empty" role="alert">${escapeHtml(message.message)}</p>`;
+      controller.error(message.message);
       return;
     case "freshness":
       document.body.dataset.freshness = message.changed ? "changed" : "current";
       return;
     case "focus":
+      controller.focus(message.focus);
       return;
   }
 }

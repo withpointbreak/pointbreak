@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { expect, it } from "vitest";
-import { isHostToWebview } from "../src/webviewProtocol";
+import snapshotFixture from "../../../src/cli/inspect/web/test/fixtures/snapshot.json";
+import { isHostToWebview, isWebviewToHost } from "../src/webviewProtocol";
 
 const browserEntry = readFileSync("src/webview/review.ts", "utf8");
 const protocol = readFileSync("src/webviewProtocol.ts", "utf8");
@@ -17,7 +18,7 @@ it("keeps browser messages on one pure protocol", () => {
   expect(browserEntry).toContain('from "../webviewProtocol"');
 });
 
-it("reserves typed attention focus messages without owning their behavior", () => {
+it("validates the complete host and webview message unions", () => {
   expect(
     isHostToWebview({
       type: "focus",
@@ -28,7 +29,12 @@ it("reserves typed attention focus messages without owning their behavior", () =
   expect(
     isHostToWebview({
       type: "render",
-      data: {},
+      data: {
+        revisionId: "rev:sha256:one",
+        snapshotId: "obj:sha256:one",
+        artifact: snapshotFixture,
+        annotations: [],
+      },
       focus: { kind: "attention", id: "attention:stale" },
     }),
   ).toBe(true);
@@ -38,13 +44,47 @@ it("reserves typed attention focus messages without owning their behavior", () =
       focus: { kind: "attention", id: 42 },
     }),
   ).toBe(false);
+  expect(isHostToWebview({ type: "focus", unexpected: true })).toBe(false);
+  expect(
+    isHostToWebview({
+      type: "render",
+      data: {},
+    }),
+  ).toBe(false);
+  expect(isWebviewToHost({ type: "ready" })).toBe(true);
+  expect(isWebviewToHost({ type: "reload" })).toBe(true);
+  expect(
+    isWebviewToHost({
+      type: "openSource",
+      target: {
+        filePath: "src/lib.rs",
+        side: "new",
+        startLine: 1,
+        endLine: 2,
+      },
+    }),
+  ).toBe(true);
+  expect(isWebviewToHost({ type: "ready", token: "secret" })).toBe(false);
+  expect(
+    isWebviewToHost({
+      type: "openSource",
+      target: {
+        filePath: "/private/repo/src/lib.rs",
+        side: "new",
+        startLine: 1,
+        endLine: 2,
+      },
+    }),
+  ).toBe(false);
 });
 
 it("keeps the browser entry presentation-only", () => {
   expect(browserEntry).not.toMatch(/\bfetch\s*\(/);
   expect(browserEntry).not.toMatch(/\bXMLHttpRequest\b/);
   expect(browserEntry).not.toMatch(/\bWebSocket\b/);
+  expect(browserEntry).not.toMatch(/\bEventSource\b/);
   expect(browserEntry).not.toContain('from "node:');
+  expect(browserEntry).toContain("ReviewWebviewController");
 });
 
 it("bridges light, dark, and high-contrast themes through VS Code tokens", () => {

@@ -33,6 +33,9 @@ vi.mock("../src/binary", () => ({
 }));
 vi.mock("../src/cli", () => ({ PointbreakCli: class {} }));
 vi.mock("../src/commands/capture", () => ({ runCaptureCommand: vi.fn() }));
+vi.mock("../src/commands/openAnnotatedDiff", () => ({
+  runOpenAnnotatedDiffCommand: vi.fn(),
+}));
 vi.mock("../src/commands/openInReview", () => ({
   runOpenInReviewCommand: mocks.startBrowser,
 }));
@@ -46,11 +49,20 @@ vi.mock("../src/inspectChild", () => ({
 vi.mock("../src/inspectConnectionStore", () => ({
   InspectConnectionStore: class {},
 }));
+vi.mock("../src/diffDataSource", () => ({
+  InspectApiDiffDataSource: class {},
+}));
 vi.mock("../src/logger", () => ({
   Logger: class {
     dispose = vi.fn();
     error = vi.fn();
     warn = vi.fn();
+  },
+}));
+vi.mock("../src/reviewPanel", () => ({
+  ReviewPanelManager: class {
+    dispose = vi.fn();
+    open = vi.fn();
   },
 }));
 vi.mock("../src/targetResolver", () => ({
@@ -67,6 +79,7 @@ beforeEach(() => {
 it("does not probe, spawn, or open a terminal during activation", async () => {
   const context = {
     extensionPath: "/extension",
+    extensionUri: {},
     secrets: {},
     subscriptions: [] as Array<{ dispose(): unknown }>,
     workspaceState: {},

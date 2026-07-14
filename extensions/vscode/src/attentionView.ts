@@ -48,8 +48,9 @@ export interface AttentionItemNode extends NodeBase {
   folder: WorkspaceFolder;
   description: string;
   revisionId?: string;
+  attentionId: string;
   lens: "attention";
-  command?: "pointbreak.openInReview";
+  command?: "pointbreak.openAnnotatedDiff";
 }
 
 export interface RevisionItemNode extends NodeBase {
@@ -58,7 +59,7 @@ export interface RevisionItemNode extends NodeBase {
   folder: WorkspaceFolder;
   description: string;
   revisionId: string;
-  command: "pointbreak.openInReview";
+  command: "pointbreak.openAnnotatedDiff";
 }
 
 export interface OnboardingNode extends NodeBase {
@@ -230,6 +231,11 @@ export class AttentionTreeProvider implements TreeDataProvider<TreeNode> {
         arguments: [node],
       };
     }
+    if (node.kind === "revision-item") {
+      item.contextValue = "pointbreak.revision";
+    } else if (node.kind === "attention-item" && node.revisionId) {
+      item.contextValue = "pointbreak.attentionItem";
+    }
     return item;
   }
 
@@ -328,8 +334,9 @@ function deriveTargetChildren(
       folder: resolution.folder,
       description: item.tier,
       revisionId: item.revisionId,
+      attentionId: item.id,
       lens: "attention",
-      command: item.revisionId ? "pointbreak.openInReview" : undefined,
+      command: item.revisionId ? "pointbreak.openAnnotatedDiff" : undefined,
     }),
   );
   const revisionChildren: RevisionItemNode[] = (revisions?.entries ?? [])
@@ -341,7 +348,7 @@ function deriveTargetChildren(
       folder: resolution.folder,
       description: entry.mergeStatus,
       revisionId: entry.revisionId,
-      command: "pointbreak.openInReview",
+      command: "pointbreak.openAnnotatedDiff",
     }));
   return [
     {

@@ -17,6 +17,7 @@ it("contributes the Review view and its commands", () => {
     "onView:pointbreak.attention",
     "onCommand:pointbreak.refreshAttention",
     "onCommand:pointbreak.capture",
+    "onCommand:pointbreak.openAnnotatedDiff",
     "onCommand:pointbreak.openInReview",
     "onCommand:pointbreak.stopInspect",
   ]);
@@ -27,9 +28,15 @@ it("contributes the Review view and its commands", () => {
   expect(pkg.contributes.commands.map(({ command }) => command)).toEqual([
     "pointbreak.refreshAttention",
     "pointbreak.capture",
+    "pointbreak.openAnnotatedDiff",
     "pointbreak.openInReview",
     "pointbreak.stopInspect",
   ]);
+  expect(pkg.contributes.menus["view/item/context"]).toContainEqual({
+    command: "pointbreak.openInReview",
+    when: "view == pointbreak.attention && (viewItem == pointbreak.revision || viewItem == pointbreak.attentionItem)",
+    group: "navigation@2",
+  });
   expect(
     pkg.contributes.configuration.properties["pointbreak.reviewUrl"],
   ).toMatchObject({
