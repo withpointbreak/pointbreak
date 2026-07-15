@@ -283,7 +283,7 @@ fn unit_list_renders_commit_range_source_without_paths() {
 }
 
 #[test]
-fn unit_list_hides_orphans_by_default_and_surfaces_with_flags() {
+fn unit_list_shows_unreachable_revisions_by_default_and_filters_explicitly() {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
     repo.commit_all("base");
@@ -312,15 +312,15 @@ fn unit_list_hides_orphans_by_default_and_surfaces_with_flags() {
     let floating_id = floating["revision"]["id"].as_str().unwrap().to_owned();
     assert_ne!(orphan_id, floating_id);
 
-    // Default: the orphan is hidden, the floating capture remains.
+    // Default: both recorded revisions remain discoverable regardless of Git
+    // reachability.
     let default_ids = unit_list_ids(&repo, &[]);
     assert!(default_ids.contains(&floating_id));
-    assert!(!default_ids.contains(&orphan_id));
+    assert!(default_ids.contains(&orphan_id));
 
-    // --all surfaces both.
+    // --all remains a compatibility spelling of the default.
     let all_ids = unit_list_ids(&repo, &["--all"]);
-    assert!(all_ids.contains(&orphan_id));
-    assert!(all_ids.contains(&floating_id));
+    assert_eq!(all_ids, default_ids);
 
     // --orphans surfaces only the orphan.
     assert_eq!(
@@ -333,6 +333,73 @@ fn unit_list_hides_orphans_by_default_and_surfaces_with_flags() {
         unit_list_ids(&repo, &["--orphans", "--all"]),
         vec![orphan_id]
     );
+}
+
+#[test]
+fn unit_list_keeps_revision_after_capture_target_is_amended() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.git(["checkout", "-b", "feature"]);
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    repo.commit_all("captured change");
+
+    let captured = parse_json(
+        &shore([
+            "capture",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "--base",
+            "main",
+        ])
+        .stdout,
+    );
+    let revision_id = captured["revision"]["id"].as_str().unwrap().to_owned();
+    let captured_target = captured["revision"]["target"]["commitOid"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    repo.git(["add", "--all"]);
+    repo.git(["commit", "--amend", "--no-edit"]);
+    let amended_target = repo.git(["rev-parse", "HEAD"]).stdout.trim().to_owned();
+    assert_ne!(captured_target, amended_target);
+    assert!(
+        repo.git([
+            "for-each-ref",
+            &format!("--contains={captured_target}"),
+            "--format=%(refname)",
+        ])
+        .stdout
+        .trim()
+        .is_empty(),
+        "the captured target must be unreachable from live refs"
+    );
+
+    let listed =
+        parse_json(&shore(["revision", "list", "--repo", repo.path().to_str().unwrap()]).stdout);
+    let entry = listed["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["revisionId"] == revision_id)
+        .unwrap_or_else(|| panic!("amended capture target removed the revision: {listed}"));
+    assert_eq!(entry["mergeStatus"], "orphaned");
+
+    let shown = shore([
+        "revision",
+        "show",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        &revision_id,
+    ]);
+    assert!(
+        shown.status.success(),
+        "direct revision read must still succeed: {}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    assert_eq!(parse_json(&shown.stdout)["revision"]["id"], revision_id);
 }
 
 #[test]

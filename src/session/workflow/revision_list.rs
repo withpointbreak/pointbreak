@@ -27,15 +27,16 @@ pub enum RefFilterMode {
     Liveness,
 }
 
-/// Which units the list surfaces with respect to commit-reachability. A unit is
+/// Which explicit commit-reachability filter the list applies. A unit is
 /// "orphaned" when it is commit-anchored and every current commit is unreachable
-/// from any live ref; floating (commit-free) units are never orphaned.
+/// from any live ref; floating (commit-free) units are never orphaned. The
+/// unfiltered default keeps every recorded revision regardless of Git liveness.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum OrphanVisibility {
-    /// Default: hide commit-anchored units whose every current commit is orphaned.
-    #[default]
+    /// Explicitly hide commit-anchored units whose every current commit is orphaned.
     HideOrphans,
-    /// Show everything (hidden + visible).
+    /// Default: show every recorded revision.
+    #[default]
     All,
     /// Show only the orphaned units.
     OrphansOnly,
@@ -320,10 +321,11 @@ fn merge_status_for(
     }
 }
 
-/// Apply the orphan-visibility filter over the already-built entries. Default
-/// hides commit-anchored units whose every current commit is orphaned; `All`
-/// shows everything; `OrphansOnly` keeps only the orphaned ones. Reuses each
-/// entry's `commit_range` view (no event re-list) against git reachability.
+/// Apply an explicit orphan-visibility filter over the already-built entries.
+/// `All` is the projection-complete default; `HideOrphans` removes
+/// commit-anchored units whose every current commit is orphaned; `OrphansOnly`
+/// keeps only those units. Reuses each entry's `commit_range` view (no event
+/// re-list) against git reachability.
 fn apply_orphan_visibility(
     result: &mut RevisionListResult,
     repo: &Path,
@@ -1060,7 +1062,7 @@ mod tests {
     }
 
     #[test]
-    fn orphan_capture_is_hidden_by_default() {
+    fn orphan_capture_can_be_hidden_explicitly() {
         let repo = OrphanRepo::new();
         let dangling = repo.dangling_oid();
         let tip = repo.oid("main");
@@ -1078,7 +1080,7 @@ mod tests {
     }
 
     #[test]
-    fn orphan_capture_is_shown_with_all() {
+    fn orphan_capture_is_shown_by_default() {
         let repo = OrphanRepo::new();
         let dangling = repo.dangling_oid();
         let tip = repo.oid("main");
@@ -1088,7 +1090,7 @@ mod tests {
             range_captured_event("live", "2026-05-13T10:00:02Z", &tip),
         ];
 
-        let ids = listed(&events, OrphanVisibility::All, repo.path());
+        let ids = listed(&events, OrphanVisibility::default(), repo.path());
 
         assert!(ids.contains(&"review-unit:sha256:orph".to_owned()));
         assert!(ids.contains(&"review-unit:sha256:float".to_owned()));
@@ -1116,8 +1118,8 @@ mod tests {
         let repo = OrphanRepo::new();
         let events = [captured_event("float", "2026-05-13T10:00:00Z")];
 
-        let default_ids = listed(&events, OrphanVisibility::HideOrphans, repo.path());
-        assert!(default_ids.contains(&"review-unit:sha256:float".to_owned()));
+        let hidden_ids = listed(&events, OrphanVisibility::HideOrphans, repo.path());
+        assert!(hidden_ids.contains(&"review-unit:sha256:float".to_owned()));
 
         let orphan_ids = listed(&events, OrphanVisibility::OrphansOnly, repo.path());
         assert!(orphan_ids.is_empty());
@@ -1129,15 +1131,15 @@ mod tests {
         let tip = repo.oid("main");
         let events = [range_captured_event("live", "2026-05-13T10:00:00Z", &tip)];
 
-        let default_ids = listed(&events, OrphanVisibility::HideOrphans, repo.path());
-        assert!(default_ids.contains(&"review-unit:sha256:live".to_owned()));
+        let hidden_ids = listed(&events, OrphanVisibility::HideOrphans, repo.path());
+        assert!(hidden_ids.contains(&"review-unit:sha256:live".to_owned()));
 
         let orphan_ids = listed(&events, OrphanVisibility::OrphansOnly, repo.path());
         assert!(orphan_ids.is_empty());
     }
 
     #[test]
-    fn gone_commit_is_hidden_and_degrades_without_error() {
+    fn gone_commit_is_shown_by_default_and_degrades_without_error() {
         let repo = OrphanRepo::new();
         let missing = "0".repeat(repo.oid("main").len());
         let events = [range_captured_event(
@@ -1146,10 +1148,13 @@ mod tests {
             &missing,
         )];
 
-        // A gc'd (object-missing) commit classifies Orphaned and is hidden by
-        // default; enrich_liveness returns Ok, so the list never errors.
-        let default_ids = listed(&events, OrphanVisibility::HideOrphans, repo.path());
-        assert!(default_ids.is_empty());
+        // A gc'd (object-missing) commit still classifies Orphaned, but the
+        // projection-complete default keeps its recorded revision visible.
+        let default_ids = listed(&events, OrphanVisibility::default(), repo.path());
+        assert_eq!(default_ids, vec!["review-unit:sha256:gone".to_owned()]);
+
+        let hidden_ids = listed(&events, OrphanVisibility::HideOrphans, repo.path());
+        assert!(hidden_ids.is_empty());
 
         let orphan_ids = listed(&events, OrphanVisibility::OrphansOnly, repo.path());
         assert_eq!(orphan_ids, vec!["review-unit:sha256:gone".to_owned()]);
@@ -1167,8 +1172,8 @@ mod tests {
             commit_associated_event("mix", &dangling),
         ];
 
-        let default_ids = listed(&events, OrphanVisibility::HideOrphans, repo.path());
-        assert!(default_ids.contains(&"review-unit:sha256:mix".to_owned()));
+        let hidden_ids = listed(&events, OrphanVisibility::HideOrphans, repo.path());
+        assert!(hidden_ids.contains(&"review-unit:sha256:mix".to_owned()));
     }
 
     /// Surface every entry (so orphaned units are present too), group, and

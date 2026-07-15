@@ -501,8 +501,8 @@ fn revision_overviews(
     );
     let _guard = span.enter();
 
-    // Build overviews for exactly the listed entries (orphan-hidden and grouped-away
-    // captures are not among them). The overview slice reads no member readbacks or
+    // Build overviews for exactly the listed entries (explicit filters and grouping
+    // may remove captures). The overview slice reads no member readbacks or
     // principal diagnostics, so the verification-policy / actor-attributes /
     // delegation-map inputs are dropped; the trust set is retained — it drives the
     // operative-removal decision behind file_count/row_count. The CALLER discovers
@@ -2756,6 +2756,30 @@ mod tests {
             .output()
             .unwrap();
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    #[test]
+    fn revisions_json_keeps_revision_after_capture_target_is_amended() {
+        let (repo, revision_id, _branch) = captured_commit_range_repo();
+        let path = repo.path();
+
+        std::fs::write(path.join("src.txt"), "amended\n").unwrap();
+        git(path, &["add", "--all"]);
+        git(path, &["commit", "--amend", "--no-edit"]);
+
+        let cache = super::super::cache::RevisionsResponseCache::new();
+        let summaries = Arc::new(SnapshotSummaryCache::new());
+        let value: serde_json::Value =
+            serde_json::from_str(&revisions_json(path, &cache, &summaries).unwrap()).unwrap();
+
+        assert_eq!(value["revisionCount"], 1);
+        let entry = value["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["revisionId"] == revision_id)
+            .unwrap_or_else(|| panic!("amended capture target removed the revision: {value}"));
+        assert_eq!(entry["mergeStatus"], "orphaned");
     }
 
     #[test]

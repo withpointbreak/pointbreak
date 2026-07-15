@@ -1114,8 +1114,9 @@ endpoints, and `objectArtifactContentHash`.
   `shore revision show` applies — so the status answers "did this land on the default branch?". When
   no default branch is detected it falls back to broad reachability (any live tip).
 - `--worktree <path>` scopes the listing to captures belonging to the worktree at that path.
-- `--all` / `--orphans` control whether revisions whose anchored commits are all unreachable
-  (orphaned) are shown or shown exclusively; by default orphaned revisions are hidden.
+- Every recorded revision is shown by default, including revisions whose anchored commits are all
+  unreachable. `--all` remains an accepted compatibility spelling of that default; `--orphans`
+  explicitly narrows the listing to only those unreachable revisions.
 
 ## `shore revision show`
 

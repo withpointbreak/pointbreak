@@ -213,6 +213,8 @@ below remain the scriptable surface.
 flat directory of revisions. It is the discovery surface — start here when
 `shore revision show` errors with `multiple captured revisions; pass
 --revision`, or whenever you need to pick an ID for `--revision <id>`.
+Git reachability enriches each entry's status but never removes a recorded
+revision from this unfiltered directory, even if its commit objects later disappear.
 
 It returns `pointbreak.review-revision-list` JSON with `eventSetHash`, `eventCount`,
 `revisionCount`, and an `entries` array whose elements include

@@ -40,9 +40,10 @@ pub(super) struct RevisionListArgs {
     #[arg(long, value_enum, default_value = "label")]
     by: RefFilterByArg,
 
-    /// Show revisions even when every anchored commit is unreachable (orphaned).
-    #[arg(long)]
-    all: bool,
+    /// Show every recorded revision. This is the default; the flag is retained
+    /// for command compatibility.
+    #[arg(long = "all")]
+    _all: bool,
 
     /// Show only orphaned revisions (every anchored commit unreachable). Takes
     /// precedence over `--all`.
@@ -100,12 +101,13 @@ pub(super) fn run(
     if let Some(ref_name) = args.ref_name {
         options = options.with_ref_filter(ref_name, args.by.into());
     }
+    // `--all` is now the default and remains accepted for compatibility.
+    // `--orphans` is the only CLI reachability filter and keeps precedence when
+    // both flags are supplied.
     let visibility = if args.orphans {
         OrphanVisibility::OrphansOnly
-    } else if args.all {
-        OrphanVisibility::All
     } else {
-        OrphanVisibility::HideOrphans
+        OrphanVisibility::All
     };
     options = options.with_orphan_visibility(visibility);
     if let Some(integration_ref) = args.integration_ref {

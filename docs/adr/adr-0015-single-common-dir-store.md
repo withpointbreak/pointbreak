@@ -7,6 +7,10 @@ grouping projection's prerequisites (#146 and the ReviewUnit commit-range lifecy
 day-one privacy/content-removal mechanism is decided in the accepted ADR-0016. (See "load-bearing
 preconditions" below.)
 **Date:** 2026-06-19
+**Amendment (2026-07-15, #539):** the unfiltered revision list is projection-complete. Git
+reachability remains read-time status enrichment, but no longer default-hides recorded revisions;
+only an explicit filter may narrow them. Content privacy and reclamation remain the responsibility
+of ADR-0016's explicit remove/compact lifecycle, not record visibility.
 **See also:** [ADR-0003](./adr-0003-agent-resource-claims-advisory-first.md) (advisory contract),
 [ADR-0008](./adr-0008-cross-peer-conflict-policy.md) (cross-peer conflict policy — "ambiguity is a
 selection error at unscoped-current boundaries"; idempotent union),
@@ -137,7 +141,9 @@ implied. All three are resolved:
    sensitive snapshot bytes in `.git/shore` after `git worktree remove` (which previously discarded
    them), so an explicit day-one cleanup is non-negotiable. **Resolved by the accepted ADR-0016**
    (content-targeted `ArtifactRemoved` + `shore store remove` then `gc`/`compact`, remove-only) — the
-   day-one removal mechanism, paired with default-hide of orphans. The working-tree-capture default scope
+   day-one removal mechanism. The original default-hide pairing was superseded by #539's invariant
+   that recorded revisions stay discoverable; privacy requires explicit removal, not a hidden row.
+   The working-tree-capture default scope
    (uncommitted target → no commit anchor → scoped by worktree-identity + recency, not structurally
    merge-status'd) and the explicit opt-in ephemeral / worktree-local opt-out command and config surface
    (§4) are part of the as-built collapse. (The projection-freshness rebuild was always **non-gating** —

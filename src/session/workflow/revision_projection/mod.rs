@@ -509,9 +509,9 @@ impl RevisionOverviewsOptions {
 
     /// The revisions to build overviews for. The caller supplies exactly the set
     /// it will surface — the inspector passes the `list_revisions` entry ids, which
-    /// are a subset of every `WorkObjectProposed` revision (orphan-hidden and
-    /// commit-OID-grouped captures are not listed). Building only this set keeps the
-    /// batch faithful to the per-revision path it replaces, and never resolves a
+    /// are a subset of every `WorkObjectProposed` revision after explicit filters
+    /// and commit-OID grouping. Building only this set keeps the batch faithful to
+    /// the per-revision path it replaces, and never resolves a
     /// snapshot for a revision that never reaches the wire.
     pub fn with_revisions(mut self, revisions: impl IntoIterator<Item = RevisionId>) -> Self {
         self.revisions = revisions.into_iter().collect();
@@ -639,8 +639,8 @@ fn revision_overviews_from_store(
     };
     // Index every captured identity by id once, then build only the requested
     // revisions. The requested set is the caller's listed entries, a subset of all
-    // captures — building only it never resolves a snapshot for an orphan-hidden or
-    // grouped-away revision the caller will not surface.
+    // captures after explicit filters and grouping — building only it never resolves
+    // a snapshot for a grouped-away revision the caller will not surface.
     let identities: BTreeMap<RevisionId, RevisionProjectionIdentity> = {
         let span = tracing::debug_span!("shore.revisions.overviews.enumerate_identities");
         let _guard = span.enter();
