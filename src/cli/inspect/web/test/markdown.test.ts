@@ -75,6 +75,14 @@ describe("renderMarkdownInline", () => {
     ).querySelector("span.ref");
     expect(span?.getAttribute("data-ref-kind")).toBe("rev");
   });
+
+  it("honors backslash escapes outside inline code", () => {
+    expect(
+      renderMarkdownInline(
+        "\\*literal\\*, \\`not code\\`, and `code \\* marker`",
+      ),
+    ).toBe("*literal*, `not code`, and <code>code \\* marker</code>");
+  });
 });
 
 describe("renderContentHtml / renderBodyContent", () => {

@@ -27,6 +27,14 @@ it("includes the webview runtime in both exact package allowlists", () => {
   expect(packageScript.match(/\.\.\.runtimeFiles/g)).toHaveLength(2);
 });
 
+it("keeps command runtime modules bundled into the existing host artifact", () => {
+  expect(packageScript).toContain(
+    'const runtimeFiles = ["out/extension.js", "out/review.js", "out/review.css"]',
+  );
+  expect(packageScript).not.toContain("problemsSnapshot.js");
+  expect(packageScript).not.toContain("recordProblemsSnapshot.js");
+});
+
 it("excludes source and local-only build inputs from the VSIX", () => {
   const ignored = readFileSync(".vscodeignore", "utf8").split("\n");
 

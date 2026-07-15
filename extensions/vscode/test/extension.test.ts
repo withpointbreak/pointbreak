@@ -43,6 +43,9 @@ vi.mock("../src/commands/capture", () => ({ runCaptureCommand: vi.fn() }));
 vi.mock("../src/commands/addObservationFromSelection", () => ({
   runAddObservationFromSelectionCommand: vi.fn(),
 }));
+vi.mock("../src/commands/recordProblemsSnapshot", () => ({
+  runRecordProblemsSnapshotCommand: vi.fn(),
+}));
 vi.mock("../src/commands/openAnnotatedDiff", () => ({
   runOpenAnnotatedDiffCommand: vi.fn(),
 }));

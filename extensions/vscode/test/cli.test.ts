@@ -111,10 +111,13 @@ describe("observationArgs", () => {
     revisionId: "rev:sha256:one",
     track: "human:local",
     title: "Check this range",
-    file: "src/lib.rs",
-    side: "new",
-    startLine: 7,
-    endLine: 9,
+    target: {
+      kind: "range",
+      file: "src/lib.rs",
+      side: "new",
+      startLine: 7,
+      endLine: 9,
+    },
   };
 
   it("always emits the complete explicit range target", () => {
@@ -168,6 +171,64 @@ describe("observationArgs", () => {
       observationId: "obs:sha256:one",
     });
     expect(calls).toEqual([["version"], observationArgs(options)]);
+  });
+
+  it("emits a revision target with Markdown body only on stdin", async () => {
+    const calls: Array<{ args: string[]; stdin?: Uint8Array }> = [];
+    const revisionOptions: ObservationOptions = {
+      revisionId: "rev:sha256:one",
+      track: "human:local",
+      title: "VS Code Problems snapshot",
+      target: { kind: "revision" },
+      body: "# Problems snapshot\n\nExact bytes.\n",
+      bodyContentType: "text/markdown",
+    };
+    const exec: ExecFn = async (_file, args, opts) => {
+      calls.push({ args, stdin: opts.stdin });
+      return {
+        stdout:
+          args[0] === "version"
+            ? VERSION_JSON
+            : JSON.stringify({
+                schema: "pointbreak.review-observation-add",
+                version: 1,
+                revisionId: "rev:sha256:one",
+                observationId: "obs:sha256:problems",
+                eventId: "evt:sha256:problems",
+                trackId: "human:local",
+                target: { kind: "revision" },
+                diagnostics: [],
+              }),
+        stderr: "",
+        exitCode: 0,
+      };
+    };
+    const cli = new PointbreakCli(binary, exec);
+
+    await cli.addObservation("/repo", revisionOptions);
+
+    expect(observationArgs(revisionOptions)).toEqual([
+      "observation",
+      "add",
+      "--exact-revision",
+      "rev:sha256:one",
+      "--track",
+      "human:local",
+      "--title",
+      "VS Code Problems snapshot",
+      "--body-stdin",
+      "--body-content-type",
+      "text/markdown",
+    ]);
+    expect(observationArgs(revisionOptions)).not.toContain("--file");
+    expect(calls.map(({ args }) => args)).toEqual([
+      ["version"],
+      observationArgs(revisionOptions),
+    ]);
+    expect(calls.map(({ stdin }) => bytes(stdin))).toEqual([
+      undefined,
+      revisionOptions.body,
+    ]);
   });
 });
 
@@ -315,20 +376,30 @@ it("rejects a document whose schema does not match the requested command", async
 });
 
 it("decodes the live revision-list entries shape", async () => {
-  const exec: ExecFn = async (_file, args) => ({
-    stdout: args[0] === "version" ? VERSION_JSON : REVISION_LIST_JSON,
-    stderr: "",
-    exitCode: 0,
-  });
+  const calls: string[][] = [];
+  const exec: ExecFn = async (_file, args) => {
+    calls.push(args);
+    return {
+      stdout: args[0] === "version" ? VERSION_JSON : REVISION_LIST_JSON,
+      stderr: "",
+      exitCode: 0,
+    };
+  };
   const cli = new PointbreakCli(binary, exec);
 
-  const document = await cli.revisionList("/repo");
+  const document = await cli.revisionList("/repo", {
+    filter: "-is:superseded",
+  });
 
   expect(document.entries[0]).toMatchObject({
     revisionId: "rev:sha256:9442bfeb",
     mergeStatus: "merged",
   });
   expect(document.revisionCount).toBe(1);
+  expect(calls).toEqual([
+    ["version"],
+    ["revision", "list", "--filter=-is:superseded"],
+  ]);
 });
 
 function bytes(value: Uint8Array | undefined): string | undefined {

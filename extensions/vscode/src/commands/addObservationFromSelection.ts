@@ -186,10 +186,13 @@ export async function runAddObservationFromSelectionCommand(
           revisionId: context.revisionId,
           track,
           title,
-          file: verification.target.filePath,
-          side: verification.target.side,
-          startLine: verification.target.startLine,
-          endLine: verification.target.endLine,
+          target: {
+            kind: "range",
+            file: verification.target.filePath,
+            side: verification.target.side,
+            startLine: verification.target.startLine,
+            endLine: verification.target.endLine,
+          },
         });
         if (added.revisionId !== context.revisionId) {
           throw new Error("observation revision changed during write");

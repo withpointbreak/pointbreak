@@ -3,7 +3,9 @@ import {
   matchDiffFiles as matchInspectorFiles,
   renderDiff as renderInspectorDiff,
 } from "../../../src/cli/inspect/web/src/diff/render";
+import { renderMarkdownInline as renderInspectorMarkdownInline } from "../../../src/cli/inspect/web/src/markdown";
 import inspectorSnapshot from "../../../src/cli/inspect/web/test/fixtures/snapshot.json";
+import { renderMarkdownInline as renderWebviewMarkdownInline } from "../src/webview/diff/markdown";
 import type {
   Annotation,
   DiffArtifact,
@@ -53,6 +55,14 @@ describe("webview renderer parity", () => {
         fileLabels(matchInspectorFiles(inspector.ctx, query).files),
       );
     }
+  });
+
+  it("matches escaped punctuation and inline-code literals", () => {
+    const markdown = "\\*literal\\*, \\`not code\\`, and `code \\* marker`";
+    const expected = "*literal*, `not code`, and <code>code \\* marker</code>";
+
+    expect(renderWebviewMarkdownInline(markdown)).toBe(expected);
+    expect(renderInspectorMarkdownInline(markdown)).toBe(expected);
   });
 });
 

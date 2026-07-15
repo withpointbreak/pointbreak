@@ -18,7 +18,9 @@
     "node": ">=20",
     "vscode": "^1.74.0"
   },
-  "extensionKind": ["workspace"],
+  "extensionKind": [
+    "workspace"
+  ],
   "main": "./out/extension.js",
   "activationEvents": [
     "onView:pointbreak.attention",
@@ -30,7 +32,8 @@
     "onCommand:pointbreak.addObservationFromSelection",
     "onCommand:pointbreak.respondInputRequest",
     "onCommand:pointbreak.assessAttention",
-    "onCommand:pointbreak.captureAttentionResolution"
+    "onCommand:pointbreak.captureAttentionResolution",
+    "onCommand:pointbreak.recordProblemsSnapshot"
   ],
   "contributes": {
     "commands": [
@@ -82,6 +85,12 @@
         "title": "Capture Head Resolution",
         "category": "Pointbreak",
         "icon": "$(git-merge)"
+      },
+      {
+        "command": "pointbreak.recordProblemsSnapshot",
+        "title": "Record Problems Snapshot",
+        "category": "Pointbreak",
+        "icon": "$(warning)"
       }
     ],
     "menus": {
@@ -100,6 +109,11 @@
           "command": "pointbreak.assessAttention",
           "when": "view == pointbreak.attention && viewItem == pointbreak.attention.assessment",
           "group": "inline@1"
+        },
+        {
+          "command": "pointbreak.recordProblemsSnapshot",
+          "when": "view == pointbreak.attention && (viewItem == pointbreak.revision || viewItem == pointbreak.attention.inputRequest || viewItem == pointbreak.attention.assessment)",
+          "group": "inline@2"
         },
         {
           "command": "pointbreak.captureAttentionResolution",

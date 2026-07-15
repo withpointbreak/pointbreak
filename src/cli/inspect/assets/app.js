@@ -2793,10 +2793,12 @@
       return token;
     }, "stash");
     let html = escapeHtml(String(text ?? ""));
+    html = protectBackslashEscapes(html, stash, (character) => character === "`");
     html = html.replace(
       /`([^`]+)`/g,
       (_, code) => stash(`<code>${code}</code>`)
     );
+    html = protectBackslashEscapes(html, stash);
     html = html.replace(
       /\[([^\]]+)\]\(([^)\s]+)\)/g,
       (_, label, href) => {
@@ -2809,12 +2811,32 @@
     );
     html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/\*([^*]+)\*/g, "<em>$1</em>");
     html = linkifyEscaped(html);
-    for (const [token, replacement] of placeholders) {
+    for (const [token, replacement] of placeholders.reverse()) {
       html = html.split(token).join(replacement);
     }
     return html;
   }
   __name(renderMarkdownInline, "renderMarkdownInline");
+  function protectBackslashEscapes(html, stash, shouldProtect = isAsciiPunctuation) {
+    let protectedHtml = "";
+    for (let index = 0; index < html.length; index++) {
+      const character = html[index];
+      const escaped = html[index + 1];
+      if (character === "\\" && escaped && shouldProtect(escaped)) {
+        protectedHtml += stash(escaped);
+        index++;
+      } else {
+        protectedHtml += character;
+      }
+    }
+    return protectedHtml;
+  }
+  __name(protectBackslashEscapes, "protectBackslashEscapes");
+  function isAsciiPunctuation(character) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint >= 33 && codePoint <= 47 || codePoint >= 58 && codePoint <= 64 || codePoint >= 91 && codePoint <= 96 || codePoint >= 123 && codePoint <= 126;
+  }
+  __name(isAsciiPunctuation, "isAsciiPunctuation");
 
   // src/supersession.ts
   function renderSupersessionSvg(laid, opts) {

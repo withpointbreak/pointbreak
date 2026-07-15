@@ -244,6 +244,10 @@ export interface RevisionListDoc extends DiagnosticDocument {
   eventSetHash: string;
 }
 
+export interface RevisionListOptions {
+  filter?: string;
+}
+
 export interface StoreStatusDoc extends DiagnosticDocument {
   schema: "pointbreak.store-status";
   version: 1;
@@ -274,15 +278,31 @@ export interface CaptureOptions {
   supersedes?: readonly string[];
 }
 
-export interface ObservationOptions {
+interface ObservationOptionsBase {
   revisionId: string;
   track: string;
   title: string;
-  file: string;
-  side: "old" | "new";
-  startLine: number;
-  endLine: number;
+  body?: string;
+  bodyContentType?: "text/plain" | "text/markdown";
 }
+
+export interface RevisionObservationOptions extends ObservationOptionsBase {
+  target: { kind: "revision" };
+}
+
+export interface RangeObservationOptions extends ObservationOptionsBase {
+  target: {
+    kind: "range";
+    file: string;
+    side: "old" | "new";
+    startLine: number;
+    endLine: number;
+  };
+}
+
+export type ObservationOptions =
+  | RevisionObservationOptions
+  | RangeObservationOptions;
 
 export interface IdentityWhoamiDoc extends DiagnosticDocument {
   schema: "pointbreak.identity-whoami";
@@ -502,10 +522,13 @@ export class PointbreakCli {
     );
   }
 
-  async revisionList(repo: string): Promise<RevisionListDoc> {
+  async revisionList(
+    repo: string,
+    options: RevisionListOptions = {},
+  ): Promise<RevisionListDoc> {
     return this.runDocument(
       repo,
-      ["revision", "list"],
+      revisionListArgs(options),
       "pointbreak.review-revision-list",
     );
   }
@@ -530,10 +553,12 @@ export class PointbreakCli {
     repo: string,
     options: ObservationOptions,
   ): Promise<ObservationAddDoc> {
+    const command = observationCommand(options);
     return this.runDocument(
       repo,
-      observationArgs(options),
+      command.args,
       "pointbreak.review-observation-add",
+      command.stdin,
     );
   }
 
@@ -699,8 +724,20 @@ export function captureArgs(opts: CaptureOptions): string[] {
   return args;
 }
 
+function revisionListArgs(options: RevisionListOptions): string[] {
+  const args = ["revision", "list"];
+  if (options.filter !== undefined) {
+    args.push(`--filter=${options.filter}`);
+  }
+  return args;
+}
+
 export function observationArgs(options: ObservationOptions): string[] {
-  return [
+  return observationCommand(options).args;
+}
+
+function observationCommand(options: ObservationOptions): CommandInput {
+  const args = [
     "observation",
     "add",
     "--exact-revision",
@@ -709,15 +746,26 @@ export function observationArgs(options: ObservationOptions): string[] {
     options.track,
     "--title",
     options.title,
-    "--file",
-    options.file,
-    "--side",
-    options.side,
-    "--start-line",
-    String(options.startLine),
-    "--end-line",
-    String(options.endLine),
   ];
+  if (options.body !== undefined) {
+    args.push("--body-stdin");
+  }
+  if (options.bodyContentType !== undefined) {
+    args.push("--body-content-type", options.bodyContentType);
+  }
+  if (options.target.kind === "range") {
+    args.push(
+      "--file",
+      options.target.file,
+      "--side",
+      options.target.side,
+      "--start-line",
+      String(options.target.startLine),
+      "--end-line",
+      String(options.target.endLine),
+    );
+  }
+  return { args, stdin: textBytes(options.body) };
 }
 
 function assessmentShowArgs(options: AssessmentShowOptions): string[] {

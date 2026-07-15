@@ -40,6 +40,7 @@ it("contributes the Review view and its commands", () => {
     "onCommand:pointbreak.respondInputRequest",
     "onCommand:pointbreak.assessAttention",
     "onCommand:pointbreak.captureAttentionResolution",
+    "onCommand:pointbreak.recordProblemsSnapshot",
   ]);
   expect(pkg.contributes.views.pointbreak).toContainEqual({
     id: "pointbreak.attention",
@@ -55,6 +56,7 @@ it("contributes the Review view and its commands", () => {
     "pointbreak.respondInputRequest",
     "pointbreak.assessAttention",
     "pointbreak.captureAttentionResolution",
+    "pointbreak.recordProblemsSnapshot",
   ]);
   expect(
     pkg.contributes.commands.find(
@@ -67,6 +69,11 @@ it("contributes the Review view and its commands", () => {
     command: "pointbreak.openInReview",
     when: "view == pointbreak.attention && (viewItem == pointbreak.revision || viewItem == pointbreak.attentionItem || viewItem == pointbreak.attention.inputRequest || viewItem == pointbreak.attention.assessment)",
     group: "navigation@2",
+  });
+  expect(pkg.contributes.menus["view/item/context"]).toContainEqual({
+    command: "pointbreak.recordProblemsSnapshot",
+    when: "view == pointbreak.attention && (viewItem == pointbreak.revision || viewItem == pointbreak.attention.inputRequest || viewItem == pointbreak.attention.assessment)",
+    group: "inline@2",
   });
   expect(pkg.contributes.menus["view/item/context"]).toContainEqual({
     command: "pointbreak.captureAttentionResolution",

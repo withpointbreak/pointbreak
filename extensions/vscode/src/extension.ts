@@ -12,6 +12,7 @@ import {
   OpenInSourceCommand,
   SourceReviewContextStore,
 } from "./commands/openInSource";
+import { runRecordProblemsSnapshotCommand } from "./commands/recordProblemsSnapshot";
 import { runRespondInputRequestCommand } from "./commands/respondInputRequest";
 import { InspectApiDiffDataSource } from "./diffDataSource";
 import { FreshnessCoordinator } from "./freshnessCoordinator";
@@ -159,6 +160,11 @@ export async function activate(context: ExtensionContext): Promise<void> {
           provider.findAttentionItem(targetKey, attentionId),
         routeAssessment: async (refreshedNode) =>
           commands.executeCommand("pointbreak.assessAttention", refreshedNode),
+      }),
+    ),
+    commands.registerCommand("pointbreak.recordProblemsSnapshot", (node) =>
+      runRecordProblemsSnapshotCommand(cli, resolutions, node, {
+        humanWrites,
       }),
     ),
   );

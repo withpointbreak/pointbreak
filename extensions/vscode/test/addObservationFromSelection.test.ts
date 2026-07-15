@@ -61,10 +61,13 @@ describe("runAddObservationFromSelectionCommand", () => {
       revisionId: "rev:sha256:one",
       track: "human:local",
       title: "Check this range",
-      file: "src/lib.rs",
-      side: "new",
-      startLine: 2,
-      endLine: 2,
+      target: {
+        kind: "range",
+        file: "src/lib.rs",
+        side: "new",
+        startLine: 2,
+        endLine: 2,
+      },
     });
     expect(dependencies.showInformationMessage).toHaveBeenCalledWith(
       "Observation recorded.",
@@ -201,7 +204,9 @@ describe("runAddObservationFromSelectionCommand", () => {
     expect(dependencies.confirmDrift).toHaveBeenCalledOnce();
     expect(cli.addObservation).toHaveBeenCalledWith(
       "/repo",
-      expect.objectContaining({ startLine: 2, endLine: 2 }),
+      expect.objectContaining({
+        target: expect.objectContaining({ startLine: 2, endLine: 2 }),
+      }),
     );
   });
 
