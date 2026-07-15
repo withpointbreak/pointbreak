@@ -195,6 +195,9 @@ it("uses typed exact-write documents, sanitized env, and stdin bytes", async () 
     revisionId: "rev:sha256:one",
     track: "human:local",
   });
+  await cli.showAssessments("/repo", {
+    revisionId: "rev:sha256:one",
+  });
   await cli.addAssessment("/repo", {
     revisionId: "rev:sha256:one",
     track: "human:local",
@@ -226,6 +229,14 @@ it("uses typed exact-write documents, sanitized env, and stdin bytes", async () 
       "rev:sha256:one",
       "--track",
       "human:local",
+      "--all",
+      "--include-summary",
+    ],
+    [
+      "assessment",
+      "show",
+      "--exact-revision",
+      "rev:sha256:one",
       "--all",
       "--include-summary",
     ],
@@ -269,6 +280,7 @@ it("uses typed exact-write documents, sanitized env, and stdin bytes", async () 
     ],
   ]);
   expect(calls.map(({ opts }) => bytes(opts.stdin))).toEqual([
+    undefined,
     undefined,
     undefined,
     undefined,

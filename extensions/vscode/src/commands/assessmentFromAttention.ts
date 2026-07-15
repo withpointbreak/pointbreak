@@ -10,6 +10,7 @@ import type {
   HumanWriteContext,
   HumanWriteCoordinator,
 } from "../humanWriteCoordinator";
+import { shortReferenceId } from "../idDisplay";
 
 type AssessmentAttentionItem = Extract<
   AttentionItemNode["item"],
@@ -23,6 +24,19 @@ interface AssessmentConfirmation extends HumanWriteContext {
   assessment: AssessmentValue;
   summary?: string;
   replacementIds: string[];
+  remainingCandidateIds: string[];
+  crossActorReplacementIds: string[];
+}
+
+export interface AssessmentReplacementCandidate {
+  view: AssessmentView;
+  preselected: boolean;
+}
+
+interface AssessmentPreparation {
+  replacementIds: string[];
+  remainingCandidateIds: string[];
+  crossActorReplacementIds: string[];
 }
 
 interface AssessmentFromAttentionDependencies {
@@ -35,7 +49,7 @@ interface AssessmentFromAttentionDependencies {
     assessment: AssessmentValue,
   ): Promise<string | undefined>;
   pickReplacements(
-    candidates: AssessmentView[],
+    candidates: AssessmentReplacementCandidate[],
   ): Promise<AssessmentView[] | undefined>;
   confirmAssessment(context: AssessmentConfirmation): Promise<boolean>;
   routeHeadResolution(node: AttentionItemNode): Promise<unknown>;
@@ -95,21 +109,30 @@ export async function runAssessmentFromAttentionCommand(
       trackOverride:
         item.kind === "failed_validation" ? item.trackId : undefined,
       prepare: async (context) => {
+        const includeEveryCurrentCandidate =
+          item.kind === "ambiguous_assessment";
         const document = await cli.showAssessments(node.folder.uri.fsPath, {
           revisionId,
-          track: context.track,
+          track: includeEveryCurrentCandidate ? undefined : context.track,
         });
-        const candidates = sameHumanRevisionCandidates(
+        const candidates = replacementCandidates(
           document,
           context,
           revisionId,
+          includeEveryCurrentCandidate,
         );
-        if (candidates.length <= 1) {
-          return { replacementIds: candidates.map(({ id }) => id) };
+        const preselected = candidates
+          .filter(({ preselected }) => preselected)
+          .map(({ view }) => view);
+        const requiresPicker =
+          preselected.length > 1 ||
+          candidates.some(({ preselected }) => !preselected);
+        if (!requiresPicker) {
+          return assessmentPreparation(candidates, preselected, context);
         }
         const selected = await dependencies.pickReplacements(candidates);
         return selected
-          ? { replacementIds: selected.map(({ id }) => id) }
+          ? assessmentPreparation(candidates, selected, context)
           : undefined;
       },
       confirm: (context, preparation) => {
@@ -120,6 +143,8 @@ export async function runAssessmentFromAttentionCommand(
           assessment,
           summary,
           replacementIds: preparation.replacementIds,
+          remainingCandidateIds: preparation.remainingCandidateIds,
+          crossActorReplacementIds: preparation.crossActorReplacementIds,
         });
       },
       write: (context, preparation) => {
@@ -150,14 +175,53 @@ export function sameHumanRevisionCandidates(
   context: HumanWriteContext,
   revisionId: string,
 ): AssessmentView[] {
-  return document.assessments.filter(
+  return replacementCandidates(document, context, revisionId, false).map(
+    ({ view }) => view,
+  );
+}
+
+export function replacementCandidates(
+  document: AssessmentShowDoc,
+  context: HumanWriteContext,
+  revisionId: string,
+  includeEveryCurrentCandidate: boolean,
+): AssessmentReplacementCandidate[] {
+  const current = document.assessments.filter(
     (candidate) =>
       candidate.status === "current" &&
-      candidate.trackId === context.track &&
-      candidate.writer.actorId === context.actorId &&
       candidate.target.kind === "revision" &&
       candidate.target.revisionId === revisionId,
   );
+  return current
+    .filter(
+      (candidate) =>
+        includeEveryCurrentCandidate ||
+        (candidate.trackId === context.track &&
+          candidate.writer.actorId === context.actorId),
+    )
+    .map((view) => ({
+      view,
+      preselected:
+        view.trackId === context.track &&
+        view.writer.actorId === context.actorId,
+    }));
+}
+
+function assessmentPreparation(
+  candidates: AssessmentReplacementCandidate[],
+  selected: AssessmentView[],
+  context: HumanWriteContext,
+): AssessmentPreparation {
+  const selectedIds = new Set(selected.map(({ id }) => id));
+  return {
+    replacementIds: [...selectedIds],
+    remainingCandidateIds: candidates
+      .map(({ view }) => view.id)
+      .filter((id) => !selectedIds.has(id)),
+    crossActorReplacementIds: selected
+      .filter(({ writer }) => writer.actorId !== context.actorId)
+      .map(({ id }) => id),
+  };
 }
 
 function isAssessmentItem(
@@ -208,37 +272,25 @@ function defaultDependencies(): AssessmentFromAttentionDependencies {
         placeHolder: "Leave blank to record without a summary",
       }),
     pickReplacements: async (candidates) => {
-      const choices = candidates.map((candidate) => ({
-        label: candidate.id,
-        description: candidate.assessment,
-        detail: candidate.createdAt,
-        candidate,
-        picked: true,
+      const choices = candidates.map(({ view, preselected }) => ({
+        label: shortReferenceId(view.id),
+        description: `${view.assessment} · ${view.trackId}`,
+        detail: [view.writer.actorId, view.createdAt]
+          .filter(Boolean)
+          .join(" · "),
+        candidate: view,
+        picked: preselected,
       }));
       return (
         await window.showQuickPick(choices, {
           canPickMany: true,
-          placeHolder: "Choose your earlier assessments to replace",
+          placeHolder: "Choose current assessments this judgment replaces",
         })
       )?.map(({ candidate }) => candidate);
     },
-    confirmAssessment: async ({
-      actorId,
-      track,
-      revisionId,
-      assessment,
-      summary,
-      replacementIds,
-    }) =>
+    confirmAssessment: async (context) =>
       (await window.showWarningMessage(
-        assessmentConfirmation({
-          actorId,
-          track,
-          revisionId,
-          assessment,
-          summary,
-          replacementIds,
-        }),
+        assessmentConfirmation(context),
         { modal: true },
         CONFIRM_ASSESSMENT_ACTION,
       )) === CONFIRM_ASSESSMENT_ACTION,
@@ -250,12 +302,24 @@ function defaultDependencies(): AssessmentFromAttentionDependencies {
   };
 }
 
-function assessmentConfirmation(context: AssessmentConfirmation): string {
+export function assessmentConfirmation(
+  context: AssessmentConfirmation,
+): string {
   const replacements = context.replacementIds.length
-    ? ` Replace ${context.replacementIds.join(", ")}.`
+    ? ` Replace ${context.replacementIds.map(shortReferenceId).join(", ")}.`
     : "";
   const summary = context.summary ? ` Summary: “${context.summary}”.` : "";
-  return `Record ${context.assessment} on ${context.revisionId} as ${context.actorId} in track ${context.track}.${summary}${replacements}`;
+  const crossActor = context.crossActorReplacementIds.length
+    ? ` This explicitly replaces ${assessmentCount(context.crossActorReplacementIds.length)} from another actor identity; replaced assessments remain in history.`
+    : "";
+  const remaining = context.remainingCandidateIds.length
+    ? ` ${assessmentCount(context.remainingCandidateIds.length)} will remain current and may keep this revision ambiguous.`
+    : "";
+  return `Record ${context.assessment} on ${shortReferenceId(context.revisionId)} as ${context.actorId} in track ${context.track}.${summary}${replacements}${crossActor}${remaining}`;
+}
+
+function assessmentCount(count: number): string {
+  return `${count} ${count === 1 ? "assessment" : "assessments"}`;
 }
 
 function errorMessage(error: unknown): string {

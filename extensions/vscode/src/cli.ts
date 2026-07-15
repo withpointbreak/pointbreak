@@ -338,7 +338,7 @@ export interface AssessmentAddDoc extends DiagnosticDocument {
 
 export interface AssessmentShowOptions {
   revisionId: string;
-  track: string;
+  track?: string;
 }
 
 export interface AssessmentAddOptions {
@@ -721,16 +721,12 @@ export function observationArgs(options: ObservationOptions): string[] {
 }
 
 function assessmentShowArgs(options: AssessmentShowOptions): string[] {
-  return [
-    "assessment",
-    "show",
-    "--exact-revision",
-    options.revisionId,
-    "--track",
-    options.track,
-    "--all",
-    "--include-summary",
-  ];
+  const args = ["assessment", "show", "--exact-revision", options.revisionId];
+  if (options.track !== undefined) {
+    args.push("--track", options.track);
+  }
+  args.push("--all", "--include-summary");
+  return args;
 }
 
 function assessmentAddCommand(options: AssessmentAddOptions): CommandInput {

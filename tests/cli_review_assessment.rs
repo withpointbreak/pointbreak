@@ -500,6 +500,82 @@ fn shore_review_assessment_add_records_related_facts_and_replacement() {
 }
 
 #[test]
+fn shore_review_assessment_add_diagnoses_cross_actor_replacement() {
+    let repo = support::dump_repo();
+    let repo_arg = repo.path().to_str().unwrap();
+    shore(["capture", "--repo", repo_arg]);
+
+    let first = parse_json(
+        &support::shore_env(
+            [
+                "assessment",
+                "add",
+                "--repo",
+                repo_arg,
+                "--track",
+                "agent:codex",
+                "--assessment",
+                "needs-changes",
+                "--summary",
+                "Fix this",
+            ],
+            &[("SHORE_ACTOR_ID", "actor:agent:codex")],
+        )
+        .stdout,
+    );
+    let second = support::shore_env(
+        [
+            "assessment",
+            "add",
+            "--repo",
+            repo_arg,
+            "--track",
+            "human:local",
+            "--assessment",
+            "accepted",
+            "--summary",
+            "Resolved after review",
+            "--replaces",
+            first["assessmentId"].as_str().unwrap(),
+        ],
+        &[("SHORE_ACTOR_ID", "actor:git-email:human@example.com")],
+    );
+    assert!(
+        second.status.success(),
+        "assessment add failed: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second = parse_json(&second.stdout);
+    let diagnostic = second["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "assessment_cross_actor_replacement")
+        .unwrap_or_else(|| panic!("expected cross-actor replacement diagnostic: {second}"));
+    let message = diagnostic["message"].as_str().unwrap();
+    for expected in [
+        first["assessmentId"].as_str().unwrap(),
+        "actor:agent:codex",
+        "actor:git-email:human@example.com",
+        "remain in history",
+    ] {
+        assert!(
+            message.contains(expected),
+            "diagnostic must contain {expected:?}:\n{message}"
+        );
+    }
+
+    let show = assessment_show(&repo, &["--all"]);
+    let replaced = show["assessments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|assessment| assessment["id"] == first["assessmentId"])
+        .unwrap();
+    assert_eq!(replaced["status"], "replaced");
+}
+
+#[test]
 fn shore_review_assessment_add_flags_competing_candidates_without_replaces() {
     let repo = support::dump_repo();
     let repo_arg = repo.path().to_str().unwrap();
@@ -565,8 +641,11 @@ fn shore_review_assessment_add_replacing_every_candidate_stays_quiet() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|diagnostic| diagnostic["code"] != "assessment_competing_candidates"),
-        "a full replacement must not flag competing candidates: {output}"
+            .all(|diagnostic| !matches!(
+                diagnostic["code"].as_str(),
+                Some("assessment_competing_candidates" | "assessment_cross_actor_replacement")
+            )),
+        "a same-actor full replacement must stay quiet: {output}"
     );
 }
 

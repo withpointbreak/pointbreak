@@ -9,6 +9,7 @@ import type {
   HumanWriteContext,
   HumanWriteCoordinator,
 } from "../humanWriteCoordinator";
+import { shortReferenceId } from "../idDisplay";
 import type { TargetResolution } from "../targetResolver";
 import { runCoordinatedCapture } from "./capture";
 
@@ -140,9 +141,9 @@ function resolutionHeads(item: AttentionItem): string[] | undefined {
 
 function defaultDependencies(): AttentionHeadResolutionDependencies {
   return {
-    confirmResolution: async ({ actorId, targetLabel, headRevisionIds }) =>
+    confirmResolution: async (context) =>
       (await window.showWarningMessage(
-        `Capture current work for ${targetLabel} as ${actorId}, superseding ${headRevisionIds.join(", ")}? Only a genuinely new content state can resolve this complete head set.`,
+        headResolutionConfirmation(context),
         { modal: true },
         CONFIRM_RESOLUTION_ACTION,
       )) === CONFIRM_RESOLUTION_ACTION,
@@ -153,6 +154,14 @@ function defaultDependencies(): AttentionHeadResolutionDependencies {
     showWarningMessage: async (message) => window.showWarningMessage(message),
     showErrorMessage: async (message) => window.showErrorMessage(message),
   };
+}
+
+export function headResolutionConfirmation({
+  actorId,
+  targetLabel,
+  headRevisionIds,
+}: ResolutionConfirmation): string {
+  return `Capture current work for ${targetLabel} as ${actorId}, superseding ${headRevisionIds.map(shortReferenceId).join(", ")}? Only a genuinely new content state can resolve this complete head set.`;
 }
 
 function resolutionErrorMessage(error: unknown): string {

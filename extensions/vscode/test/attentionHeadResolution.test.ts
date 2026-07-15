@@ -15,7 +15,10 @@ import {
   PointbreakCliError,
   type StaleAssessmentAttentionItem,
 } from "../src/cli";
-import { runAttentionHeadResolutionCommand } from "../src/commands/attentionHeadResolution";
+import {
+  headResolutionConfirmation,
+  runAttentionHeadResolutionCommand,
+} from "../src/commands/attentionHeadResolution";
 import { HumanWriteCoordinator } from "../src/humanWriteCoordinator";
 import type { TargetResolution } from "../src/targetResolver";
 import { workspaceFolder } from "./helpers/vscodeMock";
@@ -212,6 +215,24 @@ describe("runAttentionHeadResolutionCommand", () => {
     expect(harness.showErrorMessage).toHaveBeenCalledWith(
       expect.stringMatching(/no complete head set/i),
     );
+  });
+});
+
+describe("headResolutionConfirmation", () => {
+  it("uses the shared short-ID convention for every head", () => {
+    const message = headResolutionConfirmation({
+      actorId: "actor:human:kevin",
+      track: "human:local",
+      targetLabel: "Repo",
+      headRevisionIds: [
+        "rev:sha256:02aee825f4486a8e24485fe290717d28ce4d9a5bee2b3734db3311a1d48bda27",
+        "rev:sha256:3d4ccf96dce1f2dcae0d304aa363e4b92498fade8cdfbe1fea6cf92444cfd61f",
+      ],
+    });
+
+    expect(message).toContain("02aee825f448");
+    expect(message).toContain("3d4ccf96dce1");
+    expect(message).not.toContain("02aee825f4486a8e");
   });
 });
 

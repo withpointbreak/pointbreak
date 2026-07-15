@@ -258,6 +258,13 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
         &assessment_id,
         &replaces_assessment_ids,
     );
+    let cross_actor_replacement = cross_actor_replacement_diagnostic(
+        &validation_events,
+        &resolved.revision_id,
+        &assessment_id,
+        &writer.actor_id,
+        &replaces_assessment_ids,
+    );
     let source_key = options
         .idempotency_key
         .as_deref()
@@ -324,6 +331,7 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
 
     let mut diagnostics = state.diagnostics;
     diagnostics.extend(competing_candidates);
+    diagnostics.extend(cross_actor_replacement);
 
     let result = AssessmentAddResult {
         revision_id: resolved.revision_id,
@@ -349,6 +357,52 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
 /// already recorded when this is computed, and it decorates only the write's
 /// result document, never the store.
 pub const ASSESSMENT_COMPETING_CANDIDATES_CODE: &str = "assessment_competing_candidates";
+
+/// The advisory diagnostic emitted when an assessment explicitly replaces an
+/// assessment written by another actor. The relationship is allowed:
+/// the forward pointer records the new actor's intent, while the replaced
+/// assessment remains available in projected history.
+pub const ASSESSMENT_CROSS_ACTOR_REPLACEMENT_CODE: &str = "assessment_cross_actor_replacement";
+
+fn cross_actor_replacement_diagnostic(
+    events: &[ShoreEvent],
+    revision_id: &RevisionId,
+    new_assessment_id: &AssessmentId,
+    new_actor_id: &ActorId,
+    replaces_assessment_ids: &[AssessmentId],
+) -> Option<ProjectionDiagnostic> {
+    let Ok(mut by_revision) = collect_assessment_records_by_revision(events) else {
+        return None;
+    };
+    let records = by_revision.remove(revision_id).unwrap_or_default();
+    let replacements = replaces_assessment_ids
+        .iter()
+        .filter_map(|assessment_id| {
+            let record = records.get(assessment_id)?;
+            (record.event.writer.actor_id != *new_actor_id).then(|| {
+                format!(
+                    "{} by {}",
+                    assessment_id.as_str(),
+                    record.event.writer.actor_id.as_str()
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    if replacements.is_empty() {
+        return None;
+    }
+
+    Some(ProjectionDiagnostic {
+        code: ASSESSMENT_CROSS_ACTOR_REPLACEMENT_CODE.to_owned(),
+        message: format!(
+            "assessment {} by {} explicitly replaces assessment(s) by another actor on revision {}: {}; the replaced assessments remain in history",
+            new_assessment_id.as_str(),
+            new_actor_id.as_str(),
+            revision_id.as_str(),
+            replacements.join(", "),
+        ),
+    })
+}
 
 /// Advisory competing-candidates diagnostic for the add result, or `None` when
 /// this write leaves the revision with a single current assessment.

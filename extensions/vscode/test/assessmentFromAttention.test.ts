@@ -20,6 +20,7 @@ import type {
   StaleAssessmentAttentionItem,
 } from "../src/cli";
 import {
+  assessmentConfirmation,
   runAssessmentFromAttentionCommand,
   sameHumanRevisionCandidates,
 } from "../src/commands/assessmentFromAttention";
@@ -134,11 +135,45 @@ describe("runAssessmentFromAttentionCommand", () => {
     );
 
     expect(harness.pickReplacements).toHaveBeenCalledWith(
-      candidates.slice(0, 2),
+      candidates.map((view, index) => ({
+        view,
+        preselected: index < 2,
+      })),
     );
     expect(harness.addAssessment).toHaveBeenCalledWith(
       "/repo",
       expect.objectContaining({ replaces: ["assess:sha256:two"] }),
+    );
+  });
+
+  it("offers every current ambiguous candidate and replaces explicit cross-boundary selections", async () => {
+    const candidates = [
+      assessment("same-actor-other-track", "actor:human:kevin", "agent:codex"),
+      assessment("other-actor", "actor:human:other", "human:kevin"),
+      assessment("mine", "actor:human:kevin", "human:local"),
+    ];
+    const harness = commandHarness({ assessments: candidates });
+    harness.pickReplacements.mockResolvedValue(candidates);
+
+    await runAssessmentFromAttentionCommand(
+      harness.cli,
+      ambiguousNode(),
+      harness.dependencies,
+    );
+
+    expect(harness.showAssessments).toHaveBeenCalledWith("/repo", {
+      revisionId: "rev:sha256:one",
+    });
+    expect(harness.pickReplacements).toHaveBeenCalledWith([
+      { view: candidates[0], preselected: false },
+      { view: candidates[1], preselected: false },
+      { view: candidates[2], preselected: true },
+    ]);
+    expect(harness.addAssessment).toHaveBeenCalledWith(
+      "/repo",
+      expect.objectContaining({
+        replaces: candidates.map(({ id }) => id),
+      }),
     );
   });
 
@@ -186,7 +221,7 @@ describe("runAssessmentFromAttentionCommand", () => {
 
     expect(
       harness.showAssessments.mock.calls.map(([, options]) => options.track),
-    ).toEqual(["human:first", "human:second"]);
+    ).toEqual([undefined, undefined]);
     expect(harness.addAssessment).toHaveBeenCalledWith(
       "/repo",
       expect.objectContaining({
@@ -277,6 +312,31 @@ describe("runAssessmentFromAttentionCommand", () => {
   });
 });
 
+describe("assessmentConfirmation", () => {
+  it("uses short IDs and explains cross-actor and residual candidates", () => {
+    const message = assessmentConfirmation({
+      actorId: "actor:human:kevin",
+      track: "human:local",
+      revisionId:
+        "rev:sha256:99d4b77cc63d6d2a7f5891894323f2823434733bbd7734c177902b62a39b5e76",
+      assessment: "accepted",
+      replacementIds: [
+        "assess:sha256:c8f759637abc0100a42ff9c394b5e3f98d0cff1b1742ca83e6ab7a3ccaf65697",
+      ],
+      crossActorReplacementIds: [
+        "assess:sha256:c8f759637abc0100a42ff9c394b5e3f98d0cff1b1742ca83e6ab7a3ccaf65697",
+      ],
+      remainingCandidateIds: ["assess:sha256:ed3093833994"],
+    });
+
+    expect(message).toContain("99d4b77cc63d");
+    expect(message).toContain("c8f759637abc");
+    expect(message).not.toContain("99d4b77cc63d6d2a");
+    expect(message).toMatch(/another actor.*remain in history/i);
+    expect(message).toMatch(/1 assessment.*remain current.*ambiguous/i);
+  });
+});
+
 interface HarnessOptions {
   actors?: string[];
   tracks?: string[];
@@ -296,7 +356,7 @@ function commandHarness(options: HarnessOptions) {
     diagnostics: [],
   }));
   const showAssessments = vi.fn(
-    async (_repo: string, _values: { revisionId: string; track: string }) =>
+    async (_repo: string, _values: { revisionId: string; track?: string }) =>
       assessmentShow(options.assessments),
   );
   const addAssessment = vi.fn(
@@ -337,7 +397,10 @@ function commandHarness(options: HarnessOptions) {
   );
   const promptSummary = vi.fn(async () => "" as string | undefined);
   const pickReplacements = vi.fn(
-    async (candidates: AssessmentView[]) => candidates,
+    async (candidates: Array<{ view: AssessmentView; preselected: boolean }>) =>
+      candidates
+        .filter(({ preselected }) => preselected)
+        .map(({ view }) => view),
   );
   const confirmAssessment = vi.fn(
     async (_context: {
@@ -347,6 +410,8 @@ function commandHarness(options: HarnessOptions) {
       assessment: AssessmentValue;
       summary?: string;
       replacementIds: string[];
+      remainingCandidateIds: string[];
+      crossActorReplacementIds: string[];
     }) => true,
   );
   const routeHeadResolution = vi.fn(
