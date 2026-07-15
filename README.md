@@ -141,7 +141,7 @@ Architecture and model notes:
 Pointbreak Review is experimental and under active development. The published crate is `pointbreak`;
 the installed command stays `shore` because command names should remain short and practical.
 
-The current focus is a headless, durable review model first:
+The current focus is a headless, durable review model and the surfaces derived from it:
 
 - Git working-tree or commit-range (`--base`) capture into a revision
 - append-only local events under `.shore/data/events/`
@@ -166,5 +166,3 @@ This repository's source code is licensed under Apache-2.0. See [LICENSE](LICENS
 
 Pointbreak, Pointbreak Review, and the Pointbreak logo are trademarks of Kevin Swiber.
 Trademark rights are reserved; see [NOTICE](NOTICE) and [TRADEMARKS.md](TRADEMARKS.md).
-The private Pointbreak debugger codebase is not part of this Apache-2.0 repository unless
-it is separately published under its own license.
