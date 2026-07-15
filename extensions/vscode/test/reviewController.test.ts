@@ -98,6 +98,34 @@ describe("ReviewWebviewController", () => {
     expect(typing.defaultPrevented).toBe(false);
   });
 
+  it("leaves modified page keys for VS Code shortcuts", () => {
+    const controller = new ReviewWebviewController(requiredRoot(), {
+      getState: () => undefined,
+      setState: vi.fn(),
+    });
+    controller.render(renderData("rev:one"));
+
+    const shortcuts = [
+      ["Cmd-N", "n", { metaKey: true }],
+      ["Cmd-Shift-P", "p", { metaKey: true, shiftKey: true }],
+      ["Cmd-Shift-[", "[", { metaKey: true, shiftKey: true }],
+      ["Cmd-Shift-]", "]", { metaKey: true, shiftKey: true }],
+      ["Ctrl-N", "n", { ctrlKey: true }],
+      ["Alt-P", "p", { altKey: true }],
+      ["Shift-[", "[", { shiftKey: true }],
+    ] as const;
+    for (const [label, key, modifiers] of shortcuts) {
+      const observedByHost = vi.fn();
+      window.addEventListener("keydown", observedByHost);
+      const event = keydown(document.body, key, modifiers);
+      window.removeEventListener("keydown", observedByHost);
+
+      expect(event.defaultPrevented, label).toBe(false);
+      expect(observedByHost, label).toHaveBeenCalledOnce();
+      expect(document.querySelector(".review-current"), label).toBeNull();
+    }
+  });
+
   it.each([
     "Enter",
     " ",
@@ -236,11 +264,16 @@ function requiredRoot(): HTMLElement {
   return root;
 }
 
-function keydown(target: EventTarget, key: string): KeyboardEvent {
+function keydown(
+  target: EventTarget,
+  key: string,
+  modifiers: KeyboardEventInit = {},
+): KeyboardEvent {
   const event = new KeyboardEvent("keydown", {
     key,
     bubbles: true,
     cancelable: true,
+    ...modifiers,
   });
   target.dispatchEvent(event);
   return event;

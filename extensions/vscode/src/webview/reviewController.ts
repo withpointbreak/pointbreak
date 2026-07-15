@@ -180,6 +180,9 @@ export class ReviewWebviewController {
   }
 
   private onKeydown(event: KeyboardEvent): void {
+    if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
+      return;
+    }
     const target = event.target;
     if (target instanceof Element) {
       const header = target.closest<HTMLElement>(".dfile-head");
