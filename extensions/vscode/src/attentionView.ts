@@ -15,6 +15,7 @@ import type {
   PointbreakCli,
   RevisionListDoc,
 } from "./cli";
+import { newestRevisionEntries } from "./revisionOrder";
 import type { TargetResolution } from "./targetResolver";
 
 interface NodeBase {
@@ -363,7 +364,9 @@ function deriveTargetChildren(
       command: item.revisionId ? "pointbreak.openAnnotatedDiff" : undefined,
     }),
   );
-  const revisionChildren: RevisionItemNode[] = (revisions?.entries ?? [])
+  const revisionChildren: RevisionItemNode[] = newestRevisionEntries(
+    revisions?.entries ?? [],
+  )
     .slice(0, 5)
     .map((entry) => ({
       kind: "revision-item",
@@ -401,10 +404,12 @@ function attentionContextValue(item: AttentionItem): string | undefined {
   }
   if (
     item.kind === "ambiguous_assessment" ||
-    item.kind === "stale_assessment" ||
-    item.kind === "failed_validation"
+    item.kind === "stale_assessment"
   ) {
     return "pointbreak.attention.assessment";
+  }
+  if (item.kind === "failed_validation") {
+    return "pointbreak.attention.failedValidation";
   }
   if (item.kind === "competing_heads") {
     return "pointbreak.attention.headResolution";

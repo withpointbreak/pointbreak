@@ -14,6 +14,7 @@ import {
 } from "./commands/openInSource";
 import { runRecordProblemsSnapshotCommand } from "./commands/recordProblemsSnapshot";
 import { runRespondInputRequestCommand } from "./commands/respondInputRequest";
+import { runTaskAndRecordValidationCommand } from "./commands/runTaskAndRecordValidation";
 import { InspectApiDiffDataSource } from "./diffDataSource";
 import { FreshnessCoordinator } from "./freshnessCoordinator";
 import { HumanWriteCoordinator } from "./humanWriteCoordinator";
@@ -23,6 +24,7 @@ import { InspectConnectionStore } from "./inspectConnectionStore";
 import { Logger } from "./logger";
 import { ReviewPanelManager } from "./reviewPanel";
 import { resolveTargets } from "./targetResolver";
+import { TaskRunner } from "./taskRunner";
 
 let activeInspectManager: InspectChildManager | undefined;
 const SOURCE_CONTEXT_KEY = "pointbreak.hasSourceReviewContext";
@@ -104,6 +106,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
     refresh: () => freshness.refreshAfterWrite(),
     showRefreshError: async (message) => window.showWarningMessage(message),
   });
+  const taskRunner = new TaskRunner();
   context.subscriptions.push(
     provider,
     treeView,
@@ -112,6 +115,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
     openInSource,
     reviewPanel,
     freshness,
+    taskRunner,
     window.onDidChangeActiveTextEditor(() => {
       void updateSourceContext();
     }),
@@ -165,6 +169,14 @@ export async function activate(context: ExtensionContext): Promise<void> {
     commands.registerCommand("pointbreak.recordProblemsSnapshot", (node) =>
       runRecordProblemsSnapshotCommand(cli, resolutions, node, {
         humanWrites,
+      }),
+    ),
+    commands.registerCommand("pointbreak.runTaskAndRecordValidation", (node) =>
+      runTaskAndRecordValidationCommand(cli, resolutions, node, {
+        humanWrites,
+        taskRunner,
+        findAttentionItem: (targetKey, attentionId) =>
+          provider.findAttentionItem(targetKey, attentionId),
       }),
     ),
   );

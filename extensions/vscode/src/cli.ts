@@ -392,6 +392,7 @@ export interface InputRequestRespondOptions {
 }
 
 export type ValidationStatus = "passed" | "failed" | "errored" | "skipped";
+export type ValidationTrigger = "manual" | "push" | "pull-request";
 
 export interface ValidationAddDoc extends DiagnosticDocument {
   schema: "pointbreak.review-validation-add";
@@ -410,6 +411,10 @@ export interface ValidationAddOptions {
   checkName: string;
   status: ValidationStatus;
   command?: string;
+  exitCode?: number;
+  startedAt?: string;
+  completedAt?: string;
+  trigger?: ValidationTrigger;
   summary?: string;
 }
 
@@ -828,6 +833,18 @@ function validationAddCommand(options: ValidationAddOptions): CommandInput {
   ];
   if (options.command !== undefined) {
     args.push("--command", options.command);
+  }
+  if (options.exitCode !== undefined) {
+    args.push("--exit-code", String(options.exitCode));
+  }
+  if (options.startedAt !== undefined) {
+    args.push("--started-at", options.startedAt);
+  }
+  if (options.completedAt !== undefined) {
+    args.push("--completed-at", options.completedAt);
+  }
+  if (options.trigger !== undefined) {
+    args.push("--trigger", options.trigger);
   }
   if (options.summary !== undefined) {
     args.push("--summary-stdin");

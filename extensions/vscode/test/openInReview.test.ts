@@ -133,6 +133,33 @@ describe("probeReview", () => {
 });
 
 describe("runOpenInReviewCommand", () => {
+  it("offers every revision newest-first in the explicit picker", async () => {
+    const target = resolved();
+    const entries = Array.from({ length: 25 }, (_, index) => ({
+      revisionId: `rev:sha256:${String(index + 1).padStart(2, "0")}`,
+      mergeStatus: "open",
+      capturedAt: `2026-07-${String(index + 1).padStart(2, "0")}T00:00:00Z`,
+    }));
+    const pointbreak = {
+      revisionList: vi.fn(async () => ({ entries })),
+    } as unknown as PointbreakCli;
+    vscodeMocks.showQuickPick.mockImplementation(
+      async (items: readonly { revisionId: string }[]) => items[0],
+    );
+
+    await runOpenInReviewCommand(pointbreak, binary(), [target], undefined, {
+      pick: vi.fn(async () => target as never),
+      reviewUrl: "https://review.example.com",
+    });
+
+    const items = vscodeMocks.showQuickPick.mock.calls[0][0];
+    expect(items).toHaveLength(25);
+    expect(items[0]).toMatchObject({ revisionId: "rev:sha256:25" });
+    expect(vscodeMocks.openExternal).toHaveBeenCalledWith(
+      "https://review.example.com/#/revision/rev:sha256:25",
+    );
+  });
+
   it("opens a verified running text-web capability without starting another process", async () => {
     const probe = vi.fn(async () => MATCH);
     const start = vi.fn();

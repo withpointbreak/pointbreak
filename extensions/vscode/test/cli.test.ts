@@ -277,6 +277,10 @@ it("uses typed exact-write documents, sanitized env, and stdin bytes", async () 
     checkName: "vscode-task:npm:workspace:test",
     status: "passed",
     command: "npm test",
+    exitCode: 0,
+    startedAt: "2026-07-15T20:00:00.000Z",
+    completedAt: "2026-07-15T20:00:01.250Z",
+    trigger: "manual",
     summary: "The selected task passed.",
   });
 
@@ -337,6 +341,14 @@ it("uses typed exact-write documents, sanitized env, and stdin bytes", async () 
       "passed",
       "--command",
       "npm test",
+      "--exit-code",
+      "0",
+      "--started-at",
+      "2026-07-15T20:00:00.000Z",
+      "--completed-at",
+      "2026-07-15T20:00:01.250Z",
+      "--trigger",
+      "manual",
       "--summary-stdin",
     ],
   ]);

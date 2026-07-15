@@ -97,6 +97,38 @@ it("lets the explicit command choose a revision and focus the same panel", async
   );
 });
 
+it("offers every revision newest-first in the explicit picker", async () => {
+  const open = vi.fn();
+  const target = resolution();
+  const entries = Array.from({ length: 25 }, (_, index) => ({
+    revisionId: `rev:sha256:${String(index + 1).padStart(2, "0")}`,
+    mergeStatus: "open",
+    capturedAt: `2026-07-${String(index + 1).padStart(2, "0")}T00:00:00Z`,
+  }));
+  const cli = {
+    revisionList: vi.fn(async () => ({ entries })),
+  } as unknown as PointbreakCli;
+  vscodeMocks.showQuickPick.mockImplementation(
+    async (items: readonly { revisionId: string }[]) => items[0],
+  );
+
+  await runOpenAnnotatedDiffCommand(
+    cli,
+    [target],
+    { open } as unknown as ReviewPanelManager,
+    undefined,
+    { pick: vi.fn(async () => target) },
+  );
+
+  const items = vscodeMocks.showQuickPick.mock.calls[0][0];
+  expect(items).toHaveLength(25);
+  expect(items[0]).toMatchObject({ revisionId: "rev:sha256:25" });
+  expect(open).toHaveBeenCalledWith(
+    { resolution: target, revisionId: "rev:sha256:25" },
+    { preserveFocus: false },
+  );
+});
+
 function resolution(): ResolvedTargetResolution {
   return {
     kind: "resolved",

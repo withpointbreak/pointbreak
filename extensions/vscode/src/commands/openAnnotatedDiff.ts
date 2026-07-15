@@ -2,6 +2,7 @@ import { window } from "vscode";
 import type { AttentionItemNode, RevisionItemNode } from "../attentionView";
 import type { PointbreakCli } from "../cli";
 import type { ReviewPanelManager } from "../reviewPanel";
+import { newestRevisionEntries } from "../revisionOrder";
 import {
   pickFolder,
   type ResolvedTargetResolution,
@@ -81,7 +82,7 @@ async function pickLocation(
   if (!resolution) return undefined;
   try {
     const revisions = await cli.revisionList(resolution.folder.uri.fsPath);
-    const items = revisions.entries.slice(0, 20).map((entry) => ({
+    const items = newestRevisionEntries(revisions.entries).map((entry) => ({
       label: shortRevisionId(entry.revisionId),
       description: entry.mergeStatus,
       detail: entry.capturedAt,

@@ -166,6 +166,38 @@ describe("deriveTree", () => {
     ]);
   });
 
+  it("shows only the five newest captures in Recent revisions", () => {
+    const entries = Array.from({ length: 7 }, (_, index) => ({
+      revisionId: `rev:sha256:${index + 1}`,
+      mergeStatus: "open",
+      capturedAt: `2026-07-${String(index + 1).padStart(2, "0")}T00:00:00Z`,
+    }));
+    const nodes = deriveTree(
+      [resolved("/a", "a")],
+      new Map([["a", attention("A")]]),
+      new Map([
+        [
+          "a",
+          {
+            ...revisions(),
+            entries,
+            revisionCount: entries.length,
+            eventCount: entries.length,
+          },
+        ],
+      ]),
+    );
+    const section = nodes.find((node) => node.kind === "revisions-section");
+
+    expect(section?.children.map(({ revisionId }) => revisionId)).toEqual([
+      "rev:sha256:7",
+      "rev:sha256:6",
+      "rev:sha256:5",
+      "rev:sha256:4",
+      "rev:sha256:3",
+    ]);
+  });
+
   it("retains typed input-request details and exposes only their response action", () => {
     const openRequest = {
       ...attentionItem("open", "open_input_request"),
@@ -256,7 +288,7 @@ describe("deriveTree", () => {
     ).toEqual([
       "pointbreak.attention.assessment",
       "pointbreak.attention.assessment",
-      "pointbreak.attention.assessment",
+      "pointbreak.attention.failedValidation",
     ]);
     provider.dispose();
   });

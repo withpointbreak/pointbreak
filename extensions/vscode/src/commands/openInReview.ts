@@ -19,6 +19,7 @@ import {
   startReviewTerminal,
   stopReviewTerminal,
 } from "../reviewTerminal";
+import { newestRevisionEntries } from "../revisionOrder";
 import { pickFolder, type TargetResolution } from "../targetResolver";
 
 const RETRY_ATTEMPTS = 10;
@@ -315,7 +316,7 @@ async function pickRevision(
   }
   try {
     const revisions = await cli.revisionList(resolution.folder.uri.fsPath);
-    const items = revisions.entries.slice(0, 20).map((entry) => ({
+    const items = newestRevisionEntries(revisions.entries).map((entry) => ({
       label: shortRevisionId(entry.revisionId),
       description: entry.mergeStatus,
       detail: entry.capturedAt,

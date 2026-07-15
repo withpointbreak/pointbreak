@@ -46,6 +46,9 @@ vi.mock("../src/commands/addObservationFromSelection", () => ({
 vi.mock("../src/commands/recordProblemsSnapshot", () => ({
   runRecordProblemsSnapshotCommand: vi.fn(),
 }));
+vi.mock("../src/commands/runTaskAndRecordValidation", () => ({
+  runTaskAndRecordValidationCommand: vi.fn(),
+}));
 vi.mock("../src/commands/openAnnotatedDiff", () => ({
   runOpenAnnotatedDiffCommand: vi.fn(),
 }));
@@ -97,6 +100,12 @@ vi.mock("../src/reviewPanel", () => ({
 }));
 vi.mock("../src/targetResolver", () => ({
   resolveTargets: vi.fn(async () => []),
+}));
+vi.mock("../src/taskRunner", () => ({
+  TaskRunner: class {
+    dispose = vi.fn();
+    run = vi.fn();
+  },
 }));
 
 import { activate } from "../src/extension";

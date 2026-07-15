@@ -33,6 +33,7 @@ it("keeps command runtime modules bundled into the existing host artifact", () =
   );
   expect(packageScript).not.toContain("problemsSnapshot.js");
   expect(packageScript).not.toContain("recordProblemsSnapshot.js");
+  expect(packageScript).not.toContain("runTaskAndRecordValidation.js");
 });
 
 it("excludes source and local-only build inputs from the VSIX", () => {
