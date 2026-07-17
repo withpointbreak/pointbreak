@@ -53,40 +53,28 @@ platforms, manual downloads, and checksum verification.
 
 ## Quick Start
 
-Start with the first-review walkthrough:
-
-- [docs/getting-started.md](docs/getting-started.md)
-
-The short path is:
+Make a real change in a Git repository — modify a tracked file — then capture it with a useful
+summary and open Review:
 
 ```bash
 cd path/to/git-worktree
 pointbreak capture --summary "Explain the fallback behavior"
-pointbreak revision show --format json-pretty
-```
-
-Then record what you learn:
-
-```bash
-pointbreak observation add --track human:local --title "Check error handling"
-pointbreak input-request open --track human:local --title "Need decision" \
-  --reason manual-decision-required --mode advisory
-pointbreak assessment add --track human:local --assessment needs-clarification \
-  --summary "Small change, but one decision is still open."
-```
-
-In a real collaboration each actor records on its own track — the coding agent that authored the
-change (`agent:codex`), a reviewer that is a human or another agent, and you (`human:local`) — so
-every fact stays attributed to whoever asserted it. See
-[the review workflow](docs/review-workflow.md) and
-[agent authoring handoffs](docs/agent-authoring.md) for how the author and reviewer hand off.
-
-Or browse the whole store visually — event timeline, per-revision pages, and annotated diffs — in
-a local web UI:
-
-```bash
 pointbreak inspect --open
 ```
+
+Review is a local, read-only view of the durable record: the captured diff, every fact on its
+author's track, and the current call. A review moves through five stages —
+`Work -> Claims -> Evidence -> Questions -> Call` — owned by the existing `capture`/`revision`/
+`inspect`, `observation`, `validation`, `input-request`, and `assessment` command families.
+
+Continue with the complete paired author/reviewer loop — claims, validation evidence, questions,
+the call, and landing the commit on the same revision — in
+[docs/getting-started.md](docs/getting-started.md).
+
+In a real collaboration each actor records on its own track — the coding agent that authored the
+change, a reviewer that is a human or another agent, and you — so every fact stays attributed to
+whoever asserted it. See [the review workflow](docs/review-workflow.md) and
+[agent authoring handoffs](docs/agent-authoring.md) for how the author and reviewer hand off.
 
 Repository config lives in `.pointbreak/`. Review facts normally live in the Git common directory's
 `pointbreak/` store, shared by every linked worktree; an ephemeral worktree uses `.pointbreak/data/`.
@@ -117,8 +105,8 @@ For users:
 - [Getting started](docs/getting-started.md) - first local review from a scratch Git repository.
 - [Installation](docs/installation.md) - installers, releases, supported platforms, and checksums.
 - [CLI reference](docs/cli-reference.md) - commands, options, output JSON, and V1 boundaries.
-- [Review workflow](docs/review-workflow.md) - when to use capture, observations, input requests,
-  assessments, history, and revision show.
+- [Review workflow](docs/review-workflow.md) - the five review stages, the author and reviewer
+  roles, and when to reach for each command family.
 - [Agent authoring handoffs](docs/agent-authoring.md) - how a coding agent captures a durable
   handoff record before declaring implementation work done.
 - [Agent skills](skills/README.md) - install the portable Pointbreak author-handoff skill.

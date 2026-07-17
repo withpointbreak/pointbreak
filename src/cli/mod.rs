@@ -37,13 +37,51 @@ mod help_hygiene_guard;
 mod help_vocab_guard;
 #[cfg(test)]
 mod reference_coverage;
+#[cfg(test)]
+mod workflow_help_guard;
+
+/// The root `--help` narrative: the five-stage review model over the existing
+/// flattened families, the short first-review path, and direct recovery
+/// pointers. Narrative only — it adds no command, alias, flag, or default, and
+/// `workflow_help_guard` pins both the rendered content and that boundary.
+const ROOT_LONG_ABOUT: &str = "\
+Durable, local-first review record for code changes that humans and coding \
+agents build together.
+
+A review moves through five stages: Work -> Claims -> Evidence -> Questions -> Call.
+
+  Work — what changed: capture, revision, inspect
+  Claims — what an author or reviewer asserts: observation
+  Evidence — what was checked: validation
+  Questions — what still needs judgment: input-request
+  Call — the current assessment: assessment
+
+Across the stages, attention lists the outstanding judgment, and association
+records where the reviewed work landed.
+
+First review, from a real tracked change in a Git repository:
+
+  pointbreak capture --summary \"<what changed>\"
+  pointbreak inspect --open
+
+That opens the local, read-only Review. The Getting Started guide continues
+with the complete paired author/reviewer loop:
+https://github.com/withpointbreak/pointbreak/blob/main/docs/getting-started.md
+
+Recovery:
+  wrong repository or store    pointbreak store paths --repo <repo> --format text
+  more than one revision       pointbreak revision list, then pass --revision <id>
+  replace an earlier call      pointbreak assessment add --replaces <assessment-id>
+  commit landed after capture  pointbreak association record --commit <oid>
+                               (same revision — a landing is never a recapture)";
 
 #[derive(Debug, Parser)]
 #[command(
     name = "pointbreak",
     bin_name = "pointbreak",
     version,
-    about = "Inspect review streams"
+    about = "Durable, local-first review record for code changes",
+    long_about = ROOT_LONG_ABOUT
 )]
 struct Cli {
     #[command(flatten)]
@@ -55,20 +93,30 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Record and read the current review call (the Call stage)
     Assessment(Box<assessment::AssessmentArgs>),
+    /// Record where reviewed work landed: commit and ref associations on the same revision
     Association(Box<association::AssociationArgs>),
+    /// List what still needs an actor's judgment across the review record
     Attention(attention::AttentionArgs),
     Capture(capture::CaptureArgs),
     Diff(diff::DiffArgs),
     Endorse(endorse::EndorseArgs),
     History(history::HistoryArgs),
+    /// Inspect actor identity, delegation, and attestations
     Identity(identity::IdentityArgs),
+    /// Open, read, and respond to durable review questions (the Questions stage)
     InputRequest(Box<input_request::InputRequestArgs>),
     Inspect(inspect::InspectArgs),
+    /// Manage signing keys, enrollment, and trust staging
     Key(key::KeyArgs),
+    /// Record and read review claims (the Claims stage)
     Observation(Box<observation::ObservationArgs>),
+    /// List and show captured revisions (the Work stage)
     Revision(revision::RevisionArgs),
+    /// Inspect and manage the resolved Pointbreak store
     Store(store::StoreArgs),
+    /// Record and read validation evidence (the Evidence stage)
     Validation(validation::ValidationArgs),
     Version(version::VersionArgs),
 }

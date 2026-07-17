@@ -1,10 +1,47 @@
 # Review Workflow
 
-This document describes the intended end-to-end workflow for reviewing a
-tool-assisted change with Pointbreak today. Command reference details live in the
-`README.md`; this is the narrative version that explains *when* to run each
-command and *why*. If the change was authored by a coding agent, start with
+This document explains how to interpret a Pointbreak review: the five stages every review moves
+through, the roles that write into it, and when to reach for each command family. The canonical
+executable journey — install to first Review to the complete paired author/reviewer loop — lives in
+[getting-started.md](getting-started.md); command reference details live in
+[cli-reference.md](cli-reference.md). If the change was authored by a coding agent, start with
 [Agent authoring handoffs](agent-authoring.md) for the capture-at-end-of-work loop.
+
+## The five stages
+
+Every review answers five questions, in this order:
+`Work -> Claims -> Evidence -> Questions -> Call`. Each stage is owned by one existing flattened
+command family:
+
+| Stage | The question it answers | Command family |
+| --- | --- | --- |
+| Work | What changed? | `capture`, `revision`, `inspect` |
+| Claims | What does an author or reviewer assert? | `observation` |
+| Evidence | What was checked? | `validation` |
+| Questions | What still needs judgment? | `input-request` |
+| Call | What is the current assessment? | `assessment` |
+
+Two supporting nouns complete the picture: `attention` lists the outstanding judgment across
+stages, and `association` records where the reviewed work landed. Review — the local web surface
+opened by `pointbreak inspect --open` — is read-only and advisory: it renders the durable record
+and never executes commands or writes to the store.
+
+### Roles
+
+Two review lanes do the work, and a human owns the outcome:
+
+- **Author handoff** — the actor that made the change captures it and records claims, real
+  validation evidence, and genuine open questions. Packaged for coding agents as the
+  `pointbreak-author` skill.
+- **Reviewer pass** — a second actor reads before writing, records its own findings and checks on
+  its own track, asks questions, and makes exactly one current call. Packaged as
+  `pointbreak-reviewer`.
+- **Author response** — the author answers reviewer questions where they were asked, fixes what an
+  actionable call requires, and records response context. It never assesses its own work. Packaged
+  as `pointbreak-author-response`.
+
+The roles describe review lanes, not headcount: one human can play all three, or two agents can
+pair while a human reads the record and owns the decision.
 
 ## What Pointbreak reviews
 
@@ -34,14 +71,17 @@ the **competing heads** are surfaced rather than one silently winning.
 ## The workflow at a glance
 
 1. Start from a Git worktree containing the change you want to review.
-2. Capture a revision with `pointbreak capture`.
-3. Inspect what was captured with `pointbreak revision show` and
-   `pointbreak history`.
-4. Record review facts as you read the diff:
-   - **Observations** are notes you want preserved.
+2. Capture a revision with `pointbreak capture --summary`.
+3. Open Review with `pointbreak inspect --open`, or use the scriptable reads
+   (`pointbreak revision show`, `pointbreak history`).
+4. Record review facts as the review moves through the stages:
+   - **Observations** are the claims an author or reviewer wants preserved.
+   - **Validation checks** are evidence that a command actually ran.
    - **Input requests** are durable pause/decision requests for someone else.
    - **Assessments** are the current review call for the revision (or for a
      file, range, or specific fact within it).
+5. When the reviewed content lands as a commit, associate that commit with the
+   same revision.
 
 The rest of this document walks through each step.
 
@@ -322,6 +362,29 @@ Bodies may come from `--body`, `--body-file`, or `--body-stdin`. Large bodies
 are stored as Pointbreak-owned content-addressed artifacts; command output never
 exposes those paths.
 
+### Validation evidence
+
+A validation check records that a command actually ran against the captured content and what it
+reported. It is evidence, not a verdict: it never accepts, rejects, merges, blocks, or replaces the
+reviewer's assessment, and a green check does not close a review.
+
+```bash
+git diff --check
+pointbreak validation add \
+  --track agent:codex \
+  --check-name "git diff --check" \
+  --status passed \
+  --command "git diff --check" \
+  --exit-code 0 \
+  --summary "The captured tracked change has no whitespace errors."
+
+pointbreak validation list --include-body
+```
+
+Record only checks that actually ran; a deliberately skipped check is recorded as `skipped` with a
+summary that says why. Validation checks target the whole revision — when the reasoning around a
+check belongs to a specific file or range, record that as a separate anchored observation.
+
 ### Input requests
 
 An input request is a durable pause/decision request. Use it when a reviewer
@@ -378,8 +441,11 @@ pointbreak assessment show --all --include-summary
 ```
 
 `--replaces` is the only V1 relationship that removes an older assessment
-from the current set. An `accepted-with-follow-up` recorded while no input
-request is open on the revision carries an advisory
+from the current set. Replacement is never implicit — even for the same actor,
+a revised call must name the assessment it retires, and two unreplaced
+assessments read as competing candidates that surface as an
+`ambiguous_assessment` attention item. An `accepted-with-follow-up` recorded
+while no input request is open on the revision carries an advisory
 `assessment_unlinked_follow_up` diagnostic: the label alone creates no durable
 actionable state, so open the follow-up as an advisory input request unless
 the label is deliberately prose-only.
@@ -430,6 +496,22 @@ never a fact about the queue (ADR-0019's judgment-subsumption amendment):
   waiting for.
 - `competing_heads` — consolidate the fork with a capture that supersedes
   the competing heads.
+
+### Landing: commit association
+
+When the reviewed content lands as a commit, record the landing on the same revision:
+
+```bash
+pointbreak association record --track agent:codex --commit <oid>
+pointbreak association list --axis commit --current
+```
+
+A landed commit is an association on the existing revision — unchanged reviewed content is
+never a recapture and never a supersession, even when the commit lands after the assessment.
+Successive
+commits landing more of the same reviewed work accrete on one revision; that multi-pass shape is
+expected. Capture with `--supersedes` only when a genuinely new content state replaces the reviewed
+one. `pointbreak association withdraw <association-id>` retires a wrongly recorded edge.
 
 ## 5. Concepts you need to know
 
@@ -510,73 +592,13 @@ In particular:
 - Do not depend on artifact paths or the internal shape of
   `state.json`.
 
-## 6. A small realistic walkthrough
+## 6. The canonical walkthrough
 
-The block below captures the typical sequence: confirm the change, capture
-the revision, inspect it, record a couple of observations, open an
-input request, respond to it, and land an assessment.
+The end-to-end transcript — install to capture to Review, the complete paired author/reviewer
+loop, and the same-revision landing — lives in [getting-started.md](getting-started.md). This
+document stays the interpretation layer; when the two disagree, the walkthrough and its executable
+contract are authoritative.
 
-```bash
-# 0. Confirm the worktree has the changes you want to review.
-cd ~/src/myproject
-git status
-
-# 1. Capture a revision. This freezes the current diff as a snapshot.
-#    `pointbreak capture` emits compact JSON only; pipe through jq if you
-#    want to read it.
-pointbreak capture | jq .
-
-# 2. Read the captured revision (composite view, narrative + snapshot).
-pointbreak revision show --format json-pretty | less
-
-# 3. Record observations as you read the diff.
-pointbreak observation add \
-  --track agent:codex \
-  --title "Check error handling near IO boundary" \
-  --file src/io.rs --start-line 88 --end-line 104 \
-  --body "The new branch swallows io::ErrorKind::Interrupted silently."
-
-pointbreak observation add \
-  --track human:kevin \
-  --title "Unit test for the new retry path" \
-  --file src/io.rs --start-line 120 --end-line 135
-
-pointbreak observation list --format json-pretty
-
-# 4. Open an input request when you need a decision from someone else.
-pointbreak input-request open \
-  --track human:kevin \
-  --title "Approve schema migration before landing" \
-  --reason manual-decision-required \
-  --file db/migrations/0042_users.sql
-
-# Someone reads the open queue and responds to it.
-pointbreak input-request list --status open
-pointbreak input-request respond <input-request-id> \
-  --outcome approved \
-  --reason "verified backfill plan with on-call DBA"
-
-# 5. Record the final assessment for the revision. A follow-up worth acting on
-#    is opened as an advisory input request first, so it stands as durable,
-#    answerable state — the label alone creates no Attention item, and an
-#    accepted-with-follow-up recorded with no open input request on the
-#    revision carries an `assessment_unlinked_follow_up` advisory diagnostic.
-pointbreak input-request open \
-  --track human:kevin \
-  --title "Add the retry-path unit test" \
-  --reason manual-decision-required \
-  --mode advisory \
-  --body "Shipping without it; the retry path still needs direct coverage."
-pointbreak assessment add \
-  --track human:kevin \
-  --assessment accepted-with-follow-up \
-  --summary "ship it; the open request carries the retry-path follow-up"
-
-# 6. Verify the durable record.
-pointbreak assessment show --format json-pretty
-pointbreak history --format json-pretty | less
-```
-
-That is the full V1 workflow. Anything beyond it — notifications, daemons,
-multi-writer coordination, automatic delivery — is intentionally out of
-scope and will be addressed by future, separately-designed subsystems.
+Anything beyond this workflow — notifications, daemons, multi-writer coordination, automatic
+delivery — is intentionally out of scope and will be addressed by future, separately-designed
+subsystems.

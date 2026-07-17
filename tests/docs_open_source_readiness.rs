@@ -237,6 +237,163 @@ fn getting_started_starts_after_supported_install_and_reaches_a_real_first_revie
 }
 
 #[test]
+fn readme_routes_the_supported_install_into_first_review() {
+    let readme = std::fs::read_to_string("README.md").expect("read README");
+
+    // The public entry: supported installer, then a real change captured with a
+    // useful summary, then Review, then the canonical Getting Started journey.
+    assert_ordered_doc_anchors(
+        &readme,
+        &[
+            "curl -fsSL",
+            "pointbreak capture --summary",
+            "pointbreak inspect --open",
+            "docs/getting-started.md",
+        ],
+    );
+    assert!(
+        readme.contains("Work -> Claims -> Evidence -> Questions -> Call"),
+        "README names the five review stages in order"
+    );
+
+    // The quick start pays off in Review, not in a JSON dump.
+    assert!(
+        !readme.contains("--format json-pretty"),
+        "README's short path must not lead with a JSON-first payoff"
+    );
+    assert!(
+        !readme.contains("pointbreak revision show"),
+        "README routes comprehension through Review and Getting Started"
+    );
+}
+
+#[test]
+fn installation_continues_from_verification_into_first_review() {
+    let installation =
+        std::fs::read_to_string("docs/installation.md").expect("read installation guide");
+
+    // After version/PATH verification the guide continues straight into the
+    // first Review instead of restarting setup.
+    assert_ordered_doc_anchors(
+        &installation,
+        &[
+            "pointbreak --version",
+            "pointbreak capture --summary",
+            "pointbreak inspect --open",
+            "getting-started.md",
+        ],
+    );
+
+    // The frozen v0.7 cutover history stays intact.
+    assert!(
+        installation.contains("## Upgrading to 0.7.0"),
+        "installation keeps the frozen cutover history"
+    );
+    assert!(
+        installation.contains("hard cutover"),
+        "installation keeps the cutover framing"
+    );
+}
+
+#[test]
+fn review_workflow_explains_stages_roles_and_recovery() {
+    let workflow =
+        std::fs::read_to_string("docs/review-workflow.md").expect("read review workflow");
+
+    // The five stages, in their exact order, each owned by a command family.
+    assert!(
+        workflow.contains("Work -> Claims -> Evidence -> Questions -> Call"),
+        "review workflow names the five stages in order"
+    );
+    assert_ordered_doc_anchors(
+        &workflow,
+        &[
+            "| Work |",
+            "| Claims |",
+            "| Evidence |",
+            "| Questions |",
+            "| Call |",
+        ],
+    );
+
+    // The three primary workflow roles, by name.
+    for role in [
+        "pointbreak-author",
+        "pointbreak-reviewer",
+        "pointbreak-author-response",
+    ] {
+        assert!(
+            workflow.contains(role),
+            "review workflow names the workflow role {role}"
+        );
+    }
+
+    // Validation is evidence, never the call; replacement and follow-up carry
+    // the recovery path; landing associates the same revision.
+    assert!(
+        workflow.contains("evidence, not a verdict"),
+        "review workflow separates validation evidence from the assessment"
+    );
+    assert!(
+        workflow.contains("--replaces"),
+        "review workflow teaches assessment replacement"
+    );
+    assert!(
+        workflow.contains("pointbreak association record"),
+        "review workflow covers commit association"
+    );
+    assert!(
+        workflow.contains("same revision") && workflow.contains("never a recapture"),
+        "review workflow states the same-revision landing rule"
+    );
+    assert!(
+        workflow.contains("read-only"),
+        "review workflow presents Review as a local, read-only advisory surface"
+    );
+
+    // Interpretation, not a second transcript authority: route to the
+    // canonical journey instead of duplicating it.
+    assert!(
+        workflow.contains("getting-started.md"),
+        "review workflow routes to the canonical Getting Started journey"
+    );
+    assert!(
+        !workflow.contains("# 0. Confirm the worktree"),
+        "review workflow no longer duplicates a full walkthrough transcript"
+    );
+}
+
+#[test]
+fn public_entry_docs_carry_no_private_coordination_vocabulary() {
+    for path in [
+        "README.md",
+        "docs/installation.md",
+        "docs/review-workflow.md",
+    ] {
+        let text = std::fs::read_to_string(path).expect("read public entry doc");
+        for private in ["Candidate 3", "Candidate 5", "GAP-0", ".gumbo"] {
+            assert!(
+                !text.contains(private),
+                "{path} leaks private coordination vocabulary: {private}"
+            );
+        }
+    }
+}
+
+#[track_caller]
+fn assert_ordered_doc_anchors(text: &str, anchors: &[&str]) {
+    let mut last_index = 0;
+    let mut last_anchor = "start of document";
+    for anchor in anchors {
+        let found = text[last_index..]
+            .find(anchor)
+            .unwrap_or_else(|| panic!("missing anchor {anchor:?} after {last_anchor:?}"));
+        last_index += found + anchor.len();
+        last_anchor = anchor;
+    }
+}
+
+#[test]
 fn contributor_docs_cover_local_development_flow() {
     let contributing = std::fs::read_to_string("CONTRIBUTING.md").expect("read contributing");
 

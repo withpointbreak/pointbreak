@@ -57,6 +57,21 @@ $Install = [scriptblock]::Create((irm https://raw.githubusercontent.com/withpoin
 & $Install -Version v0.7.0 -InstallDir "$HOME\bin" -NoModifyPath
 ```
 
+## Your first Review
+
+Once `pointbreak --version` reports the installed release, go straight to a first useful Review:
+make a real change to a tracked file in one of your repositories, capture it with a useful summary,
+and open Review:
+
+```sh
+pointbreak capture --summary "<what changed>"
+pointbreak inspect --open
+```
+
+[Getting started](getting-started.md) continues from here through the complete paired
+author/reviewer loop. The sections below cover installer options, checksum verification, supported
+platforms, and manual downloads; return to them when you need them.
+
 ## Checksum verification
 
 Verification is on by default and fails closed. The installer stops without replacing `pointbreak` if:

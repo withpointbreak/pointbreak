@@ -83,6 +83,37 @@ fn write_acks_accept_format_json() {
 }
 
 #[test]
+fn json_stays_the_machine_document_default() {
+    // The onboarding surfaces route humans through Review, but the flag-less
+    // machine contract is unchanged: reads and write acks default to compact
+    // JSON documents.
+    let repo = support::dump_repo();
+    let path = repo.path().to_str().unwrap();
+
+    let capture = support::pointbreak(["capture", "--repo", path]);
+    assert!(capture.status.success());
+    let capture_stdout = String::from_utf8_lossy(&capture.stdout);
+    let capture_doc: serde_json::Value =
+        serde_json::from_slice(&capture.stdout).expect("flag-less capture emits JSON");
+    assert_eq!(capture_doc["schema"], "pointbreak.review-capture");
+    assert!(
+        capture_stdout.starts_with("{\""),
+        "flag-less capture stays compact JSON: {capture_stdout}"
+    );
+
+    let history = support::pointbreak(["history", "--repo", path]);
+    assert!(history.status.success());
+    let history_stdout = String::from_utf8_lossy(&history.stdout);
+    let history_doc: serde_json::Value =
+        serde_json::from_slice(&history.stdout).expect("flag-less history emits JSON");
+    assert_eq!(history_doc["schema"], "pointbreak.review-history");
+    assert!(
+        history_stdout.starts_with("{\""),
+        "flag-less history stays compact JSON: {history_stdout}"
+    );
+}
+
+#[test]
 fn text_lane_emits_no_stderr_chatter() {
     let repo = support::dump_repo();
     let path = repo.path().to_str().unwrap();
