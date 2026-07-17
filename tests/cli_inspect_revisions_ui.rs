@@ -180,3 +180,19 @@ fn served_index_html_offers_the_list_lens_not_a_lineages_tab() {
         "no lineage filter remains"
     );
 }
+
+#[test]
+fn served_revisions_bundle_names_outstanding_and_recovered_validation() {
+    let store = representative_store();
+    let inspector = Inspector::spawn(store.repo.path());
+    let app_js = inspector.get_text("/app.js");
+
+    assert!(
+        app_js.contains("outstanding validation check"),
+        "Revisions must name actionable validation as outstanding"
+    );
+    assert!(
+        app_js.contains("failed then passed"),
+        "Revisions must name recovered validation without an Attention token"
+    );
+}

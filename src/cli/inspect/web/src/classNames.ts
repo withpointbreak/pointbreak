@@ -64,6 +64,9 @@ export const CLASS = {
   outcome: "outcome",
   advisoryNote: "advisory-note",
   validationNote: "validation-note",
+  validationContinuity: "validation-continuity",
+  validationContinuityNeutral: "validation-continuity-neutral",
+  validationContinuityOutstanding: "validation-continuity-outstanding",
   readback: "readback",
   readbackRow: "readback-row",
   readerScopeNote: "reader-scope-note",
@@ -86,6 +89,7 @@ export const CLASS = {
   // The revision-overview summary line.
   overviewAssessment: "overview-assessment",
   overviewCue: "overview-cue",
+  overviewHistoryCue: "overview-history-cue",
   overviewCues: "overview-cues",
   overviewLabel: "overview-label",
   overviewLatest: "overview-latest",

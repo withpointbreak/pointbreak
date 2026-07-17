@@ -381,6 +381,15 @@ export interface OverviewCounts {
   validationChecks?: number;
 }
 
+/** Server-projected validation group counts for a revision overview. */
+export interface ValidationContinuitySummary {
+  outstandingFailedCount?: number;
+  outstandingErroredCount?: number;
+  recoveredCount?: number;
+  passedCount?: number;
+  skippedOnlyCount?: number;
+}
+
 /** The most recent activity recorded against a revision. */
 export interface LatestActivity {
   title?: string;
@@ -392,6 +401,7 @@ export interface LatestActivity {
 export interface Overview {
   currentAssessment?: CurrentAssessment;
   attention?: OverviewAttention;
+  validationContinuity?: ValidationContinuitySummary;
   counts?: OverviewCounts;
   latestActivity?: LatestActivity;
   // The per-revision fact-meta aggregation (track ids, writer actor ids,

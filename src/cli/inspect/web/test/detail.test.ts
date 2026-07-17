@@ -439,6 +439,73 @@ describe("openRevision / renderRevisionPage (the composite page, fetched via htt
     expect(page.textContent).toContain("author disagrees");
   });
 
+  it("joins validation dispositions by immutable id while preserving every raw fact", async () => {
+    const response = structuredClone(revisionJson) as unknown as {
+      validationChecks: Array<{ id: string; status: string }>;
+      validationContinuity: {
+        checks: Record<string, string>;
+      };
+    };
+    const seed = response.validationChecks[0];
+    response.validationChecks = [
+      { ...seed, id: "validation:passed", status: "passed" },
+      { ...seed, id: "validation:failed", status: "failed" },
+      { ...seed, id: "validation:errored", status: "errored" },
+      { ...seed, id: "validation:skipped", status: "skipped" },
+      { ...seed, id: "validation:recovered", status: "failed" },
+      { ...seed, id: "validation:skipped-after-fail", status: "skipped" },
+    ];
+    response.validationContinuity.checks = {
+      "validation:passed": "current",
+      "validation:failed": "outstanding",
+      "validation:errored": "historical",
+      "validation:skipped": "skipped",
+      "validation:recovered": "resolved_by_later_pass",
+      "validation:skipped-after-fail": "outstanding",
+    };
+    setCompositeResponse(response);
+    store.commit({ selected: { kind: "revision", id: REV } });
+    await detail.openRevision(REV);
+
+    const cards = Array.from(
+      detailEl().querySelectorAll<HTMLElement>(".anno-validation"),
+    );
+    expect(cards).toHaveLength(6);
+    expect(
+      cards.map((card) => card.querySelector(".fact-status")?.textContent),
+    ).toEqual(["passed", "failed", "errored", "skipped", "failed", "skipped"]);
+    expect(
+      cards.map(
+        (card) => card.querySelector(".validation-continuity")?.textContent,
+      ),
+    ).toEqual([
+      "current result",
+      "outstanding",
+      "historical",
+      "skipped",
+      "resolved by strictly later pass",
+      "outstanding",
+    ]);
+    expect(detailEl().textContent).toContain(
+      "context only — does not affect the current assessment",
+    );
+  });
+
+  it("renders raw validation evidence without guessing when private continuity is absent", async () => {
+    const response = structuredClone(revisionJson) as unknown as {
+      validationContinuity?: unknown;
+    };
+    delete response.validationContinuity;
+    setCompositeResponse(response);
+    store.commit({ selected: { kind: "revision", id: REV } });
+    await detail.openRevision(REV);
+
+    expect(detailEl().querySelectorAll(".anno-validation")).toHaveLength(2);
+    expect(detailEl().querySelector(".fact-status.passed")).not.toBeNull();
+    expect(detailEl().querySelector(".fact-status.failed")).not.toBeNull();
+    expect(detailEl().querySelector(".validation-continuity")).toBeNull();
+  });
+
   it("renders floating, capture-target, landing, and unknown wording from existing authority", async () => {
     const cases = [
       {

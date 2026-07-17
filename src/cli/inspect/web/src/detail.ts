@@ -39,6 +39,7 @@ import {
   renderObservationCard,
   renderValidationCheckCard,
   type ValidationCheck,
+  type ValidationCheckDisposition,
   verdictBadge,
 } from "./cards";
 import { CLASS } from "./classNames";
@@ -93,6 +94,7 @@ import {
   type HistoryEntry,
   type ProjectionDiagnostic,
   typeLabel,
+  type ValidationContinuitySummary,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -182,6 +184,11 @@ interface RevisionCommitRange {
   liveness?: CommitRangeLiveness;
 }
 
+interface ValidationContinuity {
+  summary?: ValidationContinuitySummary;
+  checks?: Record<string, ValidationCheckDisposition | undefined>;
+}
+
 /** The `/api/revisions/{id}` composite document the revision page projects. */
 export interface RevisionPageDoc extends RevisionDetail {
   revision?: RevisionPageRevision;
@@ -189,6 +196,7 @@ export interface RevisionPageDoc extends RevisionDetail {
   observations?: Observation[];
   inputRequests?: InputRequest[];
   validationChecks?: ValidationCheck[];
+  validationContinuity?: ValidationContinuity;
   diagnostics?: ProjectionDiagnostic[];
   commitRange?: RevisionCommitRange;
   factSupersession?: FactSupersession;
@@ -1063,8 +1071,17 @@ export function renderRevisionPage(d: RevisionPageDoc): void {
   // document array (not raw events). Advisory-only — a context-only caption,
   // structurally separate from Current assessment, never a verdict aggregate.
   const validationChecks = d.validationChecks ?? [];
+  const validationDispositions = d.validationContinuity?.checks;
+  const renderedValidationChecks = validationChecks
+    .map((check) =>
+      renderValidationCheckCard(
+        check,
+        check.id ? validationDispositions?.[check.id] : undefined,
+      ),
+    )
+    .join("");
   const validationBody = validationChecks.length
-    ? `${validationChecks.map(renderValidationCheckCard).join("")}<p class="${CLASS.validationNote}">context only — does not affect the current assessment</p>`
+    ? `${renderedValidationChecks}<p class="${CLASS.validationNote}">context only — does not affect the current assessment</p>`
     : `<p class="${CLASS.upEmpty}">none</p>`;
   sections.push(
     `<section><h2>Validation checks (${validationChecks.length})</h2>${staleContext}${validationBody}</section>`,

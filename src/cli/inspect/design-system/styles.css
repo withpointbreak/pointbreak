@@ -669,6 +669,9 @@ body {
 .readback { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; }
 .readback-row { display: flex; gap: 6px; flex-wrap: wrap; }
 .validation-note { font-size: 11px; color: var(--fg-dim); margin: 4px 0 0; }
+.validation-continuity { font: 11px/var(--line) var(--mono); margin-top: 4px; }
+.validation-continuity-outstanding { color: var(--danger); }
+.validation-continuity-neutral { color: var(--fg-dim); }
 .fact-responses { margin-top: 6px; padding-left: 10px; border-left: 1px solid var(--border); }
 .fact-response { font-size: 12px; margin-top: 4px; }
 .fact-response .outcome { font-family: var(--mono); color: var(--teal); }

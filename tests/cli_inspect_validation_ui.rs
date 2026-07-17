@@ -130,6 +130,9 @@ fn served_app_css_styles_validation_facts() {
         );
     }
     assert!(app_css.contains(".validation-note"));
+    assert!(app_css.contains(".validation-continuity"));
+    assert!(app_css.contains(".validation-continuity-outstanding"));
+    assert!(app_css.contains(".overview-history-cue"));
 }
 
 #[test]

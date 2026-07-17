@@ -263,6 +263,9 @@
     outcome: "outcome",
     advisoryNote: "advisory-note",
     validationNote: "validation-note",
+    validationContinuity: "validation-continuity",
+    validationContinuityNeutral: "validation-continuity-neutral",
+    validationContinuityOutstanding: "validation-continuity-outstanding",
     readback: "readback",
     readbackRow: "readback-row",
     readerScopeNote: "reader-scope-note",
@@ -282,6 +285,7 @@
     // The revision-overview summary line.
     overviewAssessment: "overview-assessment",
     overviewCue: "overview-cue",
+    overviewHistoryCue: "overview-history-cue",
     overviewCues: "overview-cues",
     overviewLabel: "overview-label",
     overviewLatest: "overview-latest",
@@ -1160,8 +1164,8 @@
         query: `attention:${ATTENTION_VALIDATION_CONTEXT}`,
         label: plural(
           validationCount,
-          "validation context",
-          "validation contexts"
+          "outstanding validation check",
+          "outstanding validation checks"
         )
       });
     }
@@ -1191,6 +1195,12 @@
     ).join("");
   }
   __name(attentionCues, "attentionCues");
+  function validationContinuityCue(overview) {
+    const recovered = overview?.validationContinuity?.recoveredCount || 0;
+    if (!recovered) return "";
+    return `<span class="${CLASS.overviewHistoryCue}">${recovered} failed then passed</span>`;
+  }
+  __name(validationContinuityCue, "validationContinuityCue");
   function overviewStats(overview) {
     const counts = overview?.counts || {};
     const facts = (counts.observations || 0) + (counts.inputRequests || 0) + (counts.assessments || 0) + (counts.validationChecks || 0);
@@ -1285,7 +1295,7 @@
   function renderRevisionOverview(r, overview = r.overview) {
     return `<div class="${CLASS.overviewSummary}">
     <div class="${CLASS.overviewMain}">${assessmentCue(overview)}${overviewStats(overview)}</div>
-    <div class="${CLASS.overviewCues}" aria-label="review cues"><span class="${CLASS.overviewLabel}">review cues</span>${attentionCues(overview)}</div>
+    <div class="${CLASS.overviewCues}" aria-label="review cues"><span class="${CLASS.overviewLabel}">review cues</span>${attentionCues(overview)}${validationContinuityCue(overview)}</div>
     ${revisionDiagnostics(r)}
     ${latestActivityLine(overview)}
   </div>`;
@@ -2894,6 +2904,13 @@
   __name(renderSupersessionSvg, "renderSupersessionSvg");
 
   // src/cards.ts
+  var VALIDATION_DISPOSITION_LABELS = {
+    outstanding: "outstanding",
+    current: "current result",
+    resolved_by_later_pass: "resolved by strictly later pass",
+    historical: "historical",
+    skipped: "skipped"
+  };
   function renderActorAttribution(label, writer) {
     const actorId = writer?.actorId ?? "";
     if (!actorId) return "";
@@ -3075,11 +3092,13 @@
     });
   }
   __name(renderAssessmentCard, "renderAssessmentCard");
-  function renderValidationCheckCard(v) {
+  function renderValidationCheckCard(v, disposition) {
     const rel = [];
     const logs = v.logArtifactContentHashes ?? [];
     if (v.command) rel.push(escapeHtml(v.command));
     if (logs.length) rel.push(`logs ${logs.map(linkify).join(", ")}`);
+    const continuity = disposition ? `<div class="${CLASS.validationContinuity} ${disposition === "outstanding" ? CLASS.validationContinuityOutstanding : CLASS.validationContinuityNeutral}" title="server-projected validation continuity">${escapeHtml(VALIDATION_DISPOSITION_LABELS[disposition])}</div>` : "";
+    const related = rel.length ? `<div class="${CLASS.factRel}">${rel.join(" · ")}</div>` : "";
     return factCard("validation", {
       track: v.trackId,
       title: v.checkName,
@@ -3094,7 +3113,7 @@
       verify: verificationChip(v.verificationStatus ?? ""),
       endorsements: endorsementsBlock(v.endorsements),
       writer: v.writer,
-      extra: rel.length ? `<div class="${CLASS.factRel}">${rel.join(" · ")}</div>` : ""
+      extra: continuity + related
     });
   }
   __name(renderValidationCheckCard, "renderValidationCheckCard");
@@ -4673,7 +4692,14 @@
       )
     );
     const validationChecks = d.validationChecks ?? [];
-    const validationBody = validationChecks.length ? `${validationChecks.map(renderValidationCheckCard).join("")}<p class="${CLASS.validationNote}">context only — does not affect the current assessment</p>` : `<p class="${CLASS.upEmpty}">none</p>`;
+    const validationDispositions = d.validationContinuity?.checks;
+    const renderedValidationChecks = validationChecks.map(
+      (check) => renderValidationCheckCard(
+        check,
+        check.id ? validationDispositions?.[check.id] : void 0
+      )
+    ).join("");
+    const validationBody = validationChecks.length ? `${renderedValidationChecks}<p class="${CLASS.validationNote}">context only — does not affect the current assessment</p>` : `<p class="${CLASS.upEmpty}">none</p>`;
     sections.push(
       `<section><h2>Validation checks (${validationChecks.length})</h2>${staleContext}${validationBody}</section>`
     );

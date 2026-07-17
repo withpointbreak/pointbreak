@@ -738,6 +738,7 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-directio
 .revision-diagnostic b { color: var(--warning); font-family: var(--mono); font-weight: 600; }
 .overview-cue { font: var(--fs-xs)/var(--line) var(--mono); color: var(--fg-dim); background: var(--bg-row); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 1px 6px; cursor: pointer; }
 .overview-cue:hover, .overview-cue:focus-visible { color: var(--fg); border-color: var(--accent); }
+.overview-history-cue { font: var(--fs-xs)/var(--line) var(--mono); color: var(--fg-dim); background: color-mix(in srgb, var(--validation) 8%, var(--bg-row)); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 1px 6px; }
 .overview-latest { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
 .overview-latest b { color: var(--fg); font-weight: 500; }
 /* The revision DAG: one node per revision, each marked head/superseded with its
@@ -1205,6 +1206,9 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-directio
 .fact-status.needs_changes, .fact-status.needs_clarification { color: var(--warning); }
 .fact-status.unassessed, .fact-status.ambiguous { color: var(--fg-dim); }
 .validation-note { font-size: var(--fs-xs); color: var(--fg-dim); margin: 4px 0 0; }
+.validation-continuity { font: var(--fs-xs)/var(--line) var(--mono); margin-top: 4px; }
+.validation-continuity-outstanding { color: var(--danger); }
+.validation-continuity-neutral { color: var(--fg-dim); }
 /* Persistent advisory framing — the quietest tier (dim caption / dim chrome), never
    a banner or a second headline; the verdict stays a card. */
 .advisory-note, .reader-scope-note { font-size: var(--fs-xs); color: var(--fg-dim); margin: 4px 0 0; }

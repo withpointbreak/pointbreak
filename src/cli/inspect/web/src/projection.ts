@@ -287,8 +287,8 @@ export function attentionTokens(overview?: Overview | null): AttentionToken[] {
       query: `attention:${ATTENTION_VALIDATION_CONTEXT}`,
       label: plural(
         validationCount,
-        "validation context",
-        "validation contexts",
+        "outstanding validation check",
+        "outstanding validation checks",
       ),
     });
   }
@@ -320,6 +320,13 @@ export function attentionCues(overview?: Overview | null): string {
         `<button class="${CLASS.overviewCue}" type="button" data-attention-query="${escapeHtml(cue.query)}" title="filter ${escapeHtml(cue.query)}">${escapeHtml(cue.label)}</button>`,
     )
     .join("");
+}
+
+/** Neutral recovered-validation history; never an Attention filter token. */
+export function validationContinuityCue(overview?: Overview | null): string {
+  const recovered = overview?.validationContinuity?.recoveredCount || 0;
+  if (!recovered) return "";
+  return `<span class="${CLASS.overviewHistoryCue}">${recovered} failed then passed</span>`;
 }
 
 /** The files/rows/facts stat line for a revision overview. */
@@ -457,7 +464,7 @@ export function renderRevisionOverview(
 ): string {
   return `<div class="${CLASS.overviewSummary}">
     <div class="${CLASS.overviewMain}">${assessmentCue(overview)}${overviewStats(overview)}</div>
-    <div class="${CLASS.overviewCues}" aria-label="review cues"><span class="${CLASS.overviewLabel}">review cues</span>${attentionCues(overview)}</div>
+    <div class="${CLASS.overviewCues}" aria-label="review cues"><span class="${CLASS.overviewLabel}">review cues</span>${attentionCues(overview)}${validationContinuityCue(overview)}</div>
     ${revisionDiagnostics(r)}
     ${latestActivityLine(overview)}
   </div>`;

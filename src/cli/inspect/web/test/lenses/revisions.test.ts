@@ -179,6 +179,46 @@ describe("renderRevisionList (the flat revision list lens)", () => {
     if (cue) expect(cue.dataset.attentionQuery).toMatch(/^attention:/);
   });
 
+  it("shows recovered validation as neutral history without making it an Attention item", () => {
+    seedFixtures();
+    const current = store.getState().revisions as RevisionsDoc;
+    store.commit({
+      revisions: {
+        ...current,
+        entries: current.entries.map((entry) => ({
+          ...entry,
+          overview: {
+            ...entry.overview,
+            attention: {
+              ...entry.overview?.attention,
+              failedValidationCount: 0,
+              erroredValidationCount: 0,
+            },
+            validationContinuity: {
+              outstandingFailedCount: 0,
+              outstandingErroredCount: 0,
+              recoveredCount: 1,
+              passedCount: 0,
+              skippedOnlyCount: 0,
+            },
+          },
+        })),
+      },
+    });
+    mountListBody();
+    revisions.renderRevisionList();
+
+    const card = document.querySelector<HTMLElement>("#units .unit-card");
+    expect(card?.querySelector(".overview-history-cue")?.textContent).toBe(
+      "1 failed then passed",
+    );
+    expect(
+      card?.querySelector(
+        '[data-attention-query="attention:validation-context"]',
+      ),
+    ).toBeNull();
+  });
+
   it("attaches no per-card click listener — selection is left to the #master delegate", () => {
     seedFixtures();
     mountListBody();

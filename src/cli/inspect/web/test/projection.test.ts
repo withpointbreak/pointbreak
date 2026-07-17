@@ -23,6 +23,7 @@ import {
   revisionDiagnostics,
   revisionSearchIndex,
   revisionSnapshotUnavailable,
+  validationContinuityCue,
   verificationChip,
 } from "../src/projection";
 import {
@@ -408,7 +409,7 @@ describe("attentionTokens", () => {
       "attention:validation-context",
     ]);
     expect(tokens[0].label).toBe("1 open request");
-    expect(tokens[1].label).toBe("1 validation context");
+    expect(tokens[1].label).toBe("1 outstanding validation check");
   });
 
   it("serializes every attention cue through an `attention:` query token", () => {
@@ -427,7 +428,47 @@ describe("attentionTokens", () => {
       "attention:validation-context",
       "attention:follow-up",
     ]);
-    expect(tokens[2].label).toBe("3 validation contexts");
+    expect(tokens[2].label).toBe("3 outstanding validation checks");
+  });
+
+  it("labels only effective failed and errored groups as outstanding validation", () => {
+    const tokens = attentionTokens({
+      attention: {
+        failedValidationCount: 1,
+        erroredValidationCount: 2,
+      },
+      validationContinuity: {
+        outstandingFailedCount: 1,
+        outstandingErroredCount: 2,
+        recoveredCount: 4,
+        passedCount: 5,
+        skippedOnlyCount: 6,
+      },
+    });
+    expect(tokens).toEqual([
+      {
+        token: "validation-context",
+        query: "attention:validation-context",
+        label: "3 outstanding validation checks",
+      },
+    ]);
+  });
+
+  it("keeps a server-projected equal-time failure actionable without inspecting timestamps", () => {
+    const tokens = attentionTokens({
+      attention: {
+        failedValidationCount: 1,
+        erroredValidationCount: 0,
+      },
+      validationContinuity: {
+        outstandingFailedCount: 1,
+        outstandingErroredCount: 0,
+        recoveredCount: 0,
+        passedCount: 0,
+        skippedOnlyCount: 0,
+      },
+    });
+    expect(tokens[0]?.label).toBe("1 outstanding validation check");
   });
 
   it("returns no tokens for an overview with no attention", () => {
@@ -463,6 +504,52 @@ describe("attentionCues", () => {
       "attention:open-request",
     );
     expect(buttons[0].textContent).toBe("1 open request");
+  });
+});
+
+describe("validationContinuityCue", () => {
+  it("renders recovered history as neutral failed-then-passed context without an Attention query", () => {
+    const doc = parse(
+      validationContinuityCue({
+        attention: {
+          failedValidationCount: 0,
+          erroredValidationCount: 0,
+        },
+        validationContinuity: {
+          outstandingFailedCount: 0,
+          outstandingErroredCount: 0,
+          recoveredCount: 2,
+          passedCount: 0,
+          skippedOnlyCount: 0,
+        },
+      }),
+    );
+    expect(doc.querySelector(".overview-history-cue")?.textContent).toBe(
+      "2 failed then passed",
+    );
+    expect(doc.querySelector("[data-attention-query]")).toBeNull();
+  });
+
+  it("does not turn passed-only or skipped-only history into failure context", () => {
+    for (const validationContinuity of [
+      {
+        outstandingFailedCount: 0,
+        outstandingErroredCount: 0,
+        recoveredCount: 0,
+        passedCount: 1,
+        skippedOnlyCount: 0,
+      },
+      {
+        outstandingFailedCount: 0,
+        outstandingErroredCount: 0,
+        recoveredCount: 0,
+        passedCount: 0,
+        skippedOnlyCount: 1,
+      },
+    ]) {
+      expect(validationContinuityCue({ validationContinuity })).toBe("");
+      expect(attentionTokens({ validationContinuity })).toEqual([]);
+    }
   });
 });
 
@@ -524,7 +611,7 @@ describe("revisionSearchIndex", () => {
       "cargo clippy",
       "ffc93de",
       "1 open request",
-      "1 validation context",
+      "1 outstanding validation check",
       "review cues",
       "attention",
     ]) {

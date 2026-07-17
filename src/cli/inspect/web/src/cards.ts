@@ -130,6 +130,7 @@ export interface Assessment {
 
 /** A recorded validation-evidence fact (advisory; never a verdict). */
 export interface ValidationCheck {
+  id?: string;
   trackId?: string;
   checkName?: string;
   status?: string;
@@ -147,6 +148,25 @@ export interface ValidationCheck {
   logArtifactContentHashes?: string[];
   writer?: EntryWriter;
 }
+
+/** Server-owned interpretation of one validation record within its check history. */
+export type ValidationCheckDisposition =
+  | "outstanding"
+  | "current"
+  | "resolved_by_later_pass"
+  | "historical"
+  | "skipped";
+
+const VALIDATION_DISPOSITION_LABELS: Record<
+  ValidationCheckDisposition,
+  string
+> = {
+  outstanding: "outstanding",
+  current: "current result",
+  resolved_by_later_pass: "resolved by strictly later pass",
+  historical: "historical",
+  skipped: "skipped",
+};
 
 /** The fields the verdict badge/summary read off the `/api/revisions/{id}` payload. */
 export interface RevisionDetail {
@@ -399,11 +419,24 @@ export function renderAssessmentCard(a: Assessment): string {
 // Validation evidence is advisory: it renders with the shared factCard shape
 // (status maps to .fact-status.<status>) but never as a verdict aggregate.
 /** A validation-check card (advisory evidence; never a verdict). */
-export function renderValidationCheckCard(v: ValidationCheck): string {
+export function renderValidationCheckCard(
+  v: ValidationCheck,
+  disposition?: ValidationCheckDisposition,
+): string {
   const rel: string[] = [];
   const logs = v.logArtifactContentHashes ?? [];
   if (v.command) rel.push(escapeHtml(v.command));
   if (logs.length) rel.push(`logs ${logs.map(linkify).join(", ")}`);
+  const continuity = disposition
+    ? `<div class="${CLASS.validationContinuity} ${
+        disposition === "outstanding"
+          ? CLASS.validationContinuityOutstanding
+          : CLASS.validationContinuityNeutral
+      }" title="server-projected validation continuity">${escapeHtml(VALIDATION_DISPOSITION_LABELS[disposition])}</div>`
+    : "";
+  const related = rel.length
+    ? `<div class="${CLASS.factRel}">${rel.join(" · ")}</div>`
+    : "";
   return factCard("validation", {
     track: v.trackId,
     title: v.checkName,
@@ -417,9 +450,7 @@ export function renderValidationCheckCard(v: ValidationCheck): string {
     verify: verificationChip(v.verificationStatus ?? ""),
     endorsements: endorsementsBlock(v.endorsements),
     writer: v.writer,
-    extra: rel.length
-      ? `<div class="${CLASS.factRel}">${rel.join(" · ")}</div>`
-      : "",
+    extra: continuity + related,
   });
 }
 

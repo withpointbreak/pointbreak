@@ -463,6 +463,49 @@ describe("renderValidationCheckCard", () => {
       doc.querySelector<HTMLElement>('[data-ref-kind="actor"]')?.textContent,
     ).toBe(REVIEWER_ACTOR);
   });
+
+  it("keeps every raw status while rendering every server-projected disposition", () => {
+    const cases = [
+      ["passed", "current", "current result"],
+      ["failed", "outstanding", "outstanding"],
+      ["errored", "historical", "historical"],
+      ["skipped", "skipped", "skipped"],
+      ["failed", "resolved_by_later_pass", "resolved by strictly later pass"],
+    ] as const;
+
+    for (const [status, disposition, label] of cases) {
+      const doc = parse(
+        renderValidationCheckCard({ ...failedCheck, status }, disposition),
+      );
+      expect(
+        doc.querySelector(".fact-status")?.classList.contains(status),
+      ).toBe(true);
+      expect(doc.querySelector(".validation-continuity")?.textContent).toBe(
+        label,
+      );
+    }
+  });
+
+  it("shows a skipped fact as skipped while its group remains outstanding", () => {
+    const doc = parse(
+      renderValidationCheckCard(
+        { ...failedCheck, status: "skipped" },
+        "outstanding",
+      ),
+    );
+    expect(doc.querySelector(".fact-status.skipped")?.textContent).toBe(
+      "skipped",
+    );
+    expect(doc.querySelector(".validation-continuity")?.textContent).toBe(
+      "outstanding",
+    );
+  });
+
+  it("falls back to raw validation evidence when continuity is absent", () => {
+    const doc = parse(renderValidationCheckCard(failedCheck));
+    expect(doc.querySelector(".fact-status.failed")).not.toBeNull();
+    expect(doc.querySelector(".validation-continuity")).toBeNull();
+  });
 });
 
 describe("factSection", () => {
