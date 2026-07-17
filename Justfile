@@ -211,3 +211,8 @@ review-example-materialize output pack="examples/review/checkout-refactor":
 review-decision-matrix-materialize output:
     cargo +stable build --bin pointbreak
     POINTBREAK_BINARY="$PWD/target/debug/pointbreak" ./scripts/materialize-inspector-decision-matrix.sh "{{ output }}"
+
+# Materialize both Review evidence stores and verify decision continuity in a real browser.
+review-decision-browser-verify root:
+    cargo +stable build --bin pointbreak
+    POINTBREAK_BINARY="$PWD/target/debug/pointbreak" ./scripts/verify-inspector-decision-continuity.sh --root "{{ root }}"

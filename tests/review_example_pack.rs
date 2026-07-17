@@ -50,7 +50,11 @@ fn synthetic_decision_matrix_materializer_uses_only_isolated_pointbreak_surfaces
 
     let script = fs::read_to_string(&script_path).expect("read decision matrix materializer");
     assert!(script.contains("POINTBREAK_BINARY"));
-    assert!(script.contains("POINTBREAK_HOME=\"$destination/.git/pointbreak-home\""));
+    assert!(
+        script
+            .contains("pointbreak_home=\"${POINTBREAK_HOME:-$destination/.git/pointbreak-home}\"")
+    );
+    assert!(script.contains("POINTBREAK_HOME=\"$pointbreak_home\""));
     assert!(script.contains("--format json"));
     assert!(script.contains("cygpath -u \"$native_path\""));
     assert!(!script.contains("~/.pointbreak"));
@@ -62,6 +66,59 @@ fn synthetic_decision_matrix_materializer_uses_only_isolated_pointbreak_surfaces
     let justfile = fs::read_to_string(root.join("Justfile")).expect("read Justfile");
     assert!(justfile.contains("review-decision-matrix-materialize output:"));
     assert!(justfile.contains("scripts/materialize-inspector-decision-matrix.sh"));
+}
+
+#[test]
+fn inspector_decision_continuity_browser_gate_uses_isolated_pointbreak_surfaces() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let script_path = root.join("scripts/verify-inspector-decision-continuity.sh");
+    assert!(
+        script_path.is_file(),
+        "Inspector decision-continuity browser gate is missing: {}",
+        script_path.display()
+    );
+
+    let script = fs::read_to_string(&script_path).expect("read Inspector browser gate");
+    let browser_program =
+        fs::read_to_string(root.join("scripts/verify-inspector-decision-continuity.mjs"))
+            .expect("read Inspector browser program");
+    let gate = format!("{script}\n{browser_program}");
+    for required in [
+        "POINTBREAK_BINARY",
+        "POINTBREAK_HOME",
+        "--format json",
+        "review-example-materialize",
+        "review-decision-matrix-materialize",
+        "playwright-cli",
+        "1440",
+        "1000",
+        "900",
+        "506",
+        "390",
+        "844",
+        "Decision context",
+    ] {
+        assert!(
+            gate.contains(required),
+            "missing browser gate term: {required}"
+        );
+    }
+    for excluded in [
+        "cargo publish",
+        "gh release",
+        "npm publish",
+        "vsce package",
+        "capture-marketing-review-screenshots",
+    ] {
+        assert!(
+            !gate.contains(excluded),
+            "browser gate includes excluded command: {excluded}"
+        );
+    }
+
+    let justfile = fs::read_to_string(root.join("Justfile")).expect("read Justfile");
+    assert!(justfile.contains("review-decision-browser-verify"));
+    assert!(justfile.contains("scripts/verify-inspector-decision-continuity.sh"));
 }
 
 #[test]

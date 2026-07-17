@@ -44,15 +44,26 @@ case "$destination" in
     ;;
 esac
 
+pointbreak_home="${POINTBREAK_HOME:-$destination/.git/pointbreak-home}"
+mkdir -p "$pointbreak_home"
+pointbreak_home="$(cd "$pointbreak_home" && pwd -P)"
+if [ -n "${POINTBREAK_HOME:-}" ]; then
+  destination_parent="$(dirname "$destination")"
+  case "$pointbreak_home" in
+    "$destination_parent"/*) ;;
+    *) die "POINTBREAK_HOME must remain beneath the destination's temporary parent" ;;
+  esac
+fi
+
 pointbreak_json() {
-  POINTBREAK_HOME="$destination/.git/pointbreak-home" \
+  POINTBREAK_HOME="$pointbreak_home" \
     "$pointbreak_binary" "$@" --format json
 }
 
 pointbreak_actor_json() {
   local actor="$1"
   shift
-  POINTBREAK_HOME="$destination/.git/pointbreak-home" \
+  POINTBREAK_HOME="$pointbreak_home" \
     POINTBREAK_ACTOR_ID="$actor" "$pointbreak_binary" "$@" --format json
 }
 
