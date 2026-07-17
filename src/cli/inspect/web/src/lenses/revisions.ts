@@ -22,7 +22,12 @@ import {
   renderRevisionOverview,
   revisionSnapshotUnavailable,
 } from "../projection";
-import { shortId, targetDisplayLabel, targetHeadBadge } from "../refs";
+import {
+  shortId,
+  targetDisplayLabel,
+  targetHeadBadge,
+  workLabelText,
+} from "../refs";
 import { getState } from "../store";
 
 // ---------------------------------------------------------------------------
@@ -68,7 +73,10 @@ export function renderRevisionList(): void {
             : (base.kind ?? "—"),
         ],
       ];
-      const tail: [string, string][] = [["snapshot", shortId(u.snapshotId)]];
+      const tail: [string, string][] = [
+        ["revision", shortId(revisionId)],
+        ["snapshot", shortId(u.snapshotId)],
+      ];
       // The target cell carries pre-escaped derived HTML (label + head badge), so
       // it bypasses the generic escaping cell renderer rather than double-escaping.
       const targetCell = `<span>target</span><b>${targetDisplayLabel(u.targetDisplay)}${targetHeadBadge(u.targetDisplay)}</b>`;
@@ -79,7 +87,7 @@ export function renderRevisionList(): void {
       return `<div class="${CLASS.unitCard}" data-revision-id="${escapeHtml(revisionId)}"${
         isSelected ? ' aria-selected="true"' : ""
       } title="${escapeHtml(revisionId)}\nclick to open the revision page">
-      <h3>${escapeHtml(shortId(revisionId))}</h3>
+      <h3>${workLabelText(u.targetDisplay)}</h3>
       ${badge ? `<div class="${CLASS.supersessionBadges}">${badge}</div>` : ""}
       ${renderRevisionOverview(u, overview)}
       <div class="${CLASS.kv} ${CLASS.tierMedium}">${rows.map(kv).join("")}${targetCell}${tail.map(kv).join("")}</div>

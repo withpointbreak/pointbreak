@@ -5,7 +5,6 @@ mod raw;
 
 #[cfg(test)]
 pub(crate) use command::git_info_exclude_path;
-pub use command::git_worktree_root;
 pub(crate) use command::{
     Ancestry, git_commit_changed_paths, git_commit_tree_oid, git_common_dir, git_config_get,
     git_config_path_get, git_default_branch_ref, git_empty_tree_oid, git_for_each_ref,
@@ -15,6 +14,7 @@ pub(crate) use command::{
     git_tracked_and_untracked_inventory, git_untracked_inventory, git_worktree_list,
     git_write_index_tree_oid,
 };
+pub use command::{git_commit_subjects, git_worktree_root};
 pub use ingest::{IngestOptions, ingest_tracked_diff, ingest_tracked_diff_with_options};
 pub(crate) use ingest::{
     capture_commit_range_diff_files, capture_root_commit_diff_files, capture_staged_diff_files,

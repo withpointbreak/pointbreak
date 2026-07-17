@@ -21,12 +21,23 @@ export interface TargetHead {
   commitOidShort?: string;
 }
 
+export interface WorkLabel {
+  text?: string;
+  source?: "commit_subject" | "current_ref" | "source_fallback";
+}
+
 /** Server-derived, path-private display metadata for a revision's target. */
 export interface TargetDisplay {
   label?: string;
+  workLabel?: WorkLabel;
   head?: TargetHead | null;
   kind?: string;
   pathPrivate?: boolean;
+}
+
+/** Escaped, display-only semantic work label projected by the Inspector. */
+export function workLabelText(td: TargetDisplay | null | undefined): string {
+  return escapeHtml(td?.workLabel?.text || "working-tree changes");
 }
 
 /** The last colon segment of an id, truncated to 12 chars. */

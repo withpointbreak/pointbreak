@@ -887,6 +887,10 @@
   __name(matchesQuery, "matchesQuery");
 
   // src/refs.ts
+  function workLabelText(td) {
+    return escapeHtml(td?.workLabel?.text || "working-tree changes");
+  }
+  __name(workLabelText, "workLabelText");
   function shortId(id) {
     if (!id) return "";
     const tail = String(id).split(":").pop() || "";
@@ -1227,6 +1231,7 @@
       r.revisionId,
       r.snapshotId,
       target.label,
+      target.workLabel?.text,
       head.label,
       currentAssessment.status,
       currentAssessment.assessment,
@@ -4002,6 +4007,70 @@
   __name(detailRows, "detailRows");
 
   // src/detail.ts
+  function commitConditionLabel(condition) {
+    if (!condition?.condition) return "unknown";
+    if (condition.condition !== "orphaned") return condition.condition;
+    return condition.reason ? `orphaned (${condition.reason})` : "orphaned";
+  }
+  __name(commitConditionLabel, "commitConditionLabel");
+  function shortGitRef(reference) {
+    return (reference || "").replace(/^refs\/heads\//, "").replace(/^refs\/remotes\//, "");
+  }
+  __name(shortGitRef, "shortGitRef");
+  function associationRows(label, rows) {
+    const content = rows.length ? `<ul>${rows.join("")}</ul>` : `<p class="${CLASS.upEmpty}">none</p>`;
+    return `<div><h3>${escapeHtml(label)}</h3>${content}</div>`;
+  }
+  __name(associationRows, "associationRows");
+  function renderAssociationAndLanding(commitRange, diagnostics) {
+    const range = commitRange ?? {};
+    const currentCommits = range.currentCommits ?? [];
+    const currentRefs = range.currentRefs ?? [];
+    const withdrawnCommits = range.withdrawnCommits ?? [];
+    const withdrawnRefs = range.withdrawnRefs ?? [];
+    const livenessByCommit = new Map(
+      (range.liveness?.perCommit ?? []).map((item) => [item.commitOid, item])
+    );
+    const hasLanding = currentCommits.some(
+      (commit2) => commit2.source === "association"
+    );
+    const divergent = (diagnostics ?? []).some(
+      (diagnostic) => diagnostic.code === "divergent_commit_association"
+    );
+    let headline;
+    let captureQualifier = "";
+    if (!currentCommits.length) {
+      headline = "floating revision — no landing commit association recorded";
+    } else if (hasLanding) {
+      if (divergent) {
+        headline = "landing ambiguous";
+      } else if (range.liveness) {
+        headline = `landing ${commitConditionLabel(range.liveness.headline)}`;
+      } else {
+        headline = "landing unknown — Git reachability unavailable";
+      }
+    } else {
+      headline = range.liveness ? `anchored capture target ${commitConditionLabel(range.liveness.headline)}` : "anchored capture target unknown — Git reachability unavailable";
+      captureQualifier = `<p class="${CLASS.advisoryNote}">no landing commit association recorded</p>`;
+    }
+    const commitRow = /* @__PURE__ */ __name((commit2) => {
+      const liveness = livenessByCommit.get(commit2.commitOid);
+      const association = commit2.commitAssociationId ? ` ${linkify(commit2.commitAssociationId)}` : "";
+      return `<li>${linkify(commit2.commitOid)} <span class="${CLASS.factStatus}">${escapeHtml(commit2.source || "unknown")}</span>${association} <span>${escapeHtml(commitConditionLabel(liveness))}</span></li>`;
+    }, "commitRow");
+    const refRow = /* @__PURE__ */ __name((reference) => `<li>${escapeHtml(shortGitRef(reference.refName))} @ ${linkify(reference.headOid)} ${linkify(reference.refAssociationId)}</li>`, "refRow");
+    const withdrawnCommitRow = /* @__PURE__ */ __name((commit2) => `<li>${linkify(commit2.commitOid)} ${linkify(commit2.commitAssociationId)} ${linkify(commit2.commitWithdrawalId)}</li>`, "withdrawnCommitRow");
+    const withdrawnRefRow = /* @__PURE__ */ __name((reference) => `<li>${escapeHtml(shortGitRef(reference.refName))} @ ${linkify(reference.headOid)} ${linkify(reference.refAssociationId)} ${linkify(reference.refWithdrawalId)}</li>`, "withdrawnRefRow");
+    return `<section><h2>Association and landing</h2>
+    <dl class="${CLASS.upIdentity}"><dt>anchored</dt><dd>${range.anchored ? "yes" : "no"}</dd><dt>state</dt><dd>${escapeHtml(headline)}</dd></dl>
+    ${captureQualifier}
+    ${associationRows("current commits", currentCommits.map(commitRow))}
+    ${associationRows("current refs", currentRefs.map(refRow))}
+    ${associationRows("withdrawn commits", withdrawnCommits.map(withdrawnCommitRow))}
+    ${associationRows("withdrawn refs", withdrawnRefs.map(withdrawnRefRow))}
+  </section>`;
+  }
+  __name(renderAssociationAndLanding, "renderAssociationAndLanding");
   var shownCompositeId = null;
   var compositeCache = /* @__PURE__ */ new Map();
   var compositeInFlight = /* @__PURE__ */ new Map();
@@ -4481,7 +4550,7 @@
     const s = d.summary ?? {};
     const revisionId = ru.id ?? "";
     const badge = supersessionBadge(revisionId);
-    const title = `${shortId(ru.id)}${base.commitOid ? ` · base ${shortId(base.commitOid)}` : ""}`;
+    const title = ru.targetDisplay?.workLabel?.text || `${shortId(ru.id)}${base.commitOid ? ` · base ${shortId(base.commitOid)}` : ""}`;
     const staleContext = staleFactSectionContext(revisionId);
     const observationContext = renderFactSupersessionBlock(
       d.factSupersession?.observations,
@@ -4493,6 +4562,7 @@
     const sections = [];
     sections.push(`<section><h2>Revision</h2><dl class="${CLASS.upIdentity}">
     <dt>id</dt><dd>${linkify(ru.id)}</dd>
+    <dt>work</dt><dd>${workLabelText(ru.targetDisplay)}</dd>
     <dt>base</dt><dd>${base.commitOid ? linkify(base.commitOid) : "—"} ${base.kind ? `<span class="${CLASS.factStatus}">${escapeHtml(base.kind)}</span>` : ""}</dd>
     <dt>target</dt><dd>${targetDisplayLabel(ru.targetDisplay)}${targetHeadBadge(ru.targetDisplay)}</dd>
     <dt>worktree</dt><dd>${escapeHtml(ru.targetDisplay?.label ?? "working tree")}</dd>
@@ -4500,6 +4570,7 @@
     <dt>supersession</dt><dd>${badge || "—"}</dd>
     <dt>snapshot</dt><dd>${linkify(ru.objectId)}</dd>
   </dl>${revisionDiagnostics(d)}${renderRevisionSupersessionBlock(d.revisionSupersession, revisionId)}</section>`);
+    sections.push(renderAssociationAndLanding(d.commitRange, d.diagnostics));
     sections.push(
       `<section><h2>Current assessment</h2>${verdictBadge(d.currentAssessment)}${currentAssessmentSummary(d)}<p class="${CLASS.advisoryNote}">advisory — a recorded judgement, not a merge gate</p></section>`
     );
@@ -6179,11 +6250,14 @@
           base.commitOid ? `${shortId(base.commitOid)} (${base.kind ?? ""})` : base.kind ?? "—"
         ]
       ];
-      const tail = [["snapshot", shortId(u.snapshotId)]];
+      const tail = [
+        ["revision", shortId(revisionId)],
+        ["snapshot", shortId(u.snapshotId)]
+      ];
       const targetCell = `<span>target</span><b>${targetDisplayLabel(u.targetDisplay)}${targetHeadBadge(u.targetDisplay)}</b>`;
       return `<div class="${CLASS.unitCard}" data-revision-id="${escapeHtml(revisionId)}"${isSelected ? ' aria-selected="true"' : ""} title="${escapeHtml(revisionId)}
 click to open the revision page">
-      <h3>${escapeHtml(shortId(revisionId))}</h3>
+      <h3>${workLabelText(u.targetDisplay)}</h3>
       ${badge ? `<div class="${CLASS.supersessionBadges}">${badge}</div>` : ""}
       ${renderRevisionOverview(u, overview)}
       <div class="${CLASS.kv} ${CLASS.tierMedium}">${rows.map(kv).join("")}${targetCell}${tail.map(kv).join("")}</div>

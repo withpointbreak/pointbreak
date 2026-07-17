@@ -79,6 +79,7 @@ import {
   type TargetDisplay,
   targetDisplayLabel,
   targetHeadBadge,
+  workLabelText,
 } from "./refs";
 import { navigate } from "./router";
 import type { AttentionDoc, AttentionItem } from "./store";
@@ -119,6 +120,50 @@ interface RevisionPageSummary {
   validationCheckCount?: number;
 }
 
+interface CommitCondition {
+  condition?: "merged" | "live" | "orphaned";
+  reason?: "object_missing" | "unreachable";
+}
+
+interface CommitLiveness extends CommitCondition {
+  commitOid?: string;
+  liveBranch?: string;
+}
+
+interface CommitRangeLiveness {
+  perCommit?: CommitLiveness[];
+  headline?: CommitCondition;
+}
+
+interface CurrentCommitAssociation {
+  commitOid?: string;
+  source?: "capture_target" | "association";
+  commitAssociationId?: string;
+}
+
+interface CurrentRefAssociation {
+  refName?: string;
+  headOid?: string;
+  refAssociationId?: string;
+}
+
+interface WithdrawnCommitAssociation extends CurrentCommitAssociation {
+  commitWithdrawalId?: string;
+}
+
+interface WithdrawnRefAssociation extends CurrentRefAssociation {
+  refWithdrawalId?: string;
+}
+
+interface RevisionCommitRange {
+  anchored?: boolean;
+  currentCommits?: CurrentCommitAssociation[];
+  currentRefs?: CurrentRefAssociation[];
+  withdrawnCommits?: WithdrawnCommitAssociation[];
+  withdrawnRefs?: WithdrawnRefAssociation[];
+  liveness?: CommitRangeLiveness;
+}
+
 /** The `/api/revisions/{id}` composite document the revision page projects. */
 export interface RevisionPageDoc extends RevisionDetail {
   revision?: RevisionPageRevision;
@@ -127,10 +172,93 @@ export interface RevisionPageDoc extends RevisionDetail {
   inputRequests?: InputRequest[];
   validationChecks?: ValidationCheck[];
   diagnostics?: ProjectionDiagnostic[];
+  commitRange?: RevisionCommitRange;
   factSupersession?: FactSupersession;
   // Fork-gated: present only when the revision's supersession component has more
   // than one member (same `Thread` wire shape `/api/threads` round-trips).
   revisionSupersession?: Thread;
+}
+
+function commitConditionLabel(condition: CommitCondition | undefined): string {
+  if (!condition?.condition) return "unknown";
+  if (condition.condition !== "orphaned") return condition.condition;
+  return condition.reason ? `orphaned (${condition.reason})` : "orphaned";
+}
+
+function shortGitRef(reference: string | undefined): string {
+  return (reference || "")
+    .replace(/^refs\/heads\//, "")
+    .replace(/^refs\/remotes\//, "");
+}
+
+function associationRows(label: string, rows: string[]): string {
+  const content = rows.length
+    ? `<ul>${rows.join("")}</ul>`
+    : `<p class="${CLASS.upEmpty}">none</p>`;
+  return `<div><h3>${escapeHtml(label)}</h3>${content}</div>`;
+}
+
+/** Bounded readback of event-borne associations plus repository-borne liveness. */
+export function renderAssociationAndLanding(
+  commitRange: RevisionCommitRange | null | undefined,
+  diagnostics: ProjectionDiagnostic[] | null | undefined,
+): string {
+  const range = commitRange ?? {};
+  const currentCommits = range.currentCommits ?? [];
+  const currentRefs = range.currentRefs ?? [];
+  const withdrawnCommits = range.withdrawnCommits ?? [];
+  const withdrawnRefs = range.withdrawnRefs ?? [];
+  const livenessByCommit = new Map(
+    (range.liveness?.perCommit ?? []).map((item) => [item.commitOid, item]),
+  );
+  const hasLanding = currentCommits.some(
+    (commit) => commit.source === "association",
+  );
+  const divergent = (diagnostics ?? []).some(
+    (diagnostic) => diagnostic.code === "divergent_commit_association",
+  );
+
+  let headline: string;
+  let captureQualifier = "";
+  if (!currentCommits.length) {
+    headline = "floating revision — no landing commit association recorded";
+  } else if (hasLanding) {
+    if (divergent) {
+      headline = "landing ambiguous";
+    } else if (range.liveness) {
+      headline = `landing ${commitConditionLabel(range.liveness.headline)}`;
+    } else {
+      headline = "landing unknown — Git reachability unavailable";
+    }
+  } else {
+    headline = range.liveness
+      ? `anchored capture target ${commitConditionLabel(range.liveness.headline)}`
+      : "anchored capture target unknown — Git reachability unavailable";
+    captureQualifier = `<p class="${CLASS.advisoryNote}">no landing commit association recorded</p>`;
+  }
+
+  const commitRow = (commit: CurrentCommitAssociation): string => {
+    const liveness = livenessByCommit.get(commit.commitOid);
+    const association = commit.commitAssociationId
+      ? ` ${linkify(commit.commitAssociationId)}`
+      : "";
+    return `<li>${linkify(commit.commitOid)} <span class="${CLASS.factStatus}">${escapeHtml(commit.source || "unknown")}</span>${association} <span>${escapeHtml(commitConditionLabel(liveness))}</span></li>`;
+  };
+  const refRow = (reference: CurrentRefAssociation): string =>
+    `<li>${escapeHtml(shortGitRef(reference.refName))} @ ${linkify(reference.headOid)} ${linkify(reference.refAssociationId)}</li>`;
+  const withdrawnCommitRow = (commit: WithdrawnCommitAssociation): string =>
+    `<li>${linkify(commit.commitOid)} ${linkify(commit.commitAssociationId)} ${linkify(commit.commitWithdrawalId)}</li>`;
+  const withdrawnRefRow = (reference: WithdrawnRefAssociation): string =>
+    `<li>${escapeHtml(shortGitRef(reference.refName))} @ ${linkify(reference.headOid)} ${linkify(reference.refAssociationId)} ${linkify(reference.refWithdrawalId)}</li>`;
+
+  return `<section><h2>Association and landing</h2>
+    <dl class="${CLASS.upIdentity}"><dt>anchored</dt><dd>${range.anchored ? "yes" : "no"}</dd><dt>state</dt><dd>${escapeHtml(headline)}</dd></dl>
+    ${captureQualifier}
+    ${associationRows("current commits", currentCommits.map(commitRow))}
+    ${associationRows("current refs", currentRefs.map(refRow))}
+    ${associationRows("withdrawn commits", withdrawnCommits.map(withdrawnCommitRow))}
+    ${associationRows("withdrawn refs", withdrawnRefs.map(withdrawnRefRow))}
+  </section>`;
 }
 
 // The revision whose composite is currently shown, so a re-render with an
@@ -790,7 +918,9 @@ export function renderRevisionPage(d: RevisionPageDoc): void {
   const s = d.summary ?? {};
   const revisionId = ru.id ?? "";
   const badge = supersessionBadge(revisionId);
-  const title = `${shortId(ru.id)}${base.commitOid ? ` · base ${shortId(base.commitOid)}` : ""}`;
+  const title =
+    ru.targetDisplay?.workLabel?.text ||
+    `${shortId(ru.id)}${base.commitOid ? ` · base ${shortId(base.commitOid)}` : ""}`;
   const staleContext = staleFactSectionContext(revisionId);
   // Prepend the fork-gated fact DAG (server-gated, absent otherwise) above the
   // stale context in the Observations / Assessments sections; both are "" when the
@@ -811,6 +941,7 @@ export function renderRevisionPage(d: RevisionPageDoc): void {
 
   sections.push(`<section><h2>Revision</h2><dl class="${CLASS.upIdentity}">
     <dt>id</dt><dd>${linkify(ru.id)}</dd>
+    <dt>work</dt><dd>${workLabelText(ru.targetDisplay)}</dd>
     <dt>base</dt><dd>${base.commitOid ? linkify(base.commitOid) : "—"} ${base.kind ? `<span class="${CLASS.factStatus}">${escapeHtml(base.kind)}</span>` : ""}</dd>
     <dt>target</dt><dd>${targetDisplayLabel(ru.targetDisplay)}${targetHeadBadge(ru.targetDisplay)}</dd>
     <dt>worktree</dt><dd>${escapeHtml(ru.targetDisplay?.label ?? "working tree")}</dd>
@@ -818,6 +949,8 @@ export function renderRevisionPage(d: RevisionPageDoc): void {
     <dt>supersession</dt><dd>${badge || "—"}</dd>
     <dt>snapshot</dt><dd>${linkify(ru.objectId)}</dd>
   </dl>${revisionDiagnostics(d)}${renderRevisionSupersessionBlock(d.revisionSupersession, revisionId)}</section>`);
+
+  sections.push(renderAssociationAndLanding(d.commitRange, d.diagnostics));
 
   sections.push(
     `<section><h2>Current assessment</h2>${verdictBadge(d.currentAssessment)}${currentAssessmentSummary(d)}<p class="${CLASS.advisoryNote}">advisory — a recorded judgement, not a merge gate</p></section>`,

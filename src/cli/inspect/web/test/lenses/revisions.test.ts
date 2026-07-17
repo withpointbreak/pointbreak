@@ -65,6 +65,33 @@ describe("renderRevisionList (the flat revision list lens)", () => {
     expect(diffBtn?.dataset.diffHash).toBe(ARTIFACT);
   });
 
+  it("uses the work label as the heading while retaining revision and snapshot ids", () => {
+    seedFixtures();
+    const current = store.getState().revisions as RevisionsDoc;
+    store.commit({
+      revisions: {
+        ...current,
+        entries: current.entries.map((entry) => ({
+          ...entry,
+          targetDisplay: {
+            ...entry.targetDisplay,
+            workLabel: {
+              text: "Review landing truth",
+              source: "commit_subject",
+            },
+          },
+        })),
+      },
+    });
+    mountListBody();
+    revisions.renderRevisionList();
+
+    const card = document.querySelector<HTMLElement>("#units .unit-card");
+    expect(card?.querySelector("h3")?.textContent).toBe("Review landing truth");
+    expect(card?.textContent).toContain(REV.split(":").at(-1)?.slice(0, 12));
+    expect(card?.textContent).toContain(OBJ.split(":").at(-1)?.slice(0, 12));
+  });
+
   it("keeps an incomplete revision visible and disables its unavailable snapshot", () => {
     seedFixtures();
     const current = store.getState().revisions as RevisionsDoc;

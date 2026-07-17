@@ -136,6 +136,164 @@ fn inspector_units_render_commit_target_display_for_range_capture() {
     );
 }
 
+#[test]
+fn inspector_projects_commit_subject_as_display_only_work_label() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    repo.commit_all("Review <truth> café");
+
+    let capture = pointbreak([
+        "capture",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--base",
+        "HEAD~1",
+    ]);
+    assert!(capture.status.success());
+
+    let inspector = Inspector::spawn(repo.path());
+    let units = inspector.get_json("/api/revisions");
+    let entry = &units["entries"][0];
+    assert_eq!(
+        entry["targetDisplay"]["workLabel"]["text"],
+        "Review <truth> café"
+    );
+    assert_eq!(
+        entry["targetDisplay"]["workLabel"]["source"],
+        "commit_subject"
+    );
+    assert!(entry["revisionId"].is_string());
+    assert!(entry["snapshotId"].is_string());
+
+    let detail = inspector.get_json(&format!(
+        "/api/revisions/{}",
+        urlencode(entry["revisionId"].as_str().unwrap())
+    ));
+    assert_eq!(
+        detail["revision"]["targetDisplay"]["workLabel"],
+        entry["targetDisplay"]["workLabel"]
+    );
+    assert!(detail["revision"]["id"].is_string());
+    assert!(detail["revision"]["objectId"].is_string());
+}
+
+#[test]
+fn inspector_projects_current_ref_for_worktree_staged_and_unstaged_sources() {
+    for (flag, expected) in [
+        (None, "working-tree changes on main"),
+        (Some("--staged"), "staged changes on main"),
+        (Some("--unstaged"), "unstaged changes on main"),
+    ] {
+        let repo = GitRepo::new();
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+        repo.commit_all("base");
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+        if flag == Some("--staged") {
+            repo.git(["add", "src/lib.rs"]);
+        }
+        let mut args = vec!["capture", "--repo", repo.path().to_str().unwrap()];
+        if let Some(flag) = flag {
+            args.push(flag);
+        }
+        let output = pointbreak(args);
+        assert!(output.status.success());
+
+        let inspector = Inspector::spawn(repo.path());
+        let units = inspector.get_json("/api/revisions");
+        let work_label = &units["entries"][0]["targetDisplay"]["workLabel"];
+        assert_eq!(work_label["text"], expected);
+        assert_eq!(work_label["source"], "current_ref");
+        assert!(
+            !work_label
+                .to_string()
+                .contains(repo.path().to_str().unwrap()),
+            "the work label must not expose the absolute worktree path"
+        );
+    }
+}
+
+#[test]
+fn unreadable_range_and_root_targets_use_exact_fallback_even_with_current_ref() {
+    for (root, expected_prefix) in [(false, "commit range "), (true, "root commit ")] {
+        let repo = GitRepo::new();
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+        repo.commit_all("base");
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+        repo.commit_all("target");
+        let target_oid = repo.git(["rev-parse", "HEAD"]).stdout.trim().to_owned();
+        let base_oid = repo.git(["rev-parse", "HEAD~1"]).stdout.trim().to_owned();
+        let args = if root {
+            vec!["capture", "--repo", repo.path().to_str().unwrap(), "--root"]
+        } else {
+            vec![
+                "capture",
+                "--repo",
+                repo.path().to_str().unwrap(),
+                "--base",
+                "HEAD~1",
+            ]
+        };
+        assert!(pointbreak(args).status.success());
+
+        let git_dir = repo
+            .git(["rev-parse", "--git-dir"])
+            .stdout
+            .trim()
+            .to_owned();
+        let object = repo
+            .path()
+            .join(git_dir)
+            .join("objects")
+            .join(&target_oid[..2])
+            .join(&target_oid[2..]);
+        std::fs::remove_file(&object).expect("remove loose target commit object");
+
+        let inspector = Inspector::spawn(repo.path());
+        let units = inspector.get_json("/api/revisions");
+        let work_label = &units["entries"][0]["targetDisplay"]["workLabel"];
+        let expected = if root {
+            format!("{expected_prefix}{}", &target_oid[..7])
+        } else {
+            format!("{expected_prefix}{}..{}", &base_oid[..7], &target_oid[..7])
+        };
+        assert_eq!(work_label["text"], expected);
+        assert_eq!(work_label["source"], "source_fallback");
+        assert_ne!(work_label["text"], "main");
+    }
+}
+
+#[test]
+fn work_label_clamps_unicode_scalars_and_keeps_html_as_plain_json_text() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    let subject = format!("<script>{}</script>", "é".repeat(140));
+    repo.commit_all(&subject);
+    assert!(
+        pointbreak([
+            "capture",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "--base",
+            "HEAD~1",
+        ])
+        .status
+        .success()
+    );
+
+    let inspector = Inspector::spawn(repo.path());
+    let units = inspector.get_json("/api/revisions");
+    let text = units["entries"][0]["targetDisplay"]["workLabel"]["text"]
+        .as_str()
+        .unwrap();
+    assert_eq!(text.chars().count(), 120);
+    assert!(text.ends_with('…'));
+    assert!(text.starts_with("<script>"));
+}
+
 /// Test B: a detached-HEAD capture still derives `label = <basename>` and a short
 /// head OID, with no branch claimed.
 #[test]

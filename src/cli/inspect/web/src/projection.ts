@@ -379,6 +379,7 @@ export function revisionSearchIndex(
     r.revisionId,
     r.snapshotId,
     target.label,
+    target.workLabel?.text,
     head.label,
     currentAssessment.status,
     currentAssessment.assessment,

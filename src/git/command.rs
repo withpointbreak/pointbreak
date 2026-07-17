@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -399,6 +399,93 @@ pub(crate) fn git_commit_changed_paths(repo: &Path, commit_oid: &str) -> Result<
         .filter_map(|field| std::str::from_utf8(field).ok())
         .map(str::to_owned)
         .collect())
+}
+
+/// Read the non-empty first message line for an explicit, bounded set of commit
+/// OIDs through one `cat-file --batch` process. Missing, non-commit, or
+/// non-UTF-8 objects are omitted so display callers can use their recorded
+/// source fallback without turning an unreadable object into a hard failure.
+/// The input set and returned map are ordered for deterministic callers.
+pub fn git_commit_subjects(
+    repo: &Path,
+    commit_oids: &BTreeSet<String>,
+) -> Result<BTreeMap<String, String>> {
+    if commit_oids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let mut input = commit_oids.iter().cloned().collect::<Vec<_>>().join("\n");
+    input.push('\n');
+    let output = run_git_with_stdin(repo, ["cat-file", "--batch"], input.as_bytes(), &[0])?;
+    parse_commit_subject_batch(commit_oids, &output.stdout)
+}
+
+fn parse_commit_subject_batch(
+    commit_oids: &BTreeSet<String>,
+    output: &[u8],
+) -> Result<BTreeMap<String, String>> {
+    let mut subjects = BTreeMap::new();
+    let mut cursor = 0;
+
+    for requested_oid in commit_oids {
+        let header_end = output[cursor..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map(|offset| cursor + offset)
+            .ok_or_else(|| ShoreError::Message("truncated git cat-file batch header".to_owned()))?;
+        let header = std::str::from_utf8(&output[cursor..header_end]).map_err(|error| {
+            ShoreError::Message(format!("git returned non-utf8 cat-file header: {error}"))
+        })?;
+        cursor = header_end + 1;
+
+        if header.ends_with(" missing") || header.ends_with(" ambiguous") {
+            continue;
+        }
+
+        let mut fields = header.rsplitn(3, ' ');
+        let size = fields
+            .next()
+            .and_then(|value| value.parse::<usize>().ok())
+            .ok_or_else(|| ShoreError::Message(format!("invalid git cat-file header: {header}")))?;
+        let object_type = fields
+            .next()
+            .ok_or_else(|| ShoreError::Message(format!("invalid git cat-file header: {header}")))?;
+        if cursor + size > output.len() {
+            return Err(ShoreError::Message(
+                "truncated git cat-file batch object".to_owned(),
+            ));
+        }
+        let object = &output[cursor..cursor + size];
+        cursor += size;
+        if output.get(cursor) == Some(&b'\n') {
+            cursor += 1;
+        }
+
+        if object_type != "commit" {
+            continue;
+        }
+        let Some(message_start) = object
+            .windows(2)
+            .position(|window| window == b"\n\n")
+            .map(|position| position + 2)
+        else {
+            continue;
+        };
+        let message = &object[message_start..];
+        let first_line_end = message
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .unwrap_or(message.len());
+        let Ok(subject) = std::str::from_utf8(&message[..first_line_end]) else {
+            continue;
+        };
+        let subject = subject.trim();
+        if !subject.is_empty() {
+            subjects.insert(requested_oid.clone(), subject.to_owned());
+        }
+    }
+
+    Ok(subjects)
 }
 
 /// Ref tips matching `patterns` (e.g. `&["refs/heads/*"]`), as `(oid, full ref)`
@@ -946,6 +1033,27 @@ mod tests {
 
         assert_eq!(tree_via_commit, tree_via_head);
         assert_ne!(tree_via_commit, head_oid);
+    }
+
+    #[test]
+    fn commit_subjects_batch_is_deterministic_and_omits_unreadable_oids() {
+        let repo = TwoCommitRepo::new();
+        let first = rev_parse(repo.path(), "HEAD~1");
+        let second = rev_parse(repo.path(), "HEAD");
+        let missing = "0".repeat(second.len());
+        let requested = BTreeSet::from([second.clone(), missing.clone(), first.clone()]);
+
+        let subjects = git_commit_subjects(repo.path(), &requested).unwrap();
+
+        assert_eq!(
+            subjects,
+            BTreeMap::from([(first, "first".to_owned()), (second, "second".to_owned())])
+        );
+        assert!(
+            !git_commit_subjects(repo.path(), &BTreeSet::new())
+                .unwrap()
+                .contains_key(&missing)
+        );
     }
 
     #[test]

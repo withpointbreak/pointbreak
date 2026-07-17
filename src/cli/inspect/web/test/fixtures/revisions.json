@@ -78,7 +78,11 @@
         },
         "kind": "working_tree",
         "label": ".tmplPi8eZ",
-        "pathPrivate": true
+        "pathPrivate": true,
+        "workLabel": {
+          "source": "current_ref",
+          "text": "working-tree changes on main"
+        }
       }
     }
   ],

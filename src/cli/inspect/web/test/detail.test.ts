@@ -327,6 +327,168 @@ describe("openRevision / renderRevisionPage (the composite page, fetched via htt
     ).toBe(REV);
   });
 
+  it("renders floating, capture-target, landing, and unknown wording from existing authority", async () => {
+    const cases = [
+      {
+        commitRange: {
+          anchored: false,
+          currentCommits: [],
+          currentRefs: [],
+          withdrawnCommits: [],
+          withdrawnRefs: [],
+          liveness: { perCommit: [] },
+        },
+        expected: "floating revision — no landing commit association recorded",
+      },
+      {
+        commitRange: {
+          anchored: true,
+          currentCommits: [
+            { commitOid: "a".repeat(40), source: "capture_target" },
+          ],
+          currentRefs: [],
+          withdrawnCommits: [],
+          withdrawnRefs: [],
+          liveness: {
+            perCommit: [{ commitOid: "a".repeat(40), condition: "live" }],
+            headline: { condition: "live" },
+          },
+        },
+        expected: "anchored capture target live",
+      },
+      {
+        commitRange: {
+          anchored: true,
+          currentCommits: [
+            {
+              commitOid: "b".repeat(40),
+              source: "association",
+              commitAssociationId: "assoc-commit:sha256:12345678",
+            },
+          ],
+          currentRefs: [],
+          withdrawnCommits: [],
+          withdrawnRefs: [],
+          liveness: {
+            perCommit: [{ commitOid: "b".repeat(40), condition: "merged" }],
+            headline: { condition: "merged" },
+          },
+        },
+        expected: "landing merged",
+      },
+      {
+        commitRange: {
+          anchored: true,
+          currentCommits: [
+            { commitOid: "c".repeat(40), source: "association" },
+          ],
+          currentRefs: [],
+          withdrawnCommits: [],
+          withdrawnRefs: [],
+        },
+        expected: "landing unknown — Git reachability unavailable",
+      },
+    ];
+
+    for (const [index, { commitRange, expected }] of cases.entries()) {
+      const response = {
+        ...structuredClone(revisionJson),
+        commitRange,
+      };
+      setCompositeResponse(response);
+      store.commit({
+        history: {
+          ...(store.getState().history as HistoryDoc),
+          eventSetHash: `case-${index}`,
+        },
+        selected: { kind: "revision", id: REV },
+      });
+      await detail.openRevision(REV);
+      expect(detailEl().textContent).toContain(expected);
+    }
+  });
+
+  it("renders full-OID tooltips plus current and withdrawn association history", async () => {
+    const oid = "d".repeat(40);
+    const response = {
+      ...structuredClone(revisionJson),
+      commitRange: {
+        anchored: true,
+        currentCommits: [
+          {
+            commitOid: oid,
+            source: "association",
+            commitAssociationId: "assoc-commit:sha256:current",
+          },
+        ],
+        currentRefs: [
+          {
+            refName: "refs/heads/feature/landing",
+            headOid: oid,
+            refAssociationId: "assoc-ref:sha256:current",
+          },
+        ],
+        withdrawnCommits: [
+          {
+            commitOid: "e".repeat(40),
+            commitAssociationId: "assoc-commit:sha256:old",
+            commitWithdrawalId: "withdraw-commit:sha256:old",
+          },
+        ],
+        withdrawnRefs: [
+          {
+            refName: "refs/heads/old",
+            headOid: "e".repeat(40),
+            refAssociationId: "assoc-ref:sha256:old",
+            refWithdrawalId: "withdraw-ref:sha256:old",
+          },
+        ],
+        liveness: {
+          perCommit: [{ commitOid: oid, condition: "live" }],
+          headline: { condition: "live" },
+        },
+      },
+    };
+    setCompositeResponse(response);
+    store.commit({ selected: { kind: "revision", id: REV } });
+    await detail.openRevision(REV);
+
+    const section = [...detailEl().querySelectorAll("section")].find(
+      (item) =>
+        item.querySelector("h2")?.textContent === "Association and landing",
+    );
+    expect(section).toBeDefined();
+    expect(section?.querySelector(`[title="${oid}"]`)).not.toBeNull();
+    expect(section?.textContent).toContain("feature/landing");
+    expect(section?.textContent).toContain("withdrawn commits");
+    expect(section?.textContent).toContain("withdrawn refs");
+  });
+
+  it("uses the semantic work label as the title and keeps immutable ids visible", async () => {
+    const response = {
+      ...structuredClone(revisionJson),
+      revision: {
+        ...structuredClone(revisionJson.revision),
+        targetDisplay: {
+          ...structuredClone(revisionJson.revision.targetDisplay),
+          workLabel: {
+            text: "Review <landing> truth",
+            source: "commit_subject",
+          },
+        },
+      },
+    };
+    setCompositeResponse(response);
+    store.commit({ selected: { kind: "revision", id: REV } });
+    await detail.openRevision(REV);
+
+    expect(detailEl().querySelector(".unit-page-title")?.textContent).toBe(
+      "Review <landing> truth",
+    );
+    expect(detailEl().querySelector(`span[title="${REV}"]`)).not.toBeNull();
+    expect(detailEl().querySelector(`span[title="${OBJ}"]`)).not.toBeNull();
+  });
+
   it("opens the revision page diff via the #detail delegate", async () => {
     store.commit({ selected: { kind: "revision", id: REV } });
     await detail.openRevision(REV);

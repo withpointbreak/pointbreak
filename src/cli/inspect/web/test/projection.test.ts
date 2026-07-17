@@ -502,6 +502,23 @@ describe("revisionSearchIndex", () => {
     }
     expect(text).toBe(text.toLowerCase());
   });
+
+  it("indexes the semantic work label without replacing immutable identity", () => {
+    const labeled = {
+      ...revision,
+      targetDisplay: {
+        ...revision.targetDisplay,
+        workLabel: {
+          text: "Review landing truth",
+          source: "commit_subject" as const,
+        },
+      },
+    };
+    const index = revisionSearchIndex(labeled);
+    expect(index.text).toContain("review landing truth");
+    expect(index.revision).toBe(revision.revisionId);
+    expect(index.snapshot).toBe(revision.snapshotId);
+  });
 });
 
 describe("revisionSearchIndex — track/actor/tag/is/assessment/capturedAt (pair 2)", () => {

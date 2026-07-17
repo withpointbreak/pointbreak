@@ -11,6 +11,7 @@ import {
   shortRef,
   targetDisplayLabel,
   targetHeadBadge,
+  workLabelText,
 } from "../src/refs";
 
 function parse(html: string): Document {
@@ -242,6 +243,15 @@ describe("targetDisplayLabel", () => {
     expect(targetDisplayLabel({})).toBe("working tree");
     expect(targetDisplayLabel({ label: "feature-x" })).toBe("feature-x");
     expect(targetDisplayLabel({ label: "<x>" })).toBe("&lt;x&gt;");
+  });
+});
+
+describe("workLabelText", () => {
+  it("renders the server-derived display label as escaped text", () => {
+    expect(workLabelText(undefined)).toBe("working-tree changes");
+    expect(workLabelText({ workLabel: { text: "Review <truth> café" } })).toBe(
+      "Review &lt;truth&gt; café",
+    );
   });
 });
 

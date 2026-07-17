@@ -15,6 +15,7 @@ use mmdflux::layout::{LaidOutGraph, LayoutOptions, layout_graph};
 use pointbreak::documents::{
     InspectFreshnessDocument, review_snapshot_document, revision_show_document,
 };
+use pointbreak::git::git_commit_subjects;
 use pointbreak::model::{
     EventId, ObjectId, ReviewEndpoint, RevisionId, RevisionSource, ValidationStatus,
 };
@@ -28,11 +29,11 @@ use pointbreak::session::{
     RevisionOverview, RevisionOverviewsOptions, RevisionShowOptions, RevisionShowResult,
     SessionState, SnapshotSummaryCache, StoreIdentity, StoreIdentityOptions, SupersessionView,
     TrustSet, apply_history_query, commit_graph_stamp, compare_event_instants, count_new_since,
-    current_assessment_includes_follow_up, default_history_page_projection, enrich_liveness,
-    event_log_head_marker, history_base_projection, list_attention, list_revisions,
-    read_bound_object_artifact, read_events_for_display, read_object_artifact,
-    revision_supersession_classification, show_revision, show_revision_overviews,
-    stale_review_fact_count, store_identity,
+    current_assessment_includes_follow_up, default_history_page_projection,
+    effective_integration_ref, enrich_liveness, event_log_head_marker, history_base_projection,
+    list_attention, list_revisions, read_bound_object_artifact, read_events_for_display,
+    read_object_artifact, revision_supersession_classification, show_revision,
+    show_revision_overviews, stale_review_fact_count, store_identity,
 };
 use serde::Serialize;
 
@@ -320,6 +321,9 @@ const WORKING_TREE_FLOOR: &str = "working tree";
 const GIT_COMMIT_FLOOR: &str = "git commit";
 /// Length of the git-style short commit OID used for head labels (git's default).
 const SHORT_OID_LEN: usize = 7;
+/// Maximum number of Unicode scalar values in the display-only work label,
+/// including the visible ellipsis when truncation is required.
+const WORK_LABEL_MAX_CHARS: usize = 120;
 
 /// Path-private display view-model for a Revision target.
 ///
@@ -337,11 +341,29 @@ struct TargetDisplay {
     /// `"working tree"` floor). For a commit target, the short target OID (or
     /// the `"git commit"` floor).
     label: String,
+    /// Display-only semantic description of the captured work. Immutable ids
+    /// remain the authority; this value is never used for addressing.
+    work_label: WorkLabel,
     #[serde(skip_serializing_if = "Option::is_none")]
     head: Option<HeadDisplay>,
     /// Always true: this block is built from path-free fields and never carries
     /// the raw worktree path.
     path_private: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkLabel {
+    text: String,
+    source: WorkLabelSource,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WorkLabelSource {
+    CommitSubject,
+    CurrentRef,
+    SourceFallback,
 }
 
 #[derive(Serialize)]
@@ -362,7 +384,11 @@ struct HeadDisplay {
 ///
 /// Pure: reads only captured fields, never the filesystem, and never rewrites
 /// identity.
-fn derive_target_display(target: &ReviewEndpoint, base: &ReviewEndpoint) -> TargetDisplay {
+fn derive_target_display(
+    target: &ReviewEndpoint,
+    base: &ReviewEndpoint,
+    work_label: WorkLabel,
+) -> TargetDisplay {
     let (kind, label) = match target {
         ReviewEndpoint::GitWorkingTree { worktree_root } => {
             ("working_tree", basename_label(worktree_root))
@@ -383,9 +409,132 @@ fn derive_target_display(target: &ReviewEndpoint, base: &ReviewEndpoint) -> Targ
     TargetDisplay {
         kind,
         label,
+        work_label,
         head: head_display(base),
         // The raw worktree path is never copied into this block.
         path_private: true,
+    }
+}
+
+fn derive_work_label(
+    source: &RevisionSource,
+    base: &ReviewEndpoint,
+    target: &ReviewEndpoint,
+    commit_range: &RevisionCommitRangeView,
+    commit_subjects: &BTreeMap<String, String>,
+) -> WorkLabel {
+    let label = match source {
+        RevisionSource::GitCommitRange { .. } => commit_subject_label(target, commit_subjects)
+            .unwrap_or_else(|| WorkLabel {
+                text: format!(
+                    "commit range {}..{}",
+                    endpoint_short_oid(base),
+                    endpoint_short_oid(target)
+                ),
+                source: WorkLabelSource::SourceFallback,
+            }),
+        RevisionSource::GitRootCommit { .. } => commit_subject_label(target, commit_subjects)
+            .unwrap_or_else(|| WorkLabel {
+                text: format!("root commit {}", endpoint_short_oid(target)),
+                source: WorkLabelSource::SourceFallback,
+            }),
+        RevisionSource::GitStaged { .. } => {
+            source_or_ref_label("staged changes", "staged changes on", commit_range)
+        }
+        RevisionSource::GitUnstaged { .. } => {
+            source_or_ref_label("unstaged changes", "unstaged changes on", commit_range)
+        }
+        RevisionSource::GitWorktree { .. } => source_or_ref_label(
+            "working-tree changes",
+            "working-tree changes on",
+            commit_range,
+        ),
+    };
+    WorkLabel {
+        text: clamp_work_label(&label.text),
+        source: label.source,
+    }
+}
+
+fn commit_subject_label(
+    target: &ReviewEndpoint,
+    commit_subjects: &BTreeMap<String, String>,
+) -> Option<WorkLabel> {
+    let ReviewEndpoint::GitCommit { commit_oid, .. } = target else {
+        return None;
+    };
+    commit_subjects.get(commit_oid).map(|subject| WorkLabel {
+        text: subject.clone(),
+        source: WorkLabelSource::CommitSubject,
+    })
+}
+
+fn source_or_ref_label(
+    fallback: &str,
+    with_ref: &str,
+    commit_range: &RevisionCommitRangeView,
+) -> WorkLabel {
+    match sole_current_ref(commit_range) {
+        Some(reference) => WorkLabel {
+            text: format!("{with_ref} {}", short_ref(reference)),
+            source: WorkLabelSource::CurrentRef,
+        },
+        None => WorkLabel {
+            text: fallback.to_owned(),
+            source: WorkLabelSource::SourceFallback,
+        },
+    }
+}
+
+fn sole_current_ref(commit_range: &RevisionCommitRangeView) -> Option<&str> {
+    let refs = commit_range
+        .current_refs
+        .iter()
+        .map(|association| association.ref_name.as_str())
+        .collect::<BTreeSet<_>>();
+    (refs.len() == 1).then(|| *refs.first().expect("one ref is present"))
+}
+
+fn short_ref(reference: &str) -> &str {
+    reference
+        .strip_prefix("refs/heads/")
+        .or_else(|| reference.strip_prefix("refs/remotes/"))
+        .unwrap_or(reference)
+}
+
+fn endpoint_short_oid(endpoint: &ReviewEndpoint) -> String {
+    let oid = match endpoint {
+        ReviewEndpoint::GitCommit { commit_oid, .. } => commit_oid,
+        ReviewEndpoint::GitTree { tree_oid } | ReviewEndpoint::GitIndex { tree_oid } => tree_oid,
+        ReviewEndpoint::GitWorkingTree { .. } => return "unknown".to_owned(),
+    };
+    short_oid(oid).unwrap_or_else(|| "unknown".to_owned())
+}
+
+fn clamp_work_label(label: &str) -> String {
+    if label.chars().count() <= WORK_LABEL_MAX_CHARS {
+        return label.to_owned();
+    }
+    let mut clamped = label
+        .chars()
+        .take(WORK_LABEL_MAX_CHARS - 1)
+        .collect::<String>();
+    clamped.push('…');
+    clamped
+}
+
+fn commit_subject_oids(source: &RevisionSource, target: &ReviewEndpoint) -> Option<String> {
+    if !matches!(
+        source,
+        RevisionSource::GitCommitRange { .. } | RevisionSource::GitRootCommit { .. }
+    ) {
+        return None;
+    }
+    match target {
+        ReviewEndpoint::GitCommit { commit_oid, .. } if !commit_oid.is_empty() => {
+            Some(commit_oid.clone())
+        }
+        _ => None,
     }
 }
 
@@ -448,6 +597,7 @@ fn splice_target_display(
 fn to_unit_entry_documents(
     entries: Vec<RevisionListEntry>,
     mut overviews: BTreeMap<String, RevisionEntryOverviewDocument>,
+    commit_subjects: &BTreeMap<String, String>,
 ) -> Result<Vec<RevisionEntryDocument>, String> {
     entries
         .into_iter()
@@ -469,7 +619,9 @@ fn to_unit_entry_documents(
                 // deliberately not a wire field.
                 merge_status_view: _,
             } = entry;
-            let target_display = derive_target_display(&target, &base);
+            let work_label =
+                derive_work_label(&source, &base, &target, &commit_range, commit_subjects);
+            let target_display = derive_target_display(&target, &base, work_label);
             let overview = overviews.remove(revision_id.as_str()).ok_or_else(|| {
                 format!("missing overview for revision: {}", revision_id.as_str())
             })?;
@@ -1010,6 +1162,12 @@ fn build_revisions_json(
         list_revisions(RevisionListOptions::new(repo).with_read_for_display(true))
             .map_err(|error| error.to_string())?
     };
+    let subject_oids = result
+        .entries
+        .iter()
+        .filter_map(|entry| commit_subject_oids(&entry.source, &entry.target))
+        .collect::<BTreeSet<_>>();
+    let commit_subjects = git_commit_subjects(repo, &subject_oids).unwrap_or_default();
     let overviews = revision_overviews(repo, &result.entries, trust_set, snapshot_summaries)?;
     let entries = {
         let span = tracing::debug_span!(
@@ -1017,7 +1175,7 @@ fn build_revisions_json(
             revision_count = result.entries.len()
         );
         let _guard = span.enter();
-        to_unit_entry_documents(result.entries, overviews)?
+        to_unit_entry_documents(result.entries, overviews, &commit_subjects)?
     };
     let payload = RevisionsPayload {
         schema: "pointbreak.inspect-revisions",
@@ -1598,14 +1756,26 @@ pub(super) fn revision_json(repo: &Path, revision_id: &str) -> Result<String, St
     // Thread the typed endpoints and the commit-range view out before
     // `revision_show_document` consumes `result`, then splice the additive
     // `targetDisplay` into the serialized document.
-    let target_display = derive_target_display(&result.revision.target, &result.revision.base);
+    let commit_range = result.commit_range.clone();
+    let subject_oids = commit_subject_oids(&result.revision.source, &result.revision.target)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let commit_subjects = git_commit_subjects(repo, &subject_oids).unwrap_or_default();
+    let work_label = derive_work_label(
+        &result.revision.source,
+        &result.revision.base,
+        &result.revision.target,
+        &commit_range,
+        &commit_subjects,
+    );
+    let target_display =
+        derive_target_display(&result.revision.target, &result.revision.base, work_label);
     let head_oid = match &result.revision.base {
         ReviewEndpoint::GitCommit { commit_oid, .. } => Some(commit_oid.clone()),
         ReviewEndpoint::GitTree { .. }
         | ReviewEndpoint::GitIndex { .. }
         | ReviewEndpoint::GitWorkingTree { .. } => None,
     };
-    let commit_range = result.commit_range.clone();
     // Build the inspector-private fact graphs while `result` is still live; it is
     // moved into `revision_show_document` below.
     let fact_supersession = fact_supersession_document(&result);
@@ -1628,16 +1798,59 @@ pub(super) fn revision_json(repo: &Path, revision_id: &str) -> Result<String, St
     splice_fact_supersession(&mut value, fact_supersession)?;
     splice_revision_supersession(&mut value, revision_supersession)?;
 
-    // Current/live enrichment is best-effort: a missing or unreadable repo leaves
-    // `liveBranch` omitted ("reachability unknown"), never an error.
-    if let Some(head_oid) = head_oid
-        && let Ok(enrichment) = enrich_liveness(&commit_range, repo, None)
-        && let Some(live_branch) = resolve_head_live_branch(&enrichment, &head_oid)
-    {
-        set_head_live_branch(&mut value, live_branch);
-    }
+    splice_repository_liveness(&mut value, &commit_range, repo, head_oid.as_deref())?;
 
     serde_json::to_string(&value).map_err(|error| error.to_string())
+}
+
+/// Best-effort repository join for revision detail. A Git failure is an honest
+/// absence: no liveness field and no live-branch claim. One successful
+/// enrichment feeds both Inspector-private consumers.
+fn splice_repository_liveness(
+    document: &mut serde_json::Value,
+    commit_range: &RevisionCommitRangeView,
+    repo: &Path,
+    head_oid: Option<&str>,
+) -> Result<(), String> {
+    let integration_ref = effective_integration_ref(repo, None);
+    let Ok(enrichment) = enrich_liveness(commit_range, repo, integration_ref.as_deref()) else {
+        return Ok(());
+    };
+    if let Some(head_oid) = head_oid
+        && let Some(live_branch) = resolve_head_live_branch(&enrichment, head_oid)
+    {
+        set_head_live_branch(document, live_branch);
+    }
+    splice_commit_range_liveness(document, enrichment)
+}
+
+/// Splice repository-borne liveness into the Inspector-private commit-range
+/// block and merge enrichment diagnostics into the existing top-level array,
+/// matching `revision show` without changing its shared document builder.
+fn splice_commit_range_liveness(
+    document: &mut serde_json::Value,
+    mut enrichment: LivenessEnrichment,
+) -> Result<(), String> {
+    let enrichment_diagnostics = std::mem::take(&mut enrichment.diagnostics);
+    if let Some(commit_range) = document
+        .get_mut("commitRange")
+        .and_then(|commit_range| commit_range.as_object_mut())
+    {
+        commit_range.insert(
+            "liveness".to_owned(),
+            serde_json::to_value(enrichment).map_err(|error| error.to_string())?,
+        );
+    }
+    if !enrichment_diagnostics.is_empty()
+        && let Some(diagnostics) = document
+            .get_mut("diagnostics")
+            .and_then(|diagnostics| diagnostics.as_array_mut())
+    {
+        for diagnostic in enrichment_diagnostics {
+            diagnostics.push(serde_json::to_value(diagnostic).map_err(|error| error.to_string())?);
+        }
+    }
+    Ok(())
 }
 
 /// The branch a unit's head commit currently lives on, for the head display.
@@ -1727,6 +1940,13 @@ mod tests {
     };
 
     use super::*;
+
+    fn test_work_label() -> WorkLabel {
+        WorkLabel {
+            text: "working-tree changes".to_owned(),
+            source: WorkLabelSource::SourceFallback,
+        }
+    }
 
     #[test]
     fn latest_activity_compares_mixed_timestamp_forms_by_instant() {
@@ -2468,7 +2688,7 @@ mod tests {
         let target = working_tree("/Users/x/worktrees/boardwalk/plan-0006");
         let base = commit("545b0eb81463aaaaaaaaaaaaaaaaaaaaaaaaaaaa");
 
-        let display = derive_target_display(&target, &base);
+        let display = derive_target_display(&target, &base, test_work_label());
 
         assert_eq!(display.kind, "working_tree");
         assert_eq!(display.label, "plan-0006");
@@ -2485,18 +2705,19 @@ mod tests {
     #[test]
     fn floors_empty_or_root_worktree_root_to_working_tree() {
         assert_eq!(
-            derive_target_display(&working_tree("/"), &commit("abc1234")).label,
+            derive_target_display(&working_tree("/"), &commit("abc1234"), test_work_label()).label,
             "working tree"
         );
         assert_eq!(
-            derive_target_display(&working_tree(""), &commit("abc1234")).label,
+            derive_target_display(&working_tree(""), &commit("abc1234"), test_work_label()).label,
             "working tree"
         );
     }
 
     #[test]
     fn empty_commit_oid_yields_no_head() {
-        let display = derive_target_display(&working_tree("/repo/wt"), &commit(""));
+        let display =
+            derive_target_display(&working_tree("/repo/wt"), &commit(""), test_work_label());
         assert!(display.head.is_none());
     }
 
@@ -2505,6 +2726,7 @@ mod tests {
         let display = derive_target_display(
             &commit("9fceb02d0ae598e95dc970b74767f19372d61af8"),
             &commit("abc1234def"),
+            test_work_label(),
         );
 
         assert_eq!(display.kind, "git_commit");
@@ -2518,6 +2740,7 @@ mod tests {
         let display = derive_target_display(
             &commit("9fceb02d0ae598e95dc970b74767f19372d61af8"),
             &tree("empty-tree"),
+            test_work_label(),
         );
 
         assert_eq!(display.kind, "git_commit");
@@ -2528,7 +2751,11 @@ mod tests {
 
     #[test]
     fn revision_source_target_display_handles_git_index_explicitly() {
-        let display = derive_target_display(&index_tree("abcdef123456"), &commit("base1234"));
+        let display = derive_target_display(
+            &index_tree("abcdef123456"),
+            &commit("base1234"),
+            test_work_label(),
+        );
 
         assert_eq!(display.kind, "git_index");
         assert_eq!(display.label, "abcdef1");
@@ -2538,7 +2765,7 @@ mod tests {
 
     #[test]
     fn commit_target_with_empty_oid_floors_to_kind_label() {
-        let display = derive_target_display(&commit(""), &commit("abc1234def"));
+        let display = derive_target_display(&commit(""), &commit("abc1234def"), test_work_label());
 
         assert_eq!(display.kind, "git_commit");
         assert_eq!(display.label, "git commit");
@@ -2550,6 +2777,7 @@ mod tests {
         let display = derive_target_display(
             &working_tree("/Users/x/worktrees/boardwalk/plan-0006"),
             &commit("545b0eb81463aaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            test_work_label(),
         );
         let json = serde_json::to_string(&display).unwrap();
 
@@ -2638,7 +2866,7 @@ mod tests {
             },
         )]);
 
-        let docs = to_unit_entry_documents(entries, overviews).unwrap();
+        let docs = to_unit_entry_documents(entries, overviews, &BTreeMap::new()).unwrap();
         let json = serde_json::to_value(&docs[0]).unwrap();
 
         // The derived, path-private targetDisplay is spliced in...
@@ -2687,6 +2915,7 @@ mod tests {
         let display = derive_target_display(
             &working_tree("/Users/x/worktrees/boardwalk/plan-0006"),
             &commit("545b0eb81463aaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            test_work_label(),
         );
 
         splice_target_display(&mut document, display).unwrap();
@@ -2740,7 +2969,8 @@ mod tests {
             unreachable!("constructed a revision proposal");
         };
         let provenance = revision.git_provenance.as_ref().unwrap();
-        let display = derive_target_display(&provenance.target, &provenance.base);
+        let display =
+            derive_target_display(&provenance.target, &provenance.base, test_work_label());
         let json = serde_json::to_string(&display).unwrap();
 
         assert_eq!(display.label, "legacy-wt");
@@ -2924,12 +3154,11 @@ mod tests {
     }
 
     #[test]
-    fn revision_json_omits_live_branch_when_commit_objects_are_unavailable() {
+    fn revision_json_classifies_positively_missing_commit_objects() {
         let (repo, revision_id, _branch) = captured_commit_range_repo();
 
         // A second repo that serves the same store but whose object database does
-        // not hold the captured commits (the linked-inspector case). The store
-        // still reads; reachability cannot resolve, so liveBranch is omitted.
+        // not hold the captured commits (the linked-inspector case).
         let elsewhere = tempfile::tempdir().expect("create separate repo");
         git(elsewhere.path(), &["init"]);
         git(elsewhere.path(), &["config", "user.name", "Shore Tests"]);
@@ -2946,9 +3175,55 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&revision_json(elsewhere.path(), &revision_id).unwrap()).unwrap();
 
+        assert_eq!(
+            value["commitRange"]["liveness"]["perCommit"][0]["condition"],
+            "orphaned"
+        );
+        assert_eq!(
+            value["commitRange"]["liveness"]["perCommit"][0]["reason"],
+            "object_missing"
+        );
+    }
+
+    #[test]
+    fn repository_git_failure_omits_liveness_instead_of_manufacturing_state() {
+        let unavailable = tempfile::tempdir().expect("create non-repository directory");
+        let commit_range = RevisionCommitRangeView {
+            revision_id: RevisionId::new("rev:sha256:unavailable"),
+            anchored: true,
+            current_commits: vec![pointbreak::session::CurrentCommitAssociation {
+                commit_oid: "a".repeat(40),
+                tree_oid: "b".repeat(40),
+                commit_association_id: None,
+                source: pointbreak::session::CommitEdgeSource::CaptureTarget,
+            }],
+            current_refs: Vec::new(),
+            withdrawn_commits: Vec::new(),
+            withdrawn_refs: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let mut document = serde_json::json!({
+            "commitRange": {},
+            "diagnostics": [],
+            "revision": { "targetDisplay": { "head": {} } }
+        });
+
+        splice_repository_liveness(
+            &mut document,
+            &commit_range,
+            unavailable.path(),
+            Some("head"),
+        )
+        .unwrap();
+
         assert!(
-            value["revision"]["targetDisplay"]["head"]["liveBranch"].is_null(),
-            "commit objects absent → reachability unknown → liveBranch omitted, request still 200s"
+            document["commitRange"].get("liveness").is_none(),
+            "a Git command failure omits enrichment instead of manufacturing a condition"
+        );
+        assert!(
+            document["revision"]["targetDisplay"]["head"]
+                .get("liveBranch")
+                .is_none()
         );
     }
 
