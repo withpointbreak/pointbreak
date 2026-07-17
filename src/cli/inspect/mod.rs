@@ -14,13 +14,14 @@ enum StartupOutputFormat {
     Json,
 }
 
-/// `pointbreak inspect` starts a small local web server that visualizes a `.pointbreak/data`
-/// store: the event timeline, captured Revisions, and recorded outcomes.
+/// Open the local, read-only Review web UI over the resolved store (the Work stage)
 ///
-/// The server is intentionally synchronous (thread-per-connection, std only).
-/// It introduces no async runtime, matching the storage-model guidance, and
-/// reuses the same validated projections as `pointbreak history` /
-/// `pointbreak revision list`, so it never parses raw `.pointbreak/data/` files itself.
+/// `pointbreak inspect` starts a loopback-only web server over the repository's
+/// resolved Pointbreak store — the same store every other command reads and
+/// writes, whichever storage tier the repository resolves (`pointbreak store
+/// paths` reports it). It renders the event timeline, captured revisions,
+/// supersession threads, and annotated diffs, and it never executes commands
+/// or writes to the store.
 #[derive(Debug, Args)]
 pub(super) struct InspectArgs {
     /// Repository root or a path inside the repository.
