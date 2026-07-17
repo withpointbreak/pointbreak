@@ -73,6 +73,7 @@ import {
   verificationChip,
 } from "./projection";
 import {
+  actorChip,
   linkify,
   shortId,
   shortRef,
@@ -718,8 +719,10 @@ export function renderDetail(): void {
     ["payloadHash", e.payloadHash ?? ""],
     ["revision", revisionId || "—"],
     ["track", entryTrack(e) || "—"],
-    ["actor", principalLabel(e) || entryActor(e) || "—"],
+    ["actor", entryActor(e) || "—"],
   ];
+  const principal = principalLabel(e);
+  if (principal) kv.push(["principal", principal]);
   const snapshotId = revisionId ? snapshotIdForRevision(revisionId) : "";
   const s = e.summary ?? {};
   if (e.eventType === "work_object_proposed") {
@@ -766,6 +769,7 @@ export function renderDetail(): void {
     if (k === "eventId" && e.eventId) return entityAnchor("event", e.eventId);
     if (k === "revision" && revisionId)
       return entityAnchor("revision", revisionId);
+    if (k === "actor" && v !== "—") return actorChip(v);
     return linkify(v);
   };
   el.innerHTML = `

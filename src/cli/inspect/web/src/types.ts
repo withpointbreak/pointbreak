@@ -306,9 +306,16 @@ export interface EntryTarget extends FactTarget {
   worktreeRoot?: string;
 }
 
-/** The actor (and producer) that wrote a history entry. */
+/** Provenance for the tool that emitted an entry; not the writer identity. */
+export interface EntryProducer {
+  name?: string;
+  version?: string;
+}
+
+/** The actor (and separate producer provenance) that wrote a history entry. */
 export interface EntryWriter {
   actorId?: string;
+  producer?: EntryProducer;
 }
 
 /** The review subject a history entry addresses (keys on the revision). */

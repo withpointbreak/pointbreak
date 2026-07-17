@@ -209,7 +209,7 @@ describe("renderDetail (event detail / empty prompt)", () => {
     expect(btn?.dataset.diffFocus).toBe(OBS_ID);
   });
 
-  it("derives the actor readback from the writer actor id, never the writer role", () => {
+  it("keeps the exact writer actor separate from role and resolved principal", () => {
     const eventId = "evt:sha256:writerrolecharacterization";
     store.commit({
       history: {
@@ -220,6 +220,10 @@ describe("renderDetail (event detail / empty prompt)", () => {
             occurredAt: "unix-ms:1782699185488",
             // An envelope that also carries a role — the readback must ignore it.
             writer: { actorId: "actor:agent:codex", role: "admin" },
+            principal: {
+              status: "resolved",
+              actorId: "actor:git-email:kevin@example.com",
+            },
             subject: { revisionId: REV },
             summary: { observationId: "obs:x", title: "obs" },
           },
@@ -235,8 +239,15 @@ describe("renderDetail (event detail / empty prompt)", () => {
       document.querySelectorAll<HTMLElement>("#detail dl.kv dt"),
     ).find((dt) => dt.textContent === "actor");
     const actorReadback = actorDt?.nextElementSibling?.textContent ?? "";
-    expect(actorReadback).toContain("codex");
+    expect(actorReadback).toBe("actor:agent:codex");
     expect(actorReadback).not.toContain("admin");
+    expect(actorReadback).not.toContain("kevin@example.com");
+    const principalDt = Array.from(
+      document.querySelectorAll<HTMLElement>("#detail dl.kv dt"),
+    ).find((dt) => dt.textContent === "principal");
+    expect(principalDt?.nextElementSibling?.textContent).toContain(
+      "kevin@example.com",
+    );
   });
 });
 
@@ -325,6 +336,93 @@ describe("openRevision / renderRevisionPage (the composite page, fetched via htt
       document.querySelector<HTMLElement>("#up-timeline-btn")?.dataset
         .revealRevision,
     ).toBe(REV);
+  });
+
+  it("renders exact fact, opener, and response writers from the composite", async () => {
+    const author = "actor:agent:pointbreak-example-author";
+    const reviewer = "actor:agent:pointbreak-example-reviewer";
+    const response = structuredClone(revisionJson) as unknown as {
+      observations: Array<{ writer: { actorId: string } }>;
+      inputRequests: Array<{
+        writer: { actorId: string };
+        status: string;
+        responses: Array<{
+          id: string;
+          eventId: string;
+          outcome: string;
+          reason: string;
+          createdAt: string;
+          verificationStatus: string;
+          writer: {
+            actorId: string;
+            producer: { name: string; version: string };
+          };
+        }>;
+      }>;
+      assessments: Array<{ writer: { actorId: string } }>;
+      validationChecks: Array<{ writer: { actorId: string } }>;
+    };
+    response.observations[0].writer.actorId = author;
+    response.inputRequests[0].writer.actorId = author;
+    response.inputRequests[0].status = "ambiguous";
+    response.inputRequests[0].responses = [
+      {
+        id: "input-request-response:sha256:aaaaaaaaaaaaaaaa",
+        eventId: "evt:sha256:aaaaaaaaaaaaaaaa",
+        outcome: "approved",
+        reason: "reviewer approves",
+        createdAt: "unix-ms:1782699185700",
+        verificationStatus: "unsigned",
+        writer: {
+          actorId: reviewer,
+          producer: { name: "pointbreak", version: "0.6.0" },
+        },
+      },
+      {
+        id: "input-request-response:sha256:bbbbbbbbbbbbbbbb",
+        eventId: "evt:sha256:bbbbbbbbbbbbbbbb",
+        outcome: "rejected",
+        reason: "author disagrees",
+        createdAt: "unix-ms:1782699185800",
+        verificationStatus: "unsigned",
+        writer: {
+          actorId: author,
+          producer: { name: "pointbreak", version: "0.6.0" },
+        },
+      },
+    ];
+    response.assessments[0].writer.actorId = reviewer;
+    response.validationChecks[0].writer.actorId = reviewer;
+    setCompositeResponse(response);
+    store.commit({ selected: { kind: "revision", id: REV } });
+    await detail.openRevision(REV);
+
+    const page = detailEl();
+    const cards = [
+      [".anno-observation", author],
+      [".anno-input-request", author],
+      [".anno-assessment", reviewer],
+      [".anno-validation", reviewer],
+    ] as const;
+    for (const [selector, actorId] of cards) {
+      const chip = page.querySelector<HTMLElement>(
+        `${selector} > .anno-head [data-ref-kind="actor"]`,
+      );
+      expect(chip?.textContent).toBe(actorId);
+      expect(chip?.dataset.refId).toBe(actorId);
+    }
+    const responseChips = Array.from(
+      page.querySelectorAll<HTMLElement>(
+        '.fact-response [data-ref-kind="actor"]',
+      ),
+    );
+    expect(responseChips.map((chip) => chip.dataset.refId)).toEqual([
+      reviewer,
+      author,
+    ]);
+    expect(page.querySelectorAll(".fact-response")).toHaveLength(2);
+    expect(page.textContent).toContain("reviewer approves");
+    expect(page.textContent).toContain("author disagrees");
   });
 
   it("renders floating, capture-target, landing, and unknown wording from existing authority", async () => {

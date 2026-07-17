@@ -1100,6 +1100,7 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-directio
 .anno-kind-assessment { color: var(--assess); }
 .anno-kind-validation { color: var(--validation); }
 .anno-track { font-family: var(--mono); font-size: var(--fs-xs); color: var(--fg-dim); }
+.actor-attribution { min-width: 0; color: var(--fg-dim); font-size: var(--fs-xs); overflow-wrap: anywhere; word-break: break-word; }
 .anno-time { margin-left: auto; color: var(--fg-dim); font-family: var(--mono); font-size: var(--fs-xs); white-space: nowrap; }
 .anno-title { font-weight: 500; }
 .anno-loc { font-family: var(--mono); font-size: var(--fs-xs); color: var(--fg-dim); }
@@ -1147,6 +1148,7 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-directio
 
 /* Reference chips (truncated IDs) */
 .ref { font-family: var(--mono); }
+.ref[data-ref-kind="actor"] { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
 .ref[data-ref-kind] { color: var(--accent); cursor: pointer; border-bottom: 1px dotted color-mix(in srgb, var(--accent) 60%, transparent); }
 .ref[data-ref-kind]:hover { background: var(--bg-row); }
 .ref[data-ref-kind]:focus-visible {

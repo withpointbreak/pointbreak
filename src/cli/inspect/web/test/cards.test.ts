@@ -37,6 +37,16 @@ const currentAssessmentRecord = detail.assessments.find(
 const failedCheck = detail.validationChecks.find(
   (v) => v.status === "failed",
 ) as ValidationCheck;
+const AUTHOR_ACTOR = "actor:agent:pointbreak-example-author";
+const REVIEWER_ACTOR = "actor:agent:pointbreak-example-reviewer";
+const authorWriter = {
+  actorId: AUTHOR_ACTOR,
+  producer: { name: "producer-must-not-replace-writer", version: "1.0.0" },
+};
+const reviewerWriter = {
+  actorId: REVIEWER_ACTOR,
+  producer: { name: "another-producer", version: "2.0.0" },
+};
 
 describe("verdictBadge", () => {
   it("renders the resolved assessment as the verdict value", () => {
@@ -256,6 +266,28 @@ describe("renderObservationCard", () => {
     expect(doc.querySelector(".fact-rel")?.textContent).toContain("supersedes");
     expect(doc.querySelector(".fact-rel .ref")).not.toBeNull();
   });
+
+  it("renders the exact writer separately from track and producer", () => {
+    const doc = parse(
+      renderObservationCard({
+        ...observation,
+        trackId: "agent:review-lane",
+        writer: authorWriter,
+      }),
+    );
+    const attribution = doc.querySelector(".anno-head");
+    const actor = attribution?.querySelector<HTMLElement>(
+      '[data-ref-kind="actor"]',
+    );
+
+    expect(attribution?.textContent).toContain("agent:review-lane");
+    expect(attribution?.textContent).toContain("writer");
+    expect(attribution?.textContent).not.toContain(
+      "producer-must-not-replace-writer",
+    );
+    expect(actor?.textContent).toBe(AUTHOR_ACTOR);
+    expect(actor?.dataset.refId).toBe(AUTHOR_ACTOR);
+  });
 });
 
 describe("renderInputRequestCard", () => {
@@ -294,6 +326,72 @@ describe("renderInputRequestCard", () => {
     expect(response?.textContent).toContain("go ahead");
     expect(response?.querySelector(".verify")).not.toBeNull();
   });
+
+  it("keeps the opener and every ambiguous response writer and state visible in order", () => {
+    const createdAt = ["unix-ms:1782699185700", "unix-ms:1782699185800"];
+    const doc = parse(
+      renderInputRequestCard({
+        ...inputRequest,
+        status: "ambiguous",
+        writer: authorWriter,
+        responses: [
+          {
+            id: "input-request-response:sha256:aaaaaaaaaaaaaaaa",
+            outcome: "approved",
+            reason: "ship this version",
+            createdAt: createdAt[0],
+            writer: reviewerWriter,
+            verificationStatus: "valid",
+            endorsements: [
+              {
+                classification: "endorsement-trusted",
+                endorser: "actor:git-name:Reviewer One",
+              },
+            ],
+          },
+          {
+            id: "input-request-response:sha256:bbbbbbbbbbbbbbbb",
+            outcome: "rejected",
+            reason: "wait for another pass",
+            createdAt: createdAt[1],
+            writer: authorWriter,
+            verificationStatus: "unsigned",
+          },
+        ],
+      }),
+    );
+
+    const opener = doc.querySelector<HTMLElement>(
+      '.anno-input-request > .anno-head [data-ref-kind="actor"]',
+    );
+    expect(opener?.textContent).toBe(AUTHOR_ACTOR);
+    expect(opener?.dataset.refId).toBe(AUTHOR_ACTOR);
+    expect(doc.querySelector(".fact-status")?.textContent).toBe("ambiguous");
+
+    const responses = Array.from(
+      doc.querySelectorAll<HTMLElement>(".fact-response"),
+    );
+    expect(responses).toHaveLength(2);
+    expect(
+      responses.map(
+        (response) =>
+          response.querySelector<HTMLElement>('[data-ref-kind="actor"]')
+            ?.dataset.refId,
+      ),
+    ).toEqual([REVIEWER_ACTOR, AUTHOR_ACTOR]);
+    expect(responses[0].textContent).toContain("answered by");
+    expect(responses[0].textContent).toContain("approved");
+    expect(responses[0].textContent).toContain("ship this version");
+    expect(responses[0].querySelector(".verify-valid")).not.toBeNull();
+    expect(responses[0].querySelector(".endorsements")).not.toBeNull();
+    expect(responses[1].textContent).toContain("rejected");
+    expect(responses[1].textContent).toContain("wait for another pass");
+    expect(
+      responses.map((response) =>
+        response.querySelector(".anno-time")?.getAttribute("title"),
+      ),
+    ).toEqual(createdAt);
+  });
 });
 
 describe("renderAssessmentCard", () => {
@@ -315,6 +413,18 @@ describe("renderAssessmentCard", () => {
     const rel = doc.querySelector(".fact-rel")?.textContent ?? "";
     expect(rel).toContain("replaces");
     expect(rel).toContain("re ");
+  });
+
+  it("renders the assessment writer", () => {
+    const doc = parse(
+      renderAssessmentCard({
+        ...currentAssessmentRecord,
+        writer: reviewerWriter,
+      }),
+    );
+    expect(
+      doc.querySelector<HTMLElement>('[data-ref-kind="actor"]')?.dataset.refId,
+    ).toBe(REVIEWER_ACTOR);
   });
 });
 
@@ -340,6 +450,18 @@ describe("renderValidationCheckCard", () => {
     expect(doc.querySelector(".fact-rel")?.textContent).toContain(
       "cargo clippy -- -D warnings",
     );
+  });
+
+  it("renders the validation writer", () => {
+    const doc = parse(
+      renderValidationCheckCard({
+        ...failedCheck,
+        writer: reviewerWriter,
+      }),
+    );
+    expect(
+      doc.querySelector<HTMLElement>('[data-ref-kind="actor"]')?.textContent,
+    ).toBe(REVIEWER_ACTOR);
   });
 });
 

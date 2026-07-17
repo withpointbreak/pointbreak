@@ -146,6 +146,44 @@ describe("renderTimeline", () => {
     expect(actorChips[0].dataset.refId ?? "").not.toBe("");
   });
 
+  it("keeps exact long-prefix actors distinct from track, producer, and principal", () => {
+    const actorIds = [
+      "actor:agent:pointbreak-example-author",
+      "actor:agent:pointbreak-example-reviewer",
+    ];
+    seedHistory(
+      actorIds.map((actorId, index) =>
+        entry(`e${index}`, {
+          trackId: "agent:review-lane",
+          writer: {
+            actorId,
+            producer: {
+              name: index === 0 ? "reviewer" : "author",
+              version: "1.0.0",
+            },
+          },
+          principal: {
+            status: "resolved",
+            actorId: actorIds[1 - index],
+          },
+        }),
+      ),
+    );
+    timeline.renderTimeline();
+
+    const actorChips = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        '#timeline [data-ref-kind="actor"]',
+      ),
+    );
+    expect(actorChips.map((chip) => chip.textContent)).toEqual(actorIds);
+    expect(actorChips.map((chip) => chip.dataset.refId)).toEqual(actorIds);
+    expect(actorChips[0].textContent).not.toBe(actorChips[1].textContent);
+    expect(document.querySelector("#timeline")?.textContent).toContain(
+      "agent:review-lane",
+    );
+  });
+
   it("keeps supersession badge refs out of the sequential timeline tab order", () => {
     const head =
       "rev:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

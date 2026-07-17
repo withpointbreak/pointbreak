@@ -25,9 +25,9 @@ import {
   endorsementsBlock,
   verificationChip,
 } from "./projection";
-import { isMarkdownContentType, linkify } from "./refs";
+import { actorChip, isMarkdownContentType, linkify } from "./refs";
 import { renderSupersessionSvg } from "./supersession";
-import type { Endorsement } from "./types";
+import type { Endorsement, EntryWriter } from "./types";
 
 // ---------------------------------------------------------------------------
 // Wire view types
@@ -73,16 +73,21 @@ export interface Observation {
   verificationStatus?: string;
   endorsements?: Endorsement[];
   supersedes?: string[];
+  writer?: EntryWriter;
 }
 
 /** One response recorded against an input request. */
 export interface InputRequestResponse {
+  id?: string;
+  eventId?: string;
   outcome?: string;
   reason?: string;
   reasonContentType?: string;
   reasonContentState?: string;
   verificationStatus?: string;
   endorsements?: Endorsement[];
+  createdAt?: string;
+  writer?: EntryWriter;
 }
 
 /** A recorded input-request fact. */
@@ -101,6 +106,7 @@ export interface InputRequest {
   verificationStatus?: string;
   endorsements?: Endorsement[];
   responses?: InputRequestResponse[];
+  writer?: EntryWriter;
 }
 
 /** A recorded assessment fact. */
@@ -119,6 +125,7 @@ export interface Assessment {
   replaces?: string[];
   relatedObservations?: string[];
   relatedInputRequests?: string[];
+  writer?: EntryWriter;
 }
 
 /** A recorded validation-evidence fact (advisory; never a verdict). */
@@ -138,6 +145,7 @@ export interface ValidationCheck {
   endorsements?: Endorsement[];
   command?: string;
   logArtifactContentHashes?: string[];
+  writer?: EntryWriter;
 }
 
 /** The fields the verdict badge/summary read off the `/api/revisions/{id}` payload. */
@@ -160,12 +168,29 @@ export interface FactCardOptions {
    *  when set, the card renders the content-removed cue instead of a body. */
   bodyContentState?: string;
   createdAt?: string;
+  writer?: EntryWriter;
   /** Already-rendered advisory signature chip HTML (from `verificationChip`). */
   verify?: string;
   /** Already-rendered endorsement readback HTML (from `endorsementsBlock`). */
   endorsements?: string;
   /** Already-rendered relation/response HTML appended after the body. */
   extra?: string;
+}
+
+/** Exact writer attribution for a fact or nested response. */
+export function renderActorAttribution(
+  label: "writer" | "answered by",
+  writer: EntryWriter | null | undefined,
+): string {
+  const actorId = writer?.actorId ?? "";
+  if (!actorId) return "";
+  return `<span class="${CLASS.actorAttribution}">${label} ${actorChip(actorId)}</span>`;
+}
+
+/** A recorded timestamp with exact source text retained in its tooltip. */
+function renderRecordedTime(createdAt: string | undefined): string {
+  if (!createdAt) return "";
+  return `<span class="${CLASS.annoTime}" title="${escapeHtml(createdAt)}">${escapeHtml(fmtDateTime(createdAt))}</span>`;
 }
 
 /** The advisory current-assessment badge (a recorded judgement, never a gate). */
@@ -262,12 +287,13 @@ export function factCard(kind: string, opts: FactCardOptions): string {
     <div class="${CLASS.annoHead}">
       <span class="${annoKindClass(kind)}">${kind}</span>
       <span class="${CLASS.annoTrack}">${escapeHtml(opts.track || "")}</span>
+      ${renderActorAttribution("writer", opts.writer)}
       <span class="${CLASS.annoTitle}">${linkify(opts.title || "")}</span>
       ${opts.status ? `<span class="${factStatusClass(escapeHtml(opts.status))}">${escapeHtml(opts.status)}</span>` : ""}
       ${opts.target ? `<span class="${CLASS.annoLoc}">${opts.target}</span>` : ""}
       ${tags}
       ${opts.verify || ""}
-      ${opts.createdAt ? `<span class="${CLASS.annoTime}" title="${escapeHtml(opts.createdAt)}">${escapeHtml(fmtDateTime(opts.createdAt))}</span>` : ""}
+      ${renderRecordedTime(opts.createdAt)}
     </div>
     ${body}
     ${opts.endorsements || ""}
@@ -292,17 +318,33 @@ export function renderObservationCard(o: Observation): string {
     createdAt: o.createdAt,
     verify: verificationChip(o.verificationStatus ?? ""),
     endorsements: endorsementsBlock(o.endorsements),
+    writer: o.writer,
     extra,
   });
+}
+
+/** One response nested under its durable input request, in projection order. */
+export function renderInputRequestResponse(r: InputRequestResponse): string {
+  const reason =
+    removedBodyCue(r.reasonContentState) ??
+    (r.reason ? renderBodyContent(r.reason, r.reasonContentType) : "");
+  return `<div class="${CLASS.factResponse}">
+    <div class="${CLASS.annoHead}">
+      <span class="${CLASS.outcome}">${escapeHtml(r.outcome)}</span>
+      ${r.id ? `<span class="${CLASS.annoLoc}">${linkify(r.id)}</span>` : ""}
+      ${renderActorAttribution("answered by", r.writer)}
+      ${verificationChip(r.verificationStatus ?? "")}
+      ${renderRecordedTime(r.createdAt)}
+    </div>
+    ${reason}
+    ${endorsementsBlock(r.endorsements)}
+  </div>`;
 }
 
 /** An input-request card, with its responses' advisory readback. */
 export function renderInputRequestCard(ir: InputRequest): string {
   const responses = (ir.responses ?? [])
-    .map(
-      (r) =>
-        `<div class="${CLASS.factResponse}"><span class="${CLASS.outcome}">${escapeHtml(r.outcome)}</span>${removedBodyCue(r.reasonContentState) ?? (r.reason ? renderBodyContent(r.reason, r.reasonContentType) : "")} ${verificationChip(r.verificationStatus ?? "")}${endorsementsBlock(r.endorsements)}</div>`,
-    )
+    .map(renderInputRequestResponse)
     .join("");
   return factCard("input-request", {
     track: ir.trackId,
@@ -316,6 +358,7 @@ export function renderInputRequestCard(ir: InputRequest): string {
     createdAt: ir.createdAt,
     verify: verificationChip(ir.verificationStatus ?? ""),
     endorsements: endorsementsBlock(ir.endorsements),
+    writer: ir.writer,
     extra: responses
       ? `<div class="${CLASS.factResponses}">${responses}</div>`
       : "",
@@ -346,6 +389,7 @@ export function renderAssessmentCard(a: Assessment): string {
     createdAt: a.createdAt,
     verify: verificationChip(a.verificationStatus ?? ""),
     endorsements: endorsementsBlock(a.endorsements),
+    writer: a.writer,
     extra: rel.length
       ? `<div class="${CLASS.factRel}">${rel.join(" · ")}</div>`
       : "",
@@ -372,6 +416,7 @@ export function renderValidationCheckCard(v: ValidationCheck): string {
     createdAt: v.completedAt || v.createdAt,
     verify: verificationChip(v.verificationStatus ?? ""),
     endorsements: endorsementsBlock(v.endorsements),
+    writer: v.writer,
     extra: rel.length
       ? `<div class="${CLASS.factRel}">${rel.join(" · ")}</div>`
       : "",

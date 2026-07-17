@@ -306,6 +306,31 @@ fn api_units_lists_captured_unit_with_counts_and_target_display() {
 }
 
 #[test]
+fn api_revision_composite_preserves_fact_writer_identity_fields() {
+    let store = representative_store();
+    let inspector = Inspector::spawn(store.repo.path());
+    let revision = inspector.get_json(&format!("/api/revisions/{}", urlencode(&store.revision_id)));
+
+    for collection in [
+        "observations",
+        "inputRequests",
+        "assessments",
+        "validationChecks",
+    ] {
+        for fact in revision[collection]
+            .as_array()
+            .unwrap_or_else(|| panic!("{collection} is an array"))
+        {
+            let writer = &fact["writer"];
+            assert!(writer["actorId"].as_str().unwrap().starts_with("actor:"));
+            assert!(writer["producer"]["name"].is_string());
+            assert!(writer["producer"]["version"].is_string());
+            assert_ne!(fact["trackId"], writer["actorId"]);
+        }
+    }
+}
+
+#[test]
 fn api_units_include_additive_overview_summary() {
     let store = representative_store();
     let inspector = Inspector::spawn(store.repo.path());

@@ -80,6 +80,27 @@ describe("entryActor", () => {
       entryOfType("review_observation_recorded").writer?.actorId ?? "",
     );
   });
+
+  it("never substitutes the track, producer, or resolved principal", () => {
+    const entry: HistoryEntry = {
+      eventType: "review_observation_recorded",
+      trackId: "agent:review-lane",
+      writer: {
+        actorId: "actor:agent:pointbreak-example-author",
+        producer: {
+          name: "pointbreak-example-reviewer",
+          version: "1.0.0",
+        },
+      },
+      principal: {
+        status: "resolved",
+        actorId: "actor:agent:pointbreak-example-reviewer",
+      },
+    };
+
+    expect(entryTrack(entry)).toBe("agent:review-lane");
+    expect(entryActor(entry)).toBe("actor:agent:pointbreak-example-author");
+  });
 });
 
 describe("entryRevisionId", () => {

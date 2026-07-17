@@ -621,6 +621,7 @@ body {
 .anno-kind-assessment { color: var(--assess); }
 .anno-kind-validation { color: var(--validation); }
 .anno-track { font-family: var(--mono); font-size: 11px; color: var(--fg-dim); }
+.actor-attribution { min-width: 0; color: var(--fg-dim); font-size: 11px; overflow-wrap: anywhere; word-break: break-word; }
 .anno-time { margin-left: auto; color: var(--fg-dim); font-family: var(--mono); font-size: 11px; white-space: nowrap; }
 .anno-title { font-weight: 500; }
 .anno-loc { font-family: var(--mono); font-size: 11px; color: var(--fg-dim); }
@@ -674,6 +675,7 @@ body {
 
 /* ---- Reference chips -------------------------------------------------- */
 .ref { font-family: var(--mono); }
+.ref[data-ref-kind="actor"] { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
 .ref[data-ref-kind] { color: var(--accent); cursor: pointer; border-bottom: 1px dotted color-mix(in srgb, var(--accent) 60%, transparent); }
 .ref-commit, .ref-hash { color: var(--fg-dim); }
 

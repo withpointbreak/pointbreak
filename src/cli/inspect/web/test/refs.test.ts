@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { REF_ID_PREFIXES, REF_KINDS } from "../src/classNames";
 import {
+  actorChip,
   isMarkdownContentType,
   linkify,
   linkifyEscaped,
@@ -25,6 +26,31 @@ describe("shortId", () => {
     expect(shortId("a:b:c")).toBe("c");
     expect(shortId("obj:sha256:38a493d2f09d6fde9d1dcac6")).toBe("38a493d2f09d");
     expect(shortId("rev:sha256:1ace028b9f00")).toBe("1ace028b9f00");
+  });
+});
+
+describe("actorChip", () => {
+  it("keeps long common-prefix actor ids exact and distinguishable", () => {
+    const actorIds = [
+      "actor:agent:pointbreak-example-author",
+      "actor:agent:pointbreak-example-reviewer",
+    ];
+    const chips = actorIds.map((actorId) =>
+      parse(actorChip(actorId, { tabIndex: -1 })).querySelector<HTMLElement>(
+        '[data-ref-kind="actor"]',
+      ),
+    );
+
+    expect(chips.map((chip) => chip?.textContent)).toEqual(actorIds);
+    expect(chips.map((chip) => chip?.dataset.refId)).toEqual(actorIds);
+    expect(chips.map((chip) => chip?.getAttribute("title"))).toEqual(
+      actorIds.map((actorId) => `filter to ${actorId}`),
+    );
+    expect(chips.every((chip) => chip?.getAttribute("tabindex") === "-1")).toBe(
+      true,
+    );
+    expect(chips[0]?.textContent).not.toBe(chips[1]?.textContent);
+    expect(chips.every((chip) => !chip?.textContent?.includes("…"))).toBe(true);
   });
 });
 

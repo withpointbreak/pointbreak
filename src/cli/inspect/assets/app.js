@@ -253,6 +253,7 @@
     annoTime: "anno-time",
     annoTitle: "anno-title",
     annoTrack: "anno-track",
+    actorAttribution: "actor-attribution",
     factBodyRemoved: "fact-body-removed",
     factRel: "fact-rel",
     factResponse: "fact-response",
@@ -975,7 +976,7 @@
   function actorChip(actorId, opts = {}) {
     if (!actorId) return "";
     const tabIndex = typeof opts === "object" ? opts.tabIndex ?? 0 : opts;
-    const display = escapeHtml(`actor ${shortId(actorId)}`);
+    const display = escapeHtml(actorId);
     return `<span class="${refClass("actor")}" role="link" tabindex="${tabIndex}" data-ref-kind="actor" data-ref-id="${escapeHtml(actorId)}" title="filter to ${escapeHtml(actorId)}">${display}</span>`;
   }
   __name(actorChip, "actorChip");
@@ -2891,6 +2892,17 @@
   __name(renderSupersessionSvg, "renderSupersessionSvg");
 
   // src/cards.ts
+  function renderActorAttribution(label, writer) {
+    const actorId = writer?.actorId ?? "";
+    if (!actorId) return "";
+    return `<span class="${CLASS.actorAttribution}">${label} ${actorChip(actorId)}</span>`;
+  }
+  __name(renderActorAttribution, "renderActorAttribution");
+  function renderRecordedTime(createdAt) {
+    if (!createdAt) return "";
+    return `<span class="${CLASS.annoTime}" title="${escapeHtml(createdAt)}">${escapeHtml(fmtDateTime(createdAt))}</span>`;
+  }
+  __name(renderRecordedTime, "renderRecordedTime");
   function verdictBadge(ca) {
     const status = ca?.status || "unassessed";
     let value;
@@ -2966,12 +2978,13 @@
     <div class="${CLASS.annoHead}">
       <span class="${annoKindClass(kind)}">${kind}</span>
       <span class="${CLASS.annoTrack}">${escapeHtml(opts.track || "")}</span>
+      ${renderActorAttribution("writer", opts.writer)}
       <span class="${CLASS.annoTitle}">${linkify(opts.title || "")}</span>
       ${opts.status ? `<span class="${factStatusClass(escapeHtml(opts.status))}">${escapeHtml(opts.status)}</span>` : ""}
       ${opts.target ? `<span class="${CLASS.annoLoc}">${opts.target}</span>` : ""}
       ${tags}
       ${opts.verify || ""}
-      ${opts.createdAt ? `<span class="${CLASS.annoTime}" title="${escapeHtml(opts.createdAt)}">${escapeHtml(fmtDateTime(opts.createdAt))}</span>` : ""}
+      ${renderRecordedTime(opts.createdAt)}
     </div>
     ${body}
     ${opts.endorsements || ""}
@@ -2993,14 +3006,28 @@
       createdAt: o.createdAt,
       verify: verificationChip(o.verificationStatus ?? ""),
       endorsements: endorsementsBlock(o.endorsements),
+      writer: o.writer,
       extra
     });
   }
   __name(renderObservationCard, "renderObservationCard");
+  function renderInputRequestResponse(r) {
+    const reason = removedBodyCue(r.reasonContentState) ?? (r.reason ? renderBodyContent(r.reason, r.reasonContentType) : "");
+    return `<div class="${CLASS.factResponse}">
+    <div class="${CLASS.annoHead}">
+      <span class="${CLASS.outcome}">${escapeHtml(r.outcome)}</span>
+      ${r.id ? `<span class="${CLASS.annoLoc}">${linkify(r.id)}</span>` : ""}
+      ${renderActorAttribution("answered by", r.writer)}
+      ${verificationChip(r.verificationStatus ?? "")}
+      ${renderRecordedTime(r.createdAt)}
+    </div>
+    ${reason}
+    ${endorsementsBlock(r.endorsements)}
+  </div>`;
+  }
+  __name(renderInputRequestResponse, "renderInputRequestResponse");
   function renderInputRequestCard(ir) {
-    const responses = (ir.responses ?? []).map(
-      (r) => `<div class="${CLASS.factResponse}"><span class="${CLASS.outcome}">${escapeHtml(r.outcome)}</span>${removedBodyCue(r.reasonContentState) ?? (r.reason ? renderBodyContent(r.reason, r.reasonContentType) : "")} ${verificationChip(r.verificationStatus ?? "")}${endorsementsBlock(r.endorsements)}</div>`
-    ).join("");
+    const responses = (ir.responses ?? []).map(renderInputRequestResponse).join("");
     return factCard("input-request", {
       track: ir.trackId,
       title: ir.title,
@@ -3013,6 +3040,7 @@
       createdAt: ir.createdAt,
       verify: verificationChip(ir.verificationStatus ?? ""),
       endorsements: endorsementsBlock(ir.endorsements),
+      writer: ir.writer,
       extra: responses ? `<div class="${CLASS.factResponses}">${responses}</div>` : ""
     });
   }
@@ -3040,6 +3068,7 @@
       createdAt: a.createdAt,
       verify: verificationChip(a.verificationStatus ?? ""),
       endorsements: endorsementsBlock(a.endorsements),
+      writer: a.writer,
       extra: rel.length ? `<div class="${CLASS.factRel}">${rel.join(" · ")}</div>` : ""
     });
   }
@@ -3062,6 +3091,7 @@
       createdAt: v.completedAt || v.createdAt,
       verify: verificationChip(v.verificationStatus ?? ""),
       endorsements: endorsementsBlock(v.endorsements),
+      writer: v.writer,
       extra: rel.length ? `<div class="${CLASS.factRel}">${rel.join(" · ")}</div>` : ""
     });
   }
@@ -4416,8 +4446,10 @@
       ["payloadHash", e.payloadHash ?? ""],
       ["revision", revisionId || "—"],
       ["track", entryTrack(e) || "—"],
-      ["actor", principalLabel(e) || entryActor(e) || "—"]
+      ["actor", entryActor(e) || "—"]
     ];
+    const principal = principalLabel(e);
+    if (principal) kv.push(["principal", principal]);
     const snapshotId = revisionId ? snapshotIdForRevision(revisionId) : "";
     const s = e.summary ?? {};
     if (e.eventType === "work_object_proposed") {
@@ -4447,6 +4479,7 @@
       if (k === "eventId" && e.eventId) return entityAnchor("event", e.eventId);
       if (k === "revision" && revisionId)
         return entityAnchor("revision", revisionId);
+      if (k === "actor" && v !== "—") return actorChip(v);
       return linkify(v);
     }, "kvValue");
     el.innerHTML = `
