@@ -389,7 +389,7 @@ pointbreak store link [<slug>] [--repo <path>] [--include-ephemeral] [--include-
 pointbreak store unlink [--repo <path>] [--format <fmt>]
 pointbreak store forget <slug> [--yes] [--force] [--format <fmt>]
 pointbreak store list [--format <fmt>]
-pointbreak store remove [--repo <path>] (--snapshot <id> | --revision <id> | --ref <name> | --range <a>..<b> | --orphans) [--sign-key <key>] [--format <fmt>]
+pointbreak store remove [--repo <path>] (--snapshot <id> | --revision <id> | --ref <name> | --range <a>..<b> | --unreachable) [--sign-key <key>] [--format <fmt>]
 pointbreak store gc [--repo <path>] [--format <fmt>]
 pointbreak store compact [--repo <path>] [--format <fmt>]
 ```
@@ -566,7 +566,7 @@ and deregistering it) without moving any data, and survives a family store that 
 outside `pointbreak store remove`'s content-targeted removal (no store survives a forget to hold a removal
 event). It is dry-run by default: it previews the inventory and live-clone count that would be lost
 and deletes nothing. `--yes` performs the deletion, but only for a family with zero live clones (an
-**orphaned** family store — a different notion from `pointbreak store remove --orphans`, which targets
+**orphaned** family store — a different notion from `pointbreak store remove --unreachable`, which targets
 unreachable-commit content); a family with live clones additionally requires `--force`. `pointbreak store
 list` is the one repo-less surface: it takes no `--repo` flag, never resolves a git repo, and walks
 `<pointbreak-home-root>/stores/` reporting each family's `familyRef`, inventory, `liveCloneCount`,
@@ -575,8 +575,9 @@ list` is the one repo-less surface: it takes no `--repo` flag, never resolves a 
 `pointbreak store remove` retires content-addressed artifacts from the store. It resolves exactly one
 selector to a set of content hashes — `--snapshot <id>` (a snapshot's bound artifact), `--revision
 <id>` (every artifact a revision references), `--ref <name>` / `--range <a>..<b>` (artifacts of
-revisions anchored on the named commit or commit range), or `--orphans` (artifacts of commit-anchored
-revisions whose commits are all unreachable) — and records one removal fact per content hash. It emits
+revisions anchored on the named commit or commit range), or `--unreachable` (artifacts of commit-anchored
+revisions whose commits are all unreachable from live refs; `--orphans` is a deprecated alias) — and
+records one removal fact per content hash. It emits
 `pointbreak.store-remove` JSON listing each `contentHash`, whether it was newly `created`, and
 `coReferencingUnits` (other revisions that still name the same shared artifact, reported before the
 removal), plus `eventsCreated` and `eventsExisting`. Removal is content-targeted and idempotent:
@@ -1093,7 +1094,7 @@ narrative-first plus snapshot-complete view of one captured revision.
 
 ```bash
 pointbreak revision list [--repo <path>] [--object <object-id>] [--ref <name> [--by label|liveness]] \
-  [--filter <query>] [--integration-ref <name>] [--worktree <path>] [--all | --orphans] [--format <fmt>]
+  [--filter <query>] [--integration-ref <name>] [--worktree <path>] [--all | --unreachable] [--format <fmt>]
 ```
 
 `pointbreak revision list` is the discovery surface for captured revisions. It emits
@@ -1127,8 +1128,14 @@ endpoints, and `objectArtifactContentHash`.
   no default branch is detected it falls back to broad reachability (any live tip).
 - `--worktree <path>` scopes the listing to captures belonging to the worktree at that path.
 - Every recorded revision is shown by default, including revisions whose anchored commits are all
-  unreachable. `--all` remains an accepted compatibility spelling of that default; `--orphans`
-  explicitly narrows the listing to only those unreachable revisions.
+  unreachable. `--all` remains an accepted compatibility spelling of that default; `--unreachable`
+  explicitly narrows the listing to only those unreachable revisions (`--orphans` is a deprecated
+  alias).
+- Each entry carries `mergeStatus`: `merged` (an ancestor of the integration target), `open` (still
+  reachable from a live ref without having landed there), `unreachable` (no live ref reaches any
+  anchored commit — present-but-unreachable and gc'd objects alike; per-commit detail stays on
+  `revision show`), or `unknown` (floating capture, divergent landing claims, or an unavailable
+  repository). The former `orphaned` status is retired.
 
 ## `pointbreak revision show`
 
@@ -1148,6 +1155,16 @@ pointbreak revision show [REVISION] [--repo <path>] [--track <track-id>] \
   current assessment status, native observations, input requests, assessments, validation checks,
   projection rows, and diagnostics.
 - Rows are narrative-first, then snapshot-complete.
+- `commitRange.liveness` is the read-time Git enrichment (best-effort; omitted when the repository
+  cannot be read). `perCommit[].condition` is `merged`, `live`, `unreachable` (object present, no
+  live ref reaches it), or `missing` (object gone) — availability and reachability stay
+  distinguishable, and nothing is called `orphaned`. An `unreachable` commit also carries
+  `retention`: `reflog` while a reflog entry still retains the object, `none` after expiry.
+  `refContinuity` diagnoses each recorded ref association: `current`, `advanced`, `rewritten`
+  (best-effort reflog evidence naming the `rewriteAction`, e.g. `commit (amend)`, plus `sameTree`
+  when both objects survive), `moved` (no rewrite evidence — expired reflog or a reset), `deleted`,
+  or `unknown`. A `rewritten` ref adds a `ref_rewritten` diagnostic naming the recorded and current
+  OIDs with the suggested explicit follow-up; reflog evidence never mutates the durable record.
 - `--track <track-id>` filters narrative facts without changing the selected revision,
   event-set freshness metadata, or captured snapshot completeness.
 - Body-like text is omitted by default. `--include-body` hydrates observation bodies, input request

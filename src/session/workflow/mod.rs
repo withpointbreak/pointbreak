@@ -50,7 +50,8 @@ pub use capture::{
     UnstagedSpec, WorktreeSpec, capture_review, capture_worktree_review, diffstat_from_files,
 };
 pub use commit_range_liveness::{
-    CommitGraphCondition, CommitLiveness, LivenessEnrichment, OrphanReason, commit_graph_stamp,
+    CommitGraphCondition, CommitLiveness, LivenessEnrichment, REF_REWRITTEN_CODE, RefContinuity,
+    RefContinuityReport, RefContinuityView, Retention, commit_graph_stamp, diagnose_ref_continuity,
     effective_integration_ref, enrich_liveness, resolve_default_integration_ref,
 };
 pub use event_signature::{
@@ -82,8 +83,8 @@ pub use observation::{
     record_observation,
 };
 pub use revision_list::{
-    OrphanVisibility, RefFilterMode, RevisionListEntry, RevisionListOptions, RevisionListResult,
-    list_revisions, list_units_for_ref,
+    RefFilterMode, RevisionListEntry, RevisionListOptions, RevisionListResult,
+    UnreachableVisibility, list_revisions, list_units_for_ref,
 };
 pub use revision_projection::{
     MemberReadback, RevisionOverview, RevisionOverviewsOptions, RevisionProjectionIdentity,

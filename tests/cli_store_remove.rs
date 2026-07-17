@@ -51,6 +51,47 @@ fn artifact_removed_event(repo: &Path) -> Value {
     panic!("no artifact_removed event written under {events_dir:?}");
 }
 
+/// The unreachable selector removes artifacts of revisions whose anchored
+/// commits no live ref reaches, under both its canonical spelling and the
+/// deprecated `--orphans` alias.
+#[test]
+fn store_remove_unreachable_accepts_the_deprecated_orphans_alias() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    // A range capture anchored to a soon-deleted branch tip → unreachable.
+    repo.git(["checkout", "-b", "doomed"]);
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    repo.commit_all("doomed change");
+    let repo_arg = repo.path().to_str().unwrap();
+    let captured =
+        parse_json(&pointbreak(["capture", "--repo", repo_arg, "--base", "main"]).stdout);
+    let content_hash = captured["revision"]["objectArtifactContentHash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    repo.git(["checkout", "main"]);
+    repo.git(["branch", "-D", "doomed"]);
+
+    let removed = pointbreak(["store", "remove", "--repo", repo_arg, "--orphans"]);
+    assert!(
+        removed.status.success(),
+        "the deprecated --orphans alias still resolves the unreachable selector: {}",
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    let document = parse_json(&removed.stdout);
+    let hashes: Vec<&str> = document["removed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry["contentHash"].as_str())
+        .collect();
+    assert!(
+        hashes.contains(&content_hash.as_str()),
+        "the unreachable revision's artifact is targeted: {document}"
+    );
+}
+
 #[test]
 fn store_remove_by_snapshot_emits_removed_document() {
     let repo = modified_repo();

@@ -107,7 +107,8 @@ struct RevisionProjectionRowDocument {
     related_validation_check_ids: Vec<String>,
 }
 
-/// Events-only commit-range lifecycle block. Liveness (merged/live/orphaned) is
+/// Events-only commit-range lifecycle block. Liveness
+/// (merged/live/unreachable/missing) is
 /// layered by repo-holding callers, never here. The view's `revisionId` and
 /// `diagnostics` are omitted: the id renders on the revision identity and the
 /// diagnostics merge into the document's top-level diagnostics.

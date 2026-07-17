@@ -329,15 +329,21 @@ fn unit_list_shows_unreachable_revisions_by_default_and_filters_explicitly() {
     let all_ids = unit_list_ids(&repo, &["--all"]);
     assert_eq!(all_ids, default_ids);
 
-    // --orphans surfaces only the orphan.
+    // --unreachable surfaces only the unreachable revision.
+    assert_eq!(
+        unit_list_ids(&repo, &["--unreachable"]),
+        vec![orphan_id.clone()]
+    );
+
+    // --orphans remains a compatibility spelling of --unreachable.
     assert_eq!(
         unit_list_ids(&repo, &["--orphans"]),
         vec![orphan_id.clone()]
     );
 
-    // --orphans takes precedence over --all.
+    // --unreachable takes precedence over --all.
     assert_eq!(
-        unit_list_ids(&repo, &["--orphans", "--all"]),
+        unit_list_ids(&repo, &["--unreachable", "--all"]),
         vec![orphan_id]
     );
 }
@@ -393,7 +399,10 @@ fn unit_list_keeps_revision_after_capture_target_is_amended() {
         .iter()
         .find(|entry| entry["revisionId"] == revision_id)
         .unwrap_or_else(|| panic!("amended capture target removed the revision: {listed}"));
-    assert_eq!(entry["mergeStatus"], "orphaned");
+    assert_eq!(
+        entry["mergeStatus"], "unreachable",
+        "an amended-away capture reads unreachable, never orphaned"
+    );
 
     let shown = pointbreak([
         "revision",
@@ -408,6 +417,51 @@ fn unit_list_keeps_revision_after_capture_target_is_amended() {
         String::from_utf8_lossy(&shown.stderr)
     );
     assert_eq!(parse_json(&shown.stdout)["revision"]["id"], revision_id);
+}
+
+#[test]
+fn unit_list_keeps_revision_after_capture_target_is_pruned() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.git(["checkout", "-b", "feature"]);
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    repo.commit_all("captured change");
+
+    let captured = parse_json(
+        &pointbreak([
+            "capture",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "--base",
+            "main",
+        ])
+        .stdout,
+    );
+    let revision_id = captured["revision"]["id"].as_str().unwrap().to_owned();
+    let captured_target = captured["revision"]["target"]["commitOid"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Rewrite the tip, expire the reflogs, and prune: the recorded target's
+    // object is gone entirely.
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    repo.git(["add", "--all"]);
+    repo.git(["commit", "--amend", "--no-edit"]);
+    repo.git(["reflog", "expire", "--expire=now", "--all"]);
+    repo.git(["prune", "--expire=now"]);
+    let gone = std::process::Command::new("git")
+        .args(["cat-file", "-e", &captured_target])
+        .current_dir(repo.path())
+        .status()
+        .unwrap();
+    assert!(!gone.success(), "the captured target object must be pruned");
+
+    // The recorded revision stays listed, summarized as unreachable — object
+    // retention (missing vs present) never leaks into the aggregate status.
+    assert_eq!(unit_list_merge_status(&repo, &revision_id), "unreachable");
+    assert!(unit_list_ids(&repo, &["--unreachable"]).contains(&revision_id));
 }
 
 #[test]
@@ -561,10 +615,11 @@ fn unit_list_keeps_broad_merge_status_without_a_detectable_default_branch() {
 }
 
 #[test]
-fn unit_list_reads_side_branch_only_landing_as_orphaned_but_still_shown() {
-    // A commit landed only onto a NON-default live branch: orphan visibility
-    // stays broad (reachable from develop → the entry is shown), while the
-    // narrow default integration ref classifies it off the default branch —
+fn unit_list_reads_side_branch_only_landing_as_open_and_never_unreachable() {
+    // A commit landed only onto a NON-default live branch IS reachable from a
+    // live ref, so it must never read "unreachable": the narrow default
+    // integration ref answers the landing question ("open" — not on the
+    // default branch), while reachability stays a separate, broad axis —
     // the same answer `revision show` gives. Locks the intended semantics.
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
@@ -584,11 +639,11 @@ fn unit_list_reads_side_branch_only_landing_as_orphaned_but_still_shown() {
     repo.git(["checkout", "main"]);
 
     // Shown by the default list (the helper panics when the entry is absent),
-    // with the narrow merge-status.
-    assert_eq!(unit_list_merge_status(&repo, &revision_id), "orphaned");
+    // with the narrow landing answer: not on the default branch, still open.
+    assert_eq!(unit_list_merge_status(&repo, &revision_id), "open");
 
-    // Not a broad orphan: `--orphans` (broad reachability) excludes it.
-    assert!(!unit_list_ids(&repo, &["--orphans"]).contains(&revision_id));
+    // Not unreachable: `--unreachable` (broad reachability) excludes it.
+    assert!(!unit_list_ids(&repo, &["--unreachable"]).contains(&revision_id));
 }
 
 /// Run `revision list` with extra flags and return the entry ids in order.

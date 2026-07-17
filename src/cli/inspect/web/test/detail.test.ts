@@ -523,6 +523,96 @@ describe("openRevision / renderRevisionPage (the composite page, fetched via htt
   });
 });
 
+describe("renderAssociationAndLanding (liveness + ref-continuity readout)", () => {
+  it("keeps unreachable and missing distinct, with reflog retention, never orphaned", () => {
+    const html = detail.renderAssociationAndLanding(
+      {
+        anchored: true,
+        currentCommits: [
+          { commitOid: "b".repeat(40), source: "capture_target" },
+          { commitOid: "c".repeat(40), source: "association" },
+        ],
+        liveness: {
+          perCommit: [
+            {
+              commitOid: "b".repeat(40),
+              condition: "unreachable",
+              retention: "reflog",
+            },
+            { commitOid: "c".repeat(40), condition: "missing" },
+          ],
+          headline: { condition: "unreachable" },
+        },
+      },
+      [],
+    );
+    expect(html).toContain("landing unreachable");
+    expect(html).toContain("unreachable (reflog-retained)");
+    expect(html).toContain("missing");
+    expect(html).not.toContain("orphaned");
+  });
+
+  it("labels a rewritten recorded ref with the action and current tip", () => {
+    const html = detail.renderAssociationAndLanding(
+      {
+        anchored: true,
+        currentRefs: [
+          {
+            refName: "refs/heads/feat/amend",
+            headOid: "a".repeat(40),
+            refAssociationId: "assoc-ref:sha256:test",
+          },
+        ],
+        liveness: {
+          perCommit: [],
+          refContinuity: [
+            {
+              refName: "refs/heads/feat/amend",
+              recordedHeadOid: "a".repeat(40),
+              currentTipOid: "d".repeat(40),
+              continuity: "rewritten",
+              rewriteAction: "commit (amend)",
+              sameTree: false,
+            },
+          ],
+        },
+      },
+      [],
+    );
+    expect(html).toContain("rewritten by commit (amend)");
+    expect(html).toContain(`→ ${"d".repeat(12)}`);
+  });
+
+  it("reads an expired-reflog move without rewrite evidence", () => {
+    const html = detail.renderAssociationAndLanding(
+      {
+        anchored: true,
+        currentRefs: [
+          {
+            refName: "refs/heads/feat/amend",
+            headOid: "a".repeat(40),
+            refAssociationId: "assoc-ref:sha256:test",
+          },
+        ],
+        liveness: {
+          perCommit: [],
+          refContinuity: [
+            {
+              refName: "refs/heads/feat/amend",
+              recordedHeadOid: "a".repeat(40),
+              currentTipOid: "d".repeat(40),
+              continuity: "moved",
+            },
+          ],
+        },
+      },
+      [],
+    );
+    expect(html).toContain("moved");
+    expect(html).not.toContain(" by ");
+  });
+});
+
 describe("staleFactSectionContext (state-bound, fed into the pure factSection)", () => {
   it("repeats the superseded-by context near each fact section of a stale revision", async () => {
     // Mark the captured revision superseded so its facts carry the stale context.

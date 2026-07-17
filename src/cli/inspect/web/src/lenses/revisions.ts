@@ -73,8 +73,11 @@ export function renderRevisionList(): void {
             : (base.kind ?? "—"),
         ],
       ];
+      // The landing cell mirrors the CLI merge-status vocabulary
+      // (merged/open/unreachable/unknown) so the surfaces agree.
       const tail: [string, string][] = [
         ["revision", shortId(revisionId)],
+        ["landing", u.mergeStatus || "unknown"],
         ["snapshot", shortId(u.snapshotId)],
       ];
       // The target cell carries pre-escaped derived HTML (label + head badge), so

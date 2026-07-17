@@ -220,8 +220,12 @@ fn normalize(raw: &str, repo_path: &str) -> String {
     let text = normalize_git_oid(&text, "commitOid");
     let text = normalize_git_oid(&text, "treeOid");
     // `headOid` rides on auto-recorded ref associations (the capture-time branch
-    // head), a real commit OID that varies run to run like the others.
-    normalize_git_oid(&text, "headOid")
+    // head), a real commit OID that varies run to run like the others; the ref
+    // continuity block echoes it as `recordedHeadOid` alongside the ref's
+    // `currentTipOid`.
+    let text = normalize_git_oid(&text, "headOid");
+    let text = normalize_git_oid(&text, "recordedHeadOid");
+    normalize_git_oid(&text, "currentTipOid")
 }
 
 #[test]

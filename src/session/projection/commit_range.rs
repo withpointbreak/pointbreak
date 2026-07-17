@@ -7,8 +7,8 @@
 //! only association-backed edges are subtracted by their association id.
 //!
 //! This fold touches only `event_type` and `payload` — no git, no clock, no
-//! store reads. Reachability (merged/live/orphaned) is a separate read-time
-//! enrichment and never enters this view.
+//! store reads. Reachability (merged/live/unreachable/missing) is a separate
+//! read-time enrichment and never enters this view.
 
 use std::collections::BTreeMap;
 
@@ -31,7 +31,7 @@ use crate::session::state::ProjectionDiagnostic;
 /// Realizes the condition ADR-0008 reserved as `ambiguous_supersession` for the
 /// commit axis, re-scoped by the 2026-07-09 ADR-0014 amendment: only
 /// association-source edges compete (the capture target is provenance, not a
-/// landing claim), a chain of successive landings is history, and orphaned
+/// landing claim), a chain of successive landings is history, and unreachable
 /// claims never compete. Ancestry needs git, so this is emitted by the
 /// read-time liveness enrichment, never by this pure fold — the const lives
 /// here as the code's single definition beside its sibling.

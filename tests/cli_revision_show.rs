@@ -47,8 +47,8 @@ fn revision_show_liveness_defaults_to_the_integration_branch() {
 
 /// An explicit `--integration-ref` overrides the default: narrowed against a side
 /// branch that main's tip has not landed on, the commit is not `merged`. It stays
-/// a live tip (`live`), not orphaned — the integration check only decides "merged
-/// into that ref".
+/// a live tip (`live`), never unreachable — the integration check only decides
+/// "merged into that ref".
 #[test]
 fn revision_show_accepts_explicit_integration_ref() {
     let repo = GitRepo::new();
@@ -877,6 +877,302 @@ fn text_digest_groups_fact_counts_by_track() {
     assert!(stdout.contains("tracks:"), "stdout:\n{stdout}");
     assert!(stdout.contains("agent:codex"), "stdout:\n{stdout}");
     assert!(stdout.contains("agent:claude"), "stdout:\n{stdout}");
+}
+
+/// A repo whose captured branch tip is about to be rewritten: `main` holds a
+/// base commit, `feat/amend` holds one captured commit. Returns
+/// `(repo, revision_id, recorded_head_oid)`.
+fn amendable_capture_repo() -> (GitRepo, String, String) {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.git(["checkout", "-b", "feat/amend"]);
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    repo.commit_all("captured change");
+
+    let captured = parse_json(
+        &pointbreak([
+            "capture",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "--base",
+            "main",
+        ])
+        .stdout,
+    );
+    let revision_id = captured["revision"]["id"].as_str().unwrap().to_owned();
+    let recorded_head = captured["revision"]["target"]["commitOid"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    (repo, revision_id, recorded_head)
+}
+
+/// Amend the tip of the current branch with new content, returning the new tip.
+fn amend_with_content(repo: &GitRepo, contents: &str) -> String {
+    repo.write("src/lib.rs", contents);
+    repo.git(["add", "--all"]);
+    repo.git(["commit", "--amend", "--no-edit"]);
+    repo.git(["rev-parse", "HEAD"]).stdout.trim().to_owned()
+}
+
+fn shown_document(repo: &GitRepo, revision_id: &str) -> Value {
+    let output = pointbreak([
+        "revision",
+        "show",
+        revision_id,
+        "--repo",
+        repo.path().to_str().unwrap(),
+    ]);
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parse_json(&output.stdout)
+}
+
+fn shown_liveness(repo: &GitRepo, revision_id: &str) -> Value {
+    shown_document(repo, revision_id)["commitRange"]["liveness"].clone()
+}
+
+/// An amended-away capture target is `unreachable` — never `orphaned` — and the
+/// recorded ref association is diagnosed as rewritten, naming the recorded and
+/// current OIDs plus the reflog action, without touching the durable record.
+#[test]
+fn revision_show_reads_amended_capture_as_unreachable_with_rewrite_diagnosis() {
+    let (repo, revision_id, recorded_head) = amendable_capture_repo();
+    let amended_tip = amend_with_content(&repo, "pub fn value() -> u32 { 3 }\n");
+    assert_ne!(recorded_head, amended_tip);
+
+    let document = shown_document(&repo, &revision_id);
+    let liveness = document["commitRange"]["liveness"].clone();
+
+    let per_commit = liveness["perCommit"].as_array().unwrap();
+    assert_eq!(per_commit.len(), 1);
+    assert_eq!(per_commit[0]["condition"], "unreachable");
+    assert!(
+        per_commit[0].get("reason").is_none(),
+        "unreachable is a first-class condition, not an orphan reason: {per_commit:?}"
+    );
+    assert_eq!(
+        per_commit[0]["retention"], "reflog",
+        "the amended-away object is still reflog-retained"
+    );
+    assert_eq!(liveness["headline"]["condition"], "unreachable");
+
+    let continuity = liveness["refContinuity"].as_array().unwrap();
+    let entry = continuity
+        .iter()
+        .find(|entry| entry["refName"] == "refs/heads/feat/amend")
+        .expect("the captured branch ref has a continuity entry");
+    assert_eq!(entry["continuity"], "rewritten");
+    assert_eq!(entry["recordedHeadOid"], recorded_head);
+    assert_eq!(entry["currentTipOid"], amended_tip);
+    assert!(
+        entry["rewriteAction"]
+            .as_str()
+            .unwrap()
+            .starts_with("commit (amend)"),
+        "the reflog action names the rewrite: {entry:?}"
+    );
+    assert_eq!(
+        entry["sameTree"], false,
+        "a changed-content amend is not a same-tree rewrite"
+    );
+
+    // Enrichment diagnostics surface in the document's top-level array, the
+    // same place divergence diagnostics land.
+    let diagnostics = document["diagnostics"].as_array().unwrap();
+    let rewritten = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic["code"] == "ref_rewritten")
+        .expect("a rewritten recorded ref surfaces a diagnostic");
+    let message = rewritten["message"].as_str().unwrap();
+    assert!(
+        message.contains(&recorded_head[..12]) && message.contains(&amended_tip[..12]),
+        "the diagnostic names the recorded and current OIDs: {message}"
+    );
+}
+
+/// A message-only amend keeps the tree: the rewrite is diagnosed with same-tree
+/// confidence.
+#[test]
+fn revision_show_marks_a_same_tree_rewrite() {
+    let (repo, revision_id, recorded_head) = amendable_capture_repo();
+    repo.git(["commit", "--amend", "-m", "captured change, reworded"]);
+    let amended_tip = repo.git(["rev-parse", "HEAD"]).stdout.trim().to_owned();
+    assert_ne!(recorded_head, amended_tip);
+
+    let liveness = shown_liveness(&repo, &revision_id);
+    let entry = &liveness["refContinuity"][0];
+
+    assert_eq!(entry["continuity"], "rewritten");
+    assert_eq!(entry["sameTree"], true);
+}
+
+/// A multi-amend chain still diagnoses the recorded head against the final tip.
+#[test]
+fn revision_show_diagnoses_a_multi_amend_chain() {
+    let (repo, revision_id, recorded_head) = amendable_capture_repo();
+    amend_with_content(&repo, "pub fn value() -> u32 { 3 }\n");
+    amend_with_content(&repo, "pub fn value() -> u32 { 4 }\n");
+    let final_tip = amend_with_content(&repo, "pub fn value() -> u32 { 5 }\n");
+
+    let liveness = shown_liveness(&repo, &revision_id);
+    let entry = &liveness["refContinuity"][0];
+
+    assert_eq!(entry["continuity"], "rewritten");
+    assert_eq!(entry["recordedHeadOid"], recorded_head);
+    assert_eq!(entry["currentTipOid"], final_tip);
+}
+
+/// An amend performed in a linked worktree writes the shared branch reflog, so
+/// the rewrite is diagnosed from the main worktree too.
+#[test]
+fn revision_show_diagnoses_an_amend_from_a_linked_worktree() {
+    let (repo, revision_id, recorded_head) = amendable_capture_repo();
+    repo.git(["checkout", "main"]);
+    let linked_parent = tempfile::tempdir().unwrap();
+    let linked = linked_parent
+        .path()
+        .join("linked-amend-wt")
+        .to_str()
+        .unwrap()
+        .to_owned();
+    repo.git(["worktree", "add", &linked, "feat/amend"]);
+    std::fs::write(
+        std::path::Path::new(&linked).join("src/lib.rs"),
+        "pub fn value() -> u32 { 7 }\n",
+    )
+    .unwrap();
+    let git_at = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(&linked)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    };
+    git_at(&["add", "--all"]);
+    git_at(&["commit", "--amend", "--no-edit"]);
+
+    let liveness = shown_liveness(&repo, &revision_id);
+    let entry = &liveness["refContinuity"][0];
+
+    assert_eq!(entry["continuity"], "rewritten");
+    assert_eq!(entry["recordedHeadOid"], recorded_head);
+    repo.git(["worktree", "remove", "--force", &linked]);
+}
+
+/// Expired reflog evidence degrades the diagnosis to `moved` — never a false
+/// `rewritten`, never an error, and never a change to the durable record.
+#[test]
+fn revision_show_degrades_to_ref_moved_when_reflog_evidence_expired() {
+    let (repo, revision_id, recorded_head) = amendable_capture_repo();
+    let amended_tip = amend_with_content(&repo, "pub fn value() -> u32 { 3 }\n");
+    repo.git(["reflog", "expire", "--expire=now", "--all"]);
+
+    let liveness = shown_liveness(&repo, &revision_id);
+
+    let per_commit = liveness["perCommit"].as_array().unwrap();
+    assert_eq!(per_commit[0]["condition"], "unreachable");
+    assert_eq!(
+        per_commit[0]["retention"], "none",
+        "no reflog retains the amended-away object any more"
+    );
+
+    let entry = &liveness["refContinuity"][0];
+    assert_eq!(entry["continuity"], "moved");
+    assert_eq!(entry["recordedHeadOid"], recorded_head);
+    assert_eq!(entry["currentTipOid"], amended_tip);
+    assert!(entry.get("rewriteAction").is_none());
+}
+
+/// A gc'd capture target reads `missing` — object availability stays
+/// distinguishable from live-ref reachability — while the revision stays shown.
+#[test]
+fn revision_show_reads_pruned_capture_target_as_missing() {
+    let (repo, revision_id, recorded_head) = amendable_capture_repo();
+    amend_with_content(&repo, "pub fn value() -> u32 { 3 }\n");
+    repo.git(["reflog", "expire", "--expire=now", "--all"]);
+    repo.git(["prune", "--expire=now"]);
+    let gone = std::process::Command::new("git")
+        .args(["cat-file", "-e", &recorded_head])
+        .current_dir(repo.path())
+        .status()
+        .unwrap();
+    assert!(
+        !gone.success(),
+        "the recorded target object must be pruned for this fixture"
+    );
+
+    let liveness = shown_liveness(&repo, &revision_id);
+
+    let per_commit = liveness["perCommit"].as_array().unwrap();
+    assert_eq!(per_commit[0]["condition"], "missing");
+    assert!(
+        per_commit[0].get("retention").is_none(),
+        "retention only qualifies a present-but-unreachable object"
+    );
+    assert_eq!(liveness["headline"]["condition"], "missing");
+    assert_eq!(liveness["refContinuity"][0]["continuity"], "moved");
+}
+
+/// A deleted recorded ref is diagnosed `deleted`, with no fabricated tip.
+#[test]
+fn revision_show_reads_deleted_ref_continuity() {
+    let (repo, revision_id, recorded_head) = amendable_capture_repo();
+    repo.git(["checkout", "main"]);
+    repo.git(["branch", "-D", "feat/amend"]);
+
+    let liveness = shown_liveness(&repo, &revision_id);
+
+    let entry = &liveness["refContinuity"][0];
+    assert_eq!(entry["continuity"], "deleted");
+    assert_eq!(entry["recordedHeadOid"], recorded_head);
+    assert!(entry.get("currentTipOid").is_none());
+    assert_eq!(liveness["perCommit"][0]["condition"], "unreachable");
+}
+
+/// A ref that advanced normally reads `advanced`, and the captured commit —
+/// now interior to the live branch — reads `live`, not unreachable: it is
+/// reachable from a live ref even though it has not landed on the integration
+/// branch.
+#[test]
+fn revision_show_reads_advanced_ref_and_carried_commit_as_live() {
+    let (repo, revision_id, recorded_head) = amendable_capture_repo();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    repo.commit_all("follow-up on the branch");
+    let advanced_tip = repo.git(["rev-parse", "HEAD"]).stdout.trim().to_owned();
+
+    let liveness = shown_liveness(&repo, &revision_id);
+
+    let per_commit = liveness["perCommit"].as_array().unwrap();
+    assert_eq!(
+        per_commit[0]["condition"], "live",
+        "a commit carried by a live branch is live, not unreachable"
+    );
+    assert_eq!(per_commit[0]["liveBranch"], "feat/amend");
+
+    let entry = &liveness["refContinuity"][0];
+    assert_eq!(entry["continuity"], "advanced");
+    assert_eq!(entry["recordedHeadOid"], recorded_head);
+    assert_eq!(entry["currentTipOid"], advanced_tip);
+}
+
+/// The still-current ref association reads `current`.
+#[test]
+fn revision_show_reads_current_ref_continuity() {
+    let (repo, revision_id, recorded_head) = amendable_capture_repo();
+
+    let liveness = shown_liveness(&repo, &revision_id);
+
+    let entry = &liveness["refContinuity"][0];
+    assert_eq!(entry["continuity"], "current");
+    assert_eq!(entry["recordedHeadOid"], recorded_head);
+    assert_eq!(entry["currentTipOid"], recorded_head);
+    assert!(entry.get("rewriteAction").is_none());
 }
 
 /// Find the captured Revision event id via the public read path (`read_events`).

@@ -121,18 +121,34 @@ interface RevisionPageSummary {
 }
 
 interface CommitCondition {
-  condition?: "merged" | "live" | "orphaned";
-  reason?: "object_missing" | "unreachable";
+  // `unreachable` (object present, no live ref reaches it) and `missing`
+  // (object gone) are distinct first-class conditions — never `orphaned`.
+  condition?: "merged" | "live" | "unreachable" | "missing";
 }
 
 interface CommitLiveness extends CommitCondition {
   commitOid?: string;
   liveBranch?: string;
+  // For an unreachable commit: `reflog` while a reflog entry retains the
+  // object, `none` after expiry; absent when the probe cannot answer.
+  retention?: "reflog" | "none";
+}
+
+/** One recorded ref association's continuity against the ref's live state. */
+interface RefContinuityEntry {
+  refName?: string;
+  recordedHeadOid?: string;
+  currentTipOid?: string;
+  // `current`, `advanced`, `rewritten`, `moved`, `deleted`, or `unknown`.
+  continuity?: string;
+  rewriteAction?: string;
+  sameTree?: boolean;
 }
 
 interface CommitRangeLiveness {
   perCommit?: CommitLiveness[];
   headline?: CommitCondition;
+  refContinuity?: RefContinuityEntry[];
 }
 
 interface CurrentCommitAssociation {
@@ -180,9 +196,27 @@ export interface RevisionPageDoc extends RevisionDetail {
 }
 
 function commitConditionLabel(condition: CommitCondition | undefined): string {
-  if (!condition?.condition) return "unknown";
-  if (condition.condition !== "orphaned") return condition.condition;
-  return condition.reason ? `orphaned (${condition.reason})` : "orphaned";
+  return condition?.condition ?? "unknown";
+}
+
+/** The per-commit condition plus its reflog-retention qualifier. */
+function commitLivenessLabel(item: CommitLiveness | undefined): string {
+  let label = commitConditionLabel(item);
+  if (item?.retention === "reflog") label += " (reflog-retained)";
+  else if (item?.retention === "none") label += " (reflog expired)";
+  return label;
+}
+
+/** The continuity readout for one recorded ref association, or "". */
+function refContinuityLabel(entry: RefContinuityEntry | undefined): string {
+  if (!entry?.continuity) return "";
+  let label = entry.continuity;
+  if (entry.continuity === "rewritten" && entry.rewriteAction)
+    label += ` by ${entry.rewriteAction}`;
+  if (entry.sameTree === true) label += " (same tree)";
+  if (entry.currentTipOid && entry.currentTipOid !== entry.recordedHeadOid)
+    label += ` → ${shortId(entry.currentTipOid)}`;
+  return label;
 }
 
 function shortGitRef(reference: string | undefined): string {
@@ -242,10 +276,25 @@ export function renderAssociationAndLanding(
     const association = commit.commitAssociationId
       ? ` ${linkify(commit.commitAssociationId)}`
       : "";
-    return `<li>${linkify(commit.commitOid)} <span class="${CLASS.factStatus}">${escapeHtml(commit.source || "unknown")}</span>${association} <span>${escapeHtml(commitConditionLabel(liveness))}</span></li>`;
+    return `<li>${linkify(commit.commitOid)} <span class="${CLASS.factStatus}">${escapeHtml(commit.source || "unknown")}</span>${association} <span>${escapeHtml(commitLivenessLabel(liveness))}</span></li>`;
   };
-  const refRow = (reference: CurrentRefAssociation): string =>
-    `<li>${escapeHtml(shortGitRef(reference.refName))} @ ${linkify(reference.headOid)} ${linkify(reference.refAssociationId)}</li>`;
+  // Continuity entries key on the recorded (refName, headOid) pair, so a ref
+  // re-associated at a new head reads each recorded state independently.
+  const continuityByRef = new Map(
+    (range.liveness?.refContinuity ?? []).map((entry) => [
+      `${entry.refName} ${entry.recordedHeadOid}`,
+      entry,
+    ]),
+  );
+  const refRow = (reference: CurrentRefAssociation): string => {
+    const continuity = refContinuityLabel(
+      continuityByRef.get(`${reference.refName} ${reference.headOid}`),
+    );
+    const continuityCell = continuity
+      ? ` <span class="${CLASS.factStatus}">${escapeHtml(continuity)}</span>`
+      : "";
+    return `<li>${escapeHtml(shortGitRef(reference.refName))} @ ${linkify(reference.headOid)}${continuityCell} ${linkify(reference.refAssociationId)}</li>`;
+  };
   const withdrawnCommitRow = (commit: WithdrawnCommitAssociation): string =>
     `<li>${linkify(commit.commitOid)} ${linkify(commit.commitAssociationId)} ${linkify(commit.commitWithdrawalId)}</li>`;
   const withdrawnRefRow = (reference: WithdrawnRefAssociation): string =>

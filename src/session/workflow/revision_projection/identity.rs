@@ -212,7 +212,8 @@ pub struct RevisionShowResult {
     pub rows: Vec<RevisionProjectionRow>,
     /// Commit-range lifecycle view (floating/anchored, current and withdrawn
     /// commit/ref associations) derived git-free from the event set. Liveness
-    /// (merged/live/orphaned) is layered separately by callers that hold a repo.
+    /// (merged/live/unreachable/missing) is layered separately by callers that
+    /// hold a repo.
     pub commit_range: RevisionCommitRangeView,
     /// Reader-relative readback keyed by event id, covering the capture event and
     /// every narrative member. Attached at the document layer; empty when no

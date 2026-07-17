@@ -9,7 +9,7 @@ use pointbreak::session::event::AssertionMode;
 use pointbreak::session::{
     CurrentAssessmentStatus, EventVerificationPolicy, EventVerificationStatus, InputRequestStatus,
     InputRequestView, RemovalPolicy, RevisionShowOptions, RevisionShowResult,
-    effective_integration_ref, enrich_liveness, show_revision,
+    diagnose_ref_continuity, effective_integration_ref, enrich_liveness, show_revision,
 };
 
 use crate::cli::common::{count_label, endpoint_label};
@@ -67,15 +67,24 @@ pub(super) fn run(
     let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
     let result = show_revision(show_options(&args))?;
 
-    // Liveness (merged/live/orphaned per OID + headline) is layered here, outside
-    // the git-free document workflow: best-effort, omitted when reachability is
-    // unknown. Narrow by default against the repository's detected default branch
-    // so the block answers "did this land on the default branch?" (#445); an
-    // explicit `--integration-ref` overrides, and an undetectable default falls
-    // back to broad reachability.
+    // Liveness (merged/live/unreachable/missing per OID + headline) is layered
+    // here, outside the git-free document workflow: best-effort, omitted when
+    // reachability is unknown. Narrow by default against the repository's
+    // detected default branch so the block answers "did this land on the
+    // default branch?" (#445); an explicit `--integration-ref` overrides, and
+    // an undetectable default falls back to broad reachability.
     let integration_ref = effective_integration_ref(&args.repo, args.integration_ref.as_deref());
-    let liveness =
+    let mut liveness =
         enrich_liveness(&result.commit_range, &args.repo, integration_ref.as_deref()).ok();
+    // Ref continuity (current/advanced/rewritten/moved/deleted per recorded
+    // ref, with best-effort reflog rewrite evidence) rides the same block; its
+    // `ref_rewritten` diagnostics join the enrichment's and surface in the
+    // document's top-level diagnostics below.
+    if let Some(liveness) = liveness.as_mut() {
+        let continuity = diagnose_ref_continuity(&result.commit_range, &args.repo);
+        liveness.ref_continuity = continuity.refs;
+        liveness.diagnostics.extend(continuity.diagnostics);
+    }
     // `revision_show_document` consumes `result` by value; the text digest reads
     // the same result, so clone it only when the text lane will actually render
     // (the machine lanes never pay for the clone — this is the #96 heavy command).

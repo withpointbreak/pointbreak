@@ -206,9 +206,11 @@ struct StoreRemoveArgs {
     /// Remove artifacts of revisions anchored on a commit in the `<a>..<b>` range.
     #[arg(long, group = "selector")]
     range: Option<String>,
-    /// Remove artifacts of commit-anchored revisions whose commits are all orphaned.
-    #[arg(long, group = "selector")]
-    orphans: bool,
+    /// Remove artifacts of commit-anchored revisions whose commits are all
+    /// unreachable (no live ref reaches them; missing objects count).
+    /// `--orphans` is a deprecated alias.
+    #[arg(long, alias = "orphans", group = "selector")]
+    unreachable: bool,
 
     /// Sign this write with a specific key: a keystore key name or a path to a
     /// key file. Removal is a write, so a signed store stays signed.
@@ -1136,10 +1138,10 @@ fn selector_from_args(
         Ok(RemoveSelector::Ref(reference.clone()))
     } else if let Some(range) = &args.range {
         Ok(RemoveSelector::Range(range.clone()))
-    } else if args.orphans {
-        Ok(RemoveSelector::Orphans)
+    } else if args.unreachable {
+        Ok(RemoveSelector::Unreachable)
     } else {
-        Err("exactly one of --snapshot/--revision/--ref/--range/--orphans is required".into())
+        Err("exactly one of --snapshot/--revision/--ref/--range/--unreachable is required".into())
     }
 }
 

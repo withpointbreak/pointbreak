@@ -602,11 +602,11 @@ fn text_association_digest_reports_landing_when_liveness_resolves() {
 }
 
 #[test]
-fn text_association_digest_reads_orphaned_anchor_as_orphaned() {
+fn text_association_digest_reads_unreachable_anchor_as_unreachable() {
     // A range capture anchored to a commit on a soon-deleted branch: the commit
-    // survives in the object store but no live ref reaches it → orphaned. Liveness
-    // resolves it (a real status), so the headline is `orphaned`, never `unknown`,
-    // and the read still exits 0 (INV-10).
+    // survives in the object store but no live ref reaches it → unreachable.
+    // Liveness resolves it (a real status), so the headline is `unreachable`,
+    // never `unknown` and never `orphaned`, and the read still exits 0 (INV-10).
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
     repo.commit_all("base");
@@ -636,12 +636,16 @@ fn text_association_digest_reads_orphaned_anchor_as_orphaned() {
     ]);
     assert!(
         output.status.success(),
-        "the digest exits 0 even when the anchor is orphaned"
+        "the digest exits 0 even when the anchor is unreachable"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("landing: orphaned"),
-        "an unreachable anchor reads as orphaned: {stdout}"
+        stdout.contains("landing: unreachable"),
+        "an unreachable anchor reads as unreachable: {stdout}"
+    );
+    assert!(
+        !stdout.contains("orphaned"),
+        "the orphaned vocabulary is retired from the digest: {stdout}"
     );
 }
 

@@ -127,7 +127,7 @@ non-`--repo`-scoped surface — walks `<root>/stores/` and reports each family's
 live-clone count, and orphan flag. `store status` populates the already-reserved
 `repository_family_ref`/`clone_ref` wire fields (opaque clone id, never a raw path) plus new
 lifecycle fields. CLI copy must keep "orphaned family store" distinct from the existing
-`store remove --orphans` selector (unreachable-commit content — a different orphan).
+`store remove --unreachable` selector (unreachable-commit content).
 
 ### 7. Sensitivity: gate at the one-shot boundary, promise only what holds
 

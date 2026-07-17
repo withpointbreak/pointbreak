@@ -99,11 +99,11 @@ default (isolated-by-default + share-by-opt-in) to its inverse (shared-by-defaul
    auto-fan-in an ephemeral/sensitive worktree** (privacy precondition below). The opt-in-link
    registration is replaced by the smaller ephemeral-opt-out state, not removed outright.
 
-5. **Lifecycle is explicit.** Orphan units (deleted-unmerged branches) are **kept** (append-only) but
+5. **Lifecycle is explicit.** Unreachable units (deleted-unmerged branches) are **kept** (append-only) but
    **hidden** from the default view (no live ref contains their commit) and removed only by an explicit,
    never-automatic **content removal** (ADR-0016: `shore store remove` then `compact`; its full
    mirror-aware retention semantics in an append-only model are deferred there to a follow-on ADR).
-   Merge-status is a **structural reachability projection** (`merged|open|orphaned|unknown`) for
+   Merge-status is a **structural reachability projection** (`merged|open|unreachable|unknown`, #540 renamed the former `orphaned`) for
    commit-anchored captures, replacing the observation-only signal — except for uncommitted
    working-tree-snapshot captures, which remain observation-driven until committed.
 
@@ -195,7 +195,7 @@ ephemeral opt-out surface, and the working-tree-capture scope are part of the as
   prior default). What is rejected is making isolation the *default*.
 - **A store/clone-level write mutex** — unnecessary (content-addressing is lock-free) and would break
   cross-clone / user-level federation; any future lock is store-dir scoped only.
-- **Automatic/silent deletion of orphans** — retention is keep-by-default; deletion is explicit only.
+- **Automatic/silent deletion of unreachable units** — retention is keep-by-default; deletion is explicit only.
 - **Teaching reads to union worktree-local into results** — re-forks authority; the relocation removes
   the need.
 

@@ -33,8 +33,10 @@ Three substrate facts constrain the design:
 - **Vocabulary is collision-checked**: `associate`/`associated` is clean; rejected as already-loaded —
   `finaliz*` (closure connotation), `anchor*` (the note/diff `Anchor` struct), `abandoned`
   (`InputRequestResponseOutcome::Abandoned`), bare `withdrawn`/`retract*` (substrate retraction,
-  `docs/substrate-language.md`). `orphaned` (`ResolutionStatus::Orphaned`) is reused **only** as a derived
-  graph condition.
+  `docs/substrate-language.md`). `orphaned` (`ResolutionStatus::Orphaned`) was initially reused as a derived
+  graph condition; the 2026-07-16 amendment below retires that reuse — commit conditions now read
+  `unreachable`/`missing`. (The note-anchor `ResolutionStatus` named here was never built in this
+  repository; the reference is retained as historical context.)
 
 ## Decision
 
@@ -102,7 +104,8 @@ whose `GitCommit` target is already in `ReviewUnitCapturedPayload`) **∪** `ass
 - `anchored` ≡ the current commit set is non-empty — i.e. a **commit-range capture is born `anchored`**
   from its captured `GitCommit` target (no auto-association), and a **worktree capture starts `floating`**
   until a `ReviewUnitCommitAssociated` lands. `floating`/`anchored` are **events-only, no git**.
-- `merged` / `live` / `orphaned` — derived from the current commit set **plus** git reachability and a
+- `merged` / `live` / `orphaned` (the 2026-07-16 amendment below splits `orphaned` into
+  `unreachable`/`missing`) — derived from the current commit set **plus** git reachability and a
   **read-time integration ref** (a parameter/config, **not** stored — `merged` is relative to which ref
   you ask about and would go stale if persisted). The breadth of `merged` is **broad-by-default,
   narrow-when-configured** (see Resolved in implementation).
@@ -447,3 +450,49 @@ nothing. Withdrawal, idempotency, convergence, and the surface-both/pick-no-winn
 divergence are unchanged. §10 stands verbatim: association = the *same* revision landing as commit X;
 supersession = a *new* revision replacing an old one. A commit landing after capture or assessment is
 recorded with an association and is never grounds to recapture or supersede.
+
+## Amendment: Unreachable/Missing Replace `orphaned`; Ref Continuity Diagnoses Rewrites (2026-07-16)
+
+**What changes.** The derived commit condition `Orphaned { reason: object_missing | unreachable }`
+conflated two axes Git keeps distinct — object availability and live-ref reachability — and reused a
+term whose Git meaning (`git checkout --orphan`: an unborn branch with no parents) does not describe
+an amended-away commit that still has parent history. The read-time enrichment now derives four flat
+conditions: **`merged`**, **`live`**, **`unreachable`** (object present, no live ref reaches it), and
+**`missing`** (object gone). Nothing user-facing calls a commit or revision `orphaned` any more.
+(The note-anchor `ResolutionStatus::Orphaned` this ADR's context section cites was never built in
+this repository — the token otherwise survives only in the unrelated family-store lifecycle flag.)
+
+- **`live` broadens under a narrow integration ref.** A commit some live branch still carries —
+  interior to that branch, not its tip — has not landed on the integration ref, but it *is*
+  reachable from a live ref. It now reads `live` (labeled by a containing tip, best-effort), never
+  unreachable: reachability is a broad axis; only the landing answer narrows. The aggregate
+  merge-status therefore reads `open` for side-branch-carried work.
+- **Aggregate status.** The list/digest merge-status vocabulary is `merged | open | unreachable |
+  unknown`. `unreachable` summarizes a unit no live ref reaches; present-but-unreachable and missing
+  objects collapse there deliberately — object retention never leaks into the aggregate. The
+  2026-07-09 amendment's "reads `orphaned` when every current claim is orphaned" headline rule holds
+  with the new tokens: the headline reads `unreachable` (or `missing` when every claim's object is
+  gone), and such claims still never compete for the landing.
+- **Retention.** An `unreachable` commit carries best-effort `retention` (`reflog` | `none`; omitted
+  when the probe cannot answer): local, ephemeral evidence that a reflog entry still retains the
+  object. Never persisted, never membership-bearing.
+- **Ref continuity.** A sibling read-time diagnosis (`diagnose_ref_continuity`) classifies each
+  current ref association against the ref's live state: `current`, `advanced`, `rewritten` (the
+  ref's reflog shows a `commit (amend)`/rebase transition away from the recorded head — the
+  diagnosis names the action, the recorded and current OIDs, and same-tree equivalence when both
+  objects survive), `moved` (no rewrite evidence — expired/absent reflog, or a reset), `deleted`, or
+  `unknown`. A rewritten ref adds the `ref_rewritten` diagnostic suggesting the explicit follow-up
+  (record a commit association if the tip realizes the same revision; capture a successor for a new
+  content state). Reflog evidence is read-only enrichment: it never replaces the captured target,
+  auto-associates a commit, or captures a successor — the captured target stays immutable
+  provenance.
+- **Filters and library surface.** `revision list --unreachable` replaces `--orphans` (retained as a
+  deprecated alias), as does `store remove --unreachable`; `OrphanVisibility` is renamed
+  `UnreachableVisibility` (`HideUnreachable`/`All`/`UnreachableOnly`). The `--ref --by liveness`
+  filter tightens to "reachable from THIS ref" (`merged`, equality counts) so the broadened `live`
+  does not make it match unrelated branches.
+
+**What does not change.** §10 stands: association = the *same* revision landing; supersession = a
+*new* content state. Record membership stays projection-complete (ADR-0015's 2026-07-15 amendment) —
+these conditions are enrichment, never a visibility predicate by default. Nothing new is stored; no
+event, payload field, or `sigVersion` changes.

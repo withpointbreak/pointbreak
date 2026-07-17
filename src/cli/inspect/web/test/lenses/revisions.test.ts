@@ -123,6 +123,27 @@ describe("renderRevisionList (the flat revision list lens)", () => {
     expect(button?.textContent).toBe("snapshot unavailable");
   });
 
+  it("labels each card's landing with the merge-status vocabulary, never orphaned", () => {
+    seedFixtures();
+    const current = store.getState().revisions as RevisionsDoc;
+    store.commit({
+      revisions: {
+        ...current,
+        entries: current.entries.map((entry) => ({
+          ...entry,
+          mergeStatus: "unreachable",
+        })),
+      },
+    });
+    mountListBody();
+    revisions.renderRevisionList();
+
+    const labeled = document.querySelector<HTMLElement>("#units .unit-card");
+    expect(labeled?.textContent).toContain("landing");
+    expect(labeled?.textContent).toContain("unreachable");
+    expect(labeled?.textContent).not.toContain("orphaned");
+  });
+
   it("surfaces the supersession badge and the advisory attention cues", () => {
     seedFixtures();
     mountListBody();

@@ -110,7 +110,7 @@ avoiding).
 
 `shore store remove` accepts ergonomic selectors that **all resolve to a set of `content_hash`es**:
 `--snapshot <id>`, `--review-unit <id>`, `--ref <branch>` / `--range A..B` (via the
-reachability/context projection), `--orphans`. `--review-unit` reports co-referencing units before
+reachability/context projection), `--unreachable` (formerly `--orphans`). `--review-unit` reports co-referencing units before
 acting ("snapshot S is also referenced by V, W; removing it removes the content for all of them") —
 consent/awareness, not a block.
 
@@ -223,7 +223,7 @@ redaction is out of scope here.
 - **Full mirror-aware retention policy** — retention windows, tombstone-vs-hard-delete across mirrors,
   federation redaction.
 - **Integration-ref definition and gc'd-commit (object-gone) degradation** — these belong to the
-  merge-status / orphan projection, not the removal mechanism.
+  merge-status / reachability projection, not the removal mechanism.
 - **The ephemeral worktree-local opt-out** — the sibling day-one privacy constraint, decided in ADR-0015;
   referenced here, decided there.
 - **A removal `reason`/justification.** Deliberately **not** carried in the Tier-1 `ArtifactRemoved`

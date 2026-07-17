@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 use clap::{Args, ValueEnum};
 use pointbreak::documents::revision_list_document;
 use pointbreak::session::{
-    OrphanVisibility, QueryDiagnosticCode, QuerySurface, RefFilterMode, RevisionListOptions,
-    RevisionOverviewsOptions, RevisionRecordInputs, SupersessionView, build_revision_search_record,
-    list_revisions, matches_query, parse_search_query_for, read_events_for_display,
-    revision_supersession_classification, show_revision_overviews,
+    QueryDiagnosticCode, QuerySurface, RefFilterMode, RevisionListOptions,
+    RevisionOverviewsOptions, RevisionRecordInputs, SupersessionView, UnreachableVisibility,
+    build_revision_search_record, list_revisions, matches_query, parse_search_query_for,
+    read_events_for_display, revision_supersession_classification, show_revision_overviews,
 };
 
 use crate::cli::common::{count_label, endpoint_label};
@@ -46,10 +46,11 @@ pub(super) struct RevisionListArgs {
     #[arg(long = "all")]
     _all: bool,
 
-    /// Show only orphaned revisions (every anchored commit unreachable). Takes
-    /// precedence over `--all`.
-    #[arg(long)]
-    orphans: bool,
+    /// Show only unreachable revisions (no live ref reaches any anchored
+    /// commit; missing objects count). Takes precedence over `--all`.
+    /// `--orphans` is a deprecated alias.
+    #[arg(long, alias = "orphans")]
+    unreachable: bool,
 
     /// Reachability target for the "merged" status: a revision is merged only when
     /// an ancestor of this ref (equality counts). Defaults to the repository's
@@ -102,15 +103,15 @@ pub(super) fn run(
     if let Some(ref_name) = args.ref_name {
         options = options.with_ref_filter(ref_name, args.by.into());
     }
-    // `--all` is now the default and remains accepted for compatibility.
-    // `--orphans` is the only CLI reachability filter and keeps precedence when
-    // both flags are supplied.
-    let visibility = if args.orphans {
-        OrphanVisibility::OrphansOnly
+    // `--all` is the default and remains accepted for compatibility.
+    // `--unreachable` (deprecated alias `--orphans`) is the only CLI
+    // reachability filter and keeps precedence when both flags are supplied.
+    let visibility = if args.unreachable {
+        UnreachableVisibility::UnreachableOnly
     } else {
-        OrphanVisibility::All
+        UnreachableVisibility::All
     };
-    options = options.with_orphan_visibility(visibility);
+    options = options.with_unreachable_visibility(visibility);
     if let Some(integration_ref) = args.integration_ref {
         options = options.with_integration_ref(integration_ref);
     }

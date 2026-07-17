@@ -44,6 +44,9 @@ export interface Revision {
   // The captured base commit and the capture timestamp, shown in a revision card.
   base?: EntryBase;
   capturedAt?: string;
+  // The structural landing status from git reachability: `merged`, `open`,
+  // `unreachable` (no live ref reaches any anchored commit), or `unknown`.
+  mergeStatus?: string;
   diagnostics?: ProjectionDiagnostic[];
 }
 

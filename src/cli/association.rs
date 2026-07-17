@@ -293,7 +293,8 @@ struct LandingDigest {
 /// liveness machinery `revision show` uses — including the detected-default-branch
 /// integration ref, so a landed tip reads `merged` on every surface (#466) — and
 /// mapped exactly like the revision list's `merge_status_for`:
-/// `merged|open|orphaned`, and `unknown` on any git failure or withheld headline.
+/// `merged|open|unreachable`, and `unknown` on any git failure or withheld
+/// headline.
 /// Runs only on the text lane (the sole caller is the text renderer) and never
 /// propagates a liveness error to the exit code (INV-10). The machine lanes gain
 /// nothing — the JSON document is untouched.
@@ -304,7 +305,9 @@ fn landing_digest(result: &ListAssociationsResult, repo: &Path) -> LandingDigest
             landing: match enrichment.headline {
                 Some(CommitGraphCondition::Merged) => "merged",
                 Some(CommitGraphCondition::Live) => "open",
-                Some(CommitGraphCondition::Orphaned { .. }) => "orphaned",
+                Some(CommitGraphCondition::Unreachable | CommitGraphCondition::Missing) => {
+                    "unreachable"
+                }
                 None => "unknown",
             },
             diagnostics: enrichment.diagnostics,

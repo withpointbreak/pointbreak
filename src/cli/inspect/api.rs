@@ -30,10 +30,10 @@ use pointbreak::session::{
     SessionState, SnapshotSummaryCache, StoreIdentity, StoreIdentityOptions, SupersessionView,
     TrustSet, apply_history_query, commit_graph_stamp, compare_event_instants, count_new_since,
     current_assessment_includes_follow_up, default_history_page_projection,
-    effective_integration_ref, enrich_liveness, event_log_head_marker, history_base_projection,
-    list_attention, list_revisions, read_bound_object_artifact, read_events_for_display,
-    read_object_artifact, revision_supersession_classification, show_revision,
-    show_revision_overviews, stale_review_fact_count, store_identity,
+    diagnose_ref_continuity, effective_integration_ref, enrich_liveness, event_log_head_marker,
+    history_base_projection, list_attention, list_revisions, read_bound_object_artifact,
+    read_events_for_display, read_object_artifact, revision_supersession_classification,
+    show_revision, show_revision_overviews, stale_review_fact_count, store_identity,
 };
 use serde::Serialize;
 
@@ -1813,9 +1813,16 @@ fn splice_repository_liveness(
     head_oid: Option<&str>,
 ) -> Result<(), String> {
     let integration_ref = effective_integration_ref(repo, None);
-    let Ok(enrichment) = enrich_liveness(commit_range, repo, integration_ref.as_deref()) else {
+    let Ok(mut enrichment) = enrich_liveness(commit_range, repo, integration_ref.as_deref()) else {
         return Ok(());
     };
+    // Ref continuity rides the same block (current/advanced/rewritten/moved/
+    // deleted per recorded ref); its `ref_rewritten` diagnostics join the
+    // enrichment's before the splice moves them into the top-level array —
+    // the same composition `revision show` performs on the CLI document.
+    let continuity = diagnose_ref_continuity(commit_range, repo);
+    enrichment.ref_continuity = continuity.refs;
+    enrichment.diagnostics.extend(continuity.diagnostics);
     if let Some(head_oid) = head_oid
         && let Some(live_branch) = resolve_head_live_branch(&enrichment, head_oid)
     {
@@ -3036,7 +3043,7 @@ mod tests {
             .iter()
             .find(|entry| entry["revisionId"] == revision_id)
             .unwrap_or_else(|| panic!("amended capture target removed the revision: {value}"));
-        assert_eq!(entry["mergeStatus"], "orphaned");
+        assert_eq!(entry["mergeStatus"], "unreachable");
     }
 
     #[test]
@@ -3177,11 +3184,13 @@ mod tests {
 
         assert_eq!(
             value["commitRange"]["liveness"]["perCommit"][0]["condition"],
-            "orphaned"
+            "missing"
         );
-        assert_eq!(
-            value["commitRange"]["liveness"]["perCommit"][0]["reason"],
-            "object_missing"
+        assert!(
+            value["commitRange"]["liveness"]["perCommit"][0]
+                .get("reason")
+                .is_none(),
+            "missing is a first-class condition, not an orphan reason"
         );
     }
 
@@ -3391,8 +3400,10 @@ mod tests {
                 commit_oid: "headoid".to_owned(),
                 condition: CommitGraphCondition::Live,
                 live_branch: Some("main".to_owned()),
+                retention: None,
             }],
             headline: Some(CommitGraphCondition::Live),
+            ref_continuity: Vec::new(),
             diagnostics: Vec::new(),
         };
         assert_eq!(
@@ -3414,14 +3425,17 @@ mod tests {
                     commit_oid: "a".to_owned(),
                     condition: CommitGraphCondition::Live,
                     live_branch: Some("main".to_owned()),
+                    retention: None,
                 },
                 CommitLiveness {
                     commit_oid: "b".to_owned(),
                     condition: CommitGraphCondition::Live,
                     live_branch: Some("feature".to_owned()),
+                    retention: None,
                 },
             ],
             headline: None,
+            ref_continuity: Vec::new(),
             diagnostics: Vec::new(),
         };
         assert_eq!(resolve_head_live_branch(&ambiguous, "baseoid"), None);

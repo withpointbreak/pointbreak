@@ -36,9 +36,9 @@ use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{prepare_write_landing, resolve_write_store};
 use crate::session::{
     ArtifactRemovalProjection, CommitGraphCondition, EventSigningOptions, EventStore,
-    EventWriteOutcome, OrphanReason, RemovalOperativeStatus, RemovalPolicy,
-    RevisionCommitRangeProjection, TrustSet, current_timestamp, enrich_liveness,
-    referenced_artifacts, sign_event_if_requested, writer_from_options,
+    EventWriteOutcome, RemovalOperativeStatus, RemovalPolicy, RevisionCommitRangeProjection,
+    TrustSet, current_timestamp, enrich_liveness, referenced_artifacts, sign_event_if_requested,
+    writer_from_options,
 };
 use crate::storage::{Durability, LocalStorage, RemoveOutcome};
 
@@ -55,8 +55,8 @@ pub enum RemoveSelector {
     /// Content hashes of units anchored on a commit in the `<a>..<b>` range.
     Range(String),
     /// Content hashes of commit-anchored units whose current commits are all
-    /// orphaned (no live ref reaches them).
-    Orphans,
+    /// unreachable (no live ref reaches them; missing objects count).
+    Unreachable,
 }
 
 /// Inputs to [`remove_content`].
@@ -283,8 +283,8 @@ fn resolve_selector(
             let units = units_anchored_on_oids(events, &oids)?;
             Ok(selection_for_units(units, index))
         }
-        RemoveSelector::Orphans => {
-            let units = orphaned_anchored_units(events, repo)?;
+        RemoveSelector::Unreachable => {
+            let units = unreachable_anchored_units(events, repo)?;
             Ok(selection_for_units(units, index))
         }
     }
@@ -353,11 +353,11 @@ fn units_anchored_on_oids(
         .collect())
 }
 
-/// The commit-anchored units whose every current commit is orphaned (no live ref
-/// reaches it). A floating unit (no commit anchor) is never orphaned; a unit
-/// whose reachability cannot be determined (a git error) degrades to unknown and
-/// is skipped rather than removed.
-fn orphaned_anchored_units(events: &[ShoreEvent], repo: &Path) -> Result<BTreeSet<RevisionId>> {
+/// The commit-anchored units whose every current commit is unreachable or
+/// missing (no live ref reaches it). A floating unit (no commit anchor) is
+/// never unreachable; a unit whose reachability cannot be determined (a git
+/// error) degrades to unknown and is skipped rather than removed.
+fn unreachable_anchored_units(events: &[ShoreEvent], repo: &Path) -> Result<BTreeSet<RevisionId>> {
     let projection = RevisionCommitRangeProjection::from_events(events)?;
     let mut units = BTreeSet::new();
     for (id, view) in projection.units {
@@ -367,27 +367,25 @@ fn orphaned_anchored_units(events: &[ShoreEvent], repo: &Path) -> Result<BTreeSe
         let Ok(enrichment) = enrich_liveness(&view, repo, None) else {
             continue;
         };
-        let all_orphaned = !enrichment.per_commit.is_empty()
+        let all_unreachable = !enrichment.per_commit.is_empty()
             && enrichment
                 .per_commit
                 .iter()
-                .all(|commit| is_orphaned(&commit.condition));
-        if all_orphaned {
+                .all(|commit| is_unreachable(commit.condition));
+        if all_unreachable {
             units.insert(id);
         }
     }
     Ok(units)
 }
 
-/// Whether a commit is orphaned — either reason. A commit whose object was
-/// reclaimed (`ObjectMissing`) is as orphaned as one no live ref reaches
-/// (`Unreachable`); both mean the review's commit is gone from the live graph.
-fn is_orphaned(condition: &CommitGraphCondition) -> bool {
+/// Whether a commit is off the live graph. A commit whose object was reclaimed
+/// (`Missing`) counts just like one no live ref reaches (`Unreachable`); both
+/// mean the review's commit is gone from the live graph.
+fn is_unreachable(condition: CommitGraphCondition) -> bool {
     matches!(
         condition,
-        CommitGraphCondition::Orphaned {
-            reason: OrphanReason::ObjectMissing | OrphanReason::Unreachable
-        }
+        CommitGraphCondition::Unreachable | CommitGraphCondition::Missing
     )
 }
 
@@ -953,7 +951,7 @@ mod tests {
         repo.git(["branch", "-D", "doomed"]);
 
         let result =
-            remove_content(RemoveOptions::new(repo.path(), RemoveSelector::Orphans)).unwrap();
+            remove_content(RemoveOptions::new(repo.path(), RemoveSelector::Unreachable)).unwrap();
 
         let hashes: Vec<&str> = result
             .removed
@@ -962,7 +960,7 @@ mod tests {
             .collect();
         assert!(
             hashes.contains(&doomed_capture.object_artifact_content_hash.as_str()),
-            "the orphaned unit's hash is resolved"
+            "the unreachable unit's hash is resolved"
         );
         assert!(
             !hashes.contains(&reachable_capture.object_artifact_content_hash.as_str()),

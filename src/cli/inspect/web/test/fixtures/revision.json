@@ -64,7 +64,15 @@
       }
     ],
     "liveness": {
-      "perCommit": []
+      "perCommit": [],
+      "refContinuity": [
+        {
+          "continuity": "current",
+          "currentTipOid": "ffc93defe11730aca098a481cc1409e76a2d249f",
+          "recordedHeadOid": "ffc93defe11730aca098a481cc1409e76a2d249f",
+          "refName": "refs/heads/main"
+        }
+      ]
     },
     "withdrawnCommits": [],
     "withdrawnRefs": []

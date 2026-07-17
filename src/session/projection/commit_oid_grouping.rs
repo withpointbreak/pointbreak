@@ -5,7 +5,7 @@
 //! `fingerprint.rs`), but their current commit sets converge on the same OID(s). This
 //! view recovers that convergence so a read surface can present co-grouped units as one.
 //! It is a pure projection — no git, no store reads, no re-identification. Reachability
-//! (merged/live/orphaned) is a separate read-time enrichment and never enters this view.
+//! (merged/live/unreachable/missing) is a separate read-time enrichment and never enters this view.
 //! The identity fold is deliberately left untouched; a floating capture (no current
 //! commit OID) has no grouping key and stays un-grouped.
 

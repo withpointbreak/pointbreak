@@ -4008,11 +4008,27 @@
 
   // src/detail.ts
   function commitConditionLabel(condition) {
-    if (!condition?.condition) return "unknown";
-    if (condition.condition !== "orphaned") return condition.condition;
-    return condition.reason ? `orphaned (${condition.reason})` : "orphaned";
+    return condition?.condition ?? "unknown";
   }
   __name(commitConditionLabel, "commitConditionLabel");
+  function commitLivenessLabel(item) {
+    let label = commitConditionLabel(item);
+    if (item?.retention === "reflog") label += " (reflog-retained)";
+    else if (item?.retention === "none") label += " (reflog expired)";
+    return label;
+  }
+  __name(commitLivenessLabel, "commitLivenessLabel");
+  function refContinuityLabel(entry) {
+    if (!entry?.continuity) return "";
+    let label = entry.continuity;
+    if (entry.continuity === "rewritten" && entry.rewriteAction)
+      label += ` by ${entry.rewriteAction}`;
+    if (entry.sameTree === true) label += " (same tree)";
+    if (entry.currentTipOid && entry.currentTipOid !== entry.recordedHeadOid)
+      label += ` → ${shortId(entry.currentTipOid)}`;
+    return label;
+  }
+  __name(refContinuityLabel, "refContinuityLabel");
   function shortGitRef(reference) {
     return (reference || "").replace(/^refs\/heads\//, "").replace(/^refs\/remotes\//, "");
   }
@@ -4056,9 +4072,21 @@
     const commitRow = /* @__PURE__ */ __name((commit2) => {
       const liveness = livenessByCommit.get(commit2.commitOid);
       const association = commit2.commitAssociationId ? ` ${linkify(commit2.commitAssociationId)}` : "";
-      return `<li>${linkify(commit2.commitOid)} <span class="${CLASS.factStatus}">${escapeHtml(commit2.source || "unknown")}</span>${association} <span>${escapeHtml(commitConditionLabel(liveness))}</span></li>`;
+      return `<li>${linkify(commit2.commitOid)} <span class="${CLASS.factStatus}">${escapeHtml(commit2.source || "unknown")}</span>${association} <span>${escapeHtml(commitLivenessLabel(liveness))}</span></li>`;
     }, "commitRow");
-    const refRow = /* @__PURE__ */ __name((reference) => `<li>${escapeHtml(shortGitRef(reference.refName))} @ ${linkify(reference.headOid)} ${linkify(reference.refAssociationId)}</li>`, "refRow");
+    const continuityByRef = new Map(
+      (range.liveness?.refContinuity ?? []).map((entry) => [
+        `${entry.refName} ${entry.recordedHeadOid}`,
+        entry
+      ])
+    );
+    const refRow = /* @__PURE__ */ __name((reference) => {
+      const continuity = refContinuityLabel(
+        continuityByRef.get(`${reference.refName} ${reference.headOid}`)
+      );
+      const continuityCell = continuity ? ` <span class="${CLASS.factStatus}">${escapeHtml(continuity)}</span>` : "";
+      return `<li>${escapeHtml(shortGitRef(reference.refName))} @ ${linkify(reference.headOid)}${continuityCell} ${linkify(reference.refAssociationId)}</li>`;
+    }, "refRow");
     const withdrawnCommitRow = /* @__PURE__ */ __name((commit2) => `<li>${linkify(commit2.commitOid)} ${linkify(commit2.commitAssociationId)} ${linkify(commit2.commitWithdrawalId)}</li>`, "withdrawnCommitRow");
     const withdrawnRefRow = /* @__PURE__ */ __name((reference) => `<li>${escapeHtml(shortGitRef(reference.refName))} @ ${linkify(reference.headOid)} ${linkify(reference.refAssociationId)} ${linkify(reference.refWithdrawalId)}</li>`, "withdrawnRefRow");
     return `<section><h2>Association and landing</h2>
@@ -6252,6 +6280,7 @@
       ];
       const tail = [
         ["revision", shortId(revisionId)],
+        ["landing", u.mergeStatus || "unknown"],
         ["snapshot", shortId(u.snapshotId)]
       ];
       const targetCell = `<span>target</span><b>${targetDisplayLabel(u.targetDisplay)}${targetHeadBadge(u.targetDisplay)}</b>`;

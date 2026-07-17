@@ -28,18 +28,21 @@ pub enum RefFilterMode {
 }
 
 /// Which explicit commit-reachability filter the list applies. A unit is
-/// "orphaned" when it is commit-anchored and every current commit is unreachable
-/// from any live ref; floating (commit-free) units are never orphaned. The
-/// unfiltered default keeps every recorded revision regardless of Git liveness.
+/// unreachable when it is commit-anchored and no live ref reaches any of its
+/// current commits (present-but-unreachable and missing objects both count);
+/// floating (commit-free) units are never unreachable. The unfiltered default
+/// keeps every recorded revision regardless of Git liveness. Replaces the
+/// retired orphan-visibility vocabulary.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum OrphanVisibility {
-    /// Explicitly hide commit-anchored units whose every current commit is orphaned.
-    HideOrphans,
+pub enum UnreachableVisibility {
+    /// Explicitly hide commit-anchored units whose every current commit is
+    /// unreachable or missing.
+    HideUnreachable,
     /// Default: show every recorded revision.
     #[default]
     All,
-    /// Show only the orphaned units.
-    OrphansOnly,
+    /// Show only the unreachable units.
+    UnreachableOnly,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,7 +55,7 @@ struct RefFilter {
 pub struct RevisionListOptions {
     repo: PathBuf,
     ref_filter: Option<RefFilter>,
-    orphan_visibility: OrphanVisibility,
+    unreachable_visibility: UnreachableVisibility,
     integration_ref: Option<String>,
     worktree_scope: Option<PathBuf>,
     read_for_display: bool,
@@ -63,7 +66,7 @@ impl RevisionListOptions {
         Self {
             repo: repo.as_ref().to_path_buf(),
             ref_filter: None,
-            orphan_visibility: OrphanVisibility::default(),
+            unreachable_visibility: UnreachableVisibility::default(),
             integration_ref: None,
             worktree_scope: None,
             read_for_display: false,
@@ -81,8 +84,8 @@ impl RevisionListOptions {
     }
 
     /// Choose which units the list surfaces with respect to commit-reachability.
-    pub fn with_orphan_visibility(mut self, visibility: OrphanVisibility) -> Self {
-        self.orphan_visibility = visibility;
+    pub fn with_unreachable_visibility(mut self, visibility: UnreachableVisibility) -> Self {
+        self.unreachable_visibility = visibility;
         self
     }
 
@@ -126,9 +129,12 @@ pub struct RevisionListEntry {
     /// current and withdrawn associations). Structural merge-status is attached
     /// separately in `merge_status`.
     pub commit_range: RevisionCommitRangeView,
-    /// Structural merge-status from git reachability: `merged | open | orphaned |
-    /// unknown`. `unknown` covers floating units, disagreeing per-commit
-    /// conditions, and a repo error (which degrades gracefully, never an error).
+    /// Structural merge-status from git reachability: `merged | open |
+    /// unreachable | unknown`. `unreachable` summarizes a unit no live ref
+    /// reaches (present-but-unreachable and missing objects alike — object
+    /// retention never leaks into the aggregate); `unknown` covers floating
+    /// units, disagreeing per-commit conditions, and a repo error (which
+    /// degrades gracefully, never an error).
     pub merge_status: String,
     /// The review units this entry stands for. Singleton (`[revision_id]`) for an
     /// ungrouped unit; for a unit whose current commit OID is shared by sibling
@@ -217,7 +223,7 @@ pub fn list_revisions(options: RevisionListOptions) -> Result<RevisionListResult
     }
 
     // Resolve the live tips and reachability ONCE for the whole list. The
-    // orphan-visibility filter and the merge-status attach each classify every
+    // reachability filter and the merge-status attach each classify every
     // entry's commits against this shared set by in-memory membership, instead of a
     // git ancestry probe per (commit, tip) pair per entry. A git failure here
     // degrades every entry to "reachability unknown" — the same graceful fallback
@@ -231,7 +237,7 @@ pub fn list_revisions(options: RevisionListOptions) -> Result<RevisionListResult
         // (#466; under broad reachability the most recently landed revision
         // reads "open" until the next commit lands). An explicit integration
         // ref overrides; an undetectable default keeps broad reachability.
-        // Orphan visibility is unaffected: it reads `enrich_broad`, which
+        // Reachability visibility is unaffected: it reads `enrich_broad`, which
         // ignores the batch's integration set.
         let integration_ref =
             effective_integration_ref(&options.repo, options.integration_ref.as_deref());
@@ -239,20 +245,20 @@ pub fn list_revisions(options: RevisionListOptions) -> Result<RevisionListResult
     };
 
     {
-        let span = tracing::debug_span!("shore.revisions.list.orphan_visibility");
+        let span = tracing::debug_span!("shore.revisions.list.unreachable_visibility");
         let _guard = span.enter();
-        apply_orphan_visibility(
+        apply_unreachable_visibility(
             &mut result,
             &options.repo,
-            options.orphan_visibility,
+            options.unreachable_visibility,
             liveness.as_ref(),
         );
     }
 
     // Canonical read-surface order: build entries → `--ref` retain → `--worktree`
-    // identity retain → orphan-visibility retain → grouping → recompute count →
+    // identity retain → reachability retain → grouping → recompute count →
     // merge-status attach → divergence diagnostics. Grouping runs after every retain
-    // (a `--ref`/`--worktree`/orphan filter that drops a member shrinks its group; a
+    // (a `--ref`/`--worktree`/reachability filter that drops a member shrinks its group; a
     // group whose only surviving member matched still surfaces via that member), and
     // before merge-status, which is attached over the grouped entries.
     let grouping = {
@@ -280,7 +286,7 @@ pub fn list_revisions(options: RevisionListOptions) -> Result<RevisionListResult
 /// enrichment-level diagnostics (divergence needs ancestry, so it is
 /// liveness-derived) into the entry's per-unit `commit_range.diagnostics` —
 /// the same array the fold's diagnostics land in. Run after the visibility
-/// filter so hidden orphans are not classified twice. Reuses each entry's
+/// filter so filtered-out units are not classified twice. Reuses each entry's
 /// `commit_range` view against the shared reachability batch.
 fn attach_merge_status(
     result: &mut RevisionListResult,
@@ -312,7 +318,9 @@ fn merge_status_for(
             let merge_status = match enrichment.headline {
                 Some(CommitGraphCondition::Merged) => "merged",
                 Some(CommitGraphCondition::Live) => "open",
-                Some(CommitGraphCondition::Orphaned { .. }) => "orphaned",
+                Some(CommitGraphCondition::Unreachable | CommitGraphCondition::Missing) => {
+                    "unreachable"
+                }
                 None => "unknown",
             };
             (merge_status, enrichment.diagnostics)
@@ -321,40 +329,40 @@ fn merge_status_for(
     }
 }
 
-/// Apply an explicit orphan-visibility filter over the already-built entries.
-/// `All` is the projection-complete default; `HideOrphans` removes
-/// commit-anchored units whose every current commit is orphaned; `OrphansOnly`
-/// keeps only those units. Reuses each entry's `commit_range` view (no event
-/// re-list) against git reachability.
-fn apply_orphan_visibility(
+/// Apply an explicit reachability filter over the already-built entries.
+/// `All` is the projection-complete default; `HideUnreachable` removes
+/// commit-anchored units whose every current commit is unreachable or missing;
+/// `UnreachableOnly` keeps only those units. Reuses each entry's `commit_range`
+/// view (no event re-list) against git reachability.
+fn apply_unreachable_visibility(
     result: &mut RevisionListResult,
     repo: &Path,
-    visibility: OrphanVisibility,
+    visibility: UnreachableVisibility,
     liveness: Option<&LivenessBatch>,
 ) {
     match visibility {
-        OrphanVisibility::All => {}
-        OrphanVisibility::HideOrphans => {
+        UnreachableVisibility::All => {}
+        UnreachableVisibility::HideUnreachable => {
             result
                 .entries
-                .retain(|entry| !is_hidden_orphan(&entry.commit_range, repo, liveness));
+                .retain(|entry| !is_unreachable_unit(&entry.commit_range, repo, liveness));
             result.revision_count = result.entries.len();
         }
-        OrphanVisibility::OrphansOnly => {
+        UnreachableVisibility::UnreachableOnly => {
             result
                 .entries
-                .retain(|entry| is_hidden_orphan(&entry.commit_range, repo, liveness));
+                .retain(|entry| is_unreachable_unit(&entry.commit_range, repo, liveness));
             result.revision_count = result.entries.len();
         }
     }
 }
 
-/// Whether a unit is a hidden orphan: commit-anchored with **every** current
-/// commit classified `Orphaned` (any reason) by the shared reachability batch.
-/// Floating units (no current commits) are never orphaned. A repo-unavailable
-/// git error degrades to "not a hidden orphan" — never hide what we cannot
-/// classify, and never error (graceful degradation).
-fn is_hidden_orphan(
+/// Whether a unit is unreachable: commit-anchored with **every** current
+/// commit classified `Unreachable` or `Missing` by the shared reachability
+/// batch. Floating units (no current commits) are never unreachable. A
+/// repo-unavailable git error degrades to "not unreachable" — never hide what
+/// we cannot classify, and never error (graceful degradation).
+fn is_unreachable_unit(
     view: &RevisionCommitRangeView,
     repo: &Path,
     liveness: Option<&LivenessBatch>,
@@ -363,10 +371,12 @@ fn is_hidden_orphan(
         return false;
     }
     match liveness.map(|batch| batch.enrich_broad(repo, view)) {
-        Some(Ok(enrichment)) => enrichment
-            .per_commit
-            .iter()
-            .all(|commit| matches!(commit.condition, CommitGraphCondition::Orphaned { .. })),
+        Some(Ok(enrichment)) => enrichment.per_commit.iter().all(|commit| {
+            matches!(
+                commit.condition,
+                CommitGraphCondition::Unreachable | CommitGraphCondition::Missing
+            )
+        }),
         Some(Err(_)) | None => false,
     }
 }
@@ -417,7 +427,7 @@ fn group_entries(
         // The row stands for every member, so merge-status classifies the
         // UNION of the members' current commits: a landing recorded on any
         // member counts, instead of the representative's own view reading a
-        // shared interior commit as orphaned while a sibling demonstrably
+        // shared interior commit as unreachable while a sibling demonstrably
         // landed (#468). The wire `commitRange` stays the representative's.
         // Dedup is by (oid, source), never oid alone: a sibling's landing
         // ASSOCIATION on the shared capture OID is a claim the landing
@@ -537,7 +547,10 @@ pub fn list_units_for_ref(
 /// The review-unit ids matching a ref under the chosen mode. The name is
 /// normalized to its full ref first. `Label` is fully offline (current ref
 /// labels); `Liveness` joins `enrich_liveness` against the ref's tip and keeps
-/// units with at least one reachable commit. Shared by `unit list` and history.
+/// units with at least one commit the ref's tip reaches (`Merged` — equality
+/// counts). A commit merely carried by some *other* live branch never matches:
+/// the filter answers "reachable from THIS ref". Shared by `unit list` and
+/// history.
 pub(crate) fn revisions_matching_ref(
     projection: &RevisionCommitRangeProjection,
     name: &str,
@@ -555,12 +568,11 @@ pub(crate) fn revisions_matching_ref(
             let mut matching = BTreeSet::new();
             for view in projection.units.values() {
                 let enrichment = enrich_liveness(view, repo, Some(&normalized_ref))?;
-                if enrichment.per_commit.iter().any(|commit| {
-                    matches!(
-                        commit.condition,
-                        CommitGraphCondition::Merged | CommitGraphCondition::Live
-                    )
-                }) {
+                if enrichment
+                    .per_commit
+                    .iter()
+                    .any(|commit| commit.condition == CommitGraphCondition::Merged)
+                {
                     matching.insert(view.revision_id.clone());
                 }
             }
@@ -1048,11 +1060,15 @@ mod tests {
         .unwrap()
     }
 
-    fn listed(events: &[ShoreEvent], visibility: OrphanVisibility, repo: &Path) -> Vec<String> {
+    fn listed(
+        events: &[ShoreEvent],
+        visibility: UnreachableVisibility,
+        repo: &Path,
+    ) -> Vec<String> {
         let projection = RevisionCommitRangeProjection::from_events(events).unwrap();
         let mut result = list_from_events(events, &projection).unwrap();
         let liveness = LivenessBatch::build(repo, None).ok();
-        apply_orphan_visibility(&mut result, repo, visibility, liveness.as_ref());
+        apply_unreachable_visibility(&mut result, repo, visibility, liveness.as_ref());
         assert_eq!(result.revision_count, result.entries.len());
         result
             .entries
@@ -1062,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn orphan_capture_can_be_hidden_explicitly() {
+    fn unreachable_capture_can_be_hidden_explicitly() {
         let repo = OrphanRepo::new();
         let dangling = repo.dangling_oid();
         let tip = repo.oid("main");
@@ -1072,7 +1088,7 @@ mod tests {
             range_captured_event("live", "2026-05-13T10:00:02Z", &tip),
         ];
 
-        let ids = listed(&events, OrphanVisibility::HideOrphans, repo.path());
+        let ids = listed(&events, UnreachableVisibility::HideUnreachable, repo.path());
 
         assert!(ids.contains(&"review-unit:sha256:float".to_owned()));
         assert!(ids.contains(&"review-unit:sha256:live".to_owned()));
@@ -1080,7 +1096,7 @@ mod tests {
     }
 
     #[test]
-    fn orphan_capture_is_shown_by_default() {
+    fn unreachable_capture_is_shown_by_default() {
         let repo = OrphanRepo::new();
         let dangling = repo.dangling_oid();
         let tip = repo.oid("main");
@@ -1090,7 +1106,7 @@ mod tests {
             range_captured_event("live", "2026-05-13T10:00:02Z", &tip),
         ];
 
-        let ids = listed(&events, OrphanVisibility::default(), repo.path());
+        let ids = listed(&events, UnreachableVisibility::default(), repo.path());
 
         assert!(ids.contains(&"review-unit:sha256:orph".to_owned()));
         assert!(ids.contains(&"review-unit:sha256:float".to_owned()));
@@ -1098,7 +1114,7 @@ mod tests {
     }
 
     #[test]
-    fn orphans_flag_shows_only_orphaned() {
+    fn unreachable_only_shows_only_unreachable() {
         let repo = OrphanRepo::new();
         let dangling = repo.dangling_oid();
         let tip = repo.oid("main");
@@ -1108,7 +1124,7 @@ mod tests {
             range_captured_event("live", "2026-05-13T10:00:02Z", &tip),
         ];
 
-        let ids = listed(&events, OrphanVisibility::OrphansOnly, repo.path());
+        let ids = listed(&events, UnreachableVisibility::UnreachableOnly, repo.path());
 
         assert_eq!(ids, vec!["review-unit:sha256:orph".to_owned()]);
     }
@@ -1118,11 +1134,11 @@ mod tests {
         let repo = OrphanRepo::new();
         let events = [captured_event("float", "2026-05-13T10:00:00Z")];
 
-        let hidden_ids = listed(&events, OrphanVisibility::HideOrphans, repo.path());
+        let hidden_ids = listed(&events, UnreachableVisibility::HideUnreachable, repo.path());
         assert!(hidden_ids.contains(&"review-unit:sha256:float".to_owned()));
 
-        let orphan_ids = listed(&events, OrphanVisibility::OrphansOnly, repo.path());
-        assert!(orphan_ids.is_empty());
+        let unreachable_ids = listed(&events, UnreachableVisibility::UnreachableOnly, repo.path());
+        assert!(unreachable_ids.is_empty());
     }
 
     #[test]
@@ -1131,11 +1147,11 @@ mod tests {
         let tip = repo.oid("main");
         let events = [range_captured_event("live", "2026-05-13T10:00:00Z", &tip)];
 
-        let hidden_ids = listed(&events, OrphanVisibility::HideOrphans, repo.path());
+        let hidden_ids = listed(&events, UnreachableVisibility::HideUnreachable, repo.path());
         assert!(hidden_ids.contains(&"review-unit:sha256:live".to_owned()));
 
-        let orphan_ids = listed(&events, OrphanVisibility::OrphansOnly, repo.path());
-        assert!(orphan_ids.is_empty());
+        let unreachable_ids = listed(&events, UnreachableVisibility::UnreachableOnly, repo.path());
+        assert!(unreachable_ids.is_empty());
     }
 
     #[test]
@@ -1148,35 +1164,35 @@ mod tests {
             &missing,
         )];
 
-        // A gc'd (object-missing) commit still classifies Orphaned, but the
+        // A gc'd (object-missing) commit classifies Missing, but the
         // projection-complete default keeps its recorded revision visible.
-        let default_ids = listed(&events, OrphanVisibility::default(), repo.path());
+        let default_ids = listed(&events, UnreachableVisibility::default(), repo.path());
         assert_eq!(default_ids, vec!["review-unit:sha256:gone".to_owned()]);
 
-        let hidden_ids = listed(&events, OrphanVisibility::HideOrphans, repo.path());
+        let hidden_ids = listed(&events, UnreachableVisibility::HideUnreachable, repo.path());
         assert!(hidden_ids.is_empty());
 
-        let orphan_ids = listed(&events, OrphanVisibility::OrphansOnly, repo.path());
-        assert_eq!(orphan_ids, vec!["review-unit:sha256:gone".to_owned()]);
+        let unreachable_ids = listed(&events, UnreachableVisibility::UnreachableOnly, repo.path());
+        assert_eq!(unreachable_ids, vec!["review-unit:sha256:gone".to_owned()]);
     }
 
     #[test]
-    fn partial_orphan_is_not_hidden() {
+    fn partially_unreachable_unit_is_not_hidden() {
         let repo = OrphanRepo::new();
         let mid = repo.oid("main~1");
         let dangling = repo.dangling_oid();
         // One current commit Merged (mid), one Orphaned (dangling) → not every
-        // current commit is orphaned, so the unit is not hidden.
+        // current commit is unreachable, so the unit is not hidden.
         let events = [
             range_captured_event("mix", "2026-05-13T10:00:00Z", &mid),
             commit_associated_event("mix", &dangling),
         ];
 
-        let hidden_ids = listed(&events, OrphanVisibility::HideOrphans, repo.path());
+        let hidden_ids = listed(&events, UnreachableVisibility::HideUnreachable, repo.path());
         assert!(hidden_ids.contains(&"review-unit:sha256:mix".to_owned()));
     }
 
-    /// Surface every entry (so orphaned units are present too), group, and
+    /// Surface every entry (so unreachable units are present too), group, and
     /// attach merge-status — the canonical read-surface order — returning
     /// `(revision_id, merge_status)` pairs (one per grouped row).
     fn merge_statuses(
@@ -1187,7 +1203,12 @@ mod tests {
         let projection = RevisionCommitRangeProjection::from_events(events).unwrap();
         let mut result = list_from_events(events, &projection).unwrap();
         let liveness = LivenessBatch::build(repo, integration_ref).ok();
-        apply_orphan_visibility(&mut result, repo, OrphanVisibility::All, liveness.as_ref());
+        apply_unreachable_visibility(
+            &mut result,
+            repo,
+            UnreachableVisibility::All,
+            liveness.as_ref(),
+        );
         let grouping = CommitOidGroupingProjection::from_events(events).unwrap();
         result.entries = group_entries(result.entries, &grouping);
         attach_merge_status(&mut result, repo, liveness.as_ref());
@@ -1227,7 +1248,7 @@ mod tests {
 
         assert_eq!(status_of("review-unit:sha256:merged"), "merged");
         assert_eq!(status_of("review-unit:sha256:open"), "open");
-        assert_eq!(status_of("review-unit:sha256:orphan"), "orphaned");
+        assert_eq!(status_of("review-unit:sha256:orphan"), "unreachable");
         assert_eq!(status_of("review-unit:sha256:float"), "unknown");
     }
 
@@ -1242,7 +1263,9 @@ mod tests {
         assert_eq!(broad[0].1, "merged");
 
         let narrow = merge_statuses(&events, repo.path(), Some("refs/heads/main"));
-        assert_eq!(narrow[0].1, "orphaned");
+        // feat1 is carried by the live `other` branch: reachable, so the narrow
+        // landing answer is "open" — never "unreachable".
+        assert_eq!(narrow[0].1, "open");
     }
 
     #[test]
@@ -1250,7 +1273,7 @@ mod tests {
         let repo = OrphanRepo::new();
         // The shared capture OID is an interior commit of the live side branch
         // `other`: not reachable from `main`, not a tip — narrow reads it
-        // orphaned on its own.
+        // unreachable on its own.
         let shared = repo.oid("other~1");
         let tip = repo.oid("main");
         // Two sibling captures of one range (the cross-worktree shape) group on
@@ -1271,7 +1294,7 @@ mod tests {
         // The row stands for every member (it lists every member id), so a
         // landing recorded on any member counts: the union of the members'
         // current commits classifies merged, not the representative's
-        // orphaned-on-its-own view (#468).
+        // unreachable-on-its-own view (#468).
         assert_eq!(statuses[0].1, "merged");
     }
 

@@ -202,7 +202,7 @@ fn detail_retains_successive_and_withdrawn_commit_and_ref_edges() {
 }
 
 #[test]
-fn missing_commit_object_is_orphaned_but_git_failure_stays_unprojected() {
+fn missing_commit_object_is_missing_but_git_failure_stays_unprojected() {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
     repo.commit_all("base");
@@ -229,11 +229,13 @@ fn missing_commit_object_is_orphaned_but_git_failure_stays_unprojected() {
     let response = detail(&repo, &revision_id);
     assert_eq!(
         response["commitRange"]["liveness"]["perCommit"][0]["condition"],
-        "orphaned"
+        "missing"
     );
-    assert_eq!(
-        response["commitRange"]["liveness"]["perCommit"][0]["reason"],
-        "object_missing"
+    assert!(
+        response["commitRange"]["liveness"]["perCommit"][0]
+            .get("reason")
+            .is_none(),
+        "missing is a first-class condition, not an orphan reason"
     );
 }
 

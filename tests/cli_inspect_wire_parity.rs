@@ -83,6 +83,10 @@ fn blanked_value(key: &str) -> Option<&'static str> {
         "worktreeRoot" => Some("<worktreeRoot>"),
         "commitOid" => Some("<commitOid>"),
         "headOid" => Some("<headOid>"),
+        // The ref-continuity block echoes the recorded head and the ref's live
+        // tip — real commit OIDs that vary run to run like `headOid`.
+        "recordedHeadOid" => Some("<recordedHeadOid>"),
+        "currentTipOid" => Some("<currentTipOid>"),
         "commitOidShort" => Some("<commitOidShort>"),
         "label" => Some("<label>"),
         "eventSetHash" => Some("<eventSetHash>"),

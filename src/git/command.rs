@@ -702,6 +702,74 @@ pub(crate) fn git_rev_list_reachable(repo: &Path, tips: &[String]) -> Result<Has
         .collect())
 }
 
+/// Every commit reachable from any reflog entry of any ref (`rev-list
+/// --reflog`), as a set of full OIDs — the "is this unreachable object still
+/// reflog-retained?" probe. A repository with no reflog entries at all reports
+/// an empty set (git refuses the pseudo-rev with a usage error, exit 129),
+/// which is the truthful answer: nothing is reflog-retained. Any other git
+/// failure (e.g. a reflog naming pruned objects) propagates so the caller can
+/// degrade to "retention unknown" rather than a false "none".
+pub(crate) fn git_rev_list_reflog_reachable(repo: &Path) -> Result<HashSet<String>> {
+    let (code, stdout) = run_git_status(repo, ["rev-list", "--reflog"], &[0, 129])?;
+    if code != 0 {
+        return Ok(HashSet::new());
+    }
+    let listing = git_field_string(trim_git_stdout(&stdout), "rev-list --reflog output")?;
+    Ok(listing
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+/// One reflog entry of a ref: the OID the entry set and the subject describing
+/// the action that set it (e.g. `commit (amend): message`).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct GitReflogEntry {
+    pub new_oid: String,
+    pub subject: String,
+}
+
+/// The reflog of `ref_name`, newest first, via `git log -g`. Each entry records
+/// the OID the ref was set to and the action subject that set it, so the
+/// transition away from an older OID is the entry just above that OID's most
+/// recent appearance. A ref whose reflog is absent — expired to empty, never
+/// logged, or the ref deleted — reports an empty vec, never an error: reflog
+/// evidence is best-effort and local.
+pub(crate) fn git_reflog_entries(repo: &Path, ref_name: &str) -> Result<Vec<GitReflogEntry>> {
+    let (code, stdout) = run_git_status(
+        repo,
+        [
+            "log",
+            "-g",
+            "--format=%H%x09%gs",
+            "--end-of-options",
+            ref_name,
+            "--",
+        ],
+        &[0, 128],
+    )?;
+    if code != 0 {
+        return Ok(Vec::new());
+    }
+    let listing = git_field_string(trim_git_stdout(&stdout), "reflog output")?;
+    Ok(listing
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_end();
+            if line.is_empty() {
+                return None;
+            }
+            let (oid, subject) = line.split_once('\t').unwrap_or((line, ""));
+            Some(GitReflogEntry {
+                new_oid: oid.to_owned(),
+                subject: subject.to_owned(),
+            })
+        })
+        .collect())
+}
+
 pub(crate) fn git_rev_list_range(repo: &Path, range: &str) -> Result<Vec<String>> {
     if !range.contains("..") {
         return Err(ShoreError::Message(format!(
