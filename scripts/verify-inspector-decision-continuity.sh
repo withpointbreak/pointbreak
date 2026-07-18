@@ -18,7 +18,11 @@ pointbreak_binary="${POINTBREAK_BINARY:-$repo_root/target/debug/pointbreak}"
 browser_program_template="$script_dir/verify-inspector-decision-continuity.mjs"
 
 [ -x "$pointbreak_binary" ] \
-  || die "POINTBREAK_BINARY is not executable; build the worktree-local binary first"
+  || die "POINTBREAK_BINARY is not executable; provide an installed binary or build the worktree-local binary"
+case "$pointbreak_binary" in
+  /*) ;;
+  *) die "POINTBREAK_BINARY must resolve to an absolute path" ;;
+esac
 [ -f "$browser_program_template" ] \
   || die "browser program is missing: $browser_program_template"
 
@@ -74,7 +78,8 @@ binary_sha256="$(shasum -a 256 "$pointbreak_binary" | awk '{print $1}')"
 ) >"$log_dir/canonical-materialize.log" 2>&1
 (
   cd "$repo_root"
-  just review-decision-matrix-materialize "$synthetic_destination"
+  POINTBREAK_BINARY="$pointbreak_binary" \
+    just review-decision-matrix-materialize "$synthetic_destination"
 ) >"$log_dir/synthetic-ids.json" 2>"$log_dir/synthetic-materialize.log"
 
 "$pointbreak_binary" revision list --repo "$canonical_destination" --format json \
@@ -134,8 +139,7 @@ start_inspector() {
     "$pointbreak_binary" inspect --repo "$repository" --port 0 --format json \
     >"$startup" 2>"$server_log" &
   local pid=$!
-  local attempt
-  for attempt in $(seq 1 100); do
+  for _ in $(seq 1 100); do
     [ -s "$startup" ] && break
     kill -0 "$pid" >/dev/null 2>&1 || die "$name inspector exited before startup"
     sleep 0.05

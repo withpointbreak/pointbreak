@@ -29,11 +29,9 @@ pre_bump_hooks = [
 ]
 post_bump_hooks = [
     "git commit --amend -m 'chore: v{{version}}'",
-    "git tag -f -m 'v{{version}}' v{{version}}",
+    "git tag -m 'v{{version}}' v{{version}}",
     "git push origin HEAD:main",
     "git push origin refs/tags/v{{version}}",
-    "gh workflow run release.yml -f tag=v{{version}}",
-    "gh workflow run release-binaries.yml -f tag=v{{version}}",
 ]
 
 [git_hooks.commit-msg]

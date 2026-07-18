@@ -119,6 +119,9 @@ fn inspector_decision_continuity_browser_gate_uses_isolated_pointbreak_surfaces(
     let justfile = fs::read_to_string(root.join("Justfile")).expect("read Justfile");
     assert!(justfile.contains("review-decision-browser-verify"));
     assert!(justfile.contains("scripts/verify-inspector-decision-continuity.sh"));
+    assert!(justfile.contains(r#"if [ -n "${POINTBREAK_BINARY:-}" ]"#));
+    assert!(script.contains(r#"POINTBREAK_BINARY="$pointbreak_binary""#));
+    assert!(script.contains("review-decision-matrix-materialize"));
 }
 
 #[test]

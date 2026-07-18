@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Plan (preview only) or Release (execute bump)"
+        description: "Plan (preview only) or release (execute signed bump)"
         required: true
         default: "plan"
         type: choice
@@ -12,13 +12,16 @@ on:
           - plan
           - release
       version:
-        description: "Exact version to release (optional, e.g. 1.0.0)"
-        required: false
+        description: "Exact version to release (for example 0.8.0)"
+        required: true
+        type: string
+      expected_source_commit:
+        description: "Full reviewed origin/main commit permitted as the release parent"
+        required: true
         type: string
 
 permissions:
   contents: write
-  actions: write
 
 concurrency:
   group: release-plan
@@ -30,10 +33,24 @@ jobs:
     if: inputs.mode == 'plan'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout reviewed main
         uses: actions/checkout@v6
         with:
+          ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
+          fetch-tags: true
+
+      - name: Verify expected source commit
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ inputs.expected_source_commit }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "expected_source_commit must be full lowercase 40-hex" >&2; exit 1; }
+          git fetch --force --tags origin main
+          test -z "$(git status --porcelain --untracked-files=all)"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_COMMIT"
+          test "$(git rev-parse origin/main)" = "$EXPECTED_SOURCE_COMMIT"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -53,166 +70,108 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           INPUT_VERSION: ${{ inputs.version }}
+          EXPECTED_SOURCE_COMMIT: ${{ inputs.expected_source_commit }}
         run: |
           set -euo pipefail
 
           PLAN_FILE="${RUNNER_TEMP}/release-plan.md"
           out() { tee -a "$PLAN_FILE" >> "$GITHUB_STEP_SUMMARY"; }
-
+          NEXT_VERSION="${INPUT_VERSION#v}"
+          [[ "$NEXT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] \
+            || { echo "unsupported release version: $INPUT_VERSION" >&2; exit 1; }
+          TAG="v${NEXT_VERSION}"
           HEAD_SHA=$(git rev-parse HEAD)
           HEAD_SHORT=$(git rev-parse --short HEAD)
-          REPO="${GITHUB_REPOSITORY}"
-          BRANCH="${GITHUB_REF_NAME}"
           CURRENT_VERSION=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "pointbreak") | .version')
-          LATEST_TAG=$(git describe --tags --match "v[0-9]*" --abbrev=0 2>/dev/null || echo "")
+          LATEST_TAG=$(git describe --tags --match "v[0-9]*" --abbrev=0 2>/dev/null || true)
           RELEASE_COG_CONFIG="${RUNNER_TEMP}/cog-release.toml"
           cp cog.toml "$RELEASE_COG_CONFIG"
           perl -0pi -e 's/^scopes = \[\]/scopes = ["cli", "review"]/m' "$RELEASE_COG_CONFIG"
 
+          tag_conflict=false
+          crate_conflict=false
+          release_conflict=false
+          git show-ref --verify --quiet "refs/tags/${TAG}" && tag_conflict=true
+          curl -fsS "https://crates.io/api/v1/crates/pointbreak/${NEXT_VERSION}" >/dev/null 2>&1 \
+            && crate_conflict=true
+          gh release view "$TAG" >/dev/null 2>&1 && release_conflict=true
+
           {
             echo "# Release Plan"
             echo ""
-            echo "## Branch Status"
+            echo "## Exact source boundary"
             echo ""
-            echo "**Commit:** [\`${HEAD_SHORT}\`](https://github.com/${REPO}/commit/${HEAD_SHA}) on \`${BRANCH}\`"
+            echo "**Expected source commit:** \`${EXPECTED_SOURCE_COMMIT}\`"
             echo ""
-            echo "### CI Workflows"
+            echo "**Current origin/main:** \`${HEAD_SHA}\`"
             echo ""
-            echo "| Workflow | Status | Commit |"
-            echo "|----------|--------|--------|"
+            echo "**Commit:** [\`${HEAD_SHORT}\`](https://github.com/${GITHUB_REPOSITORY}/commit/${HEAD_SHA})"
+            echo ""
+            echo "## Target"
+            echo ""
+            echo "**Current crate version:** ${CURRENT_VERSION}"
+            echo ""
+            echo "**Target version:** ${NEXT_VERSION}"
+            echo ""
+            echo "**Intended annotated tag:** \`${TAG}\`"
+            echo ""
+            echo "**Latest existing tag:** ${LATEST_TAG:-none}"
+            echo ""
+            echo "## Existing-state conflicts"
+            echo ""
+            echo "- Existing tag conflict: **${tag_conflict}**"
+            echo "- Existing crate conflict: **${crate_conflict}**"
+            echo "- Existing GitHub release conflict: **${release_conflict}**"
+            echo ""
+            echo "## Intended release assets"
+            echo ""
           } | out
 
-          # shellcheck disable=SC2016  # The single-quoted jq program must remain literal.
-          gh run list --branch "${BRANCH}" --limit 20 \
+          # jq expands $version.
+          # shellcheck disable=SC2016
+          jq -r --arg version "$NEXT_VERSION" \
+            '.[] | "- `pointbreak-\($version)-\(.target).\(.archive)`"' \
+            .github/binary-targets.json | out
+          echo "- \`checksums.txt\`" | out
+
+          {
+            echo ""
+            echo "## CI workflows at the expected parent"
+            echo ""
+            echo "| Workflow | Status | Commit |"
+            echo "| --- | --- | --- |"
+          } | out
+          # jq expands its own fields.
+          # shellcheck disable=SC2016
+          gh run list --branch "${GITHUB_REF_NAME}" --limit 20 \
             --json name,conclusion,createdAt,headSha,status \
             --jq '[group_by(.name)[] | sort_by(.createdAt) | last] | sort_by(.name)[] | "| \(.name) | \(if .conclusion != "" and .conclusion != null then .conclusion else .status end) | `\(.headSha[0:7])` |"' \
             | out
 
+          changelog=$(cog --config "$RELEASE_COG_CONFIG" changelog \
+            "${LATEST_TAG:+${LATEST_TAG}..HEAD}" 2>&1 || echo "(changelog generation failed)")
           {
             echo ""
-            echo "## Crate Release"
+            echo "<details>"
+            echo "<summary>Changelog preview</summary>"
             echo ""
-            echo "**Crate:** \`pointbreak\`"
+            echo "$changelog"
             echo ""
-          } | out
-
-          bump_command=""
-
-          if [ -n "$INPUT_VERSION" ]; then
-            NEXT_VERSION="${INPUT_VERSION#v}"
-            bump_command="cog bump --version ${NEXT_VERSION} --hook-profile ci"
-            {
-              echo "**Current crate version:** ${CURRENT_VERSION}"
-              echo ""
-              if [ -n "$LATEST_TAG" ]; then
-                echo "**Current release:** ${LATEST_TAG#v} **-->** ${NEXT_VERSION}"
-              else
-                echo "**Requested release:** ${NEXT_VERSION}"
-              fi
-              echo ""
-              echo "This plan uses an explicit target version instead of Cocogitto's automatic bump calculation."
-              echo ""
-            } | out
-            if [ -n "$LATEST_TAG" ]; then
-              changelog=$(cog --config "$RELEASE_COG_CONFIG" changelog "${LATEST_TAG}..HEAD" 2>&1 || echo "(changelog generation failed)")
+            echo "</details>"
+            echo ""
+            echo "## Next step"
+            echo ""
+            if $tag_conflict || $crate_conflict || $release_conflict; then
+              echo "**BLOCKED:** resolve the reported immutable-state conflict; do not run release mode."
             else
-              changelog=$(cog --config "$RELEASE_COG_CONFIG" changelog 2>&1 || echo "(changelog generation failed)")
+              echo "After explicit owner authorization, rerun with mode \`release\`, version \`${NEXT_VERSION}\`, and the same expected source commit."
+              echo "Release mode will run \`cog bump --version ${NEXT_VERSION} --hook-profile ci\`."
             fi
-          elif [ -z "$LATEST_TAG" ]; then
-            NEXT_VERSION="$CURRENT_VERSION"
-            bump_command="cog bump --version ${NEXT_VERSION} --hook-profile ci"
-            {
-              echo "**Current crate version:** ${CURRENT_VERSION}"
-              echo ""
-              echo "**Bootstrap release:** ${NEXT_VERSION}"
-              echo ""
-              echo "No prior \`v*\` release tag was found. The first automated release keeps the current crate version and creates \`v${NEXT_VERSION}\`; later releases can use Cocogitto's automatic bump calculation."
-              echo ""
-            } | out
-            changelog=$(cog --config "$RELEASE_COG_CONFIG" changelog 2>&1 || echo "(changelog generation failed)")
-          else
-            CURRENT_RELEASE="${LATEST_TAG#v}"
-            if dry_output=$(cog bump --auto --dry-run --skip-untracked 2>&1); then
-              NEXT_VERSION=$(echo "$dry_output" | sed -nE "s/^v([0-9]+\.[0-9]+\.[0-9]+.*)$/\1/p" | tail -1)
-              if [ -z "$NEXT_VERSION" ]; then
-                {
-                  echo "**Current release:** ${CURRENT_RELEASE}"
-                  echo ""
-                  echo "Could not parse next version from Cocogitto dry-run output."
-                  echo ""
-                  echo '```'
-                  echo "$dry_output"
-                  echo '```'
-                  echo ""
-                } | out
-                exit 1
-              fi
-              bump_command="cog bump --auto --hook-profile ci"
-              {
-                echo "**Current release:** ${CURRENT_RELEASE} **-->** ${NEXT_VERSION}"
-                echo ""
-              } | out
-              changelog=$(cog --config "$RELEASE_COG_CONFIG" changelog "${LATEST_TAG}..HEAD" 2>&1 || echo "(changelog generation failed)")
-            elif echo "$dry_output" | grep -q "No conventional commit found"; then
-              {
-                echo "**Current release:** ${CURRENT_RELEASE}"
-                echo ""
-                echo "No unreleased changes."
-                echo ""
-              } | out
-              changelog=""
-            else
-              {
-                echo "**Current release:** ${CURRENT_RELEASE}"
-                echo ""
-                echo "Could not determine next version."
-                echo ""
-                echo '```'
-                echo "$dry_output"
-                echo '```'
-                echo ""
-              } | out
-              exit 1
-            fi
-          fi
-
-          if [ -n "${changelog:-}" ]; then
-            {
-              echo "<details>"
-              echo "<summary>Changelog preview</summary>"
-              echo ""
-              echo "$changelog"
-              echo ""
-              echo "</details>"
-              echo ""
-            } | out
-          fi
-
-          {
-            echo "---"
-            echo ""
           } | out
-
-          if [ -n "$bump_command" ]; then
-            {
-              echo "## Next Steps"
-              echo ""
-              echo "To execute this release, re-run this workflow with **mode: release**."
-              echo ""
-              echo "Release mode will run:"
-              echo ""
-              echo '```bash'
-              echo "$bump_command"
-              echo '```'
-              echo ""
-              echo "The Cocogitto CI bump profile rewrites Cocogitto's scoped bump commit to an unscoped commit, pushes the bump commit and tag, then dispatches \`release.yml\` for the new tag."
-            } | out
-          else
-            echo "No release is planned." | out
-          fi
 
       - name: Upload release plan
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: release-plan
@@ -224,10 +183,12 @@ jobs:
     if: inputs.mode == 'release'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout reviewed main
         uses: actions/checkout@v6
         with:
+          ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -254,41 +215,59 @@ jobs:
           git_committer_name: "Kevin Swiber"
           git_committer_email: "kswiber@gmail.com"
 
-      - name: Execute release bump
+      - name: Execute exact-parent release bump
         env:
           GH_TOKEN: ${{ github.token }}
           INPUT_VERSION: ${{ inputs.version }}
+          EXPECTED_SOURCE_COMMIT: ${{ inputs.expected_source_commit }}
         run: |
           set -euo pipefail
 
           PLAN_FILE="${RUNNER_TEMP}/release-plan.md"
-          out() { tee -a "$PLAN_FILE" >> "$GITHUB_STEP_SUMMARY"; }
-          CURRENT_VERSION=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "pointbreak") | .version')
-          LATEST_TAG=$(git describe --tags --match "v[0-9]*" --abbrev=0 2>/dev/null || echo "")
+          TARGET_VERSION="${INPUT_VERSION#v}"
+          TAG="v${TARGET_VERSION}"
+          [[ "$EXPECTED_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "expected_source_commit must be full lowercase 40-hex" >&2; exit 1; }
+          [[ "$TARGET_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] \
+            || { echo "unsupported release version: $INPUT_VERSION" >&2; exit 1; }
+
+          # This is deliberately repeated immediately before the first mutation.
+          git fetch --force --tags origin main
+          test -z "$(git status --porcelain --untracked-files=all)"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_COMMIT"
+          test "$(git rev-parse origin/main)" = "$EXPECTED_SOURCE_COMMIT"
+          ! git show-ref --verify --quiet "refs/tags/${TAG}" \
+            || { echo "Existing tag conflict: $TAG" >&2; exit 1; }
+          ! curl -fsS "https://crates.io/api/v1/crates/pointbreak/${TARGET_VERSION}" >/dev/null 2>&1 \
+            || { echo "Existing crate conflict: pointbreak $TARGET_VERSION" >&2; exit 1; }
+          ! gh release view "$TAG" >/dev/null 2>&1 \
+            || { echo "Existing GitHub release conflict: $TAG" >&2; exit 1; }
+
           RELEASE_COG_CONFIG="${RUNNER_TEMP}/cog-release.toml"
           cp cog.toml "$RELEASE_COG_CONFIG"
           perl -0pi -e 's/^scopes = \[\]/scopes = ["cli", "review"]/m' "$RELEASE_COG_CONFIG"
+          cog --config "$RELEASE_COG_CONFIG" bump \
+            --version "$TARGET_VERSION" --hook-profile ci
 
-          if [ -n "$INPUT_VERSION" ]; then
-            TARGET_VERSION="${INPUT_VERSION#v}"
-            cog --config "$RELEASE_COG_CONFIG" bump --version "$TARGET_VERSION" --hook-profile ci
-            BUMP_COMMAND="cog --config \"$RELEASE_COG_CONFIG\" bump --version ${TARGET_VERSION} --hook-profile ci"
-          elif [ -z "$LATEST_TAG" ]; then
-            cog --config "$RELEASE_COG_CONFIG" bump --version "$CURRENT_VERSION" --hook-profile ci
-            BUMP_COMMAND="cog --config \"$RELEASE_COG_CONFIG\" bump --version ${CURRENT_VERSION} --hook-profile ci"
-          else
-            cog --config "$RELEASE_COG_CONFIG" bump --auto --hook-profile ci
-            BUMP_COMMAND="cog --config \"$RELEASE_COG_CONFIG\" bump --auto --hook-profile ci"
-          fi
+          RELEASE_COMMIT=$(git rev-parse HEAD)
+          RELEASE_PARENT=$(git rev-parse HEAD^)
+          TAG_TYPE=$(git cat-file -t "refs/tags/${TAG}")
+          TAG_COMMIT=$(git rev-parse "refs/tags/${TAG}^{}")
+          test "$RELEASE_PARENT" = "$EXPECTED_SOURCE_COMMIT"
+          test "$TAG_TYPE" = tag
+          test "$TAG_COMMIT" = "$RELEASE_COMMIT"
 
           {
             echo "# Release Bump Complete"
             echo ""
-            echo "Executed \`${BUMP_COMMAND}\`."
+            echo "**Expected source parent:** \`${EXPECTED_SOURCE_COMMIT}\`"
             echo ""
-            echo "The \`release.yml\` workflow was dispatched by the Cocogitto post-bump hook."
-          } | out
+            echo "**Release commit:** \`${RELEASE_COMMIT}\`"
+            echo ""
+            echo "**Annotated tag:** \`${TAG}\` (peels to the release commit)"
+            echo ""
+            echo "The tag push dispatches the immutable crate/release and binary workflows."
+          } | tee "$PLAN_FILE" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload release report
         if: always()

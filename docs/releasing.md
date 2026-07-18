@@ -12,28 +12,45 @@ operators to stop writers, move owner-controlled state offline, update environme
 verify `pointbreak store paths` and readback, and use the inverse filesystem move for rollback. Do not
 promise a fallback, compatibility alias, automatic migration, or migration command.
 
-Use the **Release Plan** workflow in `plan` mode first. It reports the current commit, recent CI
-status, the version Cocogitto will publish, and a changelog preview. For an exact release, set the
-optional `version` input, for example `0.1.1`. After checking the plan, re-run the same workflow in
-`release` mode with the same version input.
+Use the **Release Plan** workflow in `plan` mode first. Supply an exact version and the full
+40-character `origin/main` commit that has been reviewed and approved as the release parent. Plan
+mode is side-effect-free: it reports that expected parent, the current checkout and recent CI,
+the target version/tag/assets, the changelog preview, and any existing tag, crate, or GitHub Release
+conflict. A missing, abbreviated, malformed, moved, or non-`origin/main` parent fails closed.
 
-Release mode creates the Cocogitto version commit and tag, pushes both to `main`, and dispatches the
-**Release** workflow for that tag. The Release workflow publishes the `pointbreak` crate to crates.io,
-then creates the GitHub Release.
+After checking the plan, explicitly authorize the named commit and version, then re-run the same
+workflow in `release` mode with exactly the same inputs. Release mode fetches `origin/main` again
+immediately before mutation. It stops if the parent moved or the target tag, crate, or release
+already exists.
+
+Release mode creates the Cocogitto version commit as the direct child of the approved parent, creates
+an annotated tag that peels to that commit, and pushes both to `main`. The tag push is the sole
+publication trigger. The **Release** workflow publishes the `pointbreak` crate to crates.io and creates
+the GitHub Release. The **Release Binaries** workflow builds from clean exact-tag checkouts with full
+tag history, verifies runnable binaries' build identity, and refuses to overwrite existing assets.
 
 The **Release Binaries** workflow adds eight versioned archives and `checksums.txt` to that release.
 The install scripts depend on those exact filenames and fail closed when an archive or checksum is
-missing. Run `just installer-selftest` after changing installer or release-asset behavior.
+missing. They also require the binary to report a clean Git build, a full commit, and the exact
+requested tag. The sole transition exception is the already-published v0.7.0 binary, which predates
+the additive build field. Run `just installer-selftest` after changing installer or release-asset
+behavior.
+
+After the crate, release, and all assets exist, run **Verify Published Release** with the same expected
+source parent and the new tag. It verifies the immutable tag/release/archive/checksum set and installer
+digests, then performs fresh temporary-prefix acquisition on macOS, glibc Linux, musl Linux, and Windows
+PowerShell 5.1. Each live row records the installed binary path, SHA-256, and full version document.
 
 ## Local helper
 
 ```sh
-./scripts/run-release-plan.sh
-./scripts/run-release-plan.sh plan 0.1.1
-./scripts/run-release-plan.sh release 0.1.1
+./scripts/run-release-plan.sh plan 0.8.0 --expected-source <full-origin-main-sha>
+./scripts/run-release-plan.sh release 0.8.0 --expected-source <same-full-sha>
+./scripts/run-release-verification.sh v0.8.0 --expected-source <same-full-sha>
 ```
 
 Set `RELEASE_PLAN_DIR=.` to keep the downloaded `release-plan.md`.
+Use `--output <directory>` with `run-release-verification.sh` to retain all platform reports.
 
 ## Required repository setup
 

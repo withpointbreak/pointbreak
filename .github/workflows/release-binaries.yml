@@ -1,33 +1,18 @@
 name: Release Binaries
 
-# Builds and publishes prebuilt pointbreak binaries for all supported targets.
-# The target matrix lives in .github/binary-targets.json (single source of truth,
-# also consumed by downstream packaging workflows).
-#
-# workflow_dispatch has two modes. An existing tag is a real release: every job
-# checks out that tag, verifies its crate version, and publishes non-draft assets.
-# Dispatching an existing tag deliberately rebuilds and overwrites that release's
-# assets. A missing tag is test mode: it builds the default branch into a draft
-# release, skips the version guard, and never creates a tag. Never push a
-# prerelease tag to test this workflow: any pushed v* tag also triggers
-# release.yml, which publishes the crate version to crates.io.
-
+# Real assets are produced only by an immutable annotated-tag push. Preview and
+# contract testing live in package-release-selftest.sh; existing tags/assets are
+# never rebuilt or overwritten by a manual dispatch.
 on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to build; existing tags publish assets, missing tags create a draft without creating a tag"
-        required: true
-        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-binaries-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+  group: release-binaries-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -37,55 +22,41 @@ jobs:
       targets: ${{ steps.load.outputs.targets }}
       tag: ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
-      mode: ${{ steps.mode.outputs.mode }}
+      commit: ${{ steps.meta.outputs.commit }}
     steps:
-      - name: Check out default branch for mode detection
+      - name: Checkout annotated release tag
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.repository.default_branch }}
-      - id: meta
+          ref: refs/tags/${{ github.ref_name }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Verify clean exact tag checkout
+        id: meta
         env:
-          RAW_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref_name }}
+          TAG: ${{ github.ref_name }}
         run: |
-          if ! printf '%s' "$RAW_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
-            echo "unsupported tag: $RAW_TAG" >&2
-            exit 1
-          fi
-          echo "tag=$RAW_TAG" >> "$GITHUB_OUTPUT"
-          echo "version=${RAW_TAG#v}" >> "$GITHUB_OUTPUT"
-      - name: Resolve release mode
-        id: mode
-        env:
-          TAG: ${{ steps.meta.outputs.tag }}
-        run: |
-          if git ls-remote --exit-code origin "refs/tags/$TAG" > /dev/null; then
-            echo "mode=real" >> "$GITHUB_OUTPUT"
-          else
-            status=$?
-            if [ "$status" -ne 2 ]; then
-              echo "failed to check whether refs/tags/$TAG exists on origin" >&2
-              exit "$status"
-            fi
-            echo "mode=test" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Check out release tag
-        if: steps.mode.outputs.mode == 'real'
-        uses: actions/checkout@v6
-        with:
-          ref: refs/tags/${{ steps.meta.outputs.tag }}
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] \
+            || { echo "unsupported tag: $TAG" >&2; exit 1; }
+          git fetch --force --tags origin
+          test "$(git cat-file -t "refs/tags/${TAG}")" = tag
+          release_commit=$(git rev-parse "refs/tags/${TAG}^{}")
+          test "$(git rev-parse HEAD)" = "$release_commit"
+          test "$(git describe --tags --always --dirty)" = "$TAG"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          version="${TAG#v}"
+          crate_version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "pointbreak") | .version')
+          test "$version" = "$crate_version"
+          {
+            echo "tag=$TAG"
+            echo "version=$version"
+            echo "commit=$release_commit"
+          } >> "$GITHUB_OUTPUT"
+
       - id: load
         run: echo "targets=$(jq -c . .github/binary-targets.json)" >> "$GITHUB_OUTPUT"
-      - name: Verify tag matches crate version
-        if: steps.mode.outputs.mode == 'real'
-        env:
-          VERSION: ${{ steps.meta.outputs.version }}
-        run: |
-          crate_version="$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "pointbreak") | .version')"
-          if [ "$VERSION" != "$crate_version" ]; then
-            echo "tag version $VERSION does not match crate version $crate_version" >&2
-            exit 1
-          fi
 
   build:
     needs: prepare
@@ -95,30 +66,79 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.prepare.outputs.targets) }}
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout annotated release tag
+        uses: actions/checkout@v6
         with:
-          ref: ${{ needs.prepare.outputs.mode == 'real' && format('refs/tags/{0}', needs.prepare.outputs.tag) || github.event.repository.default_branch }}
+          ref: refs/tags/${{ needs.prepare.outputs.tag }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Verify clean exact tag checkout
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.prepare.outputs.commit }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+          test "$(git cat-file -t "refs/tags/${TAG}")" = tag
+          test "$(git rev-parse "refs/tags/${TAG}^{}")" = "$RELEASE_COMMIT"
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          test "$(git describe --tags --always --dirty)" = "$TAG"
+          test -z "$(git status --porcelain --untracked-files=all)"
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust-target }}
+
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-          # GitHub-hosted macOS images have shipped rustup state that collides
-          # with cached ~/.cargo/bin contents, leaving `cargo` as rustup-init.
-          # See Swatinem/rust-cache#341, actions/runner-images#14099.
           cache-bin: false
+
       - name: Install cargo-zigbuild
         if: matrix.builder == 'zigbuild'
         run: pip3 install cargo-zigbuild
+
       - name: Build
         shell: bash
         run: |
+          set -euo pipefail
           if [ "${{ matrix.builder }}" = "zigbuild" ]; then
             cargo zigbuild --release --bin pointbreak --target "${{ matrix.rust-target }}" --locked
           else
             cargo build --release --bin pointbreak --target "${{ matrix.rust-target }}" --locked
           fi
+
+      - name: Verify native build identity or record contract-only row
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.prepare.outputs.commit }}
+          TARGET: ${{ matrix.target }}
+          EXECUTABLE: ${{ matrix.executable }}
+        run: |
+          set -euo pipefail
+          binary="target/${{ matrix.rust-target }}/release/${EXECUTABLE}"
+          native=false
+          case "${RUNNER_OS}/${RUNNER_ARCH}/${TARGET}" in
+            macOS/X64/darwin-x64 | macOS/ARM64/darwin-arm64 | Linux/X64/linux-x64 | Windows/X64/win32-x64)
+              native=true
+              ;;
+          esac
+          if $native; then
+            scripts/assert-release-identity.sh \
+              "$binary" "$VERSION" "$TAG" "$RELEASE_COMMIT" >"identity-${TARGET}.json"
+          else
+            jq -n \
+              --arg target "$TARGET" \
+              --arg tag "$TAG" \
+              --arg commit "$RELEASE_COMMIT" \
+              '{status:"contract-only", target:$target, tag:$tag, commit:$commit, reason:"cross-compiled binary is not runnable on this hosted runner"}' \
+              >"identity-${TARGET}.json"
+          fi
+
       - name: Package
         shell: bash
         env:
@@ -128,10 +148,13 @@ jobs:
             "${{ matrix.target }}" \
             "$VERSION" \
             "target/${{ matrix.rust-target }}/release"
+
       - uses: actions/upload-artifact@v7
         with:
           name: bin-${{ matrix.target }}
-          path: pointbreak-*
+          path: |
+            pointbreak-*
+            identity-${{ matrix.target }}.json
           if-no-files-found: error
           retention-days: 7
 
@@ -139,26 +162,53 @@ jobs:
     needs: [prepare, build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout annotated release tag
+        uses: actions/checkout@v6
         with:
-          ref: ${{ needs.prepare.outputs.mode == 'real' && format('refs/tags/{0}', needs.prepare.outputs.tag) || github.event.repository.default_branch }}
+          ref: refs/tags/${{ needs.prepare.outputs.tag }}
+          fetch-depth: 0
+          fetch-tags: true
+
       - uses: actions/download-artifact@v8
         with:
           path: dist
           pattern: bin-*
           merge-multiple: true
+
       - name: Verify archives and write checksums
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
+        run: scripts/verify-release-archives.sh "$VERSION" dist --write-checksums
+
+      - name: Wait for immutable GitHub release and reject asset collisions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
-          scripts/verify-release-archives.sh "$VERSION" dist --write-checksums
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            gh release view "$TAG" >/dev/null 2>&1 && break
+            [ "$attempt" -lt 30 ] || { echo "GitHub release was not created for $TAG" >&2; exit 1; }
+            sleep 10
+          done
+          existing=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          while IFS= read -r expected; do
+            [ -z "$expected" ] && continue
+            ! grep -Fxq "$expected" <<<"$existing" \
+              || { echo "release asset already exists: $expected" >&2; exit 1; }
+          done < <(
+            jq -r --arg version "$VERSION" '.[] | "pointbreak-\($version)-\(.target).\(.archive)"' \
+              .github/binary-targets.json
+            echo checksums.txt
+          )
+
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
-          draft: ${{ needs.prepare.outputs.mode == 'test' }}
           prerelease: ${{ contains(needs.prepare.outputs.tag, '-') }}
           files: |
             dist/pointbreak-*
             dist/checksums.txt
           fail_on_unmatched_files: true
-          overwrite_files: true
+          overwrite_files: false

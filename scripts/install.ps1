@@ -188,14 +188,15 @@ function Read-PointbreakVersionDocument {
         throw "Pointbreak version command did not emit JSON"
     }
 
-    $expectedProperties = @("cliVersion", "diagnostics", "documents", "schema", "version")
-    $actualProperties = @($document.PSObject.Properties.Name | Sort-Object)
-    if (@(Compare-Object -ReferenceObject $expectedProperties -DifferenceObject $actualProperties).Count -ne 0) {
-        throw "Pointbreak version document has unexpected fields"
+    foreach ($requiredProperty in @("cliVersion", "diagnostics", "documents", "schema", "version")) {
+        if ($null -eq $document.PSObject.Properties[$requiredProperty]) {
+            throw "Pointbreak version document is missing $requiredProperty"
+        }
     }
     if ($document.schema -cne "pointbreak.version" -or
         $document.version -ne 1 -or
         $document.cliVersion -cne $ExpectedVersion -or
+        $document.diagnostics -isnot [System.Array] -or
         @($document.diagnostics).Count -ne 0) {
         throw "Pointbreak version document has an unexpected identity"
     }
@@ -203,6 +204,28 @@ function Read-PointbreakVersionDocument {
     $versionMember = $document.documents.PSObject.Properties["pointbreak.version"]
     if ($null -eq $versionMember -or $versionMember.Value -ne 1) {
         throw "Pointbreak version document has an unexpected registry"
+    }
+
+    $buildMember = $document.PSObject.Properties["build"]
+    if ($null -eq $buildMember) {
+        if ($ExpectedVersion -cne "0.7.0") {
+            throw "Pointbreak version document is missing build identity"
+        }
+        return $document
+    }
+
+    $expectedTag = "v$ExpectedVersion"
+    $build = $document.build
+    foreach ($requiredBuildProperty in @("source", "commit", "describe", "dirty")) {
+        if ($null -eq $build.PSObject.Properties[$requiredBuildProperty]) {
+            throw "Pointbreak build identity is missing $requiredBuildProperty"
+        }
+    }
+    if ($build.source -cne "git" -or
+        $build.commit -cnotmatch '^[0-9a-f]{40}$' -or
+        $build.describe -cne $expectedTag -or
+        $build.dirty -ne $false) {
+        throw "Pointbreak version document does not describe the clean exact release tag"
     }
     return $document
 }

@@ -36,3 +36,47 @@ fn windows_installer_checksum_does_not_require_get_file_hash() {
         assert!(source.contains("[Security.Cryptography.SHA256]::Create()"));
     }
 }
+
+#[test]
+fn installers_require_exact_release_build_identity_with_one_v070_transition() {
+    let unix = std::fs::read_to_string("scripts/install.sh").expect("read Unix installer source");
+    let windows =
+        std::fs::read_to_string("scripts/install.ps1").expect("read Windows installer source");
+    let unix_selftest =
+        std::fs::read_to_string("scripts/install-selftest.sh").expect("read Unix self-test");
+    let windows_selftest =
+        std::fs::read_to_string("scripts/install-selftest.ps1").expect("read Windows self-test");
+
+    for source in [&unix, &windows] {
+        for field in ["source", "commit", "describe", "dirty"] {
+            assert!(
+                source.contains(field),
+                "installer does not validate build.{field}"
+            );
+        }
+        assert!(source.contains("0.7.0"));
+        assert!(source.contains("pointbreak.version") || source.contains(r"pointbreak\.version"));
+    }
+
+    assert!(!windows.contains("$expectedProperties"));
+    assert!(windows.contains("$document.build"));
+    assert!(unix.contains("expected_version\" = \"0.7.0"));
+
+    for selftest in [&unix_selftest, &windows_selftest] {
+        for scenario in [
+            "wrong-tag",
+            "dirty-build",
+            "package-build",
+            "short-commit",
+            "malformed-document",
+            "missing-build-after-v0.7.0",
+            "legacy-v0.7.0",
+            "additive-fields-and-order",
+        ] {
+            assert!(
+                selftest.contains(scenario),
+                "installer self-test does not cover {scenario}"
+            );
+        }
+    }
+}

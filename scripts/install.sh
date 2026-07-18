@@ -214,12 +214,46 @@ read_version_document() {
 '*) return 1 ;;
     esac
 
-    prefix="{\"schema\":\"pointbreak.version\",\"version\":1,\"cliVersion\":\"${expected_version}\",\"documents\":{"
-    suffix='"pointbreak.version":1},"diagnostics":[]}'
-    case "$document" in
-        "$prefix"*"$suffix") printf '%s\n' "$document" ;;
-        *) return 1 ;;
-    esac
+    printf '%s\n' "$document" \
+        | grep -Eq '"schema"[[:space:]]*:[[:space:]]*"pointbreak\.version"' \
+        || return 1
+    printf '%s\n' "$document" \
+        | grep -Eq '"version"[[:space:]]*:[[:space:]]*1([,}])' \
+        || return 1
+    printf '%s\n' "$document" \
+        | grep -Eq '"cliVersion"[[:space:]]*:[[:space:]]*"'"$expected_version"'"' \
+        || return 1
+    printf '%s\n' "$document" \
+        | grep -Eq '"pointbreak\.version"[[:space:]]*:[[:space:]]*1([,}])' \
+        || return 1
+    printf '%s\n' "$document" \
+        | grep -Eq '"diagnostics"[[:space:]]*:[[:space:]]*\[[[:space:]]*\]' \
+        || return 1
+
+    build_object=$(printf '%s\n' "$document" \
+        | sed -n 's/.*"build"[[:space:]]*:[[:space:]]*{\([^{}]*\)}.*/\1/p')
+    if [ -z "$build_object" ]; then
+        # v0.7.0 is the one published transition artifact whose binary predates
+        # build provenance. No other release may omit the required tuple.
+        [ "$expected_version" = "0.7.0" ] || return 1
+        printf '%s\n' "$document"
+        return 0
+    fi
+
+    printf '%s\n' "$build_object" \
+        | grep -Eq '"source"[[:space:]]*:[[:space:]]*"git"' \
+        || return 1
+    commit=$(printf '%s\n' "$build_object" \
+        | sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([0-9A-Fa-f]*\)".*/\1/p')
+    printf '%s\n' "$commit" | grep -Eq '^[0-9a-f]{40}$' || return 1
+    describe=$(printf '%s\n' "$build_object" \
+        | sed -n 's/.*"describe"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    [ "$describe" = "v${expected_version}" ] || return 1
+    printf '%s\n' "$build_object" \
+        | grep -Eq '"dirty"[[:space:]]*:[[:space:]]*false([,}]|$)' \
+        || return 1
+
+    printf '%s\n' "$document"
 }
 
 print_posix_path_command() {

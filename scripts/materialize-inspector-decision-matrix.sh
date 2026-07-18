@@ -27,7 +27,11 @@ destination="$1"
 pointbreak_binary="${POINTBREAK_BINARY:-$repo_root/target/debug/pointbreak}"
 
 [ -x "$pointbreak_binary" ] \
-  || die "worktree-local Pointbreak binary is missing; run 'just build' first"
+  || die "POINTBREAK_BINARY is not executable; provide an absolute installed binary or run 'just build'"
+case "$pointbreak_binary" in
+  /*) ;;
+  *) die "POINTBREAK_BINARY must resolve to an absolute path" ;;
+esac
 
 if [ -e "$destination" ]; then
   [ -d "$destination" ] || die "destination exists and is not a directory: $destination"

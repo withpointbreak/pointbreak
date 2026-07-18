@@ -1,0 +1,232 @@
+name: Verify Published Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing immutable release tag (for example v0.8.0)"
+        required: true
+        type: string
+      expected_source_commit:
+        description: "Full reviewed parent of the signed release commit"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+      commit: ${{ steps.meta.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Verify tag, parent, release, archives, and installer digests
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          EXPECTED_SOURCE_COMMIT: ${{ inputs.expected_source_commit }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "unsupported stable tag: $TAG" >&2; exit 1; }
+          [[ "$EXPECTED_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] \
+            || { echo "expected_source_commit must be full lowercase 40-hex" >&2; exit 1; }
+          git fetch --force --tags origin
+          test "$(git cat-file -t "refs/tags/${TAG}")" = tag
+          release_commit=$(git rev-parse "refs/tags/${TAG}^{}")
+          test "$(git rev-parse HEAD)" = "$release_commit"
+          test "$(git rev-parse HEAD^)" = "$EXPECTED_SOURCE_COMMIT"
+          test "$(git describe --tags --always --dirty)" = "$TAG"
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+          version="${TAG#v}"
+          release_state=$(gh release view "$TAG" --json isDraft,isPrerelease,assets,tagName,url)
+          jq -e '.isDraft == false and .isPrerelease == false and .tagName == $tag' \
+            --arg tag "$TAG" <<<"$release_state" >/dev/null
+
+          mkdir -p dist
+          gh release download "$TAG" --dir dist
+          scripts/verify-release-archives.sh "$version" dist
+          expected_assets=$(jq -r --arg version "$version" \
+            '.[] | "pointbreak-\($version)-\(.target).\(.archive)"' \
+            .github/binary-targets.json; echo checksums.txt)
+          actual_assets=$(jq -r '.assets[].name' <<<"$release_state")
+          diff -u <(printf '%s\n' "$expected_assets" | sort) <(printf '%s\n' "$actual_assets" | sort)
+
+          jq -n \
+            --arg tag "$TAG" \
+            --arg version "$version" \
+            --arg releaseCommit "$release_commit" \
+            --arg expectedSourceCommit "$EXPECTED_SOURCE_COMMIT" \
+            --arg installShSha256 "$(sha256sum scripts/install.sh | awk '{print $1}')" \
+            --arg installPs1Sha256 "$(sha256sum scripts/install.ps1 | awk '{print $1}')" \
+            --argjson release "$release_state" \
+            '{schema:"pointbreak.release-verification",version:1,tag:$tag,releaseVersion:$version,releaseCommit:$releaseCommit,expectedSourceCommit:$expectedSourceCommit,installers:{unixSha256:$installShSha256,windowsSha256:$installPs1Sha256},release:$release}' \
+            >release-verification.json
+          {
+            echo "tag=$TAG"
+            echo "version=$version"
+            echo "commit=$release_commit"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-verification-metadata
+          path: release-verification.json
+          retention-days: 90
+
+  unix-install:
+    needs: metadata
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: linux-glibc
+          - os: macos-latest
+            label: macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ needs.metadata.outputs.tag }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Install published archive into a fresh prefix
+        env:
+          TAG: ${{ needs.metadata.outputs.tag }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.metadata.outputs.commit }}
+          PLATFORM_LABEL: ${{ matrix.label }}
+        run: |
+          set -euo pipefail
+          prefix=$(mktemp -d)
+          scripts/install.sh --version="$TAG" --prefix="$prefix/bin"
+          scripts/assert-release-identity.sh \
+            "$prefix/bin/pointbreak" "$VERSION" "$TAG" "$RELEASE_COMMIT" \
+            | jq --arg platform "$PLATFORM_LABEL" \
+              --arg installerSha256 "$(shasum -a 256 scripts/install.sh | awk '{print $1}')" \
+              '. + {schema:"pointbreak.release-verification",platform:$platform,installerSha256:$installerSha256,acquisition:"live"}' \
+            >"release-verification-${PLATFORM_LABEL}.json"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-verification-${{ matrix.label }}
+          path: release-verification-${{ matrix.label }}.json
+          retention-days: 90
+
+  windows-install:
+    needs: metadata
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ needs.metadata.outputs.tag }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Install and verify under Windows PowerShell 5.1
+        shell: powershell
+        env:
+          TAG: ${{ needs.metadata.outputs.tag }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.metadata.outputs.commit }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          function Get-Sha256([string]$Path) {
+              $sha = [Security.Cryptography.SHA256]::Create()
+              try {
+                  $stream = [IO.File]::OpenRead($Path)
+                  try { return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace("-", "").ToLowerInvariant() }
+                  finally { $stream.Dispose() }
+              }
+              finally { $sha.Dispose() }
+          }
+          $prefix = Join-Path $env:RUNNER_TEMP ("pointbreak-release-" + [Guid]::NewGuid())
+          $installDir = Join-Path $prefix "bin"
+          & scripts/install.ps1 -Version $env:TAG -InstallDir $installDir -NoModifyPath
+          $binary = Join-Path $installDir "pointbreak.exe"
+          $document = (& $binary version --format json | ConvertFrom-Json -ErrorAction Stop)
+          if ($document.schema -cne "pointbreak.version" -or
+              $document.version -ne 1 -or
+              $document.cliVersion -cne $env:VERSION -or
+              $document.build.source -cne "git" -or
+              $document.build.commit -cne $env:RELEASE_COMMIT -or
+              $document.build.describe -cne $env:TAG -or
+              $document.build.dirty -ne $false -or
+              @($document.diagnostics).Count -ne 0) {
+              throw "installed Windows binary does not report the exact release identity"
+          }
+          $binaryHash = Get-Sha256 $binary
+          $installerHash = Get-Sha256 scripts/install.ps1
+          [ordered]@{
+              schema = "pointbreak.release-verification"
+              version = 1
+              platform = "windows"
+              acquisition = "live"
+              tag = $env:TAG
+              releaseCommit = $env:RELEASE_COMMIT
+              binary = $binary
+              binarySha256 = $binaryHash
+              installerSha256 = $installerHash
+              versionDocument = $document
+          } | ConvertTo-Json -Depth 8 | Set-Content release-verification-windows.json -Encoding utf8
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-verification-windows
+          path: release-verification-windows.json
+          retention-days: 90
+
+  musl-install:
+    needs: metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: refs/tags/${{ needs.metadata.outputs.tag }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Install and execute the published musl archive in Alpine
+        env:
+          TAG: ${{ needs.metadata.outputs.tag }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.metadata.outputs.commit }}
+        run: |
+          set -euo pipefail
+          output=$(mktemp -d)
+          docker run --rm \
+            -e TAG -e VERSION -e RELEASE_COMMIT \
+            -v "$GITHUB_WORKSPACE:/repo:ro" \
+            -v "$output:/out" \
+            alpine:3.22 sh -ec '
+              apk add --no-cache bash curl jq tar coreutils
+              /repo/scripts/install.sh --version="$TAG" --prefix=/out/bin
+              /repo/scripts/assert-release-identity.sh \
+                /out/bin/pointbreak "$VERSION" "$TAG" "$RELEASE_COMMIT" \
+                | jq ". + {schema:\"pointbreak.release-verification\",platform:\"linux-musl\",acquisition:\"live\"}" \
+                >/out/release-verification-linux-musl.json
+            '
+          test -s "$output/release-verification-linux-musl.json"
+          cp "$output/release-verification-linux-musl.json" .
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-verification-linux-musl
+          path: release-verification-linux-musl.json
+          retention-days: 90

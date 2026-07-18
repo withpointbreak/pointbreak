@@ -48,7 +48,12 @@ workflow-lint-assertions:
       scripts/package-release-selftest.sh \
       scripts/verify-release-archives.sh \
       scripts/install.sh \
-      scripts/install-selftest.sh
+      scripts/install-selftest.sh \
+      scripts/assert-release-identity.sh \
+      scripts/assert-release-identity-selftest.sh \
+      scripts/run-release-plan.sh \
+      scripts/run-release-verification.sh
+    ./scripts/assert-release-identity-selftest.sh
     expected="$(cat <<'EOF'
     [
       {"archive":"tar.gz","builder":"cargo","executable":"pointbreak","os":"macos-latest","rust-target":"x86_64-apple-darwin","target":"darwin-x64"},
@@ -73,6 +78,10 @@ workflow-lint-assertions:
     grep -Fq -- 'package-archive-selftest' .github/workflows/release-plan.yml
     grep -Fq -- 'package-archive-selftest' .github/workflows/release.yml
     grep -Fq -- 'package-archive-selftest' scripts/run-release-plan.sh
+    grep -Fq -- 'expected_source_commit' .github/workflows/release-plan.yml
+    grep -Fq -- 'overwrite_files: false' .github/workflows/release-binaries.yml
+    grep -Fq -- 'shell: powershell' .github/workflows/verify-release.yml
+    grep -Fq -- 'alpine:3.22' .github/workflows/verify-release.yml
     if rg -n 'shore(\.exe)?|--bin shore' \
       .github/binary-targets.json \
       .github/workflows/release-binaries.yml \
@@ -209,10 +218,24 @@ review-example-materialize output pack="examples/review/checkout-refactor":
 
 # Materialize the generated Inspector decision-continuity matrix into an empty, isolated repository.
 review-decision-matrix-materialize output:
-    cargo +stable build --bin pointbreak
-    POINTBREAK_BINARY="$PWD/target/debug/pointbreak" ./scripts/materialize-inspector-decision-matrix.sh "{{ output }}"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "${POINTBREAK_BINARY:-}" ]; then
+      ./scripts/materialize-inspector-decision-matrix.sh "{{ output }}"
+    else
+      cargo +stable build --bin pointbreak
+      POINTBREAK_BINARY="$PWD/target/debug/pointbreak" \
+        ./scripts/materialize-inspector-decision-matrix.sh "{{ output }}"
+    fi
 
 # Materialize both Review evidence stores and verify decision continuity in a real browser.
 review-decision-browser-verify root:
-    cargo +stable build --bin pointbreak
-    POINTBREAK_BINARY="$PWD/target/debug/pointbreak" ./scripts/verify-inspector-decision-continuity.sh --root "{{ root }}"
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "${POINTBREAK_BINARY:-}" ]; then
+      ./scripts/verify-inspector-decision-continuity.sh --root "{{ root }}"
+    else
+      cargo +stable build --bin pointbreak
+      POINTBREAK_BINARY="$PWD/target/debug/pointbreak" \
+        ./scripts/verify-inspector-decision-continuity.sh --root "{{ root }}"
+    fi
