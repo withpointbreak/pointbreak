@@ -59,11 +59,10 @@ fn platform_filesystem_name(_path: &Path) -> Option<String> {
     None
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn macos_df_parser_reads_the_filesystem_type_column() {
         let output =
@@ -72,7 +71,6 @@ mod tests {
         assert_eq!(parse_macos_df_filesystem(output).as_deref(), Some("apfs"));
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn macos_probe_reports_a_filesystem_type() {
         let filesystem = qualification_filesystem_name(Path::new(env!("CARGO_MANIFEST_DIR")));

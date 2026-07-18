@@ -183,9 +183,22 @@ mod tests {
     #[test]
     fn foundation_api_remains_behind_the_test_or_bench_gate() {
         let library_root = include_str!("lib.rs");
-        assert!(library_root.contains(
-            "#[cfg(any(test, feature = \"bench\"))]\n#[doc(hidden)]\npub mod bench_support;"
-        ));
+        let windows_checkout = library_root.replace("\r\n", "\n").replace('\n', "\r\n");
+
+        assert!(source_has_foundation_gate(library_root));
+        assert!(source_has_foundation_gate(&windows_checkout));
+    }
+
+    fn source_has_foundation_gate(source: &str) -> bool {
+        let lines = source.lines().map(str::trim).collect::<Vec<_>>();
+        lines.windows(3).any(|window| {
+            window
+                == [
+                    "#[cfg(any(test, feature = \"bench\"))]",
+                    "#[doc(hidden)]",
+                    "pub mod bench_support;",
+                ]
+        })
     }
 
     #[test]
