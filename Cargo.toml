@@ -39,10 +39,15 @@ name = "store_backend"
 harness = false
 required-features = ["bench"]
 
+[[bench]]
+name = "store_foundation"
+harness = false
+required-features = ["bench"]
+
 [features]
-# Exposes the developer-run `bench_support` harness to the `store_backend`
-# benchmark crate. Off by default and never enabled in a release build, so the
-# harness stays out of the published surface.
+# Exposes the developer-run `bench_support` harnesses to benchmark crates. Off
+# by default and never enabled in a release build, so the harnesses stay out of
+# the published surface.
 bench = []
 
 [dependencies]

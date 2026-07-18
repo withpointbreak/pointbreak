@@ -1,0 +1,147 @@
+[
+  {
+    "logical_key": "artifacts/documents/blob-guide.md",
+    "record_kind": "document_blob",
+    "decoded": "# Synthetic qualification guide"
+  },
+  {
+    "logical_key": "artifacts/documents/manifest-guide.json",
+    "record_kind": "document_manifest",
+    "decoded": {
+      "blob": "artifacts/documents/blob-guide.md",
+      "media_type": "text/markdown"
+    }
+  },
+  {
+    "logical_key": "artifacts/objects/round-001.json",
+    "record_kind": "object_artifact",
+    "decoded": {
+      "artifact_round": 1,
+      "content": "alpha"
+    }
+  },
+  {
+    "logical_key": "artifacts/objects/round-002.json",
+    "record_kind": "object_artifact",
+    "decoded": {
+      "artifact_round": 2,
+      "content": "alpha beta gamma delta"
+    }
+  },
+  {
+    "logical_key": "artifacts/objects/round-003.json",
+    "record_kind": "object_artifact",
+    "decoded": {
+      "artifact_round": 3,
+      "content": "alpha beta gamma delta epsilon zeta eta theta iota kappa"
+    }
+  },
+  {
+    "logical_key": "artifacts/proofs/relation-001.json",
+    "record_kind": "relation_proof",
+    "decoded": {
+      "content": {
+        "proof_kind": "commit_association",
+        "verified": true
+      },
+      "relation_id": "relation:synthetic-001"
+    }
+  },
+  {
+    "logical_key": "events/000-root.json",
+    "record_kind": "generation_proposal",
+    "decoded": {
+      "generation": "root",
+      "work_object": "revision:synthetic-root"
+    }
+  },
+  {
+    "logical_key": "events/001-replacement.json",
+    "record_kind": "generation_proposal",
+    "decoded": {
+      "generation": "replacement",
+      "supersedes": "revision:synthetic-root",
+      "work_object": "revision:synthetic-replacement"
+    }
+  },
+  {
+    "logical_key": "events/002-continuation.json",
+    "record_kind": "legacy_event",
+    "decoded": {
+      "continuation": true,
+      "work_object": "revision:synthetic-replacement"
+    }
+  },
+  {
+    "logical_key": "events/003-attestation-verified.json",
+    "record_kind": "relation_attestation",
+    "decoded": {
+      "proof_status": "verified",
+      "relation_id": "relation:synthetic-001"
+    }
+  },
+  {
+    "logical_key": "events/004-attestation-asserted.json",
+    "record_kind": "relation_attestation",
+    "decoded": {
+      "proof_status": "asserted",
+      "relation_id": "relation:synthetic-002"
+    }
+  },
+  {
+    "logical_key": "events/005-attestation-unverified.json",
+    "record_kind": "relation_attestation",
+    "decoded": {
+      "proof_status": "unverified",
+      "relation_id": "relation:synthetic-003"
+    }
+  },
+  {
+    "logical_key": "events/006-attestation-indeterminate.json",
+    "record_kind": "relation_attestation",
+    "decoded": {
+      "proof_status": "indeterminate",
+      "relation_id": "relation:synthetic-004"
+    }
+  },
+  {
+    "logical_key": "events/007-attestation-refuted.json",
+    "record_kind": "relation_attestation",
+    "decoded": {
+      "proof_status": "refuted",
+      "relation_id": "relation:synthetic-005"
+    }
+  },
+  {
+    "logical_key": "events/008-port-context.json",
+    "record_kind": "fact_port",
+    "decoded": {
+      "relation": "context_only",
+      "source_fact": "observation:synthetic-001"
+    }
+  },
+  {
+    "logical_key": "events/009-port-reanchored.json",
+    "record_kind": "fact_port",
+    "decoded": {
+      "relation": "reanchored_as",
+      "source_fact": "observation:synthetic-002"
+    }
+  },
+  {
+    "logical_key": "events/010-port-open.json",
+    "record_kind": "fact_port",
+    "decoded": {
+      "relation": "carried_open_as",
+      "source_fact": "input-request:synthetic-001"
+    }
+  },
+  {
+    "logical_key": "events/011-port-resolved.json",
+    "record_kind": "fact_port",
+    "decoded": {
+      "relation": "resolved_by",
+      "source_fact": "input-request:synthetic-002"
+    }
+  }
+]

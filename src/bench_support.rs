@@ -20,6 +20,8 @@ use crate::model::JournalId;
 use crate::session::EventStore;
 use crate::session::event::{EventTarget, EventType, ReviewInitializedPayload, ShoreEvent, Writer};
 
+pub mod foundation;
+
 /// On-disk versus logical byte accounting for a store directory.
 pub struct ByteUsage {
     /// Sum of file content lengths — the logical bytes the events occupy.
@@ -177,6 +179,14 @@ fn physical_bytes(metadata: &std::fs::Metadata) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foundation_api_remains_behind_the_test_or_bench_gate() {
+        let library_root = include_str!("lib.rs");
+        assert!(library_root.contains(
+            "#[cfg(any(test, feature = \"bench\"))]\n#[doc(hidden)]\npub mod bench_support;"
+        ));
+    }
 
     #[test]
     fn canonical_common_store_derives_the_repository_fixture() {

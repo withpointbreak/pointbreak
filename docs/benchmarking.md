@@ -6,6 +6,46 @@ log-structured backend would be compared against for the file backend: whole-log
 (100 / 1k / 10k events) are generated in-process and need nothing external — anyone can run them, and
 they carry the portable baseline.
 
+## Foundation workload smoke
+
+The `store_foundation` target freezes two backend-neutral qualification workloads before any
+alternative store is implemented:
+
+- `synthetic-legacy-shape` is a small public fixture that exercises legacy event, object-artifact,
+  and note-body records.
+- `modeled-foundation-workload` covers root and replacement generations, continuation, every
+  relation-proof status, every supported fact-port relation, relation-proof content, auxiliary
+  documents, and multi-round artifact growth.
+
+Run its non-timing smoke mode with:
+
+```sh
+cargo bench --features bench --bench store_foundation -- --smoke
+```
+
+The target prints one JSON record containing build identity, a Cargo lockfile hash, Rust version,
+OS, filesystem, configuration, logical capabilities, and manifest hashes/counts. It does not select
+or time a storage implementation.
+
+An optional frozen legacy corpus must be a separately supplied external copy:
+
+```sh
+export POINTBREAK_QUALIFICATION_CORPUS=/path/to/external-corpus-copy
+cargo bench --features bench --bench store_foundation -- --smoke
+```
+
+Never point this variable at a live Pointbreak store. The loader rejects source-tree paths and
+symbolic links, reads only `events/`, `artifacts/objects/`, and `artifacts/notes/`, and emits only
+hashes, counts, byte totals, and sanitized status. It never prints the supplied path or record
+bytes. When the variable is absent, the public workloads still validate and the external row is
+reported as `not_configured`.
+
+The frozen snapshot contains 6,437 files totaling 57,041,682 decoded bytes. Its manifest carries
+the 6,433 logical workload records (6,131 events, 301 object artifacts, and one note body; 57,040,114
+decoded bytes). The loader separately checks the four store-metadata files and their 1,568 bytes
+without reading their content. Any logical or metadata mismatch is returned as a structured drift
+report rather than silently accepting a different corpus.
+
 ## Real-world read-all sample: `POINTBREAK_BENCH_FIXTURE`
 
 The `read_all/fixture` group runs only when `POINTBREAK_BENCH_FIXTURE` points at a **store directory** — the

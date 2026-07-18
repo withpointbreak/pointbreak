@@ -1,0 +1,84 @@
+mod contract;
+mod corpus;
+
+use std::path::Path;
+
+pub use contract::*;
+pub use corpus::*;
+
+/// Report the filesystem type containing a qualification workload.
+///
+/// The platform commands are metadata-only: they inspect the supplied path
+/// without reading any corpus files.
+pub fn qualification_filesystem_name(path: &Path) -> String {
+    platform_filesystem_name(path).unwrap_or_else(|| "unavailable".to_owned())
+}
+
+#[cfg(target_os = "macos")]
+fn platform_filesystem_name(path: &Path) -> Option<String> {
+    let output = std::process::Command::new("/bin/df")
+        .arg("-Y")
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_macos_df_filesystem(&String::from_utf8(output.stdout).ok()?)
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_df_filesystem(output: &str) -> Option<String> {
+    output
+        .lines()
+        .nth(1)?
+        .split_whitespace()
+        .nth(1)
+        .map(str::to_owned)
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(target_os = "linux")]
+fn platform_filesystem_name(path: &Path) -> Option<String> {
+    let output = std::process::Command::new("stat")
+        .args(["-f", "-c", "%T"])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn platform_filesystem_name(_path: &Path) -> Option<String> {
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_df_parser_reads_the_filesystem_type_column() {
+        let output =
+            "Filesystem Type 512-blocks Mounted on\n/dev/disk3s5 apfs 100 /System/Volumes/Data\n";
+
+        assert_eq!(parse_macos_df_filesystem(output).as_deref(), Some("apfs"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_probe_reports_a_filesystem_type() {
+        let filesystem = qualification_filesystem_name(Path::new(env!("CARGO_MANIFEST_DIR")));
+
+        assert_ne!(filesystem, "unavailable");
+        assert_ne!(filesystem, "/");
+        assert_ne!(filesystem, "Directory");
+    }
+}

@@ -1,0 +1,23 @@
+[
+  {
+    "logical_key": "artifacts/notes/note-001.md",
+    "record_kind": "note_body",
+    "decoded": "Synthetic legacy note body"
+  },
+  {
+    "logical_key": "artifacts/objects/revision-001.json",
+    "record_kind": "object_artifact",
+    "decoded": {
+      "kind": "revision",
+      "object_id": "revision:synthetic-001"
+    }
+  },
+  {
+    "logical_key": "events/event-001.json",
+    "record_kind": "legacy_event",
+    "decoded": {
+      "event_type": "review_initialized",
+      "journal_id": "review:synthetic-001"
+    }
+  }
+]
