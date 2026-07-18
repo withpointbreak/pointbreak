@@ -16,6 +16,7 @@ import { fmtDateTime } from "../format";
 import { linkify, shortRef } from "../refs";
 import type { AttentionItem } from "../store";
 import { getState } from "../store";
+import { attentionHandoffs, renderWorkflowHandoffs } from "../workflow-handoff";
 
 /**
  * Split attention items into the needs-input (primary) and advisory (secondary)
@@ -99,10 +100,15 @@ function renderAttentionCard(
     push(k, v, k === "reason" || k === "track" || k === "actor");
   push("observed", escapeHtml(fmtDateTime(item.observedAt ?? "")), true);
 
+  // Kind-specific copyable commands, rendered only when the item carries every
+  // authoritative field the command needs (workflow-handoff.ts is the gate).
+  // The block's clicks are guarded by the #master delegate so command text is
+  // selectable and the copy button never doubles as card selection.
   return `<div class="${CLASS.unitCard} ${CLASS.attentionCard}${focusClass}" data-entry-id="${escapeHtml(item.id)}" data-revision-id="${escapeHtml(anchor)}" title="${escapeHtml(item.id)}">
       <h3><span class="${CLASS.attentionKind}">${kind}</span> ${escapeHtml(askLabel(item))}</h3>
       ${freshness}
       <div class="${CLASS.kv}">${rows.join("")}</div>
+      ${renderWorkflowHandoffs(attentionHandoffs(item))}
     </div>`;
 }
 

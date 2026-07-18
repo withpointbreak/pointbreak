@@ -990,3 +990,66 @@ describe("lens-aware search placeholder and query notices", () => {
     );
   });
 });
+
+describe("the master delegate and workflow command copies", () => {
+  function paintAttentionLens(): void {
+    store.commit({
+      lens: "attention",
+      attention: attentionJson as unknown as AttentionDoc,
+    });
+    render.render();
+  }
+
+  function stubClipboard(writeText: (text: string) => Promise<void>): void {
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+  }
+
+  it("a copy click inside an attention card copies without selecting or fetching", async () => {
+    paintAttentionLens();
+    const button = $<HTMLElement>(
+      "#attention .attention-card [data-copy-workflow-command]",
+    );
+    expect(button).not.toBeNull();
+    const expected =
+      button
+        ?.closest("[data-workflow-handoff]")
+        ?.querySelector("[data-workflow-command]")?.textContent ?? "";
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    stubClipboard(writeText);
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const before = { ...store.getState().selected };
+
+    button?.click();
+    await Promise.resolve();
+
+    expect(writeText).toHaveBeenCalledWith(expected);
+    expect(expected).not.toBe("");
+    expect(store.getState().selected).toEqual(before);
+    expect(store.getState().lens).toBe("attention");
+    expect(fetchSpy).not.toHaveBeenCalled();
+    fetchSpy.mockRestore();
+  });
+
+  it("a click on the command text stays inert so selection is possible", () => {
+    paintAttentionLens();
+    const code = $<HTMLElement>(
+      "#attention .attention-card [data-workflow-command]",
+    );
+    expect(code).not.toBeNull();
+    const before = { ...store.getState().selected };
+    code?.click();
+    expect(store.getState().selected).toEqual(before);
+  });
+
+  it("a click on the card outside the handoff block still selects the revision", () => {
+    paintAttentionLens();
+    const card = $<HTMLElement>("#attention .attention-card");
+    const heading = card?.querySelector<HTMLElement>("h3");
+    heading?.click();
+    expect(store.getState().selected.kind).toBe("revision");
+    expect(store.getState().selected.id).toBe(card?.dataset.revisionId);
+  });
+});

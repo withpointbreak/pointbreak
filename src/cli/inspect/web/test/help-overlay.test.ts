@@ -99,6 +99,21 @@ describe("initControls wiring", () => {
     expect(isOpen()).toBe(false);
   });
 
+  it("explains the five-stage CLI mapping and the read-only copy boundary", () => {
+    // The static workflow section rides the cheat sheet: stages, attention,
+    // association, the placeholder convention, and the copy-never-execute rule.
+    const text = sheet().textContent ?? "";
+    expect(text).toContain("Work -> Claims -> Evidence -> Questions -> Call");
+    expect(text).toContain("outstanding judgment");
+    expect(text).toContain("same revision");
+    expect(text).toContain("never runs them");
+    expect(text).toContain("replace each placeholder before running");
+    expect(text).toContain("never a verdict or merge gate");
+    // Keyboard help remains intact beside the workflow section.
+    expect(sheet().querySelector(".key-help-list")).not.toBeNull();
+    expect(text).toContain("toggle this cheat sheet");
+  });
+
   it("closes on a backdrop click but not on a click inside the card", () => {
     help.initControls();
     help.openKeyHelp();

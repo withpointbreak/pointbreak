@@ -39,6 +39,7 @@ import {
   typeColor,
   typeLabel,
 } from "./types";
+import { copyWorkflowCommand } from "./workflow-handoff";
 
 const INSPECTOR_TITLE = "Pointbreak Review";
 
@@ -659,6 +660,17 @@ function onMasterClick(ev: Event): void {
     return;
   }
   if (t.closest("[data-ref-kind]")) return;
+  // Command handoffs are handled before card selection: the copy button writes
+  // only to the clipboard, and any other click inside the block stays inert so
+  // the command text is selectable without navigating away.
+  const workflowCopyBtn = t.closest<HTMLElement>(
+    "[data-copy-workflow-command]",
+  );
+  if (workflowCopyBtn) {
+    void copyWorkflowCommand(workflowCopyBtn);
+    return;
+  }
+  if (t.closest("[data-workflow-handoff]")) return;
   const cue = t.closest<HTMLElement>("[data-attention-query]");
   if (cue) {
     const query = cue.dataset.attentionQuery;

@@ -29,6 +29,7 @@ import {
   workLabelText,
 } from "../refs";
 import { getState } from "../store";
+import { firstReviewHandoff, renderWorkflowHandoff } from "../workflow-handoff";
 
 // ---------------------------------------------------------------------------
 // The flat revision list lens (#units)
@@ -45,11 +46,20 @@ export function renderRevisionList(): void {
     state.sortKey,
   );
   if (!entries.length) {
+    const filtered = Boolean(state.filterText || state.filterSnapshot);
+    // The capture suggestion is first-open-only: the revisions document has
+    // loaded, the UNFILTERED store is genuinely empty, and no filter is active.
+    // A filtered-empty result keeps its recovery message and never suggests a
+    // capture (recapturing is not the answer to a filter miss).
+    const genuinelyEmpty =
+      !filtered &&
+      state.revisions != null &&
+      (state.revisions.entries ?? []).length === 0;
     el.innerHTML = `<p class="${CLASS.empty}" style="color:var(--fg-dim)">${
-      state.filterText || state.filterSnapshot
+      filtered
         ? "No revisions match the current filters."
         : "No captured revisions in this store."
-    }</p>`;
+    }</p>${genuinelyEmpty ? renderWorkflowHandoff(firstReviewHandoff()) : ""}`;
     return;
   }
   const selected = state.selected;

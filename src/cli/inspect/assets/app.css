@@ -725,6 +725,33 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-directio
    one compact row per item, navigation-only. Absent when nothing is outstanding. */
 .outstanding-set ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; }
 .outstanding-set li { font-size: var(--fs-sm); }
+
+/* Copyable CLI command handoffs: a label, the exact command as selectable code
+   (long ids wrap instead of forcing horizontal scroll on narrow screens), the
+   visibly marked <placeholder> tokens, and the clipboard-only copy control. */
+.workflow-handoff { display: grid; gap: 4px; margin: 8px 0 0; justify-items: start; }
+.workflow-handoff-label { color: var(--fg-dim); font-size: var(--fs-sm); }
+.workflow-command {
+  display: block;
+  width: 100%;
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  color: var(--fg);
+  background: var(--bg-row);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 6px 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+  cursor: text;
+}
+.workflow-placeholder { color: var(--accent); font-style: italic; }
+.workflow-copy { font-size: var(--fs-xs); }
+/* The detail page's collapsed stage-template section. */
+.workflow-handoffs { margin: 10px 0; }
+.workflow-handoffs > summary { cursor: pointer; color: var(--fg-dim); font-size: var(--fs-sm); }
+.workflow-handoffs[open] > summary { margin-bottom: 6px; }
 .supersession-badges { display: flex; gap: 5px; flex-wrap: wrap; margin: 0 0 8px; }
 .overview-summary { display: grid; gap: 6px; margin: 8px 0 10px; }
 .overview-main { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
@@ -1009,6 +1036,17 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-directio
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   padding: 1px 6px;
+}
+.key-help-workflow { padding: 0 18px 14px; border-top: 1px solid var(--border); }
+.key-help-workflow h3 { margin: 12px 0 4px; font-size: var(--fs-sm); color: var(--fg); }
+.key-help-workflow p { margin: 6px 0; color: var(--fg-dim); font-size: var(--fs-sm); }
+.key-help-workflow code {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  background: var(--bg-row);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 1px 5px;
 }
 
 .dfile { margin-bottom: 18px; border: 1px solid var(--border); border-radius: var(--r-lg); overflow: hidden; }

@@ -49,6 +49,40 @@ function mountListBody(): void {
   if (master) master.innerHTML = `<div id="units" class="units"></div>`;
 }
 
+describe("renderRevisionList first-open capture handoff", () => {
+  it("suggests the short-path capture only on a genuinely empty store", () => {
+    store.commit({ revisions: { entries: [], revisionCount: 0 } });
+    mountListBody();
+    revisions.renderRevisionList();
+    const el = document.querySelector("#units");
+    expect(el?.textContent).toContain("No captured revisions in this store.");
+    const code = el?.querySelector("[data-workflow-command]");
+    expect(code?.textContent).toBe(
+      'pointbreak capture --summary "<what changed>"',
+    );
+    expect(el?.querySelector("[data-copy-workflow-command]")).not.toBeNull();
+  });
+
+  it("keeps the filtered-empty recovery free of any capture suggestion", () => {
+    seedFixtures();
+    store.commit({ filterText: "zzz-no-such-revision" });
+    mountListBody();
+    revisions.renderRevisionList();
+    const el = document.querySelector("#units");
+    expect(el?.textContent).toContain(
+      "No revisions match the current filters.",
+    );
+    expect(el?.querySelector("[data-workflow-handoff]")).toBeNull();
+    expect(el?.textContent).not.toContain("pointbreak capture");
+  });
+
+  it("suggests nothing before the revisions document has loaded", () => {
+    mountListBody();
+    revisions.renderRevisionList();
+    expect(document.querySelector("#units [data-workflow-handoff]")).toBeNull();
+  });
+});
+
 describe("renderRevisionList (the flat revision list lens)", () => {
   it("paints one card per revision with the delegation datasets and the open-diff control", () => {
     seedFixtures();

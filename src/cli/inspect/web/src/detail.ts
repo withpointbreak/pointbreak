@@ -96,6 +96,12 @@ import {
   typeLabel,
   type ValidationContinuitySummary,
 } from "./types";
+import {
+  attentionHandoffs,
+  copyWorkflowCommand,
+  renderWorkflowHandoffs,
+  revisionHandoffs,
+} from "./workflow-handoff";
 
 // ---------------------------------------------------------------------------
 // The /api/revisions/{id} composite-page document (the fields the page reads)
@@ -992,7 +998,9 @@ function renderOutstandingBlock(revisionId: string): string {
     .map((item) => {
       const anchor = anchorRevision(item);
       const kind = escapeHtml(item.kind.replace(/_/g, "-"));
-      return `<li><span class="${CLASS.attentionKind}">${kind}</span> ${escapeHtml(askLabel(item))}${anchor ? ` ${linkify(anchor)}` : ""}</li>`;
+      // The item's kind-specific copyable command(s), when its authoritative
+      // fields are complete — clipboard-only, never a dismissal or write.
+      return `<li><span class="${CLASS.attentionKind}">${kind}</span> ${escapeHtml(askLabel(item))}${anchor ? ` ${linkify(anchor)}` : ""}${renderWorkflowHandoffs(attentionHandoffs(item))}</li>`;
     })
     .join("");
   return `<section class="${CLASS.outstandingSet}"><h2>Outstanding (${items.length})</h2><ul>${rows}</ul></section>`;
@@ -1071,6 +1079,18 @@ export function renderRevisionPage(d: RevisionPageDoc): void {
   sections.push(
     `<div data-outstanding-host>${renderOutstandingBlock(revisionId)}</div>`,
   );
+
+  // The exact-revision stage templates, collapsed by default beside the
+  // judgment context: Claims, Evidence, Questions, Call, and the same-revision
+  // landing association, each filled with the loaded revision id only. Review
+  // stays a reader — the commands are shown and copied, never executed.
+  if (revisionId) {
+    sections.push(
+      `<details class="${CLASS.workflowHandoffs}"><summary>Record with the CLI</summary>
+      <p class="${CLASS.advisoryNote}">copy a command into your terminal and replace each &lt;placeholder&gt; before running — Review never runs commands</p>
+      ${renderWorkflowHandoffs(revisionHandoffs(revisionId))}</details>`,
+    );
+  }
 
   // The annotated-diff affordance carries its open-diff datasets (the #detail
   // delegate opens it); the "show in timeline" affordance carries a
@@ -1221,6 +1241,13 @@ export function initControls(): void {
     const rawCopyBtn = t.closest<HTMLElement>("[data-copy-raw-event]");
     if (rawCopyBtn) {
       void copyRawEvent(rawCopyBtn);
+      return;
+    }
+    const workflowCopyBtn = t.closest<HTMLElement>(
+      "[data-copy-workflow-command]",
+    );
+    if (workflowCopyBtn) {
+      void copyWorkflowCommand(workflowCopyBtn);
       return;
     }
     const diffBtn = t.closest<HTMLElement>("[data-open-diff]");

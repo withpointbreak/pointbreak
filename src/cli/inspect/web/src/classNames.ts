@@ -190,6 +190,16 @@ export const CLASS = {
   // The detail page's per-revision outstanding set (the scoped attention read);
   // absent when nothing is outstanding on the shown revision.
   outstandingSet: "outstanding-set",
+
+  // Copyable CLI command handoffs (workflow-handoff.ts): the block, its label,
+  // the command code, the visible placeholder marker, the clipboard-only copy
+  // control, and the detail page's stage-template section host.
+  workflowHandoff: "workflow-handoff",
+  workflowHandoffLabel: "workflow-handoff-label",
+  workflowCommand: "workflow-command",
+  workflowPlaceholder: "workflow-placeholder",
+  workflowCopy: "workflow-copy",
+  workflowHandoffs: "workflow-handoffs",
 } as const;
 
 // ---------------------------------------------------------------------------

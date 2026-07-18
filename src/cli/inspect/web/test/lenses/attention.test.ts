@@ -93,3 +93,73 @@ describe("renderAttention", () => {
     expect(document.querySelector(".attention-empty")).not.toBeNull();
   });
 });
+
+describe("renderAttention kind-specific command handoffs", () => {
+  const doc = () => attentionJson as unknown as AttentionDoc;
+
+  function card(entryIdPrefix: string): HTMLElement {
+    const found = Array.from(
+      document.querySelectorAll<HTMLElement>(".attention-card"),
+    ).find((c) => c.getAttribute("data-entry-id")?.startsWith(entryIdPrefix));
+    if (!found) throw new Error(`no card for ${entryIdPrefix}`);
+    return found;
+  }
+
+  it("an open request card offers the exact respond command with a copy control", () => {
+    seed(doc());
+    const c = card("open_input_request:");
+    const code = c.querySelector("[data-workflow-command]");
+    expect(code?.textContent).toBe(
+      'pointbreak input-request respond input-request:sha256:aaaa111111111111111111111111111111111111111111111111111111111111 --outcome <approved|rejected|dismissed|superseded|abandoned> --reason "<answer>"',
+    );
+    expect(c.querySelector("[data-copy-workflow-command]")).not.toBeNull();
+  });
+
+  it("an ambiguous assessment card replaces both loaded candidates", () => {
+    seed(doc());
+    const code = card("ambiguous_assessment:").querySelector(
+      "[data-workflow-command]",
+    );
+    const text = code?.textContent ?? "";
+    expect(text).toContain(
+      "--replaces assess:sha256:bbbb111111111111111111111111111111111111111111111111111111111111",
+    );
+    expect(text).toContain(
+      "--replaces assess:sha256:cccc111111111111111111111111111111111111111111111111111111111111",
+    );
+    expect(text).toContain("--track <your-track>");
+  });
+
+  it("a competing-heads card names every head and conditions the capture", () => {
+    seed(doc());
+    const c = card("competing_heads:");
+    const text = c.querySelector("[data-workflow-command]")?.textContent ?? "";
+    expect(text).toContain(
+      "--supersedes rev:sha256:1111aaaa11111111111111111111111111111111111111111111111111111111",
+    );
+    expect(text).toContain(
+      "--supersedes rev:sha256:2222bbbb22222222222222222222222222222222222222222222222222222222",
+    );
+    expect(c.textContent).toContain("genuinely new content");
+  });
+
+  it("a stale assessment card is context only — no command, never a guess", () => {
+    seed(doc());
+    expect(
+      card("stale_assessment:").querySelector("[data-workflow-handoff]"),
+    ).toBeNull();
+  });
+
+  it("an incomplete item renders its card without any command", () => {
+    const base = doc();
+    const items = base.items.map((entry) =>
+      entry.kind === "open_input_request"
+        ? { ...entry, inputRequestId: undefined }
+        : entry,
+    );
+    seed({ ...base, items });
+    expect(
+      card("open_input_request:").querySelector("[data-workflow-handoff]"),
+    ).toBeNull();
+  });
+});

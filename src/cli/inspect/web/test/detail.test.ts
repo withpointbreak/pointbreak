@@ -1061,8 +1061,13 @@ describe("the per-revision outstanding block (scoped attention on the detail pag
     await detail.showComposite(REV);
     const block = detailEl().querySelector(".outstanding-set");
     expect(block).not.toBeNull();
-    // Links only: no per-item control, no read-state, no done/snooze.
-    expect(block?.querySelector("button, input, select, textarea")).toBeNull();
+    // No per-item write control, no read-state, no done/snooze. The one allowed
+    // button is the clipboard-only command copy — it mutates nothing.
+    expect(
+      block?.querySelector(
+        "button:not([data-copy-workflow-command]), input, select, textarea",
+      ),
+    ).toBeNull();
   });
 
   it("re-fetches the scoped set when the global attention doc moves under an open revision", async () => {
@@ -1506,5 +1511,91 @@ describe("renderRevisionPage revision supersession block (fork-gated)", () => {
     headB?.dispatchEvent(new Event("mouseleave"));
     expect(headB?.classList.contains("traced")).toBe(false);
     expect(incident?.getAttribute("marker-end")).toBe("url(#dag-arrow)");
+  });
+});
+
+describe("revision-page CLI handoffs (exact-revision templates + copy delegate)", () => {
+  function stubClipboard(writeText: (text: string) => Promise<void>): void {
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    });
+  }
+
+  it("offers the five stage templates filled with the loaded revision id", async () => {
+    store.commit({ selected: { kind: "revision", id: REV } });
+    await detail.openRevision(REV);
+    const section = detailEl().querySelector(".workflow-handoffs");
+    expect(section).not.toBeNull();
+    const commands = Array.from(
+      section?.querySelectorAll("[data-workflow-command]") ?? [],
+    ).map((code) => code.textContent ?? "");
+    expect(commands.length).toBe(5);
+    expect(commands[0]).toBe(
+      `pointbreak observation add --exact-revision ${REV} --track <your-track> --title "<claim title>" --body "<why it matters>"`,
+    );
+    expect(commands[4]).toBe(
+      `pointbreak association record --revision ${REV} --track <your-track> --commit <landed-commit>`,
+    );
+    // Every template carries its copy control and stays read-only.
+    expect(
+      section?.querySelectorAll("[data-copy-workflow-command]").length,
+    ).toBe(5);
+  });
+
+  it("renders kind-specific commands beside complete outstanding items only", async () => {
+    setScopedAttentionResponse({
+      items: [
+        {
+          id: "open_input_request:input-request:sha256:full",
+          kind: "open_input_request",
+          tier: "primary",
+          revisionId: REV,
+          title: "Answerable",
+          inputRequestId: "input-request:sha256:full",
+        },
+        {
+          id: "open_input_request:input-request:sha256:partial",
+          kind: "open_input_request",
+          tier: "primary",
+          revisionId: REV,
+          title: "Missing id",
+        },
+      ],
+    });
+    store.commit({ selected: { kind: "revision", id: REV } });
+    await detail.showComposite(REV);
+    const block = detailEl().querySelector(".outstanding-set");
+    const commands = Array.from(
+      block?.querySelectorAll("[data-workflow-command]") ?? [],
+    ).map((code) => code.textContent ?? "");
+    expect(commands).toEqual([
+      'pointbreak input-request respond input-request:sha256:full --outcome <approved|rejected|dismissed|superseded|abandoned> --reason "<answer>"',
+    ]);
+  });
+
+  it("the detail copy delegate writes only to the clipboard and mutates nothing", async () => {
+    store.commit({ selected: { kind: "revision", id: REV } });
+    await detail.openRevision(REV);
+    const button = detailEl().querySelector<HTMLElement>(
+      ".workflow-handoffs [data-copy-workflow-command]",
+    );
+    expect(button).not.toBeNull();
+    const expected =
+      detailEl().querySelector(".workflow-handoffs [data-workflow-command]")
+        ?.textContent ?? "";
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    stubClipboard(writeText);
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const selectionBefore = { ...store.getState().selected };
+
+    button?.click();
+    await Promise.resolve();
+
+    expect(writeText).toHaveBeenCalledWith(expected);
+    expect(expected).not.toBe("");
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(store.getState().selected).toEqual(selectionBefore);
+    fetchSpy.mockRestore();
   });
 });

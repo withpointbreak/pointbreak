@@ -376,7 +376,16 @@
     attentionBadgeSecondary: "attention-badge-secondary",
     // The detail page's per-revision outstanding set (the scoped attention read);
     // absent when nothing is outstanding on the shown revision.
-    outstandingSet: "outstanding-set"
+    outstandingSet: "outstanding-set",
+    // Copyable CLI command handoffs (workflow-handoff.ts): the block, its label,
+    // the command code, the visible placeholder marker, the clipboard-only copy
+    // control, and the detail page's stage-template section host.
+    workflowHandoff: "workflow-handoff",
+    workflowHandoffLabel: "workflow-handoff-label",
+    workflowCommand: "workflow-command",
+    workflowPlaceholder: "workflow-placeholder",
+    workflowCopy: "workflow-copy",
+    workflowHandoffs: "workflow-handoffs"
   };
   var ANNO_KINDS = [
     "observation",
@@ -4111,6 +4120,175 @@
   }
   __name(initControls2, "initControls");
 
+  // src/workflow-handoff.ts
+  var TRACK = "<your-track>";
+  var OUTCOMES = "<approved|rejected|dismissed|superseded|abandoned>";
+  var STATUSES = "<passed|failed|errored|skipped>";
+  var CALLS = "<accepted|accepted-with-follow-up|needs-changes|needs-clarification>";
+  var SHELL_SAFE = /^[A-Za-z0-9@%+=:,._/-]+$/;
+  function shellQuote(value) {
+    if (SHELL_SAFE.test(value)) return value;
+    return `'${value.replace(/'/g, `'\\''`)}'`;
+  }
+  __name(shellQuote, "shellQuote");
+  function firstReviewHandoff() {
+    return {
+      label: "Capture your first revision",
+      command: 'pointbreak capture --summary "<what changed>"',
+      placeholders: ["<what changed>"]
+    };
+  }
+  __name(firstReviewHandoff, "firstReviewHandoff");
+  function revisionHandoffs(revisionId) {
+    if (!revisionId) return [];
+    const rev = shellQuote(revisionId);
+    return [
+      {
+        label: "Add a claim (observation)",
+        command: `pointbreak observation add --exact-revision ${rev} --track ${TRACK} --title "<claim title>" --body "<why it matters>"`,
+        placeholders: [TRACK, "<claim title>", "<why it matters>"]
+      },
+      {
+        label: "Record evidence (validation)",
+        command: `pointbreak validation add --exact-revision ${rev} --track ${TRACK} --check-name "<check name>" --status ${STATUSES} --command "<command you ran>" --exit-code <exit-code> --summary "<what the run showed>"`,
+        placeholders: [
+          TRACK,
+          "<check name>",
+          STATUSES,
+          "<command you ran>",
+          "<exit-code>",
+          "<what the run showed>"
+        ]
+      },
+      {
+        label: "Ask a question (input request)",
+        command: `pointbreak input-request open --revision ${rev} --track ${TRACK} --title "<question>" --reason manual-decision-required --mode advisory --body "<what needs an answer>"`,
+        placeholders: [TRACK, "<question>", "<what needs an answer>"]
+      },
+      {
+        label: "Make the call (assessment)",
+        command: `pointbreak assessment add --exact-revision ${rev} --track ${TRACK} --assessment ${CALLS} --summary "<why this call>"`,
+        placeholders: [TRACK, CALLS, "<why this call>"]
+      },
+      {
+        label: "Record a landed commit on this same revision",
+        command: `pointbreak association record --revision ${rev} --track ${TRACK} --commit <landed-commit>`,
+        placeholders: [TRACK, "<landed-commit>"]
+      }
+    ];
+  }
+  __name(revisionHandoffs, "revisionHandoffs");
+  function respondHandoff(inputRequestId, label) {
+    return {
+      label,
+      command: `pointbreak input-request respond ${shellQuote(inputRequestId)} --outcome ${OUTCOMES} --reason "<answer>"`,
+      placeholders: [OUTCOMES, "<answer>"]
+    };
+  }
+  __name(respondHandoff, "respondHandoff");
+  function attentionHandoffs(item) {
+    switch (item.kind) {
+      case "open_input_request": {
+        if (!item.inputRequestId) return [];
+        return [respondHandoff(item.inputRequestId, "Respond to this request")];
+      }
+      case "ambiguous_assessment": {
+        const candidates = item.assessments ?? [];
+        const ids = candidates.map((record) => record.assessmentId ?? "");
+        if (!item.revisionId || ids.length < 2 || ids.some((id) => !id))
+          return [];
+        const replaces = ids.map((id) => ` --replaces ${shellQuote(id)}`).join("");
+        return [
+          {
+            label: "Record one current call replacing the competing assessments",
+            command: `pointbreak assessment add --exact-revision ${shellQuote(item.revisionId)} --track ${TRACK} --assessment ${CALLS} --summary "<why this call>"${replaces}`,
+            placeholders: [TRACK, CALLS, "<why this call>"]
+          }
+        ];
+      }
+      case "failed_validation": {
+        if (!item.revisionId || !item.trackId || !item.checkName) return [];
+        return [
+          {
+            label: "Record the re-run of this check",
+            command: `pointbreak validation add --exact-revision ${shellQuote(item.revisionId)} --track ${shellQuote(item.trackId)} --check-name ${shellQuote(item.checkName)} --status ${STATUSES} --command "<command you ran>" --exit-code <exit-code> --summary "<what the re-run showed>"`,
+            placeholders: [
+              STATUSES,
+              "<command you ran>",
+              "<exit-code>",
+              "<what the re-run showed>"
+            ]
+          }
+        ];
+      }
+      case "follow_up_outstanding": {
+        const ids = item.openInputRequestIds ?? [];
+        if (!ids.length || ids.some((id) => !id)) return [];
+        return ids.map(
+          (id, index) => respondHandoff(
+            id,
+            ids.length === 1 ? "Respond to the open follow-up request" : `Respond to open follow-up request ${index + 1} of ${ids.length}`
+          )
+        );
+      }
+      case "competing_heads": {
+        const heads = item.headRevisionIds ?? [];
+        if (heads.length < 2 || heads.some((id) => !id)) return [];
+        const supersedes = heads.map((id) => ` --supersedes ${shellQuote(id)}`).join("");
+        return [
+          {
+            label: "Capture a replacement only when genuinely new content replaces every head",
+            command: `pointbreak capture --summary "<what changed>"${supersedes}`,
+            placeholders: ["<what changed>"]
+          }
+        ];
+      }
+      default:
+        return [];
+    }
+  }
+  __name(attentionHandoffs, "attentionHandoffs");
+  function commandHtml(handoff) {
+    let html = escapeHtml(handoff.command);
+    for (const token of new Set(handoff.placeholders)) {
+      const escaped = escapeHtml(token);
+      html = html.split(escaped).join(`<span class="${CLASS.workflowPlaceholder}">${escaped}</span>`);
+    }
+    return html;
+  }
+  __name(commandHtml, "commandHtml");
+  function renderWorkflowHandoff(handoff) {
+    return `<div class="${CLASS.workflowHandoff}" data-workflow-handoff>
+    <span class="${CLASS.workflowHandoffLabel}">${escapeHtml(handoff.label)}</span>
+    <code class="${CLASS.workflowCommand}" data-workflow-command>${commandHtml(handoff)}</code>
+    <button type="button" class="${CLASS.ghost} ${CLASS.workflowCopy}" data-copy-workflow-command aria-label="copy command: ${escapeHtml(handoff.label)}">copy</button>
+  </div>`;
+  }
+  __name(renderWorkflowHandoff, "renderWorkflowHandoff");
+  function renderWorkflowHandoffs(handoffs) {
+    return handoffs.map(renderWorkflowHandoff).join("");
+  }
+  __name(renderWorkflowHandoffs, "renderWorkflowHandoffs");
+  async function copyWorkflowCommand(button) {
+    const text = button.closest(`.${CLASS.workflowHandoff}`)?.querySelector("[data-workflow-command]")?.textContent;
+    if (!text) return;
+    const previous = button.textContent ?? "copy";
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("clipboard unavailable");
+      }
+      await navigator.clipboard.writeText(text);
+      button.textContent = "copied";
+    } catch {
+      button.textContent = "copy failed";
+    } finally {
+      window.setTimeout(() => {
+        button.textContent = previous;
+      }, 1200);
+    }
+  }
+  __name(copyWorkflowCommand, "copyWorkflowCommand");
+
   // src/lenses/attention.ts
   function partitionAttentionTiers(items) {
     return {
@@ -4161,6 +4339,7 @@
       <h3><span class="${CLASS.attentionKind}">${kind}</span> ${escapeHtml(askLabel(item))}</h3>
       ${freshness}
       <div class="${CLASS.kv}">${rows.join("")}</div>
+      ${renderWorkflowHandoffs(attentionHandoffs(item))}
     </div>`;
   }
   __name(renderAttentionCard, "renderAttentionCard");
@@ -4815,7 +4994,7 @@
     const rows = items.map((item) => {
       const anchor = anchorRevision(item);
       const kind = escapeHtml(item.kind.replace(/_/g, "-"));
-      return `<li><span class="${CLASS.attentionKind}">${kind}</span> ${escapeHtml(askLabel(item))}${anchor ? ` ${linkify(anchor)}` : ""}</li>`;
+      return `<li><span class="${CLASS.attentionKind}">${kind}</span> ${escapeHtml(askLabel(item))}${anchor ? ` ${linkify(anchor)}` : ""}${renderWorkflowHandoffs(attentionHandoffs(item))}</li>`;
     }).join("");
     return `<section class="${CLASS.outstandingSet}"><h2>Outstanding (${items.length})</h2><ul>${rows}</ul></section>`;
   }
@@ -4870,6 +5049,13 @@
     sections.push(
       `<div data-outstanding-host>${renderOutstandingBlock(revisionId)}</div>`
     );
+    if (revisionId) {
+      sections.push(
+        `<details class="${CLASS.workflowHandoffs}"><summary>Record with the CLI</summary>
+      <p class="${CLASS.advisoryNote}">copy a command into your terminal and replace each &lt;placeholder&gt; before running — Review never runs commands</p>
+      ${renderWorkflowHandoffs(revisionHandoffs(revisionId))}</details>`
+      );
+    }
     sections.push(`<section><h2>Summary</h2><div class="${CLASS.upStats}">
     ${stat("files", s.fileCount)}${stat("rows", s.rowCount)}${stat("observations", s.observationCount)}${stat("input requests", s.inputRequestCount)}${stat("assessments", s.assessmentCount)}${stat("validation checks", s.validationCheckCount)}
   </div>
@@ -4979,6 +5165,13 @@
       const rawCopyBtn = t.closest("[data-copy-raw-event]");
       if (rawCopyBtn) {
         void copyRawEvent(rawCopyBtn);
+        return;
+      }
+      const workflowCopyBtn = t.closest(
+        "[data-copy-workflow-command]"
+      );
+      if (workflowCopyBtn) {
+        void copyWorkflowCommand(workflowCopyBtn);
         return;
       }
       const diffBtn = t.closest("[data-open-diff]");
@@ -6531,7 +6724,9 @@
       state2.sortKey
     );
     if (!entries.length) {
-      el.innerHTML = `<p class="${CLASS.empty}" style="color:var(--fg-dim)">${state2.filterText || state2.filterSnapshot ? "No revisions match the current filters." : "No captured revisions in this store."}</p>`;
+      const filtered = Boolean(state2.filterText || state2.filterSnapshot);
+      const genuinelyEmpty = !filtered && state2.revisions != null && (state2.revisions.entries ?? []).length === 0;
+      el.innerHTML = `<p class="${CLASS.empty}" style="color:var(--fg-dim)">${filtered ? "No revisions match the current filters." : "No captured revisions in this store."}</p>${genuinelyEmpty ? renderWorkflowHandoff(firstReviewHandoff()) : ""}`;
       return;
     }
     const selected = state2.selected;
@@ -6995,6 +7190,14 @@ click to open the revision page">
       return;
     }
     if (t.closest("[data-ref-kind]")) return;
+    const workflowCopyBtn = t.closest(
+      "[data-copy-workflow-command]"
+    );
+    if (workflowCopyBtn) {
+      void copyWorkflowCommand(workflowCopyBtn);
+      return;
+    }
+    if (t.closest("[data-workflow-handoff]")) return;
     const cue = t.closest("[data-attention-query]");
     if (cue) {
       const query = cue.dataset.attentionQuery;

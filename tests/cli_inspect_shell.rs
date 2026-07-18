@@ -98,6 +98,57 @@ fn served_shell_exposes_the_pointbreak_favicon() {
 }
 
 #[test]
+fn served_help_overlay_explains_the_workflow_mapping_and_copy_boundary() {
+    let store = representative_store();
+    let html = Inspector::spawn(store.repo.path()).get_text("/");
+    let help = html
+        .split("id=\"key-help\"")
+        .nth(1)
+        .and_then(|tail| tail.split("<script").next())
+        .expect("help overlay markup exists");
+
+    // The five-stage mapping, attention, and same-revision association are
+    // explained as rendered text beside the keyboard list.
+    for fragment in [
+        "Work -> Claims -> Evidence -> Questions -> Call",
+        "outstanding judgment",
+        "same revision",
+        "never a verdict or merge gate",
+    ] {
+        assert!(
+            help.contains(fragment),
+            "help overlay should explain: {fragment}"
+        );
+    }
+    // The read-only/copy boundary and the visible-placeholder convention.
+    assert!(
+        help.contains("never runs them"),
+        "help overlay states that Review copies commands but never runs them"
+    );
+    assert!(
+        help.contains("replace each placeholder before running"),
+        "help overlay states the visible-placeholder convention"
+    );
+    // The keyboard cheat sheet stays intact beside the workflow section.
+    assert!(
+        help.contains("<kbd>?</kbd>"),
+        "keyboard help remains in the overlay"
+    );
+}
+
+#[test]
+fn served_css_styles_the_workflow_handoff_blocks() {
+    let css = served_app_css();
+    for selector in [
+        ".workflow-handoff",
+        ".workflow-command",
+        ".workflow-placeholder",
+    ] {
+        assert!(css.contains(selector), "served CSS should style {selector}");
+    }
+}
+
+#[test]
 fn served_css_has_a_narrow_viewport_shell_contract() {
     let css = served_app_css();
     assert!(

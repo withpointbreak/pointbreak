@@ -207,6 +207,11 @@ const INDEX_BODY = `
       <dt><kbd>Esc</kbd></dt><dd>close the diff page or an overlay, restore the split, close the detail, clear the cursor, then the query</dd>
       <dt><kbd>?</kbd></dt><dd>toggle this cheat sheet</dd>
     </dl>
+    <div class="key-help-workflow">
+      <h3>Review stages and the CLI</h3>
+      <p>Work -> Claims -> Evidence -> Questions -> Call maps to <code>capture</code>/<code>revision</code>/<code>inspect</code>, then <code>observation</code>, <code>validation</code>, <code>input-request</code>, and <code>assessment</code>. <code>attention</code> lists outstanding judgment; <code>association</code> records where the same revision landed. Validation is evidence, never a verdict or merge gate.</p>
+      <p>Review is local, read-only, and advisory: it shows and copies commands but never runs them. Copied commands keep visible placeholder tokens like <code>&lt;your-track&gt;</code> — replace each placeholder before running.</p>
+    </div>
   </div>
 </div>
 

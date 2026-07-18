@@ -381,6 +381,17 @@ body {
   border-radius: var(--r-sm);
   padding: 1px 6px;
 }
+.key-help-workflow { padding: 0 18px 14px; border-top: 1px solid var(--border); }
+.key-help-workflow h3 { margin: 12px 0 4px; font-size: var(--fs-sm); color: var(--fg); }
+.key-help-workflow p { margin: 6px 0; color: var(--fg-dim); font-size: var(--fs-sm); }
+.key-help-workflow code {
+  font-family: var(--mono);
+  font-size: var(--fs-xs);
+  background: var(--bg-row);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 1px 5px;
+}
 
 /* ---- Timeline --------------------------------------------------------- */
 .timeline { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: var(--r-lg); overflow: hidden; }
