@@ -1,0 +1,8 @@
+[
+  {"scenario":"textual","side":"after","content_kind":"text","encoding":"utf8","absence_reason":null},
+  {"scenario":"binary","side":"after","content_kind":"binary","encoding":"raw","absence_reason":null},
+  {"scenario":"empty","side":"after","content_kind":"text","encoding":"utf8","absence_reason":null},
+  {"scenario":"deleted","side":"after","content_kind":null,"encoding":null,"absence_reason":"deleted"},
+  {"scenario":"unavailable","side":"after","content_kind":null,"encoding":null,"absence_reason":"unavailable"},
+  {"scenario":"policy_not_retained","side":"after","content_kind":null,"encoding":null,"absence_reason":"policy_not_retained"}
+]

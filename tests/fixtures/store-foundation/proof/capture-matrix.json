@@ -1,0 +1,25 @@
+[
+  {
+    "capture_mode": "commit_range",
+    "base": "commit:base",
+    "parent": "commit:base",
+    "path_scope": ["src", "assets", "vendor"],
+    "git_availability": "available",
+    "entries": [
+      {"path":"src/added.rs","previous_path":null,"change":"added","old_oid":null,"new_oid":"oid:add","old_mode":null,"new_mode":"100644","old_decoded_sha256":null,"new_decoded_sha256":"sha256:add","content_kind":"text","untracked":false},
+      {"path":"src/deleted.rs","previous_path":null,"change":"deleted","old_oid":"oid:delete","new_oid":null,"old_mode":"100644","new_mode":null,"old_decoded_sha256":"sha256:delete","new_decoded_sha256":null,"content_kind":"text","untracked":false},
+      {"path":"src/modified.rs","previous_path":null,"change":"modified","old_oid":"oid:old","new_oid":"oid:new","old_mode":"100644","new_mode":"100644","old_decoded_sha256":"sha256:old","new_decoded_sha256":"sha256:new","content_kind":"text","untracked":false},
+      {"path":"src/renamed.rs","previous_path":"src/original.rs","change":"renamed","old_oid":"oid:rename","new_oid":"oid:rename","old_mode":"100644","new_mode":"100644","old_decoded_sha256":"sha256:rename","new_decoded_sha256":"sha256:rename","content_kind":"text","untracked":false},
+      {"path":"src/copied.rs","previous_path":"src/source.rs","change":"copied","old_oid":"oid:copy","new_oid":"oid:copy","old_mode":"100644","new_mode":"100644","old_decoded_sha256":"sha256:copy","new_decoded_sha256":"sha256:copy","content_kind":"text","untracked":false},
+      {"path":"src/tool.sh","previous_path":null,"change":"mode_only","old_oid":"oid:mode","new_oid":"oid:mode","old_mode":"100644","new_mode":"100755","old_decoded_sha256":"sha256:mode","new_decoded_sha256":"sha256:mode","content_kind":"text","untracked":false},
+      {"path":"assets/image.bin","previous_path":null,"change":"modified","old_oid":"oid:binary-old","new_oid":"oid:binary-new","old_mode":"100644","new_mode":"100644","old_decoded_sha256":"sha256:binary-old","new_decoded_sha256":"sha256:binary-new","content_kind":"binary","untracked":false},
+      {"path":"vendor/dependency","previous_path":null,"change":"modified","old_oid":"commit:submodule-old","new_oid":"commit:submodule-new","old_mode":"160000","new_mode":"160000","old_decoded_sha256":null,"new_decoded_sha256":null,"content_kind":"submodule","untracked":false}
+    ]
+  },
+  {"capture_mode":"root","base":null,"parent":null,"path_scope":["."],"git_availability":"available","entries":[{"path":"README.md","previous_path":null,"change":"added","old_oid":null,"new_oid":"oid:readme","old_mode":null,"new_mode":"100644","old_decoded_sha256":null,"new_decoded_sha256":"sha256:readme","content_kind":"text","untracked":false}]},
+  {"capture_mode":"staged","base":"commit:head","parent":"commit:head","path_scope":["src"],"git_availability":"available","entries":[{"path":"src/staged.rs","previous_path":null,"change":"modified","old_oid":"oid:staged-old","new_oid":"oid:staged-new","old_mode":"100644","new_mode":"100644","old_decoded_sha256":"sha256:staged-old","new_decoded_sha256":"sha256:staged-new","content_kind":"text","untracked":false}]},
+  {"capture_mode":"unstaged","base":"tree:index","parent":"commit:head","path_scope":["src"],"git_availability":"available","entries":[{"path":"src/unstaged.rs","previous_path":null,"change":"modified","old_oid":"oid:unstaged-old","new_oid":null,"old_mode":"100644","new_mode":"100644","old_decoded_sha256":"sha256:unstaged-old","new_decoded_sha256":"sha256:unstaged-new","content_kind":"text","untracked":false}]},
+  {"capture_mode":"combined_worktree","base":"commit:head","parent":"commit:head","path_scope":["src"],"git_availability":"available","entries":[{"path":"src/worktree.rs","previous_path":null,"change":"modified","old_oid":"oid:worktree-old","new_oid":null,"old_mode":"100644","new_mode":"100644","old_decoded_sha256":"sha256:worktree-old","new_decoded_sha256":"sha256:worktree-new","content_kind":"text","untracked":false}]},
+  {"capture_mode":"synthetic_untracked","base":"commit:head","parent":"commit:head","path_scope":["notes"],"git_availability":"available","entries":[{"path":"notes/new.txt","previous_path":null,"change":"added","old_oid":null,"new_oid":null,"old_mode":null,"new_mode":"100644","old_decoded_sha256":null,"new_decoded_sha256":"sha256:untracked","content_kind":"text","untracked":true}]},
+  {"capture_mode":"commit_range","base":"commit:missing-base","parent":"commit:missing-base","path_scope":["src"],"git_availability":"missing","entries":[]}
+]
