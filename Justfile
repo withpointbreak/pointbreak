@@ -29,6 +29,10 @@ release *args:
 package-archive-selftest:
     ./scripts/package-release-selftest.sh
 
+# Reproduce Cocogitto's native tag lifecycle and the guarded signed-tag finalizer.
+release-bump-selftest:
+    ./scripts/finalize-cocogitto-release-tag-selftest.sh
+
 # Exercise the release installer for the current host platform without network access.
 installer-selftest:
     {{ if os() == "windows" { "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/install-selftest.ps1" } else { "./scripts/install-selftest.sh" } }}
@@ -51,6 +55,8 @@ workflow-lint-assertions:
       scripts/install-selftest.sh \
       scripts/assert-release-identity.sh \
       scripts/assert-release-identity-selftest.sh \
+      scripts/finalize-cocogitto-release-tag.sh \
+      scripts/finalize-cocogitto-release-tag-selftest.sh \
       scripts/run-release-plan.sh \
       scripts/run-release-verification.sh
     ./scripts/assert-release-identity-selftest.sh

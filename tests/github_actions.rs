@@ -24,6 +24,11 @@ fn release_workflows_target_single_pointbreak_crate() {
     let release = std::fs::read_to_string(".github/workflows/release.yml").expect("read release");
     let release_script =
         std::fs::read_to_string("scripts/run-release-plan.sh").expect("read release script");
+    let finalize_tag = std::fs::read_to_string("scripts/finalize-cocogitto-release-tag.sh")
+        .expect("read Cocogitto tag finalizer");
+    let finalize_tag_selftest =
+        std::fs::read_to_string("scripts/finalize-cocogitto-release-tag-selftest.sh")
+            .expect("read Cocogitto tag finalizer selftest");
     let cog = std::fs::read_to_string("cog.toml").expect("read cog config");
 
     assert!(release_plan.contains("select(.name == \"pointbreak\")"));
@@ -40,12 +45,34 @@ fn release_workflows_target_single_pointbreak_crate() {
     assert!(!release_script.contains(&stale_repository));
     assert!(!release.contains("boardwalk"));
     assert!(cog.contains(r#""git commit --amend -m 'chore: v{{version}}'""#));
-    assert!(cog.contains(r#""git tag -m 'v{{version}}' v{{version}}""#));
+    assert!(cog.contains(r#""scripts/finalize-cocogitto-release-tag.sh v{{version}}""#));
+    assert!(!cog.contains(r#""git tag -m 'v{{version}}' v{{version}}""#));
     assert!(!cog.contains("git tag -f"));
     assert!(cog.contains(r#""git push origin HEAD:main""#));
     assert!(cog.contains(r#""git push origin refs/tags/v{{version}}""#));
     assert!(!cog.contains("gh workflow run release.yml"));
     assert!(!cog.contains("gh workflow run release-binaries.yml"));
+    for required in [
+        "git cat-file -t \"$TAG_REF\"",
+        "git ls-remote --exit-code --tags origin \"$TAG_REF\"",
+        "git rev-parse \"${COG_TAG_COMMIT}^{tree}\"",
+        "git rev-parse \"${RELEASE_COMMIT}^{tree}\"",
+        "git rev-parse \"${COG_TAG_COMMIT}^\"",
+        "git rev-parse \"${RELEASE_COMMIT}^\"",
+        "git update-ref -d \"$TAG_REF\" \"$COG_TAG_COMMIT\"",
+        "git tag -s -m \"$TAG\" \"$TAG\"",
+        "git verify-tag \"$TAG\"",
+    ] {
+        assert!(
+            finalize_tag.contains(required),
+            "tag finalizer is missing: {required}"
+        );
+    }
+    assert!(!finalize_tag.contains("git tag -f"));
+    assert!(finalize_tag_selftest.contains("finalize-cocogitto-release-tag.sh"));
+    assert!(finalize_tag_selftest.contains("verify-commit"));
+    assert!(finalize_tag_selftest.contains("verify-tag"));
+    assert!(finalize_tag_selftest.contains("refs/tags/v0.8.0"));
     assert!(cog.contains(r#"repository = "pointbreak""#));
     assert!(cog.contains(r#"owner = "withpointbreak""#));
     let stale_owner = ["owner = \"", "kevinswiber", "\""].join("");
@@ -85,6 +112,11 @@ fn release_workflows_bind_the_reviewed_parent_and_keep_published_state_immutable
     assert!(release_plan.contains("private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}"));
     assert!(release_plan.contains("permission-contents: write"));
     assert!(release_plan.contains("token: ${{ steps.release-token.outputs.token }}"));
+    assert_eq!(release_plan.matches("Verify release bump hooks").count(), 2);
+    assert_eq!(
+        release_plan.matches("just release-bump-selftest").count(),
+        2
+    );
     assert!(!release_plan.contains("RELEASE_PUSH_TOKEN"));
     assert!(release_plan.contains("select(.headSha == $expected)"));
     assert!(release_plan.contains("unexpected crates.io status"));

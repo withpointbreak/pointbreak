@@ -29,7 +29,7 @@ pre_bump_hooks = [
 ]
 post_bump_hooks = [
     "git commit --amend -m 'chore: v{{version}}'",
-    "git tag -m 'v{{version}}' v{{version}}",
+    "scripts/finalize-cocogitto-release-tag.sh v{{version}}",
     "git push origin HEAD:main",
     "git push origin refs/tags/v{{version}}",
 ]

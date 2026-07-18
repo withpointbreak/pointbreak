@@ -81,5 +81,8 @@ commit such as `feat!:` or a commit with a `BREAKING CHANGE:` footer. Exact rele
 workflow `version` input instead of creating artificial breaking-change commits.
 
 The CI release profile amends Cocogitto's generated version bump commit to an unscoped
-`chore: v<version>` header before pushing and tagging. Keep that behavior while `cog.toml` has an
-empty scopes list.
+`chore: v<version>` header. Cocogitto 6.5.0 creates a local lightweight tag before its post-bump hooks,
+so the profile then verifies that tag still names the same release tree and reviewed parent, confirms no
+matching remote tag exists, deletes only that exact guarded local ref, and creates the signed annotated tag
+at the amended commit before either push. This pre-push finalization never force-moves a published tag.
+Keep the unscoped commit behavior while `cog.toml` has an empty scopes list.

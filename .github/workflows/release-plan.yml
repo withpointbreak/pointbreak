@@ -66,6 +66,9 @@ jobs:
       - name: Install tools
         run: cargo binstall --no-confirm cocogitto@6.5.0 cargo-edit
 
+      - name: Verify release bump hooks
+        run: just release-bump-selftest
+
       - name: Generate release plan
         env:
           GH_TOKEN: ${{ github.token }}
@@ -229,6 +232,9 @@ jobs:
 
       - name: Install tools
         run: cargo binstall --no-confirm cocogitto@6.5.0 cargo-edit
+
+      - name: Verify release bump hooks
+        run: just release-bump-selftest
 
       - name: Import GPG key
         uses: crazy-max/ghaction-import-gpg@v7
