@@ -1,8 +1,9 @@
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::backup::Backup;
@@ -234,6 +235,10 @@ pub fn validate_sqlite_runtime_version(
 
 pub fn bundled_sqlite_runtime_evidence() -> Result<SqliteRuntimeEvidenceV1, SqliteQualificationError>
 {
+    sqlite_open_admission_cache().runtime_evidence_with(inspect_bundled_sqlite_runtime)
+}
+
+fn inspect_bundled_sqlite_runtime() -> Result<SqliteRuntimeEvidenceV1, SqliteQualificationError> {
     let version_number = rusqlite::version_number();
     validate_sqlite_runtime_version(version_number)?;
     let connection =
@@ -254,6 +259,104 @@ pub fn bundled_sqlite_runtime_evidence() -> Result<SqliteRuntimeEvidenceV1, Sqli
         page_size: SQLITE_PAGE_SIZE,
         wal_autocheckpoint_pages: SQLITE_WAL_AUTOCHECKPOINT_PAGES,
     })
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct SqliteFilesystemAdmissionKey {
+    canonical_root: PathBuf,
+    platform_identity: String,
+}
+
+impl SqliteFilesystemAdmissionKey {
+    fn for_root(root: &Path) -> Result<Self, SqliteQualificationError> {
+        Ok(Self {
+            canonical_root: root.to_path_buf(),
+            platform_identity: sqlite_filesystem_platform_identity(root)?,
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct SqliteOpenAdmissionCache {
+    runtime: Mutex<Option<SqliteRuntimeEvidenceV1>>,
+    filesystems: Mutex<HashSet<SqliteFilesystemAdmissionKey>>,
+}
+
+impl SqliteOpenAdmissionCache {
+    fn runtime_evidence_with(
+        &self,
+        inspect: impl FnOnce() -> Result<SqliteRuntimeEvidenceV1, SqliteQualificationError>,
+    ) -> Result<SqliteRuntimeEvidenceV1, SqliteQualificationError> {
+        let mut runtime =
+            self.runtime
+                .lock()
+                .map_err(|_| SqliteQualificationError::InvalidProfile {
+                    message: "SQLite runtime admission cache is poisoned".to_owned(),
+                })?;
+        if let Some(evidence) = runtime.as_ref() {
+            return Ok(evidence.clone());
+        }
+        let evidence = inspect()?;
+        *runtime = Some(evidence.clone());
+        Ok(evidence)
+    }
+
+    fn admit_filesystem_with(
+        &self,
+        key: SqliteFilesystemAdmissionKey,
+        inspect: impl FnOnce() -> String,
+    ) -> Result<(), SqliteQualificationError> {
+        let mut filesystems =
+            self.filesystems
+                .lock()
+                .map_err(|_| SqliteQualificationError::InvalidProfile {
+                    message: "SQLite filesystem admission cache is poisoned".to_owned(),
+                })?;
+        if filesystems.contains(&key) {
+            return Ok(());
+        }
+        let filesystem = inspect();
+        reject_unsupported_filesystem_name(&filesystem)?;
+        if filesystem.eq_ignore_ascii_case("unavailable") {
+            return Ok(());
+        }
+        filesystems.insert(key);
+        Ok(())
+    }
+}
+
+// The bundled runtime and a known local filesystem class are stable within a process for this
+// root identity. Profile headers and database metadata are deliberately validated on every open.
+static SQLITE_OPEN_ADMISSION_CACHE: OnceLock<SqliteOpenAdmissionCache> = OnceLock::new();
+
+fn sqlite_open_admission_cache() -> &'static SqliteOpenAdmissionCache {
+    SQLITE_OPEN_ADMISSION_CACHE.get_or_init(SqliteOpenAdmissionCache::default)
+}
+
+#[cfg(unix)]
+fn sqlite_filesystem_platform_identity(root: &Path) -> Result<String, SqliteQualificationError> {
+    use std::os::unix::fs::MetadataExt;
+
+    fs::metadata(root)
+        .map(|metadata| format!("device:{}", metadata.dev()))
+        .map_err(|error| io_error(root, error))
+}
+
+#[cfg(windows)]
+fn sqlite_filesystem_platform_identity(root: &Path) -> Result<String, SqliteQualificationError> {
+    use std::path::Component;
+
+    match root.components().next() {
+        Some(Component::Prefix(prefix)) => Ok(prefix.as_os_str().to_string_lossy().into_owned()),
+        _ => Err(SqliteQualificationError::InvalidProfile {
+            message: "canonical SQLite root has no Windows volume identity".to_owned(),
+        }),
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn sqlite_filesystem_platform_identity(root: &Path) -> Result<String, SqliteQualificationError> {
+    Ok(root.to_string_lossy().into_owned())
 }
 
 struct SqliteQualificationJournal {
@@ -1584,13 +1687,19 @@ fn write_profile_header(
 }
 
 fn reject_unsupported_filesystem(root: &Path) -> Result<(), SqliteQualificationError> {
-    let filesystem = qualification_filesystem_name(root);
+    let key = SqliteFilesystemAdmissionKey::for_root(root)?;
+    sqlite_open_admission_cache().admit_filesystem_with(key, || qualification_filesystem_name(root))
+}
+
+fn reject_unsupported_filesystem_name(filesystem: &str) -> Result<(), SqliteQualificationError> {
     let normalized = filesystem.to_ascii_lowercase();
     if ["nfs", "smb", "cifs", "afpfs", "fuse.rclone", "fuse.sshfs"]
         .iter()
         .any(|unsupported| normalized.contains(unsupported))
     {
-        return Err(SqliteQualificationError::UnsupportedFilesystem { filesystem });
+        return Err(SqliteQualificationError::UnsupportedFilesystem {
+            filesystem: filesystem.to_owned(),
+        });
     }
     Ok(())
 }
@@ -1744,13 +1853,16 @@ fn io_error(path: &Path, error: std::io::Error) -> SqliteQualificationError {
 #[cfg(test)]
 mod tests {
     use std::io::{Seek, SeekFrom, Write};
+    use std::path::PathBuf;
     use std::process::{Child, Command};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use std::{fs, thread};
 
     use super::{
         MINIMUM_SAFE_SQLITE_VERSION_NUMBER, SQLITE_DATABASE_FILE, SqliteDiagnosticStateV1,
-        SqliteQualificationProfile, SqliteRecoveryStateV1, bundled_sqlite_runtime_evidence,
+        SqliteFilesystemAdmissionKey, SqliteOpenAdmissionCache, SqliteQualificationProfile,
+        SqliteRecoveryStateV1, bundled_sqlite_runtime_evidence, inspect_bundled_sqlite_runtime,
         validate_sqlite_runtime_version,
     };
     use crate::bench_support::foundation::{
@@ -1776,6 +1888,100 @@ mod tests {
         assert!(evidence.version_number >= MINIMUM_SAFE_SQLITE_VERSION_NUMBER);
         assert!(!evidence.version.is_empty());
         assert!(!evidence.source_id.is_empty());
+    }
+
+    #[test]
+    fn open_admission_cache_reuses_only_successful_process_invariants() {
+        let cache = SqliteOpenAdmissionCache::default();
+        let runtime_probes = AtomicUsize::new(0);
+        let first_runtime = cache
+            .runtime_evidence_with(|| {
+                runtime_probes.fetch_add(1, Ordering::Relaxed);
+                inspect_bundled_sqlite_runtime()
+            })
+            .expect("first runtime admission");
+        let second_runtime = cache
+            .runtime_evidence_with(|| {
+                runtime_probes.fetch_add(1, Ordering::Relaxed);
+                inspect_bundled_sqlite_runtime()
+            })
+            .expect("cached runtime admission");
+        assert_eq!(first_runtime, second_runtime);
+        assert_eq!(runtime_probes.load(Ordering::Relaxed), 1);
+
+        let filesystem_probes = AtomicUsize::new(0);
+        let first_root = SqliteFilesystemAdmissionKey {
+            canonical_root: PathBuf::from("first-root"),
+            platform_identity: "volume-a".to_owned(),
+        };
+        cache
+            .admit_filesystem_with(first_root.clone(), || {
+                filesystem_probes.fetch_add(1, Ordering::Relaxed);
+                "apfs".to_owned()
+            })
+            .expect("first filesystem admission");
+        cache
+            .admit_filesystem_with(first_root, || {
+                panic!("a successful root admission must be reused")
+            })
+            .expect("cached filesystem admission");
+
+        let second_root = SqliteFilesystemAdmissionKey {
+            canonical_root: PathBuf::from("second-root"),
+            platform_identity: "volume-b".to_owned(),
+        };
+        assert!(
+            cache
+                .admit_filesystem_with(second_root.clone(), || {
+                    filesystem_probes.fetch_add(1, Ordering::Relaxed);
+                    "smb".to_owned()
+                })
+                .is_err()
+        );
+        cache
+            .admit_filesystem_with(second_root, || {
+                filesystem_probes.fetch_add(1, Ordering::Relaxed);
+                "ntfs".to_owned()
+            })
+            .expect("failed admission is not cached");
+
+        let unknown_root = SqliteFilesystemAdmissionKey {
+            canonical_root: PathBuf::from("unknown-root"),
+            platform_identity: "volume-c".to_owned(),
+        };
+        cache
+            .admit_filesystem_with(unknown_root.clone(), || {
+                filesystem_probes.fetch_add(1, Ordering::Relaxed);
+                "unavailable".to_owned()
+            })
+            .expect("unknown filesystem retains the existing admission behavior");
+        cache
+            .admit_filesystem_with(unknown_root, || {
+                filesystem_probes.fetch_add(1, Ordering::Relaxed);
+                "ext4".to_owned()
+            })
+            .expect("unknown filesystem is not cached");
+        assert_eq!(filesystem_probes.load(Ordering::Relaxed), 5);
+    }
+
+    #[test]
+    fn cached_open_admissions_do_not_bypass_root_metadata_validation() {
+        let root = tempfile::tempdir().expect("profile root");
+        drop(SqliteQualificationProfile::open(root.path()).expect("initialize profile"));
+        let connection = rusqlite::Connection::open(root.path().join(SQLITE_DATABASE_FILE))
+            .expect("metadata mutation connection");
+        connection
+            .pragma_update(None, "user_version", 2)
+            .expect("mutate user version");
+        drop(connection);
+
+        let error = SqliteQualificationProfile::open(root.path())
+            .expect_err("cached admissions must not bypass metadata validation");
+        assert!(
+            error
+                .to_string()
+                .contains("application/schema version mismatch")
+        );
     }
 
     #[test]
