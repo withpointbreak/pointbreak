@@ -369,7 +369,7 @@ pub(crate) enum RoutedBackend {
 // gates.
 const DEFAULT_READ_GRAPH_REFS: RoutedBackend = RoutedBackend::Gix;
 const DEFAULT_READ_IGNORE: RoutedBackend = RoutedBackend::Gix;
-const DEFAULT_READ_INVENTORY: RoutedBackend = RoutedBackend::Subprocess;
+const DEFAULT_READ_INVENTORY: RoutedBackend = RoutedBackend::Gix;
 const DEFAULT_READ_CONFIG_DISCOVERY: RoutedBackend = RoutedBackend::Subprocess;
 const DEFAULT_READ_REPO_DISCOVERY: RoutedBackend = RoutedBackend::Subprocess;
 const DEFAULT_IDENTITY_SCALARS: RoutedBackend = RoutedBackend::Subprocess;
@@ -580,7 +580,11 @@ mod tests {
         // `reset_selector`) so the assertion is deterministic even under
         // `POINTBREAK_GIT_BACKEND=gix`.
         inject_selector(BackendSelector::Compiled);
-        for class in [BackendClass::ReadIgnore, BackendClass::ReadGraphRefs] {
+        for class in [
+            BackendClass::ReadIgnore,
+            BackendClass::ReadGraphRefs,
+            BackendClass::ReadInventory,
+        ] {
             assert_eq!(
                 routed_backend(class).unwrap(),
                 RoutedBackend::Gix,
@@ -590,7 +594,6 @@ mod tests {
         for class in [
             BackendClass::ReadConfigDiscovery,
             BackendClass::ReadRepoDiscovery,
-            BackendClass::ReadInventory,
             BackendClass::IdentityScalars,
         ] {
             assert_eq!(
