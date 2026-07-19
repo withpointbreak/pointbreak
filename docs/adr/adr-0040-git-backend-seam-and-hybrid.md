@@ -298,3 +298,57 @@ cross-platform qualification made the boundary more exact. All preserve D1–D8;
   writer `config --get` multi-scope precedence on both platforms. The default build keeps a
   single-variant enum and stays byte-identical; shipping gix by default (making it non-optional)
   remains the owner-gated end-state flip, out of scope here.
+
+## Amendment: the Option-B default flip, exercised (2026-07-19)
+
+The owner-gated end-state flip that D8 and the Consequences reserved ("the release binary gains gix
+only at the owner-gated Option-B end-state flip") was exercised on 2026-07-19: `default = ["gix"]`
+landed as `3bc8b8f` and reached `main` with the integration branch (PR #603; issue #238 closed).
+This amendment records the decision, its measured price, and the security posture; it re-decides
+nothing else — D1–D8 stand, and the D5 boundary (capture diff and write-tree on subprocess,
+permanently) is untouched by the flip.
+
+**Superseded statements.** Wherever this ADR says the default build is gix-free — D1's
+"subprocess stays the default" build posture, D4's "a default `cargo test` compiles zero gix
+code", D7's release-closure and default-test-build gix-free lines, D8's "until then `gix` stays
+off-by-default", and the as-landed refinement lines "the default build stays gix-free" / "stays
+byte-identical … remains the owner-gated end-state flip" — those now describe the
+`--no-default-features` build, which remains the supported subprocess-only single-variant
+configuration. Unchanged: `gix-imara-diff` and the
+blob-diff/tree-editor capabilities still enter only through `gix-parity`, never the default build
+or the release binary; `POINTBREAK_GIT_BACKEND=subprocess` remains the runtime escape hatch for
+every routed class.
+
+**Measured price of the flip** (macOS arm64, tree `3bc8b8f`, default release profile, cold builds;
+CI on hosted runners):
+
+- Release binary: 13.2 MiB → 17.5 MiB (**+4.6 MB, +33%**).
+- Cold release build: **+30% wall** (25.2 s → 32.8 s), **+47% user CPU** (185 s → 273 s);
+  incremental builds are unaffected once the dependency tree is cached.
+- Dependency tree: **102 → 258 unique crates (+156)**.
+- CI wall: neutral in steady state (warm-cache run −1.4% vs the pre-flip baseline, within runner
+  noise; the first run after any manifest change pays a one-time cache-key rebuild).
+
+**What it buys** (the program's measured record): per-capture git overhead ~4–5×
+(≈130→30 ms macOS, ≈470→85 ms Windows), per-op reads 11–41×, per-capture spawns 9–11 → 2–4, local
+suite wall −11.6% vs the pre-integration baseline — now in the shipped default rather than behind a
+feature.
+
+**Security posture, stated plainly.** The flip widens the default supply-chain surface by 156
+pure-Rust crates (one pinned train, RUSTSEC/cargo-audit-tracked). This is the same *category* of
+standing upstream-tracking commitment that D6 weighed against libgit2 — milder per unit
+(memory-safe, advisory-integrated, no vendored C) but broader. Two further facts are recorded so
+the clean audit picture is not over-read: (a) the *current* locked graph audits clean
+(`cargo audit`: zero active advisories; the resolved `gix-features`/`gix-date` sit above the
+patched thresholds), and gitoxide's advisory history is non-empty but patched —
+RUSTSEC-2025-0021 (`gix-features` < 0.41.0) and RUSTSEC-2025-0140 (`gix-date` 0.10.0–0.11.1) —
+so the record shows some real scrutiny with fixes shipped; independently of that, gitoxide still
+receives substantially less fuzzing, deployment, and researcher attention than libgit2, so a
+clean audit is weaker evidence there than libgit2's long patched record, with cargo's own gix
+adoption and Rust's memory-safety guarantees as the counterweights; (b) routing reads in-process
+moves the
+malformed-repo-data failure domain into the pointbreak process itself — input that would previously
+fail in a `git` subprocess and surface as an error can now panic the process (Rust bounds the
+severity class; the runtime escape hatch and the `--no-default-features` build are the rollbacks).
+A capture-time identity fork attributable to the backend remains covered by the existing revisit
+trigger (immediate env-selector rollback + frozen-fixture audit).

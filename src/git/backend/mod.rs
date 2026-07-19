@@ -82,8 +82,8 @@ pub(crate) trait GitBackend: Send + Sync {
 
 /// The closed set of git backends resolved at the [`dispatch`] choke point. The
 /// subprocess backend is always present; the in-process `gix` backend is added
-/// behind the `gix` cargo feature, so the default build keeps a single-variant
-/// enum and stays byte-identical.
+/// by the `gix` cargo feature (in the default set since the default flip), so a
+/// `--no-default-features` build keeps a single-variant enum.
 pub(crate) enum GitBackendKind {
     Subprocess(SubprocessBackend),
     #[cfg(feature = "gix")]
@@ -245,9 +245,10 @@ static SUBPROCESS_BACKEND: SubprocessBackend = SubprocessBackend;
 const POINTBREAK_GIT_BACKEND: &str = "POINTBREAK_GIT_BACKEND";
 
 /// How the process resolves a routable operation's backend. `Compiled` follows
-/// the build-time default (subprocess for every routable operation in this
-/// phase); the two `Force*` values are the runtime override for diagnostics and
-/// immediate mitigation. Resolved once per process (see [`selector`]).
+/// each class's build-time default (the qualified classes route to gix when the
+/// `gix` feature is compiled in; the rest stay subprocess); the two `Force*`
+/// values are the runtime override for diagnostics and immediate mitigation.
+/// Resolved once per process (see [`selector`]).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BackendSelector {
     Compiled,
