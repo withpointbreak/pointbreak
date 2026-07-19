@@ -1,0 +1,9 @@
+[core]
+	repositoryformatversion = 0
+	bare = false
+	logallrefupdates = true
+[user]
+	name = Shore Tests
+	email = shore-tests@example.com
+[commit]
+	gpgsign = false

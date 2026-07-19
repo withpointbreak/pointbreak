@@ -25,3 +25,8 @@ src/cli/inspect/assets/app.js text eol=lf
 examples/review/checkout-refactor/*.json text eol=lf
 examples/review/checkout-refactor/exports/*.json text eol=lf
 assets/marketing/review-interface-capture.json text eol=lf
+
+# The frozen git-skeleton template is copied verbatim into a fixture repo's .git
+# directory; git reads HEAD and config literally, so pin them to LF and keep them
+# valid on a Windows autocrlf checkout.
+tests/support/assets/git-skeleton/** text eol=lf
