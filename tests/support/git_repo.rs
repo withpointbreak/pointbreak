@@ -19,19 +19,8 @@ pub struct GitRepo {
 impl GitRepo {
     pub fn new() -> Self {
         let root = TempDir::new().expect("create temp git repository directory");
-        let repo = Self { root };
-
-        repo.git(["init"]);
-        // Force a deterministic default branch so a capture (and the auto-recorded
-        // capture-time ref name that now appears in documents) does not depend on
-        // the host's init.defaultBranch, which differs between developer machines
-        // (main) and CI (master).
-        repo.git(["symbolic-ref", "HEAD", "refs/heads/main"]);
-        repo.git(["config", "user.name", "Shore Tests"]);
-        repo.git(["config", "user.email", "shore-tests@example.com"]);
-        repo.git(["config", "commit.gpgsign", "false"]);
-
-        repo
+        copy_git_skeleton(root.path().join(".git"));
+        Self { root }
     }
 
     pub fn path(&self) -> &Path {
@@ -41,11 +30,7 @@ impl GitRepo {
     pub fn init_at(path: impl AsRef<Path>) {
         let path = path.as_ref();
         fs::create_dir_all(path).expect("create nested git repository directory");
-        run_git(path, ["init"]);
-        run_git(path, ["symbolic-ref", "HEAD", "refs/heads/main"]);
-        run_git(path, ["config", "user.name", "Shore Tests"]);
-        run_git(path, ["config", "user.email", "shore-tests@example.com"]);
-        run_git(path, ["config", "commit.gpgsign", "false"]);
+        copy_git_skeleton(path.join(".git"));
     }
 
     pub fn read(&self, path: impl AsRef<Path>) -> String {
@@ -113,6 +98,62 @@ impl Default for GitRepo {
     }
 }
 
+/// Bootstrap a `.git` directory at `git_dir` by copying the frozen skeleton
+/// template — an empty repository on the deterministic `refs/heads/main` branch,
+/// with the fixture identity baked in — without spawning `git`. Baking the branch
+/// keeps a capture (and the auto-recorded capture-time ref name that appears in
+/// documents) independent of the host's `init.defaultBranch`, which differs
+/// between developer machines (main) and CI (master). The template carries the
+/// content files a fresh `git init` writes (`HEAD`, `config`, `info/exclude`);
+/// the always-empty scaffold directories git cannot track are recreated here so a
+/// later `add`/`commit` on real git has the structure it expects.
+fn copy_git_skeleton(git_dir: impl AsRef<Path>) {
+    let git_dir = git_dir.as_ref();
+    let skeleton = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/assets/git-skeleton");
+    copy_dir_recursive(&skeleton, git_dir);
+    for scaffold in ["objects/info", "objects/pack", "refs/heads", "refs/tags"] {
+        fs::create_dir_all(git_dir.join(scaffold)).expect("create git skeleton directory");
+    }
+}
+
+fn copy_dir_recursive(src: &Path, dest: &Path) {
+    fs::create_dir_all(dest).expect("create git skeleton directory");
+    for entry in fs::read_dir(src).expect("read git skeleton template") {
+        let entry = entry.expect("read git skeleton entry");
+        let target = dest.join(entry.file_name());
+        if entry.file_type().expect("stat git skeleton entry").is_dir() {
+            copy_dir_recursive(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), &target).expect("copy git skeleton file");
+        }
+    }
+}
+
+// Per-thread bootstrap spawn counter. A test resets it, bootstraps a fixture,
+// and asserts on the exact number of `git` subprocesses the bootstrap paid.
+// Keeping it thread-local makes each test's reset/act/assert protocol immune to
+// concurrent fixtures on other threads under a shared-process runner, where a
+// process-global counter would race across tests.
+#[cfg(test)]
+thread_local! {
+    static GIT_SPAWN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_git_spawn() {
+    GIT_SPAWN_COUNT.with(|cell| cell.set(cell.get() + 1));
+}
+
+#[cfg(test)]
+pub fn git_spawn_count() -> usize {
+    GIT_SPAWN_COUNT.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub fn reset_git_spawn_count() {
+    GIT_SPAWN_COUNT.with(|cell| cell.set(0));
+}
+
 fn run_git<I, S>(cwd: &Path, args: I) -> GitOutput
 where
     I: IntoIterator<Item = S>,
@@ -122,6 +163,8 @@ where
         .into_iter()
         .map(|arg| arg.as_ref().to_owned())
         .collect::<Vec<_>>();
+    #[cfg(test)]
+    record_git_spawn();
     let output = Command::new("git")
         .args(&args)
         .current_dir(cwd)
