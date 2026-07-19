@@ -1,0 +1,12 @@
+{
+  "schema": "pointbreak.segment-crash-cases.v1",
+  "cases": [
+    { "boundary": "record_bytes", "expected": "discard_uncommitted_suffix" },
+    { "boundary": "commit_footer", "expected": "discard_uncommitted_suffix" },
+    { "boundary": "tail_sync", "expected": "discard_uncommitted_suffix" },
+    { "boundary": "head_publication", "expected": "recover_committed_and_rebuild_index" },
+    { "boundary": "index_publication", "expected": "recover_committed" },
+    { "boundary": "sealed_generation_sync", "expected": "ignore_orphan_generation" },
+    { "boundary": "generation_publication", "expected": "recover_published_generation" }
+  ]
+}

@@ -7,6 +7,7 @@ mod corpus;
 mod documents;
 mod proof;
 mod receipt;
+mod segments;
 mod sqlite;
 
 use std::path::Path;
@@ -20,6 +21,7 @@ pub use corpus::*;
 pub use documents::*;
 pub use proof::*;
 pub use receipt::*;
+pub use segments::*;
 pub use sqlite::*;
 
 /// Report the filesystem type containing a qualification workload.
