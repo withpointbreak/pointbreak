@@ -2472,7 +2472,13 @@ fn native_file_allocation(path: &Path, _metadata: &fs::Metadata) -> Result<u64, 
         fn GetCompressedFileSizeW(file_name: *const u16, file_size_high: *mut u32) -> u32;
     }
 
-    let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let canonical = path.canonicalize().map_err(|error| {
+        format!(
+            "failed to canonicalize {} for native allocation: {error}",
+            path.display()
+        )
+    })?;
+    let mut wide = canonical.as_os_str().encode_wide().collect::<Vec<_>>();
     wide.push(0);
     let mut high = 0_u32;
     // SAFETY: `wide` is NUL-terminated and remains alive for the call; `high`
