@@ -682,6 +682,7 @@ pub fn classify_qualification_filesystem(name: &str) -> QualificationFilesystemD
     }
     if [
         "apfs",
+        "ext2/ext3",
         "ext4",
         "xfs",
         "btrfs",
@@ -2777,6 +2778,10 @@ mod tests {
         );
         assert_eq!(
             classify_qualification_filesystem("ntfs"),
+            QualificationFilesystemDispositionV1::LocalProofEligible
+        );
+        assert_eq!(
+            classify_qualification_filesystem("ext2/ext3"),
             QualificationFilesystemDispositionV1::LocalProofEligible
         );
         assert_eq!(
