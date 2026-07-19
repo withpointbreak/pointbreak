@@ -1,7 +1,7 @@
 //! Deterministic smoke entry point for durable-store qualification workloads.
 //!
-//! This target establishes workload identity and metadata only. It does not
-//! select or time a storage implementation.
+//! The default modes establish workload and transfer identity. The explicit
+//! SQLite smoke mode exercises only the developer-gated qualification profile.
 
 use std::process::{Command, ExitCode};
 
@@ -10,17 +10,18 @@ use pointbreak::bench_support::foundation::{
     ExactBundleManifestV2, ExactBundlePublicationReportV2, ImportReceiptPolicyPrototypeV1,
     ImportReceiptPrototypeV1, LogicalCapabilityEpochV1, QualificationCorpusError,
     QualificationCorpusSummaryV1, QualificationSnapshotTotalsV1, ReceiptBackupConsequenceV1,
-    ReceiptProjectionConsequenceV1, SnapshotDriftReportV1, load_frozen_legacy_manifest_from_env,
-    modeled_post_foundation_manifest, publish_exact_bundle_v2, qualification_filesystem_name,
+    ReceiptProjectionConsequenceV1, SnapshotDriftReportV1, SqliteWorkloadEvidenceV1,
+    load_frozen_legacy_manifest_from_env, modeled_post_foundation_manifest,
+    publish_exact_bundle_v2, qualification_filesystem_name, run_sqlite_workload,
     synthetic_legacy_manifest,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 const USAGE: &str = "\
-Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--transfer-smoke|--help]\n\
+Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--transfer-smoke|--sqlite-smoke|--help]\n\
 \n\
-Validates deterministic workload or exact-transfer contracts and prints one JSON metadata record.\n\
+Validates deterministic workload, exact-transfer, or SQLite qualification contracts and prints JSON.\n\
 No production storage implementation is selected or timed by this target.\n";
 
 #[derive(Serialize)]
@@ -98,6 +99,13 @@ struct TransferSmokeMetadataV1 {
 }
 
 #[derive(Serialize)]
+struct SqliteSmokeMetadataV1 {
+    schema: &'static str,
+    mode: &'static str,
+    workloads: Vec<SqliteWorkloadEvidenceV1>,
+}
+
+#[derive(Serialize)]
 struct InterruptedPublicationMetadataV1 {
     content_count: usize,
     event_count: usize,
@@ -118,12 +126,16 @@ fn main() -> ExitCode {
         print!("{USAGE}");
         return ExitCode::SUCCESS;
     }
+    let requested_modes = ["--smoke", "--transfer-smoke", "--sqlite-smoke"]
+        .into_iter()
+        .filter(|mode| arguments.iter().any(|argument| argument == mode))
+        .count();
     if arguments.iter().any(|argument| {
-        argument != "--smoke" && argument != "--transfer-smoke" && argument != "--bench"
-    }) || (arguments.iter().any(|argument| argument == "--smoke")
-        && arguments
-            .iter()
-            .any(|argument| argument == "--transfer-smoke"))
+        argument != "--smoke"
+            && argument != "--transfer-smoke"
+            && argument != "--sqlite-smoke"
+            && argument != "--bench"
+    }) || requested_modes > 1
     {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
@@ -148,6 +160,25 @@ fn main() -> ExitCode {
         };
     }
 
+    if arguments
+        .iter()
+        .any(|argument| argument == "--sqlite-smoke")
+    {
+        return match sqlite_smoke_metadata() {
+            Ok(metadata) => {
+                println!(
+                    "{}",
+                    serde_json::to_string(&metadata).expect("SQLite smoke metadata serializes")
+                );
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("store foundation SQLite smoke failed: {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
+
     match smoke_metadata() {
         Ok((metadata, external_is_valid)) => {
             println!(
@@ -165,6 +196,21 @@ fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+fn sqlite_smoke_metadata() -> Result<SqliteSmokeMetadataV1, String> {
+    let roots = tempfile::tempdir().map_err(|error| error.to_string())?;
+    let legacy = synthetic_legacy_manifest().map_err(|error| error.to_string())?;
+    let modeled = modeled_post_foundation_manifest().map_err(|error| error.to_string())?;
+    let workloads = vec![
+        run_sqlite_workload(&roots.path().join("synthetic-legacy"), &legacy)?,
+        run_sqlite_workload(&roots.path().join("modeled-foundation"), &modeled)?,
+    ];
+    Ok(SqliteSmokeMetadataV1 {
+        schema: "pointbreak.store-foundation-sqlite-smoke.v1",
+        mode: "non_timing_sqlite_qualification",
+        workloads,
+    })
 }
 
 fn transfer_smoke_metadata() -> Result<TransferSmokeMetadataV1, String> {

@@ -1,0 +1,9 @@
+{
+  "schema": "pointbreak.sqlite-corruption-cases.v1",
+  "cases": [
+    "truncated_pbrf",
+    "decoded_digest_mismatch",
+    "btree_page_corruption",
+    "interrupted_checkpoint"
+  ]
+}
