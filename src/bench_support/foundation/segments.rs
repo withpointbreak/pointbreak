@@ -19,7 +19,9 @@ use super::{
 };
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
 
-pub const SEGMENT_QUALIFICATION_PROFILE_ID_V1: &str = "pointbreak.bounded-segments-pbrf.v1";
+pub const SEGMENT_QUALIFICATION_PROFILE_ID_V2: &str = "pointbreak.bounded-segments-pbrf.v2";
+#[doc(hidden)]
+pub const SEGMENT_QUALIFICATION_PROFILE_ID_V1: &str = SEGMENT_QUALIFICATION_PROFILE_ID_V2;
 pub const SEGMENT_SIZE_CANDIDATES_V1: [u64; 3] = [256 * 1024, 1024 * 1024, 4 * 1024 * 1024];
 pub const DEFAULT_SEGMENT_BYTES_V1: u64 = 1024 * 1024;
 pub const SEGMENT_FRAME_HEADER_LEN_V1: usize = 96;
@@ -43,6 +45,12 @@ const FRAME_VERSION: u16 = 1;
 const MAX_LOGICAL_KEY_BYTES: usize = 4096;
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+thread_local! {
+    static TEST_VISIBLE_SCAN_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TEST_DIRECTORY_SYNC_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SegmentFailurePointV1 {
@@ -288,7 +296,7 @@ impl SegmentQualificationProfile {
             fs::create_dir_all(root.join(PIN_DIRECTORY))
                 .map_err(|error| io_error(&root.join(PIN_DIRECTORY), error))?;
             let active_file = active_relative_path(0);
-            create_preallocated(&root.join(&active_file), segment_bytes)?;
+            create_active_carrier(&root.join(&active_file))?;
             let head = SegmentHeadV1 {
                 schema: "pointbreak.segment-head.v1".to_owned(),
                 active_file,
@@ -482,12 +490,8 @@ impl QualificationJournal for SegmentQualificationJournal {
     fn read(&self, logical_key: &str) -> Result<Option<QualificationEntry>, String> {
         let _lock = SegmentLock::acquire(&self.root).map_err(|error| error.to_string())?;
         let head = read_head(&self.root).map_err(|error| error.to_string())?;
-        let frames = scan_visible(&self.root, &head, self.segment_bytes)
-            .map_err(|error| error.to_string())?;
-        Ok(frames
-            .into_iter()
-            .find(|frame| frame.entry.logical_key == logical_key)
-            .map(|frame| frame.entry))
+        read_with_rebuildable_index(&self.root, &head, self.segment_bytes, logical_key)
+            .map_err(|error| error.to_string())
     }
 
     fn list(&self) -> Result<Vec<QualificationEntry>, String> {
@@ -549,7 +553,7 @@ impl SegmentQualificationJournal {
             }
             Ok(())
         })?;
-        let (_lock, mut head, frames) =
+        let (_lock, mut head, mut frames) =
             measure_profile_stage(&mut recorder, "lock_head_visible_scan", || {
                 let lock = SegmentLock::acquire(&self.root)?;
                 let head = read_head(&self.root)?;
@@ -583,9 +587,13 @@ impl SegmentQualificationJournal {
                 if head.committed_active_bytes + frame_bytes > self.segment_bytes {
                     seal_active_locked(&self.root, self.segment_bytes, None)?;
                     head = read_head(&self.root)?;
+                    frames = scan_visible(&self.root, &head, self.segment_bytes)?;
                 }
                 Ok((frame, frame_bytes))
             })?;
+        let appended_offset = head.committed_active_bytes;
+        let appended_sequence = head.next_sequence;
+        let appended_carrier = head.active_file.clone();
         measure_profile_stage(&mut recorder, "tail_write_and_sync", || {
             let active_path = self.root.join(&head.active_file);
             let body_len = frame.len() - SEGMENT_FRAME_FOOTER_LEN_V1;
@@ -611,11 +619,20 @@ impl SegmentQualificationJournal {
         head.next_sequence += 1;
         measure_profile_stage(&mut recorder, "head_publication", || {
             write_json_atomic(&self.root.join(SEGMENT_HEAD_FILE_V1), &head)?;
-            sync_directory(&self.root)?;
             inject_if(failure, SegmentFailurePointV1::AfterHeadPublish)
         })?;
         measure_profile_stage(&mut recorder, "index_scan_and_publication", || {
-            let frames = scan_visible(&self.root, &head, self.segment_bytes)?;
+            frames.push(ScannedFrame {
+                entry: QualificationEntry {
+                    logical_key: logical_key.to_owned(),
+                    decoded_sha256: sha256_bytes_hex(decoded_bytes),
+                    decoded_bytes: decoded_bytes.to_vec(),
+                },
+                sequence: appended_sequence,
+                carrier: appended_carrier,
+                offset: appended_offset,
+                frame_bytes,
+            });
             write_index(&self.root, &head, &frames)?;
             inject_if(failure, SegmentFailurePointV1::AfterIndexPublish)
         })?;
@@ -900,7 +917,7 @@ pub fn run_segment_workload(
         selected_counts.ok_or_else(|| "selected segment size was not measured".to_owned())?;
     Ok(SegmentWorkloadEvidenceV1 {
         schema: "pointbreak.segment-workload-evidence.v1".to_owned(),
-        physical_profile_id: SEGMENT_QUALIFICATION_PROFILE_ID_V1.to_owned(),
+        physical_profile_id: SEGMENT_QUALIFICATION_PROFILE_ID_V2.to_owned(),
         manifest_sha256: manifest.manifest_sha256.clone(),
         records: manifest.records.len() as u64,
         journal_records,
@@ -1019,7 +1036,7 @@ fn seal_active_locked(
     inject_if(failure, SegmentFailurePointV1::AfterSealedGenerationSync)?;
 
     let new_active = active_relative_path(generation);
-    create_preallocated(&root.join(&new_active), segment_bytes)?;
+    create_active_carrier(&root.join(&new_active))?;
     let published = SegmentHeadV1 {
         schema: head.schema.clone(),
         active_file: new_active,
@@ -1094,6 +1111,8 @@ fn scan_visible(
     head: &SegmentHeadV1,
     segment_bytes: u64,
 ) -> Result<Vec<ScannedFrame>, SegmentQualificationError> {
+    #[cfg(test)]
+    TEST_VISIBLE_SCAN_CALLS.with(|calls| calls.set(calls.get() + 1));
     let mut frames = Vec::new();
     if let Some(generation) = head.current_generation {
         frames.extend(scan_generation(root, generation, segment_bytes)?);
@@ -1188,78 +1207,87 @@ fn scan_segment(
     let mut frames = Vec::new();
     while offset < bytes.len() {
         let remaining = &bytes[offset..];
-        if remaining.len() < SEGMENT_FRAME_HEADER_LEN_V1 + SEGMENT_FRAME_FOOTER_LEN_V1 {
-            return Err(frame_corruption(path, offset, "truncated frame"));
-        }
-        let header = &remaining[..SEGMENT_FRAME_HEADER_LEN_V1];
-        if &header[0..4] != FRAME_MAGIC
-            || read_u16(header, 4)? != FRAME_VERSION
-            || read_u16(header, 6)? as usize != SEGMENT_FRAME_HEADER_LEN_V1
-            || header[20..24].iter().any(|byte| *byte != 0)
-            || Sha256::digest(&header[..64]).as_slice() != &header[64..96]
-        {
-            return Err(frame_corruption(path, offset, "invalid frame header"));
-        }
-        let sequence = read_u64(header, 8)?;
-        let key_len = read_u32(header, 16)? as usize;
-        let pbrf_len = read_u64(header, 24)? as usize;
-        if key_len == 0 || key_len > MAX_LOGICAL_KEY_BYTES {
-            return Err(frame_corruption(path, offset, "invalid logical-key length"));
-        }
-        let frame_len = SEGMENT_FRAME_HEADER_LEN_V1
-            .checked_add(key_len)
-            .and_then(|value| value.checked_add(pbrf_len))
-            .and_then(|value| value.checked_add(SEGMENT_FRAME_FOOTER_LEN_V1))
-            .ok_or_else(|| frame_corruption(path, offset, "frame length overflow"))?;
-        if frame_len > remaining.len() {
-            return Err(frame_corruption(path, offset, "truncated committed frame"));
-        }
-        let key_start = SEGMENT_FRAME_HEADER_LEN_V1;
-        let pbrf_start = key_start + key_len;
-        let footer_start = pbrf_start + pbrf_len;
-        let key = std::str::from_utf8(&remaining[key_start..pbrf_start]).map_err(|error| {
-            frame_corruption(path, offset, &format!("logical key is not UTF-8: {error}"))
-        })?;
-        if logical_key_digest(key).as_slice() != &header[32..64] {
-            return Err(frame_corruption(
-                path,
-                offset,
-                "logical-key digest mismatch",
-            ));
-        }
-        let footer = &remaining[footer_start..frame_len];
-        if &footer[0..4] != FOOTER_MAGIC
-            || read_u16(footer, 4)? != FRAME_VERSION
-            || read_u16(footer, 6)? as usize != SEGMENT_FRAME_FOOTER_LEN_V1
-            || read_u64(footer, 8)? != sequence
-            || read_u64(footer, 16)? != frame_len as u64
-            || footer[56..64].iter().any(|byte| *byte != 0)
-            || Sha256::digest(&remaining[..footer_start]).as_slice() != &footer[24..56]
-        {
-            return Err(frame_corruption(path, offset, "invalid commit footer"));
-        }
-        let decoded =
-            PhysicalRecordV1::decode(&remaining[pbrf_start..footer_start], &NeverCancelled)
-                .map_err(|error| frame_corruption(path, offset, &error.to_string()))?;
-        if decoded.record_kind != PhysicalRecordKindV1::Event
-            || decoded.logical_key_digest != logical_key_digest(key)
-        {
-            return Err(frame_corruption(path, offset, "PBRF identity mismatch"));
-        }
-        frames.push(ScannedFrame {
-            entry: QualificationEntry {
-                logical_key: key.to_owned(),
-                decoded_sha256: sha256_bytes_hex(&decoded.decoded_bytes),
-                decoded_bytes: decoded.decoded_bytes,
-            },
-            sequence,
-            carrier: carrier.clone(),
-            offset: offset as u64,
-            frame_bytes: frame_len as u64,
-        });
-        offset += frame_len;
+        let frame = decode_scanned_frame(path, &carrier, remaining, offset)?;
+        offset += frame.frame_bytes as usize;
+        frames.push(frame);
     }
     Ok(frames)
+}
+
+fn decode_scanned_frame(
+    path: &Path,
+    carrier: &str,
+    remaining: &[u8],
+    offset: usize,
+) -> Result<ScannedFrame, SegmentQualificationError> {
+    if remaining.len() < SEGMENT_FRAME_HEADER_LEN_V1 + SEGMENT_FRAME_FOOTER_LEN_V1 {
+        return Err(frame_corruption(path, offset, "truncated frame"));
+    }
+    let header = &remaining[..SEGMENT_FRAME_HEADER_LEN_V1];
+    if &header[0..4] != FRAME_MAGIC
+        || read_u16(header, 4)? != FRAME_VERSION
+        || read_u16(header, 6)? as usize != SEGMENT_FRAME_HEADER_LEN_V1
+        || header[20..24].iter().any(|byte| *byte != 0)
+        || Sha256::digest(&header[..64]).as_slice() != &header[64..96]
+    {
+        return Err(frame_corruption(path, offset, "invalid frame header"));
+    }
+    let sequence = read_u64(header, 8)?;
+    let key_len = read_u32(header, 16)? as usize;
+    let pbrf_len = read_u64(header, 24)? as usize;
+    if key_len == 0 || key_len > MAX_LOGICAL_KEY_BYTES {
+        return Err(frame_corruption(path, offset, "invalid logical-key length"));
+    }
+    let frame_len = SEGMENT_FRAME_HEADER_LEN_V1
+        .checked_add(key_len)
+        .and_then(|value| value.checked_add(pbrf_len))
+        .and_then(|value| value.checked_add(SEGMENT_FRAME_FOOTER_LEN_V1))
+        .ok_or_else(|| frame_corruption(path, offset, "frame length overflow"))?;
+    if frame_len > remaining.len() {
+        return Err(frame_corruption(path, offset, "truncated committed frame"));
+    }
+    let key_start = SEGMENT_FRAME_HEADER_LEN_V1;
+    let pbrf_start = key_start + key_len;
+    let footer_start = pbrf_start + pbrf_len;
+    let key = std::str::from_utf8(&remaining[key_start..pbrf_start]).map_err(|error| {
+        frame_corruption(path, offset, &format!("logical key is not UTF-8: {error}"))
+    })?;
+    if logical_key_digest(key).as_slice() != &header[32..64] {
+        return Err(frame_corruption(
+            path,
+            offset,
+            "logical-key digest mismatch",
+        ));
+    }
+    let footer = &remaining[footer_start..frame_len];
+    if &footer[0..4] != FOOTER_MAGIC
+        || read_u16(footer, 4)? != FRAME_VERSION
+        || read_u16(footer, 6)? as usize != SEGMENT_FRAME_FOOTER_LEN_V1
+        || read_u64(footer, 8)? != sequence
+        || read_u64(footer, 16)? != frame_len as u64
+        || footer[56..64].iter().any(|byte| *byte != 0)
+        || Sha256::digest(&remaining[..footer_start]).as_slice() != &footer[24..56]
+    {
+        return Err(frame_corruption(path, offset, "invalid commit footer"));
+    }
+    let decoded = PhysicalRecordV1::decode(&remaining[pbrf_start..footer_start], &NeverCancelled)
+        .map_err(|error| frame_corruption(path, offset, &error.to_string()))?;
+    if decoded.record_kind != PhysicalRecordKindV1::Event
+        || decoded.logical_key_digest != logical_key_digest(key)
+    {
+        return Err(frame_corruption(path, offset, "PBRF identity mismatch"));
+    }
+    Ok(ScannedFrame {
+        entry: QualificationEntry {
+            logical_key: key.to_owned(),
+            decoded_sha256: sha256_bytes_hex(&decoded.decoded_bytes),
+            decoded_bytes: decoded.decoded_bytes,
+        },
+        sequence,
+        carrier: carrier.to_owned(),
+        offset: offset as u64,
+        frame_bytes: frame_len as u64,
+    })
 }
 
 fn validate_visible_frames(
@@ -1332,13 +1360,12 @@ fn recover_active_tail(
     file.read_exact(&mut suffix)
         .map_err(|error| io_error(&path, error))?;
     let dirty = suffix.iter().filter(|byte| **byte != 0).count() as u64;
-    if dirty > 0 {
-        file.seek(SeekFrom::Start(head.committed_active_bytes))
-            .map_err(|error| io_error(&path, error))?;
-        let zeros = vec![0_u8; suffix_len as usize];
-        file.write_all(&zeros)
+    if suffix_len > 0 {
+        file.set_len(head.committed_active_bytes)
             .and_then(|_| file.sync_all())
             .map_err(|error| io_error(&path, error))?;
+    }
+    if dirty > 0 {
         Ok(SegmentRecoveryStateV1::DiscardedUncommittedSuffix { bytes: dirty })
     } else {
         Ok(SegmentRecoveryStateV1::Healthy)
@@ -1357,6 +1384,136 @@ fn ensure_index(
         write_json_atomic(&path, &expected)?;
     }
     Ok(())
+}
+
+fn read_with_rebuildable_index(
+    root: &Path,
+    head: &SegmentHeadV1,
+    segment_bytes: u64,
+    logical_key: &str,
+) -> Result<Option<QualificationEntry>, SegmentQualificationError> {
+    validate_head(head, segment_bytes)?;
+    if let Some(entry) = try_read_indexed_entry(root, head, segment_bytes, logical_key) {
+        return Ok(Some(entry));
+    }
+
+    let frames = scan_visible(root, head, segment_bytes)?;
+    validate_visible_frames(head, &frames)?;
+    ensure_index(root, head, &frames)?;
+    Ok(frames
+        .into_iter()
+        .find(|frame| frame.entry.logical_key == logical_key)
+        .map(|frame| frame.entry))
+}
+
+fn try_read_indexed_entry(
+    root: &Path,
+    head: &SegmentHeadV1,
+    segment_bytes: u64,
+    logical_key: &str,
+) -> Option<QualificationEntry> {
+    let index: SegmentIndexV1 = read_json(&root.join(SEGMENT_INDEX_FILE_V1)).ok()?;
+    if index.schema != "pointbreak.segment-index.v1"
+        || index.head_marker != head.head_marker
+        || index.entries.len() as u64 != head.head_marker
+        || index
+            .entries
+            .windows(2)
+            .any(|entries| entries[0].logical_key.as_bytes() >= entries[1].logical_key.as_bytes())
+    {
+        return None;
+    }
+    let mut sequences = BTreeSet::new();
+    if index.entries.iter().any(|entry| {
+        entry.sequence == 0
+            || entry.sequence >= head.next_sequence
+            || !sequences.insert(entry.sequence)
+    }) {
+        return None;
+    }
+    let position = index
+        .entries
+        .binary_search_by(|entry| entry.logical_key.as_bytes().cmp(logical_key.as_bytes()))
+        .ok()?;
+    let indexed = &index.entries[position];
+    if indexed.frame_bytes == 0 || indexed.frame_bytes > segment_bytes {
+        return None;
+    }
+    let carrier_path = visible_index_carrier_path(root, head, indexed)?;
+    let mut file = File::open(&carrier_path).ok()?;
+    let end = indexed.offset.checked_add(indexed.frame_bytes)?;
+    let file_len = file.metadata().ok()?.len();
+    if end > file_len || file_len > segment_bytes {
+        return None;
+    }
+    file.seek(SeekFrom::Start(indexed.offset)).ok()?;
+    let frame_len = usize::try_from(indexed.frame_bytes).ok()?;
+    let offset = usize::try_from(indexed.offset).ok()?;
+    let mut bytes = vec![0_u8; frame_len];
+    file.read_exact(&mut bytes).ok()?;
+    let frame = decode_scanned_frame(&carrier_path, &indexed.carrier, &bytes, offset).ok()?;
+    if frame.frame_bytes != indexed.frame_bytes
+        || frame.offset != indexed.offset
+        || frame.carrier != indexed.carrier
+        || frame.sequence != indexed.sequence
+        || frame.entry.logical_key != indexed.logical_key
+        || frame.entry.decoded_sha256 != indexed.decoded_sha256
+    {
+        return None;
+    }
+    Some(frame.entry)
+}
+
+fn visible_index_carrier_path(
+    root: &Path,
+    head: &SegmentHeadV1,
+    entry: &SegmentIndexEntryV1,
+) -> Option<PathBuf> {
+    let relative = Path::new(&entry.carrier);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+    let end = entry.offset.checked_add(entry.frame_bytes)?;
+    let sealed_encoded_bytes = if entry.carrier == head.active_file {
+        if end > head.committed_active_bytes {
+            return None;
+        }
+        None
+    } else {
+        let generation = head.current_generation?;
+        let prefix = format!("{GENERATION_DIRECTORY}/{generation:016}/");
+        let name = entry.carrier.strip_prefix(&prefix)?;
+        if name.contains('/') || !name.starts_with("events-") || !name.ends_with(".seg") {
+            return None;
+        }
+        let manifest: SealedGenerationManifestV1 =
+            read_json(&generation_directory_path(root, generation).join(GENERATION_MANIFEST_FILE))
+                .ok()?;
+        if manifest.schema != "pointbreak.sealed-generation.v1" || manifest.generation != generation
+        {
+            return None;
+        }
+        Some(
+            manifest
+                .carriers
+                .iter()
+                .find(|carrier| carrier.relative_path == name)?
+                .encoded_bytes,
+        )
+    };
+    let path = root.join(&entry.carrier);
+    let metadata = fs::symlink_metadata(&path).ok()?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || sealed_encoded_bytes.is_some_and(|expected| expected != metadata.len())
+    {
+        return None;
+    }
+    Some(path)
 }
 
 fn write_index(
@@ -1600,7 +1757,7 @@ fn sealed_segment_paths(directory: &Path) -> Result<Vec<PathBuf>, SegmentQualifi
 
 fn segment_descriptor() -> QualificationProfileDescriptorV1 {
     QualificationProfileDescriptorV1 {
-        physical_profile_id: SEGMENT_QUALIFICATION_PROFILE_ID_V1.to_owned(),
+        physical_profile_id: SEGMENT_QUALIFICATION_PROFILE_ID_V2.to_owned(),
         logical_capabilities: LogicalCapabilityEpochV1::foundation(),
     }
 }
@@ -1799,7 +1956,7 @@ fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), SegmentQualificatio
         .map_err(|error| io_error(path, error))
 }
 
-fn create_preallocated(path: &Path, bytes: u64) -> Result<(), SegmentQualificationError> {
+fn create_active_carrier(path: &Path) -> Result<(), SegmentQualificationError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| io_error(parent, error))?;
     }
@@ -1808,9 +1965,7 @@ fn create_preallocated(path: &Path, bytes: u64) -> Result<(), SegmentQualificati
         .create_new(true)
         .open(path)
         .map_err(|error| io_error(path, error))?;
-    file.set_len(bytes)
-        .and_then(|_| file.sync_all())
-        .map_err(|error| io_error(path, error))
+    file.sync_all().map_err(|error| io_error(path, error))
 }
 
 fn copy_file_synced(source: &Path, destination: &Path) -> Result<(), SegmentQualificationError> {
@@ -1906,6 +2061,8 @@ fn sync_file(file: File, path: &Path) -> Result<(), SegmentQualificationError> {
 
 #[cfg(not(target_os = "windows"))]
 fn sync_directory(path: &Path) -> Result<(), SegmentQualificationError> {
+    #[cfg(test)]
+    TEST_DIRECTORY_SYNC_CALLS.with(|calls| calls.set(calls.get() + 1));
     File::open(path)
         .and_then(|file| file.sync_all())
         .map_err(|error| io_error(path, error))
@@ -1913,6 +2070,8 @@ fn sync_directory(path: &Path) -> Result<(), SegmentQualificationError> {
 
 #[cfg(target_os = "windows")]
 fn sync_directory(_path: &Path) -> Result<(), SegmentQualificationError> {
+    #[cfg(test)]
+    TEST_DIRECTORY_SYNC_CALLS.with(|calls| calls.set(calls.get() + 1));
     Ok(())
 }
 
@@ -1975,6 +2134,146 @@ mod tests {
             modeled_evidence.selected_segment_bytes,
             DEFAULT_SEGMENT_BYTES_V1
         );
+    }
+
+    #[test]
+    fn active_carrier_grows_only_to_its_committed_length() {
+        let root = tempfile::tempdir().expect("profile root");
+        let profile = SegmentQualificationProfile::open(root.path()).expect("segment profile");
+        let before = profile.segment_inventory_evidence().unwrap();
+        let active = root.path().join(&before.active_file);
+
+        assert_eq!(fs::metadata(&active).unwrap().len(), 0);
+        assert_eq!(before.active_committed_bytes, 0);
+        assert_eq!(before.active_slack_bytes, DEFAULT_SEGMENT_BYTES_V1);
+        assert_eq!(
+            profile.descriptor().unwrap().physical_profile_id,
+            "pointbreak.bounded-segments-pbrf.v2"
+        );
+
+        profile.journal().create_once("events/a", b"a").unwrap();
+        let after = profile.segment_inventory_evidence().unwrap();
+        assert_eq!(
+            fs::metadata(root.path().join(&after.active_file))
+                .unwrap()
+                .len(),
+            after.active_committed_bytes
+        );
+        assert!(after.active_committed_bytes < DEFAULT_SEGMENT_BYTES_V1);
+    }
+
+    #[test]
+    fn append_reuses_the_visible_scan_and_syncs_each_publication_once() {
+        let root = tempfile::tempdir().expect("profile root");
+        let profile = SegmentQualificationProfile::open(root.path()).expect("segment profile");
+        profile.journal().create_once("events/a", b"a").unwrap();
+        TEST_VISIBLE_SCAN_CALLS.with(|calls| calls.set(0));
+        TEST_DIRECTORY_SYNC_CALLS.with(|calls| calls.set(0));
+
+        profile.journal().create_once("events/b", b"b").unwrap();
+
+        assert_eq!(TEST_VISIBLE_SCAN_CALLS.with(std::cell::Cell::get), 1);
+        assert_eq!(TEST_DIRECTORY_SYNC_CALLS.with(std::cell::Cell::get), 2);
+    }
+
+    #[test]
+    fn existing_keyed_read_verifies_only_the_index_target() {
+        let root = tempfile::tempdir().expect("profile root");
+        let profile = SegmentQualificationProfile::open(root.path()).expect("segment profile");
+        profile.journal().create_once("events/a", b"a").unwrap();
+        profile.journal().create_once("events/b", b"b").unwrap();
+        TEST_VISIBLE_SCAN_CALLS.with(|calls| calls.set(0));
+
+        let entry = profile
+            .journal()
+            .read("events/b")
+            .unwrap()
+            .expect("indexed entry");
+
+        assert_eq!(entry.decoded_bytes, b"b");
+        assert_eq!(TEST_VISIBLE_SCAN_CALLS.with(std::cell::Cell::get), 0);
+    }
+
+    #[test]
+    fn invalid_or_missing_index_entries_fall_back_and_rebuild() {
+        let root = tempfile::tempdir().expect("profile root");
+        let profile = SegmentQualificationProfile::open(root.path()).expect("segment profile");
+        profile.journal().create_once("events/a", b"a").unwrap();
+        profile.journal().create_once("events/b", b"b").unwrap();
+        let path = root.path().join(SEGMENT_INDEX_FILE_V1);
+        let mut index: SegmentIndexV1 = read_json(&path).unwrap();
+        let target = index
+            .entries
+            .iter_mut()
+            .find(|entry| entry.logical_key == "events/b")
+            .unwrap();
+        target.offset += 1;
+        write_json_atomic(&path, &index).unwrap();
+        TEST_VISIBLE_SCAN_CALLS.with(|calls| calls.set(0));
+
+        let entry = profile
+            .journal()
+            .read("events/b")
+            .unwrap()
+            .expect("rebuilt entry");
+
+        assert_eq!(entry.decoded_bytes, b"b");
+        assert_eq!(TEST_VISIBLE_SCAN_CALLS.with(std::cell::Cell::get), 1);
+        let head = read_head_for_test(root.path());
+        let frames = scan_visible(root.path(), &head, DEFAULT_SEGMENT_BYTES_V1).unwrap();
+        assert_eq!(
+            read_json::<SegmentIndexV1>(&path).unwrap(),
+            build_index(&head, &frames)
+        );
+
+        let mut index: SegmentIndexV1 = read_json(&path).unwrap();
+        index
+            .entries
+            .iter_mut()
+            .find(|entry| entry.logical_key == "events/b")
+            .unwrap()
+            .logical_key = "events/c".to_owned();
+        index.entries.sort_by(|left, right| {
+            left.logical_key
+                .as_bytes()
+                .cmp(right.logical_key.as_bytes())
+        });
+        write_json_atomic(&path, &index).unwrap();
+        TEST_VISIBLE_SCAN_CALLS.with(|calls| calls.set(0));
+
+        assert_eq!(
+            profile
+                .journal()
+                .read("events/b")
+                .unwrap()
+                .expect("carrier truth wins")
+                .decoded_bytes,
+            b"b"
+        );
+        assert_eq!(TEST_VISIBLE_SCAN_CALLS.with(std::cell::Cell::get), 1);
+    }
+
+    #[test]
+    fn indexed_sealed_read_requires_manifest_membership() {
+        let root = tempfile::tempdir().expect("profile root");
+        let profile = SegmentQualificationProfile::open(root.path()).expect("segment profile");
+        profile.journal().create_once("events/a", b"a").unwrap();
+        let generation = profile.seal_active().expect("sealed generation");
+        let original = generation_segment_path(root.path(), generation);
+        let extra =
+            generation_directory_path(root.path(), generation).join(sealed_segment_name(99));
+        fs::copy(&original, &extra).expect("copy valid frame into extra carrier");
+        let index_path = root.path().join(SEGMENT_INDEX_FILE_V1);
+        let mut index: SegmentIndexV1 = read_json(&index_path).unwrap();
+        index.entries[0].carrier = relative_path_string(root.path(), &extra).unwrap();
+        write_json_atomic(&index_path, &index).unwrap();
+
+        let error = profile
+            .journal()
+            .read("events/a")
+            .expect_err("extra carrier must fall back to the strict manifest scan");
+
+        assert!(error.contains("carrier manifest mismatch"), "{error}");
     }
 
     #[test]
