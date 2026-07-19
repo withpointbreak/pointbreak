@@ -356,18 +356,18 @@ pub(crate) enum RoutedBackend {
 // takes effect only in a build that includes the gix backend (a gix-free build
 // collapses a gix default back to subprocess in `dispatch`).
 //
-// Only `ReadIgnore` is qualified to gix in this phase: it shows zero divergence
-// in the differential battery on macOS and Windows and no failure in the
-// forced-gix full suite on either platform. The other read classes return
-// filesystem paths that gix and git canonicalize/expand differently on Windows —
-// `common_dir` and `worktree_list` (verbatim `\\?\` vs git's path form),
-// `config_path_get` (`~` expansion) — so their battery diverges on Windows and
-// they stay on subprocess (a supported steady state). `ReadInventory` also stays
-// subprocess: gix `path_is_untracked` compares a caller path verbatim, so a
-// backslash path on Windows misses gix's forward-slash inventory and the
-// generated `.pointbreak/.gitignore` leaks into a capture. `IdentityScalars`
-// qualifies separately in a later phase.
-const DEFAULT_READ_GRAPH_REFS: RoutedBackend = RoutedBackend::Subprocess;
+// Qualified to gix (zero divergence on the macOS and Windows differential
+// batteries and no failure in the forced-gix full suite on both platforms): the
+// read graph/refs, ignore, inventory, and repo-discovery classes. The gix
+// backend normalizes the Windows path-form spellings that once diverged
+// (`common_dir` and `worktree_list` verbatim `\\?\` paths, `path_is_untracked`'s
+// backslash comparison key) to git's form. `ReadConfigDiscovery` stays on
+// subprocess: git's `config --type=path` renders a `~`-expanded signing-key path
+// in forward-slash form but an absolute stored path with its backslashes, and gix
+// cannot reproduce that conditional spelling — a supported held steady state.
+// `IdentityScalars` qualifies separately under its SHA-256 + config-precedence
+// gates.
+const DEFAULT_READ_GRAPH_REFS: RoutedBackend = RoutedBackend::Gix;
 const DEFAULT_READ_IGNORE: RoutedBackend = RoutedBackend::Gix;
 const DEFAULT_READ_INVENTORY: RoutedBackend = RoutedBackend::Subprocess;
 const DEFAULT_READ_CONFIG_DISCOVERY: RoutedBackend = RoutedBackend::Subprocess;
@@ -574,24 +574,30 @@ mod tests {
     #[cfg(feature = "gix")]
     #[test]
     fn compiled_defaults_route_qualified_reads_to_gix() {
-        // Only `ReadIgnore` is qualified to gix by its compiled default; every
-        // other class (Windows path divergences for graph-refs/config/repo, the
-        // inventory path bug, and identity scalars in a later phase) stays on
-        // subprocess. Pin the compiled path explicitly (not `reset_selector`) so
-        // the assertion is deterministic even under `POINTBREAK_GIT_BACKEND=gix`.
+        // The qualified read classes route to gix by their compiled default; the
+        // held classes (config-discovery, and identity scalars until their own
+        // phase) stay on subprocess. Pin the compiled path explicitly (not
+        // `reset_selector`) so the assertion is deterministic even under
+        // `POINTBREAK_GIT_BACKEND=gix`.
         inject_selector(BackendSelector::Compiled);
-        assert_eq!(
-            routed_backend(BackendClass::ReadIgnore).unwrap(),
-            RoutedBackend::Gix
-        );
+        for class in [BackendClass::ReadIgnore, BackendClass::ReadGraphRefs] {
+            assert_eq!(
+                routed_backend(class).unwrap(),
+                RoutedBackend::Gix,
+                "{class:?} is qualified to gix"
+            );
+        }
         for class in [
-            BackendClass::ReadGraphRefs,
             BackendClass::ReadConfigDiscovery,
             BackendClass::ReadRepoDiscovery,
             BackendClass::ReadInventory,
             BackendClass::IdentityScalars,
         ] {
-            assert_eq!(routed_backend(class).unwrap(), RoutedBackend::Subprocess);
+            assert_eq!(
+                routed_backend(class).unwrap(),
+                RoutedBackend::Subprocess,
+                "{class:?} stays on subprocess"
+            );
         }
         reset_selector();
     }
