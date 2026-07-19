@@ -74,8 +74,14 @@ side effects, expected outcomes, and failure classes.
 
 ## Implementation Guidance
 
-Keep the first version deliberately smaller than hunk. Prefer shelling out to `git` at first, and
-let a VCS abstraction come later if the review model earns it.
+Keep the first version deliberately smaller than hunk. Git access runs through one typed backend
+seam (ADR-0040): the routable `git_*` helpers dispatch through a closed backend enum resolved at a
+single choke point. Subprocess `git` is the default build and stays the permanent home of the
+identity-bearing capture diff and write-tree (which are non-routable — direct-subprocess, not seam
+methods) and of honest byte-faithful fixtures. A feature-gated `gix` backend owns the
+presentation-only reads and the spec-deterministic identity scalars, each flipped to default only
+after a differential parity harness proves byte-equal typed output (and message-equal errors) on
+macOS and Windows; see `docs/adr/adr-0040-git-backend-seam-and-hybrid.md`.
 
 The headless model should own file identity, file order, hunk identity, row geometry, note anchors,
 navigation cursors, and serializable review/session state. The TUI should be a projection of that
