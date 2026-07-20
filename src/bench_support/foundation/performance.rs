@@ -1850,7 +1850,8 @@ pub fn run_qualification_performance_open_child(request_path: &Path) -> Result<(
 fn validate_campaign_configuration(
     configuration: &QualificationPerformanceCampaignConfigurationV2,
 ) -> Result<(), String> {
-    QualificationPerformanceContractV2::frozen().validate()?;
+    let contract = QualificationPerformanceContractV2::frozen();
+    contract.validate()?;
     if !configuration.executable.is_file()
         || configuration.root.exists()
         || configuration
@@ -1874,6 +1875,14 @@ fn validate_campaign_configuration(
     {
         return Err("performance campaign requires a local proof filesystem".to_owned());
     }
+    if !qualification_performance_platform_is_supported(
+        &contract,
+        std::env::consts::OS,
+        &filesystem,
+        final_native_allocation_method(),
+    ) {
+        return Err("performance campaign platform is outside the frozen contract".to_owned());
+    }
     match std::env::consts::OS {
         "macos" if configuration.external_corpus_root.is_none() => {
             Err("performance campaign requires the external workload on macOS".to_owned())
@@ -1885,6 +1894,21 @@ fn validate_campaign_configuration(
         "linux" | "windows" => Ok(()),
         _ => Err("performance campaign platform is unsupported".to_owned()),
     }
+}
+
+fn qualification_performance_platform_is_supported(
+    contract: &QualificationPerformanceContractV2,
+    operating_system: &str,
+    filesystem: &str,
+    allocation_method: &str,
+) -> bool {
+    contract.workloads.iter().any(|workload| {
+        workload.platforms.iter().any(|platform| {
+            platform.operating_system == operating_system
+                && platform.filesystem == filesystem
+                && platform.allocation_method == allocation_method
+        })
+    })
 }
 
 fn qualification_campaign_workloads(
@@ -4027,6 +4051,30 @@ mod tests {
         let mut duplicate = shards.clone();
         duplicate.push(shards[0].clone());
         assert!(QualificationPerformancePackageV2::assemble(&duplicate).is_err());
+    }
+
+    #[test]
+    fn final_campaign_admits_only_exact_frozen_platform_rows() {
+        let contract = QualificationPerformanceContractV2::frozen();
+
+        assert!(qualification_performance_platform_is_supported(
+            &contract,
+            "linux",
+            "ext4",
+            "stat_blocks_512"
+        ));
+        assert!(!qualification_performance_platform_is_supported(
+            &contract,
+            "linux",
+            "ext2/ext3",
+            "stat_blocks_512"
+        ));
+        assert!(!qualification_performance_platform_is_supported(
+            &contract,
+            "linux",
+            "xfs",
+            "stat_blocks_512"
+        ));
     }
 
     #[test]

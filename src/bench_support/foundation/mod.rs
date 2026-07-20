@@ -66,18 +66,79 @@ fn parse_macos_df_filesystem(output: &str) -> Option<String> {
 
 #[cfg(target_os = "linux")]
 fn platform_filesystem_name(path: &Path) -> Option<String> {
-    let output = std::process::Command::new("stat")
-        .args(["-f", "-c", "%T"])
+    let findmnt = std::process::Command::new("findmnt")
+        .args(["--noheadings", "--output", "FSTYPE", "--target"])
+        .arg(path)
+        .output()
+        .ok();
+    if let Some(filesystem) = findmnt
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .and_then(|output| parse_linux_findmnt_filesystem(&output))
+    {
+        return Some(filesystem);
+    }
+
+    let output = std::process::Command::new("df")
+        .arg("-T")
         .arg(path)
         .output()
         .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout)
-        .ok()
-        .map(|value| value.trim().to_owned())
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8(output.stdout).ok())
+        .flatten()
+        .and_then(|output| parse_linux_df_filesystem(&output))
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn parse_linux_findmnt_filesystem(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+#[cfg(any(test, target_os = "linux"))]
+fn parse_linux_df_filesystem(output: &str) -> Option<String> {
+    output
+        .lines()
+        .nth(1)?
+        .split_whitespace()
+        .nth(1)
+        .map(str::to_owned)
         .filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod linux_filesystem_parser_tests {
+    use super::*;
+
+    #[test]
+    fn linux_filesystem_probe_parses_unambiguous_mount_types() {
+        assert_eq!(
+            parse_linux_findmnt_filesystem("ext4\n").as_deref(),
+            Some("ext4")
+        );
+        assert_eq!(
+            parse_linux_df_filesystem(
+                "Filesystem Type 1K-blocks Used Available Use% Mounted on\n/dev/sda2 ext4 100 50 50 50% /\n"
+            )
+            .as_deref(),
+            Some("ext4")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_filesystem_probe_reports_an_unambiguous_mount_type() {
+        let filesystem = qualification_filesystem_name(Path::new(env!("CARGO_MANIFEST_DIR")));
+
+        assert_ne!(filesystem, "unavailable");
+        assert_ne!(filesystem, "ext2/ext3");
+    }
 }
 
 #[cfg(target_os = "windows")]
