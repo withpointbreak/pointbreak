@@ -19,6 +19,8 @@ impl GitFixture {
             root.path(),
             &["config", "user.email", "pointbreak@example.test"],
         );
+        run_git(root.path(), &["config", "commit.gpgsign", "false"]);
+        run_git(root.path(), &["config", "tag.gpgsign", "false"]);
         fs::write(root.path().join("tracked.txt"), "one\n").expect("write tracked file");
         run_git(root.path(), &["add", "tracked.txt"]);
         run_git(root.path(), &["commit", "-m", "initial"]);
