@@ -73,6 +73,35 @@ Windows allocation uses `FILE_STANDARD_INFO.AllocationSize`; its native fixture 
 multi-cluster ordinary files, sparse allocated ranges, and compressed data. Missing, stale, unsupported,
 duplicate, or hash-mismatched evidence is rejected or evaluated as unknown, never as a pass.
 
+Run a final evidence shard only from a clean exact commit on a quiesced native host. macOS additionally
+requires the validated external workload copy; Linux and Windows reject that variable because the frozen
+contract assigns the external row only to macOS:
+
+```sh
+export POINTBREAK_QUALIFICATION_QUIESCED=1
+export POINTBREAK_QUALIFICATION_CORPUS=/path/to/external-corpus-copy # macOS only
+cargo bench --features bench --bench store_foundation -- --qualification-final-evidence > macos.json
+```
+
+The runner discards separate warm-up roots, grows fresh measured roots monotonically, validates replay and
+fresh-process open receipts, and records native event-scope and complete-profile allocation. High-water
+sampling includes the candidate checkpoint or seal boundary before reopen. The JSON contains only
+sanitized hashes, counts, timing samples, allocation totals, and environment identity.
+
+After collecting the macOS, native Linux/ext4, and native Windows/NTFS shards from the same source and
+contract identities, assemble and evaluate the complete performance package with:
+
+```sh
+cargo bench --features bench --bench store_foundation -- --qualification-package \
+  --qualification-input=macos.json \
+  --qualification-input=linux.json \
+  --qualification-input=windows.json
+```
+
+Assembly rejects stale or duplicate shards and any package with a missing required run. A valid package
+may still contain failed timing or allocation criteria; measurement failure is evidence, not a malformed
+package.
+
 ## Native foundation qualification
 
 The developer-gated foundation runner applies one deterministic matrix to the SQLite WAL and bounded-
