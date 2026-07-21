@@ -31,13 +31,14 @@ use pointbreak::bench_support::foundation::{
 };
 #[cfg(feature = "lmdb-proof")]
 use pointbreak::bench_support::foundation::{
-    run_lmdb_proof_open_close_v1, run_qualification_lmdb_smoke_v1,
+    run_lmdb_proof_open_close_v1, run_qualification_lmdb_lifecycle_child_v1,
+    run_qualification_lmdb_lifecycle_smoke_v1, run_qualification_lmdb_smoke_v1,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 const USAGE: &str = "\
-Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--generated-workload-smoke|--loose-baseline-smoke|--loose-baseline-evidence|--prospective-contract|--transfer-smoke|--sqlite-smoke|--segments-smoke|--lmdb-proof-open-close|--lmdb-smoke|--qualification-smoke|--qualification-evidence|--qualification-diagnostics|--qualification-contract|--qualification-final-evidence|--qualification-package|--help]\n\
+Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--generated-workload-smoke|--loose-baseline-smoke|--loose-baseline-evidence|--prospective-contract|--transfer-smoke|--sqlite-smoke|--segments-smoke|--lmdb-proof-open-close|--lmdb-smoke|--lmdb-lifecycle-smoke|--qualification-smoke|--qualification-evidence|--qualification-diagnostics|--qualification-contract|--qualification-final-evidence|--qualification-package|--help]\n\
        --qualification-diagnostics [--qualification-pair-order=alternating|candidate_then_baseline|baseline_then_candidate]\n\
        --qualification-package --qualification-input=<path> [--qualification-input=<path> ...]\n\
 \n\
@@ -199,6 +200,24 @@ fn main() -> ExitCode {
             }
         };
     }
+    #[cfg(feature = "lmdb-proof")]
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "--lmdb-lifecycle-child")
+    {
+        if arguments.len() != 2 {
+            eprintln!("plain LMDB lifecycle child requires exactly one request path");
+            return ExitCode::from(2);
+        }
+        return match run_qualification_lmdb_lifecycle_child_v1(std::path::Path::new(&arguments[1]))
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("store foundation plain LMDB lifecycle child failed: {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
     if arguments.iter().any(|argument| argument == "--help") {
         print!("{USAGE}");
         return ExitCode::SUCCESS;
@@ -214,6 +233,7 @@ fn main() -> ExitCode {
         "--segments-smoke",
         "--lmdb-proof-open-close",
         "--lmdb-smoke",
+        "--lmdb-lifecycle-smoke",
         "--qualification-smoke",
         "--qualification-evidence",
         "--qualification-diagnostics",
@@ -252,6 +272,7 @@ fn main() -> ExitCode {
             && argument != "--segments-smoke"
             && argument != "--lmdb-proof-open-close"
             && argument != "--lmdb-smoke"
+            && argument != "--lmdb-lifecycle-smoke"
             && argument != "--qualification-smoke"
             && argument != "--qualification-evidence"
             && argument != "--qualification-diagnostics"
@@ -427,6 +448,13 @@ fn main() -> ExitCode {
         return lmdb_smoke_report();
     }
 
+    if arguments
+        .iter()
+        .any(|argument| argument == "--lmdb-lifecycle-smoke")
+    {
+        return lmdb_lifecycle_smoke_report();
+    }
+
     match smoke_metadata() {
         Ok((metadata, external_is_valid)) => {
             println!(
@@ -497,6 +525,44 @@ fn lmdb_smoke_report() -> ExitCode {
 #[cfg(not(feature = "lmdb-proof"))]
 fn lmdb_smoke_report() -> ExitCode {
     eprintln!("--lmdb-smoke requires --features bench,lmdb-proof");
+    ExitCode::from(2)
+}
+
+#[cfg(feature = "lmdb-proof")]
+fn lmdb_lifecycle_smoke_report() -> ExitCode {
+    let disposable = match tempfile::tempdir() {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("plain LMDB lifecycle smoke failed to create a disposable root: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let executable = match std::env::current_exe() {
+        Ok(executable) => executable,
+        Err(error) => {
+            eprintln!("plain LMDB lifecycle smoke could not resolve its executable: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    match run_qualification_lmdb_lifecycle_smoke_v1(&executable, disposable.path()) {
+        Ok(report) => {
+            println!(
+                "{}",
+                serde_json::to_string(&report)
+                    .expect("plain LMDB lifecycle smoke report serializes")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("plain LMDB lifecycle smoke failed: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+#[cfg(not(feature = "lmdb-proof"))]
+fn lmdb_lifecycle_smoke_report() -> ExitCode {
+    eprintln!("--lmdb-lifecycle-smoke requires --features bench,lmdb-proof");
     ExitCode::from(2)
 }
 

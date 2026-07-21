@@ -3252,7 +3252,7 @@ mdb_reader_pid(MDB_env *env, enum Pidlock_op op, MDB_PID_T pid)
 	int ret = 0;
 	HANDLE h;
 	if (op == Pidcheck) {
-		h = OpenProcess(env->me_pidquery, FALSE, pid);
+		h = OpenProcess(env->me_pidquery | SYNCHRONIZE, FALSE, pid);
 		/* No documented "no such process" code, but other program use this: */
 		if (!h)
 			return ErrCode() != ERROR_INVALID_PARAMETER;

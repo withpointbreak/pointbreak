@@ -2307,7 +2307,7 @@ fn wait_children(children: &mut [Child], timeout: Duration) -> Result<(), String
     Ok(())
 }
 
-fn wait_child(child: &mut Child, timeout: Duration) -> Result<(), String> {
+pub(super) fn wait_child(child: &mut Child, timeout: Duration) -> Result<(), String> {
     let started = Instant::now();
     loop {
         if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {

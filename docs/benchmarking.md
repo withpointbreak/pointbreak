@@ -72,6 +72,11 @@ validates the embedded structural contract without requiring a source checkout a
 sources are excluded from default Cargo packages and release archives; default builds do not resolve
 or compile heed3 or LMDB.
 
+The native tree retains two ordered, hash-bound source corrections over the immutable LMDB commit:
+an explicit byte-pointer cast required by MSVC and the `SYNCHRONIZE` process access required before
+Windows can test whether a retained process object has exited. Failed process opens and failed waits
+remain conservative and never establish that a reader is dead.
+
 The same feature contains a plain qualification-only journal/profile core with physical identity
 `qualification-lmdb-plain-v1`. It uses one journal database, versioned metadata and value envelopes,
 default durable commits, exact create-once retries, deterministic byte-ordered replay, and independent
@@ -89,8 +94,44 @@ cargo bench --locked --features bench,lmdb-proof --bench store_foundation -- --l
 
 The smoke emits no timing samples or feasibility verdict. It verifies create-once journal writes,
 sorted replay, exact decoded hashes, the oldest/middle/newest/absent read schedule, and the deterministic
-head marker. Online copy, restore, repair, stale-reader cleanup, exhaustive lifecycle inventory,
-performance evidence, selection, migration, and production routing are unavailable on this surface.
+head marker.
+
+Run the separate non-timing lifecycle smoke with:
+
+```sh
+unset POINTBREAK_QUALIFICATION_CORPUS
+cargo bench --locked --features bench,lmdb-proof --bench store_foundation -- \
+  --lmdb-lifecycle-smoke
+```
+
+This mode uses deterministic process barriers and only generated public inputs in disposable roots.
+It proves that a pinned reader retains its old snapshot while later writers commit, clears a dead
+reader slot without evicting a live reader, and keeps the fixed reader-retention workload within a
+16 MiB native-allocation bound. After the reader is released, an additional fixed write cohort may
+grow native allocation by at most 2 MiB; ordinary page reuse satisfied that predeclared bound. These
+are lifecycle bounds derived from the fixed map and workload, not feasibility thresholds.
+
+Backup uses heed3's ordinary online-copy primitive with compaction disabled; it never copies a live
+`data.mdb` through filesystem APIs. Candidate and independent-content carriers are published through
+the shared backup manifest contract, and the completion marker is written last. The smoke overlaps an
+online copy with a writer cohort, accepts only an exact coherent cohort prefix, rejects interrupted or
+incomplete destinations, restores in a fresh process without changing the backup, and repairs by
+replaying validated logical truth into a fresh copy. Restore and repair both compare the exact
+database/content carrier-set identity as well as profile, head, journal, and content receipts. Repair
+never replaces an open environment or modifies source carriers in place.
+
+The report schema is `pointbreak.qualification-lmdb-lifecycle-smoke.v1` with report mode
+`non_timing_lifecycle_receipts`. It serializes exact receipt hashes and sanitized inventory only:
+carrier classes, counts, set hashes, encoded bytes, and native allocated bytes. The exhaustive classes
+are database, lock, resize lock, independent content, copy, temporary, obsolete, pinned, repair, and
+sidecar. Native allocation uses filesystem allocation metadata and excludes the virtual map
+reservation. Separate steady, reopened, and all-carrier high-water snapshots use the shared sanitized
+inventory document. Every owned class remains explicit even when the engine has no distinct carrier for
+it; for example, reader-pin state is proven by the lifecycle receipt and LMDB lock carrier, so the separate
+`pinned` class has a zero count rather than invented bytes. Runner barrier/request/result files are control
+evidence, not candidate storage carriers. Windows runs additionally require open-handle replacement to fail while mapped,
+succeed after close, reopen exactly, and clean interrupted-copy carriers. The mode emits no timing
+samples, performance evaluation, feasibility verdict, selection, migration, or production routing.
 
 ## Generated public scale workloads
 

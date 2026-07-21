@@ -396,18 +396,28 @@ fn validate_published_comparison(
 }
 
 fn validate_native_patches(patches: &[PatchIdentityV1]) -> Result<(), String> {
-    let [patch] = patches else {
+    let [msvc_patch, windows_reader_patch] = patches else {
         return Err("native patch inventory is not exact".to_owned());
     };
-    if patch.id != "msvc-void-pointer-arithmetic"
-        || patch.path != "vendor/lmdb-proof/lmdb-master3-sys/lmdb/libraries/liblmdb/mdb.c"
-        || patch.preimage_sha256
+    if msvc_patch.id != "msvc-void-pointer-arithmetic"
+        || msvc_patch.path != "vendor/lmdb-proof/lmdb-master3-sys/lmdb/libraries/liblmdb/mdb.c"
+        || msvc_patch.preimage_sha256
             != "9c90127df98846c21dfdc2221a94180bc217b7cbf01b68cd0c60823a7075e464"
-        || patch.purpose != "cast byte-address arithmetic explicitly for MSVC"
+        || msvc_patch.postimage_sha256
+            != "508ea872cabb350711eecae33e2df3f3abd74ec27c74652204a5120cbc4632a0"
+        || msvc_patch.purpose != "cast byte-address arithmetic explicitly for MSVC"
     {
         return Err("native patch inventory is not exact".to_owned());
     }
-    if patch.postimage_sha256 != "508ea872cabb350711eecae33e2df3f3abd74ec27c74652204a5120cbc4632a0"
+    if windows_reader_patch.id != "windows-reader-pid-synchronize"
+        || windows_reader_patch.path
+            != "vendor/lmdb-proof/lmdb-master3-sys/lmdb/libraries/liblmdb/mdb.c"
+        || windows_reader_patch.preimage_sha256
+            != "508ea872cabb350711eecae33e2df3f3abd74ec27c74652204a5120cbc4632a0"
+        || windows_reader_patch.postimage_sha256
+            != "0be44f5118668dba319b1fd7df865d8718757b8d5b21b07ad5e9df417cbb0ab4"
+        || windows_reader_patch.purpose
+            != "request SYNCHRONIZE before checking retained Windows process liveness"
     {
         return Err("native patch inventory is not exact".to_owned());
     }
@@ -623,6 +633,28 @@ mod tests {
             validate_lmdb_proof_closure_v1(&manifest, repository_root()).unwrap_err(),
             "native behavior authority must be the immutable upstream Git source"
         );
+    }
+
+    #[test]
+    fn native_patch_inventory_is_exact() {
+        let missing = mutated_manifest(&["native", "patches"], json!([]));
+
+        assert_eq!(
+            validate_lmdb_proof_closure_v1(&missing, repository_root()).unwrap_err(),
+            "native patch inventory is not exact"
+        );
+    }
+
+    #[test]
+    fn windows_reader_liveness_patch_keeps_uncertain_processes_live() {
+        let source = include_str!(
+            "../../../vendor/lmdb-proof/lmdb-master3-sys/lmdb/libraries/liblmdb/mdb.c"
+        )
+        .replace("\r\n", "\n");
+
+        assert!(source.contains("h = OpenProcess(env->me_pidquery | SYNCHRONIZE, FALSE, pid);"));
+        assert!(source.contains("if (!h)\n\t\t\treturn ErrCode() != ERROR_INVALID_PARAMETER;"));
+        assert!(source.contains("ret = WaitForSingleObject(h, 0) != 0;"));
     }
 
     #[test]

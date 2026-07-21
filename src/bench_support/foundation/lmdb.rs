@@ -1,29 +1,46 @@
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use heed3::types::Bytes;
-use heed3::{Database, Env, EnvOpenOptions, Error as HeedError, MdbError};
+use heed3::{
+    CompactionOption, Database, Env, EnvFlags, EnvOpenOptions, Error as HeedError, MdbError,
+};
 use serde::{Deserialize, Serialize};
 
 use super::{
     IndependentContentStoreV1, LogicalCapabilityEpochV1, QUALIFICATION_LOGICAL_KEY_MAX_BYTES_V1,
     QualificationCreateOutcome, QualificationEntry, QualificationGeneratedWorkloadV1,
-    QualificationInventoryV1, QualificationJournal, QualificationProfile,
-    QualificationProfileDescriptorV1, QualificationRecordKindV1,
-    qualification_generated_manifest_v1, qualification_generator_spec_v1,
-    qualification_operation_schedule_v1,
+    QualificationInventoryV1, QualificationJournal, QualificationPerformanceInventoryStateV1,
+    QualificationPerformanceInventoryV2, QualificationProcessOverlapEvidenceV1,
+    QualificationProfile, QualificationProfileDescriptorV1, QualificationRecordKindV1,
+    publish_completed_backup, qualification_generated_manifest_v1, qualification_generator_spec_v1,
+    qualification_operation_schedule_v1, verify_completed_backup,
 };
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
 
 pub const QUALIFICATION_LMDB_PLAIN_PROFILE_ID_V1: &str = "qualification-lmdb-plain-v1";
 pub const QUALIFICATION_LMDB_SMOKE_SCHEMA_V1: &str = "pointbreak.qualification-lmdb-smoke.v1";
+pub const QUALIFICATION_LMDB_LIFECYCLE_SMOKE_SCHEMA_V1: &str =
+    "pointbreak.qualification-lmdb-lifecycle-smoke.v1";
+pub const QUALIFICATION_LMDB_LIFECYCLE_SMOKE_MODE_V1: &str = "--lmdb-lifecycle-smoke";
+pub const QUALIFICATION_LMDB_LIFECYCLE_REPORT_MODE_V1: &str = "non_timing_lifecycle_receipts";
+pub const LIFECYCLE_READER_RETENTION_BOUND_BYTES_V1: u64 = 16 * MIB;
+pub const LIFECYCLE_POST_RELEASE_REUSE_BOUND_BYTES_V1: u64 = 2 * MIB;
 
 const METADATA_SCHEMA_V1: &str = "pointbreak.qualification-lmdb-plain-metadata.v1";
 const DATABASE_NAME_V1: &str = "journal-v1";
 const JOURNAL_DIRECTORY_V1: &str = "journal";
 const CONTENT_DIRECTORY_V1: &str = "content";
 const RESIZE_LOCK_FILE_V1: &str = "pointbreak-lmdb-resize-v1.lock";
+const LMDB_BACKUP_RECEIPT_SCHEMA_V1: &str = "pointbreak.qualification-lmdb-backup-receipt.v1";
+const LMDB_BACKUP_DATABASE_FILE_V1: &str = "journal/data.mdb";
+const LMDB_BACKUP_RECEIPT_FILE_V1: &str = "pointbreak-lmdb-receipt-v1.json";
 const METADATA_KEY_V1: &[u8] = b"\x00metadata-v1";
 const HEAD_KEY_V1: &[u8] = b"\x00head-v1";
 const ENTRY_KEY_PREFIX_V1: u8 = 1;
@@ -32,6 +49,7 @@ const ENTRY_VERSION_V1: u8 = 1;
 const HEAD_MAGIC_V1: &[u8; 4] = b"PBHD";
 const HEAD_VERSION_V1: u8 = 1;
 const MIB: u64 = 1024 * 1024;
+static REPAIR_STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 type JournalDatabase = Database<Bytes, Bytes>;
 
@@ -166,10 +184,11 @@ pub struct QualificationLmdbSmokeV1 {
 #[derive(Debug)]
 pub struct LmdbQualificationJournal {
     root: PathBuf,
-    environment: Env,
+    environment: Env<heed3::WithoutTls>,
     database: JournalDatabase,
     map_policy: LmdbMapPolicyV1,
     transaction_gate: Mutex<()>,
+    active_pinned_readers: Arc<AtomicUsize>,
 }
 
 #[derive(Debug)]
@@ -177,6 +196,266 @@ pub struct LmdbQualificationProfile {
     descriptor: QualificationProfileDescriptorV1,
     journal: LmdbQualificationJournal,
     content: IndependentContentStoreV1,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LmdbExactReceiptV1 {
+    pub profile_id: String,
+    pub map_policy: LmdbMapPolicyV1,
+    pub head_marker: u64,
+    pub journal_records: u64,
+    pub journal_logical_bytes: u64,
+    pub journal_receipt_sha256: String,
+    pub content_records: u64,
+    pub content_logical_bytes: u64,
+    pub content_receipt_sha256: String,
+}
+
+pub struct LmdbPinnedReaderV1 {
+    transaction: Option<heed3::RoTxn<'static, heed3::WithoutTls>>,
+    database: JournalDatabase,
+    map_policy: LmdbMapPolicyV1,
+    content: IndependentContentStoreV1,
+    active_pinned_readers: Arc<AtomicUsize>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LmdbCarrierClassV1 {
+    Database,
+    Lock,
+    ResizeLock,
+    IndependentContent,
+    Copy,
+    Temporary,
+    Obsolete,
+    Pinned,
+    Repair,
+    Sidecar,
+}
+
+impl LmdbCarrierClassV1 {
+    pub const ALL: [Self; 10] = [
+        Self::Database,
+        Self::Lock,
+        Self::ResizeLock,
+        Self::IndependentContent,
+        Self::Copy,
+        Self::Temporary,
+        Self::Obsolete,
+        Self::Pinned,
+        Self::Repair,
+        Self::Sidecar,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Database => "database",
+            Self::Lock => "lock",
+            Self::ResizeLock => "resize_lock",
+            Self::IndependentContent => "independent_content",
+            Self::Copy => "copy",
+            Self::Temporary => "temporary",
+            Self::Obsolete => "obsolete",
+            Self::Pinned => "pinned",
+            Self::Repair => "repair",
+            Self::Sidecar => "sidecar",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationLmdbCarrierClassInventoryV1 {
+    pub class: LmdbCarrierClassV1,
+    pub carrier_count: u64,
+    pub carrier_set_sha256: String,
+    pub encoded_bytes: u64,
+    pub allocated_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationLmdbSanitizedInventoryV1 {
+    pub carrier_classes: Vec<LmdbCarrierClassV1>,
+    pub class_inventories: Vec<QualificationLmdbCarrierClassInventoryV1>,
+    pub inventory: QualificationPerformanceInventoryV2,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationLmdbReaderLifecycleV1 {
+    pub pinned_receipt: LmdbExactReceiptV1,
+    pub latest_receipt: LmdbExactReceiptV1,
+    pub process_overlap: QualificationProcessOverlapEvidenceV1,
+    pub stale_readers_cleared: u64,
+    pub live_reader_preserved: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationLmdbRetentionLifecycleV1 {
+    pub steady_allocated_bytes: u64,
+    pub retained_allocated_bytes: u64,
+    pub reused_allocated_bytes: u64,
+    pub retention_bound_bytes: u64,
+    pub post_release_reuse_bound_bytes: u64,
+    pub within_predeclared_bounds: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationLmdbCopyLifecycleV1 {
+    pub copied_receipt: LmdbExactReceiptV1,
+    pub source_before_receipt: LmdbExactReceiptV1,
+    pub source_after_receipt: LmdbExactReceiptV1,
+    pub exact_coherent_prefix: bool,
+    pub process_overlap: QualificationProcessOverlapEvidenceV1,
+    pub completion_marker_last: bool,
+    pub interrupted_backup_rejected: bool,
+    pub interrupted_retry_rejected: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationLmdbRestoreRepairLifecycleV1 {
+    pub restored_receipt: LmdbExactReceiptV1,
+    pub repaired_receipt: LmdbExactReceiptV1,
+    pub backup_preserved: bool,
+    pub source_preserved: bool,
+    pub restore_inventory_identity_exact: bool,
+    pub repair_inventory_identity_exact: bool,
+    pub corrupt_truth_rejected: bool,
+    pub incomplete_destination_rejected: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationLmdbInventorySnapshotV1 {
+    pub state: QualificationPerformanceInventoryStateV1,
+    pub inventory: QualificationPerformanceInventoryV2,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationLmdbWindowsLifecycleV1 {
+    pub required: bool,
+    pub replacement_blocked_while_open: bool,
+    pub replacement_succeeded_after_close: bool,
+    pub reopened_exact: bool,
+    pub interrupted_copy_cleaned: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationLmdbLifecycleSmokeV1 {
+    pub schema: &'static str,
+    pub mode: &'static str,
+    pub profile_id: String,
+    pub map_policy: LmdbMapPolicyV1,
+    pub workload: QualificationGeneratedWorkloadV1,
+    pub workload_manifest_sha256: String,
+    pub reader: QualificationLmdbReaderLifecycleV1,
+    pub retention: QualificationLmdbRetentionLifecycleV1,
+    pub copy: QualificationLmdbCopyLifecycleV1,
+    pub restore_repair: QualificationLmdbRestoreRepairLifecycleV1,
+    pub inventory: QualificationLmdbSanitizedInventoryV1,
+    pub inventory_snapshots: Vec<QualificationLmdbInventorySnapshotV1>,
+    pub native_allocation_excludes_virtual_map: bool,
+    pub windows: QualificationLmdbWindowsLifecycleV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LmdbLifecycleChildRequestV1 {
+    source_root: PathBuf,
+    destination: Option<PathBuf>,
+    barrier_root: Option<PathBuf>,
+    participant: String,
+    result_path: PathBuf,
+    operation: LmdbLifecycleChildOperationV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+enum LmdbLifecycleChildOperationV1 {
+    PinnedReader,
+    HoldPinnedReader,
+    CreateCohort { records: Vec<LmdbLifecycleRecordV1> },
+    OnlineCopy,
+    InterruptedCopy,
+    Restore,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LmdbLifecycleRecordV1 {
+    logical_key: String,
+    decoded_bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LmdbBackupReceiptV1 {
+    schema: String,
+    exact: LmdbExactReceiptV1,
+}
+
+#[derive(Clone, Debug)]
+struct LmdbCarrierV1 {
+    class: LmdbCarrierClassV1,
+    relative_path: String,
+    encoded_sha256: String,
+    encoded_bytes: u64,
+    allocated_bytes: u64,
+}
+
+struct LmdbLifecycleInventoryRoots<'a> {
+    source: &'a Path,
+    backup: &'a Path,
+    interrupted: &'a Path,
+    restored: &'a Path,
+    repair_backup: &'a Path,
+    repair_restored: &'a Path,
+    retention: &'a Path,
+    corrupt: &'a Path,
+}
+
+struct RepairStagingDirectory {
+    path: PathBuf,
+}
+
+impl RepairStagingDirectory {
+    fn create(parent: &Path) -> Result<Self, String> {
+        for _ in 0..64 {
+            let sequence = REPAIR_STAGING_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let path = parent.join(format!(
+                ".pointbreak-lmdb-repair-{}-{sequence}",
+                std::process::id()
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => return Ok(Self { path }),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => {
+                    return Err(format!(
+                        "plain LMDB repair staging creation failed: {error}"
+                    ));
+                }
+            }
+        }
+        Err("plain LMDB repair could not allocate a fresh staging directory".to_owned())
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for RepairStagingDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
 }
 
 impl LmdbQualificationProfile {
@@ -193,7 +472,7 @@ impl LmdbQualificationProfile {
             .map_err(|error| format!("plain LMDB journal root creation failed: {error}"))?;
         let map_size = usize::try_from(map_policy.initial_size_bytes)
             .map_err(|_| "plain LMDB initial map size exceeds this platform".to_owned())?;
-        let mut options = EnvOpenOptions::new();
+        let mut options = EnvOpenOptions::new().read_txn_without_tls();
         options.map_size(map_size).max_dbs(1);
         // SAFETY: the profile owns this stable directory for the environment's
         // lifetime. Reopens in other processes use the same fixed policy.
@@ -206,6 +485,7 @@ impl LmdbQualificationProfile {
             database,
             map_policy,
             transaction_gate: Mutex::new(()),
+            active_pinned_readers: Arc::new(AtomicUsize::new(0)),
         };
         journal.validate_current_map_size()?;
         let content = IndependentContentStoreV1::open(&root.join(CONTENT_DIRECTORY_V1))
@@ -223,10 +503,169 @@ impl LmdbQualificationProfile {
     pub fn current_map_size_bytes(&self) -> u64 {
         self.journal.environment.info().map_size as u64
     }
+
+    pub fn pin_reader(&self) -> Result<LmdbPinnedReaderV1, String> {
+        let _gate = self.journal.gate()?;
+        let transaction = self
+            .journal
+            .environment
+            .clone()
+            .static_read_txn()
+            .map_err(|error| format!("plain LMDB pinned read transaction failed: {error}"))?;
+        self.journal
+            .active_pinned_readers
+            .fetch_add(1, Ordering::SeqCst);
+        Ok(LmdbPinnedReaderV1 {
+            transaction: Some(transaction),
+            database: self.journal.database,
+            map_policy: self.journal.map_policy,
+            content: self.content.clone(),
+            active_pinned_readers: Arc::clone(&self.journal.active_pinned_readers),
+        })
+    }
+
+    pub fn clear_stale_readers(&self) -> Result<usize, String> {
+        self.journal
+            .environment
+            .clear_stale_readers()
+            .map_err(|error| format!("plain LMDB stale reader cleanup failed: {error}"))
+    }
+
+    pub fn exact_receipt(&self) -> Result<LmdbExactReceiptV1, String> {
+        let _gate = self.journal.gate()?;
+        self.journal.read_transaction(|transaction| {
+            exact_receipt_from_transaction(
+                self.journal.database,
+                transaction,
+                self.journal.map_policy,
+                &self.content,
+            )
+        })
+    }
+
+    pub fn sanitized_inventory(&self) -> Result<QualificationLmdbSanitizedInventoryV1, String> {
+        let carriers = collect_active_lmdb_carriers(&self.journal.root)?;
+        sanitized_inventory_from_carriers(&carriers, self.inventory()?)
+    }
+
+    pub fn repair_to(&self, destination: &Path) -> Result<(), String> {
+        if destination
+            .try_exists()
+            .map_err(|error| format!("plain LMDB repair destination check failed: {error}"))?
+        {
+            return Err("plain LMDB repair destination already exists".to_owned());
+        }
+        let source_receipt = self.exact_receipt()?;
+        let entries = self.journal.list()?;
+        let parent = destination.parent().ok_or_else(|| {
+            "plain LMDB repair destination must have a parent directory".to_owned()
+        })?;
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("plain LMDB repair parent creation failed: {error}"))?;
+        let staging = RepairStagingDirectory::create(parent)?;
+        let repaired = LmdbQualificationProfile::open(staging.path())?;
+        for entry in entries {
+            if repaired
+                .journal()
+                .create_once(&entry.logical_key, &entry.decoded_bytes)?
+                != QualificationCreateOutcome::Created
+            {
+                return Err("plain LMDB repair replay encountered existing truth".to_owned());
+            }
+        }
+        copy_directory_contents(self.content.root(), repaired.content.root())?;
+        if repaired.exact_receipt()? != source_receipt {
+            return Err("plain LMDB repaired truth receipt does not match the source".to_owned());
+        }
+        repaired.backup_to(destination)?;
+        verify_lmdb_backup_receipt(destination, &self.descriptor, Some(&source_receipt))?;
+        Ok(())
+    }
+
+    fn backup_to_with_hook(
+        &self,
+        destination: &Path,
+        after_database_copy: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        let mut after_database_copy = Some(after_database_copy);
+        publish_completed_backup(destination, &self.descriptor, |backup_root| {
+            let journal_root = backup_root.join(JOURNAL_DIRECTORY_V1);
+            fs::create_dir_all(&journal_root)
+                .map_err(|error| format!("plain LMDB backup journal creation failed: {error}"))?;
+            let database_path = backup_root.join(LMDB_BACKUP_DATABASE_FILE_V1);
+            let database_file = self
+                .journal
+                .environment
+                .copy_to_path(&database_path, CompactionOption::Disabled)
+                .map_err(|error| format!("plain LMDB online copy failed: {error}"))?;
+            database_file
+                .sync_all()
+                .map_err(|error| format!("plain LMDB online copy sync failed: {error}"))?;
+            after_database_copy
+                .take()
+                .expect("database-copy hook is called once")()?;
+            copy_directory_contents(self.content.root(), &backup_root.join(CONTENT_DIRECTORY_V1))?;
+            let exact = exact_receipt_from_candidate(backup_root, self.journal.map_policy)?;
+            write_canonical_new(
+                &backup_root.join(LMDB_BACKUP_RECEIPT_FILE_V1),
+                &LmdbBackupReceiptV1 {
+                    schema: LMDB_BACKUP_RECEIPT_SCHEMA_V1.to_owned(),
+                    exact,
+                },
+            )
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+    }
+
+    fn backup_to_after_copy_barrier(
+        &self,
+        destination: &Path,
+        barrier_root: &Path,
+        participant: &str,
+    ) -> Result<(), String> {
+        self.backup_to_with_hook(destination, || {
+            let participant =
+                super::QualificationProcessBarrierParticipantV1::join(barrier_root, participant)
+                    .map_err(|error| error.to_string())?;
+            participant
+                .wait_for_release(std::time::Duration::from_secs(20))
+                .map_err(|error| error.to_string())?;
+            participant.complete().map_err(|error| error.to_string())
+        })
+    }
+}
+
+impl LmdbPinnedReaderV1 {
+    fn transaction(&self) -> Result<&heed3::RoTxn<'static, heed3::WithoutTls>, String> {
+        self.transaction
+            .as_ref()
+            .ok_or_else(|| "plain LMDB pinned reader is closed".to_owned())
+    }
+
+    pub fn head_marker(&self) -> Result<u64, String> {
+        head_from_transaction(self.database, self.transaction()?)
+    }
+
+    pub fn exact_receipt(&self) -> Result<LmdbExactReceiptV1, String> {
+        exact_receipt_from_transaction(
+            self.database,
+            self.transaction()?,
+            self.map_policy,
+            &self.content,
+        )
+    }
+}
+
+impl Drop for LmdbPinnedReaderV1 {
+    fn drop(&mut self) {
+        self.transaction.take();
+        self.active_pinned_readers.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 fn initialize_database(
-    environment: &Env,
+    environment: &Env<heed3::WithoutTls>,
     map_policy: LmdbMapPolicyV1,
 ) -> Result<JournalDatabase, String> {
     let mut refreshes = 0;
@@ -294,11 +733,13 @@ impl LmdbQualificationJournal {
     }
 
     fn refresh_map(&self) -> Result<(), String> {
+        self.ensure_no_pinned_readers("refresh")?;
         with_resize_lock(&self.root, || refresh_environment_map(&self.environment))?;
         self.validate_current_map_size()
     }
 
     fn grow_map(&self) -> Result<(), String> {
+        self.ensure_no_pinned_readers("resize")?;
         with_resize_lock(&self.root, || {
             let current = self.environment.info().map_size as u64;
             if !self.map_policy.admits_size(current) {
@@ -321,9 +762,18 @@ impl LmdbQualificationJournal {
         })
     }
 
+    fn ensure_no_pinned_readers(&self, operation: &str) -> Result<(), String> {
+        if self.active_pinned_readers.load(Ordering::SeqCst) != 0 {
+            return Err(format!(
+                "plain LMDB map {operation} is blocked by a live pinned reader"
+            ));
+        }
+        Ok(())
+    }
+
     fn read_transaction<T>(
         &self,
-        mut operation: impl FnMut(&heed3::RoTxn<'_>) -> Result<T, String>,
+        mut operation: impl FnMut(&heed3::RoTxn<'_, heed3::WithoutTls>) -> Result<T, String>,
     ) -> Result<T, String> {
         for refresh in 0..=self.map_policy.resize_retry_limit {
             match self.environment.read_txn() {
@@ -341,32 +791,16 @@ impl LmdbQualificationJournal {
 
     fn list_in_transaction(
         &self,
-        transaction: &heed3::RoTxn<'_>,
+        transaction: &heed3::RoTxn<'_, heed3::WithoutTls>,
     ) -> Result<Vec<QualificationEntry>, String> {
-        let mut entries = Vec::new();
-        let iterator = self
-            .database
-            .iter(transaction)
-            .map_err(|error| format!("plain LMDB replay cursor failed: {error}"))?;
-        for result in iterator {
-            let (key, value) =
-                result.map_err(|error| format!("plain LMDB replay failed: {error}"))?;
-            if key == METADATA_KEY_V1 || key == HEAD_KEY_V1 {
-                continue;
-            }
-            let logical_key = decode_entry_key(key)?;
-            entries.push(decode_entry(&logical_key, value)?);
-        }
-        Ok(entries)
+        list_from_transaction(self.database, transaction)
     }
 
-    fn head_in_transaction(&self, transaction: &heed3::RoTxn<'_>) -> Result<u64, String> {
-        let bytes = self
-            .database
-            .get(transaction, HEAD_KEY_V1)
-            .map_err(|error| format!("plain LMDB head read failed: {error}"))?
-            .ok_or_else(|| "plain LMDB head marker is missing".to_owned())?;
-        decode_head(bytes)
+    fn head_in_transaction(
+        &self,
+        transaction: &heed3::RoTxn<'_, heed3::WithoutTls>,
+    ) -> Result<u64, String> {
+        head_from_transaction(self.database, transaction)
     }
 }
 
@@ -492,6 +926,1190 @@ impl QualificationJournal for LmdbQualificationJournal {
     }
 }
 
+fn list_from_transaction(
+    database: JournalDatabase,
+    transaction: &heed3::RoTxn<'_, heed3::WithoutTls>,
+) -> Result<Vec<QualificationEntry>, String> {
+    let mut entries = Vec::new();
+    let iterator = database
+        .iter(transaction)
+        .map_err(|error| format!("plain LMDB replay cursor failed: {error}"))?;
+    for result in iterator {
+        let (key, value) = result.map_err(|error| format!("plain LMDB replay failed: {error}"))?;
+        if key == METADATA_KEY_V1 || key == HEAD_KEY_V1 {
+            continue;
+        }
+        let logical_key = decode_entry_key(key)?;
+        entries.push(decode_entry(&logical_key, value)?);
+    }
+    Ok(entries)
+}
+
+fn head_from_transaction(
+    database: JournalDatabase,
+    transaction: &heed3::RoTxn<'_, heed3::WithoutTls>,
+) -> Result<u64, String> {
+    let bytes = database
+        .get(transaction, HEAD_KEY_V1)
+        .map_err(|error| format!("plain LMDB head read failed: {error}"))?
+        .ok_or_else(|| "plain LMDB head marker is missing".to_owned())?;
+    decode_head(bytes)
+}
+
+fn exact_receipt_from_transaction(
+    database: JournalDatabase,
+    transaction: &heed3::RoTxn<'_, heed3::WithoutTls>,
+    map_policy: LmdbMapPolicyV1,
+    content: &IndependentContentStoreV1,
+) -> Result<LmdbExactReceiptV1, String> {
+    let metadata = database
+        .get(transaction, METADATA_KEY_V1)
+        .map_err(|error| format!("plain LMDB metadata read failed: {error}"))?
+        .ok_or_else(|| "plain LMDB profile metadata is missing".to_owned())?;
+    LmdbProfileMetadataV1::decode(metadata)?.validate(map_policy)?;
+    let entries = list_from_transaction(database, transaction)?;
+    let head_marker = head_from_transaction(database, transaction)?;
+    if entries.len() as u64 != head_marker {
+        return Err(format!(
+            "plain LMDB head marker {head_marker} does not match {} entries",
+            entries.len()
+        ));
+    }
+    let content_entries = content.list().map_err(|error| error.to_string())?;
+    Ok(LmdbExactReceiptV1 {
+        profile_id: QUALIFICATION_LMDB_PLAIN_PROFILE_ID_V1.to_owned(),
+        map_policy,
+        head_marker,
+        journal_records: entries.len() as u64,
+        journal_logical_bytes: logical_bytes(&entries)?,
+        journal_receipt_sha256: entry_set_sha256(&entries)?,
+        content_records: content_entries.len() as u64,
+        content_logical_bytes: logical_bytes(&content_entries)?,
+        content_receipt_sha256: entry_set_sha256(&content_entries)?,
+    })
+}
+
+fn logical_bytes(entries: &[QualificationEntry]) -> Result<u64, String> {
+    entries.iter().try_fold(0_u64, |total, entry| {
+        total
+            .checked_add(entry.decoded_bytes.len() as u64)
+            .ok_or_else(|| "plain LMDB receipt byte count overflow".to_owned())
+    })
+}
+
+fn entry_set_sha256(entries: &[QualificationEntry]) -> Result<String, String> {
+    let values = entries
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "logicalKey": entry.logical_key,
+                "decodedSha256": entry.decoded_sha256,
+                "decodedBytes": entry.decoded_bytes.len(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let bytes = canonical_json_bytes(&serde_json::Value::Array(values))
+        .map_err(|error| format!("plain LMDB receipt canonicalization failed: {error}"))?;
+    Ok(sha256_bytes_hex(&bytes))
+}
+
+fn exact_receipt_from_candidate(
+    root: &Path,
+    map_policy: LmdbMapPolicyV1,
+) -> Result<LmdbExactReceiptV1, String> {
+    let mut options = EnvOpenOptions::new().read_txn_without_tls();
+    options.max_dbs(1);
+    // SAFETY: completed or in-progress candidate carriers are immutable while
+    // this read-only, lock-free inspection is active.
+    unsafe { options.flags(EnvFlags::READ_ONLY | EnvFlags::NO_LOCK) };
+    // SAFETY: the candidate journal directory remains stable for this bounded
+    // read and is not modified through this environment handle.
+    let environment = unsafe { options.open(root.join(JOURNAL_DIRECTORY_V1)) }
+        .map_err(|error| format!("plain LMDB backup candidate open failed: {error}"))?;
+    let transaction = environment
+        .read_txn()
+        .map_err(|error| format!("plain LMDB backup candidate read failed: {error}"))?;
+    let database: JournalDatabase = environment
+        .open_database(&transaction, Some(DATABASE_NAME_V1))
+        .map_err(|error| format!("plain LMDB backup database open failed: {error}"))?
+        .ok_or_else(|| "plain LMDB backup omitted the journal database".to_owned())?;
+    let content = IndependentContentStoreV1::open(&root.join(CONTENT_DIRECTORY_V1))
+        .map_err(|error| error.to_string())?;
+    exact_receipt_from_transaction(database, &transaction, map_policy, &content)
+}
+
+fn verify_lmdb_backup_receipt(
+    backup_root: &Path,
+    descriptor: &QualificationProfileDescriptorV1,
+    expected: Option<&LmdbExactReceiptV1>,
+) -> Result<LmdbExactReceiptV1, String> {
+    verify_completed_backup(backup_root, descriptor).map_err(|error| error.to_string())?;
+    let receipt_path = backup_root.join(LMDB_BACKUP_RECEIPT_FILE_V1);
+    let receipt: LmdbBackupReceiptV1 = serde_json::from_slice(
+        &fs::read(&receipt_path)
+            .map_err(|error| format!("plain LMDB backup receipt read failed: {error}"))?,
+    )
+    .map_err(|error| format!("plain LMDB backup receipt is invalid: {error}"))?;
+    if receipt.schema != LMDB_BACKUP_RECEIPT_SCHEMA_V1 {
+        return Err(format!(
+            "unsupported plain LMDB backup receipt schema {}",
+            receipt.schema
+        ));
+    }
+    receipt.exact.map_policy.validate()?;
+    let actual = exact_receipt_from_candidate(backup_root, receipt.exact.map_policy)?;
+    if actual != receipt.exact {
+        return Err("plain LMDB backup receipt does not match its candidate carriers".to_owned());
+    }
+    if expected.is_some_and(|expected| expected != &actual) {
+        return Err("plain LMDB backup receipt does not match the expected truth".to_owned());
+    }
+    Ok(actual)
+}
+
+pub fn restore_completed_lmdb_backup_v1(
+    backup_root: &Path,
+    destination: &Path,
+) -> Result<LmdbExactReceiptV1, String> {
+    let descriptor = QualificationProfileDescriptorV1 {
+        physical_profile_id: QUALIFICATION_LMDB_PLAIN_PROFILE_ID_V1.to_owned(),
+        logical_capabilities: LogicalCapabilityEpochV1::foundation(),
+    };
+    let expected = verify_lmdb_backup_receipt(backup_root, &descriptor, None)?;
+    if destination
+        .try_exists()
+        .map_err(|error| format!("plain LMDB restore destination check failed: {error}"))?
+    {
+        return Err("plain LMDB restore destination already exists".to_owned());
+    }
+    fs::create_dir_all(destination.join(JOURNAL_DIRECTORY_V1))
+        .map_err(|error| format!("plain LMDB restore journal creation failed: {error}"))?;
+    copy_file_synced(
+        &backup_root.join(LMDB_BACKUP_DATABASE_FILE_V1),
+        &destination.join(LMDB_BACKUP_DATABASE_FILE_V1),
+    )?;
+    copy_directory_contents(
+        &backup_root.join(CONTENT_DIRECTORY_V1),
+        &destination.join(CONTENT_DIRECTORY_V1),
+    )?;
+    copy_file_synced(
+        &backup_root.join(LMDB_BACKUP_RECEIPT_FILE_V1),
+        &destination.join(LMDB_BACKUP_RECEIPT_FILE_V1),
+    )?;
+    let actual = exact_receipt_from_candidate(destination, expected.map_policy)?;
+    if actual != expected {
+        return Err("plain LMDB restored truth does not match the completed backup".to_owned());
+    }
+    Ok(actual)
+}
+
+fn write_canonical_new(path: &Path, value: &impl Serialize) -> Result<(), String> {
+    let value = serde_json::to_value(value)
+        .map_err(|error| format!("plain LMDB sidecar serialization failed: {error}"))?;
+    let bytes = canonical_json_bytes(&value)
+        .map_err(|error| format!("plain LMDB sidecar canonicalization failed: {error}"))?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| format!("plain LMDB sidecar creation failed: {error}"))?;
+    file.write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| format!("plain LMDB sidecar write failed: {error}"))
+}
+
+fn copy_directory_contents(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::create_dir_all(destination)
+        .map_err(|error| format!("plain LMDB copy directory creation failed: {error}"))?;
+    let mut entries = fs::read_dir(source)
+        .map_err(|error| format!("plain LMDB copy directory read failed: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("plain LMDB copy directory entry failed: {error}"))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("plain LMDB copy carrier inspection failed: {error}"))?;
+        let target = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_directory_contents(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            copy_file_synced(&entry.path(), &target)?;
+        } else {
+            return Err("plain LMDB copy rejected a non-file carrier".to_owned());
+        }
+    }
+    Ok(())
+}
+
+fn copy_file_synced(source: &Path, destination: &Path) -> Result<(), String> {
+    if destination
+        .try_exists()
+        .map_err(|error| format!("plain LMDB copy destination check failed: {error}"))?
+    {
+        return Err(format!(
+            "plain LMDB copy destination already exists: {}",
+            destination.display()
+        ));
+    }
+    fs::copy(source, destination)
+        .map_err(|error| format!("plain LMDB carrier copy failed: {error}"))?;
+    OpenOptions::new()
+        .write(true)
+        .open(destination)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| format!("plain LMDB copied carrier sync failed: {error}"))
+}
+
+fn collect_active_lmdb_carriers(root: &Path) -> Result<Vec<LmdbCarrierV1>, String> {
+    let mut carriers = Vec::new();
+    collect_carriers_recursive(root, root, &mut carriers, &classify_active_carrier)?;
+    carriers.sort_by(|left, right| {
+        left.relative_path
+            .as_bytes()
+            .cmp(right.relative_path.as_bytes())
+    });
+    Ok(carriers)
+}
+
+fn collect_carriers_recursive(
+    root: &Path,
+    directory: &Path,
+    carriers: &mut Vec<LmdbCarrierV1>,
+    classify: &impl Fn(&str) -> Result<LmdbCarrierClassV1, String>,
+) -> Result<(), String> {
+    let mut entries = fs::read_dir(directory)
+        .map_err(|error| format!("plain LMDB inventory directory read failed: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("plain LMDB inventory directory entry failed: {error}"))?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("plain LMDB inventory carrier inspection failed: {error}"))?;
+        if file_type.is_dir() {
+            collect_carriers_recursive(root, &path, carriers, classify)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            return Err(format!(
+                "plain LMDB inventory rejected non-file carrier {}",
+                path.display()
+            ));
+        }
+        let relative_path = path
+            .strip_prefix(root)
+            .map_err(|_| "plain LMDB inventory carrier escaped its root".to_owned())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let metadata = fs::metadata(&path)
+            .map_err(|error| format!("plain LMDB inventory metadata read failed: {error}"))?;
+        carriers.push(LmdbCarrierV1 {
+            class: classify(&relative_path)?,
+            relative_path,
+            encoded_sha256: sha256_bytes_hex(
+                &fs::read(&path).map_err(|error| {
+                    format!("plain LMDB inventory carrier read failed: {error}")
+                })?,
+            ),
+            encoded_bytes: metadata.len(),
+            allocated_bytes: super::fault::native_file_allocation(&path, &metadata)?,
+        });
+    }
+    Ok(())
+}
+
+fn classify_active_carrier(relative_path: &str) -> Result<LmdbCarrierClassV1, String> {
+    match relative_path {
+        "journal/data.mdb" => Ok(LmdbCarrierClassV1::Database),
+        "journal/lock.mdb" => Ok(LmdbCarrierClassV1::Lock),
+        RESIZE_LOCK_FILE_V1 => Ok(LmdbCarrierClassV1::ResizeLock),
+        LMDB_BACKUP_RECEIPT_FILE_V1 => Ok(LmdbCarrierClassV1::Sidecar),
+        path if path.starts_with("content/") => Ok(LmdbCarrierClassV1::IndependentContent),
+        other => Err(format!(
+            "plain LMDB inventory found an unclassified carrier {other}"
+        )),
+    }
+}
+
+fn inventory_from_carriers(
+    carriers: &[LmdbCarrierV1],
+    logical_bytes: u64,
+) -> Result<QualificationInventoryV1, String> {
+    if carriers.is_empty() {
+        return Err("plain LMDB inventory is empty".to_owned());
+    }
+    let mut encoded_bytes = 0_u64;
+    let mut allocated_bytes = 0_u64;
+    let mut names = Vec::with_capacity(carriers.len());
+    for carrier in carriers {
+        encoded_bytes = encoded_bytes
+            .checked_add(carrier.encoded_bytes)
+            .ok_or_else(|| "plain LMDB inventory encoded byte count overflow".to_owned())?;
+        allocated_bytes = allocated_bytes
+            .checked_add(carrier.allocated_bytes)
+            .ok_or_else(|| "plain LMDB inventory allocation byte count overflow".to_owned())?;
+        names.push(format!(
+            "{}:{}",
+            carrier.class.as_str(),
+            carrier.relative_path
+        ));
+    }
+    names.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    Ok(QualificationInventoryV1 {
+        carriers: names,
+        logical_bytes,
+        encoded_bytes,
+        allocated_bytes,
+        high_water_bytes: allocated_bytes,
+    })
+}
+
+fn sanitized_inventory_from_carriers(
+    carriers: &[LmdbCarrierV1],
+    inventory: QualificationInventoryV1,
+) -> Result<QualificationLmdbSanitizedInventoryV1, String> {
+    let mut by_class = BTreeMap::<LmdbCarrierClassV1, Vec<&LmdbCarrierV1>>::new();
+    for carrier in carriers {
+        by_class.entry(carrier.class).or_default().push(carrier);
+    }
+    let carrier_classes = LmdbCarrierClassV1::ALL.to_vec();
+    let class_inventories = LmdbCarrierClassV1::ALL
+        .into_iter()
+        .map(|class| {
+            let carriers = by_class.remove(&class).unwrap_or_default();
+            let encoded_bytes = carriers.iter().try_fold(0_u64, |total, carrier| {
+                total
+                    .checked_add(carrier.encoded_bytes)
+                    .ok_or_else(|| "plain LMDB class inventory byte count overflow".to_owned())
+            })?;
+            let allocated_bytes = carriers.iter().try_fold(0_u64, |total, carrier| {
+                total
+                    .checked_add(carrier.allocated_bytes)
+                    .ok_or_else(|| "plain LMDB class inventory allocation overflow".to_owned())
+            })?;
+            let identities = carriers
+                .iter()
+                .map(|carrier| {
+                    serde_json::json!({
+                        "relativePath": carrier.relative_path,
+                        "encodedSha256": carrier.encoded_sha256,
+                        "encodedBytes": carrier.encoded_bytes,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let identity = canonical_json_bytes(
+                &serde_json::to_value(identities).map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(QualificationLmdbCarrierClassInventoryV1 {
+                class,
+                carrier_count: carriers.len() as u64,
+                carrier_set_sha256: sha256_bytes_hex(&identity),
+                encoded_bytes,
+                allocated_bytes,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(QualificationLmdbSanitizedInventoryV1 {
+        carrier_classes,
+        class_inventories,
+        inventory: QualificationPerformanceInventoryV2::from_inventory(&inventory)?,
+    })
+}
+
+pub fn run_qualification_lmdb_lifecycle_child_v1(request_path: &Path) -> Result<(), String> {
+    let request: LmdbLifecycleChildRequestV1 = serde_json::from_slice(
+        &fs::read(request_path)
+            .map_err(|error| format!("plain LMDB lifecycle child request read failed: {error}"))?,
+    )
+    .map_err(|error| format!("plain LMDB lifecycle child request is invalid: {error}"))?;
+    match request.operation.clone() {
+        LmdbLifecycleChildOperationV1::Restore => {
+            let destination = request
+                .destination
+                .as_deref()
+                .ok_or_else(|| "plain LMDB restore child omitted its destination".to_owned())?;
+            let receipt = restore_completed_lmdb_backup_v1(&request.source_root, destination)?;
+            let restored = LmdbQualificationProfile::open(destination)?;
+            if restored.exact_receipt()? != receipt {
+                return Err("plain LMDB fresh-process restore receipt drifted on open".to_owned());
+            }
+            write_canonical_new(&request.result_path, &receipt)
+        }
+        LmdbLifecycleChildOperationV1::PinnedReader
+        | LmdbLifecycleChildOperationV1::HoldPinnedReader => {
+            let profile = LmdbQualificationProfile::open(&request.source_root)?;
+            let pinned = profile.pin_reader()?;
+            let participant = join_lifecycle_participant(&request)?;
+            participant.wait_for_release(Duration::from_secs(300))?;
+            let receipt = pinned.exact_receipt()?;
+            write_canonical_new(&request.result_path, &receipt)?;
+            participant.complete()
+        }
+        LmdbLifecycleChildOperationV1::InterruptedCopy => {
+            let profile = LmdbQualificationProfile::open(&request.source_root)?;
+            profile.backup_to_after_copy_barrier(
+                request
+                    .destination
+                    .as_deref()
+                    .ok_or_else(|| "plain LMDB copy child omitted its destination".to_owned())?,
+                request
+                    .barrier_root
+                    .as_deref()
+                    .ok_or_else(|| "plain LMDB copy child omitted its barrier".to_owned())?,
+                &request.participant,
+            )
+        }
+        operation => {
+            let profile = LmdbQualificationProfile::open(&request.source_root)?;
+            let participant = join_lifecycle_participant(&request)?;
+            participant.wait_for_release(Duration::from_secs(300))?;
+            let receipt = match operation {
+                LmdbLifecycleChildOperationV1::CreateCohort { records } => {
+                    for record in records {
+                        if profile
+                            .journal()
+                            .create_once(&record.logical_key, &record.decoded_bytes)?
+                            != QualificationCreateOutcome::Created
+                        {
+                            return Err(format!(
+                                "plain LMDB lifecycle writer found existing key {}",
+                                record.logical_key
+                            ));
+                        }
+                    }
+                    profile.exact_receipt()?
+                }
+                LmdbLifecycleChildOperationV1::OnlineCopy => {
+                    let destination = request.destination.as_deref().ok_or_else(|| {
+                        "plain LMDB copy child omitted its destination".to_owned()
+                    })?;
+                    profile.backup_to(destination)?;
+                    verify_lmdb_backup_receipt(destination, &profile.descriptor, None)?
+                }
+                _ => unreachable!("early lifecycle child operations returned above"),
+            };
+            write_canonical_new(&request.result_path, &receipt)?;
+            participant.complete()
+        }
+    }
+}
+
+fn join_lifecycle_participant(
+    request: &LmdbLifecycleChildRequestV1,
+) -> Result<super::QualificationProcessBarrierParticipantV1, String> {
+    super::QualificationProcessBarrierParticipantV1::join(
+        request
+            .barrier_root
+            .as_deref()
+            .ok_or_else(|| "plain LMDB lifecycle child omitted its barrier".to_owned())?,
+        &request.participant,
+    )
+}
+
+fn spawn_lmdb_lifecycle_child(
+    executable: &Path,
+    requests_root: &Path,
+    label: &str,
+    request: &LmdbLifecycleChildRequestV1,
+) -> Result<Child, String> {
+    fs::create_dir_all(requests_root)
+        .map_err(|error| format!("plain LMDB lifecycle request root creation failed: {error}"))?;
+    let request_path = requests_root.join(format!("{label}.json"));
+    write_canonical_new(&request_path, request)?;
+    Command::new(executable)
+        .arg("--lmdb-lifecycle-child")
+        .arg(request_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("failed to spawn plain LMDB lifecycle child {label}: {error}"))
+}
+
+fn read_lmdb_lifecycle_receipt(path: &Path) -> Result<LmdbExactReceiptV1, String> {
+    serde_json::from_slice(
+        &fs::read(path)
+            .map_err(|error| format!("plain LMDB lifecycle child result read failed: {error}"))?,
+    )
+    .map_err(|error| format!("plain LMDB lifecycle child result is invalid: {error}"))
+}
+
+fn terminate_lmdb_lifecycle_child(child: &mut Child) -> Result<(), String> {
+    child
+        .kill()
+        .map_err(|error| format!("plain LMDB lifecycle child termination failed: {error}"))?;
+    let status = child
+        .wait()
+        .map_err(|error| format!("plain LMDB lifecycle child wait failed: {error}"))?;
+    if status.success() {
+        return Err("plain LMDB lifecycle child exited successfully before termination".to_owned());
+    }
+    Ok(())
+}
+
+pub fn run_qualification_lmdb_lifecycle_smoke_v1(
+    executable: &Path,
+    root: &Path,
+) -> Result<QualificationLmdbLifecycleSmokeV1, String> {
+    fs::create_dir_all(root)
+        .map_err(|error| format!("plain LMDB lifecycle root creation failed: {error}"))?;
+    let requests_root = root.join("orchestration").join("requests");
+    let results_root = root.join("orchestration").join("results");
+    fs::create_dir_all(&results_root)
+        .map_err(|error| format!("plain LMDB lifecycle result root creation failed: {error}"))?;
+    let source_root = root.join("source");
+    let profile = LmdbQualificationProfile::open(&source_root)?;
+    profile.put_content_once(
+        "sha256:3000000000000000000000000000000000000000000000000000000000000000",
+        QualificationRecordKindV1::ObjectArtifact,
+        b"plain-lmdb-lifecycle-content",
+    )?;
+    let spec = qualification_generator_spec_v1(QualificationGeneratedWorkloadV1::G0);
+    let manifest = qualification_generated_manifest_v1(&spec).map_err(|error| error.to_string())?;
+    let split = manifest.records.len() / 2;
+    for record in &manifest.records[..split] {
+        if profile
+            .journal()
+            .create_once(&record.logical_key, &record.decoded_bytes)?
+            != QualificationCreateOutcome::Created
+        {
+            return Err("plain LMDB lifecycle seed cohort was not created once".to_owned());
+        }
+    }
+
+    let reader_barrier_root = root.join("orchestration").join("reader-barrier");
+    fs::create_dir_all(&reader_barrier_root)
+        .map_err(|error| format!("plain LMDB reader barrier root creation failed: {error}"))?;
+    let reader_barrier = super::QualificationProcessBarrierV1::create(
+        &reader_barrier_root,
+        &["pinned-reader", "later-writer"],
+    )?;
+    let pinned_result = results_root.join("pinned-reader.json");
+    let writer_result = results_root.join("later-writer.json");
+    let mut pinned_child = spawn_lmdb_lifecycle_child(
+        executable,
+        &requests_root,
+        "pinned-reader",
+        &LmdbLifecycleChildRequestV1 {
+            source_root: source_root.clone(),
+            destination: None,
+            barrier_root: Some(reader_barrier_root.clone()),
+            participant: "pinned-reader".to_owned(),
+            result_path: pinned_result.clone(),
+            operation: LmdbLifecycleChildOperationV1::PinnedReader,
+        },
+    )?;
+    let mut writer_child = spawn_lmdb_lifecycle_child(
+        executable,
+        &requests_root,
+        "later-writer",
+        &LmdbLifecycleChildRequestV1 {
+            source_root: source_root.clone(),
+            destination: None,
+            barrier_root: Some(reader_barrier_root.clone()),
+            participant: "later-writer".to_owned(),
+            result_path: writer_result,
+            operation: LmdbLifecycleChildOperationV1::CreateCohort {
+                records: manifest.records[split..]
+                    .iter()
+                    .map(|record| LmdbLifecycleRecordV1 {
+                        logical_key: record.logical_key.clone(),
+                        decoded_bytes: record.decoded_bytes.clone(),
+                    })
+                    .collect(),
+            },
+        },
+    )?;
+    reader_barrier.wait_until_ready(Duration::from_secs(30))?;
+    reader_barrier.release()?;
+    super::fault::wait_child(&mut pinned_child, Duration::from_secs(60))?;
+    super::fault::wait_child(&mut writer_child, Duration::from_secs(60))?;
+    let reader_overlap = reader_barrier.evidence()?;
+    let pinned_receipt = read_lmdb_lifecycle_receipt(&pinned_result)?;
+    let latest_receipt = profile.exact_receipt()?;
+    if pinned_receipt.head_marker != split as u64
+        || latest_receipt.head_marker != manifest.records.len() as u64
+        || pinned_receipt == latest_receipt
+    {
+        return Err(
+            "plain LMDB pinned-reader lifecycle receipts are not stable and current".to_owned(),
+        );
+    }
+
+    let retention_root = root.join("retention");
+    let retention_profile = LmdbQualificationProfile::open(&retention_root)?;
+    populate_lifecycle_range(&retention_profile, "seed", 0..32, 512)?;
+    let steady_allocated_bytes = retention_profile.inventory()?.allocated_bytes;
+    let retained_reader = retention_profile.pin_reader()?;
+    populate_lifecycle_range(&retention_profile, "retained", 0..128, 4096)?;
+    let retained_allocated_bytes = retention_profile.inventory()?.allocated_bytes;
+    drop(retained_reader);
+    populate_lifecycle_range(&retention_profile, "reuse", 0..128, 512)?;
+    let reused_allocated_bytes = retention_profile.inventory()?.allocated_bytes;
+    let within_predeclared_bounds = reused_allocated_bytes
+        <= LIFECYCLE_READER_RETENTION_BOUND_BYTES_V1
+        && reused_allocated_bytes.saturating_sub(retained_allocated_bytes)
+            <= LIFECYCLE_POST_RELEASE_REUSE_BOUND_BYTES_V1;
+    if !within_predeclared_bounds {
+        return Err(format!(
+            "plain LMDB reader retention exceeded its predeclared native-allocation bounds: steady={steady_allocated_bytes}, retained={retained_allocated_bytes}, reused={reused_allocated_bytes}"
+        ));
+    }
+
+    let live_reader = profile.pin_reader()?;
+    let live_receipt = live_reader.exact_receipt()?;
+    let stale_barrier_root = root.join("orchestration").join("stale-reader-barrier");
+    fs::create_dir_all(&stale_barrier_root)
+        .map_err(|error| format!("plain LMDB stale-reader barrier creation failed: {error}"))?;
+    let stale_barrier =
+        super::QualificationProcessBarrierV1::create(&stale_barrier_root, &["stale-reader"])?;
+    let mut stale_child = spawn_lmdb_lifecycle_child(
+        executable,
+        &requests_root,
+        "stale-reader",
+        &LmdbLifecycleChildRequestV1 {
+            source_root: source_root.clone(),
+            destination: None,
+            barrier_root: Some(stale_barrier_root),
+            participant: "stale-reader".to_owned(),
+            result_path: results_root.join("stale-reader.json"),
+            operation: LmdbLifecycleChildOperationV1::HoldPinnedReader,
+        },
+    )?;
+    stale_barrier.wait_until_ready(Duration::from_secs(30))?;
+    terminate_lmdb_lifecycle_child(&mut stale_child)?;
+    let stale_readers_cleared = profile.clear_stale_readers()? as u64;
+    drop(stale_child);
+    let live_reader_preserved = live_reader.exact_receipt()? == live_receipt;
+    drop(live_reader);
+    if stale_readers_cleared == 0 || !live_reader_preserved || profile.clear_stale_readers()? != 0 {
+        return Err("plain LMDB stale-reader cleanup did not preserve the live reader".to_owned());
+    }
+
+    let copy_before = profile.exact_receipt()?;
+    let copy_barrier_root = root.join("orchestration").join("copy-barrier");
+    fs::create_dir_all(&copy_barrier_root)
+        .map_err(|error| format!("plain LMDB copy barrier root creation failed: {error}"))?;
+    let copy_barrier = super::QualificationProcessBarrierV1::create(
+        &copy_barrier_root,
+        &["online-copy", "copy-writer"],
+    )?;
+    let backup_root = root.join("backup");
+    let copy_result = results_root.join("online-copy.json");
+    let mut copy_child = spawn_lmdb_lifecycle_child(
+        executable,
+        &requests_root,
+        "online-copy",
+        &LmdbLifecycleChildRequestV1 {
+            source_root: source_root.clone(),
+            destination: Some(backup_root.clone()),
+            barrier_root: Some(copy_barrier_root.clone()),
+            participant: "online-copy".to_owned(),
+            result_path: copy_result.clone(),
+            operation: LmdbLifecycleChildOperationV1::OnlineCopy,
+        },
+    )?;
+    let mut copy_writer_child = spawn_lmdb_lifecycle_child(
+        executable,
+        &requests_root,
+        "copy-writer",
+        &LmdbLifecycleChildRequestV1 {
+            source_root: source_root.clone(),
+            destination: None,
+            barrier_root: Some(copy_barrier_root),
+            participant: "copy-writer".to_owned(),
+            result_path: results_root.join("copy-writer.json"),
+            operation: LmdbLifecycleChildOperationV1::CreateCohort {
+                records: vec![LmdbLifecycleRecordV1 {
+                    logical_key: "journal/lifecycle-copy-writer".to_owned(),
+                    decoded_bytes: b"later-writer-cohort".to_vec(),
+                }],
+            },
+        },
+    )?;
+    copy_barrier.wait_until_ready(Duration::from_secs(30))?;
+    copy_barrier.release()?;
+    super::fault::wait_child(&mut copy_child, Duration::from_secs(60))?;
+    super::fault::wait_child(&mut copy_writer_child, Duration::from_secs(60))?;
+    let copy_overlap = copy_barrier.evidence()?;
+    let copied_receipt = read_lmdb_lifecycle_receipt(&copy_result)?;
+    let copy_after = profile.exact_receipt()?;
+    let exact_coherent_prefix = copied_receipt == copy_before || copied_receipt == copy_after;
+    if !exact_coherent_prefix {
+        return Err("plain LMDB online copy is not an exact coherent cohort prefix".to_owned());
+    }
+    let completed_manifest = verify_completed_backup(&backup_root, &profile.descriptor)
+        .map_err(|error| error.to_string())?;
+    let completion_marker_last = backup_root.join(super::BACKUP_COMPLETION_FILE_V1).is_file()
+        && backup_root.join(super::BACKUP_MANIFEST_FILE_V1).is_file()
+        && !completed_manifest.carriers.iter().any(|carrier| {
+            carrier.relative_path == super::BACKUP_COMPLETION_FILE_V1
+                || carrier.relative_path == super::BACKUP_MANIFEST_FILE_V1
+        });
+    if !completion_marker_last {
+        return Err("plain LMDB completion marker publication order is invalid".to_owned());
+    }
+
+    let interrupted_root = root.join("interrupted");
+    let interrupted_barrier_root = root.join("orchestration").join("interrupted-barrier");
+    fs::create_dir_all(&interrupted_barrier_root).map_err(|error| {
+        format!("plain LMDB interrupted-copy barrier root creation failed: {error}")
+    })?;
+    let interrupted_barrier =
+        super::QualificationProcessBarrierV1::create(&interrupted_barrier_root, &["copy"])?;
+    let mut interrupted_child = spawn_lmdb_lifecycle_child(
+        executable,
+        &requests_root,
+        "interrupted-copy",
+        &LmdbLifecycleChildRequestV1 {
+            source_root: source_root.clone(),
+            destination: Some(interrupted_root.clone()),
+            barrier_root: Some(interrupted_barrier_root),
+            participant: "copy".to_owned(),
+            result_path: results_root.join("interrupted-copy.json"),
+            operation: LmdbLifecycleChildOperationV1::InterruptedCopy,
+        },
+    )?;
+    interrupted_barrier.wait_until_ready(Duration::from_secs(30))?;
+    terminate_lmdb_lifecycle_child(&mut interrupted_child)?;
+    let interrupted_backup_rejected =
+        verify_completed_backup(&interrupted_root, &profile.descriptor).is_err();
+    let interrupted_retry_rejected = profile.backup_to(&interrupted_root).is_err();
+    if !interrupted_backup_rejected || !interrupted_retry_rejected {
+        return Err("plain LMDB interrupted backup was reinterpreted as complete".to_owned());
+    }
+
+    let backup_before_restore = tree_carrier_receipt(&backup_root, false)?;
+    let restored_root = root.join("restored");
+    let restored_result = results_root.join("restored.json");
+    let mut restore_child = spawn_lmdb_lifecycle_child(
+        executable,
+        &requests_root,
+        "fresh-restore",
+        &LmdbLifecycleChildRequestV1 {
+            source_root: backup_root.clone(),
+            destination: Some(restored_root.clone()),
+            barrier_root: None,
+            participant: "restore".to_owned(),
+            result_path: restored_result.clone(),
+            operation: LmdbLifecycleChildOperationV1::Restore,
+        },
+    )?;
+    super::fault::wait_child(&mut restore_child, Duration::from_secs(60))?;
+    let restored_receipt = read_lmdb_lifecycle_receipt(&restored_result)?;
+    let backup_preserved = tree_carrier_receipt(&backup_root, false)? == backup_before_restore;
+    let restore_inventory_identity_exact =
+        truth_carrier_identity(&backup_root)? == truth_carrier_identity(&restored_root)?;
+    if restored_receipt != copied_receipt || !backup_preserved || !restore_inventory_identity_exact
+    {
+        return Err("plain LMDB fresh-process restore was not exact and read-only".to_owned());
+    }
+
+    with_resize_lock(&source_root, || Ok(()))?;
+    let source_before_repair = tree_carrier_receipt(&source_root, true)?;
+    let repair_backup_root = root.join("repair-backup");
+    profile.repair_to(&repair_backup_root)?;
+    let source_preserved = tree_carrier_receipt(&source_root, true)? == source_before_repair;
+    let repair_root = root.join("repair-restored");
+    let repaired_receipt = restore_completed_lmdb_backup_v1(&repair_backup_root, &repair_root)?;
+    let repair_inventory_identity_exact =
+        truth_carrier_identity(&repair_backup_root)? == truth_carrier_identity(&repair_root)?;
+    if repaired_receipt != copy_after || !source_preserved || !repair_inventory_identity_exact {
+        return Err("plain LMDB fresh-copy repair did not preserve exact source truth".to_owned());
+    }
+    let corrupt_root = root.join("corrupt-source");
+    fs::create_dir_all(corrupt_root.join(JOURNAL_DIRECTORY_V1))
+        .map_err(|error| format!("plain LMDB corrupt fixture creation failed: {error}"))?;
+    copy_file_synced(
+        &backup_root.join(LMDB_BACKUP_DATABASE_FILE_V1),
+        &corrupt_root.join(JOURNAL_DIRECTORY_V1).join("data.mdb"),
+    )?;
+    OpenOptions::new()
+        .write(true)
+        .open(corrupt_root.join(JOURNAL_DIRECTORY_V1).join("data.mdb"))
+        .and_then(|file| file.set_len(1024))
+        .map_err(|error| format!("plain LMDB corrupt fixture truncation failed: {error}"))?;
+    let corrupt_truth_rejected = LmdbQualificationProfile::open(&corrupt_root).is_err();
+    let incomplete_repair_root = root.join("incomplete-repair");
+    fs::create_dir(&incomplete_repair_root)
+        .map_err(|error| format!("plain LMDB incomplete repair fixture failed: {error}"))?;
+    let incomplete_destination_rejected = profile.repair_to(&incomplete_repair_root).is_err();
+    if !corrupt_truth_rejected || !incomplete_destination_rejected {
+        return Err(
+            "plain LMDB repair admitted corrupt truth or an incomplete destination".to_owned(),
+        );
+    }
+
+    let source_inventory = profile.inventory()?;
+    let steady_inventory = QualificationPerformanceInventoryV2::from_inventory(&source_inventory)?;
+    let native_allocation_excludes_virtual_map =
+        source_inventory.allocated_bytes < profile.current_map_size_bytes();
+    if !native_allocation_excludes_virtual_map {
+        return Err(
+            "plain LMDB inventory counted virtual map reservation as allocation".to_owned(),
+        );
+    }
+    let inventory = collect_lifecycle_inventory(
+        LmdbLifecycleInventoryRoots {
+            source: &source_root,
+            backup: &backup_root,
+            interrupted: &interrupted_root,
+            restored: &restored_root,
+            repair_backup: &repair_backup_root,
+            repair_restored: &repair_root,
+            retention: &retention_root,
+            corrupt: &corrupt_root,
+        },
+        source_inventory.logical_bytes,
+    )?;
+    if inventory.carrier_classes != LmdbCarrierClassV1::ALL {
+        return Err("plain LMDB lifecycle inventory omitted an owned carrier class".to_owned());
+    }
+
+    drop(retention_profile);
+    let interrupted_copy_cleaned = fs::remove_dir_all(&interrupted_root).is_ok()
+        && !interrupted_root.try_exists().map_err(|error| {
+            format!("plain LMDB interrupted-copy cleanup check failed: {error}")
+        })?;
+    if !interrupted_copy_cleaned {
+        return Err("plain LMDB interrupted-copy carriers could not be cleaned".to_owned());
+    }
+    drop(profile);
+    let reopened_profile = LmdbQualificationProfile::open(&source_root)?;
+    let reopened_inventory =
+        QualificationPerformanceInventoryV2::from_inventory(&reopened_profile.inventory()?)?;
+    drop(reopened_profile);
+    let windows = exercise_windows_lmdb_lifecycle(&backup_root, root, interrupted_copy_cleaned)?;
+    let inventory_snapshots = vec![
+        QualificationLmdbInventorySnapshotV1 {
+            state: QualificationPerformanceInventoryStateV1::Steady,
+            inventory: steady_inventory,
+        },
+        QualificationLmdbInventorySnapshotV1 {
+            state: QualificationPerformanceInventoryStateV1::Reopened,
+            inventory: reopened_inventory,
+        },
+        QualificationLmdbInventorySnapshotV1 {
+            state: QualificationPerformanceInventoryStateV1::HighWater,
+            inventory: inventory.inventory.clone(),
+        },
+    ];
+
+    Ok(QualificationLmdbLifecycleSmokeV1 {
+        schema: QUALIFICATION_LMDB_LIFECYCLE_SMOKE_SCHEMA_V1,
+        mode: QUALIFICATION_LMDB_LIFECYCLE_REPORT_MODE_V1,
+        profile_id: QUALIFICATION_LMDB_PLAIN_PROFILE_ID_V1.to_owned(),
+        map_policy: LmdbMapPolicyV1::default(),
+        workload: QualificationGeneratedWorkloadV1::G0,
+        workload_manifest_sha256: manifest.manifest_sha256,
+        reader: QualificationLmdbReaderLifecycleV1 {
+            pinned_receipt,
+            latest_receipt,
+            process_overlap: reader_overlap,
+            stale_readers_cleared,
+            live_reader_preserved,
+        },
+        retention: QualificationLmdbRetentionLifecycleV1 {
+            steady_allocated_bytes,
+            retained_allocated_bytes,
+            reused_allocated_bytes,
+            retention_bound_bytes: LIFECYCLE_READER_RETENTION_BOUND_BYTES_V1,
+            post_release_reuse_bound_bytes: LIFECYCLE_POST_RELEASE_REUSE_BOUND_BYTES_V1,
+            within_predeclared_bounds,
+        },
+        copy: QualificationLmdbCopyLifecycleV1 {
+            copied_receipt,
+            source_before_receipt: copy_before,
+            source_after_receipt: copy_after,
+            exact_coherent_prefix,
+            process_overlap: copy_overlap,
+            completion_marker_last,
+            interrupted_backup_rejected,
+            interrupted_retry_rejected,
+        },
+        restore_repair: QualificationLmdbRestoreRepairLifecycleV1 {
+            restored_receipt,
+            repaired_receipt,
+            backup_preserved,
+            source_preserved,
+            restore_inventory_identity_exact,
+            repair_inventory_identity_exact,
+            corrupt_truth_rejected,
+            incomplete_destination_rejected,
+        },
+        inventory,
+        inventory_snapshots,
+        native_allocation_excludes_virtual_map,
+        windows,
+    })
+}
+
+fn populate_lifecycle_range(
+    profile: &LmdbQualificationProfile,
+    prefix: &str,
+    range: std::ops::Range<u64>,
+    value_bytes: usize,
+) -> Result<(), String> {
+    for index in range {
+        let outcome = profile.journal().create_once(
+            &format!("journal/{prefix}-{index:04}"),
+            &vec![(index % 251) as u8; value_bytes],
+        )?;
+        if outcome != QualificationCreateOutcome::Created {
+            return Err(format!(
+                "plain LMDB lifecycle record {prefix}-{index:04} was not created once"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn tree_carrier_receipt(root: &Path, exclude_lock: bool) -> Result<String, String> {
+    fn visit(
+        root: &Path,
+        directory: &Path,
+        exclude_lock: bool,
+        carriers: &mut Vec<serde_json::Value>,
+    ) -> Result<(), String> {
+        let mut entries = fs::read_dir(directory)
+            .map_err(|error| format!("plain LMDB receipt directory read failed: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("plain LMDB receipt directory entry failed: {error}"))?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let file_type = entry.file_type().map_err(|error| {
+                format!("plain LMDB receipt carrier inspection failed: {error}")
+            })?;
+            if file_type.is_dir() {
+                visit(root, &path, exclude_lock, carriers)?;
+                continue;
+            }
+            if !file_type.is_file() {
+                return Err("plain LMDB receipt rejected a non-file carrier".to_owned());
+            }
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| "plain LMDB receipt carrier escaped its root".to_owned())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if exclude_lock && relative == "journal/lock.mdb" {
+                continue;
+            }
+            carriers.push(serde_json::json!({
+                "relativePath": relative,
+                "encodedSha256": sha256_bytes_hex(
+                    &fs::read(&path)
+                        .map_err(|error| format!("plain LMDB receipt carrier read failed: {error}"))?
+                ),
+            }));
+        }
+        Ok(())
+    }
+
+    let mut carriers = Vec::new();
+    visit(root, root, exclude_lock, &mut carriers)?;
+    let canonical =
+        canonical_json_bytes(&serde_json::to_value(carriers).map_err(|error| error.to_string())?)
+            .map_err(|error| error.to_string())?;
+    Ok(sha256_bytes_hex(&canonical))
+}
+
+fn truth_carrier_identity(root: &Path) -> Result<String, String> {
+    fn add_file(
+        root: &Path,
+        path: &Path,
+        carriers: &mut Vec<serde_json::Value>,
+    ) -> Result<(), String> {
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| "plain LMDB truth carrier escaped its root".to_owned())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let bytes = fs::read(path)
+            .map_err(|error| format!("plain LMDB truth carrier read failed: {error}"))?;
+        carriers.push(serde_json::json!({
+            "relativePath": relative,
+            "encodedBytes": bytes.len(),
+            "encodedSha256": sha256_bytes_hex(&bytes),
+        }));
+        Ok(())
+    }
+
+    fn visit_content(
+        root: &Path,
+        directory: &Path,
+        carriers: &mut Vec<serde_json::Value>,
+    ) -> Result<(), String> {
+        let mut entries = fs::read_dir(directory)
+            .map_err(|error| format!("plain LMDB truth content read failed: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("plain LMDB truth content entry failed: {error}"))?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("plain LMDB truth carrier inspection failed: {error}"))?;
+            if file_type.is_dir() {
+                visit_content(root, &entry.path(), carriers)?;
+            } else if file_type.is_file() {
+                add_file(root, &entry.path(), carriers)?;
+            } else {
+                return Err("plain LMDB truth identity rejected a non-file carrier".to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    let mut carriers = Vec::new();
+    add_file(
+        root,
+        &root.join(LMDB_BACKUP_DATABASE_FILE_V1),
+        &mut carriers,
+    )?;
+    visit_content(root, &root.join(CONTENT_DIRECTORY_V1), &mut carriers)?;
+    carriers.sort_by(|left, right| {
+        left["relativePath"]
+            .as_str()
+            .cmp(&right["relativePath"].as_str())
+    });
+    let canonical = canonical_json_bytes(&serde_json::Value::Array(carriers))
+        .map_err(|error| error.to_string())?;
+    Ok(sha256_bytes_hex(&canonical))
+}
+
+fn collect_lifecycle_inventory(
+    roots: LmdbLifecycleInventoryRoots<'_>,
+    logical_bytes: u64,
+) -> Result<QualificationLmdbSanitizedInventoryV1, String> {
+    let mut carriers = collect_active_lmdb_carriers(roots.source)?;
+    prefix_carrier_paths(&mut carriers, "source");
+    append_role_carriers(&mut carriers, "backup", roots.backup, |path| {
+        if matches!(
+            path,
+            LMDB_BACKUP_RECEIPT_FILE_V1
+                | super::BACKUP_MANIFEST_FILE_V1
+                | super::BACKUP_COMPLETION_FILE_V1
+        ) {
+            Ok(LmdbCarrierClassV1::Sidecar)
+        } else {
+            Ok(LmdbCarrierClassV1::Copy)
+        }
+    })?;
+    append_role_carriers(&mut carriers, "interrupted", roots.interrupted, |_| {
+        Ok(LmdbCarrierClassV1::Temporary)
+    })?;
+    append_role_carriers(&mut carriers, "restored", roots.restored, |_| {
+        Ok(LmdbCarrierClassV1::Copy)
+    })?;
+    append_role_carriers(&mut carriers, "repair-backup", roots.repair_backup, |_| {
+        Ok(LmdbCarrierClassV1::Repair)
+    })?;
+    append_role_carriers(
+        &mut carriers,
+        "repair-restored",
+        roots.repair_restored,
+        |_| Ok(LmdbCarrierClassV1::Repair),
+    )?;
+    append_role_carriers(&mut carriers, "retention", roots.retention, |_| {
+        Ok(LmdbCarrierClassV1::Obsolete)
+    })?;
+    append_role_carriers(&mut carriers, "corrupt", roots.corrupt, |_| {
+        Ok(LmdbCarrierClassV1::Obsolete)
+    })?;
+    carriers.sort_by(|left, right| {
+        left.relative_path
+            .as_bytes()
+            .cmp(right.relative_path.as_bytes())
+    });
+    let aggregate = inventory_from_carriers(&carriers, logical_bytes)?;
+    sanitized_inventory_from_carriers(&carriers, aggregate)
+}
+
+fn append_role_carriers(
+    carriers: &mut Vec<LmdbCarrierV1>,
+    role: &str,
+    root: &Path,
+    classify: impl Fn(&str) -> Result<LmdbCarrierClassV1, String>,
+) -> Result<(), String> {
+    let mut role_carriers = Vec::new();
+    collect_carriers_recursive(root, root, &mut role_carriers, &classify)?;
+    prefix_carrier_paths(&mut role_carriers, role);
+    carriers.extend(role_carriers);
+    Ok(())
+}
+
+fn prefix_carrier_paths(carriers: &mut [LmdbCarrierV1], role: &str) {
+    for carrier in carriers {
+        carrier.relative_path = format!("{role}/{}", carrier.relative_path);
+    }
+}
+
+#[cfg(not(windows))]
+fn exercise_windows_lmdb_lifecycle(
+    _backup_root: &Path,
+    _workspace_root: &Path,
+    interrupted_copy_cleaned: bool,
+) -> Result<QualificationLmdbWindowsLifecycleV1, String> {
+    Ok(QualificationLmdbWindowsLifecycleV1 {
+        required: false,
+        replacement_blocked_while_open: false,
+        replacement_succeeded_after_close: false,
+        reopened_exact: false,
+        interrupted_copy_cleaned,
+    })
+}
+
+#[cfg(windows)]
+fn exercise_windows_lmdb_lifecycle(
+    backup_root: &Path,
+    workspace_root: &Path,
+    interrupted_copy_cleaned: bool,
+) -> Result<QualificationLmdbWindowsLifecycleV1, String> {
+    let open_root = workspace_root.join("windows-open-handle");
+    let expected = restore_completed_lmdb_backup_v1(backup_root, &open_root)?;
+    let profile = LmdbQualificationProfile::open(&open_root)?;
+    let journal_root = open_root.join(JOURNAL_DIRECTORY_V1);
+    let database_path = journal_root.join("data.mdb");
+    let replacement_path = journal_root.join("replacement.mdb");
+    copy_file_synced(
+        &backup_root.join(LMDB_BACKUP_DATABASE_FILE_V1),
+        &replacement_path,
+    )?;
+    let replacement_blocked_while_open = fs::remove_file(&database_path).is_err();
+    let closing = heed3::env_closing_event(&journal_root)
+        .ok_or_else(|| "plain LMDB Windows closing event is unavailable".to_owned())?;
+    drop(profile);
+    closing.wait();
+    if database_path.exists() {
+        fs::remove_file(&database_path).map_err(|error| {
+            format!("plain LMDB Windows closed carrier removal failed: {error}")
+        })?;
+    }
+    let replacement_succeeded_after_close = fs::rename(&replacement_path, &database_path).is_ok();
+    let reopened_exact = replacement_succeeded_after_close
+        && LmdbQualificationProfile::open(&open_root)
+            .and_then(|profile| profile.exact_receipt())
+            .is_ok_and(|receipt| receipt == expected);
+    if !replacement_blocked_while_open
+        || !replacement_succeeded_after_close
+        || !reopened_exact
+        || !interrupted_copy_cleaned
+    {
+        return Err("plain LMDB Windows handle lifecycle proof failed".to_owned());
+    }
+    Ok(QualificationLmdbWindowsLifecycleV1 {
+        required: true,
+        replacement_blocked_while_open,
+        replacement_succeeded_after_close,
+        reopened_exact,
+        interrupted_copy_cleaned,
+    })
+}
+
 impl QualificationProfile for LmdbQualificationProfile {
     fn descriptor(&self) -> Result<QualificationProfileDescriptorV1, String> {
         Ok(self.descriptor.clone())
@@ -524,16 +2142,27 @@ impl QualificationProfile for LmdbQualificationProfile {
             .map_err(|error| error.to_string())
     }
 
-    fn backup_to(&self, _destination: &Path) -> Result<(), String> {
-        Err("plain LMDB online copy is unavailable until the lifecycle proof".to_owned())
+    fn backup_to(&self, destination: &Path) -> Result<(), String> {
+        self.backup_to_with_hook(destination, || Ok(()))
     }
 
-    fn verify_restore(&self, _restored_root: &Path) -> Result<(), String> {
-        Err("plain LMDB restore verification is unavailable until the lifecycle proof".to_owned())
+    fn verify_restore(&self, restored_root: &Path) -> Result<(), String> {
+        verify_lmdb_backup_receipt(restored_root, &self.descriptor, None).map(|_| ())
     }
 
     fn inventory(&self) -> Result<QualificationInventoryV1, String> {
-        Err("plain LMDB exhaustive inventory is unavailable until the lifecycle proof".to_owned())
+        let carriers = collect_active_lmdb_carriers(&self.journal.root)?;
+        let logical_bytes = self
+            .journal
+            .list()?
+            .into_iter()
+            .chain(self.content.list().map_err(|error| error.to_string())?)
+            .try_fold(0_u64, |total, entry| {
+                total
+                    .checked_add(entry.decoded_bytes.len() as u64)
+                    .ok_or_else(|| "plain LMDB inventory logical byte count overflow".to_owned())
+            })?;
+        inventory_from_carriers(&carriers, logical_bytes)
     }
 }
 
@@ -698,7 +2327,7 @@ fn is_map_resized(error: &HeedError) -> bool {
     matches!(error, HeedError::Mdb(MdbError::MapResized))
 }
 
-fn refresh_environment_map(environment: &Env) -> Result<(), String> {
+fn refresh_environment_map(environment: &Env<heed3::WithoutTls>) -> Result<(), String> {
     // SAFETY: callers serialize all local transactions before adopting the
     // map size persisted by another process.
     unsafe { environment.resize(0) }
@@ -781,16 +2410,18 @@ fn mutate_raw_database_for_test(
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command};
     use std::time::Duration;
 
     use super::*;
     use crate::bench_support::foundation::{
-        QualificationCreateOutcome, QualificationGeneratedWorkloadV1,
-        QualificationKeyedReadClassV1, QualificationProcessBarrierParticipantV1,
-        QualificationProcessBarrierV1, qualification_generated_manifest_v1,
-        qualification_generator_spec_v1, qualification_operation_schedule_v1,
+        BACKUP_COMPLETION_FILE_V1, BACKUP_MANIFEST_FILE_V1, QualificationCreateOutcome,
+        QualificationGeneratedWorkloadV1, QualificationKeyedReadClassV1,
+        QualificationProcessBarrierParticipantV1, QualificationProcessBarrierV1,
+        qualification_generated_manifest_v1, qualification_generator_spec_v1,
+        qualification_operation_schedule_v1,
     };
 
     const CHILD_TEST: &str =
@@ -832,6 +2463,56 @@ mod tests {
         std::fs::read_to_string(path).expect("read child result")
     }
 
+    fn populate_records(
+        profile: &LmdbQualificationProfile,
+        prefix: &str,
+        range: std::ops::Range<u64>,
+        value_bytes: usize,
+    ) {
+        for index in range {
+            assert_eq!(
+                profile
+                    .journal()
+                    .create_once(
+                        &format!("journal/{prefix}-{index:04}"),
+                        &vec![(index % 251) as u8; value_bytes],
+                    )
+                    .expect("create lifecycle record"),
+                QualificationCreateOutcome::Created
+            );
+        }
+    }
+
+    fn tree_receipt(root: &Path) -> String {
+        fn visit(root: &Path, directory: &Path, carriers: &mut Vec<(String, String)>) {
+            let mut entries = fs::read_dir(directory)
+                .expect("read receipt directory")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect receipt directory");
+            entries.sort_by_key(|entry| entry.file_name());
+            for entry in entries {
+                let path = entry.path();
+                if entry.file_type().expect("receipt file type").is_dir() {
+                    visit(root, &path, carriers);
+                } else {
+                    let relative = path
+                        .strip_prefix(root)
+                        .expect("receipt relative path")
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    carriers.push((
+                        relative,
+                        sha256_bytes_hex(&fs::read(path).expect("read receipt carrier")),
+                    ));
+                }
+            }
+        }
+
+        let mut carriers = Vec::new();
+        visit(root, root, &mut carriers);
+        sha256_bytes_hex(&canonical_json_bytes(&serde_json::to_value(carriers).unwrap()).unwrap())
+    }
+
     #[test]
     fn lmdb_process_child_entrypoint() {
         let Some(action) = std::env::var_os("POINTBREAK_LMDB_CHILD_ACTION") else {
@@ -843,12 +2524,54 @@ mod tests {
             .unwrap()
             .into_bytes();
         let result = PathBuf::from(std::env::var_os("POINTBREAK_LMDB_CHILD_RESULT").unwrap());
+        if action == "restore" {
+            let destination = PathBuf::from(&key);
+            restore_completed_lmdb_backup_v1(&root, &destination).expect("restore LMDB backup");
+            let restored = LmdbQualificationProfile::open(&destination)
+                .expect("open restored LMDB profile in child");
+            fs::write(
+                result,
+                serde_json::to_vec(&restored.exact_receipt().expect("restored receipt")).unwrap(),
+            )
+            .expect("write restored receipt");
+            return;
+        }
         let profile = if action.to_string_lossy().starts_with("refresh_") {
             LmdbQualificationProfile::open_with_policy(&root, LmdbMapPolicyV1::test_resize_policy())
         } else {
             LmdbQualificationProfile::open(&root)
         }
         .expect("open child LMDB profile");
+        if action == "pin_wait" {
+            let pinned = profile.pin_reader().expect("pin LMDB reader");
+            let participant = QualificationProcessBarrierParticipantV1::join(
+                std::env::var_os("POINTBREAK_LMDB_CHILD_BARRIER").unwrap(),
+                &std::env::var("POINTBREAK_LMDB_CHILD_PARTICIPANT").unwrap(),
+            )
+            .expect("join pinned-reader barrier");
+            participant
+                .wait_for_release(Duration::from_secs(20))
+                .expect("wait for pinned-reader release");
+            fs::write(
+                result,
+                serde_json::to_vec(&pinned.exact_receipt().expect("pinned receipt")).unwrap(),
+            )
+            .expect("write pinned receipt");
+            participant
+                .complete()
+                .expect("complete pinned-reader barrier");
+            return;
+        }
+        if action == "interrupt_backup" {
+            profile
+                .backup_to_after_copy_barrier(
+                    &result,
+                    Path::new(&std::env::var_os("POINTBREAK_LMDB_CHILD_BARRIER").unwrap()),
+                    &std::env::var("POINTBREAK_LMDB_CHILD_PARTICIPANT").unwrap(),
+                )
+                .expect("interrupted backup should be killed at barrier");
+            panic!("interrupted backup unexpectedly passed its copy barrier");
+        }
         let participant = std::env::var_os("POINTBREAK_LMDB_CHILD_BARRIER").map(|barrier| {
             QualificationProcessBarrierParticipantV1::join(
                 barrier,
@@ -860,6 +2583,13 @@ mod tests {
             participant
                 .wait_for_release(Duration::from_secs(20))
                 .expect("wait for LMDB child release");
+        }
+        if action == "backup" {
+            profile.backup_to(&result).expect("online LMDB backup");
+            if let Some(participant) = participant {
+                participant.complete().expect("complete LMDB child barrier");
+            }
+            return;
         }
         let output = match action.to_string_lossy().as_ref() {
             "create" | "refresh_write" => profile
@@ -1147,7 +2877,7 @@ mod tests {
     }
 
     #[test]
-    fn content_stays_independent_and_lifecycle_operations_fail_closed() {
+    fn content_stays_independent_across_completed_backup_and_restore() {
         let root = tempfile::tempdir().expect("LMDB content root");
         let profile = LmdbQualificationProfile::open(root.path()).expect("LMDB profile");
         let key = "sha256:0000000000000000000000000000000000000000000000000000000000000001";
@@ -1168,9 +2898,398 @@ mod tests {
         );
         assert_eq!(profile.journal().head_marker().unwrap(), 0);
         assert!(root.path().join("content").is_dir());
-        assert!(profile.backup_to(&root.path().join("backup")).is_err());
-        assert!(profile.verify_restore(root.path()).is_err());
-        assert!(profile.inventory().is_err());
+        let backup = root.path().join("backup");
+        profile
+            .backup_to(&backup)
+            .expect("backup independent content");
+        profile
+            .verify_restore(&backup)
+            .expect("verify completed backup");
+        let restored_root = root.path().join("restored");
+        restore_completed_lmdb_backup_v1(&backup, &restored_root)
+            .expect("restore independent content");
+        let restored =
+            LmdbQualificationProfile::open(&restored_root).expect("open restored profile");
+        assert_eq!(
+            restored.read_content(key).unwrap().unwrap().decoded_bytes,
+            b"object"
+        );
+        assert_eq!(restored.journal().head_marker().unwrap(), 0);
+    }
+
+    #[test]
+    fn pinned_reader_keeps_a_stable_snapshot_while_later_writers_commit() {
+        let root = tempfile::tempdir().expect("LMDB pinned-reader root");
+        let profile = LmdbQualificationProfile::open(root.path()).expect("open LMDB profile");
+        populate_records(&profile, "before-pin", 0..8, 128);
+        let expected = profile.exact_receipt().expect("pre-pin receipt");
+        let pinned = profile.pin_reader().expect("pin reader snapshot");
+
+        populate_records(&profile, "after-pin", 0..8, 128);
+
+        assert_eq!(pinned.exact_receipt().unwrap(), expected);
+        assert_eq!(pinned.head_marker().unwrap(), 8);
+        assert_eq!(profile.journal().head_marker().unwrap(), 16);
+        assert_ne!(profile.exact_receipt().unwrap(), expected);
+    }
+
+    #[test]
+    fn reader_retention_has_a_predeclared_bound_and_reuses_pages_after_release() {
+        let root = tempfile::tempdir().expect("LMDB retention root");
+        let profile = LmdbQualificationProfile::open(root.path()).expect("open LMDB profile");
+        populate_records(&profile, "seed", 0..32, 512);
+        let steady = profile.inventory().unwrap().allocated_bytes;
+        let pinned = profile.pin_reader().expect("pin retention reader");
+        populate_records(&profile, "retained", 0..128, 4096);
+        let retained = profile.inventory().unwrap().allocated_bytes;
+        assert!(retained >= steady);
+        drop(pinned);
+        populate_records(&profile, "reuse", 0..128, 512);
+        let reused = profile.inventory().unwrap().allocated_bytes;
+
+        assert!(
+            reused <= LIFECYCLE_READER_RETENTION_BOUND_BYTES_V1,
+            "native allocation {reused} exceeded the predeclared {}-byte bound",
+            LIFECYCLE_READER_RETENTION_BOUND_BYTES_V1
+        );
+        assert!(
+            reused.saturating_sub(retained) <= LIFECYCLE_POST_RELEASE_REUSE_BOUND_BYTES_V1,
+            "ordinary post-release commits grew by {} bytes",
+            reused.saturating_sub(retained)
+        );
+    }
+
+    #[test]
+    fn stale_reader_cleanup_clears_dead_slots_without_evicting_a_live_reader() {
+        let root = tempfile::tempdir().expect("LMDB stale-reader root");
+        let results = tempfile::tempdir().expect("LMDB stale-reader results");
+        let profile = LmdbQualificationProfile::open(root.path()).expect("open LMDB profile");
+        populate_records(&profile, "stable", 0..4, 64);
+        let live = profile.pin_reader().expect("pin live reader");
+        let expected = live.exact_receipt().unwrap();
+
+        let barrier_root = results.path().join("barrier");
+        fs::create_dir(&barrier_root).expect("create stale-reader barrier root");
+        let barrier = QualificationProcessBarrierV1::create(&barrier_root, &["stale-reader"])
+            .expect("create stale-reader barrier");
+        let mut stale = spawn_child(
+            "pin_wait",
+            root.path(),
+            "unused",
+            b"",
+            &results.path().join("stale-result"),
+            Some((&barrier_root, "stale-reader")),
+        );
+        barrier
+            .wait_until_ready(Duration::from_secs(20))
+            .expect("stale reader pinned");
+        stale.kill().expect("terminate stale reader process");
+        assert!(!stale.wait().expect("wait for stale reader").success());
+
+        assert!(profile.clear_stale_readers().expect("clear stale readers") >= 1);
+        drop(stale);
+        assert_eq!(live.exact_receipt().unwrap(), expected);
+        assert_eq!(profile.clear_stale_readers().unwrap(), 0);
+    }
+
+    #[test]
+    fn online_copy_overlapping_a_writer_restores_one_exact_coherent_prefix() {
+        let root = tempfile::tempdir().expect("LMDB online-copy root");
+        let results = tempfile::tempdir().expect("LMDB online-copy results");
+        let profile = LmdbQualificationProfile::open(root.path()).expect("open LMDB profile");
+        populate_records(&profile, "prefix", 0..32, 1024);
+        let before = profile.exact_receipt().unwrap();
+
+        let barrier_root = results.path().join("barrier");
+        fs::create_dir(&barrier_root).expect("create copy barrier root");
+        let barrier = QualificationProcessBarrierV1::create(&barrier_root, &["copy", "writer"])
+            .expect("create copy barrier");
+        let backup = results.path().join("completed-backup");
+        let writer_result = results.path().join("writer-result");
+        let copy = spawn_child(
+            "backup",
+            root.path(),
+            "unused",
+            b"",
+            &backup,
+            Some((&barrier_root, "copy")),
+        );
+        let writer = spawn_child(
+            "create",
+            root.path(),
+            "journal/later-writer",
+            b"later",
+            &writer_result,
+            Some((&barrier_root, "writer")),
+        );
+        barrier.wait_until_ready(Duration::from_secs(20)).unwrap();
+        barrier.release().unwrap();
+        wait_success(copy);
+        wait_success(writer);
+        barrier.evidence().unwrap().validate_overlap().unwrap();
+        let after = profile.exact_receipt().unwrap();
+
+        let restored_root = results.path().join("restored-prefix");
+        restore_completed_lmdb_backup_v1(&backup, &restored_root).unwrap();
+        let restored = LmdbQualificationProfile::open(&restored_root).unwrap();
+        let restored_receipt = restored.exact_receipt().unwrap();
+        assert!(restored_receipt == before || restored_receipt == after);
+        restored.journal().integrity_check().unwrap();
+    }
+
+    #[test]
+    fn backup_publishes_candidate_and_content_before_the_completion_marker() {
+        let root = tempfile::tempdir().expect("LMDB publication root");
+        let profile = LmdbQualificationProfile::open(root.path()).expect("open LMDB profile");
+        populate_records(&profile, "backup", 0..4, 64);
+        profile
+            .put_content_once(
+                "sha256:1000000000000000000000000000000000000000000000000000000000000000",
+                QualificationRecordKindV1::NoteBody,
+                b"independent",
+            )
+            .unwrap();
+        let backup = root.path().join("completed");
+        profile
+            .backup_to(&backup)
+            .expect("publish completed backup");
+        let manifest = verify_completed_backup(&backup, &profile.descriptor().unwrap()).unwrap();
+
+        assert!(backup.join(BACKUP_COMPLETION_FILE_V1).is_file());
+        assert!(backup.join(BACKUP_MANIFEST_FILE_V1).is_file());
+        assert!(
+            manifest
+                .carriers
+                .iter()
+                .any(|carrier| carrier.relative_path == LMDB_BACKUP_DATABASE_FILE_V1)
+        );
+        assert!(
+            manifest
+                .carriers
+                .iter()
+                .any(|carrier| carrier.relative_path.starts_with("content/"))
+        );
+        assert!(
+            manifest
+                .carriers
+                .iter()
+                .any(|carrier| carrier.relative_path == LMDB_BACKUP_RECEIPT_FILE_V1)
+        );
+    }
+
+    #[test]
+    fn interrupted_backup_is_incomplete_and_retry_does_not_reinterpret_it() {
+        let root = tempfile::tempdir().expect("LMDB interrupted-copy root");
+        let results = tempfile::tempdir().expect("LMDB interrupted-copy results");
+        let profile = LmdbQualificationProfile::open(root.path()).expect("open LMDB profile");
+        populate_records(&profile, "interrupt", 0..32, 2048);
+        let barrier_root = results.path().join("barrier");
+        fs::create_dir(&barrier_root).expect("create interruption barrier root");
+        let barrier = QualificationProcessBarrierV1::create(&barrier_root, &["copy"])
+            .expect("create interruption barrier");
+        let destination = results.path().join("interrupted");
+        let mut child = spawn_child(
+            "interrupt_backup",
+            root.path(),
+            "unused",
+            b"",
+            &destination,
+            Some((&barrier_root, "copy")),
+        );
+        barrier.wait_until_ready(Duration::from_secs(20)).unwrap();
+        child.kill().expect("terminate interrupted copy");
+        assert!(!child.wait().expect("wait interrupted copy").success());
+
+        assert!(!destination.join(BACKUP_COMPLETION_FILE_V1).exists());
+        assert!(verify_completed_backup(&destination, &profile.descriptor().unwrap()).is_err());
+        assert!(profile.backup_to(&destination).is_err());
+    }
+
+    #[test]
+    fn exact_restore_runs_in_a_fresh_process_without_mutating_the_backup() {
+        let root = tempfile::tempdir().expect("LMDB fresh-restore root");
+        let results = tempfile::tempdir().expect("LMDB fresh-restore results");
+        let profile = LmdbQualificationProfile::open(root.path()).expect("open LMDB profile");
+        populate_records(&profile, "restore", 0..12, 256);
+        let expected = profile.exact_receipt().unwrap();
+        let backup = results.path().join("backup");
+        profile.backup_to(&backup).unwrap();
+        let backup_before = tree_receipt(&backup);
+        let restored_root = results.path().join("restored");
+        let receipt_path = results.path().join("restored-receipt.json");
+
+        wait_success(spawn_child(
+            "restore",
+            &backup,
+            restored_root.to_string_lossy().as_ref(),
+            b"",
+            &receipt_path,
+            None,
+        ));
+        let actual: LmdbExactReceiptV1 =
+            serde_json::from_slice(&fs::read(receipt_path).unwrap()).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(
+            truth_carrier_identity(&backup).unwrap(),
+            truth_carrier_identity(&restored_root).unwrap()
+        );
+        assert_eq!(tree_receipt(&backup), backup_before);
+    }
+
+    #[test]
+    fn fresh_copy_repair_preserves_source_and_rejects_corrupt_or_incomplete_truth() {
+        let root = tempfile::tempdir().expect("LMDB repair root");
+        let results = tempfile::tempdir().expect("LMDB repair results");
+        let profile = LmdbQualificationProfile::open(root.path()).expect("open LMDB profile");
+        populate_records(&profile, "repair", 0..8, 128);
+        let expected = profile.exact_receipt().unwrap();
+        let source_before = tree_receipt(root.path());
+        let repaired_backup = results.path().join("repaired-backup");
+
+        profile
+            .repair_to(&repaired_backup)
+            .expect("fresh-copy repair");
+        assert_eq!(tree_receipt(root.path()), source_before);
+        let repaired_root = results.path().join("repaired-root");
+        restore_completed_lmdb_backup_v1(&repaired_backup, &repaired_root).unwrap();
+        assert_eq!(
+            LmdbQualificationProfile::open(&repaired_root)
+                .unwrap()
+                .exact_receipt()
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            truth_carrier_identity(&repaired_backup).unwrap(),
+            truth_carrier_identity(&repaired_root).unwrap()
+        );
+
+        drop(profile);
+        overwrite_raw_journal_value_for_test(root.path(), "journal/corrupt", b"bad").unwrap();
+        let corrupt = LmdbQualificationProfile::open(root.path()).unwrap();
+        assert!(
+            corrupt
+                .repair_to(&results.path().join("corrupt-output"))
+                .is_err()
+        );
+        let incomplete = results.path().join("incomplete-output");
+        fs::create_dir(&incomplete).unwrap();
+        fs::write(incomplete.join("partial"), b"partial").unwrap();
+        assert!(corrupt.repair_to(&incomplete).is_err());
+    }
+
+    #[test]
+    fn inventory_classifies_all_owned_carriers_and_excludes_virtual_map_reservation() {
+        let root = tempfile::tempdir().expect("LMDB inventory root");
+        let profile = LmdbQualificationProfile::open(root.path()).expect("open LMDB profile");
+        populate_records(&profile, "inventory", 0..4, 64);
+        profile
+            .journal
+            .refresh_map()
+            .expect("materialize resize lock");
+        profile
+            .put_content_once(
+                "sha256:2000000000000000000000000000000000000000000000000000000000000000",
+                QualificationRecordKindV1::ObjectArtifact,
+                b"content",
+            )
+            .unwrap();
+        let inventory = profile.inventory().expect("native LMDB inventory");
+        let sanitized = profile.sanitized_inventory().expect("sanitized inventory");
+
+        assert_eq!(LmdbCarrierClassV1::ALL.len(), 10);
+        assert!(
+            sanitized
+                .carrier_classes
+                .contains(&LmdbCarrierClassV1::Database)
+        );
+        assert!(
+            sanitized
+                .carrier_classes
+                .contains(&LmdbCarrierClassV1::Lock)
+        );
+        assert!(
+            sanitized
+                .carrier_classes
+                .contains(&LmdbCarrierClassV1::ResizeLock)
+        );
+        assert!(
+            sanitized
+                .carrier_classes
+                .contains(&LmdbCarrierClassV1::IndependentContent)
+        );
+        assert!(inventory.allocated_bytes < profile.current_map_size_bytes());
+        assert_eq!(inventory.high_water_bytes, inventory.allocated_bytes);
+        assert_eq!(
+            sanitized
+                .class_inventories
+                .iter()
+                .find(|class| class.class == LmdbCarrierClassV1::Pinned)
+                .expect("pinned class remains explicit")
+                .carrier_count,
+            0
+        );
+        let json = serde_json::to_string(&sanitized).unwrap();
+        assert!(!json.contains(root.path().to_string_lossy().as_ref()));
+        assert!(!json.contains("data.mdb"));
+        assert!(!json.contains("lock.mdb"));
+    }
+
+    #[test]
+    fn lifecycle_schema_mode_and_carrier_names_are_frozen() {
+        assert_eq!(
+            QUALIFICATION_LMDB_LIFECYCLE_SMOKE_SCHEMA_V1,
+            "pointbreak.qualification-lmdb-lifecycle-smoke.v1"
+        );
+        assert_eq!(
+            QUALIFICATION_LMDB_LIFECYCLE_SMOKE_MODE_V1,
+            "--lmdb-lifecycle-smoke"
+        );
+        assert_eq!(
+            QUALIFICATION_LMDB_LIFECYCLE_REPORT_MODE_V1,
+            "non_timing_lifecycle_receipts"
+        );
+        assert_eq!(
+            serde_json::to_value(LmdbCarrierClassV1::ALL).unwrap(),
+            serde_json::json!([
+                "database",
+                "lock",
+                "resize_lock",
+                "independent_content",
+                "copy",
+                "temporary",
+                "obsolete",
+                "pinned",
+                "repair",
+                "sidecar"
+            ])
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_open_handles_block_replacement_then_allow_reopen_and_cleanup() {
+        let root = tempfile::tempdir().expect("LMDB Windows lifecycle root");
+        let source = LmdbQualificationProfile::open(&root.path().join("source"))
+            .expect("open LMDB source profile");
+        populate_records(&source, "windows", 0..4, 64);
+        let backup = root.path().join("backup");
+        source.backup_to(&backup).expect("create online backup");
+        let open_root = root.path().join("open");
+        let expected = restore_completed_lmdb_backup_v1(&backup, &open_root).unwrap();
+        let profile = LmdbQualificationProfile::open(&open_root).expect("open restored profile");
+        let database = open_root.join(JOURNAL_DIRECTORY_V1).join("data.mdb");
+        let replacement = open_root.join(JOURNAL_DIRECTORY_V1).join("replacement.mdb");
+        copy_file_synced(&backup.join(LMDB_BACKUP_DATABASE_FILE_V1), &replacement)
+            .expect("copy offline replacement carrier");
+        assert!(fs::remove_file(&database).is_err());
+        let closing = heed3::env_closing_event(open_root.join(JOURNAL_DIRECTORY_V1)).unwrap();
+        drop(profile);
+        closing.wait();
+        fs::remove_file(&database).expect("remove after handles close");
+        fs::rename(&replacement, &database).expect("install replacement after handles close");
+        let reopened = LmdbQualificationProfile::open(&open_root).expect("reopen after replace");
+        assert_eq!(reopened.exact_receipt().unwrap(), expected);
     }
 
     #[test]

@@ -23,7 +23,7 @@
   "native": {
     "repository": "https://github.com/LMDB/lmdb",
     "sourceCommit": "62e2a60e71cd58e6fdd83a31af3d3c7fe103483d",
-    "treeSha256": "0079ef39c7309ebfd3cb6cad89eb49d0ef38673247b954db6e68f46e0f4e82b5",
+    "treeSha256": "c7f979f542aabbc30fcc84850a9d9693b43f8ea6eeca4912125f790c506062e9",
     "behaviorAuthority": "immutable_upstream_git",
     "publishedComparison": {
       "package": "lmdb-master3-sys",
@@ -38,6 +38,13 @@
         "preimageSha256": "9c90127df98846c21dfdc2221a94180bc217b7cbf01b68cd0c60823a7075e464",
         "postimageSha256": "508ea872cabb350711eecae33e2df3f3abd74ec27c74652204a5120cbc4632a0",
         "purpose": "cast byte-address arithmetic explicitly for MSVC"
+      },
+      {
+        "id": "windows-reader-pid-synchronize",
+        "path": "vendor/lmdb-proof/lmdb-master3-sys/lmdb/libraries/liblmdb/mdb.c",
+        "preimageSha256": "508ea872cabb350711eecae33e2df3f3abd74ec27c74652204a5120cbc4632a0",
+        "postimageSha256": "0be44f5118668dba319b1fd7df865d8718757b8d5b21b07ad5e9df417cbb0ab4",
+        "purpose": "request SYNCHRONIZE before checking retained Windows process liveness"
       }
     ]
   },
@@ -107,7 +114,7 @@
     },
     {
       "path": "vendor/lmdb-proof/lmdb-master3-sys/lmdb/libraries/liblmdb/mdb.c",
-      "sha256": "508ea872cabb350711eecae33e2df3f3abd74ec27c74652204a5120cbc4632a0"
+      "sha256": "0be44f5118668dba319b1fd7df865d8718757b8d5b21b07ad5e9df417cbb0ab4"
     },
     {
       "path": "vendor/lmdb-proof/lmdb-master3-sys/lmdb/libraries/liblmdb/midl.c",
