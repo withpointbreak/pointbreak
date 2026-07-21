@@ -52,8 +52,8 @@ available only for reproducing historical reports; it is not relabeled as the cu
 The non-default `lmdb-proof` feature compiles a source-only, developer-gated LMDB closure. It pins
 the reviewed heed3 wrapper and upstream `mdb.master3` native source, uses no wrapper, native,
 encryption, bindgen, sanitizer, Valgrind, or alternate-key-size features, and links the native
-`liblmdb.a` archive statically. It does not implement a Pointbreak storage adapter, select a store,
-read a Pointbreak store, write application records, or collect timings.
+`liblmdb.a` archive statically. It does not select a store, read a Pointbreak store, route production
+records, or enable encryption.
 
 Validate the embedded closure contract and exercise one plain open/close against a disposable
 directory with:
@@ -71,6 +71,26 @@ licenses/notices, feature set, release target matrix, or default-package exclusi
 validates the embedded structural contract without requiring a source checkout at runtime. The proof
 sources are excluded from default Cargo packages and release archives; default builds do not resolve
 or compile heed3 or LMDB.
+
+The same feature contains a plain qualification-only journal/profile core with physical identity
+`qualification-lmdb-plain-v1`. It uses one journal database, versioned metadata and value envelopes,
+default durable commits, exact create-once retries, deterministic byte-ordered replay, and independent
+content carriers. Its fixed map policy starts at 16 MiB, grows in 64 MiB increments under a
+cross-process resize lock, stops at 256 MiB, and permits at most four resize attempts. Those values are
+derived from the public 64 MiB G2 ceiling and reserve four times its decoded bytes; they are not tuned
+from candidate timings.
+
+Run its non-timing G0 semantic and receipt smoke against a fresh disposable root with:
+
+```sh
+unset POINTBREAK_QUALIFICATION_CORPUS
+cargo bench --locked --features bench,lmdb-proof --bench store_foundation -- --lmdb-smoke
+```
+
+The smoke emits no timing samples or feasibility verdict. It verifies create-once journal writes,
+sorted replay, exact decoded hashes, the oldest/middle/newest/absent read schedule, and the deterministic
+head marker. Online copy, restore, repair, stale-reader cleanup, exhaustive lifecycle inventory,
+performance evidence, selection, migration, and production routing are unavailable on this surface.
 
 ## Generated public scale workloads
 

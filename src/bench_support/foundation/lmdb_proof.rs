@@ -719,4 +719,17 @@ mod tests {
             "proof sources must be excluded from the default Cargo package"
         );
     }
+
+    #[test]
+    fn lmdb_adapter_and_modes_remain_feature_gated_and_out_of_runtime_routing() {
+        let foundation_module = include_str!("mod.rs");
+        let benchmark = include_str!("../../../benches/store_foundation.rs");
+        let runtime = include_str!("../../../src/main.rs");
+
+        assert!(foundation_module.contains("#[cfg(feature = \"lmdb-proof\")]\nmod lmdb;"));
+        assert!(benchmark.contains("#[cfg(not(feature = \"lmdb-proof\"))]\nfn lmdb_smoke_report"));
+        assert!(benchmark.contains("--lmdb-smoke requires --features bench,lmdb-proof"));
+        assert!(!runtime.contains("qualification-lmdb-plain-v1"));
+        assert!(!runtime.contains("--lmdb-smoke"));
+    }
 }

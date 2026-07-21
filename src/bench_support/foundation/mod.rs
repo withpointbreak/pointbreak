@@ -8,6 +8,8 @@ mod documents;
 mod fault;
 mod generated;
 mod lifecycle;
+#[cfg(feature = "lmdb-proof")]
+mod lmdb;
 mod lmdb_proof;
 mod migration;
 mod performance;
@@ -28,6 +30,8 @@ pub use documents::*;
 pub use fault::*;
 pub use generated::*;
 pub use lifecycle::*;
+#[cfg(feature = "lmdb-proof")]
+pub use lmdb::*;
 pub use lmdb_proof::*;
 pub use migration::*;
 pub use performance::*;
