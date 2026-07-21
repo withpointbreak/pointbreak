@@ -487,9 +487,9 @@ fn validate_loose_baseline_platform_v1(
         || platform.allocation_api != final_native_allocation_method()
         || classify_qualification_filesystem(&platform.filesystem)
             != QualificationFilesystemDispositionV1::LocalProofEligible
-        || platform.operating_system_version.trim().is_empty()
-        || platform.cpu.trim().is_empty()
-        || platform.rustc.trim().is_empty()
+        || !concrete_platform_value_v1(&platform.operating_system_version)
+        || !concrete_platform_value_v1(&platform.cpu)
+        || !concrete_platform_value_v1(&platform.rustc)
         || platform.build_source.trim().is_empty()
         || platform.build_describe.trim().is_empty()
         || !platform.source_tree_clean
@@ -497,6 +497,11 @@ fn validate_loose_baseline_platform_v1(
         return Err("loose baseline platform provenance is incomplete".to_owned());
     }
     Ok(())
+}
+
+fn concrete_platform_value_v1(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty() && value != "-" && !value.eq_ignore_ascii_case("unavailable")
 }
 
 fn validate_loose_baseline_run_v1(
@@ -4520,17 +4525,42 @@ fn native_cpu_description() -> String {
 
 #[cfg(target_os = "linux")]
 fn native_cpu_description() -> String {
-    fs::read_to_string("/proc/cpuinfo")
-        .ok()
-        .and_then(|contents| {
-            contents.lines().find_map(|line| {
-                line.split_once(':')
-                    .filter(|(key, _)| matches!(key.trim(), "model name" | "Model"))
-                    .map(|(_, value)| value.trim().to_owned())
-                    .filter(|value| !value.is_empty())
-            })
+    let cpuinfo = fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+    let device_tree_model =
+        fs::read_to_string("/sys/firmware/devicetree/base/model").unwrap_or_default();
+    let dmi_product_name =
+        fs::read_to_string("/sys/devices/virtual/dmi/id/product_name").unwrap_or_default();
+    linux_cpu_description_from_sources_v1(
+        &cpuinfo,
+        &[device_tree_model.as_str(), dmi_product_name.as_str()],
+    )
+    .unwrap_or_else(|| "unavailable".to_owned())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_cpu_description_from_sources_v1(
+    cpuinfo: &str,
+    fallback_hardware_models: &[&str],
+) -> Option<String> {
+    cpuinfo
+        .lines()
+        .find_map(|line| {
+            line.split_once(':')
+                .filter(|(key, _)| matches!(key.trim(), "model name" | "Model"))
+                .and_then(|(_, value)| normalized_hardware_description_v1(value))
         })
-        .unwrap_or_else(|| "unavailable".to_owned())
+        .or_else(|| {
+            fallback_hardware_models
+                .iter()
+                .find_map(|value| normalized_hardware_description_v1(value))
+        })
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn normalized_hardware_description_v1(value: &str) -> Option<String> {
+    let value =
+        value.trim_matches(|character: char| character.is_whitespace() || character == '\0');
+    concrete_platform_value_v1(value).then(|| value.to_owned())
 }
 
 #[cfg(target_os = "windows")]
@@ -5997,6 +6027,34 @@ mod tests {
             .canonical_sha256()
             .expect("canonical evidence");
         assert!(missing_read_class.validate().is_err());
+    }
+
+    #[test]
+    fn loose_baseline_evidence_rejects_unavailable_platform_provenance() {
+        for missing_cpu in ["unavailable", "-"] {
+            let mut evidence = QualificationLooseBaselineEvidenceV1::fixture_for_tests();
+            evidence.platform.cpu = missing_cpu.to_owned();
+            evidence.evidence_sha256 = evidence.canonical_sha256().expect("canonical evidence");
+
+            assert!(evidence.validate().is_err());
+        }
+    }
+
+    #[test]
+    fn linux_cpu_provenance_falls_back_to_a_hardware_model() {
+        let cpuinfo = "processor: 0\nCPU implementer: 0x41\nCPU architecture: 8\n";
+
+        assert_eq!(
+            linux_cpu_description_from_sources_v1(
+                cpuinfo,
+                &["", "Parallels ARM Virtual Machine\n"]
+            ),
+            Some("Parallels ARM Virtual Machine".to_owned())
+        );
+        assert_eq!(
+            linux_cpu_description_from_sources_v1(cpuinfo, &["unavailable", "-"]),
+            None
+        );
     }
 
     #[test]
