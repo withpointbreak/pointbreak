@@ -2,8 +2,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::instant::format_rfc3339_utc_millis;
 
+pub(crate) trait IngestClock {
+    fn received_at(&self) -> String;
+}
+
+pub(crate) struct SystemIngestClock;
+
+impl IngestClock for SystemIngestClock {
+    fn received_at(&self) -> String {
+        now_rfc3339_utc()
+    }
+}
+
 pub(crate) fn current_timestamp() -> String {
-    now_rfc3339_utc()
+    SystemIngestClock.received_at()
 }
 
 /// "Now" as an RFC 3339 UTC instant with millisecond precision.
@@ -17,6 +29,23 @@ pub fn now_rfc3339_utc() -> String {
 
 #[cfg(test)]
 mod tests {
+    struct FrozenTestClock;
+
+    impl super::IngestClock for FrozenTestClock {
+        fn received_at(&self) -> String {
+            "2026-01-02T03:04:05.006Z".to_owned()
+        }
+    }
+
+    #[test]
+    fn ingest_clock_can_be_injected_without_changing_the_public_now_function() {
+        let injected = super::IngestClock::received_at(&FrozenTestClock);
+        let system = super::IngestClock::received_at(&super::SystemIngestClock);
+
+        assert_eq!(injected, "2026-01-02T03:04:05.006Z");
+        assert_ne!(system, injected);
+    }
+
     #[test]
     fn current_timestamp_uses_rfc3339_utc_with_millisecond_precision() {
         use crate::session::identity::instant::parse_rfc3339_utc_millis;

@@ -1,4 +1,6 @@
 pub mod adapter;
+#[cfg(any(test, feature = "bench"))]
+pub(crate) mod benchmark;
 pub mod event;
 mod identity;
 mod projection;
@@ -20,7 +22,7 @@ pub use identity::{
     parse_event_instant, principal_display_label, principal_resolution_for_writer,
     principal_view_for, resolve_writer_actor_id, stage_actor_attributes, stage_delegation,
 };
-pub(crate) use identity::{current_timestamp, writer_from_options};
+pub(crate) use identity::{IngestClock, SystemIngestClock, current_timestamp, writer_from_options};
 pub use projection::cosignature::{
     EndorsementClassification, EndorsementReadback, EndorserAttributesView,
 };

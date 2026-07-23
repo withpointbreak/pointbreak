@@ -13,9 +13,9 @@ use crate::session::store::resolution::{prepare_write_landing, resolve_write_sto
 use crate::session::{
     COSIGNATURE_BINDING_MISMATCH_CODE, COSIGNATURE_INVALID_CODE, COSIGNATURE_TARGET_PENDING_CODE,
     COSIGNATURE_UNTRUSTED_SIGNER_CODE, CosignatureGateDecision, EventStore,
-    EventVerificationPolicy, EventWriteOutcome, IngestEventVerification, TrustSet,
-    current_timestamp, gate_cosignature_for_store, is_valid_actor_id, verify_events_for_ingest,
-    writer_from_options,
+    EventVerificationPolicy, EventWriteOutcome, IngestClock, IngestEventVerification,
+    SystemIngestClock, TrustSet, current_timestamp, gate_cosignature_for_store, is_valid_actor_id,
+    verify_events_for_ingest, writer_from_options,
 };
 use crate::storage::{Durability, LocalStorage};
 
@@ -124,6 +124,13 @@ pub fn import_event(options: ImportEventOptions) -> Result<IngestEventsResult> {
 /// match what is on disk before the error is returned — re-ingesting the batch
 /// is safe.
 pub fn ingest_events(options: IngestEventsOptions) -> Result<IngestEventsResult> {
+    ingest_events_with_clock(options, &SystemIngestClock)
+}
+
+pub(crate) fn ingest_events_with_clock(
+    options: IngestEventsOptions,
+    clock: &dyn IngestClock,
+) -> Result<IngestEventsResult> {
     let write_store = resolve_write_store(&options.repo)?;
     let store_dir = write_store.store_dir();
     let storage = LocalStorage::new(store_dir);
@@ -152,7 +159,7 @@ pub fn ingest_events(options: IngestEventsOptions) -> Result<IngestEventsResult>
     let stamped = stamp_ingest_provenance(
         &options.events,
         IngestVia::IngestEvents,
-        &current_timestamp(),
+        &clock.received_at(),
     );
 
     let event_store = EventStore::from_backend(write_store.backend());

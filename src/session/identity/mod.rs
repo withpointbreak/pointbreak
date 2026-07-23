@@ -9,8 +9,8 @@ pub use actor_attributes::{
     ActorAttributes, ActorAttributesMap, ActorAttributesStageOutcome, ActorAttributesWriteRecord,
     actor_attributes_from_value, stage_actor_attributes,
 };
-pub(crate) use clock::current_timestamp;
 pub use clock::now_rfc3339_utc;
+pub(crate) use clock::{IngestClock, SystemIngestClock, current_timestamp};
 pub use delegates::{
     DelegationMap, DelegationRecord, DelegationStageOutcome, DelegationWriteRecord,
     PrincipalResolution, UnresolvedReason, delegation_map_from_value, stage_delegation,

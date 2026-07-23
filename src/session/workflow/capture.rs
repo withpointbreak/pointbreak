@@ -16,7 +16,6 @@ use crate::model::{
 };
 use crate::session::event::{
     EventTarget, EventType, Revision, ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload,
-    subject_id, type_code,
 };
 use crate::session::fingerprint::{
     ResolvedCommitEndpoint, ResolvedIndexEndpoint, ResolvedStagedBaseEndpoint,
@@ -462,7 +461,11 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
 
     let mut event = ShoreEvent::new(
         EventType::WorkObjectProposed,
-        work_object_proposed_idempotency_key(&fingerprint.revision_id)?,
+        WorkObjectProposedPayload::idempotency_key(&TargetRef::Review(
+            ReviewTargetRef::Revision {
+                revision_id: fingerprint.revision_id.clone(),
+            },
+        ))?,
         target,
         writer,
         payload,
@@ -866,22 +869,6 @@ fn normalize_pathspecs(pathspecs: &[String]) -> Result<Vec<String>> {
         normalized.push(trimmed.to_owned());
     }
     Ok(sorted_unique(normalized))
-}
-
-fn work_object_proposed_idempotency_key(revision_id: &RevisionId) -> Result<String> {
-    // Lead with the stable type code and fold the opaque subject id over the
-    // revision subject (seam S2) — never the human event-kind string.
-    let subject = TargetRef::Review(ReviewTargetRef::Revision {
-        revision_id: revision_id.clone(),
-    });
-    let subject_id = subject_id(&subject)?.ok_or_else(|| {
-        ShoreError::Message("work object proposed subject must have an id".to_owned())
-    })?;
-    Ok(format!(
-        "{}:{}",
-        type_code(EventType::WorkObjectProposed),
-        subject_id
-    ))
 }
 
 /// Derive the engagement grouping hint for a generative move over the existing

@@ -3,8 +3,10 @@ use serde::{Deserialize, Serialize};
 use super::kind::EventType;
 use super::payload::EventPayload;
 use super::task::SourceSpeaker;
+use super::{subject_id, type_code};
+use crate::error::{Result, ShoreError};
 use crate::model::{
-    EngagementId, ObjectId, ReviewEndpoint, RevisionId, RevisionSource, WorkObjectId,
+    EngagementId, ObjectId, ReviewEndpoint, RevisionId, RevisionSource, TargetRef, WorkObjectId,
 };
 
 /// The git provenance of a revision: the resolved source selector and endpoint
@@ -86,6 +88,18 @@ pub enum WorkObjectProposal {
 pub struct WorkObjectProposedPayload {
     pub engagement_id: EngagementId,
     pub work_object: WorkObjectProposal,
+}
+
+impl WorkObjectProposedPayload {
+    pub(crate) fn idempotency_key(subject: &TargetRef) -> Result<String> {
+        let subject_id = subject_id(subject)?.ok_or_else(|| {
+            ShoreError::Message("work object proposed subject must have an id".to_owned())
+        })?;
+        Ok(format!(
+            "{}:{subject_id}",
+            type_code(EventType::WorkObjectProposed)
+        ))
+    }
 }
 
 impl EventPayload for WorkObjectProposedPayload {

@@ -67,6 +67,8 @@ pub use history::{
     default_history_page_projection, history_base_projection, matches_query, parse_search_query,
     parse_search_query_for, review_history,
 };
+#[cfg(any(test, feature = "bench"))]
+pub(in crate::session) use ingest::ingest_events_with_clock;
 pub use ingest::{
     ImportEventOptions, IngestEventsOptions, IngestEventsResult, import_event, ingest_events,
 };

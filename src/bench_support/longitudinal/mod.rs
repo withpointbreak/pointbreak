@@ -1,10 +1,12 @@
-//! Public, deterministic longitudinal benchmark contracts.
+//! Public deterministic longitudinal contracts and materialization support.
 //!
-//! Materialization and evidence execution are added by later source tasks. This
-//! task freezes only the typed, non-timing contract consumed by those tasks.
+//! Evidence execution remains a later source task; this module exposes only
+//! typed, non-timing workload construction and receipts.
 
+mod builder;
 mod contract;
 
+pub use builder::*;
 pub use contract::*;
 
 #[cfg(test)]
