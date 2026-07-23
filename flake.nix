@@ -175,6 +175,10 @@
             inherit version;
             src = sourceWithInspector;
             cargoLock.lockFile = ./Cargo.lock;
+            # This is a reproducible development package, not the release tagged
+            # by GitHub Actions. Preserve the Cargo/crates.io version as the base
+            # while marking its provenance as `nix-dev:<base-version>`.
+            env.POINTBREAK_BUILD_CHANNEL = "nix-dev";
 
             # Match `just build-all`: building an artifact does not run the full
             # test suite. Tests remain an explicit `just test` / CI concern.

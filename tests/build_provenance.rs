@@ -41,7 +41,7 @@ fn exact_tag_is_clean_git_identity_with_full_commit() {
     let repo = GitFixture::new();
     run_git(repo.path(), &["tag", "v1.2.3"]);
 
-    let identity = build_script::derive_identity(repo.path(), "1.2.3").unwrap();
+    let identity = build_script::derive_identity(repo.path(), "1.2.3", None).unwrap();
     let head = repo.head();
 
     assert_eq!(identity.source, "git");
@@ -70,7 +70,7 @@ fn post_tag_linked_worktree_reports_distance_hash_and_full_head() {
         ],
     );
 
-    let identity = build_script::derive_identity(&worktree, "1.2.3").unwrap();
+    let identity = build_script::derive_identity(&worktree, "1.2.3", None).unwrap();
     let head = repo.head();
 
     assert!(worktree.join(".git").is_file());
@@ -90,12 +90,12 @@ fn tracked_and_index_changes_cannot_claim_a_clean_tag() {
     run_git(repo.path(), &["tag", "v1.2.3"]);
     fs::write(repo.path().join("tracked.txt"), "dirty\n").expect("dirty tracked file");
 
-    let worktree_dirty = build_script::derive_identity(repo.path(), "1.2.3").unwrap();
+    let worktree_dirty = build_script::derive_identity(repo.path(), "1.2.3", None).unwrap();
     assert!(worktree_dirty.dirty);
     assert_eq!(worktree_dirty.describe, "v1.2.3-dirty");
 
     run_git(repo.path(), &["add", "tracked.txt"]);
-    let index_dirty = build_script::derive_identity(repo.path(), "1.2.3").unwrap();
+    let index_dirty = build_script::derive_identity(repo.path(), "1.2.3", None).unwrap();
     assert!(index_dirty.dirty);
     assert_eq!(index_dirty.describe, "v1.2.3-dirty");
 }
@@ -106,7 +106,7 @@ fn package_root_does_not_inherit_parent_checkout_metadata() {
     let package_root = parent.path().join("target/package/pointbreak-1.2.3");
     fs::create_dir_all(&package_root).expect("create package root");
 
-    let identity = build_script::derive_identity(&package_root, "1.2.3").unwrap();
+    let identity = build_script::derive_identity(&package_root, "1.2.3", None).unwrap();
 
     assert_eq!(identity.source, "package");
     assert_eq!(identity.commit, None);
@@ -115,11 +115,36 @@ fn package_root_does_not_inherit_parent_checkout_metadata() {
 }
 
 #[test]
+fn nix_dev_channel_marks_a_gitless_build_without_changing_the_package_version() {
+    let root = tempfile::tempdir().expect("create nix fixture");
+
+    let identity = build_script::derive_identity(root.path(), "1.2.3", Some("nix-dev")).unwrap();
+
+    assert_eq!(identity.source, "package");
+    assert_eq!(identity.commit, None);
+    assert_eq!(identity.describe, "nix-dev:1.2.3");
+    assert!(!identity.dirty);
+}
+
+#[test]
+fn unknown_gitless_build_channel_is_rejected() {
+    let root = tempfile::tempdir().expect("create package fixture");
+
+    let error =
+        build_script::derive_identity(root.path(), "1.2.3", Some("unsupported")).unwrap_err();
+
+    assert_eq!(
+        error,
+        "unsupported POINTBREAK_BUILD_CHANNEL value \"unsupported\". Git-less builds accept either an unset channel (package:1.2.3) or `nix-dev` (nix-dev:1.2.3). Remove POINTBREAK_BUILD_CHANNEL for a source package, or set POINTBREAK_BUILD_CHANNEL=nix-dev for a Nix development package."
+    );
+}
+
+#[test]
 fn manifest_root_git_metadata_is_fail_closed_when_malformed() {
     let root = tempfile::tempdir().expect("create malformed fixture");
     fs::create_dir(root.path().join(".git")).expect("create partial git metadata");
 
-    let error = build_script::derive_identity(root.path(), "1.2.3").unwrap_err();
+    let error = build_script::derive_identity(root.path(), "1.2.3", None).unwrap_err();
 
     assert!(error.contains("Git metadata"), "unexpected error: {error}");
 }
