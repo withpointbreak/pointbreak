@@ -151,6 +151,10 @@
           version = "0.8.0";
           rustToolchains = mkRustToolchains pkgs;
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchains.stable;
+          # rustfmt.toml enables unstable options, so the format check needs the
+          # combined dev toolchain (stable cargo, nightly rustfmt) rather than the
+          # stable-only toolchain the compile/lint derivations build against.
+          craneLibDev = (crane.mkLib pkgs).overrideToolchain rustToolchains.dev;
 
           inspector = pkgs.buildNpmPackage {
             pname = "pointbreak-inspector";
@@ -229,6 +233,29 @@
             ];
           };
 
+          # Hermetic clippy gate reusing the shared dependency artifacts. Mirrors
+          # `just lint`'s clippy invocation so the flake check and the Justfile gate
+          # stay in lockstep; `-D warnings` makes any lint fail the check.
+          cliClippy = craneLib.cargoClippy {
+            pname = "pointbreak";
+            inherit version;
+            src = sourceWithInspector;
+            cargoLock = ./Cargo.lock;
+            inherit cargoArtifacts;
+            env.POINTBREAK_BUILD_CHANNEL = "nix-dev";
+            cargoClippyExtraArgs = "--workspace --all-targets --all-features -- -D warnings";
+            # Build scripts run under clippy; build.rs shells out to git.
+            nativeBuildInputs = [ pkgs.git ];
+          };
+
+          # Format check with the pinned nightly rustfmt. Compiles nothing, so it
+          # needs neither the dependency artifacts nor git — only the cleaned source.
+          cliFmt = craneLibDev.cargoFmt {
+            pname = "pointbreak";
+            inherit version;
+            src = craneLib.cleanCargoSource sourceWithInspector;
+          };
+
           vscode = pkgs.buildNpmPackage {
             pname = "pointbreak-vscode";
             inherit version;
@@ -268,6 +295,8 @@
           default = cli;
           inherit cli inspector vscode;
           cli-nextest = cliNextest;
+          cli-clippy = cliClippy;
+          cli-fmt = cliFmt;
           # Curate the aggregate as a delivery surface. The Inspector bundle is
           # embedded in the CLI and `libexec/pointbreak` is only the VSIX input;
           # both remain available from their owning package outputs.
@@ -279,10 +308,12 @@
         }
       );
 
-      # `nix flake check` runs the complete Git-less Nextest suite and realises
-      # the pinned cocogitto (proving the from-source pin still compiles on a clean
-      # machine). This keeps package consumers on the fast delivery path while
-      # making test/tool version drift fail the flake.
+      # `nix flake check` runs the full Rust gate hermetically: the complete
+      # Git-less Nextest suite, clippy (`-D warnings`), and the nightly rustfmt
+      # format check — clippy and the tests share the crane dependency artifacts.
+      # It also realises the pinned cocogitto (proving the from-source pin still
+      # compiles on a clean machine). This keeps package consumers on the fast
+      # delivery path while making test, lint, format, or tool drift fail the flake.
       checks = forEachSystem (
         pkgs:
         let
@@ -291,6 +322,8 @@
         in
         {
           cli-nextest = self.packages.${pkgs.stdenv.hostPlatform.system}.cli-nextest;
+          clippy = self.packages.${pkgs.stdenv.hostPlatform.system}.cli-clippy;
+          fmt = self.packages.${pkgs.stdenv.hostPlatform.system}.cli-fmt;
           devshell-tools =
             pkgs.runCommand "devshell-tools-check"
               {

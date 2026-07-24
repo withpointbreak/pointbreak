@@ -6,14 +6,16 @@ name: CI (Nix)
 # Windows legs stay in ci.yml. See the PR discussion for the Windows cross-compile
 # sketch (nextest archive built on Linux, executed on a plain Windows runner).
 #
-# The flake already carries the gate:
-#   - `nix flake check`  -> checks.cli-nextest (full Git-less nextest suite) +
-#                           checks.devshell-tools (tool-version drift). cli-nextest
-#                           compiles the whole crate and all test targets, so it covers
-#                           the same cfg/feature arms ci.yml's macOS `check-types` leg does.
-#   - `nix develop -c just lint` -> the exact fmt + clippy gate ci.yml runs on Linux,
-#                           via the flake's pinned Fenix toolchain (stable clippy +
-#                           nightly rustfmt) instead of rustup.
+# The flake already carries the full gate:
+#   - `nix flake check`  -> the same fmt + clippy + test gate ci.yml runs, through the
+#                           flake's pinned Fenix toolchain instead of rustup:
+#                           checks.cli-nextest (full Git-less nextest suite),
+#                           checks.clippy (`-D warnings`) and checks.fmt (nightly
+#                           rustfmt) — clippy and the tests share crane's dependency
+#                           artifacts — plus checks.devshell-tools (tool-version drift).
+#                           cli-nextest compiles the whole crate and all test targets, so
+#                           it covers the same cfg/feature arms ci.yml's macOS
+#                           `check-types` leg does.
 #   - `nix build .#build-all`    -> the store-backed counterpart of `just build-all`
 #                           (CLI + embedded Inspector bundle + platform VSIX), with no
 #                           checkout mutation and no npm network access. Because the
@@ -60,17 +62,10 @@ jobs:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', 'Cargo.lock', 'src/cli/inspect/web/package-lock.json', 'extensions/vscode/package-lock.json') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-
 
-      # cli-nextest (full Git-less suite) + devshell-tools (pinned-tool drift).
+      # fmt + clippy + cli-nextest (full Git-less suite) + devshell-tools drift.
       # -L streams full build logs so a failure is legible in the Actions UI.
       - name: nix flake check
         run: nix flake check -L
-
-      # Same Rust lint gate as ci.yml's Linux leg, through the flake's toolchain.
-      # Linux only, mirroring ci.yml (macOS coverage of the cfg arms comes from the
-      # cli-nextest build above).
-      - name: just lint
-        if: runner.os == 'Linux'
-        run: nix develop --command just lint
 
       # Hermetic, store-backed artifact build. Warm in the local store after the
       # flake check above, so this is a near-instant realisation of the aggregate.
