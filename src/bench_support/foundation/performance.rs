@@ -94,13 +94,13 @@ const QUALIFICATION_LOOSE_BASELINE_INDEPENDENT_ROOTS_V1: u32 = 2;
 #[cfg(test)]
 const PERFORMANCE_TEST_SOURCE_COMMIT: &str = "cccccccccccccccccccccccccccccccccccccccc";
 
+#[cfg(test)]
 fn expected_qualification_source_commit() -> Result<String, String> {
-    #[cfg(test)]
-    {
-        return Ok(PERFORMANCE_TEST_SOURCE_COMMIT.to_owned());
-    }
+    Ok(PERFORMANCE_TEST_SOURCE_COMMIT.to_owned())
+}
 
-    #[cfg(not(test))]
+#[cfg(not(test))]
+fn expected_qualification_source_commit() -> Result<String, String> {
     super::qualification_source_commit()
 }
 
