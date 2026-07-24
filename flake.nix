@@ -7,10 +7,19 @@
       url = "github:nix-community/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # Kept as a parallel packaging experiment until its dependency-artifact
+    # cache proves a meaningful win over buildRustPackage for Pointbreak.
+    crane.url = "github:ipetkov/crane/v0.23.4";
   };
 
   outputs =
-    { nixpkgs, fenix, ... }:
+    {
+      self,
+      nixpkgs,
+      fenix,
+      crane,
+      ...
+    }:
     let
       # Systems the dev shell is built for: Linux and macOS on x86_64 and arm64.
       systems = [
@@ -141,10 +150,7 @@
         let
           version = "0.8.0";
           rustToolchains = mkRustToolchains pkgs;
-          rustPlatform = pkgs.makeRustPlatform {
-            cargo = rustToolchains.stable;
-            rustc = rustToolchains.stable;
-          };
+          craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchains.stable;
 
           inspector = pkgs.buildNpmPackage {
             pname = "pointbreak-inspector";
@@ -170,40 +176,57 @@
                 cp ${inspector}/app.js "$out/src/cli/inspect/assets/app.js"
               '';
 
-          cli = rustPlatform.buildRustPackage {
+          # Crane's dummy source isolates this derivation from ordinary Rust
+          # source edits, so the delivery package and test check reuse dependency
+          # and dev-dependency artifacts across Nix builds.
+          cargoArtifacts = craneLib.buildDepsOnly {
+            pname = "pointbreak";
+            inherit version;
+            src = craneLib.cleanCargoSource sourceWithInspector;
+            cargoLock = ./Cargo.lock;
+            env.POINTBREAK_BUILD_CHANNEL = "nix-dev";
+          };
+
+          # Build the distributable artifact without coupling ordinary consumers
+          # to the complete repository test suite. `cliNextest` below is exposed
+          # through `nix flake check` as the full Git-less quality gate.
+          cli = craneLib.buildPackage {
             pname = "pointbreak";
             inherit version;
             src = sourceWithInspector;
-            cargoLock.lockFile = ./Cargo.lock;
-            # This is a reproducible development package, not the release tagged
-            # by GitHub Actions. Preserve the Cargo/crates.io version as the base
-            # while marking its provenance as `nix-dev:<base-version>`.
+            cargoLock = ./Cargo.lock;
+            inherit cargoArtifacts;
+            doCheck = false;
             env.POINTBREAK_BUILD_CHANNEL = "nix-dev";
-            # Match `just test`: Nextest runs independent test binaries in
-            # parallel while retaining Nix's sandboxed release-profile check.
-            useNextest = true;
-
-            # Git supplies compile-time build identity and is the runtime backend.
             nativeBuildInputs = [
               pkgs.git
               pkgs.makeWrapper
             ];
-            # Integration tests invoke project scripts that require these tools;
-            # they are not part of the delivered CLI's runtime closure.
-            nativeCheckInputs = [
-              pkgs.jq
-              pkgs.nodejs_22
-            ];
             postFixup = ''
-              # Keep the Nix-facing launcher wrapped with Git on PATH while also
-              # exposing the real executable for the standalone VSIX payload.
               mkdir -p "$out/libexec"
               mv "$out/bin/pointbreak" "$out/libexec/pointbreak"
               makeWrapper "$out/libexec/pointbreak" "$out/bin/pointbreak" \
                 --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.git ]}
             '';
-
             meta.mainProgram = "pointbreak";
+          };
+
+          # This complete Git-less integration suite is a flake check rather
+          # than a dependency of the delivery artifact above.
+          cliNextest = craneLib.cargoNextest {
+            pname = "pointbreak";
+            inherit version;
+            src = sourceWithInspector;
+            cargoLock = ./Cargo.lock;
+            inherit cargoArtifacts;
+            doInstallCargoArtifacts = false;
+            cargoNextestExtraArgs = "--no-tests pass";
+            env.POINTBREAK_BUILD_CHANNEL = "nix-dev";
+            nativeBuildInputs = [
+              pkgs.git
+              pkgs.jq
+              pkgs.nodejs_22
+            ];
           };
 
           vscode = pkgs.buildNpmPackage {
@@ -244,6 +267,7 @@
         {
           default = cli;
           inherit cli inspector vscode;
+          cli-nextest = cliNextest;
           # Curate the aggregate as a delivery surface. The Inspector bundle is
           # embedded in the CLI and `libexec/pointbreak` is only the VSIX input;
           # both remain available from their owning package outputs.
@@ -255,10 +279,10 @@
         }
       );
 
-      # `nix flake check` builds every derivation under `checks`. This one realises
+      # `nix flake check` runs the complete Git-less Nextest suite and realises
       # the pinned cocogitto (proving the from-source pin still compiles on a clean
-      # machine) and asserts the version-critical tools resolve, so a broken pin or
-      # version drift fails the flake rather than only surfacing in a live shell.
+      # machine). This keeps package consumers on the fast delivery path while
+      # making test/tool version drift fail the flake.
       checks = forEachSystem (
         pkgs:
         let
@@ -266,6 +290,7 @@
           rustToolchains = mkRustToolchains pkgs;
         in
         {
+          cli-nextest = self.packages.${pkgs.stdenv.hostPlatform.system}.cli-nextest;
           devshell-tools =
             pkgs.runCommand "devshell-tools-check"
               {
