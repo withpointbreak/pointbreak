@@ -32,7 +32,13 @@ jobs:
       - name: Install just
         uses: taiki-e/install-action@just
 
-      # nixfmt --check + statix + deadnix + `nix flake check`. Runs only on Nix
-      # changes (see paths above); the Rust gate stays in ci.yml.
-      - name: Run nix-check
-        run: just nix-check
+      # nixfmt --check + statix + deadnix. Builds nothing, so this job matches its
+      # name and finishes in seconds.
+      #
+      # It used to run `just nix-check`, whose `nix flake check` BUILDS every check
+      # — clippy, the full nextest suite, tool drift — with no store cache, taking
+      # 14-18 minutes. Since ci-nix.yml realises those same derivations on every
+      # pull request, this job was running the entire suite a second time, in
+      # parallel, from cold. Linting the Nix files is what is unique to this lane.
+      - name: Run nix-lint
+        run: just nix-lint

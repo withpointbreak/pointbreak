@@ -198,17 +198,25 @@ nix-fmt:
     set -euo pipefail
     nix run nixpkgs#nixfmt -- $(git ls-files '*.nix')
 
-# Lint and format-check Nix files: nixfmt, statix, deadnix, and `nix flake check`.
-# Requires Nix. Deliberately separate from `just lint`/`check`, which stay
-# Rust-only so contributors without Nix (mise/manual) can run the core gate.
+# Requires Nix, but builds nothing, so it stays fast. This is the CI-facing Nix
+# gate; the build and test outputs are gated by ci-nix.yml, which realises those
+# derivations individually.
+# Lint and format-check the Nix files themselves (nixfmt, statix, deadnix).
 [group('nix')]
-nix-check:
+nix-lint:
     #!/usr/bin/env bash
     set -euo pipefail
     files=$(git ls-files '*.nix')
     nix run nixpkgs#nixfmt -- --check $files
     nix run nixpkgs#statix -- check .
     nix run nixpkgs#deadnix -- --fail .
+
+# Deliberately separate from `just lint`/`check`, which stay Rust-only so
+# contributors without Nix (mise/manual) can run the core gate. CI does not run
+# this; ci-nix.yml realises the same derivations in phases instead.
+# Run the Nix lint plus `nix flake check`, which BUILDS every check (fmt, clippy, the full test suite).
+[group('nix')]
+nix-check: nix-lint
     nix flake check
 
 # EXPERIMENTAL: cross-compile a cargo-nextest archive for a Windows msvc target from
