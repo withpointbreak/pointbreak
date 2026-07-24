@@ -591,7 +591,7 @@ fn string_set<'a>(values: &'a [&'a str]) -> BTreeSet<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::PathBuf;
 
     use serde_json::{Value, json};
 
@@ -599,8 +599,8 @@ mod tests {
 
     const MANIFEST: &str = include_str!("../../../vendor/lmdb-proof/closure.json");
 
-    fn repository_root() -> &'static Path {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
+    fn repository_root() -> PathBuf {
+        crate::bench_support::manifest_dir()
     }
 
     fn mutated_manifest(path: &[&str], value: Value) -> String {
@@ -617,7 +617,7 @@ mod tests {
 
     #[test]
     fn exact_lmdb_proof_closure_is_self_consistent() {
-        let closure = validate_lmdb_proof_closure_v1(MANIFEST, repository_root())
+        let closure = validate_lmdb_proof_closure_v1(MANIFEST, &repository_root())
             .expect("exact closure validates");
 
         assert_eq!(closure.target_triples.len(), 8);
@@ -630,7 +630,7 @@ mod tests {
         let manifest = mutated_manifest(&["native", "behaviorAuthority"], json!("registry"));
 
         assert_eq!(
-            validate_lmdb_proof_closure_v1(&manifest, repository_root()).unwrap_err(),
+            validate_lmdb_proof_closure_v1(&manifest, &repository_root()).unwrap_err(),
             "native behavior authority must be the immutable upstream Git source"
         );
     }
@@ -640,7 +640,7 @@ mod tests {
         let missing = mutated_manifest(&["native", "patches"], json!([]));
 
         assert_eq!(
-            validate_lmdb_proof_closure_v1(&missing, repository_root()).unwrap_err(),
+            validate_lmdb_proof_closure_v1(&missing, &repository_root()).unwrap_err(),
             "native patch inventory is not exact"
         );
     }
@@ -664,7 +664,7 @@ mod tests {
             json!("0000000000000000000000000000000000000000"),
         );
         assert_eq!(
-            validate_lmdb_proof_closure_v1(&wrong_overlay, repository_root()).unwrap_err(),
+            validate_lmdb_proof_closure_v1(&wrong_overlay, &repository_root()).unwrap_err(),
             "wrapper source commit does not match the reviewed pin"
         );
 
@@ -673,7 +673,7 @@ mod tests {
             json!("0000000000000000000000000000000000000000"),
         );
         assert_eq!(
-            validate_lmdb_proof_closure_v1(&wrong_native, repository_root()).unwrap_err(),
+            validate_lmdb_proof_closure_v1(&wrong_native, &repository_root()).unwrap_err(),
             "native source commit does not match the reviewed pin"
         );
 
@@ -682,7 +682,7 @@ mod tests {
             json!("0000000000000000000000000000000000000000000000000000000000000000"),
         );
         assert_eq!(
-            validate_lmdb_proof_closure_v1(&wrong_materialization, repository_root()).unwrap_err(),
+            validate_lmdb_proof_closure_v1(&wrong_materialization, &repository_root()).unwrap_err(),
             "wrapper materialization record is not exact"
         );
     }
@@ -694,13 +694,13 @@ mod tests {
             json!("https://github.com/meilisearch/heed/tree/main"),
         );
         assert_eq!(
-            validate_lmdb_proof_closure_v1(&mutable, repository_root()).unwrap_err(),
+            validate_lmdb_proof_closure_v1(&mutable, &repository_root()).unwrap_err(),
             "wrapper repository is not the recorded upstream source"
         );
 
         let unexpected = mutated_manifest(&["features", "wrapper"], json!(["use-valgrind"]));
         assert_eq!(
-            validate_lmdb_proof_closure_v1(&unexpected, repository_root()).unwrap_err(),
+            validate_lmdb_proof_closure_v1(&unexpected, &repository_root()).unwrap_err(),
             "wrapper feature closure is not the minimum plain set"
         );
     }
@@ -709,19 +709,19 @@ mod tests {
     fn license_generated_input_and_dynamic_link_gaps_fail_closed() {
         let missing_license = mutated_manifest(&["licenses"], json!([]));
         assert_eq!(
-            validate_lmdb_proof_closure_v1(&missing_license, repository_root()).unwrap_err(),
+            validate_lmdb_proof_closure_v1(&missing_license, &repository_root()).unwrap_err(),
             "source license and notice inventory is incomplete"
         );
 
         let missing_bindings = mutated_manifest(&["generatedInputs"], json!([]));
         assert_eq!(
-            validate_lmdb_proof_closure_v1(&missing_bindings, repository_root()).unwrap_err(),
+            validate_lmdb_proof_closure_v1(&missing_bindings, &repository_root()).unwrap_err(),
             "generated binding inventory is incomplete"
         );
 
         let dynamic = mutated_manifest(&["link", "dynamicHostDependencies"], json!(true));
         assert_eq!(
-            validate_lmdb_proof_closure_v1(&dynamic, repository_root()).unwrap_err(),
+            validate_lmdb_proof_closure_v1(&dynamic, &repository_root()).unwrap_err(),
             "dynamic host dependencies are forbidden"
         );
     }
@@ -741,13 +741,13 @@ mod tests {
             ]),
         );
         assert_eq!(
-            validate_lmdb_proof_closure_v1(&seven_targets, repository_root()).unwrap_err(),
+            validate_lmdb_proof_closure_v1(&seven_targets, &repository_root()).unwrap_err(),
             "proof target matrix does not match the release target manifest"
         );
 
         let included = mutated_manifest(&["package", "excludedFromDefaultPackage"], json!(false));
         assert_eq!(
-            validate_lmdb_proof_closure_v1(&included, repository_root()).unwrap_err(),
+            validate_lmdb_proof_closure_v1(&included, &repository_root()).unwrap_err(),
             "proof sources must be excluded from the default Cargo package"
         );
     }

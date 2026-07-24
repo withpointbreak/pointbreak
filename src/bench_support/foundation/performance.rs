@@ -2757,14 +2757,14 @@ pub fn qualification_lmdb_prospective_execution_v1()
     if env!("POINTBREAK_BUILD_SOURCE") != "git" || env!("POINTBREAK_BUILD_DIRTY") == "true" {
         return Err("LMDB prospective runner requires a clean Git build".to_owned());
     }
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest_dir = crate::bench_support::manifest_dir();
     let source_commit = super::qualification_source_commit()?;
     let live_commit =
-        git_identity_stdout_v1(manifest_dir, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+        git_identity_stdout_v1(&manifest_dir, &["rev-parse", "--verify", "HEAD^{commit}"])?;
     let source_tree =
-        git_identity_stdout_v1(manifest_dir, &["rev-parse", "--verify", "HEAD^{tree}"])?;
+        git_identity_stdout_v1(&manifest_dir, &["rev-parse", "--verify", "HEAD^{tree}"])?;
     let status = git_identity_stdout_v1(
-        manifest_dir,
+        &manifest_dir,
         &["status", "--porcelain=v1", "--untracked-files=no"],
     )?;
     if live_commit != source_commit || !status.is_empty() {

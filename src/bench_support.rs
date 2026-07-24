@@ -23,6 +23,22 @@ use crate::session::event::{EventTarget, EventType, ReviewInitializedPayload, Sh
 pub mod foundation;
 pub mod longitudinal;
 
+/// Absolute path to this crate's manifest directory, resolved at runtime.
+///
+/// Prefers the runtime `CARGO_MANIFEST_DIR` — which cargo-nextest remaps via
+/// `--workspace-remap` when the harnesses run from an archive built on another machine —
+/// and falls back to the compile-time value for ordinary in-place runs, where the two are
+/// identical. Only for paths opened at run time; `include_str!(concat!(env!(..), ..))`
+/// embeds its bytes at compile time and needs no runtime path, so it stays as it is.
+///
+/// This mirrors `crate::test_fixtures::manifest_dir`, which cannot be shared here because
+/// it is `cfg(test)`-only while these harnesses also compile under the `bench` feature.
+pub(crate) fn manifest_dir() -> PathBuf {
+    std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
+
 /// On-disk versus logical byte accounting for a store directory.
 pub struct ByteUsage {
     /// Sum of file content lengths — the logical bytes the events occupy.

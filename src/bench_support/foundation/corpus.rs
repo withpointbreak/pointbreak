@@ -389,7 +389,7 @@ fn validate_external_root(path: &Path) -> Result<PathBuf, QualificationCorpusErr
         });
     }
 
-    let source_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+    let source_root = crate::bench_support::manifest_dir()
         .canonicalize()
         .map_err(|error| QualificationCorpusError::InvalidExternalPath {
             reason: format!("could not resolve source root: {error}"),
@@ -671,7 +671,7 @@ mod tests {
             Err(QualificationCorpusError::ExternalPathRequired)
         );
 
-        let source_fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let source_fixture = crate::bench_support::manifest_dir()
             .join("tests/fixtures/store-foundation/legacy-shape");
         assert!(matches!(
             load_frozen_legacy_manifest_from_path(Some(&source_fixture)),

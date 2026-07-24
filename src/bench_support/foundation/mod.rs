@@ -144,7 +144,7 @@ mod linux_filesystem_parser_tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn linux_filesystem_probe_reports_an_unambiguous_mount_type() {
-        let filesystem = qualification_filesystem_name(Path::new(env!("CARGO_MANIFEST_DIR")));
+        let filesystem = qualification_filesystem_name(&crate::bench_support::manifest_dir());
 
         assert_ne!(filesystem, "unavailable");
         assert_ne!(filesystem, "ext2/ext3");
@@ -285,7 +285,7 @@ mod windows_tests {
     #[test]
     fn windows_probe_reports_a_local_filesystem_type() {
         assert_eq!(
-            qualification_filesystem_name(Path::new(env!("CARGO_MANIFEST_DIR"))),
+            qualification_filesystem_name(&crate::bench_support::manifest_dir()),
             "ntfs"
         );
     }
@@ -414,7 +414,7 @@ mod tests {
 
     #[test]
     fn macos_probe_reports_a_filesystem_type() {
-        let filesystem = qualification_filesystem_name(Path::new(env!("CARGO_MANIFEST_DIR")));
+        let filesystem = qualification_filesystem_name(&crate::bench_support::manifest_dir());
 
         assert_ne!(filesystem, "unavailable");
         assert_ne!(filesystem, "/");
