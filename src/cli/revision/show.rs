@@ -129,12 +129,18 @@ fn render_revision_digest(result: &RevisionShowResult) -> String {
     let mut lines: Vec<String> = Vec::new();
     let identity = &result.revision;
 
-    lines.push(format!(
-        "{} · base {} → {}",
-        output::short_ref(identity.revision_id.as_str()),
-        endpoint_label(&identity.base),
-        endpoint_label(&identity.target),
-    ));
+    lines.push(match &identity.git_provenance {
+        Some(provenance) => format!(
+            "{} · base {} → {}",
+            output::short_ref(identity.revision_id.as_str()),
+            endpoint_label(&provenance.base),
+            endpoint_label(&provenance.target),
+        ),
+        None => format!(
+            "{} · non-git revision",
+            output::short_ref(identity.revision_id.as_str())
+        ),
+    });
     if let Some(summary) = &identity.summary {
         lines.push(format!(
             "summary: {}",

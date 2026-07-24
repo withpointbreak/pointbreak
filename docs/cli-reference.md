@@ -261,7 +261,9 @@ payload is **content-only**: it carries the immutable diff content and its `cont
 from the snapshot wire (there is nothing to redact). Endpoint/target display lives on
 `/api/revisions/{id}` and `/api/revisions`, derived from the revision projection (a path-private
 `targetDisplay` block), not from the snapshot artifact. `pointbreak revision list` JSON still carries
-`target.worktreeRoot`, unchanged.
+`target.worktreeRoot` unchanged for Git-backed worktree captures. A provenance-free revision omits the
+complete `source` / `base` / `target` triple and receives `targetDisplay.kind: "non_git"` with a
+non-Git label.
 
 ## `pointbreak capture`
 
@@ -1123,8 +1125,11 @@ pointbreak revision list [--repo <path>] [--object <object-id>] [--ref <name> [-
 `pointbreak revision list` is the discovery surface for captured revisions. It emits
 `pointbreak.review-revision-list` JSON with `eventSetHash`, `eventCount`, `revisionCount`, and entries
 sorted by capture time. Each entry carries the revision id, the content-only object id, the capture
-endpoints, the optional capture `summary`, and `objectArtifactContentHash`. Text output places the
-summary beside the short revision id; Inspector and VS Code use it as the primary selection label.
+endpoints when Git provenance exists, the optional capture `summary`, and
+`objectArtifactContentHash`. Provenance-free revisions remain first-class entries and omit
+`source`, `base`, and `target` together rather than inventing Git coordinates. Text output places the
+summary beside the short revision id and labels provenance-free entries explicitly; Inspector and VS Code
+use the summary as the primary selection label.
 
 - `--object <object-id>` lists only the revisions that share one content object. Coincident content
   may span supersession threads, so this is a listing/grouping lens, never a head selector.

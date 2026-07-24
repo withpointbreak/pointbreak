@@ -50,9 +50,8 @@ struct ShowRevisionDocument {
     journal_id: String,
     revision_id: String,
     object_id: String,
-    source: crate::model::RevisionSource,
-    base: crate::model::ReviewEndpoint,
-    target: crate::model::ReviewEndpoint,
+    #[serde(flatten)]
+    git_provenance: Option<crate::session::event::GitProvenance>,
     object_artifact_content_hash: String,
     /// The capture event id, kept only to key the readback side table; never
     /// serialized (the identity renders no `eventId` of its own).
@@ -221,9 +220,7 @@ impl From<RevisionProjectionIdentity> for ShowRevisionDocument {
             journal_id: identity.journal_id.as_str().to_owned(),
             revision_id: identity.revision_id.as_str().to_owned(),
             object_id: identity.object_id.as_str().to_owned(),
-            source: identity.source,
-            base: identity.base,
-            target: identity.target,
+            git_provenance: identity.git_provenance,
             object_artifact_content_hash: identity.object_artifact_content_hash,
             capture_event_id: identity.capture_event_id,
             verification_status: None,
@@ -316,5 +313,34 @@ impl From<crate::session::SnapshotOrder> for SnapshotOrderDocument {
             hunk_index: order.hunk_index,
             row_index: order.row_index,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ShowRevisionDocument;
+    use crate::model::{EventId, JournalId, ObjectId, RevisionId};
+    use crate::session::RevisionProjectionIdentity;
+
+    #[test]
+    fn provenance_free_show_identity_omits_the_complete_git_triple() {
+        let document = ShowRevisionDocument::from(RevisionProjectionIdentity {
+            id: RevisionId::new("rev:sha256:non-git"),
+            summary: Some("generated revision".to_owned()),
+            journal_id: JournalId::new("journal:default"),
+            git_provenance: None,
+            revision_id: RevisionId::new("rev:sha256:non-git"),
+            object_id: ObjectId::new("obj:sha256:non-git"),
+            object_artifact_content_hash: "sha256:artifact".to_owned(),
+            capture_event_id: EventId::new("evt:sha256:capture"),
+        });
+
+        let json = serde_json::to_value(document).unwrap();
+
+        assert_eq!(json["id"], "rev:sha256:non-git");
+        assert!(json.get("source").is_none());
+        assert!(json.get("base").is_none());
+        assert!(json.get("target").is_none());
+        assert_eq!(json["objectId"], "obj:sha256:non-git");
     }
 }

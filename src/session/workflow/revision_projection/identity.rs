@@ -2,11 +2,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::RevisionProjectionRow;
-use crate::model::{
-    ActorId, DiffSnapshot, EventId, JournalId, ObjectId, ReviewEndpoint, RevisionId,
-    RevisionSource, TrackId,
-};
+use crate::model::{ActorId, DiffSnapshot, EventId, JournalId, ObjectId, RevisionId, TrackId};
 use crate::session::assessment::{AssessmentView, CurrentAssessmentView};
+use crate::session::event::GitProvenance;
 use crate::session::input_request::InputRequestView;
 use crate::session::observation::ObservationView;
 use crate::session::state::ProjectionDiagnostic;
@@ -236,9 +234,7 @@ pub struct RevisionProjectionIdentity {
     pub id: RevisionId,
     pub summary: Option<String>,
     pub journal_id: JournalId,
-    pub source: RevisionSource,
-    pub base: ReviewEndpoint,
-    pub target: ReviewEndpoint,
+    pub git_provenance: Option<GitProvenance>,
     pub revision_id: RevisionId,
     pub object_id: ObjectId,
     pub object_artifact_content_hash: String,

@@ -149,6 +149,10 @@ mod tests {
     #[test]
     fn revision_arm_round_trips_and_tags_with_kind() {
         let payload = revision_payload();
+        assert_eq!(
+            serde_json::to_string(&payload).unwrap(),
+            r#"{"engagementId":"engagement:sha256:e","workObject":{"kind":"revision","revision":{"id":"rev:sha256:r","objectId":"obj:sha256:o","gitProvenance":{"source":{"kind":"git_worktree","mode":"combined_head_to_working_tree","includeUntracked":true},"base":{"kind":"git_commit","commitOid":"abc","treeOid":"def"},"target":{"kind":"git_working_tree","worktreeRoot":"/repo"}}},"objectArtifactContentHash":"sha256:artifact"}}"#
+        );
         let json = serde_json::to_value(&payload).unwrap();
 
         assert_eq!(json["engagementId"], "engagement:sha256:e");
@@ -201,6 +205,10 @@ mod tests {
                 supersedes: vec![],
             },
         };
+        assert_eq!(
+            serde_json::to_string(&payload).unwrap(),
+            r#"{"engagementId":"engagement:sha256:e","workObject":{"kind":"revision","revision":{"id":"rev:sha256:r","objectId":"obj:sha256:o"},"objectArtifactContentHash":"sha256:artifact"}}"#
+        );
         let json = serde_json::to_value(&payload).unwrap();
         assert!(
             json["workObject"]["revision"]

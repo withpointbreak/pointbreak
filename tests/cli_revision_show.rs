@@ -210,6 +210,51 @@ fn revision_show_emits_v2_json() {
 }
 
 #[test]
+fn revision_show_represents_provenance_free_revision_without_git_coordinates() {
+    let repo = modified_repo();
+    let capture =
+        parse_json(&pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]).stdout);
+    let revision_id = support::append_provenance_free_revision(
+        repo.path(),
+        capture["revision"]["objectId"].as_str().unwrap(),
+        capture["revision"]["objectArtifactContentHash"]
+            .as_str()
+            .unwrap(),
+    );
+    let path = repo.path().to_str().unwrap();
+
+    let output = pointbreak(["revision", "show", &revision_id, "--repo", path]);
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = parse_json(&output.stdout);
+
+    assert_eq!(json["revision"]["id"], revision_id);
+    assert!(json["revision"].get("source").is_none());
+    assert!(json["revision"].get("base").is_none());
+    assert!(json["revision"].get("target").is_none());
+    assert_eq!(
+        json["revision"]["objectId"],
+        capture["revision"]["objectId"]
+    );
+
+    let text = pointbreak([
+        "revision",
+        "show",
+        &revision_id,
+        "--repo",
+        path,
+        "--format",
+        "text",
+    ]);
+    let text = String::from_utf8(text.stdout).unwrap();
+    assert!(text.contains("non-git revision"));
+    assert!(!text.contains("base working tree"));
+}
+
+#[test]
 fn revision_show_rejects_invalid_track_before_json_output() {
     let repo = modified_repo();
     pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]);

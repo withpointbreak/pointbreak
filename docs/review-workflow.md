@@ -261,8 +261,10 @@ revision from this unfiltered directory, even if its commit objects later disapp
 
 It returns `pointbreak.review-revision-list` JSON with `eventSetHash`, `eventCount`,
 `revisionCount`, and an `entries` array whose elements include
-`revisionId`, `capturedAt`, `objectId`, `source`, `base`,
-`target`, and `objectArtifactContentHash`. Entries are sorted by capture
+`revisionId`, `capturedAt`, `objectId`, and `objectArtifactContentHash`. Git-backed entries also include
+the complete `source`, `base`, and `target` provenance triple. A provenance-free revision omits all three
+and remains independently listable and showable; later commit/ref associations may enrich liveness but do
+not manufacture capture provenance or collapse it into another revision. Entries are sorted by capture
 time so the newest revision appears last. Pass `--object <object-id>` to list only the revisions
 that share one content object — a listing lens that may span threads, never a head selector.
 

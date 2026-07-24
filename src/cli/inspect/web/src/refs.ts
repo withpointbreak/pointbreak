@@ -60,11 +60,12 @@ export function shortRef(id: unknown): string {
   return value;
 }
 
-/** Path-private target label from `targetDisplay`, floored to "working tree" (escaped). */
+/** Path-private target label with an honest floor for non-Git revisions. */
 export function targetDisplayLabel(
   td: TargetDisplay | null | undefined,
 ): string {
   if (!td) return "working tree";
+  if (td.kind === "non_git") return escapeHtml(td.label || "non-git revision");
   return escapeHtml(td.label || "working tree");
 }
 

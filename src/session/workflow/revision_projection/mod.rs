@@ -1330,16 +1330,17 @@ mod tests {
         )
         .unwrap();
 
+        let provenance = shown
+            .revision
+            .git_provenance
+            .expect("a Git capture retains provenance");
         assert!(matches!(
-            shown.revision.source,
+            provenance.source,
             RevisionSource::GitRootCommit { .. }
         ));
+        assert!(matches!(provenance.base, ReviewEndpoint::GitTree { .. }));
         assert!(matches!(
-            shown.revision.base,
-            ReviewEndpoint::GitTree { .. }
-        ));
-        assert!(matches!(
-            shown.revision.target,
+            provenance.target,
             ReviewEndpoint::GitCommit { .. }
         ));
     }

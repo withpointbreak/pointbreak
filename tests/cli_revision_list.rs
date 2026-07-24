@@ -103,6 +103,49 @@ fn revision_list_emits_v1_json_with_freshness_metadata() {
 }
 
 #[test]
+fn revision_list_represents_provenance_free_revision_without_git_coordinates() {
+    let repo = modified_repo();
+    let capture =
+        parse_json(&pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]).stdout);
+    let revision_id = support::append_provenance_free_revision(
+        repo.path(),
+        capture["revision"]["objectId"].as_str().unwrap(),
+        capture["revision"]["objectArtifactContentHash"]
+            .as_str()
+            .unwrap(),
+    );
+    let path = repo.path().to_str().unwrap();
+
+    let output = pointbreak(["revision", "list", "--repo", path]);
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json = parse_json(&output.stdout);
+    let entry = json["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["revisionId"] == revision_id)
+        .expect("provenance-free revision is listed");
+
+    assert!(entry.get("source").is_none());
+    assert!(entry.get("base").is_none());
+    assert!(entry.get("target").is_none());
+    assert_eq!(entry["mergeStatus"], "unknown");
+    assert_eq!(
+        entry["groupedRevisionIds"],
+        serde_json::json!([revision_id])
+    );
+
+    let text = pointbreak(["revision", "list", "--repo", path, "--format", "text"]);
+    let text = String::from_utf8(text.stdout).unwrap();
+    assert!(text.contains("non-git revision"));
+    assert!(!text.contains("non-git revision · base"));
+}
+
+#[test]
 fn revision_list_does_not_expose_storage_paths() {
     let repo = modified_repo();
     pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]);

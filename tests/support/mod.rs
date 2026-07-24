@@ -130,6 +130,74 @@ pub fn common_dir_store(repo_root: &Path) -> std::path::PathBuf {
     Path::new(&common_dir).join("pointbreak")
 }
 
+/// Append a model-valid provenance-free revision that reuses an already stored
+/// object artifact. This is a read-surface fixture only: production capture is
+/// intentionally Git-backed, while longitudinal/generated producers may propose
+/// revisions without Git coordinates.
+#[allow(dead_code)]
+pub fn append_provenance_free_revision(
+    repo_root: &Path,
+    object_id: &str,
+    object_artifact_content_hash: &str,
+) -> String {
+    use pointbreak::model::{
+        EngagementId, JournalId, ObjectId, ReviewTargetRef, RevisionId, TargetRef,
+    };
+    use pointbreak::session::event::{
+        EventTarget, EventType, Revision, ShoreEvent, WorkObjectProposal,
+        WorkObjectProposedPayload, Writer,
+    };
+    use sha2::{Digest, Sha256};
+
+    let revision_id = RevisionId::new(format!("rev:sha256:{}", "15".repeat(32)));
+    let target = TargetRef::Review(ReviewTargetRef::Revision {
+        revision_id: revision_id.clone(),
+    });
+    let payload = WorkObjectProposedPayload {
+        engagement_id: EngagementId::new(format!("engagement:sha256:{}", "16".repeat(32))),
+        work_object: WorkObjectProposal::Revision {
+            revision: Revision {
+                id: revision_id.clone(),
+                object_id: ObjectId::new(object_id),
+                git_provenance: None,
+            },
+            summary: Some("generated revision".to_owned()),
+            object_artifact_content_hash: object_artifact_content_hash.to_owned(),
+            supersedes: Vec::new(),
+        },
+    };
+    let idempotency_key = format!("fixture:provenance-free:{}", revision_id.as_str());
+    let event = ShoreEvent::new(
+        EventType::WorkObjectProposed,
+        &idempotency_key,
+        EventTarget::for_generative_move(
+            JournalId::new("journal:default"),
+            pointbreak::model::EngagementType::Review,
+            target,
+            None,
+        )
+        .expect("fixture event target"),
+        Writer::shore_local("test"),
+        payload,
+        "2026-07-24T00:00:00Z",
+    )
+    .expect("fixture event");
+
+    let events_dir = common_dir_store(repo_root).join("events");
+    std::fs::create_dir_all(&events_dir).expect("create fixture events directory");
+    let stem = Sha256::digest(idempotency_key.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    std::fs::write(
+        events_dir.join(format!("{stem}.json")),
+        serde_json::to_vec(&event).expect("serialize fixture event"),
+    )
+    .expect("write fixture event");
+
+    revision_id.as_str().to_owned()
+}
+
 #[track_caller]
 #[allow(dead_code)]
 pub fn assert_existing_paths_eq(actual: &Path, expected: &Path) {

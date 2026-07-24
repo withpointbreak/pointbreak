@@ -4,8 +4,10 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::error::Result;
-use crate::model::{ObjectId, ReviewEndpoint, RevisionId, RevisionSource};
-use crate::session::event::{EventType, ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload};
+use crate::model::{ObjectId, RevisionId, RevisionSource};
+use crate::session::event::{
+    EventType, GitProvenance, ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload,
+};
 use crate::session::projection::skipped_to_diagnostics;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::resolution::resolve_read_store;
@@ -123,9 +125,11 @@ pub struct RevisionListEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     pub object_id: ObjectId,
-    pub source: RevisionSource,
-    pub base: ReviewEndpoint,
-    pub target: ReviewEndpoint,
+    /// Git capture coordinates when the revision was proposed from Git. Flattened
+    /// to preserve the established `source` / `base` / `target` wire fields for
+    /// Git-backed captures while omitting the complete triple for non-Git work.
+    #[serde(flatten)]
+    pub git_provenance: Option<GitProvenance>,
     pub object_artifact_content_hash: String,
     /// Git-free commit-range lifecycle view for this unit (anchored/floating,
     /// current and withdrawn associations). Structural merge-status is attached
@@ -392,7 +396,7 @@ fn is_unreachable_unit(
 /// the smallest member id, chosen for a deterministic row.
 ///
 /// The representative entry's scalar fields (`object_artifact_content_hash`,
-/// `target`, …) come from the smallest-id member. Same-range captures already share
+/// `git_provenance`, …) come from the smallest-id member. Same-range captures already share
 /// one content-addressed object artifact (the body is decoupled from the identity
 /// fields), so the artifact hash is identical across members — collapsing is honest,
 /// not lossy. That honesty depends on the members sharing one pathspec scope:
@@ -493,8 +497,14 @@ fn connected_components(
         let mut by_scope: BTreeMap<&[String], Vec<RevisionId>> = BTreeMap::new();
         for id in members {
             if let Some(entry) = by_id.get(id) {
+                let Some(provenance) = &entry.git_provenance else {
+                    // A later commit association may enrich a non-Git revision's
+                    // liveness, but it does not retroactively create capture
+                    // pathspecs. Keep the revision in its singleton component.
+                    continue;
+                };
                 by_scope
-                    .entry(source_pathspecs(&entry.source))
+                    .entry(source_pathspecs(&provenance.source))
                     .or_default()
                     .push(id.clone());
             }
@@ -630,11 +640,6 @@ fn entry_from_event(
         // the review listing skips task-domain proposals rather than failing.
         return Ok(None);
     };
-    let provenance = revision.git_provenance.ok_or_else(|| {
-        crate::error::ShoreError::Message(
-            "review unit listing requires git provenance for a captured revision".to_owned(),
-        )
-    })?;
     let commit_range = projection
         .unit(&revision.id)
         .cloned()
@@ -645,9 +650,7 @@ fn entry_from_event(
         revision_id: revision_id.clone(),
         summary,
         object_id: revision.object_id,
-        source: provenance.source,
-        base: provenance.base,
-        target: provenance.target,
+        git_provenance: revision.git_provenance,
         object_artifact_content_hash,
         // Singletons classify their own range; the grouping pass fills this
         // with the member union for collapsed rows only.
@@ -754,6 +757,23 @@ mod tests {
     }
 
     #[test]
+    fn includes_provenance_free_revision_captures() {
+        let capture = provenance_free_captured_event("nongit-a", "2026-05-13T10:00:00Z");
+        let events = [capture];
+        let projection = RevisionCommitRangeProjection::from_events(&events).unwrap();
+
+        let result =
+            list_from_events(&events, &projection).expect("a non-git revision remains listable");
+
+        assert_eq!(result.revision_count, 1);
+        assert_eq!(
+            result.entries[0].revision_id.as_str(),
+            "review-unit:sha256:nongit-a"
+        );
+        assert_eq!(result.entries[0].merge_status, "");
+    }
+
+    #[test]
     fn sorts_entries_by_captured_at_then_revision_id() {
         let later = captured_event("z-later", "2026-05-13T10:00:05Z");
         let tie_b = captured_event("b-tie", "2026-05-13T10:00:01Z");
@@ -836,6 +856,36 @@ mod tests {
                 .unwrap(),
             Writer::shore_local("test"),
             payload,
+            occurred_at,
+        )
+        .unwrap()
+    }
+
+    fn provenance_free_captured_event(suffix: &str, occurred_at: &str) -> ShoreEvent {
+        let revision_id = RevisionId::new(format!("review-unit:sha256:{suffix}"));
+        let object_id = ObjectId::new(format!("obj:sha256:{suffix}"));
+        ShoreEvent::new(
+            EventType::WorkObjectProposed,
+            format!("capture:{suffix}"),
+            EventTarget::for_revision(JournalId::new("journal:default"), revision_id.clone(), None)
+                .unwrap(),
+            Writer::shore_local("test"),
+            WorkObjectProposedPayload {
+                engagement_id: EngagementId::new(format!(
+                    "engagement:sha256:{}",
+                    crate::canonical_hash::sha256_bytes_hex(revision_id.as_str().as_bytes())
+                )),
+                work_object: WorkObjectProposal::Revision {
+                    revision: Revision {
+                        id: revision_id,
+                        object_id,
+                        git_provenance: None,
+                    },
+                    summary: None,
+                    object_artifact_content_hash: format!("sha256:artifact:{suffix}"),
+                    supersedes: vec![],
+                },
+            },
             occurred_at,
         )
         .unwrap()
@@ -1580,13 +1630,15 @@ mod tests {
         );
         let mut scopes: Vec<Vec<String>> = grouped
             .iter()
-            .map(|entry| match &entry.source {
-                RevisionSource::GitCommitRange { pathspecs, .. } => pathspecs.clone(),
-                RevisionSource::GitWorktree { pathspecs, .. } => pathspecs.clone(),
-                RevisionSource::GitRootCommit { pathspecs, .. } => pathspecs.clone(),
-                RevisionSource::GitStaged { pathspecs, .. } => pathspecs.clone(),
-                RevisionSource::GitUnstaged { pathspecs, .. } => pathspecs.clone(),
-            })
+            .map(
+                |entry| match &entry.git_provenance.as_ref().unwrap().source {
+                    RevisionSource::GitCommitRange { pathspecs, .. } => pathspecs.clone(),
+                    RevisionSource::GitWorktree { pathspecs, .. } => pathspecs.clone(),
+                    RevisionSource::GitRootCommit { pathspecs, .. } => pathspecs.clone(),
+                    RevisionSource::GitStaged { pathspecs, .. } => pathspecs.clone(),
+                    RevisionSource::GitUnstaged { pathspecs, .. } => pathspecs.clone(),
+                },
+            )
             .collect();
         scopes.sort();
         assert_eq!(scopes, vec![vec!["a".to_owned()], vec!["b".to_owned()]]);
@@ -1610,7 +1662,7 @@ mod tests {
         assert_eq!(grouped.len(), 2);
         let mut scopes: Vec<Vec<String>> = grouped
             .iter()
-            .map(|entry| source_pathspecs(&entry.source).to_vec())
+            .map(|entry| source_pathspecs(&entry.git_provenance.as_ref().unwrap().source).to_vec())
             .collect();
         scopes.sort();
         assert_eq!(scopes, vec![vec!["a".to_owned()], vec!["b".to_owned()]]);
@@ -1663,6 +1715,31 @@ mod tests {
         assert_eq!(members.len(), 2);
         assert!(members.contains(&unit_a));
         assert!(members.contains(&unit_b));
+    }
+
+    #[test]
+    fn provenance_free_revisions_never_group_through_a_shared_commit_association() {
+        let shared = "shared-commit";
+        let events = [
+            provenance_free_captured_event("nongit-a", "2026-05-13T10:00:00Z"),
+            provenance_free_captured_event("nongit-b", "2026-05-13T10:00:01Z"),
+            commit_associated_event("nongit-a", shared),
+            commit_associated_event("nongit-b", shared),
+        ];
+        let projection = RevisionCommitRangeProjection::from_events(&events).unwrap();
+        let mut result =
+            list_from_events(&events, &projection).expect("non-git revisions remain listable");
+        let grouping = CommitOidGroupingProjection::from_events(&events).unwrap();
+
+        result.entries = group_entries(result.entries, &grouping);
+
+        assert_eq!(result.entries.len(), 2);
+        assert!(
+            result
+                .entries
+                .iter()
+                .all(|entry| { entry.grouped_revision_ids == vec![entry.revision_id.clone()] })
+        );
     }
 
     #[test]

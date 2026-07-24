@@ -156,8 +156,18 @@ fn render_revision_list_text(result: &pointbreak::session::RevisionListResult) -
         count_label(result.revision_count, "revision", "revisions")
     )];
     for entry in &result.entries {
+        let captured_from = entry.git_provenance.as_ref().map_or_else(
+            || "non-git revision".to_owned(),
+            |provenance| {
+                format!(
+                    "base {} → {}",
+                    endpoint_label(&provenance.base),
+                    endpoint_label(&provenance.target)
+                )
+            },
+        );
         let mut line = format!(
-            "  {}{} · base {} → {} · {} · {}",
+            "  {}{} · {} · {} · {}",
             output::short_ref(entry.revision_id.as_str()),
             entry
                 .summary
@@ -165,8 +175,7 @@ fn render_revision_list_text(result: &pointbreak::session::RevisionListResult) -
                 .map(crate::cli::common::clamp_title)
                 .map(|summary| format!(" · \"{summary}\""))
                 .unwrap_or_default(),
-            endpoint_label(&entry.base),
-            endpoint_label(&entry.target),
+            captured_from,
             entry.merge_status,
             entry.captured_at,
         );

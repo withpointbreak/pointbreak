@@ -240,7 +240,9 @@ mod tests {
         RevisionId, RevisionSource, TrackId, ValidationCheckId, ValidationTarget,
         ValidationTrigger, WorktreeCaptureMode,
     };
-    use crate::session::event::{AssertionMode, InputRequestReasonCode, ReviewAssessment, Writer};
+    use crate::session::event::{
+        AssertionMode, GitProvenance, InputRequestReasonCode, ReviewAssessment, Writer,
+    };
     use crate::session::identity::instant::normalize_instant_to_iso_millis;
     use crate::session::workflow::revision_projection::RevisionProjectionSummary;
     use crate::session::{
@@ -256,18 +258,20 @@ mod tests {
             revision_id: RevisionId::new(revision),
             summary: None,
             object_id: ObjectId::new(snapshot),
-            source: RevisionSource::GitWorktree {
-                mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
-                include_untracked: true,
-                pathspecs: Vec::new(),
-            },
-            base: ReviewEndpoint::GitCommit {
-                commit_oid: "base".to_owned(),
-                tree_oid: "base-tree".to_owned(),
-            },
-            target: ReviewEndpoint::GitWorkingTree {
-                worktree_root: "/repo".to_owned(),
-            },
+            git_provenance: Some(GitProvenance {
+                source: RevisionSource::GitWorktree {
+                    mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
+                    include_untracked: true,
+                    pathspecs: Vec::new(),
+                },
+                base: ReviewEndpoint::GitCommit {
+                    commit_oid: "base".to_owned(),
+                    tree_oid: "base-tree".to_owned(),
+                },
+                target: ReviewEndpoint::GitWorkingTree {
+                    worktree_root: "/repo".to_owned(),
+                },
+            }),
             object_artifact_content_hash: "sha256:artifact".to_owned(),
             commit_range: RevisionCommitRangeView {
                 revision_id: RevisionId::new(revision),

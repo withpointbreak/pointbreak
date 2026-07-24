@@ -17,7 +17,7 @@ use pointbreak::documents::{
 };
 use pointbreak::git::git_commit_subjects;
 use pointbreak::model::{EventId, ObjectId, ReviewEndpoint, RevisionId, RevisionSource};
-use pointbreak::session::event::ReviewAssessment;
+use pointbreak::session::event::{GitProvenance, ReviewAssessment};
 use pointbreak::session::{
     AssessmentRecordStatus, AssessmentView, AttentionItem, AttentionListOptions,
     BaseHistoryProjection, BaseProjectionConfig, CurrentAssessmentStatus, DistinctValues,
@@ -232,8 +232,10 @@ struct FactGraphDocument {
 /// the additive, path-private `targetDisplay`, revision-scoped `diagnostics`, and
 /// server-computed `overview`. The shared `pointbreak.review-revision-list`
 /// document is untouched; this is the inspector-private wire shape. Fields are
-/// listed explicitly (no flatten) so a new shared field forces a naming decision
-/// on this surface.
+/// listed explicitly so a new shared field forces a naming decision on this
+/// surface. The optional Git provenance triple is the deliberate exception:
+/// flattening that one typed invariant preserves the established Git-backed
+/// fields while omitting the complete triple for a non-Git revision.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RevisionEntryDocument {
@@ -242,9 +244,8 @@ struct RevisionEntryDocument {
     #[serde(skip_serializing_if = "Option::is_none")]
     summary: Option<String>,
     snapshot_id: ObjectId,
-    source: RevisionSource,
-    base: ReviewEndpoint,
-    target: ReviewEndpoint,
+    #[serde(flatten)]
+    git_provenance: Option<GitProvenance>,
     snapshot_content_hash: String,
     commit_range: RevisionCommitRangeView,
     merge_status: String,
@@ -321,6 +322,8 @@ const WORKING_TREE_FLOOR: &str = "working tree";
 /// The floor label for a commit target whose OID is empty/unreadable. Distinct
 /// from the worktree floor: a commit target is never a "working tree".
 const GIT_COMMIT_FLOOR: &str = "git commit";
+/// Honest display floor for a revision that has no capture-time Git coordinates.
+const NON_GIT_REVISION_FLOOR: &str = "non-git revision";
 /// Length of the git-style short commit OID used for head labels (git's default).
 const SHORT_OID_LEN: usize = 7;
 /// Maximum number of Unicode scalar values in the display-only work label,
@@ -337,11 +340,12 @@ const WORK_LABEL_MAX_CHARS: usize = 120;
 #[serde(rename_all = "camelCase")]
 struct TargetDisplay {
     /// `"working_tree"` for a Git working-tree target; `"git_commit"` for a
-    /// commit target (e.g. a commit-range capture).
+    /// commit target (e.g. a commit-range capture); `"non_git"` when capture-time
+    /// Git coordinates are absent.
     kind: &'static str,
     /// For a working-tree target, the worktree-root basename (or the
     /// `"working tree"` floor). For a commit target, the short target OID (or
-    /// the `"git commit"` floor).
+    /// the `"git commit"` floor). For a non-Git revision, `"non-git revision"`.
     label: String,
     /// Display-only semantic description of the captured work. Immutable ids
     /// remain the authority; this value is never used for addressing.
@@ -416,6 +420,37 @@ fn derive_target_display(
         // The raw worktree path is never copied into this block.
         path_private: true,
     }
+}
+
+fn non_git_target_display() -> TargetDisplay {
+    TargetDisplay {
+        kind: "non_git",
+        label: NON_GIT_REVISION_FLOOR.to_owned(),
+        work_label: WorkLabel {
+            text: NON_GIT_REVISION_FLOOR.to_owned(),
+            source: WorkLabelSource::SourceFallback,
+        },
+        head: None,
+        path_private: true,
+    }
+}
+
+fn revision_target_display(
+    provenance: Option<&GitProvenance>,
+    commit_range: &RevisionCommitRangeView,
+    commit_subjects: &BTreeMap<String, String>,
+) -> TargetDisplay {
+    let Some(provenance) = provenance else {
+        return non_git_target_display();
+    };
+    let work_label = derive_work_label(
+        &provenance.source,
+        &provenance.base,
+        &provenance.target,
+        commit_range,
+        commit_subjects,
+    );
+    derive_target_display(&provenance.target, &provenance.base, work_label)
 }
 
 fn derive_work_label(
@@ -611,9 +646,7 @@ fn to_unit_entry_documents(
                 revision_id,
                 summary,
                 object_id,
-                source,
-                base,
-                target,
+                git_provenance,
                 object_artifact_content_hash,
                 commit_range,
                 merge_status,
@@ -622,9 +655,8 @@ fn to_unit_entry_documents(
                 // deliberately not a wire field.
                 merge_status_view: _,
             } = entry;
-            let work_label =
-                derive_work_label(&source, &base, &target, &commit_range, commit_subjects);
-            let target_display = derive_target_display(&target, &base, work_label);
+            let target_display =
+                revision_target_display(git_provenance.as_ref(), &commit_range, commit_subjects);
             let overview = overviews.remove(revision_id.as_str()).ok_or_else(|| {
                 format!("missing overview for revision: {}", revision_id.as_str())
             })?;
@@ -633,9 +665,7 @@ fn to_unit_entry_documents(
                 revision_id,
                 summary,
                 snapshot_id: object_id,
-                source,
-                base,
-                target,
+                git_provenance,
                 snapshot_content_hash: object_artifact_content_hash,
                 commit_range,
                 merge_status,
@@ -1163,7 +1193,8 @@ fn build_revisions_json(
     let subject_oids = result
         .entries
         .iter()
-        .filter_map(|entry| commit_subject_oids(&entry.source, &entry.target))
+        .filter_map(|entry| entry.git_provenance.as_ref())
+        .filter_map(|provenance| commit_subject_oids(&provenance.source, &provenance.target))
         .collect::<BTreeSet<_>>();
     let commit_subjects = git_commit_subjects(repo, &subject_oids).unwrap_or_default();
     let overviews = revision_overviews(repo, &result.entries, trust_set, snapshot_summaries)?;
@@ -1768,25 +1799,29 @@ pub(super) fn revision_json(repo: &Path, revision_id: &str) -> Result<String, St
     // `revision_show_document` consumes `result`, then splice the additive
     // `targetDisplay` into the serialized document.
     let commit_range = result.commit_range.clone();
-    let subject_oids = commit_subject_oids(&result.revision.source, &result.revision.target)
+    let subject_oids = result
+        .revision
+        .git_provenance
+        .as_ref()
+        .and_then(|provenance| commit_subject_oids(&provenance.source, &provenance.target))
         .into_iter()
         .collect::<BTreeSet<_>>();
     let commit_subjects = git_commit_subjects(repo, &subject_oids).unwrap_or_default();
-    let work_label = derive_work_label(
-        &result.revision.source,
-        &result.revision.base,
-        &result.revision.target,
+    let target_display = revision_target_display(
+        result.revision.git_provenance.as_ref(),
         &commit_range,
         &commit_subjects,
     );
-    let target_display =
-        derive_target_display(&result.revision.target, &result.revision.base, work_label);
-    let head_oid = match &result.revision.base {
-        ReviewEndpoint::GitCommit { commit_oid, .. } => Some(commit_oid.clone()),
-        ReviewEndpoint::GitTree { .. }
-        | ReviewEndpoint::GitIndex { .. }
-        | ReviewEndpoint::GitWorkingTree { .. } => None,
-    };
+    let head_oid = result
+        .revision
+        .git_provenance
+        .as_ref()
+        .and_then(|provenance| match &provenance.base {
+            ReviewEndpoint::GitCommit { commit_oid, .. } => Some(commit_oid.clone()),
+            ReviewEndpoint::GitTree { .. }
+            | ReviewEndpoint::GitIndex { .. }
+            | ReviewEndpoint::GitWorkingTree { .. } => None,
+        });
     // Build the inspector-private fact graphs while `result` is still live; it is
     // moved into `revision_show_document` below.
     let fact_supersession = fact_supersession_document(&result);
@@ -1953,11 +1988,14 @@ pub(super) fn identity_json(repo: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use pointbreak::model::{
-        EngagementId, ObjectId, ReviewEndpoint, RevisionId, RevisionSource, WorktreeCaptureMode,
+        EngagementId, EngagementType, JournalId, ObjectId, ReviewEndpoint, ReviewTargetRef,
+        RevisionId, RevisionSource, TargetRef, WorktreeCaptureMode,
     };
     use pointbreak::session::event::{
-        GitProvenance, Revision, WorkObjectProposal, WorkObjectProposedPayload,
+        EventTarget, EventType, GitProvenance, Revision, ShoreEvent, WorkObjectProposal,
+        WorkObjectProposedPayload, Writer,
     };
+    use sha2::{Digest, Sha256};
 
     use super::*;
 
@@ -2238,6 +2276,56 @@ mod tests {
             result.object_id.as_str().to_owned(),
             result.object_artifact_content_hash,
         )
+    }
+
+    fn append_provenance_free_revision(
+        repo: &Path,
+        object_id: &str,
+        object_artifact_content_hash: &str,
+    ) -> RevisionId {
+        let revision_id = RevisionId::new(format!("rev:sha256:{}", "17".repeat(32)));
+        let target = TargetRef::Review(ReviewTargetRef::Revision {
+            revision_id: revision_id.clone(),
+        });
+        let idempotency_key = format!("fixture:provenance-free:{}", revision_id.as_str());
+        let event = ShoreEvent::new(
+            EventType::WorkObjectProposed,
+            &idempotency_key,
+            EventTarget::for_generative_move(
+                JournalId::new("journal:default"),
+                EngagementType::Review,
+                target,
+                None,
+            )
+            .unwrap(),
+            Writer::shore_local("test"),
+            WorkObjectProposedPayload {
+                engagement_id: EngagementId::new(format!("engagement:sha256:{}", "18".repeat(32))),
+                work_object: WorkObjectProposal::Revision {
+                    revision: Revision {
+                        id: revision_id.clone(),
+                        object_id: ObjectId::new(object_id),
+                        git_provenance: None,
+                    },
+                    summary: Some("generated revision".to_owned()),
+                    object_artifact_content_hash: object_artifact_content_hash.to_owned(),
+                    supersedes: Vec::new(),
+                },
+            },
+            "2026-07-24T00:00:00Z",
+        )
+        .unwrap();
+        let events_dir = common_dir_store(repo).join("events");
+        let stem = Sha256::digest(idempotency_key.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        std::fs::write(
+            events_dir.join(format!("{stem}.json")),
+            serde_json::to_vec(&event).unwrap(),
+        )
+        .unwrap();
+        revision_id
     }
 
     fn git(cwd: &Path, args: &[&str]) {
@@ -2815,18 +2903,20 @@ mod tests {
             revision_id: RevisionId::new("rev:sha256:abc"),
             summary: None,
             object_id: ObjectId::new("snap:sha256:abc"),
-            source: RevisionSource::GitWorktree {
-                mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
-                include_untracked: true,
-                pathspecs: Vec::new(),
-            },
-            base: ReviewEndpoint::GitCommit {
-                commit_oid: commit.to_owned(),
-                tree_oid: "tree-oid".to_owned(),
-            },
-            target: ReviewEndpoint::GitWorkingTree {
-                worktree_root: worktree.to_owned(),
-            },
+            git_provenance: Some(GitProvenance {
+                source: RevisionSource::GitWorktree {
+                    mode: WorktreeCaptureMode::CombinedHeadToWorkingTree,
+                    include_untracked: true,
+                    pathspecs: Vec::new(),
+                },
+                base: ReviewEndpoint::GitCommit {
+                    commit_oid: commit.to_owned(),
+                    tree_oid: "tree-oid".to_owned(),
+                },
+                target: ReviewEndpoint::GitWorkingTree {
+                    worktree_root: worktree.to_owned(),
+                },
+            }),
             object_artifact_content_hash: "sha256:artifact:abc".to_owned(),
             commit_range: pointbreak::session::RevisionCommitRangeView {
                 revision_id: RevisionId::new("review-unit:sha256:abc"),
@@ -2922,6 +3012,53 @@ mod tests {
             json.get("objectId").is_none() && json.get("objectArtifactContentHash").is_none(),
             "the inspector entry re-keys the shared fields into snapshot vocabulary"
         );
+    }
+
+    #[test]
+    fn units_document_represents_provenance_free_revision_without_git_fields() {
+        let mut non_git = entry("/ignored", "ignored");
+        non_git.git_provenance = None;
+        let entries = vec![non_git];
+        let overviews = BTreeMap::from([(
+            "rev:sha256:abc".to_owned(),
+            RevisionEntryOverviewDocument {
+                overview: overview(),
+                diagnostics: Vec::new(),
+            },
+        )]);
+
+        let docs = to_unit_entry_documents(entries, overviews, &BTreeMap::new()).unwrap();
+        let json = serde_json::to_value(&docs[0]).unwrap();
+
+        assert!(json.get("source").is_none());
+        assert!(json.get("base").is_none());
+        assert!(json.get("target").is_none());
+        assert_eq!(json["targetDisplay"]["kind"], "non_git");
+        assert_eq!(json["targetDisplay"]["label"], "non-git revision");
+        assert_eq!(
+            json["targetDisplay"]["workLabel"]["text"],
+            "non-git revision"
+        );
+        assert!(json["targetDisplay"].get("head").is_none());
+        assert_eq!(json["targetDisplay"]["pathPrivate"], true);
+    }
+
+    #[test]
+    fn revision_detail_represents_provenance_free_revision_end_to_end() {
+        let (repo, object_id, content_hash) = captured_repo();
+        let revision_id = append_provenance_free_revision(repo.path(), &object_id, &content_hash);
+
+        let json: serde_json::Value =
+            serde_json::from_str(&revision_json(repo.path(), revision_id.as_str()).unwrap())
+                .unwrap();
+        let revision = &json["revision"];
+
+        assert_eq!(revision["id"], revision_id.as_str());
+        assert!(revision.get("source").is_none());
+        assert!(revision.get("base").is_none());
+        assert!(revision.get("target").is_none());
+        assert_eq!(revision["targetDisplay"]["kind"], "non_git");
+        assert_eq!(revision["targetDisplay"]["label"], NON_GIT_REVISION_FLOOR);
     }
 
     #[test]
@@ -3063,6 +3200,30 @@ mod tests {
             .find(|entry| entry["revisionId"] == revision_id)
             .unwrap_or_else(|| panic!("amended capture target removed the revision: {value}"));
         assert_eq!(entry["mergeStatus"], "unreachable");
+    }
+
+    #[test]
+    fn revisions_json_represents_provenance_free_revision_end_to_end() {
+        let (repo, object_id, content_hash) = captured_repo();
+        let revision_id = append_provenance_free_revision(repo.path(), &object_id, &content_hash);
+        let cache = super::super::cache::RevisionsResponseCache::new();
+        let summaries = Arc::new(SnapshotSummaryCache::new());
+
+        let value: serde_json::Value =
+            serde_json::from_str(&revisions_json(repo.path(), &cache, &summaries).unwrap())
+                .unwrap();
+        let entry = value["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["revisionId"] == revision_id.as_str())
+            .expect("provenance-free revision is listed through the batch overview path");
+
+        assert!(entry.get("source").is_none());
+        assert!(entry.get("base").is_none());
+        assert!(entry.get("target").is_none());
+        assert_eq!(entry["targetDisplay"]["kind"], "non_git");
+        assert_eq!(entry["targetDisplay"]["label"], NON_GIT_REVISION_FLOOR);
     }
 
     #[test]

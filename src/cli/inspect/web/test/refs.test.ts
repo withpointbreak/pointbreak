@@ -270,6 +270,13 @@ describe("targetDisplayLabel", () => {
     expect(targetDisplayLabel({ label: "feature-x" })).toBe("feature-x");
     expect(targetDisplayLabel({ label: "<x>" })).toBe("&lt;x&gt;");
   });
+
+  it("never renders a non-git target as a working tree", () => {
+    expect(targetDisplayLabel({ kind: "non_git" })).toBe("non-git revision");
+    expect(
+      targetDisplayLabel({ kind: "non_git", label: "generated revision" }),
+    ).toBe("generated revision");
+  });
 });
 
 describe("workLabelText", () => {

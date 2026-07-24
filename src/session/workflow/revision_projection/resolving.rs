@@ -1,8 +1,6 @@
 use super::identity::RevisionProjectionIdentity;
 use crate::error::{Result, ShoreError};
-use crate::session::event::{
-    EventType, GitProvenance, ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload,
-};
+use crate::session::event::{EventType, ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload};
 use crate::session::observation::ResolvedRevision;
 
 /// Decode a `work_object_proposed` payload into the current model, rejecting the
@@ -47,27 +45,11 @@ pub(super) fn selected_revision_capture(
             continue;
         };
         if revision.id == resolved.revision_id {
-            // Provenance is enforced only for the matching capture, so a malformed
-            // sibling (e.g. a fabricated identity-reuse capture with no provenance)
-            // never masks the target the caller asked for.
-            let Some(GitProvenance {
-                source,
-                base,
-                target,
-            }) = revision.git_provenance
-            else {
-                return Err(ShoreError::Message(format!(
-                    "captured revision {} has no git provenance",
-                    revision.id.as_str()
-                )));
-            };
             return Ok(RevisionProjectionIdentity {
                 id: revision.id.clone(),
                 summary,
                 journal_id: event.target.journal_id.clone(),
-                source,
-                base,
-                target,
+                git_provenance: revision.git_provenance,
                 revision_id: revision.id,
                 object_id: revision.object_id,
                 object_artifact_content_hash,
@@ -84,11 +66,10 @@ pub(super) fn selected_revision_capture(
 
 /// Every captured revision identity in the event set, in event order — the
 /// single-pass enumeration the overview batch folds over. Mirrors
-/// `list_from_events`' `WorkObjectProposed` scan and shares its provenance
-/// requirement: a captured revision without git provenance is an error here, the
-/// same way `entry_from_event` rejects it on the list path (so the batch and the
-/// `/api/revisions` list it serves agree on which captures are listable). Task
-/// proposals are skipped, exactly as the review listing skips them.
+/// `list_from_events`' `WorkObjectProposed` scan. Optional Git provenance is
+/// carried as one typed value; non-Git revisions remain first-class projection
+/// identities. Task proposals are skipped exactly as the review listing skips
+/// them.
 pub(super) fn enumerate_revision_identities(
     events: &[ShoreEvent],
 ) -> Result<Vec<RevisionProjectionIdentity>> {
@@ -101,8 +82,7 @@ pub(super) fn enumerate_revision_identities(
 
 /// Decode one `WorkObjectProposed` event into a [`RevisionProjectionIdentity`],
 /// or `None` when the move proposes a task attempt rather than a review revision.
-/// Errors when a captured revision lacks git provenance — matching the list
-/// path's `entry_from_event`. Used by [`enumerate_revision_identities`].
+/// Used by [`enumerate_revision_identities`].
 fn revision_identity_from_capture_event(
     event: &ShoreEvent,
 ) -> Result<Option<RevisionProjectionIdentity>> {
@@ -116,24 +96,11 @@ fn revision_identity_from_capture_event(
     else {
         return Ok(None);
     };
-    let Some(GitProvenance {
-        source,
-        base,
-        target,
-    }) = revision.git_provenance
-    else {
-        return Err(ShoreError::Message(format!(
-            "captured revision {} has no git provenance",
-            revision.id.as_str()
-        )));
-    };
     Ok(Some(RevisionProjectionIdentity {
         id: revision.id.clone(),
         summary,
         journal_id: event.target.journal_id.clone(),
-        source,
-        base,
-        target,
+        git_provenance: revision.git_provenance,
         revision_id: revision.id,
         object_id: revision.object_id,
         object_artifact_content_hash,
@@ -144,8 +111,8 @@ fn revision_identity_from_capture_event(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{EngagementId, ObjectId, RevisionId};
-    use crate::session::event::Revision;
+    use crate::model::{EngagementId, JournalId, ObjectId, RevisionId};
+    use crate::session::event::{EventTarget, Revision, Writer};
 
     fn legacy_view_fixture_event() -> ShoreEvent {
         serde_json::from_str(include_str!(
@@ -190,5 +157,39 @@ mod tests {
         let value = serde_json::to_value(&current).expect("current payload serializes");
         let decoded = decode_work_object_proposed(&value).expect("current value decodes");
         assert_eq!(decoded, current);
+    }
+
+    #[test]
+    fn provenance_free_capture_projects_as_a_revision_identity() {
+        let revision_id = RevisionId::new("rev:sha256:nongit");
+        let payload = WorkObjectProposedPayload {
+            engagement_id: EngagementId::new("engagement:sha256:nongit"),
+            work_object: WorkObjectProposal::Revision {
+                revision: Revision {
+                    id: revision_id.clone(),
+                    object_id: ObjectId::new("obj:sha256:nongit"),
+                    git_provenance: None,
+                },
+                summary: Some("generated public workload".to_owned()),
+                object_artifact_content_hash: "sha256:artifact".to_owned(),
+                supersedes: vec![],
+            },
+        };
+        let event = ShoreEvent::new(
+            EventType::WorkObjectProposed,
+            "capture:nongit",
+            EventTarget::for_revision(JournalId::new("journal:default"), revision_id.clone(), None)
+                .unwrap(),
+            Writer::shore_local("test"),
+            payload,
+            "2026-05-13T10:00:00Z",
+        )
+        .unwrap();
+
+        let identity = revision_identity_from_capture_event(&event)
+            .expect("non-git capture is a valid projection input")
+            .expect("capture produces an identity");
+
+        assert_eq!(identity.revision_id, revision_id);
     }
 }

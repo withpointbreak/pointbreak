@@ -295,6 +295,12 @@ pub(crate) fn capture_has_worktree_identity_match(
     revision: &Revision,
     context: &CurrentRevisionContext,
 ) -> Result<bool> {
+    // Ref associations may later enrich liveness, but they do not manufacture
+    // capture-time Git identity for a provenance-free revision.
+    if revision.git_provenance.is_none() {
+        return Ok(false);
+    }
+
     if let Some(ReviewEndpoint::GitWorkingTree { worktree_root }) =
         revision.git_provenance.as_ref().map(|p| &p.target)
         && worktree_root == &context.worktree_root
@@ -514,6 +520,32 @@ mod scope_tests {
         )
     }
 
+    fn provenance_free_capture(suffix: &str) -> ShoreEvent {
+        let revision_id = RevisionId::new(format!("review-unit:sha256:{suffix}"));
+        ShoreEvent::new(
+            EventType::WorkObjectProposed,
+            format!("work_object_proposed:{}", revision_id.as_str()),
+            EventTarget::for_revision(JournalId::new("journal:default"), revision_id.clone(), None)
+                .unwrap(),
+            Writer::shore_local("test"),
+            WorkObjectProposedPayload {
+                engagement_id: EngagementId::new(format!("engagement:sha256:{suffix}")),
+                work_object: WorkObjectProposal::Revision {
+                    revision: Revision {
+                        id: revision_id,
+                        object_id: ObjectId::new(format!("obj:sha256:{suffix}")),
+                        git_provenance: None,
+                    },
+                    summary: None,
+                    object_artifact_content_hash: "sha256:artifact".to_owned(),
+                    supersedes: vec![],
+                },
+            },
+            "2026-05-12T00:00:00Z",
+        )
+        .unwrap()
+    }
+
     /// An ingested copy of a worktree capture: it keeps the origin's worktree root
     /// and carries an `ingest` provenance marker (the dest stamps this on import).
     fn ingested_worktree_capture(suffix: &str, origin_root: &str) -> ShoreEvent {
@@ -629,6 +661,19 @@ mod scope_tests {
         )
         .expect("ref association scopes the range capture into the current branch context");
         assert_eq!(resolved.revision_id.as_str(), "review-unit:sha256:r");
+    }
+
+    #[test]
+    fn worktree_identity_excludes_provenance_free_capture_with_matching_ref() {
+        let events = [
+            provenance_free_capture("nongit"),
+            ref_association("nongit", "refs/heads/feat/x"),
+        ];
+
+        let in_scope =
+            revision_ids_in_worktree(&events, &ctx("/wt/a", Some("refs/heads/feat/x"))).unwrap();
+
+        assert!(in_scope.is_empty());
     }
 
     #[test]

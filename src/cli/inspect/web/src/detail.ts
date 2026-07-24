@@ -1080,7 +1080,7 @@ export function renderRevisionPage(d: RevisionPageDoc): void {
     <dt>work</dt><dd>${workLabelText(ru.targetDisplay)}</dd>
     <dt>base</dt><dd>${base.commitOid ? linkify(base.commitOid) : "—"} ${base.kind ? `<span class="${CLASS.factStatus}">${escapeHtml(base.kind)}</span>` : ""}</dd>
     <dt>target</dt><dd>${targetDisplayLabel(ru.targetDisplay)}${targetHeadBadge(ru.targetDisplay)}</dd>
-    <dt>worktree</dt><dd>${escapeHtml(ru.targetDisplay?.label ?? "working tree")}</dd>
+    <dt>worktree</dt><dd>${targetDisplayLabel(ru.targetDisplay)}</dd>
     <dt>head</dt><dd>${escapeHtml(ru.targetDisplay?.head?.label ?? "—")}</dd>
     <dt>supersession</dt><dd>${badge || "—"}</dd>
     <dt>snapshot</dt><dd>${linkify(ru.objectId)}</dd>

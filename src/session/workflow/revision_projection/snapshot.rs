@@ -172,12 +172,14 @@ mod tests {
         // A second identity over the SAME snapshot + content hash but a DIFFERENT
         // revision_id and a different worktree target also binds — identity is
         // not read from the artifact body (INV-3).
-        let other = RevisionProjectionIdentity {
-            id: RevisionId::new("review-unit:sha256:other-worktree"),
-            target: ReviewEndpoint::GitWorkingTree {
-                worktree_root: "/some/other/worktree".to_owned(),
-            },
-            ..authentic.clone()
+        let mut other = authentic.clone();
+        other.id = RevisionId::new("review-unit:sha256:other-worktree");
+        other
+            .git_provenance
+            .as_mut()
+            .expect("range capture has git provenance")
+            .target = ReviewEndpoint::GitWorkingTree {
+            worktree_root: "/some/other/worktree".to_owned(),
         };
         let snapshot = load_bound_object_artifact(repo.path(), &other).unwrap();
         assert_eq!(snapshot.object_id, captured.object_id);
@@ -299,9 +301,11 @@ mod tests {
             id: captured.revision_id.clone(),
             summary: captured.summary.clone(),
             journal_id: captured.journal_id.clone(),
-            source: captured.source.clone(),
-            base: captured.base.clone(),
-            target: captured.target.clone(),
+            git_provenance: Some(crate::session::event::GitProvenance {
+                source: captured.source.clone(),
+                base: captured.base.clone(),
+                target: captured.target.clone(),
+            }),
             revision_id: captured.revision_id.clone(),
             object_id: captured.object_id.clone(),
             object_artifact_content_hash: captured.object_artifact_content_hash.clone(),
