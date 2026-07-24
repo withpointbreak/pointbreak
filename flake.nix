@@ -179,6 +179,9 @@
             # by GitHub Actions. Preserve the Cargo/crates.io version as the base
             # while marking its provenance as `nix-dev:<base-version>`.
             env.POINTBREAK_BUILD_CHANNEL = "nix-dev";
+            # Match `just test`: Nextest runs independent test binaries in
+            # parallel while retaining Nix's sandboxed release-profile check.
+            useNextest = true;
 
             # Git supplies compile-time build identity and is the runtime backend.
             nativeBuildInputs = [
