@@ -14,17 +14,32 @@ pub(crate) struct DerivedIdentity {
 pub(crate) fn derive_identity(
     manifest_dir: &Path,
     package_version: &str,
+    build_channel: Option<&str>,
 ) -> Result<DerivedIdentity, String> {
     let dot_git = manifest_dir.join(".git");
     let metadata = match fs::symlink_metadata(&dot_git) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(DerivedIdentity {
-                source: "package",
-                commit: None,
-                describe: format!("package:{package_version}"),
-                dirty: false,
-            });
+            return match build_channel {
+                Some("nix-dev") => Ok(DerivedIdentity {
+                    source: "package",
+                    commit: None,
+                    describe: format!("nix-dev:{package_version}"),
+                    dirty: false,
+                }),
+                None => Ok(DerivedIdentity {
+                    source: "package",
+                    commit: None,
+                    describe: format!("package:{package_version}"),
+                    dirty: false,
+                }),
+                Some(channel) => Err(format!(
+                    "unsupported POINTBREAK_BUILD_CHANNEL value {channel:?}. Git-less builds accept \
+                     either an unset channel (package:{package_version}) or `nix-dev` \
+                     (nix-dev:{package_version}). Remove POINTBREAK_BUILD_CHANNEL for a source \
+                     package, or set POINTBREAK_BUILD_CHANNEL=nix-dev for a Nix development package."
+                )),
+            };
         }
         Err(error) => {
             return Err(format!(
@@ -121,9 +136,11 @@ fn run() -> Result<(), String> {
         .ok_or_else(|| "Cargo did not provide CARGO_MANIFEST_DIR".to_owned())?;
     let package_version = env::var("CARGO_PKG_VERSION")
         .map_err(|_| "Cargo did not provide CARGO_PKG_VERSION".to_owned())?;
-    let identity = derive_identity(&manifest_dir, &package_version)?;
+    let build_channel = env::var("POINTBREAK_BUILD_CHANNEL").ok();
+    let identity = derive_identity(&manifest_dir, &package_version, build_channel.as_deref())?;
 
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=POINTBREAK_BUILD_CHANNEL");
     if identity.source == "git" {
         emit_git_rerun_directives(&manifest_dir)?;
     }

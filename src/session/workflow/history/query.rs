@@ -106,7 +106,7 @@ pub fn apply_history_query(
     query: &HistoryQuery,
     page: &HistoryPage,
 ) -> QueriedHistory {
-    debug_assert!(
+    assert!(
         !(matches!(query.order, HistoryOrder::Desc) && page.after.is_some()),
         "history cursor windowing requires ascending order"
     );

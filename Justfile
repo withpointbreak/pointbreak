@@ -12,6 +12,11 @@ export SKILLS_REF_REV := env_var_or_default("SKILLS_REF_REV", "5d4c1fda3f786fff8
 # PowerShell/cmd with "could not find the shell `sh`".
 set windows-shell := ["C:/Program Files/Git/bin/sh.exe", "-cu"]
 
+# Rustup users select toolchains explicitly. The Fenix Nix shell overrides both
+# commands with direct `cargo`, whose compiler is stable and formatter is nightly.
+cargo_stable := env_var_or_default("POINTBREAK_CARGO_STABLE", "cargo +stable")
+cargo_nightly := env_var_or_default("POINTBREAK_CARGO_NIGHTLY", "cargo +nightly")
+
 # Host executable suffix: `.exe` on Windows, empty elsewhere. Mirrors the name the
 # extension packager derives from .github/binary-targets.json, so the path handed to
 # it in `build-all` actually exists on disk.
@@ -25,38 +30,38 @@ default:
 # Run all tests.
 [group('core')]
 test *args:
-    cargo +stable nextest run --no-tests pass {{ args }}
+    {{ cargo_stable }} nextest run --no-tests pass {{ args }}
 
 # Run all tests (CI mode: no fail-fast, verbose).
 [group('core')]
 test-ci *args:
-    cargo +stable nextest run --profile ci --no-tests pass {{ args }}
+    {{ cargo_stable }} nextest run --profile ci --no-tests pass {{ args }}
 
 # Run a specific test file (e.g. just test-file integration).
 [group('core')]
 test-file name *args:
-    cargo +stable nextest run --test {{ name }} {{ args }}
+    {{ cargo_stable }} nextest run --test {{ name }} {{ args }}
 
 # Run the differential subprocess-vs-gix git-backend parity harness (report-only).
 [group('core')]
 git-parity *args:
-    cargo +stable nextest run --features gix-parity -E 'test(git_backend_parity)' {{ args }}
+    {{ cargo_stable }} nextest run --features gix-parity -E 'test(git_backend_parity)' {{ args }}
 
 # Per-op subprocess-vs-gix microbench behind the read-class flips (gix-parity
 # feature; separate from the `bench` feature). Prints the measured per-op win.
 [group('core')]
 git-bench *args:
-    cargo +stable nextest run --features gix-parity -E 'test(git_backend_microbench)' --no-capture {{ args }}
+    {{ cargo_stable }} nextest run --features gix-parity -E 'test(git_backend_microbench)' --no-capture {{ args }}
 
 # Build (debug).
 [group('core')]
 build *args:
-    cargo +stable build {{ args }}
+    {{ cargo_stable }} build {{ args }}
 
 # Build an optimized binary without publishing it.
 [group('core')]
 release *args:
-    cargo +stable build --release {{ args }}
+    {{ cargo_stable }} build --release {{ args }}
 
 # Reject a build profile that is not exactly `debug` or `release`, before any
 # dependency runs. Kept private so it stays out of `just --list`.
@@ -70,7 +75,7 @@ _require-build-profile profile:
 # or `release` (default `release`).
 [group('core')]
 build-all profile="release": (_require-build-profile profile) web-install web-build extension-install
-    cargo +stable build {{ if profile == "release" { "--release" } else { "" } }}
+    {{ cargo_stable }} build {{ if profile == "release" { "--release" } else { "" } }}
     POINTBREAK_EXTENSION_PROFILE={{ profile }} POINTBREAK_EXTENSION_BINARY="{{ justfile_directory() }}/target/{{ profile }}/pointbreak{{ bin_ext }}" just extension-package
 
 # Self-test Cargo installation and all release archive layouts without publishing.
@@ -161,7 +166,7 @@ workflow-lint-assertions:
 # Run Rust formatting checks and Clippy across all targets and features.
 [group('quality')]
 lint: fmt-check
-    cargo +stable clippy --workspace --all-targets --all-features -- -D warnings
+    {{ cargo_stable }} clippy --workspace --all-targets --all-features -- -D warnings
 
 # Type-check all targets without the full clippy/fmt gate. Used by CI's non-Linux
 # legs to keep the cfg(windows)/cfg(not(unix))/feature-gated arms compiled while
@@ -169,22 +174,22 @@ lint: fmt-check
 # Type-check all workspace targets and features without the full lint gate.
 [group('core')]
 check-types:
-    cargo +stable check --workspace --all-targets --all-features
+    {{ cargo_stable }} check --workspace --all-targets --all-features
 
 # Run clippy with auto-fix.
 [group('quality')]
 fix *args: fmt
-    cargo +stable clippy --fix --workspace --all-targets --all-features --allow-dirty --allow-staged -- -D warnings {{ args }}
+    {{ cargo_stable }} clippy --fix --workspace --all-targets --all-features --allow-dirty --allow-staged -- -D warnings {{ args }}
 
 # Format code.
 [group('quality')]
 fmt *args:
-    cargo +nightly fmt --all {{ args }}
+    {{ cargo_nightly }} fmt --all {{ args }}
 
 # Check Rust formatting without writing files.
 [group('quality')]
 fmt-check:
-    cargo +nightly fmt --all -- --check
+    {{ cargo_nightly }} fmt --all -- --check
 
 # Format Nix files with the canonical RFC-166 formatter. Requires Nix.
 [group('nix')]
@@ -205,6 +210,23 @@ nix-check:
     nix run nixpkgs#statix -- check .
     nix run nixpkgs#deadnix -- --fail .
     nix flake check
+
+# EXPERIMENTAL: cross-compile a cargo-nextest archive for a Windows msvc target from
+# this Linux/macOS host, to run on a real Windows machine (the archive carries prebuilt
+# test binaries; the Windows side needs no Rust toolchain). Run inside the Nix
+# windows-cross shell: `nix develop .#windows-cross -c just windows-cross-archive`.
+# cargo-xwin downloads the MSVC CRT/SDK on first use. See ci-nix-windows-spike.yml.
+[group('nix')]
+windows-cross-archive target="x86_64-pc-windows-msvc":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out="target/nextest/pointbreak-{{ target }}.tar.zst"
+    mkdir -p "$(dirname "$out")"
+    # cargo-xwin emits the per-target CC/AR/linker/lib-search env nextest needs to
+    # build (and link) the Windows test binaries; eval it, then archive.
+    eval "$(cargo-xwin env --target {{ target }})"
+    cargo nextest archive --target {{ target }} --archive-file "$out"
+    echo "wrote $out"
 
 # Install git hooks (commit-msg and pre-push validation via cocogitto).
 [group('maintenance')]
@@ -239,7 +261,7 @@ commit-check range='origin/main..HEAD':
 # Run the CLI.
 [group('core')]
 run *args:
-    cargo +stable run --bin pointbreak -- {{ args }}
+    {{ cargo_stable }} run --bin pointbreak -- {{ args }}
 
 # Fold a worktree-local .pointbreak/data store into the Git-common-dir pointbreak store.
 # Non-destructive + idempotent; refuses an ephemeral/sensitive worktree unless
@@ -247,7 +269,7 @@ run *args:
 # Migrate a worktree-local store into the Git-common-dir store without deleting the source.
 [group('maintenance')]
 migrate-store-common-dir repo="." include-ephemeral="false":
-    cargo +stable run --bin pointbreak -- store migrate --repo {{ repo }} \
+    {{ cargo_stable }} run --bin pointbreak -- store migrate --repo {{ repo }} \
         {{ if include-ephemeral == "true" { "--include-ephemeral" } else { "" } }}
 
 # Run the complete Rust gate: commit check, build, lint, and tests.
@@ -258,28 +280,28 @@ check: commit-check build lint test
 # uses only disposable roots and records raw samples without timing thresholds.
 [group('quality')]
 store-foundation-qualification-smoke:
-    cargo +stable bench --features bench --bench store_foundation -- --qualification-smoke
+    {{ cargo_stable }} bench --features bench --bench store_foundation -- --qualification-smoke
 
 # Run the developer evidence lane with repeated raw performance samples. This
 # remains environment evidence rather than a default-test timing gate.
 [group('quality')]
 store-foundation-qualification:
-    cargo +stable bench --features bench --bench store_foundation -- --qualification-evidence
+    {{ cargo_stable }} bench --features bench --bench store_foundation -- --qualification-evidence
 
 # Print and validate the public longitudinal workload and capacity contracts.
 [group('quality')]
 longitudinal-contract:
-    cargo +stable bench --locked --features bench --bench store_foundation -- --longitudinal-contract
+    {{ cargo_stable }} bench --locked --features bench --bench store_foundation -- --longitudinal-contract
 
 # Exercise disposable longitudinal construction, pair, preflight, and package mechanics without timing.
 [group('quality')]
 longitudinal-smoke:
-    cargo +stable bench --locked --features bench --bench store_foundation -- --longitudinal-smoke
+    {{ cargo_stable }} bench --locked --features bench --bench store_foundation -- --longitudinal-smoke
 
 # Recursively verify one completed longitudinal raw-evidence package without editing it.
 [group('quality')]
 longitudinal-verify-package root:
-    cargo +stable bench --locked --features bench --bench store_foundation -- \
+    {{ cargo_stable }} bench --locked --features bench --bench store_foundation -- \
         --longitudinal-verify-package --longitudinal-package-root="{{ root }}"
 
 # Install the Visual Studio Code extension toolchain from its committed lockfile.
@@ -349,17 +371,17 @@ capture-marketing-review-screenshots url="http://127.0.0.1:7878":
 # Export the canonical Review example from a source repository through public Pointbreak APIs.
 [group('review-evidence')]
 review-example-export source output="examples/review/checkout-refactor":
-    cargo +stable run --example review_example_pack -- export --repo {{ source }} --output {{ output }}
+    {{ cargo_stable }} run --example review_example_pack -- export --repo {{ source }} --output {{ output }}
 
 # Verify the checked canonical Review example pack without depending on store layout.
 [group('review-evidence')]
 review-example-verify pack="examples/review/checkout-refactor":
-    cargo +stable run --example review_example_pack -- verify --pack {{ pack }}
+    {{ cargo_stable }} run --example review_example_pack -- verify --pack {{ pack }}
 
 # Materialize the canonical Review example into an empty destination repository.
 [group('review-evidence')]
 review-example-materialize output pack="examples/review/checkout-refactor":
-    cargo +stable run --example review_example_pack -- materialize --pack {{ pack }} --output {{ output }}
+    {{ cargo_stable }} run --example review_example_pack -- materialize --pack {{ pack }} --output {{ output }}
 
 # Materialize the Inspector decision-continuity matrix into an empty, isolated repository.
 [group('review-evidence')]
@@ -369,7 +391,7 @@ review-decision-matrix-materialize output:
     if [ -n "${POINTBREAK_BINARY:-}" ]; then
       ./scripts/materialize-inspector-decision-matrix.sh "{{ output }}"
     else
-      cargo +stable build --bin pointbreak
+      {{ cargo_stable }} build --bin pointbreak
       POINTBREAK_BINARY="$PWD/target/debug/pointbreak" \
         ./scripts/materialize-inspector-decision-matrix.sh "{{ output }}"
     fi
@@ -382,7 +404,7 @@ review-decision-browser-verify root:
     if [ -n "${POINTBREAK_BINARY:-}" ]; then
       ./scripts/verify-inspector-decision-continuity.sh --root "{{ root }}"
     else
-      cargo +stable build --bin pointbreak
+      {{ cargo_stable }} build --bin pointbreak
       POINTBREAK_BINARY="$PWD/target/debug/pointbreak" \
         ./scripts/verify-inspector-decision-continuity.sh --root "{{ root }}"
     fi

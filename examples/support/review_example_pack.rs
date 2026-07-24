@@ -14,6 +14,7 @@ use pointbreak::session::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tempfile::tempdir;
 
 pub type PackResult<T> = Result<T, Box<dyn Error>>;
 
@@ -258,7 +259,20 @@ pub fn verify_pack(pack: &Path) -> PackResult<()> {
         &manifest.documents.revision.sha256,
     )?;
     verify_documents(pack, &manifest)?;
+    // Verify against an empty repository so pack validation does not depend on
+    // the caller running from a checkout that happens to contain prerequisites.
+    let bundle_verify_repo = tempdir()?;
+    let bundle_repo_init = Command::new("git")
+        .args(["init", "--bare", "--initial-branch=main"])
+        .arg(bundle_verify_repo.path())
+        .output()?;
+    require(
+        bundle_repo_init.status.success(),
+        "source.bundle verify repository",
+    )?;
     let bundle_verify = Command::new("git")
+        .arg("-C")
+        .arg(bundle_verify_repo.path())
         .args(["bundle", "verify"])
         .arg(pack.join(&manifest.source.bundle_path))
         .output()?;

@@ -63,8 +63,12 @@ worktree `.git` file). In that mode, `build.commit` is the full lowercase commit
 `build.describe` is the result of `git describe --tags --always --dirty`, and `build.dirty` reports tracked
 index or worktree changes at build time. Invalid or partial manifest-root Git metadata fails the build.
 When a source package has no manifest-root `.git`, `build.source` is `package`, `build.commit` is `null`,
-`build.describe` is `package:<cliVersion>`, and `build.dirty` is `false`. A package directory nested beneath
-some other checkout does not inherit that parent's Git identity.
+`build.describe` is `package:<cliVersion>`, and `build.dirty` is `false`. Nix development packages set the
+explicit `POINTBREAK_BUILD_CHANNEL=nix-dev` build input instead; they retain the compatible `package`
+source and report `build.describe` as `nix-dev:<cliVersion>`, with `build.commit=null` and
+`build.dirty=false`. The static Nix channel marks an unreleased package build without guessing a future
+semantic version or depending on checkout metadata. A package directory nested beneath some other checkout
+does not inherit that parent's Git identity.
 
 JSON is authoritative for the full identity. A clean exact-tag binary has the exact tag in
 `build.describe`, its peeled full commit in `build.commit`, and `build.dirty=false`; semantic version alone
@@ -120,7 +124,7 @@ tests/CI). **Signing never gates a write** (with one exception, below): any reso
 an unreadable key home, an unsupported algorithm, a malformed configured key, `POINTBREAK_SIGNING=off`)
 degrades to an unsigned write at exit 0 with a one-line advisory diagnostic on stderr — it never blocks.
 The sole exception is `pointbreak endorse` (below), where unsigned is a hard error because the
-signature *is* the endorsement's content. See
+signature _is_ the endorsement's content. See
 [signing-ux.md](./signing-ux.md) for the human / agent / CI flows and the
 `unsigned → untrusted_key → valid` ladder.
 
@@ -161,7 +165,7 @@ revision recorded; its subject is always the captured snapshot, never the live w
 - `--color <auto|always|never>` controls ANSI syntax coloring of the diff body. `auto` (the default)
   colorizes only when stdout is a TTY, honoring `NO_COLOR` and `CLICOLOR_FORCE` (precedence: `--color`
   > `NO_COLOR` > `CLICOLOR_FORCE` > isatty); piped or redirected output stays plain. Color is pure
-  presentation — stripping the ANSI reproduces the plain diff exactly.
+  > presentation — stripping the ANSI reproduces the plain diff exactly.
 - `--theme <theme>` picks the truecolor palette: `auto` (the default) detects the terminal
   background — light or dark — and selects the matching built-in palette; `light` / `dark` force a
   built-in; any other value names a bundled syntax theme, matched case-insensitively (bat's
@@ -495,7 +499,7 @@ when a repo's own test fixtures carry scanner-triggering strings:
 
 The two files merge by **union** (committed order first, then novel local entries) — deliberately
 diverging from the local-replaces-committed rule `store.json`/`delegates.json` use, because this is
-a *list*: replace would force copying the whole committed list to add one local entry, union grants
+a _list_: replace would force copying the whole committed list to add one local entry, union grants
 nothing replace couldn't, and the audit counts make any widening visible. Default is empty (scan
 everything; opt-in only).
 
@@ -515,7 +519,7 @@ ran (absent under `--include-ephemeral`, which skips the scan). Excluded paths t
 listed — the scan's redacted `file:sha256:*` posture stands. The gate behavior is unchanged: a
 `block` finding outside the excludes still refuses without `--include-ephemeral`.
 
-**Seeing which files matched (`pointbreak store status --show-paths`).** A finding names only its *kind*
+**Seeing which files matched (`pointbreak store status --show-paths`).** A finding names only its _kind_
 and a redacted `file:sha256:*` reference, so on its own it does not tell you which file to exclude.
 `--show-paths` closes that loop: it re-runs the same scan (the same matchers, the same exclude
 globs) locally and lists the real matched worktree paths grouped by finding kind, so you can author
@@ -623,7 +627,7 @@ commands, and `pointbreak history` omit the body text and carry a `bodyContentSt
 `summaryContentState` / `reasonContentState` field beside the content hash — `suppressed_present`
 while the bytes are still stored (a compact would reclaim them) or `physically_removed` after the
 sweep — plus `body_content_suppressed_present` / `body_content_physically_removed` diagnostics.
-The field is omitted entirely while content is present, and a body that is missing *without* a
+The field is omitted entirely while content is present, and a body that is missing _without_ a
 recorded removal still fails the read with the `import referenced artifacts` guidance.
 
 Command output is the machine-integration surface, under the tiered stability promise described at
@@ -965,7 +969,7 @@ signer and the carrier's envelope writer is the **endorser's own actor** (`--act
 writing identity), never the target's author.
 
 - **Unsigned is a hard error.** Unlike every other write — where signing never gates — an endorsement
-  has no unsigned form, because the signature *is* its content. The signer is resolved first (before the
+  has no unsigned form, because the signature _is_ its content. The signer is resolved first (before the
   target); if none resolves (`POINTBREAK_SIGNING=off`, no key, an unreadable key), the command exits non-zero
   and writes nothing. Signer precedence otherwise follows the **Signing** rules above.
 - Idempotent: re-endorsing the same target with the same signer is a no-op (`eventsCreated: 0`,

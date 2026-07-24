@@ -454,5 +454,5 @@ fn readme_drops_branded_hunk_origin_references() {
 fn just_run_targets_the_pointbreak_binary() {
     let justfile = std::fs::read_to_string("Justfile").expect("read Justfile");
 
-    assert!(justfile.contains("cargo +stable run --bin pointbreak --"));
+    assert!(justfile.contains("{{ cargo_stable }} run --bin pointbreak -- {{ args }}"));
 }

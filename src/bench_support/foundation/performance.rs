@@ -32,7 +32,7 @@ use super::{
     modeled_post_foundation_manifest, qualification_cargo_lock_sha256,
     qualification_filesystem_name, qualification_generated_manifest_v1,
     qualification_generator_spec_v1, qualification_operation_schedule_v1,
-    qualification_source_commit, synthetic_legacy_manifest,
+    synthetic_legacy_manifest,
 };
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
 
@@ -90,6 +90,19 @@ const QUALIFICATION_LMDB_PROOF_CLOSURE_SHA256_V1: &str =
 const QUALIFICATION_LOOSE_BASELINE_WARMUP_ITERATIONS_V1: u32 = 3;
 const QUALIFICATION_LOOSE_BASELINE_MEASURED_ITERATIONS_V1: u32 = 30;
 const QUALIFICATION_LOOSE_BASELINE_INDEPENDENT_ROOTS_V1: u32 = 2;
+
+#[cfg(test)]
+const PERFORMANCE_TEST_SOURCE_COMMIT: &str = "cccccccccccccccccccccccccccccccccccccccc";
+
+#[cfg(test)]
+fn expected_qualification_source_commit() -> Result<String, String> {
+    Ok(PERFORMANCE_TEST_SOURCE_COMMIT.to_owned())
+}
+
+#[cfg(not(test))]
+fn expected_qualification_source_commit() -> Result<String, String> {
+    super::qualification_source_commit()
+}
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -261,7 +274,7 @@ impl QualificationLooseBaselineEvidenceV1 {
 
     pub fn validate(&self) -> Result<(), String> {
         if self.schema != QUALIFICATION_LOOSE_BASELINE_EVIDENCE_SCHEMA_V1
-            || self.source_commit != qualification_source_commit()?
+            || self.source_commit != expected_qualification_source_commit()?
             || self.cargo_lock_sha256 != qualification_cargo_lock_sha256()
             || self.generator_schema != QUALIFICATION_GENERATOR_SCHEMA_V1
             || self.public_seed_hex != QUALIFICATION_PUBLIC_SEED_HEX_V1
@@ -861,7 +874,8 @@ impl QualificationLooseBaselineEvidenceV1 {
             .collect();
         let mut evidence = Self {
             schema: QUALIFICATION_LOOSE_BASELINE_EVIDENCE_SCHEMA_V1.to_owned(),
-            source_commit: qualification_source_commit().expect("test build source commit"),
+            source_commit: expected_qualification_source_commit()
+                .expect("test build source commit"),
             cargo_lock_sha256: qualification_cargo_lock_sha256(),
             generator_schema: QUALIFICATION_GENERATOR_SCHEMA_V1.to_owned(),
             public_seed_hex: QUALIFICATION_PUBLIC_SEED_HEX_V1.to_owned(),
@@ -2744,7 +2758,7 @@ pub fn qualification_lmdb_prospective_execution_v1()
         return Err("LMDB prospective runner requires a clean Git build".to_owned());
     }
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let source_commit = qualification_source_commit()?;
+    let source_commit = super::qualification_source_commit()?;
     let live_commit =
         git_identity_stdout_v1(manifest_dir, &["rev-parse", "--verify", "HEAD^{commit}"])?;
     let source_tree =
@@ -3811,7 +3825,7 @@ impl QualificationPerformanceEvidenceV2 {
         {
             return Err("performance evidence uses a different contract".to_owned());
         }
-        if self.source_commit != qualification_source_commit()? {
+        if self.source_commit != expected_qualification_source_commit()? {
             return Err("performance evidence source commit is stale".to_owned());
         }
         if self.cargo_lock_sha256 != qualification_cargo_lock_sha256() {
@@ -4270,7 +4284,7 @@ fn validate_loose_baseline_evidence_configuration_v1(
             .root
             .parent()
             .is_none_or(|parent| !parent.is_dir())
-        || configuration.source_commit != qualification_source_commit()?
+        || configuration.source_commit != expected_qualification_source_commit()?
         || configuration.cargo_lock_sha256 != qualification_cargo_lock_sha256()
         || !configuration.quiesced_host
         || env!("POINTBREAK_BUILD_DIRTY") == "true"
@@ -6422,7 +6436,7 @@ pub fn validate_diagnostic_configuration(
     {
         return Err("performance diagnostics root must be a fresh path".to_owned());
     }
-    if configuration.source_commit != qualification_source_commit()? {
+    if configuration.source_commit != expected_qualification_source_commit()? {
         return Err("performance diagnostics source commit is stale".to_owned());
     }
     if configuration.cargo_lock_sha256 != qualification_cargo_lock_sha256() {
@@ -6546,7 +6560,7 @@ fn validate_campaign_configuration(
             .root
             .parent()
             .is_none_or(|parent| !parent.is_dir())
-        || configuration.source_commit != qualification_source_commit()?
+        || configuration.source_commit != expected_qualification_source_commit()?
         || configuration.cargo_lock_sha256 != qualification_cargo_lock_sha256()
         || !configuration.quiesced_host
         || env!("POINTBREAK_BUILD_DIRTY") == "true"
@@ -8270,8 +8284,7 @@ mod tests {
         let mut configuration = QualificationPerformanceDiagnosticConfigurationV1 {
             executable: std::env::current_exe().expect("test executable"),
             root: root.clone(),
-            source_commit: crate::bench_support::foundation::qualification_source_commit()
-                .expect("build commit"),
+            source_commit: expected_qualification_source_commit().expect("build commit"),
             cargo_lock_sha256: crate::bench_support::foundation::qualification_cargo_lock_sha256(),
             warmup_samples: 0,
             measured_samples: 1,
@@ -8287,8 +8300,7 @@ mod tests {
         assert!(validate_diagnostic_configuration(&configuration).is_err());
         assert!(!root.exists());
 
-        configuration.source_commit =
-            crate::bench_support::foundation::qualification_source_commit().expect("build commit");
+        configuration.source_commit = expected_qualification_source_commit().expect("build commit");
         std::fs::create_dir(&root).expect("pre-existing root");
         assert!(validate_diagnostic_configuration(&configuration).is_err());
     }
@@ -8476,8 +8488,7 @@ mod tests {
         let configuration = QualificationPerformanceDiagnosticConfigurationV1 {
             executable: std::env::current_exe().expect("test executable"),
             root: parent.path().join("diagnostics"),
-            source_commit: crate::bench_support::foundation::qualification_source_commit()
-                .expect("build commit"),
+            source_commit: expected_qualification_source_commit().expect("build commit"),
             cargo_lock_sha256: crate::bench_support::foundation::qualification_cargo_lock_sha256(),
             warmup_samples: 1,
             measured_samples: 2,
@@ -8515,8 +8526,7 @@ mod tests {
         baseline_allocated: u64,
     ) -> QualificationPerformanceEvidenceV2 {
         let contract = QualificationPerformanceContractV2::frozen();
-        let source_commit = crate::bench_support::foundation::qualification_source_commit()
-            .expect("build source commit");
+        let source_commit = expected_qualification_source_commit().expect("build source commit");
         let cargo_lock_sha256 = crate::bench_support::foundation::qualification_cargo_lock_sha256();
         let mut runs = Vec::new();
 
