@@ -290,6 +290,11 @@
             cargoLock = ./Cargo.lock;
             cargoArtifacts = cargoArtifactsTest;
             CARGO_PROFILE = "test";
+            # Nothing consumes this gate's compiled target directory, and installing
+            # it cost a ~250MB output that changed on every commit — dead weight in
+            # both the CI store cache and the build itself, which paid to compress
+            # it. The shared dependency artifacts above are the reusable part.
+            doInstallCargoArtifacts = false;
             env.POINTBREAK_BUILD_CHANNEL = "nix-dev";
             cargoClippyExtraArgs = "--workspace --all-targets --all-features -- -D warnings";
             # Build scripts run under clippy; build.rs shells out to git.
