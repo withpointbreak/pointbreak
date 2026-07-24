@@ -62,12 +62,35 @@ jobs:
           primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', 'Cargo.lock', 'src/cli/inspect/web/package-lock.json', 'extensions/vscode/package-lock.json') }}
           restore-prefixes-first-match: nix-${{ runner.os }}-
 
-      # fmt + clippy + cli-nextest (full Git-less suite) + devshell-tools drift.
-      # -L streams full build logs so a failure is legible in the Actions UI.
-      - name: nix flake check
-        run: nix flake check -L
+      # `nix flake check` builds every check in one arbitrary-order batch, so it
+      # cannot express "cheap gate first". Realising the checks individually does:
+      # each step below is an explicit dependency of the next, and a failure stops
+      # the job before the expensive phases run.
+      #
+      # Logs are compact by default; the failure step at the end dumps the full
+      # build log of whatever failed, which is the idiomatic Nix pattern (`-L` on
+      # every step is what made these runs unreadable).
 
-      # Hermetic, store-backed artifact build. Warm in the local store after the
-      # flake check above, so this is a near-instant realisation of the aggregate.
-      - name: nix build .#build-all
-        run: nix build .#build-all -L
+      # Phase 1 — formatting. Compiles nothing, so this is a true early return.
+      - name: fmt
+        run: nix build .#cli-fmt
+
+      # Phase 2 — clippy. Linux only, mirroring ci.yml: the lint result is
+      # platform-independent, and `--all-targets` compiles the whole test surface,
+      # so running it on both platforms bought a second full compile for nothing.
+      - name: clippy
+        if: runner.os == 'Linux'
+        run: nix build .#cli-clippy
+
+      # Phase 3 — the full Git-less nextest suite, plus the pinned-tool drift check.
+      - name: test
+        run: nix build .#cli-nextest .#devshell-tools
+
+      # Phase 4 — hermetic artifact build (CLI + embedded Inspector + VSIX).
+      - name: build
+        run: nix build .#build-all
+
+      # Nix prints only a summary on failure; surface the actual build log.
+      - name: dump failing build log
+        if: failure()
+        run: nix log "$(nix eval --raw .#cli-nextest.drvPath)" 2>/dev/null | tail -150 || true

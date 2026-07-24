@@ -179,6 +179,7 @@
         pkgs:
         let
           version = "0.8.0";
+          cocogitto = mkCocogitto pkgs;
           rustToolchains = mkRustToolchains pkgs;
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchains.stable;
           # rustfmt.toml enables unstable options, so the format check needs the
@@ -221,6 +222,21 @@
             env.POINTBREAK_BUILD_CHANNEL = "nix-dev";
           };
 
+          # Dependencies for the quality gates, built with Cargo's `test` profile.
+          # Crane defaults every derivation to `release`, which made the gates pay
+          # optimized codegen for throwaway test binaries; `just lint`/`just test`
+          # compile with the dev-inheriting `test` profile, so the gates now match
+          # what a contributor runs locally. Kept separate from the release
+          # artifacts above so the delivery build stays optimized.
+          cargoArtifactsTest = craneLib.buildDepsOnly {
+            pname = "pointbreak";
+            inherit version;
+            src = craneLib.cleanCargoSource sourceWithInspector;
+            cargoLock = ./Cargo.lock;
+            CARGO_PROFILE = "test";
+            env.POINTBREAK_BUILD_CHANNEL = "nix-dev";
+          };
+
           # Build the distributable artifact without coupling ordinary consumers
           # to the complete repository test suite. `cliNextest` below is exposed
           # through `nix flake check` as the full Git-less quality gate.
@@ -252,8 +268,9 @@
             inherit version;
             src = sourceWithInspector;
             cargoLock = ./Cargo.lock;
-            inherit cargoArtifacts;
+            cargoArtifacts = cargoArtifactsTest;
             doInstallCargoArtifacts = false;
+            CARGO_PROFILE = "test";
             cargoNextestExtraArgs = "--no-tests pass";
             env.POINTBREAK_BUILD_CHANNEL = "nix-dev";
             nativeBuildInputs = [
@@ -271,7 +288,8 @@
             inherit version;
             src = sourceWithInspector;
             cargoLock = ./Cargo.lock;
-            inherit cargoArtifacts;
+            cargoArtifacts = cargoArtifactsTest;
+            CARGO_PROFILE = "test";
             env.POINTBREAK_BUILD_CHANNEL = "nix-dev";
             cargoClippyExtraArgs = "--workspace --all-targets --all-features -- -D warnings";
             # Build scripts run under clippy; build.rs shells out to git.
@@ -327,33 +345,9 @@
           cli-nextest = cliNextest;
           cli-clippy = cliClippy;
           cli-fmt = cliFmt;
-          # Curate the aggregate as a delivery surface. The Inspector bundle is
-          # embedded in the CLI and `libexec/pointbreak` is only the VSIX input;
-          # both remain available from their owning package outputs.
-          build-all = pkgs.runCommand "pointbreak-build-all-${version}" { } ''
-            mkdir -p "$out/bin"
-            ln -s ${cli}/bin/pointbreak "$out/bin/pointbreak"
-            ln -s ${vscode}/pointbreak.vsix "$out/pointbreak.vsix"
-          '';
-        }
-      );
-
-      # `nix flake check` runs the full Rust gate hermetically: the complete
-      # Git-less Nextest suite, clippy (`-D warnings`), and the nightly rustfmt
-      # format check — clippy and the tests share the crane dependency artifacts.
-      # It also realises the pinned cocogitto (proving the from-source pin still
-      # compiles on a clean machine). This keeps package consumers on the fast
-      # delivery path while making test, lint, format, or tool drift fail the flake.
-      checks = forEachSystem (
-        pkgs:
-        let
-          cocogitto = mkCocogitto pkgs;
-          rustToolchains = mkRustToolchains pkgs;
-        in
-        {
-          cli-nextest = self.packages.${pkgs.stdenv.hostPlatform.system}.cli-nextest;
-          clippy = self.packages.${pkgs.stdenv.hostPlatform.system}.cli-clippy;
-          fmt = self.packages.${pkgs.stdenv.hostPlatform.system}.cli-fmt;
+          # Exposed as a package (not only a check) so CI can realise it as
+          # `.#devshell-tools`, which resolves the current system automatically
+          # instead of hardcoding a system string per runner.
           devshell-tools =
             pkgs.runCommand "devshell-tools-check"
               {
@@ -375,7 +369,28 @@
                 cargo-nextest nextest --version >/dev/null
                 touch "$out"
               '';
+          # Curate the aggregate as a delivery surface. The Inspector bundle is
+          # embedded in the CLI and `libexec/pointbreak` is only the VSIX input;
+          # both remain available from their owning package outputs.
+          build-all = pkgs.runCommand "pointbreak-build-all-${version}" { } ''
+            mkdir -p "$out/bin"
+            ln -s ${cli}/bin/pointbreak "$out/bin/pointbreak"
+            ln -s ${vscode}/pointbreak.vsix "$out/pointbreak.vsix"
+          '';
         }
       );
+
+      # `nix flake check` runs the full Rust gate hermetically: the complete
+      # Git-less Nextest suite, clippy (`-D warnings`), and the nightly rustfmt
+      # format check — clippy and the tests share the crane dependency artifacts.
+      # It also realises the pinned cocogitto (proving the from-source pin still
+      # compiles on a clean machine). This keeps package consumers on the fast
+      # delivery path while making test, lint, format, or tool drift fail the flake.
+      checks = forEachSystem (pkgs: {
+        cli-nextest = self.packages.${pkgs.stdenv.hostPlatform.system}.cli-nextest;
+        clippy = self.packages.${pkgs.stdenv.hostPlatform.system}.cli-clippy;
+        fmt = self.packages.${pkgs.stdenv.hostPlatform.system}.cli-fmt;
+        devshell-tools = self.packages.${pkgs.stdenv.hostPlatform.system}.devshell-tools;
+      });
     };
 }
