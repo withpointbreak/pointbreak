@@ -43,10 +43,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: DeterminateSystems/nix-installer-action@main
-      - uses: nix-community/cache-nix-action@v6
+      # Same store-cache reasoning as ci-nix.yml: keep only this project's own
+      # paths rather than a whole-store tarball, so the shared 10GB Actions cache
+      # budget is not exhausted by paths cache.nixos.org already serves.
+      - uses: DeterminateSystems/magic-nix-cache-action@main
         with:
-          primary-key: nix-wincross-${{ hashFiles('flake.lock', 'Cargo.lock') }}
-          restore-prefixes-first-match: nix-wincross-
+          use-flakehub: false
       # cargo-xwin fetches the MSVC CRT/SDK here (network is available in the step);
       # XWIN_ACCEPT_LICENSE is set inside the windows-cross dev shell.
       - name: cross-compile x86_64-pc-windows-msvc nextest archive

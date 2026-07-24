@@ -52,15 +52,21 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
-      # Persist /nix/store across runs through GitHub's own Actions cache — no
-      # external account (Cachix / FlakeHub) required. Without this, every run
-      # recompiles crane's dependency artifacts from source. Keyed on the inputs
-      # that actually invalidate the store; the prefix restore warms partial hits.
-      - name: Cache Nix store
-        uses: nix-community/cache-nix-action@v6
+      # Binary cache over GitHub's own Actions cache — still no external account.
+      #
+      # This replaced cache-nix-action, which tarred the WHOLE /nix/store into one
+      # entry: 4.46GB on macOS, most of it paths cache.nixos.org already serves for
+      # free. Two of those plus the rustup lane's caches blew past the 10GB repo
+      # limit, so they evicted each other and Linux ran with a cold store every time.
+      # Magic Nix Cache stores individual paths and skips anything fetchable from
+      # the upstream cache, so only this project's own outputs are kept.
+      #
+      # use-flakehub is off: FlakeHub Cache is a separate (account-backed) service,
+      # and the GitHub Actions cache alone is what this lane needs.
+      - name: Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
         with:
-          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', 'Cargo.lock', 'src/cli/inspect/web/package-lock.json', 'extensions/vscode/package-lock.json') }}
-          restore-prefixes-first-match: nix-${{ runner.os }}-
+          use-flakehub: false
 
       # `nix flake check` builds every check in one arbitrary-order batch, so it
       # cannot express "cheap gate first". Realising the checks individually does:
