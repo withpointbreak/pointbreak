@@ -74,6 +74,25 @@ jobs:
       - name: build
         run: nix build .#build-all
 
+      # `nix build` prints nothing on success, so a green run showed no evidence the suite
+      # had run at all. Recover the counts from the derivation's own log rather than
+      # restoring `-L`, which streams every compile line and made these runs unreadable.
+      #
+      # Nextest colourises even in the sandbox — it has no TTY, but nothing tells it not to,
+      # and the workflow's CARGO_TERM_COLOR does not reach inside a derivation — so the
+      # escape codes have to come out before matching.
+      - name: suite summary
+        run: |
+          drv="$(nix eval --raw .#cli-nextest.drvPath)"
+          log="$(nix log "$drv" 2>/dev/null || true)"
+          if [ -n "$log" ]; then
+            printf '%s\n' "$log" | sed 's/\x1b\[[0-9;]*m//g' \
+              | grep -aE 'Starting [0-9]+ tests|Summary \[|^ +(FAIL|SLOW)' || true
+          else
+            echo "No local build log: the suite result was substituted from the cache."
+            echo "Identical inputs, so the derivation was not rebuilt and the tests did not re-run."
+          fi
+
       - name: dump failing build log
         if: failure()
         run: nix log "$(nix eval --raw .#cli-nextest.drvPath)" 2>/dev/null | tail -150 || true

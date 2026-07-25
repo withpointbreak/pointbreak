@@ -77,6 +77,20 @@ gate first". Naming the checks individually can, which is why the PR job runs
 The cost is that the explicit list can drift from the flake's actual `checks`. The nightly job
 runs `nix flake check` precisely so a newly added check cannot be silently left ungated.
 
+### Reading the Nix lane's logs
+
+`nix build` prints nothing on success, so a green Linux gate showed no evidence the suite had
+run — the job log contained no test counts at all. Passing `-L` fixes that by streaming every
+compile line, which is what made these runs unreadable in the first place.
+
+The `suite summary` step splits the difference: it pulls the counts back out of the derivation's
+own build log after the fact. Two things to know when reading it. Nextest colourises even inside
+the sandbox — it has no TTY, but nothing tells it not to, and the workflow's `CARGO_TERM_COLOR`
+does not reach into a derivation — so the escape codes are stripped before matching. And on a
+cache hit there is no local log, because nothing was built; the step says so rather than printing
+an ambiguous blank. That case is not a gap: the derivation output *is* the proof those exact
+inputs passed, just from an earlier run.
+
 ### Store caching
 
 Three approaches, each of which hit a different GitHub ceiling:
