@@ -14,8 +14,9 @@ name: CI (Nix Windows cross — spike)
 # package_identity::cargo_install_exposes_only_pointbreak_executable, intentionally builds
 # the crate via `cargo install` — the sole exception to the no-build premise (~2-3 min).
 #
-# See docs/ci-architecture.md#windows for what has to change before this can replace
-# rustup on the Windows legs.
+# The Windows run is sharded three ways (see the windows-run job) so this lane is
+# comparable to ci.yml's sharded Windows legs rather than a single serialized run.
+# See docs/ci-architecture.md#windows.
 #
 # Still report-only (continue-on-error) until this is confirmed green on the actual x86_64
 # windows-latest runner a few times: an x64 run may surface genuine platform byte/behaviour
@@ -62,11 +63,26 @@ jobs:
           retention-days: 3
 
   windows-run:
-    name: run archive on Windows (x64, no suite build)
+    name: run archive on Windows (x64 ${{ matrix.shard }}/${{ matrix.shards }})
     needs: cross-archive
     runs-on: windows-latest
     # Report-only until confirmed stably green on this x64 runner — see header.
     continue-on-error: true
+    # Fanned out the same way and for the same reason as ci.yml's Windows legs: the suite
+    # is spawn-bound on per-CreateProcess cost, so execution parallelises across machines
+    # far better than it does across cores on one. `slice` matches ci.yml's partition type,
+    # which keeps adjacent tests in a binary together.
+    #
+    # The difference from ci.yml is that no shard compiles anything: all three consume the
+    # single archive cross-built on Linux above, so sharding here buys execution time
+    # without multiplying build time. ci.yml's shards each rebuild the test binaries.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { shard: 1, shards: 3 }
+          - { shard: 2, shards: 3 }
+          - { shard: 3, shards: 3 }
     steps:
       - uses: actions/checkout@v6
       - uses: taiki-e/install-action@nextest
@@ -77,11 +93,13 @@ jobs:
       # No Rust build of the suite: nextest runs the prebuilt binaries from the archive.
       # --workspace-remap points the (runtime-resolved) fixture and binary lookups at this
       # checkout. The lone exception is the cargo_install packaging test, which builds the
-      # crate on the runner by design (see header).
+      # crate on the runner by design (see header) and so makes whichever shard draws it
+      # the long pole.
       - name: run archived suite (report-only)
         shell: bash
         run: |
           cargo nextest run \
             --archive-file archive/pointbreak-x86_64-pc-windows-msvc.tar.zst \
             --workspace-remap . \
+            --partition "slice:${{ matrix.shard }}/${{ matrix.shards }}" \
             --no-fail-fast

@@ -171,9 +171,18 @@ Rust at all. It works: validated against an ARM64 Windows machine at 2924/2924 a
 suite was changed to resolve its binary and fixtures at runtime rather than through compile-time
 `env!()`.
 
-It stays report-only because it is not yet competitive on wall-clock: 15m20s (cross-compile then
-run, serialized) against 10m02s for the sharded rustup legs. Sharding the Windows run the way
-`ci.yml` shards it is the work required before it can replace rustup on Windows.
+The Windows run is now fanned across three shards, the same `slice:N/3` partitioning `ci.yml`
+uses, which splits evenly (2922 tests, 974 per shard, reconciling exactly). Before that it was a
+single leg and the lane cost 15m20s — cross-compile then run, serialized — against 10m02s for the
+sharded rustup legs.
+
+The shape is better than `ci.yml`'s, not just equal: there, each Windows shard rebuilds the test
+binaries, so sharding multiplies compile work. Here the archive is cross-built once on Linux and
+all three shards consume it, so sharding buys execution time and nothing else. Whether that is
+enough to beat the rustup legs is now a measurement rather than an argument.
+
+It stays report-only until it is confirmed green on the x86_64 runner across a few runs — the
+2924/2924 validation was on ARM64.
 
 One test is an intentional exception to the no-build premise:
 `package_identity::cargo_install_exposes_only_pointbreak_executable` builds the crate on the
