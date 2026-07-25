@@ -12,10 +12,9 @@ choices look like oversights until you see the number behind them.
 
 | Workflow | Runs | Purpose |
 | --- | --- | --- |
-| `ci.yml` | every PR, all three platforms | The gate. Lint, type-check, and the full suite, with `rust-cache` and Windows sharding. |
+| `ci.yml` | every PR, all three platforms | The platform gate: the macOS suite, the sharded Windows suite from a cross-compiled archive, installers, skills, workflow lint, the front-end and extension checks, store qualification, and git parity. |
 | `ci-nix.yml` | every PR (Linux); nightly (Linux + macOS) | The hermetic check: the suite in a sandbox, plus a network-free build of the shipped artifact. |
 | `nix.yml` | PRs touching `*.nix` | Lints the Nix files themselves. Builds nothing. |
-| `ci-nix-windows-spike.yml` | spike branch only | Report-only experiment: cross-compile the tests on Linux, run them on Windows. |
 | `cache-gc.yml` | nightly on the default branch | Prunes the hestia cache so the Nix lane stays inside the shared 10GB quota. |
 
 Both lanes compile with the same flake-pinned toolchain, so `ci-nix.yml` is not a second opinion
@@ -165,11 +164,19 @@ cache is ever wanted outside CI.
 
 ## Windows
 
-`ci-nix-windows-spike.yml` cross-compiles the suite to `x86_64-pc-windows-msvc` on Linux with
-cargo-xwin and runs the resulting `cargo nextest` archive on a plain Windows runner that builds no
-Rust at all. It works: validated against an ARM64 Windows machine at 2924/2924 after the test
-suite was changed to resolve its binary and fixtures at runtime rather than through compile-time
-`env!()`.
+`ci.yml`'s `windows-cross-archive` job cross-compiles the suite to `x86_64-pc-windows-msvc` on
+Linux with cargo-xwin; three `test-windows` shards then execute the resulting `cargo nextest`
+archive on plain Windows runners that build no Rust at all. This was a report-only spike until it
+proved both green and competitive on x64, and is now the gate.
+
+It became possible once the suite was changed to resolve its test binary, fixtures, and cargo at
+runtime rather than through compile-time `env!()`, which bakes the build machine's paths in and
+which `--workspace-remap` cannot relocate.
+
+**Rustup is not gone from Windows.** Three things still need a toolchain there: the
+`--all-features` type-check (`test-windows-check`, which compiles the `cfg(windows)` arms behind
+`bench` and `gix-parity` that the default-feature archive never sees), plus the
+store-foundation-qualification and git-parity legs. Only the test execution was freed.
 
 The Windows run is now fanned across three shards, the same `slice:N/3` partitioning `ci.yml`
 uses, which splits evenly (2922 tests, 974 per shard, reconciling exactly). Before that it was a

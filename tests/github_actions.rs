@@ -1,6 +1,7 @@
 #[test]
 fn ci_workflow_runs_project_lint_and_tests() {
     let ci = std::fs::read_to_string(".github/workflows/ci.yml").expect("read CI workflow");
+    let nix = std::fs::read_to_string(".github/workflows/ci-nix.yml").expect("read Nix workflow");
 
     assert!(ci.contains("name: CI"));
     assert!(ci.contains("branches: [main]"));
@@ -9,19 +10,27 @@ fn ci_workflow_runs_project_lint_and_tests() {
     assert!(ci.contains("ubuntu-latest"));
     assert!(ci.contains("macos-latest"));
     assert!(ci.contains("windows-latest"));
-    assert!(ci.contains("just lint"));
-    assert!(ci.contains("just test-ci"));
 
-    // Linux and macOS compile with the flake's pinned toolchain, so CI and a
-    // contributor's `nix develop` agree on the compiler and formatter.
+    // The Rust gate is split by platform. Linux runs hermetically as derivations;
+    // macOS runs cargo directly for an incremental target/; Windows executes a
+    // cross-compiled archive. Every platform still runs the suite somewhere.
+    assert!(nix.contains("nix build .#cli-fmt"));
+    assert!(nix.contains("nix build .#cli-clippy"));
+    assert!(nix.contains("nix build .#cli-nextest"));
+    assert!(ci.contains("just test-ci"));
+    assert!(ci.contains("just windows-cross-archive x86_64-pc-windows-msvc"));
+    assert!(ci.contains("--archive-file"));
+    assert!(ci.contains("--partition"));
+
+    // Linux and macOS take the compiler and formatter from the flake, so CI and a
+    // contributor's `nix develop` cannot drift apart.
     assert!(ci.contains("DeterminateSystems/nix-installer-action"));
     assert!(ci.contains("nix develop .#ci -c"));
 
-    // Windows still resolves its toolchain through rustup: Nix has no native
-    // Windows support. Retiring these needs the cross-compiled nextest archive
-    // to graduate out of its report-only phase.
+    // Windows keeps rustup: Nix has no native Windows support, and the all-features
+    // type-check plus the qualification and git-parity legs still need a toolchain
+    // there. The sharded test legs no longer do — they run prebuilt binaries.
     assert!(ci.contains("dtolnay/rust-toolchain@stable"));
-    assert!(ci.contains("dtolnay/rust-toolchain@nightly"));
     assert!(ci.contains("taiki-e/install-action@just"));
     assert!(ci.contains("taiki-e/install-action@nextest"));
 }
