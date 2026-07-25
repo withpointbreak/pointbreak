@@ -151,6 +151,29 @@
             '';
           };
 
+          # The toolchain CI needs and nothing else. `nix develop .#ci -c just <recipe>`
+          # gives the workflow the same pinned compiler, formatter, and nextest a
+          # contributor gets, without realising the interactive extras: cocogitto is
+          # built from source here, and gh/cargo-edit have no CI consumer. jq, Node,
+          # and git are kept because the test suite shells out to all three.
+          ci = pkgs.mkShell {
+            packages = [
+              rustToolchains.dev
+              pkgs.cargo-nextest
+              pkgs.just
+              pkgs.git
+              pkgs.jq
+              pkgs.nodejs_22
+              pkgs.pkg-config
+            ];
+            # The Justfile selects rustup's `+stable`/`+nightly` toolchains by default;
+            # this shell has one Fenix toolchain whose rustfmt is already nightly.
+            env = {
+              POINTBREAK_CARGO_STABLE = "cargo";
+              POINTBREAK_CARGO_NIGHTLY = "cargo";
+            };
+          };
+
           # Experimental Windows-msvc cross shell. Produces a cargo-nextest archive
           # (prebuilt test binaries) that runs on a real Windows machine needing no
           # Rust toolchain. cargo-xwin fetches the MSVC CRT/SDK on first use, which

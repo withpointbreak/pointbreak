@@ -1,102 +1,79 @@
-name: CI (Nix)
+name: Flake health
 
-# Experimental, parallel Nix-driven variant of ci.yml. It does NOT replace ci.yml;
-# the two run side by side while we evaluate whether a hermetic, store-cached gate
-# is worth adopting. Linux and macOS only: Nix has no native Windows support, so the
-# Windows legs stay in ci.yml. See the PR discussion for the Windows cross-compile
-# sketch (nextest archive built on Linux, executed on a plain Windows runner).
+# Guards the flake itself, which CONTRIBUTING.md names as the recommended way to set
+# up the project (`nix develop`) and which now also supplies ci.yml's toolchain on
+# Linux and macOS. If the flake breaks, the documented first-choice setup breaks with
+# it, so something has to exercise it.
 #
-# The flake already carries the full gate:
-#   - `nix flake check`  -> the same fmt + clippy + test gate ci.yml runs, through the
-#                           flake's pinned Fenix toolchain instead of rustup:
-#                           checks.cli-nextest (full Git-less nextest suite),
-#                           checks.clippy (`-D warnings`) and checks.fmt (nightly
-#                           rustfmt) — clippy and the tests share crane's dependency
-#                           artifacts — plus checks.devshell-tools (tool-version drift).
-#                           cli-nextest compiles the whole crate and all test targets, so
-#                           it covers the same cfg/feature arms ci.yml's macOS
-#                           `check-types` leg does.
-#   - `nix build .#build-all`    -> the store-backed counterpart of `just build-all`
-#                           (CLI + embedded Inspector bundle + platform VSIX), with no
-#                           checkout mutation and no npm network access. Because the
-#                           Inspector bundle is rebuilt here, this sidesteps ci.yml's
-#                           `assets/app.js` staleness gate entirely.
+# It deliberately does NOT re-run clippy or the test suite. ci.yml already runs those,
+# on the same code, through this same flake toolchain — paying for them twice bought a
+# roughly 1.5x slower duplicate gate. What is unique to Nix is whether the flake still
+# evaluates, whether the dev shell still carries the pinned tools, and whether a fully
+# hermetic build of the shippable artifact still succeeds with no network.
+#
+# `nix build .#build-all` covers most of that transitively: it needs the crane
+# dependency artifacts (so every dependency must still compile in the sandbox), the
+# CLI, an offline npm build of the Inspector bundle, and the VSIX packaging step.
+#
+# The sandbox-only regressions this does not catch — a test that needs a tool absent
+# from the nextest derivation's nativeBuildInputs — are covered by the nightly full
+# `nix flake check` below rather than on every pull request.
 
 on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Nightly, for the full hermetic check that is too slow to gate pull requests.
+    - cron: "0 7 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-nix-${{ github.ref }}
+  group: flake-health-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
-
 jobs:
-  nix:
-    name: nix gate (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+  flake-health:
+    name: flake health
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@main
-
-      # Binary cache over GitHub's own Actions cache — still no external account.
-      #
-      # This replaced cache-nix-action, which tarred the WHOLE /nix/store into one
-      # entry: 4.46GB on macOS, most of it paths cache.nixos.org already serves for
-      # free. Two of those plus the rustup lane's caches blew past the 10GB repo
-      # limit, so they evicted each other and Linux ran with a cold store every time.
-      # Magic Nix Cache stores individual paths and skips anything fetchable from
-      # the upstream cache, so only this project's own outputs are kept.
-      #
-      # use-flakehub is off: FlakeHub Cache is a separate (account-backed) service,
-      # and the GitHub Actions cache alone is what this lane needs.
-      - name: Magic Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
         with:
           use-flakehub: false
 
-      # `nix flake check` builds every check in one arbitrary-order batch, so it
-      # cannot express "cheap gate first". Realising the checks individually does:
-      # each step below is an explicit dependency of the next, and a failure stops
-      # the job before the expensive phases run.
-      #
-      # Logs are compact by default; the failure step at the end dumps the full
-      # build log of whatever failed, which is the idiomatic Nix pattern (`-L` on
-      # every step is what made these runs unreadable).
+      # The dev shell still resolves and its pinned tools are the expected versions.
+      - name: dev shell tools
+        run: nix build .#devshell-tools
 
-      # Phase 1 — formatting. Compiles nothing, so this is a true early return.
-      - name: fmt
-        run: nix build .#cli-fmt
-
-      # Phase 2 — clippy. Linux only, mirroring ci.yml: the lint result is
-      # platform-independent, and `--all-targets` compiles the whole test surface,
-      # so running it on both platforms bought a second full compile for nothing.
-      - name: clippy
-        if: runner.os == 'Linux'
-        run: nix build .#cli-clippy
-
-      # Phase 3 — the full Git-less nextest suite, plus the pinned-tool drift check.
-      - name: test
-        run: nix build .#cli-nextest .#devshell-tools
-
-      # Phase 4 — hermetic artifact build (CLI + embedded Inspector + VSIX).
-      - name: build
+      # A hermetic, network-free build of everything the project ships.
+      - name: hermetic artifact build
         run: nix build .#build-all
 
-      # Nix prints only a summary on failure; surface the actual build log.
+      - name: dump failing build log
+        if: failure()
+        run: nix log "$(nix eval --raw .#build-all.drvPath)" 2>/dev/null | tail -100 || true
+
+  full-check:
+    name: full flake check (nightly)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+        with:
+          use-flakehub: false
+
+      # Builds every check, including the whole suite inside the sandbox. This is the
+      # only thing that catches a test needing a tool the derivation does not provide.
+      - name: nix flake check
+        run: nix flake check
+
       - name: dump failing build log
         if: failure()
         run: nix log "$(nix eval --raw .#cli-nextest.drvPath)" 2>/dev/null | tail -150 || true

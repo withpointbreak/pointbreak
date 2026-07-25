@@ -6,15 +6,24 @@ fn ci_workflow_runs_project_lint_and_tests() {
     assert!(ci.contains("branches: [main]"));
     assert!(ci.contains("pull_request:"));
     assert!(ci.contains("actions/checkout@v6"));
+    assert!(ci.contains("ubuntu-latest"));
+    assert!(ci.contains("macos-latest"));
+    assert!(ci.contains("windows-latest"));
+    assert!(ci.contains("just lint"));
+    assert!(ci.contains("just test-ci"));
+
+    // Linux and macOS compile with the flake's pinned toolchain, so CI and a
+    // contributor's `nix develop` agree on the compiler and formatter.
+    assert!(ci.contains("DeterminateSystems/nix-installer-action"));
+    assert!(ci.contains("nix develop .#ci -c"));
+
+    // Windows still resolves its toolchain through rustup: Nix has no native
+    // Windows support. Retiring these needs the cross-compiled nextest archive
+    // to graduate out of its report-only phase.
     assert!(ci.contains("dtolnay/rust-toolchain@stable"));
     assert!(ci.contains("dtolnay/rust-toolchain@nightly"));
     assert!(ci.contains("taiki-e/install-action@just"));
     assert!(ci.contains("taiki-e/install-action@nextest"));
-    assert!(ci.contains("ubuntu-latest"));
-    assert!(ci.contains("macos-latest"));
-    assert!(ci.contains("windows-latest"));
-    assert!(ci.contains("run: just lint"));
-    assert!(ci.contains("run: just test-ci"));
 }
 
 #[test]

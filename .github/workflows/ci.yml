@@ -110,12 +110,14 @@ jobs:
               os: ubuntu-latest,
               gate: lint,
               run_tests: true,
+              nix: true,
             }
           - {
               name: "test (macos-latest)",
               os: macos-latest,
               gate: check,
               run_tests: true,
+              nix: true,
             }
           - {
               name: "test (windows-latest check)",
@@ -147,30 +149,53 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
+
+      # Linux and macOS take their toolchain from the flake, so CI compiles with the
+      # exact rustc, nightly rustfmt, and nextest that `nix develop` gives a
+      # contributor — pinned by flake.lock rather than resolved by rustup at run time.
+      # `.#ci` is a lean shell: no cocogitto (built from source), gh, or cargo-edit.
+      #
+      # Windows keeps rustup because Nix has no native Windows support. Removing that
+      # last rustup dependency needs the cross-compiled nextest archive from
+      # ci-nix-windows-spike.yml to graduate out of its report-only phase.
+      - uses: DeterminateSystems/nix-installer-action@main
+        if: matrix.nix
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+        if: matrix.nix
+        with:
+          use-flakehub: false
       - uses: dtolnay/rust-toolchain@stable
+        if: ${{ !matrix.nix }}
         with:
           components: rustfmt, clippy
       - uses: dtolnay/rust-toolchain@nightly
+        if: ${{ !matrix.nix }}
         with:
           components: rustfmt
       - uses: taiki-e/install-action@just
+        if: ${{ !matrix.nix }}
       - uses: taiki-e/install-action@nextest
+        if: ${{ !matrix.nix }}
+
+      # Still worth caching on every leg: cargo runs in the workspace here (unlike a
+      # sandboxed `nix build`), so target/ persists and stays incremental.
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ${{ runner.os == 'Windows' && 'windows-shards' || '' }}
+
       - name: just lint
         if: matrix.gate == 'lint'
-        run: just lint
+        run: ${{ matrix.nix && 'nix develop .#ci -c' || '' }} just lint
       - name: just check-types
         if: matrix.gate == 'check'
-        run: just check-types
+        run: ${{ matrix.nix && 'nix develop .#ci -c' || '' }} just check-types
       - name: configure Windows test debuginfo
         if: runner.os == 'Windows'
         shell: bash
         run: echo "CARGO_PROFILE_TEST_SPLIT_DEBUGINFO=packed" >> "$GITHUB_ENV"
       - name: just test-ci
         if: matrix.run_tests
-        run: just test-ci ${{ matrix.shard && format('--partition slice:{0}/{1}', matrix.shard, matrix.shards) || '' }}
+        run: ${{ matrix.nix && 'nix develop .#ci -c' || '' }} just test-ci ${{ matrix.shard && format('--partition slice:{0}/{1}', matrix.shard, matrix.shards) || '' }}
 
   store-foundation-qualification:
     name: store foundation qualification (${{ matrix.os }})
