@@ -10,9 +10,9 @@ name: CI (Nix Windows cross — spike)
 # The suite resolves the test binary, fixtures, and cargo at runtime (tests/support/env.rs
 # + test_fixtures::manifest_dir), so cargo-nextest's --workspace-remap relocates them onto
 # the target. Cross-compiled to aarch64-pc-windows-msvc and executed on a real ARM64 Windows
-# machine, the archived suite runs green (2924/2924, validated locally). One packaging test,
-# package_identity::cargo_install_exposes_only_pointbreak_executable, intentionally builds
-# the crate via `cargo install` — the sole exception to the no-build premise (~2-3 min).
+# machine, the archived suite runs green. No shard compiles any Rust: the one test that did
+# (a `cargo install` packaging check) was a leftover of the shore -> pointbreak rename and
+# has been retired, so the no-build premise now holds without exception.
 #
 # The Windows run is sharded three ways (see the windows-run job) so this lane is
 # comparable to ci.yml's sharded Windows legs rather than a single serialized run.
@@ -92,9 +92,7 @@ jobs:
           path: archive
       # No Rust build of the suite: nextest runs the prebuilt binaries from the archive.
       # --workspace-remap points the (runtime-resolved) fixture and binary lookups at this
-      # checkout. The lone exception is the cargo_install packaging test, which builds the
-      # crate on the runner by design (see header) and so makes whichever shard draws it
-      # the long pole.
+      # checkout. Nothing here compiles Rust, so a shard's cost is test execution alone.
       - name: run archived suite (report-only)
         shell: bash
         run: |

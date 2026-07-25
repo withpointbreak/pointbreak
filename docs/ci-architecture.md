@@ -184,6 +184,12 @@ enough to beat the rustup legs is now a measurement rather than an argument.
 It stays report-only until it is confirmed green on the x86_64 runner across a few runs — the
 2924/2924 validation was on ARM64.
 
-One test is an intentional exception to the no-build premise:
-`package_identity::cargo_install_exposes_only_pointbreak_executable` builds the crate on the
-runner by design.
+No shard compiles Rust. The one test that did — a `cargo install` packaging check — was a
+leftover of the `shore` -> `pointbreak` rename and has been retired; the invariant it still
+carried (exactly one installed binary, named `pointbreak`) is asserted from `cargo metadata`
+by `package_identity_declares_only_pointbreak_binary`. Retiring it also removed the ~2-3
+minute on-target build that made whichever shard drew it the long pole.
+
+Nothing now exercises `cargo install` itself, which is the route the README and
+[installation guide](installation.md) give users. That path is covered indirectly by the
+release workflows building and verifying the published binaries, but not directly.

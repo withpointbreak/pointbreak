@@ -65,35 +65,6 @@ fn package_identity_declares_only_pointbreak_binary() {
 }
 
 #[test]
-fn cargo_install_exposes_only_pointbreak_executable() {
-    let install_root = tempfile::tempdir().expect("create cargo install root");
-    let output = Command::new(env::cargo_bin())
-        .args(["install", "--path"])
-        .arg(env::manifest_dir())
-        .arg("--root")
-        .arg(install_root.path())
-        .arg("--debug")
-        .env("CARGO_TARGET_DIR", install_root.path().join("target"))
-        .output()
-        .expect("run cargo install");
-    assert!(
-        output.status.success(),
-        "cargo install stderr:\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let mut installed = fs::read_dir(install_root.path().join("bin"))
-        .expect("read installed bin directory")
-        .map(|entry| entry.expect("installed bin entry").file_name())
-        .collect::<Vec<_>>();
-    installed.sort();
-
-    assert_eq!(installed, [OsStr::new(POINTBREAK_EXECUTABLE_BASENAME)]);
-    assert!(!install_root.path().join("bin").join("shore").exists());
-    assert!(!install_root.path().join("bin").join("shore.exe").exists());
-}
-
-#[test]
 fn cli_help_uses_pointbreak_and_keeps_the_flat_command_tree() {
     let temp_dir = tempfile::tempdir().expect("create temp command dir");
     let command_path = temp_dir.path().join("renamed-command.exe");
