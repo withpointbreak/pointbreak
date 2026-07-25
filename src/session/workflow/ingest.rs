@@ -19,6 +19,23 @@ use crate::session::{
 };
 use crate::storage::{Durability, LocalStorage};
 
+#[cfg(any(test, feature = "bench"))]
+std::thread_local! {
+    static CARRIER_TARGET_FULL_SCAN_COUNT: std::cell::Cell<u64> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+#[cfg(any(test, feature = "bench"))]
+pub(crate) fn reset_carrier_target_full_scan_count() {
+    CARRIER_TARGET_FULL_SCAN_COUNT.set(0);
+}
+
+#[cfg(any(test, feature = "bench"))]
+pub(crate) fn carrier_target_full_scan_count() -> u64 {
+    CARRIER_TARGET_FULL_SCAN_COUNT.get()
+}
+
 /// Options for ingesting one or more pre-formed events into a repo's `.pointbreak/data`
 /// store — for example events produced on another machine and forwarded over a
 /// network, or merged from another clone.
@@ -175,7 +192,8 @@ pub(crate) fn ingest_events_with_clock(
     // ids in one batch would mis-assign by id.
     let mut verified_row_cursor = 0usize;
 
-    for event in &stamped {
+    let mut carrier_targets = CarrierTargetIndex::default();
+    for (event_index, event) in stamped.iter().enumerate() {
         // A standalone detached co-signature carrier from a peer flows through the
         // family verify-before-store gate, NOT the plain record path: the gate is
         // the always-on family rule (reject `invalid`, keep `untrusted_key`/`valid`,
@@ -184,6 +202,11 @@ pub(crate) fn ingest_events_with_clock(
             match ingest_detached_cosignature(
                 &event_store,
                 event,
+                CarrierIngestContext {
+                    batch: &stamped,
+                    event_index,
+                    targets: &mut carrier_targets,
+                },
                 &options.trust_set,
                 &mut verification,
                 &mut ingest_diagnostics,
@@ -209,6 +232,12 @@ pub(crate) fn ingest_events_with_clock(
         verified_row_cursor += 1;
         match event_store.record_event_once(event) {
             Ok(outcome) => {
+                if let Err(err) =
+                    carrier_targets.observe_batch_write(&event_store, event, event_index, outcome)
+                {
+                    write_error = Some(err);
+                    break;
+                }
                 verification[row_index].write_outcome = Some(outcome);
                 match outcome {
                     EventWriteOutcome::Created => {
@@ -229,6 +258,7 @@ pub(crate) fn ingest_events_with_clock(
                             event,
                             worktree_root,
                             &options.trust_set,
+                            &mut carrier_targets,
                             &mut ingest_diagnostics,
                         ) {
                             Ok((created, existing)) => {
@@ -259,6 +289,9 @@ pub(crate) fn ingest_events_with_clock(
 
     // Rebuild the projection from whatever is durably on disk — even on a
     // partial-batch failure — so state.json never drifts from the event log.
+    // Release the batch index first so a capacity-scale resume does not retain
+    // its decoded seed alongside the projection rebuild's complete replay.
+    drop(carrier_targets);
     let events = event_store.list_events()?;
     let state = SessionState::from_events(&events)?;
     storage.write_json_atomic(
@@ -287,24 +320,42 @@ pub(crate) fn ingest_events_with_clock(
 /// carrier, pushing the carrier's embedded-attestation status to `verification` and
 /// any drop/authorization diagnostics. A carrier is an ordinary event: when stored
 /// it rides the same event-set machinery as every event, with no separate channel.
+struct CarrierIngestContext<'a> {
+    batch: &'a [ShoreEvent],
+    event_index: usize,
+    targets: &'a mut CarrierTargetIndex,
+}
+
 fn ingest_detached_cosignature(
     event_store: &EventStore,
     event: &ShoreEvent,
+    context: CarrierIngestContext<'_>,
     trust: &TrustSet,
     verification: &mut Vec<IngestEventVerification>,
     diagnostics: &mut Vec<ProjectionDiagnostic>,
 ) -> Result<(usize, usize)> {
     let payload: EventSignatureRecordedPayload = serde_json::from_value(event.payload.clone())?;
-    // Resolve the target by content identity. The store keys on the idempotency-key,
-    // so there is no eventId path lookup; scan the event set for the named target.
-    let stored = event_store.list_events()?;
-    let target = stored
-        .iter()
-        .find(|stored_event| stored_event.event_id == payload.target_event_id);
+    let (decision, target_context) = {
+        let target = context.targets.resolve(
+            event_store,
+            context.batch,
+            payload.target_event_id.as_str(),
+        )?;
+        let decision = gate_cosignature_for_store(&payload, target, trust)?;
+        let target_context =
+            target.map(|target| (target.event_id.clone(), target.writer.actor_id.clone()));
+        (decision, target_context)
+    };
 
-    match gate_cosignature_for_store(&payload, target, trust)? {
+    match decision {
         CosignatureGateDecision::Store(status) => {
             let outcome = event_store.record_event_once(event)?;
+            context.targets.observe_batch_write(
+                event_store,
+                event,
+                context.event_index,
+                outcome,
+            )?;
             let counts = match outcome {
                 EventWriteOutcome::Created => (1, 0),
                 // A carrier's identity is the full attestation triple, so a divergent
@@ -324,13 +375,13 @@ fn ingest_detached_cosignature(
             });
             if status == EventVerificationStatus::UntrustedKey
                 && outcome == EventWriteOutcome::Created
-                && let Some(target) = target
+                && let Some((target_event_id, target_actor_id)) = target_context
             {
                 diagnostics.push(cosignature_untrusted_signer_diagnostic(
                     event.event_id.as_str(),
-                    payload.target_event_id.as_str(),
+                    target_event_id.as_str(),
                     payload.attesting_signer.as_str(),
-                    target.writer.actor_id.as_str(),
+                    target_actor_id.as_str(),
                 ));
             }
             Ok(counts)
@@ -373,6 +424,99 @@ fn ingest_detached_cosignature(
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum CarrierTargetLocation {
+    Seeded(usize),
+    Batch(usize),
+    Recorded(usize),
+}
+
+#[derive(Debug, Default)]
+struct CarrierTargetIndex {
+    seeded: bool,
+    seeded_events: Vec<ShoreEvent>,
+    recorded_events: Vec<ShoreEvent>,
+    by_event_id: BTreeMap<String, CarrierTargetLocation>,
+}
+
+impl CarrierTargetIndex {
+    fn resolve<'a>(
+        &'a mut self,
+        event_store: &EventStore,
+        batch: &'a [ShoreEvent],
+        event_id: &str,
+    ) -> Result<Option<&'a ShoreEvent>> {
+        if !self.seeded {
+            self.seeded_events = list_events_for_carrier_target(event_store)?;
+            for (index, event) in self.seeded_events.iter().enumerate() {
+                self.by_event_id
+                    .entry(event.event_id.as_str().to_owned())
+                    .or_insert(CarrierTargetLocation::Seeded(index));
+            }
+            self.seeded = true;
+        }
+
+        Ok(self
+            .by_event_id
+            .get(event_id)
+            .copied()
+            .map(|location| match location {
+                CarrierTargetLocation::Seeded(index) => &self.seeded_events[index],
+                CarrierTargetLocation::Batch(index) => &batch[index],
+                CarrierTargetLocation::Recorded(index) => &self.recorded_events[index],
+            }))
+    }
+
+    fn observe_batch_write(
+        &mut self,
+        event_store: &EventStore,
+        event: &ShoreEvent,
+        event_index: usize,
+        outcome: EventWriteOutcome,
+    ) -> Result<()> {
+        if !self.seeded || self.by_event_id.contains_key(event.event_id.as_str()) {
+            return Ok(());
+        }
+        match outcome {
+            EventWriteOutcome::Created => {
+                self.by_event_id.insert(
+                    event.event_id.as_str().to_owned(),
+                    CarrierTargetLocation::Batch(event_index),
+                );
+            }
+            EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => {
+                self.observe_recorded_event(event_store, event)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn observe_recorded_event(
+        &mut self,
+        event_store: &EventStore,
+        event: &ShoreEvent,
+    ) -> Result<()> {
+        if !self.seeded || self.by_event_id.contains_key(event.event_id.as_str()) {
+            return Ok(());
+        }
+        let stored = event_store
+            .read_event(&event_store.event_path_for_idempotency_key(&event.idempotency_key))?;
+        let index = self.recorded_events.len();
+        self.recorded_events.push(stored);
+        self.by_event_id.insert(
+            event.event_id.as_str().to_owned(),
+            CarrierTargetLocation::Recorded(index),
+        );
+        Ok(())
+    }
+}
+
+fn list_events_for_carrier_target(event_store: &EventStore) -> Result<Vec<ShoreEvent>> {
+    #[cfg(any(test, feature = "bench"))]
+    CARRIER_TARGET_FULL_SCAN_COUNT.with(|count| count.set(count.get() + 1));
+    event_store.list_events()
+}
+
 /// Transcribe an incoming divergent inline attestation into a co-signature carrier.
 /// The incoming attestation is a real signature the importer RECEIVED and can
 /// verify — re-homing it is transcription, never minting; the co-signer's private
@@ -383,6 +527,7 @@ fn transcribe_divergent_signature(
     event: &ShoreEvent,
     worktree_root: &Path,
     trust: &TrustSet,
+    carrier_targets: &mut CarrierTargetIndex,
     diagnostics: &mut Vec<ProjectionDiagnostic>,
 ) -> Result<(usize, usize)> {
     // The divergent outcome required a stored event under the same idempotencyKey;
@@ -424,6 +569,7 @@ fn transcribe_divergent_signature(
             let outcome = record
                 .write_outcome
                 .expect("a stored decision yields a write outcome");
+            carrier_targets.observe_recorded_event(event_store, &record.carrier)?;
             let counts = match outcome {
                 EventWriteOutcome::Created => (1, 0),
                 EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => {
@@ -903,6 +1049,165 @@ mod tests {
         .unwrap();
         let carrier = carrier_in(repo.path());
         (target, carrier)
+    }
+
+    #[test]
+    fn one_batch_does_not_rescan_the_full_event_set_for_each_detached_carrier() {
+        let repo = modified_repo();
+        let actor = ActorId::new("actor:git-email:alice@example.com");
+        let signer_a = DeterministicSigner::from_seed([91u8; 32]);
+        let signer_b = DeterministicSigner::from_seed([92u8; 32]);
+        capture_worktree_review(
+            CaptureOptions::new(repo.path())
+                .with_actor_id(actor.clone())
+                .sign_with(signer_a.clone()),
+        )
+        .unwrap();
+        let source_store = EventStore::open(resolved_store_dir(repo.path()));
+        let target = source_store
+            .list_events()
+            .unwrap()
+            .into_iter()
+            .find(|event| event.event_type == EventType::WorkObjectProposed)
+            .unwrap();
+        record_event_signature(EventSignatureRecordOptions::new(
+            repo.path(),
+            target.event_id.clone(),
+            signer_a.clone(),
+        ))
+        .unwrap();
+        record_event_signature(EventSignatureRecordOptions::new(
+            repo.path(),
+            target.event_id.clone(),
+            signer_b.clone(),
+        ))
+        .unwrap();
+        let carriers = source_store
+            .list_events()
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_type == EventType::EventSignatureRecorded)
+            .collect::<Vec<_>>();
+        assert_eq!(carriers.len(), 2);
+
+        let destination = dest_repo();
+        let trust = two_signer_trust(&actor, &signer_a, &signer_b);
+        ingest_events(
+            IngestEventsOptions::new(destination.path(), vec![target])
+                .with_trust_set(trust.clone()),
+        )
+        .unwrap();
+        reset_carrier_target_full_scan_count();
+
+        let result = ingest_events(
+            IngestEventsOptions::new(destination.path(), carriers).with_trust_set(trust),
+        )
+        .unwrap();
+
+        assert_eq!(result.events_created, 2);
+        assert_eq!(
+            carrier_target_full_scan_count(),
+            1,
+            "carrier target lookup should scan once per batch, not once per carrier"
+        );
+    }
+
+    #[test]
+    fn carrier_free_batch_does_not_scan_for_carrier_targets() {
+        let destination = dest_repo();
+        reset_carrier_target_full_scan_count();
+
+        let result = ingest_events(IngestEventsOptions::new(
+            destination.path(),
+            vec![unsigned_event()],
+        ))
+        .unwrap();
+
+        assert_eq!(result.events_created, 1);
+        assert_eq!(
+            carrier_target_full_scan_count(),
+            0,
+            "ordinary ingest should not pay for carrier target lookup"
+        );
+    }
+
+    #[test]
+    fn carrier_before_target_pends_while_later_carrier_in_the_batch_stores() {
+        let repo = modified_repo();
+        let actor = ActorId::new("actor:git-email:alice@example.com");
+        let signer_a = DeterministicSigner::from_seed([93u8; 32]);
+        let signer_b = DeterministicSigner::from_seed([94u8; 32]);
+        capture_worktree_review(
+            CaptureOptions::new(repo.path())
+                .with_actor_id(actor.clone())
+                .sign_with(signer_a.clone()),
+        )
+        .unwrap();
+        let source_store = EventStore::open(resolved_store_dir(repo.path()));
+        let target = source_store
+            .list_events()
+            .unwrap()
+            .into_iter()
+            .find(|event| event.event_type == EventType::WorkObjectProposed)
+            .unwrap();
+        record_event_signature(EventSignatureRecordOptions::new(
+            repo.path(),
+            target.event_id.clone(),
+            signer_a.clone(),
+        ))
+        .unwrap();
+        record_event_signature(EventSignatureRecordOptions::new(
+            repo.path(),
+            target.event_id.clone(),
+            signer_b.clone(),
+        ))
+        .unwrap();
+        let mut carriers = source_store
+            .list_events()
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.event_type == EventType::EventSignatureRecorded)
+            .collect::<Vec<_>>();
+        carriers.sort_by(|left, right| left.event_id.cmp(&right.event_id));
+        let first_carrier = carriers.remove(0);
+        let second_carrier = carriers.remove(0);
+        let first_carrier_id = first_carrier.event_id.clone();
+        let second_carrier_id = second_carrier.event_id.clone();
+
+        let destination = dest_repo();
+        let trust = two_signer_trust(&actor, &signer_a, &signer_b);
+        reset_carrier_target_full_scan_count();
+        let result = ingest_events(
+            IngestEventsOptions::new(
+                destination.path(),
+                vec![first_carrier, target, second_carrier],
+            )
+            .with_trust_set(trust),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result.events_created, 2,
+            "the target and later carrier store"
+        );
+        assert!(result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "cosignature_target_pending"
+                && diagnostic.message.contains(first_carrier_id.as_str())
+        }));
+        let stored = EventStore::open(resolved_store_dir(destination.path()))
+            .list_events()
+            .unwrap();
+        assert!(
+            stored
+                .iter()
+                .any(|event| event.event_id == second_carrier_id)
+        );
+        assert!(
+            stored
+                .iter()
+                .all(|event| event.event_id != first_carrier_id)
+        );
+        assert_eq!(carrier_target_full_scan_count(), 1);
     }
 
     #[test]

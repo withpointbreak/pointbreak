@@ -248,6 +248,15 @@ dirty, mixed-identity, or protected-environment destinations. Neither the smoke 
 selects storage, reads external store data, migrates a store, changes production routing, or makes an
 architecture verdict.
 
+The bench-gated builder keeps fresh and resumed construction distinct.
+`materialize_longitudinal_workload_v1` and `materialize_longitudinal_capacity_v1` remain
+create-all entrypoints. An explicit operator ledger may instead call
+`resume_longitudinal_workload_v1` or `resume_longitudinal_capacity_v1` for an interrupted or cloned
+public fixture. Resume accepts only exact existing records, requires the complete frozen final
+state, and binds pre/post store-data inventories plus exact Created/Existing counts. The separate
+materializer-equivalence verifier compares complete store bytes and strict semantic receipts while
+binding—rather than equating—the two execution identities and the implementation-diff hash.
+
 Before allocating a longitudinal evidence root, build the product release and debug binaries, the
 benchmark controller, and any external evidence driver with mutually disjoint `CARGO_TARGET_DIR`
 values. Freeze and hash each executable before materialization so a later Cargo build cannot replace

@@ -72,6 +72,8 @@ pub(in crate::session) use ingest::ingest_events_with_clock;
 pub use ingest::{
     ImportEventOptions, IngestEventsOptions, IngestEventsResult, import_event, ingest_events,
 };
+#[cfg(any(test, feature = "bench"))]
+pub(crate) use ingest::{carrier_target_full_scan_count, reset_carrier_target_full_scan_count};
 pub use input_request::{
     InputRequestFetchOptions, InputRequestFetchResult, InputRequestListOptions,
     InputRequestListResult, InputRequestOpenOptions, InputRequestOpenResult,
