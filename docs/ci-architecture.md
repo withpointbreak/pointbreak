@@ -8,17 +8,21 @@ The workflows carry short comments at each decision point that name the rule and
 you are about to change one of them, read the matching section first — several of the current
 choices look like oversights until you see the number behind them.
 
-## The two lanes
+## The workflows
 
 | Workflow | Runs | Purpose |
 | --- | --- | --- |
-| `ci.yml` | every PR, all three platforms | The platform gate: the macOS suite, the sharded Windows suite from a cross-compiled archive, installers, skills, workflow lint, the front-end and extension checks, store qualification, and git parity. |
-| `ci-nix.yml` | every PR (Linux); nightly (Linux + macOS) | The hermetic check: the suite in a sandbox, plus a network-free build of the shipped artifact. |
+| `ci.yml` | every PR, all three platforms | The whole gate. The suite on each platform — Linux as sandboxed derivations, macOS as plain cargo, Windows from a cross-compiled archive — plus installers, skills, workflow lint, the front-end and extension checks, store qualification, and git parity. |
+| `nightly.yml` | nightly and on demand | What is too slow to gate: the hermetic check on macOS, and `nix flake check` in full. |
 | `nix.yml` | PRs touching `*.nix` | Lints the Nix files themselves. Builds nothing. |
 | `cache-gc.yml` | nightly on the default branch | Prunes the hestia cache so the Nix lane stays inside the shared 10GB quota. |
 
-Both lanes compile with the same flake-pinned toolchain, so `ci-nix.yml` is not a second opinion
-on the lints. Its unique contribution is stated in [Why keep a Nix lane](#why-keep-a-nix-lane).
+Every leg compiles with the same flake-pinned toolchain, so the Linux job is not a second opinion
+on the lints. What only it establishes is stated in [Why keep a Nix lane](#why-keep-a-nix-lane).
+
+The Linux leg lives in `ci.yml` alongside the other two rather than in its own workflow. It ran
+separately while it was still an experiment, but that left `ci.yml` showing macOS and Windows
+tests and no Linux — a gate that reads as though it has a hole in it.
 
 ## Toolchain comes from the flake
 
@@ -35,13 +39,14 @@ open item; see [Windows](#windows).
 
 ## Why keep a Nix lane
 
-`ci.yml` gets its speed from a `rust-cache`-restored `target/` and a mutable working directory.
+The macOS and Windows legs get their speed from a `rust-cache`-restored `target/` and a mutable
+working directory.
 That makes a stale-artifact false green *possible* there. In a Nix derivation it is impossible:
 no host tools, no network, nothing reused from a cache. That property, on Linux, is the entire
 reason the lane exists.
 
-Linux gates every PR. macOS runs nightly instead, for two reasons: it measured 22m37s against
-Linux's 15m46s, and **Nix does not sandbox builds on macOS by default** (`sandbox = false` is the
+Linux gates every PR, as `ci.yml`'s `test-linux` job. macOS runs the same check nightly instead,
+for two reasons: it measured 22m37s against Linux's 15m46s, and **Nix does not sandbox builds on macOS by default** (`sandbox = false` is the
 Darwin default), so the hermeticity argument is weaker there anyway.
 
 ## Decisions, with the numbers
@@ -131,7 +136,7 @@ If quota is still the binding constraint after that, the action takes an
 
 It used to run `just nix-check`, whose `nix flake check` builds every check — clippy, the whole
 suite, tool drift — with no store cache. A job named "Format and lint" was taking 14–18 minutes
-and duplicating `ci-nix.yml` from cold. It now runs `just nix-lint` (nixfmt, statix, deadnix) in
+and duplicating the Linux gate from cold. It now runs `just nix-lint` (nixfmt, statix, deadnix) in
 about a second. `just nix-check` keeps the fuller behaviour for local use.
 
 `nix flake check --no-build` is not a cheap substitute: `cleanCargoSource` filters a derivation

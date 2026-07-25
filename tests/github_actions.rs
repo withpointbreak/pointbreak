@@ -1,7 +1,8 @@
 #[test]
 fn ci_workflow_runs_project_lint_and_tests() {
     let ci = std::fs::read_to_string(".github/workflows/ci.yml").expect("read CI workflow");
-    let nix = std::fs::read_to_string(".github/workflows/ci-nix.yml").expect("read Nix workflow");
+    let nightly =
+        std::fs::read_to_string(".github/workflows/nightly.yml").expect("read nightly workflow");
 
     assert!(ci.contains("name: CI"));
     assert!(ci.contains("branches: [main]"));
@@ -11,12 +12,13 @@ fn ci_workflow_runs_project_lint_and_tests() {
     assert!(ci.contains("macos-latest"));
     assert!(ci.contains("windows-latest"));
 
-    // The Rust gate is split by platform. Linux runs hermetically as derivations;
+    // The Rust gate is split by platform, and all three legs live in this one workflow so
+    // the checks list shows the whole matrix. Linux runs hermetically as derivations;
     // macOS runs cargo directly for an incremental target/; Windows executes a
-    // cross-compiled archive. Every platform still runs the suite somewhere.
-    assert!(nix.contains("nix build .#cli-fmt"));
-    assert!(nix.contains("nix build .#cli-clippy"));
-    assert!(nix.contains("nix build .#cli-nextest"));
+    // cross-compiled archive.
+    assert!(ci.contains("nix build .#cli-fmt"));
+    assert!(ci.contains("nix build .#cli-clippy"));
+    assert!(ci.contains("nix build .#cli-nextest"));
     assert!(ci.contains("just test-ci"));
     assert!(ci.contains("just windows-cross-archive x86_64-pc-windows-msvc"));
     assert!(ci.contains("--archive-file"));
@@ -33,6 +35,12 @@ fn ci_workflow_runs_project_lint_and_tests() {
     assert!(ci.contains("dtolnay/rust-toolchain@stable"));
     assert!(ci.contains("taiki-e/install-action@just"));
     assert!(ci.contains("taiki-e/install-action@nextest"));
+
+    // Nightly carries what is too slow to gate, and nothing else: `nix flake check` in
+    // full, so a check added to the flake cannot be left ungated by the explicit phase
+    // list above. It must not run per pull request — a job that only skips is noise.
+    assert!(nightly.contains("nix flake check"));
+    assert!(!nightly.contains("pull_request"));
 }
 
 #[test]

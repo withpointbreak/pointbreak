@@ -38,7 +38,7 @@ jobs:
       # See docs/ci-architecture.md#nixyml-lints-nix-files-and-nothing-else.
       # It used to run `just nix-check`, whose `nix flake check` BUILDS every check
       # — clippy, the full nextest suite, tool drift — with no store cache, taking
-      # 14-18 minutes. Since ci-nix.yml realises those same derivations on every
+      # 14-18 minutes. Since ci.yml realises those same derivations on every
       # pull request, this job was running the entire suite a second time, in
       # parallel, from cold. Linting the Nix files is what is unique to this lane.
       - name: Run nix-lint

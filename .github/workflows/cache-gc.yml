@@ -25,7 +25,7 @@ concurrency:
 on:
   schedule:
     # Daily and off-peak. Deliberately not 07:00 UTC, which is the nightly full flake
-    # check in ci-nix.yml.
+    # check in nightly.yml.
     - cron: "23 3 * * *"
   workflow_dispatch:
     inputs:
