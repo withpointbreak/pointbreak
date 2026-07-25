@@ -128,9 +128,11 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: taiki-e/install-action@just
+      # No longer shared with anything: the sharded test legs run prebuilt binaries and
+      # have no target/ to cache. Keyed on its own so it stops colliding with them.
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: windows-shards
+          shared-key: windows-check
       - run: just check-types
 
   windows-cross-archive:
