@@ -173,6 +173,12 @@ It became possible once the suite was changed to resolve its test binary, fixtur
 runtime rather than through compile-time `env!()`, which bakes the build machine's paths in and
 which `--workspace-remap` cannot relocate.
 
+`tests/runtime_path_resolution.rs` guards that convention. Reintroducing a compile-time path is
+easy to do by accident and fails nowhere except the Windows shards, with a bare "system cannot
+find the path specified" that names no cause — so the guard fails on Linux instead, naming the
+file, the line, and the resolver to use. `include_str!`/`include_bytes!` are exempt: they embed
+bytes, so no path survives into the binary.
+
 **Rustup is not gone from Windows.** Three things still need a toolchain there: the
 `--all-features` type-check (`test-windows-check`, which compiles the `cfg(windows)` arms behind
 `bench` and `gix-parity` that the default-feature archive never sees), plus the
