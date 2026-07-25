@@ -246,6 +246,9 @@
           };
 
           # Dependencies for the quality gates, built with Cargo's `test` profile.
+          # NOT an oversight and NOT to be "fixed" to release: release made the crate
+          # take 2m54s to compile against 25s here, and the suite 253s against 179s.
+          # See docs/ci-architecture.md#test-gates-build-with-cargo_profile--test.
           # Crane defaults every derivation to `release`, which made the gates pay
           # optimized codegen for throwaway test binaries; `just lint`/`just test`
           # compile with the dev-inheriting `test` profile, so the gates now match
@@ -313,6 +316,7 @@
             cargoLock = ./Cargo.lock;
             cargoArtifacts = cargoArtifactsTest;
             CARGO_PROFILE = "test";
+            # See docs/ci-architecture.md#the-clippy-gate-installs-no-cargo-artifacts.
             # Nothing consumes this gate's compiled target directory, and installing
             # it cost a ~250MB output that changed on every commit — dead weight in
             # both the CI store cache and the build itself, which paid to compress

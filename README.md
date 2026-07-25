@@ -120,6 +120,8 @@ For contributors and maintainers:
 - [CONTRIBUTING.md](CONTRIBUTING.md) - setup, hooks, branch names, commits, tests, and PR flow.
 - [docs/development.md](docs/development.md) - change-to-gate matrix, generated artifacts, and
   failure interpretation.
+- [docs/ci-architecture.md](docs/ci-architecture.md) - why CI is split into the lanes it is, what
+  was measured, and what would justify changing it.
 - [scripts/README.md](scripts/README.md) - script ownership, preferred entrypoints, side effects,
   and expected outcomes.
 - [docs/releasing.md](docs/releasing.md) - release planning and publish automation.

@@ -14,6 +14,9 @@ name: CI (Nix Windows cross — spike)
 # package_identity::cargo_install_exposes_only_pointbreak_executable, intentionally builds
 # the crate via `cargo install` — the sole exception to the no-build premise (~2-3 min).
 #
+# See docs/ci-architecture.md#windows for what has to change before this can replace
+# rustup on the Windows legs.
+#
 # Still report-only (continue-on-error) until this is confirmed green on the actual x86_64
 # windows-latest runner a few times: an x64 run may surface genuine platform byte/behaviour
 # differences the arm64 validation did not. Promote to gating (and to pull_request) once
