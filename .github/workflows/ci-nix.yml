@@ -42,15 +42,16 @@ jobs:
       - uses: actions/checkout@v6
       - uses: DeterminateSystems/nix-installer-action@main
 
-      # DO NOT swap back to cache-nix-action: it tars the whole /nix/store, which
-      # measured 4.87GB (Linux) + 4.46GB (macOS) against a 10GB repository limit, so
-      # the platforms evicted each other and every run started cold. This stores
-      # individual paths and skips anything fetchable from cache.nixos.org.
-      # (Magic Nix Cache broke in Feb 2025 and was revived in Jun 2025 — it is alive.)
-      # See docs/ci-architecture.md#store-caching-uses-magic-nix-cache.
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-        with:
-          use-flakehub: false
+      # Third approach here; the first two each hit a different GitHub ceiling.
+      # cache-nix-action tarred the whole /nix/store (4.87GB Linux + 4.46GB macOS
+      # against a 10GB STORAGE limit, so the platforms evicted each other). Magic Nix
+      # Cache stored one entry per store path (1788 of them), which tripped the API
+      # RATE limit and then disabled itself mid-run. Hestia packs paths into
+      # content-defined chunks — few large entries — so it avoids both.
+      # Uploads authenticate with the runner-injected ACTIONS_RUNTIME_TOKEN, so
+      # `permissions: contents: read` above is sufficient.
+      # See docs/ci-architecture.md#store-caching.
+      - uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527 # v2
 
       # Named individually on purpose: `nix flake check` batches every check in
       # arbitrary order and so cannot return early on a cheap failure. The nightly job
@@ -90,9 +91,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: DeterminateSystems/nix-installer-action@main
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-        with:
-          use-flakehub: false
+      - uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527 # v2
       - name: nix flake check
         run: nix flake check
       - name: dump failing build log

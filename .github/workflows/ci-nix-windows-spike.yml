@@ -49,9 +49,7 @@ jobs:
       # Same store-cache reasoning as ci-nix.yml: keep only this project's own
       # paths rather than a whole-store tarball, so the shared 10GB Actions cache
       # budget is not exhausted by paths cache.nixos.org already serves.
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-        with:
-          use-flakehub: false
+      - uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527 # v2
       # cargo-xwin fetches the MSVC CRT/SDK here (network is available in the step);
       # XWIN_ACCEPT_LICENSE is set inside the windows-cross dev shell.
       - name: cross-compile x86_64-pc-windows-msvc nextest archive

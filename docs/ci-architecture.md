@@ -77,21 +77,30 @@ gate first". Naming the checks individually can, which is why the PR job runs
 The cost is that the explicit list can drift from the flake's actual `checks`. The nightly job
 runs `nix flake check` precisely so a newly added check cannot be silently left ungated.
 
-### Store caching uses Magic Nix Cache
+### Store caching
 
-`cache-nix-action` tars the whole `/nix/store` into one entry per platform. Measured here: 4.87GB
-on Linux and 4.46GB on macOS — **9.33GB before counting anything else**, against GitHub's 10GB
-per-repository limit. The two platforms evicted each other, and Linux ran with a cold store on
-every run.
+Three approaches, each of which hit a different GitHub ceiling:
 
-Magic Nix Cache stores individual paths and skips anything fetchable from `cache.nixos.org`, so
-only this project's own outputs are kept (~3.6GB across both platforms). It needs no external
-account. `use-flakehub: false` keeps it on the Actions cache; FlakeHub Cache is a separate
-account-backed service.
+| Approach | Granularity | Outcome |
+| --- | --- | --- |
+| `cache-nix-action` | one tarball of the whole `/nix/store`, per platform | 4.87GB (Linux) + 4.46GB (macOS) = **9.33GB before anything else**, against a 10GB storage limit. The platforms evicted each other and Linux ran cold every time. |
+| `magic-nix-cache` | one entry per store path | **1788 entries**, whose API calls tripped GitHub's rate limiter. On throttle it logs `Not trying to use it again on this run` and disables itself, so the job silently finishes cold. |
+| `Mic92/hestia` (current) | content-defined chunks, a few large entries | Aims between the two: few enough entries to stay under the rate limit, deduplicated enough to stay under the storage limit. |
 
-> Magic Nix Cache broke in February 2025 when GitHub retired the old Actions Cache API, and was
-> widely described as dead. It was revived in June 2025 against the new API. Check its current
-> state before acting on any advice about it.
+Hestia needs no account: uploads authenticate with the runner-injected
+`ACTIONS_RUNTIME_TOKEN`, so build jobs need only `permissions: contents: read`. It is
+pinned by commit SHA, matching how this repository pins its other third-party actions.
+
+Two things to know if quota becomes the binding constraint again: the action takes an
+`upstream-cache-filter` input that skips paths already signed by an upstream cache, and
+upstream recommends a daily GC workflow on the default branch (its REST deletes are what
+need `actions: write`).
+
+> Two corrections worth keeping, because both cost time here. Magic Nix Cache broke in
+> February 2025 and was widely written off, but was revived in June 2025 against the new
+> API — it is not dead. And hestia *is* MIT licensed (README and both `Cargo.toml`
+> files); GitHub's license detector reports nothing only because there is no `LICENSE`
+> file at the repository root.
 
 ### `nix.yml` lints Nix files and nothing else
 
@@ -121,17 +130,20 @@ Nix still reports `false`). On Linux it would be actively harmful, deleting the 
 Nix lane exists to provide. It remains a legitimate *debugging* lever for a derivation that fails
 only under the sandbox.
 
-**Cachix.** Would work — the footprint is ~3.6GB against a 5GB free open-source tier — but it
-needs an account and a token secret, and Magic Nix Cache solved the eviction problem without
-either. Worth revisiting if the cache is ever needed outside CI.
+**Cachix.** Would work, and is the one option where GitHub's rate limits cannot apply at all,
+since it does not use the Actions cache. The footprint is ~3.6GB against a 5GB free
+open-source tier, which is workable but not roomy, and it needs an account plus a token
+secret. It stays the fallback if the current approach hits either ceiling again, or if the
+cache is ever wanted outside CI.
 
 ## Revisit triggers
 
 - **`ci.yml` produces a false green traced to a stale `target/`.** The strongest argument for
   moving more of the gate into derivations.
-- **Actions cache pressure returns.** The 10GB limit is shared; both lanes' caches coexist only
-  because the whole-store tarballs are gone. If usage approaches the ceiling again, the next step
-  is a real binary cache (Cachix or FlakeHub), not more tuning.
+- **Either GitHub cache ceiling is hit again** — storage (10GB, shared with `ci.yml`'s
+  rust-cache entries) or the API rate limit. First try hestia's `upstream-cache-filter` and a
+  GC workflow; if that is not enough, move to a real binary cache (Cachix or FlakeHub), which
+  is subject to neither.
 - **macOS runners get materially faster,** or a macOS-specific sandbox regression appears — then
   reconsider gating macOS per PR rather than nightly.
 - **Nix gains native Windows support,** or the cross-compile spike graduates — either removes the
