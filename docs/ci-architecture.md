@@ -16,6 +16,7 @@ choices look like oversights until you see the number behind them.
 | `ci-nix.yml` | every PR (Linux); nightly (Linux + macOS) | The hermetic check: the suite in a sandbox, plus a network-free build of the shipped artifact. |
 | `nix.yml` | PRs touching `*.nix` | Lints the Nix files themselves. Builds nothing. |
 | `ci-nix-windows-spike.yml` | spike branch only | Report-only experiment: cross-compile the tests on Linux, run them on Windows. |
+| `cache-gc.yml` | nightly on the default branch | Prunes the hestia cache so the Nix lane stays inside the shared 10GB quota. |
 
 Both lanes compile with the same flake-pinned toolchain, so `ci-nix.yml` is not a second opinion
 on the lints. Its unique contribution is stated in [Why keep a Nix lane](#why-keep-a-nix-lane).
@@ -97,10 +98,15 @@ Hestia needs no account: uploads authenticate with the runner-injected
 `ACTIONS_RUNTIME_TOKEN`, so build jobs need only `permissions: contents: read`. It is
 pinned by commit SHA, matching how this repository pins its other third-party actions.
 
-Two things to know if quota becomes the binding constraint again: the action takes an
-`upstream-cache-filter` input that skips paths already signed by an upstream cache, and
-upstream recommends a daily GC workflow on the default branch (its REST deletes are what
-need `actions: write`).
+`cache-gc.yml` prunes it nightly. Hestia tracks liveness through *roots* — one per branch
+and system, e.g. `main-x86_64-linux` — and collects whatever no root reaches once it falls
+out of the push grace period. It only ever considers paths hestia itself pushed, so the
+rust-cache and setup-node entries sharing the quota are untouched. GC must run on the
+default branch, because a pull request's cache scope is read-only towards it, and it is the
+only workflow here holding `actions: write`.
+
+If quota is still the binding constraint after that, the action takes an
+`upstream-cache-filter` input that skips paths already signed by an upstream cache.
 
 > Two corrections worth keeping, because both cost time here. Magic Nix Cache broke in
 > February 2025 and was widely written off, but was revived in June 2025 against the new
