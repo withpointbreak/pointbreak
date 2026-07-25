@@ -42,18 +42,26 @@ use pointbreak::bench_support::foundation::{
     run_qualification_lmdb_smoke_v1,
 };
 use pointbreak::bench_support::longitudinal::{
-    LONGITUDINAL_CAPACITY_PACKAGE_FILE_V1, LONGITUDINAL_CONTRACT_MODE_V1,
+    LONGITUDINAL_CAPACITY_PACKAGE_FILE_V1, LONGITUDINAL_CARRY_FORWARD_MODE_V1,
+    LONGITUDINAL_CARRY_FORWARD_SMOKE_MODE_V1, LONGITUDINAL_CONTRACT_MODE_V1,
     LONGITUDINAL_EVIDENCE_PACKAGE_FILE_V1, LONGITUDINAL_HELP_MODE_V1, LONGITUDINAL_SMOKE_MODE_V1,
-    LONGITUDINAL_VERIFY_PACKAGE_MODE_V1, longitudinal_contract_publication_v1,
+    LONGITUDINAL_VERIFY_CARRY_FORWARD_MODE_V1, LONGITUDINAL_VERIFY_PACKAGE_MODE_V1,
+    LONGITUDINAL_VERIFY_PACKAGE_RECEIPT_MODE_V1, LongitudinalCarryForwardRequestV1,
+    longitudinal_carry_forward_non_timing_smoke_v1, longitudinal_contract_publication_v1,
     longitudinal_help_v1, longitudinal_non_timing_smoke_v1,
-    verify_longitudinal_capacity_package_v1, verify_longitudinal_evidence_package_v1,
+    verify_longitudinal_capacity_package_v1,
+    verify_longitudinal_carry_forward_authority_package_v1,
+    verify_longitudinal_evidence_package_v1, verify_longitudinal_package_receipt_v1,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 const USAGE: &str = "\
-Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--generated-workload-smoke|--longitudinal-contract|--longitudinal-help|--longitudinal-smoke|--longitudinal-verify-package|--loose-baseline-smoke|--loose-baseline-evidence|--prospective-contract|--content-only-contract|--transfer-smoke|--sqlite-smoke|--segments-smoke|--lmdb-proof-open-close|--lmdb-smoke|--lmdb-lifecycle-smoke|--lmdb-prospective-smoke|--lmdb-prospective-evidence|--lmdb-prospective-package|--qualification-smoke|--qualification-evidence|--qualification-diagnostics|--qualification-contract|--qualification-final-evidence|--qualification-package|--help]\n\
+Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--generated-workload-smoke|--longitudinal-contract|--longitudinal-help|--longitudinal-smoke|--longitudinal-carry-forward|--longitudinal-carry-forward-smoke|--longitudinal-verify-package|--longitudinal-verify-package-receipt|--longitudinal-verify-carry-forward|--loose-baseline-smoke|--loose-baseline-evidence|--prospective-contract|--content-only-contract|--transfer-smoke|--sqlite-smoke|--segments-smoke|--lmdb-proof-open-close|--lmdb-smoke|--lmdb-lifecycle-smoke|--lmdb-prospective-smoke|--lmdb-prospective-evidence|--lmdb-prospective-package|--qualification-smoke|--qualification-evidence|--qualification-diagnostics|--qualification-contract|--qualification-final-evidence|--qualification-package|--help]\n\
+       --longitudinal-carry-forward --longitudinal-carry-forward-request=<path>\n\
        --longitudinal-verify-package --longitudinal-package-root=<path>\n\
+       --longitudinal-verify-package-receipt --longitudinal-package-root=<path>\n\
+       --longitudinal-verify-carry-forward --longitudinal-authority-package=<path> --longitudinal-package-root=<path>\n\
        --qualification-diagnostics [--qualification-pair-order=alternating|candidate_then_baseline|baseline_then_candidate]\n\
        --qualification-package --qualification-input=<path> [--qualification-input=<path> ...]\n\
        --lmdb-prospective-package --lmdb-prospective-input=<path> [--lmdb-prospective-input=<path> ...]\n\
@@ -263,7 +271,11 @@ fn main() -> ExitCode {
         LONGITUDINAL_CONTRACT_MODE_V1,
         LONGITUDINAL_HELP_MODE_V1,
         LONGITUDINAL_SMOKE_MODE_V1,
+        LONGITUDINAL_CARRY_FORWARD_MODE_V1,
+        LONGITUDINAL_CARRY_FORWARD_SMOKE_MODE_V1,
         LONGITUDINAL_VERIFY_PACKAGE_MODE_V1,
+        LONGITUDINAL_VERIFY_PACKAGE_RECEIPT_MODE_V1,
+        LONGITUDINAL_VERIFY_CARRY_FORWARD_MODE_V1,
         QUALIFICATION_LOOSE_BASELINE_SMOKE_MODE_V1,
         QUALIFICATION_LOOSE_BASELINE_EVIDENCE_MODE_V1,
         QUALIFICATION_PROSPECTIVE_CONTRACT_PUBLICATION_MODE_V1,
@@ -307,6 +319,23 @@ fn main() -> ExitCode {
     let longitudinal_package_requested = arguments
         .iter()
         .any(|argument| argument == LONGITUDINAL_VERIFY_PACKAGE_MODE_V1);
+    let longitudinal_package_receipt_requested = arguments
+        .iter()
+        .any(|argument| argument == LONGITUDINAL_VERIFY_PACKAGE_RECEIPT_MODE_V1);
+    let longitudinal_carry_forward_requested = arguments
+        .iter()
+        .any(|argument| argument == LONGITUDINAL_CARRY_FORWARD_MODE_V1);
+    let longitudinal_carry_forward_requests = arguments
+        .iter()
+        .filter_map(|argument| argument.strip_prefix("--longitudinal-carry-forward-request="))
+        .collect::<Vec<_>>();
+    let longitudinal_authority_verify_requested = arguments
+        .iter()
+        .any(|argument| argument == LONGITUDINAL_VERIFY_CARRY_FORWARD_MODE_V1);
+    let longitudinal_authority_packages = arguments
+        .iter()
+        .filter_map(|argument| argument.strip_prefix("--longitudinal-authority-package="))
+        .collect::<Vec<_>>();
     let longitudinal_package_roots = arguments
         .iter()
         .filter_map(|argument| argument.strip_prefix("--longitudinal-package-root="))
@@ -324,7 +353,11 @@ fn main() -> ExitCode {
             && argument != LONGITUDINAL_CONTRACT_MODE_V1
             && argument != LONGITUDINAL_HELP_MODE_V1
             && argument != LONGITUDINAL_SMOKE_MODE_V1
+            && argument != LONGITUDINAL_CARRY_FORWARD_MODE_V1
+            && argument != LONGITUDINAL_CARRY_FORWARD_SMOKE_MODE_V1
             && argument != LONGITUDINAL_VERIFY_PACKAGE_MODE_V1
+            && argument != LONGITUDINAL_VERIFY_PACKAGE_RECEIPT_MODE_V1
+            && argument != LONGITUDINAL_VERIFY_CARRY_FORWARD_MODE_V1
             && argument != QUALIFICATION_LOOSE_BASELINE_SMOKE_MODE_V1
             && argument != QUALIFICATION_LOOSE_BASELINE_EVIDENCE_MODE_V1
             && argument != QUALIFICATION_PROSPECTIVE_CONTRACT_PUBLICATION_MODE_V1
@@ -348,13 +381,26 @@ fn main() -> ExitCode {
             && !argument.starts_with("--qualification-pair-order=")
             && !argument.starts_with("--qualification-input=")
             && !argument.starts_with("--longitudinal-package-root=")
+            && !argument.starts_with("--longitudinal-carry-forward-request=")
+            && !argument.starts_with("--longitudinal-authority-package=")
             && !argument.starts_with("--lmdb-prospective-input=")
     }) || requested_modes > 1
         || (!diagnostics_requested && diagnostic_pair_order.is_some())
         || (!package_requested && !package_inputs.is_empty())
         || (package_requested && package_inputs.is_empty())
-        || (!longitudinal_package_requested && !longitudinal_package_roots.is_empty())
-        || (longitudinal_package_requested && longitudinal_package_roots.len() != 1)
+        || (!(longitudinal_package_requested
+            || longitudinal_package_receipt_requested
+            || longitudinal_authority_verify_requested)
+            && !longitudinal_package_roots.is_empty())
+        || ((longitudinal_package_requested
+            || longitudinal_package_receipt_requested
+            || longitudinal_authority_verify_requested)
+            && longitudinal_package_roots.len() != 1)
+        || (!longitudinal_carry_forward_requested
+            && !longitudinal_carry_forward_requests.is_empty())
+        || (longitudinal_carry_forward_requested && longitudinal_carry_forward_requests.len() != 1)
+        || (!longitudinal_authority_verify_requested && !longitudinal_authority_packages.is_empty())
+        || (longitudinal_authority_verify_requested && longitudinal_authority_packages.len() != 1)
         || (!lmdb_prospective_package_requested && !lmdb_prospective_inputs.is_empty())
         || (lmdb_prospective_package_requested && lmdb_prospective_inputs.is_empty())
     {
@@ -429,8 +475,47 @@ fn main() -> ExitCode {
         };
     }
 
+    if arguments
+        .iter()
+        .any(|argument| argument == LONGITUDINAL_CARRY_FORWARD_SMOKE_MODE_V1)
+    {
+        return match longitudinal_carry_forward_non_timing_smoke_v1() {
+            Ok(receipt) => {
+                println!(
+                    "{}",
+                    serde_json::to_string(&receipt)
+                        .expect("longitudinal carry-forward smoke receipt serializes")
+                );
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("store foundation longitudinal carry-forward smoke failed: {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
+
+    if longitudinal_carry_forward_requested {
+        return longitudinal_carry_forward_report(std::path::Path::new(
+            longitudinal_carry_forward_requests[0],
+        ));
+    }
+
     if longitudinal_package_requested {
         return longitudinal_package_report(std::path::Path::new(longitudinal_package_roots[0]));
+    }
+
+    if longitudinal_package_receipt_requested {
+        return longitudinal_package_receipt_report(std::path::Path::new(
+            longitudinal_package_roots[0],
+        ));
+    }
+
+    if longitudinal_authority_verify_requested {
+        return longitudinal_carry_forward_authority_report(
+            std::path::Path::new(longitudinal_authority_packages[0]),
+            std::path::Path::new(longitudinal_package_roots[0]),
+        );
     }
 
     if arguments
@@ -663,6 +748,73 @@ fn longitudinal_package_report(root: &std::path::Path) -> ExitCode {
                 "store foundation longitudinal package requires exactly one recognized package document"
             );
             ExitCode::from(2)
+        }
+    }
+}
+
+fn longitudinal_carry_forward_report(request_path: &std::path::Path) -> ExitCode {
+    let request = match std::fs::read(request_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<LongitudinalCarryForwardRequestV1>(&bytes).ok())
+    {
+        Some(request) => request,
+        None => {
+            eprintln!("store foundation longitudinal carry-forward request is invalid");
+            return ExitCode::from(2);
+        }
+    };
+    match request.execute() {
+        Ok(artifacts) => {
+            println!(
+                "{}",
+                serde_json::to_string(&artifacts)
+                    .expect("longitudinal carry-forward artifacts serialize")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("store foundation longitudinal carry-forward failed: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn longitudinal_package_receipt_report(root: &std::path::Path) -> ExitCode {
+    match verify_longitudinal_package_receipt_v1(root) {
+        Ok(receipt) => {
+            println!(
+                "{}",
+                serde_json::to_string(&receipt)
+                    .expect("longitudinal package verification receipt serializes")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("store foundation longitudinal package receipt failed: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn longitudinal_carry_forward_authority_report(
+    authority_package: &std::path::Path,
+    workload_package_root: &std::path::Path,
+) -> ExitCode {
+    match verify_longitudinal_carry_forward_authority_package_v1(
+        authority_package,
+        workload_package_root,
+    ) {
+        Ok(package) => {
+            println!(
+                "{}",
+                serde_json::to_string(&package)
+                    .expect("longitudinal carry-forward authority package serializes")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("store foundation longitudinal carry-forward authority failed: {error}");
+            ExitCode::from(1)
         }
     }
 }

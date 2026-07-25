@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -8,15 +9,26 @@ use thiserror::Error;
 
 use super::{
     LONGITUDINAL_CAPACITY_MATERIALIZATION_RECEIPT_SCHEMA_V1,
+    LONGITUDINAL_CARRY_FORWARD_RECEIPT_SCHEMA_V1, LONGITUDINAL_CARRY_FORWARD_REQUEST_SCHEMA_V1,
+    LONGITUDINAL_CONTROLLER_FAILURE_RECEIPT_SCHEMA_V1,
     LONGITUDINAL_MATERIALIZATION_RECEIPT_SCHEMA_V1, LongitudinalC524GateInputsV1,
     LongitudinalC524GateReceiptV1, LongitudinalCapacityManifestV1,
     LongitudinalCapacityMaterializationReceiptV1, LongitudinalCapacityPackageV1,
     LongitudinalCapacityProbeV1, LongitudinalCapacityProfileV1, LongitudinalCapacityReceiptV1,
-    LongitudinalCapacitySubjectV1, LongitudinalEvidencePackageV1, LongitudinalExecutionIdentityV1,
-    LongitudinalLaneV1, LongitudinalMaterializationReceiptV1, LongitudinalOperationReceiptV1,
-    LongitudinalOperationV1, LongitudinalTierV1, LongitudinalWorkloadManifestV1,
-    longitudinal_capacity_contract_v1, longitudinal_runner_contract_v1,
-    materialize_longitudinal_capacity_v1, materialize_longitudinal_workload_v1,
+    LongitudinalCapacitySubjectV1, LongitudinalCarryForwardAuthorityCompletionV1,
+    LongitudinalCarryForwardAuthorityPackageV1, LongitudinalCarryForwardReceiptV1,
+    LongitudinalCarryForwardSlotV1, LongitudinalControllerFailureReceiptV1,
+    LongitudinalEvidencePackageV1, LongitudinalExecutionIdentityV1,
+    LongitudinalFailureOperationSelectorV1, LongitudinalHttpBodyClassificationV1,
+    LongitudinalHttpFailureV1, LongitudinalInspectorExitV1, LongitudinalLaneV1,
+    LongitudinalMaterializationReceiptV1, LongitudinalMaterializerEquivalenceReceiptV1,
+    LongitudinalOperationReceiptV1, LongitudinalOperationV1,
+    LongitudinalPackageVerificationReceiptV1, LongitudinalStderrClassificationV1,
+    LongitudinalStderrFailureV1, LongitudinalTierV1, LongitudinalVerifiedPackageKindV1,
+    LongitudinalWorkloadManifestV1, longitudinal_capacity_contract_v1,
+    longitudinal_runner_contract_v1, longitudinal_store_data_inventory_v1,
+    longitudinal_workload_manifest_carry_invariant_sha256_v1, materialize_longitudinal_capacity_v1,
+    materialize_longitudinal_workload_v1, verify_longitudinal_materializer_equivalence_v1,
 };
 use crate::bench_support::foundation::{
     QualificationFilesystemDispositionV1, classify_qualification_filesystem,
@@ -35,6 +47,12 @@ use crate::session::{
 
 pub const LONGITUDINAL_EVIDENCE_PACKAGE_FILE_V1: &str = "longitudinal-evidence-package.json";
 pub const LONGITUDINAL_CAPACITY_PACKAGE_FILE_V1: &str = "longitudinal-capacity-package.json";
+pub const LONGITUDINAL_CARRIED_MATERIALIZATION_FILE_V1: &str = "carried-materialization.json";
+pub const LONGITUDINAL_CARRY_FORWARD_RECEIPT_FILE_V1: &str = "carry-forward-receipt.json";
+pub const LONGITUDINAL_CARRY_FORWARD_ROOT_AUTHORITY_FILE_V1: &str =
+    "carry-forward-root-authority.json";
+pub const LONGITUDINAL_CARRY_FORWARD_AUTHORITY_PACKAGE_FILE_V1: &str =
+    "carry-forward-authority-package.json";
 const LONGITUDINAL_PACKAGE_VERIFICATION_RECEIPT_FILE_V1: &str = "package-receipt.json";
 
 const PROTECTED_ENVIRONMENT_VARIABLES: [&str; 4] = [
@@ -132,6 +150,71 @@ pub struct LongitudinalRunOptionsV1 {
     pub manifest: LongitudinalWorkloadManifestV1,
     pub lane: LongitudinalLaneV1,
     pub operations: Vec<LongitudinalOperationReceiptV1>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LongitudinalCarryForwardOptionsV1 {
+    pub source_root: PathBuf,
+    pub clone_root: PathBuf,
+    pub source_materialization: LongitudinalMaterializationReceiptV1,
+    pub corrected_execution: LongitudinalExecutionIdentityV1,
+    pub slot: LongitudinalCarryForwardSlotV1,
+    pub materializer_equivalence: LongitudinalMaterializerEquivalenceReceiptV1,
+    pub final_authority_diff_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalCarryForwardRequestV1 {
+    pub schema: String,
+    pub source_root: PathBuf,
+    pub clone_root: PathBuf,
+    pub authority_root: PathBuf,
+    pub source_materialization: LongitudinalMaterializationReceiptV1,
+    pub corrected_execution: LongitudinalExecutionIdentityV1,
+    pub slot: LongitudinalCarryForwardSlotV1,
+    pub materializer_equivalence: LongitudinalMaterializerEquivalenceReceiptV1,
+    pub final_authority_diff_sha256: String,
+}
+
+impl LongitudinalCarryForwardRequestV1 {
+    pub fn execute(
+        &self,
+    ) -> Result<LongitudinalCarryForwardArtifactsV1, LongitudinalEvidenceError> {
+        if self.schema != LONGITUDINAL_CARRY_FORWARD_REQUEST_SCHEMA_V1 {
+            return Err(LongitudinalEvidenceError::InvalidReceipt);
+        }
+        write_longitudinal_carry_forward_v1(
+            &LongitudinalCarryForwardOptionsV1 {
+                source_root: self.source_root.clone(),
+                clone_root: self.clone_root.clone(),
+                source_materialization: self.source_materialization.clone(),
+                corrected_execution: self.corrected_execution.clone(),
+                slot: self.slot,
+                materializer_equivalence: self.materializer_equivalence.clone(),
+                final_authority_diff_sha256: self.final_authority_diff_sha256.clone(),
+            },
+            &self.authority_root,
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalCarryForwardArtifactsV1 {
+    pub carried_materialization: LongitudinalMaterializationReceiptV1,
+    pub receipt: LongitudinalCarryForwardReceiptV1,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalCarryForwardSmokeReceiptV1 {
+    pub schema: String,
+    pub timing_admissible: bool,
+    pub terminal_evidence_admissible: bool,
+    pub carry_forward_verified: bool,
+    pub failure_receipt_verified: bool,
+    pub package_verifier_receipt_verified: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -506,6 +589,199 @@ pub fn preflight_longitudinal_root_v1(
     receipt
         .validate()
         .map_err(|_| LongitudinalEvidenceError::Preflight)?;
+    Ok(receipt)
+}
+
+pub fn carry_forward_longitudinal_root_v1(
+    options: &LongitudinalCarryForwardOptionsV1,
+) -> Result<LongitudinalCarryForwardArtifactsV1, LongitudinalEvidenceError> {
+    require_unprotected_environment()?;
+    options
+        .source_materialization
+        .validate()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    options
+        .corrected_execution
+        .validate()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    options
+        .slot
+        .validate()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    if options.slot.tier != options.source_materialization.manifest.tier
+        || options.corrected_execution.parent_commit.is_some()
+        || options.corrected_execution == options.source_materialization.manifest.execution
+    {
+        return Err(LongitudinalEvidenceError::InvalidReceipt);
+    }
+    let source_root =
+        fs::canonicalize(&options.source_root).map_err(|_| LongitudinalEvidenceError::Preflight)?;
+    let clone_root =
+        fs::canonicalize(&options.clone_root).map_err(|_| LongitudinalEvidenceError::Preflight)?;
+    if source_root == clone_root
+        || source_root.starts_with(&clone_root)
+        || clone_root.starts_with(&source_root)
+    {
+        return Err(LongitudinalEvidenceError::UnsafeRoot);
+    }
+
+    let source_pre_inventory = longitudinal_store_data_inventory_v1(&source_root)
+        .map_err(|_| LongitudinalEvidenceError::Preflight)?;
+    let clone_pre_inventory = longitudinal_store_data_inventory_v1(&clone_root)
+        .map_err(|_| LongitudinalEvidenceError::Preflight)?;
+    let source_preflight =
+        preflight_longitudinal_root_v1(&source_root, &options.source_materialization.manifest)?;
+    if source_preflight != options.source_materialization
+        || source_pre_inventory != clone_pre_inventory
+    {
+        return Err(LongitudinalEvidenceError::Preflight);
+    }
+
+    let mut carried_manifest = options.source_materialization.manifest.clone();
+    carried_manifest.execution = options.corrected_execution.clone();
+    carried_manifest.manifest_sha256 = carried_manifest
+        .canonical_sha256()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    let carried_materialization = preflight_longitudinal_root_v1(&clone_root, &carried_manifest)?;
+
+    let source_post_inventory = longitudinal_store_data_inventory_v1(&source_root)
+        .map_err(|_| LongitudinalEvidenceError::Preflight)?;
+    let clone_post_inventory = longitudinal_store_data_inventory_v1(&clone_root)
+        .map_err(|_| LongitudinalEvidenceError::Preflight)?;
+    if source_pre_inventory != source_post_inventory || source_pre_inventory != clone_post_inventory
+    {
+        return Err(LongitudinalEvidenceError::Preflight);
+    }
+
+    options
+        .materializer_equivalence
+        .validate()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+
+    let mut receipt = LongitudinalCarryForwardReceiptV1 {
+        schema: LONGITUDINAL_CARRY_FORWARD_RECEIPT_SCHEMA_V1.to_owned(),
+        slot: options.slot,
+        contract_sha256: options
+            .source_materialization
+            .manifest
+            .contract_sha256
+            .clone(),
+        schedule_sha256: options
+            .source_materialization
+            .manifest
+            .schedule_sha256
+            .clone(),
+        source_execution: options.source_materialization.manifest.execution.clone(),
+        corrected_execution: options.corrected_execution.clone(),
+        source_root_identity: options.source_materialization.root_identity.clone(),
+        clone_root_identity: carried_materialization.root_identity.clone(),
+        source_pre_inventory,
+        source_post_inventory,
+        clone_pre_inventory,
+        clone_post_inventory,
+        source_strict: options.source_materialization.strict.clone(),
+        clone_strict: carried_materialization.strict.clone(),
+        event_count: carried_materialization.manifest.event_count,
+        content_count: carried_materialization.manifest.content_inventory.len() as u64,
+        source_manifest_sha256: options
+            .source_materialization
+            .manifest
+            .manifest_sha256
+            .clone(),
+        carried_manifest_sha256: carried_materialization.manifest.manifest_sha256.clone(),
+        source_manifest_invariant_sha256: longitudinal_workload_manifest_carry_invariant_sha256_v1(
+            &options.source_materialization.manifest,
+        )
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?,
+        carried_manifest_invariant_sha256:
+            longitudinal_workload_manifest_carry_invariant_sha256_v1(
+                &carried_materialization.manifest,
+            )
+            .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?,
+        source_materialization_sha256: options
+            .source_materialization
+            .materialization_sha256
+            .clone(),
+        carried_materialization_sha256: carried_materialization.materialization_sha256.clone(),
+        materializer_equivalence: options.materializer_equivalence.clone(),
+        final_authority_diff_sha256: options.final_authority_diff_sha256.clone(),
+        receipt_sha256: String::new(),
+    };
+    receipt.receipt_sha256 = receipt
+        .canonical_sha256()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    receipt
+        .validate()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    Ok(LongitudinalCarryForwardArtifactsV1 {
+        carried_materialization,
+        receipt,
+    })
+}
+
+pub fn verify_longitudinal_carry_forward_v1(
+    options: &LongitudinalCarryForwardOptionsV1,
+    artifacts: &LongitudinalCarryForwardArtifactsV1,
+) -> Result<(), LongitudinalEvidenceError> {
+    let verified = carry_forward_longitudinal_root_v1(options)?;
+    if verified != *artifacts {
+        return Err(LongitudinalEvidenceError::InvalidReceipt);
+    }
+    Ok(())
+}
+
+pub fn write_longitudinal_carry_forward_v1(
+    options: &LongitudinalCarryForwardOptionsV1,
+    authority_root: &Path,
+) -> Result<LongitudinalCarryForwardArtifactsV1, LongitudinalEvidenceError> {
+    validate_fresh_local_root(authority_root, &options.source_root)?;
+    let parent = authority_root
+        .parent()
+        .ok_or(LongitudinalEvidenceError::UnsafeRoot)?;
+    let parent = fs::canonicalize(parent).map_err(|_| LongitudinalEvidenceError::UnsafeRoot)?;
+    let source =
+        fs::canonicalize(&options.source_root).map_err(|_| LongitudinalEvidenceError::Preflight)?;
+    let clone =
+        fs::canonicalize(&options.clone_root).map_err(|_| LongitudinalEvidenceError::Preflight)?;
+    if parent.starts_with(&source) || parent.starts_with(&clone) {
+        return Err(LongitudinalEvidenceError::UnsafeRoot);
+    }
+    let artifacts = carry_forward_longitudinal_root_v1(options)?;
+    fs::create_dir(authority_root).map_err(io_error)?;
+    write_json_create_new(
+        &authority_root.join(LONGITUDINAL_CARRIED_MATERIALIZATION_FILE_V1),
+        &artifacts.carried_materialization,
+    )
+    .and_then(|()| {
+        write_json_create_new(
+            &authority_root.join(LONGITUDINAL_CARRY_FORWARD_RECEIPT_FILE_V1),
+            &artifacts.receipt,
+        )
+    })?;
+    Ok(artifacts)
+}
+
+pub fn longitudinal_controller_failure_receipt_v1(
+    operation_selector: LongitudinalFailureOperationSelectorV1,
+    http: Option<LongitudinalHttpFailureV1>,
+    inspector_exit: LongitudinalInspectorExitV1,
+    stderr: LongitudinalStderrFailureV1,
+) -> Result<LongitudinalControllerFailureReceiptV1, LongitudinalEvidenceError> {
+    let mut receipt = LongitudinalControllerFailureReceiptV1 {
+        schema: LONGITUDINAL_CONTROLLER_FAILURE_RECEIPT_SCHEMA_V1.to_owned(),
+        operation_selector,
+        http,
+        inspector_exit,
+        stderr,
+        immutable: true,
+        receipt_sha256: String::new(),
+    };
+    receipt.receipt_sha256 = receipt
+        .canonical_sha256()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    receipt
+        .validate()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
     Ok(receipt)
 }
 
@@ -1122,6 +1398,151 @@ pub fn verify_longitudinal_capacity_package_v1(
     Ok(package)
 }
 
+pub fn verify_longitudinal_package_receipt_v1(
+    raw_root: &Path,
+) -> Result<LongitudinalPackageVerificationReceiptV1, LongitudinalEvidenceError> {
+    let workload = raw_root
+        .join(LONGITUDINAL_EVIDENCE_PACKAGE_FILE_V1)
+        .is_file();
+    let capacity = raw_root
+        .join(LONGITUDINAL_CAPACITY_PACKAGE_FILE_V1)
+        .is_file();
+    let (package_kind, package_sha256, contract_sha256, execution_identity_sha256, raw_inventory) =
+        match (workload, capacity) {
+            (true, false) => {
+                let package = verify_longitudinal_evidence_package_v1(raw_root)?;
+                (
+                    LongitudinalVerifiedPackageKindV1::Workload,
+                    package.package_sha256,
+                    package.contract_sha256,
+                    package
+                        .base_execution
+                        .canonical_sha256()
+                        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?,
+                    package.raw_inventory,
+                )
+            }
+            (false, true) => {
+                let package = verify_longitudinal_capacity_package_v1(raw_root)?;
+                (
+                    LongitudinalVerifiedPackageKindV1::Capacity,
+                    package.package_sha256,
+                    package.contract_sha256,
+                    package
+                        .base_execution
+                        .canonical_sha256()
+                        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?,
+                    package.raw_inventory,
+                )
+            }
+            _ => return Err(LongitudinalEvidenceError::InvalidReceipt),
+        };
+    let mut receipt = LongitudinalPackageVerificationReceiptV1 {
+        schema: super::LONGITUDINAL_PACKAGE_VERIFICATION_RECEIPT_SCHEMA_V1.to_owned(),
+        package_kind,
+        package_sha256,
+        contract_sha256,
+        execution_identity_sha256,
+        raw_inventory_sha256: canonical_sha256(&raw_inventory)?,
+        verified: true,
+        receipt_sha256: String::new(),
+    };
+    receipt.receipt_sha256 = receipt
+        .canonical_sha256()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    receipt
+        .validate()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    Ok(receipt)
+}
+
+pub fn verify_longitudinal_carry_forward_authority_package_v1(
+    authority_package_path: &Path,
+    workload_package_root: &Path,
+) -> Result<LongitudinalCarryForwardAuthorityPackageV1, LongitudinalEvidenceError> {
+    let package: LongitudinalCarryForwardAuthorityPackageV1 = read_json(authority_package_path)?;
+    let verification_receipt = verify_longitudinal_package_receipt_v1(workload_package_root)?;
+    let completion = package
+        .completion
+        .as_ref()
+        .ok_or(LongitudinalEvidenceError::InvalidReceipt)?;
+    if completion.verification_receipt != verification_receipt
+        || !completion.package_verified
+        || completion.final_workload_package_sha256 != verification_receipt.package_sha256
+    {
+        return Err(LongitudinalEvidenceError::InvalidReceipt);
+    }
+    package
+        .validate()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    Ok(package)
+}
+
+pub fn assemble_longitudinal_carry_forward_root_authority_v1(
+    corrected_execution: LongitudinalExecutionIdentityV1,
+    carry_receipts: Vec<LongitudinalCarryForwardReceiptV1>,
+) -> Result<LongitudinalCarryForwardAuthorityPackageV1, LongitudinalEvidenceError> {
+    let mut package = LongitudinalCarryForwardAuthorityPackageV1 {
+        schema: super::LONGITUDINAL_CARRY_FORWARD_AUTHORITY_PACKAGE_SCHEMA_V1.to_owned(),
+        contract_sha256: longitudinal_runner_contract_v1().contract_sha256,
+        corrected_execution,
+        carry_receipts,
+        authority_set_sha256: String::new(),
+        completion: None,
+        package_sha256: String::new(),
+    };
+    package.authority_set_sha256 = package
+        .canonical_authority_set_sha256()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    package.package_sha256 = package
+        .canonical_sha256()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    package
+        .validate_incomplete()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    Ok(package)
+}
+
+pub fn complete_longitudinal_carry_forward_authority_package_v1(
+    root_authority: &LongitudinalCarryForwardAuthorityPackageV1,
+    workload_package_root: &Path,
+) -> Result<LongitudinalCarryForwardAuthorityPackageV1, LongitudinalEvidenceError> {
+    root_authority
+        .validate_incomplete()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    let verification_receipt = verify_longitudinal_package_receipt_v1(workload_package_root)?;
+    if verification_receipt.package_kind != LongitudinalVerifiedPackageKindV1::Workload {
+        return Err(LongitudinalEvidenceError::InvalidReceipt);
+    }
+    let mut package = root_authority.clone();
+    package.completion = Some(LongitudinalCarryForwardAuthorityCompletionV1 {
+        final_workload_package_sha256: verification_receipt.package_sha256.clone(),
+        verification_receipt,
+        package_verified: true,
+    });
+    package.package_sha256 = package
+        .canonical_sha256()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    package
+        .validate()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    Ok(package)
+}
+
+pub fn write_longitudinal_carry_forward_authority_package_v1(
+    root_authority: &LongitudinalCarryForwardAuthorityPackageV1,
+    workload_package_root: &Path,
+    output_path: &Path,
+) -> Result<LongitudinalCarryForwardAuthorityPackageV1, LongitudinalEvidenceError> {
+    validate_fresh_local_root(output_path, workload_package_root)?;
+    let package = complete_longitudinal_carry_forward_authority_package_v1(
+        root_authority,
+        workload_package_root,
+    )?;
+    write_json_create_new(output_path, &package)?;
+    Ok(package)
+}
+
 pub fn longitudinal_non_timing_smoke_v1()
 -> Result<LongitudinalSmokeReceiptV1, LongitudinalEvidenceError> {
     let contract = longitudinal_runner_contract_v1();
@@ -1232,6 +1653,171 @@ pub fn longitudinal_non_timing_smoke_v1()
     result
 }
 
+pub fn longitudinal_carry_forward_non_timing_smoke_v1()
+-> Result<LongitudinalCarryForwardSmokeReceiptV1, LongitudinalEvidenceError> {
+    require_unprotected_environment()?;
+    let smoke_root = std::env::temp_dir().join(format!(
+        "pointbreak-longitudinal-carry-forward-smoke-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(io_error)?
+            .as_nanos()
+    ));
+    fs::create_dir(&smoke_root).map_err(io_error)?;
+    let result = (|| {
+        let source_root = smoke_root.join("source");
+        let optimized_root = smoke_root.join("optimized");
+        let clone_root = smoke_root.join("clone");
+        initialize_evidence_root(&source_root)?;
+
+        let mut source_execution = smoke_execution_identity();
+        source_execution.build_profile = "release-uninstrumented".to_owned();
+        let mut optimized_execution = source_execution.clone();
+        optimized_execution.source_commit = "4".repeat(40);
+        optimized_execution.source_tree = "5".repeat(40);
+        optimized_execution.runner_sha256 = "6".repeat(64);
+        let source_materialization =
+            materialize_longitudinal_workload_v1(super::LongitudinalMaterializeOptionsV1::new(
+                &source_root,
+                LongitudinalTierV1::L1,
+                source_execution,
+            ))
+            .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+        let source_inventory = longitudinal_store_data_inventory_v1(&source_root)
+            .map_err(|_| LongitudinalEvidenceError::Preflight)?;
+        copy_directory_tree(&source_root, &optimized_root)?;
+        let mut optimized_manifest = source_materialization.manifest.clone();
+        optimized_manifest.execution = optimized_execution;
+        optimized_manifest.manifest_sha256 = optimized_manifest
+            .canonical_sha256()
+            .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+        let optimized_materialization =
+            preflight_longitudinal_root_v1(&optimized_root, &optimized_manifest)?;
+        let final_authority_diff_sha256 = sha256_bytes_hex(b"public carry-forward smoke diff");
+        let materializer_equivalence = verify_longitudinal_materializer_equivalence_v1(
+            &source_root,
+            &source_materialization,
+            &optimized_root,
+            &optimized_materialization,
+            final_authority_diff_sha256.clone(),
+        )
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+
+        copy_directory_tree(&source_root, &clone_root)?;
+        let mut corrected_execution = source_materialization.manifest.execution.clone();
+        corrected_execution.source_commit = "7".repeat(40);
+        corrected_execution.source_tree = "8".repeat(40);
+        corrected_execution.runner_sha256 = "9".repeat(64);
+        let options = LongitudinalCarryForwardOptionsV1 {
+            source_root: source_root.clone(),
+            clone_root: clone_root.clone(),
+            source_materialization,
+            corrected_execution,
+            slot: LongitudinalCarryForwardSlotV1 {
+                tier: LongitudinalTierV1::L1,
+                lane: LongitudinalLaneV1::ReleaseUninstrumented,
+                independent_run: 1,
+            },
+            materializer_equivalence,
+            final_authority_diff_sha256,
+        };
+        let authority_root = smoke_root.join("authority");
+        let request = LongitudinalCarryForwardRequestV1 {
+            schema: LONGITUDINAL_CARRY_FORWARD_REQUEST_SCHEMA_V1.to_owned(),
+            source_root: options.source_root.clone(),
+            clone_root: options.clone_root.clone(),
+            authority_root: authority_root.clone(),
+            source_materialization: options.source_materialization.clone(),
+            corrected_execution: options.corrected_execution.clone(),
+            slot: options.slot,
+            materializer_equivalence: options.materializer_equivalence.clone(),
+            final_authority_diff_sha256: options.final_authority_diff_sha256.clone(),
+        };
+        let mut unsanitized_request = serde_json::to_value(&request)
+            .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+        unsanitized_request
+            .as_object_mut()
+            .ok_or(LongitudinalEvidenceError::InvalidReceipt)?
+            .insert("pointbreakHome".to_owned(), "/private/store".into());
+        if serde_json::from_value::<LongitudinalCarryForwardRequestV1>(unsanitized_request).is_ok()
+        {
+            return Err(LongitudinalEvidenceError::InvalidReceipt);
+        }
+        let artifacts = request.execute()?;
+        verify_longitudinal_carry_forward_v1(&options, &artifacts)?;
+        let persisted = LongitudinalCarryForwardArtifactsV1 {
+            carried_materialization: read_json(
+                &authority_root.join(LONGITUDINAL_CARRIED_MATERIALIZATION_FILE_V1),
+            )?,
+            receipt: read_json(&authority_root.join(LONGITUDINAL_CARRY_FORWARD_RECEIPT_FILE_V1))?,
+        };
+        if persisted != artifacts {
+            return Err(LongitudinalEvidenceError::InvalidReceipt);
+        }
+        let clone_store = store_dir_for_repo(&clone_root)
+            .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+        let carrier = &artifacts.carried_materialization.manifest.event_carriers[0];
+        fs::write(
+            clone_store
+                .join("events")
+                .join(format!("{}.json", carrier.logical_key_sha256)),
+            b"{}",
+        )
+        .map_err(io_error)?;
+        if !matches!(
+            verify_longitudinal_carry_forward_v1(&options, &artifacts),
+            Err(LongitudinalEvidenceError::Preflight)
+        ) || longitudinal_store_data_inventory_v1(&source_root)
+            .map_err(|_| LongitudinalEvidenceError::Preflight)?
+            != source_inventory
+        {
+            return Err(LongitudinalEvidenceError::InvalidReceipt);
+        }
+
+        let failure = longitudinal_controller_failure_receipt_v1(
+            LongitudinalFailureOperationSelectorV1::InspectorRevisionListPreflight,
+            Some(LongitudinalHttpFailureV1 {
+                status: 500,
+                body_classification: LongitudinalHttpBodyClassificationV1::JsonError,
+                body_bytes: 21,
+                body_sha256: Some(sha256_bytes_hex(b"sanitized error body")),
+            }),
+            LongitudinalInspectorExitV1::Exited(1),
+            LongitudinalStderrFailureV1 {
+                classification: LongitudinalStderrClassificationV1::KnownDiagnostic,
+                bytes: 20,
+                sha256: Some(sha256_bytes_hex(b"sanitized diagnostic")),
+            },
+        )?;
+        failure
+            .validate()
+            .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+
+        let package_root = smoke_root.join("package");
+        fs::create_dir(&package_root).map_err(io_error)?;
+        write_smoke_workload_package(&package_root, artifacts.carried_materialization.clone())?;
+        let package_verifier = verify_longitudinal_package_receipt_v1(&package_root)?;
+        package_verifier
+            .validate()
+            .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+
+        Ok(LongitudinalCarryForwardSmokeReceiptV1 {
+            schema: "pointbreak.longitudinal-carry-forward-non-timing-smoke.v1".to_owned(),
+            timing_admissible: false,
+            terminal_evidence_admissible: false,
+            carry_forward_verified: true,
+            failure_receipt_verified: true,
+            package_verifier_receipt_verified: true,
+        })
+    })();
+    let cleanup = fs::remove_dir_all(&smoke_root);
+    if result.is_ok() {
+        cleanup.map_err(io_error)?;
+    }
+    result
+}
+
 fn smoke_execution_identity() -> LongitudinalExecutionIdentityV1 {
     LongitudinalExecutionIdentityV1 {
         source_commit: "0".repeat(40),
@@ -1246,6 +1832,42 @@ fn smoke_execution_identity() -> LongitudinalExecutionIdentityV1 {
     }
 }
 
+fn write_smoke_workload_package(
+    package_root: &Path,
+    materialization: LongitudinalMaterializationReceiptV1,
+) -> Result<(), LongitudinalEvidenceError> {
+    let raw = b"public carry-forward package smoke fixture\n";
+    fs::write(package_root.join("raw.json"), raw).map_err(io_error)?;
+    let raw_inventory = vec![super::LongitudinalRawFileV1 {
+        relative_path: "raw.json".to_owned(),
+        sha256: sha256_bytes_hex(raw),
+        bytes: raw.len() as u64,
+    }];
+    let mut package = LongitudinalEvidencePackageV1 {
+        schema: super::LONGITUDINAL_EVIDENCE_PACKAGE_SCHEMA_V1.to_owned(),
+        purpose: super::LongitudinalPackagePurposeV1::NonTimingSmoke,
+        contract_sha256: longitudinal_runner_contract_v1().contract_sha256,
+        base_execution: materialization.manifest.execution.clone(),
+        derivative_execution: None,
+        materializations: vec![materialization],
+        operations: Vec::new(),
+        memory_receipts: Vec::new(),
+        interruption_receipts: Vec::new(),
+        counters: Vec::new(),
+        raw_inventory,
+        failures: Vec::new(),
+        compensation_applied: false,
+        package_sha256: String::new(),
+    };
+    package.package_sha256 = package
+        .canonical_sha256()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    write_json_create_new(
+        &package_root.join(LONGITUDINAL_EVIDENCE_PACKAGE_FILE_V1),
+        &package,
+    )
+}
+
 fn validate_materialization_boundary(
     root: &Path,
     source_root: &Path,
@@ -1256,12 +1878,7 @@ fn validate_materialization_boundary(
         .validate()
         .map_err(|_| LongitudinalEvidenceError::SourceIdentity)?;
     validate_fresh_local_root(root, source_root)?;
-    if PROTECTED_ENVIRONMENT_VARIABLES
-        .iter()
-        .any(|name| std::env::var_os(name).is_some())
-    {
-        return Err(LongitudinalEvidenceError::ProtectedEnvironment);
-    }
+    require_unprotected_environment()?;
     let source_root =
         fs::canonicalize(source_root).map_err(|_| LongitudinalEvidenceError::SourceIdentity)?;
     let runner = fs::canonicalize(runner).map_err(|_| LongitudinalEvidenceError::RunnerIdentity)?;
@@ -1545,6 +2162,56 @@ where
     let receipt = root.join(LONGITUDINAL_PACKAGE_VERIFICATION_RECEIPT_FILE_V1);
     if receipt.exists() && read_json::<T>(&receipt)? != *package {
         return Err(LongitudinalEvidenceError::InvalidReceipt);
+    }
+    Ok(())
+}
+
+fn require_unprotected_environment() -> Result<(), LongitudinalEvidenceError> {
+    if PROTECTED_ENVIRONMENT_VARIABLES
+        .iter()
+        .any(|variable| std::env::var_os(variable).is_some())
+    {
+        return Err(LongitudinalEvidenceError::ProtectedEnvironment);
+    }
+    Ok(())
+}
+
+fn write_json_create_new(
+    path: &Path,
+    value: &impl Serialize,
+) -> Result<(), LongitudinalEvidenceError> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(io_error)?;
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .map_err(io_error)?;
+    file.write_all(&bytes).map_err(io_error)?;
+    file.write_all(b"\n").map_err(io_error)?;
+    file.sync_all().map_err(io_error)
+}
+
+fn copy_directory_tree(source: &Path, destination: &Path) -> Result<(), LongitudinalEvidenceError> {
+    if destination.exists() {
+        return Err(LongitudinalEvidenceError::UnsafeRoot);
+    }
+    fs::create_dir(destination).map_err(io_error)?;
+    let mut pending = vec![(source.to_path_buf(), destination.to_path_buf())];
+    while let Some((source_directory, destination_directory)) = pending.pop() {
+        for entry in fs::read_dir(&source_directory).map_err(io_error)? {
+            let entry = entry.map_err(io_error)?;
+            let source_path = entry.path();
+            let destination_path = destination_directory.join(entry.file_name());
+            let metadata = fs::symlink_metadata(&source_path).map_err(io_error)?;
+            if metadata.is_dir() {
+                fs::create_dir(&destination_path).map_err(io_error)?;
+                pending.push((source_path, destination_path));
+            } else if metadata.is_file() {
+                fs::copy(&source_path, &destination_path).map_err(io_error)?;
+            } else {
+                return Err(LongitudinalEvidenceError::UnsafeRoot);
+            }
+        }
     }
     Ok(())
 }
@@ -1904,5 +2571,19 @@ mod tests {
         package.purpose = LongitudinalPackagePurposeV1::NonTimingSmoke;
         package.package_sha256 = package.canonical_sha256().unwrap();
         package.validate().unwrap();
+    }
+
+    #[test]
+    fn longitudinal_carry_forward_public_smoke_proves_clone_and_verifier_mechanics() {
+        let receipt = longitudinal_carry_forward_non_timing_smoke_v1().unwrap();
+        assert_eq!(
+            receipt.schema,
+            "pointbreak.longitudinal-carry-forward-non-timing-smoke.v1"
+        );
+        assert!(!receipt.timing_admissible);
+        assert!(!receipt.terminal_evidence_admissible);
+        assert!(receipt.carry_forward_verified);
+        assert!(receipt.failure_receipt_verified);
+        assert!(receipt.package_verifier_receipt_verified);
     }
 }

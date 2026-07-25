@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -29,6 +29,16 @@ pub const LONGITUDINAL_MATERIALIZATION_RESUME_RECEIPT_SCHEMA_V1: &str =
     "pointbreak.longitudinal-materialization-resume-receipt.v1";
 pub const LONGITUDINAL_MATERIALIZER_EQUIVALENCE_RECEIPT_SCHEMA_V1: &str =
     "pointbreak.longitudinal-materializer-equivalence-receipt.v1";
+pub const LONGITUDINAL_CARRY_FORWARD_RECEIPT_SCHEMA_V1: &str =
+    "pointbreak.longitudinal-carry-forward-receipt.v1";
+pub const LONGITUDINAL_CARRY_FORWARD_AUTHORITY_PACKAGE_SCHEMA_V1: &str =
+    "pointbreak.longitudinal-carry-forward-authority-package.v1";
+pub const LONGITUDINAL_PACKAGE_VERIFICATION_RECEIPT_SCHEMA_V1: &str =
+    "pointbreak.longitudinal-package-verification-receipt.v1";
+pub const LONGITUDINAL_CONTROLLER_FAILURE_RECEIPT_SCHEMA_V1: &str =
+    "pointbreak.longitudinal-controller-failure-receipt.v1";
+pub const LONGITUDINAL_CARRY_FORWARD_REQUEST_SCHEMA_V1: &str =
+    "pointbreak.longitudinal-carry-forward-request.v1";
 pub const LONGITUDINAL_CAPACITY_PACKAGE_SCHEMA_V1: &str =
     "pointbreak.longitudinal-capacity-package.v1";
 pub const LONGITUDINAL_CONTRACT_PUBLICATION_SCHEMA_V1: &str =
@@ -38,6 +48,11 @@ pub const LONGITUDINAL_CONTRACT_MODE_V1: &str = "--longitudinal-contract";
 pub const LONGITUDINAL_HELP_MODE_V1: &str = "--longitudinal-help";
 pub const LONGITUDINAL_SMOKE_MODE_V1: &str = "--longitudinal-smoke";
 pub const LONGITUDINAL_VERIFY_PACKAGE_MODE_V1: &str = "--longitudinal-verify-package";
+pub const LONGITUDINAL_CARRY_FORWARD_MODE_V1: &str = "--longitudinal-carry-forward";
+pub const LONGITUDINAL_CARRY_FORWARD_SMOKE_MODE_V1: &str = "--longitudinal-carry-forward-smoke";
+pub const LONGITUDINAL_VERIFY_PACKAGE_RECEIPT_MODE_V1: &str =
+    "--longitudinal-verify-package-receipt";
+pub const LONGITUDINAL_VERIFY_CARRY_FORWARD_MODE_V1: &str = "--longitudinal-verify-carry-forward";
 pub const LONGITUDINAL_RUNNER_CONTRACT_SHA256_V1: &str =
     "a2182c741530317f31532c62d4b0152b228e3d85aa177f812fdca433c265ed85";
 pub const LONGITUDINAL_CAPACITY_CONTRACT_SHA256_V1: &str =
@@ -283,6 +298,96 @@ impl LongitudinalInterruptionPointV1 {
 pub enum LongitudinalPackagePurposeV1 {
     TerminalEvidence,
     NonTimingSmoke,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LongitudinalVerifiedPackageKindV1 {
+    Workload,
+    Capacity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalCarryForwardSlotV1 {
+    pub tier: LongitudinalTierV1,
+    pub lane: LongitudinalLaneV1,
+    pub independent_run: u8,
+}
+
+impl LongitudinalCarryForwardSlotV1 {
+    pub fn validate(self) -> Result<(), LongitudinalContractError> {
+        match (self.lane, self.independent_run) {
+            (LongitudinalLaneV1::ReleaseUninstrumented, 1 | 2)
+            | (LongitudinalLaneV1::DebugUninstrumented, 1) => Ok(()),
+            _ => Err(LongitudinalContractError::ContractDrift {
+                field: "carry-forward root slot",
+            }),
+        }
+    }
+}
+
+fn carry_forward_lane_profile_v1(
+    lane: LongitudinalLaneV1,
+) -> Result<&'static str, LongitudinalContractError> {
+    match lane {
+        LongitudinalLaneV1::ReleaseUninstrumented => Ok("release-uninstrumented"),
+        LongitudinalLaneV1::DebugUninstrumented => Ok("debug-uninstrumented"),
+        LongitudinalLaneV1::AttributionCounts => Err(LongitudinalContractError::ContractDrift {
+            field: "carry-forward source lane",
+        }),
+    }
+}
+
+fn execution_without_lane_identity_v1(
+    execution: &LongitudinalExecutionIdentityV1,
+) -> LongitudinalExecutionIdentityV1 {
+    let mut common = execution.clone();
+    common.runner_sha256.clear();
+    common.build_profile.clear();
+    common
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum LongitudinalFailureOperationSelectorV1 {
+    Workload(LongitudinalOperationV1),
+    Capacity(LongitudinalCapacityProbeV1),
+    InspectorRevisionListPreflight,
+    PackageVerification(LongitudinalVerifiedPackageKindV1),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LongitudinalHttpBodyClassificationV1 {
+    Empty,
+    JsonSuccess,
+    JsonError,
+    Html,
+    Text,
+    Binary,
+    RedactedSensitive,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(tag = "kind", content = "code", rename_all = "snake_case")]
+pub enum LongitudinalInspectorExitV1 {
+    NotStarted,
+    Exited(i32),
+    Signaled,
+    SpawnFailed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LongitudinalStderrClassificationV1 {
+    NotCaptured,
+    Empty,
+    KnownDiagnostic,
+    Panic,
+    IoFailure,
+    OtherSanitized,
+    RedactedSensitive,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
@@ -1480,6 +1585,32 @@ impl LongitudinalWorkloadManifestV1 {
     }
 }
 
+pub fn longitudinal_workload_manifest_carry_invariant_sha256_v1(
+    manifest: &LongitudinalWorkloadManifestV1,
+) -> Result<String, LongitudinalContractError> {
+    manifest.validate()?;
+    let mut value = serde_json::to_value(manifest).map_err(|error| {
+        LongitudinalContractError::CanonicalJson {
+            message: error.to_string(),
+        }
+    })?;
+    let object = value
+        .as_object_mut()
+        .ok_or(LongitudinalContractError::ContractDrift {
+            field: "carry-forward manifest representation",
+        })?;
+    if object.remove("execution").is_none() || object.remove("manifestSha256").is_none() {
+        return Err(LongitudinalContractError::ContractDrift {
+            field: "carry-forward manifest representation",
+        });
+    }
+    let bytes =
+        canonical_json_bytes(&value).map_err(|error| LongitudinalContractError::CanonicalJson {
+            message: error.to_string(),
+        })?;
+    Ok(sha256_bytes_hex(&bytes))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LongitudinalStrictSemanticReceiptV1 {
@@ -1695,6 +1826,506 @@ impl LongitudinalMaterializerEquivalenceReceiptV1 {
             &self.receipt_sha256,
             &self.canonical_sha256()?,
             "materializer equivalence receipt",
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalCarryForwardReceiptV1 {
+    pub schema: String,
+    pub slot: LongitudinalCarryForwardSlotV1,
+    pub contract_sha256: String,
+    pub schedule_sha256: String,
+    pub source_execution: LongitudinalExecutionIdentityV1,
+    pub corrected_execution: LongitudinalExecutionIdentityV1,
+    pub source_root_identity: String,
+    pub clone_root_identity: String,
+    pub source_pre_inventory: LongitudinalStoreDataInventoryV1,
+    pub source_post_inventory: LongitudinalStoreDataInventoryV1,
+    pub clone_pre_inventory: LongitudinalStoreDataInventoryV1,
+    pub clone_post_inventory: LongitudinalStoreDataInventoryV1,
+    pub source_strict: LongitudinalStrictSemanticReceiptV1,
+    pub clone_strict: LongitudinalStrictSemanticReceiptV1,
+    pub event_count: u64,
+    pub content_count: u64,
+    pub source_manifest_sha256: String,
+    pub carried_manifest_sha256: String,
+    pub source_manifest_invariant_sha256: String,
+    pub carried_manifest_invariant_sha256: String,
+    pub source_materialization_sha256: String,
+    pub carried_materialization_sha256: String,
+    pub materializer_equivalence: LongitudinalMaterializerEquivalenceReceiptV1,
+    pub final_authority_diff_sha256: String,
+    pub receipt_sha256: String,
+}
+
+impl LongitudinalCarryForwardReceiptV1 {
+    pub fn canonical_sha256(&self) -> Result<String, LongitudinalContractError> {
+        canonical_sha256_without(&self.receipt_sha256, |receipt_sha256| {
+            let mut preimage = self.clone();
+            preimage.receipt_sha256 = receipt_sha256;
+            preimage
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), LongitudinalContractError> {
+        if self.schema != LONGITUDINAL_CARRY_FORWARD_RECEIPT_SCHEMA_V1
+            || self.contract_sha256 != LONGITUDINAL_RUNNER_CONTRACT_SHA256_V1
+        {
+            return Err(LongitudinalContractError::UnsupportedContract);
+        }
+        self.slot.validate()?;
+        self.source_execution.validate()?;
+        self.corrected_execution.validate()?;
+        if self.source_execution == self.corrected_execution
+            || self.source_execution.parent_commit.is_some()
+            || self.corrected_execution.parent_commit.is_some()
+            || self.source_execution.build_profile != carry_forward_lane_profile_v1(self.slot.lane)?
+        {
+            return Err(LongitudinalContractError::MixedRevision);
+        }
+        validate_hex(
+            &self.source_root_identity,
+            64,
+            "carry-forward source root identity",
+        )?;
+        validate_hex(
+            &self.clone_root_identity,
+            64,
+            "carry-forward clone root identity",
+        )?;
+        if self.source_root_identity == self.clone_root_identity {
+            return Err(LongitudinalContractError::RootIdentityNotDistinct);
+        }
+        for inventory in [
+            &self.source_pre_inventory,
+            &self.source_post_inventory,
+            &self.clone_pre_inventory,
+            &self.clone_post_inventory,
+        ] {
+            inventory.validate()?;
+        }
+        if self.source_pre_inventory != self.source_post_inventory
+            || self.source_pre_inventory != self.clone_pre_inventory
+            || self.source_pre_inventory != self.clone_post_inventory
+        {
+            return Err(LongitudinalContractError::PairMismatch);
+        }
+        validate_strict_receipt(&self.source_strict)?;
+        validate_strict_receipt(&self.clone_strict)?;
+        if self.source_strict != self.clone_strict {
+            return Err(LongitudinalContractError::PairMismatch);
+        }
+        let requirement = longitudinal_runner_contract_v1()
+            .tiers
+            .into_iter()
+            .find(|requirement| requirement.tier == self.slot.tier)
+            .ok_or(LongitudinalContractError::UnsupportedTier)?;
+        require_count(
+            self.event_count,
+            requirement.event_count,
+            "carry-forward event count",
+        )?;
+        require_count(
+            self.content_count,
+            requirement.present_content_count,
+            "carry-forward content count",
+        )?;
+        validate_bound_hash(
+            &self.schedule_sha256,
+            &canonical_sha256(&LongitudinalOperationV1::ALL)?,
+            "carry-forward schedule",
+        )?;
+        for (hash, field) in [
+            (
+                &self.source_manifest_sha256,
+                "carry-forward source manifest SHA-256",
+            ),
+            (
+                &self.carried_manifest_sha256,
+                "carry-forward carried manifest SHA-256",
+            ),
+            (
+                &self.source_manifest_invariant_sha256,
+                "carry-forward source manifest invariant SHA-256",
+            ),
+            (
+                &self.carried_manifest_invariant_sha256,
+                "carry-forward carried manifest invariant SHA-256",
+            ),
+            (
+                &self.source_materialization_sha256,
+                "carry-forward source materialization SHA-256",
+            ),
+            (
+                &self.carried_materialization_sha256,
+                "carry-forward carried materialization SHA-256",
+            ),
+            (
+                &self.final_authority_diff_sha256,
+                "carry-forward final authority diff SHA-256",
+            ),
+        ] {
+            validate_hex(hash, 64, field)?;
+        }
+        if self.source_manifest_invariant_sha256 != self.carried_manifest_invariant_sha256 {
+            return Err(LongitudinalContractError::ContractDrift {
+                field: "carry-forward manifest invariant",
+            });
+        }
+        self.materializer_equivalence.validate()?;
+        let baseline = &self.materializer_equivalence.baseline;
+        let successor = &self.materializer_equivalence.successor;
+        if baseline.subject != LongitudinalMaterializationSubjectV1::Workload(self.slot.tier)
+            || successor.execution.parent_commit.is_some()
+            || baseline.inventory != self.source_pre_inventory
+            || baseline.strict != self.source_strict
+            || baseline.event_count != self.event_count
+            || baseline.content_count != self.content_count
+            || successor.subject != LongitudinalMaterializationSubjectV1::Workload(self.slot.tier)
+            || successor.inventory != self.clone_post_inventory
+            || successor.strict != self.clone_strict
+            || successor.event_count != self.event_count
+            || successor.content_count != self.content_count
+            || self.materializer_equivalence.implementation_diff_sha256
+                != self.final_authority_diff_sha256
+        {
+            return Err(LongitudinalContractError::PairMismatch);
+        }
+        validate_bound_hash(
+            &self.receipt_sha256,
+            &self.canonical_sha256()?,
+            "carry-forward receipt",
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalPackageVerificationReceiptV1 {
+    pub schema: String,
+    pub package_kind: LongitudinalVerifiedPackageKindV1,
+    pub package_sha256: String,
+    pub contract_sha256: String,
+    pub execution_identity_sha256: String,
+    pub raw_inventory_sha256: String,
+    pub verified: bool,
+    pub receipt_sha256: String,
+}
+
+impl LongitudinalPackageVerificationReceiptV1 {
+    pub fn canonical_sha256(&self) -> Result<String, LongitudinalContractError> {
+        canonical_sha256_without(&self.receipt_sha256, |receipt_sha256| {
+            let mut preimage = self.clone();
+            preimage.receipt_sha256 = receipt_sha256;
+            preimage
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), LongitudinalContractError> {
+        if self.schema != LONGITUDINAL_PACKAGE_VERIFICATION_RECEIPT_SCHEMA_V1 || !self.verified {
+            return Err(LongitudinalContractError::IncompleteEvidence);
+        }
+        let expected_contract = match self.package_kind {
+            LongitudinalVerifiedPackageKindV1::Workload => LONGITUDINAL_RUNNER_CONTRACT_SHA256_V1,
+            LongitudinalVerifiedPackageKindV1::Capacity => LONGITUDINAL_CAPACITY_CONTRACT_SHA256_V1,
+        };
+        if self.contract_sha256 != expected_contract {
+            return Err(LongitudinalContractError::UnsupportedContract);
+        }
+        for (hash, field) in [
+            (&self.package_sha256, "verified package SHA-256"),
+            (
+                &self.execution_identity_sha256,
+                "verified package execution identity SHA-256",
+            ),
+            (
+                &self.raw_inventory_sha256,
+                "verified package raw inventory SHA-256",
+            ),
+        ] {
+            validate_hex(hash, 64, field)?;
+        }
+        validate_bound_hash(
+            &self.receipt_sha256,
+            &self.canonical_sha256()?,
+            "package verification receipt",
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalCarryForwardAuthorityCompletionV1 {
+    pub final_workload_package_sha256: String,
+    pub verification_receipt: LongitudinalPackageVerificationReceiptV1,
+    pub package_verified: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalCarryForwardAuthorityPackageV1 {
+    pub schema: String,
+    pub contract_sha256: String,
+    pub corrected_execution: LongitudinalExecutionIdentityV1,
+    pub carry_receipts: Vec<LongitudinalCarryForwardReceiptV1>,
+    pub authority_set_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion: Option<LongitudinalCarryForwardAuthorityCompletionV1>,
+    pub package_sha256: String,
+}
+
+impl LongitudinalCarryForwardAuthorityPackageV1 {
+    pub fn canonical_authority_set_sha256(&self) -> Result<String, LongitudinalContractError> {
+        canonical_sha256(&(
+            &self.contract_sha256,
+            &self.corrected_execution,
+            &self.carry_receipts,
+        ))
+    }
+
+    pub fn canonical_sha256(&self) -> Result<String, LongitudinalContractError> {
+        canonical_sha256_without(&self.package_sha256, |package_sha256| {
+            let mut preimage = self.clone();
+            preimage.package_sha256 = package_sha256;
+            preimage
+        })
+    }
+
+    pub fn validate_roots(&self) -> Result<(), LongitudinalContractError> {
+        if self.schema != LONGITUDINAL_CARRY_FORWARD_AUTHORITY_PACKAGE_SCHEMA_V1
+            || self.contract_sha256 != LONGITUDINAL_RUNNER_CONTRACT_SHA256_V1
+        {
+            return Err(LongitudinalContractError::UnsupportedContract);
+        }
+        self.corrected_execution.validate()?;
+        if self.corrected_execution.parent_commit.is_some() {
+            return Err(LongitudinalContractError::MixedRevision);
+        }
+        let expected = LongitudinalTierV1::ALL
+            .into_iter()
+            .flat_map(|tier| {
+                [
+                    LongitudinalCarryForwardSlotV1 {
+                        tier,
+                        lane: LongitudinalLaneV1::ReleaseUninstrumented,
+                        independent_run: 1,
+                    },
+                    LongitudinalCarryForwardSlotV1 {
+                        tier,
+                        lane: LongitudinalLaneV1::ReleaseUninstrumented,
+                        independent_run: 2,
+                    },
+                    LongitudinalCarryForwardSlotV1 {
+                        tier,
+                        lane: LongitudinalLaneV1::DebugUninstrumented,
+                        independent_run: 1,
+                    },
+                ]
+            })
+            .collect::<Vec<_>>();
+        let mut actual = Vec::new();
+        let mut unique_slots = BTreeSet::new();
+        let mut source_roots = BTreeSet::new();
+        let mut clone_roots = BTreeSet::new();
+        let mut common_source_execution = None;
+        let mut source_execution_by_lane = BTreeMap::new();
+        let mut equivalence_by_tier = BTreeMap::new();
+        let mut equivalence_baseline_execution = None;
+        let mut equivalence_successor_execution = None;
+        let mut final_authority_diff_sha256 = None;
+        for receipt in &self.carry_receipts {
+            receipt.validate()?;
+            if receipt.corrected_execution != self.corrected_execution
+                || !unique_slots.insert(receipt.slot)
+                || !source_roots.insert(receipt.source_root_identity.as_str())
+                || !clone_roots.insert(receipt.clone_root_identity.as_str())
+            {
+                return Err(LongitudinalContractError::PairMismatch);
+            }
+            let source_common = execution_without_lane_identity_v1(&receipt.source_execution);
+            if common_source_execution.get_or_insert_with(|| source_common.clone())
+                != &source_common
+                || source_execution_by_lane
+                    .entry(receipt.slot.lane)
+                    .or_insert_with(|| receipt.source_execution.clone())
+                    != &receipt.source_execution
+                || equivalence_by_tier
+                    .entry(receipt.slot.tier)
+                    .or_insert_with(|| receipt.materializer_equivalence.clone())
+                    != &receipt.materializer_equivalence
+                || equivalence_baseline_execution.get_or_insert_with(|| {
+                    receipt.materializer_equivalence.baseline.execution.clone()
+                }) != &receipt.materializer_equivalence.baseline.execution
+                || equivalence_successor_execution.get_or_insert_with(|| {
+                    receipt.materializer_equivalence.successor.execution.clone()
+                }) != &receipt.materializer_equivalence.successor.execution
+                || final_authority_diff_sha256
+                    .get_or_insert_with(|| receipt.final_authority_diff_sha256.clone())
+                    != &receipt.final_authority_diff_sha256
+            {
+                return Err(LongitudinalContractError::PairMismatch);
+            }
+            actual.push(receipt.slot);
+        }
+        if actual != expected || !source_roots.is_disjoint(&clone_roots) {
+            return Err(LongitudinalContractError::IncompleteEvidence);
+        }
+        validate_bound_hash(
+            &self.authority_set_sha256,
+            &self.canonical_authority_set_sha256()?,
+            "carry-forward authority set",
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), LongitudinalContractError> {
+        self.validate_roots()?;
+        let completion = self
+            .completion
+            .as_ref()
+            .ok_or(LongitudinalContractError::IncompleteEvidence)?;
+        completion.verification_receipt.validate()?;
+        if !completion.package_verified
+            || completion.verification_receipt.package_kind
+                != LongitudinalVerifiedPackageKindV1::Workload
+            || completion.final_workload_package_sha256
+                != completion.verification_receipt.package_sha256
+            || completion.verification_receipt.execution_identity_sha256
+                != self.corrected_execution.canonical_sha256()?
+        {
+            return Err(LongitudinalContractError::IncompleteEvidence);
+        }
+        validate_bound_hash(
+            &self.package_sha256,
+            &self.canonical_sha256()?,
+            "carry-forward authority package",
+        )
+    }
+
+    pub fn validate_incomplete(&self) -> Result<(), LongitudinalContractError> {
+        self.validate_roots()?;
+        if self.completion.is_some() {
+            return Err(LongitudinalContractError::IncompleteEvidence);
+        }
+        validate_bound_hash(
+            &self.package_sha256,
+            &self.canonical_sha256()?,
+            "incomplete carry-forward authority package",
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalHttpFailureV1 {
+    pub status: u16,
+    pub body_classification: LongitudinalHttpBodyClassificationV1,
+    pub body_bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body_sha256: Option<String>,
+}
+
+impl LongitudinalHttpFailureV1 {
+    fn validate(&self) -> Result<(), LongitudinalContractError> {
+        if !(100..=599).contains(&self.status) {
+            return Err(LongitudinalContractError::ContractDrift {
+                field: "controller failure HTTP status",
+            });
+        }
+        match (self.body_bytes, &self.body_sha256) {
+            (0, None)
+                if self.body_classification == LongitudinalHttpBodyClassificationV1::Empty =>
+            {
+                Ok(())
+            }
+            (bytes, Some(hash))
+                if bytes > 0
+                    && self.body_classification != LongitudinalHttpBodyClassificationV1::Empty =>
+            {
+                validate_hex(hash, 64, "controller failure HTTP body SHA-256")
+            }
+            _ => Err(LongitudinalContractError::ContractDrift {
+                field: "controller failure HTTP body",
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalStderrFailureV1 {
+    pub classification: LongitudinalStderrClassificationV1,
+    pub bytes: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+impl LongitudinalStderrFailureV1 {
+    fn validate(&self) -> Result<(), LongitudinalContractError> {
+        match (self.classification, self.bytes, &self.sha256) {
+            (LongitudinalStderrClassificationV1::NotCaptured, 0, None)
+            | (LongitudinalStderrClassificationV1::Empty, 0, None) => Ok(()),
+            (classification, bytes, Some(hash))
+                if bytes > 0
+                    && !matches!(
+                        classification,
+                        LongitudinalStderrClassificationV1::NotCaptured
+                            | LongitudinalStderrClassificationV1::Empty
+                    ) =>
+            {
+                validate_hex(hash, 64, "controller failure stderr SHA-256")
+            }
+            _ => Err(LongitudinalContractError::ContractDrift {
+                field: "controller failure stderr",
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalControllerFailureReceiptV1 {
+    pub schema: String,
+    pub operation_selector: LongitudinalFailureOperationSelectorV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub http: Option<LongitudinalHttpFailureV1>,
+    pub inspector_exit: LongitudinalInspectorExitV1,
+    pub stderr: LongitudinalStderrFailureV1,
+    pub immutable: bool,
+    pub receipt_sha256: String,
+}
+
+impl LongitudinalControllerFailureReceiptV1 {
+    pub fn canonical_sha256(&self) -> Result<String, LongitudinalContractError> {
+        canonical_sha256_without(&self.receipt_sha256, |receipt_sha256| {
+            let mut preimage = self.clone();
+            preimage.receipt_sha256 = receipt_sha256;
+            preimage
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), LongitudinalContractError> {
+        if self.schema != LONGITUDINAL_CONTROLLER_FAILURE_RECEIPT_SCHEMA_V1 {
+            return Err(LongitudinalContractError::UnsupportedContract);
+        }
+        if !self.immutable {
+            return Err(LongitudinalContractError::MutableFailure);
+        }
+        if let Some(http) = &self.http {
+            http.validate()?;
+        }
+        self.stderr.validate()?;
+        if self.http.is_none()
+            && self.inspector_exit == LongitudinalInspectorExitV1::NotStarted
+            && self.stderr.classification == LongitudinalStderrClassificationV1::NotCaptured
+        {
+            return Err(LongitudinalContractError::IncompleteEvidence);
+        }
+        validate_bound_hash(
+            &self.receipt_sha256,
+            &self.canonical_sha256()?,
+            "controller failure receipt",
         )
     }
 }
@@ -3628,6 +4259,38 @@ pub fn longitudinal_help_v1() -> LongitudinalHelpV1 {
                 runs_timing: false,
                 reads_private_inputs: false,
             },
+            LongitudinalHelpModeV1 {
+                flag: LONGITUDINAL_CARRY_FORWARD_MODE_V1.to_owned(),
+                purpose: "strictly verify an immutable source and isolated clone, then write completion-last carry authority"
+                    .to_owned(),
+                constructs_roots: false,
+                runs_timing: false,
+                reads_private_inputs: false,
+            },
+            LongitudinalHelpModeV1 {
+                flag: LONGITUDINAL_CARRY_FORWARD_SMOKE_MODE_V1.to_owned(),
+                purpose: "exercise disposable carry-forward, failure, and package-verifier mechanics"
+                    .to_owned(),
+                constructs_roots: true,
+                runs_timing: false,
+                reads_private_inputs: false,
+            },
+            LongitudinalHelpModeV1 {
+                flag: LONGITUDINAL_VERIFY_PACKAGE_RECEIPT_MODE_V1.to_owned(),
+                purpose: "derive a typed verification receipt from one completed raw-evidence package"
+                    .to_owned(),
+                constructs_roots: false,
+                runs_timing: false,
+                reads_private_inputs: false,
+            },
+            LongitudinalHelpModeV1 {
+                flag: LONGITUDINAL_VERIFY_CARRY_FORWARD_MODE_V1.to_owned(),
+                purpose: "verify final carry-forward authority against its exact workload package"
+                    .to_owned(),
+                constructs_roots: false,
+                runs_timing: false,
+                reads_private_inputs: false,
+            },
         ],
         native_evidence_guidance:
             "use the separately frozen explicit operator command ledger; native collection is not a public bench mode"
@@ -4095,6 +4758,179 @@ mod contract_tests {
             .canonical_sha256()
             .expect("equivalence receipt hash");
         receipt
+    }
+
+    fn carry_receipt(
+        slot: LongitudinalCarryForwardSlotV1,
+        ordinal: usize,
+    ) -> LongitudinalCarryForwardReceiptV1 {
+        let requirement = longitudinal_runner_contract_v1()
+            .tiers
+            .into_iter()
+            .find(|requirement| requirement.tier == slot.tier)
+            .expect("tier requirement");
+        let inventory = store_inventory("equivalent-inventory");
+        let strict = materialization("carry-strict").strict;
+        let mut source_execution = execution();
+        source_execution.build_profile = carry_forward_lane_profile_v1(slot.lane)
+            .expect("supported carry lane")
+            .to_owned();
+        source_execution.runner_sha256 = match slot.lane {
+            LongitudinalLaneV1::ReleaseUninstrumented => digest("source release runner"),
+            LongitudinalLaneV1::DebugUninstrumented => digest("source debug runner"),
+            LongitudinalLaneV1::AttributionCounts => unreachable!("unsupported carry lane"),
+        };
+        let mut equivalence_baseline_execution = execution();
+        equivalence_baseline_execution.build_profile = "release-uninstrumented".to_owned();
+        equivalence_baseline_execution.runner_sha256 = digest("equivalence baseline runner");
+        let mut optimized_execution = equivalence_baseline_execution.clone();
+        optimized_execution.source_commit = "5".repeat(40);
+        optimized_execution.source_tree = "6".repeat(40);
+        optimized_execution.runner_sha256 = digest("equivalence successor runner");
+        let mut corrected_execution = optimized_execution.clone();
+        corrected_execution.source_commit = "7".repeat(40);
+        corrected_execution.source_tree = "8".repeat(40);
+        corrected_execution.runner_sha256 = digest("corrected runner");
+        let mut equivalence = LongitudinalMaterializerEquivalenceReceiptV1 {
+            schema: LONGITUDINAL_MATERIALIZER_EQUIVALENCE_RECEIPT_SCHEMA_V1.to_owned(),
+            baseline: LongitudinalMaterializerRootReceiptV1 {
+                subject: LongitudinalMaterializationSubjectV1::Workload(slot.tier),
+                execution: equivalence_baseline_execution,
+                root_identity: digest(&format!("equivalence-baseline-{:?}", slot.tier)),
+                inventory: inventory.clone(),
+                event_count: requirement.event_count,
+                content_count: requirement.present_content_count,
+                strict: strict.clone(),
+                materialization_sha256: digest(&format!(
+                    "baseline-materialization-{:?}",
+                    slot.tier
+                )),
+            },
+            successor: LongitudinalMaterializerRootReceiptV1 {
+                subject: LongitudinalMaterializationSubjectV1::Workload(slot.tier),
+                execution: optimized_execution,
+                root_identity: digest(&format!("equivalence-successor-{:?}", slot.tier)),
+                inventory: inventory.clone(),
+                event_count: requirement.event_count,
+                content_count: requirement.present_content_count,
+                strict: strict.clone(),
+                materialization_sha256: digest(&format!(
+                    "successor-materialization-{:?}",
+                    slot.tier
+                )),
+            },
+            implementation_diff_sha256: digest("implementation-diff"),
+            equivalent: true,
+            receipt_sha256: String::new(),
+        };
+        equivalence.receipt_sha256 = equivalence
+            .canonical_sha256()
+            .expect("equivalence receipt hash");
+        let mut receipt = LongitudinalCarryForwardReceiptV1 {
+            schema: LONGITUDINAL_CARRY_FORWARD_RECEIPT_SCHEMA_V1.to_owned(),
+            slot,
+            contract_sha256: LONGITUDINAL_RUNNER_CONTRACT_SHA256_V1.to_owned(),
+            schedule_sha256: canonical_sha256(&LongitudinalOperationV1::ALL)
+                .expect("schedule hash"),
+            source_execution,
+            corrected_execution,
+            source_root_identity: digest(&format!("source-root-{ordinal}")),
+            clone_root_identity: digest(&format!("clone-root-{ordinal}")),
+            source_pre_inventory: inventory.clone(),
+            source_post_inventory: inventory.clone(),
+            clone_pre_inventory: inventory.clone(),
+            clone_post_inventory: inventory,
+            source_strict: strict.clone(),
+            clone_strict: strict,
+            event_count: requirement.event_count,
+            content_count: requirement.present_content_count,
+            source_manifest_sha256: digest(&format!("source-manifest-{ordinal}")),
+            carried_manifest_sha256: digest(&format!("carried-manifest-{ordinal}")),
+            source_manifest_invariant_sha256: digest("manifest-invariant"),
+            carried_manifest_invariant_sha256: digest("manifest-invariant"),
+            source_materialization_sha256: digest(&format!("source-materialization-{ordinal}")),
+            carried_materialization_sha256: digest(&format!("carried-materialization-{ordinal}")),
+            materializer_equivalence: equivalence,
+            final_authority_diff_sha256: digest("implementation-diff"),
+            receipt_sha256: String::new(),
+        };
+        receipt.receipt_sha256 = receipt.canonical_sha256().expect("carry receipt hash");
+        receipt
+    }
+
+    fn package_verification_receipt(
+        execution: &LongitudinalExecutionIdentityV1,
+    ) -> LongitudinalPackageVerificationReceiptV1 {
+        let mut receipt = LongitudinalPackageVerificationReceiptV1 {
+            schema: LONGITUDINAL_PACKAGE_VERIFICATION_RECEIPT_SCHEMA_V1.to_owned(),
+            package_kind: LongitudinalVerifiedPackageKindV1::Workload,
+            package_sha256: digest("workload package"),
+            contract_sha256: LONGITUDINAL_RUNNER_CONTRACT_SHA256_V1.to_owned(),
+            execution_identity_sha256: execution
+                .canonical_sha256()
+                .expect("execution identity hash"),
+            raw_inventory_sha256: digest("raw inventory"),
+            verified: true,
+            receipt_sha256: String::new(),
+        };
+        receipt.receipt_sha256 = receipt
+            .canonical_sha256()
+            .expect("verification receipt hash");
+        receipt
+    }
+
+    fn carry_authority_package() -> LongitudinalCarryForwardAuthorityPackageV1 {
+        let carry_receipts = LongitudinalTierV1::ALL
+            .into_iter()
+            .flat_map(|tier| {
+                [
+                    LongitudinalCarryForwardSlotV1 {
+                        tier,
+                        lane: LongitudinalLaneV1::ReleaseUninstrumented,
+                        independent_run: 1,
+                    },
+                    LongitudinalCarryForwardSlotV1 {
+                        tier,
+                        lane: LongitudinalLaneV1::ReleaseUninstrumented,
+                        independent_run: 2,
+                    },
+                    LongitudinalCarryForwardSlotV1 {
+                        tier,
+                        lane: LongitudinalLaneV1::DebugUninstrumented,
+                        independent_run: 1,
+                    },
+                ]
+            })
+            .enumerate()
+            .map(|(ordinal, slot)| carry_receipt(slot, ordinal))
+            .collect::<Vec<_>>();
+        let corrected_execution = carry_receipts[0].corrected_execution.clone();
+        let verification_receipt = package_verification_receipt(&corrected_execution);
+        let mut package = LongitudinalCarryForwardAuthorityPackageV1 {
+            schema: LONGITUDINAL_CARRY_FORWARD_AUTHORITY_PACKAGE_SCHEMA_V1.to_owned(),
+            contract_sha256: LONGITUDINAL_RUNNER_CONTRACT_SHA256_V1.to_owned(),
+            corrected_execution,
+            carry_receipts,
+            authority_set_sha256: String::new(),
+            completion: Some(LongitudinalCarryForwardAuthorityCompletionV1 {
+                final_workload_package_sha256: verification_receipt.package_sha256.clone(),
+                verification_receipt,
+                package_verified: true,
+            }),
+            package_sha256: String::new(),
+        };
+        package.authority_set_sha256 = package
+            .canonical_authority_set_sha256()
+            .expect("authority set hash");
+        package.package_sha256 = package.canonical_sha256().expect("authority package hash");
+        package
+    }
+
+    fn rehash_carry_authority_package(package: &mut LongitudinalCarryForwardAuthorityPackageV1) {
+        package.authority_set_sha256 = package
+            .canonical_authority_set_sha256()
+            .expect("authority set hash");
+        package.package_sha256 = package.canonical_sha256().expect("authority package hash");
     }
 
     fn generation(
@@ -4764,6 +5600,265 @@ mod contract_tests {
         assert_eq!(
             publication.publication_sha256,
             LONGITUDINAL_CONTRACT_PUBLICATION_SHA256_V1
+        );
+    }
+
+    #[test]
+    fn carry_forward_contract_surface_is_versioned() {
+        assert_eq!(
+            LONGITUDINAL_CARRY_FORWARD_RECEIPT_SCHEMA_V1,
+            "pointbreak.longitudinal-carry-forward-receipt.v1"
+        );
+        assert_eq!(
+            LONGITUDINAL_CARRY_FORWARD_AUTHORITY_PACKAGE_SCHEMA_V1,
+            "pointbreak.longitudinal-carry-forward-authority-package.v1"
+        );
+        assert_eq!(
+            LONGITUDINAL_PACKAGE_VERIFICATION_RECEIPT_SCHEMA_V1,
+            "pointbreak.longitudinal-package-verification-receipt.v1"
+        );
+        assert_eq!(
+            LONGITUDINAL_CONTROLLER_FAILURE_RECEIPT_SCHEMA_V1,
+            "pointbreak.longitudinal-controller-failure-receipt.v1"
+        );
+        assert_eq!(
+            LONGITUDINAL_CARRY_FORWARD_REQUEST_SCHEMA_V1,
+            "pointbreak.longitudinal-carry-forward-request.v1"
+        );
+    }
+
+    #[test]
+    fn carry_forward_receipt_fails_closed_for_every_authority_binding() {
+        let slot = LongitudinalCarryForwardSlotV1 {
+            tier: LongitudinalTierV1::L1,
+            lane: LongitudinalLaneV1::ReleaseUninstrumented,
+            independent_run: 1,
+        };
+        let receipt = carry_receipt(slot, 0);
+        receipt.validate().expect("carry receipt validates");
+
+        let mut tampered = receipt.clone();
+        tampered.carried_manifest_invariant_sha256 = digest("drifted invariant");
+        tampered.receipt_sha256 = tampered.canonical_sha256().expect("tampered receipt hash");
+        assert!(tampered.validate().is_err());
+
+        tampered = receipt.clone();
+        tampered.clone_post_inventory.inventory_sha256 = digest("changed store file");
+        tampered.receipt_sha256 = tampered.canonical_sha256().expect("tampered receipt hash");
+        assert!(tampered.validate().is_err());
+
+        tampered = receipt.clone();
+        tampered.source_strict.state_sha256 = digest("changed semantics");
+        tampered.receipt_sha256 = tampered.canonical_sha256().expect("tampered receipt hash");
+        assert!(tampered.validate().is_err());
+
+        tampered = receipt.clone();
+        tampered.schedule_sha256 = digest("changed schedule");
+        tampered.receipt_sha256 = tampered.canonical_sha256().expect("tampered receipt hash");
+        assert!(tampered.validate().is_err());
+
+        tampered = receipt.clone();
+        tampered.contract_sha256 = digest("changed workload contract");
+        tampered.receipt_sha256 = tampered.canonical_sha256().expect("tampered receipt hash");
+        assert!(tampered.validate().is_err());
+
+        tampered = receipt.clone();
+        tampered.materializer_equivalence.equivalent = false;
+        tampered.materializer_equivalence.receipt_sha256 = tampered
+            .materializer_equivalence
+            .canonical_sha256()
+            .expect("tampered equivalence hash");
+        tampered.receipt_sha256 = tampered.canonical_sha256().expect("tampered receipt hash");
+        assert!(tampered.validate().is_err());
+
+        tampered = receipt;
+        tampered.clone_root_identity = tampered.source_root_identity.clone();
+        tampered.receipt_sha256 = tampered.canonical_sha256().expect("tampered receipt hash");
+        assert!(tampered.validate().is_err());
+    }
+
+    #[test]
+    fn carry_forward_authority_requires_all_slots_and_a_matching_verified_workload_package() {
+        let package = carry_authority_package();
+        package.validate().expect("complete authority validates");
+
+        let mut incomplete = package.clone();
+        incomplete.completion = None;
+        incomplete.package_sha256 = incomplete.canonical_sha256().expect("package hash");
+        incomplete
+            .validate_incomplete()
+            .expect("root authority validates before workload collection");
+        assert_eq!(
+            incomplete.validate(),
+            Err(LongitudinalContractError::IncompleteEvidence)
+        );
+
+        let mut missing = package.clone();
+        missing.carry_receipts.pop();
+        missing.authority_set_sha256 = missing
+            .canonical_authority_set_sha256()
+            .expect("authority set hash");
+        missing.package_sha256 = missing.canonical_sha256().expect("package hash");
+        assert_eq!(
+            missing.validate(),
+            Err(LongitudinalContractError::IncompleteEvidence)
+        );
+
+        let mut reordered = package.clone();
+        reordered.carry_receipts.swap(0, 1);
+        reordered.authority_set_sha256 = reordered
+            .canonical_authority_set_sha256()
+            .expect("authority set hash");
+        reordered.package_sha256 = reordered.canonical_sha256().expect("package hash");
+        assert_eq!(
+            reordered.validate(),
+            Err(LongitudinalContractError::IncompleteEvidence)
+        );
+
+        let mut mismatch = package.clone();
+        mismatch
+            .completion
+            .as_mut()
+            .expect("completion")
+            .final_workload_package_sha256 = digest("other package");
+        mismatch.package_sha256 = mismatch.canonical_sha256().expect("package hash");
+        assert_eq!(
+            mismatch.validate(),
+            Err(LongitudinalContractError::IncompleteEvidence)
+        );
+
+        let mut unverified = package;
+        let completion = unverified.completion.as_mut().expect("completion");
+        completion.package_verified = false;
+        unverified.package_sha256 = unverified.canonical_sha256().expect("package hash");
+        assert_eq!(
+            unverified.validate(),
+            Err(LongitudinalContractError::IncompleteEvidence)
+        );
+    }
+
+    #[test]
+    fn carry_forward_authority_rejects_cross_slot_execution_and_proof_drift() {
+        let package = carry_authority_package();
+
+        let mut final_diff_drift = package.clone();
+        let receipt = &mut final_diff_drift.carry_receipts[1];
+        receipt.final_authority_diff_sha256 = digest("different final authority diff");
+        receipt.materializer_equivalence.implementation_diff_sha256 =
+            receipt.final_authority_diff_sha256.clone();
+        receipt.materializer_equivalence.receipt_sha256 = receipt
+            .materializer_equivalence
+            .canonical_sha256()
+            .expect("equivalence receipt hash");
+        receipt.receipt_sha256 = receipt.canonical_sha256().expect("carry receipt hash");
+        rehash_carry_authority_package(&mut final_diff_drift);
+        assert_eq!(
+            final_diff_drift.validate(),
+            Err(LongitudinalContractError::PairMismatch)
+        );
+
+        let mut equivalence_drift = package.clone();
+        let receipt = &mut equivalence_drift.carry_receipts[1];
+        receipt.materializer_equivalence.baseline.root_identity = digest("different baseline root");
+        receipt.materializer_equivalence.receipt_sha256 = receipt
+            .materializer_equivalence
+            .canonical_sha256()
+            .expect("equivalence receipt hash");
+        receipt.receipt_sha256 = receipt.canonical_sha256().expect("carry receipt hash");
+        rehash_carry_authority_package(&mut equivalence_drift);
+        assert_eq!(
+            equivalence_drift.validate(),
+            Err(LongitudinalContractError::PairMismatch)
+        );
+
+        let mut same_lane_drift = package.clone();
+        let receipt = &mut same_lane_drift.carry_receipts[1];
+        receipt.source_execution.runner_sha256 = digest("different release runner");
+        receipt.receipt_sha256 = receipt.canonical_sha256().expect("carry receipt hash");
+        rehash_carry_authority_package(&mut same_lane_drift);
+        assert_eq!(
+            same_lane_drift.validate(),
+            Err(LongitudinalContractError::PairMismatch)
+        );
+
+        let mut wrong_lane_profile = package;
+        let receipt = &mut wrong_lane_profile.carry_receipts[2];
+        receipt.source_execution.build_profile = "release-uninstrumented".to_owned();
+        receipt.receipt_sha256 = receipt.canonical_sha256().expect("carry receipt hash");
+        rehash_carry_authority_package(&mut wrong_lane_profile);
+        assert_eq!(
+            wrong_lane_profile.validate(),
+            Err(LongitudinalContractError::MixedRevision)
+        );
+    }
+
+    #[test]
+    fn carry_forward_manifest_invariant_excludes_only_execution_and_its_hash() {
+        let source = materialization("invariant-source").manifest;
+        let mut carried = source.clone();
+        carried.execution.source_commit = "9".repeat(40);
+        carried.execution.source_tree = "8".repeat(40);
+        carried.manifest_sha256 = carried.canonical_sha256().expect("carried manifest hash");
+        assert_ne!(source.manifest_sha256, carried.manifest_sha256);
+        assert_eq!(
+            longitudinal_workload_manifest_carry_invariant_sha256_v1(&source).unwrap(),
+            longitudinal_workload_manifest_carry_invariant_sha256_v1(&carried).unwrap()
+        );
+
+        let mut semantic_drift = source.clone();
+        semantic_drift.expected_semantic_receipts[0].semantic_receipt_sha256 =
+            digest("different semantic receipt");
+        semantic_drift.manifest_sha256 = semantic_drift
+            .canonical_sha256()
+            .expect("semantic-drift manifest hash");
+        semantic_drift
+            .validate()
+            .expect("self-consistent semantic drift remains structurally valid");
+        assert_ne!(
+            longitudinal_workload_manifest_carry_invariant_sha256_v1(&source).unwrap(),
+            longitudinal_workload_manifest_carry_invariant_sha256_v1(&semantic_drift).unwrap(),
+            "the carry invariant excludes execution only"
+        );
+    }
+
+    #[test]
+    fn controller_failure_receipt_is_typed_immutable_and_denies_unsanitized_fields() {
+        let mut receipt = LongitudinalControllerFailureReceiptV1 {
+            schema: LONGITUDINAL_CONTROLLER_FAILURE_RECEIPT_SCHEMA_V1.to_owned(),
+            operation_selector:
+                LongitudinalFailureOperationSelectorV1::InspectorRevisionListPreflight,
+            http: Some(LongitudinalHttpFailureV1 {
+                status: 500,
+                body_classification: LongitudinalHttpBodyClassificationV1::JsonError,
+                body_bytes: 4,
+                body_sha256: Some(digest("body")),
+            }),
+            inspector_exit: LongitudinalInspectorExitV1::Exited(1),
+            stderr: LongitudinalStderrFailureV1 {
+                classification: LongitudinalStderrClassificationV1::KnownDiagnostic,
+                bytes: 6,
+                sha256: Some(digest("stderr")),
+            },
+            immutable: true,
+            receipt_sha256: String::new(),
+        };
+        receipt.receipt_sha256 = receipt.canonical_sha256().expect("failure receipt hash");
+        receipt.validate().expect("failure receipt validates");
+
+        let mut serialized = serde_json::to_value(&receipt).expect("failure JSON");
+        serialized
+            .as_object_mut()
+            .expect("failure object")
+            .insert("responseBody".to_owned(), "secret-token".into());
+        assert!(
+            serde_json::from_value::<LongitudinalControllerFailureReceiptV1>(serialized).is_err()
+        );
+
+        receipt.immutable = false;
+        receipt.receipt_sha256 = receipt.canonical_sha256().expect("failure receipt hash");
+        assert_eq!(
+            receipt.validate(),
+            Err(LongitudinalContractError::MutableFailure)
         );
     }
 

@@ -257,6 +257,65 @@ state, and binds pre/post store-data inventories plus exact Created/Existing cou
 materializer-equivalence verifier compares complete store bytes and strict semantic receipts while
 binding—rather than equating—the two execution identities and the implementation-diff hash.
 
+Immutable roots may be reused under a corrected execution identity only through the versioned
+carry-forward surface. The operator first creates an isolated clone, then supplies a
+`pointbreak.longitudinal-carry-forward-request.v1` document containing the source and clone paths,
+a new authority-output path, the original materialization receipt, the corrected execution, the
+scheduled tier/lane/run slot, and the accepted materializer-equivalence receipt:
+
+```sh
+unset POINTBREAK_QUALIFICATION_CORPUS POINTBREAK_BENCH_FIXTURE POINTBREAK_BENCH_REPO POINTBREAK_HOME
+cargo bench --locked --features bench --bench store_foundation -- \
+  --longitudinal-carry-forward \
+  --longitudinal-carry-forward-request=/absolute/path/to/request.json
+```
+
+The command reads both data roots strictly, rejects aliases or any byte/semantic/contract/schedule
+drift, and writes only to the new authority-output directory. It emits the carried materialization
+first and `carry-forward-receipt.json` last. The carried manifest changes only the execution
+identity and its dependent canonical hash; the source manifest and both store roots remain
+unchanged. A disposable public check exercises these rules without admissible timing or terminal
+evidence:
+
+```sh
+cargo bench --locked --features bench --bench store_foundation -- \
+  --longitudinal-carry-forward-smoke
+```
+
+After collection, derive a typed verifier receipt rather than asserting verification in controller
+state:
+
+```sh
+cargo bench --locked --features bench --bench store_foundation -- \
+  --longitudinal-verify-package-receipt \
+  --longitudinal-package-root=/absolute/path/to/completed-package
+```
+
+The final `pointbreak.longitudinal-carry-forward-authority-package.v1` must contain all twelve
+scheduled v1 carry receipts and a matching parsed workload-package verification receipt. Release
+source slots require `buildProfile: "release-uninstrumented"` and debug source slots require
+`buildProfile: "debug-uninstrumented"`. Source executions must be identical within a lane and share
+all non-runner, non-profile identity across lanes. The corrected execution and final authority diff
+must be identical across all twelve slots; the final diff must also equal every embedded
+materializer implementation diff. Each tier's three slots must embed one exact equivalence receipt,
+and every tier must bind the same equivalence baseline and successor executions. Verify that
+binding with:
+
+```sh
+cargo bench --locked --features bench --bench store_foundation -- \
+  --longitudinal-verify-carry-forward \
+  --longitudinal-authority-package=/absolute/path/to/carry-forward-authority-package.json \
+  --longitudinal-package-root=/absolute/path/to/completed-workload-package
+```
+
+Controller failures use a separate typed receipt with only an operation selector, HTTP
+status/body classification plus length/hash, Inspector exit classification, and sanitized stderr
+classification plus length/hash. Raw response bodies, stderr, paths, environment values, tokens,
+or payload bytes have no serializable field in that contract. The pre-existing evidence-package
+failure entry remains a short immutable reason classifier plus a detail hash; new controller
+failures bind that detail hash to the separately persisted typed receipt instead of placing
+diagnostic text in the package.
+
 Before allocating a longitudinal evidence root, build the product release and debug binaries, the
 benchmark controller, and any external evidence driver with mutually disjoint `CARGO_TARGET_DIR`
 values. Freeze and hash each executable before materialization so a later Cargo build cannot replace
