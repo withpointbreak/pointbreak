@@ -1,30 +1,24 @@
-name: Flake health
+name: CI (Nix)
 
-# Guards the flake itself, which CONTRIBUTING.md names as the recommended way to set
-# up the project (`nix develop`) and which now also supplies ci.yml's toolchain on
-# Linux and macOS. If the flake breaks, the documented first-choice setup breaks with
-# it, so something has to exercise it.
+# The hermetic counterpart to ci.yml. Both lanes now compile with the same flake-pinned
+# toolchain, so this is not here to re-check the lints or the assertions — ci.yml covers
+# those, and a broken flake already fails it because it runs `nix develop .#ci`.
 #
-# It deliberately does NOT re-run clippy or the test suite. ci.yml already runs those,
-# on the same code, through this same flake toolchain — paying for them twice bought a
-# roughly 1.5x slower duplicate gate. What is unique to Nix is whether the flake still
-# evaluates, whether the dev shell still carries the pinned tools, and whether a fully
-# hermetic build of the shippable artifact still succeeds with no network.
+# What only this lane can establish is that the suite passes in a SANDBOX: no host
+# tools leaking in, no network, and no reuse of a `target/` directory restored from a
+# cache. ci.yml's speed comes precisely from that restored target/, which makes a
+# stale-artifact false green possible there and impossible here.
 #
-# `nix build .#build-all` covers most of that transitively: it needs the crane
-# dependency artifacts (so every dependency must still compile in the sandbox), the
-# CLI, an offline npm build of the Inspector bundle, and the VSIX packaging step.
-#
-# The sandbox-only regressions this does not catch — a test that needs a tool absent
-# from the nextest derivation's nativeBuildInputs — are covered by the nightly full
-# `nix flake check` below rather than on every pull request.
+# Linux gates every pull request. macOS runs the same thing nightly rather than per
+# pull request: it measured 22m37s against Linux's 15m46s, which is not worth adding
+# to every change for a platform ci.yml already tests.
 
 on:
   push:
     branches: [main]
   pull_request:
   schedule:
-    # Nightly, for the full hermetic check that is too slow to gate pull requests.
+    # Nightly, for the platforms not gated per pull request.
     - cron: "0 7 * * *"
   workflow_dispatch:
 
@@ -32,48 +26,72 @@ permissions:
   contents: read
 
 concurrency:
-  group: flake-health-${{ github.ref }}
+  group: ci-nix-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
 jobs:
-  flake-health:
-    name: flake health
+  nix-gate:
+    name: nix gate (ubuntu-latest)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: DeterminateSystems/nix-installer-action@main
+
+      # Stores individual store paths over the GitHub Actions cache and skips anything
+      # fetchable from cache.nixos.org. Its predecessor tarred the whole /nix/store
+      # (4.87GB on Linux, 4.46GB on macOS), which alone exceeded the 10GB repository
+      # limit, so the two platforms evicted each other and every run started cold.
       - uses: DeterminateSystems/magic-nix-cache-action@main
         with:
           use-flakehub: false
 
-      # The dev shell still resolves and its pinned tools are the expected versions.
-      - name: dev shell tools
-        run: nix build .#devshell-tools
+      # `nix flake check` builds every check in one arbitrary-order batch, so it cannot
+      # express "cheap gate first". Realising them individually can: each step is a
+      # dependency of the next, and a failure stops the job before the expensive phases.
 
-      # A hermetic, network-free build of everything the project ships.
-      - name: hermetic artifact build
+      # Phase 1 — formatting. Compiles nothing, so this is a true early return.
+      - name: fmt
+        run: nix build .#cli-fmt
+
+      # Phase 2 — clippy, with the shared test-profile dependency artifacts.
+      - name: clippy
+        run: nix build .#cli-clippy
+
+      # Phase 3 — the full suite in the sandbox, plus pinned-tool drift.
+      - name: test
+        run: nix build .#cli-nextest .#devshell-tools
+
+      # Phase 4 — hermetic, network-free build of everything the project ships.
+      - name: build
         run: nix build .#build-all
 
       - name: dump failing build log
         if: failure()
-        run: nix log "$(nix eval --raw .#build-all.drvPath)" 2>/dev/null | tail -100 || true
+        run: nix log "$(nix eval --raw .#cli-nextest.drvPath)" 2>/dev/null | tail -150 || true
 
   full-check:
-    name: full flake check (nightly)
+    name: full flake check (${{ matrix.os }})
+    # Nightly and on demand only. Runs `nix flake check` rather than the named phases
+    # above so that a check added to the flake cannot be silently left ungated.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/magic-nix-cache-action@main
         with:
           use-flakehub: false
-
-      # Builds every check, including the whole suite inside the sandbox. This is the
-      # only thing that catches a test needing a tool the derivation does not provide.
       - name: nix flake check
         run: nix flake check
-
       - name: dump failing build log
         if: failure()
         run: nix log "$(nix eval --raw .#cli-nextest.drvPath)" 2>/dev/null | tail -150 || true
