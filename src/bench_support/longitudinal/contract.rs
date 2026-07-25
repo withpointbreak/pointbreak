@@ -25,6 +25,10 @@ pub const LONGITUDINAL_EVIDENCE_PACKAGE_SCHEMA_V1: &str =
     "pointbreak.longitudinal-evidence-package.v1";
 pub const LONGITUDINAL_CAPACITY_MATERIALIZATION_RECEIPT_SCHEMA_V1: &str =
     "pointbreak.longitudinal-capacity-materialization-receipt.v1";
+pub const LONGITUDINAL_MATERIALIZATION_RESUME_RECEIPT_SCHEMA_V1: &str =
+    "pointbreak.longitudinal-materialization-resume-receipt.v1";
+pub const LONGITUDINAL_MATERIALIZER_EQUIVALENCE_RECEIPT_SCHEMA_V1: &str =
+    "pointbreak.longitudinal-materializer-equivalence-receipt.v1";
 pub const LONGITUDINAL_CAPACITY_PACKAGE_SCHEMA_V1: &str =
     "pointbreak.longitudinal-capacity-package.v1";
 pub const LONGITUDINAL_CONTRACT_PUBLICATION_SCHEMA_V1: &str =
@@ -1484,6 +1488,215 @@ pub struct LongitudinalStrictSemanticReceiptV1 {
     pub state_sha256: String,
     pub projection_sha256: String,
     pub content_inventory_sha256: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum LongitudinalMaterializationSubjectV1 {
+    Workload(LongitudinalTierV1),
+    Capacity(LongitudinalCapacityProfileV1),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "kind", content = "receipt", rename_all = "snake_case")]
+pub enum LongitudinalResumedMaterializationV1 {
+    Workload(LongitudinalMaterializationReceiptV1),
+    Capacity(LongitudinalCapacityMaterializationReceiptV1),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalStoreDataInventoryV1 {
+    pub file_count: u64,
+    pub byte_count: u64,
+    pub inventory_sha256: String,
+}
+
+impl LongitudinalStoreDataInventoryV1 {
+    pub fn validate(&self) -> Result<(), LongitudinalContractError> {
+        validate_hex(&self.inventory_sha256, 64, "store-data inventory SHA-256")
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalMaterializationResumeReceiptV1 {
+    pub schema: String,
+    pub subject: LongitudinalMaterializationSubjectV1,
+    pub execution: LongitudinalExecutionIdentityV1,
+    pub root_identity: String,
+    pub pre_inventory: LongitudinalStoreDataInventoryV1,
+    pub post_inventory: LongitudinalStoreDataInventoryV1,
+    pub events_created: u64,
+    pub events_existing: u64,
+    pub event_count: u64,
+    pub content_count: u64,
+    pub strict: LongitudinalStrictSemanticReceiptV1,
+    pub materialization_sha256: String,
+    pub materialization: LongitudinalResumedMaterializationV1,
+    pub receipt_sha256: String,
+}
+
+impl LongitudinalMaterializationResumeReceiptV1 {
+    pub fn canonical_sha256(&self) -> Result<String, LongitudinalContractError> {
+        canonical_sha256_without(&self.receipt_sha256, |receipt_sha256| {
+            let mut preimage = self.clone();
+            preimage.receipt_sha256 = receipt_sha256;
+            preimage
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), LongitudinalContractError> {
+        if self.schema != LONGITUDINAL_MATERIALIZATION_RESUME_RECEIPT_SCHEMA_V1 {
+            return Err(LongitudinalContractError::UnsupportedContract);
+        }
+        self.execution.validate()?;
+        validate_hex(&self.root_identity, 64, "resume root identity")?;
+        self.pre_inventory.validate()?;
+        self.post_inventory.validate()?;
+        validate_strict_receipt(&self.strict)?;
+        validate_hex(
+            &self.materialization_sha256,
+            64,
+            "resumed materialization SHA-256",
+        )?;
+        let (event_count, content_count) = materialization_subject_counts(self.subject)?;
+        require_count(self.event_count, event_count, "resume event count")?;
+        require_count(self.content_count, content_count, "resume content count")?;
+        require_count(
+            self.events_created
+                .checked_add(self.events_existing)
+                .ok_or(LongitudinalContractError::ContractDrift {
+                    field: "resume write counts",
+                })?,
+            event_count,
+            "resume write counts",
+        )?;
+        match (&self.subject, &self.materialization) {
+            (
+                LongitudinalMaterializationSubjectV1::Workload(tier),
+                LongitudinalResumedMaterializationV1::Workload(materialization),
+            ) => {
+                materialization.validate()?;
+                if materialization.manifest.tier != *tier
+                    || materialization.manifest.execution != self.execution
+                    || materialization.root_identity != self.root_identity
+                    || materialization.manifest.event_count != self.event_count
+                    || materialization.manifest.content_inventory.len() as u64 != self.content_count
+                    || materialization.strict != self.strict
+                    || materialization.materialization_sha256 != self.materialization_sha256
+                {
+                    return Err(LongitudinalContractError::PairMismatch);
+                }
+            }
+            (
+                LongitudinalMaterializationSubjectV1::Capacity(profile),
+                LongitudinalResumedMaterializationV1::Capacity(materialization),
+            ) => {
+                materialization.validate()?;
+                if materialization.manifest.subject
+                    != LongitudinalCapacitySubjectV1::Companion(*profile)
+                    || materialization.manifest.execution != self.execution
+                    || materialization.root_identity != self.root_identity
+                    || materialization.manifest.event_count != self.event_count
+                    || materialization.manifest.content_inventory.len() as u64 != self.content_count
+                    || materialization.strict != self.strict
+                    || materialization.materialization_sha256 != self.materialization_sha256
+                {
+                    return Err(LongitudinalContractError::PairMismatch);
+                }
+            }
+            _ => return Err(LongitudinalContractError::PairMismatch),
+        }
+        validate_bound_hash(
+            &self.receipt_sha256,
+            &self.canonical_sha256()?,
+            "materialization resume receipt",
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalMaterializerRootReceiptV1 {
+    pub subject: LongitudinalMaterializationSubjectV1,
+    pub execution: LongitudinalExecutionIdentityV1,
+    pub root_identity: String,
+    pub inventory: LongitudinalStoreDataInventoryV1,
+    pub event_count: u64,
+    pub content_count: u64,
+    pub strict: LongitudinalStrictSemanticReceiptV1,
+    pub materialization_sha256: String,
+}
+
+impl LongitudinalMaterializerRootReceiptV1 {
+    fn validate(&self) -> Result<(), LongitudinalContractError> {
+        self.execution.validate()?;
+        validate_hex(&self.root_identity, 64, "equivalence root identity")?;
+        self.inventory.validate()?;
+        validate_strict_receipt(&self.strict)?;
+        validate_hex(
+            &self.materialization_sha256,
+            64,
+            "equivalence materialization SHA-256",
+        )?;
+        let (event_count, content_count) = materialization_subject_counts(self.subject)?;
+        require_count(self.event_count, event_count, "equivalence event count")?;
+        require_count(
+            self.content_count,
+            content_count,
+            "equivalence content count",
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalMaterializerEquivalenceReceiptV1 {
+    pub schema: String,
+    pub baseline: LongitudinalMaterializerRootReceiptV1,
+    pub successor: LongitudinalMaterializerRootReceiptV1,
+    pub implementation_diff_sha256: String,
+    pub equivalent: bool,
+    pub receipt_sha256: String,
+}
+
+impl LongitudinalMaterializerEquivalenceReceiptV1 {
+    pub fn canonical_sha256(&self) -> Result<String, LongitudinalContractError> {
+        canonical_sha256_without(&self.receipt_sha256, |receipt_sha256| {
+            let mut preimage = self.clone();
+            preimage.receipt_sha256 = receipt_sha256;
+            preimage
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), LongitudinalContractError> {
+        if self.schema != LONGITUDINAL_MATERIALIZER_EQUIVALENCE_RECEIPT_SCHEMA_V1 {
+            return Err(LongitudinalContractError::UnsupportedContract);
+        }
+        self.baseline.validate()?;
+        self.successor.validate()?;
+        validate_hex(
+            &self.implementation_diff_sha256,
+            64,
+            "implementation diff SHA-256",
+        )?;
+        if !self.equivalent
+            || self.baseline.root_identity == self.successor.root_identity
+            || self.baseline.subject != self.successor.subject
+            || self.baseline.event_count != self.successor.event_count
+            || self.baseline.content_count != self.successor.content_count
+            || self.baseline.strict != self.successor.strict
+            || self.baseline.inventory != self.successor.inventory
+        {
+            return Err(LongitudinalContractError::PairMismatch);
+        }
+        validate_bound_hash(
+            &self.receipt_sha256,
+            &self.canonical_sha256()?,
+            "materializer equivalence receipt",
+        )
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -3637,6 +3850,29 @@ fn scaled_event_families(
         .collect()
 }
 
+fn materialization_subject_counts(
+    subject: LongitudinalMaterializationSubjectV1,
+) -> Result<(u64, u64), LongitudinalContractError> {
+    match subject {
+        LongitudinalMaterializationSubjectV1::Workload(tier) => {
+            let requirement = longitudinal_runner_contract_v1()
+                .tiers
+                .into_iter()
+                .find(|candidate| candidate.tier == tier)
+                .ok_or(LongitudinalContractError::UnsupportedTier)?;
+            Ok((requirement.event_count, requirement.present_content_count))
+        }
+        LongitudinalMaterializationSubjectV1::Capacity(profile) => {
+            let requirement = longitudinal_capacity_contract_v1()
+                .profiles
+                .into_iter()
+                .find(|candidate| candidate.profile == profile)
+                .ok_or(LongitudinalContractError::UnsupportedProfile)?;
+            Ok((requirement.event_count, requirement.present_content_count))
+        }
+    }
+}
+
 fn validate_strict_receipt(
     receipt: &LongitudinalStrictSemanticReceiptV1,
 ) -> Result<(), LongitudinalContractError> {
@@ -3799,6 +4035,66 @@ mod contract_tests {
         receipt.manifest.manifest_sha256 =
             receipt.manifest.canonical_sha256().expect("manifest hash");
         receipt.materialization_sha256 = receipt.canonical_sha256().expect("materialization hash");
+    }
+
+    fn store_inventory(label: &str) -> LongitudinalStoreDataInventoryV1 {
+        LongitudinalStoreDataInventoryV1 {
+            file_count: 1,
+            byte_count: 1,
+            inventory_sha256: digest(label),
+        }
+    }
+
+    fn resume_receipt() -> LongitudinalMaterializationResumeReceiptV1 {
+        let materialization = materialization("resume-root");
+        let mut receipt = LongitudinalMaterializationResumeReceiptV1 {
+            schema: LONGITUDINAL_MATERIALIZATION_RESUME_RECEIPT_SCHEMA_V1.to_owned(),
+            subject: LongitudinalMaterializationSubjectV1::Workload(LongitudinalTierV1::L1),
+            execution: materialization.manifest.execution.clone(),
+            root_identity: materialization.root_identity.clone(),
+            pre_inventory: store_inventory("pre-inventory"),
+            post_inventory: store_inventory("post-inventory"),
+            events_created: 0,
+            events_existing: materialization.manifest.event_count,
+            event_count: materialization.manifest.event_count,
+            content_count: materialization.manifest.content_inventory.len() as u64,
+            strict: materialization.strict.clone(),
+            materialization_sha256: materialization.materialization_sha256.clone(),
+            materialization: LongitudinalResumedMaterializationV1::Workload(materialization),
+            receipt_sha256: String::new(),
+        };
+        receipt.receipt_sha256 = receipt.canonical_sha256().expect("resume receipt hash");
+        receipt
+    }
+
+    fn equivalence_receipt() -> LongitudinalMaterializerEquivalenceReceiptV1 {
+        let materialization = materialization("equivalence-source");
+        let inventory = store_inventory("equivalent-inventory");
+        let baseline = LongitudinalMaterializerRootReceiptV1 {
+            subject: LongitudinalMaterializationSubjectV1::Workload(LongitudinalTierV1::L1),
+            execution: materialization.manifest.execution.clone(),
+            root_identity: digest("equivalence-baseline"),
+            inventory: inventory.clone(),
+            event_count: materialization.manifest.event_count,
+            content_count: materialization.manifest.content_inventory.len() as u64,
+            strict: materialization.strict.clone(),
+            materialization_sha256: materialization.materialization_sha256.clone(),
+        };
+        let mut successor = baseline.clone();
+        successor.root_identity = digest("equivalence-successor");
+        successor.execution.source_commit = "5".repeat(40);
+        let mut receipt = LongitudinalMaterializerEquivalenceReceiptV1 {
+            schema: LONGITUDINAL_MATERIALIZER_EQUIVALENCE_RECEIPT_SCHEMA_V1.to_owned(),
+            baseline,
+            successor,
+            implementation_diff_sha256: digest("implementation-diff"),
+            equivalent: true,
+            receipt_sha256: String::new(),
+        };
+        receipt.receipt_sha256 = receipt
+            .canonical_sha256()
+            .expect("equivalence receipt hash");
+        receipt
     }
 
     fn generation(
@@ -4166,6 +4462,58 @@ mod contract_tests {
             verify_longitudinal_materialization_pair_v1(&left, &source_drift),
             Err(LongitudinalContractError::PairMismatch)
         );
+    }
+
+    #[test]
+    fn longitudinal_resume_receipt_rejects_write_count_and_embedded_receipt_drift() {
+        let receipt = resume_receipt();
+        receipt.validate().expect("resume receipt validates");
+
+        let mut count_drift = receipt.clone();
+        count_drift.events_existing -= 1;
+        count_drift.receipt_sha256 = count_drift
+            .canonical_sha256()
+            .expect("count-drift receipt hash");
+        assert!(matches!(
+            count_drift.validate(),
+            Err(LongitudinalContractError::CountMismatch { .. })
+        ));
+
+        let mut materialization_drift = receipt;
+        materialization_drift.materialization_sha256 = digest("wrong-materialization");
+        materialization_drift.receipt_sha256 = materialization_drift
+            .canonical_sha256()
+            .expect("materialization-drift receipt hash");
+        assert_eq!(
+            materialization_drift.validate(),
+            Err(LongitudinalContractError::PairMismatch)
+        );
+    }
+
+    #[test]
+    fn longitudinal_equivalence_receipt_rejects_inventory_and_subject_drift() {
+        let receipt = equivalence_receipt();
+        receipt
+            .validate()
+            .expect("materializer equivalence receipt validates");
+
+        let mut inventory_drift = receipt.clone();
+        inventory_drift.successor.inventory.byte_count += 1;
+        inventory_drift.receipt_sha256 = inventory_drift
+            .canonical_sha256()
+            .expect("inventory-drift receipt hash");
+        assert_eq!(
+            inventory_drift.validate(),
+            Err(LongitudinalContractError::PairMismatch)
+        );
+
+        let mut subject_drift = receipt;
+        subject_drift.successor.subject =
+            LongitudinalMaterializationSubjectV1::Capacity(LongitudinalCapacityProfileV1::L100O10K);
+        subject_drift.receipt_sha256 = subject_drift
+            .canonical_sha256()
+            .expect("subject-drift receipt hash");
+        assert!(subject_drift.validate().is_err());
     }
 
     #[test]

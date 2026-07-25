@@ -116,5 +116,7 @@ pub use workflow::{
     unlink_store_from_family, withdraw_commit, withdraw_ref,
 };
 pub(in crate::session) use workflow::{assessment, input_request, observation};
+#[cfg(any(test, feature = "bench"))]
+pub(crate) use workflow::{carrier_target_full_scan_count, reset_carrier_target_full_scan_count};
 
 pub use crate::crypto::EventVerificationStatus;

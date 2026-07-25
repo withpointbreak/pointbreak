@@ -1,12 +1,20 @@
+use std::fs;
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 use crate::bench_support::longitudinal::contract::{
     LONGITUDINAL_CAPACITY_MATERIALIZATION_RECEIPT_SCHEMA_V1,
-    LONGITUDINAL_MATERIALIZATION_RECEIPT_SCHEMA_V1, LONGITUDINAL_PUBLIC_SEED_HEX_V1,
+    LONGITUDINAL_MATERIALIZATION_RECEIPT_SCHEMA_V1,
+    LONGITUDINAL_MATERIALIZATION_RESUME_RECEIPT_SCHEMA_V1,
+    LONGITUDINAL_MATERIALIZER_EQUIVALENCE_RECEIPT_SCHEMA_V1, LONGITUDINAL_PUBLIC_SEED_HEX_V1,
     LongitudinalCapacityManifestV1, LongitudinalCapacityMaterializationReceiptV1,
     LongitudinalCapacityProfileV1, LongitudinalCapacitySubjectV1, LongitudinalEventFamilyCountV1,
     LongitudinalExecutionIdentityV1, LongitudinalExpectedSemanticReceiptV1,
-    LongitudinalMaterializationReceiptV1, LongitudinalTierV1, LongitudinalWorkloadManifestV1,
+    LongitudinalMaterializationReceiptV1, LongitudinalMaterializationResumeReceiptV1,
+    LongitudinalMaterializationSubjectV1, LongitudinalMaterializerEquivalenceReceiptV1,
+    LongitudinalMaterializerRootReceiptV1, LongitudinalResumedMaterializationV1,
+    LongitudinalStoreDataInventoryV1, LongitudinalTierV1, LongitudinalWorkloadManifestV1,
     longitudinal_capacity_contract_v1, longitudinal_runner_contract_v1,
 };
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
@@ -14,7 +22,10 @@ use crate::session::benchmark::{
     LongitudinalRecordShapeV1, LongitudinalRecordSpecV1, prepare_longitudinal_record_v1,
     write_longitudinal_records_v1,
 };
-use crate::session::format_rfc3339_utc_millis;
+use crate::session::{
+    carrier_target_full_scan_count, format_rfc3339_utc_millis,
+    reset_carrier_target_full_scan_count, store_dir_for_repo,
+};
 
 pub const LONGITUDINAL_FIXED_EPOCH_V1: &str = "2026-01-01T00:00:00.000Z";
 pub const LONGITUDINAL_FIXED_INGEST_RECEIVED_AT_V1: &str = "2026-02-01T00:00:00.000Z";
@@ -132,6 +143,40 @@ impl LongitudinalCapacityMaterializeOptionsV1 {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalCarrierScanDiagnosticV1 {
+    pub schema: String,
+    pub subject: LongitudinalMaterializationSubjectV1,
+    pub event_count: u64,
+    pub signature_carrier_count: u64,
+    pub target_lookup_full_scans: u64,
+    pub repeated_target_lookup_full_scans: u64,
+    pub diagnostic_sha256: String,
+}
+
+impl LongitudinalCarrierScanDiagnosticV1 {
+    pub fn canonical_sha256(&self) -> Result<String, LongitudinalMaterializeError> {
+        let mut preimage = self.clone();
+        preimage.diagnostic_sha256.clear();
+        canonical_sha256(&preimage)
+    }
+
+    pub fn validate(&self) -> Result<(), LongitudinalMaterializeError> {
+        if self.schema != "pointbreak.longitudinal-carrier-scan-diagnostic.v1"
+            || self.signature_carrier_count == 0
+            || self.target_lookup_full_scans != 1
+            || self.repeated_target_lookup_full_scans != 0
+            || self.diagnostic_sha256 != self.canonical_sha256()?
+        {
+            return Err(LongitudinalMaterializeError::Contract(
+                "carrier scan diagnostic is invalid".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub fn materialize_longitudinal_workload_v1(
     options: LongitudinalMaterializeOptionsV1,
 ) -> Result<LongitudinalMaterializationReceiptV1, LongitudinalMaterializeError> {
@@ -231,6 +276,176 @@ pub fn materialize_longitudinal_workload_v1(
     Ok(receipt)
 }
 
+pub fn diagnose_longitudinal_workload_carrier_scans_v1(
+    options: LongitudinalMaterializeOptionsV1,
+) -> Result<LongitudinalCarrierScanDiagnosticV1, LongitudinalMaterializeError> {
+    let subject = LongitudinalMaterializationSubjectV1::Workload(options.tier);
+    reset_carrier_target_full_scan_count();
+    let receipt = materialize_longitudinal_workload_v1(options)?;
+    let signature_carrier_count = receipt
+        .manifest
+        .by_type
+        .iter()
+        .find(|entry| entry.event_type == "event_signature_recorded")
+        .map(|entry| entry.count)
+        .ok_or_else(|| {
+            LongitudinalMaterializeError::Contract(
+                "workload signature-carrier count is absent".to_owned(),
+            )
+        })?;
+    carrier_scan_diagnostic_v1(
+        subject,
+        receipt.manifest.event_count,
+        signature_carrier_count,
+    )
+}
+
+pub fn resume_longitudinal_workload_v1(
+    options: LongitudinalMaterializeOptionsV1,
+) -> Result<LongitudinalMaterializationResumeReceiptV1, LongitudinalMaterializeError> {
+    let pre_inventory = store_data_inventory_v1(&options.root)?;
+    let root = options.root.clone();
+    let execution = options.execution.clone();
+    let subject = LongitudinalMaterializationSubjectV1::Workload(options.tier);
+    let result = resume_longitudinal_workload_inner_v1(options)?;
+    let post_inventory = store_data_inventory_v1(&root)?;
+    let mut receipt = LongitudinalMaterializationResumeReceiptV1 {
+        schema: LONGITUDINAL_MATERIALIZATION_RESUME_RECEIPT_SCHEMA_V1.to_owned(),
+        subject,
+        execution,
+        root_identity: result.receipt.root_identity.clone(),
+        pre_inventory,
+        post_inventory,
+        events_created: result.counts.events_created,
+        events_existing: result.counts.events_existing,
+        event_count: result.receipt.manifest.event_count,
+        content_count: result.receipt.manifest.content_inventory.len() as u64,
+        strict: result.receipt.strict.clone(),
+        materialization_sha256: result.receipt.materialization_sha256.clone(),
+        materialization: LongitudinalResumedMaterializationV1::Workload(result.receipt),
+        receipt_sha256: String::new(),
+    };
+    receipt.receipt_sha256 = receipt.canonical_sha256().map_err(contract_error)?;
+    receipt.validate().map_err(contract_error)?;
+    Ok(receipt)
+}
+
+struct ResumedWorkloadMaterializationV1 {
+    receipt: LongitudinalMaterializationReceiptV1,
+    counts: MaterializationWriteCountsV1,
+}
+
+#[derive(Clone, Copy)]
+struct MaterializationWriteCountsV1 {
+    events_created: u64,
+    events_existing: u64,
+}
+
+fn resume_longitudinal_workload_inner_v1(
+    options: LongitudinalMaterializeOptionsV1,
+) -> Result<ResumedWorkloadMaterializationV1, LongitudinalMaterializeError> {
+    validate_frozen_inputs(&options.public_seed_hex, &options.clock_identity)?;
+    let contract = longitudinal_runner_contract_v1();
+    let requirement = contract
+        .tiers
+        .iter()
+        .find(|requirement| requirement.tier == options.tier)
+        .ok_or(LongitudinalMaterializeError::UnsupportedContract)?;
+    let records = (0..requirement.block_count)
+        .map(|block| {
+            prepare_longitudinal_record_v1(LongitudinalRecordSpecV1::new(
+                LongitudinalRecordShapeV1::Workload,
+                block,
+            ))
+            .map_err(store_error)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let write = write_longitudinal_records_v1(&options.root, &records).map_err(store_error)?;
+    let counts = MaterializationWriteCountsV1 {
+        events_created: write.events_created,
+        events_existing: write.events_existing,
+    };
+
+    if write
+        .events_created
+        .checked_add(write.events_existing)
+        .is_none_or(|count| count != requirement.event_count)
+        || write.event_count != requirement.event_count
+        || write.revision_count != requirement.revision_count
+        || write.body_fact_count != requirement.body_fact_count
+        || write.external_body_count != requirement.external_body_count
+        || write.object_artifact_count != requirement.object_artifact_count
+        || write.decoded_body_bytes != requirement.decoded_body_bytes
+        || write.decoded_object_target_bytes != requirement.decoded_object_target_bytes
+    {
+        return Err(LongitudinalMaterializeError::Store(
+            "workload counts drifted from the frozen tier".to_owned(),
+        ));
+    }
+
+    let by_type = contract
+        .event_families
+        .iter()
+        .map(|family| LongitudinalEventFamilyCountV1 {
+            event_type: family.event_type.clone(),
+            count: write
+                .by_type
+                .get(&family.event_type)
+                .copied()
+                .unwrap_or_default(),
+        })
+        .collect();
+    let schedule = contract.operation_schedule.clone();
+    let schedule_sha256 = canonical_sha256(&schedule)?;
+    let expected_semantic_receipts = schedule
+        .iter()
+        .copied()
+        .map(|operation| {
+            Ok(LongitudinalExpectedSemanticReceiptV1 {
+                operation,
+                semantic_receipt_sha256: canonical_sha256(&(
+                    operation,
+                    &write.strict,
+                    &write.ordered_events,
+                ))?,
+            })
+        })
+        .collect::<Result<Vec<_>, LongitudinalMaterializeError>>()?;
+    let mut manifest = LongitudinalWorkloadManifestV1 {
+        schema: contract.schema,
+        protocol: contract.protocol,
+        contract_sha256: contract.contract_sha256,
+        execution: options.execution,
+        public_seed_hex: options.public_seed_hex,
+        tier: options.tier,
+        event_count: write.event_count,
+        revision_count: write.revision_count,
+        by_type,
+        ordered_events: write.ordered_events,
+        event_carriers: write.event_carriers,
+        content_inventory: write.content_inventory,
+        removed_content_sha256: write.removed_content_sha256,
+        capacity_selectors: write.capacity_selectors,
+        expected_semantic_receipts,
+        schedule,
+        schedule_sha256,
+        manifest_sha256: String::new(),
+    };
+    manifest.manifest_sha256 = manifest.canonical_sha256().map_err(contract_error)?;
+    manifest.validate().map_err(contract_error)?;
+
+    let mut receipt = LongitudinalMaterializationReceiptV1 {
+        schema: LONGITUDINAL_MATERIALIZATION_RECEIPT_SCHEMA_V1.to_owned(),
+        root_identity: root_identity(&options.root)?,
+        manifest,
+        strict: write.strict,
+        materialization_sha256: String::new(),
+    };
+    receipt.materialization_sha256 = receipt.canonical_sha256().map_err(contract_error)?;
+    receipt.validate().map_err(contract_error)?;
+    Ok(ResumedWorkloadMaterializationV1 { receipt, counts })
+}
+
 pub fn materialize_longitudinal_capacity_v1(
     options: LongitudinalCapacityMaterializeOptionsV1,
 ) -> Result<LongitudinalCapacityMaterializationReceiptV1, LongitudinalMaterializeError> {
@@ -307,6 +522,365 @@ pub fn materialize_longitudinal_capacity_v1(
         materialization_sha256: String::new(),
     };
     receipt.materialization_sha256 = receipt.canonical_sha256().map_err(contract_error)?;
+    receipt.validate().map_err(contract_error)?;
+    Ok(receipt)
+}
+
+pub fn diagnose_longitudinal_capacity_carrier_scans_v1(
+    options: LongitudinalCapacityMaterializeOptionsV1,
+) -> Result<LongitudinalCarrierScanDiagnosticV1, LongitudinalMaterializeError> {
+    let profile = options.profile;
+    let root = options.root.clone();
+    let subject = LongitudinalMaterializationSubjectV1::Capacity(profile);
+    reset_carrier_target_full_scan_count();
+    let receipt = materialize_longitudinal_capacity_v1(options)?;
+    let signature_carrier_count = crate::session::read_events(&root)
+        .map_err(store_error)?
+        .into_iter()
+        .filter(|event| event.event_type.as_str() == "event_signature_recorded")
+        .count() as u64;
+    carrier_scan_diagnostic_v1(
+        subject,
+        receipt.manifest.event_count,
+        signature_carrier_count,
+    )
+}
+
+fn carrier_scan_diagnostic_v1(
+    subject: LongitudinalMaterializationSubjectV1,
+    event_count: u64,
+    signature_carrier_count: u64,
+) -> Result<LongitudinalCarrierScanDiagnosticV1, LongitudinalMaterializeError> {
+    let target_lookup_full_scans = carrier_target_full_scan_count();
+    let mut diagnostic = LongitudinalCarrierScanDiagnosticV1 {
+        schema: "pointbreak.longitudinal-carrier-scan-diagnostic.v1".to_owned(),
+        subject,
+        event_count,
+        signature_carrier_count,
+        target_lookup_full_scans,
+        repeated_target_lookup_full_scans: target_lookup_full_scans.saturating_sub(1),
+        diagnostic_sha256: String::new(),
+    };
+    diagnostic.diagnostic_sha256 = diagnostic.canonical_sha256()?;
+    diagnostic.validate()?;
+    Ok(diagnostic)
+}
+
+pub fn resume_longitudinal_capacity_v1(
+    options: LongitudinalCapacityMaterializeOptionsV1,
+) -> Result<LongitudinalMaterializationResumeReceiptV1, LongitudinalMaterializeError> {
+    let pre_inventory = store_data_inventory_v1(&options.root)?;
+    let root = options.root.clone();
+    let execution = options.execution.clone();
+    let subject = LongitudinalMaterializationSubjectV1::Capacity(options.profile);
+    let result = resume_longitudinal_capacity_inner_v1(options)?;
+    let post_inventory = store_data_inventory_v1(&root)?;
+    let mut receipt = LongitudinalMaterializationResumeReceiptV1 {
+        schema: LONGITUDINAL_MATERIALIZATION_RESUME_RECEIPT_SCHEMA_V1.to_owned(),
+        subject,
+        execution,
+        root_identity: result.receipt.root_identity.clone(),
+        pre_inventory,
+        post_inventory,
+        events_created: result.counts.events_created,
+        events_existing: result.counts.events_existing,
+        event_count: result.receipt.manifest.event_count,
+        content_count: result.receipt.manifest.content_inventory.len() as u64,
+        strict: result.receipt.strict.clone(),
+        materialization_sha256: result.receipt.materialization_sha256.clone(),
+        materialization: LongitudinalResumedMaterializationV1::Capacity(result.receipt),
+        receipt_sha256: String::new(),
+    };
+    receipt.receipt_sha256 = receipt.canonical_sha256().map_err(contract_error)?;
+    receipt.validate().map_err(contract_error)?;
+    Ok(receipt)
+}
+
+struct ResumedCapacityMaterializationV1 {
+    receipt: LongitudinalCapacityMaterializationReceiptV1,
+    counts: MaterializationWriteCountsV1,
+}
+
+fn resume_longitudinal_capacity_inner_v1(
+    options: LongitudinalCapacityMaterializeOptionsV1,
+) -> Result<ResumedCapacityMaterializationV1, LongitudinalMaterializeError> {
+    validate_frozen_inputs(&options.public_seed_hex, &options.clock_identity)?;
+    let contract = longitudinal_capacity_contract_v1();
+    let requirement = contract
+        .profiles
+        .iter()
+        .find(|requirement| requirement.profile == options.profile)
+        .ok_or(LongitudinalMaterializeError::UnsupportedContract)?;
+    let (shape, block_count) = match options.profile {
+        LongitudinalCapacityProfileV1::L100O10K => {
+            (LongitudinalRecordShapeV1::CapacityL100O10K, 100)
+        }
+        LongitudinalCapacityProfileV1::C262 => (LongitudinalRecordShapeV1::CapacityV1, 1_024),
+        LongitudinalCapacityProfileV1::C524 => (LongitudinalRecordShapeV1::CapacityV1, 2_048),
+    };
+    let records = (0..block_count)
+        .map(|block| {
+            prepare_longitudinal_record_v1(LongitudinalRecordSpecV1::new(shape, block))
+                .map_err(store_error)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let write = write_longitudinal_records_v1(&options.root, &records).map_err(store_error)?;
+    let counts = MaterializationWriteCountsV1 {
+        events_created: write.events_created,
+        events_existing: write.events_existing,
+    };
+    if write
+        .events_created
+        .checked_add(write.events_existing)
+        .is_none_or(|count| count != requirement.event_count)
+        || write.event_count != requirement.event_count
+        || write.revision_count != requirement.revision_count
+        || write.object_artifact_count != requirement.object_artifact_count
+        || write.task_attempt_count != requirement.task_attempt_count
+        || write.body_fact_count != requirement.body_fact_count
+        || write.external_body_count != requirement.external_body_count
+        || write.decoded_body_bytes != requirement.decoded_body_bytes
+        || write.decoded_object_target_bytes != requirement.decoded_object_target_bytes
+    {
+        return Err(LongitudinalMaterializeError::Store(
+            "capacity counts drifted from the frozen profile".to_owned(),
+        ));
+    }
+
+    let probe_schedule = contract.probes.clone();
+    let schedule_sha256 = canonical_sha256(&probe_schedule)?;
+    let mut manifest = LongitudinalCapacityManifestV1 {
+        schema: contract.schema,
+        contract_sha256: contract.contract_sha256,
+        execution: options.execution,
+        public_seed_hex: options.public_seed_hex,
+        subject: LongitudinalCapacitySubjectV1::Companion(options.profile),
+        event_count: write.event_count,
+        revision_count: write.revision_count,
+        object_artifact_count: write.object_artifact_count,
+        task_attempt_count: write.task_attempt_count,
+        body_fact_count: write.body_fact_count,
+        external_body_count: write.external_body_count,
+        decoded_body_bytes: write.decoded_body_bytes,
+        decoded_object_target_bytes: write.decoded_object_target_bytes,
+        ordered_events: write.ordered_events,
+        event_carriers: write.event_carriers,
+        content_inventory: write.content_inventory,
+        removed_content_sha256: write.removed_content_sha256,
+        selectors: write.capacity_selectors,
+        probe_schedule,
+        schedule_sha256,
+        manifest_sha256: String::new(),
+    };
+    manifest.manifest_sha256 = manifest.canonical_sha256().map_err(contract_error)?;
+    manifest.validate().map_err(contract_error)?;
+
+    let mut receipt = LongitudinalCapacityMaterializationReceiptV1 {
+        schema: LONGITUDINAL_CAPACITY_MATERIALIZATION_RECEIPT_SCHEMA_V1.to_owned(),
+        root_identity: root_identity(&options.root)?,
+        manifest,
+        strict: write.strict,
+        materialization_sha256: String::new(),
+    };
+    receipt.materialization_sha256 = receipt.canonical_sha256().map_err(contract_error)?;
+    receipt.validate().map_err(contract_error)?;
+    Ok(ResumedCapacityMaterializationV1 { receipt, counts })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StoreDataFileV1 {
+    relative_path: String,
+    bytes: u64,
+    sha256: String,
+}
+
+pub fn longitudinal_store_data_inventory_v1(
+    root: &Path,
+) -> Result<LongitudinalStoreDataInventoryV1, LongitudinalMaterializeError> {
+    store_data_inventory_v1(root)
+}
+
+fn store_data_inventory_v1(
+    root: &Path,
+) -> Result<LongitudinalStoreDataInventoryV1, LongitudinalMaterializeError> {
+    let store = store_dir_for_repo(root).map_err(store_error)?;
+    let mut files = Vec::new();
+    if store.exists() {
+        collect_store_data_files_v1(&store, &store, &mut files)?;
+    }
+    files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    let byte_count = files.iter().try_fold(0_u64, |total, file| {
+        total.checked_add(file.bytes).ok_or_else(|| {
+            LongitudinalMaterializeError::Store("store byte count overflowed".into())
+        })
+    })?;
+    let inventory_sha256 = canonical_sha256(&files)?;
+    Ok(LongitudinalStoreDataInventoryV1 {
+        file_count: files.len() as u64,
+        byte_count,
+        inventory_sha256,
+    })
+}
+
+fn collect_store_data_files_v1(
+    store: &Path,
+    directory: &Path,
+    files: &mut Vec<StoreDataFileV1>,
+) -> Result<(), LongitudinalMaterializeError> {
+    let entries = fs::read_dir(directory).map_err(|error| {
+        LongitudinalMaterializeError::Store(format!(
+            "cannot inventory store directory {}: {error}",
+            directory.display()
+        ))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            LongitudinalMaterializeError::Store(format!(
+                "cannot read store directory entry in {}: {error}",
+                directory.display()
+            ))
+        })?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            LongitudinalMaterializeError::Store(format!(
+                "cannot inspect store-data path {}: {error}",
+                path.display()
+            ))
+        })?;
+        if metadata.is_dir() {
+            collect_store_data_files_v1(store, &path, files)?;
+            continue;
+        }
+        if !metadata.is_file() {
+            return Err(LongitudinalMaterializeError::Store(format!(
+                "store-data inventory rejects non-file path {}",
+                path.display()
+            )));
+        }
+        let relative_path = path
+            .strip_prefix(store)
+            .map_err(|_| {
+                LongitudinalMaterializeError::Store(
+                    "store-data inventory path escaped its root".to_owned(),
+                )
+            })?
+            .to_str()
+            .ok_or_else(|| {
+                LongitudinalMaterializeError::Store(
+                    "store-data inventory path is not UTF-8".to_owned(),
+                )
+            })?
+            .replace('\\', "/");
+        let bytes = fs::read(&path).map_err(|error| {
+            LongitudinalMaterializeError::Store(format!(
+                "cannot read store-data file {}: {error}",
+                path.display()
+            ))
+        })?;
+        files.push(StoreDataFileV1 {
+            relative_path,
+            bytes: bytes.len() as u64,
+            sha256: sha256_bytes_hex(&bytes),
+        });
+    }
+    Ok(())
+}
+
+pub fn verify_longitudinal_materializer_equivalence_v1(
+    baseline_root: &Path,
+    baseline: &LongitudinalMaterializationReceiptV1,
+    successor_root: &Path,
+    successor: &LongitudinalMaterializationReceiptV1,
+    implementation_diff_sha256: String,
+) -> Result<LongitudinalMaterializerEquivalenceReceiptV1, LongitudinalMaterializeError> {
+    baseline.validate().map_err(contract_error)?;
+    successor.validate().map_err(contract_error)?;
+    let baseline = workload_equivalence_root_v1(baseline_root, baseline)?;
+    let successor = workload_equivalence_root_v1(successor_root, successor)?;
+    equivalence_receipt_v1(baseline, successor, implementation_diff_sha256)
+}
+
+pub fn verify_longitudinal_capacity_materializer_equivalence_v1(
+    baseline_root: &Path,
+    baseline: &LongitudinalCapacityMaterializationReceiptV1,
+    successor_root: &Path,
+    successor: &LongitudinalCapacityMaterializationReceiptV1,
+    implementation_diff_sha256: String,
+) -> Result<LongitudinalMaterializerEquivalenceReceiptV1, LongitudinalMaterializeError> {
+    baseline.validate().map_err(contract_error)?;
+    successor.validate().map_err(contract_error)?;
+    let baseline = capacity_equivalence_root_v1(baseline_root, baseline)?;
+    let successor = capacity_equivalence_root_v1(successor_root, successor)?;
+    equivalence_receipt_v1(baseline, successor, implementation_diff_sha256)
+}
+
+fn workload_equivalence_root_v1(
+    root: &Path,
+    receipt: &LongitudinalMaterializationReceiptV1,
+) -> Result<LongitudinalMaterializerRootReceiptV1, LongitudinalMaterializeError> {
+    let actual_root_identity = root_identity(root)?;
+    if receipt.root_identity != actual_root_identity {
+        return Err(LongitudinalMaterializeError::Contract(
+            "workload receipt does not describe the supplied root".to_owned(),
+        ));
+    }
+    Ok(LongitudinalMaterializerRootReceiptV1 {
+        subject: LongitudinalMaterializationSubjectV1::Workload(receipt.manifest.tier),
+        execution: receipt.manifest.execution.clone(),
+        root_identity: actual_root_identity,
+        inventory: store_data_inventory_v1(root)?,
+        event_count: receipt.manifest.event_count,
+        content_count: receipt.manifest.content_inventory.len() as u64,
+        strict: receipt.strict.clone(),
+        materialization_sha256: receipt.materialization_sha256.clone(),
+    })
+}
+
+fn capacity_equivalence_root_v1(
+    root: &Path,
+    receipt: &LongitudinalCapacityMaterializationReceiptV1,
+) -> Result<LongitudinalMaterializerRootReceiptV1, LongitudinalMaterializeError> {
+    let actual_root_identity = root_identity(root)?;
+    if receipt.root_identity != actual_root_identity {
+        return Err(LongitudinalMaterializeError::Contract(
+            "capacity receipt does not describe the supplied root".to_owned(),
+        ));
+    }
+    let LongitudinalCapacitySubjectV1::Companion(profile) = receipt.manifest.subject else {
+        return Err(LongitudinalMaterializeError::UnsupportedContract);
+    };
+    Ok(LongitudinalMaterializerRootReceiptV1 {
+        subject: LongitudinalMaterializationSubjectV1::Capacity(profile),
+        execution: receipt.manifest.execution.clone(),
+        root_identity: actual_root_identity,
+        inventory: store_data_inventory_v1(root)?,
+        event_count: receipt.manifest.event_count,
+        content_count: receipt.manifest.content_inventory.len() as u64,
+        strict: receipt.strict.clone(),
+        materialization_sha256: receipt.materialization_sha256.clone(),
+    })
+}
+
+fn equivalence_receipt_v1(
+    baseline: LongitudinalMaterializerRootReceiptV1,
+    successor: LongitudinalMaterializerRootReceiptV1,
+    implementation_diff_sha256: String,
+) -> Result<LongitudinalMaterializerEquivalenceReceiptV1, LongitudinalMaterializeError> {
+    let equivalent = baseline.subject == successor.subject
+        && baseline.event_count == successor.event_count
+        && baseline.content_count == successor.content_count
+        && baseline.strict == successor.strict
+        && baseline.inventory == successor.inventory;
+    let mut receipt = LongitudinalMaterializerEquivalenceReceiptV1 {
+        schema: LONGITUDINAL_MATERIALIZER_EQUIVALENCE_RECEIPT_SCHEMA_V1.to_owned(),
+        baseline,
+        successor,
+        implementation_diff_sha256,
+        equivalent,
+        receipt_sha256: String::new(),
+    };
+    receipt.receipt_sha256 = receipt.canonical_sha256().map_err(contract_error)?;
     receipt.validate().map_err(contract_error)?;
     Ok(receipt)
 }
@@ -572,6 +1146,7 @@ mod tests {
                 execution_identity(),
             ))
             .unwrap();
+        reset_carrier_target_full_scan_count();
         let right_receipt =
             materialize_longitudinal_workload_v1(LongitudinalMaterializeOptionsV1::new(
                 right.path(),
@@ -579,6 +1154,14 @@ mod tests {
                 execution_identity(),
             ))
             .unwrap();
+        let scan_diagnostic = carrier_scan_diagnostic_v1(
+            LongitudinalMaterializationSubjectV1::Workload(LongitudinalTierV1::L1),
+            right_receipt.manifest.event_count,
+            32,
+        )
+        .unwrap();
+        assert_eq!(scan_diagnostic.target_lookup_full_scans, 1);
+        assert_eq!(scan_diagnostic.repeated_target_lookup_full_scans, 0);
 
         verify_longitudinal_materialization_pair_v1(&left_receipt, &right_receipt).unwrap();
         assert_ne!(left_receipt.root_identity, right_receipt.root_identity);
@@ -587,6 +1170,84 @@ mod tests {
         assert_eq!(left_receipt.manifest.content_inventory.len(), 416);
         assert_eq!(left_receipt.manifest.removed_content_sha256.len(), 12);
         assert_eq!(left_receipt.strict, right_receipt.strict);
+
+        let mut successor_receipt = right_receipt.clone();
+        successor_receipt.manifest.execution.source_commit = "5".repeat(40);
+        successor_receipt.manifest.manifest_sha256 =
+            successor_receipt.manifest.canonical_sha256().unwrap();
+        successor_receipt.materialization_sha256 = successor_receipt.canonical_sha256().unwrap();
+        successor_receipt.validate().unwrap();
+        let equivalence = verify_longitudinal_materializer_equivalence_v1(
+            left.path(),
+            &left_receipt,
+            right.path(),
+            &successor_receipt,
+            sha256_bytes_hex(b"optimized implementation diff"),
+        )
+        .unwrap();
+        assert!(equivalence.equivalent);
+        assert_ne!(
+            equivalence.baseline.execution.source_commit,
+            equivalence.successor.execution.source_commit,
+            "source identities are bound but excluded from store-data equality"
+        );
+
+        let complete_resume =
+            resume_longitudinal_workload_v1(LongitudinalMaterializeOptionsV1::new(
+                right.path(),
+                LongitudinalTierV1::L1,
+                execution_identity(),
+            ))
+            .unwrap();
+        assert_eq!(complete_resume.events_created, 0);
+        assert_eq!(complete_resume.events_existing, 1_024);
+        assert_eq!(
+            complete_resume.pre_inventory, complete_resume.post_inventory,
+            "idempotent replay must preserve every store-data byte"
+        );
+        assert!(
+            materialize_longitudinal_workload_v1(LongitudinalMaterializeOptionsV1::new(
+                right.path(),
+                LongitudinalTierV1::L1,
+                execution_identity(),
+            ))
+            .is_err()
+        );
+
+        let store = store_dir_for_repo(right.path()).unwrap();
+        let event_path = fs::read_dir(store.join("events"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        fs::remove_file(&event_path).unwrap();
+        let interrupted_resume =
+            resume_longitudinal_workload_v1(LongitudinalMaterializeOptionsV1::new(
+                right.path(),
+                LongitudinalTierV1::L1,
+                execution_identity(),
+            ))
+            .unwrap();
+        assert_eq!(interrupted_resume.events_created, 1);
+        assert_eq!(interrupted_resume.events_existing, 1_023);
+        assert_eq!(
+            interrupted_resume.post_inventory,
+            complete_resume.post_inventory
+        );
+
+        let valid_event_bytes = fs::read(&event_path).unwrap();
+        fs::write(&event_path, b"{}").unwrap();
+        assert!(
+            resume_longitudinal_workload_v1(LongitudinalMaterializeOptionsV1::new(
+                right.path(),
+                LongitudinalTierV1::L1,
+                execution_identity(),
+            ))
+            .is_err(),
+            "a corrupt existing event must fail closed"
+        );
+        fs::write(&event_path, valid_event_bytes).unwrap();
 
         for root in [left.path(), right.path()] {
             let events = crate::session::read_events(root).unwrap();
@@ -598,6 +1259,29 @@ mod tests {
                 })
             }));
         }
+    }
+
+    #[test]
+    fn longitudinal_capacity_resume_rejects_non_public_inputs_before_generation() {
+        let repo = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        let mut options = LongitudinalCapacityMaterializeOptionsV1::new(
+            repo.path(),
+            LongitudinalCapacityProfileV1::L100O10K,
+            execution_identity(),
+        );
+        options.public_seed_hex = "00".repeat(32);
+
+        assert!(matches!(
+            resume_longitudinal_capacity_v1(options),
+            Err(LongitudinalMaterializeError::NonFrozenSeed)
+        ));
+        assert_eq!(
+            longitudinal_store_data_inventory_v1(repo.path())
+                .unwrap()
+                .file_count,
+            0
+        );
     }
 
     #[test]
