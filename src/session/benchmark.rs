@@ -5,6 +5,7 @@
 //! artifact, ingest, replay, and projection primitives.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::Path;
 
 use serde::Serialize;
@@ -12,7 +13,7 @@ use sha2::{Digest as _, Sha256};
 
 use super::event::{
     ArtifactRemovedPayload, AssertionMode, BodyContentType, EventSignature,
-    EventSignatureRecordedPayload, EventTarget, EventToBeSigned, EventType,
+    EventSignatureRecordedPayload, EventTarget, EventToBeSigned, EventType, IngestProvenance,
     InputRequestOpenedPayload, InputRequestReasonCode, InputRequestRespondedPayload,
     InputRequestResponseOutcome, ReviewAssessment, ReviewAssessmentRecordedPayload,
     ReviewInitializedPayload, ReviewObservationRecordedPayload, Revision,
@@ -42,7 +43,8 @@ use super::workflow::observation::staged_body;
 use super::workflow::validation::add::{ValidationCheckIdMaterial, build_validation_check_id};
 use super::{
     EventStore, IngestClock, IngestEventsOptions, IngestVia, SessionState, TrustSet,
-    event_signature_trust_set,
+    allowed_signers_path_for_repo, event_signature_trust_set, store_dir_for_repo,
+    trust_set_to_value,
 };
 use crate::bench_support::longitudinal::{
     FixedLongitudinalClockV1, LONGITUDINAL_FIXED_INGEST_RECEIVED_AT_V1,
@@ -60,7 +62,7 @@ use crate::model::{
     ReviewId, ReviewTargetRef, RevisionId, TargetRef, TaskTargetRef, TrackId, ValidationStatus,
     ValidationTarget, ValidationTrigger, WorkObjectId, WorkObjectType, id_prefix,
 };
-use crate::storage::{LocalStorage, RemoveOutcome};
+use crate::storage::{Durability, LocalStorage, RemoveOutcome};
 
 const V1_BLOCK_EVENT_COUNT: u64 = 256;
 const V1_BLOCK_BODY_COUNT: u64 = 180;
@@ -215,6 +217,26 @@ pub(crate) struct LongitudinalWriteReceiptV1 {
     pub(crate) decoded_body_bytes: u64,
     pub(crate) decoded_object_target_bytes: u64,
     pub(crate) by_type: BTreeMap<String, u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LongitudinalRemovalRewriteV1 {
+    pub(crate) relative_path: String,
+    pub(crate) event_id: String,
+    pub(crate) event_record_hash: String,
+    pub(crate) payload_hash: String,
+    pub(crate) before_sha256: String,
+    pub(crate) before_bytes: u64,
+    pub(crate) after_sha256: String,
+    pub(crate) after_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LongitudinalRemovalUpgradeWriteReceiptV1 {
+    pub(crate) rewrites: Vec<LongitudinalRemovalRewriteV1>,
+    pub(crate) enrollment_relative_path: String,
+    pub(crate) enrollment_sha256: String,
+    pub(crate) enrollment_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1272,7 +1294,7 @@ impl BlockBuilderV1 {
                 },
                 self.occurred_at()?,
             )?;
-            self.push_unsigned(event);
+            self.push_trusted_removal(event)?;
         }
         Ok(())
     }
@@ -1289,7 +1311,7 @@ impl BlockBuilderV1 {
             self.occurred_at()?,
         )?;
         let event_id = event.event_id.as_str().to_owned();
-        self.push_unsigned(event);
+        self.push_trusted_removal(event)?;
         Ok(event_id)
     }
 
@@ -1446,12 +1468,25 @@ impl BlockBuilderV1 {
     fn push_unsigned(&mut self, event: ShoreEvent) {
         self.events.push(event);
     }
+
+    fn push_trusted_removal(&mut self, mut event: ShoreEvent) -> Result<()> {
+        let signer = deterministic_signer(self.events.len() % 4);
+        super::sign_event_if_requested(&mut event, &super::EventSigningOptions::sign_with(signer))?;
+        self.events.push(event);
+        Ok(())
+    }
 }
 
 pub(crate) fn write_longitudinal_records_v1(
     repo: &Path,
     records: &[PreparedLongitudinalRecordV1],
 ) -> Result<LongitudinalWriteReceiptV1> {
+    let events = records
+        .iter()
+        .flat_map(|record| record.events.iter().cloned())
+        .collect::<Vec<_>>();
+    reject_legacy_longitudinal_removals(repo, &events)?;
+
     let write_store = resolve_write_store(repo)?;
     let storage = LocalStorage::new(write_store.store_dir());
     prepare_write_landing(&write_store, &storage)?;
@@ -1463,10 +1498,6 @@ pub(crate) fn write_longitudinal_records_v1(
         }
     }
 
-    let events = records
-        .iter()
-        .flat_map(|record| record.events.iter().cloned())
-        .collect::<Vec<_>>();
     let result = ingest_events_with_clock(
         IngestEventsOptions::new(repo, events.clone()).with_trust_set(longitudinal_trust_set()?),
         &FixedBenchmarkIngestClock,
@@ -1532,7 +1563,6 @@ pub(crate) fn write_longitudinal_records_v1(
             raw_bytes: raw.len() as u64,
         });
     }
-
     let removed_refs = records
         .iter()
         .flat_map(|record| record.removed.iter().map(PreparedContentV1::relative_path))
@@ -1604,6 +1634,8 @@ pub(crate) fn write_longitudinal_records_v1(
             .or_default() += 1;
     }
 
+    persist_longitudinal_trust_set(repo)?;
+
     Ok(LongitudinalWriteReceiptV1 {
         ordered_events,
         event_carriers,
@@ -1632,6 +1664,187 @@ pub(crate) fn write_longitudinal_records_v1(
             .sum(),
         by_type,
     })
+}
+
+fn reject_legacy_longitudinal_removals(repo: &Path, desired: &[ShoreEvent]) -> Result<()> {
+    let existing = EventStore::from_backend(resolve_read_store(repo)?.backend()).list_events()?;
+    if existing.is_empty() {
+        return Ok(());
+    }
+    let existing_by_id = existing
+        .iter()
+        .map(|event| (event.event_id.as_str(), event))
+        .collect::<BTreeMap<_, _>>();
+    for generated in desired
+        .iter()
+        .filter(|event| event.event_type == EventType::ArtifactRemoved)
+    {
+        let Some(stored) = existing_by_id.get(generated.event_id.as_str()) else {
+            continue;
+        };
+        if stored.signer != generated.signer || stored.signature != generated.signature {
+            return Err(ShoreError::Message(
+                "legacy longitudinal removals require the explicit clone upgrade".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn upgrade_longitudinal_removals_v1(
+    root: &Path,
+    block_count: u64,
+) -> Result<LongitudinalRemovalUpgradeWriteReceiptV1> {
+    let root = crate::paths::RepositoryPaths::resolve(root)?
+        .worktree_root()
+        .to_path_buf();
+    if super::resolve_store_mode_for_repo(&root)?.mode != super::StoreMode::Ephemeral {
+        return Err(ShoreError::Message(
+            "longitudinal removal upgrade requires a loose ephemeral root".to_owned(),
+        ));
+    }
+    let enrollment_path = allowed_signers_path_for_repo(&root)?;
+    if enrollment_path.exists() {
+        return Err(ShoreError::Message(
+            "longitudinal removal upgrade requires absent signer enrollment".to_owned(),
+        ));
+    }
+
+    let store_dir = store_dir_for_repo(&root)?;
+    let events_dir = store_dir.join("events");
+    let content_store = ContentArtifacts::local(&store_dir);
+    let stored_events = EventStore::open(&store_dir).list_events()?;
+    let stored_removal_ids = stored_events
+        .iter()
+        .filter(|event| event.event_type == EventType::ArtifactRemoved)
+        .map(|event| event.event_id.as_str())
+        .collect::<BTreeSet<_>>();
+
+    let mut desired_removals = Vec::new();
+    let mut removed_content = Vec::new();
+    for block in 0..block_count {
+        let record = prepare_longitudinal_record_v1(LongitudinalRecordSpecV1::new(
+            LongitudinalRecordShapeV1::Workload,
+            block,
+        ))?;
+        desired_removals.extend(
+            record
+                .events
+                .into_iter()
+                .filter(|event| event.event_type == EventType::ArtifactRemoved),
+        );
+        removed_content.extend(record.removed);
+    }
+    if desired_removals.len()
+        != usize::try_from(block_count.saturating_mul(3)).unwrap_or(usize::MAX)
+        || stored_removal_ids.len() != desired_removals.len()
+        || desired_removals
+            .iter()
+            .any(|event| !stored_removal_ids.contains(event.event_id.as_str()))
+    {
+        return Err(ShoreError::Message(
+            "longitudinal removal upgrade found unexpected removal count or identity".to_owned(),
+        ));
+    }
+    for content in &removed_content {
+        if content_store
+            .get_if_exists(content.relative_path())?
+            .is_some()
+        {
+            return Err(ShoreError::Message(
+                "longitudinal removal upgrade requires every removal target to be absent"
+                    .to_owned(),
+            ));
+        }
+    }
+
+    let mut pending = Vec::with_capacity(desired_removals.len());
+    for mut desired in desired_removals {
+        desired.ingest = Some(IngestProvenance {
+            via: IngestVia::IngestEvents,
+            received_at: LONGITUDINAL_FIXED_INGEST_RECEIVED_AT_V1.to_owned(),
+        });
+        let path = events_dir.join(format!(
+            "{}.json",
+            sha256_bytes_hex(desired.idempotency_key.as_bytes())
+        ));
+        let before = fs::read(&path).map_err(|error| {
+            ShoreError::Message(format!("read removal event {}: {error}", path.display()))
+        })?;
+        let stored: ShoreEvent = serde_json::from_slice(&before)?;
+        let mut expected_legacy = desired.clone();
+        expected_legacy.signer = None;
+        expected_legacy.signature = None;
+        if stored != expected_legacy {
+            return Err(ShoreError::Message(format!(
+                "longitudinal removal upgrade rejects non-legacy event {}",
+                stored.event_id.as_str()
+            )));
+        }
+        let after = serde_json::to_vec(&desired)?;
+        let relative_path = path
+            .strip_prefix(&root)
+            .map_err(|_| ShoreError::Message("upgrade path escaped its root".to_owned()))?
+            .to_str()
+            .ok_or_else(|| ShoreError::Message("upgrade path is not UTF-8".to_owned()))?
+            .replace('\\', "/");
+        pending.push((
+            path,
+            after.clone(),
+            LongitudinalRemovalRewriteV1 {
+                relative_path,
+                event_id: desired.event_id.as_str().to_owned(),
+                event_record_hash: desired.event_record_hash()?,
+                payload_hash: desired.payload_hash.clone(),
+                before_sha256: sha256_bytes_hex(&before),
+                before_bytes: before.len() as u64,
+                after_sha256: sha256_bytes_hex(&after),
+                after_bytes: after.len() as u64,
+            },
+        ));
+    }
+    pending.sort_by(|left, right| left.2.relative_path.cmp(&right.2.relative_path));
+
+    for (path, after, _) in &pending {
+        LocalStorage::new(&root).write_bytes_atomic(path, after, Durability::Durable)?;
+    }
+    persist_longitudinal_trust_set(&root)?;
+
+    let enrollment = fs::read(&enrollment_path).map_err(|error| {
+        ShoreError::Message(format!(
+            "read longitudinal signer enrollment {}: {error}",
+            enrollment_path.display()
+        ))
+    })?;
+    let enrollment_relative_path = enrollment_path
+        .strip_prefix(&root)
+        .map_err(|_| ShoreError::Message("enrollment path escaped its root".to_owned()))?
+        .to_str()
+        .ok_or_else(|| ShoreError::Message("enrollment path is not UTF-8".to_owned()))?
+        .replace('\\', "/");
+    Ok(LongitudinalRemovalUpgradeWriteReceiptV1 {
+        rewrites: pending.into_iter().map(|(_, _, rewrite)| rewrite).collect(),
+        enrollment_relative_path,
+        enrollment_sha256: sha256_bytes_hex(&enrollment),
+        enrollment_bytes: enrollment.len() as u64,
+    })
+}
+
+fn persist_longitudinal_trust_set(repo: &Path) -> Result<()> {
+    let path = allowed_signers_path_for_repo(repo)?;
+    let parent = path.parent().ok_or_else(|| {
+        ShoreError::Message(format!(
+            "longitudinal signer enrollment path has no parent: {}",
+            path.display()
+        ))
+    })?;
+    fs::create_dir_all(parent)
+        .map_err(|error| ShoreError::Message(format!("create {}: {error}", parent.display())))?;
+    LocalStorage::new(parent).write_json_atomic(
+        &path,
+        &trust_set_to_value(&longitudinal_trust_set()?),
+        Durability::Durable,
+    )
 }
 
 fn capacity_selectors(
@@ -2683,7 +2896,7 @@ mod tests {
                 .iter()
                 .filter(|event| event.signature.is_some())
                 .count(),
-            48
+            51
         );
         assert_eq!(inline_signers.len(), 4);
         assert_eq!(engagements.len(), 2);

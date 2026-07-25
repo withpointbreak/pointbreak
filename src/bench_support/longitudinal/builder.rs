@@ -13,14 +13,15 @@ use crate::bench_support::longitudinal::contract::{
     LongitudinalExecutionIdentityV1, LongitudinalExpectedSemanticReceiptV1,
     LongitudinalMaterializationReceiptV1, LongitudinalMaterializationResumeReceiptV1,
     LongitudinalMaterializationSubjectV1, LongitudinalMaterializerEquivalenceReceiptV1,
-    LongitudinalMaterializerRootReceiptV1, LongitudinalResumedMaterializationV1,
-    LongitudinalStoreDataInventoryV1, LongitudinalTierV1, LongitudinalWorkloadManifestV1,
-    longitudinal_capacity_contract_v1, longitudinal_runner_contract_v1,
+    LongitudinalMaterializerRootReceiptV1, LongitudinalRemovalUpgradePathV1,
+    LongitudinalResumedMaterializationV1, LongitudinalStoreDataInventoryV1, LongitudinalTierV1,
+    LongitudinalWorkloadManifestV1, longitudinal_capacity_contract_v1,
+    longitudinal_runner_contract_v1,
 };
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
 use crate::session::benchmark::{
     LongitudinalRecordShapeV1, LongitudinalRecordSpecV1, prepare_longitudinal_record_v1,
-    write_longitudinal_records_v1,
+    upgrade_longitudinal_removals_v1, write_longitudinal_records_v1,
 };
 use crate::session::{
     carrier_target_full_scan_count, format_rfc3339_utc_millis,
@@ -125,6 +126,15 @@ pub struct LongitudinalCapacityMaterializeOptionsV1 {
     pub execution: LongitudinalExecutionIdentityV1,
     pub public_seed_hex: String,
     pub clock_identity: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct AppliedLongitudinalRemovalUpgradeV1 {
+    pub(crate) changed_paths: Vec<LongitudinalRemovalUpgradePathV1>,
+    pub(crate) enrollment_relative_path: String,
+    pub(crate) enrollment_sha256: String,
+    pub(crate) enrollment_bytes: u64,
+    pub(crate) resumed_materialization: LongitudinalMaterializationResumeReceiptV1,
 }
 
 impl LongitudinalCapacityMaterializeOptionsV1 {
@@ -328,6 +338,43 @@ pub fn resume_longitudinal_workload_v1(
     receipt.receipt_sha256 = receipt.canonical_sha256().map_err(contract_error)?;
     receipt.validate().map_err(contract_error)?;
     Ok(receipt)
+}
+
+pub(crate) fn apply_longitudinal_removal_upgrade_v1(
+    root: &Path,
+    tier: LongitudinalTierV1,
+    corrected_execution: LongitudinalExecutionIdentityV1,
+) -> Result<AppliedLongitudinalRemovalUpgradeV1, LongitudinalMaterializeError> {
+    let requirement = longitudinal_runner_contract_v1()
+        .tiers
+        .into_iter()
+        .find(|requirement| requirement.tier == tier)
+        .ok_or(LongitudinalMaterializeError::UnsupportedContract)?;
+    let write =
+        upgrade_longitudinal_removals_v1(root, requirement.block_count).map_err(store_error)?;
+    let resumed_materialization = resume_longitudinal_workload_v1(
+        LongitudinalMaterializeOptionsV1::new(root, tier, corrected_execution),
+    )?;
+    Ok(AppliedLongitudinalRemovalUpgradeV1 {
+        changed_paths: write
+            .rewrites
+            .into_iter()
+            .map(|rewrite| LongitudinalRemovalUpgradePathV1 {
+                relative_path: rewrite.relative_path,
+                event_id: rewrite.event_id,
+                event_record_hash: rewrite.event_record_hash,
+                payload_hash: rewrite.payload_hash,
+                before_sha256: rewrite.before_sha256,
+                before_bytes: rewrite.before_bytes,
+                after_sha256: rewrite.after_sha256,
+                after_bytes: rewrite.after_bytes,
+            })
+            .collect(),
+        enrollment_relative_path: write.enrollment_relative_path,
+        enrollment_sha256: write.enrollment_sha256,
+        enrollment_bytes: write.enrollment_bytes,
+        resumed_materialization,
+    })
 }
 
 struct ResumedWorkloadMaterializationV1 {
@@ -1259,6 +1306,56 @@ mod tests {
                 })
             }));
         }
+    }
+
+    #[test]
+    fn longitudinal_materialize_enrolls_trusted_removals_for_absent_content() {
+        use crate::bench_support::EventType;
+        use crate::crypto::EventVerificationStatus;
+        use crate::session::{
+            BaseProjectionConfig, TrustSet, allowed_signers_path_for_repo, history_base_projection,
+            read_events, verify_event_signature,
+        };
+
+        let repo = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        let receipt = materialize_longitudinal_workload_v1(LongitudinalMaterializeOptionsV1::new(
+            repo.path(),
+            LongitudinalTierV1::L1,
+            execution_identity(),
+        ))
+        .unwrap();
+
+        let enrollment_path = allowed_signers_path_for_repo(repo.path()).unwrap();
+        assert!(
+            enrollment_path.is_file(),
+            "fresh materialization must persist reader-visible trust enrollment"
+        );
+        let trust = TrustSet::from_allowed_signers_file(&enrollment_path).unwrap();
+        let events = read_events(repo.path()).unwrap();
+        let removals = events
+            .iter()
+            .filter(|event| event.event_type == EventType::ArtifactRemoved)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            removals.len(),
+            receipt.manifest.removed_content_sha256.len()
+        );
+        for event in removals {
+            assert_eq!(
+                verify_event_signature(event, &trust).unwrap(),
+                EventVerificationStatus::Valid,
+                "every absent generated content target must have a reader-trusted removal"
+            );
+        }
+        history_base_projection(
+            repo.path(),
+            &BaseProjectionConfig {
+                trust_set: trust,
+                ..BaseProjectionConfig::default()
+            },
+        )
+        .expect("trusted generated removals keep fully hydrated history readable");
     }
 
     #[test]

@@ -33,6 +33,10 @@ pub const LONGITUDINAL_CARRY_FORWARD_RECEIPT_SCHEMA_V1: &str =
     "pointbreak.longitudinal-carry-forward-receipt.v1";
 pub const LONGITUDINAL_CARRY_FORWARD_AUTHORITY_PACKAGE_SCHEMA_V1: &str =
     "pointbreak.longitudinal-carry-forward-authority-package.v1";
+pub const LONGITUDINAL_REMOVAL_UPGRADE_RECEIPT_SCHEMA_V1: &str =
+    "pointbreak.longitudinal-removal-upgrade-receipt.v1";
+pub const LONGITUDINAL_REMOVAL_UPGRADE_AUTHORITY_PACKAGE_SCHEMA_V1: &str =
+    "pointbreak.longitudinal-removal-upgrade-authority-package.v1";
 pub const LONGITUDINAL_PACKAGE_VERIFICATION_RECEIPT_SCHEMA_V1: &str =
     "pointbreak.longitudinal-package-verification-receipt.v1";
 pub const LONGITUDINAL_CONTROLLER_FAILURE_RECEIPT_SCHEMA_V1: &str =
@@ -1611,6 +1615,103 @@ pub fn longitudinal_workload_manifest_carry_invariant_sha256_v1(
     Ok(sha256_bytes_hex(&bytes))
 }
 
+pub fn longitudinal_workload_manifest_upgrade_invariant_sha256_v1(
+    manifest: &LongitudinalWorkloadManifestV1,
+    changed_event_ids: &[String],
+) -> Result<String, LongitudinalContractError> {
+    manifest.validate()?;
+    require_unique(
+        changed_event_ids.iter().map(String::as_str),
+        "removal-upgrade invariant event ids",
+    )?;
+    let changed_event_ids = changed_event_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let mut value = serde_json::to_value(manifest).map_err(|error| {
+        LongitudinalContractError::CanonicalJson {
+            message: error.to_string(),
+        }
+    })?;
+    let object = value
+        .as_object_mut()
+        .ok_or(LongitudinalContractError::ContractDrift {
+            field: "removal-upgrade manifest representation",
+        })?;
+    if object.remove("execution").is_none() || object.remove("manifestSha256").is_none() {
+        return Err(LongitudinalContractError::ContractDrift {
+            field: "removal-upgrade manifest representation",
+        });
+    }
+    let ordered_events = object
+        .get_mut("orderedEvents")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or(LongitudinalContractError::ContractDrift {
+            field: "removal-upgrade ordered events",
+        })?;
+    for event in ordered_events {
+        let event = event
+            .as_object_mut()
+            .ok_or(LongitudinalContractError::ContractDrift {
+                field: "removal-upgrade ordered event identity",
+            })?;
+        let event_id = event
+            .get("eventId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(LongitudinalContractError::ContractDrift {
+                field: "removal-upgrade ordered event identity",
+            })?;
+        if changed_event_ids.contains(event_id) && event.remove("canonicalDecodedSha256").is_none()
+        {
+            return Err(LongitudinalContractError::ContractDrift {
+                field: "removal-upgrade ordered event identity",
+            });
+        }
+    }
+    let carriers = object
+        .get_mut("eventCarriers")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or(LongitudinalContractError::ContractDrift {
+            field: "removal-upgrade event carriers",
+        })?;
+    for carrier in carriers {
+        let carrier = carrier
+            .as_object_mut()
+            .ok_or(LongitudinalContractError::ContractDrift {
+                field: "removal-upgrade event carrier",
+            })?;
+        let event_id = carrier
+            .get("eventId")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(LongitudinalContractError::ContractDrift {
+                field: "removal-upgrade event carrier",
+            })?;
+        if changed_event_ids.contains(event_id)
+            && (carrier.remove("rawSha256").is_none() || carrier.remove("rawBytes").is_none())
+        {
+            return Err(LongitudinalContractError::ContractDrift {
+                field: "removal-upgrade event carrier bytes",
+            });
+        }
+    }
+    if changed_event_ids.len()
+        != manifest
+            .ordered_events
+            .iter()
+            .filter(|event| changed_event_ids.contains(event.event_id.as_str()))
+            .count()
+    {
+        return Err(LongitudinalContractError::ContractDrift {
+            field: "removal-upgrade invariant event ids",
+        });
+    }
+    let bytes =
+        canonical_json_bytes(&value).map_err(|error| LongitudinalContractError::CanonicalJson {
+            message: error.to_string(),
+        })?;
+    Ok(sha256_bytes_hex(&bytes))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LongitudinalStrictSemanticReceiptV1 {
@@ -2003,6 +2104,257 @@ impl LongitudinalCarryForwardReceiptV1 {
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalRemovalUpgradePathV1 {
+    pub relative_path: String,
+    pub event_id: String,
+    pub event_record_hash: String,
+    pub payload_hash: String,
+    pub before_sha256: String,
+    pub before_bytes: u64,
+    pub after_sha256: String,
+    pub after_bytes: u64,
+}
+
+impl LongitudinalRemovalUpgradePathV1 {
+    fn validate(&self) -> Result<(), LongitudinalContractError> {
+        validate_relative_path(&self.relative_path)?;
+        if !self.relative_path.starts_with(".pointbreak/data/events/")
+            || !self.relative_path.ends_with(".json")
+            || self.before_sha256 == self.after_sha256
+            || self.before_bytes == self.after_bytes
+        {
+            return Err(LongitudinalContractError::ContractDrift {
+                field: "removal-upgrade changed path",
+            });
+        }
+        validate_prefixed_hash(&self.event_id, "evt:sha256:", "removal-upgrade event id")?;
+        validate_prefixed_hash(
+            &self.event_record_hash,
+            "sha256:",
+            "removal-upgrade event record hash",
+        )?;
+        validate_prefixed_hash(
+            &self.payload_hash,
+            "sha256:",
+            "removal-upgrade payload hash",
+        )?;
+        validate_hex(&self.before_sha256, 64, "removal-upgrade before SHA-256")?;
+        validate_hex(&self.after_sha256, 64, "removal-upgrade after SHA-256")
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalRemovalUpgradeReceiptV1 {
+    pub schema: String,
+    pub slot: LongitudinalCarryForwardSlotV1,
+    pub contract_sha256: String,
+    pub schedule_sha256: String,
+    pub source_execution: LongitudinalExecutionIdentityV1,
+    pub corrected_execution: LongitudinalExecutionIdentityV1,
+    pub source_root_identity: String,
+    pub successor_root_identity: String,
+    pub source_pre_inventory: LongitudinalStoreDataInventoryV1,
+    pub source_post_inventory: LongitudinalStoreDataInventoryV1,
+    pub successor_pre_inventory: LongitudinalStoreDataInventoryV1,
+    pub successor_post_inventory: LongitudinalStoreDataInventoryV1,
+    pub source_strict: LongitudinalStrictSemanticReceiptV1,
+    pub successor_strict: LongitudinalStrictSemanticReceiptV1,
+    pub event_count: u64,
+    pub content_count: u64,
+    pub removed_content_count: u64,
+    pub changed_paths: Vec<LongitudinalRemovalUpgradePathV1>,
+    pub enrollment_relative_path: String,
+    pub enrollment_sha256: String,
+    pub enrollment_bytes: u64,
+    pub source_manifest_sha256: String,
+    pub corrected_manifest_sha256: String,
+    pub source_manifest_invariant_sha256: String,
+    pub corrected_manifest_invariant_sha256: String,
+    pub source_materialization_sha256: String,
+    pub corrected_materialization_sha256: String,
+    pub resume_receipt_sha256: String,
+    pub resume_events_created: u64,
+    pub resume_events_existing: u64,
+    pub final_authority_diff_sha256: String,
+    pub receipt_sha256: String,
+}
+
+impl LongitudinalRemovalUpgradeReceiptV1 {
+    pub fn canonical_sha256(&self) -> Result<String, LongitudinalContractError> {
+        canonical_sha256_without(&self.receipt_sha256, |receipt_sha256| {
+            let mut preimage = self.clone();
+            preimage.receipt_sha256 = receipt_sha256;
+            preimage
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), LongitudinalContractError> {
+        if self.schema != LONGITUDINAL_REMOVAL_UPGRADE_RECEIPT_SCHEMA_V1
+            || self.contract_sha256 != LONGITUDINAL_RUNNER_CONTRACT_SHA256_V1
+        {
+            return Err(LongitudinalContractError::UnsupportedContract);
+        }
+        self.slot.validate()?;
+        self.source_execution.validate()?;
+        self.corrected_execution.validate()?;
+        if self.source_execution == self.corrected_execution
+            || self.source_execution.parent_commit.is_some()
+            || self.corrected_execution.parent_commit.is_some()
+            || self.source_execution.build_profile != carry_forward_lane_profile_v1(self.slot.lane)?
+        {
+            return Err(LongitudinalContractError::MixedRevision);
+        }
+        validate_hex(
+            &self.source_root_identity,
+            64,
+            "removal-upgrade source root identity",
+        )?;
+        validate_hex(
+            &self.successor_root_identity,
+            64,
+            "removal-upgrade successor root identity",
+        )?;
+        if self.source_root_identity == self.successor_root_identity {
+            return Err(LongitudinalContractError::RootIdentityNotDistinct);
+        }
+        for inventory in [
+            &self.source_pre_inventory,
+            &self.source_post_inventory,
+            &self.successor_pre_inventory,
+            &self.successor_post_inventory,
+        ] {
+            inventory.validate()?;
+        }
+        if self.source_pre_inventory != self.source_post_inventory
+            || self.source_pre_inventory != self.successor_pre_inventory
+            || self.successor_pre_inventory == self.successor_post_inventory
+        {
+            return Err(LongitudinalContractError::PairMismatch);
+        }
+        validate_strict_receipt(&self.source_strict)?;
+        validate_strict_receipt(&self.successor_strict)?;
+        if self.source_strict != self.successor_strict {
+            return Err(LongitudinalContractError::PairMismatch);
+        }
+        let requirement = longitudinal_runner_contract_v1()
+            .tiers
+            .into_iter()
+            .find(|requirement| requirement.tier == self.slot.tier)
+            .ok_or(LongitudinalContractError::UnsupportedTier)?;
+        require_count(
+            self.event_count,
+            requirement.event_count,
+            "removal-upgrade event count",
+        )?;
+        require_count(
+            self.content_count,
+            requirement.present_content_count,
+            "removal-upgrade content count",
+        )?;
+        require_count(
+            self.removed_content_count,
+            requirement.removed_content_count,
+            "removal-upgrade removed-content count",
+        )?;
+        require_len(
+            self.changed_paths.len(),
+            requirement.removed_content_count,
+            "removal-upgrade changed paths",
+        )?;
+        require_unique(
+            self.changed_paths
+                .iter()
+                .map(|path| path.relative_path.as_str()),
+            "removal-upgrade changed paths",
+        )?;
+        require_unique(
+            self.changed_paths.iter().map(|path| path.event_id.as_str()),
+            "removal-upgrade event ids",
+        )?;
+        if !self
+            .changed_paths
+            .windows(2)
+            .all(|pair| pair[0].relative_path < pair[1].relative_path)
+        {
+            return Err(LongitudinalContractError::ContractDrift {
+                field: "removal-upgrade changed-path order",
+            });
+        }
+        for path in &self.changed_paths {
+            path.validate()?;
+        }
+        if self.enrollment_relative_path != ".pointbreak/allowed-signers.json"
+            || self.enrollment_bytes == 0
+        {
+            return Err(LongitudinalContractError::ContractDrift {
+                field: "removal-upgrade signer enrollment",
+            });
+        }
+        validate_hex(
+            &self.enrollment_sha256,
+            64,
+            "removal-upgrade enrollment SHA-256",
+        )?;
+        validate_bound_hash(
+            &self.schedule_sha256,
+            &canonical_sha256(&LongitudinalOperationV1::ALL)?,
+            "removal-upgrade schedule",
+        )?;
+        for (hash, field) in [
+            (
+                &self.source_manifest_sha256,
+                "removal-upgrade source manifest SHA-256",
+            ),
+            (
+                &self.corrected_manifest_sha256,
+                "removal-upgrade corrected manifest SHA-256",
+            ),
+            (
+                &self.source_manifest_invariant_sha256,
+                "removal-upgrade source manifest invariant SHA-256",
+            ),
+            (
+                &self.corrected_manifest_invariant_sha256,
+                "removal-upgrade corrected manifest invariant SHA-256",
+            ),
+            (
+                &self.source_materialization_sha256,
+                "removal-upgrade source materialization SHA-256",
+            ),
+            (
+                &self.corrected_materialization_sha256,
+                "removal-upgrade corrected materialization SHA-256",
+            ),
+            (
+                &self.resume_receipt_sha256,
+                "removal-upgrade resume receipt SHA-256",
+            ),
+            (
+                &self.final_authority_diff_sha256,
+                "removal-upgrade final authority diff SHA-256",
+            ),
+        ] {
+            validate_hex(hash, 64, field)?;
+        }
+        if self.source_manifest_invariant_sha256 != self.corrected_manifest_invariant_sha256 {
+            return Err(LongitudinalContractError::ContractDrift {
+                field: "removal-upgrade manifest invariant",
+            });
+        }
+        if self.resume_events_created != 0 || self.resume_events_existing != self.event_count {
+            return Err(LongitudinalContractError::PairMismatch);
+        }
+        validate_bound_hash(
+            &self.receipt_sha256,
+            &self.canonical_sha256()?,
+            "removal-upgrade receipt",
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LongitudinalPackageVerificationReceiptV1 {
     pub schema: String,
     pub package_kind: LongitudinalVerifiedPackageKindV1,
@@ -2212,6 +2564,196 @@ impl LongitudinalCarryForwardAuthorityPackageV1 {
             &self.package_sha256,
             &self.canonical_sha256()?,
             "incomplete carry-forward authority package",
+        )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalRemovalUpgradeAuthorityCompletionV1 {
+    pub final_workload_package_sha256: String,
+    pub verification_receipt: LongitudinalPackageVerificationReceiptV1,
+    pub package_verified: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalRemovalUpgradeAuthorityPackageV1 {
+    pub schema: String,
+    pub contract_sha256: String,
+    pub corrected_execution: LongitudinalExecutionIdentityV1,
+    pub upgrade_receipts: Vec<LongitudinalRemovalUpgradeReceiptV1>,
+    pub materializer_equivalences: Vec<LongitudinalMaterializerEquivalenceReceiptV1>,
+    pub authority_set_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion: Option<LongitudinalRemovalUpgradeAuthorityCompletionV1>,
+    pub package_sha256: String,
+}
+
+impl LongitudinalRemovalUpgradeAuthorityPackageV1 {
+    pub fn canonical_authority_set_sha256(&self) -> Result<String, LongitudinalContractError> {
+        canonical_sha256(&(
+            &self.contract_sha256,
+            &self.corrected_execution,
+            &self.upgrade_receipts,
+            &self.materializer_equivalences,
+        ))
+    }
+
+    pub fn canonical_sha256(&self) -> Result<String, LongitudinalContractError> {
+        canonical_sha256_without(&self.package_sha256, |package_sha256| {
+            let mut preimage = self.clone();
+            preimage.package_sha256 = package_sha256;
+            preimage
+        })
+    }
+
+    pub fn validate_roots(&self) -> Result<(), LongitudinalContractError> {
+        if self.schema != LONGITUDINAL_REMOVAL_UPGRADE_AUTHORITY_PACKAGE_SCHEMA_V1
+            || self.contract_sha256 != LONGITUDINAL_RUNNER_CONTRACT_SHA256_V1
+        {
+            return Err(LongitudinalContractError::UnsupportedContract);
+        }
+        self.corrected_execution.validate()?;
+        if self.corrected_execution.parent_commit.is_some() {
+            return Err(LongitudinalContractError::MixedRevision);
+        }
+        let expected_slots = LongitudinalTierV1::ALL
+            .into_iter()
+            .flat_map(|tier| {
+                [
+                    LongitudinalCarryForwardSlotV1 {
+                        tier,
+                        lane: LongitudinalLaneV1::ReleaseUninstrumented,
+                        independent_run: 1,
+                    },
+                    LongitudinalCarryForwardSlotV1 {
+                        tier,
+                        lane: LongitudinalLaneV1::ReleaseUninstrumented,
+                        independent_run: 2,
+                    },
+                    LongitudinalCarryForwardSlotV1 {
+                        tier,
+                        lane: LongitudinalLaneV1::DebugUninstrumented,
+                        independent_run: 1,
+                    },
+                ]
+            })
+            .collect::<Vec<_>>();
+        if self
+            .upgrade_receipts
+            .iter()
+            .map(|receipt| receipt.slot)
+            .ne(expected_slots.iter().copied())
+        {
+            return Err(LongitudinalContractError::IncompleteEvidence);
+        }
+        let mut source_roots = BTreeSet::new();
+        let mut successor_roots = BTreeSet::new();
+        let mut source_execution_by_lane = BTreeMap::new();
+        let mut common_source_execution = None;
+        let mut final_authority_diff_sha256 = None;
+        for receipt in &self.upgrade_receipts {
+            receipt.validate()?;
+            if receipt.corrected_execution != self.corrected_execution
+                || !source_roots.insert(receipt.source_root_identity.as_str())
+                || !successor_roots.insert(receipt.successor_root_identity.as_str())
+            {
+                return Err(LongitudinalContractError::PairMismatch);
+            }
+            let source_common = execution_without_lane_identity_v1(&receipt.source_execution);
+            if common_source_execution.get_or_insert_with(|| source_common.clone())
+                != &source_common
+                || source_execution_by_lane
+                    .entry(receipt.slot.lane)
+                    .or_insert_with(|| receipt.source_execution.clone())
+                    != &receipt.source_execution
+                || final_authority_diff_sha256
+                    .get_or_insert_with(|| receipt.final_authority_diff_sha256.clone())
+                    != &receipt.final_authority_diff_sha256
+            {
+                return Err(LongitudinalContractError::PairMismatch);
+            }
+        }
+        if !source_roots.is_disjoint(&successor_roots)
+            || self.materializer_equivalences.len() != LongitudinalTierV1::ALL.len()
+        {
+            return Err(LongitudinalContractError::IncompleteEvidence);
+        }
+        for (tier, equivalence) in LongitudinalTierV1::ALL
+            .into_iter()
+            .zip(&self.materializer_equivalences)
+        {
+            equivalence.validate()?;
+            let release_one = self
+                .upgrade_receipts
+                .iter()
+                .find(|receipt| {
+                    receipt.slot
+                        == LongitudinalCarryForwardSlotV1 {
+                            tier,
+                            lane: LongitudinalLaneV1::ReleaseUninstrumented,
+                            independent_run: 1,
+                        }
+                })
+                .ok_or(LongitudinalContractError::IncompleteEvidence)?;
+            if equivalence.baseline.subject != LongitudinalMaterializationSubjectV1::Workload(tier)
+                || equivalence.baseline.execution != self.corrected_execution
+                || equivalence.baseline.root_identity != release_one.successor_root_identity
+                || equivalence.baseline.inventory != release_one.successor_post_inventory
+                || equivalence.baseline.strict != release_one.successor_strict
+                || equivalence.baseline.materialization_sha256
+                    != release_one.corrected_materialization_sha256
+                || equivalence.successor.subject
+                    != LongitudinalMaterializationSubjectV1::Workload(tier)
+                || equivalence.successor.execution != self.corrected_execution
+                || successor_roots.contains(equivalence.successor.root_identity.as_str())
+                || Some(&equivalence.implementation_diff_sha256)
+                    != final_authority_diff_sha256.as_ref()
+            {
+                return Err(LongitudinalContractError::PairMismatch);
+            }
+        }
+        validate_bound_hash(
+            &self.authority_set_sha256,
+            &self.canonical_authority_set_sha256()?,
+            "removal-upgrade authority set",
+        )
+    }
+
+    pub fn validate(&self) -> Result<(), LongitudinalContractError> {
+        self.validate_roots()?;
+        let completion = self
+            .completion
+            .as_ref()
+            .ok_or(LongitudinalContractError::IncompleteEvidence)?;
+        completion.verification_receipt.validate()?;
+        if !completion.package_verified
+            || completion.verification_receipt.package_kind
+                != LongitudinalVerifiedPackageKindV1::Workload
+            || completion.final_workload_package_sha256
+                != completion.verification_receipt.package_sha256
+            || completion.verification_receipt.execution_identity_sha256
+                != self.corrected_execution.canonical_sha256()?
+        {
+            return Err(LongitudinalContractError::IncompleteEvidence);
+        }
+        validate_bound_hash(
+            &self.package_sha256,
+            &self.canonical_sha256()?,
+            "removal-upgrade authority package",
+        )
+    }
+
+    pub fn validate_incomplete(&self) -> Result<(), LongitudinalContractError> {
+        self.validate_roots()?;
+        if self.completion.is_some() {
+            return Err(LongitudinalContractError::IncompleteEvidence);
+        }
+        validate_bound_hash(
+            &self.package_sha256,
+            &self.canonical_sha256()?,
+            "incomplete removal-upgrade authority package",
         )
     }
 }
@@ -4419,6 +4961,17 @@ fn validate_hex(
     Ok(())
 }
 
+fn validate_prefixed_hash(
+    value: &str,
+    prefix: &'static str,
+    field: &'static str,
+) -> Result<(), LongitudinalContractError> {
+    let digest = value
+        .strip_prefix(prefix)
+        .ok_or(LongitudinalContractError::InvalidHex { field, length: 64 })?;
+    validate_hex(digest, 64, field)
+}
+
 fn require_nonempty(value: &str, field: &'static str) -> Result<(), LongitudinalContractError> {
     if value.trim().is_empty() {
         return Err(LongitudinalContractError::EmptyField { field });
@@ -4603,12 +5156,19 @@ mod contract_tests {
     }
 
     fn materialization(root_label: &str) -> LongitudinalMaterializationReceiptV1 {
+        materialization_for_tier(root_label, LongitudinalTierV1::L1)
+    }
+
+    fn materialization_for_tier(
+        root_label: &str,
+        selected_tier: LongitudinalTierV1,
+    ) -> LongitudinalMaterializationReceiptV1 {
         let contract = longitudinal_runner_contract_v1();
         let tier = contract
             .tiers
             .iter()
-            .find(|tier| tier.tier == LongitudinalTierV1::L1)
-            .expect("L1 contract");
+            .find(|tier| tier.tier == selected_tier)
+            .expect("tier contract");
         let ordered_events = (0..tier.event_count)
             .map(|ordinal| LongitudinalEventIdentityV1 {
                 event_id: format!("evt:{ordinal:04}"),
@@ -4931,6 +5491,194 @@ mod contract_tests {
             .canonical_authority_set_sha256()
             .expect("authority set hash");
         package.package_sha256 = package.canonical_sha256().expect("authority package hash");
+    }
+
+    fn removal_upgrade_receipt(
+        slot: LongitudinalCarryForwardSlotV1,
+        ordinal: usize,
+        corrected_execution: &LongitudinalExecutionIdentityV1,
+    ) -> LongitudinalRemovalUpgradeReceiptV1 {
+        let requirement = longitudinal_runner_contract_v1()
+            .tiers
+            .into_iter()
+            .find(|requirement| requirement.tier == slot.tier)
+            .expect("tier requirement");
+        let mut source_execution = execution();
+        source_execution.build_profile = carry_forward_lane_profile_v1(slot.lane)
+            .expect("upgrade source lane")
+            .to_owned();
+        source_execution.runner_sha256 = match slot.lane {
+            LongitudinalLaneV1::ReleaseUninstrumented => digest("upgrade source release runner"),
+            LongitudinalLaneV1::DebugUninstrumented => digest("upgrade source debug runner"),
+            LongitudinalLaneV1::AttributionCounts => unreachable!("unsupported upgrade lane"),
+        };
+        let strict = materialization("upgrade-strict").strict;
+        let legacy_inventory = store_inventory(&format!("upgrade-legacy-inventory-{ordinal}"));
+        let corrected_inventory =
+            store_inventory(&format!("upgrade-corrected-inventory-{ordinal}"));
+        let mut changed_paths = (0..requirement.removed_content_count)
+            .map(|change| LongitudinalRemovalUpgradePathV1 {
+                relative_path: format!(
+                    ".pointbreak/data/events/{}.json",
+                    digest(&format!("upgrade-path-{ordinal}-{change}"))
+                ),
+                event_id: format!(
+                    "evt:sha256:{}",
+                    digest(&format!("upgrade-event-{ordinal}-{change}"))
+                ),
+                event_record_hash: format!(
+                    "sha256:{}",
+                    digest(&format!("upgrade-record-{ordinal}-{change}"))
+                ),
+                payload_hash: format!(
+                    "sha256:{}",
+                    digest(&format!("upgrade-payload-{ordinal}-{change}"))
+                ),
+                before_sha256: digest(&format!("upgrade-before-{ordinal}-{change}")),
+                before_bytes: 100,
+                after_sha256: digest(&format!("upgrade-after-{ordinal}-{change}")),
+                after_bytes: 200,
+            })
+            .collect::<Vec<_>>();
+        changed_paths.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+        let mut receipt = LongitudinalRemovalUpgradeReceiptV1 {
+            schema: LONGITUDINAL_REMOVAL_UPGRADE_RECEIPT_SCHEMA_V1.to_owned(),
+            slot,
+            contract_sha256: LONGITUDINAL_RUNNER_CONTRACT_SHA256_V1.to_owned(),
+            schedule_sha256: canonical_sha256(&LongitudinalOperationV1::ALL)
+                .expect("upgrade schedule hash"),
+            source_execution,
+            corrected_execution: corrected_execution.clone(),
+            source_root_identity: digest(&format!("upgrade-source-root-{ordinal}")),
+            successor_root_identity: digest(&format!("upgrade-successor-root-{ordinal}")),
+            source_pre_inventory: legacy_inventory.clone(),
+            source_post_inventory: legacy_inventory.clone(),
+            successor_pre_inventory: legacy_inventory,
+            successor_post_inventory: corrected_inventory,
+            source_strict: strict.clone(),
+            successor_strict: strict,
+            event_count: requirement.event_count,
+            content_count: requirement.present_content_count,
+            removed_content_count: requirement.removed_content_count,
+            changed_paths,
+            enrollment_relative_path: ".pointbreak/allowed-signers.json".to_owned(),
+            enrollment_sha256: digest("upgrade enrollment"),
+            enrollment_bytes: 1_024,
+            source_manifest_sha256: digest(&format!("upgrade-source-manifest-{ordinal}")),
+            corrected_manifest_sha256: digest(&format!("upgrade-corrected-manifest-{ordinal}")),
+            source_manifest_invariant_sha256: digest(&format!("upgrade-invariant-{ordinal}")),
+            corrected_manifest_invariant_sha256: digest(&format!("upgrade-invariant-{ordinal}")),
+            source_materialization_sha256: digest(&format!(
+                "upgrade-source-materialization-{ordinal}"
+            )),
+            corrected_materialization_sha256: digest(&format!(
+                "upgrade-corrected-materialization-{ordinal}"
+            )),
+            resume_receipt_sha256: digest(&format!("upgrade-resume-{ordinal}")),
+            resume_events_created: 0,
+            resume_events_existing: requirement.event_count,
+            final_authority_diff_sha256: digest("upgrade implementation diff"),
+            receipt_sha256: String::new(),
+        };
+        receipt.receipt_sha256 = receipt.canonical_sha256().expect("upgrade receipt hash");
+        receipt
+    }
+
+    fn removal_upgrade_authority_package() -> LongitudinalRemovalUpgradeAuthorityPackageV1 {
+        let mut corrected_execution = execution();
+        corrected_execution.source_commit = "7".repeat(40);
+        corrected_execution.source_tree = "8".repeat(40);
+        corrected_execution.runner_sha256 = digest("upgrade corrected runner");
+        corrected_execution.build_profile = "corrected-uninstrumented".to_owned();
+        let upgrade_receipts = LongitudinalTierV1::ALL
+            .into_iter()
+            .flat_map(|tier| {
+                [
+                    LongitudinalCarryForwardSlotV1 {
+                        tier,
+                        lane: LongitudinalLaneV1::ReleaseUninstrumented,
+                        independent_run: 1,
+                    },
+                    LongitudinalCarryForwardSlotV1 {
+                        tier,
+                        lane: LongitudinalLaneV1::ReleaseUninstrumented,
+                        independent_run: 2,
+                    },
+                    LongitudinalCarryForwardSlotV1 {
+                        tier,
+                        lane: LongitudinalLaneV1::DebugUninstrumented,
+                        independent_run: 1,
+                    },
+                ]
+            })
+            .enumerate()
+            .map(|(ordinal, slot)| removal_upgrade_receipt(slot, ordinal, &corrected_execution))
+            .collect::<Vec<_>>();
+        let materializer_equivalences = LongitudinalTierV1::ALL
+            .into_iter()
+            .map(|tier| {
+                let release_one = upgrade_receipts
+                    .iter()
+                    .find(|receipt| {
+                        receipt.slot.tier == tier
+                            && receipt.slot.lane == LongitudinalLaneV1::ReleaseUninstrumented
+                            && receipt.slot.independent_run == 1
+                    })
+                    .expect("release-one upgrade");
+                let baseline = LongitudinalMaterializerRootReceiptV1 {
+                    subject: LongitudinalMaterializationSubjectV1::Workload(tier),
+                    execution: corrected_execution.clone(),
+                    root_identity: release_one.successor_root_identity.clone(),
+                    inventory: release_one.successor_post_inventory.clone(),
+                    event_count: release_one.event_count,
+                    content_count: release_one.content_count,
+                    strict: release_one.successor_strict.clone(),
+                    materialization_sha256: release_one.corrected_materialization_sha256.clone(),
+                };
+                let mut successor = baseline.clone();
+                successor.root_identity = digest(&format!("upgrade-fresh-root-{tier:?}"));
+                let mut equivalence = LongitudinalMaterializerEquivalenceReceiptV1 {
+                    schema: LONGITUDINAL_MATERIALIZER_EQUIVALENCE_RECEIPT_SCHEMA_V1.to_owned(),
+                    baseline,
+                    successor,
+                    implementation_diff_sha256: digest("upgrade implementation diff"),
+                    equivalent: true,
+                    receipt_sha256: String::new(),
+                };
+                equivalence.receipt_sha256 = equivalence
+                    .canonical_sha256()
+                    .expect("upgrade equivalence hash");
+                equivalence
+            })
+            .collect::<Vec<_>>();
+        let verification_receipt = package_verification_receipt(&corrected_execution);
+        let mut package = LongitudinalRemovalUpgradeAuthorityPackageV1 {
+            schema: LONGITUDINAL_REMOVAL_UPGRADE_AUTHORITY_PACKAGE_SCHEMA_V1.to_owned(),
+            contract_sha256: LONGITUDINAL_RUNNER_CONTRACT_SHA256_V1.to_owned(),
+            corrected_execution,
+            upgrade_receipts,
+            materializer_equivalences,
+            authority_set_sha256: String::new(),
+            completion: Some(LongitudinalRemovalUpgradeAuthorityCompletionV1 {
+                final_workload_package_sha256: verification_receipt.package_sha256.clone(),
+                verification_receipt,
+                package_verified: true,
+            }),
+            package_sha256: String::new(),
+        };
+        rehash_removal_upgrade_authority_package(&mut package);
+        package
+    }
+
+    fn rehash_removal_upgrade_authority_package(
+        package: &mut LongitudinalRemovalUpgradeAuthorityPackageV1,
+    ) {
+        package.authority_set_sha256 = package
+            .canonical_authority_set_sha256()
+            .expect("upgrade authority set hash");
+        package.package_sha256 = package
+            .canonical_sha256()
+            .expect("upgrade authority package hash");
     }
 
     fn generation(
@@ -5614,6 +6362,14 @@ mod contract_tests {
             "pointbreak.longitudinal-carry-forward-authority-package.v1"
         );
         assert_eq!(
+            LONGITUDINAL_REMOVAL_UPGRADE_RECEIPT_SCHEMA_V1,
+            "pointbreak.longitudinal-removal-upgrade-receipt.v1"
+        );
+        assert_eq!(
+            LONGITUDINAL_REMOVAL_UPGRADE_AUTHORITY_PACKAGE_SCHEMA_V1,
+            "pointbreak.longitudinal-removal-upgrade-authority-package.v1"
+        );
+        assert_eq!(
             LONGITUDINAL_PACKAGE_VERIFICATION_RECEIPT_SCHEMA_V1,
             "pointbreak.longitudinal-package-verification-receipt.v1"
         );
@@ -5818,6 +6574,171 @@ mod contract_tests {
             longitudinal_workload_manifest_carry_invariant_sha256_v1(&source).unwrap(),
             longitudinal_workload_manifest_carry_invariant_sha256_v1(&semantic_drift).unwrap(),
             "the carry invariant excludes execution only"
+        );
+    }
+
+    #[test]
+    fn removal_upgrade_receipt_fails_closed_for_upgrade_drift() {
+        let package = removal_upgrade_authority_package();
+        let receipt = package.upgrade_receipts[0].clone();
+        receipt.validate().expect("upgrade receipt validates");
+
+        let mut tampered = receipt.clone();
+        tampered.changed_paths.pop();
+        tampered.receipt_sha256 = tampered.canonical_sha256().expect("upgrade receipt hash");
+        assert!(tampered.validate().is_err());
+
+        tampered = receipt.clone();
+        tampered.enrollment_relative_path = ".pointbreak/other.json".to_owned();
+        tampered.receipt_sha256 = tampered.canonical_sha256().expect("upgrade receipt hash");
+        assert!(tampered.validate().is_err());
+
+        tampered = receipt.clone();
+        tampered.successor_pre_inventory = tampered.successor_post_inventory.clone();
+        tampered.receipt_sha256 = tampered.canonical_sha256().expect("upgrade receipt hash");
+        assert!(tampered.validate().is_err());
+
+        tampered = receipt.clone();
+        tampered.successor_strict.state_sha256 = digest("changed upgrade semantics");
+        tampered.receipt_sha256 = tampered.canonical_sha256().expect("upgrade receipt hash");
+        assert!(tampered.validate().is_err());
+
+        tampered = receipt.clone();
+        tampered.resume_events_created = 1;
+        tampered.resume_events_existing -= 1;
+        tampered.receipt_sha256 = tampered.canonical_sha256().expect("upgrade receipt hash");
+        assert!(tampered.validate().is_err());
+
+        tampered = receipt;
+        tampered.corrected_manifest_invariant_sha256 = digest("changed upgrade invariant");
+        tampered.receipt_sha256 = tampered.canonical_sha256().expect("upgrade receipt hash");
+        assert!(tampered.validate().is_err());
+    }
+
+    #[test]
+    fn removal_upgrade_authority_requires_ordered_slots_equivalence_and_q2_binding() {
+        let package = removal_upgrade_authority_package();
+        package
+            .validate()
+            .expect("complete upgrade authority validates");
+
+        let mut incomplete = package.clone();
+        incomplete.completion = None;
+        rehash_removal_upgrade_authority_package(&mut incomplete);
+        incomplete
+            .validate_incomplete()
+            .expect("upgrade root authority validates before Q2");
+        assert_eq!(
+            incomplete.validate(),
+            Err(LongitudinalContractError::IncompleteEvidence)
+        );
+
+        let mut missing = package.clone();
+        missing.upgrade_receipts.pop();
+        rehash_removal_upgrade_authority_package(&mut missing);
+        assert!(missing.validate().is_err());
+
+        let mut duplicate = package.clone();
+        duplicate.upgrade_receipts[1] = duplicate.upgrade_receipts[0].clone();
+        rehash_removal_upgrade_authority_package(&mut duplicate);
+        assert!(duplicate.validate().is_err());
+
+        let mut reordered = package.clone();
+        reordered.upgrade_receipts.swap(0, 1);
+        rehash_removal_upgrade_authority_package(&mut reordered);
+        assert!(reordered.validate().is_err());
+
+        let mut mixed = package.clone();
+        mixed.corrected_execution.runner_sha256 = digest("other corrected runner");
+        let verification = package_verification_receipt(&mixed.corrected_execution);
+        mixed.completion = Some(LongitudinalRemovalUpgradeAuthorityCompletionV1 {
+            final_workload_package_sha256: verification.package_sha256.clone(),
+            verification_receipt: verification,
+            package_verified: true,
+        });
+        rehash_removal_upgrade_authority_package(&mut mixed);
+        assert_eq!(
+            mixed.validate(),
+            Err(LongitudinalContractError::PairMismatch)
+        );
+
+        let mut mismatched_equivalence = package.clone();
+        let equivalence = &mut mismatched_equivalence.materializer_equivalences[0];
+        equivalence.baseline.root_identity = digest("wrong upgraded root");
+        equivalence.receipt_sha256 = equivalence
+            .canonical_sha256()
+            .expect("equivalence receipt hash");
+        rehash_removal_upgrade_authority_package(&mut mismatched_equivalence);
+        assert_eq!(
+            mismatched_equivalence.validate(),
+            Err(LongitudinalContractError::PairMismatch)
+        );
+
+        let mut wrong_q2 = package;
+        wrong_q2
+            .completion
+            .as_mut()
+            .expect("upgrade completion")
+            .final_workload_package_sha256 = digest("wrong Q2 package");
+        rehash_removal_upgrade_authority_package(&mut wrong_q2);
+        assert_eq!(
+            wrong_q2.validate(),
+            Err(LongitudinalContractError::IncompleteEvidence)
+        );
+    }
+
+    #[test]
+    fn removal_upgrade_manifest_invariant_excludes_only_changed_carrier_and_execution_bytes() {
+        let source = materialization("upgrade-invariant-source").manifest;
+        let changed_event_ids = vec![source.ordered_events[0].event_id.clone()];
+        let mut corrected = source.clone();
+        corrected.execution.source_commit = "9".repeat(40);
+        corrected.ordered_events[0].canonical_decoded_sha256 = digest("signed decoded event");
+        corrected.event_carriers[0].raw_sha256 = digest("signed raw event");
+        corrected.event_carriers[0].raw_bytes += 128;
+        corrected.manifest_sha256 = corrected
+            .canonical_sha256()
+            .expect("corrected manifest hash");
+        assert_eq!(
+            longitudinal_workload_manifest_upgrade_invariant_sha256_v1(&source, &changed_event_ids)
+                .unwrap(),
+            longitudinal_workload_manifest_upgrade_invariant_sha256_v1(
+                &corrected,
+                &changed_event_ids
+            )
+            .unwrap()
+        );
+
+        let mut semantic_drift = source.clone();
+        semantic_drift.expected_semantic_receipts[0].semantic_receipt_sha256 =
+            digest("different upgrade semantic receipt");
+        semantic_drift.manifest_sha256 = semantic_drift
+            .canonical_sha256()
+            .expect("semantic-drift manifest hash");
+        assert_ne!(
+            longitudinal_workload_manifest_upgrade_invariant_sha256_v1(&source, &changed_event_ids)
+                .unwrap(),
+            longitudinal_workload_manifest_upgrade_invariant_sha256_v1(
+                &semantic_drift,
+                &changed_event_ids
+            )
+            .unwrap()
+        );
+
+        let mut non_removal_drift = source.clone();
+        non_removal_drift.event_carriers[1].raw_sha256 = digest("changed non-removal carrier");
+        non_removal_drift.manifest_sha256 = non_removal_drift
+            .canonical_sha256()
+            .expect("non-removal-drift manifest hash");
+        assert_ne!(
+            longitudinal_workload_manifest_upgrade_invariant_sha256_v1(&source, &changed_event_ids)
+                .unwrap(),
+            longitudinal_workload_manifest_upgrade_invariant_sha256_v1(
+                &non_removal_drift,
+                &changed_event_ids
+            )
+            .unwrap(),
+            "non-removal carrier bytes remain inside the upgrade invariant"
         );
     }
 

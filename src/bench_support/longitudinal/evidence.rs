@@ -23,12 +23,16 @@ use super::{
     LongitudinalHttpFailureV1, LongitudinalInspectorExitV1, LongitudinalLaneV1,
     LongitudinalMaterializationReceiptV1, LongitudinalMaterializerEquivalenceReceiptV1,
     LongitudinalOperationReceiptV1, LongitudinalOperationV1,
-    LongitudinalPackageVerificationReceiptV1, LongitudinalStderrClassificationV1,
-    LongitudinalStderrFailureV1, LongitudinalTierV1, LongitudinalVerifiedPackageKindV1,
-    LongitudinalWorkloadManifestV1, longitudinal_capacity_contract_v1,
+    LongitudinalPackageVerificationReceiptV1, LongitudinalRemovalUpgradeAuthorityCompletionV1,
+    LongitudinalRemovalUpgradeAuthorityPackageV1, LongitudinalRemovalUpgradeReceiptV1,
+    LongitudinalStderrClassificationV1, LongitudinalStderrFailureV1, LongitudinalTierV1,
+    LongitudinalVerifiedPackageKindV1, LongitudinalWorkloadManifestV1,
+    apply_longitudinal_removal_upgrade_v1, longitudinal_capacity_contract_v1,
     longitudinal_runner_contract_v1, longitudinal_store_data_inventory_v1,
-    longitudinal_workload_manifest_carry_invariant_sha256_v1, materialize_longitudinal_capacity_v1,
-    materialize_longitudinal_workload_v1, verify_longitudinal_materializer_equivalence_v1,
+    longitudinal_workload_manifest_carry_invariant_sha256_v1,
+    longitudinal_workload_manifest_upgrade_invariant_sha256_v1,
+    materialize_longitudinal_capacity_v1, materialize_longitudinal_workload_v1,
+    verify_longitudinal_materialization_pair_v1, verify_longitudinal_materializer_equivalence_v1,
 };
 use crate::bench_support::foundation::{
     QualificationFilesystemDispositionV1, classify_qualification_filesystem,
@@ -41,8 +45,9 @@ use crate::session::benchmark::{
     read_longitudinal_carrier_by_key_v1, stage_longitudinal_append_records_v1,
 };
 use crate::session::{
-    SessionState, StoreMode, event_log_head_marker, read_bound_object_artifact, read_events,
-    set_store_mode_for_repo, store_dir_for_repo, store_id_index,
+    SessionState, StoreMode, allowed_signers_path_for_repo, event_log_head_marker,
+    read_bound_object_artifact, read_events, set_store_mode_for_repo, store_dir_for_repo,
+    store_id_index,
 };
 
 pub const LONGITUDINAL_EVIDENCE_PACKAGE_FILE_V1: &str = "longitudinal-evidence-package.json";
@@ -53,6 +58,12 @@ pub const LONGITUDINAL_CARRY_FORWARD_ROOT_AUTHORITY_FILE_V1: &str =
     "carry-forward-root-authority.json";
 pub const LONGITUDINAL_CARRY_FORWARD_AUTHORITY_PACKAGE_FILE_V1: &str =
     "carry-forward-authority-package.json";
+pub const LONGITUDINAL_REMOVAL_UPGRADE_RECEIPT_FILE_V1: &str = "removal-upgrade-receipt.json";
+pub const LONGITUDINAL_CORRECTED_MATERIALIZATION_FILE_V1: &str = "corrected-materialization.json";
+pub const LONGITUDINAL_REMOVAL_UPGRADE_ROOT_AUTHORITY_FILE_V1: &str =
+    "removal-upgrade-root-authority.json";
+pub const LONGITUDINAL_REMOVAL_UPGRADE_AUTHORITY_PACKAGE_FILE_V1: &str =
+    "removal-upgrade-authority-package.json";
 const LONGITUDINAL_PACKAGE_VERIFICATION_RECEIPT_FILE_V1: &str = "package-receipt.json";
 
 const PROTECTED_ENVIRONMENT_VARIABLES: [&str; 4] = [
@@ -161,6 +172,22 @@ pub struct LongitudinalCarryForwardOptionsV1 {
     pub slot: LongitudinalCarryForwardSlotV1,
     pub materializer_equivalence: LongitudinalMaterializerEquivalenceReceiptV1,
     pub final_authority_diff_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LongitudinalRemovalUpgradeOptionsV1 {
+    pub source_root: PathBuf,
+    pub successor_root: PathBuf,
+    pub source_materialization: LongitudinalMaterializationReceiptV1,
+    pub corrected_execution: LongitudinalExecutionIdentityV1,
+    pub slot: LongitudinalCarryForwardSlotV1,
+    pub final_authority_diff_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LongitudinalRemovalUpgradeArtifactsV1 {
+    pub corrected_materialization: LongitudinalMaterializationReceiptV1,
+    pub receipt: LongitudinalRemovalUpgradeReceiptV1,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -758,6 +785,192 @@ pub fn write_longitudinal_carry_forward_v1(
             &artifacts.receipt,
         )
     })?;
+    Ok(artifacts)
+}
+
+pub fn upgrade_longitudinal_root_removals_v1(
+    options: &LongitudinalRemovalUpgradeOptionsV1,
+) -> Result<LongitudinalRemovalUpgradeArtifactsV1, LongitudinalEvidenceError> {
+    require_unprotected_environment()?;
+    options
+        .source_materialization
+        .validate()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    options
+        .corrected_execution
+        .validate()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    options
+        .slot
+        .validate()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    if options.slot.tier != options.source_materialization.manifest.tier
+        || options.corrected_execution.parent_commit.is_some()
+        || options.corrected_execution == options.source_materialization.manifest.execution
+    {
+        return Err(LongitudinalEvidenceError::InvalidReceipt);
+    }
+    let source_root =
+        fs::canonicalize(&options.source_root).map_err(|_| LongitudinalEvidenceError::Preflight)?;
+    let successor_root = fs::canonicalize(&options.successor_root)
+        .map_err(|_| LongitudinalEvidenceError::Preflight)?;
+    if source_root == successor_root
+        || source_root.starts_with(&successor_root)
+        || successor_root.starts_with(&source_root)
+    {
+        return Err(LongitudinalEvidenceError::UnsafeRoot);
+    }
+    let source_enrollment = allowed_signers_path_for_repo(&source_root)
+        .map_err(|_| LongitudinalEvidenceError::Preflight)?;
+    let successor_enrollment = allowed_signers_path_for_repo(&successor_root)
+        .map_err(|_| LongitudinalEvidenceError::Preflight)?;
+    if source_enrollment.exists() || successor_enrollment.exists() {
+        return Err(LongitudinalEvidenceError::Preflight);
+    }
+
+    let source_pre_inventory = longitudinal_store_data_inventory_v1(&source_root)
+        .map_err(|_| LongitudinalEvidenceError::Preflight)?;
+    let successor_pre_inventory = longitudinal_store_data_inventory_v1(&successor_root)
+        .map_err(|_| LongitudinalEvidenceError::Preflight)?;
+    let source_preflight =
+        preflight_longitudinal_root_v1(&source_root, &options.source_materialization.manifest)?;
+    let successor_preflight =
+        preflight_longitudinal_root_v1(&successor_root, &options.source_materialization.manifest)?;
+    verify_longitudinal_materialization_pair_v1(&source_preflight, &successor_preflight)
+        .map_err(|_| LongitudinalEvidenceError::Preflight)?;
+    if source_preflight != options.source_materialization
+        || source_pre_inventory != successor_pre_inventory
+    {
+        return Err(LongitudinalEvidenceError::Preflight);
+    }
+
+    let applied = apply_longitudinal_removal_upgrade_v1(
+        &successor_root,
+        options.slot.tier,
+        options.corrected_execution.clone(),
+    )
+    .map_err(|_| LongitudinalEvidenceError::Preflight)?;
+    let corrected_materialization = match &applied.resumed_materialization.materialization {
+        super::LongitudinalResumedMaterializationV1::Workload(materialization) => {
+            materialization.clone()
+        }
+        super::LongitudinalResumedMaterializationV1::Capacity(_) => {
+            return Err(LongitudinalEvidenceError::InvalidReceipt);
+        }
+    };
+    let source_post_inventory = longitudinal_store_data_inventory_v1(&source_root)
+        .map_err(|_| LongitudinalEvidenceError::Preflight)?;
+    let successor_post_inventory = longitudinal_store_data_inventory_v1(&successor_root)
+        .map_err(|_| LongitudinalEvidenceError::Preflight)?;
+    if source_pre_inventory != source_post_inventory
+        || successor_post_inventory != applied.resumed_materialization.post_inventory
+    {
+        return Err(LongitudinalEvidenceError::Preflight);
+    }
+    let changed_event_ids = applied
+        .changed_paths
+        .iter()
+        .map(|path| path.event_id.clone())
+        .collect::<Vec<_>>();
+
+    let mut receipt = LongitudinalRemovalUpgradeReceiptV1 {
+        schema: super::LONGITUDINAL_REMOVAL_UPGRADE_RECEIPT_SCHEMA_V1.to_owned(),
+        slot: options.slot,
+        contract_sha256: options
+            .source_materialization
+            .manifest
+            .contract_sha256
+            .clone(),
+        schedule_sha256: options
+            .source_materialization
+            .manifest
+            .schedule_sha256
+            .clone(),
+        source_execution: options.source_materialization.manifest.execution.clone(),
+        corrected_execution: options.corrected_execution.clone(),
+        source_root_identity: options.source_materialization.root_identity.clone(),
+        successor_root_identity: corrected_materialization.root_identity.clone(),
+        source_pre_inventory,
+        source_post_inventory,
+        successor_pre_inventory,
+        successor_post_inventory,
+        source_strict: options.source_materialization.strict.clone(),
+        successor_strict: corrected_materialization.strict.clone(),
+        event_count: corrected_materialization.manifest.event_count,
+        content_count: corrected_materialization.manifest.content_inventory.len() as u64,
+        removed_content_count: corrected_materialization
+            .manifest
+            .removed_content_sha256
+            .len() as u64,
+        changed_paths: applied.changed_paths,
+        enrollment_relative_path: applied.enrollment_relative_path,
+        enrollment_sha256: applied.enrollment_sha256,
+        enrollment_bytes: applied.enrollment_bytes,
+        source_manifest_sha256: options
+            .source_materialization
+            .manifest
+            .manifest_sha256
+            .clone(),
+        corrected_manifest_sha256: corrected_materialization.manifest.manifest_sha256.clone(),
+        source_manifest_invariant_sha256:
+            longitudinal_workload_manifest_upgrade_invariant_sha256_v1(
+                &options.source_materialization.manifest,
+                &changed_event_ids,
+            )
+            .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?,
+        corrected_manifest_invariant_sha256:
+            longitudinal_workload_manifest_upgrade_invariant_sha256_v1(
+                &corrected_materialization.manifest,
+                &changed_event_ids,
+            )
+            .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?,
+        source_materialization_sha256: options
+            .source_materialization
+            .materialization_sha256
+            .clone(),
+        corrected_materialization_sha256: corrected_materialization.materialization_sha256.clone(),
+        resume_receipt_sha256: applied.resumed_materialization.receipt_sha256.clone(),
+        resume_events_created: applied.resumed_materialization.events_created,
+        resume_events_existing: applied.resumed_materialization.events_existing,
+        final_authority_diff_sha256: options.final_authority_diff_sha256.clone(),
+        receipt_sha256: String::new(),
+    };
+    receipt.receipt_sha256 = receipt
+        .canonical_sha256()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    receipt
+        .validate()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    Ok(LongitudinalRemovalUpgradeArtifactsV1 {
+        corrected_materialization,
+        receipt,
+    })
+}
+
+pub fn write_longitudinal_removal_upgrade_v1(
+    options: &LongitudinalRemovalUpgradeOptionsV1,
+    authority_root: &Path,
+) -> Result<LongitudinalRemovalUpgradeArtifactsV1, LongitudinalEvidenceError> {
+    validate_fresh_local_root(authority_root, &options.source_root)?;
+    let parent = authority_root
+        .parent()
+        .ok_or(LongitudinalEvidenceError::UnsafeRoot)?;
+    let parent = fs::canonicalize(parent).map_err(|_| LongitudinalEvidenceError::UnsafeRoot)?;
+    let successor = fs::canonicalize(&options.successor_root)
+        .map_err(|_| LongitudinalEvidenceError::Preflight)?;
+    if parent.starts_with(&successor) {
+        return Err(LongitudinalEvidenceError::UnsafeRoot);
+    }
+    let artifacts = upgrade_longitudinal_root_removals_v1(options)?;
+    fs::create_dir(authority_root).map_err(io_error)?;
+    write_json_create_new(
+        &authority_root.join(LONGITUDINAL_CORRECTED_MATERIALIZATION_FILE_V1),
+        &artifacts.corrected_materialization,
+    )?;
+    write_json_create_new(
+        &authority_root.join(LONGITUDINAL_REMOVAL_UPGRADE_RECEIPT_FILE_V1),
+        &artifacts.receipt,
+    )?;
     Ok(artifacts)
 }
 
@@ -1536,6 +1749,119 @@ pub fn write_longitudinal_carry_forward_authority_package_v1(
 ) -> Result<LongitudinalCarryForwardAuthorityPackageV1, LongitudinalEvidenceError> {
     validate_fresh_local_root(output_path, workload_package_root)?;
     let package = complete_longitudinal_carry_forward_authority_package_v1(
+        root_authority,
+        workload_package_root,
+    )?;
+    write_json_create_new(output_path, &package)?;
+    Ok(package)
+}
+
+pub fn verify_longitudinal_removal_upgrade_authority_package_v1(
+    authority_package_path: &Path,
+    workload_package_root: &Path,
+) -> Result<LongitudinalRemovalUpgradeAuthorityPackageV1, LongitudinalEvidenceError> {
+    let package: LongitudinalRemovalUpgradeAuthorityPackageV1 = read_json(authority_package_path)?;
+    let verification_receipt = verify_longitudinal_package_receipt_v1(workload_package_root)?;
+    let completion = package
+        .completion
+        .as_ref()
+        .ok_or(LongitudinalEvidenceError::InvalidReceipt)?;
+    if completion.verification_receipt != verification_receipt
+        || !completion.package_verified
+        || completion.final_workload_package_sha256 != verification_receipt.package_sha256
+    {
+        return Err(LongitudinalEvidenceError::InvalidReceipt);
+    }
+    package
+        .validate()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    Ok(package)
+}
+
+pub fn assemble_longitudinal_removal_upgrade_root_authority_v1(
+    corrected_execution: LongitudinalExecutionIdentityV1,
+    upgrade_artifacts: Vec<LongitudinalRemovalUpgradeArtifactsV1>,
+    materializer_equivalences: Vec<LongitudinalMaterializerEquivalenceReceiptV1>,
+) -> Result<LongitudinalRemovalUpgradeAuthorityPackageV1, LongitudinalEvidenceError> {
+    let upgrade_receipts = upgrade_artifacts
+        .into_iter()
+        .map(|artifacts| {
+            artifacts
+                .corrected_materialization
+                .validate()
+                .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+            artifacts
+                .receipt
+                .validate()
+                .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+            if artifacts.corrected_materialization.manifest.execution
+                != artifacts.receipt.corrected_execution
+                || artifacts.corrected_materialization.root_identity
+                    != artifacts.receipt.successor_root_identity
+                || artifacts.corrected_materialization.strict != artifacts.receipt.successor_strict
+                || artifacts.corrected_materialization.materialization_sha256
+                    != artifacts.receipt.corrected_materialization_sha256
+            {
+                return Err(LongitudinalEvidenceError::InvalidReceipt);
+            }
+            Ok(artifacts.receipt)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut package = LongitudinalRemovalUpgradeAuthorityPackageV1 {
+        schema: super::LONGITUDINAL_REMOVAL_UPGRADE_AUTHORITY_PACKAGE_SCHEMA_V1.to_owned(),
+        contract_sha256: longitudinal_runner_contract_v1().contract_sha256,
+        corrected_execution,
+        upgrade_receipts,
+        materializer_equivalences,
+        authority_set_sha256: String::new(),
+        completion: None,
+        package_sha256: String::new(),
+    };
+    package.authority_set_sha256 = package
+        .canonical_authority_set_sha256()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    package.package_sha256 = package
+        .canonical_sha256()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    package
+        .validate_incomplete()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    Ok(package)
+}
+
+pub fn complete_longitudinal_removal_upgrade_authority_package_v1(
+    root_authority: &LongitudinalRemovalUpgradeAuthorityPackageV1,
+    workload_package_root: &Path,
+) -> Result<LongitudinalRemovalUpgradeAuthorityPackageV1, LongitudinalEvidenceError> {
+    root_authority
+        .validate_incomplete()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    let verification_receipt = verify_longitudinal_package_receipt_v1(workload_package_root)?;
+    if verification_receipt.package_kind != LongitudinalVerifiedPackageKindV1::Workload {
+        return Err(LongitudinalEvidenceError::InvalidReceipt);
+    }
+    let mut package = root_authority.clone();
+    package.completion = Some(LongitudinalRemovalUpgradeAuthorityCompletionV1 {
+        final_workload_package_sha256: verification_receipt.package_sha256.clone(),
+        verification_receipt,
+        package_verified: true,
+    });
+    package.package_sha256 = package
+        .canonical_sha256()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    package
+        .validate()
+        .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?;
+    Ok(package)
+}
+
+pub fn write_longitudinal_removal_upgrade_authority_package_v1(
+    root_authority: &LongitudinalRemovalUpgradeAuthorityPackageV1,
+    workload_package_root: &Path,
+    output_path: &Path,
+) -> Result<LongitudinalRemovalUpgradeAuthorityPackageV1, LongitudinalEvidenceError> {
+    validate_fresh_local_root(output_path, workload_package_root)?;
+    let package = complete_longitudinal_removal_upgrade_authority_package_v1(
         root_authority,
         workload_package_root,
     )?;
@@ -2326,6 +2652,8 @@ mod tests {
         LongitudinalContractError, LongitudinalPackagePurposeV1, LongitudinalRawFileV1,
     };
     use super::*;
+    use crate::bench_support::EventType;
+    use crate::session::{BaseProjectionConfig, TrustSet, history_base_projection};
 
     #[test]
     fn longitudinal_evidence_rejects_existing_and_relative_roots() {
@@ -2458,6 +2786,396 @@ mod tests {
             preflight_longitudinal_root_v1(&root, &materialized.manifest),
             Err(LongitudinalEvidenceError::Preflight)
         ));
+    }
+
+    #[test]
+    fn longitudinal_removal_upgrade_matches_a_fresh_corrected_l1_root() {
+        let disposable = tempfile::tempdir().unwrap();
+        let source = disposable.path().join("source");
+        let successor = disposable.path().join("successor");
+        let fresh = disposable.path().join("fresh");
+        initialize_evidence_root(&source).unwrap();
+        let source_execution = removal_upgrade_source_execution();
+        let corrected_execution = removal_upgrade_corrected_execution();
+        let corrected_source = materialize_longitudinal_workload_v1(
+            super::super::LongitudinalMaterializeOptionsV1::new(
+                &source,
+                LongitudinalTierV1::L1,
+                source_execution.clone(),
+            ),
+        )
+        .unwrap();
+        let legacy_source = downgrade_longitudinal_l1_to_legacy(&source, corrected_source);
+        let legacy_inventory = longitudinal_store_data_inventory_v1(&source).unwrap();
+        assert!(
+            super::super::resume_longitudinal_workload_v1(
+                super::super::LongitudinalMaterializeOptionsV1::new(
+                    &source,
+                    LongitudinalTierV1::L1,
+                    corrected_execution.clone(),
+                ),
+            )
+            .is_err(),
+            "legacy roots must use the explicit clone upgrade"
+        );
+        assert_eq!(
+            longitudinal_store_data_inventory_v1(&source).unwrap(),
+            legacy_inventory
+        );
+        assert!(!allowed_signers_path_for_repo(&source).unwrap().exists());
+        copy_directory_tree(&source, &successor).unwrap();
+
+        let options = LongitudinalRemovalUpgradeOptionsV1 {
+            source_root: source.clone(),
+            successor_root: successor.clone(),
+            source_materialization: legacy_source,
+            corrected_execution: corrected_execution.clone(),
+            slot: LongitudinalCarryForwardSlotV1 {
+                tier: LongitudinalTierV1::L1,
+                lane: LongitudinalLaneV1::ReleaseUninstrumented,
+                independent_run: 1,
+            },
+            final_authority_diff_sha256: sha256_bytes_hex(b"removal-integrity-diff"),
+        };
+        let upgraded = upgrade_longitudinal_root_removals_v1(&options).unwrap();
+        assert_eq!(upgraded.receipt.changed_paths.len(), 12);
+        assert_eq!(
+            upgraded.receipt.resume_events_created, 0,
+            "the corrected materializer must resume the upgraded root without replay"
+        );
+        assert_eq!(upgraded.receipt.resume_events_existing, 1_024);
+
+        initialize_evidence_root(&fresh).unwrap();
+        let fresh_materialization = materialize_longitudinal_workload_v1(
+            super::super::LongitudinalMaterializeOptionsV1::new(
+                &fresh,
+                LongitudinalTierV1::L1,
+                corrected_execution,
+            ),
+        )
+        .unwrap();
+        let equivalence = verify_longitudinal_materializer_equivalence_v1(
+            &successor,
+            &upgraded.corrected_materialization,
+            &fresh,
+            &fresh_materialization,
+            options.final_authority_diff_sha256,
+        )
+        .unwrap();
+        assert!(equivalence.equivalent);
+
+        for root in [&successor, &fresh] {
+            let trust =
+                TrustSet::from_allowed_signers_file(allowed_signers_path_for_repo(root).unwrap())
+                    .unwrap();
+            history_base_projection(
+                root,
+                &BaseProjectionConfig {
+                    trust_set: trust,
+                    ..BaseProjectionConfig::default()
+                },
+            )
+            .expect("trusted generated removals keep full history readable");
+        }
+    }
+
+    #[test]
+    fn longitudinal_removal_upgrade_rejects_legacy_root_drift_before_writing() {
+        let disposable = tempfile::tempdir().unwrap();
+        let source = disposable.path().join("source");
+        initialize_evidence_root(&source).unwrap();
+        let corrected_source = materialize_longitudinal_workload_v1(
+            super::super::LongitudinalMaterializeOptionsV1::new(
+                &source,
+                LongitudinalTierV1::L1,
+                removal_upgrade_source_execution(),
+            ),
+        )
+        .unwrap();
+        let legacy_source = downgrade_longitudinal_l1_to_legacy(&source, corrected_source);
+
+        assert_rejected_upgrade_clone(
+            &source,
+            &legacy_source,
+            disposable.path(),
+            "conflicting-enrollment",
+            |root| {
+                let enrollment = allowed_signers_path_for_repo(root).unwrap();
+                fs::write(enrollment, b"{\"allowedSigners\":{}}\n").unwrap();
+            },
+        );
+        assert_rejected_upgrade_clone(
+            &source,
+            &legacy_source,
+            disposable.path(),
+            "wrong-store-mode",
+            |root| set_store_mode_for_repo(root, StoreMode::Shared).unwrap(),
+        );
+        assert_rejected_upgrade_clone(
+            &source,
+            &legacy_source,
+            disposable.path(),
+            "missing-removal",
+            |root| {
+                let event = read_events(root)
+                    .unwrap()
+                    .into_iter()
+                    .find(|event| event.event_type == EventType::ArtifactRemoved)
+                    .unwrap();
+                fs::remove_file(event_file(root, &event.idempotency_key)).unwrap();
+            },
+        );
+        assert_rejected_upgrade_clone(
+            &source,
+            &legacy_source,
+            disposable.path(),
+            "unexpected-signature",
+            |root| {
+                let events = read_events(root).unwrap();
+                let signed = events.iter().find(|event| event.signer.is_some()).unwrap();
+                let mut removal = events
+                    .iter()
+                    .find(|event| event.event_type == EventType::ArtifactRemoved)
+                    .unwrap()
+                    .clone();
+                removal.signer = signed.signer.clone();
+                removal.signature = signed.signature.clone();
+                fs::write(
+                    event_file(root, &removal.idempotency_key),
+                    serde_json::to_vec(&removal).unwrap(),
+                )
+                .unwrap();
+            },
+        );
+        assert_rejected_upgrade_clone(
+            &source,
+            &legacy_source,
+            disposable.path(),
+            "unexpected-ingest",
+            |root| {
+                let mut event = read_events(root)
+                    .unwrap()
+                    .into_iter()
+                    .find(|event| event.event_type == EventType::ArtifactRemoved)
+                    .unwrap();
+                event.ingest.as_mut().unwrap().received_at = "2026-02-01T00:00:00.001Z".to_owned();
+                fs::write(
+                    event_file(root, &event.idempotency_key),
+                    serde_json::to_vec(&event).unwrap(),
+                )
+                .unwrap();
+            },
+        );
+        assert_rejected_upgrade_clone(
+            &source,
+            &legacy_source,
+            disposable.path(),
+            "unexpected-path",
+            |root| {
+                let event = read_events(root)
+                    .unwrap()
+                    .into_iter()
+                    .find(|event| event.event_type == EventType::ArtifactRemoved)
+                    .unwrap();
+                let path = event_file(root, &event.idempotency_key);
+                fs::rename(&path, path.with_extension("moved")).unwrap();
+            },
+        );
+        assert_rejected_upgrade_clone(
+            &source,
+            &legacy_source,
+            disposable.path(),
+            "present-content",
+            |root| {
+                let path = store_dir_for_repo(root)
+                    .unwrap()
+                    .join("artifacts/notes/unexpected.json");
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, b"unexpected").unwrap();
+            },
+        );
+        assert_rejected_upgrade_clone(
+            &source,
+            &legacy_source,
+            disposable.path(),
+            "non-removal-drift",
+            |root| {
+                let event = read_events(root)
+                    .unwrap()
+                    .into_iter()
+                    .find(|event| event.event_type != EventType::ArtifactRemoved)
+                    .unwrap();
+                let path = event_file(root, &event.idempotency_key);
+                let mut bytes = fs::read(&path).unwrap();
+                bytes.push(b' ');
+                fs::write(path, bytes).unwrap();
+            },
+        );
+
+        let successor = disposable.path().join("source-mutation");
+        copy_directory_tree(&source, &successor).unwrap();
+        let event = read_events(&source)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.event_type != EventType::ArtifactRemoved)
+            .unwrap();
+        let source_event = event_file(&source, &event.idempotency_key);
+        let original = fs::read(&source_event).unwrap();
+        let mut drifted = original.clone();
+        drifted.push(b' ');
+        fs::write(&source_event, drifted).unwrap();
+        let successor_before = test_root_inventory(&successor);
+        let result = upgrade_longitudinal_root_removals_v1(&LongitudinalRemovalUpgradeOptionsV1 {
+            source_root: source.clone(),
+            successor_root: successor.clone(),
+            source_materialization: legacy_source.clone(),
+            corrected_execution: removal_upgrade_corrected_execution(),
+            slot: LongitudinalCarryForwardSlotV1 {
+                tier: LongitudinalTierV1::L1,
+                lane: LongitudinalLaneV1::ReleaseUninstrumented,
+                independent_run: 1,
+            },
+            final_authority_diff_sha256: sha256_bytes_hex(b"removal-integrity-diff"),
+        });
+        assert!(result.is_err(), "source mutation must fail closed");
+        assert_eq!(test_root_inventory(&successor), successor_before);
+        fs::write(source_event, original).unwrap();
+        assert_eq!(
+            preflight_longitudinal_root_v1(&source, &legacy_source.manifest).unwrap(),
+            legacy_source
+        );
+    }
+
+    fn assert_rejected_upgrade_clone(
+        source: &Path,
+        source_materialization: &LongitudinalMaterializationReceiptV1,
+        parent: &Path,
+        label: &str,
+        mutate: impl FnOnce(&Path),
+    ) {
+        let successor = parent.join(label);
+        copy_directory_tree(source, &successor).unwrap();
+        mutate(&successor);
+        let pre_inventory = test_root_inventory(&successor);
+        let enrollment = allowed_signers_path_for_repo(&successor).unwrap();
+        let pre_enrollment = fs::read(&enrollment).ok();
+        let result = upgrade_longitudinal_root_removals_v1(&LongitudinalRemovalUpgradeOptionsV1 {
+            source_root: source.to_path_buf(),
+            successor_root: successor.clone(),
+            source_materialization: source_materialization.clone(),
+            corrected_execution: removal_upgrade_corrected_execution(),
+            slot: LongitudinalCarryForwardSlotV1 {
+                tier: LongitudinalTierV1::L1,
+                lane: LongitudinalLaneV1::ReleaseUninstrumented,
+                independent_run: 1,
+            },
+            final_authority_diff_sha256: sha256_bytes_hex(b"removal-integrity-diff"),
+        });
+        assert!(result.is_err(), "{label} must fail closed");
+        assert_eq!(
+            test_root_inventory(&successor),
+            pre_inventory,
+            "{label} must not write after failed preflight"
+        );
+        assert_eq!(
+            fs::read(enrollment).ok(),
+            pre_enrollment,
+            "{label} must not alter signer enrollment"
+        );
+        fs::remove_dir_all(successor).unwrap();
+    }
+
+    fn test_root_inventory(root: &Path) -> String {
+        let files = list_relative_files(root, root).unwrap();
+        let inventory = files
+            .into_iter()
+            .map(|relative_path| {
+                let bytes = fs::read(root.join(&relative_path)).unwrap();
+                (relative_path, bytes.len() as u64, sha256_bytes_hex(&bytes))
+            })
+            .collect::<Vec<_>>();
+        canonical_sha256(&inventory).unwrap()
+    }
+
+    fn event_file(root: &Path, idempotency_key: &str) -> PathBuf {
+        store_dir_for_repo(root)
+            .unwrap()
+            .join("events")
+            .join(format!(
+                "{}.json",
+                sha256_bytes_hex(idempotency_key.as_bytes())
+            ))
+    }
+
+    fn downgrade_longitudinal_l1_to_legacy(
+        root: &Path,
+        mut materialization: LongitudinalMaterializationReceiptV1,
+    ) -> LongitudinalMaterializationReceiptV1 {
+        fs::remove_file(allowed_signers_path_for_repo(root).unwrap()).unwrap();
+        let store = store_dir_for_repo(root).unwrap();
+        let events = read_events(root).unwrap();
+        for mut event in events
+            .into_iter()
+            .filter(|event| event.event_type == EventType::ArtifactRemoved)
+        {
+            event.signer = None;
+            event.signature = None;
+            let carrier = materialization
+                .manifest
+                .event_carriers
+                .iter_mut()
+                .find(|carrier| carrier.event_id == event.event_id.as_str())
+                .unwrap();
+            let raw = serde_json::to_vec(&event).unwrap();
+            fs::write(
+                store
+                    .join("events")
+                    .join(format!("{}.json", carrier.logical_key_sha256)),
+                &raw,
+            )
+            .unwrap();
+            carrier.raw_sha256 = sha256_bytes_hex(&raw);
+            carrier.raw_bytes = raw.len() as u64;
+            let identity = materialization
+                .manifest
+                .ordered_events
+                .iter_mut()
+                .find(|identity| identity.event_id == event.event_id.as_str())
+                .unwrap();
+            identity.canonical_decoded_sha256 = sha256_bytes_hex(
+                &canonical_json_bytes(&serde_json::to_value(&event).unwrap()).unwrap(),
+            );
+        }
+        materialization.manifest.manifest_sha256 =
+            materialization.manifest.canonical_sha256().unwrap();
+        materialization.strict = strict_preflight(
+            root,
+            &materialization.manifest.ordered_events,
+            &materialization.manifest.event_carriers,
+            &materialization.manifest.content_inventory,
+        )
+        .unwrap();
+        materialization.materialization_sha256 = materialization.canonical_sha256().unwrap();
+        materialization.validate().unwrap();
+        materialization
+    }
+
+    fn removal_upgrade_source_execution() -> LongitudinalExecutionIdentityV1 {
+        let mut execution = smoke_execution_identity();
+        execution.source_commit = "4".repeat(40);
+        execution.source_tree = "5".repeat(40);
+        execution.runner_sha256 = "6".repeat(64);
+        execution.build_profile = "release-uninstrumented".to_owned();
+        execution
+    }
+
+    fn removal_upgrade_corrected_execution() -> LongitudinalExecutionIdentityV1 {
+        let mut execution = smoke_execution_identity();
+        execution.source_commit = "7".repeat(40);
+        execution.source_tree = "8".repeat(40);
+        execution.runner_sha256 = "9".repeat(64);
+        execution.build_profile = "corrected-uninstrumented".to_owned();
+        execution
     }
 
     #[test]

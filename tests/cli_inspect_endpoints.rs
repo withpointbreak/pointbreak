@@ -1560,6 +1560,47 @@ fn api_history_windows_with_limit_and_continues_via_offset() {
     assert!(page1.as_object().unwrap().get("nextCursor").is_none());
 }
 
+#[cfg(feature = "bench")]
+#[test]
+fn api_history_adjacent_page_reads_a_trusted_longitudinal_l1_root() {
+    use pointbreak::bench_support::longitudinal::{
+        LongitudinalExecutionIdentityV1, LongitudinalMaterializeOptionsV1, LongitudinalTierV1,
+        materialize_longitudinal_workload_v1,
+    };
+
+    let repo = GitRepo::new();
+    pointbreak::session::set_store_mode_for_repo(
+        repo.path(),
+        pointbreak::session::StoreMode::Ephemeral,
+    )
+    .unwrap();
+    materialize_longitudinal_workload_v1(LongitudinalMaterializeOptionsV1::new(
+        repo.path(),
+        LongitudinalTierV1::L1,
+        LongitudinalExecutionIdentityV1 {
+            source_commit: "1".repeat(40),
+            source_tree: "2".repeat(40),
+            cargo_lock_sha256: "3".repeat(64),
+            runner_sha256: "4".repeat(64),
+            build_profile: "endpoint-regression".to_owned(),
+            operating_system: std::env::consts::OS.to_owned(),
+            architecture: std::env::consts::ARCH.to_owned(),
+            filesystem: "disposable".to_owned(),
+            parent_commit: None,
+        },
+    ))
+    .unwrap();
+
+    let inspector = Inspector::spawn(repo.path());
+    let adjacent = inspector.get_json("/api/history?order=desc&limit=100&offset=100");
+    assert_eq!(adjacent["offset"], 100);
+    assert_eq!(adjacent["entries"].as_array().unwrap().len(), 100);
+    assert!(
+        adjacent["matchCount"].as_u64().unwrap() > 200,
+        "the adjacent page must come from the complete projected history"
+    );
+}
+
 #[test]
 fn api_history_rejects_malformed_window_params() {
     let store = representative_store();
