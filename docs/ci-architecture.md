@@ -85,7 +85,13 @@ Three approaches, each of which hit a different GitHub ceiling:
 | --- | --- | --- |
 | `cache-nix-action` | one tarball of the whole `/nix/store`, per platform | 4.87GB (Linux) + 4.46GB (macOS) = **9.33GB before anything else**, against a 10GB storage limit. The platforms evicted each other and Linux ran cold every time. |
 | `magic-nix-cache` | one entry per store path | **1788 entries**, whose API calls tripped GitHub's rate limiter. On throttle it logs `Not trying to use it again on this run` and disables itself, so the job silently finishes cold. |
-| `Mic92/hestia` (current) | content-defined chunks, a few large entries | Aims between the two: few enough entries to stay under the rate limit, deduplicated enough to stay under the storage limit. |
+| `Mic92/hestia` (current) | content-defined chunks, a few large entries | **491 paths packed into 37 entries** — about 48x fewer objects than per-path storage, with no throttling observed. |
+
+Measured on this repository: a cold run costs 22m52s and drains 2.3 GiB in about a minute;
+re-running the same commit costs **48s** end to end (fmt 17s, clippy 2s, test 3s, build 8s),
+because identical inputs make every derivation output a cache hit. A real change still
+recompiles the crate and its test binaries — only the dependency artifacts stay cached — so
+expect a normal pull request to land between those two numbers rather than near the low one.
 
 Hestia needs no account: uploads authenticate with the runner-injected
 `ACTIONS_RUNTIME_TOKEN`, so build jobs need only `permissions: contents: read`. It is
