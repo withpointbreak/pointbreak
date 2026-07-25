@@ -915,12 +915,14 @@ pub fn upgrade_longitudinal_root_removals_v1(
         source_manifest_invariant_sha256:
             longitudinal_workload_manifest_upgrade_invariant_sha256_v1(
                 &options.source_materialization.manifest,
+                &options.source_materialization.strict,
                 &changed_event_ids,
             )
             .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?,
         corrected_manifest_invariant_sha256:
             longitudinal_workload_manifest_upgrade_invariant_sha256_v1(
                 &corrected_materialization.manifest,
+                &corrected_materialization.strict,
                 &changed_event_ids,
             )
             .map_err(|_| LongitudinalEvidenceError::InvalidReceipt)?,
@@ -3146,8 +3148,6 @@ mod tests {
                 &canonical_json_bytes(&serde_json::to_value(&event).unwrap()).unwrap(),
             );
         }
-        materialization.manifest.manifest_sha256 =
-            materialization.manifest.canonical_sha256().unwrap();
         materialization.strict = strict_preflight(
             root,
             &materialization.manifest.ordered_events,
@@ -3155,6 +3155,16 @@ mod tests {
             &materialization.manifest.content_inventory,
         )
         .unwrap();
+        for receipt in &mut materialization.manifest.expected_semantic_receipts {
+            receipt.semantic_receipt_sha256 = longitudinal_canonical_sha256_v1(&(
+                receipt.operation,
+                &materialization.strict,
+                &materialization.manifest.ordered_events,
+            ))
+            .unwrap();
+        }
+        materialization.manifest.manifest_sha256 =
+            materialization.manifest.canonical_sha256().unwrap();
         materialization.materialization_sha256 = materialization.canonical_sha256().unwrap();
         materialization.validate().unwrap();
         materialization

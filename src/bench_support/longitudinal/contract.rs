@@ -1617,9 +1617,18 @@ pub fn longitudinal_workload_manifest_carry_invariant_sha256_v1(
 
 pub fn longitudinal_workload_manifest_upgrade_invariant_sha256_v1(
     manifest: &LongitudinalWorkloadManifestV1,
+    strict: &LongitudinalStrictSemanticReceiptV1,
     changed_event_ids: &[String],
 ) -> Result<String, LongitudinalContractError> {
     manifest.validate()?;
+    validate_strict_receipt(strict)?;
+    for receipt in &manifest.expected_semantic_receipts {
+        validate_bound_hash(
+            &receipt.semantic_receipt_sha256,
+            &canonical_sha256(&(receipt.operation, strict, &manifest.ordered_events))?,
+            "expected semantic receipt",
+        )?;
+    }
     require_unique(
         changed_event_ids.iter().map(String::as_str),
         "removal-upgrade invariant event ids",
@@ -1642,6 +1651,24 @@ pub fn longitudinal_workload_manifest_upgrade_invariant_sha256_v1(
         return Err(LongitudinalContractError::ContractDrift {
             field: "removal-upgrade manifest representation",
         });
+    }
+    let expected_semantic_receipts = object
+        .get_mut("expectedSemanticReceipts")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or(LongitudinalContractError::ContractDrift {
+            field: "removal-upgrade expected semantic receipts",
+        })?;
+    for receipt in expected_semantic_receipts {
+        let receipt = receipt
+            .as_object_mut()
+            .ok_or(LongitudinalContractError::ContractDrift {
+                field: "removal-upgrade expected semantic receipt",
+            })?;
+        if receipt.remove("semanticReceiptSha256").is_none() {
+            return Err(LongitudinalContractError::ContractDrift {
+                field: "removal-upgrade expected semantic receipt",
+            });
+        }
     }
     let ordered_events = object
         .get_mut("orderedEvents")
@@ -5203,6 +5230,21 @@ mod contract_tests {
         content_inventory[0].kind = LongitudinalContentKindV1::ObjectArtifact;
         content_inventory[0].logical_key = format!("artifacts/objects/{object_content_hash}.json");
         let schedule = LongitudinalOperationV1::ALL.to_vec();
+        let strict = LongitudinalStrictSemanticReceiptV1 {
+            event_set_sha256: digest("event-set"),
+            ordered_journal_sha256: digest("ordered-journal"),
+            state_sha256: digest("state"),
+            projection_sha256: digest("projection"),
+            content_inventory_sha256: digest("content-inventory"),
+        };
+        let expected_semantic_receipts = LongitudinalOperationV1::ALL
+            .into_iter()
+            .map(|operation| LongitudinalExpectedSemanticReceiptV1 {
+                operation,
+                semantic_receipt_sha256: canonical_sha256(&(operation, &strict, &ordered_events))
+                    .expect("semantic receipt hash"),
+            })
+            .collect();
         let mut manifest = LongitudinalWorkloadManifestV1 {
             schema: contract.schema.clone(),
             protocol: contract.protocol.clone(),
@@ -5225,13 +5267,7 @@ mod contract_tests {
                 "event-key-0",
                 &object_content_hash,
             ),
-            expected_semantic_receipts: LongitudinalOperationV1::ALL
-                .into_iter()
-                .map(|operation| LongitudinalExpectedSemanticReceiptV1 {
-                    operation,
-                    semantic_receipt_sha256: digest(&format!("semantic-{operation:?}")),
-                })
-                .collect(),
+            expected_semantic_receipts,
             schedule_sha256: canonical_sha256(&schedule).expect("schedule hash"),
             schedule,
             manifest_sha256: String::new(),
@@ -5241,13 +5277,7 @@ mod contract_tests {
             schema: LONGITUDINAL_MATERIALIZATION_RECEIPT_SCHEMA_V1.to_owned(),
             root_identity: digest(root_label),
             manifest,
-            strict: LongitudinalStrictSemanticReceiptV1 {
-                event_set_sha256: digest("event-set"),
-                ordered_journal_sha256: digest("ordered-journal"),
-                state_sha256: digest("state"),
-                projection_sha256: digest("projection"),
-                content_inventory_sha256: digest("content-inventory"),
-            },
+            strict,
             materialization_sha256: String::new(),
         };
         receipt.materialization_sha256 = receipt.canonical_sha256().expect("materialization hash");
@@ -6689,21 +6719,33 @@ mod contract_tests {
 
     #[test]
     fn removal_upgrade_manifest_invariant_excludes_only_changed_carrier_and_execution_bytes() {
-        let source = materialization("upgrade-invariant-source").manifest;
+        let source_materialization = materialization("upgrade-invariant-source");
+        let strict = source_materialization.strict;
+        let source = source_materialization.manifest;
         let changed_event_ids = vec![source.ordered_events[0].event_id.clone()];
         let mut corrected = source.clone();
         corrected.execution.source_commit = "9".repeat(40);
         corrected.ordered_events[0].canonical_decoded_sha256 = digest("signed decoded event");
         corrected.event_carriers[0].raw_sha256 = digest("signed raw event");
         corrected.event_carriers[0].raw_bytes += 128;
+        for receipt in &mut corrected.expected_semantic_receipts {
+            receipt.semantic_receipt_sha256 =
+                canonical_sha256(&(receipt.operation, &strict, &corrected.ordered_events))
+                    .expect("corrected semantic receipt hash");
+        }
         corrected.manifest_sha256 = corrected
             .canonical_sha256()
             .expect("corrected manifest hash");
         assert_eq!(
-            longitudinal_workload_manifest_upgrade_invariant_sha256_v1(&source, &changed_event_ids)
-                .unwrap(),
+            longitudinal_workload_manifest_upgrade_invariant_sha256_v1(
+                &source,
+                &strict,
+                &changed_event_ids
+            )
+            .unwrap(),
             longitudinal_workload_manifest_upgrade_invariant_sha256_v1(
                 &corrected,
+                &strict,
                 &changed_event_ids
             )
             .unwrap()
@@ -6715,15 +6757,16 @@ mod contract_tests {
         semantic_drift.manifest_sha256 = semantic_drift
             .canonical_sha256()
             .expect("semantic-drift manifest hash");
-        assert_ne!(
-            longitudinal_workload_manifest_upgrade_invariant_sha256_v1(&source, &changed_event_ids)
-                .unwrap(),
+        assert!(matches!(
             longitudinal_workload_manifest_upgrade_invariant_sha256_v1(
                 &semantic_drift,
+                &strict,
                 &changed_event_ids
-            )
-            .unwrap()
-        );
+            ),
+            Err(LongitudinalContractError::HashMismatch {
+                field: "expected semantic receipt"
+            })
+        ));
 
         let mut non_removal_drift = source.clone();
         non_removal_drift.event_carriers[1].raw_sha256 = digest("changed non-removal carrier");
@@ -6731,10 +6774,15 @@ mod contract_tests {
             .canonical_sha256()
             .expect("non-removal-drift manifest hash");
         assert_ne!(
-            longitudinal_workload_manifest_upgrade_invariant_sha256_v1(&source, &changed_event_ids)
-                .unwrap(),
+            longitudinal_workload_manifest_upgrade_invariant_sha256_v1(
+                &source,
+                &strict,
+                &changed_event_ids
+            )
+            .unwrap(),
             longitudinal_workload_manifest_upgrade_invariant_sha256_v1(
                 &non_removal_drift,
+                &strict,
                 &changed_event_ids
             )
             .unwrap(),
