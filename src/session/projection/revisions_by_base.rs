@@ -20,6 +20,11 @@ pub struct RevisionsByBase {
 
 impl RevisionsByBase {
     pub fn from_events(events: &[ShoreEvent]) -> Result<Self> {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        {
+            crate::bench_support::longitudinal::record_projection_rebuild();
+            crate::bench_support::longitudinal::record_event_folds(events.len());
+        }
         let mut buckets: BTreeMap<String, BTreeSet<RevisionId>> = BTreeMap::new();
         for event in events
             .iter()

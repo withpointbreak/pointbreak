@@ -206,9 +206,10 @@ impl LocalStorage {
 
         let mut paths = entries
             .map(|entry| {
-                entry
-                    .map(|entry| entry.path())
-                    .map_err(|error| io_error("read directory entry", &dir, error))
+                let entry = entry.map_err(|error| io_error("read directory entry", &dir, error))?;
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                crate::bench_support::longitudinal::record_directory_entries_walked(1);
+                Ok(entry.path())
             })
             .collect::<Result<Vec<_>>>()?;
         paths.sort();

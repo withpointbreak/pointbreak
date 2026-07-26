@@ -155,6 +155,11 @@ impl<'a> CosignatureIndex<'a> {
     /// Index every detached `event_signature` carrier by its `target_event_id` in a
     /// single pass over the log, parsing each carrier payload exactly once.
     pub(crate) fn build(events: &'a [ShoreEvent]) -> Result<Self> {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        {
+            crate::bench_support::longitudinal::record_projection_rebuild();
+            crate::bench_support::longitudinal::record_event_folds(events.len());
+        }
         let mut carriers_by_target: BTreeMap<String, Vec<DetachedCarrier<'a>>> = BTreeMap::new();
         for event in events
             .iter()

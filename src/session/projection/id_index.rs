@@ -36,6 +36,11 @@ pub fn store_id_index(repo: &Path) -> Result<StoreIdIndex> {
 }
 
 fn fold_index(events: &[ShoreEvent]) -> Result<StoreIdIndex> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    {
+        crate::bench_support::longitudinal::record_projection_rebuild();
+        crate::bench_support::longitudinal::record_event_folds(events.len());
+    }
     let mut index = StoreIdIndex::default();
     for event in events {
         // Every recorded event carries its own opaque event id.

@@ -68,6 +68,16 @@ struct RequestHead {
     target: String,
     hosts: Vec<String>,
     authorizations: Vec<String>,
+    #[cfg(feature = "longitudinal-counting")]
+    longitudinal_counting: Vec<String>,
+}
+
+#[cfg(feature = "longitudinal-counting")]
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LongitudinalCountingRequest {
+    run_identity: String,
+    context: pointbreak::bench_support::longitudinal::LongitudinalCounterReceiptContextV1,
 }
 
 #[derive(Debug)]
@@ -145,15 +155,21 @@ impl HighlightCache {
     }
 
     pub(super) fn get(&self, key: &str) -> Option<String> {
+        #[cfg(feature = "longitudinal-counting")]
+        self.record_longitudinal_ownership();
         self.map.get(key).cloned()
     }
 
     pub(super) fn put(&mut self, key: &str, value: String) {
         if self.map.contains_key(key) {
             self.map.insert(key.to_owned(), value);
+            #[cfg(feature = "longitudinal-counting")]
+            self.record_longitudinal_ownership();
             return;
         }
         if self.cap == 0 {
+            #[cfg(feature = "longitudinal-counting")]
+            self.record_longitudinal_ownership();
             return;
         }
         while self.order.len() >= self.cap {
@@ -162,6 +178,18 @@ impl HighlightCache {
         }
         self.order.push(key.to_owned());
         self.map.insert(key.to_owned(), value);
+        #[cfg(feature = "longitudinal-counting")]
+        self.record_longitudinal_ownership();
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    fn record_longitudinal_ownership(&self) {
+        pointbreak::bench_support::longitudinal::set_retained_snapshot_highlight_entries(
+            self.map.len(),
+        );
+        pointbreak::bench_support::longitudinal::set_retained_snapshot_highlight_bytes(
+            self.map.values().map(String::len).sum(),
+        );
     }
 }
 
@@ -372,12 +400,68 @@ fn handle_connection(
     {
         return write_response(stream, &Response::unauthorized());
     }
+    #[cfg(feature = "longitudinal-counting")]
+    if !request.longitudinal_counting.is_empty() && !is_api_path(path) {
+        return write_response(stream, &Response::unauthorized());
+    }
     if is_api_path(path) {
         warm_caches_after_auth(state);
     }
 
+    #[cfg(feature = "longitudinal-counting")]
+    if let Some(counting_request) = longitudinal_counting_request(&request)? {
+        let scope = pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1::new(
+            counting_request.run_identity,
+        )
+        .map_err(std::io::Error::other)?;
+        let _guard = scope.enter();
+        let response = route(state, policy.serve_static, &request.method, path, query);
+        record_response_body(&response);
+        let receipt = longitudinal_receipt_header(&scope, counting_request.context, &response)?;
+        return write_response_inner(
+            stream,
+            &response,
+            Some(("X-Pointbreak-Longitudinal-Receipt", receipt.as_str())),
+        );
+    }
+
     let response = route(state, policy.serve_static, &request.method, path, query);
     write_response(stream, &response)
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn longitudinal_receipt_header(
+    scope: &pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1,
+    mut context: pointbreak::bench_support::longitudinal::LongitudinalCounterReceiptContextV1,
+    response: &Response,
+) -> std::io::Result<String> {
+    context.success = response.status == "200 OK";
+    let receipt = scope
+        .receipt(context)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let receipt =
+        serde_json::to_vec(&receipt).map_err(|error| std::io::Error::other(error.to_string()))?;
+    Ok(URL_SAFE_NO_PAD.encode(receipt))
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn longitudinal_counting_request(
+    request: &RequestHead,
+) -> std::io::Result<Option<LongitudinalCountingRequest>> {
+    match request.longitudinal_counting.as_slice() {
+        [] => Ok(None),
+        [encoded] => {
+            let bytes = URL_SAFE_NO_PAD
+                .decode(encoded)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|error| std::io::Error::other(error.to_string()))
+        }
+        _ => Err(std::io::Error::other(
+            "multiple longitudinal counting headers",
+        )),
+    }
 }
 
 fn warm_caches_after_auth(state: &Arc<InspectState>) {
@@ -415,6 +499,8 @@ fn parse_request_head(reader: &mut impl BufRead) -> Result<Option<RequestHead>, 
     let mut header_bytes = 0_usize;
     let mut hosts = Vec::new();
     let mut authorizations = Vec::new();
+    #[cfg(feature = "longitudinal-counting")]
+    let mut longitudinal_counting = Vec::new();
     loop {
         let Some(line) = read_bounded_line(reader, MAX_HEADER_BYTES)? else {
             return Err(RequestParseError::BadRequest);
@@ -438,6 +524,11 @@ fn parse_request_head(reader: &mut impl BufRead) -> Result<Option<RequestHead>, 
             hosts.push(value.to_owned());
         } else if name.eq_ignore_ascii_case("authorization") {
             authorizations.push(value.to_owned());
+        } else if cfg!(feature = "longitudinal-counting")
+            && name.eq_ignore_ascii_case("x-pointbreak-longitudinal-counting")
+        {
+            #[cfg(feature = "longitudinal-counting")]
+            longitudinal_counting.push(value.to_owned());
         }
     }
 
@@ -446,6 +537,8 @@ fn parse_request_head(reader: &mut impl BufRead) -> Result<Option<RequestHead>, 
         target: target.to_owned(),
         hosts,
         authorizations,
+        #[cfg(feature = "longitudinal-counting")]
+        longitudinal_counting,
     }))
 }
 
@@ -779,7 +872,23 @@ fn api_response(result: Result<String, String>) -> Response {
     }
 }
 
-fn write_response(mut stream: TcpStream, response: &Response) -> std::io::Result<()> {
+fn write_response(stream: TcpStream, response: &Response) -> std::io::Result<()> {
+    record_response_body(response);
+    write_response_inner(stream, response, None)
+}
+
+fn record_response_body(response: &Response) {
+    #[cfg(not(feature = "longitudinal-counting"))]
+    let _ = response;
+    #[cfg(feature = "longitudinal-counting")]
+    pointbreak::bench_support::longitudinal::record_response_bytes(response.body.len());
+}
+
+fn write_response_inner(
+    mut stream: TcpStream,
+    response: &Response,
+    extra_header: Option<(&str, &str)>,
+) -> std::io::Result<()> {
     let mut header = format!(
         "HTTP/1.1 {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n",
         response.status,
@@ -790,6 +899,12 @@ fn write_response(mut stream: TcpStream, response: &Response) -> std::io::Result
         header.push_str(
             "Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\n",
         );
+    }
+    if let Some((name, value)) = extra_header {
+        header.push_str(name);
+        header.push_str(": ");
+        header.push_str(value);
+        header.push_str("\r\n");
     }
     header.push_str("Connection: close\r\n\r\n");
     stream.write_all(header.as_bytes())?;
@@ -843,6 +958,58 @@ mod tests {
         assert_eq!(request.target, "/api/version");
         assert_eq!(request.hosts, ["127.0.0.1:1234"]);
         assert_eq!(request.authorizations, ["Bearer opaque"]);
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn counting_transport_is_authenticated_request_local_and_counts_only_body_bytes() {
+        let encoded = URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&serde_json::json!({
+                "runIdentity": "a".repeat(64),
+                "context": {
+                    "rootIdentity": "b".repeat(64),
+                    "operation": "WARM_HEAD",
+                    "phase": "warm",
+                    "baseExecutionIdentitySha256": "c".repeat(64),
+                    "derivativeExecutionIdentitySha256": "d".repeat(64),
+                    "manifestSha256": "e".repeat(64),
+                    "scheduleSha256": "f".repeat(64),
+                    "success": false,
+                    "semanticResultSha256": "1".repeat(64),
+                    "includeCapacityOwnership": true
+                }
+            }))
+            .expect("request JSON"),
+        );
+        let request = parse(format!(
+            "GET /api/version HTTP/1.1\r\nHost: 127.0.0.1:1234\r\nAuthorization: Bearer opaque\r\nX-Pointbreak-Longitudinal-Counting: {encoded}\r\n\r\n"
+        ))
+        .expect("valid request")
+        .expect("request head");
+        let counting = longitudinal_counting_request(&request)
+            .expect("valid counting transport")
+            .expect("counting requested");
+        let scope = pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1::new(
+            counting.run_identity,
+        )
+        .expect("valid scope");
+        let _guard = scope.enter();
+        let response = Response::json_ok("{\"ok\":true}".to_owned());
+
+        record_response_body(&response);
+
+        assert_eq!(
+            scope.snapshot().counters.response_bytes,
+            response.body.len() as u64
+        );
+        let encoded = longitudinal_receipt_header(&scope, counting.context, &response)
+            .expect("receipt transport");
+        let receipt: pointbreak::bench_support::longitudinal::LongitudinalCounterReceiptV1 =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(encoded).expect("receipt base64"))
+                .expect("receipt JSON");
+        assert_eq!(receipt.operation, "WARM_HEAD");
+        assert!(receipt.success);
+        assert_eq!(receipt.counters.response_bytes, response.body.len() as u64);
     }
 
     #[test]
@@ -901,6 +1068,25 @@ mod tests {
         assert!(cache.get("a").is_none());
         assert_eq!(cache.get("b").as_deref(), Some("2"));
         assert_eq!(cache.get("c").as_deref(), Some("3"));
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn counting_calibrates_bounded_highlight_cache_ownership() {
+        let scope = pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1::new(
+            "d".repeat(64),
+        )
+        .expect("valid scope");
+        let _guard = scope.enter();
+        let mut cache = HighlightCache::new(2);
+
+        cache.put("a", "one".to_owned());
+        cache.put("b", "second".to_owned());
+        assert_eq!(cache.get("a").as_deref(), Some("one"));
+
+        let ownership = scope.snapshot().capacity_ownership;
+        assert_eq!(ownership.retained_snapshot_highlight_entries, 2);
+        assert_eq!(ownership.retained_snapshot_highlight_bytes, 9);
     }
 
     #[test]

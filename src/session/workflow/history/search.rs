@@ -51,6 +51,17 @@ impl SearchRecord {
     pub fn field(&self, key: &str) -> Option<&str> {
         self.fields.get(key).map(String::as_str)
     }
+
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    pub(super) fn retained_ownership(&self) -> (usize, usize) {
+        let field_string_count = self.fields.len().saturating_mul(2);
+        let field_bytes = self
+            .fields
+            .iter()
+            .map(|(key, value)| key.len().saturating_add(value.len()))
+            .sum();
+        (1_usize.saturating_add(field_string_count), field_bytes)
+    }
 }
 
 /// Per-entry inputs the record build cannot derive from the entry alone. Today:

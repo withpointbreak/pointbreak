@@ -1055,11 +1055,14 @@ fn cached_history_base(
         marker = key.marker
     );
     let _guard = span.enter();
-    cache.get_or_build(key, |key| {
+    let base = cache.get_or_build(key, |key| {
         let span = tracing::debug_span!("shore.inspect.history.cache_build");
         let _guard = span.enter();
         history_base_projection(repo, &key.config).map_err(|error| error.to_string())
-    })
+    })?;
+    #[cfg(feature = "longitudinal-counting")]
+    base.record_longitudinal_ownership();
+    Ok(base)
 }
 
 /// Captured Revisions with their base/target/snapshot identity. Served from the
@@ -1171,9 +1174,19 @@ fn cached_revisions_json(
         marker = key.marker
     );
     let _guard = span.enter();
-    cache.get_or_build(key, |key| {
+    let payload = cache.get_or_build(key, |key| {
         build_revisions_json(repo, &key.trust_set, snapshot_summaries)
-    })
+    })?;
+    #[cfg(feature = "longitudinal-counting")]
+    record_revisions_cache_ownership(&payload);
+    Ok(payload)
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn record_revisions_cache_ownership(payload: &str) {
+    pointbreak::bench_support::longitudinal::set_retained_serialized_response_cache_bytes(
+        payload.len(),
+    );
 }
 
 fn build_revisions_json(
@@ -1248,6 +1261,8 @@ pub(super) fn threads_json(repo: &Path) -> Result<String, String> {
             component_count = view.components.len()
         );
         let _guard = span.enter();
+        #[cfg(feature = "longitudinal-counting")]
+        pointbreak::bench_support::longitudinal::record_projection_rebuild();
         view.components
             .iter()
             .map(|component| thread_document(component, &view))
@@ -2004,6 +2019,26 @@ mod tests {
             text: "working-tree changes".to_owned(),
             source: WorkLabelSource::SourceFallback,
         }
+    }
+
+    #[cfg(feature = "longitudinal-counting")]
+    #[test]
+    fn counting_calibrates_serialized_revisions_cache_ownership() {
+        let scope = pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1::new(
+            "c".repeat(64),
+        )
+        .expect("valid scope");
+        let _guard = scope.enter();
+
+        record_revisions_cache_ownership("{\"entries\":[]}");
+
+        assert_eq!(
+            scope
+                .snapshot()
+                .capacity_ownership
+                .retained_serialized_response_cache_bytes,
+            14
+        );
     }
 
     #[test]

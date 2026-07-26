@@ -31,6 +31,13 @@ pub(crate) fn event_set_hash_for_events<'a>(
         })
         .collect::<Vec<_>>();
 
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    {
+        crate::bench_support::longitudinal::record_projection_rebuild();
+        crate::bench_support::longitudinal::record_event_folds(entries.len());
+        crate::bench_support::longitudinal::record_chronological_sort_items(entries.len());
+    }
+
     // Callers pass EventStore-validated events, where event IDs are unique;
     // duplicate entries would be a different supplied event set and are not collapsed here.
     entries.sort_by_key(|entry| (entry.event_id, entry.payload_hash));

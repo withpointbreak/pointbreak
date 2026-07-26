@@ -68,6 +68,11 @@ impl SessionState {
     /// authority; the returned `SessionState` is advisory and point-in-time as
     /// of this read.
     pub fn from_events(events: &[ShoreEvent]) -> Result<Self> {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        {
+            crate::bench_support::longitudinal::record_state_rebuild();
+            crate::bench_support::longitudinal::record_event_folds(events.len());
+        }
         let event_set_hash = event_set_hash_for_events(events)?;
         let mut reducer = StateReducer::default();
         for event in events {
@@ -415,6 +420,26 @@ mod tests {
         assert_eq!(forward.event_set_hash, reversed.event_set_hash);
         assert_eq!(forward.event_count, 2);
         assert_eq!(reversed.event_count, 2);
+    }
+
+    #[test]
+    fn counting_scope_calibrates_state_and_freshness_passes() {
+        let events = vec![
+            revision_captured_event("rev:one", "snap:one"),
+            observation_event("retry-a", "obs:sha256:one"),
+        ];
+        let scope =
+            crate::bench_support::longitudinal::LongitudinalCountingScopeV1::new("a".repeat(64))
+                .expect("valid counting scope");
+        let _guard = scope.enter();
+
+        SessionState::from_events(&events).expect("state projects");
+
+        let counters = scope.snapshot().counters;
+        assert_eq!(counters.state_rebuilds, 1);
+        assert_eq!(counters.projection_rebuilds, 1);
+        assert_eq!(counters.event_folds, 4);
+        assert_eq!(counters.chronological_sort_items, 2);
     }
 
     #[test]

@@ -60,6 +60,8 @@ pub enum EngagementLifecycle {
 
 impl EngagementGrouping {
     pub fn from_events(events: &[ShoreEvent]) -> Result<Self> {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_projection_rebuild();
         let view = SupersessionView::from_events(events)?;
         let captures = revision_captures(events)?;
 
@@ -126,6 +128,8 @@ struct RevisionCapture {
 /// engagement hint, discriminating the generative arm: only a review-domain
 /// revision is grouped; a task-attempt proposal in a mixed log is skipped.
 fn revision_captures(events: &[ShoreEvent]) -> Result<BTreeMap<RevisionId, RevisionCapture>> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_event_folds(events.len());
     let mut captures = BTreeMap::new();
     for event in events
         .iter()

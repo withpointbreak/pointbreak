@@ -56,6 +56,9 @@ default = ["gix"]
 # by default and never enabled in a release build, so the harnesses stay out of
 # the published surface.
 bench = ["dep:libsqlite3-sys", "dep:rusqlite", "dep:zstd"]
+# Enables only the request-scoped, counting-only Research 0049 observer. It
+# implies the existing developer benchmark surface and never selects a store.
+longitudinal-counting = ["bench"]
 # Compiles the developer-only plain LMDB linkage proof. This source-only
 # feature is excluded from default builds, Cargo packages, and release
 # archives; it never selects a production store.

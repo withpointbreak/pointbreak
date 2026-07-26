@@ -197,6 +197,11 @@ pub(crate) struct InputRequestProjectionRecords<'a> {
 pub(crate) fn collect_input_request_projection_records<'a>(
     events: &'a [ShoreEvent],
 ) -> Result<InputRequestProjectionRecords<'a>> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    {
+        crate::bench_support::longitudinal::record_projection_rebuild();
+        crate::bench_support::longitudinal::record_event_folds(events.len());
+    }
     let mut request_records: BTreeMap<InputRequestId, InputRequestOpenRecord<'a>> = BTreeMap::new();
     let mut response_records: BTreeMap<InputRequestResponseId, InputRequestResponseRecord<'a>> =
         BTreeMap::new();
@@ -364,6 +369,8 @@ fn status_for_response_count(count: usize) -> InputRequestStatus {
 }
 
 pub(super) fn sort_input_request_views(input_requests: &mut [InputRequestView]) {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_chronological_sort_items(input_requests.len());
     input_requests.sort_by(|left, right| {
         left.created_at
             .cmp(&right.created_at)
@@ -372,6 +379,8 @@ pub(super) fn sort_input_request_views(input_requests: &mut [InputRequestView]) 
 }
 
 fn sort_response_records(records: &mut [InputRequestResponseRecord<'_>]) {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_chronological_sort_items(records.len());
     records.sort_by(|left, right| {
         left.event
             .occurred_at

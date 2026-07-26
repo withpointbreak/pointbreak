@@ -132,6 +132,8 @@ fn load_store_wide_read(read_store: &ReadStore, read_for_display: bool) -> Resul
 }
 
 pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_projection_rebuild();
     let read_store = resolve_read_store(&options.repo)?;
     let track_id = options
         .track
@@ -651,6 +653,8 @@ fn revision_overviews_from_store(
         requested_revision_count = revisions.len()
     );
     let _guard = span.enter();
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_projection_rebuild();
 
     // The single read for the whole batch, via the same prefix `show_revision`
     // uses. Store-wide skip diagnostics stay on the list projection rather than
@@ -852,6 +856,14 @@ fn decode_snapshot_counts(
         .map(std::num::NonZeroUsize::get)
         .unwrap_or(1)
         .min(misses.len());
+    decode_snapshot_counts_with_worker_count(backend, misses, worker_count)
+}
+
+fn decode_snapshot_counts_with_worker_count(
+    backend: &StoreBackend,
+    misses: &[&RevisionProjectionIdentity],
+    worker_count: usize,
+) -> Vec<Result<SnapshotSummaryCounts>> {
     if worker_count <= 1 {
         return misses
             .iter()
@@ -859,11 +871,20 @@ fn decode_snapshot_counts(
             .collect();
     }
 
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    let longitudinal_scope =
+        crate::bench_support::longitudinal::LongitudinalCountingScopeV1::current();
     let next = AtomicUsize::new(0);
     let mut indexed: Vec<(usize, Result<SnapshotSummaryCounts>)> = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..worker_count)
             .map(|_| {
-                scope.spawn(|| {
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                let longitudinal_scope = longitudinal_scope.clone();
+                let next = &next;
+                scope.spawn(move || {
+                    #[cfg(any(test, feature = "longitudinal-counting"))]
+                    let _longitudinal_guard =
+                        longitudinal_scope.as_ref().map(|scope| scope.enter());
                     let mut local = Vec::new();
                     loop {
                         let index = next.fetch_add(1, Ordering::Relaxed);
@@ -885,6 +906,8 @@ fn decode_snapshot_counts(
             })
             .collect()
     });
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_chronological_sort_items(indexed.len());
     indexed.sort_unstable_by_key(|(index, _)| *index);
     indexed.into_iter().map(|(_, counts)| counts).collect()
 }
@@ -925,6 +948,8 @@ fn bucket_fact_events(
     events: &[ShoreEvent],
     requested: &[&RevisionProjectionIdentity],
 ) -> Result<BTreeMap<RevisionId, Vec<ShoreEvent>>> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_event_folds(events.len());
     let requested_ids: BTreeSet<&RevisionId> =
         requested.iter().map(|identity| &identity.id).collect();
     let mut buckets: BTreeMap<RevisionId, Vec<ShoreEvent>> = BTreeMap::new();
@@ -1197,6 +1222,38 @@ mod tests {
             1,
             "the batch reads the log once, not revision_count + 1"
         );
+    }
+
+    #[test]
+    fn parallel_snapshot_decode_propagates_the_longitudinal_counting_scope() {
+        let repo = TestRepo::new();
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+        repo.commit_all("base");
+
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+        capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+        capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+
+        let read_store = resolve_read_store(repo.path()).unwrap();
+        let events = EventStore::from_backend(read_store.backend())
+            .list_events()
+            .unwrap();
+        let identities = enumerate_revision_identities(&events).unwrap();
+        assert_eq!(identities.len(), 2);
+        let misses = identities.iter().collect::<Vec<_>>();
+        let counting =
+            crate::bench_support::longitudinal::LongitudinalCountingScopeV1::new("a".repeat(64))
+                .unwrap();
+        let _guard = counting.enter();
+
+        let decoded =
+            decode_snapshot_counts_with_worker_count(read_store.backend(), &misses, misses.len());
+
+        assert!(decoded.iter().all(Result::is_ok));
+        let snapshot = counting.snapshot();
+        assert_eq!(snapshot.counters.object_artifact_reads, misses.len() as u64);
+        assert!(snapshot.counters.object_bytes_read > 0);
     }
 
     /// A shared summary cache makes rebuilds skip the snapshot artifact decode

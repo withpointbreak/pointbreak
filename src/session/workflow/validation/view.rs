@@ -78,6 +78,11 @@ pub struct ValidationCheckView {
 pub fn project_validation_checks(
     options: ValidationCheckProjectionOptions<'_>,
 ) -> Result<Vec<ValidationCheckView>> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    {
+        crate::bench_support::longitudinal::record_projection_rebuild();
+        crate::bench_support::longitudinal::record_event_folds(options.events.len());
+    }
     let mut validation_records: BTreeMap<ValidationCheckId, ValidationEventRecord<'_>> =
         BTreeMap::new();
 
@@ -190,6 +195,8 @@ pub(crate) fn annotate_validation_supersession(
 }
 
 fn sort_validation_check_views(validations: &mut [ValidationCheckView]) {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_chronological_sort_items(validations.len());
     validations.sort_by(|left, right| {
         validation_sort_time(left)
             .cmp(validation_sort_time(right))

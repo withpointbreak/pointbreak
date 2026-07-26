@@ -116,6 +116,13 @@ pub struct BaseHistoryProjection {
     pub diagnostics: Vec<ProjectionDiagnostic>,
 }
 
+impl BaseHistoryProjection {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    pub fn record_longitudinal_ownership(&self) {
+        record_history_ownership(&self.entries);
+    }
+}
+
 /// Build the cacheable base from an in-memory event set: filter to the review
 /// domain, sort by the envelope key, hydrate every body, and attach each entry's
 /// `SearchRecord` (with `object` resolved via the revision->object map). It never
@@ -148,6 +155,8 @@ fn history_base_from_events_with_hydration(
 ) -> Result<BaseHistoryProjection> {
     let span = tracing::debug_span!("shore.history.base_from_events", event_count = events.len());
     let _guard = span.enter();
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_projection_rebuild();
 
     let state = {
         let span = tracing::debug_span!("shore.history.session_state_from_events");
@@ -205,6 +214,11 @@ fn history_base_from_events_with_hydration(
             .iter()
             .filter(|event| event_is_review_history(event))
             .collect();
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        {
+            crate::bench_support::longitudinal::record_event_folds(events.len());
+            crate::bench_support::longitudinal::record_chronological_sort_items(matched.len());
+        }
         matched.sort_by(|left, right| {
             cmp_key(&left.occurred_at, left.event_id.as_str())
                 .cmp(&cmp_key(&right.occurred_at, right.event_id.as_str()))
@@ -221,6 +235,8 @@ fn history_base_from_events_with_hydration(
             matched_event_count = matched.len()
         );
         let _guard = span.enter();
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_event_folds(matched.len());
         matched
             .iter()
             .map(|event| {
@@ -238,12 +254,16 @@ fn history_base_from_events_with_hydration(
     let body_diagnostics = {
         let span = tracing::debug_span!("shore.history.body_content_diagnostics");
         let _guard = span.enter();
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_event_folds(built.len());
         body_content_diagnostics(built.iter().flat_map(entry_body_states))
     };
     diagnostics.extend(body_diagnostics);
     let object_by_revision = {
         let span = tracing::debug_span!("shore.history.revision_object_map");
         let _guard = span.enter();
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_event_folds(built.len());
         revision_object_map(&built)
     };
     // The open-request set for the `is:` field — from the request lifecycle, never
@@ -252,9 +272,11 @@ fn history_base_from_events_with_hydration(
         let records = collect_input_request_projection_records(events)?;
         open_input_request_ids(&records)
     };
-    let entries = {
+    let entries: Vec<BaseEntry> = {
         let span = tracing::debug_span!("shore.history.search_records", entry_count = built.len());
         let _guard = span.enter();
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_event_folds(built.len());
         built
             .into_iter()
             .map(|entry| {
@@ -265,6 +287,9 @@ fn history_base_from_events_with_hydration(
             })
             .collect()
     };
+
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    record_history_ownership(&entries);
 
     Ok(BaseHistoryProjection {
         entries,
@@ -283,6 +308,8 @@ pub(super) fn history_default_page_from_events(
 ) -> Result<QueriedHistory> {
     let span = tracing::debug_span!("shore.history.default_page_from_events");
     let _guard = span.enter();
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_projection_rebuild();
 
     let state = {
         let span = tracing::debug_span!("shore.history.default_page.session_state_from_events");
@@ -333,6 +360,11 @@ pub(super) fn history_default_page_from_events(
             .iter()
             .filter(|event| event_is_review_history(event))
             .collect();
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        {
+            crate::bench_support::longitudinal::record_event_folds(events.len());
+            crate::bench_support::longitudinal::record_chronological_sort_items(matched.len());
+        }
         matched.sort_by(|left, right| {
             cmp_key(&left.occurred_at, left.event_id.as_str())
                 .cmp(&cmp_key(&right.occurred_at, right.event_id.as_str()))
@@ -349,6 +381,8 @@ pub(super) fn history_default_page_from_events(
         let span = tracing::debug_span!("shore.history.default_page.facets");
         let _guard = span.enter();
         let mut facets = BTreeMap::new();
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_event_folds(matched.len());
         for event in &matched {
             *facets
                 .entry(event.event_type.as_str().to_owned())
@@ -368,6 +402,8 @@ pub(super) fn history_default_page_from_events(
         let mut track = BTreeSet::new();
         let mut actor = BTreeSet::new();
         let mut tag = BTreeSet::new();
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_event_folds(matched.len());
         for event in &matched {
             if let Some(track_id) = &event.target.track_id
                 && !track_id.as_str().is_empty()
@@ -417,6 +453,8 @@ pub(super) fn history_default_page_from_events(
     let entries = {
         let span = tracing::debug_span!("shore.history.default_page.hydrate_window");
         let _guard = span.enter();
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_event_folds(end);
         matched[..end]
             .iter()
             .map(|event| {
@@ -430,6 +468,17 @@ pub(super) fn history_default_page_from_events(
             })
             .collect::<Result<Vec<_>>>()?
     };
+
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    {
+        // Ownership gauges describe the population actually retained by the
+        // serving path. The cold fast path retains only this hydrated window;
+        // the warmed base path records its full retained base below.
+        crate::bench_support::longitudinal::set_retained_hydrated_history_entries(entries.len());
+        crate::bench_support::longitudinal::set_retained_hydrated_body_bytes(
+            entries.iter().map(history_entry_body_bytes).sum(),
+        );
+    }
 
     let mut diagnostics = state.diagnostics;
     let body_diagnostics = {
@@ -452,6 +501,46 @@ pub(super) fn history_default_page_from_events(
         query_notices: Vec::new(),
         distinct_values,
     })
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+fn record_history_ownership(entries: &[BaseEntry]) {
+    // Unlike the cold fast path's bounded window, a warmed base owns every
+    // hydrated entry and search record in this slice.
+    let mut string_count = 0_usize;
+    let mut field_bytes = 0_usize;
+    for entry in entries {
+        let (strings, bytes) = entry.record.retained_ownership();
+        string_count = string_count.saturating_add(strings);
+        field_bytes = field_bytes.saturating_add(bytes);
+    }
+    crate::bench_support::longitudinal::set_retained_hydrated_history_entries(entries.len());
+    crate::bench_support::longitudinal::set_retained_hydrated_body_bytes(
+        entries
+            .iter()
+            .map(|entry| history_entry_body_bytes(&entry.entry))
+            .sum(),
+    );
+    crate::bench_support::longitudinal::set_retained_search_record_strings(string_count);
+    crate::bench_support::longitudinal::set_retained_search_record_field_bytes(field_bytes);
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+fn history_entry_body_bytes(entry: &ReviewHistoryEntry) -> usize {
+    match &entry.summary {
+        ReviewHistorySummary::ReviewObservationRecorded { body, .. }
+        | ReviewHistorySummary::InputRequestOpened { body, .. } => {
+            body.as_deref().map_or(0, str::len)
+        }
+        ReviewHistorySummary::InputRequestResponded { reason, .. } => {
+            reason.as_deref().map_or(0, str::len)
+        }
+        ReviewHistorySummary::ReviewAssessmentRecorded { summary, .. }
+        | ReviewHistorySummary::ValidationCheckRecorded { summary, .. } => {
+            summary.as_deref().map_or(0, str::len)
+        }
+        _ => 0,
+    }
 }
 
 /// The per-entry `is:` lifecycle standing: an input-request-opened entry carries

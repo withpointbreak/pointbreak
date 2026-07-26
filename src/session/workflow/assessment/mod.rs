@@ -27,6 +27,7 @@ mod tests {
     use crate::session::event::{
         AssertionMode, EventType, ReviewAssessment, ReviewAssessmentRecordedPayload,
     };
+    use crate::session::observation::ResolvedRevision;
     use crate::session::{
         CaptureOptions, EventStore, ObservationAddOptions, SessionState, capture_worktree_review,
         record_observation,
@@ -405,6 +406,47 @@ mod tests {
                 .iter()
                 .any(|view| view.id == first.assessment_id
                     && view.status == AssessmentRecordStatus::Replaced)
+        );
+    }
+
+    #[test]
+    fn assessment_projection_counts_its_single_event_pass_once() {
+        let repo = modified_repo();
+        let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        record_assessment(
+            AssessmentAddOptions::new(repo.path())
+                .with_track("human:kevin")
+                .with_assessment(ReviewAssessment::Accepted),
+        )
+        .unwrap();
+        let events = EventStore::open(resolved_store_dir(repo.path()))
+            .list_events()
+            .unwrap();
+        let resolved = ResolvedRevision {
+            journal_id: capture.journal_id,
+            revision_id: capture.revision_id,
+            object_id: capture.object_id,
+            object_artifact_content_hash: capture.object_artifact_content_hash,
+        };
+        let counting =
+            crate::bench_support::longitudinal::LongitudinalCountingScopeV1::new("b".repeat(64))
+                .unwrap();
+        let _guard = counting.enter();
+
+        project_assessments(AssessmentProjectionOptions {
+            backend: None,
+            events: &events,
+            resolved: &resolved,
+            track_filter: None,
+            include_summary: false,
+            include_all: true,
+            removal_lens: None,
+        })
+        .unwrap();
+
+        assert_eq!(
+            counting.snapshot().counters.event_folds,
+            events.len() as u64
         );
     }
 

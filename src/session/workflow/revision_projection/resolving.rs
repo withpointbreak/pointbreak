@@ -30,6 +30,11 @@ pub(super) fn selected_revision_capture(
     events: &[ShoreEvent],
     resolved: &ResolvedRevision,
 ) -> Result<RevisionProjectionIdentity> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    {
+        crate::bench_support::longitudinal::record_projection_rebuild();
+        crate::bench_support::longitudinal::record_event_folds(events.len());
+    }
     for event in events
         .iter()
         .filter(|event| event.event_type == EventType::WorkObjectProposed)
@@ -73,6 +78,11 @@ pub(super) fn selected_revision_capture(
 pub(super) fn enumerate_revision_identities(
     events: &[ShoreEvent],
 ) -> Result<Vec<RevisionProjectionIdentity>> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    {
+        crate::bench_support::longitudinal::record_projection_rebuild();
+        crate::bench_support::longitudinal::record_event_folds(events.len());
+    }
     events
         .iter()
         .filter(|event| event.event_type == EventType::WorkObjectProposed)

@@ -93,6 +93,8 @@ pub struct AssessmentView {
 pub(crate) fn project_assessments(
     options: AssessmentProjectionOptions<'_>,
 ) -> Result<(CurrentAssessmentView, Vec<AssessmentView>)> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_projection_rebuild();
     let records = collect_assessment_records(options.events, options.resolved)?;
     let replaced_ids = records
         .values()
@@ -163,6 +165,11 @@ pub(crate) struct AssessmentEventRecord<'a> {
 pub(crate) fn collect_assessment_records_by_revision(
     events: &[ShoreEvent],
 ) -> Result<BTreeMap<RevisionId, BTreeMap<AssessmentId, AssessmentEventRecord<'_>>>> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    {
+        crate::bench_support::longitudinal::record_projection_rebuild();
+        crate::bench_support::longitudinal::record_event_folds(events.len());
+    }
     let mut by_revision: BTreeMap<RevisionId, BTreeMap<AssessmentId, AssessmentEventRecord<'_>>> =
         BTreeMap::new();
     for event in events
@@ -290,6 +297,8 @@ fn assessment_summary(
 }
 
 fn sort_assessment_views(assessments: &mut [AssessmentView]) {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_chronological_sort_items(assessments.len());
     assessments.sort_by(|left, right| {
         left.created_at
             .cmp(&right.created_at)

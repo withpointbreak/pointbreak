@@ -47,8 +47,16 @@ impl Journal for LocalJournal {
     }
 
     fn read_event_bytes(&self, idempotency_key: &str) -> Result<Option<Vec<u8>>> {
-        self.storage
-            .read_bytes_if_exists(&self.event_path(idempotency_key))
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_carrier_open();
+        let bytes = self
+            .storage
+            .read_bytes_if_exists(&self.event_path(idempotency_key))?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        if let Some(bytes) = &bytes {
+            crate::bench_support::longitudinal::record_carrier_bytes(bytes.len());
+        }
+        Ok(bytes)
     }
 
     fn event_exists(&self, idempotency_key: &str) -> Result<bool> {
@@ -75,7 +83,11 @@ impl Journal for LocalJournal {
                         ))
                     })?
                     .to_owned();
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                crate::bench_support::longitudinal::record_carrier_open();
                 let bytes = self.storage.read_bytes(&path)?;
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                crate::bench_support::longitudinal::record_carrier_bytes(bytes.len());
                 Ok(JournalEntry { key_digest, bytes })
             })
             .collect()
@@ -168,6 +180,12 @@ impl ContentStore for LocalContentStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
+
+    fn counting_scope(byte: char) -> LongitudinalCountingScopeV1 {
+        LongitudinalCountingScopeV1::new(std::iter::repeat_n(byte, 64).collect::<String>())
+            .expect("valid counting scope")
+    }
 
     #[test]
     fn content_list_ignores_in_flight_temp_files() {
@@ -183,5 +201,49 @@ mod tests {
             store.list("artifacts/objects").unwrap(),
             vec!["artifacts/objects/a.json".to_owned()]
         );
+    }
+
+    #[test]
+    fn counting_calibrates_directory_point_list_and_head_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        let journal = LocalJournal::new(root.path());
+        journal.create_event_once("one", b"one").unwrap();
+        journal.create_event_once("two", b"second").unwrap();
+        std::fs::write(journal.events_dir().join("stray.txt"), b"stray").unwrap();
+
+        let point = counting_scope('1');
+        {
+            let _guard = point.enter();
+            assert_eq!(
+                journal.read_event_bytes("one").unwrap(),
+                Some(b"one".to_vec())
+            );
+        }
+        let point = point.snapshot().counters;
+        assert_eq!(point.directory_entries_walked, 0);
+        assert_eq!(point.carrier_opens, 1);
+        assert_eq!(point.carrier_bytes_read, 3);
+
+        let list = counting_scope('2');
+        let entries = {
+            let _guard = list.enter();
+            journal.list_event_entries().unwrap()
+        };
+        assert_eq!(entries.len(), 2);
+        let list = list.snapshot().counters;
+        assert_eq!(list.directory_entries_walked, 3);
+        assert_eq!(list.carrier_opens, 2);
+        assert_eq!(list.carrier_bytes_read, 9);
+
+        let head = counting_scope('3');
+        let marker = {
+            let _guard = head.enter();
+            journal.head_marker().unwrap()
+        };
+        assert_eq!(marker, 2);
+        let head = head.snapshot().counters;
+        assert_eq!(head.directory_entries_walked, 3);
+        assert_eq!(head.carrier_opens, 0);
+        assert_eq!(head.carrier_bytes_read, 0);
     }
 }

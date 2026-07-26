@@ -164,6 +164,11 @@ impl SupersessionView {
     /// never decoded as a revision — discriminating by the payload arm, never by
     /// the event type alone.
     pub fn from_events(events: &[ShoreEvent]) -> Result<Self> {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        {
+            crate::bench_support::longitudinal::record_projection_rebuild();
+            crate::bench_support::longitudinal::record_event_folds(events.len());
+        }
         let mut edges: Vec<(RevisionId, Vec<RevisionId>)> = Vec::new();
         for event in events
             .iter()

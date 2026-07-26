@@ -63,6 +63,11 @@ pub enum ObservationStatus {
 pub(crate) fn project_observations(
     options: ObservationProjectionOptions<'_>,
 ) -> Result<Vec<ObservationView>> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    {
+        crate::bench_support::longitudinal::record_projection_rebuild();
+        crate::bench_support::longitudinal::record_event_folds(options.events.len());
+    }
     let mut observation_records: BTreeMap<ObservationId, ObservationEventRecord<'_>> =
         BTreeMap::new();
     let mut superseded_ids = BTreeSet::new();
@@ -195,6 +200,8 @@ pub(crate) fn target_matches_file(target: &ReviewTargetRef, file: &str) -> bool 
 }
 
 pub(super) fn sort_observation_views(observations: &mut [ObservationView]) {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_chronological_sort_items(observations.len());
     observations.sort_by(|left, right| {
         left.created_at
             .cmp(&right.created_at)

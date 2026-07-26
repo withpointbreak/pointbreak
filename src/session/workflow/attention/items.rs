@@ -182,10 +182,14 @@ pub(crate) fn attention_from_events(
     events: &[ShoreEvent],
     scope: Option<&RevisionId>,
 ) -> Result<AttentionProjection> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_projection_rebuild();
     // One SupersessionView per call — the freshness, competing-heads, stale, and
     // failed-validation collectors all read from this single construction.
     let supersession = SupersessionView::from_events(events)?;
     let current_assessments = current_assessment_records_by_revision(events)?;
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_event_folds(events.len());
     let captured_at = captured_at_map(events)?;
     let request_records = collect_input_request_projection_records(events)?;
     let open_request_ids = open_input_request_ids(&request_records);
@@ -195,6 +199,8 @@ pub(crate) fn attention_from_events(
     ambiguous_assessment_items(&current_assessments, &supersession, &mut items);
     competing_heads_items(&supersession, &captured_at, &mut items);
     stale_assessment_items(&current_assessments, &supersession, &mut items);
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_event_folds(events.len());
     failed_validation_items(events, &supersession, &current_assessments, &mut items)?;
     follow_up_outstanding_items(
         &current_assessments,
@@ -246,6 +252,8 @@ fn item_covers_scope(
 /// oldest `observed_at` first (the longest-waiting ask surfaces first); the
 /// kind-qualified id as the final tiebreak.
 fn sort_items(items: &mut [AttentionItem]) {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_chronological_sort_items(items.len());
     items.sort_by(|left, right| {
         tier_rank(left.tier)
             .cmp(&tier_rank(right.tier))
@@ -439,6 +447,8 @@ fn failed_validation_items(
         }
         // Deterministic order among tied failing records (the final sort re-orders
         // across kinds, but keep this stable so ties never reorder run to run).
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_chronological_sort_items(group.len());
         group.sort_by(|left, right| {
             left.payload
                 .validation_check_id
@@ -600,6 +610,8 @@ fn current_assessment_records_by_revision(
                 revision_scoped: matches!(record.payload.target, ReviewTargetRef::Revision { .. }),
             })
             .collect();
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_chronological_sort_items(peers.len());
         peers.sort_by(|left, right| {
             left.recorded_at.cmp(&right.recorded_at).then_with(|| {
                 left.assessment_id

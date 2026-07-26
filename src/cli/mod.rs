@@ -2,6 +2,10 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::process::ExitCode;
 
+#[cfg(feature = "longitudinal-counting")]
+use base64::Engine as _;
+#[cfg(feature = "longitudinal-counting")]
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use clap::error::ErrorKind;
 use clap::{Parser, Subcommand};
 
@@ -87,8 +91,21 @@ struct Cli {
     #[command(flatten)]
     tracing: TracingArgs,
 
+    #[cfg(feature = "longitudinal-counting")]
+    #[arg(long, global = true, hide = true)]
+    longitudinal_counting: Option<String>,
+
     #[command(subcommand)]
     command: Command,
+}
+
+#[cfg(feature = "longitudinal-counting")]
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LongitudinalCliCountingRequest {
+    run_identity: String,
+    context: pointbreak::bench_support::longitudinal::LongitudinalCounterReceiptContextV1,
+    receipt_path: std::path::PathBuf,
 }
 
 #[derive(Debug, Subcommand)]
@@ -156,12 +173,124 @@ where
         }
     };
 
+    #[cfg(feature = "longitudinal-counting")]
+    {
+        let mut cli = cli;
+        if let Some(encoded) = cli.longitudinal_counting.take() {
+            return run_counted_cli(cli, stdout, stderr, &encoded);
+        }
+        result_exit_code(run_cli(cli, stdout, stderr), stderr)
+    }
+
+    #[cfg(not(feature = "longitudinal-counting"))]
     match run_cli(cli, stdout, stderr) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             let _ = writeln!(stderr, "{error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn result_exit_code(
+    result: Result<(), Box<dyn std::error::Error>>,
+    stderr: &mut dyn Write,
+) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            let _ = writeln!(stderr, "{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn run_counted_cli(
+    cli: Cli,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+    encoded: &str,
+) -> ExitCode {
+    let request = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|error| error.to_string())
+        .and_then(|bytes| {
+            serde_json::from_slice::<LongitudinalCliCountingRequest>(&bytes)
+                .map_err(|error| error.to_string())
+        });
+    let request = match request {
+        Ok(request) => request,
+        Err(error) => {
+            let _ = writeln!(stderr, "invalid longitudinal counting request: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if !request.receipt_path.is_absolute() {
+        let _ = writeln!(
+            stderr,
+            "longitudinal counting receipt path must be absolute"
+        );
+        return ExitCode::FAILURE;
+    }
+    let scope = match pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1::new(
+        request.run_identity,
+    ) {
+        Ok(scope) => scope,
+        Err(error) => {
+            let _ = writeln!(stderr, "{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let _guard = scope.enter();
+    let mut counting_stdout = LongitudinalCountingWriter { inner: stdout };
+    let result = run_cli(cli, &mut counting_stdout, stderr);
+    let mut context = request.context;
+    context.success = result.is_ok();
+    let receipt = scope
+        .receipt(context)
+        .map_err(|error| error.to_string())
+        .and_then(|receipt| write_counting_receipt(&request.receipt_path, &receipt));
+    if let Err(error) = receipt {
+        let _ = writeln!(
+            stderr,
+            "could not write longitudinal counting receipt: {error}"
+        );
+        return ExitCode::FAILURE;
+    }
+    result_exit_code(result, stderr)
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn write_counting_receipt(
+    path: &std::path::Path,
+    receipt: &pointbreak::bench_support::longitudinal::LongitudinalCounterReceiptV1,
+) -> Result<(), String> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    serde_json::to_writer(&mut file, receipt).map_err(|error| error.to_string())?;
+    file.write_all(b"\n").map_err(|error| error.to_string())
+}
+
+#[cfg(feature = "longitudinal-counting")]
+struct LongitudinalCountingWriter<'a> {
+    inner: &'a mut dyn Write,
+}
+
+#[cfg(feature = "longitudinal-counting")]
+impl Write for LongitudinalCountingWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(bytes)?;
+        pointbreak::bench_support::longitudinal::record_response_bytes(written);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
     }
 }
 
@@ -360,5 +489,82 @@ fn run_cli(
         Command::Store(args) => store::run(args, stdout, stderr),
         Command::Validation(args) => validation::run(args, stdout, stderr),
         Command::Version(args) => version::run(args, stdout),
+    }
+}
+
+#[cfg(all(test, feature = "longitudinal-counting"))]
+mod longitudinal_counting_tests {
+    use super::*;
+
+    #[test]
+    fn final_cli_writer_counts_only_successfully_emitted_stdout_bytes() {
+        let scope = pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1::new(
+            "9".repeat(64),
+        )
+        .expect("valid scope");
+        let _guard = scope.enter();
+        let mut output = Vec::new();
+        let mut writer = LongitudinalCountingWriter { inner: &mut output };
+
+        writer.write_all(b"pointbreak").expect("write output");
+        writer.flush().expect("flush output");
+
+        assert_eq!(output, b"pointbreak");
+        assert_eq!(
+            scope.snapshot().counters.response_bytes,
+            b"pointbreak".len() as u64
+        );
+    }
+
+    #[test]
+    fn hidden_cli_transport_writes_a_disjoint_receipt_after_the_final_stdout_boundary() {
+        let directory = tempfile::tempdir().expect("temporary receipt directory");
+        let receipt_path = directory.path().join("receipt.json");
+        let request = serde_json::json!({
+            "runIdentity": "1".repeat(64),
+            "context": {
+                "rootIdentity": "2".repeat(64),
+                "operation": "VERSION",
+                "phase": "cold",
+                "baseExecutionIdentitySha256": "3".repeat(64),
+                "derivativeExecutionIdentitySha256": "4".repeat(64),
+                "manifestSha256": "5".repeat(64),
+                "scheduleSha256": "6".repeat(64),
+                "success": false,
+                "semanticResultSha256": "7".repeat(64),
+                "includeCapacityOwnership": false
+            },
+            "receiptPath": receipt_path
+        });
+        let encoded = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&request).expect("request JSON"));
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let exit = run_with_io(
+            [
+                "pointbreak",
+                "--longitudinal-counting",
+                encoded.as_str(),
+                "version",
+                "--format",
+                "json",
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+
+        assert_eq!(
+            exit,
+            ExitCode::SUCCESS,
+            "{}",
+            String::from_utf8_lossy(&stderr)
+        );
+        let receipt: pointbreak::bench_support::longitudinal::LongitudinalCounterReceiptV1 =
+            serde_json::from_slice(&std::fs::read(receipt_path).expect("receipt bytes"))
+                .expect("receipt JSON");
+        assert!(receipt.success);
+        assert_eq!(receipt.operation, "VERSION");
+        assert_eq!(receipt.counters.response_bytes, stdout.len() as u64);
+        assert!(receipt.capacity_ownership.is_none());
     }
 }

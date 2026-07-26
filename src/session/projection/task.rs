@@ -129,6 +129,11 @@ pub(crate) fn task_attempt_summary_from_events(
     task_attempt_id: &WorkObjectId,
     reader_actor_id: &ActorId,
 ) -> Result<Option<TaskAttemptSummary>> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    {
+        crate::bench_support::longitudinal::record_projection_rebuild();
+        crate::bench_support::longitudinal::record_event_folds(events.len());
+    }
     let mut attempt: Option<(TaskProjectionEventEnvelope, CapturedTaskAttempt)> = None;
     let mut checkpoint_envelopes: BTreeMap<
         CheckpointId,
@@ -261,6 +266,8 @@ pub(crate) fn task_attempt_summary_from_events(
         })
         .collect();
 
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_chronological_sort_items(checkpoints.len());
     checkpoints
         .sort_by(|left, right| envelope_chronological_order(&left.envelope, &right.envelope));
 
@@ -329,6 +336,8 @@ fn envelope_chronological_order(
 }
 
 fn sort_observations_recent_first(observations: &mut [TaskObservationSummary]) {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_chronological_sort_items(observations.len());
     observations.sort_by(|left, right| {
         right
             .envelope
@@ -381,6 +390,11 @@ pub(crate) fn open_task_input_requests_from_events(
     task_attempt_id: &WorkObjectId,
     reader_actor_id: &ActorId,
 ) -> Result<TaskInputRequestsProjection> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    {
+        crate::bench_support::longitudinal::record_projection_rebuild();
+        crate::bench_support::longitudinal::record_event_folds(events.len());
+    }
     let mut requests: Vec<(
         TaskProjectionEventEnvelope,
         InputRequestOpenedPayload,
@@ -453,6 +467,8 @@ pub(crate) fn open_task_input_requests_from_events(
         });
     }
 
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_chronological_sort_items(open_input_requests.len());
     open_input_requests
         .sort_by(|left, right| envelope_chronological_order(&left.envelope, &right.envelope));
 
@@ -654,6 +670,8 @@ pub(crate) fn agent_resumption_with_principal_policy(
     delegation_map: Option<&DelegationMap>,
     principal_policy: PrincipalPolicy,
 ) -> Result<AgentResumptionProjection> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_projection_rebuild();
     let attempt_summary =
         task_attempt_summary_from_events(events, task_attempt_id, reader_actor_id)?;
 

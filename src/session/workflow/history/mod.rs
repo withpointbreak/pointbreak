@@ -1671,6 +1671,29 @@ mod tests {
         assert!(base.event_set_hash.starts_with("sha256:"));
     }
 
+    #[test]
+    fn counting_calibrates_history_and_search_retained_ownership() {
+        let events = [
+            observation_event_with_body("inline body"),
+            assessment_event(),
+        ];
+        let scope =
+            crate::bench_support::longitudinal::LongitudinalCountingScopeV1::new("b".repeat(64))
+                .expect("valid scope");
+        let base = {
+            let _guard = scope.enter();
+            history_base_from_events(&events, &BaseProjectionConfig::default(), None)
+                .expect("base projects")
+        };
+
+        assert_eq!(base.entries.len(), 2);
+        let ownership = scope.snapshot().capacity_ownership;
+        assert_eq!(ownership.retained_hydrated_history_entries, 2);
+        assert_eq!(ownership.retained_hydrated_body_bytes, 18);
+        assert_eq!(ownership.retained_search_record_strings, 42);
+        assert!(ownership.retained_search_record_field_bytes > 0);
+    }
+
     /// The opened entry in a base projection (there is exactly one per fixture).
     fn opened_is_field(base: &BaseHistoryProjection) -> Option<&str> {
         base.entries

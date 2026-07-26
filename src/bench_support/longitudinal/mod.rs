@@ -5,10 +5,14 @@
 
 mod builder;
 mod contract;
+#[cfg(any(test, feature = "longitudinal-counting"))]
+mod counters;
 mod evidence;
 
 pub use builder::*;
 pub use contract::*;
+#[cfg(any(test, feature = "longitudinal-counting"))]
+pub use counters::*;
 pub use evidence::*;
 
 #[cfg(test)]

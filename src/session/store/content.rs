@@ -82,8 +82,14 @@ impl ContentArtifacts {
         content_ref: &str,
         object_id: &ObjectId,
     ) -> Result<Vec<u8>> {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_object_artifact_read_attempt();
         match self.store.get_if_exists(content_ref)? {
-            Some(bytes) => Ok(bytes),
+            Some(bytes) => {
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                crate::bench_support::longitudinal::record_object_artifact_bytes(bytes.len());
+                Ok(bytes)
+            }
             None => Err(missing_object_artifact(object_id)),
         }
     }
@@ -91,7 +97,14 @@ impl ContentArtifacts {
     /// Fetch an object artifact's stored bytes, or `None` when absent (the
     /// resolver tries the next store on a miss).
     pub(crate) fn read_object_bytes_if_exists(&self, content_ref: &str) -> Result<Option<Vec<u8>>> {
-        self.store.get_if_exists(content_ref)
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_object_artifact_read_attempt();
+        let bytes = self.store.get_if_exists(content_ref)?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        if let Some(bytes) = &bytes {
+            crate::bench_support::longitudinal::record_object_artifact_bytes(bytes.len());
+        }
+        Ok(bytes)
     }
 
     /// Import a fetched object artifact's bytes: decode + validate, confirm the
@@ -200,8 +213,12 @@ impl ContentArtifacts {
         content_ref: &str,
         expected_content_hash: &str,
     ) -> Result<Vec<u8>> {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_body_artifact_read_attempt();
         match self.store.get_if_exists(content_ref)? {
             Some(bytes) => {
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                crate::bench_support::longitudinal::record_body_artifact_bytes(bytes.len());
                 validate_note_body_artifact_bytes(content_ref, expected_content_hash, &bytes)?;
                 Ok(bytes)
             }
@@ -214,8 +231,14 @@ impl ContentArtifacts {
     /// Fetch and parse a note body artifact, mapping an absent blob to the
     /// canonical "import referenced artifacts" guidance.
     pub(crate) fn read_note_body(&self, content_ref: &str) -> Result<String> {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_body_artifact_read_attempt();
         match self.store.get_if_exists(content_ref)? {
-            Some(bytes) => Ok(parse_note_body_artifact(&bytes)?.body),
+            Some(bytes) => {
+                #[cfg(any(test, feature = "longitudinal-counting"))]
+                crate::bench_support::longitudinal::record_body_artifact_bytes(bytes.len());
+                Ok(parse_note_body_artifact(&bytes)?.body)
+            }
             None => Err(ShoreError::Message(format!(
                 "missing artifact {content_ref}; import referenced artifacts before reading"
             ))),
@@ -251,6 +274,7 @@ fn missing_object_artifact(object_id: &ObjectId) -> ShoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
     use crate::canonical_hash::sha256_bytes_hex;
     use crate::model::{DiffSnapshot, ReviewId};
     use crate::session::store::body_artifact::NoteBodyEnvelope;
@@ -274,6 +298,81 @@ mod tests {
             build_object_artifact_v2(DiffSnapshot::empty(ReviewId::new("review:test"))).unwrap();
         let bytes = serde_json::to_vec(&artifact).unwrap();
         (artifact, bytes)
+    }
+
+    fn counting_scope(byte: char) -> LongitudinalCountingScopeV1 {
+        LongitudinalCountingScopeV1::new(std::iter::repeat_n(byte, 64).collect::<String>())
+            .expect("valid counting scope")
+    }
+
+    #[test]
+    fn counting_calibrates_inline_external_body_and_selected_object_reads() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = StoreBackend::Local(root.path().join(".pointbreak/data"));
+        let content = ContentArtifacts::from_backend(&backend);
+
+        let inline = counting_scope('5');
+        {
+            let _guard = inline.enter();
+            let outcome =
+                super::super::body_artifact::stage_body_artifact(b"inline").expect("inline body");
+            assert!(matches!(
+                outcome,
+                super::super::body_artifact::BodyArtifactOutcome::Inline { .. }
+            ));
+        }
+        assert_eq!(inline.snapshot().counters.body_artifact_reads, 0);
+
+        let body = "x".repeat(super::super::body_artifact::BODY_INLINE_LIMIT + 1);
+        let outcome =
+            super::super::body_artifact::stage_body_artifact(body.as_bytes()).expect("body stages");
+        let super::super::body_artifact::BodyArtifactOutcome::Artifact {
+            relative_path,
+            body_envelope,
+            ..
+        } = outcome
+        else {
+            panic!("body should externalize");
+        };
+        let body_bytes = body_envelope.to_json_bytes().expect("body bytes");
+        content
+            .put_note_body(&relative_path, &body_bytes)
+            .expect("body stored");
+
+        let external = counting_scope('6');
+        {
+            let _guard = external.enter();
+            assert_eq!(
+                content.read_note_body(&relative_path).expect("body reads"),
+                body
+            );
+        }
+        let external = external.snapshot().counters;
+        assert_eq!(external.body_artifact_reads, 1);
+        assert_eq!(external.body_bytes_read, body_bytes.len() as u64);
+        assert_eq!(external.object_artifact_reads, 0);
+
+        let (artifact, object_bytes) = valid_object();
+        let object_id = artifact.snapshot.object_id.clone();
+        let object_ref = object_content_ref_for_hash(&artifact.content_hash);
+        content
+            .put_object(&object_ref, &object_bytes, artifact)
+            .expect("object stored");
+
+        let object = counting_scope('7');
+        {
+            let _guard = object.enter();
+            assert_eq!(
+                content
+                    .read_object_bytes(&object_ref, &object_id)
+                    .expect("object reads"),
+                object_bytes
+            );
+        }
+        let object = object.snapshot().counters;
+        assert_eq!(object.object_artifact_reads, 1);
+        assert_eq!(object.object_bytes_read, object_bytes.len() as u64);
+        assert_eq!(object.body_artifact_reads, 0);
     }
 
     #[test]

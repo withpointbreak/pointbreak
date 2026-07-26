@@ -30,6 +30,8 @@ pub struct CommitOidGroupingProjection {
 
 impl CommitOidGroupingProjection {
     pub fn from_events(events: &[ShoreEvent]) -> Result<Self> {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_projection_rebuild();
         let commit_range = RevisionCommitRangeProjection::from_events(events)?;
         let mut groups: BTreeMap<String, BTreeSet<RevisionId>> = BTreeMap::new();
         for (revision_id, view) in &commit_range.units {

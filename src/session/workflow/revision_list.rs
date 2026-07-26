@@ -463,6 +463,8 @@ fn group_entries(
         grouped.push(entry);
     }
 
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_chronological_sort_items(grouped.len());
     grouped.sort_by(|left, right| {
         left.captured_at
             .cmp(&right.captured_at)
@@ -597,6 +599,11 @@ fn list_from_events(
     events: &[ShoreEvent],
     projection: &RevisionCommitRangeProjection,
 ) -> Result<RevisionListResult> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    {
+        crate::bench_support::longitudinal::record_projection_rebuild();
+        crate::bench_support::longitudinal::record_event_folds(events.len());
+    }
     let state = SessionState::from_events(events)?;
     let event_set_hash = state
         .event_set_hash
@@ -609,6 +616,8 @@ fn list_from_events(
         .filter_map(|event| entry_from_event(event, projection).transpose())
         .collect::<Result<Vec<_>>>()?;
 
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_chronological_sort_items(entries.len());
     entries.sort_by(|left, right| {
         left.captured_at
             .cmp(&right.captured_at)

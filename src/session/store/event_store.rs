@@ -146,7 +146,11 @@ impl EventStore {
     }
 
     pub fn read_event(&self, path: &Path) -> Result<ShoreEvent> {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_carrier_open();
         let bytes = self.files().storage.read_bytes(path)?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_carrier_bytes(bytes.len());
         Self::decode_validated_event(&bytes, Some(path))
     }
 
@@ -192,6 +196,8 @@ impl EventStore {
     /// this with a digest/key check at the call site instead, since the bytes carry
     /// no path of their own.
     fn decode_validated_event(bytes: &[u8], path: Option<&Path>) -> Result<ShoreEvent> {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_event_decode();
         #[derive(serde::Deserialize)]
         struct EventProbe<'a> {
             #[serde(rename = "eventType", borrow)]
@@ -253,11 +259,15 @@ impl EventStore {
     }
 
     pub fn list_events(&self) -> Result<Vec<ShoreEvent>> {
-        self.journal
+        let events = self
+            .journal
             .list_event_entries()?
             .iter()
             .map(Self::decode_validated_entry)
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::set_retained_decoded_events(events.len());
+        Ok(events)
     }
 
     /// Read every event, partitioning the two recognized schema-break classes
@@ -281,6 +291,8 @@ impl EventStore {
                 Err(other) => return Err(other),
             }
         }
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::set_retained_decoded_events(events.len());
         Ok((events, skipped))
     }
 
@@ -354,6 +366,8 @@ fn event_signature_binding_matches(existing: &ShoreEvent, candidate: &ShoreEvent
 }
 
 fn validate_event(event: &ShoreEvent, path: Option<&Path>) -> Result<()> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    crate::bench_support::longitudinal::record_event_validation();
     event.validate_schema_version()?;
 
     if event.event_type == EventType::ReviewAssessmentRecorded
@@ -452,6 +466,7 @@ mod tests {
     use std::fs;
 
     use super::*;
+    use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
     use crate::crypto::SignerId;
     use crate::model::{AssessmentId, JournalId, ReviewTargetRef, RevisionId, TargetRef, TrackId};
     use crate::session::event::{
@@ -460,6 +475,11 @@ mod tests {
         Writer,
     };
     use crate::session::state::SessionState;
+
+    fn counting_scope(byte: char) -> LongitudinalCountingScopeV1 {
+        LongitudinalCountingScopeV1::new(std::iter::repeat_n(byte, 64).collect::<String>())
+            .expect("valid counting scope")
+    }
 
     #[test]
     fn schema_break_for_covers_every_retired_identifier() {
@@ -574,6 +594,57 @@ mod tests {
             EventWriteOutcome::Existing
         );
         assert_eq!(store.list_events().unwrap(), vec![event]);
+    }
+
+    #[test]
+    fn counting_calibrates_strict_event_list_and_decoded_ownership() {
+        let (_root, store) = temp_event_store();
+        let first = review_initialized_event();
+        let second = review_assessment_recorded_event();
+        store.record_event_once(&first).unwrap();
+        store.record_event_once(&second).unwrap();
+        let expected_bytes = [first, second]
+            .iter()
+            .map(|event| serde_json::to_vec(event).unwrap().len() as u64)
+            .sum::<u64>();
+
+        let scope = counting_scope('4');
+        let events = {
+            let _guard = scope.enter();
+            store.list_events().unwrap()
+        };
+        assert_eq!(events.len(), 2);
+        let snapshot = scope.snapshot();
+        assert_eq!(snapshot.counters.directory_entries_walked, 2);
+        assert_eq!(snapshot.counters.carrier_opens, 2);
+        assert_eq!(snapshot.counters.carrier_bytes_read, expected_bytes);
+        assert_eq!(snapshot.counters.event_decodes, 2);
+        assert_eq!(snapshot.counters.event_validations, 2);
+        assert_eq!(snapshot.capacity_ownership.retained_decoded_events, 2);
+    }
+
+    #[test]
+    fn counting_calibrates_one_point_carrier_decode_and_validation() {
+        let (_root, store) = temp_event_store();
+        let event = review_initialized_event();
+        let expected_bytes = serde_json::to_vec(&event).unwrap().len() as u64;
+        store.record_event_once(&event).unwrap();
+        let scope = counting_scope('8');
+
+        let stored = {
+            let _guard = scope.enter();
+            store
+                .read_stored_event(&event.idempotency_key)
+                .expect("point event reads")
+        };
+
+        assert_eq!(stored, event);
+        let counters = scope.snapshot().counters;
+        assert_eq!(counters.directory_entries_walked, 0);
+        assert_eq!(counters.carrier_opens, 1);
+        assert_eq!(counters.carrier_bytes_read, expected_bytes);
+        assert_eq!(counters.event_decodes, 1);
+        assert_eq!(counters.event_validations, 1);
     }
 
     #[test]

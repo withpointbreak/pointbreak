@@ -112,6 +112,11 @@ pub struct WithdrawnRefAssociation {
 
 impl RevisionCommitRangeProjection {
     pub fn from_events(events: &[ShoreEvent]) -> Result<Self> {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        {
+            crate::bench_support::longitudinal::record_projection_rebuild();
+            crate::bench_support::longitudinal::record_event_folds(events.len());
+        }
         let mut builders = BTreeMap::<RevisionId, CommitRangeBuilder>::new();
 
         for event in events {
@@ -264,6 +269,8 @@ impl CommitRangeBuilder {
                 source: CommitEdgeSource::Association,
             });
         }
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_chronological_sort_items(current_commits.len());
         current_commits.sort_by(|left, right| left.commit_oid.cmp(&right.commit_oid));
 
         let mut withdrawn_commits = commit_axis
@@ -280,6 +287,10 @@ impl CommitRangeBuilder {
                 },
             )
             .collect::<Vec<_>>();
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_chronological_sort_items(
+            withdrawn_commits.len(),
+        );
         withdrawn_commits.sort_by(|left, right| left.commit_oid.cmp(&right.commit_oid));
 
         let mut current_refs = ref_axis
@@ -293,6 +304,8 @@ impl CommitRangeBuilder {
                 },
             )
             .collect::<Vec<_>>();
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_chronological_sort_items(current_refs.len());
         current_refs.sort_by(|left, right| {
             left.ref_name
                 .cmp(&right.ref_name)
@@ -313,6 +326,8 @@ impl CommitRangeBuilder {
                 },
             )
             .collect::<Vec<_>>();
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_chronological_sort_items(withdrawn_refs.len());
         withdrawn_refs.sort_by(|left, right| left.ref_name.cmp(&right.ref_name));
 
         // retraction_target_missing: a withdrawal whose association id never appeared.

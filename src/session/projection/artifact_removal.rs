@@ -76,6 +76,11 @@ pub(crate) struct IdentityReuse {
 
 impl ArtifactRemovalProjection {
     pub fn from_events(events: &[ShoreEvent]) -> Result<Self> {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        {
+            crate::bench_support::longitudinal::record_projection_rebuild();
+            crate::bench_support::longitudinal::record_event_folds(events.len());
+        }
         let mut claims: BTreeMap<String, Vec<RemovalClaim>> = BTreeMap::new();
         for event in events {
             if event.event_type == EventType::ArtifactRemoved {
@@ -465,6 +470,23 @@ mod tests {
         assert!(projection.is_removed("sha256:a"));
         assert!(projection.is_removed("sha256:b"));
         assert!(!projection.is_removed("sha256:c"));
+    }
+
+    #[test]
+    fn counting_calibrates_one_named_projection_outer_pass() {
+        let events = vec![removal_event("sha256:a"), removal_event("sha256:b")];
+        let scope =
+            crate::bench_support::longitudinal::LongitudinalCountingScopeV1::new("e".repeat(64))
+                .expect("valid scope");
+        {
+            let _guard = scope.enter();
+            ArtifactRemovalProjection::from_events(&events).expect("projection builds");
+        }
+
+        let counters = scope.snapshot().counters;
+        assert_eq!(counters.projection_rebuilds, 1);
+        assert_eq!(counters.event_folds, 2);
+        assert_eq!(counters.chronological_sort_items, 0);
     }
 
     #[test]
