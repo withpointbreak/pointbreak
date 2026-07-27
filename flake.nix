@@ -201,7 +201,11 @@
       packages = forEachSystem (
         pkgs:
         let
-          version = "0.8.0";
+          # Read from Cargo.toml rather than repeated here. A release bumps the manifest,
+          # and a hardcoded copy would keep labelling artifacts with the previous version:
+          # bumping Cargo.toml alone used to leave the dependency derivation named
+          # pointbreak-deps-0.8.0, so the VSIX and binary would ship mislabelled.
+          inherit (craneLib.crateNameFromCargoToml { cargoToml = ./Cargo.toml; }) version;
           cocogitto = mkCocogitto pkgs;
           rustToolchains = mkRustToolchains pkgs;
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchains.stable;
