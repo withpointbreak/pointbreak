@@ -47,8 +47,10 @@ use pointbreak::bench_support::longitudinal::{
     LONGITUDINAL_EVIDENCE_PACKAGE_FILE_V1, LONGITUDINAL_HELP_MODE_V1, LONGITUDINAL_SMOKE_MODE_V1,
     LONGITUDINAL_VERIFY_CARRY_FORWARD_MODE_V1, LONGITUDINAL_VERIFY_PACKAGE_MODE_V1,
     LONGITUDINAL_VERIFY_PACKAGE_RECEIPT_MODE_V1, LongitudinalCarryForwardRequestV1,
-    longitudinal_carry_forward_non_timing_smoke_v1, longitudinal_contract_publication_v1,
-    longitudinal_help_v1, longitudinal_non_timing_smoke_v1,
+    LongitudinalProcessCaptureError, LongitudinalProcessSnapshotV1,
+    capture_longitudinal_process_snapshot_v1, longitudinal_carry_forward_non_timing_smoke_v1,
+    longitudinal_contract_publication_v1, longitudinal_help_v1,
+    longitudinal_mach_ticks_to_nanos_v1, longitudinal_non_timing_smoke_v1,
     verify_longitudinal_capacity_package_v1,
     verify_longitudinal_carry_forward_authority_package_v1,
     verify_longitudinal_evidence_package_v1, verify_longitudinal_package_receipt_v1,
@@ -68,6 +70,11 @@ Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--gener
 \n\
 Validates deterministic workload, transfer, candidate, or native-platform qualification contracts and prints JSON.\n\
 Qualification modes use disposable roots and never select or activate production storage.\n";
+
+const _: fn(u64, u32, u32) -> Result<u64, LongitudinalProcessCaptureError> =
+    longitudinal_mach_ticks_to_nanos_v1;
+const _: fn(u32) -> Result<LongitudinalProcessSnapshotV1, LongitudinalProcessCaptureError> =
+    capture_longitudinal_process_snapshot_v1;
 
 #[derive(Serialize)]
 struct SmokeMetadataV1 {

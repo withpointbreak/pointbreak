@@ -2197,6 +2197,7 @@ dependencies = [
  "gix",
  "gix-imara-diff",
  "heed3",
+ "libc",
  "libsqlite3-sys",
  "mmdflux",
  "rusqlite",

@@ -28,6 +28,12 @@ a change and how to interpret its result. Script-level ownership and side effect
 These are minimum gates, not substitutes for a task-specific acceptance matrix. A change that crosses
 surfaces inherits every affected row.
 
+Any new external longitudinal driver that captures process CPU on macOS must use
+`capture_longitudinal_process_snapshot_v1`. The helper applies the live Mach timebase before returning
+nanoseconds and retains that timebase in the snapshot. It fails closed on other platforms rather than
+reporting unavailable CPU as zero. Historical receipts that did not normalize at capture remain immutable
+and require a separately bound additive correction; do not rewrite them in place.
+
 ## What `just check` covers
 
 `just check` runs, in order:
