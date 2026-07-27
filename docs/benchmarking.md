@@ -470,6 +470,83 @@ The sole success outcome,
 `survives_apfs_falsifier`, authorizes only a later decision; it does not select or activate storage, authorize
 migration, persist search/body material, change release promises, or make derived data authoritative.
 
+### Derived-access qualification runner
+
+The runner exercises a qualification-only SQLite/WAL adapter. It does not change the Inspector, CLI,
+normal store resolver, event or content formats, or any production profile. Its derived namespace contains
+only cursor, locator, and compact semantic rows; authoritative event, body, and object bytes remain in the
+unchanged loose store.
+
+List the available modes without creating a root:
+
+```sh
+just derived-access-help
+```
+
+`just derived-access-smoke D0-128`, `just derived-access-smoke L1`, and
+`just derived-access-smoke L7` are disposable self-tests over public deterministic inputs. D0-128 records
+its public seed, frozen coverage-schedule hash, distinct ordered-schedule hash, and two-root byte-identity
+receipt. L1 and L7 reuse
+the existing public longitudinal identities at exactly 1,024 and 7,168 events. Counter-admissible smoke
+receipts require both the `longitudinal-counting` feature and an execution-bound typed request:
+
+```sh
+just derived-access-native-smoke /absolute/path/to/native-smoke-request.json
+```
+
+Native smoke, lifecycle, retained-root, scale, resource, and fragment modes consume typed JSON requests:
+
+```sh
+just derived-access-lifecycle /absolute/path/to/lifecycle-request.json
+just derived-access-retained-preflight /absolute/path/to/retained-root-request.json
+just derived-access-retained-bootstrap /absolute/path/to/retained-root-request.json
+just derived-access-scale /absolute/path/to/scale-request.json
+just derived-access-resource /absolute/path/to/resource-request.json
+just derived-access-fragment /absolute/path/to/fragment-request.json
+```
+
+The retained-root modes accept only L100 or C262. They require a separately admitted immutable input and
+a distinct, precreated qualification clone; no runner mode can materialize either tier. Preflight compares
+the complete authoritative inventory. Bootstrap writes only `.pointbreak-derived/`, reports progress and
+high-water allocation, compares the incremental semantic receipt with strict full replay, and rechecks both
+the input and clone truth inventories.
+
+Scale evidence requires two already-bootstrapped roots. Each warm read receives one untimed request, three
+excluded warmups, and 30 retained samples per root. Append/post uses 30 pairs per root, and restart uses ten
+fresh child processes per root. Raw rows name wall nanoseconds, process CPU nanoseconds, responsible process
+scope, selected rows, SQLite page count and size deltas, counters, response bytes, and semantic receipts.
+Correctness and mechanically classified work complexity are checked before p95 latency or CPU is admitted.
+L100/C262 timing, CPU, allocation, bootstrap, and resource modes are APFS falsifiers collected on native
+macOS; Windows/NTFS independently gates the D0-128/L1/L7 smoke and lifecycle rows, and Linux remains a
+compile/CI surface.
+Resource evidence uses separate empty, L7, and L100 child processes so reported RSS is empty-adjusted and
+the L7-to-L100 slope has a consistent process boundary. Its body/object-retention row is measured from the
+actual sidecar schema and values rather than supplied as a constant.
+
+Fragment requests bind raw receipts to one clean source/tree/lock/binary/contract/root-authority/hashed-host
+execution identity. `rootProvenanceSha256` is the common campaign-authority commitment, not an assertion
+that every mode operates on one physical root. Each typed raw receipt separately carries its admitted
+per-root inventory hashes; each fragment promotes those hashes into execution-bound package root bindings,
+and the completed package also archives the receipts and binds their exact bytes in its completion-last
+manifest. The evaluator derives p95, retained counts, work/cardinality maxima, C262
+work ratios, allocation, and write amplification from retained raw samples and measured inventories rather
+than trusting supplied summary rows, and includes bootstrap high-water in the allocation gate. Final
+package assembly rejects exact duplicate
+identities, mixed source or per-platform native authority, and duplicate row authority; evaluates before
+publication; accepts only raw-bound fragments (never hand-authored partial packages); reconstructs every
+D0, operation, lifecycle, resource, allocation, and bootstrap summary from those archived receipts; writes
+raw inputs before the manifest; and creates the completion marker last. Verify a completed
+package recursively with:
+
+```sh
+just derived-access-verify-package /absolute/path/to/completed-package
+```
+
+Private-corpus configuration, source/build/private-store paths in evidence, body-bearing inventories,
+mutated immutable roots, ambiguous CPU units, semantic mismatches, and corrupt or unlisted package files
+fail closed. Missing native evidence remains an explicit `insufficient_evidence` result rather than a
+package error.
+
 ## Prospective feasibility contract
 
 The approved prospective contract is compiled into the benchmark target as

@@ -652,12 +652,13 @@ pub struct QualificationDerivedAccessExecutionIdentityV1 {
     pub operating_system: String,
     pub architecture: String,
     pub filesystem: String,
+    pub host_identity_sha256: String,
     pub source_dirty: bool,
     pub private_corpus_configured: bool,
 }
 
 impl QualificationDerivedAccessExecutionIdentityV1 {
-    fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), String> {
         validate_hex(&self.source_commit, 40, "source commit")?;
         validate_hex(&self.source_tree, 40, "source tree")?;
         for (value, label) in [
@@ -666,6 +667,7 @@ impl QualificationDerivedAccessExecutionIdentityV1 {
             (&self.contract_sha256, "contract SHA-256"),
             (&self.root_provenance_sha256, "root provenance SHA-256"),
             (&self.command_sha256, "command SHA-256"),
+            (&self.host_identity_sha256, "host identity SHA-256"),
         ] {
             validate_hex(value, 64, label)?;
         }
@@ -727,6 +729,8 @@ pub struct QualificationDerivedAccessOperationEvidenceV1 {
     pub retained_samples: u16,
     pub wall_p95_ms: Option<u64>,
     pub process_cpu_p95_ms: Option<u64>,
+    pub selected_work_count: u64,
+    pub retained_cardinality: u64,
     pub l100_to_c262_selected_work_ratio_milli: Option<u16>,
     pub counters: QualificationDerivedAccessCountersV1,
 }
@@ -748,6 +752,7 @@ pub struct QualificationDerivedAccessD0EvidenceV1 {
     pub revisions: u16,
     pub independently_referenced_objects: u16,
     pub schedule_sha256: String,
+    pub ordered_schedule_sha256: String,
     pub root_a_sha256: String,
     pub root_b_sha256: String,
     pub byte_identical: bool,
@@ -772,6 +777,16 @@ pub struct QualificationDerivedAccessAllocationEvidenceV1 {
     pub append_write_amplification_ratio_milli: u16,
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedAccessRootBindingV1 {
+    pub platform: QualificationDerivedAccessPlatformV1,
+    pub tier: QualificationDerivedAccessTierV1,
+    pub role: String,
+    pub command_sha256: String,
+    pub admitted_root_sha256: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct QualificationDerivedAccessBootstrapEvidenceV1 {
@@ -779,6 +794,7 @@ pub struct QualificationDerivedAccessBootstrapEvidenceV1 {
     pub status: QualificationDerivedAccessStatusV1,
     pub elapsed_seconds: u32,
     pub progress_reported: bool,
+    pub high_water_derived_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -787,6 +803,7 @@ pub struct QualificationDerivedAccessPackageV1 {
     pub schema: String,
     pub proposed_profile_id: String,
     pub execution_identities: Vec<QualificationDerivedAccessExecutionIdentityV1>,
+    pub root_bindings: Vec<QualificationDerivedAccessRootBindingV1>,
     pub d0_rows: Vec<QualificationDerivedAccessD0EvidenceV1>,
     pub operation_rows: Vec<QualificationDerivedAccessOperationEvidenceV1>,
     pub lifecycle_rows: Vec<QualificationDerivedAccessLifecycleEvidenceV1>,
@@ -1031,19 +1048,66 @@ fn validate_execution_identities(
         QualificationDerivedAccessPlatformV1::MacosApfs,
         QualificationDerivedAccessPlatformV1::WindowsNtfs,
     ]);
-    if !platforms.is_subset(&required) || platforms.len() != package.execution_identities.len() {
+    let duplicated = package
+        .execution_identities
+        .iter()
+        .enumerate()
+        .any(|(index, identity)| package.execution_identities[..index].contains(identity));
+    if !platforms.is_subset(&required) || duplicated {
         return Err("derived-access execution identities are duplicated or unsupported".to_owned());
     }
-    if let Some(first) = package.execution_identities.first()
-        && package.execution_identities.iter().any(|identity| {
+    let root_bindings = package.root_bindings.iter().collect::<BTreeSet<_>>();
+    if root_bindings.len() != package.root_bindings.len() {
+        return Err("derived-access root bindings are duplicated".to_owned());
+    }
+    for binding in &package.root_bindings {
+        if binding.role.trim().is_empty()
+            || validate_hex(&binding.command_sha256, 64, "root-binding command SHA-256").is_err()
+            || validate_hex(
+                &binding.admitted_root_sha256,
+                64,
+                "root-binding admitted-root SHA-256",
+            )
+            .is_err()
+            || !package.execution_identities.iter().any(|identity| {
+                identity.platform == binding.platform
+                    && identity.command_sha256 == binding.command_sha256
+            })
+        {
+            return Err("derived-access root binding lacks execution authority".to_owned());
+        }
+    }
+    if let Some(first) = package.execution_identities.first() {
+        if package.execution_identities.iter().any(|identity| {
             identity.source_commit != first.source_commit
                 || identity.source_tree != first.source_tree
                 || identity.cargo_lock_sha256 != first.cargo_lock_sha256
                 || identity.contract_schema != first.contract_schema
                 || identity.contract_sha256 != first.contract_sha256
-        })
-    {
-        return Err("derived-access execution identities mix source authority".to_owned());
+                || identity.root_provenance_sha256 != first.root_provenance_sha256
+        }) {
+            return Err("derived-access execution identities mix source authority".to_owned());
+        }
+        for platform in &platforms {
+            let identities = package
+                .execution_identities
+                .iter()
+                .filter(|identity| identity.platform == *platform)
+                .collect::<Vec<_>>();
+            if let Some(platform_first) = identities.first()
+                && identities.iter().any(|identity| {
+                    identity.binary_sha256 != platform_first.binary_sha256
+                        || identity.host_identity_sha256 != platform_first.host_identity_sha256
+                        || identity.operating_system != platform_first.operating_system
+                        || identity.architecture != platform_first.architecture
+                        || identity.filesystem != platform_first.filesystem
+                })
+            {
+                return Err(
+                    "derived-access execution identities mix native platform authority".to_owned(),
+                );
+            }
+        }
     }
     Ok(required.difference(&platforms).copied().collect())
 }
@@ -1144,6 +1208,7 @@ fn evaluate_d0(
     failed: &mut Vec<String>,
     missing: &mut Vec<String>,
 ) -> Result<(), String> {
+    let mut ordered_schedule_sha256 = None;
     for platform in [
         QualificationDerivedAccessPlatformV1::MacosApfs,
         QualificationDerivedAccessPlatformV1::WindowsNtfs,
@@ -1155,6 +1220,19 @@ fn evaluate_d0(
         validate_hex(&row.root_a_sha256, 64, "D0 root A SHA-256")?;
         validate_hex(&row.root_b_sha256, 64, "D0 root B SHA-256")?;
         validate_hex(&row.schedule_sha256, 64, "D0 schedule SHA-256")?;
+        validate_hex(
+            &row.ordered_schedule_sha256,
+            64,
+            "D0 ordered schedule SHA-256",
+        )?;
+        if ordered_schedule_sha256
+            .as_ref()
+            .is_some_and(|expected| expected != &row.ordered_schedule_sha256)
+        {
+            failed.push("D0-128 ordered schedule identity".to_owned());
+        } else {
+            ordered_schedule_sha256 = Some(row.ordered_schedule_sha256.clone());
+        }
         if row.stored_events != contract.d0.stored_events
             || row.revisions != contract.d0.revisions
             || row.independently_referenced_objects != contract.d0.independently_referenced_objects
@@ -1232,6 +1310,9 @@ fn evaluate_operations(
                 || !row.semantic_receipt_matches
                 || row.process_scope != requirement.process_scope
                 || row.complexity != QualificationDerivedAccessComplexityV1::BoundedSelectedWork
+                || row.selected_work_count < minimum_observed_work(&row.counters)
+                || row.retained_cardinality
+                    != expected_retained_cardinality(tier, requirement.operation, contract)
                 || counters_exceed(&row.counters, &requirement.counters)
             {
                 failed.push(format!(
@@ -1283,22 +1364,99 @@ fn evaluate_operations(
                 }
             }
             if tier == QualificationDerivedAccessTierV1::C262 {
+                let l100 = package
+                    .operation_rows
+                    .iter()
+                    .find(|candidate| {
+                        candidate.platform == platform
+                            && candidate.tier == QualificationDerivedAccessTierV1::L100
+                            && candidate.operation == requirement.operation
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "C262 {} has no L100 selected-work authority",
+                            requirement.operation.as_str()
+                        )
+                    })?;
+                let derived_ratio =
+                    selected_work_ratio_milli(row.selected_work_count, l100.selected_work_count);
                 match row.l100_to_c262_selected_work_ratio_milli {
-                    Some(ratio)
-                        if ratio <= requirement.max_l100_to_c262_selected_work_ratio_milli => {}
-                    Some(_) => failed.push(format!(
-                        "{platform:?}/{tier:?}/{} selected-work ratio",
-                        requirement.operation.as_str()
-                    )),
                     None => missing.push(format!(
                         "{platform:?}/{tier:?}/{} selected-work ratio",
                         requirement.operation.as_str()
                     )),
+                    Some(recorded) if recorded != derived_ratio => {
+                        return Err(format!(
+                            "C262 {} selected-work ratio is not derived from L100",
+                            requirement.operation.as_str()
+                        ));
+                    }
+                    Some(_)
+                        if derived_ratio
+                            > requirement.max_l100_to_c262_selected_work_ratio_milli =>
+                    {
+                        failed.push(format!(
+                            "{platform:?}/{tier:?}/{} selected-work ratio",
+                            requirement.operation.as_str()
+                        ));
+                    }
+                    Some(_) => {}
                 }
             }
         }
     }
     Ok(())
+}
+
+fn expected_retained_cardinality(
+    tier: QualificationDerivedAccessTierV1,
+    operation: QualificationDerivedAccessOperationV1,
+    contract: &QualificationDerivedAccessContractV1,
+) -> u64 {
+    let baseline = match tier {
+        QualificationDerivedAccessTierV1::D0_128 => u64::from(contract.d0.stored_events),
+        QualificationDerivedAccessTierV1::L1 => 1_024,
+        QualificationDerivedAccessTierV1::L7 => 7_168,
+        QualificationDerivedAccessTierV1::L100 => contract.scale_profiles.l100_event_count,
+        QualificationDerivedAccessTierV1::C262 => contract.scale_profiles.c262_event_count,
+    };
+    if matches!(
+        tier,
+        QualificationDerivedAccessTierV1::L100 | QualificationDerivedAccessTierV1::C262
+    ) && matches!(
+        operation,
+        QualificationDerivedAccessOperationV1::AppendOne
+            | QualificationDerivedAccessOperationV1::PostOne
+            | QualificationDerivedAccessOperationV1::Restart
+    ) {
+        baseline + u64::from(contract.sampling.append_post_pairs_per_root)
+    } else {
+        baseline
+    }
+}
+
+fn minimum_observed_work(counters: &QualificationDerivedAccessCountersV1) -> u64 {
+    [
+        counters.directory_entries_walked,
+        counters.carrier_opens,
+        counters.event_decodes,
+        counters.event_validations,
+        counters.event_folds,
+        counters.chronological_sort_items,
+        counters.projection_rebuilds,
+        counters.state_rebuilds,
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or_default()
+}
+
+fn selected_work_ratio_milli(selected_work: u64, baseline_work: u64) -> u16 {
+    selected_work
+        .saturating_mul(1_000)
+        .checked_div(baseline_work.max(1))
+        .unwrap_or(u64::MAX)
+        .min(u64::from(u16::MAX)) as u16
 }
 
 fn counters_exceed(
@@ -1401,10 +1559,19 @@ fn evaluate_allocation(
             .allocation
             .steady_fixed_floor_bytes
             .max(contract.allocation.steady_bytes_per_event * expected_event_count);
+        let bootstrap_high_water = package
+            .bootstrap_rows
+            .iter()
+            .find(|bootstrap| bootstrap.tier == tier)
+            .map(|bootstrap| bootstrap.high_water_derived_bytes)
+            .unwrap_or_default();
         if row.event_count != expected_event_count
             || row.steady_derived_bytes == 0
             || row.steady_derived_bytes > steady_ceiling
-            || row.high_water_derived_bytes.saturating_mul(1_000)
+            || row
+                .high_water_derived_bytes
+                .max(bootstrap_high_water)
+                .saturating_mul(1_000)
                 > row
                     .steady_derived_bytes
                     .saturating_mul(u64::from(contract.allocation.high_water_ratio_milli))
@@ -1540,6 +1707,38 @@ mod tests {
                             .then_some(requirement.l100_wall_p95_ceiling_ms),
                         process_cpu_p95_ms: (tier == QualificationDerivedAccessTierV1::L100)
                             .then_some(requirement.l100_process_cpu_p95_ceiling_ms),
+                        selected_work_count: if tier == QualificationDerivedAccessTierV1::C262 {
+                            1_250
+                        } else {
+                            1_000
+                        },
+                        retained_cardinality: match tier {
+                            QualificationDerivedAccessTierV1::D0_128 => 128,
+                            QualificationDerivedAccessTierV1::L1 => 1_024,
+                            QualificationDerivedAccessTierV1::L7 => 7_168,
+                            QualificationDerivedAccessTierV1::L100
+                                if matches!(
+                                    requirement.operation,
+                                    QualificationDerivedAccessOperationV1::AppendOne
+                                        | QualificationDerivedAccessOperationV1::PostOne
+                                        | QualificationDerivedAccessOperationV1::Restart
+                                ) =>
+                            {
+                                102_430
+                            }
+                            QualificationDerivedAccessTierV1::C262
+                                if matches!(
+                                    requirement.operation,
+                                    QualificationDerivedAccessOperationV1::AppendOne
+                                        | QualificationDerivedAccessOperationV1::PostOne
+                                        | QualificationDerivedAccessOperationV1::Restart
+                                ) =>
+                            {
+                                262_174
+                            }
+                            QualificationDerivedAccessTierV1::L100 => 102_400,
+                            QualificationDerivedAccessTierV1::C262 => 262_144,
+                        },
                         l100_to_c262_selected_work_ratio_milli: (tier
                             == QualificationDerivedAccessTierV1::C262)
                             .then_some(1_250),
@@ -1587,6 +1786,7 @@ mod tests {
                     operating_system: "macos".to_owned(),
                     architecture: "aarch64".to_owned(),
                     filesystem: "apfs".to_owned(),
+                    host_identity_sha256: "a".repeat(64),
                     source_dirty: false,
                     private_corpus_configured: false,
                 },
@@ -1598,15 +1798,17 @@ mod tests {
                     binary_sha256: "7".repeat(64),
                     contract_schema: QUALIFICATION_DERIVED_ACCESS_CONTRACT_SCHEMA_V1.to_owned(),
                     contract_sha256: QUALIFICATION_DERIVED_ACCESS_CONTRACT_SHA256_V1.to_owned(),
-                    root_provenance_sha256: "8".repeat(64),
+                    root_provenance_sha256: "5".repeat(64),
                     command_sha256: "9".repeat(64),
                     operating_system: "windows".to_owned(),
                     architecture: "x86_64".to_owned(),
                     filesystem: "ntfs".to_owned(),
+                    host_identity_sha256: "b".repeat(64),
                     source_dirty: false,
                     private_corpus_configured: false,
                 },
             ],
+            root_bindings: Vec::new(),
             d0_rows: [
                 QualificationDerivedAccessPlatformV1::MacosApfs,
                 QualificationDerivedAccessPlatformV1::WindowsNtfs,
@@ -1618,6 +1820,7 @@ mod tests {
                 revisions: 16,
                 independently_referenced_objects: 16,
                 schedule_sha256: contract.d0.schedule_sha256.clone(),
+                ordered_schedule_sha256: digest("D0 ordered schedule"),
                 root_a_sha256: digest("D0 root"),
                 root_b_sha256: digest("D0 root"),
                 byte_identical: true,
@@ -1653,12 +1856,14 @@ mod tests {
                     status: QualificationDerivedAccessStatusV1::Passed,
                     elapsed_seconds: 3_600,
                     progress_reported: true,
+                    high_water_derived_bytes: 1,
                 },
                 QualificationDerivedAccessBootstrapEvidenceV1 {
                     tier: QualificationDerivedAccessTierV1::C262,
                     status: QualificationDerivedAccessStatusV1::Passed,
                     elapsed_seconds: 10_800,
                     progress_reported: true,
+                    high_water_derived_bytes: 1,
                 },
             ],
             complete: true,
@@ -1783,6 +1988,29 @@ mod tests {
         mixed_source.execution_identities[1].source_tree = "a".repeat(40);
         assert!(evaluate_qualification_derived_access_v1(&mixed_source).is_err());
 
+        let mut duplicate_identity = complete_package();
+        duplicate_identity
+            .execution_identities
+            .push(duplicate_identity.execution_identities[0].clone());
+        assert!(evaluate_qualification_derived_access_v1(&duplicate_identity).is_err());
+
+        let mut distinct_command = complete_package();
+        let mut second_macos_command = distinct_command.execution_identities[0].clone();
+        second_macos_command.command_sha256 = "c".repeat(64);
+        distinct_command
+            .execution_identities
+            .push(second_macos_command);
+        assert!(evaluate_qualification_derived_access_v1(&distinct_command).is_ok());
+
+        let mut mixed_native_binary = complete_package();
+        let mut second_macos_binary = mixed_native_binary.execution_identities[0].clone();
+        second_macos_binary.command_sha256 = "c".repeat(64);
+        second_macos_binary.binary_sha256 = "d".repeat(64);
+        mixed_native_binary
+            .execution_identities
+            .push(second_macos_binary);
+        assert!(evaluate_qualification_derived_access_v1(&mixed_native_binary).is_err());
+
         let mut missing_timing = complete_package();
         let l100 = missing_timing
             .operation_rows
@@ -1809,6 +2037,24 @@ mod tests {
                 .expect("evaluation")
                 .outcome,
             QualificationDerivedAccessTerminalOutcomeV1::InsufficientEvidence
+        );
+
+        let mut forged_ratio = complete_package();
+        let c262 = forged_ratio
+            .operation_rows
+            .iter_mut()
+            .find(|row| row.tier == QualificationDerivedAccessTierV1::C262)
+            .expect("C262 row");
+        c262.l100_to_c262_selected_work_ratio_milli = Some(1_000);
+        assert!(evaluate_qualification_derived_access_v1(&forged_ratio).is_err());
+
+        let mut hidden_bootstrap_high_water = complete_package();
+        hidden_bootstrap_high_water.bootstrap_rows[0].high_water_derived_bytes = 97 * MIB;
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&hidden_bootstrap_high_water)
+                .expect("evaluation")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::Reject
         );
 
         let mut wrong_d0_schedule = complete_package();
