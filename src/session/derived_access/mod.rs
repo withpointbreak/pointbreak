@@ -4,6 +4,7 @@
 pub(crate) mod checkpoint;
 pub(crate) mod cursor;
 pub(crate) mod oracle;
+pub(crate) use super::store::backend::{QualificationJournalCursor, QualificationLocalJournal};
 
 #[cfg(test)]
 mod tests {

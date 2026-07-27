@@ -119,6 +119,42 @@ impl Journal for LocalJournal {
     }
 }
 
+/// Qualification-only access to the existing durable loose-event primitives.
+///
+/// The cursor falsifier holds its own store-scoped publication lock around
+/// these calls. This adapter deliberately adds no production route and performs
+/// no directory listing.
+#[cfg(any(test, feature = "bench"))]
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug)]
+pub(crate) struct QualificationLocalJournal {
+    journal: LocalJournal,
+    store_dir: PathBuf,
+}
+
+#[cfg(any(test, feature = "bench"))]
+#[cfg_attr(not(test), allow(dead_code))]
+impl QualificationLocalJournal {
+    pub(crate) fn new(store_dir: impl AsRef<Path>) -> Self {
+        let store_dir = store_dir.as_ref().to_path_buf();
+        Self {
+            journal: LocalJournal::new(&store_dir),
+            store_dir,
+        }
+    }
+
+    pub(crate) fn record_event_once(
+        &self,
+        event: &crate::session::event::ShoreEvent,
+    ) -> Result<crate::session::EventWriteOutcome> {
+        crate::session::EventStore::open(&self.store_dir).record_event_once(event)
+    }
+
+    pub(crate) fn read_event_bytes(&self, logical_reread_key: &str) -> Result<Option<Vec<u8>>> {
+        self.journal.read_event_bytes(logical_reread_key)
+    }
+}
+
 /// The file-backed [`ContentStore`]: blobs live at their store-relative
 /// `content_ref` under the store dir.
 #[derive(Debug)]
