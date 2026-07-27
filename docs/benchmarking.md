@@ -426,6 +426,50 @@ measurements or observed APFS results, and the contract makes no timing or recov
 select or route a physical profile, authorize migration or activation, or expand qualification beyond this
 bounded APFS falsifier.
 
+## Incremental derived-access falsifier contract
+
+The candidate-independent incremental derived-access contract is compiled into the benchmark target as
+`pointbreak.qualification-derived-access-contract.v1`. Its canonical SHA-256 is
+`c29fd0b862cfd3594c02b88f159477adb9b8666b8dfeebd868e766f8cf025ab8`. Print and validate it without
+constructing a physical profile, reading a corpus, creating a store, or collecting observations:
+
+```sh
+unset POINTBREAK_QUALIFICATION_CORPUS
+cargo bench --locked --features bench --bench store_foundation -- --derived-access-contract
+```
+
+<!-- derived-access-contract-v1:start -->
+| Decision | Frozen requirement |
+| --- | --- |
+| Contract | `incremental-derived-access-falsifier-v1` |
+| Authority | loose journal/content carriers remain truth; derived state is private, bodyless, disposable, and rebuildable |
+| Correctness tier | `D0-128`: 128 events, 16 revisions, 16 independent objects, 2 byte-identical roots, frozen transition/operation/lifecycle coverage, no timing threshold; the runner later binds one public seed and ordered-schedule receipt |
+| Operations | `SEMANTIC_ID`, `FRESH_NO_CHANGE`, `NEWCOUNT_ZERO`, `WINDOW_HEAD`, `WINDOW_MIDDLE`, `WINDOW_TAIL`, `REVISION_DETAIL_ACTIVE`, `REVISION_DETAIL_REMOVED`, `APPEND_ONE`, `POST_ONE`, `RESTART` |
+| Samples | 2 release roots; 1 untimed request and 3 excluded warmups; 30 retained warm/append-post samples per root; 10 restart samples per root; no outlier removal |
+| Complexity | classify before latency; fixed-output work is bounded selected work; L100-to-C262 work/retention ratio at most `1.25` |
+| L100 latency / CPU | `SEMANTIC_ID` `150/100 ms`; `FRESH_NO_CHANGE` `50/25 ms`; `NEWCOUNT_ZERO` `50/25 ms`; `WINDOW_HEAD` `150/100 ms`; `WINDOW_MIDDLE` `150/100 ms`; `WINDOW_TAIL` `150/100 ms`; `REVISION_DETAIL_ACTIVE` `250/175 ms`; `REVISION_DETAIL_REMOVED` `250/175 ms`; `APPEND_ONE` `250/200 ms`; `POST_ONE` `500/400 ms`; `RESTART` `3000/2500 ms` |
+| Memory | store-attributable L100 steady/peak RSS at most `96/128 MiB`; L7-to-L100 steady slope at most `512 bytes/event`; zero retained body/object bytes outside the active window |
+| Allocation | steady derived bytes at most `max(64 MiB, 1024 × event count)`; high-water at most `1.5×`; append write amplification at most `8×` |
+| Bootstrap | L100 at most 60 minutes; C262 at most 180 minutes; progress required; experiment-cost guards only |
+| Native gates | macOS/APFS and Windows/NTFS independently pass D0-128/L1/L7 before APFS L100/C262; Linux is compile/CI only |
+| Non-compensation | semantics, provenance, native, lifecycle, complexity, latency/CPU, memory, allocation, write amplification, and bootstrap gate independently |
+| Outcomes | `reject`, `survives_apfs_falsifier`, or `insufficient_evidence`; survival authorizes no production activation or migration |
+| Inputs | qualification evidence and measurement use only public generated inputs; derivation hash commitments are provenance, not workload inputs |
+| Excluded | observed candidate result, search/body persistence, private corpus, candidate measurements, production selection, activation, migration, and release promises |
+<!-- derived-access-contract-v1:end -->
+
+The publication freezes authority, workload identities, sample counts, process scopes, semantic receipts,
+counter ceilings, resource limits, native gates, and non-compensation before a physical profile is measured.
+`D0-128` is correctness-only. Native macOS/APFS and Windows/NTFS D0-128/L1/L7 rows must pass before APFS
+L100/C262 scale evidence is eligible; Linux remains a compile/CI gate.
+
+Missing or unknown rows and a missing required native-platform identity yield `insufficient_evidence`.
+Duplicate, unsupported, inadmissible, or mixed-authority identities are rejected before evaluation. A
+semantic, lifecycle, bounded-work, resource, or cost failure yields `reject` even when another row is fast.
+The sole success outcome,
+`survives_apfs_falsifier`, authorizes only a later decision; it does not select or activate storage, authorize
+migration, persist search/body material, change release promises, or make derived data authoritative.
+
 ## Prospective feasibility contract
 
 The approved prospective contract is compiled into the benchmark target as

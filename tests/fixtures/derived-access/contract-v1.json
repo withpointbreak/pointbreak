@@ -1,0 +1,28 @@
+{
+  "schema": "pointbreak.qualification-derived-access-contract-fixture.v1",
+  "contractSchema": "pointbreak.qualification-derived-access-contract.v1",
+  "contractSha256": "c29fd0b862cfd3594c02b88f159477adb9b8666b8dfeebd868e766f8cf025ab8",
+  "d0StoredEvents": 128,
+  "d0Revisions": 16,
+  "d0IndependentlyReferencedObjects": 16,
+  "d0ScheduleSha256": "c87c3a831dea64a15caabe7f4ce3369592d30df162ed096e2fce4840228bc13e",
+  "operationIds": [
+    "SEMANTIC_ID",
+    "FRESH_NO_CHANGE",
+    "NEWCOUNT_ZERO",
+    "WINDOW_HEAD",
+    "WINDOW_MIDDLE",
+    "WINDOW_TAIL",
+    "REVISION_DETAIL_ACTIVE",
+    "REVISION_DETAIL_REMOVED",
+    "APPEND_ONE",
+    "POST_ONE",
+    "RESTART"
+  ],
+  "terminalOutcomes": [
+    "reject",
+    "survives_apfs_falsifier",
+    "insufficient_evidence"
+  ],
+  "observedCandidateResultPresent": false
+}

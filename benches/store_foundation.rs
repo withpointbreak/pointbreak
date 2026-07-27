@@ -5,6 +5,10 @@
 
 use std::process::{Command, ExitCode};
 
+use pointbreak::bench_support::derived_access::{
+    QUALIFICATION_DERIVED_ACCESS_CONTRACT_MODE_V1,
+    qualification_derived_access_contract_v1_publication,
+};
 use pointbreak::bench_support::foundation::{
     DisposableBundleDestinationV2, ExactBundleClosureV2, ExactBundleFailurePointV2,
     ExactBundleManifestV2, ExactBundlePublicationReportV2, ImportReceiptPolicyPrototypeV1,
@@ -59,7 +63,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 const USAGE: &str = "\
-Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--generated-workload-smoke|--longitudinal-contract|--longitudinal-help|--longitudinal-smoke|--longitudinal-carry-forward|--longitudinal-carry-forward-smoke|--longitudinal-verify-package|--longitudinal-verify-package-receipt|--longitudinal-verify-carry-forward|--loose-baseline-smoke|--loose-baseline-evidence|--prospective-contract|--content-only-contract|--transfer-smoke|--sqlite-smoke|--segments-smoke|--lmdb-proof-open-close|--lmdb-smoke|--lmdb-lifecycle-smoke|--lmdb-prospective-smoke|--lmdb-prospective-evidence|--lmdb-prospective-package|--qualification-smoke|--qualification-evidence|--qualification-diagnostics|--qualification-contract|--qualification-final-evidence|--qualification-package|--help]\n\
+Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--generated-workload-smoke|--longitudinal-contract|--longitudinal-help|--longitudinal-smoke|--longitudinal-carry-forward|--longitudinal-carry-forward-smoke|--longitudinal-verify-package|--longitudinal-verify-package-receipt|--longitudinal-verify-carry-forward|--derived-access-contract|--loose-baseline-smoke|--loose-baseline-evidence|--prospective-contract|--content-only-contract|--transfer-smoke|--sqlite-smoke|--segments-smoke|--lmdb-proof-open-close|--lmdb-smoke|--lmdb-lifecycle-smoke|--lmdb-prospective-smoke|--lmdb-prospective-evidence|--lmdb-prospective-package|--qualification-smoke|--qualification-evidence|--qualification-diagnostics|--qualification-contract|--qualification-final-evidence|--qualification-package|--help]\n\
        --longitudinal-carry-forward --longitudinal-carry-forward-request=<path>\n\
        --longitudinal-verify-package --longitudinal-package-root=<path>\n\
        --longitudinal-verify-package-receipt --longitudinal-package-root=<path>\n\
@@ -283,6 +287,7 @@ fn main() -> ExitCode {
         LONGITUDINAL_VERIFY_PACKAGE_MODE_V1,
         LONGITUDINAL_VERIFY_PACKAGE_RECEIPT_MODE_V1,
         LONGITUDINAL_VERIFY_CARRY_FORWARD_MODE_V1,
+        QUALIFICATION_DERIVED_ACCESS_CONTRACT_MODE_V1,
         QUALIFICATION_LOOSE_BASELINE_SMOKE_MODE_V1,
         QUALIFICATION_LOOSE_BASELINE_EVIDENCE_MODE_V1,
         QUALIFICATION_PROSPECTIVE_CONTRACT_PUBLICATION_MODE_V1,
@@ -365,6 +370,7 @@ fn main() -> ExitCode {
             && argument != LONGITUDINAL_VERIFY_PACKAGE_MODE_V1
             && argument != LONGITUDINAL_VERIFY_PACKAGE_RECEIPT_MODE_V1
             && argument != LONGITUDINAL_VERIFY_CARRY_FORWARD_MODE_V1
+            && argument != QUALIFICATION_DERIVED_ACCESS_CONTRACT_MODE_V1
             && argument != QUALIFICATION_LOOSE_BASELINE_SMOKE_MODE_V1
             && argument != QUALIFICATION_LOOSE_BASELINE_EVIDENCE_MODE_V1
             && argument != QUALIFICATION_PROSPECTIVE_CONTRACT_PUBLICATION_MODE_V1
@@ -559,6 +565,23 @@ fn main() -> ExitCode {
             "{}",
             serde_json::to_string(&qualification_content_only_contract_v1_publication())
                 .expect("content-only contract publication serializes")
+        );
+        return ExitCode::SUCCESS;
+    }
+
+    if arguments
+        .iter()
+        .any(|argument| argument == QUALIFICATION_DERIVED_ACCESS_CONTRACT_MODE_V1)
+    {
+        let publication = qualification_derived_access_contract_v1_publication();
+        if let Err(error) = publication.contract.validate() {
+            eprintln!("store foundation derived-access contract failed: {error}");
+            return ExitCode::from(1);
+        }
+        println!(
+            "{}",
+            serde_json::to_string(&publication)
+                .expect("derived-access contract publication serializes")
         );
         return ExitCode::SUCCESS;
     }
