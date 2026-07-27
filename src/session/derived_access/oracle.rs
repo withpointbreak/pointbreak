@@ -5,6 +5,7 @@ use serde::Serialize;
 use super::cursor::{AppendResolution, CursorModelError, ReferenceCursorLedger, TruthCursor};
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::error::ShoreError;
+use crate::session::derived_access::semantic::{SemanticModelError, SemanticSnapshot};
 use crate::session::event::ShoreEvent;
 use crate::session::projection::{
     ArtifactRemovalProjection, EngagementGrouping, RevisionCommitRangeProjection, RevisionsByBase,
@@ -237,6 +238,53 @@ pub(crate) fn strict_session_prefix_receipts(
         )?);
     }
     Ok(receipts)
+}
+
+pub(crate) fn strict_bodyless_semantic_snapshot(
+    events: &[ShoreEvent],
+) -> Result<SemanticSnapshot, SemanticModelError> {
+    let mut events = events.to_vec();
+    events.sort_by(|left, right| {
+        replay_key_for(&left.idempotency_key)
+            .cmp(&replay_key_for(&right.idempotency_key))
+            .then_with(|| left.idempotency_key.cmp(&right.idempotency_key))
+    });
+    SemanticSnapshot::from_events(
+        TruthCursor::new(1, u64::try_from(events.len()).unwrap_or(u64::MAX)),
+        &events,
+    )
+}
+
+pub(crate) fn strict_bodyless_materialized_snapshot(
+    events: &[ShoreEvent],
+) -> Result<SemanticSnapshot, SemanticModelError> {
+    let mut events = events.to_vec();
+    events.sort_by(|left, right| {
+        replay_key_for(&left.idempotency_key)
+            .cmp(&replay_key_for(&right.idempotency_key))
+            .then_with(|| left.idempotency_key.cmp(&right.idempotency_key))
+    });
+    SemanticSnapshot::materialized_oracle_from_events(
+        TruthCursor::new(1, u64::try_from(events.len()).unwrap_or(u64::MAX)),
+        &events,
+    )
+}
+
+pub(crate) fn strict_bodyless_materialized_engagement_snapshot(
+    events: &[ShoreEvent],
+    engagement_id: &str,
+) -> Result<SemanticSnapshot, SemanticModelError> {
+    let mut events = events.to_vec();
+    events.sort_by(|left, right| {
+        replay_key_for(&left.idempotency_key)
+            .cmp(&replay_key_for(&right.idempotency_key))
+            .then_with(|| left.idempotency_key.cmp(&right.idempotency_key))
+    });
+    SemanticSnapshot::materialized_engagement_oracle_from_events(
+        TruthCursor::new(1, u64::try_from(events.len()).unwrap_or(u64::MAX)),
+        &events,
+        engagement_id,
+    )
 }
 
 fn strict_session_receipt(
