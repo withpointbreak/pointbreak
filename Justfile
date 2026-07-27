@@ -271,6 +271,11 @@ store-foundation-qualification:
 longitudinal-contract:
     cargo +stable bench --locked --features bench --bench store_foundation -- --longitudinal-contract
 
+# Print and validate the candidate-independent incremental derived-access falsifier contract.
+[group('quality')]
+derived-access-contract:
+    cargo +stable bench --locked --features bench --bench store_foundation -- --derived-access-contract
+
 # Exercise disposable longitudinal construction, pair, preflight, and package mechanics without timing.
 [group('quality')]
 longitudinal-smoke:

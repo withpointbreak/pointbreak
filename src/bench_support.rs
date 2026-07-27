@@ -20,6 +20,7 @@ use crate::model::JournalId;
 use crate::session::EventStore;
 use crate::session::event::{EventTarget, EventType, ReviewInitializedPayload, ShoreEvent, Writer};
 
+pub mod derived_access;
 pub mod foundation;
 pub mod longitudinal;
 
