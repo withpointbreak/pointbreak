@@ -96,10 +96,11 @@ impl SqliteLocator {
         read_locator_checkpoint(&connection)
     }
 
-    pub(crate) fn apply_delta(
+    pub(super) fn apply_delta_with(
         &self,
         delta: &CursorDelta,
         rows: &[LocatorRow],
+        apply_semantic: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<(), SqliteLocatorError>,
     ) -> Result<LocatorCheckpoint, SqliteLocatorError> {
         if rows.len() != delta.receipts.len() {
             return Err(SqliteLocatorError::Delta(format!(
@@ -151,6 +152,7 @@ impl SqliteLocator {
         for row in rows {
             insert_locator_row(&transaction, row)?;
         }
+        apply_semantic(&transaction)?;
         let updated = transaction
             .execute(
                 "UPDATE locator_checkpoint
@@ -458,7 +460,7 @@ impl SqliteLocator {
         Ok(connection)
     }
 
-    fn validated_connection(&self) -> Result<Connection, SqliteLocatorError> {
+    pub(super) fn validated_connection(&self) -> Result<Connection, SqliteLocatorError> {
         let connection = self.connection()?;
         let cursor = validate_cursor_metadata(&connection)?;
         validate_locator_checkpoint(&connection, &cursor)?;
@@ -612,7 +614,7 @@ fn validate_locator_checkpoint(
     Ok(())
 }
 
-fn read_locator_checkpoint(
+pub(super) fn read_locator_checkpoint(
     connection: &Connection,
 ) -> Result<LocatorCheckpoint, SqliteLocatorError> {
     connection
