@@ -1894,10 +1894,9 @@ mod tests {
             serde_json::to_string_pretty(&qualification_derived_access_contract_fixture_v1())
                 .expect("contract fixture JSON")
         );
-        assert_eq!(
-            json,
-            include_str!("../../../tests/fixtures/derived-access/contract-v1.json")
-        );
+        let fixture = include_str!("../../../tests/fixtures/derived-access/contract-v1.json")
+            .replace("\r\n", "\n");
+        assert_eq!(json, fixture);
 
         let docs = include_str!("../../../docs/benchmarking.md");
         let table = docs
