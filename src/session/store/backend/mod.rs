@@ -17,6 +17,8 @@ use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::Arc;
 
+#[cfg(any(test, feature = "bench"))]
+pub(crate) use local::QualificationLocalJournal;
 pub(crate) use local::{LocalContentStore, LocalJournal};
 #[cfg(test)]
 pub(crate) use memory::InMemoryStore;

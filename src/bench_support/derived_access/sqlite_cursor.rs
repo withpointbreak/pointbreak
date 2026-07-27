@@ -1,0 +1,1488 @@
+#![cfg_attr(not(test), allow(dead_code))]
+
+#[cfg(test)]
+use std::cell::Cell;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use rusqlite::{
+    Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
+
+use super::writer_lock::{StoreWriterLock, WriterLockError};
+use crate::canonical_hash::sha256_bytes_hex;
+use crate::error::ShoreError;
+use crate::session::derived_access::cursor::{
+    AppendResolution, CursorDelta, CursorIntent, CursorReceipt, RecoveryResolution, TruthCursor,
+    TruthHead,
+};
+use crate::session::derived_access::{QualificationJournalCursor, QualificationLocalJournal};
+use crate::session::event::ShoreEvent;
+use crate::session::{EventStore, EventWriteOutcome};
+
+const SIDECAR_DIRECTORY: &str = ".pointbreak-derived";
+const DATABASE_FILE: &str = "cursor.sqlite3";
+const PROFILE_ID: &str = "pointbreak.sqlite-derived-access-cursor.v1";
+const SCHEMA_VERSION: i64 = 1;
+const APPLICATION_ID: i64 = 0x5042_4443;
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+static QUARANTINE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+thread_local! {
+    static FULL_CHAIN_QUERY_COUNT: Cell<u64> = const { Cell::new(0) };
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CursorLedgerIdentity {
+    store_id: String,
+    profile_id: String,
+}
+
+impl CursorLedgerIdentity {
+    pub(crate) fn new(store_id: impl Into<String>) -> Self {
+        Self {
+            store_id: store_id.into(),
+            profile_id: PROFILE_ID.to_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BootstrapControl {
+    Continue,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BootstrapProgress {
+    pub(crate) completed: usize,
+    pub(crate) total: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CursorLedgerCheckpoint {
+    pub(crate) busy: bool,
+    pub(crate) log_frames: u64,
+    pub(crate) checkpointed_frames: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CursorLedgerInventory {
+    pub(crate) profile_id: String,
+    pub(crate) schema_version: i64,
+    pub(crate) epoch: u64,
+    pub(crate) head_sequence: u64,
+    pub(crate) receipt_count: u64,
+    pub(crate) attempt_count: u64,
+    pub(crate) active_intent: bool,
+    pub(crate) database_bytes: u64,
+    pub(crate) wal_bytes: u64,
+    pub(crate) shared_memory_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AppendCrashPoint {
+    BeforeIntentCommit,
+    AfterIntentCommit,
+    AfterEventPublication,
+    AfterReceiptBeforeHead,
+    AfterHeadBeforeIntentRetirement,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BootstrapCrashPoint {
+    DuringStaging,
+    AfterQuarantineBeforeNewEpoch,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CursorLedgerError {
+    #[error("derived-access writer is busy")]
+    WriterBusy,
+    #[error("cursor-ledger identity field {field} is empty")]
+    EmptyIdentity { field: &'static str },
+    #[error("cursor-ledger attempt token was already used: {0}")]
+    AttemptTokenUsed(String),
+    #[error("cursor-ledger sidecar already exists")]
+    AlreadyInitialized,
+    #[error("cursor-ledger bootstrap was cancelled")]
+    BootstrapCancelled,
+    #[error("cursor-ledger bootstrap is incomplete")]
+    IncompleteBootstrap,
+    #[error("cursor-ledger metadata is quarantined: {0}")]
+    Quarantined(String),
+    #[error("cursor-ledger metadata identity mismatch: {0}")]
+    IdentityMismatch(String),
+    #[error("cursor-ledger schema mismatch: {0}")]
+    SchemaMismatch(String),
+    #[error("cursor {cursor:?} is ahead of head {head:?}")]
+    CursorAhead {
+        cursor: TruthCursor,
+        head: TruthCursor,
+    },
+    #[error("cursor epoch mismatch: expected {expected}, observed {observed}")]
+    WrongEpoch { expected: u64, observed: u64 },
+    #[error("cursor sequence gap: expected {expected}, observed {observed}")]
+    SequenceGap { expected: u64, observed: u64 },
+    #[error("delta limit must be greater than zero")]
+    ZeroDeltaLimit,
+    #[error("unreceipted pre-existing carrier requires quarantine: {0}")]
+    UnreceiptedCarrier(String),
+    #[error("authoritative carrier is absent: {0}")]
+    CarrierAbsent(String),
+    #[error("authoritative carrier witness mismatch: {0}")]
+    WitnessMismatch(String),
+    #[error("truth operation failed: {0}")]
+    Truth(String),
+    #[error("SQLite operation {operation} failed: {message}")]
+    Sqlite {
+        operation: &'static str,
+        message: String,
+    },
+    #[error("cursor-ledger I/O failed at {path}: {message}")]
+    Io { path: PathBuf, message: String },
+}
+
+impl From<WriterLockError> for CursorLedgerError {
+    fn from(error: WriterLockError) -> Self {
+        match error {
+            WriterLockError::Busy => Self::WriterBusy,
+            WriterLockError::Io { path, message } => Self::Io { path, message },
+        }
+    }
+}
+
+/// Qualification-only ledger for roots whose writes all enter through this
+/// candidate protocol. Mixed-version and out-of-band writers remain an
+/// activation blocker; ordinary freshness reads deliberately do not audit the
+/// full loose journal.
+#[derive(Clone, Debug)]
+pub(crate) struct SqliteCursorLedger {
+    store_root: PathBuf,
+    database_path: PathBuf,
+    identity: CursorLedgerIdentity,
+}
+
+#[derive(Debug)]
+struct Metadata {
+    store_id: String,
+    profile_id: String,
+    schema_version: i64,
+    epoch: u64,
+    head_sequence: u64,
+    state: String,
+    quarantine_reason: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ReceiptChainStats {
+    count: u64,
+    minimum: u64,
+    maximum: u64,
+}
+
+impl SqliteCursorLedger {
+    pub(crate) fn initialize_empty(
+        store_root: &Path,
+        identity: CursorLedgerIdentity,
+    ) -> Result<Self, CursorLedgerError> {
+        validate_identity(&identity)?;
+        let store_root = canonical_store_root(store_root)?;
+        let _writer_lock = StoreWriterLock::acquire(&store_root)?;
+        if !EventStore::open(&store_root)
+            .list_events()
+            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?
+            .is_empty()
+        {
+            return Err(CursorLedgerError::SchemaMismatch(
+                "empty initialization refused an existing loose journal".to_owned(),
+            ));
+        }
+        let ledger = Self::for_root(store_root, identity);
+        if ledger.sidecar_path().exists() {
+            return Err(CursorLedgerError::AlreadyInitialized);
+        }
+        std::fs::create_dir_all(ledger.sidecar_path())
+            .map_err(|error| io_error(&ledger.sidecar_path(), error))?;
+        let connection = open_connection(&ledger.database_path, true)?;
+        initialize_schema(&connection, &ledger.identity, 1, "complete")?;
+        validate_completed_metadata(&connection, &ledger.identity)?;
+        Ok(ledger)
+    }
+
+    pub(crate) fn bootstrap_from_truth(
+        store_root: &Path,
+        identity: CursorLedgerIdentity,
+        epoch: u64,
+        progress: impl FnMut(BootstrapProgress) -> BootstrapControl,
+    ) -> Result<Self, CursorLedgerError> {
+        Self::bootstrap_from_truth_with_hook(store_root, identity, epoch, progress, |_| {})
+    }
+
+    pub(crate) fn bootstrap_from_truth_with_hook(
+        store_root: &Path,
+        identity: CursorLedgerIdentity,
+        epoch: u64,
+        mut progress: impl FnMut(BootstrapProgress) -> BootstrapControl,
+        mut hook: impl FnMut(BootstrapCrashPoint),
+    ) -> Result<Self, CursorLedgerError> {
+        validate_identity(&identity)?;
+        if epoch == 0 {
+            return Err(CursorLedgerError::SchemaMismatch(
+                "cursor epoch must be greater than zero".to_owned(),
+            ));
+        }
+        let store_root = canonical_store_root(store_root)?;
+        let _writer_lock = StoreWriterLock::acquire(&store_root)?;
+        let ledger = Self::for_root(store_root, identity);
+        if ledger.prepare_sidecar_for_bootstrap()? {
+            hook(BootstrapCrashPoint::AfterQuarantineBeforeNewEpoch);
+        }
+
+        let events = EventStore::open(&ledger.store_root)
+            .list_events()
+            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        std::fs::create_dir_all(ledger.sidecar_path())
+            .map_err(|error| io_error(&ledger.sidecar_path(), error))?;
+        let mut connection = open_connection(&ledger.database_path, true)?;
+        initialize_schema(&connection, &ledger.identity, epoch, "staging")?;
+
+        let journal = QualificationLocalJournal::new(&ledger.store_root);
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| sqlite_error("begin bootstrap", error))?;
+        let total = events.len();
+        if progress(BootstrapProgress {
+            completed: 0,
+            total,
+        }) == BootstrapControl::Cancel
+        {
+            return Err(CursorLedgerError::BootstrapCancelled);
+        }
+        for (offset, event) in events.iter().enumerate() {
+            let sequence = u64::try_from(offset + 1).map_err(|_| {
+                CursorLedgerError::SchemaMismatch("bootstrap sequence overflow".to_owned())
+            })?;
+            let bytes = journal
+                .read_event_bytes(&event.idempotency_key)
+                .map_err(|error| CursorLedgerError::Truth(error.to_string()))?
+                .ok_or_else(|| CursorLedgerError::CarrierAbsent(event.idempotency_key.clone()))?;
+            let witness = sha256_bytes_hex(&bytes);
+            let attempt_token = format!("bootstrap:{epoch}:{sequence}:{witness}");
+            insert_attempt(&transaction, &attempt_token)?;
+            insert_receipt(
+                &transaction,
+                &CursorReceipt {
+                    cursor: TruthCursor::new(epoch, sequence),
+                    logical_reread_key: event.idempotency_key.clone(),
+                    validation_witness: witness,
+                    attempt_token,
+                },
+            )?;
+            hook(BootstrapCrashPoint::DuringStaging);
+            if progress(BootstrapProgress {
+                completed: offset + 1,
+                total,
+            }) == BootstrapControl::Cancel
+            {
+                return Err(CursorLedgerError::BootstrapCancelled);
+            }
+        }
+        transaction
+            .execute(
+                "UPDATE cursor_meta
+                 SET head_sequence = ?1, bootstrap_state = 'complete'
+                 WHERE singleton = 1",
+                [usize_to_i64(total, "bootstrap head")?],
+            )
+            .map_err(|error| sqlite_error("publish bootstrap completion", error))?;
+        transaction
+            .commit()
+            .map_err(|error| sqlite_error("commit bootstrap", error))?;
+        validate_completed_metadata(&connection, &ledger.identity)?;
+        Ok(ledger)
+    }
+
+    pub(crate) fn open(
+        store_root: &Path,
+        identity: CursorLedgerIdentity,
+    ) -> Result<Self, CursorLedgerError> {
+        validate_identity(&identity)?;
+        let store_root = canonical_store_root(store_root)?;
+        let _writer_lock = StoreWriterLock::acquire(&store_root)?;
+        let ledger = Self::for_root(store_root, identity);
+        if !ledger.database_path.exists() {
+            return Err(CursorLedgerError::IncompleteBootstrap);
+        }
+        let connection = match open_connection(&ledger.database_path, false) {
+            Ok(connection) => connection,
+            Err(error) => {
+                let reason = error.to_string();
+                ledger.rotate_sidecar()?;
+                return Err(CursorLedgerError::Quarantined(reason));
+            }
+        };
+        match validate_recoverable_metadata(&connection, &ledger.identity) {
+            Ok(_) => Ok(ledger),
+            Err(CursorLedgerError::IncompleteBootstrap) => {
+                Err(CursorLedgerError::IncompleteBootstrap)
+            }
+            Err(error) => {
+                let reason = error.to_string();
+                let _ = mark_quarantined(&connection, &reason);
+                Err(CursorLedgerError::Quarantined(reason))
+            }
+        }
+    }
+
+    pub(crate) fn head(&self) -> Result<TruthHead, CursorLedgerError> {
+        let (_connection, metadata) = self.hot_read_connection()?;
+        Ok(TruthHead {
+            store_id: metadata.store_id,
+            cursor: TruthCursor::new(metadata.epoch, metadata.head_sequence),
+        })
+    }
+
+    pub(crate) fn append_event(
+        &self,
+        event: &ShoreEvent,
+        attempt_token: &str,
+    ) -> Result<AppendResolution, CursorLedgerError> {
+        self.append_event_with_lock(event, attempt_token, false, |_| {})
+    }
+
+    pub(crate) fn try_append_event(
+        &self,
+        event: &ShoreEvent,
+        attempt_token: &str,
+    ) -> Result<AppendResolution, CursorLedgerError> {
+        self.append_event_with_lock(event, attempt_token, true, |_| {})
+    }
+
+    pub(crate) fn append_event_with_hook(
+        &self,
+        event: &ShoreEvent,
+        attempt_token: &str,
+        hook: impl FnMut(AppendCrashPoint),
+    ) -> Result<AppendResolution, CursorLedgerError> {
+        self.append_event_with_lock(event, attempt_token, false, hook)
+    }
+
+    fn append_event_with_lock(
+        &self,
+        event: &ShoreEvent,
+        attempt_token: &str,
+        try_only: bool,
+        mut hook: impl FnMut(AppendCrashPoint),
+    ) -> Result<AppendResolution, CursorLedgerError> {
+        validate_nonempty("attempt_token", attempt_token)?;
+        validate_nonempty("logical_reread_key", &event.idempotency_key)?;
+        let expected_bytes = serde_json::to_vec(event)
+            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        let expected_witness = sha256_bytes_hex(&expected_bytes);
+        let _writer_lock = if try_only {
+            StoreWriterLock::try_acquire(&self.store_root)?
+        } else {
+            StoreWriterLock::acquire(&self.store_root)?
+        };
+        let mut connection = open_connection(&self.database_path, false)?;
+        validate_recoverable_metadata(&connection, &self.identity)?;
+        recover_locked(&mut connection, &self.store_root, &self.identity)?;
+
+        let metadata = read_metadata(&connection)?;
+        let proposed_cursor = TruthCursor::new(
+            metadata.epoch,
+            metadata.head_sequence.checked_add(1).ok_or_else(|| {
+                CursorLedgerError::SchemaMismatch("cursor sequence overflow".to_owned())
+            })?,
+        );
+        let intent = CursorIntent::new(
+            proposed_cursor,
+            event.idempotency_key.clone(),
+            expected_witness.clone(),
+            attempt_token,
+        );
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| sqlite_error("begin intent", error))?;
+        insert_attempt(&transaction, attempt_token)?;
+        insert_intent(&transaction, &intent)?;
+        hook(AppendCrashPoint::BeforeIntentCommit);
+        transaction
+            .commit()
+            .map_err(|error| sqlite_error("commit intent", error))?;
+        hook(AppendCrashPoint::AfterIntentCommit);
+
+        let journal = QualificationLocalJournal::new(&self.store_root);
+        let existing_receipt = receipt_for_key(&connection, &event.idempotency_key)?;
+        if let Some(receipt) = &existing_receipt {
+            validate_named_carrier(
+                &journal,
+                &receipt.logical_reread_key,
+                &receipt.validation_witness,
+            )?;
+        }
+        let publication = match journal.record_event_once(event) {
+            Ok(outcome) => outcome,
+            Err(ShoreError::Message(message))
+                if existing_receipt.is_some()
+                    && message
+                        == format!(
+                            "event conflict for idempotency key {}",
+                            event.idempotency_key
+                        ) =>
+            {
+                retire_intent(&connection)?;
+                return Ok(AppendResolution::Conflict(
+                    existing_receipt.expect("guarded existing receipt").cursor,
+                ));
+            }
+            Err(error) => {
+                retire_intent(&connection)?;
+                return Err(CursorLedgerError::Truth(error.to_string()));
+            }
+        };
+        hook(AppendCrashPoint::AfterEventPublication);
+
+        if let Some(receipt) = existing_receipt {
+            if matches!(publication, EventWriteOutcome::Created) {
+                let reason = format!(
+                    "receipt exists but authoritative carrier was recreated: {}",
+                    event.idempotency_key
+                );
+                mark_quarantined(&connection, &reason)?;
+                return Err(CursorLedgerError::Quarantined(reason));
+            }
+            retire_intent(&connection)?;
+            return Ok(classify_receipt(&receipt, &expected_witness));
+        }
+
+        if !matches!(publication, EventWriteOutcome::Created) {
+            let reason = format!(
+                "unreceipted pre-existing carrier: {}",
+                event.idempotency_key
+            );
+            mark_quarantined(&connection, &reason)?;
+            return Err(CursorLedgerError::UnreceiptedCarrier(
+                event.idempotency_key.clone(),
+            ));
+        }
+        validate_named_carrier(&journal, &event.idempotency_key, &expected_witness)?;
+
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| sqlite_error("begin receipt and head", error))?;
+        insert_receipt(
+            &transaction,
+            &CursorReceipt {
+                cursor: proposed_cursor,
+                logical_reread_key: event.idempotency_key.clone(),
+                validation_witness: expected_witness,
+                attempt_token: attempt_token.to_owned(),
+            },
+        )?;
+        hook(AppendCrashPoint::AfterReceiptBeforeHead);
+        advance_head(&transaction, proposed_cursor)?;
+        transaction
+            .commit()
+            .map_err(|error| sqlite_error("commit receipt and head", error))?;
+        hook(AppendCrashPoint::AfterHeadBeforeIntentRetirement);
+        retire_intent(&connection)?;
+        Ok(AppendResolution::Created(proposed_cursor))
+    }
+
+    pub(crate) fn recover(&self) -> Result<RecoveryResolution, CursorLedgerError> {
+        let _writer_lock = StoreWriterLock::acquire(&self.store_root)?;
+        let mut connection = open_connection(&self.database_path, false)?;
+        validate_recoverable_metadata(&connection, &self.identity)?;
+        recover_locked(&mut connection, &self.store_root, &self.identity)
+    }
+
+    pub(crate) fn try_recover(&self) -> Result<RecoveryResolution, CursorLedgerError> {
+        let _writer_lock = match StoreWriterLock::try_acquire(&self.store_root) {
+            Ok(writer_lock) => writer_lock,
+            Err(WriterLockError::Busy) => return Ok(RecoveryResolution::LiveWriterBusy),
+            Err(error) => return Err(error.into()),
+        };
+        let mut connection = open_connection(&self.database_path, false)?;
+        validate_recoverable_metadata(&connection, &self.identity)?;
+        recover_locked(&mut connection, &self.store_root, &self.identity)
+    }
+
+    pub(crate) fn events_after(
+        &self,
+        after: TruthCursor,
+        limit: usize,
+    ) -> Result<CursorDelta, CursorLedgerError> {
+        if limit == 0 {
+            return Err(CursorLedgerError::ZeroDeltaLimit);
+        }
+        let (connection, metadata) = self.hot_read_connection()?;
+        if after.epoch != metadata.epoch {
+            return Err(CursorLedgerError::WrongEpoch {
+                expected: metadata.epoch,
+                observed: after.epoch,
+            });
+        }
+        let head = TruthCursor::new(metadata.epoch, metadata.head_sequence);
+        if after.sequence > metadata.head_sequence {
+            return Err(CursorLedgerError::CursorAhead {
+                cursor: after,
+                head,
+            });
+        }
+
+        let mut statement = connection
+            .prepare(
+                "SELECT epoch, sequence, logical_reread_key, validation_witness, attempt_token
+                 FROM cursor_receipt
+                 WHERE sequence > ?1
+                 ORDER BY sequence
+                 LIMIT ?2",
+            )
+            .map_err(|error| sqlite_error("prepare bounded delta", error))?;
+        let rows = statement
+            .query_map(
+                params![
+                    u64_to_i64(after.sequence, "delta start")?,
+                    usize_to_i64(limit, "delta limit")?
+                ],
+                receipt_from_row,
+            )
+            .map_err(|error| sqlite_error("query bounded delta", error))?;
+        let mut receipts = Vec::new();
+        for row in rows {
+            receipts.push(row.map_err(|error| sqlite_error("read bounded delta", error))?);
+        }
+        drop(statement);
+
+        let journal = QualificationLocalJournal::new(&self.store_root);
+        for (offset, receipt) in receipts.iter().enumerate() {
+            let expected = after.sequence + u64::try_from(offset).unwrap_or(u64::MAX) + 1;
+            if receipt.cursor.epoch != metadata.epoch || receipt.cursor.sequence != expected {
+                return Err(CursorLedgerError::SequenceGap {
+                    expected,
+                    observed: receipt.cursor.sequence,
+                });
+            }
+            validate_named_carrier(
+                &journal,
+                &receipt.logical_reread_key,
+                &receipt.validation_witness,
+            )?;
+        }
+        let observed = receipts
+            .last()
+            .map_or(after.sequence, |receipt| receipt.cursor.sequence);
+        Ok(CursorDelta {
+            after,
+            observed_head: head,
+            complete: observed == metadata.head_sequence,
+            receipts,
+        })
+    }
+
+    pub(crate) fn integrity_check(&self) -> Result<(), CursorLedgerError> {
+        let connection = self.validated_connection()?;
+        let result = connection
+            .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+            .map_err(|error| sqlite_error("run integrity check", error))?;
+        if result != "ok" {
+            return Err(CursorLedgerError::SchemaMismatch(format!(
+                "SQLite integrity check returned {result}"
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn checkpoint(&self) -> Result<CursorLedgerCheckpoint, CursorLedgerError> {
+        let connection = self.validated_connection()?;
+        let (busy, log_frames, checkpointed_frames) = connection
+            .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(|error| sqlite_error("checkpoint cursor ledger", error))?;
+        Ok(CursorLedgerCheckpoint {
+            busy: busy != 0,
+            log_frames: i64_to_u64(log_frames, "checkpoint log frames")?,
+            checkpointed_frames: i64_to_u64(checkpointed_frames, "checkpointed frames")?,
+        })
+    }
+
+    pub(crate) fn inventory(&self) -> Result<CursorLedgerInventory, CursorLedgerError> {
+        let connection = self.validated_connection()?;
+        let metadata = read_metadata(&connection)?;
+        let stats = receipt_chain_stats(&connection)?;
+        let attempt_count = connection
+            .query_row("SELECT count(*) FROM cursor_attempt", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(|error| sqlite_error("count cursor attempts", error))
+            .and_then(|count| i64_to_u64(count, "attempt count"))?;
+        Ok(CursorLedgerInventory {
+            profile_id: metadata.profile_id,
+            schema_version: metadata.schema_version,
+            epoch: metadata.epoch,
+            head_sequence: metadata.head_sequence,
+            receipt_count: stats.count,
+            attempt_count,
+            active_intent: read_intent(&connection)?.is_some(),
+            database_bytes: file_len(&self.database_path)?,
+            wal_bytes: file_len(&sqlite_companion_path(&self.database_path, "-wal"))?,
+            shared_memory_bytes: file_len(&sqlite_companion_path(&self.database_path, "-shm"))?,
+        })
+    }
+
+    fn for_root(store_root: PathBuf, identity: CursorLedgerIdentity) -> Self {
+        let database_path = store_root.join(SIDECAR_DIRECTORY).join(DATABASE_FILE);
+        Self {
+            store_root,
+            database_path,
+            identity,
+        }
+    }
+
+    fn sidecar_path(&self) -> PathBuf {
+        self.store_root.join(SIDECAR_DIRECTORY)
+    }
+
+    fn validated_connection(&self) -> Result<Connection, CursorLedgerError> {
+        let connection = open_connection(&self.database_path, false)?;
+        validate_completed_metadata(&connection, &self.identity)?;
+        Ok(connection)
+    }
+
+    fn hot_read_connection(&self) -> Result<(Connection, Metadata), CursorLedgerError> {
+        let connection = open_connection(&self.database_path, false)?;
+        let metadata = validate_metadata_header(&connection, &self.identity)?;
+        validate_bounded_head(&connection, &metadata)?;
+        Ok((connection, metadata))
+    }
+
+    fn prepare_sidecar_for_bootstrap(&self) -> Result<bool, CursorLedgerError> {
+        let sidecar = self.sidecar_path();
+        if !sidecar.exists() {
+            return Ok(false);
+        }
+        if self.database_path.exists()
+            && let Ok(connection) = open_connection(&self.database_path, false)
+            && validate_completed_metadata(&connection, &self.identity).is_ok()
+        {
+            return Err(CursorLedgerError::AlreadyInitialized);
+        }
+        self.rotate_sidecar()?;
+        Ok(true)
+    }
+
+    fn rotate_sidecar(&self) -> Result<PathBuf, CursorLedgerError> {
+        let sidecar = self.sidecar_path();
+        let quarantine = self.store_root.join(format!(
+            "{SIDECAR_DIRECTORY}.quarantine-{}-{}",
+            std::process::id(),
+            QUARANTINE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::rename(&sidecar, &quarantine).map_err(|error| io_error(&sidecar, error))?;
+        Ok(quarantine)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn full_chain_query_count_for_test() -> u64 {
+    FULL_CHAIN_QUERY_COUNT.with(Cell::get)
+}
+
+impl QualificationJournalCursor for SqliteCursorLedger {
+    type Error = CursorLedgerError;
+
+    fn qualification_truth_head(&self) -> Result<TruthHead, Self::Error> {
+        self.head()
+    }
+
+    fn qualification_events_after(
+        &self,
+        after: TruthCursor,
+        limit: usize,
+    ) -> Result<CursorDelta, Self::Error> {
+        self.events_after(after, limit)
+    }
+}
+
+fn canonical_store_root(store_root: &Path) -> Result<PathBuf, CursorLedgerError> {
+    std::fs::create_dir_all(store_root).map_err(|error| io_error(store_root, error))?;
+    store_root
+        .canonicalize()
+        .map_err(|error| io_error(store_root, error))
+}
+
+fn validate_identity(identity: &CursorLedgerIdentity) -> Result<(), CursorLedgerError> {
+    validate_nonempty("store_id", &identity.store_id)?;
+    validate_nonempty("profile_id", &identity.profile_id)
+}
+
+fn validate_nonempty(field: &'static str, value: &str) -> Result<(), CursorLedgerError> {
+    if value.is_empty() {
+        return Err(CursorLedgerError::EmptyIdentity { field });
+    }
+    Ok(())
+}
+
+fn open_connection(path: &Path, create: bool) -> Result<Connection, CursorLedgerError> {
+    if !create && !path.exists() {
+        return Err(CursorLedgerError::IncompleteBootstrap);
+    }
+    let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    if create {
+        flags |= OpenFlags::SQLITE_OPEN_CREATE;
+    }
+    let connection = Connection::open_with_flags(path, flags)
+        .map_err(|error| sqlite_error("open cursor ledger", error))?;
+    connection
+        .busy_timeout(BUSY_TIMEOUT)
+        .map_err(|error| sqlite_error("set busy timeout", error))?;
+    if create {
+        connection
+            .pragma_update(None, "page_size", 4096_i64)
+            .map_err(|error| sqlite_error("set page size", error))?;
+        connection
+            .pragma_update(None, "application_id", APPLICATION_ID)
+            .map_err(|error| sqlite_error("set application id", error))?;
+        connection
+            .pragma_update(None, "user_version", SCHEMA_VERSION)
+            .map_err(|error| sqlite_error("set user version", error))?;
+    }
+    let journal_mode = connection
+        .pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))
+        .map_err(|error| sqlite_error("enable WAL", error))?;
+    if !journal_mode.eq_ignore_ascii_case("wal") {
+        return Err(CursorLedgerError::SchemaMismatch(format!(
+            "SQLite refused WAL mode and returned {journal_mode}"
+        )));
+    }
+    connection
+        .pragma_update(None, "synchronous", "FULL")
+        .map_err(|error| sqlite_error("set synchronous", error))?;
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .map_err(|error| sqlite_error("enable foreign keys", error))?;
+    connection
+        .pragma_update(None, "cell_size_check", true)
+        .map_err(|error| sqlite_error("enable cell-size checks", error))?;
+    #[cfg(target_os = "macos")]
+    connection
+        .pragma_update(None, "fullfsync", true)
+        .map_err(|error| sqlite_error("enable fullfsync", error))?;
+    Ok(connection)
+}
+
+fn initialize_schema(
+    connection: &Connection,
+    identity: &CursorLedgerIdentity,
+    epoch: u64,
+    state: &str,
+) -> Result<(), CursorLedgerError> {
+    connection
+        .execute_batch(
+            "CREATE TABLE cursor_meta (
+                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                 store_id TEXT NOT NULL,
+                 profile_id TEXT NOT NULL,
+                 schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+                 epoch INTEGER NOT NULL CHECK (epoch > 0),
+                 head_sequence INTEGER NOT NULL CHECK (head_sequence >= 0),
+                 bootstrap_state TEXT NOT NULL
+                     CHECK (bootstrap_state IN ('staging', 'complete', 'quarantined')),
+                 quarantine_reason TEXT
+             ) STRICT;
+             CREATE TABLE cursor_attempt (
+                 attempt_token TEXT PRIMARY KEY CHECK (length(attempt_token) > 0)
+             ) STRICT;
+             CREATE TABLE cursor_intent (
+                 singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                 epoch INTEGER NOT NULL CHECK (epoch > 0),
+                 sequence INTEGER NOT NULL CHECK (sequence > 0),
+                 logical_reread_key TEXT NOT NULL CHECK (length(logical_reread_key) > 0),
+                 validation_witness TEXT NOT NULL CHECK (length(validation_witness) = 64),
+                 attempt_token TEXT NOT NULL UNIQUE
+                     REFERENCES cursor_attempt(attempt_token)
+             ) STRICT;
+             CREATE TABLE cursor_receipt (
+                 sequence INTEGER PRIMARY KEY CHECK (sequence > 0),
+                 epoch INTEGER NOT NULL CHECK (epoch > 0),
+                 logical_reread_key TEXT NOT NULL UNIQUE
+                     CHECK (length(logical_reread_key) > 0),
+                 validation_witness TEXT NOT NULL CHECK (length(validation_witness) = 64),
+                 attempt_token TEXT NOT NULL UNIQUE
+                     REFERENCES cursor_attempt(attempt_token)
+             ) STRICT;",
+        )
+        .map_err(|error| sqlite_error("create cursor schema", error))?;
+    connection
+        .execute(
+            "INSERT INTO cursor_meta
+             (singleton, store_id, profile_id, schema_version, epoch, head_sequence,
+              bootstrap_state, quarantine_reason)
+             VALUES (1, ?1, ?2, ?3, ?4, 0, ?5, NULL)",
+            params![
+                identity.store_id,
+                identity.profile_id,
+                SCHEMA_VERSION,
+                u64_to_i64(epoch, "epoch")?,
+                state
+            ],
+        )
+        .map_err(|error| sqlite_error("insert cursor metadata", error))?;
+    Ok(())
+}
+
+fn read_metadata(connection: &Connection) -> Result<Metadata, CursorLedgerError> {
+    connection
+        .query_row(
+            "SELECT store_id, profile_id, schema_version, epoch, head_sequence,
+                    bootstrap_state, quarantine_reason
+             FROM cursor_meta WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                ))
+            },
+        )
+        .map_err(|error| sqlite_error("read cursor metadata", error))
+        .and_then(
+            |(
+                store_id,
+                profile_id,
+                schema_version,
+                epoch,
+                head_sequence,
+                state,
+                quarantine_reason,
+            )| {
+                Ok(Metadata {
+                    store_id,
+                    profile_id,
+                    schema_version,
+                    epoch: i64_to_u64(epoch, "epoch")?,
+                    head_sequence: i64_to_u64(head_sequence, "head sequence")?,
+                    state,
+                    quarantine_reason,
+                })
+            },
+        )
+}
+
+fn validate_completed_metadata(
+    connection: &Connection,
+    identity: &CursorLedgerIdentity,
+) -> Result<Metadata, CursorLedgerError> {
+    let metadata = validate_metadata_header(connection, identity)?;
+    validate_receipt_chain(connection)?;
+    Ok(metadata)
+}
+
+fn validate_recoverable_metadata(
+    connection: &Connection,
+    identity: &CursorLedgerIdentity,
+) -> Result<Metadata, CursorLedgerError> {
+    let metadata = validate_metadata_header(connection, identity)?;
+    validate_recoverable_receipt_chain(connection, &metadata)?;
+    Ok(metadata)
+}
+
+fn validate_metadata_header(
+    connection: &Connection,
+    identity: &CursorLedgerIdentity,
+) -> Result<Metadata, CursorLedgerError> {
+    let application_id = pragma_i64(connection, "application_id")?;
+    let user_version = pragma_i64(connection, "user_version")?;
+    if application_id != APPLICATION_ID || user_version != SCHEMA_VERSION {
+        return Err(CursorLedgerError::SchemaMismatch(format!(
+            "application_id={application_id}, user_version={user_version}"
+        )));
+    }
+    let metadata = read_metadata(connection)?;
+    if metadata.store_id != identity.store_id || metadata.profile_id != identity.profile_id {
+        return Err(CursorLedgerError::IdentityMismatch(format!(
+            "expected {}/{}, observed {}/{}",
+            identity.store_id, identity.profile_id, metadata.store_id, metadata.profile_id
+        )));
+    }
+    if metadata.schema_version != SCHEMA_VERSION {
+        return Err(CursorLedgerError::SchemaMismatch(format!(
+            "expected schema {SCHEMA_VERSION}, observed {}",
+            metadata.schema_version
+        )));
+    }
+    match metadata.state.as_str() {
+        "complete" => {}
+        "staging" => return Err(CursorLedgerError::IncompleteBootstrap),
+        "quarantined" => {
+            return Err(CursorLedgerError::Quarantined(
+                metadata
+                    .quarantine_reason
+                    .clone()
+                    .unwrap_or_else(|| "unspecified metadata failure".to_owned()),
+            ));
+        }
+        other => {
+            return Err(CursorLedgerError::SchemaMismatch(format!(
+                "unsupported bootstrap state {other}"
+            )));
+        }
+    }
+    Ok(metadata)
+}
+
+fn validate_receipt_chain(connection: &Connection) -> Result<(), CursorLedgerError> {
+    let metadata = read_metadata(connection)?;
+    validate_receipt_epochs(connection, metadata.epoch)?;
+    let stats = receipt_chain_stats(connection)?;
+    if metadata.head_sequence != stats.count
+        || (stats.count > 0 && (stats.minimum != 1 || stats.maximum != metadata.head_sequence))
+    {
+        return Err(CursorLedgerError::SchemaMismatch(format!(
+            "receipt chain mismatch: head={}, count={}, min={}, max={}",
+            metadata.head_sequence, stats.count, stats.minimum, stats.maximum
+        )));
+    }
+    Ok(())
+}
+
+fn validate_bounded_head(
+    connection: &Connection,
+    metadata: &Metadata,
+) -> Result<(), CursorLedgerError> {
+    if metadata.head_sequence > 0 {
+        let observed_epoch = connection
+            .query_row(
+                "SELECT epoch FROM cursor_receipt WHERE sequence = ?1",
+                [u64_to_i64(metadata.head_sequence, "head receipt")?],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| sqlite_error("validate head receipt", error))?
+            .ok_or_else(|| {
+                CursorLedgerError::SchemaMismatch(format!(
+                    "head {} has no receipt",
+                    metadata.head_sequence
+                ))
+            })?;
+        let observed_epoch = i64_to_u64(observed_epoch, "head receipt epoch")?;
+        if observed_epoch != metadata.epoch {
+            return Err(CursorLedgerError::WrongEpoch {
+                expected: metadata.epoch,
+                observed: observed_epoch,
+            });
+        }
+    }
+
+    let next_sequence = metadata
+        .head_sequence
+        .checked_add(1)
+        .ok_or_else(|| CursorLedgerError::SchemaMismatch("cursor head overflow".to_owned()))?;
+    let receipt_ahead = connection
+        .query_row(
+            "SELECT 1 FROM cursor_receipt WHERE sequence = ?1",
+            [u64_to_i64(next_sequence, "next receipt")?],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| sqlite_error("validate next receipt", error))?
+        .is_some();
+    if receipt_ahead {
+        return Err(CursorLedgerError::SchemaMismatch(format!(
+            "receipt {next_sequence} is ahead of head {}",
+            metadata.head_sequence
+        )));
+    }
+    Ok(())
+}
+
+fn validate_recoverable_receipt_chain(
+    connection: &Connection,
+    metadata: &Metadata,
+) -> Result<(), CursorLedgerError> {
+    validate_receipt_epochs(connection, metadata.epoch)?;
+    let stats = receipt_chain_stats(connection)?;
+    let maximum_recoverable = metadata
+        .head_sequence
+        .checked_add(1)
+        .ok_or_else(|| CursorLedgerError::SchemaMismatch("cursor head overflow".to_owned()))?;
+    if stats.count < metadata.head_sequence
+        || stats.count > maximum_recoverable
+        || (stats.count > 0 && (stats.minimum != 1 || stats.maximum != stats.count))
+    {
+        return Err(CursorLedgerError::SchemaMismatch(format!(
+            "unrecoverable receipt chain: head={}, count={}, min={}, max={}",
+            metadata.head_sequence, stats.count, stats.minimum, stats.maximum
+        )));
+    }
+    Ok(())
+}
+
+fn receipt_chain_stats(connection: &Connection) -> Result<ReceiptChainStats, CursorLedgerError> {
+    note_full_chain_query();
+    let (count, minimum, maximum) = connection
+        .query_row(
+            "SELECT count(*), coalesce(min(sequence), 0), coalesce(max(sequence), 0)
+             FROM cursor_receipt",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .map_err(|error| sqlite_error("inspect receipt chain", error))?;
+    Ok(ReceiptChainStats {
+        count: i64_to_u64(count, "receipt count")?,
+        minimum: i64_to_u64(minimum, "minimum receipt")?,
+        maximum: i64_to_u64(maximum, "maximum receipt")?,
+    })
+}
+
+fn validate_receipt_epochs(
+    connection: &Connection,
+    expected_epoch: u64,
+) -> Result<(), CursorLedgerError> {
+    note_full_chain_query();
+    let wrong_epoch = connection
+        .query_row(
+            "SELECT epoch FROM cursor_receipt WHERE epoch != ?1 LIMIT 1",
+            [u64_to_i64(expected_epoch, "expected receipt epoch")?],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| sqlite_error("validate receipt epochs", error))?;
+    if let Some(observed) = wrong_epoch {
+        return Err(CursorLedgerError::WrongEpoch {
+            expected: expected_epoch,
+            observed: i64_to_u64(observed, "observed receipt epoch")?,
+        });
+    }
+    Ok(())
+}
+
+fn note_full_chain_query() {
+    #[cfg(test)]
+    FULL_CHAIN_QUERY_COUNT.with(|count| count.set(count.get() + 1));
+}
+
+fn recover_locked(
+    connection: &mut Connection,
+    store_root: &Path,
+    identity: &CursorLedgerIdentity,
+) -> Result<RecoveryResolution, CursorLedgerError> {
+    let metadata = validate_recoverable_metadata(connection, identity)?;
+    let Some(intent) = read_intent(connection)? else {
+        return recover_head_only(connection, &metadata);
+    };
+    if let Some(receipt) = receipt_for_key(connection, &intent.logical_reread_key)? {
+        if receipt.cursor.sequence > metadata.head_sequence {
+            if receipt.cursor.sequence != metadata.head_sequence + 1
+                || receipt.cursor != intent.proposed_cursor
+            {
+                let reason = format!(
+                    "receipt sequence {} cannot advance head {}",
+                    receipt.cursor.sequence, metadata.head_sequence
+                );
+                mark_quarantined(connection, &reason)?;
+                return Err(CursorLedgerError::Quarantined(reason));
+            }
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| sqlite_error("begin head recovery", error))?;
+            advance_head(&transaction, receipt.cursor)?;
+            transaction
+                .execute("DELETE FROM cursor_intent WHERE singleton = 1", [])
+                .map_err(|error| sqlite_error("retire recovered intent", error))?;
+            transaction
+                .commit()
+                .map_err(|error| sqlite_error("commit head recovery", error))?;
+            return Ok(RecoveryResolution::AdvancedHead(receipt.cursor));
+        }
+        retire_intent(connection)?;
+        if receipt.cursor == intent.proposed_cursor
+            && receipt.cursor.sequence == metadata.head_sequence
+            && receipt.validation_witness == intent.validation_witness
+            && receipt.attempt_token == intent.attempt_token
+        {
+            return Ok(RecoveryResolution::RetiredFinalized(receipt.cursor));
+        }
+        return Ok(classify_recovered_receipt(
+            &receipt,
+            &intent.validation_witness,
+        ));
+    }
+
+    let journal = QualificationLocalJournal::new(store_root);
+    let Some(bytes) = journal
+        .read_event_bytes(&intent.logical_reread_key)
+        .map_err(|error| CursorLedgerError::Truth(error.to_string()))?
+    else {
+        retire_intent(connection)?;
+        return Ok(RecoveryResolution::RetiredAbsent);
+    };
+    if sha256_bytes_hex(&bytes) != intent.validation_witness {
+        let reason = format!(
+            "unreceipted carrier witness mismatch: {}",
+            intent.logical_reread_key
+        );
+        mark_quarantined(connection, &reason)?;
+        return Err(CursorLedgerError::WitnessMismatch(
+            intent.logical_reread_key,
+        ));
+    }
+    if intent.proposed_cursor.epoch != metadata.epoch
+        || intent.proposed_cursor.sequence != metadata.head_sequence + 1
+    {
+        let reason = format!(
+            "intent cursor {:?} does not follow head {}",
+            intent.proposed_cursor, metadata.head_sequence
+        );
+        mark_quarantined(connection, &reason)?;
+        return Err(CursorLedgerError::Quarantined(reason));
+    }
+
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| sqlite_error("begin intent recovery", error))?;
+    let receipt = CursorReceipt {
+        cursor: intent.proposed_cursor,
+        logical_reread_key: intent.logical_reread_key,
+        validation_witness: intent.validation_witness,
+        attempt_token: intent.attempt_token,
+    };
+    insert_receipt(&transaction, &receipt)?;
+    advance_head(&transaction, receipt.cursor)?;
+    transaction
+        .execute("DELETE FROM cursor_intent WHERE singleton = 1", [])
+        .map_err(|error| sqlite_error("retire recovered intent", error))?;
+    transaction
+        .commit()
+        .map_err(|error| sqlite_error("commit intent recovery", error))?;
+    Ok(RecoveryResolution::Published(receipt.cursor))
+}
+
+fn recover_head_only(
+    connection: &mut Connection,
+    metadata: &Metadata,
+) -> Result<RecoveryResolution, CursorLedgerError> {
+    let next = metadata.head_sequence + 1;
+    let receipt = receipt_for_sequence(connection, next)?;
+    let Some(receipt) = receipt else {
+        if let Some(observed) = first_receipt_after(connection, next)? {
+            let reason = format!("receipt sequence {observed} skips expected {next}");
+            mark_quarantined(connection, &reason)?;
+            return Err(CursorLedgerError::SequenceGap {
+                expected: next,
+                observed,
+            });
+        }
+        return Ok(RecoveryResolution::NoIntent);
+    };
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| sqlite_error("begin orphan-head recovery", error))?;
+    advance_head(&transaction, receipt.cursor)?;
+    transaction
+        .commit()
+        .map_err(|error| sqlite_error("commit orphan-head recovery", error))?;
+    Ok(RecoveryResolution::AdvancedHead(receipt.cursor))
+}
+
+fn insert_attempt(
+    transaction: &Transaction<'_>,
+    attempt_token: &str,
+) -> Result<(), CursorLedgerError> {
+    match transaction.execute(
+        "INSERT INTO cursor_attempt (attempt_token) VALUES (?1)",
+        [attempt_token],
+    ) {
+        Ok(_) => Ok(()),
+        Err(error) if error.sqlite_error_code() == Some(ErrorCode::ConstraintViolation) => Err(
+            CursorLedgerError::AttemptTokenUsed(attempt_token.to_owned()),
+        ),
+        Err(error) => Err(sqlite_error("insert attempt token", error)),
+    }
+}
+
+fn insert_intent(
+    transaction: &Transaction<'_>,
+    intent: &CursorIntent,
+) -> Result<(), CursorLedgerError> {
+    transaction
+        .execute(
+            "INSERT INTO cursor_intent
+             (singleton, epoch, sequence, logical_reread_key, validation_witness, attempt_token)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5)",
+            params![
+                u64_to_i64(intent.proposed_cursor.epoch, "intent epoch")?,
+                u64_to_i64(intent.proposed_cursor.sequence, "intent sequence")?,
+                intent.logical_reread_key,
+                intent.validation_witness,
+                intent.attempt_token,
+            ],
+        )
+        .map_err(|error| sqlite_error("insert cursor intent", error))?;
+    Ok(())
+}
+
+fn insert_receipt(
+    transaction: &Transaction<'_>,
+    receipt: &CursorReceipt,
+) -> Result<(), CursorLedgerError> {
+    transaction
+        .execute(
+            "INSERT INTO cursor_receipt
+             (sequence, epoch, logical_reread_key, validation_witness, attempt_token)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                u64_to_i64(receipt.cursor.sequence, "receipt sequence")?,
+                u64_to_i64(receipt.cursor.epoch, "receipt epoch")?,
+                receipt.logical_reread_key,
+                receipt.validation_witness,
+                receipt.attempt_token,
+            ],
+        )
+        .map_err(|error| sqlite_error("insert cursor receipt", error))?;
+    Ok(())
+}
+
+fn advance_head(
+    transaction: &Transaction<'_>,
+    cursor: TruthCursor,
+) -> Result<(), CursorLedgerError> {
+    let updated = transaction
+        .execute(
+            "UPDATE cursor_meta
+             SET head_sequence = ?1
+             WHERE singleton = 1 AND epoch = ?2 AND head_sequence = ?3",
+            params![
+                u64_to_i64(cursor.sequence, "head sequence")?,
+                u64_to_i64(cursor.epoch, "head epoch")?,
+                u64_to_i64(cursor.sequence - 1, "previous head")?,
+            ],
+        )
+        .map_err(|error| sqlite_error("advance cursor head", error))?;
+    if updated != 1 {
+        return Err(CursorLedgerError::SequenceGap {
+            expected: cursor.sequence,
+            observed: read_metadata(transaction)?.head_sequence,
+        });
+    }
+    Ok(())
+}
+
+fn retire_intent(connection: &Connection) -> Result<(), CursorLedgerError> {
+    connection
+        .execute("DELETE FROM cursor_intent WHERE singleton = 1", [])
+        .map_err(|error| sqlite_error("retire cursor intent", error))?;
+    Ok(())
+}
+
+fn read_intent(connection: &Connection) -> Result<Option<CursorIntent>, CursorLedgerError> {
+    connection
+        .query_row(
+            "SELECT epoch, sequence, logical_reread_key, validation_witness, attempt_token
+             FROM cursor_intent WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| sqlite_error("read cursor intent", error))
+        .and_then(|row| {
+            row.map(
+                |(epoch, sequence, logical_reread_key, validation_witness, attempt_token)| {
+                    Ok(CursorIntent::new(
+                        TruthCursor::new(
+                            i64_to_u64(epoch, "intent epoch")?,
+                            i64_to_u64(sequence, "intent sequence")?,
+                        ),
+                        logical_reread_key,
+                        validation_witness,
+                        attempt_token,
+                    ))
+                },
+            )
+            .transpose()
+        })
+}
+
+fn receipt_for_key(
+    connection: &Connection,
+    logical_reread_key: &str,
+) -> Result<Option<CursorReceipt>, CursorLedgerError> {
+    connection
+        .query_row(
+            "SELECT epoch, sequence, logical_reread_key, validation_witness, attempt_token
+             FROM cursor_receipt WHERE logical_reread_key = ?1",
+            [logical_reread_key],
+            receipt_from_row,
+        )
+        .optional()
+        .map_err(|error| sqlite_error("read receipt by key", error))
+}
+
+fn receipt_for_sequence(
+    connection: &Connection,
+    sequence: u64,
+) -> Result<Option<CursorReceipt>, CursorLedgerError> {
+    connection
+        .query_row(
+            "SELECT epoch, sequence, logical_reread_key, validation_witness, attempt_token
+             FROM cursor_receipt WHERE sequence = ?1",
+            [u64_to_i64(sequence, "receipt sequence")?],
+            receipt_from_row,
+        )
+        .optional()
+        .map_err(|error| sqlite_error("read receipt by sequence", error))
+}
+
+fn first_receipt_after(
+    connection: &Connection,
+    sequence: u64,
+) -> Result<Option<u64>, CursorLedgerError> {
+    connection
+        .query_row(
+            "SELECT sequence FROM cursor_receipt WHERE sequence > ?1 ORDER BY sequence LIMIT 1",
+            [u64_to_i64(sequence, "receipt lower bound")?],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|error| sqlite_error("read receipt gap", error))?
+        .map(|value| i64_to_u64(value, "receipt gap"))
+        .transpose()
+}
+
+fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CursorReceipt> {
+    let epoch = row.get::<_, i64>(0)?;
+    let sequence = row.get::<_, i64>(1)?;
+    if epoch <= 0 || sequence <= 0 {
+        return Err(rusqlite::Error::IntegralValueOutOfRange(0, epoch));
+    }
+    Ok(CursorReceipt {
+        cursor: TruthCursor::new(epoch as u64, sequence as u64),
+        logical_reread_key: row.get(2)?,
+        validation_witness: row.get(3)?,
+        attempt_token: row.get(4)?,
+    })
+}
+
+fn classify_receipt(receipt: &CursorReceipt, witness: &str) -> AppendResolution {
+    if receipt.validation_witness == witness {
+        AppendResolution::Existing(receipt.cursor)
+    } else {
+        AppendResolution::Conflict(receipt.cursor)
+    }
+}
+
+fn classify_recovered_receipt(receipt: &CursorReceipt, witness: &str) -> RecoveryResolution {
+    if receipt.validation_witness == witness {
+        RecoveryResolution::Existing(receipt.cursor)
+    } else {
+        RecoveryResolution::Conflict(receipt.cursor)
+    }
+}
+
+fn validate_named_carrier(
+    journal: &QualificationLocalJournal,
+    logical_reread_key: &str,
+    witness: &str,
+) -> Result<(), CursorLedgerError> {
+    let bytes = journal
+        .read_event_bytes(logical_reread_key)
+        .map_err(|error| CursorLedgerError::Truth(error.to_string()))?
+        .ok_or_else(|| CursorLedgerError::CarrierAbsent(logical_reread_key.to_owned()))?;
+    if sha256_bytes_hex(&bytes) != witness {
+        return Err(CursorLedgerError::WitnessMismatch(
+            logical_reread_key.to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn mark_quarantined(connection: &Connection, reason: &str) -> Result<(), CursorLedgerError> {
+    connection
+        .execute(
+            "UPDATE cursor_meta
+             SET bootstrap_state = 'quarantined', quarantine_reason = ?1
+             WHERE singleton = 1",
+            [reason],
+        )
+        .map_err(|error| sqlite_error("quarantine cursor metadata", error))?;
+    Ok(())
+}
+
+fn pragma_i64(connection: &Connection, name: &str) -> Result<i64, CursorLedgerError> {
+    connection
+        .query_row(&format!("PRAGMA {name}"), [], |row| row.get(0))
+        .map_err(|error| sqlite_error("read SQLite pragma", error))
+}
+
+fn u64_to_i64(value: u64, label: &'static str) -> Result<i64, CursorLedgerError> {
+    i64::try_from(value).map_err(|_| {
+        CursorLedgerError::SchemaMismatch(format!("{label} does not fit SQLite INTEGER"))
+    })
+}
+
+fn usize_to_i64(value: usize, label: &'static str) -> Result<i64, CursorLedgerError> {
+    i64::try_from(value).map_err(|_| {
+        CursorLedgerError::SchemaMismatch(format!("{label} does not fit SQLite INTEGER"))
+    })
+}
+
+fn i64_to_u64(value: i64, label: &'static str) -> Result<u64, CursorLedgerError> {
+    u64::try_from(value)
+        .map_err(|_| CursorLedgerError::SchemaMismatch(format!("{label} is negative")))
+}
+
+fn sqlite_error(operation: &'static str, error: rusqlite::Error) -> CursorLedgerError {
+    CursorLedgerError::Sqlite {
+        operation,
+        message: error.to_string(),
+    }
+}
+
+fn io_error(path: &Path, error: std::io::Error) -> CursorLedgerError {
+    CursorLedgerError::Io {
+        path: path.to_path_buf(),
+        message: error.to_string(),
+    }
+}
+
+fn file_len(path: &Path) -> Result<u64, CursorLedgerError> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(io_error(path, error)),
+    }
+}
+
+fn sqlite_companion_path(database_path: &Path, suffix: &str) -> PathBuf {
+    let mut path = database_path.as_os_str().to_os_string();
+    path.push(suffix);
+    PathBuf::from(path)
+}
