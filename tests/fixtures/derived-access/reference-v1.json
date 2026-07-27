@@ -1,0 +1,103 @@
+{
+  "schema": "pointbreak.qualification-derived-access-reference.v1",
+  "version": 1,
+  "contractSha256": "c29fd0b862cfd3594c02b88f159477adb9b8666b8dfeebd868e766f8cf025ab8",
+  "cursorVectors": [
+    "unique_create",
+    "equal_duplicate",
+    "conflicting_duplicate",
+    "gap",
+    "duplicate_sequence",
+    "cursor_ahead",
+    "wrong_epoch",
+    "corrupt_witness"
+  ],
+  "recoveryStates": [
+    "no_intent",
+    "live_writer_intent",
+    "abandoned_event_absent",
+    "abandoned_receipted_earlier",
+    "abandoned_matching_unreceipted",
+    "abandoned_mismatch",
+    "receipt_head_old",
+    "head_current_intent_remains",
+    "derived_transaction_interrupted",
+    "incompatible_or_corrupt",
+    "legacy_write_audit"
+  ],
+  "semanticFamilies": [
+    "revision",
+    "supersession",
+    "assessment",
+    "input-request",
+    "input-response",
+    "validation",
+    "association"
+  ],
+  "referenceSchedule": [
+    {
+      "logicalRereadKey": "event:fork-b",
+      "replayKey": "b",
+      "occurredAt": "2026-07-26T00:00:00Z",
+      "semanticFamily": "revision",
+      "semanticId": "rev:fork",
+      "value": "fork-b"
+    },
+    {
+      "logicalRereadKey": "event:fork-a",
+      "replayKey": "a",
+      "occurredAt": "2026-07-27T00:00:00Z",
+      "semanticFamily": "revision",
+      "semanticId": "rev:fork",
+      "value": "fork-a"
+    },
+    {
+      "logicalRereadKey": "event:supersession",
+      "replayKey": "c",
+      "occurredAt": "2026-07-27T00:00:01Z",
+      "semanticFamily": "supersession",
+      "semanticId": "rev:old->rev:new",
+      "value": "active"
+    },
+    {
+      "logicalRereadKey": "event:assessment",
+      "replayKey": "d",
+      "occurredAt": "2026-07-27T00:00:02Z",
+      "semanticFamily": "assessment",
+      "semanticId": "assess:one",
+      "value": "accepted"
+    },
+    {
+      "logicalRereadKey": "event:request",
+      "replayKey": "e",
+      "occurredAt": "2026-07-27T00:00:03Z",
+      "semanticFamily": "input-request",
+      "semanticId": "request:one",
+      "value": "open"
+    },
+    {
+      "logicalRereadKey": "event:response",
+      "replayKey": "f",
+      "occurredAt": "2026-07-27T00:00:04Z",
+      "semanticFamily": "input-response",
+      "semanticId": "response:one",
+      "value": "answered"
+    },
+    {
+      "logicalRereadKey": "event:validation",
+      "replayKey": "g",
+      "occurredAt": "2026-07-27T00:00:05Z",
+      "semanticFamily": "validation",
+      "semanticId": "validation:one",
+      "value": "passed"
+    },
+    {
+      "logicalRereadKey": "event:association",
+      "replayKey": "h",
+      "occurredAt": "2026-07-27T00:00:06Z",
+      "semanticFamily": "association",
+      "semanticId": "commit:one",
+      "value": "current"
+    }
+  ]
+}
