@@ -22,6 +22,8 @@ pub(crate) use local::{LocalContentStore, LocalJournal};
 pub(crate) use memory::InMemoryStore;
 
 use crate::error::Result;
+#[cfg(any(test, feature = "bench"))]
+use crate::session::derived_access::cursor::{CursorDelta, TruthCursor, TruthHead};
 use crate::storage::{CreateOutcome, RemoveOutcome};
 
 /// The closed set of durable-storage backends, and the one place that dispatches
@@ -122,6 +124,29 @@ pub(crate) trait Journal: Debug {
     /// can be exercised against either backend identically.
     #[cfg(test)]
     fn insert_raw(&self, idempotency_key: &str, bytes: &[u8]) -> Result<()>;
+}
+
+/// Qualification-only bounded cursor view. Existing `Journal` implementations
+/// and production resolution do not implement or select this interface; a
+/// candidate-aware ledger supplies it beside unchanged authoritative truth.
+#[cfg(any(test, feature = "bench"))]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the first physical cursor ledger is introduced in a later source slice"
+    )
+)]
+pub(crate) trait QualificationJournalCursor: Debug {
+    type Error;
+
+    fn qualification_truth_head(&self) -> std::result::Result<TruthHead, Self::Error>;
+
+    fn qualification_events_after(
+        &self,
+        after: TruthCursor,
+        limit: usize,
+    ) -> std::result::Result<CursorDelta, Self::Error>;
 }
 
 /// Content-addressed access over opaque blobs, shared by object artifacts and
