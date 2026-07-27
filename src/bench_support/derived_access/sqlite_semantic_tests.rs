@@ -716,7 +716,7 @@ fn semantic_delta_and_locator_checkpoint_commit_atomically() {
         .expect("publish truth");
 
     adapter
-        .catch_up_with_semantic_failure_for_test(32)
+        .catch_up_with_interruption(32)
         .expect_err("injected semantic failure");
     assert_eq!(
         adapter.locator_checkpoint().expect("locator checkpoint"),
@@ -888,6 +888,7 @@ fn append_restart_and_selected_detail_do_not_rebuild_full_projections() {
     );
     assert_eq!(inventory.schema_version, 1);
     assert_eq!(inventory.fact_count, 1);
+    assert_eq!(inventory.retained_body_object_bytes, 0);
     assert_eq!(
         inventory.tables,
         vec![
@@ -931,6 +932,38 @@ fn append_restart_and_selected_detail_do_not_rebuild_full_projections() {
             "forbidden semantic column {forbidden}"
         );
     }
+}
+
+#[test]
+fn semantic_inventory_measures_retained_body_or_object_payload_columns() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    drop(adapter);
+    let database = root
+        .path()
+        .join(".pointbreak-derived")
+        .join("cursor.sqlite3");
+    let connection = rusqlite::Connection::open(database).expect("open sidecar");
+    connection
+        .execute_batch(
+            "CREATE TABLE qualification_payload_probe (
+                 id INTEGER PRIMARY KEY,
+                 body_bytes BLOB NOT NULL
+             ) STRICT;
+             INSERT INTO qualification_payload_probe(body_bytes) VALUES (x'01020304');",
+        )
+        .expect("install payload probe");
+    drop(connection);
+    let reopened =
+        QualificationDerivedAccessAdapter::open(root.path(), CursorLedgerIdentity::new(STORE_ID))
+            .expect("reopen adapter");
+    assert_eq!(
+        reopened
+            .semantic_inventory()
+            .expect("semantic inventory")
+            .retained_body_object_bytes,
+        4
+    );
 }
 
 #[test]

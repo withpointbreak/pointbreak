@@ -34,6 +34,7 @@ pub(crate) struct SemanticInventory {
     pub(crate) tables: Vec<String>,
     pub(crate) columns: Vec<String>,
     pub(crate) indexes: Vec<String>,
+    pub(crate) retained_body_object_bytes: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -226,7 +227,6 @@ impl SqliteSemantic {
         self.apply_delta_inner(delta, locator_rows, semantic_facts, false)
     }
 
-    #[cfg(test)]
     pub(crate) fn apply_delta_with_failure(
         &self,
         delta: &CursorDelta,
@@ -463,6 +463,7 @@ impl SqliteSemantic {
                 row.get::<_, i64>(0)
             })
             .map_err(|error| sqlite_error("count semantic facts", error))?;
+        let retained_body_object_bytes = retained_body_object_bytes(&connection)?;
         Ok(SemanticInventory {
             profile_id,
             schema_version: u32::try_from(schema_version)
@@ -478,8 +479,71 @@ impl SqliteSemantic {
             )?,
             columns: query_names(&connection, "PRAGMA table_info(semantic_event_fact)", 1)?,
             indexes: query_names(&connection, "PRAGMA index_list(semantic_event_fact)", 1)?,
+            retained_body_object_bytes,
         })
     }
+}
+
+fn retained_body_object_bytes(
+    connection: &rusqlite::Connection,
+) -> Result<u64, SqliteSemanticError> {
+    let tables = query_names(
+        connection,
+        "SELECT name FROM sqlite_schema
+         WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+         ORDER BY name",
+        0,
+    )?;
+    let mut total = 0_u64;
+    for table in tables {
+        let pragma = format!("PRAGMA table_info({})", quote_identifier(&table));
+        let mut statement = connection
+            .prepare(&pragma)
+            .map_err(|error| sqlite_error("inspect derived-access columns", error))?;
+        let columns = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            })
+            .map_err(|error| sqlite_error("inspect derived-access columns", error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| sqlite_error("inspect derived-access columns", error))?;
+        for (column, declared_type) in columns {
+            if !is_retained_body_object_column(&column, &declared_type) {
+                continue;
+            }
+            let query = format!(
+                "SELECT coalesce(sum(length({})), 0) FROM {}",
+                quote_identifier(&column),
+                quote_identifier(&table)
+            );
+            let bytes = connection
+                .query_row(&query, [], |row| row.get::<_, i64>(0))
+                .map_err(|error| sqlite_error("measure retained body/object bytes", error))?;
+            total = total.saturating_add(u64::try_from(bytes).map_err(|_| {
+                SqliteSemanticError::Metadata("negative retained body/object bytes".to_owned())
+            })?);
+        }
+    }
+    Ok(total)
+}
+
+fn is_retained_body_object_column(name: &str, declared_type: &str) -> bool {
+    if declared_type.eq_ignore_ascii_case("BLOB") {
+        return true;
+    }
+    let name = name.to_ascii_lowercase();
+    matches!(name.as_str(), "body" | "object" | "payload" | "content")
+        || ["body", "object", "payload", "content"]
+            .iter()
+            .any(|subject| {
+                ["bytes", "json", "text", "content"]
+                    .iter()
+                    .any(|representation| name == format!("{subject}_{representation}"))
+            })
+}
+
+fn quote_identifier(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 fn insert_facts(

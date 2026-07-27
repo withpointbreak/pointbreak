@@ -276,6 +276,71 @@ longitudinal-contract:
 derived-access-contract:
     cargo +stable bench --locked --features bench --bench store_foundation -- --derived-access-contract
 
+# List the derived-access qualification modes without creating a store.
+[group('quality')]
+derived-access-help:
+    cargo +stable bench --locked --features bench --bench store_foundation -- --derived-access-help
+
+# Exercise one disposable deterministic D0-128, L1, or L7 correctness tier with counters.
+[group('quality')]
+derived-access-smoke tier="D0-128":
+    cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \
+        --derived-access-smoke --derived-access-tier="{{ tier }}"
+
+# Run one evidence-bound D0-128, L1, or L7 native smoke request.
+[group('quality')]
+derived-access-native-smoke request:
+    cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \
+        --derived-access-smoke --derived-access-request="{{ request }}"
+
+# Run all native lifecycle vectors from one typed request.
+[group('quality')]
+derived-access-lifecycle request:
+    cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \
+        --derived-access-lifecycle --derived-access-request="{{ request }}"
+
+# Verify a retained L100/C262 input and separately created qualification clone.
+[group('quality')]
+derived-access-retained-preflight request:
+    cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \
+        --derived-access-retained-preflight --derived-access-request="{{ request }}"
+
+# Bootstrap only the derived namespace of a precreated retained-root clone.
+[group('quality')]
+derived-access-retained-bootstrap request:
+    cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \
+        --derived-access-retained-bootstrap --derived-access-request="{{ request }}"
+
+# Collect the frozen L100/C262 operation samples from two admitted roots.
+[group('quality')]
+derived-access-scale request:
+    cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \
+        --derived-access-scale-evidence --derived-access-request="{{ request }}"
+
+# Collect empty-adjusted L7/L100 process-memory evidence.
+[group('quality')]
+derived-access-resource request:
+    cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \
+        --derived-access-resource-evidence --derived-access-request="{{ request }}"
+
+# Convert typed raw receipts into one independently verifiable package fragment.
+[group('quality')]
+derived-access-fragment request:
+    cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \
+        --derived-access-fragment --derived-access-request="{{ request }}"
+
+# Assemble and evaluate derived-access fragments into one completion-last package.
+[group('quality')]
+derived-access-package root *inputs:
+    cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \
+        --derived-access-package --derived-access-package-root="{{ root }}" {{ inputs }}
+
+# Recursively verify one completed derived-access package without editing it.
+[group('quality')]
+derived-access-verify-package root:
+    cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \
+        --derived-access-verify-package --derived-access-package-root="{{ root }}"
+
 # Exercise disposable longitudinal construction, pair, preflight, and package mechanics without timing.
 [group('quality')]
 longitudinal-smoke:

@@ -76,6 +76,7 @@ const BODY_SIZES: [usize; 8] = [512, 1_024, 2_048, 4_096, 8_192, 12_288, 16_384,
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LongitudinalRecordShapeV1 {
+    DerivedAccessD0,
     Workload,
     CapacityV1,
     CapacityL100O10K,
@@ -84,6 +85,7 @@ pub(crate) enum LongitudinalRecordShapeV1 {
 impl LongitudinalRecordShapeV1 {
     fn namespace(self) -> &'static str {
         match self {
+            Self::DerivedAccessD0 => "derived-access-d0",
             Self::Workload => "workload",
             Self::CapacityV1 => "capacity-v1",
             Self::CapacityL100O10K => "capacity-l100-o10k",
@@ -92,6 +94,7 @@ impl LongitudinalRecordShapeV1 {
 
     fn event_count(self) -> u64 {
         match self {
+            Self::DerivedAccessD0 => 128,
             Self::Workload | Self::CapacityV1 => V1_BLOCK_EVENT_COUNT,
             Self::CapacityL100O10K => CAPACITY_SUPERBLOCK_EVENT_COUNT,
         }
@@ -99,6 +102,7 @@ impl LongitudinalRecordShapeV1 {
 
     fn body_count(self) -> u64 {
         match self {
+            Self::DerivedAccessD0 => 78,
             Self::Workload | Self::CapacityV1 => V1_BLOCK_BODY_COUNT,
             Self::CapacityL100O10K => CAPACITY_SUPERBLOCK_BODY_COUNT,
         }
@@ -106,6 +110,7 @@ impl LongitudinalRecordShapeV1 {
 
     fn object_count(self) -> u64 {
         match self {
+            Self::DerivedAccessD0 => 16,
             Self::Workload | Self::CapacityV1 => V1_BLOCK_OBJECT_COUNT,
             Self::CapacityL100O10K => CAPACITY_SUPERBLOCK_OBJECT_COUNT,
         }
@@ -113,6 +118,7 @@ impl LongitudinalRecordShapeV1 {
 
     fn log_count(self) -> u64 {
         match self {
+            Self::DerivedAccessD0 => 1,
             Self::Workload | Self::CapacityV1 => V1_BLOCK_LOG_COUNT,
             Self::CapacityL100O10K => CAPACITY_SUPERBLOCK_LOG_COUNT,
         }
@@ -299,11 +305,35 @@ pub(crate) fn prepare_longitudinal_record_v1(
     spec: LongitudinalRecordSpecV1,
 ) -> Result<PreparedLongitudinalRecordV1> {
     match spec.shape {
+        LongitudinalRecordShapeV1::DerivedAccessD0 => prepare_derived_access_d0(spec),
         LongitudinalRecordShapeV1::Workload | LongitudinalRecordShapeV1::CapacityV1 => {
             prepare_v1_block(spec)
         }
         LongitudinalRecordShapeV1::CapacityL100O10K => prepare_capacity_superblock(spec),
     }
+}
+
+fn prepare_derived_access_d0(
+    spec: LongitudinalRecordSpecV1,
+) -> Result<PreparedLongitudinalRecordV1> {
+    let mut builder = BlockBuilderV1::new(spec);
+    builder.push_review_initialized()?;
+    builder.prepare_revisions(&[8, 4, 4])?;
+    builder.prepare_tasks(4)?;
+    builder.push_revision_proposals()?;
+    builder.push_task_proposals()?;
+    builder.push_review_observations(20)?;
+    builder.push_assessments(12)?;
+    builder.push_input_requests(12, 4)?;
+    builder.push_input_responses(8, 4)?;
+    builder.push_ref_associations(6, 2)?;
+    builder.push_commit_associations(8, 2)?;
+    builder.push_validations(20)?;
+    builder.push_task_checkpoints(6)?;
+    builder.push_task_observations(6)?;
+    builder.push_signature_carriers(4)?;
+    builder.push_one_removal()?;
+    builder.finish()
 }
 
 fn prepare_v1_block(spec: LongitudinalRecordSpecV1) -> Result<PreparedLongitudinalRecordV1> {
@@ -1299,6 +1329,18 @@ impl BlockBuilderV1 {
         Ok(())
     }
 
+    fn push_one_removal(&mut self) -> Result<()> {
+        let content = self
+            .removed
+            .first()
+            .cloned()
+            .ok_or_else(|| ShoreError::Message("D0 removal target is missing".to_owned()))?;
+        self.removed.clear();
+        self.removed.push(content.clone());
+        self.push_selected_removal(&content)?;
+        Ok(())
+    }
+
     fn push_selected_removal(&mut self, content: &PreparedContentV1) -> Result<String> {
         let event = ShoreEvent::new(
             EventType::ArtifactRemoved,
@@ -1419,7 +1461,9 @@ impl BlockBuilderV1 {
     fn global_body_ordinal(&self) -> u64 {
         let offset = match self.spec.shape {
             LongitudinalRecordShapeV1::CapacityL100O10K => 3,
-            LongitudinalRecordShapeV1::Workload | LongitudinalRecordShapeV1::CapacityV1 => 0,
+            LongitudinalRecordShapeV1::DerivedAccessD0
+            | LongitudinalRecordShapeV1::Workload
+            | LongitudinalRecordShapeV1::CapacityV1 => 0,
         };
         offset + self.spec.block * self.spec.shape.body_count() + self.body_ordinal
     }

@@ -3,6 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "longitudinal-counting")]
+use super::sqlite_cursor::CursorLedgerInventory;
 use super::sqlite_cursor::{CursorLedgerError, CursorLedgerIdentity, SqliteCursorLedger};
 use super::sqlite_locator::{LocatorInventory, SqliteLocator, SqliteLocatorError};
 use super::sqlite_semantic::{SemanticInventory, SqliteSemantic, SqliteSemanticError};
@@ -178,6 +180,13 @@ impl QualificationDerivedAccessAdapter {
         Ok(self.locator.inventory()?)
     }
 
+    #[cfg(feature = "longitudinal-counting")]
+    pub(crate) fn cursor_inventory(
+        &self,
+    ) -> Result<CursorLedgerInventory, DerivedAccessAdapterError> {
+        Ok(self.cursor.inventory()?)
+    }
+
     pub(crate) fn semantic_inventory(
         &self,
     ) -> Result<SemanticInventory, DerivedAccessAdapterError> {
@@ -260,8 +269,7 @@ impl QualificationDerivedAccessAdapter {
         })))
     }
 
-    #[cfg(test)]
-    pub(crate) fn catch_up_with_semantic_failure_for_test(
+    pub(crate) fn catch_up_with_interruption(
         &self,
         batch_limit: usize,
     ) -> Result<TruthCursor, DerivedAccessAdapterError> {

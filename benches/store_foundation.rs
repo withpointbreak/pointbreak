@@ -6,8 +6,32 @@
 use std::process::{Command, ExitCode};
 
 use pointbreak::bench_support::derived_access::{
-    QUALIFICATION_DERIVED_ACCESS_CONTRACT_MODE_V1,
+    QUALIFICATION_DERIVED_ACCESS_CONTRACT_MODE_V1, QUALIFICATION_DERIVED_ACCESS_FRAGMENT_MODE_V1,
+    QUALIFICATION_DERIVED_ACCESS_HELP_MODE_V1,
+    QUALIFICATION_DERIVED_ACCESS_LIFECYCLE_CHILD_MODE_V1,
+    QUALIFICATION_DERIVED_ACCESS_LIFECYCLE_MODE_V1, QUALIFICATION_DERIVED_ACCESS_PACKAGE_MODE_V1,
+    QUALIFICATION_DERIVED_ACCESS_RESOURCE_CHILD_MODE_V1,
+    QUALIFICATION_DERIVED_ACCESS_RESOURCE_MODE_V1,
+    QUALIFICATION_DERIVED_ACCESS_RESTART_CHILD_MODE_V1,
+    QUALIFICATION_DERIVED_ACCESS_RETAINED_BOOTSTRAP_MODE_V1,
+    QUALIFICATION_DERIVED_ACCESS_RETAINED_PREFLIGHT_MODE_V1,
+    QUALIFICATION_DERIVED_ACCESS_SCALE_MODE_V1, QUALIFICATION_DERIVED_ACCESS_SMOKE_MODE_V1,
+    QUALIFICATION_DERIVED_ACCESS_VERIFY_PACKAGE_MODE_V1, QualificationDerivedAccessTierV1,
+    assemble_qualification_derived_access_package_v1,
+    bootstrap_qualification_derived_access_retained_root_v1,
+    build_qualification_derived_access_fragment_v1,
+    preflight_qualification_derived_access_retained_root_v1,
     qualification_derived_access_contract_v1_publication,
+    run_qualification_derived_access_lifecycle_child_v1,
+    run_qualification_derived_access_lifecycle_v1,
+    run_qualification_derived_access_longitudinal_smoke_v1,
+    run_qualification_derived_access_native_smoke_v1,
+    run_qualification_derived_access_non_timing_smoke_at_v1,
+    run_qualification_derived_access_non_timing_smoke_v1,
+    run_qualification_derived_access_resource_child_v1,
+    run_qualification_derived_access_resource_v1,
+    run_qualification_derived_access_restart_child_v1, run_qualification_derived_access_scale_v1,
+    verify_qualification_derived_access_package_v1,
 };
 use pointbreak::bench_support::foundation::{
     DisposableBundleDestinationV2, ExactBundleClosureV2, ExactBundleFailurePointV2,
@@ -63,11 +87,13 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 const USAGE: &str = "\
-Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--generated-workload-smoke|--longitudinal-contract|--longitudinal-help|--longitudinal-smoke|--longitudinal-carry-forward|--longitudinal-carry-forward-smoke|--longitudinal-verify-package|--longitudinal-verify-package-receipt|--longitudinal-verify-carry-forward|--derived-access-contract|--loose-baseline-smoke|--loose-baseline-evidence|--prospective-contract|--content-only-contract|--transfer-smoke|--sqlite-smoke|--segments-smoke|--lmdb-proof-open-close|--lmdb-smoke|--lmdb-lifecycle-smoke|--lmdb-prospective-smoke|--lmdb-prospective-evidence|--lmdb-prospective-package|--qualification-smoke|--qualification-evidence|--qualification-diagnostics|--qualification-contract|--qualification-final-evidence|--qualification-package|--help]\n\
+Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--generated-workload-smoke|--longitudinal-contract|--longitudinal-help|--longitudinal-smoke|--longitudinal-carry-forward|--longitudinal-carry-forward-smoke|--longitudinal-verify-package|--longitudinal-verify-package-receipt|--longitudinal-verify-carry-forward|--derived-access-contract|--derived-access-help|--derived-access-smoke|--derived-access-lifecycle|--derived-access-retained-preflight|--derived-access-retained-bootstrap|--derived-access-scale-evidence|--derived-access-resource-evidence|--derived-access-fragment|--derived-access-package|--derived-access-verify-package|--loose-baseline-smoke|--loose-baseline-evidence|--prospective-contract|--content-only-contract|--transfer-smoke|--sqlite-smoke|--segments-smoke|--lmdb-proof-open-close|--lmdb-smoke|--lmdb-lifecycle-smoke|--lmdb-prospective-smoke|--lmdb-prospective-evidence|--lmdb-prospective-package|--qualification-smoke|--qualification-evidence|--qualification-diagnostics|--qualification-contract|--qualification-final-evidence|--qualification-package|--help]\n\
        --longitudinal-carry-forward --longitudinal-carry-forward-request=<path>\n\
        --longitudinal-verify-package --longitudinal-package-root=<path>\n\
        --longitudinal-verify-package-receipt --longitudinal-package-root=<path>\n\
        --longitudinal-verify-carry-forward --longitudinal-authority-package=<path> --longitudinal-package-root=<path>\n\
+       --derived-access-smoke [--derived-access-tier=D0-128|L1|L7 | --derived-access-request=<path>]\n\
+       --derived-access-verify-package --derived-access-package-root=<path>\n\
        --qualification-diagnostics [--qualification-pair-order=alternating|candidate_then_baseline|baseline_then_candidate]\n\
        --qualification-package --qualification-input=<path> [--qualification-input=<path> ...]\n\
        --lmdb-prospective-package --lmdb-prospective-input=<path> [--lmdb-prospective-input=<path> ...]\n\
@@ -187,6 +213,74 @@ fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     if arguments
         .first()
+        .is_some_and(|argument| argument == QUALIFICATION_DERIVED_ACCESS_LIFECYCLE_CHILD_MODE_V1)
+    {
+        if arguments.len() != 2 {
+            eprintln!("derived-access lifecycle child requires exactly one request path");
+            return ExitCode::from(2);
+        }
+        return match run_qualification_derived_access_lifecycle_child_v1(std::path::Path::new(
+            &arguments[1],
+        )) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("store foundation derived-access lifecycle child failed: {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == QUALIFICATION_DERIVED_ACCESS_RESOURCE_CHILD_MODE_V1)
+    {
+        if arguments.len() != 2 {
+            eprintln!("derived-access resource child requires exactly one request path");
+            return ExitCode::from(2);
+        }
+        return match run_qualification_derived_access_resource_child_v1(std::path::Path::new(
+            &arguments[1],
+        )) {
+            Ok(receipt) => {
+                println!(
+                    "{}",
+                    serde_json::to_string(&receipt)
+                        .expect("derived-access resource child receipt serializes")
+                );
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("store foundation derived-access resource child failed: {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == QUALIFICATION_DERIVED_ACCESS_RESTART_CHILD_MODE_V1)
+    {
+        if arguments.len() != 2 {
+            eprintln!("derived-access restart child requires exactly one request path");
+            return ExitCode::from(2);
+        }
+        return match run_qualification_derived_access_restart_child_v1(std::path::Path::new(
+            &arguments[1],
+        )) {
+            Ok(receipt) => {
+                println!(
+                    "{}",
+                    serde_json::to_string(&receipt)
+                        .expect("derived-access restart child receipt serializes")
+                );
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("store foundation derived-access restart child failed: {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
+    if arguments
+        .first()
         .is_some_and(|argument| argument == "--loose-baseline-open-child")
     {
         if arguments.len() != 2 {
@@ -288,6 +382,16 @@ fn main() -> ExitCode {
         LONGITUDINAL_VERIFY_PACKAGE_RECEIPT_MODE_V1,
         LONGITUDINAL_VERIFY_CARRY_FORWARD_MODE_V1,
         QUALIFICATION_DERIVED_ACCESS_CONTRACT_MODE_V1,
+        QUALIFICATION_DERIVED_ACCESS_FRAGMENT_MODE_V1,
+        QUALIFICATION_DERIVED_ACCESS_HELP_MODE_V1,
+        QUALIFICATION_DERIVED_ACCESS_SMOKE_MODE_V1,
+        QUALIFICATION_DERIVED_ACCESS_LIFECYCLE_MODE_V1,
+        QUALIFICATION_DERIVED_ACCESS_RETAINED_PREFLIGHT_MODE_V1,
+        QUALIFICATION_DERIVED_ACCESS_RETAINED_BOOTSTRAP_MODE_V1,
+        QUALIFICATION_DERIVED_ACCESS_SCALE_MODE_V1,
+        QUALIFICATION_DERIVED_ACCESS_RESOURCE_MODE_V1,
+        QUALIFICATION_DERIVED_ACCESS_PACKAGE_MODE_V1,
+        QUALIFICATION_DERIVED_ACCESS_VERIFY_PACKAGE_MODE_V1,
         QUALIFICATION_LOOSE_BASELINE_SMOKE_MODE_V1,
         QUALIFICATION_LOOSE_BASELINE_EVIDENCE_MODE_V1,
         QUALIFICATION_PROSPECTIVE_CONTRACT_PUBLICATION_MODE_V1,
@@ -371,6 +475,16 @@ fn main() -> ExitCode {
             && argument != LONGITUDINAL_VERIFY_PACKAGE_RECEIPT_MODE_V1
             && argument != LONGITUDINAL_VERIFY_CARRY_FORWARD_MODE_V1
             && argument != QUALIFICATION_DERIVED_ACCESS_CONTRACT_MODE_V1
+            && argument != QUALIFICATION_DERIVED_ACCESS_FRAGMENT_MODE_V1
+            && argument != QUALIFICATION_DERIVED_ACCESS_HELP_MODE_V1
+            && argument != QUALIFICATION_DERIVED_ACCESS_SMOKE_MODE_V1
+            && argument != QUALIFICATION_DERIVED_ACCESS_LIFECYCLE_MODE_V1
+            && argument != QUALIFICATION_DERIVED_ACCESS_RETAINED_PREFLIGHT_MODE_V1
+            && argument != QUALIFICATION_DERIVED_ACCESS_RETAINED_BOOTSTRAP_MODE_V1
+            && argument != QUALIFICATION_DERIVED_ACCESS_SCALE_MODE_V1
+            && argument != QUALIFICATION_DERIVED_ACCESS_RESOURCE_MODE_V1
+            && argument != QUALIFICATION_DERIVED_ACCESS_PACKAGE_MODE_V1
+            && argument != QUALIFICATION_DERIVED_ACCESS_VERIFY_PACKAGE_MODE_V1
             && argument != QUALIFICATION_LOOSE_BASELINE_SMOKE_MODE_V1
             && argument != QUALIFICATION_LOOSE_BASELINE_EVIDENCE_MODE_V1
             && argument != QUALIFICATION_PROSPECTIVE_CONTRACT_PUBLICATION_MODE_V1
@@ -397,6 +511,11 @@ fn main() -> ExitCode {
             && !argument.starts_with("--longitudinal-carry-forward-request=")
             && !argument.starts_with("--longitudinal-authority-package=")
             && !argument.starts_with("--lmdb-prospective-input=")
+            && !argument.starts_with("--derived-access-tier=")
+            && !argument.starts_with("--derived-access-request=")
+            && !argument.starts_with("--derived-access-input=")
+            && !argument.starts_with("--derived-access-package-root=")
+            && !argument.starts_with("--derived-access-root=")
     }) || requested_modes > 1
         || (!diagnostics_requested && diagnostic_pair_order.is_some())
         || (!package_requested && !package_inputs.is_empty())
@@ -456,6 +575,222 @@ fn main() -> ExitCode {
                 .expect("longitudinal contract publication serializes")
         );
         return ExitCode::SUCCESS;
+    }
+
+    if arguments
+        .iter()
+        .any(|argument| argument == QUALIFICATION_DERIVED_ACCESS_HELP_MODE_V1)
+    {
+        println!(
+            "Derived-access qualification modes:\n\
+             --derived-access-contract\n\
+             --derived-access-smoke [--derived-access-tier=D0-128|L1|L7 | --derived-access-request=<path>]\n\
+             --derived-access-lifecycle --derived-access-request=<path>\n\
+             --derived-access-retained-preflight --derived-access-request=<path>\n\
+             --derived-access-retained-bootstrap --derived-access-request=<path>\n\
+             --derived-access-scale-evidence --derived-access-request=<path>\n\
+             --derived-access-resource-evidence --derived-access-request=<path>\n\
+             --derived-access-fragment --derived-access-request=<path>\n\
+             --derived-access-package --derived-access-input=<path> ...\n\
+             --derived-access-verify-package --derived-access-package-root=<path>\n\
+             \n\
+             L100 and C262 modes consume verified admitted roots and never materialize them."
+        );
+        return ExitCode::SUCCESS;
+    }
+
+    if arguments
+        .iter()
+        .any(|argument| argument == QUALIFICATION_DERIVED_ACCESS_SMOKE_MODE_V1)
+    {
+        let requests = arguments
+            .iter()
+            .filter_map(|argument| argument.strip_prefix("--derived-access-request="))
+            .collect::<Vec<_>>();
+        let requested_tier = arguments
+            .iter()
+            .find_map(|argument| argument.strip_prefix("--derived-access-tier="))
+            .unwrap_or("D0-128");
+        let roots = arguments
+            .iter()
+            .filter_map(|argument| argument.strip_prefix("--derived-access-root="))
+            .collect::<Vec<_>>();
+        if requests.len() > 1
+            || (!requests.is_empty()
+                && (!roots.is_empty()
+                    || arguments
+                        .iter()
+                        .any(|argument| argument.starts_with("--derived-access-tier="))))
+        {
+            eprintln!("typed native smoke requests cannot be combined with tier/root flags");
+            return ExitCode::from(2);
+        }
+        if let Some(request) = requests.first() {
+            return report_derived_access_smoke(run_qualification_derived_access_native_smoke_v1(
+                std::path::Path::new(request),
+            ));
+        }
+        if roots.len() > 1 || (!roots.is_empty() && requested_tier != "D0-128") {
+            eprintln!("a retained smoke root is supported only once for D0-128");
+            return ExitCode::from(2);
+        }
+        return match requested_tier {
+            "D0-128" => report_derived_access_smoke(if let Some(root) = roots.first() {
+                run_qualification_derived_access_non_timing_smoke_at_v1(std::path::Path::new(root))
+            } else {
+                run_qualification_derived_access_non_timing_smoke_v1()
+            }),
+            "L1" => {
+                report_derived_access_smoke(run_qualification_derived_access_longitudinal_smoke_v1(
+                    QualificationDerivedAccessTierV1::L1,
+                ))
+            }
+            "L7" => {
+                report_derived_access_smoke(run_qualification_derived_access_longitudinal_smoke_v1(
+                    QualificationDerivedAccessTierV1::L7,
+                ))
+            }
+            _ => {
+                eprintln!("derived-access smoke tier must be D0-128, L1, or L7");
+                ExitCode::from(2)
+            }
+        };
+    }
+
+    if arguments
+        .iter()
+        .any(|argument| argument == QUALIFICATION_DERIVED_ACCESS_VERIFY_PACKAGE_MODE_V1)
+    {
+        let roots = arguments
+            .iter()
+            .filter_map(|argument| argument.strip_prefix("--derived-access-package-root="))
+            .collect::<Vec<_>>();
+        if roots.len() != 1 {
+            eprintln!(
+                "derived-access package verification requires exactly one --derived-access-package-root"
+            );
+            return ExitCode::from(2);
+        }
+        return match verify_qualification_derived_access_package_v1(std::path::Path::new(roots[0]))
+        {
+            Ok(evaluation) => {
+                println!(
+                    "{}",
+                    serde_json::to_string(&evaluation)
+                        .expect("derived-access evaluation serializes")
+                );
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("store foundation derived-access package failed: {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
+
+    let derived_requests = arguments
+        .iter()
+        .filter_map(|argument| argument.strip_prefix("--derived-access-request="))
+        .collect::<Vec<_>>();
+    if arguments
+        .iter()
+        .any(|argument| argument == QUALIFICATION_DERIVED_ACCESS_RETAINED_PREFLIGHT_MODE_V1)
+    {
+        if derived_requests.len() != 1 {
+            eprintln!("derived-access retained preflight requires exactly one typed request");
+            return ExitCode::from(2);
+        }
+        return report_derived_access_smoke(
+            preflight_qualification_derived_access_retained_root_v1(std::path::Path::new(
+                derived_requests[0],
+            )),
+        );
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == QUALIFICATION_DERIVED_ACCESS_RETAINED_BOOTSTRAP_MODE_V1)
+    {
+        if derived_requests.len() != 1 {
+            eprintln!("derived-access retained bootstrap requires exactly one typed request");
+            return ExitCode::from(2);
+        }
+        return report_derived_access_smoke(
+            bootstrap_qualification_derived_access_retained_root_v1(std::path::Path::new(
+                derived_requests[0],
+            )),
+        );
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == QUALIFICATION_DERIVED_ACCESS_FRAGMENT_MODE_V1)
+    {
+        if derived_requests.len() != 1 {
+            eprintln!("derived-access fragment requires exactly one typed request");
+            return ExitCode::from(2);
+        }
+        return report_derived_access_smoke(build_qualification_derived_access_fragment_v1(
+            std::path::Path::new(derived_requests[0]),
+        ));
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == QUALIFICATION_DERIVED_ACCESS_PACKAGE_MODE_V1)
+    {
+        let inputs = arguments
+            .iter()
+            .filter_map(|argument| argument.strip_prefix("--derived-access-input="))
+            .map(std::path::PathBuf::from)
+            .collect::<Vec<_>>();
+        let roots = arguments
+            .iter()
+            .filter_map(|argument| argument.strip_prefix("--derived-access-package-root="))
+            .collect::<Vec<_>>();
+        if inputs.is_empty() || roots.len() != 1 {
+            eprintln!(
+                "derived-access package assembly requires inputs and one package output root"
+            );
+            return ExitCode::from(2);
+        }
+        return report_derived_access_smoke(assemble_qualification_derived_access_package_v1(
+            &inputs,
+            std::path::Path::new(roots[0]),
+        ));
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == QUALIFICATION_DERIVED_ACCESS_LIFECYCLE_MODE_V1)
+    {
+        if derived_requests.len() != 1 {
+            eprintln!("derived-access lifecycle requires exactly one typed request");
+            return ExitCode::from(2);
+        }
+        return report_derived_access_smoke(run_qualification_derived_access_lifecycle_v1(
+            std::path::Path::new(derived_requests[0]),
+        ));
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == QUALIFICATION_DERIVED_ACCESS_SCALE_MODE_V1)
+    {
+        if derived_requests.len() != 1 {
+            eprintln!("derived-access scale evidence requires exactly one typed request");
+            return ExitCode::from(2);
+        }
+        return report_derived_access_smoke(run_qualification_derived_access_scale_v1(
+            std::path::Path::new(derived_requests[0]),
+        ));
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == QUALIFICATION_DERIVED_ACCESS_RESOURCE_MODE_V1)
+    {
+        if derived_requests.len() != 1 {
+            eprintln!("derived-access resource evidence requires exactly one typed request");
+            return ExitCode::from(2);
+        }
+        return report_derived_access_smoke(run_qualification_derived_access_resource_v1(
+            std::path::Path::new(derived_requests[0]),
+        ));
     }
 
     if arguments
@@ -736,6 +1071,22 @@ fn main() -> ExitCode {
         }
         Err(error) => {
             eprintln!("store foundation smoke failed: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn report_derived_access_smoke<T: Serialize>(result: Result<T, String>) -> ExitCode {
+    match result {
+        Ok(receipt) => {
+            println!(
+                "{}",
+                serde_json::to_string(&receipt).expect("derived-access smoke receipt serializes")
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("store foundation derived-access smoke failed: {error}");
             ExitCode::from(1)
         }
     }
