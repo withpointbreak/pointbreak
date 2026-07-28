@@ -199,11 +199,16 @@ impl SqliteLocator {
         }
         let row = connection
             .query_row(
-                "SELECT epoch, sequence, logical_reread_key, event_id,
-                        normalized_occurred_at, replay_key, event_type, journal_id,
-                        subject_id, track_id, payload_hash, validation_witness
-                 FROM locator_event
-                 WHERE event_id = ?1 AND epoch = ?2 AND sequence <= ?3",
+                "SELECT locator.epoch, locator.sequence, receipt.logical_reread_key,
+                        locator.event_id, locator.normalized_occurred_at,
+                        locator.replay_key, locator.event_type, locator.journal_id,
+                        locator.subject_id, locator.track_id, locator.payload_hash,
+                        receipt.validation_witness, receipt.epoch
+                 FROM locator_event AS locator
+                 JOIN cursor_receipt AS receipt ON receipt.sequence = locator.sequence
+                 WHERE locator.event_id = ?1
+                   AND locator.epoch = ?2
+                   AND locator.sequence <= ?3",
                 params![
                     event_id,
                     to_i64(observed.epoch, "lookup epoch")?,
@@ -213,9 +218,6 @@ impl SqliteLocator {
             )
             .optional()
             .map_err(|error| sqlite_error("lookup semantic event id", error))?;
-        if let Some(row) = &row {
-            validate_locator_receipt(&connection, row)?;
-        }
         Ok(LocatorRead::Ready(row))
     }
 
@@ -301,12 +303,15 @@ impl SqliteLocator {
             WindowPosition::Head => (
                 query_locator_rows(
                     &connection,
-                    "SELECT epoch, sequence, logical_reread_key, event_id,
-                            normalized_occurred_at, replay_key, event_type, journal_id,
-                            subject_id, track_id, payload_hash, validation_witness
-                     FROM locator_event INDEXED BY locator_event_display
-                     WHERE epoch = ?1 AND sequence <= ?2
-                     ORDER BY normalized_occurred_at, event_id
+                    "SELECT locator.epoch, locator.sequence, receipt.logical_reread_key,
+                            locator.event_id, locator.normalized_occurred_at,
+                            locator.replay_key, locator.event_type, locator.journal_id,
+                            locator.subject_id, locator.track_id, locator.payload_hash,
+                            receipt.validation_witness, receipt.epoch
+                     FROM locator_event AS locator INDEXED BY locator_event_display
+                     JOIN cursor_receipt AS receipt ON receipt.sequence = locator.sequence
+                     WHERE locator.epoch = ?1 AND locator.sequence <= ?2
+                     ORDER BY locator.normalized_occurred_at, locator.event_id
                      LIMIT ?3",
                     params![epoch, sequence, limit],
                 )?,
@@ -315,13 +320,16 @@ impl SqliteLocator {
             WindowPosition::Continue(WindowContinuation::After { anchor, .. }) => (
                 query_locator_rows(
                     &connection,
-                    "SELECT epoch, sequence, logical_reread_key, event_id,
-                            normalized_occurred_at, replay_key, event_type, journal_id,
-                            subject_id, track_id, payload_hash, validation_witness
-                     FROM locator_event INDEXED BY locator_event_display
-                     WHERE epoch = ?1 AND sequence <= ?2
-                       AND (normalized_occurred_at, event_id) > (?3, ?4)
-                     ORDER BY normalized_occurred_at, event_id
+                    "SELECT locator.epoch, locator.sequence, receipt.logical_reread_key,
+                            locator.event_id, locator.normalized_occurred_at,
+                            locator.replay_key, locator.event_type, locator.journal_id,
+                            locator.subject_id, locator.track_id, locator.payload_hash,
+                            receipt.validation_witness, receipt.epoch
+                     FROM locator_event AS locator INDEXED BY locator_event_display
+                     JOIN cursor_receipt AS receipt ON receipt.sequence = locator.sequence
+                     WHERE locator.epoch = ?1 AND locator.sequence <= ?2
+                       AND (locator.normalized_occurred_at, locator.event_id) > (?3, ?4)
+                     ORDER BY locator.normalized_occurred_at, locator.event_id
                      LIMIT ?5",
                     params![
                         epoch,
@@ -336,12 +344,15 @@ impl SqliteLocator {
             WindowPosition::Tail => (
                 query_locator_rows(
                     &connection,
-                    "SELECT epoch, sequence, logical_reread_key, event_id,
-                            normalized_occurred_at, replay_key, event_type, journal_id,
-                            subject_id, track_id, payload_hash, validation_witness
-                     FROM locator_event INDEXED BY locator_event_display
-                     WHERE epoch = ?1 AND sequence <= ?2
-                     ORDER BY normalized_occurred_at DESC, event_id DESC
+                    "SELECT locator.epoch, locator.sequence, receipt.logical_reread_key,
+                            locator.event_id, locator.normalized_occurred_at,
+                            locator.replay_key, locator.event_type, locator.journal_id,
+                            locator.subject_id, locator.track_id, locator.payload_hash,
+                            receipt.validation_witness, receipt.epoch
+                     FROM locator_event AS locator INDEXED BY locator_event_display
+                     JOIN cursor_receipt AS receipt ON receipt.sequence = locator.sequence
+                     WHERE locator.epoch = ?1 AND locator.sequence <= ?2
+                     ORDER BY locator.normalized_occurred_at DESC, locator.event_id DESC
                      LIMIT ?3",
                     params![epoch, sequence, limit],
                 )?,
@@ -350,13 +361,16 @@ impl SqliteLocator {
             WindowPosition::Continue(WindowContinuation::Before { anchor, .. }) => (
                 query_locator_rows(
                     &connection,
-                    "SELECT epoch, sequence, logical_reread_key, event_id,
-                            normalized_occurred_at, replay_key, event_type, journal_id,
-                            subject_id, track_id, payload_hash, validation_witness
-                     FROM locator_event INDEXED BY locator_event_display
-                     WHERE epoch = ?1 AND sequence <= ?2
-                       AND (normalized_occurred_at, event_id) < (?3, ?4)
-                     ORDER BY normalized_occurred_at DESC, event_id DESC
+                    "SELECT locator.epoch, locator.sequence, receipt.logical_reread_key,
+                            locator.event_id, locator.normalized_occurred_at,
+                            locator.replay_key, locator.event_type, locator.journal_id,
+                            locator.subject_id, locator.track_id, locator.payload_hash,
+                            receipt.validation_witness, receipt.epoch
+                     FROM locator_event AS locator INDEXED BY locator_event_display
+                     JOIN cursor_receipt AS receipt ON receipt.sequence = locator.sequence
+                     WHERE locator.epoch = ?1 AND locator.sequence <= ?2
+                       AND (locator.normalized_occurred_at, locator.event_id) < (?3, ?4)
+                     ORDER BY locator.normalized_occurred_at DESC, locator.event_id DESC
                      LIMIT ?5",
                     params![
                         epoch,
@@ -490,7 +504,6 @@ fn initialize_locator_schema(
                  sequence INTEGER PRIMARY KEY CHECK (sequence > 0)
                      REFERENCES cursor_receipt(sequence),
                  epoch INTEGER NOT NULL CHECK (epoch > 0),
-                 logical_reread_key TEXT NOT NULL UNIQUE,
                  event_id TEXT NOT NULL UNIQUE,
                  normalized_occurred_at TEXT NOT NULL,
                  replay_key TEXT NOT NULL UNIQUE CHECK (length(replay_key) = 64),
@@ -498,8 +511,7 @@ fn initialize_locator_schema(
                  journal_id TEXT NOT NULL,
                  subject_id TEXT,
                  track_id TEXT,
-                 payload_hash TEXT NOT NULL,
-                 validation_witness TEXT NOT NULL CHECK (length(validation_witness) = 64)
+                 payload_hash TEXT NOT NULL
              ) STRICT;
              CREATE INDEX IF NOT EXISTS locator_event_display
                  ON locator_event(epoch, normalized_occurred_at, event_id, sequence);
@@ -649,14 +661,12 @@ fn insert_locator_row(
     transaction
         .execute(
             "INSERT INTO locator_event
-             (sequence, epoch, logical_reread_key, event_id, normalized_occurred_at,
-              replay_key, event_type, journal_id, subject_id, track_id, payload_hash,
-              validation_witness)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             (sequence, epoch, event_id, normalized_occurred_at, replay_key,
+              event_type, journal_id, subject_id, track_id, payload_hash)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 to_i64(row.cursor.sequence, "locator sequence")?,
                 to_i64(row.cursor.epoch, "locator epoch")?,
-                row.logical_reread_key,
                 row.event_id,
                 row.normalized_occurred_at,
                 row.replay_key,
@@ -665,7 +675,6 @@ fn insert_locator_row(
                 row.subject_id,
                 row.track_id,
                 row.payload_hash,
-                row.validation_witness,
             ],
         )
         .map_err(|error| sqlite_error("insert locator row", error))?;
@@ -691,17 +700,18 @@ fn query_locator_rows(
         fullscan_steps: status_value(statement.get_status(StatementStatus::FullscanStep)),
         sort_operations: status_value(statement.get_status(StatementStatus::Sort)),
     };
-    for row in &output {
-        validate_locator_receipt(connection, row)?;
-    }
     Ok((output, status))
 }
 
 fn locator_row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocatorRow> {
     let epoch = row.get::<_, i64>(0)?;
     let sequence = row.get::<_, i64>(1)?;
+    let receipt_epoch = row.get::<_, i64>(12)?;
     if epoch <= 0 || sequence <= 0 {
         return Err(rusqlite::Error::IntegralValueOutOfRange(0, epoch));
+    }
+    if receipt_epoch != epoch {
+        return Err(rusqlite::Error::InvalidQuery);
     }
     Ok(LocatorRow {
         cursor: TruthCursor::new(epoch as u64, sequence as u64),
@@ -716,36 +726,6 @@ fn locator_row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocatorRow>
         payload_hash: row.get(10)?,
         validation_witness: row.get(11)?,
     })
-}
-
-fn validate_locator_receipt(
-    connection: &Connection,
-    locator: &LocatorRow,
-) -> Result<(), SqliteLocatorError> {
-    let receipt = connection
-        .query_row(
-            "SELECT epoch, logical_reread_key, validation_witness
-             FROM cursor_receipt WHERE sequence = ?1",
-            [to_i64(locator.cursor.sequence, "locator receipt sequence")?],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            },
-        )
-        .map_err(|error| sqlite_error("validate selected locator receipt", error))?;
-    if receipt.0 != to_i64(locator.cursor.epoch, "locator receipt epoch")?
-        || receipt.1 != locator.logical_reread_key
-        || receipt.2 != locator.validation_witness
-    {
-        return Err(SqliteLocatorError::Metadata(format!(
-            "locator row does not match cursor receipt at {:?}",
-            locator.cursor
-        )));
-    }
-    Ok(())
 }
 
 fn status_value(value: i32) -> u64 {

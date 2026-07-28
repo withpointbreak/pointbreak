@@ -234,7 +234,6 @@ fn locator_schema_is_bodyless_and_does_not_persist_overlay_state() {
             "locator_event_target",
             "sqlite_autoindex_locator_event_1",
             "sqlite_autoindex_locator_event_2",
-            "sqlite_autoindex_locator_event_3",
         ]
     );
     for forbidden in [
@@ -245,6 +244,8 @@ fn locator_schema_is_bodyless_and_does_not_persist_overlay_state() {
         "reason",
         "trust_generation",
         "removed_content",
+        "logical_reread_key",
+        "validation_witness",
     ] {
         assert!(
             !inventory.columns.iter().any(|column| column == forbidden),
