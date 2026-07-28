@@ -24,6 +24,7 @@ use pointbreak::bench_support::derived_access::{
     qualification_derived_access_contract_v1_publication,
     run_qualification_derived_access_lifecycle_child_v1,
     run_qualification_derived_access_lifecycle_v1,
+    run_qualification_derived_access_longitudinal_smoke_at_v1,
     run_qualification_derived_access_longitudinal_smoke_v1,
     run_qualification_derived_access_native_smoke_v1,
     run_qualification_derived_access_non_timing_smoke_at_v1,
@@ -92,7 +93,8 @@ Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--gener
        --longitudinal-verify-package --longitudinal-package-root=<path>\n\
        --longitudinal-verify-package-receipt --longitudinal-package-root=<path>\n\
        --longitudinal-verify-carry-forward --longitudinal-authority-package=<path> --longitudinal-package-root=<path>\n\
-       --derived-access-smoke [--derived-access-tier=D0-128|L1|L7 | --derived-access-request=<path>]\n\
+       --derived-access-smoke [--derived-access-tier=D0-128|L1|L7] [--derived-access-root=<empty-path>]\n\
+                              [--derived-access-request=<path>]\n\
        --derived-access-verify-package --derived-access-package-root=<path>\n\
        --qualification-diagnostics [--qualification-pair-order=alternating|candidate_then_baseline|baseline_then_candidate]\n\
        --qualification-package --qualification-input=<path> [--qualification-input=<path> ...]\n\
@@ -584,7 +586,8 @@ fn main() -> ExitCode {
         println!(
             "Derived-access qualification modes:\n\
              --derived-access-contract\n\
-             --derived-access-smoke [--derived-access-tier=D0-128|L1|L7 | --derived-access-request=<path>]\n\
+             --derived-access-smoke [--derived-access-tier=D0-128|L1|L7] [--derived-access-root=<empty-path>]\n\
+                                      [--derived-access-request=<path>]\n\
              --derived-access-lifecycle --derived-access-request=<path>\n\
              --derived-access-retained-preflight --derived-access-request=<path>\n\
              --derived-access-retained-bootstrap --derived-access-request=<path>\n\
@@ -631,8 +634,8 @@ fn main() -> ExitCode {
                 std::path::Path::new(request),
             ));
         }
-        if roots.len() > 1 || (!roots.is_empty() && requested_tier != "D0-128") {
-            eprintln!("a retained smoke root is supported only once for D0-128");
+        if roots.len() > 1 {
+            eprintln!("a derived-access smoke root is supported only once");
             return ExitCode::from(2);
         }
         return match requested_tier {
@@ -641,16 +644,26 @@ fn main() -> ExitCode {
             } else {
                 run_qualification_derived_access_non_timing_smoke_v1()
             }),
-            "L1" => {
-                report_derived_access_smoke(run_qualification_derived_access_longitudinal_smoke_v1(
+            "L1" => report_derived_access_smoke(if let Some(root) = roots.first() {
+                run_qualification_derived_access_longitudinal_smoke_at_v1(
                     QualificationDerivedAccessTierV1::L1,
-                ))
-            }
-            "L7" => {
-                report_derived_access_smoke(run_qualification_derived_access_longitudinal_smoke_v1(
+                    std::path::Path::new(root),
+                )
+            } else {
+                run_qualification_derived_access_longitudinal_smoke_v1(
+                    QualificationDerivedAccessTierV1::L1,
+                )
+            }),
+            "L7" => report_derived_access_smoke(if let Some(root) = roots.first() {
+                run_qualification_derived_access_longitudinal_smoke_at_v1(
                     QualificationDerivedAccessTierV1::L7,
-                ))
-            }
+                    std::path::Path::new(root),
+                )
+            } else {
+                run_qualification_derived_access_longitudinal_smoke_v1(
+                    QualificationDerivedAccessTierV1::L7,
+                )
+            }),
             _ => {
                 eprintln!("derived-access smoke tier must be D0-128, L1, or L7");
                 ExitCode::from(2)
