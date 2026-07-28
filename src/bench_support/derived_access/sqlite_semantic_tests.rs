@@ -801,6 +801,47 @@ fn semantic_sidecar_is_bodyless_and_restart_stable() {
         .path()
         .join(".pointbreak-derived")
         .join("cursor.sqlite3");
+    let connection = rusqlite::Connection::open(&sidecar).expect("open semantic sidecar");
+    let representative_columns = connection
+        .prepare("PRAGMA table_info(semantic_representative)")
+        .expect("prepare representative columns")
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("query representative columns")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read representative columns");
+    assert_eq!(
+        representative_columns,
+        vec![
+            "family",
+            "semantic_key_prefix_id",
+            "semantic_key_digest",
+            "semantic_key_raw",
+            "semantic_key_hash",
+            "sequence",
+        ]
+    );
+    let (representatives, raw_keys, canonical_keys, invalid_digests) = connection
+        .query_row(
+            "SELECT count(*),
+                    count(*) FILTER (WHERE semantic_key_raw IS NOT NULL),
+                    count(*) FILTER (WHERE semantic_key_prefix_id IS NOT NULL),
+                    count(*) FILTER (WHERE length(semantic_key_digest) != 32)
+             FROM semantic_representative",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .expect("read representative identity shape");
+    assert!(representatives > 0);
+    assert_eq!(raw_keys + canonical_keys, representatives);
+    assert_eq!(invalid_digests, 0);
+    drop(connection);
     let mut bytes = std::fs::read(&sidecar).expect("read sidecar");
     for suffix in ["-wal", "-shm"] {
         let path = std::path::PathBuf::from(format!("{}{suffix}", sidecar.display()));
@@ -923,7 +964,7 @@ fn append_restart_and_selected_detail_do_not_rebuild_full_projections() {
         inventory.profile_id,
         "pointbreak.sqlite-derived-access-semantic.v1"
     );
-    assert_eq!(inventory.schema_version, 2);
+    assert_eq!(inventory.schema_version, 3);
     assert_eq!(inventory.fact_count, 1);
     assert_eq!(inventory.retained_body_object_bytes, 0);
     assert_eq!(

@@ -24,7 +24,7 @@ use crate::session::derived_access::semantic::{
 use crate::session::event::ShoreEvent;
 
 const SEMANTIC_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-semantic.v1";
-const SEMANTIC_SCHEMA_VERSION: i64 = 2;
+const SEMANTIC_SCHEMA_VERSION: i64 = 3;
 
 #[derive(Clone, Debug)]
 pub(crate) struct SqliteSemantic {
@@ -75,7 +75,7 @@ impl SqliteSemantic {
                 "CREATE TABLE IF NOT EXISTS semantic_meta (
                      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                      profile_id TEXT NOT NULL,
-                     schema_version INTEGER NOT NULL CHECK (schema_version = 2),
+                     schema_version INTEGER NOT NULL CHECK (schema_version = 3),
                      epoch INTEGER NOT NULL CHECK (epoch > 0),
                      applied_sequence INTEGER NOT NULL CHECK (applied_sequence >= 0)
                  ) STRICT;
@@ -173,13 +173,39 @@ impl SqliteSemantic {
                  ) STRICT;
                  CREATE TABLE IF NOT EXISTS semantic_representative (
                      family TEXT NOT NULL,
-                     semantic_key TEXT NOT NULL,
+                     semantic_key_prefix_id INTEGER
+                         REFERENCES semantic_identity_prefix(id),
+                     semantic_key_digest BLOB CHECK (length(semantic_key_digest) = 32),
+                     semantic_key_raw TEXT,
                      semantic_key_hash BLOB NOT NULL CHECK (length(semantic_key_hash) = 32),
                      sequence INTEGER NOT NULL REFERENCES semantic_event_fact(sequence),
+                     CHECK (
+                         (
+                             semantic_key_prefix_id IS NULL
+                             AND semantic_key_digest IS NULL
+                             AND semantic_key_raw IS NOT NULL
+                         )
+                         OR (
+                             semantic_key_prefix_id IS NOT NULL
+                             AND semantic_key_digest IS NOT NULL
+                             AND semantic_key_raw IS NULL
+                         )
+                     ),
                      PRIMARY KEY (family, semantic_key_hash)
                  ) STRICT, WITHOUT ROWID;
                  CREATE INDEX IF NOT EXISTS semantic_representative_sequence
                      ON semantic_representative(sequence, family);
+                 CREATE VIEW IF NOT EXISTS semantic_representative_text AS
+                 SELECT representative.family,
+                        coalesce(
+                            representative.semantic_key_raw,
+                            prefix.value || lower(hex(representative.semantic_key_digest))
+                        ) AS semantic_key,
+                        representative.semantic_key_hash,
+                        representative.sequence
+                 FROM semantic_representative AS representative
+                 LEFT JOIN semantic_identity_prefix AS prefix
+                   ON prefix.id = representative.semantic_key_prefix_id;
                  CREATE TABLE IF NOT EXISTS semantic_duplicate_projection (
                      family TEXT NOT NULL,
                      semantic_key TEXT NOT NULL,
@@ -929,7 +955,7 @@ fn update_materialized_projection(
     let previous = transaction
         .query_row(
             "SELECT representative.sequence, locator.event_id, representative.semantic_key
-             FROM semantic_representative AS representative
+             FROM semantic_representative_text AS representative
              JOIN locator_event_text AS locator ON locator.sequence = representative.sequence
              WHERE representative.family = ?1 AND representative.semantic_key_hash = ?2",
             params![family, semantic_key_digest(semantic_key).as_slice()],
@@ -984,17 +1010,23 @@ fn update_materialized_projection(
         .collect::<Result<Vec<_>, SqliteLocatorError>>()?;
 
     let inserted = previous.is_none();
+    let encoded_key = encode_identity(transaction, Some(semantic_key))?;
     transaction
         .execute(
             "INSERT INTO semantic_representative
-             (family, semantic_key, semantic_key_hash, sequence)
-             VALUES (?1, ?2, ?3, ?4)
+             (family, semantic_key_prefix_id, semantic_key_digest, semantic_key_raw,
+              semantic_key_hash, sequence)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
              ON CONFLICT(family, semantic_key_hash) DO UPDATE SET
-                 semantic_key = excluded.semantic_key,
+                 semantic_key_prefix_id = excluded.semantic_key_prefix_id,
+                 semantic_key_digest = excluded.semantic_key_digest,
+                 semantic_key_raw = excluded.semantic_key_raw,
                  sequence = excluded.sequence",
             params![
                 family,
-                semantic_key,
+                encoded_key.prefix_id,
+                encoded_key.digest.as_deref(),
+                encoded_key.raw,
                 semantic_key_digest(semantic_key).as_slice(),
                 to_i64_locator(fact.cursor.sequence, "representative sequence")?,
             ],
@@ -1105,7 +1137,7 @@ fn update_materialized_duplicate(
             let representative = transaction
                 .query_row(
                     "SELECT locator.event_id, representative.semantic_key
-                     FROM semantic_representative AS representative
+                     FROM semantic_representative_text AS representative
                      JOIN locator_event_text AS locator
                        ON locator.sequence = representative.sequence
                      WHERE representative.family = ?1
@@ -1240,7 +1272,7 @@ fn request_projection_state(
     let mode = transaction
         .query_row(
             "SELECT event.assertion_mode, representative.semantic_key
-             FROM semantic_representative AS representative
+             FROM semantic_representative_text AS representative
              JOIN semantic_event_fact_text AS event
                ON event.sequence = representative.sequence
              WHERE representative.family = 'request'
