@@ -19,6 +19,8 @@ pub const QUALIFICATION_DERIVED_ACCESS_PACKAGE_SCHEMA_V1: &str =
 pub const QUALIFICATION_DERIVED_ACCESS_CONTRACT_MODE_V1: &str = "--derived-access-contract";
 pub const QUALIFICATION_DERIVED_ACCESS_CONTRACT_SHA256_V1: &str =
     "c29fd0b862cfd3594c02b88f159477adb9b8666b8dfeebd868e766f8cf025ab8";
+pub const QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2: &str =
+    "pointbreak.qualification-derived-access-evaluator.v2";
 
 const DERIVATION_COMMIT_V1: &str = "a0d1519e5dc86d385114abfbd8e806b1456f0474";
 const DERIVATION_TREE_V1: &str = "6445e9e5af5062924ecee29647e8288c8865060d";
@@ -502,6 +504,9 @@ impl QualificationDerivedAccessContractV1 {
             "| Decision | Frozen requirement |".to_owned(),
             "| --- | --- |".to_owned(),
             format!("| Contract | `{}` |", self.contract_id),
+            format!(
+                "| Evaluator | `{QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2}`; this revision identifies the decision procedure independently of the frozen parameter digest |"
+            ),
             "| Authority | loose journal/content carriers remain truth; derived state is private, bodyless, disposable, and rebuildable |".to_owned(),
             format!(
                 "| Correctness tier | `D0-128`: {} events, {} revisions, {} independent objects, {} byte-identical roots, frozen transition/operation/lifecycle coverage, no timing threshold; the runner later binds one public seed and ordered-schedule receipt |",
@@ -582,6 +587,7 @@ pub fn qualification_derived_access_contract_v1() -> QualificationDerivedAccessC
 pub struct QualificationDerivedAccessContractPublicationV1 {
     pub schema: String,
     pub mode: String,
+    pub evaluator_revision: String,
     pub contract: QualificationDerivedAccessContractV1,
     pub contract_sha256: String,
     pub decision_table_markdown: String,
@@ -593,6 +599,7 @@ pub fn qualification_derived_access_contract_v1_publication()
     QualificationDerivedAccessContractPublicationV1 {
         schema: QUALIFICATION_DERIVED_ACCESS_CONTRACT_PUBLICATION_SCHEMA_V1.to_owned(),
         mode: "non_timing_contract_publication".to_owned(),
+        evaluator_revision: QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2.to_owned(),
         contract_sha256: contract
             .canonical_sha256()
             .expect("the frozen derived-access contract is canonical"),
@@ -607,6 +614,7 @@ pub struct QualificationDerivedAccessContractFixtureV1 {
     pub schema: String,
     pub contract_schema: String,
     pub contract_sha256: String,
+    pub evaluator_revision: String,
     pub d0_stored_events: u16,
     pub d0_revisions: u16,
     pub d0_independently_referenced_objects: u16,
@@ -623,6 +631,7 @@ pub fn qualification_derived_access_contract_fixture_v1()
         schema: QUALIFICATION_DERIVED_ACCESS_CONTRACT_FIXTURE_SCHEMA_V1.to_owned(),
         contract_schema: contract.schema,
         contract_sha256: QUALIFICATION_DERIVED_ACCESS_CONTRACT_SHA256_V1.to_owned(),
+        evaluator_revision: QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2.to_owned(),
         d0_stored_events: contract.d0.stored_events,
         d0_revisions: contract.d0.revisions,
         d0_independently_referenced_objects: contract.d0.independently_referenced_objects,
@@ -731,6 +740,8 @@ pub struct QualificationDerivedAccessOperationEvidenceV1 {
     pub process_cpu_p95_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_output_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unselected_work_count: Option<u64>,
     pub selected_work_count: u64,
     pub retained_cardinality: u64,
     pub l100_to_c262_selected_work_ratio_milli: Option<u16>,
@@ -803,6 +814,7 @@ pub struct QualificationDerivedAccessBootstrapEvidenceV1 {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct QualificationDerivedAccessPackageV1 {
     pub schema: String,
+    pub evaluator_revision: String,
     pub proposed_profile_id: String,
     pub execution_identities: Vec<QualificationDerivedAccessExecutionIdentityV1>,
     pub root_bindings: Vec<QualificationDerivedAccessRootBindingV1>,
@@ -820,6 +832,7 @@ pub struct QualificationDerivedAccessPackageV1 {
 pub struct QualificationDerivedAccessEvaluationV1 {
     pub schema: String,
     pub contract_sha256: String,
+    pub evaluator_revision: String,
     pub proposed_profile_id: String,
     pub outcome: QualificationDerivedAccessTerminalOutcomeV1,
     pub failed_criteria: Vec<String>,
@@ -830,6 +843,7 @@ pub fn evaluate_qualification_derived_access_v1(
     package: &QualificationDerivedAccessPackageV1,
 ) -> Result<QualificationDerivedAccessEvaluationV1, String> {
     if package.schema != QUALIFICATION_DERIVED_ACCESS_PACKAGE_SCHEMA_V1
+        || package.evaluator_revision != QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2
         || package.proposed_profile_id.trim().is_empty()
     {
         return Err("unsupported derived-access package".to_owned());
@@ -864,6 +878,7 @@ pub fn evaluate_qualification_derived_access_v1(
     Ok(QualificationDerivedAccessEvaluationV1 {
         schema: QUALIFICATION_DERIVED_ACCESS_EVALUATION_SCHEMA_V1.to_owned(),
         contract_sha256: QUALIFICATION_DERIVED_ACCESS_CONTRACT_SHA256_V1.to_owned(),
+        evaluator_revision: QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2.to_owned(),
         proposed_profile_id: package.proposed_profile_id.clone(),
         outcome,
         failed_criteria: failed,
@@ -1316,6 +1331,9 @@ fn evaluate_operations(
                 || row
                     .selected_output_count
                     .is_some_and(|selected_output| selected_output > row.selected_work_count)
+                || row
+                    .unselected_work_count
+                    .is_some_and(|unselected_work| unselected_work > row.selected_work_count)
                 || row.selected_work_count < minimum_observed_work(&row.counters)
                 || row.retained_cardinality
                     != expected_retained_cardinality(tier, requirement.operation, contract)
@@ -1327,9 +1345,16 @@ fn evaluate_operations(
                 ));
                 continue;
             }
-            let Some(selected_output_count) = row.selected_output_count else {
+            let Some(_selected_output_count) = row.selected_output_count else {
                 missing.push(format!(
                     "{platform:?}/{tier:?}/{} selected-output count",
+                    requirement.operation.as_str()
+                ));
+                continue;
+            };
+            let Some(unselected_work_count) = row.unselected_work_count else {
+                missing.push(format!(
+                    "{platform:?}/{tier:?}/{} unselected-work count",
                     requirement.operation.as_str()
                 ));
                 continue;
@@ -1393,9 +1418,9 @@ fn evaluate_operations(
                     })?;
                 let derived_ratio =
                     selected_work_ratio_milli(row.selected_work_count, l100.selected_work_count);
-                let Some(l100_selected_output_count) = l100.selected_output_count else {
+                let Some(l100_unselected_work_count) = l100.unselected_work_count else {
                     missing.push(format!(
-                        "{platform:?}/L100/{} selected-output count",
+                        "{platform:?}/L100/{} unselected-work count",
                         requirement.operation.as_str()
                     ));
                     continue;
@@ -1414,9 +1439,9 @@ fn evaluate_operations(
                     Some(_)
                         if selected_work_growth_exceeds_bound(
                             l100.selected_work_count,
-                            l100_selected_output_count,
+                            l100_unselected_work_count,
                             row.selected_work_count,
-                            selected_output_count,
+                            unselected_work_count,
                             requirement.max_l100_to_c262_selected_work_ratio_milli,
                         ) =>
                     {
@@ -1486,17 +1511,15 @@ fn selected_work_ratio_milli(selected_work: u64, baseline_work: u64) -> u16 {
 
 fn selected_work_growth_exceeds_bound(
     l100_work: u64,
-    l100_output: u64,
+    l100_unselected_work: u64,
     c262_work: u64,
-    c262_output: u64,
+    c262_unselected_work: u64,
     maximum_ratio_milli: u16,
 ) -> bool {
     if selected_work_ratio_milli(c262_work, l100_work) <= maximum_ratio_milli {
         return false;
     }
-    let extra_work = c262_work.saturating_sub(l100_work);
-    let extra_selected_output = c262_output.saturating_sub(l100_output);
-    extra_work > extra_selected_output
+    c262_unselected_work > l100_unselected_work
 }
 
 fn counters_exceed(
@@ -1754,6 +1777,7 @@ mod tests {
                                 1_000
                             },
                         ),
+                        unselected_work_count: Some(0),
                         selected_work_count: if tier == QualificationDerivedAccessTierV1::C262 {
                             1_250
                         } else {
@@ -1818,6 +1842,7 @@ mod tests {
         .collect();
         QualificationDerivedAccessPackageV1 {
             schema: QUALIFICATION_DERIVED_ACCESS_PACKAGE_SCHEMA_V1.to_owned(),
+            evaluator_revision: QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2.to_owned(),
             proposed_profile_id: "example-physical-profile-v1".to_owned(),
             execution_identities: vec![
                 QualificationDerivedAccessExecutionIdentityV1 {
@@ -2031,6 +2056,10 @@ mod tests {
         wrong_provenance.execution_identities[0].source_dirty = true;
         assert!(evaluate_qualification_derived_access_v1(&wrong_provenance).is_err());
 
+        let mut wrong_evaluator = complete_package();
+        wrong_evaluator.evaluator_revision = "pointbreak.other-evaluator.v1".to_owned();
+        assert!(evaluate_qualification_derived_access_v1(&wrong_evaluator).is_err());
+
         let mut mixed_source = complete_package();
         mixed_source.execution_identities[1].source_tree = "a".repeat(40);
         assert!(evaluate_qualification_derived_access_v1(&mixed_source).is_err());
@@ -2146,10 +2175,10 @@ mod tests {
 
     #[test]
     fn selected_output_growth_is_not_unselected_scale_work() {
-        assert!(!selected_work_growth_exceeds_bound(10, 10, 15, 15, 1_250));
-        assert!(!selected_work_growth_exceeds_bound(11, 11, 21, 21, 1_250));
-        assert!(selected_work_growth_exceeds_bound(10, 10, 16, 15, 1_250));
-        assert!(selected_work_growth_exceeds_bound(10, 10, 15, 10, 1_250));
+        assert!(!selected_work_growth_exceeds_bound(10, 0, 15, 0, 1_250));
+        assert!(!selected_work_growth_exceeds_bound(11, 0, 21, 0, 1_250));
+        assert!(selected_work_growth_exceeds_bound(10, 0, 16, 1, 1_250));
+        assert!(selected_work_growth_exceeds_bound(10, 0, 15, 1, 1_250));
 
         let mut explained_growth = complete_package();
         for (operation, l100_count, c262_count) in [
@@ -2174,6 +2203,7 @@ mod tests {
                 })
                 .expect("L100 operation");
             l100.selected_output_count = Some(l100_count);
+            l100.unselected_work_count = Some(0);
             l100.selected_work_count = l100_count;
 
             let c262 = explained_growth
@@ -2186,6 +2216,7 @@ mod tests {
                 })
                 .expect("C262 operation");
             c262.selected_output_count = Some(c262_count);
+            c262.unselected_work_count = Some(0);
             c262.selected_work_count = c262_count;
             c262.l100_to_c262_selected_work_ratio_milli =
                 Some(selected_work_ratio_milli(c262_count, l100_count));
@@ -2207,6 +2238,7 @@ mod tests {
             })
             .expect("C262 operation");
         c262.selected_work_count += 1;
+        c262.unselected_work_count = Some(1);
         c262.l100_to_c262_selected_work_ratio_milli =
             Some(selected_work_ratio_milli(c262.selected_work_count, 10));
         assert_eq!(

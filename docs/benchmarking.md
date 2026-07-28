@@ -442,6 +442,7 @@ cargo bench --locked --features bench --bench store_foundation -- --derived-acce
 | Decision | Frozen requirement |
 | --- | --- |
 | Contract | `incremental-derived-access-falsifier-v1` |
+| Evaluator | `pointbreak.qualification-derived-access-evaluator.v2`; this revision identifies the decision procedure independently of the frozen parameter digest |
 | Authority | loose journal/content carriers remain truth; derived state is private, bodyless, disposable, and rebuildable |
 | Correctness tier | `D0-128`: 128 events, 16 revisions, 16 independent objects, 2 byte-identical roots, frozen transition/operation/lifecycle coverage, no timing threshold; the runner later binds one public seed and ordered-schedule receipt |
 | Operations | `SEMANTIC_ID`, `FRESH_NO_CHANGE`, `NEWCOUNT_ZERO`, `WINDOW_HEAD`, `WINDOW_MIDDLE`, `WINDOW_TAIL`, `REVISION_DETAIL_ACTIVE`, `REVISION_DETAIL_REMOVED`, `APPEND_ONE`, `POST_ONE`, `RESTART` |

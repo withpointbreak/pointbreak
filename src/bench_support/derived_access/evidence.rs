@@ -1936,6 +1936,17 @@ pub(super) fn aggregate_scale_rows(
                     .max()
                     .unwrap_or_default(),
             ),
+            unselected_work_count: Some(
+                operation_samples
+                    .iter()
+                    .map(|sample| {
+                        sample
+                            .selected_work_count
+                            .saturating_sub(sample.selected_output_count)
+                    })
+                    .max()
+                    .unwrap_or_default(),
+            ),
             selected_work_count: selected_work,
             retained_cardinality: operation_samples
                 .iter()
@@ -2393,6 +2404,7 @@ pub fn build_qualification_derived_access_fragment_v1(
     request.execution.validate()?;
     let mut package = QualificationDerivedAccessPackageV1 {
         schema: super::QUALIFICATION_DERIVED_ACCESS_PACKAGE_SCHEMA_V1.to_owned(),
+        evaluator_revision: super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2.to_owned(),
         proposed_profile_id: "sqlite-wal-bodyless-v1".to_owned(),
         execution_identities: vec![request.execution.clone()],
         root_bindings: Vec::new(),
@@ -2698,6 +2710,7 @@ fn smoke_operation_rows(
                 wall_p95_ms: None,
                 process_cpu_p95_ms: None,
                 selected_output_count: Some(selected_output),
+                unselected_work_count: Some(work.saturating_sub(selected_output)),
                 selected_work_count: work,
                 retained_cardinality: match tier {
                     QualificationDerivedAccessTierV1::D0_128 => 128,
@@ -2789,9 +2802,12 @@ pub fn assemble_qualification_derived_access_package_v1(
         .first()
         .ok_or_else(|| "derived-access evidence inputs are absent".to_owned())?;
     let schema = first.schema.clone();
+    let evaluator_revision = first.evaluator_revision.clone();
     let proposed_profile_id = first.proposed_profile_id.clone();
     if packages.iter().any(|package| {
-        package.schema != schema || package.proposed_profile_id != proposed_profile_id
+        package.schema != schema
+            || package.evaluator_revision != evaluator_revision
+            || package.proposed_profile_id != proposed_profile_id
     }) {
         return Err("derived-access evidence inputs mix package authority".to_owned());
     }
@@ -2808,6 +2824,7 @@ pub fn assemble_qualification_derived_access_package_v1(
         .collect();
     let combined = QualificationDerivedAccessPackageV1 {
         schema,
+        evaluator_revision,
         proposed_profile_id,
         execution_identities,
         root_bindings: packages
@@ -3259,6 +3276,8 @@ impl QualificationDerivedAccessPackageV1 {
     pub(crate) fn test_fixture() -> Self {
         Self {
             schema: super::QUALIFICATION_DERIVED_ACCESS_PACKAGE_SCHEMA_V1.to_owned(),
+            evaluator_revision: super::QUALIFICATION_DERIVED_ACCESS_EVALUATOR_REVISION_V2
+                .to_owned(),
             proposed_profile_id: "sqlite-wal-bodyless-v1".to_owned(),
             execution_identities: Vec::new(),
             root_bindings: Vec::new(),

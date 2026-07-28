@@ -459,10 +459,32 @@ fn scale_receipts_rederive_aggregates_and_reject_missing_raw_samples() {
             }
         }
     }
+    let mut active_samples = raw_samples
+        .iter_mut()
+        .filter(|sample| {
+            sample.operation == QualificationDerivedAccessOperationV1::RevisionDetailActive
+        })
+        .take(2)
+        .collect::<Vec<_>>();
+    active_samples[0].selected_output_count = 10;
+    active_samples[0].selected_work_count = 15;
+    active_samples[1].selected_output_count = 20;
+    active_samples[1].selected_work_count = 20;
     let l100_selected_work = std::collections::BTreeMap::new();
     let operation_rows =
         aggregate_scale_rows(tier, execution.platform, &l100_selected_work, &raw_samples)
             .expect("derive scale aggregates");
+    let active = operation_rows
+        .iter()
+        .find(|row| row.operation == QualificationDerivedAccessOperationV1::RevisionDetailActive)
+        .expect("active revision-detail aggregate");
+    assert_eq!(active.selected_work_count, 20);
+    assert_eq!(active.selected_output_count, Some(20));
+    assert_eq!(
+        active.unselected_work_count,
+        Some(5),
+        "the aggregate must retain the worst per-sample unexplained work"
+    );
     let inventories = vec![
         QualificationDerivedAccessDerivedInventoryV1 {
             database_bytes: 1,
