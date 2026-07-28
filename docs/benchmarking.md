@@ -505,8 +505,8 @@ just derived-access-resource /absolute/path/to/resource-request.json
 just derived-access-fragment /absolute/path/to/fragment-request.json
 ```
 
-The retained-root modes accept only L100 or C262. They require a separately admitted immutable input and
-a distinct, precreated qualification clone; no runner mode can materialize either tier. Preflight compares
+The retained-root modes accept L7, L100, or C262. They require a separately admitted immutable input and
+a distinct, precreated qualification clone; no runner mode can materialize those tiers. Preflight compares
 the complete authoritative inventory. Bootstrap writes only `.pointbreak-derived/`, reports progress and
 high-water allocation, compares the incremental semantic receipt with strict full replay, and rechecks both
 the input and clone truth inventories.

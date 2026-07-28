@@ -384,7 +384,9 @@ impl QualificationDerivedAccessRetainedRootRequestV1 {
         if self.schema != QUALIFICATION_DERIVED_ACCESS_RETAINED_ROOT_SCHEMA_V1
             || !matches!(
                 self.tier,
-                QualificationDerivedAccessTierV1::L100 | QualificationDerivedAccessTierV1::C262
+                QualificationDerivedAccessTierV1::L7
+                    | QualificationDerivedAccessTierV1::L100
+                    | QualificationDerivedAccessTierV1::C262
             )
             || !self.immutable_input
             || self.materialize

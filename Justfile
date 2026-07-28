@@ -305,7 +305,7 @@ derived-access-lifecycle request:
     cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \
         --derived-access-lifecycle --derived-access-request="{{ request }}"
 
-# Verify a retained L100/C262 input and separately created qualification clone.
+# Verify a retained L7/L100/C262 input and separately created qualification clone.
 [group('quality')]
 derived-access-retained-preflight request:
     cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \

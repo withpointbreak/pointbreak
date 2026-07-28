@@ -195,8 +195,9 @@ fn lifecycle_registry_covers_every_frozen_criterion_once() {
 }
 
 #[test]
-fn retained_scale_modes_never_materialize_roots() {
+fn retained_bootstrap_modes_never_materialize_roots() {
     for tier in [
+        QualificationDerivedAccessTierV1::L7,
         QualificationDerivedAccessTierV1::L100,
         QualificationDerivedAccessTierV1::C262,
     ] {
@@ -211,6 +212,45 @@ fn retained_scale_modes_never_materialize_roots() {
         assert!(request.validate().is_ok());
         assert!(!request.materialize);
     }
+
+    for tier in [
+        QualificationDerivedAccessTierV1::D0_128,
+        QualificationDerivedAccessTierV1::L1,
+    ] {
+        let request = QualificationDerivedAccessRetainedRootRequestV1::new(
+            "/tmp/source-checkout",
+            QualificationDerivedAccessExpectedAuthorityV1::test_fixture().execution,
+            tier,
+            "/tmp/immutable-input",
+            "/tmp/qualification-clone",
+            digest(20),
+        );
+        assert!(request.validate().is_err());
+    }
+}
+
+#[test]
+fn scale_mode_remains_limited_to_l100_and_c262() {
+    let execution = QualificationDerivedAccessExpectedAuthorityV1::test_fixture().execution;
+    let request = QualificationDerivedAccessScaleRunRequestV1 {
+        schema: QUALIFICATION_DERIVED_ACCESS_SCALE_REQUEST_SCHEMA_V1.to_owned(),
+        tier: QualificationDerivedAccessTierV1::L7,
+        source_checkout: PathBuf::from("/tmp/source-checkout"),
+        root_authority_sha256: execution.root_provenance_sha256.clone(),
+        execution,
+        roots: vec![
+            QualificationDerivedAccessScaleRootV1 {
+                root: PathBuf::from("/tmp/root-a"),
+                admitted_root_sha256: digest(20),
+            },
+            QualificationDerivedAccessScaleRootV1 {
+                root: PathBuf::from("/tmp/root-b"),
+                admitted_root_sha256: digest(21),
+            },
+        ],
+        l100_selected_work: std::collections::BTreeMap::new(),
+    };
+    assert!(request.validate().is_err());
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -234,7 +274,7 @@ fn retained_bootstrap_runner_preserves_authoritative_inventory() {
     let request = QualificationDerivedAccessRetainedRootRequestV1::new(
         &source_checkout,
         execution,
-        QualificationDerivedAccessTierV1::L100,
+        QualificationDerivedAccessTierV1::L7,
         &immutable,
         &qualification_clone,
         materialized.root_a.store_inventory.inventory_sha256,
@@ -248,6 +288,7 @@ fn retained_bootstrap_runner_preserves_authoritative_inventory() {
 
     let receipt = bootstrap_qualification_derived_access_retained_root_v1(&request_path)
         .expect("governed derived publication preserves authoritative truth");
+    assert_eq!(receipt.tier, QualificationDerivedAccessTierV1::L7);
     assert_eq!(receipt.immutable_before, receipt.immutable_after);
     assert_eq!(receipt.clone_truth_before, receipt.clone_truth_after);
     assert!(receipt.full_replay_matches_incremental);

@@ -594,7 +594,8 @@ fn main() -> ExitCode {
              --derived-access-package --derived-access-input=<path> ...\n\
              --derived-access-verify-package --derived-access-package-root=<path>\n\
              \n\
-             L100 and C262 modes consume verified admitted roots and never materialize them."
+             Retained L7, L100, and C262 modes consume verified admitted roots and never materialize them.\n\
+             Scale evidence remains limited to L100 and C262."
         );
         return ExitCode::SUCCESS;
     }
