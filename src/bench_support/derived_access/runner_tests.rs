@@ -1,5 +1,11 @@
 use std::path::PathBuf;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use std::process::Command;
 
+#[cfg(feature = "longitudinal-counting")]
+use super::adapter::QualificationDerivedAccessAdapter;
+#[cfg(feature = "longitudinal-counting")]
+use super::sqlite_cursor::{BootstrapControl, CursorLedgerIdentity, SqliteCursorLedger};
 use super::*;
 
 fn digest(value: u8) -> String {
@@ -204,6 +210,179 @@ fn retained_scale_modes_never_materialize_roots() {
         );
         assert!(request.validate().is_ok());
         assert!(!request.materialize);
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[test]
+fn retained_bootstrap_runner_preserves_authoritative_inventory() {
+    let workspace = tempfile::tempdir().expect("retained bootstrap workspace");
+    let immutable = workspace.path().join("immutable");
+    let qualification_clone = workspace.path().join("qualification-clone");
+    let materialized =
+        materialize_qualification_derived_access_d0_pair_v1(&immutable, &qualification_clone)
+            .expect("materialize deterministic roots");
+    let source_checkout = workspace.path().join("source");
+    initialize_clean_test_source_checkout(&source_checkout);
+    let execution = super::evidence::observe_current_execution_identity_v1(
+        native_test_platform(),
+        digest(21),
+        &source_checkout,
+        &qualification_clone,
+    )
+    .expect("observe exact test execution");
+    let request = QualificationDerivedAccessRetainedRootRequestV1::new(
+        &source_checkout,
+        execution,
+        QualificationDerivedAccessTierV1::L100,
+        &immutable,
+        &qualification_clone,
+        materialized.root_a.store_inventory.inventory_sha256,
+    );
+    let request_path = workspace.path().join("retained-request.json");
+    std::fs::write(
+        &request_path,
+        serde_json::to_vec_pretty(&request).expect("serialize retained request"),
+    )
+    .expect("write retained request");
+
+    let receipt = bootstrap_qualification_derived_access_retained_root_v1(&request_path)
+        .expect("governed derived publication preserves authoritative truth");
+    assert_eq!(receipt.immutable_before, receipt.immutable_after);
+    assert_eq!(receipt.clone_truth_before, receipt.clone_truth_after);
+    assert!(receipt.full_replay_matches_incremental);
+    assert_eq!(receipt.progress_completed, receipt.progress_total);
+}
+
+#[cfg(feature = "longitudinal-counting")]
+#[test]
+fn candidate_open_preserves_admitted_truth_and_accounts_for_governed_namespaces() {
+    let workspace = tempfile::tempdir().expect("candidate inventory workspace");
+    let root_a = workspace.path().join("root-a");
+    let root_b = workspace.path().join("root-b");
+    let materialized = materialize_qualification_derived_access_d0_pair_v1(&root_a, &root_b)
+        .expect("materialize deterministic roots");
+    let admitted = materialized.root_a.store_inventory;
+    let store = crate::session::store_dir_for_repo(&root_a).expect("resolve store");
+    let store_id = CursorLedgerIdentity::new(format!(
+        "store:derived-access:{}",
+        admitted.inventory_sha256
+    ));
+
+    let cursor = SqliteCursorLedger::bootstrap_from_truth(&store, store_id.clone(), 1, |_| {
+        BootstrapControl::Continue
+    })
+    .expect("bootstrap candidate");
+    drop(cursor);
+    assert_eq!(
+        crate::bench_support::longitudinal::longitudinal_authoritative_store_data_inventory_v1(
+            &root_a
+        )
+        .expect("authoritative inventory after bootstrap"),
+        admitted
+    );
+
+    let before_open =
+        crate::bench_support::longitudinal::longitudinal_authoritative_store_data_inventory_v1(
+            &root_a,
+        )
+        .expect("authoritative inventory before open");
+    drop(
+        QualificationDerivedAccessAdapter::open(&store, store_id)
+            .expect("open existing candidate adapter"),
+    );
+    let after_open =
+        crate::bench_support::longitudinal::longitudinal_authoritative_store_data_inventory_v1(
+            &root_a,
+        )
+        .expect("authoritative inventory after open");
+    assert_eq!(
+        before_open, after_open,
+        "resource before/after and scale admitted-root authority remain stable"
+    );
+
+    let active_bytes =
+        super::evidence::governed_derived_state_bytes(&store).expect("active derived bytes");
+    let quarantine = store.join(".pointbreak-derived.quarantine-42-7");
+    std::fs::create_dir_all(&quarantine).expect("create governed quarantine");
+    std::fs::write(quarantine.join("cursor.sqlite3"), b"quarantine")
+        .expect("write governed quarantine");
+    let with_quarantine =
+        super::evidence::governed_derived_state_bytes(&store).expect("quarantine derived bytes");
+    assert_eq!(
+        with_quarantine,
+        active_bytes + b"quarantine".len() as u64,
+        "well-formed quarantine bytes enter derived high-water accounting"
+    );
+
+    let malformed = store.join(".pointbreak-derived.quarantine-pid-7");
+    std::fs::create_dir_all(&malformed).expect("create malformed quarantine");
+    std::fs::write(malformed.join("cursor.sqlite3"), b"not derived")
+        .expect("write malformed quarantine");
+    assert_eq!(
+        super::evidence::governed_derived_state_bytes(&store)
+            .expect("malformed quarantine accounting"),
+        with_quarantine,
+        "malformed lookalikes do not enter derived accounting"
+    );
+
+    let event = std::fs::read_dir(store.join("events"))
+        .expect("read event carriers")
+        .next()
+        .expect("event carrier")
+        .expect("read event carrier")
+        .path();
+    let mut bytes = std::fs::read(&event).expect("read event carrier bytes");
+    bytes.push(b'\n');
+    std::fs::write(&event, bytes).expect("mutate authoritative carrier");
+    assert_ne!(
+        crate::bench_support::longitudinal::longitudinal_authoritative_store_data_inventory_v1(
+            &root_a
+        )
+        .expect("authoritative inventory after carrier mutation"),
+        admitted,
+        "real authoritative carrier mutation remains visible"
+    );
+}
+
+#[cfg(target_os = "macos")]
+fn native_test_platform() -> QualificationDerivedAccessPlatformV1 {
+    QualificationDerivedAccessPlatformV1::MacosApfs
+}
+
+#[cfg(target_os = "windows")]
+fn native_test_platform() -> QualificationDerivedAccessPlatformV1 {
+    QualificationDerivedAccessPlatformV1::WindowsNtfs
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn initialize_clean_test_source_checkout(root: &std::path::Path) {
+    std::fs::create_dir_all(root).expect("create test source checkout");
+    std::fs::write(root.join("Cargo.lock"), b"test lock\n").expect("write test Cargo.lock");
+    for arguments in [
+        vec!["init", "-q"],
+        vec!["add", "Cargo.lock"],
+        vec![
+            "-c",
+            "user.name=Pointbreak Tests",
+            "-c",
+            "user.email=tests@pointbreak.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "test source",
+        ],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(arguments)
+                .current_dir(root)
+                .status()
+                .expect("run git for test source")
+                .success()
+        );
     }
 }
 

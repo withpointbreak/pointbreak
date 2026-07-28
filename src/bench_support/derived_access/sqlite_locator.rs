@@ -8,6 +8,7 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Params, StatementStatus, TransactionBehavior, params,
 };
 
+use super::DERIVED_SIDECAR_DIRECTORY;
 #[cfg(any(test, feature = "longitudinal-counting"))]
 use crate::bench_support::longitudinal::record_chronological_sort_items;
 use crate::session::derived_access::cursor::{CursorDelta, TruthCursor};
@@ -16,7 +17,6 @@ use crate::session::derived_access::locator::{
     LocatorWindow, WindowContinuation, WindowPosition,
 };
 
-const SIDECAR_DIRECTORY: &str = ".pointbreak-derived";
 const DATABASE_FILE: &str = "cursor.sqlite3";
 const CURSOR_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-cursor.v1";
 const LOCATOR_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-locator.v1";
@@ -77,7 +77,9 @@ impl SqliteLocator {
             .canonicalize()
             .map_err(|error| SqliteLocatorError::Metadata(error.to_string()))?;
         let locator = Self {
-            database_path: store_root.join(SIDECAR_DIRECTORY).join(DATABASE_FILE),
+            database_path: store_root
+                .join(DERIVED_SIDECAR_DIRECTORY)
+                .join(DATABASE_FILE),
         };
         if !locator.database_path.exists() {
             return Err(SqliteLocatorError::MissingSidecar(

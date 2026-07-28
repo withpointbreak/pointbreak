@@ -24,7 +24,8 @@ use crate::bench_support::longitudinal::{
     LongitudinalCountersV1, LongitudinalCountingScopeV1, capture_longitudinal_process_snapshot_v1,
 };
 use crate::bench_support::longitudinal::{
-    LongitudinalStoreDataInventoryV1, longitudinal_store_data_inventory_v1,
+    LongitudinalStoreDataInventoryV1, is_governed_derived_store_entry_v1,
+    longitudinal_authoritative_store_data_inventory_v1, longitudinal_store_data_inventory_v1,
 };
 use crate::canonical_hash::sha256_bytes_hex;
 #[cfg(feature = "longitudinal-counting")]
@@ -834,8 +835,8 @@ pub fn run_qualification_derived_access_resource_v1(
     )?;
     let mut roots_before = Vec::new();
     for root in &request.roots {
-        let inventory =
-            longitudinal_store_data_inventory_v1(&root.root).map_err(|error| error.to_string())?;
+        let inventory = longitudinal_authoritative_store_data_inventory_v1(&root.root)
+            .map_err(|error| error.to_string())?;
         if inventory.inventory_sha256 != root.admitted_root_sha256 {
             return Err(format!(
                 "resource root {:?} does not match admitted truth",
@@ -901,7 +902,8 @@ pub fn run_qualification_derived_access_resource_v1(
             .roots
             .iter()
             .map(|root| {
-                longitudinal_store_data_inventory_v1(&root.root).map_err(|error| error.to_string())
+                longitudinal_authoritative_store_data_inventory_v1(&root.root)
+                    .map_err(|error| error.to_string())
             })
             .collect::<Result<Vec<_>, _>>()?;
         if roots_before != roots_after {
@@ -1008,8 +1010,8 @@ pub fn run_qualification_derived_access_scale_v1(
     let mut root_after = Vec::new();
     let mut inventories = Vec::new();
     for (root_ordinal, root) in request.roots.iter().enumerate() {
-        let before =
-            longitudinal_store_data_inventory_v1(&root.root).map_err(|error| error.to_string())?;
+        let before = longitudinal_authoritative_store_data_inventory_v1(&root.root)
+            .map_err(|error| error.to_string())?;
         if before.inventory_sha256 != root.admitted_root_sha256 {
             return Err(format!(
                 "scale root {root_ordinal} does not match admitted truth"
@@ -1085,7 +1087,8 @@ pub fn run_qualification_derived_access_scale_v1(
         inventories.push(inventory);
         drop(state);
         root_after.push(
-            longitudinal_store_data_inventory_v1(&root.root).map_err(|error| error.to_string())?,
+            longitudinal_authoritative_store_data_inventory_v1(&root.root)
+                .map_err(|error| error.to_string())?,
         );
     }
 
@@ -1600,7 +1603,7 @@ fn derived_inventory(
     {
         return Err("derived schema contains body/object persistence".to_owned());
     }
-    let sidecar = state.store_root.join(".pointbreak-derived");
+    let sidecar = state.store_root.join(super::DERIVED_SIDECAR_DIRECTORY);
     let database = sidecar.join("cursor.sqlite3");
     let page_count = rusqlite::Connection::open_with_flags(
         &database,
@@ -1611,12 +1614,15 @@ fn derived_inventory(
     })
     .map_err(|error| error.to_string())
     .and_then(|count| u64::try_from(count).map_err(|_| "negative SQLite page count".to_owned()))?;
-    let temporary_bytes = derived_temporary_bytes(&sidecar)?;
-    let steady = cursor
+    let core_bytes = cursor
         .database_bytes
         .saturating_add(cursor.wal_bytes)
-        .saturating_add(cursor.shared_memory_bytes)
-        .saturating_add(temporary_bytes);
+        .saturating_add(cursor.shared_memory_bytes);
+    let steady = governed_derived_state_bytes(&state.store_root)?;
+    if steady < core_bytes {
+        return Err("derived filesystem inventory is smaller than SQLite inventory".to_owned());
+    }
+    let temporary_bytes = steady - core_bytes;
     Ok(QualificationDerivedAccessDerivedInventoryV1 {
         database_bytes: cursor.database_bytes,
         wal_bytes: cursor.wal_bytes,
@@ -1631,29 +1637,6 @@ fn derived_inventory(
         object_bytes: 0,
         high_water_bytes: steady,
     })
-}
-
-#[cfg(feature = "longitudinal-counting")]
-fn derived_temporary_bytes(sidecar: &Path) -> Result<u64, String> {
-    let mut total = 0_u64;
-    for entry in std::fs::read_dir(sidecar).map_err(|error| error.to_string())? {
-        let entry = entry.map_err(|error| error.to_string())?;
-        let file_name = entry.file_name();
-        let name = file_name.to_string_lossy();
-        if entry
-            .file_type()
-            .map_err(|error| error.to_string())?
-            .is_file()
-            && !matches!(
-                name.as_ref(),
-                "cursor.sqlite3" | "cursor.sqlite3-wal" | "cursor.sqlite3-shm"
-            )
-        {
-            total =
-                total.saturating_add(entry.metadata().map_err(|error| error.to_string())?.len());
-        }
-    }
-    Ok(total)
 }
 
 #[cfg(feature = "longitudinal-counting")]
@@ -2117,7 +2100,6 @@ pub fn bootstrap_qualification_derived_access_retained_root_v1(
     let mut progress_completed = 0_u64;
     let mut progress_total = 0_u64;
     let mut high_water_derived_bytes = 0_u64;
-    let sidecar = store.join(".pointbreak-derived");
     let cursor = SqliteCursorLedger::bootstrap_from_truth(
         &store,
         CursorLedgerIdentity::new(&store_id),
@@ -2126,8 +2108,8 @@ pub fn bootstrap_qualification_derived_access_retained_root_v1(
             progress_updates = progress_updates.saturating_add(1);
             progress_completed = progress.completed as u64;
             progress_total = progress.total as u64;
-            high_water_derived_bytes =
-                high_water_derived_bytes.max(directory_file_bytes(&sidecar).unwrap_or_default());
+            high_water_derived_bytes = high_water_derived_bytes
+                .max(governed_derived_state_bytes(&store).unwrap_or_default());
             BootstrapControl::Continue
         },
     )
@@ -2158,8 +2140,9 @@ pub fn bootstrap_qualification_derived_access_retained_root_v1(
     drop(adapter);
     let immutable_after = longitudinal_store_data_inventory_v1(&request.immutable_input_root)
         .map_err(|error| error.to_string())?;
-    let clone_truth_after = longitudinal_store_data_inventory_v1(&request.qualification_clone_root)
-        .map_err(|error| error.to_string())?;
+    let clone_truth_after =
+        longitudinal_authoritative_store_data_inventory_v1(&request.qualification_clone_root)
+            .map_err(|error| error.to_string())?;
     if immutable_after != immutable_before || clone_truth_after != clone_truth_before {
         return Err("retained truth changed during derived bootstrap".to_owned());
     }
@@ -2176,7 +2159,8 @@ pub fn bootstrap_qualification_derived_access_retained_root_v1(
         progress_completed,
         progress_total,
         elapsed_millis: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-        high_water_derived_bytes: high_water_derived_bytes.max(directory_file_bytes(&sidecar)?),
+        high_water_derived_bytes: high_water_derived_bytes
+            .max(governed_derived_state_bytes(&store)?),
         semantic_receipt_sha256,
         full_replay_matches_incremental,
     })
@@ -3031,9 +3015,35 @@ fn list_package_files(root: &Path) -> Result<BTreeSet<String>, String> {
     Ok(paths)
 }
 
+pub(super) fn governed_derived_state_bytes(store_root: &Path) -> Result<u64, String> {
+    if !store_root.exists() {
+        return Ok(0);
+    }
+    let mut total = 0_u64;
+    for entry in std::fs::read_dir(store_root).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if is_governed_derived_store_entry_v1(name, file_type.is_dir(), file_type.is_file()) {
+            total = total.saturating_add(directory_file_bytes(&entry.path())?);
+        }
+    }
+    Ok(total)
+}
+
 fn directory_file_bytes(root: &Path) -> Result<u64, String> {
     if !root.exists() {
         return Ok(0);
+    }
+    let metadata = std::fs::symlink_metadata(root).map_err(|error| error.to_string())?;
+    if metadata.is_file() {
+        return Ok(metadata.len());
+    }
+    if !metadata.is_dir() {
+        return Err("derived-state path is neither a file nor directory".to_owned());
     }
     let mut total = 0_u64;
     for entry in std::fs::read_dir(root).map_err(|error| error.to_string())? {
@@ -3089,6 +3099,27 @@ pub(super) fn validate_current_execution_identity_v1(
     evidence_root: &Path,
 ) -> Result<(), String> {
     expected.validate()?;
+    let observed = observe_current_execution_identity_v1(
+        expected.platform,
+        expected.root_provenance_sha256.clone(),
+        source_checkout,
+        evidence_root,
+    )?;
+    if &observed != expected {
+        return Err(
+            "derived-access execution identity differs from the running source and binary"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn observe_current_execution_identity_v1(
+    platform: super::QualificationDerivedAccessPlatformV1,
+    root_provenance_sha256: String,
+    source_checkout: &Path,
+    evidence_root: &Path,
+) -> Result<QualificationDerivedAccessExecutionIdentityV1, String> {
     if !source_checkout.is_dir() {
         return Err("derived-access source checkout is absent".to_owned());
     }
@@ -3105,15 +3136,15 @@ pub(super) fn validate_current_execution_identity_v1(
         )
         .map_err(|error| error.to_string())?,
     );
-    let observed = QualificationDerivedAccessExecutionIdentityV1 {
-        platform: expected.platform,
+    Ok(QualificationDerivedAccessExecutionIdentityV1 {
+        platform,
         source_commit,
         source_tree,
         cargo_lock_sha256,
         binary_sha256,
         contract_schema: super::QUALIFICATION_DERIVED_ACCESS_CONTRACT_SCHEMA_V1.to_owned(),
         contract_sha256: super::QUALIFICATION_DERIVED_ACCESS_CONTRACT_SHA256_V1.to_owned(),
-        root_provenance_sha256: expected.root_provenance_sha256.clone(),
+        root_provenance_sha256,
         command_sha256,
         operating_system: std::env::consts::OS.to_owned(),
         architecture: std::env::consts::ARCH.to_owned(),
@@ -3124,14 +3155,7 @@ pub(super) fn validate_current_execution_identity_v1(
         host_identity_sha256: current_host_identity_sha256()?,
         source_dirty,
         private_corpus_configured: std::env::var_os("POINTBREAK_QUALIFICATION_CORPUS").is_some(),
-    };
-    if &observed != expected {
-        return Err(
-            "derived-access execution identity differs from the running source and binary"
-                .to_owned(),
-        );
-    }
-    Ok(())
+    })
 }
 
 fn nearest_existing_ancestor(path: &Path) -> Result<&Path, String> {

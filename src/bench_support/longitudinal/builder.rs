@@ -3,6 +3,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::bench_support::derived_access::{
+    DERIVED_QUARANTINE_PREFIX, DERIVED_SIDECAR_DIRECTORY, DERIVED_WRITER_LOCK_FILE,
+};
 use crate::bench_support::longitudinal::contract::{
     LONGITUDINAL_CAPACITY_MATERIALIZATION_RECEIPT_SCHEMA_V1,
     LONGITUDINAL_MATERIALIZATION_RECEIPT_SCHEMA_V1,
@@ -748,13 +751,32 @@ pub fn longitudinal_store_data_inventory_v1(
     store_data_inventory_v1(root)
 }
 
+pub fn longitudinal_authoritative_store_data_inventory_v1(
+    root: &Path,
+) -> Result<LongitudinalStoreDataInventoryV1, LongitudinalMaterializeError> {
+    store_data_inventory_for_scope_v1(root, StoreDataInventoryScopeV1::Authoritative)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StoreDataInventoryScopeV1 {
+    Inclusive,
+    Authoritative,
+}
+
 fn store_data_inventory_v1(
     root: &Path,
+) -> Result<LongitudinalStoreDataInventoryV1, LongitudinalMaterializeError> {
+    store_data_inventory_for_scope_v1(root, StoreDataInventoryScopeV1::Inclusive)
+}
+
+fn store_data_inventory_for_scope_v1(
+    root: &Path,
+    scope: StoreDataInventoryScopeV1,
 ) -> Result<LongitudinalStoreDataInventoryV1, LongitudinalMaterializeError> {
     let store = store_dir_for_repo(root).map_err(store_error)?;
     let mut files = Vec::new();
     if store.exists() {
-        collect_store_data_files_v1(&store, &store, &mut files)?;
+        collect_store_data_files_v1(&store, &store, scope, &mut files)?;
     }
     files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     let byte_count = files.iter().try_fold(0_u64, |total, file| {
@@ -773,6 +795,7 @@ fn store_data_inventory_v1(
 fn collect_store_data_files_v1(
     store: &Path,
     directory: &Path,
+    scope: StoreDataInventoryScopeV1,
     files: &mut Vec<StoreDataFileV1>,
 ) -> Result<(), LongitudinalMaterializeError> {
     let entries = fs::read_dir(directory).map_err(|error| {
@@ -795,8 +818,18 @@ fn collect_store_data_files_v1(
                 path.display()
             ))
         })?;
+        if scope == StoreDataInventoryScopeV1::Authoritative
+            && directory == store
+            && is_governed_derived_store_entry_v1(
+                &entry.file_name().to_string_lossy(),
+                metadata.is_dir(),
+                metadata.is_file(),
+            )
+        {
+            continue;
+        }
         if metadata.is_dir() {
-            collect_store_data_files_v1(store, &path, files)?;
+            collect_store_data_files_v1(store, &path, scope, files)?;
             continue;
         }
         if !metadata.is_file() {
@@ -832,6 +865,34 @@ fn collect_store_data_files_v1(
         });
     }
     Ok(())
+}
+
+pub(crate) fn is_governed_derived_store_entry_v1(
+    name: &str,
+    is_directory: bool,
+    is_file: bool,
+) -> bool {
+    (is_directory && name == DERIVED_SIDECAR_DIRECTORY)
+        || (is_file && name == DERIVED_WRITER_LOCK_FILE)
+        || (is_directory && is_well_formed_derived_quarantine_v1(name))
+}
+
+fn is_well_formed_derived_quarantine_v1(name: &str) -> bool {
+    let Some(suffix) = name.strip_prefix(DERIVED_QUARANTINE_PREFIX) else {
+        return false;
+    };
+    let mut components = suffix.split('-');
+    let Some(process_id) = components.next() else {
+        return false;
+    };
+    let Some(sequence) = components.next() else {
+        return false;
+    };
+    components.next().is_none()
+        && !process_id.is_empty()
+        && process_id.bytes().all(|byte| byte.is_ascii_digit())
+        && !sequence.is_empty()
+        && sequence.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 pub fn verify_longitudinal_materializer_equivalence_v1(
@@ -1378,6 +1439,92 @@ mod tests {
                 .unwrap()
                 .file_count,
             0
+        );
+    }
+
+    #[test]
+    fn authoritative_inventory_excludes_only_governed_top_level_derived_state() {
+        let repo = tempfile::tempdir().unwrap();
+        init_repo(repo.path());
+        let store = store_dir_for_repo(repo.path()).unwrap();
+        fs::create_dir_all(store.join("events")).unwrap();
+        fs::write(store.join("events/authoritative.json"), b"truth").unwrap();
+
+        let baseline = longitudinal_authoritative_store_data_inventory_v1(repo.path()).unwrap();
+        assert_eq!(
+            baseline,
+            longitudinal_store_data_inventory_v1(repo.path()).unwrap()
+        );
+
+        fs::create_dir_all(store.join(".pointbreak-derived")).unwrap();
+        fs::write(store.join(".pointbreak-derived/cursor.sqlite3"), b"derived").unwrap();
+        fs::write(store.join(".pointbreak-derived.writer.lock"), b"lock").unwrap();
+        fs::create_dir_all(store.join(".pointbreak-derived.quarantine-42-7")).unwrap();
+        fs::write(
+            store.join(".pointbreak-derived.quarantine-42-7/cursor.sqlite3"),
+            b"quarantine",
+        )
+        .unwrap();
+
+        assert_ne!(
+            longitudinal_store_data_inventory_v1(repo.path()).unwrap(),
+            baseline
+        );
+        assert_eq!(
+            longitudinal_authoritative_store_data_inventory_v1(repo.path()).unwrap(),
+            baseline
+        );
+
+        fs::create_dir_all(store.join(".pointbreak-derived.quarantine-42")).unwrap();
+        fs::write(
+            store.join(".pointbreak-derived.quarantine-42/cursor.sqlite3"),
+            b"malformed",
+        )
+        .unwrap();
+        let malformed = longitudinal_authoritative_store_data_inventory_v1(repo.path()).unwrap();
+        assert_eq!(
+            malformed.file_count,
+            baseline.file_count + 1,
+            "a malformed quarantine name remains authoritative"
+        );
+
+        fs::create_dir_all(store.join(".pointbreak-derived.quarantine-pid-7")).unwrap();
+        fs::write(
+            store.join(".pointbreak-derived.quarantine-pid-7/cursor.sqlite3"),
+            b"lookalike",
+        )
+        .unwrap();
+        let lookalike = longitudinal_authoritative_store_data_inventory_v1(repo.path()).unwrap();
+        assert_eq!(
+            lookalike.file_count,
+            malformed.file_count + 1,
+            "a quarantine lookalike remains authoritative"
+        );
+
+        fs::create_dir_all(store.join("events/.pointbreak-derived")).unwrap();
+        fs::write(
+            store.join("events/.pointbreak-derived/nested.sqlite3"),
+            b"nested truth",
+        )
+        .unwrap();
+        let nested_sidecar =
+            longitudinal_authoritative_store_data_inventory_v1(repo.path()).unwrap();
+        assert_eq!(
+            nested_sidecar.file_count,
+            lookalike.file_count + 1,
+            "an exactly named nested sidecar remains authoritative"
+        );
+
+        fs::write(
+            store.join("events/.pointbreak-derived.writer.lock"),
+            b"nested lock truth",
+        )
+        .unwrap();
+        let nested_lock = longitudinal_authoritative_store_data_inventory_v1(repo.path()).unwrap();
+        assert_eq!(
+            nested_lock.file_count,
+            nested_sidecar.file_count + 1,
+            "an exactly named nested writer lock remains authoritative"
         );
     }
 

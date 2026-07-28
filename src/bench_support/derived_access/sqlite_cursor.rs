@@ -11,6 +11,7 @@ use rusqlite::{
 };
 
 use super::writer_lock::{StoreWriterLock, WriterLockError};
+use super::{DERIVED_QUARANTINE_PREFIX, DERIVED_SIDECAR_DIRECTORY};
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::error::ShoreError;
 use crate::session::derived_access::cursor::{
@@ -21,7 +22,6 @@ use crate::session::derived_access::{QualificationJournalCursor, QualificationLo
 use crate::session::event::ShoreEvent;
 use crate::session::{EventStore, EventWriteOutcome};
 
-const SIDECAR_DIRECTORY: &str = ".pointbreak-derived";
 const DATABASE_FILE: &str = "cursor.sqlite3";
 const PROFILE_ID: &str = "pointbreak.sqlite-derived-access-cursor.v1";
 const SCHEMA_VERSION: i64 = 1;
@@ -640,7 +640,9 @@ impl SqliteCursorLedger {
     }
 
     fn for_root(store_root: PathBuf, identity: CursorLedgerIdentity) -> Self {
-        let database_path = store_root.join(SIDECAR_DIRECTORY).join(DATABASE_FILE);
+        let database_path = store_root
+            .join(DERIVED_SIDECAR_DIRECTORY)
+            .join(DATABASE_FILE);
         Self {
             store_root,
             database_path,
@@ -649,7 +651,7 @@ impl SqliteCursorLedger {
     }
 
     fn sidecar_path(&self) -> PathBuf {
-        self.store_root.join(SIDECAR_DIRECTORY)
+        self.store_root.join(DERIVED_SIDECAR_DIRECTORY)
     }
 
     fn validated_connection(&self) -> Result<Connection, CursorLedgerError> {
@@ -683,7 +685,7 @@ impl SqliteCursorLedger {
     fn rotate_sidecar(&self) -> Result<PathBuf, CursorLedgerError> {
         let sidecar = self.sidecar_path();
         let quarantine = self.store_root.join(format!(
-            "{SIDECAR_DIRECTORY}.quarantine-{}-{}",
+            "{DERIVED_QUARANTINE_PREFIX}{}-{}",
             std::process::id(),
             QUARANTINE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));

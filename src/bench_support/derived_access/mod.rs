@@ -8,6 +8,10 @@ mod sqlite_locator;
 mod sqlite_semantic;
 mod writer_lock;
 
+pub(crate) const DERIVED_QUARANTINE_PREFIX: &str = ".pointbreak-derived.quarantine-";
+pub(crate) const DERIVED_SIDECAR_DIRECTORY: &str = ".pointbreak-derived";
+pub(crate) const DERIVED_WRITER_LOCK_FILE: &str = ".pointbreak-derived.writer.lock";
+
 pub use contract::*;
 pub use evidence::*;
 pub use lifecycle::*;

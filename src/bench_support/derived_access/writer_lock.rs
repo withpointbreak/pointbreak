@@ -3,7 +3,7 @@
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
-const WRITER_LOCK_FILE: &str = ".pointbreak-derived.writer.lock";
+use super::DERIVED_WRITER_LOCK_FILE;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum WriterLockError {
@@ -46,7 +46,7 @@ fn open_lock_file(store_root: &Path) -> Result<(File, PathBuf), WriterLockError>
     let canonical_root = store_root
         .canonicalize()
         .map_err(|error| io_error(store_root, error))?;
-    let path = canonical_root.join(WRITER_LOCK_FILE);
+    let path = canonical_root.join(DERIVED_WRITER_LOCK_FILE);
     let file = OpenOptions::new()
         .create(true)
         .read(true)

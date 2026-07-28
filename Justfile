@@ -260,6 +260,12 @@ check: commit-check build lint test
 store-foundation-qualification-smoke:
     cargo +stable bench --features bench --bench store_foundation -- --qualification-smoke
 
+# Execute the feature-gated derived-access accounting and package regression lane.
+[group('quality')]
+derived-access-tests:
+    cargo +stable nextest run --features longitudinal-counting \
+        -E 'test(candidate_open_preserves_admitted_truth_and_accounts_for_governed_namespaces) | test(bound_smoke_fragment_assembles_into_a_verified_incomplete_evidence_package)'
+
 # Run the developer evidence lane with repeated raw performance samples. This
 # remains environment evidence rather than a default-test timing gate.
 [group('quality')]
