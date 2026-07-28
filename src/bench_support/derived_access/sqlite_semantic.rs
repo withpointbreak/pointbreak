@@ -140,7 +140,7 @@ impl SqliteSemantic {
                      PRIMARY KEY (family, semantic_key)
                  ) STRICT;
                  CREATE INDEX IF NOT EXISTS semantic_representative_sequence
-                     ON semantic_representative(family, sequence);
+                     ON semantic_representative(sequence, family);
                  CREATE TABLE IF NOT EXISTS semantic_duplicate_projection (
                      family TEXT NOT NULL,
                      semantic_key TEXT NOT NULL,

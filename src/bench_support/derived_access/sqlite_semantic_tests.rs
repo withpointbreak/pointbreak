@@ -978,6 +978,60 @@ fn append_restart_and_selected_detail_do_not_rebuild_full_projections() {
 }
 
 #[test]
+fn materialized_audit_looks_up_representatives_by_sequence() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    append(
+        &adapter,
+        &revision_event("audit-plan", Vec::new(), "2026-07-27T16:00:01Z"),
+        1,
+    );
+    drop(adapter);
+
+    let connection = rusqlite::Connection::open(
+        root.path()
+            .join(".pointbreak-derived")
+            .join("cursor.sqlite3"),
+    )
+    .expect("open sidecar");
+    let mut statement = connection
+        .prepare(
+            "EXPLAIN QUERY PLAN
+             SELECT representative.sequence
+             FROM locator_event AS locator
+             JOIN semantic_event_fact AS event ON event.sequence = locator.sequence
+             JOIN cursor_receipt AS receipt ON receipt.sequence = event.sequence
+             JOIN semantic_representative AS representative
+               ON representative.sequence = event.sequence
+             WHERE locator.epoch = 1
+               AND event.sequence <= 1
+               AND representative.family != 'observation'
+             ORDER BY locator.replay_key, receipt.logical_reread_key",
+        )
+        .expect("prepare audit plan");
+    let details = statement
+        .query_map([], |row| row.get::<_, String>(3))
+        .expect("query audit plan")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read audit plan");
+
+    assert!(
+        details.iter().any(|detail| {
+            detail.contains("SEARCH representative")
+                && detail.contains("semantic_representative_sequence")
+                && detail.contains("sequence=?")
+        }),
+        "materialized audit must use a representative sequence lookup: {details:?}"
+    );
+    assert!(
+        !details
+            .iter()
+            .any(|detail| detail.contains("SCAN representative")),
+        "materialized audit must not rescan all representatives per event: {details:?}"
+    );
+}
+
+#[test]
 fn semantic_inventory_measures_retained_body_or_object_payload_columns() {
     let root = tempfile::tempdir().expect("root");
     let adapter = open_adapter(root.path());
