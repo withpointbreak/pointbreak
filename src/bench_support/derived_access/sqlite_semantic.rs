@@ -4,6 +4,7 @@
 use std::collections::BTreeSet;
 
 use rusqlite::{OptionalExtension, Transaction, params};
+use sha2::{Digest, Sha256};
 
 use super::sqlite_locator::{SqliteLocator, SqliteLocatorError, read_locator_checkpoint};
 use crate::session::derived_access::cursor::{CursorDelta, TruthCursor};
@@ -161,9 +162,10 @@ impl SqliteSemantic {
                  CREATE TABLE IF NOT EXISTS semantic_representative (
                      family TEXT NOT NULL,
                      semantic_key TEXT NOT NULL,
+                     semantic_key_hash BLOB NOT NULL CHECK (length(semantic_key_hash) = 32),
                      sequence INTEGER NOT NULL REFERENCES semantic_event_fact(sequence),
-                     PRIMARY KEY (family, semantic_key)
-                 ) STRICT;
+                     PRIMARY KEY (family, semantic_key_hash)
+                 ) STRICT, WITHOUT ROWID;
                  CREATE INDEX IF NOT EXISTS semantic_representative_sequence
                      ON semantic_representative(sequence, family);
                  CREATE TABLE IF NOT EXISTS semantic_duplicate_projection (
@@ -745,6 +747,10 @@ fn split_canonical_digest(value: &str) -> Option<(&str, [u8; 32])> {
     Some((prefix, digest))
 }
 
+fn semantic_key_digest(value: &str) -> [u8; 32] {
+    Sha256::digest(value.as_bytes()).into()
+}
+
 fn semantic_dimension_id(
     transaction: &Transaction<'_>,
     table: &'static str,
@@ -895,18 +901,31 @@ fn update_materialized_projection(
 
     let previous = transaction
         .query_row(
-            "SELECT representative.sequence, locator.event_id
+            "SELECT representative.sequence, locator.event_id, representative.semantic_key
              FROM semantic_representative AS representative
              JOIN locator_event_text AS locator ON locator.sequence = representative.sequence
-             WHERE representative.family = ?1 AND representative.semantic_key = ?2",
-            params![family, semantic_key],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+             WHERE representative.family = ?1 AND representative.semantic_key_hash = ?2",
+            params![family, semantic_key_digest(semantic_key).as_slice()],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
         )
         .optional()
         .map_err(|error| locator_sqlite_error("read semantic representative", error))?;
+    if let Some((_, _, observed_key)) = &previous
+        && observed_key != semantic_key
+    {
+        return Err(SqliteLocatorError::Delta(
+            "semantic representative digest resolves to a different key".to_owned(),
+        ));
+    }
     let replace = previous
         .as_ref()
-        .is_none_or(|(_, event_id)| fact.event_id < *event_id);
+        .is_none_or(|(_, event_id, _)| fact.event_id < *event_id);
     if !replace {
         return Ok(());
     }
@@ -915,7 +934,7 @@ fn update_materialized_projection(
     if family == "request" {
         affected_requests.insert(semantic_key.to_owned());
     } else if family == "response" {
-        if let Some((sequence, _)) = &previous
+        if let Some((sequence, _, _)) = &previous
             && let Some(request_id) = response_request_id(transaction, *sequence)?
         {
             affected_requests.insert(request_id);
@@ -941,13 +960,15 @@ fn update_materialized_projection(
     transaction
         .execute(
             "INSERT INTO semantic_representative
-             (family, semantic_key, sequence)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(family, semantic_key) DO UPDATE SET
+             (family, semantic_key, semantic_key_hash, sequence)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(family, semantic_key_hash) DO UPDATE SET
+                 semantic_key = excluded.semantic_key,
                  sequence = excluded.sequence",
             params![
                 family,
                 semantic_key,
+                semantic_key_digest(semantic_key).as_slice(),
                 to_i64_locator(fact.cursor.sequence, "representative sequence")?,
             ],
         )
@@ -1056,22 +1077,27 @@ fn update_materialized_duplicate(
         None => {
             let representative = transaction
                 .query_row(
-                    "SELECT locator.event_id
+                    "SELECT locator.event_id, representative.semantic_key
                      FROM semantic_representative AS representative
                      JOIN locator_event_text AS locator
                        ON locator.sequence = representative.sequence
                      WHERE representative.family = ?1
-                       AND representative.semantic_key = ?2",
-                    params![family, semantic_key],
-                    |row| row.get::<_, String>(0),
+                       AND representative.semantic_key_hash = ?2",
+                    params![family, semantic_key_digest(semantic_key).as_slice()],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                 )
                 .optional()
                 .map_err(|error| {
                     locator_sqlite_error("read first semantic duplicate representative", error)
                 })?;
-            let Some(representative) = representative else {
+            let Some((representative, observed_key)) = representative else {
                 return Ok(());
             };
+            if observed_key != semantic_key {
+                return Err(SqliteLocatorError::Delta(
+                    "semantic duplicate digest resolves to a different key".to_owned(),
+                ));
+            }
             (2, vec![representative])
         }
     };
@@ -1186,20 +1212,25 @@ fn request_projection_state(
 ) -> Result<(bool, bool), SqliteLocatorError> {
     let mode = transaction
         .query_row(
-            "SELECT event.assertion_mode
+            "SELECT event.assertion_mode, representative.semantic_key
              FROM semantic_representative AS representative
              JOIN semantic_event_fact_text AS event
                ON event.sequence = representative.sequence
              WHERE representative.family = 'request'
-               AND representative.semantic_key = ?1",
-            [request_id],
-            |row| row.get::<_, String>(0),
+               AND representative.semantic_key_hash = ?1",
+            [semantic_key_digest(request_id).as_slice()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()
         .map_err(|error| locator_sqlite_error("read request projection state", error))?;
-    let Some(mode) = mode else {
+    let Some((mode, observed_key)) = mode else {
         return Ok((false, false));
     };
+    if observed_key != request_id {
+        return Err(SqliteLocatorError::Delta(
+            "request representative digest resolves to a different key".to_owned(),
+        ));
+    }
     let responded = transaction
         .query_row(
             "SELECT 1
