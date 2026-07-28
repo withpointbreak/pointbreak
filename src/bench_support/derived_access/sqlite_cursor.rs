@@ -9,6 +9,7 @@ use std::time::Duration;
 use rusqlite::{
     Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
+use sha2::{Digest, Sha256};
 
 use super::writer_lock::{StoreWriterLock, WriterLockError};
 use super::{DERIVED_QUARANTINE_PREFIX, DERIVED_SIDECAR_DIRECTORY};
@@ -24,7 +25,7 @@ use crate::session::{EventStore, EventWriteOutcome};
 
 const DATABASE_FILE: &str = "cursor.sqlite3";
 const PROFILE_ID: &str = "pointbreak.sqlite-derived-access-cursor.v1";
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const APPLICATION_ID: i64 = 0x5042_4443;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 static QUARANTINE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -734,6 +735,10 @@ fn validate_nonempty(field: &'static str, value: &str) -> Result<(), CursorLedge
     Ok(())
 }
 
+fn sha256_digest(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
 fn open_connection(path: &Path, create: bool) -> Result<Connection, CursorLedgerError> {
     if !create && !path.exists() {
         return Err(CursorLedgerError::IncompleteBootstrap);
@@ -794,7 +799,7 @@ fn initialize_schema(
                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                  store_id TEXT NOT NULL,
                  profile_id TEXT NOT NULL,
-                 schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+                 schema_version INTEGER NOT NULL CHECK (schema_version = 2),
                  epoch INTEGER NOT NULL CHECK (epoch > 0),
                  head_sequence INTEGER NOT NULL CHECK (head_sequence >= 0),
                  bootstrap_state TEXT NOT NULL
@@ -802,16 +807,17 @@ fn initialize_schema(
                  quarantine_reason TEXT
              ) STRICT;
              CREATE TABLE cursor_attempt (
-                 attempt_token TEXT PRIMARY KEY CHECK (length(attempt_token) > 0)
-             ) STRICT;
+                 attempt_hash BLOB PRIMARY KEY CHECK (length(attempt_hash) = 32)
+             ) STRICT, WITHOUT ROWID;
              CREATE TABLE cursor_intent (
                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                  epoch INTEGER NOT NULL CHECK (epoch > 0),
                  sequence INTEGER NOT NULL CHECK (sequence > 0),
                  logical_reread_key TEXT NOT NULL CHECK (length(logical_reread_key) > 0),
                  validation_witness TEXT NOT NULL CHECK (length(validation_witness) = 64),
-                 attempt_token TEXT NOT NULL UNIQUE
-                     REFERENCES cursor_attempt(attempt_token)
+                 attempt_hash BLOB NOT NULL UNIQUE CHECK (length(attempt_hash) = 32)
+                     REFERENCES cursor_attempt(attempt_hash),
+                 attempt_token TEXT NOT NULL CHECK (length(attempt_token) > 0)
              ) STRICT;
              CREATE TABLE cursor_receipt (
                  sequence INTEGER PRIMARY KEY CHECK (sequence > 0),
@@ -819,8 +825,9 @@ fn initialize_schema(
                  logical_reread_key TEXT NOT NULL UNIQUE
                      CHECK (length(logical_reread_key) > 0),
                  validation_witness TEXT NOT NULL CHECK (length(validation_witness) = 64),
-                 attempt_token TEXT NOT NULL UNIQUE
-                     REFERENCES cursor_attempt(attempt_token)
+                 attempt_hash BLOB NOT NULL UNIQUE CHECK (length(attempt_hash) = 32)
+                     REFERENCES cursor_attempt(attempt_hash),
+                 attempt_token TEXT NOT NULL CHECK (length(attempt_token) > 0)
              ) STRICT;",
         )
         .map_err(|error| sqlite_error("create cursor schema", error))?;
@@ -1211,9 +1218,10 @@ fn insert_attempt(
     transaction: &Transaction<'_>,
     attempt_token: &str,
 ) -> Result<(), CursorLedgerError> {
+    let attempt_hash = sha256_digest(attempt_token.as_bytes());
     match transaction.execute(
-        "INSERT INTO cursor_attempt (attempt_token) VALUES (?1)",
-        [attempt_token],
+        "INSERT INTO cursor_attempt (attempt_hash) VALUES (?1)",
+        [attempt_hash.as_slice()],
     ) {
         Ok(_) => Ok(()),
         Err(error) if error.sqlite_error_code() == Some(ErrorCode::ConstraintViolation) => Err(
@@ -1230,13 +1238,15 @@ fn insert_intent(
     transaction
         .execute(
             "INSERT INTO cursor_intent
-             (singleton, epoch, sequence, logical_reread_key, validation_witness, attempt_token)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5)",
+             (singleton, epoch, sequence, logical_reread_key, validation_witness,
+              attempt_hash, attempt_token)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 u64_to_i64(intent.proposed_cursor.epoch, "intent epoch")?,
                 u64_to_i64(intent.proposed_cursor.sequence, "intent sequence")?,
                 intent.logical_reread_key,
                 intent.validation_witness,
+                sha256_digest(intent.attempt_token.as_bytes()).as_slice(),
                 intent.attempt_token,
             ],
         )
@@ -1251,13 +1261,15 @@ fn insert_receipt(
     transaction
         .execute(
             "INSERT INTO cursor_receipt
-             (sequence, epoch, logical_reread_key, validation_witness, attempt_token)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             (sequence, epoch, logical_reread_key, validation_witness,
+              attempt_hash, attempt_token)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 u64_to_i64(receipt.cursor.sequence, "receipt sequence")?,
                 u64_to_i64(receipt.cursor.epoch, "receipt epoch")?,
                 receipt.logical_reread_key,
                 receipt.validation_witness,
+                sha256_digest(receipt.attempt_token.as_bytes()).as_slice(),
                 receipt.attempt_token,
             ],
         )

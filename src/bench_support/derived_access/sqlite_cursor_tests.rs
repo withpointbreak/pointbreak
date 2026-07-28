@@ -99,7 +99,7 @@ fn physical_cursor_ledger_matches_reference_for_unique_equal_and_conflicting_wri
         inventory.profile_id,
         "pointbreak.sqlite-derived-access-cursor.v1"
     );
-    assert_eq!(inventory.schema_version, 1);
+    assert_eq!(inventory.schema_version, 2);
     assert_eq!(inventory.epoch, 1);
     assert_eq!(inventory.head_sequence, 1);
     assert_eq!(inventory.receipt_count, 1);

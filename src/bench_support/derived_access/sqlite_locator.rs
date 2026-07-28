@@ -22,7 +22,7 @@ const CURSOR_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-cursor.v1";
 const LOCATOR_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-locator.v1";
 const LOCATOR_SCHEMA_VERSION: i64 = 2;
 const APPLICATION_ID: i64 = 0x5042_4443;
-const CURSOR_SCHEMA_VERSION: i64 = 1;
+const CURSOR_SCHEMA_VERSION: i64 = 2;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug)]
