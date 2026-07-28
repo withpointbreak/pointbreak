@@ -670,28 +670,42 @@ fn update_materialized_projection(
     transaction: &Transaction<'_>,
     fact: &SemanticFact,
 ) -> Result<(), SqliteLocatorError> {
-    transaction
-        .execute(
-            "UPDATE semantic_state_projection
-             SET event_count = event_count + 1,
-                 journal_id = CASE
-                     WHEN ?1 = 'review_initialized' THEN (
-                         SELECT locator.journal_id
-                         FROM semantic_event_fact AS event
-                         JOIN locator_event AS locator
-                           ON locator.sequence = event.sequence
-                         WHERE locator.event_type = 'review_initialized'
-                           AND event.semantic_id IS NULL
-                         ORDER BY locator.replay_key DESC, locator.event_id DESC
-                         LIMIT 1
-                     )
-                     WHEN event_count = 0 THEN ?2
-                     ELSE journal_id
-                 END
-             WHERE singleton = 1",
-            params![fact.event_type, fact.journal_id],
-        )
-        .map_err(|error| locator_sqlite_error("advance materialized state", error))?;
+    if fact.event_type == "review_initialized" {
+        let journal_id = transaction
+            .query_row(
+                "SELECT locator.journal_id
+                 FROM semantic_event_fact AS event
+                 JOIN locator_event AS locator ON locator.sequence = event.sequence
+                 WHERE locator.event_type = 'review_initialized'
+                   AND event.semantic_id IS NULL
+                 ORDER BY locator.replay_key DESC, locator.event_id DESC
+                 LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| locator_sqlite_error("select materialized journal", error))?;
+        transaction
+            .execute(
+                "UPDATE semantic_state_projection
+                 SET event_count = event_count + 1, journal_id = ?1
+                 WHERE singleton = 1",
+                [journal_id],
+            )
+            .map_err(|error| locator_sqlite_error("advance materialized state", error))?;
+    } else {
+        transaction
+            .execute(
+                "UPDATE semantic_state_projection
+                 SET event_count = event_count + 1,
+                     journal_id = CASE
+                         WHEN event_count = 0 THEN ?1
+                         ELSE journal_id
+                     END
+                 WHERE singleton = 1",
+                [&fact.journal_id],
+            )
+            .map_err(|error| locator_sqlite_error("advance materialized state", error))?;
+    }
 
     let Some((family, semantic_key)) = materialized_identity(fact) else {
         return Ok(());
