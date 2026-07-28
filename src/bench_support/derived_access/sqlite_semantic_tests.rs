@@ -949,10 +949,7 @@ fn append_restart_and_selected_detail_do_not_rebuild_full_projections() {
         inventory.indexes,
         vec![
             "semantic_event_fact_content",
-            "semantic_event_fact_kind",
             "semantic_event_fact_revision",
-            "sqlite_autoindex_semantic_event_fact_1",
-            "sqlite_autoindex_semantic_event_fact_2",
         ]
     );
     for forbidden in [
@@ -963,6 +960,15 @@ fn append_restart_and_selected_detail_do_not_rebuild_full_projections() {
         "trust_generation",
         "git_reachability",
         "bodyless_event_json",
+        "epoch",
+        "logical_reread_key",
+        "replay_key",
+        "event_id",
+        "event_type",
+        "journal_id",
+        "payload_hash",
+        "track_id",
+        "validation_witness",
     ] {
         assert!(
             !inventory.columns.iter().any(|column| column == forbidden),
