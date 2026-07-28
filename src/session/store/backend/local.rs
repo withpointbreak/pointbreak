@@ -36,6 +36,7 @@ impl LocalJournal {
             .join(format!("{}.json", event_filename_stem(idempotency_key)))
     }
 
+    #[cfg(any(test, feature = "bench"))]
     fn read_event_bytes_by_key_digest(&self, key_digest: &str) -> Result<Option<Vec<u8>>> {
         if key_digest.len() != 64
             || !key_digest
