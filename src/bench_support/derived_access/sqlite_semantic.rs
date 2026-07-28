@@ -19,7 +19,7 @@ use crate::session::derived_access::semantic::{
 };
 
 const SEMANTIC_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-semantic.v1";
-const SEMANTIC_SCHEMA_VERSION: i64 = 1;
+const SEMANTIC_SCHEMA_VERSION: i64 = 2;
 
 #[derive(Clone, Debug)]
 pub(crate) struct SqliteSemantic {
@@ -62,20 +62,45 @@ impl SqliteSemantic {
                 "CREATE TABLE IF NOT EXISTS semantic_meta (
                      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                      profile_id TEXT NOT NULL,
-                     schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+                     schema_version INTEGER NOT NULL CHECK (schema_version = 2),
                      epoch INTEGER NOT NULL CHECK (epoch > 0),
                      applied_sequence INTEGER NOT NULL CHECK (applied_sequence >= 0)
+                 ) STRICT;
+                 CREATE TABLE IF NOT EXISTS semantic_identity_prefix (
+                     id INTEGER PRIMARY KEY,
+                     value TEXT NOT NULL UNIQUE
+                 ) STRICT;
+                 CREATE TABLE IF NOT EXISTS semantic_actor (
+                     id INTEGER PRIMARY KEY,
+                     value TEXT NOT NULL UNIQUE
                  ) STRICT;
                  CREATE TABLE IF NOT EXISTS semantic_event_fact (
                      sequence INTEGER PRIMARY KEY CHECK (sequence > 0)
                          REFERENCES locator_event(sequence),
-                     revision_id TEXT,
-                     semantic_id TEXT,
-                     content_hash TEXT,
+                     revision_prefix_id INTEGER REFERENCES semantic_identity_prefix(id),
+                     revision_digest BLOB CHECK (length(revision_digest) = 32),
+                     revision_raw TEXT,
+                     semantic_prefix_id INTEGER REFERENCES semantic_identity_prefix(id),
+                     semantic_digest BLOB CHECK (length(semantic_digest) = 32),
+                     semantic_raw TEXT,
+                     content_prefix_id INTEGER REFERENCES semantic_identity_prefix(id),
+                     content_digest BLOB CHECK (length(content_digest) = 32),
+                     content_raw TEXT,
                      occurred_at TEXT NOT NULL,
-                     assertion_mode TEXT NOT NULL,
-                     actor_id TEXT NOT NULL,
-                     CHECK (assertion_mode IN ('advisory', 'operative'))
+                     assertion_mode INTEGER NOT NULL CHECK (assertion_mode IN (0, 1)),
+                     actor_id INTEGER NOT NULL REFERENCES semantic_actor(id),
+                     CHECK (
+                         (revision_prefix_id IS NULL AND revision_digest IS NULL)
+                         OR (revision_prefix_id IS NOT NULL AND revision_digest IS NOT NULL)
+                     ),
+                     CHECK (
+                         (semantic_prefix_id IS NULL AND semantic_digest IS NULL)
+                         OR (semantic_prefix_id IS NOT NULL AND semantic_digest IS NOT NULL)
+                     ),
+                     CHECK (
+                         (content_prefix_id IS NULL AND content_digest IS NULL)
+                         OR (content_prefix_id IS NOT NULL AND content_digest IS NOT NULL)
+                     )
                  ) STRICT;
                  CREATE TABLE IF NOT EXISTS semantic_revision_fact (
                      sequence INTEGER PRIMARY KEY REFERENCES semantic_event_fact(sequence),
@@ -166,9 +191,47 @@ impl SqliteSemantic {
                          CHECK (open_operative_input_request_count >= 0)
                  ) STRICT;
                  CREATE INDEX IF NOT EXISTS semantic_event_fact_revision
-                     ON semantic_event_fact(revision_id, sequence);
+                     ON semantic_event_fact(
+                         revision_prefix_id, revision_digest, revision_raw, sequence
+                     );
                  CREATE INDEX IF NOT EXISTS semantic_event_fact_content
-                     ON semantic_event_fact(content_hash, sequence);",
+                     ON semantic_event_fact(
+                         content_prefix_id, content_digest, content_raw, sequence
+                     );
+                 CREATE VIEW IF NOT EXISTS semantic_event_fact_text AS
+                 SELECT event.sequence,
+                        coalesce(
+                            event.revision_raw,
+                            revision_prefix.value || lower(hex(event.revision_digest))
+                        ) AS revision_id,
+                        coalesce(
+                            event.semantic_raw,
+                            semantic_prefix.value || lower(hex(event.semantic_digest))
+                        ) AS semantic_id,
+                        coalesce(
+                            event.content_raw,
+                            content_prefix.value || lower(hex(event.content_digest))
+                        ) AS content_hash,
+                        event.occurred_at,
+                        CASE event.assertion_mode
+                            WHEN 0 THEN 'advisory'
+                            WHEN 1 THEN 'operative'
+                        END AS assertion_mode,
+                        actor.value AS actor_id,
+                        event.revision_prefix_id,
+                        event.revision_digest,
+                        event.semantic_prefix_id,
+                        event.semantic_digest,
+                        event.content_prefix_id,
+                        event.content_digest
+                 FROM semantic_event_fact AS event
+                 LEFT JOIN semantic_identity_prefix AS revision_prefix
+                   ON revision_prefix.id = event.revision_prefix_id
+                 LEFT JOIN semantic_identity_prefix AS semantic_prefix
+                   ON semantic_prefix.id = event.semantic_prefix_id
+                 LEFT JOIN semantic_identity_prefix AS content_prefix
+                   ON content_prefix.id = event.content_prefix_id
+                 JOIN semantic_actor AS actor ON actor.id = event.actor_id;",
             )
             .map_err(|error| sqlite_error("create semantic schema", error))?;
         let locator_checkpoint = read_locator_checkpoint(&connection)?;
@@ -316,7 +379,7 @@ impl SqliteSemantic {
                     event.occurred_at, event.assertion_mode,
                     locator.track_id, event.actor_id, receipt.validation_witness,
                     receipt.epoch
-             FROM semantic_event_fact AS event
+             FROM semantic_event_fact_text AS event
              JOIN locator_event_text AS locator ON locator.sequence = event.sequence
              JOIN cursor_receipt AS receipt ON receipt.sequence = event.sequence
              WHERE locator.epoch = ?1 AND event.sequence <= ?2
@@ -402,28 +465,36 @@ impl SqliteSemantic {
                 observed,
             });
         }
-        let facts = query_facts(
-            &connection,
-            "SELECT locator.epoch, event.sequence, receipt.logical_reread_key,
-                    locator.replay_key, locator.event_id, locator.event_type,
-                    locator.journal_id, event.revision_id, event.semantic_id,
-                    event.content_hash, locator.payload_hash,
-                    event.occurred_at, event.assertion_mode,
-                    locator.track_id, event.actor_id, receipt.validation_witness,
-                    receipt.epoch
-             FROM semantic_event_fact AS event INDEXED BY semantic_event_fact_revision
-             JOIN locator_event_text AS locator ON locator.sequence = event.sequence
-             JOIN cursor_receipt AS receipt ON receipt.sequence = event.sequence
-             WHERE event.revision_id = ?1
-               AND locator.epoch = ?2
-               AND event.sequence <= ?3
-             ORDER BY locator.replay_key, receipt.logical_reread_key",
-            params![
-                revision_id,
-                to_i64(observed.epoch, "detail epoch")?,
-                to_i64(observed.sequence, "detail cursor")?,
-            ],
-        )?;
+        let epoch = to_i64(observed.epoch, "detail epoch")?;
+        let sequence = to_i64(observed.sequence, "detail cursor")?;
+        let facts = if let Some((prefix, digest)) = split_canonical_digest(revision_id) {
+            query_facts(
+                &connection,
+                &selected_semantic_facts(
+                    "physical.revision_prefix_id = (
+                         SELECT id FROM semantic_identity_prefix WHERE value = ?1
+                     )
+                     AND physical.revision_digest = ?2",
+                    "semantic_event_fact_revision",
+                    3,
+                    4,
+                ),
+                params![prefix, digest.as_slice(), epoch, sequence],
+            )?
+        } else {
+            query_facts(
+                &connection,
+                &selected_semantic_facts(
+                    "physical.revision_prefix_id IS NULL
+                     AND physical.revision_digest IS NULL
+                     AND physical.revision_raw = ?1",
+                    "semantic_event_fact_revision",
+                    2,
+                    3,
+                ),
+                params![revision_id, epoch, sequence],
+            )?
+        };
         Ok(LocatorRead::Ready(facts))
     }
 
@@ -433,24 +504,44 @@ impl SqliteSemantic {
         observed: TruthCursor,
     ) -> Result<bool, SqliteSemanticError> {
         let connection = self.locator.validated_connection()?;
+        let epoch = to_i64(observed.epoch, "removal epoch")?;
+        let sequence = to_i64(observed.sequence, "removal cursor")?;
+        let (query, parameters): (String, Vec<rusqlite::types::Value>) =
+            if let Some((prefix, digest)) = split_canonical_digest(content_hash) {
+                (
+                    selected_content_query(
+                        "event.content_prefix_id = (
+                             SELECT id FROM semantic_identity_prefix WHERE value = ?1
+                         )
+                         AND event.content_digest = ?2",
+                        3,
+                        4,
+                    ),
+                    vec![
+                        prefix.to_owned().into(),
+                        digest.to_vec().into(),
+                        epoch.into(),
+                        sequence.into(),
+                    ],
+                )
+            } else {
+                (
+                    selected_content_query(
+                        "event.content_prefix_id IS NULL
+                         AND event.content_digest IS NULL
+                         AND event.content_raw = ?1",
+                        2,
+                        3,
+                    ),
+                    vec![
+                        content_hash.to_owned().into(),
+                        epoch.into(),
+                        sequence.into(),
+                    ],
+                )
+            };
         let count = connection
-            .query_row(
-                "SELECT 1
-                 FROM semantic_event_fact AS event
-                      INDEXED BY semantic_event_fact_content
-                 JOIN locator_event_text AS locator ON locator.sequence = event.sequence
-                 WHERE event.content_hash = ?1
-                   AND locator.event_type = 'artifact_removed'
-                   AND locator.epoch = ?2
-                   AND event.sequence <= ?3
-                 LIMIT 1",
-                params![
-                    content_hash,
-                    to_i64(observed.epoch, "removal epoch")?,
-                    to_i64(observed.sequence, "removal cursor")?,
-                ],
-                |_| Ok(()),
-            )
+            .query_row(&query, rusqlite::params_from_iter(parameters), |_| Ok(()))
             .optional()
             .map_err(|error| sqlite_error("query removal fact", error))?;
         Ok(count.is_some())
@@ -535,10 +626,13 @@ fn retained_body_object_bytes(
 }
 
 fn is_retained_body_object_column(name: &str, declared_type: &str) -> bool {
-    if declared_type.eq_ignore_ascii_case("BLOB") {
+    let name = name.to_ascii_lowercase();
+    if declared_type.eq_ignore_ascii_case("BLOB")
+        && !name.ends_with("_digest")
+        && !name.ends_with("_hash")
+    {
         return true;
     }
-    let name = name.to_ascii_lowercase();
     matches!(name.as_str(), "body" | "object" | "payload" | "content")
         || ["body", "object", "payload", "content"]
             .iter()
@@ -558,20 +652,38 @@ fn insert_facts(
     facts: &[SemanticFact],
 ) -> Result<(), SqliteLocatorError> {
     for fact in facts {
+        let revision = encode_identity(transaction, fact.revision_id.as_deref())?;
+        let semantic = encode_identity(transaction, fact.semantic_id.as_deref())?;
+        let content = encode_identity(transaction, fact.content_hash.as_deref())?;
+        let actor_id = semantic_dimension_id(transaction, "semantic_actor", &fact.actor_id)?;
+        let assertion_mode = match fact.assertion_mode {
+            crate::session::event::AssertionMode::Advisory => 0_i64,
+            crate::session::event::AssertionMode::Operative => 1_i64,
+        };
         transaction
             .execute(
                 "INSERT INTO semantic_event_fact
-                 (sequence, revision_id, semantic_id, content_hash, occurred_at,
+                 (sequence,
+                  revision_prefix_id, revision_digest, revision_raw,
+                  semantic_prefix_id, semantic_digest, semantic_raw,
+                  content_prefix_id, content_digest, content_raw,
+                  occurred_at,
                   assertion_mode, actor_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     to_i64_locator(fact.cursor.sequence, "semantic sequence")?,
-                    fact.revision_id,
-                    fact.semantic_id,
-                    fact.content_hash,
+                    revision.prefix_id,
+                    revision.digest.as_deref(),
+                    revision.raw,
+                    semantic.prefix_id,
+                    semantic.digest.as_deref(),
+                    semantic.raw,
+                    content.prefix_id,
+                    content.digest.as_deref(),
+                    content.raw,
                     fact.occurred_at,
-                    enum_text(fact.assertion_mode)?,
-                    fact.actor_id,
+                    assertion_mode,
+                    actor_id,
                 ],
             )
             .map_err(|error| locator_sqlite_error("insert semantic fact", error))?;
@@ -579,6 +691,73 @@ fn insert_facts(
         update_materialized_projection(transaction, fact)?;
     }
     Ok(())
+}
+
+struct EncodedIdentity {
+    prefix_id: Option<i64>,
+    digest: Option<Vec<u8>>,
+    raw: Option<String>,
+}
+
+fn encode_identity(
+    transaction: &Transaction<'_>,
+    value: Option<&str>,
+) -> Result<EncodedIdentity, SqliteLocatorError> {
+    let Some(value) = value else {
+        return Ok(EncodedIdentity {
+            prefix_id: None,
+            digest: None,
+            raw: None,
+        });
+    };
+    if let Some((prefix, digest)) = split_canonical_digest(value) {
+        return Ok(EncodedIdentity {
+            prefix_id: Some(semantic_dimension_id(
+                transaction,
+                "semantic_identity_prefix",
+                prefix,
+            )?),
+            digest: Some(digest.to_vec()),
+            raw: None,
+        });
+    }
+    Ok(EncodedIdentity {
+        prefix_id: None,
+        digest: None,
+        raw: Some(value.to_owned()),
+    })
+}
+
+fn split_canonical_digest(value: &str) -> Option<(&str, [u8; 32])> {
+    let split = value.len().checked_sub(64)?;
+    let (prefix, hex) = value.split_at(split);
+    if prefix.is_empty()
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    let mut digest = [0_u8; 32];
+    for (index, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+        digest[index] = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some((prefix, digest))
+}
+
+fn semantic_dimension_id(
+    transaction: &Transaction<'_>,
+    table: &'static str,
+    value: &str,
+) -> Result<i64, SqliteLocatorError> {
+    let insert = format!("INSERT INTO {table}(value) VALUES (?1) ON CONFLICT(value) DO NOTHING");
+    transaction
+        .execute(&insert, [value])
+        .map_err(|error| locator_sqlite_error("insert semantic dimension", error))?;
+    let select = format!("SELECT id FROM {table} WHERE value = ?1");
+    transaction
+        .query_row(&select, [value], |row| row.get(0))
+        .map_err(|error| locator_sqlite_error("read semantic dimension", error))
 }
 
 fn insert_family_fact(
@@ -674,7 +853,7 @@ fn update_materialized_projection(
         let journal_id = transaction
             .query_row(
                 "SELECT locator.journal_id
-                 FROM semantic_event_fact AS event
+                 FROM semantic_event_fact_text AS event
                  JOIN locator_event_text AS locator ON locator.sequence = event.sequence
                  WHERE locator.event_type = 'review_initialized'
                    AND event.semantic_id IS NULL
@@ -1009,7 +1188,7 @@ fn request_projection_state(
         .query_row(
             "SELECT event.assertion_mode
              FROM semantic_representative AS representative
-             JOIN semantic_event_fact AS event
+             JOIN semantic_event_fact_text AS event
                ON event.sequence = representative.sequence
              WHERE representative.family = 'request'
                AND representative.semantic_key = ?1",
@@ -1163,7 +1342,7 @@ fn query_materialized_facts(
                     ref_withdrawal.association_id,
                     receipt.epoch
              FROM semantic_representative AS representative
-             JOIN semantic_event_fact AS event ON event.sequence = representative.sequence
+             JOIN semantic_event_fact_text AS event ON event.sequence = representative.sequence
              JOIN locator_event_text AS locator ON locator.sequence = event.sequence
              JOIN cursor_receipt AS receipt ON receipt.sequence = event.sequence
              LEFT JOIN semantic_revision_fact AS revision
@@ -1191,7 +1370,7 @@ fn query_materialized_facts(
                    OR event.revision_id IN (
                        SELECT selected_event.revision_id
                        FROM semantic_revision_fact AS selected_revision
-                       JOIN semantic_event_fact AS selected_event
+                       JOIN semantic_event_fact_text AS selected_event
                          ON selected_event.sequence = selected_revision.sequence
                        JOIN locator_event AS selected_locator
                          ON selected_locator.sequence = selected_event.sequence
@@ -1207,7 +1386,7 @@ fn query_materialized_facts(
                        AND event.content_hash IN (
                            SELECT selected_event.content_hash
                            FROM semantic_revision_fact AS selected_revision
-                           JOIN semantic_event_fact AS selected_event
+                           JOIN semantic_event_fact_text AS selected_event
                              ON selected_event.sequence = selected_revision.sequence
                            JOIN locator_event AS selected_locator
                              ON selected_locator.sequence = selected_event.sequence
@@ -1345,6 +1524,48 @@ fn materialized_optional_text(
 ) -> Result<Option<String>, SqliteSemanticError> {
     row.get(column)
         .map_err(|error| SqliteSemanticError::Metadata(format!("invalid {label}: {error}")))
+}
+
+fn selected_semantic_facts(
+    identity_predicate: &str,
+    index: &str,
+    epoch_parameter: usize,
+    sequence_parameter: usize,
+) -> String {
+    format!(
+        "SELECT locator.epoch, event.sequence, receipt.logical_reread_key,
+                locator.replay_key, locator.event_id, locator.event_type,
+                locator.journal_id, event.revision_id, event.semantic_id,
+                event.content_hash, locator.payload_hash,
+                event.occurred_at, event.assertion_mode,
+                locator.track_id, event.actor_id, receipt.validation_witness,
+                receipt.epoch
+         FROM semantic_event_fact AS physical INDEXED BY {index}
+         JOIN semantic_event_fact_text AS event ON event.sequence = physical.sequence
+         JOIN locator_event_text AS locator ON locator.sequence = event.sequence
+         JOIN cursor_receipt AS receipt ON receipt.sequence = event.sequence
+         WHERE {identity_predicate}
+           AND locator.epoch = ?{epoch_parameter}
+           AND event.sequence <= ?{sequence_parameter}
+         ORDER BY locator.replay_key, receipt.logical_reread_key"
+    )
+}
+
+fn selected_content_query(
+    identity_predicate: &str,
+    epoch_parameter: usize,
+    sequence_parameter: usize,
+) -> String {
+    format!(
+        "SELECT 1
+         FROM semantic_event_fact AS event INDEXED BY semantic_event_fact_content
+         JOIN locator_event_text AS locator ON locator.sequence = event.sequence
+         WHERE {identity_predicate}
+           AND locator.event_type = 'artifact_removed'
+           AND locator.epoch = ?{epoch_parameter}
+           AND event.sequence <= ?{sequence_parameter}
+         LIMIT 1"
+    )
 }
 
 fn query_facts(

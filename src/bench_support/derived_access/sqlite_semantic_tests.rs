@@ -923,17 +923,19 @@ fn append_restart_and_selected_detail_do_not_rebuild_full_projections() {
         inventory.profile_id,
         "pointbreak.sqlite-derived-access-semantic.v1"
     );
-    assert_eq!(inventory.schema_version, 1);
+    assert_eq!(inventory.schema_version, 2);
     assert_eq!(inventory.fact_count, 1);
     assert_eq!(inventory.retained_body_object_bytes, 0);
     assert_eq!(
         inventory.tables,
         vec![
+            "semantic_actor",
             "semantic_assessment_fact",
             "semantic_commit_association_fact",
             "semantic_commit_withdrawal_fact",
             "semantic_duplicate_projection",
             "semantic_event_fact",
+            "semantic_identity_prefix",
             "semantic_meta",
             "semantic_ref_association_fact",
             "semantic_ref_withdrawal_fact",
@@ -998,8 +1000,8 @@ fn materialized_audit_looks_up_representatives_by_sequence() {
         .prepare(
             "EXPLAIN QUERY PLAN
              SELECT representative.sequence
-             FROM locator_event AS locator
-             JOIN semantic_event_fact AS event ON event.sequence = locator.sequence
+             FROM locator_event_text AS locator
+             JOIN semantic_event_fact_text AS event ON event.sequence = locator.sequence
              JOIN cursor_receipt AS receipt ON receipt.sequence = event.sequence
              JOIN semantic_representative AS representative
                ON representative.sequence = event.sequence
