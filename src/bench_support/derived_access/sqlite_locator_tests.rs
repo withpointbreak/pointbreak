@@ -224,7 +224,7 @@ fn locator_schema_is_bodyless_and_does_not_persist_overlay_state() {
         inventory.profile_id,
         "pointbreak.sqlite-derived-access-locator.v1"
     );
-    assert_eq!(inventory.schema_version, 1);
+    assert_eq!(inventory.schema_version, 2);
     assert_eq!(inventory.row_count, 1);
     assert_eq!(
         inventory.indexes,

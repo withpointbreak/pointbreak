@@ -317,7 +317,7 @@ impl SqliteSemantic {
                     locator.track_id, event.actor_id, receipt.validation_witness,
                     receipt.epoch
              FROM semantic_event_fact AS event
-             JOIN locator_event AS locator ON locator.sequence = event.sequence
+             JOIN locator_event_text AS locator ON locator.sequence = event.sequence
              JOIN cursor_receipt AS receipt ON receipt.sequence = event.sequence
              WHERE locator.epoch = ?1 AND event.sequence <= ?2
              ORDER BY locator.replay_key, receipt.logical_reread_key",
@@ -412,7 +412,7 @@ impl SqliteSemantic {
                     locator.track_id, event.actor_id, receipt.validation_witness,
                     receipt.epoch
              FROM semantic_event_fact AS event INDEXED BY semantic_event_fact_revision
-             JOIN locator_event AS locator ON locator.sequence = event.sequence
+             JOIN locator_event_text AS locator ON locator.sequence = event.sequence
              JOIN cursor_receipt AS receipt ON receipt.sequence = event.sequence
              WHERE event.revision_id = ?1
                AND locator.epoch = ?2
@@ -438,7 +438,7 @@ impl SqliteSemantic {
                 "SELECT 1
                  FROM semantic_event_fact AS event
                       INDEXED BY semantic_event_fact_content
-                 JOIN locator_event AS locator ON locator.sequence = event.sequence
+                 JOIN locator_event_text AS locator ON locator.sequence = event.sequence
                  WHERE event.content_hash = ?1
                    AND locator.event_type = 'artifact_removed'
                    AND locator.epoch = ?2
@@ -675,7 +675,7 @@ fn update_materialized_projection(
             .query_row(
                 "SELECT locator.journal_id
                  FROM semantic_event_fact AS event
-                 JOIN locator_event AS locator ON locator.sequence = event.sequence
+                 JOIN locator_event_text AS locator ON locator.sequence = event.sequence
                  WHERE locator.event_type = 'review_initialized'
                    AND event.semantic_id IS NULL
                  ORDER BY locator.replay_key DESC, locator.event_id DESC
@@ -718,7 +718,7 @@ fn update_materialized_projection(
         .query_row(
             "SELECT representative.sequence, locator.event_id
              FROM semantic_representative AS representative
-             JOIN locator_event AS locator ON locator.sequence = representative.sequence
+             JOIN locator_event_text AS locator ON locator.sequence = representative.sequence
              WHERE representative.family = ?1 AND representative.semantic_key = ?2",
             params![family, semantic_key],
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
@@ -879,7 +879,7 @@ fn update_materialized_duplicate(
                 .query_row(
                     "SELECT locator.event_id
                      FROM semantic_representative AS representative
-                     JOIN locator_event AS locator
+                     JOIN locator_event_text AS locator
                        ON locator.sequence = representative.sequence
                      WHERE representative.family = ?1
                        AND representative.semantic_key = ?2",
@@ -1164,7 +1164,7 @@ fn query_materialized_facts(
                     receipt.epoch
              FROM semantic_representative AS representative
              JOIN semantic_event_fact AS event ON event.sequence = representative.sequence
-             JOIN locator_event AS locator ON locator.sequence = event.sequence
+             JOIN locator_event_text AS locator ON locator.sequence = event.sequence
              JOIN cursor_receipt AS receipt ON receipt.sequence = event.sequence
              LEFT JOIN semantic_revision_fact AS revision
                ON revision.sequence = event.sequence
