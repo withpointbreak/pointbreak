@@ -679,7 +679,15 @@ fn update_materialized_projection(
             "UPDATE semantic_state_projection
              SET event_count = event_count + 1,
                  journal_id = CASE
-                     WHEN event_count = 0 OR ?1 = 'review_initialized' THEN ?2
+                     WHEN ?1 = 'review_initialized' THEN (
+                         SELECT journal_id
+                         FROM semantic_event_fact
+                         WHERE event_type = 'review_initialized'
+                           AND semantic_id IS NULL
+                         ORDER BY replay_key DESC, event_id DESC
+                         LIMIT 1
+                     )
+                     WHEN event_count = 0 THEN ?2
                      ELSE journal_id
                  END
              WHERE singleton = 1",

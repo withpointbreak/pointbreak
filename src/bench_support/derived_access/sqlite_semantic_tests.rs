@@ -62,6 +62,19 @@ fn ready<T>(read: LocatorRead<T>) -> T {
     }
 }
 
+fn initialized_event(journal_id: &str) -> ShoreEvent {
+    let journal_id = JournalId::new(journal_id);
+    ShoreEvent::new(
+        EventType::ReviewInitialized,
+        ReviewInitializedPayload::idempotency_key(&journal_id),
+        EventTarget::for_journal(journal_id),
+        Writer::shore_local("0.8.0"),
+        ReviewInitializedPayload {},
+        "2026-07-27T00:00:00.000Z",
+    )
+    .expect("initialized event")
+}
+
 fn revision_event(suffix: &str, supersedes: Vec<RevisionId>, occurred_at: &str) -> ShoreEvent {
     revision_event_for_engagement(suffix, supersedes, occurred_at, ENGAGEMENT)
 }
@@ -602,6 +615,30 @@ fn materialized_semantic_families_equal_strict_full_replay_after_every_prefix() 
             "selected materialized prefix {}",
             attempt + 1
         );
+    }
+}
+
+#[test]
+fn materialized_journal_identity_follows_canonical_replay_order() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let schedule = [
+        initialized_event("journal:derived-access-scale:0"),
+        initialized_event("journal:derived-access-scale:1"),
+    ];
+    let mut stored = Vec::new();
+
+    for (attempt, event) in schedule.iter().enumerate() {
+        append(&adapter, event, attempt);
+        stored.push(event.clone());
+        let candidate = ready(
+            adapter
+                .semantic_materialized_audit_snapshot()
+                .expect("materialized candidate"),
+        );
+        let strict =
+            strict_bodyless_materialized_snapshot(&stored).expect("materialized strict oracle");
+        assert_eq!(candidate, strict, "materialized prefix {}", attempt + 1);
     }
 }
 
