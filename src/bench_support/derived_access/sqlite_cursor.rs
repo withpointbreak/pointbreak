@@ -538,7 +538,7 @@ impl SqliteCursorLedger {
         let mut statement = connection
             .prepare(
                 "SELECT epoch, sequence, logical_reread_key, validation_witness, attempt_token
-                 FROM cursor_receipt
+                 FROM cursor_receipt_text
                  WHERE sequence > ?1
                  ORDER BY sequence
                  LIMIT ?2",
@@ -739,6 +739,27 @@ fn sha256_digest(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
+fn decode_digest(value: &str, label: &'static str) -> Result<[u8; 32], CursorLedgerError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(CursorLedgerError::SchemaMismatch(format!(
+            "{label} is not a 64-character lowercase hexadecimal digest"
+        )));
+    }
+    let mut digest = [0_u8; 32];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        digest[index] = u8::from_str_radix(
+            std::str::from_utf8(pair).expect("ASCII hex slices are UTF-8"),
+            16,
+        )
+        .expect("validated hexadecimal pairs must decode");
+    }
+    Ok(digest)
+}
+
 fn open_connection(path: &Path, create: bool) -> Result<Connection, CursorLedgerError> {
     if !create && !path.exists() {
         return Err(CursorLedgerError::IncompleteBootstrap);
@@ -824,11 +845,21 @@ fn initialize_schema(
                  epoch INTEGER NOT NULL CHECK (epoch > 0),
                  logical_reread_key TEXT NOT NULL UNIQUE
                      CHECK (length(logical_reread_key) > 0),
-                 validation_witness TEXT NOT NULL CHECK (length(validation_witness) = 64),
+                 validation_witness_hash BLOB NOT NULL
+                     CHECK (length(validation_witness_hash) = 32),
                  attempt_hash BLOB NOT NULL UNIQUE CHECK (length(attempt_hash) = 32)
                      REFERENCES cursor_attempt(attempt_hash),
-                 attempt_token TEXT NOT NULL CHECK (length(attempt_token) > 0)
-             ) STRICT;",
+                 attempt_token TEXT CHECK (length(attempt_token) > 0)
+             ) STRICT;
+             CREATE VIEW cursor_receipt_text AS
+             SELECT sequence, epoch, logical_reread_key,
+                    lower(hex(validation_witness_hash)) AS validation_witness,
+                    coalesce(
+                        attempt_token,
+                        'bootstrap:' || epoch || ':' || sequence || ':'
+                            || lower(hex(validation_witness_hash))
+                    ) AS attempt_token
+             FROM cursor_receipt;",
         )
         .map_err(|error| sqlite_error("create cursor schema", error))?;
     connection
@@ -1258,19 +1289,26 @@ fn insert_receipt(
     transaction: &Transaction<'_>,
     receipt: &CursorReceipt,
 ) -> Result<(), CursorLedgerError> {
+    let witness = decode_digest(&receipt.validation_witness, "receipt validation witness")?;
+    let bootstrap_token = format!(
+        "bootstrap:{}:{}:{}",
+        receipt.cursor.epoch, receipt.cursor.sequence, receipt.validation_witness
+    );
+    let retained_attempt_token =
+        (receipt.attempt_token != bootstrap_token).then_some(receipt.attempt_token.as_str());
     transaction
         .execute(
             "INSERT INTO cursor_receipt
-             (sequence, epoch, logical_reread_key, validation_witness,
+             (sequence, epoch, logical_reread_key, validation_witness_hash,
               attempt_hash, attempt_token)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 u64_to_i64(receipt.cursor.sequence, "receipt sequence")?,
                 u64_to_i64(receipt.cursor.epoch, "receipt epoch")?,
                 receipt.logical_reread_key,
-                receipt.validation_witness,
+                witness.as_slice(),
                 sha256_digest(receipt.attempt_token.as_bytes()).as_slice(),
-                receipt.attempt_token,
+                retained_attempt_token,
             ],
         )
         .map_err(|error| sqlite_error("insert cursor receipt", error))?;
@@ -1352,7 +1390,7 @@ fn receipt_for_key(
     connection
         .query_row(
             "SELECT epoch, sequence, logical_reread_key, validation_witness, attempt_token
-             FROM cursor_receipt WHERE logical_reread_key = ?1",
+             FROM cursor_receipt_text WHERE logical_reread_key = ?1",
             [logical_reread_key],
             receipt_from_row,
         )
@@ -1367,7 +1405,7 @@ fn receipt_for_sequence(
     connection
         .query_row(
             "SELECT epoch, sequence, logical_reread_key, validation_witness, attempt_token
-             FROM cursor_receipt WHERE sequence = ?1",
+             FROM cursor_receipt_text WHERE sequence = ?1",
             [u64_to_i64(sequence, "receipt sequence")?],
             receipt_from_row,
         )

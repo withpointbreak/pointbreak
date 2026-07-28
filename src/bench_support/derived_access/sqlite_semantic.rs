@@ -381,7 +381,7 @@ impl SqliteSemantic {
                     receipt.epoch
              FROM semantic_event_fact_text AS event
              JOIN locator_event_text AS locator ON locator.sequence = event.sequence
-             JOIN cursor_receipt AS receipt ON receipt.sequence = event.sequence
+             JOIN cursor_receipt_text AS receipt ON receipt.sequence = event.sequence
              WHERE locator.epoch = ?1 AND event.sequence <= ?2
              ORDER BY locator.replay_key, receipt.logical_reread_key",
             params![
@@ -1344,7 +1344,7 @@ fn query_materialized_facts(
              FROM semantic_representative AS representative
              JOIN semantic_event_fact_text AS event ON event.sequence = representative.sequence
              JOIN locator_event_text AS locator ON locator.sequence = event.sequence
-             JOIN cursor_receipt AS receipt ON receipt.sequence = event.sequence
+             JOIN cursor_receipt_text AS receipt ON receipt.sequence = event.sequence
              LEFT JOIN semantic_revision_fact AS revision
                ON revision.sequence = event.sequence
              LEFT JOIN semantic_assessment_fact AS assessment
@@ -1543,7 +1543,7 @@ fn selected_semantic_facts(
          FROM semantic_event_fact AS physical INDEXED BY {index}
          JOIN semantic_event_fact_text AS event ON event.sequence = physical.sequence
          JOIN locator_event_text AS locator ON locator.sequence = event.sequence
-         JOIN cursor_receipt AS receipt ON receipt.sequence = event.sequence
+         JOIN cursor_receipt_text AS receipt ON receipt.sequence = event.sequence
          WHERE {identity_predicate}
            AND locator.epoch = ?{epoch_parameter}
            AND event.sequence <= ?{sequence_parameter}

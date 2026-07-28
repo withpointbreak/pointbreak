@@ -771,7 +771,7 @@ fn locator_select(suffix: &str) -> String {
                 subject.value, track.value, locator.payload_hash,
                 receipt.validation_witness, receipt.epoch
          FROM locator_event AS locator
-         JOIN cursor_receipt AS receipt ON receipt.sequence = locator.sequence
+         JOIN cursor_receipt_text AS receipt ON receipt.sequence = locator.sequence
          JOIN locator_event_type AS event_type ON event_type.id = locator.event_type_id
          JOIN locator_journal AS journal ON journal.id = locator.journal_id
          LEFT JOIN locator_subject AS subject ON subject.id = locator.subject_id

@@ -1002,7 +1002,7 @@ fn materialized_audit_looks_up_representatives_by_sequence() {
              SELECT representative.sequence
              FROM locator_event_text AS locator
              JOIN semantic_event_fact_text AS event ON event.sequence = locator.sequence
-             JOIN cursor_receipt AS receipt ON receipt.sequence = event.sequence
+             JOIN cursor_receipt_text AS receipt ON receipt.sequence = event.sequence
              JOIN semantic_representative AS representative
                ON representative.sequence = event.sequence
              WHERE locator.epoch = 1
