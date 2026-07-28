@@ -99,7 +99,7 @@ fn physical_cursor_ledger_matches_reference_for_unique_equal_and_conflicting_wri
         inventory.profile_id,
         "pointbreak.sqlite-derived-access-cursor.v1"
     );
-    assert_eq!(inventory.schema_version, 2);
+    assert_eq!(inventory.schema_version, 3);
     assert_eq!(inventory.epoch, 1);
     assert_eq!(inventory.head_sequence, 1);
     assert_eq!(inventory.receipt_count, 1);
@@ -114,6 +114,50 @@ fn physical_cursor_ledger_matches_reference_for_unique_equal_and_conflicting_wri
         reopened.head().expect("reopened head").cursor,
         TruthCursor::new(1, 1)
     );
+}
+
+#[test]
+fn cursor_receipts_persist_only_digest_addressed_carrier_identity() {
+    let root = tempfile::tempdir().expect("root");
+    let ledger =
+        SqliteCursorLedger::initialize_empty(root.path(), CursorLedgerIdentity::new("store:test"))
+            .expect("initialize ledger");
+    ledger
+        .append_event(&event(1), "attempt:1")
+        .expect("append event");
+    drop(ledger);
+
+    let connection =
+        rusqlite::Connection::open(root.path().join(".pointbreak-derived/cursor.sqlite3"))
+            .expect("open sidecar");
+    let columns = connection
+        .prepare("PRAGMA table_info(cursor_receipt)")
+        .expect("prepare receipt columns")
+        .query_map([], |row| row.get::<_, String>(1))
+        .expect("query receipt columns")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("read receipt columns");
+    assert_eq!(
+        columns,
+        vec![
+            "sequence",
+            "epoch",
+            "logical_reread_key_hash",
+            "validation_witness_hash",
+            "attempt_hash",
+            "attempt_token",
+        ]
+    );
+    let (key_type, key_bytes) = connection
+        .query_row(
+            "SELECT typeof(logical_reread_key_hash), length(logical_reread_key_hash)
+             FROM cursor_receipt WHERE sequence = 1",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .expect("read digest carrier identity");
+    assert_eq!(key_type, "blob");
+    assert_eq!(key_bytes, 32);
 }
 
 #[test]
@@ -255,7 +299,8 @@ fn no_change_head_and_bounded_delta_never_enumerate_the_event_directory() {
     );
     let counters = scope.snapshot().counters;
     assert_eq!(counters.directory_entries_walked, 0);
-    assert_eq!(counters.event_decodes, 0);
+    assert_eq!(counters.event_decodes, 1);
+    assert_eq!(counters.event_validations, 1);
     assert_eq!(counters.event_folds, 0);
     assert_eq!(counters.carrier_opens, 1);
 }

@@ -11,23 +11,40 @@ use rusqlite::{
 use super::DERIVED_SIDECAR_DIRECTORY;
 #[cfg(any(test, feature = "longitudinal-counting"))]
 use crate::bench_support::longitudinal::record_chronological_sort_items;
+use crate::canonical_hash::sha256_bytes_hex;
+use crate::session::EventStore;
+use crate::session::derived_access::QualificationLocalJournal;
 use crate::session::derived_access::cursor::{CursorDelta, TruthCursor};
 use crate::session::derived_access::locator::{
     ChronologicalWindowRequest, LocatorCheckpoint, LocatorModelError, LocatorRead, LocatorRow,
     LocatorWindow, WindowContinuation, WindowPosition,
 };
+use crate::session::event::ShoreEvent;
 
 const DATABASE_FILE: &str = "cursor.sqlite3";
 const CURSOR_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-cursor.v1";
 const LOCATOR_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-locator.v1";
 const LOCATOR_SCHEMA_VERSION: i64 = 2;
 const APPLICATION_ID: i64 = 0x5042_4443;
-const CURSOR_SCHEMA_VERSION: i64 = 2;
+const CURSOR_SCHEMA_VERSION: i64 = 3;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug)]
 pub(crate) struct SqliteLocator {
+    store_root: PathBuf,
     database_path: PathBuf,
+}
+
+#[derive(Debug)]
+pub(super) struct HydratedLocatorRow {
+    pub(super) row: LocatorRow,
+    pub(super) event: ShoreEvent,
+}
+
+#[derive(Debug)]
+pub(super) struct HydratedLocatorWindow {
+    pub(super) window: LocatorWindow,
+    pub(super) events: Vec<ShoreEvent>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -60,6 +77,8 @@ pub(crate) enum SqliteLocatorError {
     Delta(String),
     #[error(transparent)]
     Model(#[from] LocatorModelError),
+    #[error("locator carrier does not match persisted row at {0:?}")]
+    CarrierMismatch(TruthCursor),
 }
 
 #[derive(Clone, Debug)]
@@ -77,6 +96,7 @@ impl SqliteLocator {
             .canonicalize()
             .map_err(|error| SqliteLocatorError::Metadata(error.to_string()))?;
         let locator = Self {
+            store_root: store_root.clone(),
             database_path: store_root
                 .join(DERIVED_SIDECAR_DIRECTORY)
                 .join(DATABASE_FILE),
@@ -187,6 +207,19 @@ impl SqliteLocator {
         event_id: &str,
         observed: TruthCursor,
     ) -> Result<LocatorRead<Option<LocatorRow>>, SqliteLocatorError> {
+        Ok(match self.lookup_event_id_hydrated(event_id, observed)? {
+            LocatorRead::Ready(row) => LocatorRead::Ready(row.map(|row| row.row)),
+            LocatorRead::CatchUpRequired { applied, observed } => {
+                LocatorRead::CatchUpRequired { applied, observed }
+            }
+        })
+    }
+
+    pub(super) fn lookup_event_id_hydrated(
+        &self,
+        event_id: &str,
+        observed: TruthCursor,
+    ) -> Result<LocatorRead<Option<HydratedLocatorRow>>, SqliteLocatorError> {
         let connection = self.validated_connection()?;
         let checkpoint = read_locator_checkpoint(&connection)?;
         if checkpoint.applied.epoch != observed.epoch
@@ -200,7 +233,7 @@ impl SqliteLocator {
         let Some(event_hash) = decode_prefixed_digest(event_id, "evt:sha256:") else {
             return Ok(LocatorRead::Ready(None));
         };
-        let row = connection
+        let stored = connection
             .query_row(
                 &locator_select(
                     "WHERE locator.event_hash = ?1
@@ -212,10 +245,14 @@ impl SqliteLocator {
                     to_i64(observed.epoch, "lookup epoch")?,
                     to_i64(observed.sequence, "lookup as_of")?,
                 ],
-                locator_row_from_sql,
+                stored_locator_row_from_sql,
             )
             .optional()
             .map_err(|error| sqlite_error("lookup semantic event id", error))?;
+        let journal = QualificationLocalJournal::new(&self.store_root);
+        let row = stored
+            .map(|row| hydrate_locator_row(&journal, row))
+            .transpose()?;
         Ok(LocatorRead::Ready(row))
     }
 
@@ -224,6 +261,20 @@ impl SqliteLocator {
         request: &ChronologicalWindowRequest,
         observed: TruthCursor,
     ) -> Result<LocatorRead<LocatorWindow>, SqliteLocatorError> {
+        self.chronological_window_inner(request, observed)
+            .map(|(selection, _)| match selection {
+                LocatorRead::Ready(window) => LocatorRead::Ready(window.window),
+                LocatorRead::CatchUpRequired { applied, observed } => {
+                    LocatorRead::CatchUpRequired { applied, observed }
+                }
+            })
+    }
+
+    pub(super) fn chronological_window_hydrated(
+        &self,
+        request: &ChronologicalWindowRequest,
+        observed: TruthCursor,
+    ) -> Result<LocatorRead<HydratedLocatorWindow>, SqliteLocatorError> {
         self.chronological_window_inner(request, observed)
             .map(|(window, _)| window)
     }
@@ -235,13 +286,24 @@ impl SqliteLocator {
         observed: TruthCursor,
     ) -> Result<(LocatorRead<LocatorWindow>, LocatorQueryStatus), SqliteLocatorError> {
         self.chronological_window_inner(request, observed)
+            .map(|(selection, status)| {
+                (
+                    match selection {
+                        LocatorRead::Ready(window) => LocatorRead::Ready(window.window),
+                        LocatorRead::CatchUpRequired { applied, observed } => {
+                            LocatorRead::CatchUpRequired { applied, observed }
+                        }
+                    },
+                    status,
+                )
+            })
     }
 
     fn chronological_window_inner(
         &self,
         request: &ChronologicalWindowRequest,
         observed: TruthCursor,
-    ) -> Result<(LocatorRead<LocatorWindow>, LocatorQueryStatus), SqliteLocatorError> {
+    ) -> Result<(LocatorRead<HydratedLocatorWindow>, LocatorQueryStatus), SqliteLocatorError> {
         if request.limit() == 0 {
             return Err(LocatorModelError::ZeroWindowLimit.into());
         }
@@ -371,20 +433,26 @@ impl SqliteLocator {
                 true,
             ),
         };
-        let (mut rows, status) = query;
-        record_query_sort_work(status, rows.len());
-        let has_more = rows.len() > request.limit();
-        rows.truncate(request.limit());
+        let (mut stored_rows, status) = query;
+        record_query_sort_work(status, stored_rows.len());
+        let has_more = stored_rows.len() > request.limit();
+        stored_rows.truncate(request.limit());
         if descending {
-            rows.reverse();
+            stored_rows.reverse();
         }
+        let journal = QualificationLocalJournal::new(&self.store_root);
+        let hydrated_rows = stored_rows
+            .into_iter()
+            .map(|row| hydrate_locator_row(&journal, row))
+            .collect::<Result<Vec<_>, _>>()?;
         let continuation = has_more.then(|| {
             let anchor = if descending {
-                rows.first()
+                hydrated_rows.first()
             } else {
-                rows.last()
+                hydrated_rows.last()
             }
             .expect("has_more implies at least one selected row")
+            .row
             .display_key();
             if descending {
                 WindowContinuation::Before { anchor, as_of }
@@ -392,12 +460,19 @@ impl SqliteLocator {
                 WindowContinuation::After { anchor, as_of }
             }
         });
+        let (rows, events): (Vec<_>, Vec<_>) = hydrated_rows
+            .into_iter()
+            .map(|row| (row.row, row.event))
+            .unzip();
         Ok((
-            LocatorRead::Ready(LocatorWindow {
-                as_of,
-                rows,
-                continuation,
-                has_more,
+            LocatorRead::Ready(HydratedLocatorWindow {
+                window: LocatorWindow {
+                    as_of,
+                    rows,
+                    continuation,
+                    has_more,
+                },
+                events,
             }),
             status,
         ))
@@ -469,6 +544,10 @@ impl SqliteLocator {
         let cursor = validate_cursor_metadata(&connection)?;
         validate_locator_checkpoint(&connection, &cursor)?;
         Ok(connection)
+    }
+
+    pub(super) fn store_root(&self) -> &Path {
+        &self.store_root
     }
 }
 
@@ -725,7 +804,7 @@ fn query_locator_rows(
         .prepare(sql)
         .map_err(|error| sqlite_error("prepare locator range", error))?;
     let rows = statement
-        .query_map(parameters, locator_row_from_sql)
+        .query_map(parameters, stored_locator_row_from_sql)
         .map_err(|error| sqlite_error("query locator range", error))?;
     let mut output = Vec::new();
     for row in rows {
@@ -738,7 +817,7 @@ fn query_locator_rows(
     Ok((output, status))
 }
 
-fn locator_row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocatorRow> {
+fn stored_locator_row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocatorRow> {
     let epoch = row.get::<_, i64>(0)?;
     let sequence = row.get::<_, i64>(1)?;
     let receipt_epoch = row.get::<_, i64>(12)?;
@@ -763,9 +842,36 @@ fn locator_row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocatorRow>
     })
 }
 
+fn hydrate_locator_row(
+    journal: &QualificationLocalJournal,
+    mut stored: LocatorRow,
+) -> Result<HydratedLocatorRow, SqliteLocatorError> {
+    let bytes = journal
+        .read_event_bytes_by_key_digest(&stored.logical_reread_key)
+        .map_err(|error| SqliteLocatorError::Metadata(error.to_string()))?
+        .ok_or_else(|| {
+            SqliteLocatorError::Metadata(format!(
+                "locator carrier is absent for key digest {}",
+                stored.logical_reread_key
+            ))
+        })?;
+    if sha256_bytes_hex(&bytes) != stored.validation_witness {
+        return Err(SqliteLocatorError::CarrierMismatch(stored.cursor));
+    }
+    let event = EventStore::decode_qualification_entry(stored.logical_reread_key.clone(), bytes)
+        .map_err(|error| SqliteLocatorError::Metadata(error.to_string()))?;
+    stored.logical_reread_key = event.idempotency_key.clone();
+    let observed =
+        LocatorRow::from_event(stored.cursor, &event, stored.validation_witness.clone())?;
+    if observed != stored {
+        return Err(SqliteLocatorError::CarrierMismatch(stored.cursor));
+    }
+    Ok(HydratedLocatorRow { row: stored, event })
+}
+
 fn locator_select(suffix: &str) -> String {
     format!(
-        "SELECT locator.epoch, locator.sequence, receipt.logical_reread_key,
+        "SELECT locator.epoch, locator.sequence, receipt.logical_reread_key_hash,
                 locator.event_hash, locator.normalized_occurred_at,
                 locator.replay_hash, event_type.value, journal.value,
                 subject.value, track.value, locator.payload_hash,

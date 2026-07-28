@@ -7,6 +7,9 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
 use super::sqlite_locator::{SqliteLocator, SqliteLocatorError, read_locator_checkpoint};
+use crate::canonical_hash::sha256_bytes_hex;
+use crate::session::EventStore;
+use crate::session::derived_access::QualificationLocalJournal;
 use crate::session::derived_access::cursor::{CursorDelta, TruthCursor};
 use crate::session::derived_access::locator::{LocatorRead, LocatorRow};
 use crate::session::derived_access::semantic::state::{
@@ -18,6 +21,7 @@ use crate::session::derived_access::semantic::{
     SemanticFactKind, SemanticModelError, SemanticSnapshot, ValidationFact, decode_enum,
     decode_string_list, encode_enum, encode_string_list,
 };
+use crate::session::event::ShoreEvent;
 
 const SEMANTIC_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-semantic.v1";
 const SEMANTIC_SCHEMA_VERSION: i64 = 2;
@@ -25,6 +29,12 @@ const SEMANTIC_SCHEMA_VERSION: i64 = 2;
 #[derive(Clone, Debug)]
 pub(crate) struct SqliteSemantic {
     locator: SqliteLocator,
+}
+
+#[derive(Debug)]
+pub(super) struct HydratedSemanticFact {
+    pub(super) fact: SemanticFact,
+    pub(super) event: ShoreEvent,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -53,6 +63,8 @@ pub(crate) enum SqliteSemanticError {
         operation: &'static str,
         message: String,
     },
+    #[error("semantic carrier does not match persisted fact at {0:?}")]
+    CarrierMismatch(TruthCursor),
 }
 
 impl SqliteSemantic {
@@ -372,9 +384,11 @@ impl SqliteSemantic {
                 observed,
             });
         }
+        let journal = QualificationLocalJournal::new(self.locator.store_root());
         let facts = query_facts(
             &connection,
-            "SELECT locator.epoch, event.sequence, receipt.logical_reread_key,
+            &journal,
+            "SELECT locator.epoch, event.sequence, receipt.logical_reread_key_hash,
                     locator.replay_key, locator.event_id, locator.event_type,
                     locator.journal_id, event.revision_id, event.semantic_id,
                     event.content_hash, locator.payload_hash,
@@ -385,12 +399,13 @@ impl SqliteSemantic {
              JOIN locator_event_text AS locator ON locator.sequence = event.sequence
              JOIN cursor_receipt_text AS receipt ON receipt.sequence = event.sequence
              WHERE locator.epoch = ?1 AND event.sequence <= ?2
-             ORDER BY locator.replay_key, receipt.logical_reread_key",
+             ORDER BY locator.replay_key, receipt.logical_reread_key_hash",
             params![
                 to_i64(observed.epoch, "snapshot epoch")?,
                 to_i64(observed.sequence, "snapshot cursor")?,
             ],
         )?;
+        let facts = hydrated_facts_only(facts);
         Ok(LocatorRead::Ready(SemanticSnapshot::audit_from_facts(
             observed, &facts,
         )?))
@@ -412,7 +427,14 @@ impl SqliteSemantic {
             });
         }
         let state = query_materialized_state(&connection)?;
-        let facts = query_materialized_facts(&connection, observed.epoch, observed.sequence, None)?;
+        let journal = QualificationLocalJournal::new(self.locator.store_root());
+        let facts = hydrated_facts_only(query_materialized_facts(
+            &connection,
+            &journal,
+            observed.epoch,
+            observed.sequence,
+            None,
+        )?);
         #[cfg(any(test, feature = "longitudinal-counting"))]
         {
             crate::bench_support::longitudinal::record_projection_rebuild();
@@ -440,22 +462,24 @@ impl SqliteSemantic {
             });
         }
         let state = query_materialized_state(&connection)?;
-        let facts = query_materialized_facts(
+        let journal = QualificationLocalJournal::new(self.locator.store_root());
+        let facts = hydrated_facts_only(query_materialized_facts(
             &connection,
+            &journal,
             observed.epoch,
             observed.sequence,
             Some(engagement_id),
-        )?;
+        )?);
         Ok(LocatorRead::Ready(SemanticSnapshot::from_materialized(
             observed, state, &facts,
         )?))
     }
 
-    pub(crate) fn facts_for_revision(
+    pub(super) fn facts_for_revision_hydrated(
         &self,
         revision_id: &str,
         observed: TruthCursor,
-    ) -> Result<LocatorRead<Vec<SemanticFact>>, SqliteSemanticError> {
+    ) -> Result<LocatorRead<Vec<HydratedSemanticFact>>, SqliteSemanticError> {
         let connection = self.locator.validated_connection()?;
         let checkpoint = read_locator_checkpoint(&connection)?;
         validate_meta(&connection, checkpoint.applied)?;
@@ -469,9 +493,11 @@ impl SqliteSemantic {
         }
         let epoch = to_i64(observed.epoch, "detail epoch")?;
         let sequence = to_i64(observed.sequence, "detail cursor")?;
+        let journal = QualificationLocalJournal::new(self.locator.store_root());
         let facts = if let Some((prefix, digest)) = split_canonical_digest(revision_id) {
             query_facts(
                 &connection,
+                &journal,
                 &selected_semantic_facts(
                     "physical.revision_prefix_id = (
                          SELECT id FROM semantic_identity_prefix WHERE value = ?1
@@ -486,6 +512,7 @@ impl SqliteSemantic {
         } else {
             query_facts(
                 &connection,
+                &journal,
                 &selected_semantic_facts(
                     "physical.revision_prefix_id IS NULL
                      AND physical.revision_digest IS NULL
@@ -1345,13 +1372,14 @@ fn query_materialized_state(
 
 fn query_materialized_facts(
     connection: &rusqlite::Connection,
+    journal: &QualificationLocalJournal,
     epoch: u64,
     sequence: u64,
     engagement_id: Option<&str>,
-) -> Result<Vec<SemanticFact>, SqliteSemanticError> {
+) -> Result<Vec<HydratedSemanticFact>, SqliteSemanticError> {
     let mut statement = connection
         .prepare(
-            "SELECT locator.epoch, event.sequence, receipt.logical_reread_key,
+            "SELECT locator.epoch, event.sequence, receipt.logical_reread_key_hash,
                     locator.replay_key, locator.event_id, locator.event_type,
                     locator.journal_id, event.revision_id, event.semantic_id,
                     event.content_hash, locator.payload_hash,
@@ -1430,7 +1458,7 @@ fn query_materialized_facts(
                        )
                    )
                )
-             ORDER BY locator.replay_key, receipt.logical_reread_key",
+             ORDER BY locator.replay_key, receipt.logical_reread_key_hash",
         )
         .map_err(|error| sqlite_error("prepare materialized semantic facts", error))?;
     let mut rows = statement
@@ -1457,7 +1485,7 @@ fn query_materialized_facts(
                 fact.cursor
             )));
         }
-        facts.push(fact);
+        facts.push(hydrate_semantic_fact(journal, fact)?);
     }
     Ok(facts)
 }
@@ -1564,7 +1592,7 @@ fn selected_semantic_facts(
     sequence_parameter: usize,
 ) -> String {
     format!(
-        "SELECT locator.epoch, event.sequence, receipt.logical_reread_key,
+        "SELECT locator.epoch, event.sequence, receipt.logical_reread_key_hash,
                 locator.replay_key, locator.event_id, locator.event_type,
                 locator.journal_id, event.revision_id, event.semantic_id,
                 event.content_hash, locator.payload_hash,
@@ -1578,7 +1606,7 @@ fn selected_semantic_facts(
          WHERE {identity_predicate}
            AND locator.epoch = ?{epoch_parameter}
            AND event.sequence <= ?{sequence_parameter}
-         ORDER BY locator.replay_key, receipt.logical_reread_key"
+         ORDER BY locator.replay_key, receipt.logical_reread_key_hash"
     )
 }
 
@@ -1601,9 +1629,10 @@ fn selected_content_query(
 
 fn query_facts(
     connection: &rusqlite::Connection,
+    journal: &QualificationLocalJournal,
     sql: &str,
     parameters: impl rusqlite::Params,
-) -> Result<Vec<SemanticFact>, SqliteSemanticError> {
+) -> Result<Vec<HydratedSemanticFact>, SqliteSemanticError> {
     let mut statement = connection
         .prepare(sql)
         .map_err(|error| sqlite_error("prepare semantic facts", error))?;
@@ -1614,9 +1643,43 @@ fn query_facts(
     for fact in rows {
         let mut fact = fact.map_err(|error| sqlite_error("read semantic fact", error))?;
         fact.kind = query_family_fact(connection, &fact)?;
-        facts.push(fact);
+        facts.push(hydrate_semantic_fact(journal, fact)?);
     }
     Ok(facts)
+}
+
+fn hydrate_semantic_fact(
+    journal: &QualificationLocalJournal,
+    mut stored: SemanticFact,
+) -> Result<HydratedSemanticFact, SqliteSemanticError> {
+    let bytes = journal
+        .read_event_bytes_by_key_digest(&stored.logical_reread_key)
+        .map_err(|error| SqliteSemanticError::Metadata(error.to_string()))?
+        .ok_or_else(|| {
+            SqliteSemanticError::Metadata(format!(
+                "semantic carrier is absent for key digest {}",
+                stored.logical_reread_key
+            ))
+        })?;
+    if sha256_bytes_hex(&bytes) != stored.validation_witness {
+        return Err(SqliteSemanticError::CarrierMismatch(stored.cursor));
+    }
+    let event = EventStore::decode_qualification_entry(stored.logical_reread_key.clone(), bytes)
+        .map_err(|error| SqliteSemanticError::Metadata(error.to_string()))?;
+    stored.logical_reread_key = event.idempotency_key.clone();
+    let observed =
+        SemanticFact::from_event(stored.cursor, &event, stored.validation_witness.clone())?;
+    if observed != stored {
+        return Err(SqliteSemanticError::CarrierMismatch(stored.cursor));
+    }
+    Ok(HydratedSemanticFact {
+        fact: stored,
+        event,
+    })
+}
+
+fn hydrated_facts_only(facts: Vec<HydratedSemanticFact>) -> Vec<SemanticFact> {
+    facts.into_iter().map(|fact| fact.fact).collect()
 }
 
 fn semantic_fact_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<SemanticFact> {

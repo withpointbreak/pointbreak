@@ -25,7 +25,7 @@ use crate::session::{EventStore, EventWriteOutcome};
 
 const DATABASE_FILE: &str = "cursor.sqlite3";
 const PROFILE_ID: &str = "pointbreak.sqlite-derived-access-cursor.v1";
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const APPLICATION_ID: i64 = 0x5042_4443;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 static QUARANTINE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -182,6 +182,20 @@ struct ReceiptChainStats {
     count: u64,
     minimum: u64,
     maximum: u64,
+}
+
+#[derive(Clone, Debug)]
+struct StoredCursorReceipt {
+    cursor: TruthCursor,
+    logical_reread_key_hash: String,
+    validation_witness: String,
+    attempt_token: String,
+}
+
+#[derive(Debug)]
+pub(super) struct HydratedCursorDelta {
+    pub(super) delta: CursorDelta,
+    pub(super) events: Vec<ShoreEvent>,
 }
 
 impl SqliteCursorLedger {
@@ -417,14 +431,7 @@ impl SqliteCursorLedger {
         hook(AppendCrashPoint::AfterIntentCommit);
 
         let journal = QualificationLocalJournal::new(&self.store_root);
-        let existing_receipt = receipt_for_key(&connection, &event.idempotency_key)?;
-        if let Some(receipt) = &existing_receipt {
-            validate_named_carrier(
-                &journal,
-                &receipt.logical_reread_key,
-                &receipt.validation_witness,
-            )?;
-        }
+        let existing_receipt = receipt_for_key(&connection, &journal, &event.idempotency_key)?;
         let publication = match journal.record_event_once(event) {
             Ok(outcome) => outcome,
             Err(ShoreError::Message(message))
@@ -517,6 +524,14 @@ impl SqliteCursorLedger {
         after: TruthCursor,
         limit: usize,
     ) -> Result<CursorDelta, CursorLedgerError> {
+        Ok(self.events_after_hydrated(after, limit)?.delta)
+    }
+
+    pub(super) fn events_after_hydrated(
+        &self,
+        after: TruthCursor,
+        limit: usize,
+    ) -> Result<HydratedCursorDelta, CursorLedgerError> {
         if limit == 0 {
             return Err(CursorLedgerError::ZeroDeltaLimit);
         }
@@ -537,7 +552,8 @@ impl SqliteCursorLedger {
 
         let mut statement = connection
             .prepare(
-                "SELECT epoch, sequence, logical_reread_key, validation_witness, attempt_token
+                "SELECT epoch, sequence, logical_reread_key_hash,
+                        validation_witness, attempt_token
                  FROM cursor_receipt_text
                  WHERE sequence > ?1
                  ORDER BY sequence
@@ -550,16 +566,20 @@ impl SqliteCursorLedger {
                     u64_to_i64(after.sequence, "delta start")?,
                     usize_to_i64(limit, "delta limit")?
                 ],
-                receipt_from_row,
+                stored_receipt_from_row,
             )
             .map_err(|error| sqlite_error("query bounded delta", error))?;
+        let journal = QualificationLocalJournal::new(&self.store_root);
         let mut receipts = Vec::new();
+        let mut events = Vec::new();
         for row in rows {
-            receipts.push(row.map_err(|error| sqlite_error("read bounded delta", error))?);
+            let stored = row.map_err(|error| sqlite_error("read bounded delta", error))?;
+            let (receipt, event) = hydrate_stored_receipt(&journal, &stored)?;
+            receipts.push(receipt);
+            events.push(event);
         }
         drop(statement);
 
-        let journal = QualificationLocalJournal::new(&self.store_root);
         for (offset, receipt) in receipts.iter().enumerate() {
             let expected = after.sequence + u64::try_from(offset).unwrap_or(u64::MAX) + 1;
             if receipt.cursor.epoch != metadata.epoch || receipt.cursor.sequence != expected {
@@ -568,20 +588,18 @@ impl SqliteCursorLedger {
                     observed: receipt.cursor.sequence,
                 });
             }
-            validate_named_carrier(
-                &journal,
-                &receipt.logical_reread_key,
-                &receipt.validation_witness,
-            )?;
         }
         let observed = receipts
             .last()
             .map_or(after.sequence, |receipt| receipt.cursor.sequence);
-        Ok(CursorDelta {
-            after,
-            observed_head: head,
-            complete: observed == metadata.head_sequence,
-            receipts,
+        Ok(HydratedCursorDelta {
+            delta: CursorDelta {
+                after,
+                observed_head: head,
+                complete: observed == metadata.head_sequence,
+                receipts,
+            },
+            events,
         })
     }
 
@@ -820,7 +838,7 @@ fn initialize_schema(
                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                  store_id TEXT NOT NULL,
                  profile_id TEXT NOT NULL,
-                 schema_version INTEGER NOT NULL CHECK (schema_version = 2),
+                 schema_version INTEGER NOT NULL CHECK (schema_version = 3),
                  epoch INTEGER NOT NULL CHECK (epoch > 0),
                  head_sequence INTEGER NOT NULL CHECK (head_sequence >= 0),
                  bootstrap_state TEXT NOT NULL
@@ -843,8 +861,6 @@ fn initialize_schema(
              CREATE TABLE cursor_receipt (
                  sequence INTEGER PRIMARY KEY CHECK (sequence > 0),
                  epoch INTEGER NOT NULL CHECK (epoch > 0),
-                 logical_reread_key TEXT NOT NULL
-                     CHECK (length(logical_reread_key) > 0),
                  logical_reread_key_hash BLOB NOT NULL UNIQUE
                      CHECK (length(logical_reread_key_hash) = 32),
                  validation_witness_hash BLOB NOT NULL
@@ -854,7 +870,8 @@ fn initialize_schema(
                  attempt_token TEXT CHECK (length(attempt_token) > 0)
              ) STRICT;
              CREATE VIEW cursor_receipt_text AS
-             SELECT sequence, epoch, logical_reread_key, logical_reread_key_hash,
+             SELECT sequence, epoch,
+                    lower(hex(logical_reread_key_hash)) AS logical_reread_key_hash,
                     lower(hex(validation_witness_hash)) AS validation_witness,
                     coalesce(
                         attempt_token,
@@ -1131,9 +1148,10 @@ fn recover_locked(
 ) -> Result<RecoveryResolution, CursorLedgerError> {
     let metadata = validate_recoverable_metadata(connection, identity)?;
     let Some(intent) = read_intent(connection)? else {
-        return recover_head_only(connection, &metadata);
+        return recover_head_only(connection, store_root, &metadata);
     };
-    if let Some(receipt) = receipt_for_key(connection, &intent.logical_reread_key)? {
+    let journal = QualificationLocalJournal::new(store_root);
+    if let Some(receipt) = receipt_for_key(connection, &journal, &intent.logical_reread_key)? {
         if receipt.cursor.sequence > metadata.head_sequence {
             if receipt.cursor.sequence != metadata.head_sequence + 1
                 || receipt.cursor != intent.proposed_cursor
@@ -1171,7 +1189,6 @@ fn recover_locked(
         ));
     }
 
-    let journal = QualificationLocalJournal::new(store_root);
     let Some(bytes) = journal
         .read_event_bytes(&intent.logical_reread_key)
         .map_err(|error| CursorLedgerError::Truth(error.to_string()))?
@@ -1222,10 +1239,12 @@ fn recover_locked(
 
 fn recover_head_only(
     connection: &mut Connection,
+    store_root: &Path,
     metadata: &Metadata,
 ) -> Result<RecoveryResolution, CursorLedgerError> {
     let next = metadata.head_sequence + 1;
-    let receipt = receipt_for_sequence(connection, next)?;
+    let journal = QualificationLocalJournal::new(store_root);
+    let receipt = receipt_for_sequence(connection, &journal, next)?;
     let Some(receipt) = receipt else {
         if let Some(observed) = first_receipt_after(connection, next)? {
             let reason = format!("receipt sequence {observed} skips expected {next}");
@@ -1301,13 +1320,12 @@ fn insert_receipt(
     transaction
         .execute(
             "INSERT INTO cursor_receipt
-             (sequence, epoch, logical_reread_key, logical_reread_key_hash,
+             (sequence, epoch, logical_reread_key_hash,
               validation_witness_hash, attempt_hash, attempt_token)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 u64_to_i64(receipt.cursor.sequence, "receipt sequence")?,
                 u64_to_i64(receipt.cursor.epoch, "receipt epoch")?,
-                receipt.logical_reread_key,
                 sha256_digest(receipt.logical_reread_key.as_bytes()).as_slice(),
                 witness.as_slice(),
                 sha256_digest(receipt.attempt_token.as_bytes()).as_slice(),
@@ -1388,17 +1406,28 @@ fn read_intent(connection: &Connection) -> Result<Option<CursorIntent>, CursorLe
 
 fn receipt_for_key(
     connection: &Connection,
+    journal: &QualificationLocalJournal,
     logical_reread_key: &str,
 ) -> Result<Option<CursorReceipt>, CursorLedgerError> {
-    let receipt = connection
+    let stored = connection
         .query_row(
-            "SELECT epoch, sequence, logical_reread_key, validation_witness, attempt_token
-             FROM cursor_receipt_text WHERE logical_reread_key_hash = ?1",
+            "SELECT epoch, sequence, lower(hex(logical_reread_key_hash)),
+                    lower(hex(validation_witness_hash)),
+                    coalesce(
+                        attempt_token,
+                        'bootstrap:' || epoch || ':' || sequence || ':'
+                            || lower(hex(validation_witness_hash))
+                    )
+             FROM cursor_receipt WHERE logical_reread_key_hash = ?1",
             [sha256_digest(logical_reread_key.as_bytes()).as_slice()],
-            receipt_from_row,
+            stored_receipt_from_row,
         )
         .optional()
         .map_err(|error| sqlite_error("read receipt by key", error))?;
+    let receipt = stored
+        .as_ref()
+        .map(|stored| hydrate_stored_receipt(journal, stored).map(|(receipt, _)| receipt))
+        .transpose()?;
     if let Some(receipt) = &receipt
         && receipt.logical_reread_key != logical_reread_key
     {
@@ -1411,17 +1440,23 @@ fn receipt_for_key(
 
 fn receipt_for_sequence(
     connection: &Connection,
+    journal: &QualificationLocalJournal,
     sequence: u64,
 ) -> Result<Option<CursorReceipt>, CursorLedgerError> {
-    connection
+    let stored = connection
         .query_row(
-            "SELECT epoch, sequence, logical_reread_key, validation_witness, attempt_token
+            "SELECT epoch, sequence, logical_reread_key_hash,
+                    validation_witness, attempt_token
              FROM cursor_receipt_text WHERE sequence = ?1",
             [u64_to_i64(sequence, "receipt sequence")?],
-            receipt_from_row,
+            stored_receipt_from_row,
         )
         .optional()
-        .map_err(|error| sqlite_error("read receipt by sequence", error))
+        .map_err(|error| sqlite_error("read receipt by sequence", error))?;
+    stored
+        .as_ref()
+        .map(|stored| hydrate_stored_receipt(journal, stored).map(|(receipt, _)| receipt))
+        .transpose()
 }
 
 fn first_receipt_after(
@@ -1440,18 +1475,45 @@ fn first_receipt_after(
         .transpose()
 }
 
-fn receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CursorReceipt> {
+fn stored_receipt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredCursorReceipt> {
     let epoch = row.get::<_, i64>(0)?;
     let sequence = row.get::<_, i64>(1)?;
     if epoch <= 0 || sequence <= 0 {
         return Err(rusqlite::Error::IntegralValueOutOfRange(0, epoch));
     }
-    Ok(CursorReceipt {
+    Ok(StoredCursorReceipt {
         cursor: TruthCursor::new(epoch as u64, sequence as u64),
-        logical_reread_key: row.get(2)?,
+        logical_reread_key_hash: row.get(2)?,
         validation_witness: row.get(3)?,
         attempt_token: row.get(4)?,
     })
+}
+
+fn hydrate_stored_receipt(
+    journal: &QualificationLocalJournal,
+    stored: &StoredCursorReceipt,
+) -> Result<(CursorReceipt, ShoreEvent), CursorLedgerError> {
+    let bytes = journal
+        .read_event_bytes_by_key_digest(&stored.logical_reread_key_hash)
+        .map_err(|error| CursorLedgerError::Truth(error.to_string()))?
+        .ok_or_else(|| CursorLedgerError::CarrierAbsent(stored.logical_reread_key_hash.clone()))?;
+    if sha256_bytes_hex(&bytes) != stored.validation_witness {
+        return Err(CursorLedgerError::WitnessMismatch(
+            stored.logical_reread_key_hash.clone(),
+        ));
+    }
+    let event =
+        EventStore::decode_qualification_entry(stored.logical_reread_key_hash.clone(), bytes)
+            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+    Ok((
+        CursorReceipt {
+            cursor: stored.cursor,
+            logical_reread_key: event.idempotency_key.clone(),
+            validation_witness: stored.validation_witness.clone(),
+            attempt_token: stored.attempt_token.clone(),
+        },
+        event,
+    ))
 }
 
 fn classify_receipt(receipt: &CursorReceipt, witness: &str) -> AppendResolution {

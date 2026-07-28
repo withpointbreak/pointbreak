@@ -1008,7 +1008,7 @@ fn materialized_audit_looks_up_representatives_by_sequence() {
              WHERE locator.epoch = 1
                AND event.sequence <= 1
                AND representative.family != 'observation'
-             ORDER BY locator.replay_key, receipt.logical_reread_key",
+             ORDER BY locator.replay_key, receipt.logical_reread_key_hash",
         )
         .expect("prepare audit plan");
     let details = statement

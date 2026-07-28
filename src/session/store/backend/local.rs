@@ -35,6 +35,27 @@ impl LocalJournal {
         self.events_dir()
             .join(format!("{}.json", event_filename_stem(idempotency_key)))
     }
+
+    fn read_event_bytes_by_key_digest(&self, key_digest: &str) -> Result<Option<Vec<u8>>> {
+        if key_digest.len() != 64
+            || !key_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(ShoreError::Message(
+                "event key digest must be 64 lowercase hexadecimal characters".to_owned(),
+            ));
+        }
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::record_carrier_open();
+        let path = self.events_dir().join(format!("{key_digest}.json"));
+        let bytes = self.storage.read_bytes_if_exists(&path)?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        if let Some(bytes) = &bytes {
+            crate::bench_support::longitudinal::record_carrier_bytes(bytes.len());
+        }
+        Ok(bytes)
+    }
 }
 
 impl Journal for LocalJournal {
@@ -152,6 +173,13 @@ impl QualificationLocalJournal {
 
     pub(crate) fn read_event_bytes(&self, logical_reread_key: &str) -> Result<Option<Vec<u8>>> {
         self.journal.read_event_bytes(logical_reread_key)
+    }
+
+    pub(crate) fn read_event_bytes_by_key_digest(
+        &self,
+        key_digest: &str,
+    ) -> Result<Option<Vec<u8>>> {
+        self.journal.read_event_bytes_by_key_digest(key_digest)
     }
 }
 

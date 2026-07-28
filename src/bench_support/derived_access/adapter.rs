@@ -1,16 +1,14 @@
 //! Qualification-only derived-access adapter.
 #![cfg_attr(not(test), allow(dead_code))]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[cfg(feature = "longitudinal-counting")]
 use super::sqlite_cursor::CursorLedgerInventory;
 use super::sqlite_cursor::{CursorLedgerError, CursorLedgerIdentity, SqliteCursorLedger};
 use super::sqlite_locator::{LocatorInventory, SqliteLocator, SqliteLocatorError};
 use super::sqlite_semantic::{SemanticInventory, SqliteSemantic, SqliteSemanticError};
-use crate::canonical_hash::sha256_bytes_hex;
 use crate::model::RevisionId;
-use crate::session::EventStore;
 use crate::session::derived_access::cursor::{
     AppendResolution, CursorDelta, TruthCursor, TruthHead,
 };
@@ -29,7 +27,6 @@ const DEFAULT_DELTA_LIMIT: usize = 512;
 
 #[derive(Debug)]
 pub(crate) struct QualificationDerivedAccessAdapter {
-    store_root: PathBuf,
     cursor: SqliteCursorLedger,
     locator: SqliteLocator,
     semantic: SqliteSemantic,
@@ -51,10 +48,6 @@ pub(crate) enum DerivedAccessAdapterError {
     Freshness(#[from] FreshnessModelError),
     #[error("authoritative truth read failed: {0}")]
     Truth(String),
-    #[error("authoritative event does not match locator row at {0:?}")]
-    LocatorMismatch(TruthCursor),
-    #[error("authoritative event does not match semantic fact at {0:?}")]
-    SemanticMismatch(TruthCursor),
     #[error("derived catch-up batch limit must be greater than zero")]
     ZeroBatchLimit,
     #[error("derived catch-up returned no receipts before observed head {0:?}")]
@@ -73,7 +66,6 @@ impl QualificationDerivedAccessAdapter {
         let locator = SqliteLocator::open(&store_root)?;
         let semantic = SqliteSemantic::open(locator.clone())?;
         Ok(Self {
-            store_root,
             cursor,
             locator,
             semantic,
@@ -103,14 +95,17 @@ impl QualificationDerivedAccessAdapter {
             if checkpoint.applied == head {
                 return Ok(head);
             }
-            let delta = self.cursor.events_after(checkpoint.applied, batch_limit)?;
+            let hydrated = self
+                .cursor
+                .events_after_hydrated(checkpoint.applied, batch_limit)?;
+            let delta = &hydrated.delta;
             if delta.receipts.is_empty() && !delta.complete {
                 return Err(DerivedAccessAdapterError::EmptyIncompleteDelta(
                     delta.observed_head,
                 ));
             }
-            let (rows, semantic_facts) = self.derived_rows(&delta)?;
-            let applied = self.semantic.apply_delta(&delta, &rows, &semantic_facts)?;
+            let (rows, semantic_facts) = self.derived_rows(delta, &hydrated.events)?;
+            let applied = self.semantic.apply_delta(delta, &rows, &semantic_facts)?;
             if delta.complete {
                 return Ok(applied);
             }
@@ -132,11 +127,8 @@ impl QualificationDerivedAccessAdapter {
         event_id: &str,
     ) -> Result<LocatorRead<Option<ShoreEvent>>, DerivedAccessAdapterError> {
         let observed = self.cursor.head()?.cursor;
-        match self.locator.lookup_event_id(event_id, observed)? {
-            LocatorRead::Ready(row) => {
-                let event = row.as_ref().map(|row| self.hydrate(row)).transpose()?;
-                Ok(LocatorRead::Ready(event))
-            }
+        match self.locator.lookup_event_id_hydrated(event_id, observed)? {
+            LocatorRead::Ready(row) => Ok(LocatorRead::Ready(row.map(|row| row.event))),
             LocatorRead::CatchUpRequired { applied, observed } => {
                 Ok(LocatorRead::CatchUpRequired { applied, observed })
             }
@@ -148,20 +140,16 @@ impl QualificationDerivedAccessAdapter {
         request: ChronologicalWindowRequest,
     ) -> Result<LocatorRead<HydratedWindow>, DerivedAccessAdapterError> {
         let observed = self.cursor.head()?.cursor;
-        match self.locator.chronological_window(&request, observed)? {
-            LocatorRead::Ready(window) => {
-                let events = window
-                    .rows
-                    .iter()
-                    .map(|row| self.hydrate(row))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(LocatorRead::Ready(HydratedWindow {
-                    as_of: window.as_of,
-                    events,
-                    continuation: window.continuation,
-                    has_more: window.has_more,
-                }))
-            }
+        match self
+            .locator
+            .chronological_window_hydrated(&request, observed)?
+        {
+            LocatorRead::Ready(window) => Ok(LocatorRead::Ready(HydratedWindow {
+                as_of: window.window.as_of,
+                events: window.events,
+                continuation: window.window.continuation,
+                has_more: window.window.has_more,
+            })),
             LocatorRead::CatchUpRequired { applied, observed } => {
                 Ok(LocatorRead::CatchUpRequired { applied, observed })
             }
@@ -224,7 +212,7 @@ impl QualificationDerivedAccessAdapter {
         let observed = self.cursor.head()?.cursor;
         let facts = match self
             .semantic
-            .facts_for_revision(revision_id.as_str(), observed)?
+            .facts_for_revision_hydrated(revision_id.as_str(), observed)?
         {
             LocatorRead::Ready(facts) => facts,
             LocatorRead::CatchUpRequired { applied, observed } => {
@@ -235,10 +223,7 @@ impl QualificationDerivedAccessAdapter {
             return Ok(LocatorRead::Ready(None));
         }
 
-        let mut authoritative_events = facts
-            .iter()
-            .map(|fact| self.hydrate_semantic(fact))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut authoritative_events = facts.into_iter().map(|fact| fact.event).collect::<Vec<_>>();
         authoritative_events.sort_by(|left, right| left.event_id.cmp(&right.event_id));
         let capture = authoritative_events
             .iter()
@@ -277,70 +262,42 @@ impl QualificationDerivedAccessAdapter {
             return Err(DerivedAccessAdapterError::ZeroBatchLimit);
         }
         let checkpoint = self.locator.checkpoint()?;
-        let delta = self.cursor.events_after(checkpoint.applied, batch_limit)?;
-        let (rows, semantic_facts) = self.derived_rows(&delta)?;
+        let hydrated = self
+            .cursor
+            .events_after_hydrated(checkpoint.applied, batch_limit)?;
+        let delta = &hydrated.delta;
+        let (rows, semantic_facts) = self.derived_rows(delta, &hydrated.events)?;
         Ok(self
             .semantic
-            .apply_delta_with_failure(&delta, &rows, &semantic_facts)?)
+            .apply_delta_with_failure(delta, &rows, &semantic_facts)?)
     }
 
     fn derived_rows(
         &self,
         delta: &CursorDelta,
+        events: &[ShoreEvent],
     ) -> Result<(Vec<LocatorRow>, Vec<SemanticFact>), DerivedAccessAdapterError> {
+        if events.len() != delta.receipts.len() {
+            return Err(DerivedAccessAdapterError::Truth(format!(
+                "{} authoritative events for {} cursor receipts",
+                events.len(),
+                delta.receipts.len()
+            )));
+        }
         let mut locator_rows = Vec::with_capacity(delta.receipts.len());
         let mut semantic_facts = Vec::with_capacity(delta.receipts.len());
-        for receipt in &delta.receipts {
-            let event = self.read_authoritative(&receipt.logical_reread_key)?;
+        for (receipt, event) in delta.receipts.iter().zip(events) {
             locator_rows.push(LocatorRow::from_event(
                 receipt.cursor,
-                &event,
+                event,
                 receipt.validation_witness.clone(),
             )?);
             semantic_facts.push(SemanticFact::from_event(
                 receipt.cursor,
-                &event,
+                event,
                 receipt.validation_witness.clone(),
             )?);
         }
         Ok((locator_rows, semantic_facts))
-    }
-
-    fn hydrate(&self, row: &LocatorRow) -> Result<ShoreEvent, DerivedAccessAdapterError> {
-        let event = self.read_authoritative(&row.logical_reread_key)?;
-        let witness = sha256_bytes_hex(
-            &serde_json::to_vec(&event)
-                .map_err(|error| DerivedAccessAdapterError::Truth(error.to_string()))?,
-        );
-        let observed = LocatorRow::from_event(row.cursor, &event, witness)?;
-        if &observed != row {
-            return Err(DerivedAccessAdapterError::LocatorMismatch(row.cursor));
-        }
-        Ok(event)
-    }
-
-    fn hydrate_semantic(
-        &self,
-        fact: &SemanticFact,
-    ) -> Result<ShoreEvent, DerivedAccessAdapterError> {
-        let event = self.read_authoritative(&fact.logical_reread_key)?;
-        let witness = sha256_bytes_hex(
-            &serde_json::to_vec(&event)
-                .map_err(|error| DerivedAccessAdapterError::Truth(error.to_string()))?,
-        );
-        let observed = SemanticFact::from_event(fact.cursor, &event, witness)?;
-        if &observed != fact {
-            return Err(DerivedAccessAdapterError::SemanticMismatch(fact.cursor));
-        }
-        Ok(event)
-    }
-
-    fn read_authoritative(
-        &self,
-        logical_reread_key: &str,
-    ) -> Result<ShoreEvent, DerivedAccessAdapterError> {
-        EventStore::open(&self.store_root)
-            .read_stored_event(logical_reread_key)
-            .map_err(|error| DerivedAccessAdapterError::Truth(error.to_string()))
     }
 }

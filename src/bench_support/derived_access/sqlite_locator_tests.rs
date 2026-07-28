@@ -174,7 +174,7 @@ fn selected_locator_row_is_revalidated_against_its_cursor_receipt() {
     connection
         .execute(
             "UPDATE cursor_receipt
-             SET logical_reread_key = 'tampered:receipt'
+             SET logical_reread_key_hash = zeroblob(32)
              WHERE sequence = 1",
             [],
         )

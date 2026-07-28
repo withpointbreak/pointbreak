@@ -189,6 +189,14 @@ impl EventStore {
         Ok(event)
     }
 
+    #[cfg(any(test, feature = "bench"))]
+    pub(crate) fn decode_qualification_entry(
+        key_digest: String,
+        bytes: Vec<u8>,
+    ) -> Result<ShoreEvent> {
+        Self::decode_validated_entry(&JournalEntry { key_digest, bytes })
+    }
+
     /// Decode stored event bytes, rejecting the two recognized schema breaks (a
     /// retired event type, a retired envelope field) with typed errors before
     /// validating the decoded event. `path`, when given, also checks the file name
