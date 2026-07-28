@@ -527,7 +527,7 @@ impl QualificationDerivedAccessContractV1 {
                 self.sampling.restart_samples_per_root
             ),
             format!(
-                "| Complexity | classify before latency; fixed-output work is bounded selected work; L100-to-C262 work/retention ratio at most `{}` |",
+                "| Complexity | classify before latency; fixed-output work is bounded selected work; L100-to-C262 work/retention ratio at most `{}` unless the receipt proves that all excess work is selected-output growth |",
                 format_ratio_milli(selected_work_ratio)
             ),
             format!("| L100 latency / CPU | {operation_limits} |"),
@@ -729,6 +729,8 @@ pub struct QualificationDerivedAccessOperationEvidenceV1 {
     pub retained_samples: u16,
     pub wall_p95_ms: Option<u64>,
     pub process_cpu_p95_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_output_count: Option<u64>,
     pub selected_work_count: u64,
     pub retained_cardinality: u64,
     pub l100_to_c262_selected_work_ratio_milli: Option<u16>,
@@ -1310,6 +1312,10 @@ fn evaluate_operations(
                 || !row.semantic_receipt_matches
                 || row.process_scope != requirement.process_scope
                 || row.complexity != QualificationDerivedAccessComplexityV1::BoundedSelectedWork
+                || row.selected_output_count == Some(0)
+                || row
+                    .selected_output_count
+                    .is_some_and(|selected_output| selected_output > row.selected_work_count)
                 || row.selected_work_count < minimum_observed_work(&row.counters)
                 || row.retained_cardinality
                     != expected_retained_cardinality(tier, requirement.operation, contract)
@@ -1321,6 +1327,13 @@ fn evaluate_operations(
                 ));
                 continue;
             }
+            let Some(selected_output_count) = row.selected_output_count else {
+                missing.push(format!(
+                    "{platform:?}/{tier:?}/{} selected-output count",
+                    requirement.operation.as_str()
+                ));
+                continue;
+            };
             let required_samples = match tier {
                 QualificationDerivedAccessTierV1::D0_128
                 | QualificationDerivedAccessTierV1::L1
@@ -1380,6 +1393,13 @@ fn evaluate_operations(
                     })?;
                 let derived_ratio =
                     selected_work_ratio_milli(row.selected_work_count, l100.selected_work_count);
+                let Some(l100_selected_output_count) = l100.selected_output_count else {
+                    missing.push(format!(
+                        "{platform:?}/L100/{} selected-output count",
+                        requirement.operation.as_str()
+                    ));
+                    continue;
+                };
                 match row.l100_to_c262_selected_work_ratio_milli {
                     None => missing.push(format!(
                         "{platform:?}/{tier:?}/{} selected-work ratio",
@@ -1392,8 +1412,13 @@ fn evaluate_operations(
                         ));
                     }
                     Some(_)
-                        if derived_ratio
-                            > requirement.max_l100_to_c262_selected_work_ratio_milli =>
+                        if selected_work_growth_exceeds_bound(
+                            l100.selected_work_count,
+                            l100_selected_output_count,
+                            row.selected_work_count,
+                            selected_output_count,
+                            requirement.max_l100_to_c262_selected_work_ratio_milli,
+                        ) =>
                     {
                         failed.push(format!(
                             "{platform:?}/{tier:?}/{} selected-work ratio",
@@ -1457,6 +1482,21 @@ fn selected_work_ratio_milli(selected_work: u64, baseline_work: u64) -> u16 {
         .checked_div(baseline_work.max(1))
         .unwrap_or(u64::MAX)
         .min(u64::from(u16::MAX)) as u16
+}
+
+fn selected_work_growth_exceeds_bound(
+    l100_work: u64,
+    l100_output: u64,
+    c262_work: u64,
+    c262_output: u64,
+    maximum_ratio_milli: u16,
+) -> bool {
+    if selected_work_ratio_milli(c262_work, l100_work) <= maximum_ratio_milli {
+        return false;
+    }
+    let extra_work = c262_work.saturating_sub(l100_work);
+    let extra_selected_output = c262_output.saturating_sub(l100_output);
+    extra_work > extra_selected_output
 }
 
 fn counters_exceed(
@@ -1707,6 +1747,13 @@ mod tests {
                             .then_some(requirement.l100_wall_p95_ceiling_ms),
                         process_cpu_p95_ms: (tier == QualificationDerivedAccessTierV1::L100)
                             .then_some(requirement.l100_process_cpu_p95_ceiling_ms),
+                        selected_output_count: Some(
+                            if tier == QualificationDerivedAccessTierV1::C262 {
+                                1_250
+                            } else {
+                                1_000
+                            },
+                        ),
                         selected_work_count: if tier == QualificationDerivedAccessTierV1::C262 {
                             1_250
                         } else {
@@ -2094,6 +2141,79 @@ mod tests {
                 .expect("governed early-stop evaluation")
                 .outcome,
             QualificationDerivedAccessTerminalOutcomeV1::InsufficientEvidence
+        );
+    }
+
+    #[test]
+    fn selected_output_growth_is_not_unselected_scale_work() {
+        assert!(!selected_work_growth_exceeds_bound(10, 10, 15, 15, 1_250));
+        assert!(!selected_work_growth_exceeds_bound(11, 11, 21, 21, 1_250));
+        assert!(selected_work_growth_exceeds_bound(10, 10, 16, 15, 1_250));
+        assert!(selected_work_growth_exceeds_bound(10, 10, 15, 10, 1_250));
+
+        let mut explained_growth = complete_package();
+        for (operation, l100_count, c262_count) in [
+            (
+                QualificationDerivedAccessOperationV1::RevisionDetailActive,
+                10,
+                15,
+            ),
+            (
+                QualificationDerivedAccessOperationV1::RevisionDetailRemoved,
+                11,
+                21,
+            ),
+        ] {
+            let l100 = explained_growth
+                .operation_rows
+                .iter_mut()
+                .find(|row| {
+                    row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
+                        && row.tier == QualificationDerivedAccessTierV1::L100
+                        && row.operation == operation
+                })
+                .expect("L100 operation");
+            l100.selected_output_count = Some(l100_count);
+            l100.selected_work_count = l100_count;
+
+            let c262 = explained_growth
+                .operation_rows
+                .iter_mut()
+                .find(|row| {
+                    row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
+                        && row.tier == QualificationDerivedAccessTierV1::C262
+                        && row.operation == operation
+                })
+                .expect("C262 operation");
+            c262.selected_output_count = Some(c262_count);
+            c262.selected_work_count = c262_count;
+            c262.l100_to_c262_selected_work_ratio_milli =
+                Some(selected_work_ratio_milli(c262_count, l100_count));
+        }
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&explained_growth)
+                .expect("explained selected-output growth evaluates")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::SurvivesApfsFalsifier
+        );
+
+        let c262 = explained_growth
+            .operation_rows
+            .iter_mut()
+            .find(|row| {
+                row.platform == QualificationDerivedAccessPlatformV1::MacosApfs
+                    && row.tier == QualificationDerivedAccessTierV1::C262
+                    && row.operation == QualificationDerivedAccessOperationV1::RevisionDetailActive
+            })
+            .expect("C262 operation");
+        c262.selected_work_count += 1;
+        c262.l100_to_c262_selected_work_ratio_milli =
+            Some(selected_work_ratio_milli(c262.selected_work_count, 10));
+        assert_eq!(
+            evaluate_qualification_derived_access_v1(&explained_growth)
+                .expect("unselected growth evaluates")
+                .outcome,
+            QualificationDerivedAccessTerminalOutcomeV1::Reject
         );
     }
 

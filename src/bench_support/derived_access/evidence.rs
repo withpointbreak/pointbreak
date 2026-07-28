@@ -1929,6 +1929,13 @@ pub(super) fn aggregate_scale_rows(
                     .map(|sample| sample.process_cpu_nanos.unwrap_or_default())
                     .collect(),
             )?)),
+            selected_output_count: Some(
+                operation_samples
+                    .iter()
+                    .map(|sample| sample.selected_output_count)
+                    .max()
+                    .unwrap_or_default(),
+            ),
             selected_work_count: selected_work,
             retained_cardinality: operation_samples
                 .iter()
@@ -2690,6 +2697,7 @@ fn smoke_operation_rows(
                 retained_samples: 1,
                 wall_p95_ms: None,
                 process_cpu_p95_ms: None,
+                selected_output_count: Some(selected_output),
                 selected_work_count: work,
                 retained_cardinality: match tier {
                     QualificationDerivedAccessTierV1::D0_128 => 128,

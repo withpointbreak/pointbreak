@@ -446,7 +446,7 @@ cargo bench --locked --features bench --bench store_foundation -- --derived-acce
 | Correctness tier | `D0-128`: 128 events, 16 revisions, 16 independent objects, 2 byte-identical roots, frozen transition/operation/lifecycle coverage, no timing threshold; the runner later binds one public seed and ordered-schedule receipt |
 | Operations | `SEMANTIC_ID`, `FRESH_NO_CHANGE`, `NEWCOUNT_ZERO`, `WINDOW_HEAD`, `WINDOW_MIDDLE`, `WINDOW_TAIL`, `REVISION_DETAIL_ACTIVE`, `REVISION_DETAIL_REMOVED`, `APPEND_ONE`, `POST_ONE`, `RESTART` |
 | Samples | 2 release roots; 1 untimed request and 3 excluded warmups; 30 retained warm/append-post samples per root; 10 restart samples per root; no outlier removal |
-| Complexity | classify before latency; fixed-output work is bounded selected work; L100-to-C262 work/retention ratio at most `1.25` |
+| Complexity | classify before latency; fixed-output work is bounded selected work; L100-to-C262 work/retention ratio at most `1.25` unless the receipt proves that all excess work is selected-output growth |
 | L100 latency / CPU | `SEMANTIC_ID` `150/100 ms`; `FRESH_NO_CHANGE` `50/25 ms`; `NEWCOUNT_ZERO` `50/25 ms`; `WINDOW_HEAD` `150/100 ms`; `WINDOW_MIDDLE` `150/100 ms`; `WINDOW_TAIL` `150/100 ms`; `REVISION_DETAIL_ACTIVE` `250/175 ms`; `REVISION_DETAIL_REMOVED` `250/175 ms`; `APPEND_ONE` `250/200 ms`; `POST_ONE` `500/400 ms`; `RESTART` `3000/2500 ms` |
 | Memory | store-attributable L100 steady/peak RSS at most `96/128 MiB`; L7-to-L100 steady slope at most `512 bytes/event`; zero retained body/object bytes outside the active window |
 | Allocation | steady derived bytes at most `max(64 MiB, 1024 × event count)`; high-water at most `1.5×`; append write amplification at most `8×` |
