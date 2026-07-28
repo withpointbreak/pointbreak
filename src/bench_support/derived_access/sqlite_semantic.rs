@@ -24,7 +24,7 @@ use crate::session::derived_access::semantic::{
 use crate::session::event::ShoreEvent;
 
 const SEMANTIC_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-semantic.v1";
-const SEMANTIC_SCHEMA_VERSION: i64 = 3;
+const SEMANTIC_SCHEMA_VERSION: i64 = 4;
 
 #[derive(Clone, Debug)]
 pub(crate) struct SqliteSemantic {
@@ -75,7 +75,7 @@ impl SqliteSemantic {
                 "CREATE TABLE IF NOT EXISTS semantic_meta (
                      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                      profile_id TEXT NOT NULL,
-                     schema_version INTEGER NOT NULL CHECK (schema_version = 3),
+                     schema_version INTEGER NOT NULL CHECK (schema_version = 4),
                      epoch INTEGER NOT NULL CHECK (epoch > 0),
                      applied_sequence INTEGER NOT NULL CHECK (applied_sequence >= 0)
                  ) STRICT;
@@ -172,7 +172,7 @@ impl SqliteSemantic {
                      association_id TEXT NOT NULL
                  ) STRICT;
                  CREATE TABLE IF NOT EXISTS semantic_representative (
-                     family TEXT NOT NULL,
+                     family_id INTEGER NOT NULL CHECK (family_id BETWEEN 1 AND 11),
                      semantic_key_prefix_id INTEGER
                          REFERENCES semantic_identity_prefix(id),
                      semantic_key_digest BLOB CHECK (length(semantic_key_digest) = 32),
@@ -191,12 +191,25 @@ impl SqliteSemantic {
                              AND semantic_key_raw IS NULL
                          )
                      ),
-                     PRIMARY KEY (family, semantic_key_hash)
+                     PRIMARY KEY (family_id, semantic_key_hash)
                  ) STRICT, WITHOUT ROWID;
                  CREATE INDEX IF NOT EXISTS semantic_representative_sequence
-                     ON semantic_representative(sequence, family);
+                     ON semantic_representative(sequence, family_id);
                  CREATE VIEW IF NOT EXISTS semantic_representative_text AS
-                 SELECT representative.family,
+                 SELECT representative.family_id,
+                        CASE representative.family_id
+                            WHEN 1 THEN 'revision'
+                            WHEN 2 THEN 'observation'
+                            WHEN 3 THEN 'assessment'
+                            WHEN 4 THEN 'request'
+                            WHEN 5 THEN 'response'
+                            WHEN 6 THEN 'validation'
+                            WHEN 7 THEN 'commit_association'
+                            WHEN 8 THEN 'commit_withdrawal'
+                            WHEN 9 THEN 'ref_association'
+                            WHEN 10 THEN 'ref_withdrawal'
+                            WHEN 11 THEN 'removal'
+                        END AS family,
                         coalesce(
                             representative.semantic_key_raw,
                             prefix.value || lower(hex(representative.semantic_key_digest))
@@ -957,8 +970,11 @@ fn update_materialized_projection(
             "SELECT representative.sequence, locator.event_id, representative.semantic_key
              FROM semantic_representative_text AS representative
              JOIN locator_event_text AS locator ON locator.sequence = representative.sequence
-             WHERE representative.family = ?1 AND representative.semantic_key_hash = ?2",
-            params![family, semantic_key_digest(semantic_key).as_slice()],
+             WHERE representative.family_id = ?1 AND representative.semantic_key_hash = ?2",
+            params![
+                family_code(family)?,
+                semantic_key_digest(semantic_key).as_slice()
+            ],
             |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -1014,16 +1030,16 @@ fn update_materialized_projection(
     transaction
         .execute(
             "INSERT INTO semantic_representative
-             (family, semantic_key_prefix_id, semantic_key_digest, semantic_key_raw,
+             (family_id, semantic_key_prefix_id, semantic_key_digest, semantic_key_raw,
               semantic_key_hash, sequence)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(family, semantic_key_hash) DO UPDATE SET
+             ON CONFLICT(family_id, semantic_key_hash) DO UPDATE SET
                  semantic_key_prefix_id = excluded.semantic_key_prefix_id,
                  semantic_key_digest = excluded.semantic_key_digest,
                  semantic_key_raw = excluded.semantic_key_raw,
                  sequence = excluded.sequence",
             params![
-                family,
+                family_code(family)?,
                 encoded_key.prefix_id,
                 encoded_key.digest.as_deref(),
                 encoded_key.raw,
@@ -1111,6 +1127,25 @@ fn duplicate_family(family: &str) -> bool {
     )
 }
 
+fn family_code(family: &str) -> Result<i64, SqliteLocatorError> {
+    match family {
+        "revision" => Ok(1),
+        "observation" => Ok(2),
+        "assessment" => Ok(3),
+        "request" => Ok(4),
+        "response" => Ok(5),
+        "validation" => Ok(6),
+        "commit_association" => Ok(7),
+        "commit_withdrawal" => Ok(8),
+        "ref_association" => Ok(9),
+        "ref_withdrawal" => Ok(10),
+        "removal" => Ok(11),
+        _ => Err(SqliteLocatorError::Delta(format!(
+            "unsupported semantic representative family {family}"
+        ))),
+    }
+}
+
 fn update_materialized_duplicate(
     transaction: &Transaction<'_>,
     family: &str,
@@ -1140,9 +1175,12 @@ fn update_materialized_duplicate(
                      FROM semantic_representative_text AS representative
                      JOIN locator_event_text AS locator
                        ON locator.sequence = representative.sequence
-                     WHERE representative.family = ?1
+                     WHERE representative.family_id = ?1
                        AND representative.semantic_key_hash = ?2",
-                    params![family, semantic_key_digest(semantic_key).as_slice()],
+                    params![
+                        family_code(family)?,
+                        semantic_key_digest(semantic_key).as_slice()
+                    ],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                 )
                 .optional()
@@ -1275,7 +1313,7 @@ fn request_projection_state(
              FROM semantic_representative_text AS representative
              JOIN semantic_event_fact_text AS event
                ON event.sequence = representative.sequence
-             WHERE representative.family = 'request'
+             WHERE representative.family_id = 4
                AND representative.semantic_key_hash = ?1",
             [semantic_key_digest(request_id).as_slice()],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
@@ -1295,7 +1333,7 @@ fn request_projection_state(
             "SELECT 1
              FROM semantic_response_fact AS response
              JOIN semantic_representative AS representative
-               ON representative.family = 'response'
+               ON representative.family_id = 5
               AND representative.sequence = response.sequence
              WHERE response.request_id = ?1
              LIMIT 1",
@@ -1454,7 +1492,7 @@ fn query_materialized_facts(
                ON ref_association.sequence = event.sequence
              LEFT JOIN semantic_ref_withdrawal_fact AS ref_withdrawal
                ON ref_withdrawal.sequence = event.sequence
-             WHERE representative.family != 'observation'
+             WHERE representative.family_id != 2
                AND locator.epoch = ?1 AND event.sequence <= ?2
                AND (
                    ?3 IS NULL
@@ -1466,14 +1504,14 @@ fn query_materialized_facts(
                        JOIN locator_event AS selected_locator
                          ON selected_locator.sequence = selected_event.sequence
                        JOIN semantic_representative AS selected_representative
-                         ON selected_representative.family = 'revision'
+                         ON selected_representative.family_id = 1
                         AND selected_representative.sequence = selected_event.sequence
                        WHERE selected_revision.engagement_id = ?3
                          AND selected_locator.epoch = ?1
                          AND selected_event.sequence <= ?2
                    )
                    OR (
-                       representative.family = 'removal'
+                       representative.family_id = 11
                        AND event.content_hash IN (
                            SELECT selected_event.content_hash
                            FROM semantic_revision_fact AS selected_revision
@@ -1482,7 +1520,7 @@ fn query_materialized_facts(
                            JOIN locator_event AS selected_locator
                              ON selected_locator.sequence = selected_event.sequence
                            JOIN semantic_representative AS selected_representative
-                             ON selected_representative.family = 'revision'
+                             ON selected_representative.family_id = 1
                             AND selected_representative.sequence = selected_event.sequence
                            WHERE selected_revision.engagement_id = ?3
                              AND selected_locator.epoch = ?1
