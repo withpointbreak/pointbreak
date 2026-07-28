@@ -843,8 +843,10 @@ fn initialize_schema(
              CREATE TABLE cursor_receipt (
                  sequence INTEGER PRIMARY KEY CHECK (sequence > 0),
                  epoch INTEGER NOT NULL CHECK (epoch > 0),
-                 logical_reread_key TEXT NOT NULL UNIQUE
+                 logical_reread_key TEXT NOT NULL
                      CHECK (length(logical_reread_key) > 0),
+                 logical_reread_key_hash BLOB NOT NULL UNIQUE
+                     CHECK (length(logical_reread_key_hash) = 32),
                  validation_witness_hash BLOB NOT NULL
                      CHECK (length(validation_witness_hash) = 32),
                  attempt_hash BLOB NOT NULL UNIQUE CHECK (length(attempt_hash) = 32)
@@ -852,7 +854,7 @@ fn initialize_schema(
                  attempt_token TEXT CHECK (length(attempt_token) > 0)
              ) STRICT;
              CREATE VIEW cursor_receipt_text AS
-             SELECT sequence, epoch, logical_reread_key,
+             SELECT sequence, epoch, logical_reread_key, logical_reread_key_hash,
                     lower(hex(validation_witness_hash)) AS validation_witness,
                     coalesce(
                         attempt_token,
@@ -1299,13 +1301,14 @@ fn insert_receipt(
     transaction
         .execute(
             "INSERT INTO cursor_receipt
-             (sequence, epoch, logical_reread_key, validation_witness_hash,
-              attempt_hash, attempt_token)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+             (sequence, epoch, logical_reread_key, logical_reread_key_hash,
+              validation_witness_hash, attempt_hash, attempt_token)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 u64_to_i64(receipt.cursor.sequence, "receipt sequence")?,
                 u64_to_i64(receipt.cursor.epoch, "receipt epoch")?,
                 receipt.logical_reread_key,
+                sha256_digest(receipt.logical_reread_key.as_bytes()).as_slice(),
                 witness.as_slice(),
                 sha256_digest(receipt.attempt_token.as_bytes()).as_slice(),
                 retained_attempt_token,
@@ -1387,15 +1390,23 @@ fn receipt_for_key(
     connection: &Connection,
     logical_reread_key: &str,
 ) -> Result<Option<CursorReceipt>, CursorLedgerError> {
-    connection
+    let receipt = connection
         .query_row(
             "SELECT epoch, sequence, logical_reread_key, validation_witness, attempt_token
-             FROM cursor_receipt_text WHERE logical_reread_key = ?1",
-            [logical_reread_key],
+             FROM cursor_receipt_text WHERE logical_reread_key_hash = ?1",
+            [sha256_digest(logical_reread_key.as_bytes()).as_slice()],
             receipt_from_row,
         )
         .optional()
-        .map_err(|error| sqlite_error("read receipt by key", error))
+        .map_err(|error| sqlite_error("read receipt by key", error))?;
+    if let Some(receipt) = &receipt
+        && receipt.logical_reread_key != logical_reread_key
+    {
+        return Err(CursorLedgerError::SchemaMismatch(
+            "cursor receipt key digest resolves to a different logical key".to_owned(),
+        ));
+    }
+    Ok(receipt)
 }
 
 fn receipt_for_sequence(
