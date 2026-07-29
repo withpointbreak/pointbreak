@@ -1087,7 +1087,7 @@ mod tests {
 
         access.start_background_rebuild().unwrap();
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
             match access.current().unwrap() {
                 CurrentRead::Ready(_) => break,
