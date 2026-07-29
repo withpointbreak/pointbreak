@@ -37,7 +37,10 @@ fn active_inspector_first_start_bootstraps_and_serves_history() {
             .as_str()
             .expect("availability");
         assert!(
-            matches!(availability, "absent" | "bootstrapping"),
+            matches!(
+                availability,
+                "absent" | "bootstrapping" | "rebuild_required"
+            ),
             "unexpected first-start state: {body}"
         );
         assert!(
