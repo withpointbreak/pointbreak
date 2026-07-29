@@ -427,6 +427,18 @@ impl SqliteCursorLedger {
     }
 
     #[cfg(test)]
+    pub(crate) fn connection_policy_for_test(&self) -> Result<(String, i64), CursorLedgerError> {
+        let connection = open_connection(&self.database_path, false)?;
+        let journal_mode = connection
+            .pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+            .map_err(|error| sqlite_error("read journal mode", error))?;
+        let synchronous = connection
+            .pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))
+            .map_err(|error| sqlite_error("read synchronous", error))?;
+        Ok((journal_mode, synchronous))
+    }
+
+    #[cfg(test)]
     pub(crate) fn head_with_snapshot_hook(
         &self,
         hook: impl FnOnce(),

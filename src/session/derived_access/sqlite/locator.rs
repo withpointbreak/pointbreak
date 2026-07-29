@@ -533,7 +533,10 @@ impl SqliteLocator {
             )));
         }
         connection
-            .pragma_update(None, "synchronous", "FULL")
+            // Locator and semantic rows are an atomic, rebuildable projection.
+            // WAL NORMAL may roll back the latest transaction after power loss;
+            // the separately durable cursor head then forces bounded catch-up.
+            .pragma_update(None, "synchronous", "NORMAL")
             .map_err(|error| sqlite_error("set locator synchronous", error))?;
         connection
             .pragma_update(None, "foreign_keys", true)
@@ -553,6 +556,18 @@ impl SqliteLocator {
         let cursor = validate_cursor_metadata(&connection)?;
         validate_locator_checkpoint(&connection, &cursor)?;
         Ok(connection)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn connection_policy_for_test(&self) -> Result<(String, i64), SqliteLocatorError> {
+        let connection = self.connection()?;
+        let journal_mode = connection
+            .pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+            .map_err(|error| sqlite_error("read locator journal mode", error))?;
+        let synchronous = connection
+            .pragma_query_value(None, "synchronous", |row| row.get::<_, i64>(0))
+            .map_err(|error| sqlite_error("read locator synchronous", error))?;
+        Ok((journal_mode, synchronous))
     }
 
     pub(crate) fn store_root(&self) -> &Path {

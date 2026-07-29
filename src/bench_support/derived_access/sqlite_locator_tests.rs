@@ -59,6 +59,28 @@ fn ready<T>(read: LocatorRead<T>) -> T {
 }
 
 #[test]
+fn cursor_and_projection_connections_use_distinct_wal_durability_policies() {
+    let root = tempfile::tempdir().expect("root");
+    let cursor =
+        SqliteCursorLedger::initialize_empty(root.path(), CursorLedgerIdentity::new(STORE_ID))
+            .expect("initialize cursor");
+    let locator = SqliteLocator::open(root.path()).expect("open locator");
+
+    assert_eq!(
+        cursor.connection_policy_for_test().expect("cursor policy"),
+        ("wal".to_owned(), 2),
+        "intent, receipt, and head commits remain power-loss durable"
+    );
+    assert_eq!(
+        locator
+            .connection_policy_for_test()
+            .expect("projection policy"),
+        ("wal".to_owned(), 1),
+        "rebuildable locator and semantic commits use WAL NORMAL"
+    );
+}
+
+#[test]
 fn semantic_id_is_one_validated_authoritative_point_read() {
     let root = tempfile::tempdir().expect("root");
     let adapter = open_adapter(root.path());
