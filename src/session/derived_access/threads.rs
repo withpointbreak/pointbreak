@@ -212,14 +212,12 @@ mod tests {
         lifecycle
             .rebuild(|_| LifecycleControl::Continue)
             .expect("publish generation");
-        let access = DerivedHistoryAccess {
-            mode: DerivedHistoryMode::Active {
-                lifecycle,
-                current: Mutex::new(None),
-                store_identity: "store:test".to_owned(),
-                backend: read_store.backend().clone(),
-            },
-        };
+        let access = DerivedHistoryAccess::from_mode(DerivedHistoryMode::Active {
+            lifecycle,
+            current: Mutex::new(None),
+            store_identity: "store:test".to_owned(),
+            backend: read_store.backend().clone(),
+        });
         (repo, access)
     }
 

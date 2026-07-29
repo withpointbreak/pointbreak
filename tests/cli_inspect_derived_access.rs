@@ -53,8 +53,31 @@ fn active_inspector_first_start_bootstraps_and_serves_history() {
     assert_eq!(history["schema"], "pointbreak.inspect-history");
     assert!(history["projectionStamp"].is_string());
     assert!(history.get("eventSetHash").is_none());
+    let initial_projection_stamp = history["projectionStamp"].clone();
     assert!(
         derived_root.is_dir(),
         "first start created the private sidecar"
     );
+
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    capture(repo.path());
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, body) = inspector.raw_get("/api/history");
+        if status.contains("200 OK") {
+            let history = serde_json::from_str::<serde_json::Value>(&body).expect("history JSON");
+            assert_ne!(history["projectionStamp"], initial_projection_stamp);
+            break;
+        }
+        assert!(
+            status.contains("503 Service Unavailable"),
+            "out-of-band append returned {status}: {body}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "same Inspector process never rebuilt after an out-of-band append: {body}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }

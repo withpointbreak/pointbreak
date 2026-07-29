@@ -2,14 +2,18 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use rusqlite::OptionalExtension;
 use rusqlite::types::Value;
 use serde::Serialize;
 
 use super::cursor::TruthCursor;
-use super::lifecycle::{CurrentGeneration, DerivedAccessLifecycle, LifecycleControl};
+use super::lifecycle::{
+    CurrentGeneration, DerivedAccessLifecycle, LifecycleControl, LifecycleError,
+};
 use super::locator::{LocatorRead, normalize_occurred_at};
 use super::product_contract::{DerivedAccessAvailability, DerivedAccessProfile};
 use crate::canonical_hash::sha256_json_prefixed;
@@ -26,6 +30,7 @@ use crate::session::workflow::{
 const PRODUCT_HISTORY_SCHEMA_V2: &str = "pointbreak.sqlite-derived-access-history.v2";
 const PROJECTION_STAMP_SCHEMA_V1: &str = "pointbreak.derived-access-projection-stamp.v1";
 const ACTIVE_PROFILE: &str = "sqlite-wal-bodyless-v1";
+const BACKGROUND_REBUILD_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 const REVIEW_EVENT_CTE: &str = "
 WITH revision_object_ranked AS (
     SELECT event.revision_id, revision.object_id,
@@ -127,6 +132,7 @@ pub struct DerivedHistoryFreshness {
 #[doc(hidden)]
 pub struct DerivedHistoryAccess {
     pub(super) mode: DerivedHistoryMode,
+    background_rebuild_in_flight: Arc<AtomicBool>,
 }
 
 pub(super) enum DerivedHistoryMode {
@@ -140,13 +146,18 @@ pub(super) enum DerivedHistoryMode {
 }
 
 impl DerivedHistoryAccess {
+    pub(super) fn from_mode(mode: DerivedHistoryMode) -> Self {
+        Self {
+            mode,
+            background_rebuild_in_flight: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     pub fn resolve(repo: impl AsRef<Path>) -> Result<Self, String> {
         let profile =
             DerivedAccessProfile::from_environment().map_err(|error| error.to_string())?;
         if profile == DerivedAccessProfile::Off {
-            return Ok(Self {
-                mode: DerivedHistoryMode::Off,
-            });
+            return Ok(Self::from_mode(DerivedHistoryMode::Off));
         }
         let read_store = resolve_read_store(repo).map_err(|error| error.to_string())?;
         let store_identity = opaque_path_identity("store", read_store.store_dir())
@@ -154,14 +165,12 @@ impl DerivedHistoryAccess {
         let lifecycle =
             DerivedAccessLifecycle::new(profile, read_store.store_dir(), store_identity.clone())
                 .map_err(|error| error.to_string())?;
-        Ok(Self {
-            mode: DerivedHistoryMode::Active {
-                lifecycle,
-                current: Mutex::new(None),
-                store_identity,
-                backend: read_store.backend().clone(),
-            },
-        })
+        Ok(Self::from_mode(DerivedHistoryMode::Active {
+            lifecycle,
+            current: Mutex::new(None),
+            store_identity,
+            backend: read_store.backend().clone(),
+        }))
     }
 
     pub const fn is_active(&self) -> bool {
@@ -177,24 +186,26 @@ impl DerivedHistoryAccess {
         let DerivedHistoryMode::Active { lifecycle, .. } = &self.mode else {
             return Ok(());
         };
-        if lifecycle
-            .status()
-            .map_err(|error| error.to_string())?
-            .availability
-            == DerivedAccessAvailability::Current
+        if self
+            .background_rebuild_in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
         {
             return Ok(());
         }
         let lifecycle = lifecycle.clone();
-        std::thread::Builder::new()
+        let in_flight = Arc::clone(&self.background_rebuild_in_flight);
+        let spawned = std::thread::Builder::new()
             .name("pointbreak-derived-rebuild".to_owned())
-            .spawn(move || {
-                if let Err(error) = lifecycle.rebuild(|_| LifecycleControl::Continue) {
-                    tracing::warn!(error = %error, "derived_access_background_rebuild_failed");
-                }
-            })
-            .map_err(|error| format!("could not start derived-access rebuild: {error}"))?;
-        Ok(())
+            .spawn(move || background_rebuild(lifecycle, in_flight));
+        match spawned {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                self.background_rebuild_in_flight
+                    .store(false, Ordering::Release);
+                Err(format!("could not start derived-access rebuild: {error}"))
+            }
+        }
     }
 
     pub fn history(
@@ -338,9 +349,16 @@ impl DerivedHistoryAccess {
             .journal()
             .head_marker()
             .map_err(|error| error.to_string())?;
-        let published_generation_id = lifecycle
-            .published_generation_id()
-            .map_err(|error| error.to_string())?;
+        let published_generation_id = match lifecycle.published_generation_id() {
+            Ok(generation_id) => generation_id,
+            Err(error) => {
+                self.request_background_rebuild();
+                return Ok(CurrentRead::Unavailable(status(
+                    DerivedHistoryAvailability::Unavailable,
+                    error.to_string(),
+                )));
+            }
+        };
         let mut guard = lock(current);
         if let Some(existing) = guard.as_ref()
             && published_generation_id.as_deref() != Some(existing.generation_id())
@@ -361,11 +379,15 @@ impl DerivedHistoryAccess {
                 return Ok(CurrentRead::Ready(Arc::clone(existing)));
             }
             if head.sequence != truth_count {
+                drop(guard);
+                self.request_background_rebuild();
                 return Ok(CurrentRead::Unavailable(status(
                     DerivedHistoryAvailability::RebuildRequired,
                     "derived cursor does not exactly cover authoritative truth",
                 )));
             }
+            drop(guard);
+            self.request_background_rebuild();
             return Ok(CurrentRead::Unavailable(status(
                 DerivedHistoryAvailability::CatchingUp,
                 "derived history is catching up to authoritative truth",
@@ -378,18 +400,71 @@ impl DerivedHistoryAccess {
                 Ok(CurrentRead::Ready(opened))
             }
             Ok(None) => {
-                let observed = lifecycle.status().map_err(|error| error.to_string())?;
-                Ok(CurrentRead::Unavailable(DerivedHistoryStatus {
-                    availability: map_availability(observed.availability),
-                    detail: observed.detail,
+                let observed = lifecycle.status();
+                drop(guard);
+                self.request_background_rebuild();
+                Ok(CurrentRead::Unavailable(match observed {
+                    Ok(observed) => DerivedHistoryStatus {
+                        availability: map_availability(observed.availability),
+                        detail: observed.detail,
+                    },
+                    Err(error) => {
+                        status(DerivedHistoryAvailability::Unavailable, error.to_string())
+                    }
                 }))
             }
             Err(error) => {
-                let observed = lifecycle.status().map_err(|_| error.to_string())?;
-                Ok(CurrentRead::Unavailable(DerivedHistoryStatus {
-                    availability: map_availability(observed.availability),
-                    detail: observed.detail.or_else(|| Some(error.to_string())),
-                }))
+                let observed = lifecycle.status();
+                drop(guard);
+                self.request_background_rebuild();
+                match observed {
+                    Ok(observed) => Ok(CurrentRead::Unavailable(DerivedHistoryStatus {
+                        availability: map_availability(observed.availability),
+                        detail: observed.detail.or_else(|| Some(error.to_string())),
+                    })),
+                    Err(status_error) => Ok(CurrentRead::Unavailable(status(
+                        DerivedHistoryAvailability::Unavailable,
+                        format!("{error}; derived status also failed: {status_error}"),
+                    ))),
+                }
+            }
+        }
+    }
+
+    fn request_background_rebuild(&self) {
+        if let Err(error) = self.start_background_rebuild() {
+            tracing::warn!(error = %error, "derived_access_background_rebuild_start_failed");
+        }
+    }
+}
+
+struct BackgroundRebuildGuard(Arc<AtomicBool>);
+
+impl Drop for BackgroundRebuildGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+fn background_rebuild(lifecycle: DerivedAccessLifecycle, in_flight: Arc<AtomicBool>) {
+    let _guard = BackgroundRebuildGuard(in_flight);
+    loop {
+        match lifecycle.status() {
+            Ok(status) if status.availability == DerivedAccessAvailability::Current => return,
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "derived_access_background_status_failed");
+                return;
+            }
+        }
+        match lifecycle.rebuild(|_| LifecycleControl::Continue) {
+            Ok(_) => return,
+            Err(LifecycleError::RebuildBusy | LifecycleError::TruthChanged) => {
+                std::thread::sleep(BACKGROUND_REBUILD_RETRY_INTERVAL);
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "derived_access_background_rebuild_failed");
+                return;
             }
         }
     }
@@ -1063,14 +1138,12 @@ mod tests {
             "store:test",
         )
         .unwrap();
-        let access = DerivedHistoryAccess {
-            mode: DerivedHistoryMode::Active {
-                lifecycle,
-                current: Mutex::new(None),
-                store_identity: "store:test".to_owned(),
-                backend: StoreBackend::Local(temp.path().to_path_buf()),
-            },
-        };
+        let access = DerivedHistoryAccess::from_mode(DerivedHistoryMode::Active {
+            lifecycle,
+            current: Mutex::new(None),
+            store_identity: "store:test".to_owned(),
+            backend: StoreBackend::Local(temp.path().to_path_buf()),
+        });
         (temp, access)
     }
 
@@ -1096,6 +1169,32 @@ mod tests {
                 }
                 CurrentRead::Unavailable(status) => {
                     panic!("background bootstrap did not publish: {status:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn active_access_joins_a_contended_background_rebuild_without_restart() {
+        let (_temp, access) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
+        let DerivedHistoryMode::Active { lifecycle, .. } = &access.mode else {
+            unreachable!("test access is active");
+        };
+        let rebuild_lease = lifecycle.paths().try_rebuild_lease().unwrap();
+
+        access.start_background_rebuild().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        drop(rebuild_lease);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match access.current().unwrap() {
+                CurrentRead::Ready(_) => break,
+                CurrentRead::Unavailable(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                CurrentRead::Unavailable(status) => {
+                    panic!("contended background bootstrap did not publish: {status:?}");
                 }
             }
         }
@@ -1284,7 +1383,7 @@ mod tests {
     }
 
     #[test]
-    fn out_of_band_truth_append_never_serves_stale_history_as_current() {
+    fn out_of_band_truth_append_rebuilds_without_restarting_the_reader() {
         let (temp, access) = active_history(1);
         assert!(matches!(
             access.freshness().unwrap(),
@@ -1300,6 +1399,70 @@ mod tests {
         assert_eq!(
             status.availability,
             DerivedHistoryAvailability::RebuildRequired
+        );
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match access.freshness().unwrap() {
+                DerivedHistoryRoute::Ready(freshness) => {
+                    assert_eq!(freshness.event_count, 2);
+                    break;
+                }
+                DerivedHistoryRoute::Unavailable(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                DerivedHistoryRoute::Unavailable(status) => {
+                    panic!("out-of-band append did not rebuild: {status:?}");
+                }
+                DerivedHistoryRoute::Off | DerivedHistoryRoute::ExhaustiveSearchFallback => {
+                    panic!("active freshness returned the wrong route");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_publication_is_typed_unavailable_instead_of_failing_the_reader() {
+        let (_temp, access) = active_history(1);
+        let DerivedHistoryMode::Active { lifecycle, .. } = &access.mode else {
+            unreachable!("test access is active");
+        };
+        let publications = lifecycle.paths().root().join("publications");
+        let publication = std::fs::read_dir(publications)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::write(publication, b"not a publication").unwrap();
+
+        let CurrentRead::Unavailable(status) = access.current().unwrap() else {
+            panic!("invalid publication must not be served");
+        };
+        assert!(matches!(
+            status.availability,
+            DerivedHistoryAvailability::Quarantined | DerivedHistoryAvailability::Unavailable
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_sidecar_does_not_block_background_startup() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_temp, access) = active_history(1);
+        let DerivedHistoryMode::Active { lifecycle, .. } = &access.mode else {
+            unreachable!("test access is active");
+        };
+        let publications = lifecycle.paths().root().join("publications");
+        std::fs::set_permissions(&publications, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let started = access.start_background_rebuild();
+
+        std::fs::set_permissions(&publications, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(
+            started.is_ok(),
+            "sidecar status must be read in the worker: {started:?}"
         );
     }
 
@@ -1587,14 +1750,12 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        let cold = DerivedHistoryAccess {
-            mode: DerivedHistoryMode::Active {
-                lifecycle: lifecycle.clone(),
-                current: Mutex::new(None),
-                store_identity: "store:test".to_owned(),
-                backend: StoreBackend::Local(temp.path().to_path_buf()),
-            },
-        };
+        let cold = DerivedHistoryAccess::from_mode(DerivedHistoryMode::Active {
+            lifecycle: lifecycle.clone(),
+            current: Mutex::new(None),
+            store_identity: "store:test".to_owned(),
+            backend: StoreBackend::Local(temp.path().to_path_buf()),
+        });
         let DerivedHistoryRoute::Unavailable(status) = cold.freshness().unwrap() else {
             panic!("a lagging semantic checkpoint must not look current");
         };

@@ -444,8 +444,10 @@ selector is `off`. The profile implementation is owned once under `session::deri
 qualification adapters and active product routes call that same core. Selecting the active profile for
 `pointbreak inspect` starts an asynchronous rebuild of the private disposable sidecar when no current
 generation exists. The Inspector shell remains available while derived routes report their typed
-availability, and the routes begin serving from the immutable generation after publication. This does not
-migrate truth or select a production default.
+availability, and the routes begin serving from the immutable generation after publication. A running
+Inspector joins a rebuild already owned by another process and requests a fresh rebuild when an out-of-band
+writer advances authoritative truth; neither case requires restarting the Inspector. This does not migrate
+truth or select a production default.
 
 Print, verify, and smoke the contract without opening a store or performing filesystem actions:
 
