@@ -428,7 +428,15 @@ impl SqliteCursorLedger {
 
     #[cfg(test)]
     pub(crate) fn connection_policy_for_test(&self) -> Result<(String, i64), CursorLedgerError> {
-        let connection = open_connection(&self.database_path, false)?;
+        let connection = Connection::open_with_flags(
+            &self.database_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|error| sqlite_error("open cursor ledger for policy test", error))?;
+        connection
+            .pragma_update(None, "synchronous", "NORMAL")
+            .map_err(|error| sqlite_error("seed cursor synchronous policy test", error))?;
+        configure_connection(&connection, false)?;
         let journal_mode = connection
             .pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
             .map_err(|error| sqlite_error("read journal mode", error))?;
@@ -927,6 +935,11 @@ fn open_connection(path: &Path, create: bool) -> Result<Connection, CursorLedger
     }
     let connection = Connection::open_with_flags(path, flags)
         .map_err(|error| sqlite_error("open cursor ledger", error))?;
+    configure_connection(&connection, create)?;
+    Ok(connection)
+}
+
+fn configure_connection(connection: &Connection, create: bool) -> Result<(), CursorLedgerError> {
     connection
         .busy_timeout(BUSY_TIMEOUT)
         .map_err(|error| sqlite_error("set busy timeout", error))?;
@@ -962,7 +975,7 @@ fn open_connection(path: &Path, create: bool) -> Result<Connection, CursorLedger
     connection
         .pragma_update(None, "fullfsync", true)
         .map_err(|error| sqlite_error("enable fullfsync", error))?;
-    Ok(connection)
+    Ok(())
 }
 
 fn initialize_schema(
