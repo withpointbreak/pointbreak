@@ -78,6 +78,20 @@ describe("render is a no-arg projection of getState()", () => {
     expect($("#stat-hash")?.textContent).toBe("e81f297a301a");
   });
 
+  it("prefers the active projection stamp over the deprecated event-set hash", () => {
+    store.commit({
+      history: {
+        ...(historyJson as unknown as HistoryDoc),
+        projectionStamp: "sha256:active-projection-version",
+        eventSetHash: "sha256:loose-event-set",
+      },
+    });
+
+    render.render();
+
+    expect($("#stat-hash")?.textContent).toBe("active-proje");
+  });
+
   it("hides diagnostics when empty and surfaces them when present", () => {
     render.render();
     expect($("#diagnostics")?.classList.contains("hidden")).toBe(true);

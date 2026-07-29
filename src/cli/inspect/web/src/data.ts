@@ -40,11 +40,13 @@ import type { HistoryEntry } from "./types";
 // are committed, via a reload).
 interface FreshnessDoc {
   eventCount?: number;
+  projectionStamp?: string;
   commitGraphStamp?: string;
 }
 
 interface NewCountDoc {
   newCount?: number;
+  projectionStamp?: string;
 }
 
 /** The first-page size — large enough to fill a viewport, small enough to keep the transfer cheap. */
@@ -135,6 +137,7 @@ function showLoadError(err: unknown): void {
 function commitFreshnessBaseline(freshness: FreshnessDoc): void {
   commit({
     lastEventCount: freshness.eventCount ?? null,
+    lastProjectionStamp: freshness.projectionStamp ?? null,
     lastCommitGraphStamp: freshness.commitGraphStamp ?? null,
   });
 }
@@ -511,7 +514,14 @@ export async function pollFreshness(): Promise<void> {
       f.commitGraphStamp != null &&
       (s.lastCommitGraphStamp == null ||
         f.commitGraphStamp !== s.lastCommitGraphStamp);
-    const changed = (f.eventCount ?? null) !== s.lastEventCount || stampChanged;
+    const projectionChanged =
+      f.projectionStamp != null &&
+      (s.lastProjectionStamp == null ||
+        f.projectionStamp !== s.lastProjectionStamp);
+    const changed =
+      (f.eventCount ?? null) !== s.lastEventCount ||
+      projectionChanged ||
+      stampChanged;
     if (changed) {
       clearTimeout(pollSettleTimer);
       setRefreshState("updated");

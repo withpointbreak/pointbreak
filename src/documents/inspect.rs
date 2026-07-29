@@ -61,6 +61,8 @@ pub struct InspectFreshnessDocument {
     version: u32,
     event_count: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    projection_stamp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     commit_graph_stamp: Option<String>,
 }
 
@@ -70,8 +72,15 @@ impl InspectFreshnessDocument {
             schema: INSPECT_FRESHNESS_SCHEMA,
             version: 1,
             event_count,
+            projection_stamp: None,
             commit_graph_stamp,
         }
+    }
+
+    #[doc(hidden)]
+    pub fn with_projection_stamp(mut self, projection_stamp: String) -> Self {
+        self.projection_stamp = Some(projection_stamp);
+        self
     }
 }
 
@@ -312,6 +321,22 @@ mod tests {
             new_line: Some(1),
             text: text.to_owned(),
         }
+    }
+
+    #[test]
+    fn freshness_projection_stamp_is_additive_and_default_off_stays_exact() {
+        assert_eq!(
+            serde_json::to_string(&InspectFreshnessDocument::new(7, None)).unwrap(),
+            r#"{"schema":"pointbreak.inspect-freshness","version":1,"eventCount":7}"#
+        );
+        assert_eq!(
+            serde_json::to_value(
+                InspectFreshnessDocument::new(7, None)
+                    .with_projection_stamp("sha256:projection".to_owned())
+            )
+            .unwrap()["projectionStamp"],
+            "sha256:projection"
+        );
     }
 
     #[test]

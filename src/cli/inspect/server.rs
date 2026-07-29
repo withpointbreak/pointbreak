@@ -97,10 +97,11 @@ impl From<std::io::Error> for RequestParseError {
 /// highlight cache; cloned cheaply behind an `Arc` to every connection thread.
 pub(super) struct InspectState {
     pub repo: PathBuf,
+    pub derived_history: pointbreak::session::DerivedHistoryAccess,
     pub highlight_cache: RwLock<HighlightCache>,
-    /// The single-slot base-projection cache (#255): repeated `/api/history`
-    /// queries over one store version reuse the fully-hydrated base instead of
-    /// re-reading and re-hydrating the whole log per request (INV-5).
+    /// The single-slot exhaustive-search cache (#255). Default-off requests
+    /// retain the legacy behavior; the active derived profile touches it only
+    /// for explicit body search.
     pub history_cache: super::cache::HistoryProjectionCache,
     /// The single-slot `/api/revisions` response cache (#426): one payload per
     /// store version, rebuilt only when the head marker moves.
@@ -119,16 +120,18 @@ pub(super) struct InspectState {
 }
 
 impl InspectState {
-    pub(super) fn new(repo: PathBuf) -> Self {
-        Self {
+    pub(super) fn new(repo: PathBuf) -> Result<Self, String> {
+        let derived_history = pointbreak::session::DerivedHistoryAccess::resolve(&repo)?;
+        Ok(Self {
             repo,
+            derived_history,
             highlight_cache: RwLock::new(HighlightCache::new(HIGHLIGHT_CACHE_CAPACITY)),
             history_cache: super::cache::HistoryProjectionCache::new(),
             revisions_cache: super::cache::RevisionsResponseCache::new(),
             snapshot_summaries: Arc::new(SnapshotSummaryCache::new()),
             initial_warm_started: AtomicBool::new(false),
             revisions_warm_in_flight: AtomicBool::new(false),
-        }
+        })
     }
 }
 
@@ -280,6 +283,7 @@ pub(super) fn serve(
         serve_static: !api_only,
     });
     let capability_url = format!("{url}#/timeline?token={}", policy.token.expose());
+    let state = Arc::new(InspectState::new(repo.clone())?);
 
     match (api_only, output_format) {
         (false, StartupOutputFormat::Text) => {
@@ -307,8 +311,6 @@ pub(super) fn serve(
         }
     }
     stdout.flush().ok();
-
-    let state = Arc::new(InspectState::new(repo));
 
     if open {
         open_browser(&capability_url);
@@ -470,7 +472,9 @@ fn warm_caches_after_auth(state: &Arc<InspectState>) {
     }
     let state = Arc::clone(state);
     thread::spawn(move || {
-        if let Err(error) = api::warm_history_cache(state.repo.as_path(), &state.history_cache) {
+        if !state.derived_history.is_active()
+            && let Err(error) = api::warm_history_cache(state.repo.as_path(), &state.history_cache)
+        {
             tracing::debug!(error = %error, "inspect_history_cache_warm_failed");
         }
         if let Err(error) = api::warm_revisions_cache(
@@ -620,22 +624,28 @@ fn route(
                 let since_occurred_at = query_param(query, "sinceOccurredAt");
                 let since_event_id = query_param(query, "sinceEventId");
                 match (since_occurred_at, since_event_id) {
-                    (None, None) => api_response(api::zero_new_count_json()),
-                    (Some(occurred_at), Some(event_id)) => api_response(api::new_count_json(
-                        repo,
-                        &state.history_cache,
-                        &request.query,
-                        &occurred_at,
-                        &event_id,
-                    )),
+                    (None, None) => {
+                        routed_api_response(api::routed_zero_new_count_json(&state.derived_history))
+                    }
+                    (Some(occurred_at), Some(event_id)) => {
+                        routed_api_response(api::routed_new_count_json(
+                            repo,
+                            &state.derived_history,
+                            &state.history_cache,
+                            &request.query,
+                            &occurred_at,
+                            &event_id,
+                        ))
+                    }
                     _ => Response::json_error("400 Bad Request", "incomplete history cursor"),
                 }
             }
             Err(message) => Response::json_error("400 Bad Request", &message),
         },
         "/api/history" => match history_query(query) {
-            Ok(request) => api_response(api::history_json(
+            Ok(request) => routed_api_response(api::routed_history_json(
                 repo,
+                &state.derived_history,
                 &state.history_cache,
                 &request.query,
                 &request.page,
@@ -662,7 +672,11 @@ fn route(
             // gate and the payload.
             let stamp = api::freshness_commit_graph_stamp(repo);
             maybe_warm_revisions_cache(state, stamp.as_deref());
-            api_response(api::freshness_json(repo, stamp))
+            api_response(api::routed_freshness_json(
+                repo,
+                &state.derived_history,
+                stamp,
+            ))
         }
         "/api/version" => api_response(
             serde_json::to_string(&version_document()).map_err(|error| error.to_string()),
@@ -777,6 +791,9 @@ fn history_query(query: Option<&str>) -> Result<HistoryRequest, String> {
     let snapshot = query_param(query, "snapshot")
         .or_else(|| query_param(query, "object"))
         .filter(|value| !value.is_empty());
+    let revision = query_param(query, "revision")
+        .filter(|value| !value.is_empty())
+        .map(pointbreak::model::RevisionId::new);
     let types = query_param(query, "type").map(|raw| {
         raw.split(',')
             .filter(|value| !value.is_empty())
@@ -798,7 +815,7 @@ fn history_query(query: Option<&str>) -> Result<HistoryRequest, String> {
             q,
             track,
             snapshot,
-            revision: None,
+            revision,
             revisions: None,
             types,
             order,
@@ -872,6 +889,21 @@ fn api_response(result: Result<String, String>) -> Response {
     }
 }
 
+fn routed_api_response(result: Result<api::RoutedJson, String>) -> Response {
+    match result {
+        Ok(api::RoutedJson::Ok(body)) => Response::json_ok(body),
+        Ok(api::RoutedJson::Unavailable(status)) => match serde_json::to_string(&status) {
+            Ok(body) => Response::new(
+                "503 Service Unavailable",
+                "application/json; charset=utf-8",
+                body.into_bytes(),
+            ),
+            Err(error) => Response::json_error("500 Internal Server Error", &error.to_string()),
+        },
+        Err(message) => Response::json_error("500 Internal Server Error", &message),
+    }
+}
+
 fn write_response(stream: TcpStream, response: &Response) -> std::io::Result<()> {
     record_response_body(response);
     write_response_inner(stream, response, None)
@@ -936,9 +968,8 @@ mod tests {
     fn route_for(method: &str, path: &str) -> Response {
         // Static assets, 404, 405, and the missing-id snapshot case do not
         // touch the store, so the repo path is never read for these cases.
-        let state = Arc::new(InspectState::new(PathBuf::from(
-            "/inspect-routing-test-unused",
-        )));
+        let state =
+            Arc::new(InspectState::new(PathBuf::from("/inspect-routing-test-unused")).unwrap());
         route(&state, true, method, path, None)
     }
 
@@ -1099,6 +1130,22 @@ mod tests {
         // Absent => no snapshot constraint.
         let absent = history_query(Some("q=hello")).unwrap();
         assert_eq!(absent.query.snapshot, None);
+    }
+
+    #[test]
+    fn history_query_reads_exact_revision_and_treats_empty_as_absent() {
+        let selected = history_query(Some("revision=rev%3Asha256%3Aabc")).unwrap();
+        assert_eq!(
+            selected.query.revision.as_ref().map(|id| id.as_str()),
+            Some("rev:sha256:abc")
+        );
+        assert!(
+            history_query(Some("revision="))
+                .unwrap()
+                .query
+                .revision
+                .is_none()
+        );
     }
 
     #[test]

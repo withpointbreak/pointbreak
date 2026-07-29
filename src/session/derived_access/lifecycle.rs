@@ -131,6 +131,13 @@ impl DerivedAccessLifecycle {
         &self.store_root
     }
 
+    pub(crate) fn published_generation_id(&self) -> Result<Option<String>, LifecycleError> {
+        self.paths
+            .current_publication()
+            .map(|publication| publication.map(|publication| publication.generation_id))
+            .map_err(|error| self.generation_open_error(error))
+    }
+
     pub(crate) fn status(&self) -> Result<LifecycleStatus, LifecycleError> {
         if self.profile == DerivedAccessProfile::Off || !self.paths.root().exists() {
             return Ok(status(DerivedAccessAvailability::Absent, None, None));
@@ -195,6 +202,13 @@ impl DerivedAccessLifecycle {
             CursorLedgerIdentity::new(self.store_id.clone()),
         ) {
             Ok(service) => service,
+            Err(error) if service_error_requires_rebuild(&error) => {
+                return Ok(status(
+                    DerivedAccessAvailability::RebuildRequired,
+                    Some(publication.generation_id),
+                    Some(error.to_string()),
+                ));
+            }
             Err(error) if service_error_requires_quarantine(&error) => {
                 return self.quarantine_status(error.to_string());
             }
@@ -432,7 +446,9 @@ impl DerivedAccessLifecycle {
             CursorLedgerIdentity::new(self.store_id.clone()),
         )
         .map_err(|error| {
-            if service_error_requires_quarantine(&error) {
+            if service_error_requires_rebuild(&error) {
+                LifecycleError::RebuildRequired(error.to_string())
+            } else if service_error_requires_quarantine(&error) {
                 self.quarantine_error(error.to_string())
             } else {
                 LifecycleError::Service(error)
@@ -488,7 +504,14 @@ impl DerivedAccessLifecycle {
             &self.store_root,
             &generation_root,
             CursorLedgerIdentity::new(self.store_id.clone()),
-        )?;
+        )
+        .map_err(|error| {
+            if service_error_requires_rebuild(&error) {
+                LifecycleError::RebuildRequired(error.to_string())
+            } else {
+                LifecycleError::Service(error)
+            }
+        })?;
         let derived_head = service.truth_head()?.cursor.sequence;
         validate_published(&service, &descriptor, derived_head)?;
         Ok(Some(CurrentGeneration {
@@ -869,6 +892,13 @@ fn service_error_requires_quarantine(error: &DerivedAccessServiceError) -> bool 
     }
 }
 
+fn service_error_requires_rebuild(error: &DerivedAccessServiceError) -> bool {
+    matches!(
+        error,
+        DerivedAccessServiceError::Semantic(SqliteSemanticError::ProductHistoryUpgradeRequired(_))
+    )
+}
+
 fn locator_error_requires_quarantine(error: &SqliteLocatorError) -> bool {
     matches!(
         error,
@@ -887,6 +917,7 @@ fn semantic_error_requires_quarantine(error: &SqliteSemanticError) -> bool {
         | SqliteSemanticError::Metadata(_)
         | SqliteSemanticError::Delta(_)
         | SqliteSemanticError::CarrierMismatch(_) => true,
+        SqliteSemanticError::ProductHistoryUpgradeRequired(_) => false,
         SqliteSemanticError::Sqlite { .. } => false,
     }
 }
@@ -1340,6 +1371,44 @@ mod tests {
             lifecycle.open_current(),
             Err(LifecycleError::RebuildRequired(_))
         ));
+    }
+
+    #[test]
+    fn published_generation_without_product_history_schema_requires_rebuild_without_mutation() {
+        let temp = populated_store(1);
+        let lifecycle = active_lifecycle(temp.path());
+        let receipt = lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let generation = lifecycle
+            .paths()
+            .generation(receipt.generation_id.as_deref().unwrap());
+        let database = generation.join("cursor.sqlite3");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE product_history_signature;
+                 DROP TABLE product_history_tag;
+                 DROP TABLE product_history_meta;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        drop(connection);
+
+        let observed = lifecycle.status().unwrap();
+
+        assert_eq!(
+            observed.availability,
+            DerivedAccessAvailability::RebuildRequired
+        );
+        let connection = rusqlite::Connection::open(database).unwrap();
+        let product_tables = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema
+                 WHERE type = 'table' AND name LIKE 'product_history_%'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(product_tables, 0);
     }
 
     #[test]

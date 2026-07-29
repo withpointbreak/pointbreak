@@ -20,14 +20,16 @@ use pointbreak::model::{EventId, ObjectId, ReviewEndpoint, RevisionId, RevisionS
 use pointbreak::session::event::{GitProvenance, ReviewAssessment};
 use pointbreak::session::{
     AssessmentRecordStatus, AssessmentView, AttentionItem, AttentionListOptions,
-    BaseHistoryProjection, BaseProjectionConfig, CurrentAssessmentStatus, DistinctValues,
-    EventVerificationPolicy, HistoryCursor, HistoryPage, HistoryQuery, InputRequestStatus,
-    LivenessEnrichment, ObservationStatus, ObservationView, ProjectionDiagnostic, QueryDiagnostic,
-    ReviewHistoryEntry, RevisionCommitRangeView, RevisionListEntry, RevisionListOptions,
-    RevisionOverview, RevisionOverviewsOptions, RevisionShowOptions, RevisionShowResult,
-    SessionState, SnapshotSummaryCache, StoreIdentity, StoreIdentityOptions, SupersessionView,
-    TrustSet, ValidationContinuitySummary, ValidationContinuityView, apply_history_query,
-    classify_validation_continuity, commit_graph_stamp, compare_event_instants, count_new_since,
+    BaseHistoryProjection, BaseProjectionConfig, CurrentAssessmentStatus, DerivedHistoryAccess,
+    DerivedHistoryNewCount, DerivedHistoryPage, DerivedHistoryRoute, DerivedHistoryStatus,
+    DistinctValues, EventVerificationPolicy, HistoryCursor, HistoryPage, HistoryQuery,
+    InputRequestStatus, LivenessEnrichment, ObservationStatus, ObservationView,
+    ProjectionDiagnostic, QueryDiagnostic, ReviewHistoryEntry, RevisionCommitRangeView,
+    RevisionListEntry, RevisionListOptions, RevisionOverview, RevisionOverviewsOptions,
+    RevisionShowOptions, RevisionShowResult, SessionState, SnapshotSummaryCache, StoreIdentity,
+    StoreIdentityOptions, SupersessionView, TrustSet, ValidationContinuitySummary,
+    ValidationContinuityView, apply_history_query, classify_validation_continuity,
+    commit_graph_stamp, compare_event_instants, count_new_since,
     current_assessment_includes_follow_up, default_history_page_projection,
     diagnose_ref_continuity, effective_integration_ref, enrich_liveness, event_log_head_marker,
     history_base_projection, list_attention, list_revisions, read_bound_object_artifact,
@@ -42,7 +44,10 @@ use super::server::HighlightCache;
 #[serde(rename_all = "camelCase")]
 struct HistoryPayload {
     schema: &'static str,
-    event_set_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event_set_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    projection_stamp: Option<String>,
     event_count: usize,
     history_count: usize,
     entries: Vec<ReviewHistoryEntry>,
@@ -74,7 +79,14 @@ struct HistoryPayload {
 #[serde(rename_all = "camelCase")]
 struct HistoryNewCountPayload {
     schema: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    projection_stamp: Option<String>,
     new_count: usize,
+}
+
+pub(super) enum RoutedJson {
+    Ok(String),
+    Unavailable(DerivedHistoryStatus),
 }
 
 #[derive(Serialize)]
@@ -944,6 +956,24 @@ pub(super) fn history_json(
     serialize_history_payload(out)
 }
 
+pub(super) fn routed_history_json(
+    repo: &Path,
+    derived: &DerivedHistoryAccess,
+    cache: &super::cache::HistoryProjectionCache,
+    query: &HistoryQuery,
+    page: &HistoryPage,
+) -> Result<RoutedJson, String> {
+    match derived.history(query, page, &inspect_base_config(repo))? {
+        DerivedHistoryRoute::Off | DerivedHistoryRoute::ExhaustiveSearchFallback => {
+            history_json(repo, cache, query, page).map(RoutedJson::Ok)
+        }
+        DerivedHistoryRoute::Ready(page) => {
+            serialize_derived_history_payload(page).map(RoutedJson::Ok)
+        }
+        DerivedHistoryRoute::Unavailable(status) => Ok(RoutedJson::Unavailable(status)),
+    }
+}
+
 /// Count filtered history entries newer than a cursor over the same cached,
 /// body-hydrated base used by `/api/history`, without serializing any entries.
 pub(super) fn new_count_json(
@@ -961,6 +991,49 @@ pub(super) fn new_count_json(
     serialize_new_count(count_new_since(&base, query, &since))
 }
 
+pub(super) fn routed_new_count_json(
+    repo: &Path,
+    derived: &DerivedHistoryAccess,
+    cache: &super::cache::HistoryProjectionCache,
+    query: &HistoryQuery,
+    since_occurred_at: &str,
+    since_event_id: &str,
+) -> Result<RoutedJson, String> {
+    let since = HistoryCursor {
+        occurred_at: since_occurred_at.to_owned(),
+        event_id: EventId::new(since_event_id),
+    };
+    match derived.new_count(query, &since)? {
+        DerivedHistoryRoute::Off | DerivedHistoryRoute::ExhaustiveSearchFallback => {
+            new_count_json(repo, cache, query, since_occurred_at, since_event_id)
+                .map(RoutedJson::Ok)
+        }
+        DerivedHistoryRoute::Ready(result) => {
+            serialize_derived_new_count(result).map(RoutedJson::Ok)
+        }
+        DerivedHistoryRoute::Unavailable(status) => Ok(RoutedJson::Unavailable(status)),
+    }
+}
+
+pub(super) fn routed_zero_new_count_json(
+    derived: &DerivedHistoryAccess,
+) -> Result<RoutedJson, String> {
+    match derived.freshness()? {
+        DerivedHistoryRoute::Off => zero_new_count_json().map(RoutedJson::Ok),
+        DerivedHistoryRoute::Ready(freshness) => {
+            serialize_derived_new_count(DerivedHistoryNewCount {
+                projection_stamp: freshness.projection_stamp,
+                new_count: 0,
+            })
+            .map(RoutedJson::Ok)
+        }
+        DerivedHistoryRoute::Unavailable(status) => Ok(RoutedJson::Unavailable(status)),
+        DerivedHistoryRoute::ExhaustiveSearchFallback => {
+            Err("freshness cannot request exhaustive search".to_owned())
+        }
+    }
+}
+
 pub(super) fn zero_new_count_json() -> Result<String, String> {
     serialize_new_count(0)
 }
@@ -968,7 +1041,17 @@ pub(super) fn zero_new_count_json() -> Result<String, String> {
 fn serialize_new_count(new_count: usize) -> Result<String, String> {
     serde_json::to_string(&HistoryNewCountPayload {
         schema: "pointbreak.inspect-history-new-count",
+        projection_stamp: None,
         new_count,
+    })
+    .map_err(|error| error.to_string())
+}
+
+fn serialize_derived_new_count(result: DerivedHistoryNewCount) -> Result<String, String> {
+    serde_json::to_string(&HistoryNewCountPayload {
+        schema: "pointbreak.inspect-history-new-count",
+        projection_stamp: Some(result.projection_stamp),
+        new_count: result.new_count,
     })
     .map_err(|error| error.to_string())
 }
@@ -976,7 +1059,8 @@ fn serialize_new_count(new_count: usize) -> Result<String, String> {
 fn serialize_history_payload(out: pointbreak::session::QueriedHistory) -> Result<String, String> {
     let payload = HistoryPayload {
         schema: "pointbreak.inspect-history",
-        event_set_hash: out.event_set_hash,
+        event_set_hash: Some(out.event_set_hash),
+        projection_stamp: None,
         event_count: out.event_count,
         history_count: out.entries.len(),
         entries: out.entries,
@@ -990,6 +1074,25 @@ fn serialize_history_payload(out: pointbreak::session::QueriedHistory) -> Result
     };
     let span = tracing::debug_span!("shore.inspect.history.serialize_json");
     let _guard = span.enter();
+    serde_json::to_string(&payload).map_err(|error| error.to_string())
+}
+
+fn serialize_derived_history_payload(out: DerivedHistoryPage) -> Result<String, String> {
+    let payload = HistoryPayload {
+        schema: "pointbreak.inspect-history",
+        event_set_hash: None,
+        projection_stamp: Some(out.projection_stamp),
+        event_count: out.event_count,
+        history_count: out.entries.len(),
+        entries: out.entries,
+        facets: out.facets,
+        match_count: out.match_count,
+        offset: out.offset,
+        match_index: out.match_index,
+        diagnostics: out.diagnostics,
+        query_notices: out.query_notices,
+        distinct_values: out.distinct_values,
+    };
     serde_json::to_string(&payload).map_err(|error| error.to_string())
 }
 
@@ -1961,8 +2064,8 @@ fn set_head_live_branch(document: &mut serde_json::Value, live_branch: String) {
 /// Returns the event-log head marker (the event count) as `eventCount`, computed
 /// without reading or decoding any event bytes. The client compares it across
 /// polls and re-fetches only when it moves — replacing the old per-poll full read
-/// and event-set-hash recompute. The event-set hash remains the authoritative
-/// confirm stamp on the full-read endpoints (`/api/history`, `/api/revisions`).
+/// and event-set-hash recompute. Default-off full reads retain `eventSetHash`;
+/// active derived reads use their cursor-bound `projectionStamp`.
 pub(super) fn freshness_json(
     repo: &Path,
     commit_graph_stamp: Option<String>,
@@ -1973,6 +2076,30 @@ pub(super) fn freshness_json(
         commit_graph_stamp,
     ))
     .map_err(|error| error.to_string())
+}
+
+pub(super) fn routed_freshness_json(
+    repo: &Path,
+    derived: &DerivedHistoryAccess,
+    commit_graph_stamp: Option<String>,
+) -> Result<String, String> {
+    match derived.freshness()? {
+        DerivedHistoryRoute::Off => freshness_json(repo, commit_graph_stamp),
+        DerivedHistoryRoute::Ready(freshness) => serde_json::to_string(
+            &InspectFreshnessDocument::new(freshness.event_count, commit_graph_stamp)
+                .with_projection_stamp(freshness.projection_stamp),
+        )
+        .map_err(|error| error.to_string()),
+        DerivedHistoryRoute::Unavailable(_) => {
+            // Freshness alone is allowed its cheap authoritative detector. An
+            // omitted projection stamp never labels the unavailable sidecar
+            // current and the client still observes truth movement.
+            freshness_json(repo, commit_graph_stamp)
+        }
+        DerivedHistoryRoute::ExhaustiveSearchFallback => {
+            Err("freshness cannot request exhaustive search".to_owned())
+        }
+    }
 }
 
 /// The schema-tagged wire wrapper for the repo/store identity document. The
@@ -2013,6 +2140,46 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
+
+    #[test]
+    fn default_off_new_count_wire_remains_byte_identical() {
+        assert_eq!(
+            zero_new_count_json().unwrap(),
+            r#"{"schema":"pointbreak.inspect-history-new-count","newCount":0}"#
+        );
+    }
+
+    #[test]
+    fn active_history_wires_projection_stamp_without_event_set_hash() {
+        let history: serde_json::Value = serde_json::from_str(
+            &serialize_derived_history_payload(DerivedHistoryPage {
+                projection_stamp: "sha256:projection".to_owned(),
+                event_count: 3,
+                entries: Vec::new(),
+                facets: BTreeMap::new(),
+                match_count: 0,
+                offset: 0,
+                match_index: None,
+                diagnostics: Vec::new(),
+                query_notices: Vec::new(),
+                distinct_values: DistinctValues::default(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let new_count: serde_json::Value = serde_json::from_str(
+            &serialize_derived_new_count(DerivedHistoryNewCount {
+                projection_stamp: "sha256:projection".to_owned(),
+                new_count: 2,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(history["projectionStamp"], "sha256:projection");
+        assert!(history.get("eventSetHash").is_none());
+        assert_eq!(new_count["projectionStamp"], "sha256:projection");
+    }
 
     fn test_work_label() -> WorkLabel {
         WorkLabel {

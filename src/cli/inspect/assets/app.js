@@ -1350,6 +1350,7 @@
     diffFile: null,
     diffFileQuery: "",
     lastEventCount: null,
+    lastProjectionStamp: null,
     lastCommitGraphStamp: null
   };
   var subscribers = /* @__PURE__ */ new Set();
@@ -1951,6 +1952,7 @@
   function commitFreshnessBaseline(freshness) {
     commit({
       lastEventCount: freshness.eventCount ?? null,
+      lastProjectionStamp: freshness.projectionStamp ?? null,
       lastCommitGraphStamp: freshness.commitGraphStamp ?? null
     });
   }
@@ -2171,7 +2173,8 @@
       const f = await fetchJSON("/api/freshness");
       const s = getState();
       const stampChanged = f.commitGraphStamp != null && (s.lastCommitGraphStamp == null || f.commitGraphStamp !== s.lastCommitGraphStamp);
-      const changed = (f.eventCount ?? null) !== s.lastEventCount || stampChanged;
+      const projectionChanged = f.projectionStamp != null && (s.lastProjectionStamp == null || f.projectionStamp !== s.lastProjectionStamp);
+      const changed = (f.eventCount ?? null) !== s.lastEventCount || projectionChanged || stampChanged;
       if (changed) {
         clearTimeout(pollSettleTimer);
         setRefreshState("updated");
@@ -6829,7 +6832,7 @@ click to open the revision page">
     const threads = $("#stat-threads");
     if (threads) threads.textContent = `${o?.threadCount ?? "—"} threads`;
     const hash = $("#stat-hash");
-    if (hash) hash.textContent = shortId(h?.eventSetHash);
+    if (hash) hash.textContent = shortId(h?.projectionStamp ?? h?.eventSetHash);
   }
   __name(renderStats, "renderStats");
   function renderDiagnostics() {

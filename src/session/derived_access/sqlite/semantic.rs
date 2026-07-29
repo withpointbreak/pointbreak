@@ -21,10 +21,15 @@ use crate::session::derived_access::semantic::{
     SemanticFactKind, SemanticModelError, SemanticSnapshot, ValidationFact, decode_enum,
     decode_string_list, encode_enum, encode_string_list,
 };
-use crate::session::event::ShoreEvent;
+use crate::session::event::{
+    EventSignatureRecordedPayload, EventType, ReviewObservationRecordedPayload, ShoreEvent,
+};
+use crate::session::workflow::tag_completion_key;
 
 const SEMANTIC_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-semantic.v1";
 const SEMANTIC_SCHEMA_VERSION: i64 = 4;
+const PRODUCT_HISTORY_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-history.v1";
+const PRODUCT_HISTORY_SCHEMA_VERSION: i64 = 1;
 
 #[derive(Clone, Debug)]
 pub(crate) struct SqliteSemantic {
@@ -48,6 +53,48 @@ pub(crate) struct SemanticInventory {
     pub(crate) retained_body_object_bytes: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProductHistoryFact {
+    sequence: u64,
+    tag_keys: Vec<String>,
+    signature_target_event_id: Option<String>,
+}
+
+impl ProductHistoryFact {
+    pub(crate) fn from_event(
+        sequence: u64,
+        event: &ShoreEvent,
+    ) -> Result<Self, SemanticModelError> {
+        let mut tag_keys = Vec::new();
+        let mut signature_target_event_id = None;
+        match event.event_type {
+            EventType::ReviewObservationRecorded => {
+                let payload: ReviewObservationRecordedPayload =
+                    serde_json::from_value(event.payload.clone())?;
+                tag_keys.extend(
+                    payload
+                        .tags
+                        .iter()
+                        .filter_map(|tag| tag_completion_key(tag)),
+                );
+                tag_keys.sort();
+                tag_keys.dedup();
+            }
+            EventType::EventSignatureRecorded => {
+                let payload: EventSignatureRecordedPayload =
+                    serde_json::from_value(event.payload.clone())?;
+                signature_target_event_id = Some(payload.target_event_id.as_str().to_owned());
+            }
+            _ => {}
+        }
+        Ok(Self {
+            sequence,
+            tag_keys,
+            signature_target_event_id,
+        })
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SqliteSemanticError {
     #[error(transparent)]
@@ -56,6 +103,8 @@ pub(crate) enum SqliteSemanticError {
     Model(#[from] SemanticModelError),
     #[error("semantic metadata mismatch: {0}")]
     Metadata(String),
+    #[error("derived product history requires rebuild: {0}")]
+    ProductHistoryUpgradeRequired(String),
     #[error("semantic delta does not follow its checkpoint: {0}")]
     Delta(String),
     #[error("semantic SQLite failure during {operation}: {message}")]
@@ -70,6 +119,23 @@ pub(crate) enum SqliteSemanticError {
 impl SqliteSemantic {
     pub(crate) fn open(locator: SqliteLocator) -> Result<Self, SqliteSemanticError> {
         let connection = locator.validated_connection()?;
+        let locator_checkpoint = read_locator_checkpoint(&connection)?;
+        let product_history_exists = connection
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM sqlite_schema
+                     WHERE type = 'table' AND name = 'product_history_meta'
+                 )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| sqlite_error("inspect product history schema", error))?;
+        if !product_history_exists && locator_checkpoint.applied.sequence != 0 {
+            return Err(SqliteSemanticError::ProductHistoryUpgradeRequired(format!(
+                "existing locator cursor {:?} predates the product history schema",
+                locator_checkpoint.applied
+            )));
+        }
         connection
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS semantic_meta (
@@ -284,10 +350,29 @@ impl SqliteSemantic {
                    ON semantic_prefix.id = event.semantic_prefix_id
                  LEFT JOIN semantic_identity_prefix AS content_prefix
                    ON content_prefix.id = event.content_prefix_id
-                 JOIN semantic_actor AS actor ON actor.id = event.actor_id;",
+                 JOIN semantic_actor AS actor ON actor.id = event.actor_id;
+                 CREATE TABLE IF NOT EXISTS product_history_meta (
+                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                     profile_id TEXT NOT NULL,
+                     schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+                     epoch INTEGER NOT NULL CHECK (epoch > 0),
+                     applied_sequence INTEGER NOT NULL CHECK (applied_sequence >= 0)
+                 ) STRICT;
+                 CREATE TABLE IF NOT EXISTS product_history_tag (
+                     sequence INTEGER NOT NULL REFERENCES semantic_event_fact(sequence),
+                     tag_key TEXT NOT NULL,
+                     PRIMARY KEY (sequence, tag_key)
+                 ) STRICT, WITHOUT ROWID;
+                 CREATE INDEX IF NOT EXISTS product_history_tag_key
+                     ON product_history_tag(tag_key, sequence);
+                 CREATE TABLE IF NOT EXISTS product_history_signature (
+                     sequence INTEGER PRIMARY KEY REFERENCES semantic_event_fact(sequence),
+                     target_event_id TEXT NOT NULL
+                 ) STRICT;
+                 CREATE INDEX IF NOT EXISTS product_history_signature_target
+                     ON product_history_signature(target_event_id, sequence);",
             )
             .map_err(|error| sqlite_error("create semantic schema", error))?;
-        let locator_checkpoint = read_locator_checkpoint(&connection)?;
         let inserted = connection
             .execute(
                 "INSERT INTO semantic_meta
@@ -307,6 +392,20 @@ impl SqliteSemantic {
                 locator_checkpoint.applied
             )));
         }
+        let product_inserted = connection
+            .execute(
+                "INSERT INTO product_history_meta
+                 (singleton, profile_id, schema_version, epoch, applied_sequence)
+                 VALUES (1, ?1, ?2, ?3, 0)
+                 ON CONFLICT(singleton) DO NOTHING",
+                params![
+                    PRODUCT_HISTORY_PROFILE_ID,
+                    PRODUCT_HISTORY_SCHEMA_VERSION,
+                    to_i64(locator_checkpoint.applied.epoch, "product history epoch")?,
+                ],
+            )
+            .map_err(|error| sqlite_error("initialize product history metadata", error))?;
+        debug_assert!(product_inserted == 0 || locator_checkpoint.applied.sequence == 0);
         connection
             .execute(
                 "INSERT INTO semantic_state_projection
@@ -320,6 +419,7 @@ impl SqliteSemantic {
             )
             .map_err(|error| sqlite_error("initialize semantic state projection", error))?;
         validate_meta(&connection, locator_checkpoint.applied)?;
+        validate_product_history_meta(&connection, locator_checkpoint.applied)?;
         Ok(Self { locator })
     }
 
@@ -328,8 +428,15 @@ impl SqliteSemantic {
         delta: &CursorDelta,
         locator_rows: &[LocatorRow],
         semantic_facts: &[SemanticFact],
+        product_history_facts: &[ProductHistoryFact],
     ) -> Result<TruthCursor, SqliteSemanticError> {
-        self.apply_delta_inner(delta, locator_rows, semantic_facts, false)
+        self.apply_delta_inner(
+            delta,
+            locator_rows,
+            semantic_facts,
+            product_history_facts,
+            false,
+        )
     }
 
     pub(crate) fn apply_delta_with_failure(
@@ -337,8 +444,15 @@ impl SqliteSemantic {
         delta: &CursorDelta,
         locator_rows: &[LocatorRow],
         semantic_facts: &[SemanticFact],
+        product_history_facts: &[ProductHistoryFact],
     ) -> Result<TruthCursor, SqliteSemanticError> {
-        self.apply_delta_inner(delta, locator_rows, semantic_facts, true)
+        self.apply_delta_inner(
+            delta,
+            locator_rows,
+            semantic_facts,
+            product_history_facts,
+            true,
+        )
     }
 
     fn apply_delta_inner(
@@ -346,10 +460,12 @@ impl SqliteSemantic {
         delta: &CursorDelta,
         locator_rows: &[LocatorRow],
         semantic_facts: &[SemanticFact],
+        product_history_facts: &[ProductHistoryFact],
         inject_failure: bool,
     ) -> Result<TruthCursor, SqliteSemanticError> {
         if semantic_facts.len() != delta.receipts.len()
             || semantic_facts.len() != locator_rows.len()
+            || semantic_facts.len() != product_history_facts.len()
         {
             return Err(SqliteSemanticError::Delta(format!(
                 "{} semantic facts and {} locator rows for {} cursor receipts",
@@ -380,6 +496,7 @@ impl SqliteSemantic {
             .locator
             .apply_delta_with(delta, locator_rows, |transaction| {
                 insert_facts(transaction, semantic_facts)?;
+                insert_product_history_facts(transaction, product_history_facts)?;
                 if inject_failure {
                     return Err(SqliteLocatorError::Delta(
                         "injected semantic transaction failure".to_owned(),
@@ -400,6 +517,28 @@ impl SqliteSemantic {
                 if updated != 1 {
                     return Err(SqliteLocatorError::Delta(
                         "semantic checkpoint changed concurrently".to_owned(),
+                    ));
+                }
+                let product_updated = transaction
+                    .execute(
+                        "UPDATE product_history_meta
+                         SET applied_sequence = ?1
+                         WHERE singleton = 1 AND epoch = ?2 AND applied_sequence = ?3",
+                        params![
+                            to_i64_locator(applied.sequence, "product history applied")?,
+                            to_i64_locator(applied.epoch, "product history epoch")?,
+                            to_i64_locator(
+                                delta.after.sequence,
+                                "product history previous applied"
+                            )?,
+                        ],
+                    )
+                    .map_err(|error| {
+                        locator_sqlite_error("advance product history metadata", error)
+                    })?;
+                if product_updated != 1 {
+                    return Err(SqliteLocatorError::Delta(
+                        "product history checkpoint changed concurrently".to_owned(),
                     ));
                 }
                 Ok(())
@@ -615,6 +754,27 @@ impl SqliteSemantic {
         Ok(count.is_some())
     }
 
+    pub(crate) fn product_history_connection(
+        &self,
+        observed: TruthCursor,
+    ) -> Result<LocatorRead<(rusqlite::Connection, SemanticStateSnapshot)>, SqliteSemanticError>
+    {
+        let connection = self.locator.validated_connection()?;
+        let checkpoint = read_locator_checkpoint(&connection)?;
+        validate_meta(&connection, checkpoint.applied)?;
+        validate_product_history_meta(&connection, checkpoint.applied)?;
+        if checkpoint.applied.epoch != observed.epoch
+            || checkpoint.applied.sequence < observed.sequence
+        {
+            return Ok(LocatorRead::CatchUpRequired {
+                applied: checkpoint.applied,
+                observed,
+            });
+        }
+        let state = query_materialized_state(&connection)?;
+        Ok(LocatorRead::Ready((connection, state)))
+    }
+
     pub(crate) fn inventory(&self) -> Result<SemanticInventory, SqliteSemanticError> {
         let connection = self.locator.validated_connection()?;
         let (profile_id, schema_version) = connection
@@ -757,6 +917,33 @@ fn insert_facts(
             .map_err(|error| locator_sqlite_error("insert semantic fact", error))?;
         insert_family_fact(transaction, fact)?;
         update_materialized_projection(transaction, fact)?;
+    }
+    Ok(())
+}
+
+fn insert_product_history_facts(
+    transaction: &Transaction<'_>,
+    facts: &[ProductHistoryFact],
+) -> Result<(), SqliteLocatorError> {
+    for fact in facts {
+        let sequence = to_i64_locator(fact.sequence, "product history sequence")?;
+        for tag_key in &fact.tag_keys {
+            transaction
+                .execute(
+                    "INSERT INTO product_history_tag (sequence, tag_key) VALUES (?1, ?2)",
+                    params![sequence, tag_key],
+                )
+                .map_err(|error| locator_sqlite_error("insert product history tag", error))?;
+        }
+        if let Some(target_event_id) = &fact.signature_target_event_id {
+            transaction
+                .execute(
+                    "INSERT INTO product_history_signature (sequence, target_event_id)
+                     VALUES (?1, ?2)",
+                    params![sequence, target_event_id],
+                )
+                .map_err(|error| locator_sqlite_error("insert product history signature", error))?;
+        }
     }
     Ok(())
 }
@@ -2030,6 +2217,38 @@ fn validate_meta(
         return Err(SqliteSemanticError::Metadata(format!(
             "semantic identity/checkpoint {profile}/{version}/{epoch}/{applied} \
              does not match {SEMANTIC_PROFILE_ID}/{SEMANTIC_SCHEMA_VERSION}/{expected:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_product_history_meta(
+    connection: &rusqlite::Connection,
+    expected: TruthCursor,
+) -> Result<(), SqliteSemanticError> {
+    let (profile, version, epoch, applied) = connection
+        .query_row(
+            "SELECT profile_id, schema_version, epoch, applied_sequence
+             FROM product_history_meta WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .map_err(|error| sqlite_error("validate product history metadata", error))?;
+    if profile != PRODUCT_HISTORY_PROFILE_ID
+        || version != PRODUCT_HISTORY_SCHEMA_VERSION
+        || epoch != to_i64(expected.epoch, "expected product history epoch")?
+        || applied != to_i64(expected.sequence, "expected product history applied")?
+    {
+        return Err(SqliteSemanticError::Metadata(format!(
+            "product history identity/checkpoint {profile}/{version}/{epoch}/{applied} \
+             does not match {PRODUCT_HISTORY_PROFILE_ID}/{PRODUCT_HISTORY_SCHEMA_VERSION}/{expected:?}"
         )));
     }
     Ok(())

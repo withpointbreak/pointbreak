@@ -45,9 +45,9 @@ export interface HistoryDoc {
   // replacement moved outside the visible window. It keeps the detail pane
   // resolvable without inserting a non-matching row into the filtered timeline.
   retainedEntry?: HistoryEntry;
-  // The event-set hash the stat row displays (present in the committed fixture).
-  // It is the authoritative confirm stamp on this full-read endpoint; the cheap
-  // freshness poll keys on the event-count marker instead.
+  // Active derived reads expose an opaque projection version; loose reads retain
+  // the exhaustive event-set hash. Consumers prefer the stamp when present.
+  projectionStamp?: string;
   eventSetHash?: string;
   // The durable-event count the stat row reads (present in the committed fixture).
   eventCount?: number;
@@ -240,11 +240,12 @@ export interface State {
   diffRevision: string | null;
   diffFile: string | null;
   diffFileQuery: string;
-  // Freshness baseline the poller diffs against to surface a refresh cue: the
-  // event-log head marker (the event count) and the commit-graph stamp (the
-  // git ref state the revision merge statuses read — a pure-git landing moves
-  // it with no new event, #467), both seeded at load.
+  // Freshness baselines the poller diffs against to surface a refresh cue: the
+  // event-log head marker, the active derived projection version, and the
+  // commit-graph stamp (the git ref state the revision merge statuses read —
+  // a pure-git landing moves it with no new event, #467), all seeded at load.
   lastEventCount: number | null;
+  lastProjectionStamp: string | null;
   lastCommitGraphStamp: string | null;
 }
 
@@ -282,6 +283,7 @@ const state: State = {
   diffFile: null,
   diffFileQuery: "",
   lastEventCount: null,
+  lastProjectionStamp: null,
   lastCommitGraphStamp: null,
 };
 

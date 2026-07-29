@@ -32,6 +32,7 @@ describe("getState defaults", () => {
     expect(s.diffHash).toBeNull();
     expect(s.focus).toBeNull();
     expect(s.lastEventCount).toBeNull();
+    expect(s.lastProjectionStamp).toBeNull();
     expect(s.open).toBe(false);
     expect(s.reading).toBe(false);
   });

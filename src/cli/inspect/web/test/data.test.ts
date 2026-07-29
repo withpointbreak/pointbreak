@@ -141,6 +141,7 @@ describe("load", () => {
     await data.load();
     const s = store.getState();
     expect(s.lastEventCount).toBe(HISTORY_EVENT_COUNT);
+    expect(s.lastProjectionStamp).toBeNull();
     expect(s.lastCommitGraphStamp).toBe("stamp-fixture");
   });
 
@@ -1074,6 +1075,38 @@ describe("pollFreshness", () => {
     // The reload re-seeded the stamp baseline, so the next poll at the same
     // stamp reports unchanged — no reload loop.
     expect(store.getState().lastCommitGraphStamp).toBe("stamp-moved");
+  });
+
+  it("reloads when the active projection stamp changes during a rebuild", async () => {
+    setFreshnessResponse({
+      eventCount: HISTORY_EVENT_COUNT,
+      projectionStamp: "sha256:projection-before",
+      commitGraphStamp: "stamp-fixture",
+    });
+    await data.load();
+    expect(store.getState().lastProjectionStamp).toBe(
+      "sha256:projection-before",
+    );
+
+    setFreshnessResponse({
+      eventCount: HISTORY_EVENT_COUNT,
+      projectionStamp: "sha256:projection-after",
+      commitGraphStamp: "stamp-fixture",
+    });
+    const { paths, restore } = captureRequestPaths();
+    try {
+      await data.pollFreshness();
+    } finally {
+      restore();
+    }
+
+    expect(document.querySelector("#refresh")?.getAttribute("data-state")).toBe(
+      "updated",
+    );
+    expect(paths).toContain("/api/revisions");
+    expect(store.getState().lastProjectionStamp).toBe(
+      "sha256:projection-after",
+    );
   });
 
   it("reloads when a stamp first appears after a degraded load, then tracks it", async () => {

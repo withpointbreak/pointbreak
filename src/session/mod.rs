@@ -10,6 +10,11 @@ mod signing;
 mod store;
 mod workflow;
 
+#[doc(hidden)]
+pub use derived_access::history::{
+    DerivedHistoryAccess, DerivedHistoryAvailability, DerivedHistoryFreshness,
+    DerivedHistoryNewCount, DerivedHistoryPage, DerivedHistoryRoute, DerivedHistoryStatus,
+};
 pub use event::{
     BodyContentType, IngestProvenance, IngestVia, event_signature_pre_authentication_encoding,
     event_to_be_signed,

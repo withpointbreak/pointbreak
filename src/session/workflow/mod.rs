@@ -57,6 +57,8 @@ pub use commit_range_liveness::{
 pub use event_signature::{
     EventSignatureRecordOptions, EventSignatureRecordResult, record_event_signature,
 };
+#[cfg(test)]
+pub(crate) use history::history_base_from_events;
 pub use history::{
     BaseEntry, BaseHistoryProjection, BaseProjectionConfig, DistinctValues, EVENT_QUERY_FIELDS,
     EventRecordExtras, HistoryCursor, HistoryOrder, HistoryPage, HistoryQuery, KNOWN_QUERY_KEYS,
@@ -67,6 +69,7 @@ pub use history::{
     default_history_page_projection, history_base_projection, matches_query, parse_search_query,
     parse_search_query_for, review_history,
 };
+pub(crate) use history::{history_entries_from_selected_events, tag_completion_key};
 #[cfg(any(test, feature = "bench"))]
 pub(in crate::session) use ingest::ingest_events_with_clock;
 pub use ingest::{

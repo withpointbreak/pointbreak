@@ -13,9 +13,9 @@ pub use self::cursor::HistoryCursor;
 pub use self::options::{ReviewHistoryFilters, ReviewHistoryOptions};
 pub use self::projection::{BaseEntry, BaseHistoryProjection, BaseProjectionConfig};
 use self::projection::{
-    entry_body_states, history_base_from_events, history_base_from_events_without_bodies,
-    history_default_page_from_events,
+    entry_body_states, history_base_from_events_without_bodies, history_default_page_from_events,
 };
+pub(crate) use self::projection::{history_base_from_events, history_entries_from_selected_events};
 pub use self::query::{
     DistinctValues, HistoryOrder, HistoryPage, HistoryQuery, QueriedHistory, apply_history_query,
     count_new_since,
@@ -27,7 +27,7 @@ pub use self::search::{
     REVISION_ATTENTION_VALUES, REVISION_QUERY_FIELDS, SearchRecord, build_haystack, matches_query,
     parse_search_query, parse_search_query_for,
 };
-pub(crate) use self::search::{enum_wire, tag_index_tokens, wrap_set};
+pub(crate) use self::search::{enum_wire, tag_completion_key, tag_index_tokens, wrap_set};
 pub use self::summary::{ReviewHistoryEntry, ReviewHistorySummary};
 use crate::error::{Result, ShoreError};
 use crate::session::EventStore;

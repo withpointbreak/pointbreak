@@ -127,7 +127,7 @@ impl BaseHistoryProjection {
 /// domain, sort by the envelope key, hydrate every body, and attach each entry's
 /// `SearchRecord` (with `object` resolved via the revision->object map). It never
 /// windows — one base serves every pure query for a store version.
-pub(super) fn history_base_from_events(
+pub(crate) fn history_base_from_events(
     events: &[ShoreEvent],
     config: &BaseProjectionConfig,
     backend: Option<&StoreBackend>,
@@ -842,6 +842,48 @@ pub(super) fn history_entry_from_event(
         ),
         summary,
     })
+}
+
+pub(crate) fn history_entries_from_selected_events(
+    selected: &[ShoreEvent],
+    support: &[ShoreEvent],
+    config: &BaseProjectionConfig,
+    backend: &StoreBackend,
+) -> Result<(Vec<ReviewHistoryEntry>, Vec<ProjectionDiagnostic>)> {
+    let filters = HistoryProjectionOptions {
+        include_body: true,
+        verification_policy: config.verification_policy,
+        trust_set: config.trust_set.clone(),
+        actor_attributes: config.actor_attributes.clone(),
+        delegation_map: config.delegation_map.clone(),
+        removal_policy: config.removal_policy,
+    };
+    let cosignatures = CosignatureIndex::build(support)?;
+    let readback_index = filters
+        .verification_policy
+        .is_some()
+        .then_some(&cosignatures);
+    let removal = ArtifactRemovalProjection::from_events(support)?;
+    let removal_lens = BodyRemovalLens::new(
+        &removal,
+        &filters.trust_set,
+        filters.removal_policy,
+        &cosignatures,
+    );
+    let entries = selected
+        .iter()
+        .map(|event| {
+            history_entry_from_event(
+                event,
+                &filters,
+                readback_index,
+                Some(backend),
+                Some(&removal_lens),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let diagnostics = body_content_diagnostics(entries.iter().flat_map(entry_body_states));
+    Ok((entries, diagnostics))
 }
 
 /// The seam wrapper over [`optional_text`]: with a lens (paired with a live

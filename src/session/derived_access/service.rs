@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::product_contract::DerivedAccessProfile;
 use super::sqlite::{
     AppendCrashPoint, CursorLedgerError, CursorLedgerIdentity, CursorLedgerInventory,
-    LocatorInventory, SemanticInventory, SqliteCursorLedger, SqliteLocator, SqliteLocatorError,
-    SqliteSemantic, SqliteSemanticError, StoreWriterLock,
+    LocatorInventory, ProductHistoryFact, SemanticInventory, SqliteCursorLedger, SqliteLocator,
+    SqliteLocatorError, SqliteSemantic, SqliteSemanticError, StoreWriterLock,
 };
 use crate::error::Result as ShoreResult;
 use crate::model::RevisionId;
@@ -29,6 +29,7 @@ use crate::session::derived_access::semantic::{
 use crate::session::event::{ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload};
 
 const DEFAULT_DELTA_LIMIT: usize = 512;
+type DerivedRows = (Vec<LocatorRow>, Vec<SemanticFact>, Vec<ProductHistoryFact>);
 
 #[derive(Debug)]
 pub(crate) struct DerivedAccessService {
@@ -255,8 +256,11 @@ impl DerivedAccessService {
                     delta.observed_head,
                 ));
             }
-            let (rows, semantic_facts) = self.derived_rows(delta, &hydrated.events)?;
-            let applied = self.semantic.apply_delta(delta, &rows, &semantic_facts)?;
+            let (rows, semantic_facts, product_history_facts) =
+                self.derived_rows(delta, &hydrated.events)?;
+            let applied =
+                self.semantic
+                    .apply_delta(delta, &rows, &semantic_facts, &product_history_facts)?;
             if delta.complete {
                 return Ok(applied);
             }
@@ -284,6 +288,19 @@ impl DerivedAccessService {
                 Ok(LocatorRead::CatchUpRequired { applied, observed })
             }
         }
+    }
+
+    pub(super) fn product_history_connection(
+        &self,
+    ) -> Result<
+        LocatorRead<(
+            rusqlite::Connection,
+            crate::session::derived_access::semantic::state::SemanticStateSnapshot,
+        )>,
+        DerivedAccessServiceError,
+    > {
+        let observed = self.cursor.head()?.cursor;
+        Ok(self.semantic.product_history_connection(observed)?)
     }
 
     pub(crate) fn chronological_window(
@@ -416,17 +433,21 @@ impl DerivedAccessService {
             .cursor
             .events_after_hydrated(checkpoint.applied, batch_limit)?;
         let delta = &hydrated.delta;
-        let (rows, semantic_facts) = self.derived_rows(delta, &hydrated.events)?;
-        Ok(self
-            .semantic
-            .apply_delta_with_failure(delta, &rows, &semantic_facts)?)
+        let (rows, semantic_facts, product_history_facts) =
+            self.derived_rows(delta, &hydrated.events)?;
+        Ok(self.semantic.apply_delta_with_failure(
+            delta,
+            &rows,
+            &semantic_facts,
+            &product_history_facts,
+        )?)
     }
 
     fn derived_rows(
         &self,
         delta: &CursorDelta,
         events: &[ShoreEvent],
-    ) -> Result<(Vec<LocatorRow>, Vec<SemanticFact>), DerivedAccessServiceError> {
+    ) -> Result<DerivedRows, DerivedAccessServiceError> {
         if events.len() != delta.receipts.len() {
             return Err(DerivedAccessServiceError::Truth(format!(
                 "{} authoritative events for {} cursor receipts",
@@ -436,6 +457,7 @@ impl DerivedAccessService {
         }
         let mut locator_rows = Vec::with_capacity(delta.receipts.len());
         let mut semantic_facts = Vec::with_capacity(delta.receipts.len());
+        let mut product_history_facts = Vec::with_capacity(delta.receipts.len());
         for (receipt, event) in delta.receipts.iter().zip(events) {
             locator_rows.push(LocatorRow::from_event(
                 receipt.cursor,
@@ -447,7 +469,11 @@ impl DerivedAccessService {
                 event,
                 receipt.validation_witness.clone(),
             )?);
+            product_history_facts.push(ProductHistoryFact::from_event(
+                receipt.cursor.sequence,
+                event,
+            )?);
         }
-        Ok((locator_rows, semantic_facts))
+        Ok((locator_rows, semantic_facts, product_history_facts))
     }
 }

@@ -109,7 +109,7 @@ function renderIdentity(): void {
   document.title = `${id.repository} · ${INSPECTOR_TITLE}`;
 }
 
-/** Paint the topbar stat row from the loaded document counts and the history event-set hash. */
+/** Paint the topbar stat row from the loaded counts and preferred projection version. */
 function renderStats(): void {
   const h = getState().history;
   const r = getState().revisions;
@@ -121,7 +121,7 @@ function renderStats(): void {
   const threads = $("#stat-threads");
   if (threads) threads.textContent = `${o?.threadCount ?? "—"} threads`;
   const hash = $("#stat-hash");
-  if (hash) hash.textContent = shortId(h?.eventSetHash);
+  if (hash) hash.textContent = shortId(h?.projectionStamp ?? h?.eventSetHash);
 }
 
 /** Show the load diagnostics banner when there are any, else hide it. */
