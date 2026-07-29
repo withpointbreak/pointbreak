@@ -1,0 +1,67 @@
+name: Cache GC
+
+# Prunes the hestia binary cache so the Nix lane stays inside GitHub's 10GB
+# per-repository cache quota, which it shares with ci.yml's rust-cache entries.
+#
+# Scope: this deletes only paths hestia itself pushed. Hestia tracks what is alive
+# through its own "roots" (one per branch and system, e.g. `main-x86_64-linux`), and
+# collects paths unreachable from any root once they fall out of the push grace period.
+# Cache entries written by other actions — Swatinem/rust-cache, setup-node, the Nix
+# installer — are not in hestia's manifest and are never considered.
+#
+# It has to run on the default branch: a pull request's cache scope is read-only towards
+# the default branch and disappears with the PR, so a PR-scoped run cannot prune what the
+# default branch owns.
+#
+# See docs/ci-architecture.md#store-caching.
+
+concurrency:
+  # Hestia handles concurrent pushes but not a concurrent GC: a second run's repack reads
+  # race the first run's post-commit deletes. Queue behind a running GC, never cancel it
+  # partway through a delete pass.
+  group: hestia-gc
+  cancel-in-progress: false
+
+on:
+  schedule:
+    # Daily and off-peak. Deliberately not 07:00 UTC, which is the nightly full flake
+    # check in nightly.yml.
+    - cron: "23 3 * * *"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Plan only; do not repack, touch, or delete anything.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  gc:
+    name: prune the hestia cache
+    runs-on: ubuntu-latest
+    permissions:
+      # The cache deletes go through the REST API, which needs actions:write. This is the
+      # only workflow here that gets it.
+      actions: write
+      contents: read
+    steps:
+      # The action writes Nix configuration when it installs, so Nix has to exist first.
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      # Installs the released binary and exports HESTIA_BIN. Same SHA pin as the lanes
+      # that populate the cache — a GC from a different version than the writers is not
+      # a combination worth discovering at 03:23.
+      - uses: Mic92/hestia@fb239a2f72d4b6e26eec5425f289dea23b27a527 # v2
+
+      - name: Run garbage collection
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            "$HESTIA_BIN" gc --dry-run
+          else
+            "$HESTIA_BIN" gc
+          fi

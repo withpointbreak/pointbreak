@@ -20,6 +20,14 @@ nix develop
 This drops you into a shell with every tool pinned by `flake.nix`. If you use `direnv` (with
 `nix-direnv`), the checked-in `.envrc` activates it automatically on `cd`.
 
+For an immutable, host-targeted equivalent of `just build-all`, use:
+
+```bash
+nix build .#build-all
+```
+
+The resulting store output contains the runnable `bin/pointbreak` and installable `pointbreak.vsix`.
+
 ### mise
 
 ```bash

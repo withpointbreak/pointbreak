@@ -14,6 +14,7 @@ use pointbreak::session::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tempfile::tempdir;
 
 pub type PackResult<T> = Result<T, Box<dyn Error>>;
 
@@ -258,7 +259,20 @@ pub fn verify_pack(pack: &Path) -> PackResult<()> {
         &manifest.documents.revision.sha256,
     )?;
     verify_documents(pack, &manifest)?;
+    // Verify against an empty repository so pack validation does not depend on
+    // the caller running from a checkout that happens to contain prerequisites.
+    let bundle_verify_repo = tempdir()?;
+    let bundle_repo_init = Command::new("git")
+        .args(["init", "--bare", "--initial-branch=main"])
+        .arg(bundle_verify_repo.path())
+        .output()?;
+    require(
+        bundle_repo_init.status.success(),
+        "source.bundle verify repository",
+    )?;
     let bundle_verify = Command::new("git")
+        .arg("-C")
+        .arg(bundle_verify_repo.path())
         .args(["bundle", "verify"])
         .arg(pack.join(&manifest.source.bundle_path))
         .output()?;
@@ -406,10 +420,7 @@ fn build_pack(source_repo: &Path, stage: &Path) -> PackResult<()> {
         producer: ProducerManifest {
             name: "pointbreak".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
-            commit: git_output(
-                Path::new(env!("CARGO_MANIFEST_DIR")),
-                &["rev-parse", "HEAD"],
-            )?,
+            commit: git_output(&manifest_dir(), &["rev-parse", "HEAD"])?,
         },
         record: RecordManifest {
             revision: REVISION.to_owned(),
@@ -594,6 +605,18 @@ fn git_object(repo: &Path, commit: &str) -> PackResult<GitObjectManifest> {
         commit_oid: git_output(repo, &["rev-parse", commit])?,
         tree_oid: git_output(repo, &["rev-parse", &format!("{commit}^{{tree}}")])?,
     })
+}
+
+/// Absolute path to this crate's manifest directory, resolved at run time.
+///
+/// This file is included both by the example binary and, via `#[path]`, by
+/// tests/review_example_pack.rs, so it cannot reach either one's helper and carries its own.
+/// Prefers the runtime `CARGO_MANIFEST_DIR` that cargo-nextest remaps under
+/// `--workspace-remap`, falling back to the compile-time value for in-place runs.
+fn manifest_dir() -> std::path::PathBuf {
+    std::env::var_os("CARGO_MANIFEST_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")))
 }
 
 fn git_output(repo: &Path, args: &[&str]) -> PackResult<String> {

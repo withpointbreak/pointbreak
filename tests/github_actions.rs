@@ -1,20 +1,46 @@
 #[test]
 fn ci_workflow_runs_project_lint_and_tests() {
     let ci = std::fs::read_to_string(".github/workflows/ci.yml").expect("read CI workflow");
+    let nightly =
+        std::fs::read_to_string(".github/workflows/nightly.yml").expect("read nightly workflow");
 
     assert!(ci.contains("name: CI"));
     assert!(ci.contains("branches: [main]"));
     assert!(ci.contains("pull_request:"));
     assert!(ci.contains("actions/checkout@v6"));
-    assert!(ci.contains("dtolnay/rust-toolchain@stable"));
-    assert!(ci.contains("dtolnay/rust-toolchain@nightly"));
-    assert!(ci.contains("taiki-e/install-action@just"));
-    assert!(ci.contains("taiki-e/install-action@nextest"));
     assert!(ci.contains("ubuntu-latest"));
     assert!(ci.contains("macos-latest"));
     assert!(ci.contains("windows-latest"));
-    assert!(ci.contains("run: just lint"));
-    assert!(ci.contains("run: just test-ci"));
+
+    // The Rust gate is split by platform, and all three legs live in this one workflow so
+    // the checks list shows the whole matrix. Linux runs hermetically as derivations;
+    // macOS runs cargo directly for an incremental target/; Windows executes a
+    // cross-compiled archive.
+    assert!(ci.contains("nix build .#cli-fmt"));
+    assert!(ci.contains("nix build .#cli-clippy"));
+    assert!(ci.contains("nix build .#cli-nextest"));
+    assert!(ci.contains("just test-ci"));
+    assert!(ci.contains("just windows-cross-archive x86_64-pc-windows-msvc"));
+    assert!(ci.contains("--archive-file"));
+    assert!(ci.contains("--partition"));
+
+    // Linux and macOS take the compiler and formatter from the flake, so CI and a
+    // contributor's `nix develop` cannot drift apart.
+    assert!(ci.contains("DeterminateSystems/nix-installer-action"));
+    assert!(ci.contains("nix develop .#ci -c"));
+
+    // Windows keeps rustup: Nix has no native Windows support, and the all-features
+    // type-check plus the qualification and git-parity legs still need a toolchain
+    // there. The sharded test legs no longer do — they run prebuilt binaries.
+    assert!(ci.contains("dtolnay/rust-toolchain@stable"));
+    assert!(ci.contains("taiki-e/install-action@just"));
+    assert!(ci.contains("taiki-e/install-action@nextest"));
+
+    // Nightly carries what is too slow to gate, and nothing else: `nix flake check` in
+    // full, so a check added to the flake cannot be left ungated by the explicit phase
+    // list above. It must not run per pull request — a job that only skips is noise.
+    assert!(nightly.contains("nix flake check"));
+    assert!(!nightly.contains("pull_request"));
 }
 
 #[test]

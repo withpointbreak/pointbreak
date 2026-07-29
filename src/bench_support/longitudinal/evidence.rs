@@ -2659,15 +2659,15 @@ mod tests {
 
     #[test]
     fn longitudinal_evidence_rejects_existing_and_relative_roots() {
-        let source = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let source = crate::bench_support::manifest_dir();
         assert_eq!(
-            validate_fresh_local_root(source, source)
+            validate_fresh_local_root(&source, &source)
                 .unwrap_err()
                 .to_string(),
             LongitudinalEvidenceError::UnsafeRoot.to_string()
         );
         assert_eq!(
-            validate_fresh_local_root(Path::new("relative"), source)
+            validate_fresh_local_root(Path::new("relative"), &source)
                 .unwrap_err()
                 .to_string(),
             LongitudinalEvidenceError::UnsafeRoot.to_string()
