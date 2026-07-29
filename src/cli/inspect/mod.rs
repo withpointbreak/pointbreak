@@ -21,7 +21,8 @@ enum StartupOutputFormat {
 /// writes, whichever storage tier the repository resolves (`pointbreak store
 /// paths` reports it). It renders the event timeline, captured revisions,
 /// supersession threads, and annotated diffs, and it never executes commands
-/// or writes to the store.
+/// or mutates authoritative truth. The explicitly selected experimental
+/// derived-access profile may build its private, disposable sidecar.
 #[derive(Debug, Args)]
 pub(super) struct InspectArgs {
     /// Repository root or a path inside the repository.

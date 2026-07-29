@@ -9,7 +9,7 @@ use rusqlite::types::Value;
 use serde::Serialize;
 
 use super::cursor::TruthCursor;
-use super::lifecycle::{CurrentGeneration, DerivedAccessLifecycle};
+use super::lifecycle::{CurrentGeneration, DerivedAccessLifecycle, LifecycleControl};
 use super::locator::{LocatorRead, normalize_occurred_at};
 use super::product_contract::{DerivedAccessAvailability, DerivedAccessProfile};
 use crate::canonical_hash::sha256_json_prefixed;
@@ -166,6 +166,35 @@ impl DerivedHistoryAccess {
 
     pub const fn is_active(&self) -> bool {
         matches!(self.mode, DerivedHistoryMode::Active { .. })
+    }
+
+    /// Start rebuilding a non-current active profile without delaying the
+    /// caller. The lifecycle's store-scoped lease deduplicates concurrent
+    /// Inspector processes; readers continue to report the typed lifecycle
+    /// state until the immutable generation is published.
+    #[doc(hidden)]
+    pub fn start_background_rebuild(&self) -> Result<(), String> {
+        let DerivedHistoryMode::Active { lifecycle, .. } = &self.mode else {
+            return Ok(());
+        };
+        if lifecycle
+            .status()
+            .map_err(|error| error.to_string())?
+            .availability
+            == DerivedAccessAvailability::Current
+        {
+            return Ok(());
+        }
+        let lifecycle = lifecycle.clone();
+        std::thread::Builder::new()
+            .name("pointbreak-derived-rebuild".to_owned())
+            .spawn(move || {
+                if let Err(error) = lifecycle.rebuild(|_| LifecycleControl::Continue) {
+                    tracing::warn!(error = %error, "derived_access_background_rebuild_failed");
+                }
+            })
+            .map_err(|error| format!("could not start derived-access rebuild: {error}"))?;
+        Ok(())
     }
 
     pub fn history(
@@ -1009,6 +1038,17 @@ mod tests {
     }
 
     fn active_history_from_events(events: Vec<ShoreEvent>) -> (TempDir, DerivedHistoryAccess) {
+        let (temp, access) = unbuilt_active_history_from_events(events);
+        let DerivedHistoryMode::Active { lifecycle, .. } = &access.mode else {
+            unreachable!("test access is active");
+        };
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        (temp, access)
+    }
+
+    fn unbuilt_active_history_from_events(
+        events: Vec<ShoreEvent>,
+    ) -> (TempDir, DerivedHistoryAccess) {
         let temp = TempDir::new().unwrap();
         let store = EventStore::open(temp.path());
         for event in events {
@@ -1023,7 +1063,6 @@ mod tests {
             "store:test",
         )
         .unwrap();
-        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
         let access = DerivedHistoryAccess {
             mode: DerivedHistoryMode::Active {
                 lifecycle,
@@ -1033,6 +1072,33 @@ mod tests {
             },
         };
         (temp, access)
+    }
+
+    #[test]
+    fn active_access_bootstraps_an_absent_generation_in_the_background() {
+        let (_temp, access) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
+        assert!(matches!(
+            access.current().unwrap(),
+            CurrentRead::Unavailable(DerivedHistoryStatus {
+                availability: DerivedHistoryAvailability::Absent,
+                ..
+            })
+        ));
+
+        access.start_background_rebuild().unwrap();
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match access.current().unwrap() {
+                CurrentRead::Ready(_) => break,
+                CurrentRead::Unavailable(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                CurrentRead::Unavailable(status) => {
+                    panic!("background bootstrap did not publish: {status:?}");
+                }
+            }
+        }
     }
 
     fn review_initialized(index: usize) -> ShoreEvent {

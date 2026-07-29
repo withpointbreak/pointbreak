@@ -123,6 +123,7 @@ pub(super) struct InspectState {
 impl InspectState {
     pub(super) fn new(repo: PathBuf) -> Result<Self, String> {
         let derived_history = pointbreak::session::DerivedHistoryAccess::resolve(&repo)?;
+        derived_history.start_background_rebuild()?;
         Ok(Self {
             repo,
             derived_history,

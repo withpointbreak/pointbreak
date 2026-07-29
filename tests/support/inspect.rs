@@ -87,6 +87,10 @@ impl Inspector {
         Self::spawn_api_json(repo)
     }
 
+    pub fn spawn_authenticated_with_env(repo: &Path, env: &[(&str, &str)]) -> Self {
+        Self::spawn_with_env(repo, InspectSurface::ApiOnly, InspectOutput::Json, env)
+    }
+
     pub fn spawn_web_text(repo: &Path) -> Self {
         Self::spawn_with(repo, InspectSurface::Web, InspectOutput::Text)
     }
@@ -104,6 +108,15 @@ impl Inspector {
     }
 
     fn spawn_with(repo: &Path, surface: InspectSurface, output: InspectOutput) -> Self {
+        Self::spawn_with_env(repo, surface, output, &[])
+    }
+
+    fn spawn_with_env(
+        repo: &Path,
+        surface: InspectSurface,
+        output: InspectOutput,
+        env: &[(&str, &str)],
+    ) -> Self {
         let mut command = Command::new(env!("CARGO_BIN_EXE_pointbreak"));
         command.args([
             "inspect",
@@ -120,6 +133,7 @@ impl Inspector {
         if output == InspectOutput::Json {
             command.args(["--format", "json"]);
         }
+        command.envs(env.iter().copied());
         let mut child = command
             .env_remove("POINTBREAK_LOG")
             .env_remove("RUST_LOG")
