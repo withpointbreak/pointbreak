@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use super::cursor::TruthCursor;
 use super::lifecycle::{CurrentGeneration, DerivedAccessLifecycle};
-use super::locator::LocatorRead;
+use super::locator::{LocatorRead, normalize_occurred_at};
 use super::product_contract::{DerivedAccessAvailability, DerivedAccessProfile};
 use crate::canonical_hash::sha256_json_prefixed;
 use crate::session::ProjectionDiagnostic;
@@ -573,6 +573,7 @@ fn resolve_history_offset(
         if query.order == HistoryOrder::Desc {
             return Err("descending history does not support continuation cursors".to_owned());
         }
+        let occurred_at = normalize_history_cursor(after)?;
         let sql = format!(
             "{REVIEW_EVENT_CTE}
              SELECT count(*) FROM review_event
@@ -584,8 +585,8 @@ fn resolve_history_offset(
         );
         let mut before_parameters = parameters.to_vec();
         before_parameters.extend([
-            after.occurred_at.clone().into(),
-            after.occurred_at.clone().into(),
+            occurred_at.clone().into(),
+            occurred_at.into(),
             after.event_id.as_str().to_owned().into(),
         ]);
         return Ok((
@@ -677,13 +678,14 @@ fn query_page_ids(
         if query.order == HistoryOrder::Desc {
             return Err("descending history does not support continuation cursors".to_owned());
         }
+        let occurred_at = normalize_history_cursor(after)?;
         page_predicate.push_str(
             " AND (normalized_occurred_at > ? OR \
              (normalized_occurred_at = ? AND event_id > ?))",
         );
         page_parameters.extend([
-            after.occurred_at.clone().into(),
-            after.occurred_at.clone().into(),
+            occurred_at.clone().into(),
+            occurred_at.into(),
             after.event_id.as_str().to_owned().into(),
         ]);
     }
@@ -725,6 +727,7 @@ fn count_new_rows(
     since: &HistoryCursor,
 ) -> Result<usize, String> {
     let (predicate, mut parameters) = history_predicate(query, true);
+    let occurred_at = normalize_history_cursor(since)?;
     let sql = format!(
         "{REVIEW_EVENT_CTE}
          SELECT count(*)
@@ -736,11 +739,15 @@ fn count_new_rows(
            )"
     );
     parameters.extend([
-        since.occurred_at.clone().into(),
-        since.occurred_at.clone().into(),
+        occurred_at.clone().into(),
+        occurred_at.into(),
         since.event_id.as_str().to_owned().into(),
     ]);
     query_count_sql(connection, &sql, &parameters)
+}
+
+fn normalize_history_cursor(cursor: &HistoryCursor) -> Result<String, String> {
+    normalize_occurred_at(&cursor.occurred_at).map_err(|error| error.to_string())
 }
 
 fn support_event_ids(
@@ -1328,5 +1335,44 @@ mod tests {
             };
             assert_eq!(actual.new_count, expected);
         }
+    }
+
+    #[test]
+    fn active_cursor_comparisons_normalize_legacy_unix_millis() {
+        let revision_id = RevisionId::new(format!("rev:sha256:{}", "88".repeat(32)));
+        let object_id = ObjectId::new(format!("object:sha256:{}", "99".repeat(32)));
+        let older = captured_revision(&revision_id, &object_id, "unix-ms:0");
+        let newer = observation(&revision_id, "code", "1970-01-01T00:00:01Z");
+        let cursor = HistoryCursor {
+            occurred_at: older.occurred_at.clone(),
+            event_id: older.event_id.clone(),
+        };
+        let events = vec![review_initialized(3), newer.clone(), older];
+        let (_temp, access) = active_history_from_events(events);
+
+        let DerivedHistoryRoute::Ready(page) = access
+            .history(
+                &HistoryQuery::default(),
+                &HistoryPage {
+                    limit: Some(1),
+                    after: Some(cursor.clone()),
+                    ..HistoryPage::default()
+                },
+                &BaseProjectionConfig::default(),
+            )
+            .unwrap()
+        else {
+            panic!("active history should be current");
+        };
+        assert_eq!(page.offset, 1);
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].event_id, newer.event_id);
+
+        let DerivedHistoryRoute::Ready(new_count) =
+            access.new_count(&HistoryQuery::default(), &cursor).unwrap()
+        else {
+            panic!("active new-count should be current");
+        };
+        assert_eq!(new_count.new_count, 2);
     }
 }
