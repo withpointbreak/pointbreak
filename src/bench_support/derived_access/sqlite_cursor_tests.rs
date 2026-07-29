@@ -306,6 +306,32 @@ fn no_change_head_and_bounded_delta_never_enumerate_the_event_directory() {
 }
 
 #[test]
+fn hot_reads_keep_one_snapshot_across_atomic_receipt_and_head_publication() {
+    let root = tempfile::tempdir().expect("root");
+    let ledger =
+        SqliteCursorLedger::initialize_empty(root.path(), CursorLedgerIdentity::new("store:test"))
+            .expect("initialize ledger");
+    let published = event(1);
+
+    let observed = ledger
+        .head_with_snapshot_hook(|| {
+            assert_eq!(
+                ledger
+                    .append_event(&published, "attempt:concurrent")
+                    .expect("publish while reader holds its snapshot"),
+                AppendResolution::Created(TruthCursor::new(1, 1))
+            );
+        })
+        .expect("read the pre-publication snapshot");
+
+    assert_eq!(observed.cursor, TruthCursor::new(1, 0));
+    assert_eq!(
+        ledger.head().expect("read the published snapshot").cursor,
+        TruthCursor::new(1, 1)
+    );
+}
+
+#[test]
 fn every_append_crash_point_recovers_to_the_reference_result() {
     let cases = [
         AppendCrashPoint::BeforeIntentCommit,

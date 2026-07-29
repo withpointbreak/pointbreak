@@ -213,8 +213,7 @@ pub(crate) fn attention_from_events(
     // (revision_id == None), so whether it covers the scoped revision is only
     // decidable while the SupersessionView is in hand (invariant 3).
     if let Some(scope) = scope {
-        let scope_component = supersession.component_of(scope);
-        items.retain(|item| item_covers_scope(item, scope, scope_component));
+        scope_attention_items(&mut items, scope, &supersession);
     }
 
     sort_items(&mut items);
@@ -223,6 +222,15 @@ pub(crate) fn attention_from_events(
         items,
         diagnostics: supersession.diagnostics,
     })
+}
+
+pub(crate) fn scope_attention_items(
+    items: &mut Vec<AttentionItem>,
+    scope: &RevisionId,
+    supersession: &SupersessionView,
+) {
+    let scope_component = supersession.component_of(scope);
+    items.retain(|item| item_covers_scope(item, scope, scope_component));
 }
 
 /// Whether an item is in scope for a `--revision` read: anchored items match the

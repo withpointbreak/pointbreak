@@ -4981,15 +4981,17 @@
   var scopedAttentionPending = null;
   var scopedAttentionGeneration = 0;
   function scopedAttentionFresh(revisionId) {
-    const eventSetHash = getState().attention?.eventSetHash;
-    const hit = /* @__PURE__ */ __name((s) => s?.revisionId === revisionId && s.eventSetHash === eventSetHash, "hit");
+    const attention = getState().attention;
+    const generation = attention?.projectionStamp ?? attention?.eventSetHash;
+    const hit = /* @__PURE__ */ __name((s) => s?.revisionId === revisionId && s.generation === generation, "hit");
     return hit(scopedAttention) || hit(scopedAttentionPending);
   }
   __name(scopedAttentionFresh, "scopedAttentionFresh");
   async function fetchScopedAttention(revisionId) {
-    const eventSetHash = getState().attention?.eventSetHash;
-    const generation = ++scopedAttentionGeneration;
-    scopedAttentionPending = { revisionId, eventSetHash };
+    const attention = getState().attention;
+    const attentionGeneration = attention?.projectionStamp ?? attention?.eventSetHash;
+    const requestGeneration = ++scopedAttentionGeneration;
+    scopedAttentionPending = { revisionId, generation: attentionGeneration };
     let items;
     try {
       const doc = await fetchJSON(
@@ -4999,9 +5001,9 @@
     } catch {
       items = null;
     }
-    if (generation !== scopedAttentionGeneration) return;
+    if (requestGeneration !== scopedAttentionGeneration) return;
     scopedAttentionPending = null;
-    scopedAttention = { revisionId, eventSetHash, items };
+    scopedAttention = { revisionId, generation: attentionGeneration, items };
   }
   __name(fetchScopedAttention, "fetchScopedAttention");
   function renderOutstandingBlock(revisionId) {

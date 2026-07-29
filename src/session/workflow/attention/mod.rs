@@ -10,11 +10,11 @@ mod items;
 
 use std::path::{Path, PathBuf};
 
-pub(crate) use items::attention_from_events;
 pub use items::{
     AttentionAssessmentRecord, AttentionDetail, AttentionFreshness, AttentionFreshnessState,
     AttentionItem, AttentionProjection, AttentionTier,
 };
+pub(crate) use items::{attention_from_events, scope_attention_items};
 
 use crate::error::Result;
 use crate::model::RevisionId;

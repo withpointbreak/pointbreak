@@ -20,10 +20,11 @@ use pointbreak::model::{EventId, ObjectId, ReviewEndpoint, RevisionId, RevisionS
 use pointbreak::session::event::{GitProvenance, ReviewAssessment};
 use pointbreak::session::{
     AssessmentRecordStatus, AssessmentView, AttentionItem, AttentionListOptions,
-    BaseHistoryProjection, BaseProjectionConfig, CurrentAssessmentStatus, DerivedHistoryAccess,
-    DerivedHistoryNewCount, DerivedHistoryPage, DerivedHistoryRoute, DerivedHistoryStatus,
-    DerivedRevisionCollection, DerivedRevisionCollectionRoute, DerivedRevisionDetail,
-    DerivedRevisionDetailRoute, DistinctValues, EventVerificationPolicy, HistoryCursor,
+    BaseHistoryProjection, BaseProjectionConfig, CurrentAssessmentStatus, DerivedAttention,
+    DerivedAttentionRoute, DerivedHistoryAccess, DerivedHistoryNewCount, DerivedHistoryPage,
+    DerivedHistoryRoute, DerivedHistoryStatus, DerivedRevisionCollection,
+    DerivedRevisionCollectionRoute, DerivedRevisionDetail, DerivedRevisionDetailRoute,
+    DerivedThreads, DerivedThreadsRoute, DistinctValues, EventVerificationPolicy, HistoryCursor,
     HistoryPage, HistoryQuery, InputRequestStatus, LivenessEnrichment, ObservationStatus,
     ObservationView, ProjectionDiagnostic, QueryDiagnostic, ReviewHistoryEntry,
     RevisionCommitRangeView, RevisionListEntry, RevisionListOptions, RevisionOverview,
@@ -108,7 +109,10 @@ struct RevisionsPayload {
 #[serde(rename_all = "camelCase")]
 struct ThreadsPayload {
     schema: &'static str,
-    event_set_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event_set_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    projection_stamp: Option<String>,
     event_count: usize,
     thread_count: usize,
     threads: Vec<ThreadDocument>,
@@ -133,7 +137,10 @@ struct ThreadsPayload {
 #[serde(rename_all = "camelCase")]
 struct AttentionPayload {
     schema: &'static str,
-    event_set_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event_set_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    projection_stamp: Option<String>,
     event_count: usize,
     items: Vec<AttentionItem>,
     diagnostics: Vec<ProjectionDiagnostic>,
@@ -1459,7 +1466,8 @@ pub(super) fn threads_json(repo: &Path) -> Result<String, String> {
     diagnostics.extend(display_diagnostics);
     let payload = ThreadsPayload {
         schema: "pointbreak.inspect-threads",
-        event_set_hash: state.event_set_hash.unwrap_or_default(),
+        event_set_hash: state.event_set_hash,
+        projection_stamp: None,
         event_count: state.event_count,
         thread_count: threads.len(),
         threads,
@@ -1470,6 +1478,44 @@ pub(super) fn threads_json(repo: &Path) -> Result<String, String> {
     };
     let span = tracing::debug_span!("shore.inspect.threads.serialize_json");
     let _guard = span.enter();
+    serde_json::to_string(&payload).map_err(|error| error.to_string())
+}
+
+pub(super) fn routed_threads_json(
+    repo: &Path,
+    derived: &DerivedHistoryAccess,
+) -> Result<RoutedJson, String> {
+    if !derived.is_active() {
+        return threads_json(repo).map(RoutedJson::Ok);
+    }
+    match derived.threads()? {
+        DerivedThreadsRoute::Off => threads_json(repo).map(RoutedJson::Ok),
+        DerivedThreadsRoute::Ready(threads) => {
+            serialize_derived_threads_payload(threads).map(RoutedJson::Ok)
+        }
+        DerivedThreadsRoute::Unavailable(status) => Ok(RoutedJson::Unavailable(status)),
+    }
+}
+
+fn serialize_derived_threads_payload(derived: DerivedThreads) -> Result<String, String> {
+    let view = derived.supersession;
+    let threads = view
+        .components
+        .iter()
+        .map(|component| thread_document(component, &view))
+        .collect::<Result<Vec<_>, String>>()?;
+    let payload = ThreadsPayload {
+        schema: "pointbreak.inspect-threads",
+        event_set_hash: None,
+        projection_stamp: Some(derived.projection_stamp),
+        event_count: derived.event_count,
+        thread_count: threads.len(),
+        threads,
+        supersedes: revision_edge_map(&view.supersedes),
+        superseded_by: revision_edge_map(&view.superseded_by),
+        revision_classification: revision_classification(&view),
+        diagnostics: derived.diagnostics,
+    };
     serde_json::to_string(&payload).map_err(|error| error.to_string())
 }
 
@@ -1517,12 +1563,45 @@ pub(super) fn attention_json(repo: &Path, revision: Option<&str>) -> Result<Stri
     let result = list_attention(options).map_err(|error| error.to_string())?;
     let payload = AttentionPayload {
         schema: "pointbreak.inspect-attention",
-        event_set_hash: result.event_set_hash,
+        event_set_hash: Some(result.event_set_hash),
+        projection_stamp: None,
         event_count: result.event_count,
         items: result.items,
         diagnostics: result.diagnostics,
     };
     serde_json::to_string(&payload).map_err(|error| error.to_string())
+}
+
+pub(super) fn routed_attention_json(
+    repo: &Path,
+    derived: &DerivedHistoryAccess,
+    revision: Option<&str>,
+) -> Result<RoutedJson, String> {
+    if !derived.is_active() {
+        return attention_json(repo, revision).map(RoutedJson::Ok);
+    }
+    let revision = revision.map(|revision| RevisionId::new(revision.to_owned()));
+    match derived.attention(revision.as_ref())? {
+        DerivedAttentionRoute::Off => {
+            attention_json(repo, revision.as_ref().map(RevisionId::as_str)).map(RoutedJson::Ok)
+        }
+        DerivedAttentionRoute::Ready(attention) => {
+            serialize_derived_attention_payload(attention).map(RoutedJson::Ok)
+        }
+        DerivedAttentionRoute::Unavailable(status) => Ok(RoutedJson::Unavailable(status)),
+    }
+}
+
+fn serialize_derived_attention_payload(derived: DerivedAttention) -> Result<String, String> {
+    serde_json::to_string(&AttentionPayload {
+        schema: "pointbreak.inspect-attention",
+        event_set_hash: None,
+        projection_stamp: Some(derived.projection_stamp),
+        event_count: derived.event_count,
+        items: derived.items,
+        diagnostics: derived.diagnostics,
+    })
+    .map_err(|error| error.to_string())
 }
 
 /// The short display form the client paints inside a DAG node (`shortId`): the
@@ -2883,6 +2962,35 @@ mod tests {
         let payload: serde_json::Value =
             serde_json::from_str(&threads_json(repo.path()).unwrap()).unwrap();
         assert_eq!(payload["schema"], "pointbreak.inspect-threads");
+    }
+
+    #[test]
+    fn derived_thread_and_attention_documents_use_the_shared_projection_stamp() {
+        let threads: serde_json::Value = serde_json::from_str(
+            &serialize_derived_threads_payload(DerivedThreads {
+                projection_stamp: "projection:shared".to_owned(),
+                event_count: 7,
+                supersession: SupersessionView::default(),
+                diagnostics: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(threads["projectionStamp"], "projection:shared");
+        assert!(threads.get("eventSetHash").is_none());
+
+        let attention: serde_json::Value = serde_json::from_str(
+            &serialize_derived_attention_payload(DerivedAttention {
+                projection_stamp: "projection:shared".to_owned(),
+                event_count: 7,
+                items: Vec::new(),
+                diagnostics: Vec::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(attention["projectionStamp"], "projection:shared");
+        assert!(attention.get("eventSetHash").is_none());
     }
 
     #[test]

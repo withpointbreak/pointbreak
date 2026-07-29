@@ -1,6 +1,7 @@
 //! Product contract and candidate-independent reference semantics for derived access.
 #![cfg_attr(not(test), allow(dead_code))]
 
+pub(crate) mod attention;
 #[cfg(any(test, feature = "bench"))]
 pub(crate) mod checkpoint;
 pub(crate) mod cursor;
@@ -15,6 +16,7 @@ pub(crate) mod revisions;
 pub(crate) mod semantic;
 pub(crate) mod service;
 pub(crate) mod sqlite;
+pub(crate) mod threads;
 pub(crate) mod verification;
 pub(crate) mod writer;
 pub(crate) use super::store::backend::{QualificationJournalCursor, QualificationLocalJournal};

@@ -17,9 +17,9 @@ use crate::session::derived_access::semantic::state::{
 };
 use crate::session::derived_access::semantic::{
     AssessmentFact, CommitAssociationFact, CommitWithdrawalFact, InputRequestFact,
-    InputResponseFact, RefAssociationFact, RefWithdrawalFact, RevisionFact, SemanticFact,
-    SemanticFactKind, SemanticModelError, SemanticSnapshot, ValidationFact, decode_enum,
-    decode_string_list, encode_enum, encode_string_list,
+    InputResponseFact, MaterializedAttentionSnapshot, RefAssociationFact, RefWithdrawalFact,
+    RevisionFact, SemanticFact, SemanticFactKind, SemanticModelError, SemanticSnapshot,
+    ValidationFact, decode_enum, decode_string_list, encode_enum, encode_string_list,
 };
 use crate::session::event::{
     EventSignatureRecordedPayload, EventType, ReviewObservationRecordedPayload, ShoreEvent,
@@ -668,6 +668,7 @@ impl SqliteSemantic {
             observed.epoch,
             observed.sequence,
             None,
+            MaterializedFactFamilies::AllExceptObservations,
         )?);
         #[cfg(any(test, feature = "longitudinal-counting"))]
         {
@@ -677,6 +678,43 @@ impl SqliteSemantic {
         Ok(LocatorRead::Ready(SemanticSnapshot::from_materialized(
             observed, state, &facts,
         )?))
+    }
+
+    pub(crate) fn materialized_attention_snapshot(
+        &self,
+        observed: TruthCursor,
+    ) -> Result<LocatorRead<MaterializedAttentionSnapshot>, SqliteSemanticError> {
+        let connection = self.locator.validated_connection()?;
+        let checkpoint = read_locator_checkpoint(&connection)?;
+        validate_meta(&connection, checkpoint.applied)?;
+        if checkpoint.applied.epoch != observed.epoch
+            || checkpoint.applied.sequence < observed.sequence
+        {
+            return Ok(LocatorRead::CatchUpRequired {
+                applied: checkpoint.applied,
+                observed,
+            });
+        }
+        let state = query_materialized_state(&connection)?;
+        let facts = query_materialized_compact_facts(
+            &connection,
+            observed.epoch,
+            observed.sequence,
+            None,
+            MaterializedFactFamilies::Attention,
+        )?;
+        let supersession =
+            crate::session::derived_access::semantic::thread::supersession_from_facts(&facts)?;
+        let attention = crate::session::derived_access::semantic::attention::AttentionSemanticSnapshot::from_facts_with_supersession(
+            &facts,
+            &supersession,
+        )?;
+        Ok(LocatorRead::Ready(MaterializedAttentionSnapshot {
+            as_of: observed,
+            state,
+            supersession,
+            attention,
+        }))
     }
 
     pub(crate) fn materialized_engagement_snapshot(
@@ -703,6 +741,7 @@ impl SqliteSemantic {
             observed.epoch,
             observed.sequence,
             Some(engagement_id),
+            MaterializedFactFamilies::AllExceptObservations,
         )?);
         Ok(LocatorRead::Ready(SemanticSnapshot::from_materialized(
             observed, state, &facts,
@@ -1700,64 +1739,108 @@ fn query_materialized_state(
     Ok(SemanticStateSnapshot::from_materialized(state, &duplicates))
 }
 
+#[derive(Clone, Copy)]
+enum MaterializedFactFamilies {
+    AllExceptObservations,
+    Attention,
+}
+
+impl MaterializedFactFamilies {
+    const fn predicate(self) -> &'static str {
+        match self {
+            Self::AllExceptObservations => "representative.family_id != 2",
+            Self::Attention => "representative.family_id IN (1, 3, 4, 5, 6)",
+        }
+    }
+}
+
 fn query_materialized_facts(
     connection: &rusqlite::Connection,
     journal: &QualificationLocalJournal,
     epoch: u64,
     sequence: u64,
     engagement_id: Option<&str>,
+    families: MaterializedFactFamilies,
 ) -> Result<Vec<HydratedSemanticFact>, SqliteSemanticError> {
-    let mut statement = connection
-        .prepare(
-            "SELECT locator.epoch, event.sequence, receipt.logical_reread_key_hash,
-                    locator.replay_key, locator.event_id, locator.event_type,
-                    locator.journal_id, event.revision_id, event.semantic_id,
-                    event.content_hash, locator.payload_hash,
-                    event.occurred_at, event.assertion_mode,
-                    locator.track_id, event.actor_id, receipt.validation_witness,
-                    revision.object_id, revision.engagement_id, revision.supersedes_json,
-                    revision.base_commit_oid, revision.capture_commit_oid,
-                    revision.capture_tree_oid,
-                    assessment.assessment, assessment.replaces_json,
-                    assessment.related_observations_json,
-                    assessment.related_requests_json, assessment.revision_scoped,
-                    request.reason_code, request.title,
-                    response.request_id,
-                    validation.check_name, validation.status, validation.exit_code,
-                    validation.completed_at, validation.log_hashes_json,
-                    commit_association.commit_oid, commit_association.tree_oid,
-                    commit_withdrawal.association_id,
-                    ref_association.ref_name, ref_association.head_oid,
-                    ref_withdrawal.association_id,
-                    receipt.epoch
-             FROM semantic_representative AS representative
-             JOIN semantic_event_fact_text AS event ON event.sequence = representative.sequence
-             JOIN locator_event_text AS locator ON locator.sequence = event.sequence
-             JOIN cursor_receipt_text AS receipt ON receipt.sequence = event.sequence
-             LEFT JOIN semantic_revision_fact AS revision
-               ON revision.sequence = event.sequence
-             LEFT JOIN semantic_assessment_fact AS assessment
-               ON assessment.sequence = event.sequence
-             LEFT JOIN semantic_request_fact AS request
-               ON request.sequence = event.sequence
-             LEFT JOIN semantic_response_fact AS response
-               ON response.sequence = event.sequence
-             LEFT JOIN semantic_validation_fact AS validation
-               ON validation.sequence = event.sequence
-             LEFT JOIN semantic_commit_association_fact AS commit_association
-               ON commit_association.sequence = event.sequence
-             LEFT JOIN semantic_commit_withdrawal_fact AS commit_withdrawal
-               ON commit_withdrawal.sequence = event.sequence
-             LEFT JOIN semantic_ref_association_fact AS ref_association
-               ON ref_association.sequence = event.sequence
-             LEFT JOIN semantic_ref_withdrawal_fact AS ref_withdrawal
-               ON ref_withdrawal.sequence = event.sequence
-             WHERE representative.family_id != 2
-               AND locator.epoch = ?1 AND event.sequence <= ?2
-               AND (
-                   ?3 IS NULL
-                   OR event.revision_id IN (
-                       SELECT selected_event.revision_id
+    query_materialized_compact_facts(connection, epoch, sequence, engagement_id, families)?
+        .into_iter()
+        .map(|fact| hydrate_semantic_fact(journal, fact))
+        .collect()
+}
+
+fn query_materialized_compact_facts(
+    connection: &rusqlite::Connection,
+    epoch: u64,
+    sequence: u64,
+    engagement_id: Option<&str>,
+    families: MaterializedFactFamilies,
+) -> Result<Vec<SemanticFact>, SqliteSemanticError> {
+    let sql = format!(
+        "SELECT locator.epoch, event.sequence, receipt.logical_reread_key_hash,
+                locator.replay_key, locator.event_id, locator.event_type,
+                locator.journal_id, event.revision_id, event.semantic_id,
+                event.content_hash, locator.payload_hash,
+                event.occurred_at, event.assertion_mode,
+                locator.track_id, event.actor_id, receipt.validation_witness,
+                revision.object_id, revision.engagement_id, revision.supersedes_json,
+                revision.base_commit_oid, revision.capture_commit_oid,
+                revision.capture_tree_oid,
+                assessment.assessment, assessment.replaces_json,
+                assessment.related_observations_json,
+                assessment.related_requests_json, assessment.revision_scoped,
+                request.reason_code, request.title,
+                response.request_id,
+                validation.check_name, validation.status, validation.exit_code,
+                validation.completed_at, validation.log_hashes_json,
+                commit_association.commit_oid, commit_association.tree_oid,
+                commit_withdrawal.association_id,
+                ref_association.ref_name, ref_association.head_oid,
+                ref_withdrawal.association_id,
+                receipt.epoch
+         FROM semantic_representative AS representative
+         JOIN semantic_event_fact_text AS event ON event.sequence = representative.sequence
+         JOIN locator_event_text AS locator ON locator.sequence = event.sequence
+         JOIN cursor_receipt_text AS receipt ON receipt.sequence = event.sequence
+         LEFT JOIN semantic_revision_fact AS revision
+           ON revision.sequence = event.sequence
+         LEFT JOIN semantic_assessment_fact AS assessment
+           ON assessment.sequence = event.sequence
+         LEFT JOIN semantic_request_fact AS request
+           ON request.sequence = event.sequence
+         LEFT JOIN semantic_response_fact AS response
+           ON response.sequence = event.sequence
+         LEFT JOIN semantic_validation_fact AS validation
+           ON validation.sequence = event.sequence
+         LEFT JOIN semantic_commit_association_fact AS commit_association
+           ON commit_association.sequence = event.sequence
+         LEFT JOIN semantic_commit_withdrawal_fact AS commit_withdrawal
+           ON commit_withdrawal.sequence = event.sequence
+         LEFT JOIN semantic_ref_association_fact AS ref_association
+           ON ref_association.sequence = event.sequence
+         LEFT JOIN semantic_ref_withdrawal_fact AS ref_withdrawal
+           ON ref_withdrawal.sequence = event.sequence
+         WHERE {}
+           AND locator.epoch = ?1 AND event.sequence <= ?2
+           AND (
+               ?3 IS NULL
+               OR event.revision_id IN (
+                   SELECT selected_event.revision_id
+                   FROM semantic_revision_fact AS selected_revision
+                   JOIN semantic_event_fact_text AS selected_event
+                     ON selected_event.sequence = selected_revision.sequence
+                   JOIN locator_event AS selected_locator
+                     ON selected_locator.sequence = selected_event.sequence
+                   JOIN semantic_representative AS selected_representative
+                     ON selected_representative.family_id = 1
+                    AND selected_representative.sequence = selected_event.sequence
+                   WHERE selected_revision.engagement_id = ?3
+                     AND selected_locator.epoch = ?1
+                     AND selected_event.sequence <= ?2
+               )
+               OR (
+                   representative.family_id = 11
+                   AND event.content_hash IN (
+                       SELECT selected_event.content_hash
                        FROM semantic_revision_fact AS selected_revision
                        JOIN semantic_event_fact_text AS selected_event
                          ON selected_event.sequence = selected_revision.sequence
@@ -1770,26 +1853,13 @@ fn query_materialized_facts(
                          AND selected_locator.epoch = ?1
                          AND selected_event.sequence <= ?2
                    )
-                   OR (
-                       representative.family_id = 11
-                       AND event.content_hash IN (
-                           SELECT selected_event.content_hash
-                           FROM semantic_revision_fact AS selected_revision
-                           JOIN semantic_event_fact_text AS selected_event
-                             ON selected_event.sequence = selected_revision.sequence
-                           JOIN locator_event AS selected_locator
-                             ON selected_locator.sequence = selected_event.sequence
-                           JOIN semantic_representative AS selected_representative
-                             ON selected_representative.family_id = 1
-                            AND selected_representative.sequence = selected_event.sequence
-                           WHERE selected_revision.engagement_id = ?3
-                             AND selected_locator.epoch = ?1
-                             AND selected_event.sequence <= ?2
-                       )
-                   )
                )
-             ORDER BY locator.replay_key, receipt.logical_reread_key_hash",
-        )
+           )
+         ORDER BY locator.replay_key, receipt.logical_reread_key_hash",
+        families.predicate()
+    );
+    let mut statement = connection
+        .prepare(&sql)
         .map_err(|error| sqlite_error("prepare materialized semantic facts", error))?;
     let mut rows = statement
         .query(params![
@@ -1815,7 +1885,7 @@ fn query_materialized_facts(
                 fact.cursor
             )));
         }
-        facts.push(hydrate_semantic_fact(journal, fact)?);
+        facts.push(fact);
     }
     Ok(facts)
 }

@@ -362,6 +362,16 @@ impl DerivedAccessService {
         Ok(self.semantic.materialized_audit_snapshot(observed)?)
     }
 
+    pub(crate) fn semantic_materialized_attention_snapshot(
+        &self,
+    ) -> Result<
+        LocatorRead<crate::session::derived_access::semantic::MaterializedAttentionSnapshot>,
+        DerivedAccessServiceError,
+    > {
+        let observed = self.cursor.head()?.cursor;
+        Ok(self.semantic.materialized_attention_snapshot(observed)?)
+    }
+
     pub(crate) fn semantic_materialized_engagement_snapshot(
         &self,
         engagement_id: &str,

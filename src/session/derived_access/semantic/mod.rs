@@ -188,6 +188,14 @@ pub(crate) struct SemanticSnapshot {
     pub(crate) semantic_receipt: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MaterializedAttentionSnapshot {
+    pub(crate) as_of: TruthCursor,
+    pub(crate) state: SemanticStateSnapshot,
+    pub(crate) supersession: crate::session::SupersessionView,
+    pub(crate) attention: AttentionSemanticSnapshot,
+}
+
 impl SemanticSnapshot {
     /// Strict full-replay oracle/rebuild path.
     pub(crate) fn from_events(

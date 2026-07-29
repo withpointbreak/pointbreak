@@ -426,6 +426,18 @@ impl SqliteCursorLedger {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn head_with_snapshot_hook(
+        &self,
+        hook: impl FnOnce(),
+    ) -> Result<TruthHead, CursorLedgerError> {
+        let (_connection, metadata) = self.hot_read_connection_with_hook(hook)?;
+        Ok(TruthHead {
+            store_id: metadata.store_id,
+            cursor: TruthCursor::new(metadata.epoch, metadata.head_sequence),
+        })
+    }
+
     pub(crate) fn append_event(
         &self,
         event: &ShoreEvent,
@@ -780,8 +792,23 @@ impl SqliteCursorLedger {
     }
 
     fn hot_read_connection(&self) -> Result<(Connection, Metadata), CursorLedgerError> {
+        self.hot_read_connection_with_hook(|| {})
+    }
+
+    fn hot_read_connection_with_hook(
+        &self,
+        hook: impl FnOnce(),
+    ) -> Result<(Connection, Metadata), CursorLedgerError> {
         let connection = open_connection(&self.database_path, false)?;
+        // Keep metadata, bounded-head validation, and any subsequent delta query
+        // on one WAL snapshot. Without an explicit read transaction, a writer
+        // can commit between the metadata and receipt SELECTs and make an atomic
+        // receipt-plus-head publication look torn to the reader.
+        connection
+            .execute_batch("BEGIN DEFERRED")
+            .map_err(|error| sqlite_error("begin hot-read snapshot", error))?;
         let metadata = validate_metadata_header(&connection, &self.identity)?;
+        hook();
         validate_bounded_head(&connection, &metadata)?;
         Ok((connection, metadata))
     }

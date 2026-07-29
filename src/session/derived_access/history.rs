@@ -331,7 +331,6 @@ impl DerivedHistoryAccess {
             if head.sequence == truth_count && applied == head {
                 return Ok(CurrentRead::Ready(Arc::clone(existing)));
             }
-            *guard = None;
             if head.sequence != truth_count {
                 return Ok(CurrentRead::Unavailable(status(
                     DerivedHistoryAvailability::RebuildRequired,

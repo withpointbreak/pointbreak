@@ -664,12 +664,18 @@ fn route(
             &state.revisions_cache,
             &state.snapshot_summaries,
         )),
-        "/api/threads" => api_response(api::threads_json(repo)),
+        "/api/threads" => {
+            routed_api_response(api::routed_threads_json(repo, &state.derived_history))
+        }
         "/api/attention" => {
             // An empty `revision=` is absent, matching the exact-match history
             // params (`track=`/`snapshot=`).
             let revision = query_param(query, "revision").filter(|value| !value.is_empty());
-            api_response(api::attention_json(repo, revision.as_deref()))
+            routed_api_response(api::routed_attention_json(
+                repo,
+                &state.derived_history,
+                revision.as_deref(),
+            ))
         }
         "/api/freshness" => {
             // The freshness poll is the client's change detector; ride it to

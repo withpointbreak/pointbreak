@@ -40,7 +40,6 @@ pub(crate) fn thread_documents_from_facts(
     }
 
     let mut captures = BTreeMap::<RevisionId, &super::RevisionFact>::new();
-    let mut edges = Vec::new();
     for fact in facts {
         let SemanticFactKind::Revision(revision) = &fact.kind else {
             continue;
@@ -51,17 +50,8 @@ pub(crate) fn thread_documents_from_facts(
                 .ok_or(SemanticModelError::MissingField("revision_id"))?,
         );
         captures.insert(id.clone(), revision);
-        edges.push((
-            id,
-            revision
-                .supersedes
-                .iter()
-                .cloned()
-                .map(RevisionId::new)
-                .collect(),
-        ));
     }
-    let supersession = SupersessionView::from_edges(edges);
+    let supersession = supersession_from_facts(facts)?;
     let current_assessments = current_assessments(facts)?;
     let mut diagnostics = supersession.diagnostics.clone();
     let mut engagements = Vec::new();
@@ -121,6 +111,31 @@ pub(crate) fn thread_documents_from_facts(
         supersession: &supersession,
         engagements: &engagements,
     })?)
+}
+
+pub(crate) fn supersession_from_facts(
+    facts: &[SemanticFact],
+) -> std::result::Result<SupersessionView, SemanticModelError> {
+    let mut edges = Vec::new();
+    for fact in facts {
+        let SemanticFactKind::Revision(revision) = &fact.kind else {
+            continue;
+        };
+        let revision_id = fact
+            .revision_id
+            .as_deref()
+            .ok_or(SemanticModelError::MissingField("revision_id"))?;
+        edges.push((
+            RevisionId::new(revision_id),
+            revision
+                .supersedes
+                .iter()
+                .cloned()
+                .map(RevisionId::new)
+                .collect(),
+        ));
+    }
+    Ok(SupersessionView::from_edges(edges))
 }
 
 fn current_assessments(

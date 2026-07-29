@@ -40,13 +40,13 @@ pub(crate) struct OpenRequestFact {
     pub(crate) event_id: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AttentionSemanticSnapshot {
     pub(crate) current_assessments: Vec<CurrentAssessmentFact>,
     pub(crate) open_requests: Vec<OpenRequestFact>,
-    pub(crate) items: Vec<serde_json::Value>,
-    pub(crate) diagnostics: Vec<serde_json::Value>,
+    pub(crate) items: Vec<AttentionItem>,
+    pub(crate) diagnostics: Vec<crate::session::ProjectionDiagnostic>,
 }
 
 impl AttentionSemanticSnapshot {
@@ -103,29 +103,25 @@ impl AttentionSemanticSnapshot {
         });
 
         let attention = attention_from_events(events, None)?;
-        let items = attention
-            .items
-            .iter()
-            .map(serde_json::to_value)
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let diagnostics = attention
-            .diagnostics
-            .iter()
-            .map(serde_json::to_value)
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-
         Ok(Self {
             current_assessments,
             open_requests,
-            items,
-            diagnostics,
+            items: attention.items,
+            diagnostics: attention.diagnostics,
         })
     }
 
     pub(crate) fn from_facts(
         facts: &[SemanticFact],
     ) -> std::result::Result<Self, SemanticModelError> {
-        let supersession = supersession_from_facts(facts)?;
+        let supersession = super::thread::supersession_from_facts(facts)?;
+        Self::from_facts_with_supersession(facts, &supersession)
+    }
+
+    pub(crate) fn from_facts_with_supersession(
+        facts: &[SemanticFact],
+        supersession: &SupersessionView,
+    ) -> std::result::Result<Self, SemanticModelError> {
         let current = current_assessment_records(facts)?;
         let (requests, open_request_ids) = open_request_records(facts)?;
         let mut items = Vec::new();
@@ -144,18 +140,18 @@ impl AttentionSemanticSnapshot {
                 tier: tier_for(&detail),
                 revision_id: Some(RevisionId::new(request.revision_id.clone())),
                 freshness: freshness_for(
-                    &supersession,
+                    supersession,
                     &RevisionId::new(request.revision_id.clone()),
                 ),
                 observed_at: request.observed_at.clone(),
                 detail,
             });
         }
-        ambiguous_items(&current, &supersession, &mut items);
-        competing_head_items(facts, &supersession, &mut items)?;
-        stale_items(&current, &supersession, &mut items);
-        failed_validation_items(facts, &current, &supersession, &mut items)?;
-        follow_up_items(&current, &open_request_ids, &supersession, &mut items);
+        ambiguous_items(&current, supersession, &mut items);
+        competing_head_items(facts, supersession, &mut items)?;
+        stale_items(&current, supersession, &mut items);
+        failed_validation_items(facts, &current, supersession, &mut items)?;
+        follow_up_items(&current, &open_request_ids, supersession, &mut items);
         items.sort_by(|left, right| {
             tier_rank(left.tier)
                 .cmp(&tier_rank(right.tier))
@@ -189,20 +185,11 @@ impl AttentionSemanticSnapshot {
                 event_id: request.event_id,
             })
             .collect();
-        let items = items
-            .iter()
-            .map(serde_json::to_value)
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let diagnostics = supersession
-            .diagnostics
-            .iter()
-            .map(serde_json::to_value)
-            .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(Self {
             current_assessments,
             open_requests,
             items,
-            diagnostics,
+            diagnostics: supersession.diagnostics.clone(),
         })
     }
 }
@@ -245,27 +232,6 @@ struct RequestRecord {
     opened_by: String,
     observed_at: String,
     event_id: String,
-}
-
-fn supersession_from_facts(
-    facts: &[SemanticFact],
-) -> std::result::Result<SupersessionView, SemanticModelError> {
-    let mut edges = Vec::new();
-    for fact in facts {
-        let SemanticFactKind::Revision(revision) = &fact.kind else {
-            continue;
-        };
-        edges.push((
-            RevisionId::new(required(&fact.revision_id, "revision_id")?),
-            revision
-                .supersedes
-                .iter()
-                .cloned()
-                .map(RevisionId::new)
-                .collect(),
-        ));
-    }
-    Ok(SupersessionView::from_edges(edges))
 }
 
 fn current_assessment_records(

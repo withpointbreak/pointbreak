@@ -954,14 +954,14 @@ function wireDagInteractions(scope: HTMLElement): void {
 // ---------------------------------------------------------------------------
 
 // The scoped attention set the open revision's page renders, cached under the
-// revision id AND the global attention doc's eventSetHash it was fetched under:
+// revision id AND the global attention document generation it was fetched under:
 // when the freshness poll moves the global doc, the composite revision-id dedupe
-// must not pin this block, so a repaint under a changed hash re-fetches. `items`
+// must not pin this block, so a repaint under a changed stamp/hash re-fetches. `items`
 // is null when the scoped read failed — the block degrades to omission and the
 // page stays functional. Transient view-cache — never on the store.
 interface ScopedAttention {
   revisionId: string;
-  eventSetHash: string | undefined;
+  generation: string | undefined;
   items: AttentionItem[] | null;
 }
 let scopedAttention: ScopedAttention | null = null;
@@ -974,11 +974,12 @@ let scopedAttentionPending: Omit<ScopedAttention, "items"> | null = null;
 let scopedAttentionGeneration = 0;
 
 /** Whether the cached (or in-flight) scoped set matches the revision and the
- * CURRENT global attention hash — false means a re-fetch is due. */
+ * CURRENT global attention generation — false means a re-fetch is due. */
 function scopedAttentionFresh(revisionId: string): boolean {
-  const eventSetHash = getState().attention?.eventSetHash;
-  const hit = (s: { revisionId: string; eventSetHash?: string } | null) =>
-    s?.revisionId === revisionId && s.eventSetHash === eventSetHash;
+  const attention = getState().attention;
+  const generation = attention?.projectionStamp ?? attention?.eventSetHash;
+  const hit = (s: { revisionId: string; generation?: string } | null) =>
+    s?.revisionId === revisionId && s.generation === generation;
   return hit(scopedAttention) || hit(scopedAttentionPending);
 }
 
@@ -987,9 +988,11 @@ function scopedAttentionFresh(revisionId: string): boolean {
  * composite fetch without turning the page into an error paint. A read that a
  * newer one superseded drops its response instead of committing it. */
 async function fetchScopedAttention(revisionId: string): Promise<void> {
-  const eventSetHash = getState().attention?.eventSetHash;
-  const generation = ++scopedAttentionGeneration;
-  scopedAttentionPending = { revisionId, eventSetHash };
+  const attention = getState().attention;
+  const attentionGeneration =
+    attention?.projectionStamp ?? attention?.eventSetHash;
+  const requestGeneration = ++scopedAttentionGeneration;
+  scopedAttentionPending = { revisionId, generation: attentionGeneration };
   let items: AttentionItem[] | null;
   try {
     const doc = (await fetchJSON(
@@ -999,9 +1002,9 @@ async function fetchScopedAttention(revisionId: string): Promise<void> {
   } catch {
     items = null;
   }
-  if (generation !== scopedAttentionGeneration) return;
+  if (requestGeneration !== scopedAttentionGeneration) return;
   scopedAttentionPending = null;
-  scopedAttention = { revisionId, eventSetHash, items };
+  scopedAttention = { revisionId, generation: attentionGeneration, items };
 }
 
 // The outstanding block: the scoped attention item SET, one row per item (kind

@@ -100,6 +100,8 @@ export interface IdentityDoc {
 export interface ThreadsDoc {
   threads: unknown[];
   revisionClassification: Record<string, unknown>;
+  projectionStamp?: string;
+  eventSetHash?: string;
   // The supersession-thread count the stat row reads (present in the committed fixture).
   threadCount?: number;
 }
@@ -162,6 +164,7 @@ export interface AttentionItem {
 export interface AttentionDoc {
   items: AttentionItem[];
   eventCount?: number;
+  projectionStamp?: string;
   eventSetHash?: string;
 }
 

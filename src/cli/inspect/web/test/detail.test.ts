@@ -1237,6 +1237,10 @@ describe("the per-revision outstanding block (scoped attention on the detail pag
     items: [],
     eventSetHash,
   });
+  const derivedAttentionOf = (projectionStamp: string): AttentionDoc => ({
+    items: [],
+    projectionStamp,
+  });
 
   it("fetches the scoped set with the composite document and renders one row per item", async () => {
     setScopedAttentionResponse({ items: scopedItems });
@@ -1313,6 +1317,29 @@ describe("the per-revision outstanding block (scoped attention on the detail pag
     // The block re-rendered from the new scoped response.
     const rows = detailEl().querySelectorAll(".outstanding-set li");
     expect(rows.length).toBe(1);
+  });
+
+  it("prefers the derived projection stamp for scoped-attention invalidation", async () => {
+    setScopedAttentionResponse({ items: scopedItems });
+    store.commit({
+      selected: { kind: "revision", id: REV },
+      attention: derivedAttentionOf("projection:one"),
+    });
+    await detail.showComposite(REV);
+    expect(
+      attentionRequests().filter((u) => u.includes("revision=")).length,
+    ).toBe(1);
+
+    await detail.showComposite(REV);
+    expect(
+      attentionRequests().filter((u) => u.includes("revision=")).length,
+    ).toBe(1);
+
+    store.commit({ attention: derivedAttentionOf("projection:two") });
+    await detail.showComposite(REV);
+    expect(
+      attentionRequests().filter((u) => u.includes("revision=")).length,
+    ).toBe(2);
   });
 
   it("drops an out-of-order scoped response instead of overwriting a fresher cache", async () => {
