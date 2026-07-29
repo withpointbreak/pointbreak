@@ -1019,7 +1019,9 @@ pub(super) fn routed_zero_new_count_json(
     derived: &DerivedHistoryAccess,
 ) -> Result<RoutedJson, String> {
     match derived.freshness()? {
-        DerivedHistoryRoute::Off => zero_new_count_json().map(RoutedJson::Ok),
+        DerivedHistoryRoute::Off | DerivedHistoryRoute::Unavailable(_) => {
+            zero_new_count_json().map(RoutedJson::Ok)
+        }
         DerivedHistoryRoute::Ready(freshness) => {
             serialize_derived_new_count(DerivedHistoryNewCount {
                 projection_stamp: freshness.projection_stamp,
@@ -1027,7 +1029,6 @@ pub(super) fn routed_zero_new_count_json(
             })
             .map(RoutedJson::Ok)
         }
-        DerivedHistoryRoute::Unavailable(status) => Ok(RoutedJson::Unavailable(status)),
         DerivedHistoryRoute::ExhaustiveSearchFallback => {
             Err("freshness cannot request exhaustive search".to_owned())
         }

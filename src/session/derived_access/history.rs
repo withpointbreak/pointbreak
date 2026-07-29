@@ -56,8 +56,12 @@ review_event AS (
         'artifact_removed'
     )
       AND (
-          locator.event_type != 'work_object_proposed'
-          OR event.revision_id IS NOT NULL
+          event.revision_id IS NOT NULL
+          OR locator.event_type NOT IN (
+              'work_object_proposed',
+              'input_request_opened',
+              'input_request_responded'
+          )
       )
 )";
 
@@ -194,10 +198,7 @@ impl DerivedHistoryAccess {
         {
             LocatorRead::Ready(context) => context,
             LocatorRead::CatchUpRequired { .. } => {
-                return Ok(DerivedHistoryRoute::Unavailable(status(
-                    DerivedHistoryAvailability::CatchingUp,
-                    "derived history is catching up to authoritative truth",
-                )));
+                return Ok(DerivedHistoryRoute::Unavailable(catching_up_status()));
             }
         };
         let as_of = service
@@ -254,10 +255,7 @@ impl DerivedHistoryAccess {
         {
             LocatorRead::Ready(context) => context,
             LocatorRead::CatchUpRequired { .. } => {
-                return Ok(DerivedHistoryRoute::Unavailable(status(
-                    DerivedHistoryAvailability::CatchingUp,
-                    "derived history is catching up to authoritative truth",
-                )));
+                return Ok(DerivedHistoryRoute::Unavailable(catching_up_status()));
             }
         };
         let as_of = service
@@ -280,10 +278,17 @@ impl DerivedHistoryAccess {
                 return Ok(DerivedHistoryRoute::Unavailable(status));
             }
         };
-        let as_of = current
-            .service()
+        let service = current.service();
+        let observed = service
+            .truth_head()
+            .map_err(|error| error.to_string())?
+            .cursor;
+        let as_of = service
             .locator_checkpoint()
             .map_err(|error| error.to_string())?;
+        if as_of != observed {
+            return Ok(DerivedHistoryRoute::Unavailable(catching_up_status()));
+        }
         Ok(DerivedHistoryRoute::Ready(DerivedHistoryFreshness {
             projection_stamp: projection_stamp(store_identity, as_of)?,
             event_count: as_of.sequence,
@@ -386,8 +391,14 @@ fn select_history_rows(
     let match_count = query_count(connection, &page_predicate, &page_parameters)?;
     let facets = query_facets(connection, &facet_predicate, &facet_parameters)?;
     let distinct_values = query_distinct_values(connection)?;
-    let (offset, match_index, at_absent) =
-        resolve_history_offset(connection, query, page, &page_predicate, &page_parameters)?;
+    let (offset, match_index, at_absent) = resolve_history_offset(
+        connection,
+        query,
+        page,
+        &page_predicate,
+        &page_parameters,
+        match_count,
+    )?;
     if at_absent {
         return Ok(HistorySelection {
             event_ids: Vec::new(),
@@ -405,6 +416,7 @@ fn select_history_rows(
         &page_predicate,
         &page_parameters,
         offset,
+        match_count,
     )?;
     Ok(HistorySelection {
         event_ids,
@@ -568,12 +580,13 @@ fn resolve_history_offset(
     page: &HistoryPage,
     predicate: &str,
     parameters: &[Value],
+    match_count: usize,
 ) -> Result<(usize, Option<usize>, bool), String> {
     if let Some(after) = &page.after {
         if query.order == HistoryOrder::Desc {
             return Err("descending history does not support continuation cursors".to_owned());
         }
-        let occurred_at = normalize_history_cursor(after)?;
+        let occurred_at = normalized_history_cursor(after);
         let sql = format!(
             "{REVIEW_EVENT_CTE}
              SELECT count(*) FROM review_event
@@ -596,7 +609,7 @@ fn resolve_history_offset(
         ));
     }
     let Some(at) = &page.at else {
-        return Ok((page.offset.unwrap_or(0), None, false));
+        return Ok((page.offset.unwrap_or(0).min(match_count), None, false));
     };
     let sql = format!(
         "{REVIEW_EVENT_CTE}
@@ -667,6 +680,7 @@ fn query_page_ids(
     predicate: &str,
     parameters: &[Value],
     offset: usize,
+    match_count: usize,
 ) -> Result<Vec<String>, String> {
     let direction = match query.order {
         HistoryOrder::Asc => "ASC",
@@ -678,7 +692,7 @@ fn query_page_ids(
         if query.order == HistoryOrder::Desc {
             return Err("descending history does not support continuation cursors".to_owned());
         }
-        let occurred_at = normalize_history_cursor(after)?;
+        let occurred_at = normalized_history_cursor(after);
         page_predicate.push_str(
             " AND (normalized_occurred_at > ? OR \
              (normalized_occurred_at = ? AND event_id > ?))",
@@ -698,8 +712,9 @@ fn query_page_ids(
     );
     match page.limit {
         Some(limit) => {
+            let effective_limit = limit.min(match_count);
             sql.push_str(" LIMIT ? OFFSET ?");
-            page_parameters.push(to_sql_integer(limit)?.into());
+            page_parameters.push(to_sql_integer(effective_limit)?.into());
             page_parameters
                 .push(to_sql_integer(if page.after.is_some() { 0 } else { offset })?.into());
         }
@@ -727,7 +742,7 @@ fn count_new_rows(
     since: &HistoryCursor,
 ) -> Result<usize, String> {
     let (predicate, mut parameters) = history_predicate(query, true);
-    let occurred_at = normalize_history_cursor(since)?;
+    let occurred_at = normalized_history_cursor(since);
     let sql = format!(
         "{REVIEW_EVENT_CTE}
          SELECT count(*)
@@ -746,8 +761,11 @@ fn count_new_rows(
     query_count_sql(connection, &sql, &parameters)
 }
 
-fn normalize_history_cursor(cursor: &HistoryCursor) -> Result<String, String> {
-    normalize_occurred_at(&cursor.occurred_at).map_err(|error| error.to_string())
+fn normalized_history_cursor(cursor: &HistoryCursor) -> String {
+    // The authoritative in-memory order places unparseable instants before all
+    // parsed instants. Derived rows are always normalized and non-empty, so the
+    // empty SQLite key preserves that tolerant legacy behavior.
+    normalize_occurred_at(&cursor.occurred_at).unwrap_or_default()
 }
 
 fn support_event_ids(
@@ -916,6 +934,13 @@ fn status(
     }
 }
 
+fn catching_up_status() -> DerivedHistoryStatus {
+    status(
+        DerivedHistoryAvailability::CatchingUp,
+        "derived history is catching up to authoritative truth",
+    )
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
@@ -950,12 +975,17 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        EngagementId, JournalId, ObjectId, ObservationId, ReviewTargetRef, RevisionId, TrackId,
+        EngagementId, InputRequestId, InputRequestResponseId, JournalId, ObjectId, ObservationId,
+        ReviewTargetRef, RevisionId, TargetRef, TaskTargetRef, TrackId, WorkObjectId,
     };
     use crate::session::derived_access::lifecycle::LifecycleControl;
     use crate::session::event::{
-        EventTarget, EventType, ReviewInitializedPayload, ReviewObservationRecordedPayload,
-        Revision, ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload, Writer,
+        AssertionMode, EventTarget, EventType, InputRequestResponseOutcome,
+        ReviewInitializedPayload, ReviewObservationRecordedPayload, Revision, ShoreEvent,
+        WorkObjectProposal, WorkObjectProposedPayload, Writer,
+    };
+    use crate::session::projection::test_support::{
+        task_input_request_event_with_target, user_response_event,
     };
     use crate::session::workflow::history_base_from_events;
     use crate::session::{EventStore, EventWriteOutcome, apply_history_query, count_new_since};
@@ -1294,6 +1324,60 @@ mod tests {
     }
 
     #[test]
+    fn active_history_excludes_task_subject_input_requests() {
+        let task_attempt_id = WorkObjectId::new("task-attempt:sha256:history");
+        let journal_id = JournalId::new("journal:history:task");
+        let input_request_id = InputRequestId::new("input-request:sha256:history");
+        let response_id = InputRequestResponseId::new("input-request-response:sha256:history");
+        let task_target = TaskTargetRef::TaskAttempt {
+            task_attempt_id: task_attempt_id.clone(),
+        };
+        let mut request = task_input_request_event_with_target(
+            &task_attempt_id,
+            &journal_id,
+            &input_request_id,
+            "history-task-request",
+            "2026-07-28T00:00:01Z",
+            TargetRef::Task(task_target),
+            "task-only request",
+        );
+        request.target.track_id = Some(TrackId::new("agent:test"));
+        let mut response = user_response_event(
+            &input_request_id,
+            &response_id,
+            InputRequestResponseOutcome::Approved,
+            AssertionMode::Operative,
+            "2026-07-28T00:00:02Z",
+        );
+        response.target.track_id = Some(TrackId::new("agent:test"));
+        let review = review_initialized(3);
+        let events = vec![review.clone(), request, response];
+        let (_temp, access) = active_history_from_events(events.clone());
+        let config = BaseProjectionConfig::default();
+        let expected = apply_history_query(
+            &history_base_from_events(&events, &config, None).unwrap(),
+            &HistoryQuery::default(),
+            &HistoryPage::default(),
+        );
+
+        let DerivedHistoryRoute::Ready(actual) = access
+            .history(&HistoryQuery::default(), &HistoryPage::default(), &config)
+            .unwrap()
+        else {
+            panic!("active history should be current");
+        };
+        assert_eq!(actual.match_count, 1);
+        assert_eq!(actual.entries.len(), 1);
+        assert_eq!(actual.entries[0].event_id, review.event_id);
+        assert_eq!(
+            serde_json::to_value(&actual.entries).unwrap(),
+            serde_json::to_value(&expected.entries).unwrap()
+        );
+        assert_eq!(actual.facets, expected.facets);
+        assert_eq!(actual.distinct_values, expected.distinct_values);
+    }
+
+    #[test]
     fn active_new_count_matches_the_authoritative_bodyless_matrix() {
         let revision_id = RevisionId::new(format!("rev:sha256:{}", "66".repeat(32)));
         let object_id = ObjectId::new(format!("object:sha256:{}", "77".repeat(32)));
@@ -1335,6 +1419,84 @@ mod tests {
             };
             assert_eq!(actual.new_count, expected);
         }
+    }
+
+    #[test]
+    fn active_history_clamps_offsets_and_tolerates_edge_cursor_inputs() {
+        let (_temp, access) = active_history(7);
+        let config = BaseProjectionConfig::default();
+
+        for page in [
+            HistoryPage {
+                limit: Some(2),
+                offset: Some(99),
+                ..HistoryPage::default()
+            },
+            HistoryPage {
+                limit: Some(usize::MAX),
+                offset: Some(usize::MAX),
+                ..HistoryPage::default()
+            },
+        ] {
+            let DerivedHistoryRoute::Ready(actual) = access
+                .history(&HistoryQuery::default(), &page, &config)
+                .unwrap()
+            else {
+                panic!("active history should be current");
+            };
+            assert_eq!(actual.offset, 7);
+            assert!(actual.entries.is_empty());
+        }
+
+        let malformed = HistoryCursor {
+            occurred_at: "garbage".to_owned(),
+            event_id: crate::model::EventId::new("evt:sha256:before-all-legal-instants"),
+        };
+        let DerivedHistoryRoute::Ready(actual) = access
+            .new_count(&HistoryQuery::default(), &malformed)
+            .unwrap()
+        else {
+            panic!("active new-count should be current");
+        };
+        assert_eq!(actual.new_count, 7);
+    }
+
+    #[test]
+    fn freshness_rejects_a_semantic_checkpoint_behind_the_cursor_head() {
+        let (temp, access) = active_history(2);
+        let DerivedHistoryMode::Active { lifecycle, .. } = &access.mode else {
+            panic!("test access should be active");
+        };
+        let generation_id = lifecycle
+            .published_generation_id()
+            .unwrap()
+            .expect("rebuild should publish a generation");
+        let database = lifecycle
+            .paths()
+            .generation(&generation_id)
+            .join("cursor.sqlite3");
+        let connection = rusqlite::Connection::open(database).unwrap();
+        connection
+            .execute_batch(
+                "UPDATE locator_checkpoint SET applied_sequence = 1 WHERE singleton = 1;
+                 UPDATE semantic_meta SET applied_sequence = 1 WHERE singleton = 1;
+                 UPDATE product_history_meta SET applied_sequence = 1 WHERE singleton = 1;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let cold = DerivedHistoryAccess {
+            mode: DerivedHistoryMode::Active {
+                lifecycle: lifecycle.clone(),
+                current: Mutex::new(None),
+                store_identity: "store:test".to_owned(),
+                backend: StoreBackend::Local(temp.path().to_path_buf()),
+            },
+        };
+        let DerivedHistoryRoute::Unavailable(status) = cold.freshness().unwrap() else {
+            panic!("a lagging semantic checkpoint must not look current");
+        };
+        assert_eq!(status.availability, DerivedHistoryAvailability::CatchingUp);
     }
 
     #[test]
