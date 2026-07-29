@@ -35,9 +35,9 @@ use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{prepare_write_landing, resolve_write_store};
 use crate::session::{
-    ArtifactRemovalProjection, CommitGraphCondition, EventSigningOptions, EventStore,
-    EventWriteOutcome, RemovalOperativeStatus, RemovalPolicy, RevisionCommitRangeProjection,
-    TrustSet, current_timestamp, enrich_liveness, referenced_artifacts, sign_event_if_requested,
+    ArtifactRemovalProjection, CommitGraphCondition, EventSigningOptions, EventWriteOutcome,
+    RemovalOperativeStatus, RemovalPolicy, RevisionCommitRangeProjection, TrustSet,
+    current_timestamp, enrich_liveness, referenced_artifacts, sign_event_if_requested,
     writer_from_options,
 };
 use crate::storage::{Durability, LocalStorage, RemoveOutcome};
@@ -135,7 +135,7 @@ pub fn remove_content(options: RemoveOptions) -> Result<RemoveResult> {
     let store_dir = write_store.store_dir().to_path_buf();
     let storage = LocalStorage::new(&store_dir);
     prepare_write_landing(&write_store, &storage)?;
-    let event_store = EventStore::from_backend(write_store.backend());
+    let event_store = write_store.event_store()?;
 
     // Resolve the selector to content hashes from the event log + git
     // reachability — entirely before any event is emitted.
@@ -478,7 +478,7 @@ pub fn compact_store(options: CompactOptions) -> Result<CompactResult> {
     let write_store = resolve_write_store(&options.repo)?;
     let content = ContentArtifacts::from_backend(write_store.backend());
 
-    let events = EventStore::from_backend(write_store.backend()).list_events()?;
+    let events = write_store.event_store()?.list_events()?;
     let removal = ArtifactRemovalProjection::from_events(&events)?;
     let cosig = CosignatureIndex::build(&events)?;
 

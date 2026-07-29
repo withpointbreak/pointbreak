@@ -412,7 +412,7 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
     let snapshot = DiffSnapshot::new(review_id, fingerprint.object_id.clone(), files);
     let artifact = crate::session::object_artifact::build_object_artifact_v2(snapshot)?;
 
-    let event_store = EventStore::from_backend(write_store.backend());
+    let event_store = write_store.event_store()?;
     let mut recorder = CaptureRecorder::default();
     let writer = writer_from_options(&worktree_root, options.actor_id.as_ref());
     let occurred_at = current_timestamp();

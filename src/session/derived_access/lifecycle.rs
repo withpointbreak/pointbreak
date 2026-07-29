@@ -127,6 +127,10 @@ impl DerivedAccessLifecycle {
         &self.paths
     }
 
+    pub(crate) fn store_root(&self) -> &Path {
+        &self.store_root
+    }
+
     pub(crate) fn status(&self) -> Result<LifecycleStatus, LifecycleError> {
         if self.profile == DerivedAccessProfile::Off || !self.paths.root().exists() {
             return Ok(status(DerivedAccessAvailability::Absent, None, None));
@@ -233,6 +237,13 @@ impl DerivedAccessLifecycle {
         }
         if let Err(error) = validate_published(&service, &descriptor, truth_count) {
             return self.quarantine_status(error.to_string());
+        }
+        if service.locator_checkpoint()? != service.truth_head()?.cursor {
+            return Ok(status(
+                DerivedAccessAvailability::CatchingUp,
+                Some(publication.generation_id),
+                Some("derived projections are catching up to authoritative truth".to_owned()),
+            ));
         }
         Ok(status(
             DerivedAccessAvailability::Current,
@@ -440,6 +451,82 @@ impl DerivedAccessLifecycle {
             service,
             _lease: lease,
         }))
+    }
+
+    /// Open the generation selected while the caller holds the canonical writer
+    /// lock. The coordinator has already performed the exact truth-count audit at
+    /// construction; this path validates the publication and its internal cursor
+    /// coverage without repeating a history-proportional directory walk for every
+    /// append.
+    pub(crate) fn open_current_for_write_locked(
+        &self,
+        _writer_lock: &StoreWriterLock,
+    ) -> Result<Option<CurrentGeneration>, LifecycleError> {
+        if self.profile == DerivedAccessProfile::Off || !self.paths.root().exists() {
+            return Ok(None);
+        }
+        let Some(publication) = self
+            .paths
+            .current_publication()
+            .map_err(|error| self.generation_open_error(error))?
+        else {
+            return Ok(None);
+        };
+        let lease = self
+            .paths
+            .acquire_read_lease(&publication.generation_id)
+            .map_err(|error| self.generation_open_error(error))?;
+        let descriptor = self
+            .paths
+            .descriptor(&publication)
+            .map_err(|error| self.generation_open_error(error))?;
+        self.validate_descriptor(&descriptor)
+            .map_err(|error| LifecycleError::Validation(error.to_string()))?;
+        let generation_root = self.paths.generation(&publication.generation_id);
+        validate_wal_shape(&generation_root)?;
+        let service = DerivedAccessService::open_at(
+            &self.store_root,
+            &generation_root,
+            CursorLedgerIdentity::new(self.store_id.clone()),
+        )?;
+        let derived_head = service.truth_head()?.cursor.sequence;
+        validate_published(&service, &descriptor, derived_head)?;
+        Ok(Some(CurrentGeneration {
+            generation_id: publication.generation_id,
+            service,
+            _lease: lease,
+        }))
+    }
+
+    /// Admit a product writer against a stable current generation. The exact
+    /// loose-directory audit runs while the canonical writer lock excludes both
+    /// truth publication and the separately reacquired projection catch-up phase.
+    pub(crate) fn admit_writer(&self) -> Result<bool, LifecycleError> {
+        let writer_lock = StoreWriterLock::acquire(&self.store_root)?;
+        let Some(current) = self.open_current_for_write_locked(&writer_lock)? else {
+            return Ok(false);
+        };
+        let truth_count = self.truth_head_marker()?;
+        let derived_count = current.service().truth_head()?.cursor.sequence;
+        if derived_count != truth_count {
+            return Err(LifecycleError::RebuildRequired(format!(
+                "published generation does not cover {truth_count} truth events"
+            )));
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn quarantine_current_locked(
+        &self,
+        reason: &str,
+        _writer_lock: &StoreWriterLock,
+    ) -> Result<PathBuf, LifecycleError> {
+        Ok(self.paths.quarantine(reason)?)
+    }
+
+    pub(crate) fn quarantine_current(&self, reason: &str) -> Result<PathBuf, LifecycleError> {
+        let writer_lock = StoreWriterLock::acquire(&self.store_root)?;
+        self.quarantine_current_locked(reason, &writer_lock)
     }
 
     pub(crate) fn retire(&self) -> Result<Option<PathBuf>, LifecycleError> {
@@ -665,9 +752,10 @@ fn validate_published(
     let head = service.truth_head()?.cursor;
     let checkpoint = service.locator_checkpoint()?;
     if head.epoch != descriptor.epoch
-        || head.sequence != descriptor.head_sequence
+        || head.sequence < descriptor.head_sequence
         || head.sequence != truth_count
-        || checkpoint != head
+        || checkpoint.epoch != head.epoch
+        || checkpoint.sequence > head.sequence
     {
         return Err(LifecycleError::Validation(format!(
             "published coverage mismatch: head={head:?}, checkpoint={checkpoint:?}, \

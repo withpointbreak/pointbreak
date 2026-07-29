@@ -2,13 +2,12 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::store_identity::opaque_path_identity;
 use crate::error::Result;
 use crate::git::git_worktree_root;
 use crate::session::store::inventory::{
     ArtifactInventoryEntry, RevisionObjectInventory, StoreInventory, scan_store_inventory,
 };
-use crate::session::store::resolution::resolve_store;
+use crate::session::store::resolution::{opaque_path_identity, resolve_store};
 use crate::session::store::sensitivity::{
     SensitivityFinding, SensitivityScan, explain_worktree_sensitivity, scan_worktree_sensitivity,
 };

@@ -13,16 +13,13 @@
 //!
 //! [`store_status`]: super::store_status::store_status
 
-use std::ffi::OsString;
-use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
-use crate::error::{Result, ShoreError};
+use crate::error::Result;
 use crate::git::{git_common_dir, git_worktree_root};
-use crate::session::store::resolution::resolve_store;
+use crate::session::store::resolution::{opaque_path_identity, resolve_store};
 
 /// Floor label when no basename can be derived (unusual git layouts). Mirrors the
 /// `WORKING_TREE_FLOOR` idea in `src/cli/inspect/api.rs`; kept as a lib-local copy
@@ -143,63 +140,6 @@ fn basename(path: &Path) -> Option<String> {
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
-}
-
-/// Hash a normalized path into the opaque identity shared by `store status` and
-/// `/api/identity`. This stays workflow-private: equality, not path recovery or
-/// digest parsing, is the public contract.
-pub(super) fn opaque_path_identity(namespace: &str, path: &Path) -> Result<String> {
-    let normalized = normalize_path_without_requiring_leaf(path)?;
-    let digest = Sha256::digest(normalized.as_os_str().as_encoded_bytes());
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        write!(&mut hex, "{byte:02x}").expect("writing to a string cannot fail");
-    }
-    Ok(format!("{namespace}:sha256:{hex}"))
-}
-
-fn normalize_path_without_requiring_leaf(path: &Path) -> Result<PathBuf> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|error| ShoreError::Message(format!("resolve current directory: {error}")))?
-            .join(path)
-    };
-    let mut existing = absolute.as_path();
-    let mut missing = Vec::<OsString>::new();
-
-    while !existing.try_exists().map_err(|error| {
-        ShoreError::Message(format!(
-            "inspect identity path {}: {error}",
-            existing.display()
-        ))
-    })? {
-        let name = existing.file_name().ok_or_else(|| {
-            ShoreError::Message(format!(
-                "cannot find an existing ancestor for identity path {}",
-                absolute.display()
-            ))
-        })?;
-        missing.push(name.to_owned());
-        existing = existing.parent().ok_or_else(|| {
-            ShoreError::Message(format!(
-                "cannot find an existing ancestor for identity path {}",
-                absolute.display()
-            ))
-        })?;
-    }
-
-    let mut normalized = existing.canonicalize().map_err(|error| {
-        ShoreError::Message(format!(
-            "canonicalize identity path ancestor {}: {error}",
-            existing.display()
-        ))
-    })?;
-    for component in missing.into_iter().rev() {
-        normalized.push(component);
-    }
-    Ok(normalized)
 }
 
 #[cfg(test)]

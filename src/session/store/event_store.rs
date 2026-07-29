@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::error::{Result, SchemaBreakRecord, ShoreError};
 use crate::model::id_prefix;
+use crate::session::derived_access::writer::{DerivedWriteCoordinator, DerivedWriteDiagnostic};
 use crate::session::event::{AssertionMode, EventType, ShoreEvent, event_type_from_code};
 use crate::session::store::backend::{Journal, JournalEntry, LocalJournal, StoreBackend};
 use crate::storage::{CreateOutcome, LocalStorage};
@@ -12,6 +13,7 @@ use crate::storage::{CreateOutcome, LocalStorage};
 #[derive(Debug)]
 pub struct EventStore {
     journal: Box<dyn Journal>,
+    coordinator: Option<DerivedWriteCoordinator>,
     /// The file-layout helpers, present only for a file-backed store. They read
     /// events by arbitrary on-disk path (not by logical key), so they serve the
     /// store-migrate, bundle, and tamper-probe consumers and have no meaning for a
@@ -43,6 +45,7 @@ impl EventStore {
         let store_dir = store_dir.as_ref().to_path_buf();
         Self {
             journal: Box::new(LocalJournal::new(&store_dir)),
+            coordinator: None,
             files: Some(LocalEventFiles::new(store_dir)),
         }
     }
@@ -61,7 +64,16 @@ impl EventStore {
             #[cfg(test)]
             StoreBackend::Memory(_) => None,
         };
-        Self { journal, files }
+        Self {
+            journal,
+            coordinator: None,
+            files,
+        }
+    }
+
+    pub(crate) fn with_coordinator(mut self, coordinator: DerivedWriteCoordinator) -> Self {
+        self.coordinator = Some(coordinator);
+        self
     }
 
     /// The file-layout helpers, which are valid only on a file-backed store. A
@@ -95,10 +107,21 @@ impl EventStore {
         // the prior path-stem check was a tautology over the key-derived filename.
         validate_event(event, None)?;
         let bytes = serde_json::to_vec(event)?;
+        if let Some(coordinator) = &self.coordinator {
+            return coordinator
+                .record_event_once(event, || self.publish_validated_event(event, &bytes));
+        }
+        self.publish_validated_event(event, &bytes)
+    }
 
+    fn publish_validated_event(
+        &self,
+        event: &ShoreEvent,
+        bytes: &[u8],
+    ) -> Result<EventWriteOutcome> {
         match self
             .journal
-            .create_event_once(&event.idempotency_key, &bytes)?
+            .create_event_once(&event.idempotency_key, bytes)?
         {
             CreateOutcome::Created => {
                 tracing::debug!(
@@ -143,6 +166,17 @@ impl EventStore {
                 }
             }
         }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the bounded product diagnostic channel is consumed by later active workflow routes"
+    )]
+    pub(crate) fn take_write_diagnostics(&self) -> Vec<DerivedWriteDiagnostic> {
+        self.coordinator
+            .as_ref()
+            .map(DerivedWriteCoordinator::take_diagnostics)
+            .unwrap_or_default()
     }
 
     pub fn read_event(&self, path: &Path) -> Result<ShoreEvent> {

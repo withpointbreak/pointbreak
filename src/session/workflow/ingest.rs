@@ -179,7 +179,7 @@ pub(crate) fn ingest_events_with_clock(
         &clock.received_at(),
     );
 
-    let event_store = EventStore::from_backend(write_store.backend());
+    let event_store = write_store.event_store()?;
     let worktree_root = write_store.worktree_root();
     let mut events_created = 0usize;
     let mut events_existing = 0usize;

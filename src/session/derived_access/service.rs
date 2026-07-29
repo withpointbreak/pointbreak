@@ -7,11 +7,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::product_contract::DerivedAccessProfile;
 use super::sqlite::{
-    CursorLedgerError, CursorLedgerIdentity, CursorLedgerInventory, LocatorInventory,
-    SemanticInventory, SqliteCursorLedger, SqliteLocator, SqliteLocatorError, SqliteSemantic,
-    SqliteSemanticError,
+    AppendCrashPoint, CursorLedgerError, CursorLedgerIdentity, CursorLedgerInventory,
+    LocatorInventory, SemanticInventory, SqliteCursorLedger, SqliteLocator, SqliteLocatorError,
+    SqliteSemantic, SqliteSemanticError, StoreWriterLock,
 };
+use crate::error::Result as ShoreResult;
 use crate::model::RevisionId;
+use crate::session::EventWriteOutcome;
 use crate::session::derived_access::cursor::{
     AppendResolution, CursorDelta, TruthCursor, TruthHead,
 };
@@ -212,6 +214,23 @@ impl DerivedAccessService {
         let resolution = self.cursor.append_event(event, attempt_token)?;
         self.catch_up_to_head(DEFAULT_DELTA_LIMIT)?;
         Ok(resolution)
+    }
+
+    pub(crate) fn append_event_with_publisher_locked(
+        &self,
+        event: &ShoreEvent,
+        attempt_token: &str,
+        writer_lock: &StoreWriterLock,
+        hook: impl FnMut(AppendCrashPoint),
+        publish: impl FnOnce() -> ShoreResult<EventWriteOutcome>,
+    ) -> Result<AppendResolution, DerivedAccessServiceError> {
+        Ok(self.cursor.append_event_with_publisher_locked(
+            event,
+            attempt_token,
+            writer_lock,
+            hook,
+            publish,
+        )?)
     }
 
     pub(crate) fn catch_up_to_head(

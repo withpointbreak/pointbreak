@@ -98,7 +98,7 @@ pub fn record_event_signature(
 
     // The write half lands in the resolved write store (the clone-local store in
     // linked mode) and rebuilds its state.json there.
-    let event_store = EventStore::from_backend(write_store.backend());
+    let event_store = write_store.event_store()?;
 
     // Resolve the target against the writer-visible union so a linked-only target
     // still resolves. A co-signature whose target is not present cannot be verified

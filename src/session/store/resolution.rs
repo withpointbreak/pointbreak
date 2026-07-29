@@ -1,10 +1,15 @@
+use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::error::{Result, ShoreError};
 use crate::paths::{CommonDirPaths, RepositoryPaths, UserHomePaths};
+use crate::session::derived_access::lifecycle::DerivedAccessLifecycle;
 use crate::session::derived_access::product_contract::DerivedAccessProfile;
+use crate::session::derived_access::writer::DerivedWriteCoordinator;
 use crate::session::event::ShoreEvent;
 use crate::session::store::backend::StoreBackend;
 use crate::session::store::event_store::EventStore;
@@ -287,6 +292,40 @@ impl WriteStore {
     pub(crate) const fn derived_access_profile(&self) -> DerivedAccessProfile {
         self.derived_access_profile
     }
+
+    pub(crate) fn event_store(&self) -> Result<EventStore> {
+        let event_store = EventStore::from_backend(&self.backend);
+        if self.derived_access_profile == DerivedAccessProfile::Off {
+            return Ok(event_store);
+        }
+        coordinate_event_store(event_store, &self.store_dir, self.derived_access_profile)
+    }
+}
+
+pub(crate) fn event_store_for_explicit_target(
+    store_dir: &Path,
+    profile: DerivedAccessProfile,
+) -> Result<EventStore> {
+    let event_store = EventStore::open(store_dir);
+    if profile == DerivedAccessProfile::Off {
+        return Ok(event_store);
+    }
+    coordinate_event_store(event_store, store_dir, profile)
+}
+
+fn coordinate_event_store(
+    event_store: EventStore,
+    store_dir: &Path,
+    profile: DerivedAccessProfile,
+) -> Result<EventStore> {
+    let lifecycle = DerivedAccessLifecycle::new(
+        profile,
+        store_dir,
+        opaque_path_identity("store", store_dir)?,
+    )
+    .map_err(|error| ShoreError::Message(error.to_string()))?;
+    let coordinator = DerivedWriteCoordinator::new(lifecycle)?;
+    Ok(event_store.with_coordinator(coordinator))
 }
 
 /// Resolve the write landing for `repo`. See [`WriteStore`]. Reuses [`resolve_store`]
@@ -443,6 +482,62 @@ fn classify_backend(
                 .to_owned(),
         )),
     }
+}
+
+/// Hash a normalized path into the opaque identity shared by store resolution,
+/// lifecycle coordination, `store status`, and `/api/identity`.
+pub(crate) fn opaque_path_identity(namespace: &str, path: &Path) -> Result<String> {
+    let normalized = normalize_path_without_requiring_leaf(path)?;
+    let digest = Sha256::digest(normalized.as_os_str().as_encoded_bytes());
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(&mut hex, "{byte:02x}").expect("writing to a string cannot fail");
+    }
+    Ok(format!("{namespace}:sha256:{hex}"))
+}
+
+fn normalize_path_without_requiring_leaf(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| ShoreError::Message(format!("resolve current directory: {error}")))?
+            .join(path)
+    };
+    let mut existing = absolute.as_path();
+    let mut missing = Vec::<OsString>::new();
+
+    while !existing.try_exists().map_err(|error| {
+        ShoreError::Message(format!(
+            "inspect identity path {}: {error}",
+            existing.display()
+        ))
+    })? {
+        let name = existing.file_name().ok_or_else(|| {
+            ShoreError::Message(format!(
+                "cannot find an existing ancestor for identity path {}",
+                absolute.display()
+            ))
+        })?;
+        missing.push(name.to_owned());
+        existing = existing.parent().ok_or_else(|| {
+            ShoreError::Message(format!(
+                "cannot find an existing ancestor for identity path {}",
+                absolute.display()
+            ))
+        })?;
+    }
+
+    let mut normalized = existing.canonicalize().map_err(|error| {
+        ShoreError::Message(format!(
+            "canonicalize identity path ancestor {}: {error}",
+            existing.display()
+        ))
+    })?;
+    for component in missing.into_iter().rev() {
+        normalized.push(component);
+    }
+    Ok(normalized)
 }
 
 pub(crate) fn clone_local_store_dir(worktree_root: &Path) -> Result<PathBuf> {

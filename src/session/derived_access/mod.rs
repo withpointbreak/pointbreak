@@ -14,6 +14,7 @@ pub(crate) mod semantic;
 pub(crate) mod service;
 pub(crate) mod sqlite;
 pub(crate) mod verification;
+pub(crate) mod writer;
 pub(crate) use super::store::backend::{QualificationJournalCursor, QualificationLocalJournal};
 
 #[cfg(test)]

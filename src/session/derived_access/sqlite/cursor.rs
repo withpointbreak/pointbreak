@@ -456,18 +456,44 @@ impl SqliteCursorLedger {
         event: &ShoreEvent,
         attempt_token: &str,
         try_only: bool,
+        hook: impl FnMut(AppendCrashPoint),
+    ) -> Result<AppendResolution, CursorLedgerError> {
+        let journal = QualificationLocalJournal::new(&self.store_root);
+        validate_nonempty("attempt_token", attempt_token)?;
+        validate_nonempty("logical_reread_key", &event.idempotency_key)?;
+        let writer_lock = if try_only {
+            StoreWriterLock::try_acquire(&self.store_root)?
+        } else {
+            StoreWriterLock::acquire(&self.store_root)?
+        };
+        self.append_event_with_publisher_locked(event, attempt_token, &writer_lock, hook, || {
+            journal.record_event_once(event)
+        })
+    }
+
+    pub(crate) fn append_event_with_publisher_locked(
+        &self,
+        event: &ShoreEvent,
+        attempt_token: &str,
+        _writer_lock: &StoreWriterLock,
+        hook: impl FnMut(AppendCrashPoint),
+        publish: impl FnOnce() -> crate::error::Result<EventWriteOutcome>,
+    ) -> Result<AppendResolution, CursorLedgerError> {
+        self.append_event_locked(event, attempt_token, hook, publish)
+    }
+
+    fn append_event_locked(
+        &self,
+        event: &ShoreEvent,
+        attempt_token: &str,
         mut hook: impl FnMut(AppendCrashPoint),
+        publish: impl FnOnce() -> crate::error::Result<EventWriteOutcome>,
     ) -> Result<AppendResolution, CursorLedgerError> {
         validate_nonempty("attempt_token", attempt_token)?;
         validate_nonempty("logical_reread_key", &event.idempotency_key)?;
         let expected_bytes = serde_json::to_vec(event)
             .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
         let expected_witness = sha256_bytes_hex(&expected_bytes);
-        let _writer_lock = if try_only {
-            StoreWriterLock::try_acquire(&self.store_root)?
-        } else {
-            StoreWriterLock::acquire(&self.store_root)?
-        };
         let mut connection = open_connection(&self.database_path, false)?;
         validate_recoverable_metadata(&connection, &self.identity)?;
         recover_locked(&mut connection, &self.store_root, &self.identity)?;
@@ -498,7 +524,7 @@ impl SqliteCursorLedger {
 
         let journal = QualificationLocalJournal::new(&self.store_root);
         let existing_receipt = receipt_for_key(&connection, &journal, &event.idempotency_key)?;
-        let publication = match journal.record_event_once(event) {
+        let publication = match publish() {
             Ok(outcome) => outcome,
             Err(ShoreError::Message(message))
                 if existing_receipt.is_some()
@@ -530,7 +556,7 @@ impl SqliteCursorLedger {
                 return Err(CursorLedgerError::Quarantined(reason));
             }
             retire_intent(&connection)?;
-            return Ok(classify_receipt(&receipt, &expected_witness));
+            return Ok(AppendResolution::Existing(receipt.cursor));
         }
 
         if !matches!(publication, EventWriteOutcome::Created) {
@@ -1588,14 +1614,6 @@ fn hydrate_stored_receipt(
         },
         event,
     ))
-}
-
-fn classify_receipt(receipt: &CursorReceipt, witness: &str) -> AppendResolution {
-    if receipt.validation_witness == witness {
-        AppendResolution::Existing(receipt.cursor)
-    } else {
-        AppendResolution::Conflict(receipt.cursor)
-    }
 }
 
 fn classify_recovered_receipt(receipt: &CursorReceipt, witness: &str) -> RecoveryResolution {

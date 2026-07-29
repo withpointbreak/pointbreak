@@ -26,7 +26,7 @@ use crate::session::store::resolution::{
 use crate::session::store_init::RepositoryPaths;
 use crate::session::workflow::util::sorted_unique;
 use crate::session::{
-    BestEffortSkipSink, EventSigningOptions, EventStore, EventWriteOutcome, current_timestamp,
+    BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, current_timestamp,
     sign_event_if_requested, writer_from_options,
 };
 use crate::storage::{Durability, LocalStorage};
@@ -238,7 +238,7 @@ fn write_observation_event(input: ObservationWriteInput) -> Result<ObservationAd
     let storage = LocalStorage::new(store_dir);
     prepare_write_landing(&write_store, &storage)?;
 
-    let event_store = EventStore::from_backend(write_store.backend());
+    let event_store = write_store.event_store()?;
     let track_id = validated_track_id(input.track.as_deref().ok_or_else(|| {
         ShoreError::WorkflowInputInvalid {
             reason: "track is required".to_owned(),

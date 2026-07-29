@@ -24,7 +24,7 @@ use crate::session::store::resolution::{
     prepare_write_landing, resolve_write_store, resolve_write_validation_store,
 };
 use crate::session::{
-    BestEffortSkipSink, EventSigningOptions, EventStore, EventWriteOutcome, current_timestamp,
+    BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, current_timestamp,
     sign_event_if_requested, writer_from_options,
 };
 use crate::storage::{Durability, LocalStorage};
@@ -257,7 +257,7 @@ fn write_validation_check_event(input: ValidationWriteInput) -> Result<Validatio
     let storage = LocalStorage::new(store_dir);
     prepare_write_landing(&write_store, &storage)?;
 
-    let event_store = EventStore::from_backend(write_store.backend());
+    let event_store = write_store.event_store()?;
     let track_id = validated_track_id(input.track.as_deref().ok_or_else(|| {
         ShoreError::WorkflowInputInvalid {
             reason: "track is required".to_owned(),

@@ -21,7 +21,7 @@ use crate::session::store::resolution::{
     prepare_write_landing, resolve_write_store, resolve_write_validation_store,
 };
 use crate::session::{
-    BestEffortSkipSink, EventSigningOptions, EventStore, EventWriteOutcome, current_timestamp,
+    BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, current_timestamp,
     sign_event_if_requested, writer_from_options,
 };
 use crate::storage::{Durability, LocalStorage};
@@ -123,7 +123,7 @@ pub fn respond_input_request(
 
     // The write half lands in the resolved write store (the clone-local store in
     // linked mode) and rebuilds its state.json there.
-    let event_store = EventStore::from_backend(write_store.backend());
+    let event_store = write_store.event_store()?;
 
     // The request being responded to may live only in the linked store: its
     // EventTarget fields are copied verbatim into the response, so the lookup
@@ -332,6 +332,7 @@ mod tests {
 
     use super::*;
     use crate::model::{JournalId, TaskTargetRef, WorkObjectId};
+    use crate::session::EventStore;
     use crate::session::projection::test_support::task_input_request_event_with_target;
 
     #[test]

@@ -767,7 +767,7 @@ where
     let storage = LocalStorage::new(store_dir);
     prepare_write_landing(&write_store, &storage)?;
 
-    let event_store = EventStore::from_backend(write_store.backend());
+    let event_store = write_store.event_store()?;
 
     let validation_store = resolve_write_validation_store(repo)?;
     let validation_events = validation_store.validation_events()?;

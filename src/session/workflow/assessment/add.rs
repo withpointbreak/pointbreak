@@ -29,7 +29,7 @@ use crate::session::store::resolution::{
 };
 use crate::session::workflow::util::sorted_unique;
 use crate::session::{
-    BestEffortSkipSink, EventSigningOptions, EventStore, EventWriteOutcome, current_timestamp,
+    BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, current_timestamp,
     sign_event_if_requested, writer_from_options,
 };
 use crate::storage::{Durability, LocalStorage};
@@ -182,7 +182,7 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
 
     // The write half lands in the resolved write store (the clone-local store in
     // linked mode) and rebuilds its state.json there.
-    let event_store = EventStore::from_backend(write_store.backend());
+    let event_store = write_store.event_store()?;
 
     // Validation/derivation reads resolve the writer-visible union so the unit,
     // the target, and every relationship reference (`--replaces`,

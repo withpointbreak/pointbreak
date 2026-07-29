@@ -10,12 +10,13 @@ use serde::Serialize;
 
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::error::{Result, ShoreError};
+use crate::session::derived_access::product_contract::DerivedAccessProfile;
 use crate::session::event::EventType;
 use crate::session::store::bundle::{
-    ExportFidelityStatus, import_store_bundle_with_verification, preview_import_store_bundle,
+    ExportFidelityStatus, import_store_bundle_into_with_verification, preview_import_store_bundle,
     verify_source_subset_of_target,
 };
-use crate::session::store::resolution::clone_local_store_dir;
+use crate::session::store::resolution::{clone_local_store_dir, event_store_for_explicit_target};
 use crate::session::store::sensitivity::scan_worktree_sensitivity;
 use crate::session::store::store_config::{
     StoreMode, clear_family_binding_for_repo, resolve_family_binding, resolve_store_mode,
@@ -229,6 +230,8 @@ fn plan_link(options: &StoreLinkOptions) -> Result<LinkPlan> {
 
 pub fn link_store_to_family(options: StoreLinkOptions) -> Result<StoreLinkResult> {
     let plan = plan_link(&options)?;
+    let derived_access_profile = DerivedAccessProfile::from_environment()
+        .map_err(|error| ShoreError::Message(error.to_string()))?;
 
     // Preparation (all reversible until the binding flip):
     let created_family =
@@ -242,6 +245,7 @@ pub fn link_store_to_family(options: StoreLinkOptions) -> Result<StoreLinkResult
         &plan.family_dir,
         &options.trust_set,
         options.retire_source,
+        derived_access_profile,
     )?;
 
     register_clone(
@@ -477,6 +481,7 @@ fn fold_source_forward(
     family_dir: &Path,
     trust_set: &TrustSet,
     retire_source: bool,
+    derived_access_profile: DerivedAccessProfile,
 ) -> Result<FoldOutcome> {
     // An absent/empty clone-local store is a clean no-op.
     if !source.join("events").exists() {
@@ -491,9 +496,11 @@ fn fold_source_forward(
 
     // Verified fold — advisory verification is reported, never blocking; the trust
     // set is threaded from the CLI (mirrors compact).
-    let imported = import_store_bundle_with_verification(
+    let target_event_store = event_store_for_explicit_target(family_dir, derived_access_profile)?;
+    let imported = import_store_bundle_into_with_verification(
         source,
         family_dir,
+        &target_event_store,
         EventVerificationPolicy::advisory(),
         trust_set.clone(),
     )?;

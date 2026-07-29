@@ -18,13 +18,15 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use crate::error::{Result, ShoreError};
+use crate::session::derived_access::product_contract::DerivedAccessProfile;
 use crate::session::store::bundle::{
-    ImportBundleResult, import_store_bundle, verify_source_subset_of_target,
+    ImportBundleResult, import_store_bundle_into_with_verification, verify_source_subset_of_target,
 };
-use crate::session::store::resolution::clone_local_store_dir;
+use crate::session::store::resolution::{clone_local_store_dir, event_store_for_explicit_target};
 use crate::session::store::sensitivity::scan_worktree_sensitivity;
 use crate::session::store::store_config::{StoreMode, resolve_store_mode};
 use crate::session::store::store_init::RepositoryPaths;
+use crate::session::{EventVerificationPolicy, TrustSet};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MigrateToCommonDirOptions {
@@ -194,7 +196,16 @@ pub fn migrate_store_to_common_dir(
     // file in the target. (The in-place flat-store relocation is a different
     // migration and must not be conflated.)
     let target = clone_local_store_dir(&worktree_root)?;
-    let imported = import_store_bundle(&source, &target)?;
+    let profile = DerivedAccessProfile::from_environment()
+        .map_err(|error| ShoreError::Message(error.to_string()))?;
+    let target_event_store = event_store_for_explicit_target(&target, profile)?;
+    let imported = import_store_bundle_into_with_verification(
+        &source,
+        &target,
+        &target_event_store,
+        EventVerificationPolicy::advisory(),
+        TrustSet::default(),
+    )?;
     let mut result = MigrateToCommonDirResult::from_import(imported);
     result.sensitivity_excluded_path_count = sensitivity_excluded_path_count;
     if options.retire_source {

@@ -186,6 +186,7 @@ pub(crate) fn build_export_manifest(store_dir: impl AsRef<Path>) -> Result<Expor
     })
 }
 
+#[cfg(test)]
 pub(crate) fn import_store_bundle(
     source_store_dir: impl AsRef<Path>,
     target_store_dir: impl AsRef<Path>,
@@ -198,9 +199,28 @@ pub(crate) fn import_store_bundle(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn import_store_bundle_with_verification(
     source_store_dir: impl AsRef<Path>,
     target_store_dir: impl AsRef<Path>,
+    verification_policy: EventVerificationPolicy,
+    trust_set: TrustSet,
+) -> Result<ImportBundleResult> {
+    let target_store_dir = target_store_dir.as_ref();
+    let target_event_store = EventStore::open(target_store_dir);
+    import_store_bundle_into_with_verification(
+        source_store_dir,
+        target_store_dir,
+        &target_event_store,
+        verification_policy,
+        trust_set,
+    )
+}
+
+pub(crate) fn import_store_bundle_into_with_verification(
+    source_store_dir: impl AsRef<Path>,
+    target_store_dir: impl AsRef<Path>,
+    target_event_store: &EventStore,
     verification_policy: EventVerificationPolicy,
     trust_set: TrustSet,
 ) -> Result<ImportBundleResult> {
@@ -223,12 +243,11 @@ pub(crate) fn import_store_bundle_with_verification(
         .collect::<Vec<_>>();
     let verification = verify_events_for_ingest(&source_events, verification_policy, &trust_set)?;
     let artifacts = read_source_artifacts(source_store_dir, &manifest)?;
-    let target_event_store = EventStore::open(target_store_dir);
-    preflight_event_conflicts(&target_event_store, &events)?;
+    preflight_event_conflicts(target_event_store, &events)?;
 
     let (artifacts_created, artifacts_existing) = commit_artifacts(target_store_dir, &artifacts)?;
-    let (events_created, events_existing) = commit_events(&target_event_store, &events)?;
-    rebuild_target_state(target_store_dir, &target_event_store)?;
+    let (events_created, events_existing) = commit_events(target_event_store, &events)?;
+    rebuild_target_state(target_store_dir, target_event_store)?;
 
     Ok(ImportBundleResult {
         events_created,
