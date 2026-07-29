@@ -1,0 +1,578 @@
+{
+  "schema": "pointbreak.derived-access-product-integration-contract-fixture.v1",
+  "contractSchema": "pointbreak.derived-access-product-integration-contract.v1",
+  "contractSha256": "3afe3a1fd65f0d5c58246dbe426c35a32325dc42bd9931d78f0e2354411dd00d",
+  "selectorEnvironment": "POINTBREAK_DERIVED_ACCESS",
+  "profiles": [
+    "off",
+    "sqlite-wal-bodyless-v1"
+  ],
+  "availabilityStates": [
+    {
+      "state": "absent",
+      "allowedSuccessors": [
+        "bootstrapping",
+        "unavailable"
+      ],
+      "meaning": "no visible derived generation; loose truth remains available"
+    },
+    {
+      "state": "bootstrapping",
+      "allowedSuccessors": [
+        "absent",
+        "current",
+        "rebuild_required",
+        "quarantined",
+        "unavailable"
+      ],
+      "meaning": "a private generation is rebuilding and is not current"
+    },
+    {
+      "state": "current",
+      "allowedSuccessors": [
+        "catching_up",
+        "rebuild_required",
+        "quarantined",
+        "unavailable"
+      ],
+      "meaning": "the visible generation proves exact observed truth coverage"
+    },
+    {
+      "state": "catching_up",
+      "allowedSuccessors": [
+        "current",
+        "rebuild_required",
+        "quarantined",
+        "unavailable"
+      ],
+      "meaning": "a bounded governed delta is being applied before serving current"
+    },
+    {
+      "state": "rebuild_required",
+      "allowedSuccessors": [
+        "bootstrapping",
+        "quarantined",
+        "unavailable"
+      ],
+      "meaning": "coverage, mixed-writer, or integrity evidence requires a rebuild"
+    },
+    {
+      "state": "quarantined",
+      "allowedSuccessors": [
+        "absent",
+        "bootstrapping",
+        "unavailable"
+      ],
+      "meaning": "an invalid generation is isolated and cannot serve reads"
+    },
+    {
+      "state": "unavailable",
+      "allowedSuccessors": [
+        "absent",
+        "bootstrapping",
+        "rebuild_required",
+        "quarantined"
+      ],
+      "meaning": "the active profile cannot safely serve and returns typed unavailability"
+    }
+  ],
+  "projectionVersion": {
+    "decision": "projection_stamp",
+    "field": "projectionStamp",
+    "schema": "pointbreak.derived-access-projection-stamp.v1",
+    "stampComponents": [
+      "store_identity",
+      "profile",
+      "schema_version",
+      "epoch",
+      "applied_sequence"
+    ],
+    "eventSetHashRequiredOnLooseResponses": true,
+    "eventSetHashOptionalDeprecatedOnActiveResponses": true,
+    "changesOnUniqueEvent": true,
+    "changesOnRebuildEpoch": true,
+    "fullSetHashOnOrdinaryReadOrAppendAllowed": false,
+    "truthIdentityOrSignatureInput": false
+  },
+  "wireConsumers": [
+    {
+      "surface": "freshness",
+      "looseVersion": "none",
+      "looseEventSetHashRequired": false,
+      "activeVersion": "projection_stamp",
+      "activeEventSetHashRequired": false,
+      "clientTransition": "projection_stamp_only",
+      "schemaVersionChanges": false
+    },
+    {
+      "surface": "history_new_count",
+      "looseVersion": "none",
+      "looseEventSetHashRequired": false,
+      "activeVersion": "projection_stamp",
+      "activeEventSetHashRequired": false,
+      "clientTransition": "projection_stamp_only",
+      "schemaVersionChanges": false
+    },
+    {
+      "surface": "history",
+      "looseVersion": "event_set_hash",
+      "looseEventSetHashRequired": true,
+      "activeVersion": "projection_stamp",
+      "activeEventSetHashRequired": false,
+      "clientTransition": "projection_stamp_then_event_set_hash",
+      "schemaVersionChanges": false
+    },
+    {
+      "surface": "revisions",
+      "looseVersion": "event_set_hash",
+      "looseEventSetHashRequired": true,
+      "activeVersion": "projection_stamp",
+      "activeEventSetHashRequired": false,
+      "clientTransition": "projection_stamp_then_event_set_hash",
+      "schemaVersionChanges": false
+    },
+    {
+      "surface": "revision_detail",
+      "looseVersion": "event_set_hash",
+      "looseEventSetHashRequired": true,
+      "activeVersion": "projection_stamp",
+      "activeEventSetHashRequired": false,
+      "clientTransition": "projection_stamp_then_event_set_hash",
+      "schemaVersionChanges": false
+    },
+    {
+      "surface": "threads",
+      "looseVersion": "event_set_hash",
+      "looseEventSetHashRequired": true,
+      "activeVersion": "projection_stamp",
+      "activeEventSetHashRequired": false,
+      "clientTransition": "projection_stamp_then_event_set_hash",
+      "schemaVersionChanges": false
+    },
+    {
+      "surface": "attention",
+      "looseVersion": "event_set_hash",
+      "looseEventSetHashRequired": true,
+      "activeVersion": "projection_stamp",
+      "activeEventSetHashRequired": false,
+      "clientTransition": "projection_stamp_then_event_set_hash",
+      "schemaVersionChanges": false
+    }
+  ],
+  "parityFixtures": [
+    {
+      "fixture": "history",
+      "defaultOffExact": true,
+      "activeDomainParity": true,
+      "activeWireParity": true,
+      "requestCounterReceipt": true,
+      "selectedCarrierValidation": true
+    },
+    {
+      "fixture": "revisions",
+      "defaultOffExact": true,
+      "activeDomainParity": true,
+      "activeWireParity": true,
+      "requestCounterReceipt": true,
+      "selectedCarrierValidation": true
+    },
+    {
+      "fixture": "revision_detail",
+      "defaultOffExact": true,
+      "activeDomainParity": true,
+      "activeWireParity": true,
+      "requestCounterReceipt": true,
+      "selectedCarrierValidation": true
+    },
+    {
+      "fixture": "threads",
+      "defaultOffExact": true,
+      "activeDomainParity": true,
+      "activeWireParity": true,
+      "requestCounterReceipt": true,
+      "selectedCarrierValidation": false
+    },
+    {
+      "fixture": "attention",
+      "defaultOffExact": true,
+      "activeDomainParity": true,
+      "activeWireParity": true,
+      "requestCounterReceipt": true,
+      "selectedCarrierValidation": false
+    },
+    {
+      "fixture": "freshness",
+      "defaultOffExact": true,
+      "activeDomainParity": true,
+      "activeWireParity": true,
+      "requestCounterReceipt": true,
+      "selectedCarrierValidation": false
+    },
+    {
+      "fixture": "mixed_writers",
+      "defaultOffExact": true,
+      "activeDomainParity": true,
+      "activeWireParity": true,
+      "requestCounterReceipt": true,
+      "selectedCarrierValidation": false
+    },
+    {
+      "fixture": "rollback",
+      "defaultOffExact": true,
+      "activeDomainParity": true,
+      "activeWireParity": true,
+      "requestCounterReceipt": true,
+      "selectedCarrierValidation": false
+    }
+  ],
+  "routes": [
+    {
+      "route": "freshness",
+      "activePath": "derived head and checkpoint with exact mixed-writer detection",
+      "activeWork": "cheap_authority_metadata",
+      "fallback": "cheap_authoritative_detector",
+      "fallbackWork": "cheap_authority_metadata",
+      "selectedCarrierValidation": false,
+      "emitsRequestReceipt": true,
+      "unavailableIsTyped": false,
+      "counters": [
+        "directory_entries_walked",
+        "carrier_opens",
+        "carrier_bytes_read",
+        "event_decodes",
+        "event_validations",
+        "event_folds",
+        "chronological_sort_items",
+        "body_artifact_reads",
+        "object_artifact_reads",
+        "selected_output_rows",
+        "retained_hydrated_bytes",
+        "authoritative_fallbacks",
+        "full_history_fallbacks",
+        "mixed_writer_audits"
+      ]
+    },
+    {
+      "route": "history_new_count",
+      "activePath": "cursor and display-key count",
+      "activeWork": "bounded_selected",
+      "fallback": "typed_unavailable",
+      "fallbackWork": null,
+      "selectedCarrierValidation": false,
+      "emitsRequestReceipt": true,
+      "unavailableIsTyped": true,
+      "counters": [
+        "directory_entries_walked",
+        "carrier_opens",
+        "carrier_bytes_read",
+        "event_decodes",
+        "event_validations",
+        "event_folds",
+        "chronological_sort_items",
+        "body_artifact_reads",
+        "object_artifact_reads",
+        "selected_output_rows",
+        "retained_hydrated_bytes",
+        "authoritative_fallbacks",
+        "full_history_fallbacks",
+        "mixed_writer_audits"
+      ]
+    },
+    {
+      "route": "history_chronological",
+      "activePath": "locator window with selected authoritative hydration",
+      "activeWork": "bounded_selected",
+      "fallback": "typed_unavailable",
+      "fallbackWork": null,
+      "selectedCarrierValidation": true,
+      "emitsRequestReceipt": true,
+      "unavailableIsTyped": true,
+      "counters": [
+        "directory_entries_walked",
+        "carrier_opens",
+        "carrier_bytes_read",
+        "event_decodes",
+        "event_validations",
+        "event_folds",
+        "chronological_sort_items",
+        "body_artifact_reads",
+        "object_artifact_reads",
+        "selected_output_rows",
+        "retained_hydrated_bytes",
+        "authoritative_fallbacks",
+        "full_history_fallbacks",
+        "mixed_writer_audits"
+      ]
+    },
+    {
+      "route": "history_bodyless_filter",
+      "activePath": "bodyless locator and aggregate state with selected hydration",
+      "activeWork": "bounded_selected",
+      "fallback": "typed_unavailable",
+      "fallbackWork": null,
+      "selectedCarrierValidation": true,
+      "emitsRequestReceipt": true,
+      "unavailableIsTyped": true,
+      "counters": [
+        "directory_entries_walked",
+        "carrier_opens",
+        "carrier_bytes_read",
+        "event_decodes",
+        "event_validations",
+        "event_folds",
+        "chronological_sort_items",
+        "body_artifact_reads",
+        "object_artifact_reads",
+        "selected_output_rows",
+        "retained_hydrated_bytes",
+        "authoritative_fallbacks",
+        "full_history_fallbacks",
+        "mixed_writer_audits"
+      ]
+    },
+    {
+      "route": "history_body_search",
+      "activePath": "no derived body or search index",
+      "activeWork": null,
+      "fallback": "intentional_exhaustive_body_search",
+      "fallbackWork": "history_proportional",
+      "selectedCarrierValidation": true,
+      "emitsRequestReceipt": true,
+      "unavailableIsTyped": false,
+      "counters": [
+        "directory_entries_walked",
+        "carrier_opens",
+        "carrier_bytes_read",
+        "event_decodes",
+        "event_validations",
+        "event_folds",
+        "chronological_sort_items",
+        "body_artifact_reads",
+        "object_artifact_reads",
+        "selected_output_rows",
+        "retained_hydrated_bytes",
+        "authoritative_fallbacks",
+        "full_history_fallbacks",
+        "mixed_writer_audits"
+      ]
+    },
+    {
+      "route": "revisions",
+      "activePath": "materialized revision rows with selected overlay joins",
+      "activeWork": "output_proportional",
+      "fallback": "typed_unavailable",
+      "fallbackWork": null,
+      "selectedCarrierValidation": true,
+      "emitsRequestReceipt": true,
+      "unavailableIsTyped": true,
+      "counters": [
+        "directory_entries_walked",
+        "carrier_opens",
+        "carrier_bytes_read",
+        "event_decodes",
+        "event_validations",
+        "event_folds",
+        "chronological_sort_items",
+        "body_artifact_reads",
+        "object_artifact_reads",
+        "selected_output_rows",
+        "retained_hydrated_bytes",
+        "authoritative_fallbacks",
+        "full_history_fallbacks",
+        "mixed_writer_audits"
+      ]
+    },
+    {
+      "route": "revision_detail",
+      "activePath": "bounded revision facts with selected authoritative carriers",
+      "activeWork": "bounded_selected",
+      "fallback": "instrumented_exact_detail",
+      "fallbackWork": "bounded_selected",
+      "selectedCarrierValidation": true,
+      "emitsRequestReceipt": true,
+      "unavailableIsTyped": false,
+      "counters": [
+        "directory_entries_walked",
+        "carrier_opens",
+        "carrier_bytes_read",
+        "event_decodes",
+        "event_validations",
+        "event_folds",
+        "chronological_sort_items",
+        "body_artifact_reads",
+        "object_artifact_reads",
+        "selected_output_rows",
+        "retained_hydrated_bytes",
+        "authoritative_fallbacks",
+        "full_history_fallbacks",
+        "mixed_writer_audits"
+      ]
+    },
+    {
+      "route": "threads",
+      "activePath": "materialized thread and supersession state",
+      "activeWork": "output_proportional",
+      "fallback": "typed_unavailable",
+      "fallbackWork": null,
+      "selectedCarrierValidation": false,
+      "emitsRequestReceipt": true,
+      "unavailableIsTyped": true,
+      "counters": [
+        "directory_entries_walked",
+        "carrier_opens",
+        "carrier_bytes_read",
+        "event_decodes",
+        "event_validations",
+        "event_folds",
+        "chronological_sort_items",
+        "body_artifact_reads",
+        "object_artifact_reads",
+        "selected_output_rows",
+        "retained_hydrated_bytes",
+        "authoritative_fallbacks",
+        "full_history_fallbacks",
+        "mixed_writer_audits"
+      ]
+    },
+    {
+      "route": "attention",
+      "activePath": "materialized request, assessment, and validation state",
+      "activeWork": "output_proportional",
+      "fallback": "typed_unavailable",
+      "fallbackWork": null,
+      "selectedCarrierValidation": false,
+      "emitsRequestReceipt": true,
+      "unavailableIsTyped": true,
+      "counters": [
+        "directory_entries_walked",
+        "carrier_opens",
+        "carrier_bytes_read",
+        "event_decodes",
+        "event_validations",
+        "event_folds",
+        "chronological_sort_items",
+        "body_artifact_reads",
+        "object_artifact_reads",
+        "selected_output_rows",
+        "retained_hydrated_bytes",
+        "authoritative_fallbacks",
+        "full_history_fallbacks",
+        "mixed_writer_audits"
+      ]
+    }
+  ],
+  "requestCounters": [
+    "directory_entries_walked",
+    "carrier_opens",
+    "carrier_bytes_read",
+    "event_decodes",
+    "event_validations",
+    "event_folds",
+    "chronological_sort_items",
+    "body_artifact_reads",
+    "object_artifact_reads",
+    "projection_rebuilds",
+    "state_rebuilds",
+    "selected_output_rows",
+    "retained_hydrated_bytes",
+    "authoritative_fallbacks",
+    "full_history_fallbacks",
+    "mixed_writer_audits"
+  ],
+  "matchedOperationLimits": [
+    {
+      "operation": "SEMANTIC_ID",
+      "l100WallP95CeilingMs": 150,
+      "l100ProcessCpuP95CeilingMs": 100,
+      "comparison": "retain the qualified matched-operation ceiling and pair product actuals to loose",
+      "releasePromise": false
+    },
+    {
+      "operation": "FRESH_NO_CHANGE",
+      "l100WallP95CeilingMs": 50,
+      "l100ProcessCpuP95CeilingMs": 25,
+      "comparison": "retain the qualified matched-operation ceiling and pair product actuals to loose",
+      "releasePromise": false
+    },
+    {
+      "operation": "NEWCOUNT_ZERO",
+      "l100WallP95CeilingMs": 50,
+      "l100ProcessCpuP95CeilingMs": 25,
+      "comparison": "retain the qualified matched-operation ceiling and pair product actuals to loose",
+      "releasePromise": false
+    },
+    {
+      "operation": "WINDOW_HEAD",
+      "l100WallP95CeilingMs": 150,
+      "l100ProcessCpuP95CeilingMs": 100,
+      "comparison": "retain the qualified matched-operation ceiling and pair product actuals to loose",
+      "releasePromise": false
+    },
+    {
+      "operation": "WINDOW_MIDDLE",
+      "l100WallP95CeilingMs": 150,
+      "l100ProcessCpuP95CeilingMs": 100,
+      "comparison": "retain the qualified matched-operation ceiling and pair product actuals to loose",
+      "releasePromise": false
+    },
+    {
+      "operation": "WINDOW_TAIL",
+      "l100WallP95CeilingMs": 150,
+      "l100ProcessCpuP95CeilingMs": 100,
+      "comparison": "retain the qualified matched-operation ceiling and pair product actuals to loose",
+      "releasePromise": false
+    },
+    {
+      "operation": "REVISION_DETAIL_ACTIVE",
+      "l100WallP95CeilingMs": 250,
+      "l100ProcessCpuP95CeilingMs": 175,
+      "comparison": "retain the qualified matched-operation ceiling and pair product actuals to loose",
+      "releasePromise": false
+    },
+    {
+      "operation": "REVISION_DETAIL_REMOVED",
+      "l100WallP95CeilingMs": 250,
+      "l100ProcessCpuP95CeilingMs": 175,
+      "comparison": "retain the qualified matched-operation ceiling and pair product actuals to loose",
+      "releasePromise": false
+    },
+    {
+      "operation": "APPEND_ONE",
+      "l100WallP95CeilingMs": 250,
+      "l100ProcessCpuP95CeilingMs": 200,
+      "comparison": "retain the qualified matched-operation ceiling and pair product actuals to loose",
+      "releasePromise": false
+    },
+    {
+      "operation": "POST_ONE",
+      "l100WallP95CeilingMs": 500,
+      "l100ProcessCpuP95CeilingMs": 400,
+      "comparison": "retain the qualified matched-operation ceiling and pair product actuals to loose",
+      "releasePromise": false
+    },
+    {
+      "operation": "RESTART",
+      "l100WallP95CeilingMs": 3000,
+      "l100ProcessCpuP95CeilingMs": 2500,
+      "comparison": "retain the qualified matched-operation ceiling and pair product actuals to loose",
+      "releasePromise": false
+    }
+  ],
+  "gateIds": [
+    "default_off_no_sidecar_action",
+    "ordinary_routes_avoid_full_history",
+    "selected_carriers_authoritatively_validated",
+    "body_search_only_exhaustive_fallback",
+    "every_fallback_emits_receipt",
+    "projection_stamp_avoids_full_set_hash",
+    "current_requires_exact_coverage",
+    "truth_success_derived_degraded_is_explicit",
+    "l100_steady_rss_at_most128_mib",
+    "zero_full_history_hydrated_cache_bytes",
+    "qualification_matched_operation_ceilings",
+    "shell_available_during_rebuild",
+    "mixed_writer_never_false_current",
+    "wire_transition_backward_compatible",
+    "no_production_activation"
+  ]
+}

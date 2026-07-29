@@ -426,6 +426,58 @@ measurements or observed APFS results, and the contract makes no timing or recov
 select or route a physical profile, authorize migration or activation, or expand qualification beyond this
 bounded APFS falsifier.
 
+## Derived-access product-integration contract
+
+Pointbreak carries a dormant contract for evaluating the previously qualified
+`sqlite-wal-bodyless-v1` profile in normal product paths. The experiment is off by default:
+
+```sh
+unset POINTBREAK_DERIVED_ACCESS
+# Equivalent explicit value:
+export POINTBREAK_DERIVED_ACCESS=off
+```
+
+Only `off` and `sqlite-wal-bodyless-v1` are valid. Unknown or non-Unicode values are errors. This contract
+does not activate SQLite, create a sidecar, change a product route, migrate truth, or select a production
+profile.
+
+Print, verify, and smoke the contract without opening a store or performing filesystem actions:
+
+```sh
+just derived-access-product-contract
+just derived-access-product-contract-verify
+just derived-access-product-contract-smoke
+```
+
+The compiled schema is `pointbreak.derived-access-product-integration-contract.v1`; its canonical SHA-256
+is `3afe3a1fd65f0d5c58246dbe426c35a32325dc42bd9931d78f0e2354411dd00d`.
+
+<!-- derived-access-product-integration-contract-v1:start -->
+| Decision | Frozen product-integration requirement |
+| --- | --- |
+| Selector | `POINTBREAK_DERIVED_ACCESS=off|sqlite-wal-bodyless-v1`; default `off`; unknown/non-Unicode values fail |
+| Authority | loose `Journal` and `ContentStore` carriers remain the only truth; active state is private, bodyless, disposable, and rebuildable |
+| Availability | `absent`, `bootstrapping`, `current`, `catching_up`, `rebuild_required`, `quarantined`, `unavailable`; `current` requires exact observed coverage |
+| Version wire | preserve `eventSetHash` on loose responses; active responses require cursor-derived `projectionStamp` and may omit the deprecated `eventSetHash` |
+| Stamp identity | store identity + profile + schema version + epoch + applied sequence; changes on every unique event and rebuild epoch; never truth/signature identity |
+| Ordinary work | fixed-output routes are bounded-selected; complete collections are output-proportional; only body search is history-proportional |
+| Fallbacks | cheap freshness detector, typed unavailable responses, intentional exhaustive body search, and instrumented exact-detail fallback; every invocation has a request receipt |
+| Resource gate | L100 steady RSS at most `128 MiB`; zero full-history hydrated cache bytes; startup paired to measured default-off baseline; shell/status available during rebuild |
+| Matched operations | retain the qualified L100 wall/CPU comparison ceilings without creating a release promise; product-only actuals remain paired to loose |
+| Stop boundaries | no physical module, sidecar, active product route, production default, migration, production activation, or release |
+<!-- derived-access-product-integration-contract-v1:end -->
+
+The active response version is deliberately named `projectionStamp`, not `eventSetHash`. It binds store
+identity, profile, schema version, rebuild epoch, and applied sequence. It changes on each acknowledged
+unique event and every rebuild epoch, but it is neither truth identity nor a signature input. Existing loose
+responses retain `eventSetHash`; consumers transition compatibly by preferring `projectionStamp` when
+present and otherwise using `eventSetHash`.
+
+The frozen product route matrix permits a cheap authoritative freshness detector, typed unavailable
+responses, an instrumented bounded exact-detail fallback, and one intentional exhaustive fallback for body
+search. Every fallback and unavailable response emits request-scoped counters. Ordinary active routes may
+not list, decode, fold, sort, hash, or retain complete history merely to preserve a version wire.
+
 ## Incremental derived-access falsifier contract
 
 The candidate-independent incremental derived-access contract is compiled into the benchmark target as

@@ -282,6 +282,21 @@ longitudinal-contract:
 derived-access-contract:
     cargo +stable bench --locked --features bench --bench store_foundation -- --derived-access-contract
 
+# Print and validate the dormant product-integration contract.
+[group('quality')]
+derived-access-product-contract:
+    cargo +stable bench --locked --features bench --bench store_foundation -- --derived-access-product-contract
+
+# Verify the embedded product-integration fixture against the compiled contract.
+[group('quality')]
+derived-access-product-contract-verify:
+    cargo +stable bench --locked --features bench --bench store_foundation -- --derived-access-product-contract-verify
+
+# Exercise the product-integration selector, states, and routes without filesystem action.
+[group('quality')]
+derived-access-product-contract-smoke:
+    cargo +stable bench --locked --features bench --bench store_foundation -- --derived-access-product-contract-smoke
+
 # List the derived-access qualification modes without creating a store.
 [group('quality')]
 derived-access-help:

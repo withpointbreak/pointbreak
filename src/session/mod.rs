@@ -1,7 +1,6 @@
 pub mod adapter;
 #[cfg(any(test, feature = "bench"))]
 pub(crate) mod benchmark;
-#[cfg(any(test, feature = "bench"))]
 pub(crate) mod derived_access;
 pub mod event;
 mod identity;

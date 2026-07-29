@@ -3,6 +3,7 @@ mod contract;
 mod evidence;
 mod lifecycle;
 mod materializer;
+mod product_contract;
 mod sqlite_cursor;
 mod sqlite_locator;
 mod sqlite_semantic;
@@ -16,6 +17,7 @@ pub use contract::*;
 pub use evidence::*;
 pub use lifecycle::*;
 pub use materializer::*;
+pub use product_contract::*;
 
 #[cfg(test)]
 mod runner_tests;

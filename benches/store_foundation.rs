@@ -6,8 +6,9 @@
 use std::process::{Command, ExitCode};
 
 use pointbreak::bench_support::derived_access::{
-    QUALIFICATION_DERIVED_ACCESS_CONTRACT_MODE_V1, QUALIFICATION_DERIVED_ACCESS_FRAGMENT_MODE_V1,
-    QUALIFICATION_DERIVED_ACCESS_HELP_MODE_V1,
+    DERIVED_ACCESS_PRODUCT_CONTRACT_MODE_V1, DERIVED_ACCESS_PRODUCT_CONTRACT_SMOKE_MODE_V1,
+    DERIVED_ACCESS_PRODUCT_CONTRACT_VERIFY_MODE_V1, QUALIFICATION_DERIVED_ACCESS_CONTRACT_MODE_V1,
+    QUALIFICATION_DERIVED_ACCESS_FRAGMENT_MODE_V1, QUALIFICATION_DERIVED_ACCESS_HELP_MODE_V1,
     QUALIFICATION_DERIVED_ACCESS_LIFECYCLE_CHILD_MODE_V1,
     QUALIFICATION_DERIVED_ACCESS_LIFECYCLE_MODE_V1, QUALIFICATION_DERIVED_ACCESS_PACKAGE_MODE_V1,
     QUALIFICATION_DERIVED_ACCESS_RESOURCE_CHILD_MODE_V1,
@@ -20,6 +21,8 @@ use pointbreak::bench_support::derived_access::{
     assemble_qualification_derived_access_package_v1,
     bootstrap_qualification_derived_access_retained_root_v1,
     build_qualification_derived_access_fragment_v1,
+    derived_access_product_contract_publication_json_v1,
+    derived_access_product_contract_smoke_json_v1, derived_access_product_contract_verify_json_v1,
     preflight_qualification_derived_access_retained_root_v1,
     qualification_derived_access_contract_v1_publication,
     run_qualification_derived_access_lifecycle_child_v1,
@@ -88,7 +91,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 const USAGE: &str = "\
-Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--generated-workload-smoke|--longitudinal-contract|--longitudinal-help|--longitudinal-smoke|--longitudinal-carry-forward|--longitudinal-carry-forward-smoke|--longitudinal-verify-package|--longitudinal-verify-package-receipt|--longitudinal-verify-carry-forward|--derived-access-contract|--derived-access-help|--derived-access-smoke|--derived-access-lifecycle|--derived-access-retained-preflight|--derived-access-retained-bootstrap|--derived-access-scale-evidence|--derived-access-resource-evidence|--derived-access-fragment|--derived-access-package|--derived-access-verify-package|--loose-baseline-smoke|--loose-baseline-evidence|--prospective-contract|--content-only-contract|--transfer-smoke|--sqlite-smoke|--segments-smoke|--lmdb-proof-open-close|--lmdb-smoke|--lmdb-lifecycle-smoke|--lmdb-prospective-smoke|--lmdb-prospective-evidence|--lmdb-prospective-package|--qualification-smoke|--qualification-evidence|--qualification-diagnostics|--qualification-contract|--qualification-final-evidence|--qualification-package|--help]\n\
+Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--generated-workload-smoke|--longitudinal-contract|--longitudinal-help|--longitudinal-smoke|--longitudinal-carry-forward|--longitudinal-carry-forward-smoke|--longitudinal-verify-package|--longitudinal-verify-package-receipt|--longitudinal-verify-carry-forward|--derived-access-product-contract|--derived-access-product-contract-verify|--derived-access-product-contract-smoke|--derived-access-contract|--derived-access-help|--derived-access-smoke|--derived-access-lifecycle|--derived-access-retained-preflight|--derived-access-retained-bootstrap|--derived-access-scale-evidence|--derived-access-resource-evidence|--derived-access-fragment|--derived-access-package|--derived-access-verify-package|--loose-baseline-smoke|--loose-baseline-evidence|--prospective-contract|--content-only-contract|--transfer-smoke|--sqlite-smoke|--segments-smoke|--lmdb-proof-open-close|--lmdb-smoke|--lmdb-lifecycle-smoke|--lmdb-prospective-smoke|--lmdb-prospective-evidence|--lmdb-prospective-package|--qualification-smoke|--qualification-evidence|--qualification-diagnostics|--qualification-contract|--qualification-final-evidence|--qualification-package|--help]\n\
        --longitudinal-carry-forward --longitudinal-carry-forward-request=<path>\n\
        --longitudinal-verify-package --longitudinal-package-root=<path>\n\
        --longitudinal-verify-package-receipt --longitudinal-package-root=<path>\n\
@@ -383,6 +386,9 @@ fn main() -> ExitCode {
         LONGITUDINAL_VERIFY_PACKAGE_MODE_V1,
         LONGITUDINAL_VERIFY_PACKAGE_RECEIPT_MODE_V1,
         LONGITUDINAL_VERIFY_CARRY_FORWARD_MODE_V1,
+        DERIVED_ACCESS_PRODUCT_CONTRACT_MODE_V1,
+        DERIVED_ACCESS_PRODUCT_CONTRACT_VERIFY_MODE_V1,
+        DERIVED_ACCESS_PRODUCT_CONTRACT_SMOKE_MODE_V1,
         QUALIFICATION_DERIVED_ACCESS_CONTRACT_MODE_V1,
         QUALIFICATION_DERIVED_ACCESS_FRAGMENT_MODE_V1,
         QUALIFICATION_DERIVED_ACCESS_HELP_MODE_V1,
@@ -476,6 +482,9 @@ fn main() -> ExitCode {
             && argument != LONGITUDINAL_VERIFY_PACKAGE_MODE_V1
             && argument != LONGITUDINAL_VERIFY_PACKAGE_RECEIPT_MODE_V1
             && argument != LONGITUDINAL_VERIFY_CARRY_FORWARD_MODE_V1
+            && argument != DERIVED_ACCESS_PRODUCT_CONTRACT_MODE_V1
+            && argument != DERIVED_ACCESS_PRODUCT_CONTRACT_VERIFY_MODE_V1
+            && argument != DERIVED_ACCESS_PRODUCT_CONTRACT_SMOKE_MODE_V1
             && argument != QUALIFICATION_DERIVED_ACCESS_CONTRACT_MODE_V1
             && argument != QUALIFICATION_DERIVED_ACCESS_FRAGMENT_MODE_V1
             && argument != QUALIFICATION_DERIVED_ACCESS_HELP_MODE_V1
@@ -585,6 +594,9 @@ fn main() -> ExitCode {
     {
         println!(
             "Derived-access qualification modes:\n\
+             --derived-access-product-contract\n\
+             --derived-access-product-contract-verify\n\
+             --derived-access-product-contract-smoke\n\
              --derived-access-contract\n\
              --derived-access-smoke [--derived-access-tier=D0-128|L1|L7] [--derived-access-root=<empty-path>]\n\
                                       [--derived-access-request=<path>]\n\
@@ -916,6 +928,34 @@ fn main() -> ExitCode {
                 .expect("content-only contract publication serializes")
         );
         return ExitCode::SUCCESS;
+    }
+
+    for (mode, run) in [
+        (
+            DERIVED_ACCESS_PRODUCT_CONTRACT_MODE_V1,
+            derived_access_product_contract_publication_json_v1 as fn() -> Result<String, String>,
+        ),
+        (
+            DERIVED_ACCESS_PRODUCT_CONTRACT_VERIFY_MODE_V1,
+            derived_access_product_contract_verify_json_v1,
+        ),
+        (
+            DERIVED_ACCESS_PRODUCT_CONTRACT_SMOKE_MODE_V1,
+            derived_access_product_contract_smoke_json_v1,
+        ),
+    ] {
+        if arguments.iter().any(|argument| argument == mode) {
+            return match run() {
+                Ok(json) => {
+                    println!("{json}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("store foundation product-integration contract failed: {error}");
+                    ExitCode::from(1)
+                }
+            };
+        }
     }
 
     if arguments

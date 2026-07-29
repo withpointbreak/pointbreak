@@ -1,11 +1,18 @@
-//! Candidate-independent reference semantics for qualification-only derived access.
+//! Product contract and candidate-independent reference semantics for derived access.
 #![cfg_attr(not(test), allow(dead_code))]
 
+#[cfg(any(test, feature = "bench"))]
 pub(crate) mod checkpoint;
+#[cfg(any(test, feature = "bench"))]
 pub(crate) mod cursor;
+#[cfg(any(test, feature = "bench"))]
 pub(crate) mod locator;
+#[cfg(any(test, feature = "bench"))]
 pub(crate) mod oracle;
+pub(crate) mod product_contract;
+#[cfg(any(test, feature = "bench"))]
 pub(crate) mod semantic;
+#[cfg(any(test, feature = "bench"))]
 pub(crate) use super::store::backend::{QualificationJournalCursor, QualificationLocalJournal};
 
 #[cfg(test)]
@@ -758,3 +765,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod product_contract_tests;
