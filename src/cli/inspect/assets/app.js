@@ -4500,7 +4500,7 @@
   function revisionCompositeGeneration() {
     const state2 = getState();
     return JSON.stringify([
-      state2.revisions?.eventSetHash ?? null,
+      state2.revisions?.projectionStamp ?? state2.revisions?.eventSetHash ?? null,
       state2.lastCommitGraphStamp
     ]);
   }

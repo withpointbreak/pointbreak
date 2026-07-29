@@ -23,7 +23,7 @@ use crate::session::workflow::{
     QueryDiagnostic, ReviewHistoryEntry, history_entries_from_selected_events,
 };
 
-const PRODUCT_HISTORY_SCHEMA_V1: &str = "pointbreak.sqlite-derived-access-history.v1";
+const PRODUCT_HISTORY_SCHEMA_V2: &str = "pointbreak.sqlite-derived-access-history.v2";
 const PROJECTION_STAMP_SCHEMA_V1: &str = "pointbreak.derived-access-projection-stamp.v1";
 const ACTIVE_PROFILE: &str = "sqlite-wal-bodyless-v1";
 const REVIEW_EVENT_CTE: &str = "
@@ -126,10 +126,10 @@ pub struct DerivedHistoryFreshness {
 
 #[doc(hidden)]
 pub struct DerivedHistoryAccess {
-    mode: DerivedHistoryMode,
+    pub(super) mode: DerivedHistoryMode,
 }
 
-enum DerivedHistoryMode {
+pub(super) enum DerivedHistoryMode {
     Off,
     Active {
         lifecycle: DerivedAccessLifecycle,
@@ -295,7 +295,7 @@ impl DerivedHistoryAccess {
         }))
     }
 
-    fn current(&self) -> Result<CurrentRead, String> {
+    pub(super) fn current(&self) -> Result<CurrentRead, String> {
         let DerivedHistoryMode::Active {
             lifecycle,
             current,
@@ -367,7 +367,7 @@ impl DerivedHistoryAccess {
     }
 }
 
-enum CurrentRead {
+pub(super) enum CurrentRead {
     Ready(Arc<CurrentGeneration>),
     Unavailable(DerivedHistoryStatus),
 }
@@ -768,7 +768,7 @@ fn normalized_history_cursor(cursor: &HistoryCursor) -> String {
     normalize_occurred_at(&cursor.occurred_at).unwrap_or_default()
 }
 
-fn support_event_ids(
+pub(super) fn support_event_ids(
     connection: &rusqlite::Connection,
     selected: &[ShoreEvent],
     as_of: TruthCursor,
@@ -844,7 +844,7 @@ fn query_string_rows(
         .map_err(|error| error.to_string())
 }
 
-fn hydrate_events(
+pub(super) fn hydrate_events(
     service: &super::service::DerivedAccessService,
     event_ids: &[String],
 ) -> Result<Vec<ShoreEvent>, String> {
@@ -878,14 +878,26 @@ fn event_content_hashes(event: &ShoreEvent) -> Vec<String> {
     let Some(payload) = event.payload.as_object() else {
         return Vec::new();
     };
-    HASH_FIELDS
+    let mut hashes = HASH_FIELDS
         .iter()
         .filter_map(|field| payload.get(*field).and_then(serde_json::Value::as_str))
         .map(str::to_owned)
-        .collect()
+        .collect::<Vec<_>>();
+    hashes.extend(
+        payload
+            .get("logArtifactContentHashes")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned),
+    );
+    hashes
 }
 
-fn state_diagnostics(state: &SemanticStateSnapshot) -> Result<Vec<ProjectionDiagnostic>, String> {
+pub(super) fn state_diagnostics(
+    state: &SemanticStateSnapshot,
+) -> Result<Vec<ProjectionDiagnostic>, String> {
     state
         .diagnostics
         .iter()
@@ -934,7 +946,7 @@ fn status(
     }
 }
 
-fn catching_up_status() -> DerivedHistoryStatus {
+pub(super) fn catching_up_status() -> DerivedHistoryStatus {
     status(
         DerivedHistoryAvailability::CatchingUp,
         "derived history is catching up to authoritative truth",
@@ -945,7 +957,10 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn projection_stamp(store_identity: &str, cursor: TruthCursor) -> Result<String, String> {
+pub(super) fn projection_stamp(
+    store_identity: &str,
+    cursor: TruthCursor,
+) -> Result<String, String> {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct StampMaterial<'a> {
@@ -961,7 +976,7 @@ fn projection_stamp(store_identity: &str, cursor: TruthCursor) -> Result<String,
         schema: PROJECTION_STAMP_SCHEMA_V1,
         store_identity,
         profile: ACTIVE_PROFILE,
-        schema_version: PRODUCT_HISTORY_SCHEMA_V1,
+        schema_version: PRODUCT_HISTORY_SCHEMA_V2,
         epoch: cursor.epoch,
         applied_sequence: cursor.sequence,
     })
@@ -1101,6 +1116,10 @@ mod tests {
 
         assert_eq!(
             base,
+            "sha256:c50da80445d7cd5848e72ef2a5bec07331051ac2c205f00dfe0c7be26779b742"
+        );
+        assert_eq!(
+            base,
             projection_stamp("store:one", TruthCursor::new(3, 8)).unwrap()
         );
         assert_ne!(
@@ -1114,6 +1133,24 @@ mod tests {
         assert_ne!(
             base,
             projection_stamp("store:one", TruthCursor::new(3, 9)).unwrap()
+        );
+    }
+
+    #[test]
+    fn selected_support_includes_validation_log_artifact_hashes() {
+        let mut event = review_initialized(1);
+        event.payload = serde_json::json!({
+            "summaryContentHash": "sha256:summary",
+            "logArtifactContentHashes": ["sha256:log-a", "sha256:log-b"],
+        });
+
+        assert_eq!(
+            event_content_hashes(&event),
+            vec![
+                "sha256:summary".to_owned(),
+                "sha256:log-a".to_owned(),
+                "sha256:log-b".to_owned(),
+            ]
         );
     }
 

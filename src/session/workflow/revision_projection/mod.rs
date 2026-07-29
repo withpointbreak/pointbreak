@@ -135,16 +135,41 @@ pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult>
     #[cfg(any(test, feature = "longitudinal-counting"))]
     crate::bench_support::longitudinal::record_projection_rebuild();
     let read_store = resolve_read_store(&options.repo)?;
-    let track_id = options
-        .track
-        .as_deref()
-        .map(validated_track_id)
-        .transpose()?;
     let StoreWideRead {
         events,
         removal,
         skip_diagnostics,
     } = load_store_wide_read(&read_store, options.read_for_display)?;
+    show_revision_from_events(
+        options,
+        read_store.backend(),
+        events,
+        removal,
+        skip_diagnostics,
+    )
+}
+
+pub(crate) fn show_revision_from_selected_events(
+    options: RevisionShowOptions,
+    backend: &StoreBackend,
+    events: Vec<ShoreEvent>,
+) -> Result<RevisionShowResult> {
+    let removal = ArtifactRemovalProjection::from_events(&events)?;
+    show_revision_from_events(options, backend, events, removal, Vec::new())
+}
+
+fn show_revision_from_events(
+    options: RevisionShowOptions,
+    backend: &StoreBackend,
+    events: Vec<ShoreEvent>,
+    removal: ArtifactRemovalProjection,
+    skip_diagnostics: Vec<ProjectionDiagnostic>,
+) -> Result<RevisionShowResult> {
+    let track_id = options
+        .track
+        .as_deref()
+        .map(validated_track_id)
+        .transpose()?;
     // The `--revision` seed is a head seed (forward-resolving); an exact request
     // (the inspector addressing a specific revision by id, e.g. a superseded DAG
     // node) resolves the id directly instead.
@@ -215,7 +240,7 @@ pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult>
         ),
     };
     let observations = project_observations(ObservationProjectionOptions {
-        backend: read_store.backend(),
+        backend,
         events: &events,
         resolved: &resolved,
         track_filter: track_id.clone(),
@@ -225,7 +250,7 @@ pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult>
         removal_lens: &body_removal_lens,
     })?;
     let input_requests = project_input_requests(InputRequestProjectionOptions {
-        backend: read_store.backend(),
+        backend,
         events: &events,
         resolved: &resolved,
         track_filter: track_id.clone(),
@@ -236,7 +261,7 @@ pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult>
         removal_lens: &body_removal_lens,
     })?;
     let (current_assessment, assessments) = project_assessments(AssessmentProjectionOptions {
-        backend: Some(read_store.backend()),
+        backend: Some(backend),
         events: &events,
         resolved: &resolved,
         track_filter: track_id.clone(),
@@ -245,7 +270,7 @@ pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult>
         removal_lens: Some(&body_removal_lens),
     })?;
     let mut validation_checks = project_validation_checks(ValidationCheckProjectionOptions {
-        backend: read_store.backend(),
+        backend,
         events: &events,
         revision_id: &resolved.revision_id,
         track_filter: track_id.clone(),
@@ -666,6 +691,46 @@ fn revision_overviews_from_store(
         removal,
         skip_diagnostics: _,
     } = load_store_wide_read(read_store, read_for_display)?;
+    revision_overviews_from_events(
+        read_store.backend(),
+        events,
+        removal,
+        revisions,
+        trust_set,
+        removal_policy,
+        summary_cache,
+    )
+}
+
+pub(crate) fn revision_overviews_from_selected_events(
+    backend: &StoreBackend,
+    events: Vec<ShoreEvent>,
+    revisions: &[RevisionId],
+    trust_set: &TrustSet,
+    removal_policy: RemovalPolicy,
+    summary_cache: Option<&SnapshotSummaryCache>,
+) -> Result<BTreeMap<RevisionId, RevisionOverview>> {
+    let removal = ArtifactRemovalProjection::from_events(&events)?;
+    revision_overviews_from_events(
+        backend,
+        events,
+        removal,
+        revisions,
+        trust_set,
+        removal_policy,
+        summary_cache,
+    )
+}
+
+fn revision_overviews_from_events(
+    backend: &StoreBackend,
+    events: Vec<ShoreEvent>,
+    removal: ArtifactRemovalProjection,
+    revisions: &[RevisionId],
+    trust_set: &TrustSet,
+    removal_policy: RemovalPolicy,
+    summary_cache: Option<&SnapshotSummaryCache>,
+) -> Result<BTreeMap<RevisionId, RevisionOverview>> {
     let cosig_index = {
         let span = tracing::debug_span!("shore.revisions.overviews.cosignature_index");
         let _guard = span.enter();
@@ -704,7 +769,7 @@ fn revision_overviews_from_store(
         let span = tracing::debug_span!("shore.revisions.overviews.snapshot_seeds");
         let _guard = span.enter();
         snapshot_summary_seeds(
-            read_store.backend(),
+            backend,
             &requested,
             trust_set,
             removal_policy,
@@ -736,7 +801,7 @@ fn revision_overviews_from_store(
                 .map(Vec::as_slice)
                 .unwrap_or_default();
             let overview = build_revision_overview(
-                read_store.backend(),
+                backend,
                 revision_facts,
                 identity,
                 seed,

@@ -76,6 +76,7 @@ export interface RevisionsDoc {
   entries: Revision[];
   // Whole-store generation for the revision summaries. Unlike the windowed
   // history document, this advances on every whole-document poll refresh.
+  projectionStamp?: string;
   eventSetHash?: string;
   // The captured-revision count the stat row reads (present in the committed fixture).
   revisionCount?: number;

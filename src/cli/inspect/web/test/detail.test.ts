@@ -1023,6 +1023,41 @@ describe("showComposite (shownCompositeId guards re-fetch)", () => {
     expect(detailEl().textContent).toContain("Freshly polled observation");
   });
 
+  it("re-fetches an open composite when the derived projection stamp moves", async () => {
+    const initial = structuredClone(revisionJson) as unknown as RevisionPageDoc;
+    initial.observations = [];
+    initial.summary = { ...initial.summary, observationCount: 0 };
+    setCompositeResponse(initial);
+    store.commit({
+      revisions: {
+        ...(store.getState().revisions as RevisionsDoc),
+        eventSetHash: undefined,
+        projectionStamp: "sha256:before-poll",
+      },
+      selected: { kind: "revision", id: REV },
+      open: true,
+    });
+    await detail.showComposite(REV);
+    expect(detailEl().textContent).not.toContain("Fresh derived observation");
+
+    const updated = structuredClone(revisionJson) as unknown as RevisionPageDoc;
+    const updatedObservation = updated.observations?.[0];
+    if (!updatedObservation) throw new Error("expected observation fixture");
+    updatedObservation.title = "Fresh derived observation";
+    setCompositeResponse(updated);
+    store.commit({
+      revisions: {
+        ...(store.getState().revisions as RevisionsDoc),
+        eventSetHash: undefined,
+        projectionStamp: "sha256:after-poll",
+      },
+    });
+
+    await detail.showComposite(REV);
+
+    expect(detailEl().textContent).toContain("Fresh derived observation");
+  });
+
   it("keeps the current revision mounted while its fresh composite loads", async () => {
     const initial = structuredClone(revisionJson) as unknown as RevisionPageDoc;
     const initialObservation = initial.observations?.[0];

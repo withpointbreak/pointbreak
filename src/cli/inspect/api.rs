@@ -22,14 +22,15 @@ use pointbreak::session::{
     AssessmentRecordStatus, AssessmentView, AttentionItem, AttentionListOptions,
     BaseHistoryProjection, BaseProjectionConfig, CurrentAssessmentStatus, DerivedHistoryAccess,
     DerivedHistoryNewCount, DerivedHistoryPage, DerivedHistoryRoute, DerivedHistoryStatus,
-    DistinctValues, EventVerificationPolicy, HistoryCursor, HistoryPage, HistoryQuery,
-    InputRequestStatus, LivenessEnrichment, ObservationStatus, ObservationView,
-    ProjectionDiagnostic, QueryDiagnostic, ReviewHistoryEntry, RevisionCommitRangeView,
-    RevisionListEntry, RevisionListOptions, RevisionOverview, RevisionOverviewsOptions,
-    RevisionShowOptions, RevisionShowResult, SessionState, SnapshotSummaryCache, StoreIdentity,
-    StoreIdentityOptions, SupersessionView, TrustSet, ValidationContinuitySummary,
-    ValidationContinuityView, apply_history_query, classify_validation_continuity,
-    commit_graph_stamp, compare_event_instants, count_new_since,
+    DerivedRevisionCollection, DerivedRevisionCollectionRoute, DerivedRevisionDetail,
+    DerivedRevisionDetailRoute, DistinctValues, EventVerificationPolicy, HistoryCursor,
+    HistoryPage, HistoryQuery, InputRequestStatus, LivenessEnrichment, ObservationStatus,
+    ObservationView, ProjectionDiagnostic, QueryDiagnostic, ReviewHistoryEntry,
+    RevisionCommitRangeView, RevisionListEntry, RevisionListOptions, RevisionOverview,
+    RevisionOverviewsOptions, RevisionShowOptions, RevisionShowResult, SessionState,
+    SnapshotSummaryCache, StoreIdentity, StoreIdentityOptions, SupersessionView, TrustSet,
+    ValidationContinuitySummary, ValidationContinuityView, apply_history_query,
+    classify_validation_continuity, commit_graph_stamp, compare_event_instants, count_new_since,
     current_assessment_includes_follow_up, default_history_page_projection,
     diagnose_ref_continuity, effective_integration_ref, enrich_liveness, event_log_head_marker,
     history_base_projection, list_attention, list_revisions, read_bound_object_artifact,
@@ -93,7 +94,10 @@ pub(super) enum RoutedJson {
 #[serde(rename_all = "camelCase")]
 struct RevisionsPayload {
     schema: &'static str,
-    event_set_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event_set_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    projection_stamp: Option<String>,
     event_count: usize,
     revision_count: usize,
     entries: Vec<RevisionEntryDocument>,
@@ -1182,6 +1186,27 @@ pub(super) fn revisions_json(
     cached_revisions_json(repo, cache, snapshot_summaries).map(|payload| (*payload).clone())
 }
 
+pub(super) fn routed_revisions_json(
+    repo: &Path,
+    derived: &DerivedHistoryAccess,
+    cache: &super::cache::RevisionsResponseCache,
+    snapshot_summaries: &Arc<SnapshotSummaryCache>,
+) -> Result<RoutedJson, String> {
+    if !derived.is_active() {
+        return revisions_json(repo, cache, snapshot_summaries).map(RoutedJson::Ok);
+    }
+    let trust_set = crate::cli::common::discover_trust_set(repo);
+    match derived.revisions(repo, trust_set, Arc::clone(snapshot_summaries))? {
+        DerivedRevisionCollectionRoute::Off => {
+            revisions_json(repo, cache, snapshot_summaries).map(RoutedJson::Ok)
+        }
+        DerivedRevisionCollectionRoute::Ready(collection) => {
+            serialize_derived_revisions_payload(repo, collection).map(RoutedJson::Ok)
+        }
+        DerivedRevisionCollectionRoute::Unavailable(status) => Ok(RoutedJson::Unavailable(status)),
+    }
+}
+
 /// Warm the `/api/revisions` response cache without serializing a response.
 ///
 /// Best-effort, exactly like [`warm_history_cache`]: endpoint requests use the
@@ -1325,7 +1350,8 @@ fn build_revisions_json(
     };
     let payload = RevisionsPayload {
         schema: "pointbreak.inspect-revisions",
-        event_set_hash: result.event_set_hash,
+        event_set_hash: Some(result.event_set_hash),
+        projection_stamp: None,
         event_count: result.event_count,
         revision_count: result.revision_count,
         entries,
@@ -1334,6 +1360,57 @@ fn build_revisions_json(
     let span = tracing::debug_span!("shore.inspect.revisions.serialize_json");
     let _guard = span.enter();
     serde_json::to_string(&payload).map_err(|error| error.to_string())
+}
+
+fn serialize_derived_revisions_payload(
+    repo: &Path,
+    collection: DerivedRevisionCollection,
+) -> Result<String, String> {
+    let subject_oids = collection
+        .result
+        .entries
+        .iter()
+        .filter_map(|entry| entry.git_provenance.as_ref())
+        .filter_map(|provenance| commit_subject_oids(&provenance.source, &provenance.target))
+        .collect::<BTreeSet<_>>();
+    let commit_subjects = git_commit_subjects(repo, &subject_oids).unwrap_or_default();
+    let overviews =
+        selected_revision_overview_documents(&collection.result.entries, &collection.overviews)?;
+    let entries = to_unit_entry_documents(collection.result.entries, overviews, &commit_subjects)?;
+    let payload = RevisionsPayload {
+        schema: "pointbreak.inspect-revisions",
+        event_set_hash: None,
+        projection_stamp: Some(collection.projection_stamp),
+        event_count: collection.result.event_count,
+        revision_count: collection.result.revision_count,
+        entries,
+        diagnostics: collection.result.diagnostics,
+    };
+    #[cfg(feature = "longitudinal-counting")]
+    pointbreak::bench_support::longitudinal::set_retained_serialized_response_cache_bytes(0);
+    serde_json::to_string(&payload).map_err(|error| error.to_string())
+}
+
+fn selected_revision_overview_documents(
+    entries: &[RevisionListEntry],
+    overviews: &BTreeMap<RevisionId, RevisionOverview>,
+) -> Result<BTreeMap<String, RevisionEntryOverviewDocument>, String> {
+    entries
+        .iter()
+        .map(|entry| {
+            let revision_id = entry.revision_id.as_str().to_owned();
+            let overview = overviews
+                .get(&entry.revision_id)
+                .ok_or_else(|| format!("revision overview not available: {revision_id}"))?;
+            Ok((
+                revision_id,
+                RevisionEntryOverviewDocument {
+                    overview: revision_overview_document(overview, &entry.captured_at),
+                    diagnostics: overview.diagnostics.clone(),
+                },
+            ))
+        })
+        .collect()
 }
 
 /// The supersession-DAG threads (the connected components of the supersession
@@ -1896,6 +1973,39 @@ pub(super) fn revision_json(repo: &Path, revision_id: &str) -> Result<String, St
     if revision_id.is_empty() {
         return Err("missing revision id".to_owned());
     }
+    let result = show_revision(revision_show_options(repo, revision_id)).map_err(|error| {
+        tracing::debug!(error = %error, revision = revision_id, "inspect_unit_read_failed");
+        format!("revision not found or unreadable: {revision_id}")
+    })?;
+    serialize_revision_result(repo, revision_id, result, None, None)
+}
+
+pub(super) fn routed_revision_json(
+    repo: &Path,
+    derived: &DerivedHistoryAccess,
+    revision_id: &str,
+) -> Result<RoutedJson, String> {
+    if revision_id.is_empty() {
+        return Err("missing revision id".to_owned());
+    }
+    if !derived.is_active() {
+        return revision_json(repo, revision_id).map(RoutedJson::Ok);
+    }
+    let revision = RevisionId::new(revision_id.to_owned());
+    match derived.revision_detail(&revision, revision_show_options(repo, revision_id))? {
+        DerivedRevisionDetailRoute::Off | DerivedRevisionDetailRoute::ExactFallback => {
+            revision_json(repo, revision_id).map(RoutedJson::Ok)
+        }
+        DerivedRevisionDetailRoute::Ready(None) => {
+            Err(format!("revision not found or unreadable: {revision_id}"))
+        }
+        DerivedRevisionDetailRoute::Ready(Some(detail)) => {
+            serialize_derived_revision_payload(repo, revision_id, *detail).map(RoutedJson::Ok)
+        }
+    }
+}
+
+fn revision_show_options(repo: &Path, revision_id: &str) -> RevisionShowOptions {
     let mut show_options = RevisionShowOptions::new(repo)
         .with_revision_id(RevisionId::new(revision_id.to_owned()))
         // The inspector addresses a specific revision by id (e.g. a superseded
@@ -1910,10 +2020,30 @@ pub(super) fn revision_json(repo: &Path, revision_id: &str) -> Result<String, St
     if let Some(map) = crate::cli::common::discover_delegation_map(repo) {
         show_options = show_options.with_delegation_map(map);
     }
-    let result = show_revision(show_options).map_err(|error| {
-        tracing::debug!(error = %error, revision = revision_id, "inspect_unit_read_failed");
-        format!("revision not found or unreadable: {revision_id}")
-    })?;
+    show_options
+}
+
+fn serialize_derived_revision_payload(
+    repo: &Path,
+    revision_id: &str,
+    detail: DerivedRevisionDetail,
+) -> Result<String, String> {
+    serialize_revision_result(
+        repo,
+        revision_id,
+        detail.result,
+        Some(&detail.supersession),
+        Some(detail.projection_stamp),
+    )
+}
+
+fn serialize_revision_result(
+    repo: &Path,
+    revision_id: &str,
+    result: RevisionShowResult,
+    selected_supersession: Option<&SupersessionView>,
+    projection_stamp: Option<String>,
+) -> Result<String, String> {
     // Thread the typed endpoints and the commit-range view out before
     // `revision_show_document` consumes `result`, then splice the additive
     // `targetDisplay` into the serialized document.
@@ -1948,16 +2078,19 @@ pub(super) fn revision_json(repo: &Path, revision_id: &str) -> Result<String, St
     // The revision-level supersession component, from the same event read
     // `threads_json` performs. Advisory like the fact graphs: a read or layout
     // failure omits the block, never fails the composite page.
-    let revision_supersession = read_events_for_display(repo)
-        .map_err(|error| error.to_string())
-        .and_then(|(events, _)| {
-            SupersessionView::from_events(&events).map_err(|error| error.to_string())
-        })
-        .and_then(|view| revision_supersession_document(&view, &result.revision.id))
-        .unwrap_or_else(|error| {
-            tracing::debug!(error = %error, revision = revision_id, "revision_supersession_block_failed");
-            None
-        });
+    let revision_supersession = match selected_supersession {
+        Some(view) => revision_supersession_document(view, &result.revision.id),
+        None => read_events_for_display(repo)
+            .map_err(|error| error.to_string())
+            .and_then(|(events, _)| {
+                SupersessionView::from_events(&events).map_err(|error| error.to_string())
+            })
+            .and_then(|view| revision_supersession_document(&view, &result.revision.id)),
+    }
+    .unwrap_or_else(|error| {
+        tracing::debug!(error = %error, revision = revision_id, "revision_supersession_block_failed");
+        None
+    });
     let document = revision_show_document(result);
     let mut value = serde_json::to_value(&document).map_err(|error| error.to_string())?;
     splice_target_display(&mut value, target_display)?;
@@ -1966,6 +2099,15 @@ pub(super) fn revision_json(repo: &Path, revision_id: &str) -> Result<String, St
     splice_revision_supersession(&mut value, revision_supersession)?;
 
     splice_repository_liveness(&mut value, &commit_range, repo, head_oid.as_deref())?;
+    if let Some(projection_stamp) = projection_stamp
+        && let Some(object) = value.as_object_mut()
+    {
+        object.remove("eventSetHash");
+        object.insert(
+            "projectionStamp".to_owned(),
+            serde_json::Value::String(projection_stamp),
+        );
+    }
 
     serde_json::to_string(&value).map_err(|error| error.to_string())
 }
@@ -2180,6 +2322,85 @@ mod tests {
         assert_eq!(history["projectionStamp"], "sha256:projection");
         assert!(history.get("eventSetHash").is_none());
         assert_eq!(new_count["projectionStamp"], "sha256:projection");
+    }
+
+    #[test]
+    fn active_revision_collection_wire_matches_default_off_except_for_projection_stamp() {
+        let (repo, _, _) = captured_repo();
+        let summaries = Arc::new(SnapshotSummaryCache::new());
+        let trust_set = crate::cli::common::discover_trust_set(repo.path());
+        let result =
+            list_revisions(RevisionListOptions::new(repo.path()).with_read_for_display(true))
+                .unwrap();
+        let overviews = show_revision_overviews(
+            RevisionOverviewsOptions::new(repo.path())
+                .with_revisions(result.entries.iter().map(|entry| entry.revision_id.clone()))
+                .with_read_for_display(true)
+                .with_trust_set(trust_set)
+                .with_snapshot_summary_cache(Arc::clone(&summaries)),
+        )
+        .unwrap();
+        let mut active: serde_json::Value = serde_json::from_str(
+            &serialize_derived_revisions_payload(
+                repo.path(),
+                DerivedRevisionCollection {
+                    projection_stamp: "sha256:projection".to_owned(),
+                    result,
+                    overviews,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let cache = super::super::cache::RevisionsResponseCache::new();
+        let mut default_off: serde_json::Value =
+            serde_json::from_str(&revisions_json(repo.path(), &cache, &summaries).unwrap())
+                .unwrap();
+
+        assert_eq!(active["projectionStamp"], "sha256:projection");
+        assert!(active.get("eventSetHash").is_none());
+        active.as_object_mut().unwrap().remove("projectionStamp");
+        default_off.as_object_mut().unwrap().remove("eventSetHash");
+        assert_eq!(active, default_off);
+    }
+
+    #[test]
+    fn active_revision_detail_wire_matches_default_off_except_for_projection_stamp() {
+        let (repo, _, _) = captured_repo();
+        let revision_id =
+            list_revisions(RevisionListOptions::new(repo.path()).with_read_for_display(true))
+                .unwrap()
+                .entries
+                .into_iter()
+                .next()
+                .unwrap()
+                .revision_id;
+        let result =
+            show_revision(revision_show_options(repo.path(), revision_id.as_str())).unwrap();
+        let (events, _) = read_events_for_display(repo.path()).unwrap();
+        let supersession = SupersessionView::from_events(&events).unwrap();
+        let mut active: serde_json::Value = serde_json::from_str(
+            &serialize_derived_revision_payload(
+                repo.path(),
+                revision_id.as_str(),
+                DerivedRevisionDetail {
+                    projection_stamp: "sha256:projection".to_owned(),
+                    result,
+                    supersession,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut default_off: serde_json::Value =
+            serde_json::from_str(&revision_json(repo.path(), revision_id.as_str()).unwrap())
+                .unwrap();
+
+        assert_eq!(active["projectionStamp"], "sha256:projection");
+        assert!(active.get("eventSetHash").is_none());
+        active.as_object_mut().unwrap().remove("projectionStamp");
+        default_off.as_object_mut().unwrap().remove("eventSetHash");
+        assert_eq!(active, default_off);
     }
 
     fn test_work_label() -> WorkLabel {

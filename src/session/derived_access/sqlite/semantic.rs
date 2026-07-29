@@ -23,13 +23,14 @@ use crate::session::derived_access::semantic::{
 };
 use crate::session::event::{
     EventSignatureRecordedPayload, EventType, ReviewObservationRecordedPayload, ShoreEvent,
+    WorkObjectProposal, WorkObjectProposedPayload,
 };
 use crate::session::workflow::tag_completion_key;
 
 const SEMANTIC_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-semantic.v1";
 const SEMANTIC_SCHEMA_VERSION: i64 = 4;
 const PRODUCT_HISTORY_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-history.v1";
-const PRODUCT_HISTORY_SCHEMA_VERSION: i64 = 1;
+const PRODUCT_HISTORY_SCHEMA_VERSION: i64 = 2;
 
 #[derive(Clone, Debug)]
 pub(crate) struct SqliteSemantic {
@@ -58,6 +59,13 @@ pub(crate) struct ProductHistoryFact {
     sequence: u64,
     tag_keys: Vec<String>,
     signature_target_event_id: Option<String>,
+    revision: Option<ProductRevisionFact>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProductRevisionFact {
+    revision_id: String,
+    supersedes: Vec<String>,
 }
 
 impl ProductHistoryFact {
@@ -67,7 +75,26 @@ impl ProductHistoryFact {
     ) -> Result<Self, SemanticModelError> {
         let mut tag_keys = Vec::new();
         let mut signature_target_event_id = None;
+        let mut revision = None;
         match event.event_type {
+            EventType::WorkObjectProposed => {
+                let payload: WorkObjectProposedPayload =
+                    serde_json::from_value(event.payload.clone())?;
+                if let WorkObjectProposal::Revision {
+                    revision: proposed,
+                    supersedes,
+                    ..
+                } = payload.work_object
+                {
+                    revision = Some(ProductRevisionFact {
+                        revision_id: proposed.id.as_str().to_owned(),
+                        supersedes: supersedes
+                            .iter()
+                            .map(|revision| revision.as_str().to_owned())
+                            .collect(),
+                    });
+                }
+            }
             EventType::ReviewObservationRecorded => {
                 let payload: ReviewObservationRecordedPayload =
                     serde_json::from_value(event.payload.clone())?;
@@ -91,6 +118,7 @@ impl ProductHistoryFact {
             sequence,
             tag_keys,
             signature_target_event_id,
+            revision,
         })
     }
 }
@@ -135,6 +163,21 @@ impl SqliteSemantic {
                 "existing locator cursor {:?} predates the product history schema",
                 locator_checkpoint.applied
             )));
+        }
+        if product_history_exists && locator_checkpoint.applied.sequence != 0 {
+            let schema_version = connection
+                .query_row(
+                    "SELECT schema_version FROM product_history_meta WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| sqlite_error("inspect product history version", error))?;
+            if schema_version < PRODUCT_HISTORY_SCHEMA_VERSION {
+                return Err(SqliteSemanticError::ProductHistoryUpgradeRequired(format!(
+                    "existing product history schema {schema_version} predates version \
+                     {PRODUCT_HISTORY_SCHEMA_VERSION}"
+                )));
+            }
         }
         connection
             .execute_batch(
@@ -354,7 +397,7 @@ impl SqliteSemantic {
                  CREATE TABLE IF NOT EXISTS product_history_meta (
                      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                      profile_id TEXT NOT NULL,
-                     schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+                     schema_version INTEGER NOT NULL CHECK (schema_version = 2),
                      epoch INTEGER NOT NULL CHECK (epoch > 0),
                      applied_sequence INTEGER NOT NULL CHECK (applied_sequence >= 0)
                  ) STRICT;
@@ -370,7 +413,20 @@ impl SqliteSemantic {
                      target_event_id TEXT NOT NULL
                  ) STRICT;
                  CREATE INDEX IF NOT EXISTS product_history_signature_target
-                     ON product_history_signature(target_event_id, sequence);",
+                     ON product_history_signature(target_event_id, sequence);
+                 CREATE TABLE IF NOT EXISTS product_revision (
+                     sequence INTEGER PRIMARY KEY REFERENCES semantic_event_fact(sequence),
+                     revision_id TEXT NOT NULL
+                 ) STRICT;
+                 CREATE INDEX IF NOT EXISTS product_revision_identity
+                     ON product_revision(revision_id, sequence);
+                 CREATE TABLE IF NOT EXISTS product_revision_edge (
+                     sequence INTEGER NOT NULL REFERENCES product_revision(sequence),
+                     superseded_revision_id TEXT NOT NULL,
+                     PRIMARY KEY (sequence, superseded_revision_id)
+                 ) STRICT, WITHOUT ROWID;
+                 CREATE INDEX IF NOT EXISTS product_revision_edge_target
+                     ON product_revision_edge(superseded_revision_id, sequence);",
             )
             .map_err(|error| sqlite_error("create semantic schema", error))?;
         let inserted = connection
@@ -943,6 +999,23 @@ fn insert_product_history_facts(
                     params![sequence, target_event_id],
                 )
                 .map_err(|error| locator_sqlite_error("insert product history signature", error))?;
+        }
+        if let Some(revision) = &fact.revision {
+            transaction
+                .execute(
+                    "INSERT INTO product_revision (sequence, revision_id) VALUES (?1, ?2)",
+                    params![sequence, revision.revision_id],
+                )
+                .map_err(|error| locator_sqlite_error("insert product revision", error))?;
+            for superseded_revision_id in &revision.supersedes {
+                transaction
+                    .execute(
+                        "INSERT INTO product_revision_edge
+                         (sequence, superseded_revision_id) VALUES (?1, ?2)",
+                        params![sequence, superseded_revision_id],
+                    )
+                    .map_err(|error| locator_sqlite_error("insert product revision edge", error))?;
+            }
         }
     }
     Ok(())

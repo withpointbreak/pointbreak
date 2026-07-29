@@ -11,6 +11,7 @@ pub(crate) mod locator;
 #[cfg(any(test, feature = "bench"))]
 pub(crate) mod oracle;
 pub(crate) mod product_contract;
+pub(crate) mod revisions;
 pub(crate) mod semantic;
 pub(crate) mod service;
 pub(crate) mod sqlite;

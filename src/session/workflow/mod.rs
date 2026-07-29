@@ -89,6 +89,7 @@ pub use observation::{
     ObservationStatus, ObservationTargetSelector, ObservationView, list_observations,
     record_observation,
 };
+pub(crate) use revision_list::list_revisions_from_selected_events;
 pub use revision_list::{
     RefFilterMode, RevisionListEntry, RevisionListOptions, RevisionListResult,
     UnreachableVisibility, list_revisions, list_units_for_ref,
@@ -101,6 +102,9 @@ pub use revision_projection::{
     ValidationContinuitySummary, ValidationContinuityView, build_revision_search_record,
     classify_validation_continuity, current_assessment_includes_follow_up, show_revision,
     show_revision_overviews, stale_review_fact_count,
+};
+pub(crate) use revision_projection::{
+    revision_overviews_from_selected_events, show_revision_from_selected_events,
 };
 pub use store_family::{
     StoreForgetOptions, StoreForgetResult, StoreListEntry, StoreListResult, forget_family_store,

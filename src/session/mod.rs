@@ -15,6 +15,11 @@ pub use derived_access::history::{
     DerivedHistoryAccess, DerivedHistoryAvailability, DerivedHistoryFreshness,
     DerivedHistoryNewCount, DerivedHistoryPage, DerivedHistoryRoute, DerivedHistoryStatus,
 };
+#[doc(hidden)]
+pub use derived_access::revisions::{
+    DerivedRevisionCollection, DerivedRevisionCollectionRoute, DerivedRevisionDetail,
+    DerivedRevisionDetailRoute,
+};
 pub use event::{
     BodyContentType, IngestProvenance, IngestVia, event_signature_pre_authentication_encoding,
     event_to_be_signed,

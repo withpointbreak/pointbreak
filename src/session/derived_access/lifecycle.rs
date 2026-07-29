@@ -1385,7 +1385,9 @@ mod tests {
         let connection = rusqlite::Connection::open(&database).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE product_history_signature;
+                "DROP TABLE product_revision_edge;
+                 DROP TABLE product_revision;
+                 DROP TABLE product_history_signature;
                  DROP TABLE product_history_tag;
                  DROP TABLE product_history_meta;
                  PRAGMA wal_checkpoint(TRUNCATE);",
@@ -1409,6 +1411,39 @@ mod tests {
             )
             .unwrap();
         assert_eq!(product_tables, 0);
+    }
+
+    #[test]
+    fn published_generation_with_older_product_history_schema_requires_rebuild() {
+        let temp = populated_store(1);
+        let lifecycle = active_lifecycle(temp.path());
+        let receipt = lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let generation = lifecycle
+            .paths()
+            .generation(receipt.generation_id.as_deref().unwrap());
+        let database = generation.join("cursor.sqlite3");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA ignore_check_constraints = ON;
+                 UPDATE product_history_meta SET schema_version = 1 WHERE singleton = 1;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert_eq!(
+            lifecycle.status().unwrap().availability,
+            DerivedAccessAvailability::RebuildRequired
+        );
+        assert!(matches!(
+            lifecycle.open_current(),
+            Err(LifecycleError::RebuildRequired(_))
+        ));
+        assert!(
+            generation.exists(),
+            "stale generation must not be quarantined"
+        );
     }
 
     #[test]

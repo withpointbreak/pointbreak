@@ -103,8 +103,9 @@ pub(super) struct InspectState {
     /// retain the legacy behavior; the active derived profile touches it only
     /// for explicit body search.
     pub history_cache: super::cache::HistoryProjectionCache,
-    /// The single-slot `/api/revisions` response cache (#426): one payload per
-    /// store version, rebuilt only when the head marker moves.
+    /// The default-off `/api/revisions` response cache (#426): one payload per
+    /// store version, rebuilt only when the head marker moves. The active
+    /// derived profile neither warms nor reads this full serialized response.
     pub revisions_cache: super::cache::RevisionsResponseCache,
     /// Content-hash-keyed snapshot summary counts shared across every
     /// `/api/revisions` rebuild (#426): each snapshot artifact is decoded once
@@ -342,6 +343,9 @@ pub(super) fn serve(
 /// `/api/revisions` the rebuild has usually already started (or finished)
 /// instead of blocking that request for the full build.
 fn maybe_warm_revisions_cache(state: &Arc<InspectState>, commit_graph_stamp: Option<&str>) {
+    if state.derived_history.is_active() {
+        return;
+    }
     if api::revisions_cache_is_warm(
         state.repo.as_path(),
         &state.revisions_cache,
@@ -477,11 +481,13 @@ fn warm_caches_after_auth(state: &Arc<InspectState>) {
         {
             tracing::debug!(error = %error, "inspect_history_cache_warm_failed");
         }
-        if let Err(error) = api::warm_revisions_cache(
-            state.repo.as_path(),
-            &state.revisions_cache,
-            &state.snapshot_summaries,
-        ) {
+        if !state.derived_history.is_active()
+            && let Err(error) = api::warm_revisions_cache(
+                state.repo.as_path(),
+                &state.revisions_cache,
+                &state.snapshot_summaries,
+            )
+        {
             tracing::debug!(error = %error, "inspect_revisions_cache_warm_failed");
         }
     });
@@ -652,8 +658,9 @@ fn route(
             )),
             Err(message) => Response::json_error("400 Bad Request", &message),
         },
-        "/api/revisions" => api_response(api::revisions_json(
+        "/api/revisions" => routed_api_response(api::routed_revisions_json(
             repo,
+            &state.derived_history,
             &state.revisions_cache,
             &state.snapshot_summaries,
         )),
@@ -711,7 +718,9 @@ fn route_member(state: &Arc<InspectState>, path: &str, query: Option<&str>) -> R
     let repo = state.repo.as_path();
     if let Some(raw) = path_member(path, "/api/revisions/") {
         return match decode_member(raw) {
-            Some(id) => api_response(api::revision_json(repo, &id)),
+            Some(id) => {
+                routed_api_response(api::routed_revision_json(repo, &state.derived_history, &id))
+            }
             None => Response::json_error("400 Bad Request", "missing revision id"),
         };
     }

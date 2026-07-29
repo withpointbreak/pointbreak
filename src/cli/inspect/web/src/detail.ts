@@ -352,7 +352,7 @@ const compositeInFlight = new Map<string, CompositeInFlight>();
 function revisionCompositeGeneration(): string {
   const state = getState();
   return JSON.stringify([
-    state.revisions?.eventSetHash ?? null,
+    state.revisions?.projectionStamp ?? state.revisions?.eventSetHash ?? null,
     state.lastCommitGraphStamp,
   ]);
 }

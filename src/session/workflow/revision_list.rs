@@ -190,6 +190,21 @@ pub fn list_revisions(options: RevisionListOptions) -> Result<RevisionListResult
             (store.list_events()?, Vec::new())
         }
     };
+    list_revisions_from_events_with_diagnostics(options, events, skip_diagnostics)
+}
+
+pub(crate) fn list_revisions_from_selected_events(
+    options: RevisionListOptions,
+    events: Vec<ShoreEvent>,
+) -> Result<RevisionListResult> {
+    list_revisions_from_events_with_diagnostics(options, events, Vec::new())
+}
+
+fn list_revisions_from_events_with_diagnostics(
+    options: RevisionListOptions,
+    events: Vec<ShoreEvent>,
+    skip_diagnostics: Vec<ProjectionDiagnostic>,
+) -> Result<RevisionListResult> {
     let projection = {
         let span = tracing::debug_span!("shore.revisions.list.commit_range_projection");
         let _guard = span.enter();
