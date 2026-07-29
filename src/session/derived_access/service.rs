@@ -6,11 +6,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::product_contract::DerivedAccessProfile;
-#[cfg(feature = "longitudinal-counting")]
-use super::sqlite::CursorLedgerInventory;
 use super::sqlite::{
-    CursorLedgerError, CursorLedgerIdentity, LocatorInventory, SemanticInventory,
-    SqliteCursorLedger, SqliteLocator, SqliteLocatorError, SqliteSemantic, SqliteSemanticError,
+    CursorLedgerError, CursorLedgerIdentity, CursorLedgerInventory, LocatorInventory,
+    SemanticInventory, SqliteCursorLedger, SqliteLocator, SqliteLocatorError, SqliteSemantic,
+    SqliteSemanticError,
 };
 use crate::model::RevisionId;
 use crate::session::derived_access::cursor::{
@@ -147,7 +146,15 @@ impl DerivedAccessService {
         store_root: &Path,
         identity: CursorLedgerIdentity,
     ) -> Result<Self, DerivedAccessServiceError> {
-        Self::open_inner(store_root, identity, None)
+        Self::open_inner(store_root, None, identity, None)
+    }
+
+    pub(crate) fn open_at(
+        store_root: &Path,
+        sidecar_root: &Path,
+        identity: CursorLedgerIdentity,
+    ) -> Result<Self, DerivedAccessServiceError> {
+        Self::open_inner(store_root, Some(sidecar_root), identity, None)
     }
 
     fn open_observed(
@@ -155,11 +162,12 @@ impl DerivedAccessService {
         identity: CursorLedgerIdentity,
         probe: &DerivedAccessIoProbe,
     ) -> Result<Self, DerivedAccessServiceError> {
-        Self::open_inner(store_root, identity, Some(probe))
+        Self::open_inner(store_root, None, identity, Some(probe))
     }
 
     fn open_inner(
         store_root: &Path,
+        sidecar_root: Option<&Path>,
         identity: CursorLedgerIdentity,
         probe: Option<&DerivedAccessIoProbe>,
     ) -> Result<Self, DerivedAccessServiceError> {
@@ -169,11 +177,19 @@ impl DerivedAccessService {
         if let Some(probe) = probe {
             probe.record_root_resolution();
         }
-        let cursor = SqliteCursorLedger::open(&store_root, identity)?;
+        let cursor = match sidecar_root {
+            Some(sidecar_root) => {
+                SqliteCursorLedger::open_immutable_at(&store_root, sidecar_root, identity)?
+            }
+            None => SqliteCursorLedger::open(&store_root, identity)?,
+        };
         if let Some(probe) = probe {
             probe.record_sqlite_physical_open();
         }
-        let locator = SqliteLocator::open(&store_root)?;
+        let locator = match sidecar_root {
+            Some(sidecar_root) => SqliteLocator::open_at(&store_root, sidecar_root)?,
+            None => SqliteLocator::open(&store_root)?,
+        };
         if let Some(probe) = probe {
             probe.record_sqlite_physical_open();
         }
@@ -284,7 +300,6 @@ impl DerivedAccessService {
         Ok(self.locator.inventory()?)
     }
 
-    #[cfg(feature = "longitudinal-counting")]
     pub(crate) fn cursor_inventory(
         &self,
     ) -> Result<CursorLedgerInventory, DerivedAccessServiceError> {

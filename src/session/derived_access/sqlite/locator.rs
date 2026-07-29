@@ -95,11 +95,20 @@ impl SqliteLocator {
         let store_root = store_root
             .canonicalize()
             .map_err(|error| SqliteLocatorError::Metadata(error.to_string()))?;
+        let sidecar_root = store_root.join(DERIVED_SIDECAR_DIRECTORY);
+        Self::open_at(&store_root, &sidecar_root)
+    }
+
+    pub(crate) fn open_at(
+        store_root: &Path,
+        sidecar_root: &Path,
+    ) -> Result<Self, SqliteLocatorError> {
+        let store_root = store_root
+            .canonicalize()
+            .map_err(|error| SqliteLocatorError::Metadata(error.to_string()))?;
         let locator = Self {
             store_root: store_root.clone(),
-            database_path: store_root
-                .join(DERIVED_SIDECAR_DIRECTORY)
-                .join(DATABASE_FILE),
+            database_path: sidecar_root.join(DATABASE_FILE),
         };
         if !locator.database_path.exists() {
             return Err(SqliteLocatorError::MissingSidecar(

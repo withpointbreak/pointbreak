@@ -4,6 +4,7 @@ use serde::Serialize;
 
 use crate::error::{Result, ShoreError};
 use crate::paths::{CommonDirPaths, RepositoryPaths, UserHomePaths};
+use crate::session::derived_access::product_contract::DerivedAccessProfile;
 use crate::session::event::ShoreEvent;
 use crate::session::store::backend::StoreBackend;
 use crate::session::store::event_store::EventStore;
@@ -41,6 +42,7 @@ pub(crate) struct StoreResolution {
     store_dir: PathBuf,
     backend: StoreBackend,
     resolved_tier: ResolvedTier,
+    derived_access_profile: DerivedAccessProfile,
 }
 
 impl StoreResolution {
@@ -53,6 +55,10 @@ impl StoreResolution {
     /// maintenance paths keep using `store_dir`.
     pub(crate) fn backend(&self) -> &StoreBackend {
         &self.backend
+    }
+
+    pub(crate) const fn derived_access_profile(&self) -> DerivedAccessProfile {
+        self.derived_access_profile
     }
 
     pub(crate) fn command_view(&self) -> StoreResolutionView {
@@ -168,6 +174,13 @@ impl ReadStore {
         self.resolution.backend()
     }
 
+    // Dormant read routes consume the value resolved at the store boundary
+    // rather than consulting process configuration again.
+    #[allow(dead_code)]
+    pub(crate) const fn derived_access_profile(&self) -> DerivedAccessProfile {
+        self.resolution.derived_access_profile()
+    }
+
     /// Inject a resolved read store over an explicit backend — the test-only seam
     /// that lets a unit test drive a read surface over the injection-only
     /// in-memory backend (which `resolve_read_store` never selects, since the
@@ -180,6 +193,7 @@ impl ReadStore {
                 store_dir,
                 backend,
                 resolved_tier: ResolvedTier::CloneLocal,
+                derived_access_profile: DerivedAccessProfile::Off,
             },
         }
     }
@@ -251,6 +265,7 @@ pub(crate) struct WriteStore {
     store_dir: PathBuf,
     worktree_root: PathBuf,
     backend: StoreBackend,
+    derived_access_profile: DerivedAccessProfile,
 }
 
 impl WriteStore {
@@ -265,6 +280,13 @@ impl WriteStore {
     pub(crate) fn backend(&self) -> &StoreBackend {
         &self.backend
     }
+
+    // Dormant write coordination consumes the value resolved at the store
+    // boundary rather than consulting process configuration again.
+    #[allow(dead_code)]
+    pub(crate) const fn derived_access_profile(&self) -> DerivedAccessProfile {
+        self.derived_access_profile
+    }
 }
 
 /// Resolve the write landing for `repo`. See [`WriteStore`]. Reuses [`resolve_store`]
@@ -276,6 +298,7 @@ pub(crate) fn resolve_write_store(repo: impl AsRef<Path>) -> Result<WriteStore> 
         store_dir: resolution.store_dir().to_path_buf(),
         worktree_root: paths.worktree_root().to_path_buf(),
         backend: resolution.backend().clone(),
+        derived_access_profile: resolution.derived_access_profile(),
     })
 }
 
@@ -376,11 +399,14 @@ pub(crate) fn resolve_store(repo: impl AsRef<Path>) -> Result<StoreResolution> {
 /// Both `resolve_store` return paths route through here so the `POINTBREAK_BACKEND`
 /// selection is applied in exactly one place.
 fn store_resolution_for(store_dir: PathBuf, tier: ResolvedTier) -> Result<StoreResolution> {
+    let derived_access_profile = DerivedAccessProfile::from_environment()
+        .map_err(|error| ShoreError::Message(error.to_string()))?;
     let backend = select_backend(store_dir.clone())?;
     Ok(StoreResolution {
         store_dir,
         backend,
         resolved_tier: tier,
+        derived_access_profile,
     })
 }
 

@@ -162,6 +162,7 @@ impl From<WriterLockError> for CursorLedgerError {
 #[derive(Clone, Debug)]
 pub(crate) struct SqliteCursorLedger {
     store_root: PathBuf,
+    sidecar_root: PathBuf,
     database_path: PathBuf,
     identity: CursorLedgerIdentity,
 }
@@ -220,7 +221,7 @@ impl SqliteCursorLedger {
             return Err(CursorLedgerError::AlreadyInitialized);
         }
         std::fs::create_dir_all(ledger.sidecar_path())
-            .map_err(|error| io_error(&ledger.sidecar_path(), error))?;
+            .map_err(|error| io_error(ledger.sidecar_path(), error))?;
         let connection = open_connection(&ledger.database_path, true)?;
         initialize_schema(&connection, &ledger.identity, 1, "complete")?;
         validate_completed_metadata(&connection, &ledger.identity)?;
@@ -236,8 +237,45 @@ impl SqliteCursorLedger {
         Self::bootstrap_from_truth_with_hook(store_root, identity, epoch, progress, |_| {})
     }
 
+    pub(crate) fn bootstrap_from_truth_at(
+        store_root: &Path,
+        sidecar_root: &Path,
+        identity: CursorLedgerIdentity,
+        epoch: u64,
+        progress: impl FnMut(BootstrapProgress) -> BootstrapControl,
+    ) -> Result<Self, CursorLedgerError> {
+        Self::bootstrap_from_truth_at_with_hook(
+            store_root,
+            sidecar_root,
+            identity,
+            epoch,
+            progress,
+            |_| {},
+        )
+    }
+
     pub(crate) fn bootstrap_from_truth_with_hook(
         store_root: &Path,
+        identity: CursorLedgerIdentity,
+        epoch: u64,
+        progress: impl FnMut(BootstrapProgress) -> BootstrapControl,
+        hook: impl FnMut(BootstrapCrashPoint),
+    ) -> Result<Self, CursorLedgerError> {
+        let store_root = canonical_store_root(store_root)?;
+        let sidecar_root = store_root.join(DERIVED_SIDECAR_DIRECTORY);
+        Self::bootstrap_from_truth_at_with_hook(
+            &store_root,
+            &sidecar_root,
+            identity,
+            epoch,
+            progress,
+            hook,
+        )
+    }
+
+    pub(crate) fn bootstrap_from_truth_at_with_hook(
+        store_root: &Path,
+        sidecar_root: &Path,
         identity: CursorLedgerIdentity,
         epoch: u64,
         mut progress: impl FnMut(BootstrapProgress) -> BootstrapControl,
@@ -251,7 +289,7 @@ impl SqliteCursorLedger {
         }
         let store_root = canonical_store_root(store_root)?;
         let _writer_lock = StoreWriterLock::acquire(&store_root)?;
-        let ledger = Self::for_root(store_root, identity);
+        let ledger = Self::for_paths(store_root, sidecar_root.to_path_buf(), identity);
         if ledger.prepare_sidecar_for_bootstrap()? {
             hook(BootstrapCrashPoint::AfterQuarantineBeforeNewEpoch);
         }
@@ -260,7 +298,7 @@ impl SqliteCursorLedger {
             .list_events()
             .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
         std::fs::create_dir_all(ledger.sidecar_path())
-            .map_err(|error| io_error(&ledger.sidecar_path(), error))?;
+            .map_err(|error| io_error(ledger.sidecar_path(), error))?;
         let mut connection = open_connection(&ledger.database_path, true)?;
         initialize_schema(&connection, &ledger.identity, epoch, "staging")?;
 
@@ -324,10 +362,20 @@ impl SqliteCursorLedger {
         store_root: &Path,
         identity: CursorLedgerIdentity,
     ) -> Result<Self, CursorLedgerError> {
+        let store_root = canonical_store_root(store_root)?;
+        let sidecar_root = store_root.join(DERIVED_SIDECAR_DIRECTORY);
+        Self::open_at(&store_root, &sidecar_root, identity)
+    }
+
+    pub(crate) fn open_at(
+        store_root: &Path,
+        sidecar_root: &Path,
+        identity: CursorLedgerIdentity,
+    ) -> Result<Self, CursorLedgerError> {
         validate_identity(&identity)?;
         let store_root = canonical_store_root(store_root)?;
         let _writer_lock = StoreWriterLock::acquire(&store_root)?;
-        let ledger = Self::for_root(store_root, identity);
+        let ledger = Self::for_paths(store_root, sidecar_root.to_path_buf(), identity);
         if !ledger.database_path.exists() {
             return Err(CursorLedgerError::IncompleteBootstrap);
         }
@@ -350,6 +398,24 @@ impl SqliteCursorLedger {
                 Err(CursorLedgerError::Quarantined(reason))
             }
         }
+    }
+
+    /// Open one immutable, already-published generation without taking the
+    /// truth-publication lock or attempting recovery/quarantine mutations.
+    pub(crate) fn open_immutable_at(
+        store_root: &Path,
+        sidecar_root: &Path,
+        identity: CursorLedgerIdentity,
+    ) -> Result<Self, CursorLedgerError> {
+        validate_identity(&identity)?;
+        let store_root = canonical_store_root(store_root)?;
+        let ledger = Self::for_paths(store_root, sidecar_root.to_path_buf(), identity);
+        if !ledger.database_path.exists() {
+            return Err(CursorLedgerError::IncompleteBootstrap);
+        }
+        let connection = open_connection(&ledger.database_path, false)?;
+        validate_completed_metadata(&connection, &ledger.identity)?;
+        Ok(ledger)
     }
 
     pub(crate) fn head(&self) -> Result<TruthHead, CursorLedgerError> {
@@ -659,18 +725,26 @@ impl SqliteCursorLedger {
     }
 
     fn for_root(store_root: PathBuf, identity: CursorLedgerIdentity) -> Self {
-        let database_path = store_root
-            .join(DERIVED_SIDECAR_DIRECTORY)
-            .join(DATABASE_FILE);
+        let sidecar_root = store_root.join(DERIVED_SIDECAR_DIRECTORY);
+        Self::for_paths(store_root, sidecar_root, identity)
+    }
+
+    fn for_paths(
+        store_root: PathBuf,
+        sidecar_root: PathBuf,
+        identity: CursorLedgerIdentity,
+    ) -> Self {
+        let database_path = sidecar_root.join(DATABASE_FILE);
         Self {
             store_root,
+            sidecar_root,
             database_path,
             identity,
         }
     }
 
-    fn sidecar_path(&self) -> PathBuf {
-        self.store_root.join(DERIVED_SIDECAR_DIRECTORY)
+    fn sidecar_path(&self) -> &Path {
+        &self.sidecar_root
     }
 
     fn validated_connection(&self) -> Result<Connection, CursorLedgerError> {
@@ -708,7 +782,7 @@ impl SqliteCursorLedger {
             std::process::id(),
             QUARANTINE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::rename(&sidecar, &quarantine).map_err(|error| io_error(&sidecar, error))?;
+        std::fs::rename(sidecar, &quarantine).map_err(|error| io_error(sidecar, error))?;
         Ok(quarantine)
     }
 }

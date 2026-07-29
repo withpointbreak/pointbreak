@@ -179,6 +179,10 @@ impl QualificationLocalJournal {
     ) -> Result<Option<Vec<u8>>> {
         self.journal.read_event_bytes_by_key_digest(key_digest)
     }
+
+    pub(crate) fn head_marker(&self) -> Result<u64> {
+        self.journal.head_marker()
+    }
 }
 
 /// The file-backed [`ContentStore`]: blobs live at their store-relative

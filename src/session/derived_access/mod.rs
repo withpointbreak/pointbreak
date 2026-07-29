@@ -4,6 +4,8 @@
 #[cfg(any(test, feature = "bench"))]
 pub(crate) mod checkpoint;
 pub(crate) mod cursor;
+pub(crate) mod generation;
+pub(crate) mod lifecycle;
 pub(crate) mod locator;
 #[cfg(any(test, feature = "bench"))]
 pub(crate) mod oracle;
@@ -11,6 +13,7 @@ pub(crate) mod product_contract;
 pub(crate) mod semantic;
 pub(crate) mod service;
 pub(crate) mod sqlite;
+pub(crate) mod verification;
 pub(crate) use super::store::backend::{QualificationJournalCursor, QualificationLocalJournal};
 
 #[cfg(test)]

@@ -12,3 +12,4 @@ pub(crate) const DERIVED_WRITER_LOCK_FILE: &str = ".pointbreak-derived.writer.lo
 pub(crate) use cursor::*;
 pub(crate) use locator::*;
 pub(crate) use semantic::*;
+pub(crate) use writer_lock::*;
