@@ -4,20 +4,25 @@ mod evidence;
 mod lifecycle;
 mod materializer;
 mod product_contract;
-mod sqlite_cursor;
-mod sqlite_locator;
-mod sqlite_semantic;
-mod writer_lock;
 
-pub(crate) const DERIVED_QUARANTINE_PREFIX: &str = ".pointbreak-derived.quarantine-";
-pub(crate) const DERIVED_SIDECAR_DIRECTORY: &str = ".pointbreak-derived";
-pub(crate) const DERIVED_WRITER_LOCK_FILE: &str = ".pointbreak-derived.writer.lock";
+pub(crate) mod sqlite_cursor {
+    pub(crate) use crate::session::derived_access::sqlite::*;
+}
+
+#[cfg(test)]
+pub(crate) mod sqlite_locator {
+    pub(crate) use crate::session::derived_access::sqlite::*;
+}
 
 pub use contract::*;
 pub use evidence::*;
 pub use lifecycle::*;
 pub use materializer::*;
 pub use product_contract::*;
+
+pub(crate) use crate::session::derived_access::sqlite::{
+    DERIVED_QUARANTINE_PREFIX, DERIVED_SIDECAR_DIRECTORY, DERIVED_WRITER_LOCK_FILE,
+};
 
 #[cfg(test)]
 mod runner_tests;

@@ -1,4 +1,6 @@
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
+#[cfg(unix)]
+use std::ffi::OsString;
 
 use super::product_contract::{
     DERIVED_ACCESS_PROFILE_ENV, DerivedAccessAvailability, DerivedAccessFallback,

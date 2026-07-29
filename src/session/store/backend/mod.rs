@@ -17,14 +17,11 @@ use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::Arc;
 
-#[cfg(any(test, feature = "bench"))]
-pub(crate) use local::QualificationLocalJournal;
-pub(crate) use local::{LocalContentStore, LocalJournal};
+pub(crate) use local::{LocalContentStore, LocalJournal, QualificationLocalJournal};
 #[cfg(test)]
 pub(crate) use memory::InMemoryStore;
 
 use crate::error::Result;
-#[cfg(any(test, feature = "bench"))]
 use crate::session::derived_access::cursor::{CursorDelta, TruthCursor, TruthHead};
 use crate::storage::{CreateOutcome, RemoveOutcome};
 
@@ -128,10 +125,10 @@ pub(crate) trait Journal: Debug {
     fn insert_raw(&self, idempotency_key: &str, bytes: &[u8]) -> Result<()>;
 }
 
-/// Qualification-only bounded cursor view. Existing `Journal` implementations
-/// and production resolution do not implement or select this interface; a
-/// candidate-aware ledger supplies it beside unchanged authoritative truth.
-#[cfg(any(test, feature = "bench"))]
+/// Bounded cursor view for the dormant derived-access implementation. Existing
+/// `Journal` implementations and product resolution do not implement or select
+/// this interface; a derived ledger supplies it beside unchanged authoritative
+/// truth.
 #[cfg_attr(
     not(test),
     allow(

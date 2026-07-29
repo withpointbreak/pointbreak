@@ -437,9 +437,14 @@ unset POINTBREAK_DERIVED_ACCESS
 export POINTBREAK_DERIVED_ACCESS=off
 ```
 
-Only `off` and `sqlite-wal-bodyless-v1` are valid. Unknown or non-Unicode values are errors. This contract
-does not activate SQLite, create a sidecar, change a product route, migrate truth, or select a production
-profile.
+Only `off` and `sqlite-wal-bodyless-v1` are valid. Unknown or non-Unicode values are errors. The normal
+Pointbreak library and binary build the bundled `rusqlite`/`libsqlite3-sys` closure so the dormant profile
+can be exercised without a developer feature. That compilation cost is present even while the selector is
+`off`; because no product route references the dormant implementation yet, a release linker may dead-strip
+its unused SQLite machine code from the final executable. The profile implementation is owned once under
+`session::derived_access::sqlite`; qualification adapters call that same core. No product route or lifecycle
+manager resolves the active profile yet, so this contract does not create a sidecar, migrate truth, or
+select a production profile.
 
 Print, verify, and smoke the contract without opening a store or performing filesystem actions:
 
@@ -448,6 +453,13 @@ just derived-access-product-contract
 just derived-access-product-contract-verify
 just derived-access-product-contract-smoke
 ```
+
+The product service has an observed physical-access probe at its profile boundary. Resolving `off` records
+zero root-resolution and SQLite-open actions and does not stat, create, open, or quarantine a derived path.
+An explicit `sqlite-wal-bodyless-v1` resolution records a successful root resolution and only successful
+physical SQLite component opens; a missing sidecar therefore records no phantom SQLite open. The active
+resolution currently requires an already-qualified disposable sidecar, and normal product startup never
+invokes it.
 
 The compiled schema is `pointbreak.derived-access-product-integration-contract.v1`; its canonical SHA-256
 is `3afe3a1fd65f0d5c58246dbe426c35a32325dc42bd9931d78f0e2354411dd00d`.

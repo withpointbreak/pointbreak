@@ -54,8 +54,9 @@ required-features = ["bench"]
 default = ["gix"]
 # Exposes the developer-run `bench_support` harnesses to benchmark crates. Off
 # by default and never enabled in a release build, so the harnesses stay out of
-# the published surface.
-bench = ["dep:libc", "dep:libsqlite3-sys", "dep:rusqlite", "dep:zstd"]
+# the published surface. The dormant product SQLite implementation is in the
+# normal dependency closure; this feature adds only evidence support.
+bench = ["dep:libc", "dep:zstd"]
 # Enables only the request-scoped, counting-only Research 0049 observer. It
 # implies the existing developer benchmark surface and never selects a store.
 longitudinal-counting = ["bench"]
@@ -85,9 +86,9 @@ gix = { version = "0.85.0", default-features = false, features = [
 ], optional = true }
 gix-imara-diff = { version = "0.2.3", default-features = false, features = ["unified_diff"], optional = true }
 libc = { version = "0.2", optional = true }
-libsqlite3-sys = { version = "0.38.1", features = ["bundled"], optional = true }
+libsqlite3-sys = { version = "0.38.1", features = ["bundled"] }
 mmdflux = { version = "2.6", default-features = false }
-rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "bundled", "limits"], optional = true }
+rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "bundled", "limits"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

@@ -1,5 +1,7 @@
+#[cfg(any(test, feature = "bench"))]
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+#[cfg(any(test, feature = "bench"))]
 use crate::session::store::backend::QualificationJournalCursor;
 
 /// Private append position. It is deliberately distinct from every event,
@@ -55,6 +57,7 @@ pub(crate) struct CursorReceipt {
 }
 
 impl CursorReceipt {
+    #[cfg(any(test, feature = "bench"))]
     fn from_intent(intent: CursorIntent) -> Self {
         Self {
             cursor: intent.proposed_cursor,
@@ -66,11 +69,13 @@ impl CursorReceipt {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(any(test, feature = "bench"))]
 pub(crate) enum CarrierState {
     Unambiguous { validation_witness: String },
     Ambiguous { validation_witness: String },
 }
 
+#[cfg(any(test, feature = "bench"))]
 impl CarrierState {
     pub(crate) fn unambiguous(validation_witness: impl Into<String>) -> Self {
         Self::Unambiguous {
@@ -118,6 +123,7 @@ pub(crate) enum RecoveryResolution {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(any(test, feature = "bench"))]
 pub(crate) enum IntentRecoveryAuthority {
     WriterMayBeLive,
     ExclusiveAfterWriterExit,
@@ -132,6 +138,7 @@ pub(crate) struct CursorDelta {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(any(test, feature = "bench"))]
 pub(crate) struct EpochRebuildReceipt {
     pub(crate) previous_epoch: u64,
     pub(crate) new_head: TruthCursor,
@@ -139,6 +146,7 @@ pub(crate) struct EpochRebuildReceipt {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[cfg(any(test, feature = "bench"))]
 pub(crate) enum CursorModelError {
     #[error("cursor ledger is quarantined: {0}")]
     Quarantined(String),
@@ -187,6 +195,7 @@ pub(crate) enum CursorModelError {
 /// truth, while intent/head/receipts stand in for private rebuildable metadata.
 /// No method repairs or rewrites a carrier.
 #[derive(Clone, Debug)]
+#[cfg(any(test, feature = "bench"))]
 pub(crate) struct ReferenceCursorLedger {
     store_id: String,
     epoch: u64,
@@ -199,6 +208,7 @@ pub(crate) struct ReferenceCursorLedger {
     quarantine_reason: Option<String>,
 }
 
+#[cfg(any(test, feature = "bench"))]
 impl ReferenceCursorLedger {
     pub(crate) fn new(store_id: impl Into<String>, epoch: u64) -> Self {
         Self {
@@ -704,6 +714,7 @@ impl ReferenceCursorLedger {
     }
 }
 
+#[cfg(any(test, feature = "bench"))]
 fn validate_identity_fields(
     logical_reread_key: &str,
     validation_witness: &str,
@@ -721,6 +732,7 @@ fn validate_identity_fields(
     Ok(())
 }
 
+#[cfg(any(test, feature = "bench"))]
 fn classify_append_receipt(receipt: &CursorReceipt, validation_witness: &str) -> AppendResolution {
     if receipt.validation_witness == validation_witness {
         AppendResolution::Existing(receipt.cursor)
@@ -729,6 +741,7 @@ fn classify_append_receipt(receipt: &CursorReceipt, validation_witness: &str) ->
     }
 }
 
+#[cfg(any(test, feature = "bench"))]
 fn classify_recovered_receipt(
     receipt: &CursorReceipt,
     validation_witness: &str,
@@ -743,6 +756,7 @@ fn classify_recovered_receipt(
     }
 }
 
+#[cfg(any(test, feature = "bench"))]
 impl QualificationJournalCursor for ReferenceCursorLedger {
     type Error = CursorModelError;
 

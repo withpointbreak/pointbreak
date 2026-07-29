@@ -155,8 +155,8 @@ impl From<WriterLockError> for CursorLedgerError {
     }
 }
 
-/// Qualification-only ledger for roots whose writes all enter through this
-/// candidate protocol. Mixed-version and out-of-band writers remain an
+/// SQLite ledger for roots whose writes all enter through this candidate
+/// protocol. Mixed-version and out-of-band writers remain an
 /// activation blocker; ordinary freshness reads deliberately do not audit the
 /// full loose journal.
 #[derive(Clone, Debug)]
@@ -193,9 +193,9 @@ struct StoredCursorReceipt {
 }
 
 #[derive(Debug)]
-pub(super) struct HydratedCursorDelta {
-    pub(super) delta: CursorDelta,
-    pub(super) events: Vec<ShoreEvent>,
+pub(crate) struct HydratedCursorDelta {
+    pub(crate) delta: CursorDelta,
+    pub(crate) events: Vec<ShoreEvent>,
 }
 
 impl SqliteCursorLedger {
@@ -527,7 +527,7 @@ impl SqliteCursorLedger {
         Ok(self.events_after_hydrated(after, limit)?.delta)
     }
 
-    pub(super) fn events_after_hydrated(
+    pub(crate) fn events_after_hydrated(
         &self,
         after: TruthCursor,
         limit: usize,

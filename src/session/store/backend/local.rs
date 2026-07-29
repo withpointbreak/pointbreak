@@ -36,7 +36,6 @@ impl LocalJournal {
             .join(format!("{}.json", event_filename_stem(idempotency_key)))
     }
 
-    #[cfg(any(test, feature = "bench"))]
     fn read_event_bytes_by_key_digest(&self, key_digest: &str) -> Result<Option<Vec<u8>>> {
         if key_digest.len() != 64
             || !key_digest
@@ -141,12 +140,11 @@ impl Journal for LocalJournal {
     }
 }
 
-/// Qualification-only access to the existing durable loose-event primitives.
+/// Derived-access adapter over the existing durable loose-event primitives.
 ///
-/// The cursor falsifier holds its own store-scoped publication lock around
-/// these calls. This adapter deliberately adds no production route and performs
-/// no directory listing.
-#[cfg(any(test, feature = "bench"))]
+/// The dormant cursor implementation holds its own store-scoped publication
+/// lock around these calls. This adapter deliberately adds no product route and
+/// performs no directory listing.
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug)]
 pub(crate) struct QualificationLocalJournal {
@@ -154,7 +152,6 @@ pub(crate) struct QualificationLocalJournal {
     store_dir: PathBuf,
 }
 
-#[cfg(any(test, feature = "bench"))]
 #[cfg_attr(not(test), allow(dead_code))]
 impl QualificationLocalJournal {
     pub(crate) fn new(store_dir: impl AsRef<Path>) -> Self {

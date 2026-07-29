@@ -3,17 +3,18 @@
 
 #[cfg(any(test, feature = "bench"))]
 pub(crate) mod checkpoint;
-#[cfg(any(test, feature = "bench"))]
 pub(crate) mod cursor;
-#[cfg(any(test, feature = "bench"))]
 pub(crate) mod locator;
 #[cfg(any(test, feature = "bench"))]
 pub(crate) mod oracle;
 pub(crate) mod product_contract;
-#[cfg(any(test, feature = "bench"))]
 pub(crate) mod semantic;
-#[cfg(any(test, feature = "bench"))]
+pub(crate) mod service;
+pub(crate) mod sqlite;
 pub(crate) use super::store::backend::{QualificationJournalCursor, QualificationLocalJournal};
+
+#[cfg(test)]
+mod service_tests;
 
 #[cfg(test)]
 mod tests {

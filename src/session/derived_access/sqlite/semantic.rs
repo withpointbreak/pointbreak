@@ -1,4 +1,4 @@
-//! Qualification-only bodyless SQLite semantic facts.
+//! Bodyless SQLite semantic facts shared by the dormant product profile and qualification.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::BTreeSet;
@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use rusqlite::{OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
-use super::sqlite_locator::{SqliteLocator, SqliteLocatorError, read_locator_checkpoint};
+use super::locator::{SqliteLocator, SqliteLocatorError, read_locator_checkpoint};
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::session::EventStore;
 use crate::session::derived_access::QualificationLocalJournal;
@@ -32,9 +32,9 @@ pub(crate) struct SqliteSemantic {
 }
 
 #[derive(Debug)]
-pub(super) struct HydratedSemanticFact {
-    pub(super) fact: SemanticFact,
-    pub(super) event: ShoreEvent,
+pub(crate) struct HydratedSemanticFact {
+    pub(crate) fact: SemanticFact,
+    pub(crate) event: ShoreEvent,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -514,7 +514,7 @@ impl SqliteSemantic {
         )?))
     }
 
-    pub(super) fn facts_for_revision_hydrated(
+    pub(crate) fn facts_for_revision_hydrated(
         &self,
         revision_id: &str,
         observed: TruthCursor,

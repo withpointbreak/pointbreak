@@ -1,4 +1,4 @@
-//! Qualification-only SQLite locator implementation.
+//! SQLite locator implementation shared by the dormant product profile and qualification.
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::path::{Path, PathBuf};
@@ -36,15 +36,15 @@ pub(crate) struct SqliteLocator {
 }
 
 #[derive(Debug)]
-pub(super) struct HydratedLocatorRow {
-    pub(super) row: LocatorRow,
-    pub(super) event: ShoreEvent,
+pub(crate) struct HydratedLocatorRow {
+    pub(crate) row: LocatorRow,
+    pub(crate) event: ShoreEvent,
 }
 
 #[derive(Debug)]
-pub(super) struct HydratedLocatorWindow {
-    pub(super) window: LocatorWindow,
-    pub(super) events: Vec<ShoreEvent>,
+pub(crate) struct HydratedLocatorWindow {
+    pub(crate) window: LocatorWindow,
+    pub(crate) events: Vec<ShoreEvent>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -118,7 +118,7 @@ impl SqliteLocator {
         read_locator_checkpoint(&connection)
     }
 
-    pub(super) fn apply_delta_with(
+    pub(crate) fn apply_delta_with(
         &self,
         delta: &CursorDelta,
         rows: &[LocatorRow],
@@ -215,7 +215,7 @@ impl SqliteLocator {
         })
     }
 
-    pub(super) fn lookup_event_id_hydrated(
+    pub(crate) fn lookup_event_id_hydrated(
         &self,
         event_id: &str,
         observed: TruthCursor,
@@ -270,7 +270,7 @@ impl SqliteLocator {
             })
     }
 
-    pub(super) fn chronological_window_hydrated(
+    pub(crate) fn chronological_window_hydrated(
         &self,
         request: &ChronologicalWindowRequest,
         observed: TruthCursor,
@@ -539,14 +539,14 @@ impl SqliteLocator {
         Ok(connection)
     }
 
-    pub(super) fn validated_connection(&self) -> Result<Connection, SqliteLocatorError> {
+    pub(crate) fn validated_connection(&self) -> Result<Connection, SqliteLocatorError> {
         let connection = self.connection()?;
         let cursor = validate_cursor_metadata(&connection)?;
         validate_locator_checkpoint(&connection, &cursor)?;
         Ok(connection)
     }
 
-    pub(super) fn store_root(&self) -> &Path {
+    pub(crate) fn store_root(&self) -> &Path {
         &self.store_root
     }
 }
@@ -726,7 +726,7 @@ fn validate_locator_checkpoint(
     Ok(())
 }
 
-pub(super) fn read_locator_checkpoint(
+pub(crate) fn read_locator_checkpoint(
     connection: &Connection,
 ) -> Result<LocatorCheckpoint, SqliteLocatorError> {
     connection

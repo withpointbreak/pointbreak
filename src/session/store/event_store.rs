@@ -189,7 +189,6 @@ impl EventStore {
         Ok(event)
     }
 
-    #[cfg(any(test, feature = "bench"))]
     pub(crate) fn decode_qualification_entry(
         key_digest: String,
         bytes: Vec<u8>,
