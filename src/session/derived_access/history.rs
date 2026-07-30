@@ -247,10 +247,10 @@ impl DerivedHistoryAccess {
             .locator_checkpoint()
             .map_err(|error| error.to_string())?;
         let selection = select_history_rows(&connection, query, page)?;
-        let selected = hydrate_events(service, &selection.event_ids)?;
+        let selected = hydrate_events(service, &selection.event_ids, as_of)?;
         let support_ids = support_event_ids(&connection, &selected, as_of)?;
         let mut support = selected.clone();
-        support.extend(hydrate_events(service, &support_ids)?);
+        support.extend(hydrate_events(service, &support_ids, as_of)?);
         support.sort_by(|left, right| left.event_id.cmp(&right.event_id));
         support.dedup_by(|left, right| left.event_id == right.event_id);
         let (entries, body_diagnostics) =
@@ -1106,24 +1106,23 @@ fn query_string_rows(
 pub(super) fn hydrate_events(
     service: &super::service::DerivedAccessService,
     event_ids: &[String],
+    as_of: TruthCursor,
 ) -> Result<Vec<ShoreEvent>, String> {
-    event_ids
-        .iter()
-        .map(|event_id| {
-            match service
-                .semantic_id(event_id)
-                .map_err(|error| error.to_string())?
-            {
-                LocatorRead::Ready(Some(event)) => Ok(event),
-                LocatorRead::Ready(None) => {
-                    Err(format!("selected authoritative event {event_id} is absent"))
-                }
-                LocatorRead::CatchUpRequired { .. } => {
-                    Err("derived history became stale during selected hydration".to_owned())
-                }
-            }
-        })
-        .collect()
+    match service
+        .semantic_ids_at(event_ids, as_of)
+        .map_err(|error| error.to_string())?
+    {
+        LocatorRead::Ready(events) => event_ids
+            .iter()
+            .zip(events)
+            .map(|(event_id, event)| {
+                event.ok_or_else(|| format!("selected authoritative event {event_id} is absent"))
+            })
+            .collect(),
+        LocatorRead::CatchUpRequired { .. } => {
+            Err("derived history became stale during selected hydration".to_owned())
+        }
+    }
 }
 
 pub(super) fn state_diagnostics(

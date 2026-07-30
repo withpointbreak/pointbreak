@@ -305,10 +305,10 @@ fn hydrate_revision_events(
     event_ids: Vec<String>,
     as_of: super::cursor::TruthCursor,
 ) -> Result<Vec<ShoreEvent>, String> {
-    let selected = hydrate_events(service, &event_ids)?;
+    let selected = hydrate_events(service, &event_ids, as_of)?;
     let support_ids = support_event_ids(connection, &selected, as_of)?;
     let mut events = selected;
-    events.extend(hydrate_events(service, &support_ids)?);
+    events.extend(hydrate_events(service, &support_ids, as_of)?);
     events.sort_by(|left, right| {
         sha256_bytes_hex(left.idempotency_key.as_bytes())
             .cmp(&sha256_bytes_hex(right.idempotency_key.as_bytes()))

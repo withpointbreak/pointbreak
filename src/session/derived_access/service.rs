@@ -290,6 +290,31 @@ impl DerivedAccessService {
         }
     }
 
+    /// Hydrate an ordered event-id set against one already-selected truth
+    /// cursor. The locator owns the one-connection batch and validates every
+    /// carrier individually; callers never trade correctness for fewer opens.
+    pub(crate) fn semantic_ids_at(
+        &self,
+        event_ids: &[String],
+        observed: TruthCursor,
+    ) -> Result<LocatorRead<Vec<Option<ShoreEvent>>>, DerivedAccessServiceError> {
+        Ok(
+            match self
+                .locator
+                .lookup_event_ids_hydrated(event_ids, observed)?
+            {
+                LocatorRead::Ready(rows) => LocatorRead::Ready(
+                    rows.into_iter()
+                        .map(|row| row.map(|row| row.event))
+                        .collect(),
+                ),
+                LocatorRead::CatchUpRequired { applied, observed } => {
+                    LocatorRead::CatchUpRequired { applied, observed }
+                }
+            },
+        )
+    }
+
     pub(super) fn product_history_connection(
         &self,
     ) -> Result<

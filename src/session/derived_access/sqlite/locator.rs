@@ -229,6 +229,34 @@ impl SqliteLocator {
         event_id: &str,
         observed: TruthCursor,
     ) -> Result<LocatorRead<Option<HydratedLocatorRow>>, SqliteLocatorError> {
+        let event_ids = [event_id.to_owned()];
+        Ok(
+            match self.lookup_event_ids_hydrated(&event_ids, observed)? {
+                LocatorRead::Ready(mut rows) => LocatorRead::Ready(
+                    rows.pop()
+                        .expect("one requested event id yields one optional row"),
+                ),
+                LocatorRead::CatchUpRequired { applied, observed } => {
+                    LocatorRead::CatchUpRequired { applied, observed }
+                }
+            },
+        )
+    }
+
+    /// Hydrate a caller-ordered event-id set at one frozen truth cursor.
+    ///
+    /// Opening and validating the SQLite connection is request-level work, not
+    /// event-level work. Complete product collections can select tens of
+    /// thousands of carriers; reopening the same immutable generation for each
+    /// one turns an output-proportional read into connection-setup amplification.
+    /// This batch holds one validated connection and one prepared point query,
+    /// while every carrier still passes the same witness, decode, and typed-row
+    /// validation as the scalar path.
+    pub(crate) fn lookup_event_ids_hydrated(
+        &self,
+        event_ids: &[String],
+        observed: TruthCursor,
+    ) -> Result<LocatorRead<Vec<Option<HydratedLocatorRow>>>, SqliteLocatorError> {
         let connection = self.validated_connection()?;
         let checkpoint = read_locator_checkpoint(&connection)?;
         if checkpoint.applied.epoch != observed.epoch
@@ -239,30 +267,37 @@ impl SqliteLocator {
                 observed,
             });
         }
-        let Some(event_hash) = decode_prefixed_digest(event_id, "evt:sha256:") else {
-            return Ok(LocatorRead::Ready(None));
-        };
-        let stored = connection
-            .query_row(
-                &locator_select(
-                    "WHERE locator.event_hash = ?1
-                       AND locator.epoch = ?2
-                       AND locator.sequence <= ?3",
-                ),
-                params![
-                    event_hash.as_slice(),
-                    to_i64(observed.epoch, "lookup epoch")?,
-                    to_i64(observed.sequence, "lookup as_of")?,
-                ],
-                stored_locator_row_from_sql,
-            )
-            .optional()
-            .map_err(|error| sqlite_error("lookup semantic event id", error))?;
+        let sql = locator_select(
+            "WHERE locator.event_hash = ?1
+               AND locator.epoch = ?2
+               AND locator.sequence <= ?3",
+        );
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(|error| sqlite_error("prepare semantic event batch", error))?;
         let journal = QualificationLocalJournal::new(&self.store_root);
-        let row = stored
-            .map(|row| hydrate_locator_row(&journal, row))
-            .transpose()?;
-        Ok(LocatorRead::Ready(row))
+        let epoch = to_i64(observed.epoch, "lookup epoch")?;
+        let sequence = to_i64(observed.sequence, "lookup as_of")?;
+        let mut hydrated = Vec::with_capacity(event_ids.len());
+        for event_id in event_ids {
+            let Some(event_hash) = decode_prefixed_digest(event_id, "evt:sha256:") else {
+                hydrated.push(None);
+                continue;
+            };
+            let stored = statement
+                .query_row(
+                    params![event_hash.as_slice(), epoch, sequence],
+                    stored_locator_row_from_sql,
+                )
+                .optional()
+                .map_err(|error| sqlite_error("lookup semantic event batch member", error))?;
+            hydrated.push(
+                stored
+                    .map(|row| hydrate_locator_row(&journal, row))
+                    .transpose()?,
+            );
+        }
+        Ok(LocatorRead::Ready(hydrated))
     }
 
     pub(crate) fn chronological_window(
