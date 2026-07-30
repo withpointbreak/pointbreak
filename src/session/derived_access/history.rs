@@ -338,6 +338,13 @@ impl DerivedHistoryAccess {
     }
 
     pub(super) fn current(&self) -> Result<CurrentRead, String> {
+        self.current_with_publication_retry(true)
+    }
+
+    fn current_with_publication_retry(
+        &self,
+        retry_current_transition: bool,
+    ) -> Result<CurrentRead, String> {
         let DerivedHistoryMode::Active {
             lifecycle,
             current,
@@ -418,12 +425,24 @@ impl DerivedHistoryAccess {
             Ok(None) => {
                 let observed = lifecycle.status();
                 drop(guard);
+                if retry_current_transition
+                    && matches!(
+                        observed.as_ref(),
+                        Ok(status)
+                            if status.availability == DerivedAccessAvailability::Current
+                    )
+                {
+                    // Publication completed after `open_current` selected its
+                    // input. Retry once so a usable Current generation becomes
+                    // a Ready payload, never a 503 carrying "current".
+                    return self.current_with_publication_retry(false);
+                }
                 self.request_background_rebuild();
                 Ok(CurrentRead::Unavailable(match observed {
-                    Ok(observed) => DerivedHistoryStatus {
-                        availability: map_availability(observed.availability),
-                        detail: observed.detail,
-                    },
+                    Ok(observed) => unavailable_lifecycle_status(
+                        observed,
+                        "current generation was not openable after publication",
+                    ),
                     Err(error) => {
                         status(DerivedHistoryAvailability::Unavailable, error.to_string())
                     }
@@ -432,12 +451,21 @@ impl DerivedHistoryAccess {
             Err(error) => {
                 let observed = lifecycle.status();
                 drop(guard);
+                if retry_current_transition
+                    && matches!(
+                        observed.as_ref(),
+                        Ok(status)
+                            if status.availability == DerivedAccessAvailability::Current
+                    )
+                {
+                    return self.current_with_publication_retry(false);
+                }
                 self.request_background_rebuild();
                 match observed {
-                    Ok(observed) => Ok(CurrentRead::Unavailable(DerivedHistoryStatus {
-                        availability: map_availability(observed.availability),
-                        detail: observed.detail.or_else(|| Some(error.to_string())),
-                    })),
+                    Ok(observed) => Ok(CurrentRead::Unavailable(unavailable_lifecycle_status(
+                        observed,
+                        &error.to_string(),
+                    ))),
                     Err(status_error) => Ok(CurrentRead::Unavailable(status(
                         DerivedHistoryAvailability::Unavailable,
                         format!("{error}; derived status also failed: {status_error}"),
@@ -1104,6 +1132,21 @@ fn map_availability(value: DerivedAccessAvailability) -> DerivedHistoryAvailabil
     }
 }
 
+fn unavailable_lifecycle_status(
+    observed: super::lifecycle::LifecycleStatus,
+    fallback_detail: &str,
+) -> DerivedHistoryStatus {
+    let availability = map_availability(observed.availability);
+    DerivedHistoryStatus {
+        availability: if availability == DerivedHistoryAvailability::Current {
+            DerivedHistoryAvailability::Unavailable
+        } else {
+            availability
+        },
+        detail: observed.detail.or_else(|| Some(fallback_detail.to_owned())),
+    }
+}
+
 fn status(
     availability: DerivedHistoryAvailability,
     detail: impl Into<String>,
@@ -1221,6 +1264,26 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    #[test]
+    fn unavailable_route_never_serializes_lifecycle_current() {
+        let status = unavailable_lifecycle_status(
+            super::super::lifecycle::LifecycleStatus {
+                availability: DerivedAccessAvailability::Current,
+                generation_id: Some("g-current".to_owned()),
+                completed: None,
+                total: None,
+                detail: None,
+            },
+            "publication handoff requires a retry",
+        );
+
+        assert_eq!(status.availability, DerivedHistoryAvailability::Unavailable);
+        assert_eq!(
+            status.detail.as_deref(),
+            Some("publication handoff requires a retry")
+        );
     }
 
     #[test]
