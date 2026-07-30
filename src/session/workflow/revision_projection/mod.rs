@@ -8,7 +8,9 @@ use crate::model::{DiffSnapshot, EventId, ReviewId, RevisionId};
 use crate::session::assessment::{
     AssessmentProjectionOptions, AssessmentView, CurrentAssessmentView, project_assessments,
 };
-use crate::session::event::{EventType, ShoreEvent};
+use crate::session::event::{
+    ArtifactRemovedPayload, EventSignatureRecordedPayload, EventType, ShoreEvent,
+};
 use crate::session::input_request::{
     InputRequestProjectionOptions, InputRequestStatusFilter, InputRequestView,
     project_input_requests,
@@ -28,7 +30,7 @@ use crate::session::store::backend::StoreBackend;
 use crate::session::store::resolution::{ReadStore, resolve_read_store};
 use crate::session::workflow::{
     ValidationCheckProjectionOptions, ValidationCheckView, annotate_validation_supersession,
-    project_validation_checks,
+    project_validation_checks, selected_support_content_hashes,
 };
 use crate::session::{
     EventStore, RemovalPolicy, RevisionCommitRangeProjection, RevisionCommitRangeView,
@@ -149,6 +151,51 @@ pub fn show_revision(options: RevisionShowOptions) -> Result<RevisionShowResult>
     )
 }
 
+/// Build the Inspector's exact-detail document from one supersession component.
+///
+/// This is deliberately distinct from [`show_revision`]. The CLI command is a
+/// store-audit surface: its diagnostics describe the complete event set.
+/// Inspector detail is an interactive product route whose work and diagnostics
+/// are scoped to the addressed revision's supersession component. Repeating an
+/// unrelated store warning on every detail page both misstates the page's
+/// subject and makes response size grow with unrelated history.
+///
+/// Default-off Inspector reads still scan authoritative truth to preserve the
+/// full-set freshness hash and count. After that scan, this function applies the
+/// same selected-carrier closure as the active derived route: component facts,
+/// removals of their referenced content, and detached signatures over either.
+/// Keeping the closure here prevents the off and active state machines from
+/// acquiring different diagnostic semantics.
+#[doc(hidden)]
+pub fn show_revision_for_inspector(options: RevisionShowOptions) -> Result<RevisionShowResult> {
+    if !options.exact {
+        return Err(crate::error::ShoreError::Message(
+            "inspector revision detail requires exact revision selection".to_owned(),
+        ));
+    }
+    let revision_id = options.revision_id.clone().ok_or_else(|| {
+        crate::error::ShoreError::Message(
+            "inspector revision detail requires a revision id".to_owned(),
+        )
+    })?;
+    let read_store = resolve_read_store(&options.repo)?;
+    let store = EventStore::from_backend(read_store.backend());
+    let (events, skipped) = if options.read_for_display {
+        store.list_events_lenient()?
+    } else {
+        (store.list_events()?, Vec::new())
+    };
+    let full_state = SessionState::from_events(&events)?;
+    let selected = select_inspector_revision_events(&events, &revision_id)?;
+    let mut result = show_revision_from_selected_events(options, read_store.backend(), selected)?;
+    result.event_set_hash = full_state
+        .event_set_hash
+        .expect("SessionState::from_events sets event_set_hash");
+    result.event_count = events.len();
+    result.diagnostics.extend(skipped_to_diagnostics(skipped));
+    Ok(result)
+}
+
 pub(crate) fn show_revision_from_selected_events(
     options: RevisionShowOptions,
     backend: &StoreBackend,
@@ -156,6 +203,65 @@ pub(crate) fn show_revision_from_selected_events(
 ) -> Result<RevisionShowResult> {
     let removal = ArtifactRemovalProjection::from_events(&events)?;
     show_revision_from_events(options, backend, events, removal, Vec::new())
+}
+
+/// Select the authoritative closure shared by default-off and derived
+/// Inspector detail.
+///
+/// Component membership is revision-scoped. Content removal and signature
+/// events are journal-scoped carriers, so they join afterward by the hashes and
+/// event ids referenced by the component. Preserve source order in the returned
+/// vector; projection ordering remains a property of the authoritative event
+/// stream rather than this selector.
+fn select_inspector_revision_events(
+    events: &[ShoreEvent],
+    revision_id: &RevisionId,
+) -> Result<Vec<ShoreEvent>> {
+    let supersession = SupersessionView::from_events(events)?;
+    let component = supersession
+        .component_of(revision_id)
+        .cloned()
+        .unwrap_or_else(|| BTreeSet::from([revision_id.clone()]));
+
+    let mut selected_event_ids = BTreeSet::new();
+    let mut selected = Vec::new();
+    for event in events {
+        if event
+            .subject_revision_id()?
+            .is_some_and(|candidate| component.contains(&candidate))
+        {
+            selected_event_ids.insert(event.event_id.clone());
+            selected.push(event.clone());
+        }
+    }
+
+    let referenced_content = selected_support_content_hashes(&selected)?;
+    for event in events
+        .iter()
+        .filter(|event| event.event_type == EventType::ArtifactRemoved)
+    {
+        let payload: ArtifactRemovedPayload = serde_json::from_value(event.payload.clone())?;
+        if referenced_content.contains(&payload.content_hash) {
+            selected_event_ids.insert(event.event_id.clone());
+        }
+    }
+
+    let signature_targets = selected_event_ids.clone();
+    for event in events
+        .iter()
+        .filter(|event| event.event_type == EventType::EventSignatureRecorded)
+    {
+        let payload: EventSignatureRecordedPayload = serde_json::from_value(event.payload.clone())?;
+        if signature_targets.contains(&payload.target_event_id) {
+            selected_event_ids.insert(event.event_id.clone());
+        }
+    }
+
+    Ok(events
+        .iter()
+        .filter(|event| selected_event_ids.contains(&event.event_id))
+        .cloned()
+        .collect())
 }
 
 fn show_revision_from_events(

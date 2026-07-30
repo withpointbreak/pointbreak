@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -121,6 +121,50 @@ pub fn referenced_artifacts(events: &[ShoreEvent]) -> Result<Vec<ArtifactRef>> {
         referenced_artifacts_for_event(event, &mut refs)?;
     }
     Ok(refs.into_values().collect())
+}
+
+/// Content identities that can pull removal/signature support carriers into a
+/// selected product read.
+///
+/// This set is intentionally broader than [`referenced_artifacts`]. The latter
+/// enumerates Pointbreak-owned transferable bytes; this closure also includes
+/// external validation-log hashes and the flat content-hash fields carried by
+/// historical event families. A removal or detached signature over any of
+/// those identities can change a selected revision's diagnostics even when
+/// Pointbreak does not own bytes for the referenced content.
+pub(crate) fn selected_support_content_hashes(events: &[ShoreEvent]) -> Result<BTreeSet<String>> {
+    const HASH_FIELDS: [&str; 5] = [
+        "bodyContentHash",
+        "summaryContentHash",
+        "reasonContentHash",
+        "objectArtifactContentHash",
+        "contentHash",
+    ];
+    let mut hashes = referenced_artifacts(events)?
+        .into_iter()
+        .map(|artifact| artifact.content_hash().to_owned())
+        .collect::<BTreeSet<_>>();
+    for event in events {
+        let Some(payload) = event.payload.as_object() else {
+            continue;
+        };
+        hashes.extend(
+            HASH_FIELDS
+                .iter()
+                .filter_map(|field| payload.get(*field).and_then(serde_json::Value::as_str))
+                .map(str::to_owned),
+        );
+        hashes.extend(
+            payload
+                .get("logArtifactContentHashes")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned),
+        );
+    }
+    Ok(hashes)
 }
 
 /// Export an artifact's validated bytes from a source repo.
@@ -288,6 +332,19 @@ mod tests {
             artifact.kind() == ArtifactKind::Body
                 && artifact.content_hash() == format!("sha256:{hash}")
         }));
+    }
+
+    #[test]
+    fn selected_support_hashes_include_owned_objects_bodies_and_external_logs() {
+        let body_hash = "a".repeat(64);
+        let mut validation =
+            validation_event_with_summary_path(&format!("artifacts/notes/{body_hash}.json"));
+        validation.payload["logArtifactContentHashes"] = serde_json::json!(["sha256:external-log"]);
+
+        let hashes = selected_support_content_hashes(&[validation]).unwrap();
+
+        assert!(hashes.contains(&format!("sha256:{body_hash}")));
+        assert!(hashes.contains("sha256:external-log"));
     }
 
     #[test]

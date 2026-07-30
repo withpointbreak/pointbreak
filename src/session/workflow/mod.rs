@@ -25,6 +25,7 @@ pub use artifact_removal::{
     CompactOptions, CompactResult, RemoveOptions, RemoveResult, RemoveSelector, RemovedContent,
     SkippedRemoval, SweepOutcome, SweptBlob, compact_store, remove_content,
 };
+pub(crate) use artifact_transfer::selected_support_content_hashes;
 pub use artifact_transfer::{
     ArtifactKind, ArtifactRef, ImportArtifactOptions, ImportArtifactOutcome, ImportArtifactResult,
     export_artifact, import_artifact, referenced_artifacts,
@@ -101,7 +102,7 @@ pub use revision_projection::{
     SnapshotOrder, SnapshotSummaryCache, SnapshotSummaryCounts, ValidationCheckDisposition,
     ValidationContinuitySummary, ValidationContinuityView, build_revision_search_record,
     classify_validation_continuity, current_assessment_includes_follow_up, show_revision,
-    show_revision_overviews, stale_review_fact_count,
+    show_revision_for_inspector, show_revision_overviews, stale_review_fact_count,
 };
 pub(crate) use revision_projection::{
     revision_overviews_from_selected_events, show_revision_from_selected_events,

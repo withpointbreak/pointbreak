@@ -1002,10 +1002,8 @@ pub(super) fn support_event_ids(
         .iter()
         .map(|event| event.event_id.as_str().to_owned())
         .collect::<BTreeSet<_>>();
-    let mut content_hashes = selected
-        .iter()
-        .flat_map(event_content_hashes)
-        .collect::<BTreeSet<_>>();
+    let mut content_hashes = crate::session::workflow::selected_support_content_hashes(selected)
+        .map_err(|error| error.to_string())?;
     let mut support = BTreeSet::new();
     let transaction = connection
         .unchecked_transaction()
@@ -1126,34 +1124,6 @@ pub(super) fn hydrate_events(
             }
         })
         .collect()
-}
-
-fn event_content_hashes(event: &ShoreEvent) -> Vec<String> {
-    const HASH_FIELDS: [&str; 5] = [
-        "bodyContentHash",
-        "summaryContentHash",
-        "reasonContentHash",
-        "objectArtifactContentHash",
-        "contentHash",
-    ];
-    let Some(payload) = event.payload.as_object() else {
-        return Vec::new();
-    };
-    let mut hashes = HASH_FIELDS
-        .iter()
-        .filter_map(|field| payload.get(*field).and_then(serde_json::Value::as_str))
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    hashes.extend(
-        payload
-            .get("logArtifactContentHashes")
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(serde_json::Value::as_str)
-            .map(str::to_owned),
-    );
-    hashes
 }
 
 pub(super) fn state_diagnostics(
@@ -1514,11 +1484,14 @@ mod tests {
         });
 
         assert_eq!(
-            event_content_hashes(&event),
+            crate::session::workflow::selected_support_content_hashes(&[event])
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>(),
             vec![
-                "sha256:summary".to_owned(),
                 "sha256:log-a".to_owned(),
                 "sha256:log-b".to_owned(),
+                "sha256:summary".to_owned(),
             ]
         );
     }

@@ -36,7 +36,7 @@ use pointbreak::session::{
     diagnose_ref_continuity, effective_integration_ref, enrich_liveness, event_log_head_marker,
     history_base_projection, list_attention, list_revisions, read_bound_object_artifact,
     read_events_for_display, read_object_artifact, revision_supersession_classification,
-    show_revision, show_revision_overviews, stale_review_fact_count, store_identity,
+    show_revision_for_inspector, show_revision_overviews, stale_review_fact_count, store_identity,
 };
 use serde::Serialize;
 
@@ -2043,19 +2043,20 @@ fn splice_validation_continuity(
     Ok(())
 }
 
-/// Reuses the exact `pointbreak.review-revision` document the `pointbreak revision show`
-/// command builds (`revision_show_document`), so the inspector renders the same
-/// authoritative composite — current-assessment status, duplicate-collapsed
-/// facts, supersession, adapter notes, and projection rows — rather than
-/// re-deriving it client-side.
+/// Reuses the `pointbreak.review-revision` document shape the
+/// `pointbreak revision show` command builds, while scoping diagnostics to the
+/// addressed supersession component. The CLI remains a store-wide audit
+/// surface; an Inspector detail page must not repeat unrelated store warnings
+/// or grow with unrelated history.
 pub(super) fn revision_json(repo: &Path, revision_id: &str) -> Result<String, String> {
     if revision_id.is_empty() {
         return Err("missing revision id".to_owned());
     }
-    let result = show_revision(revision_show_options(repo, revision_id)).map_err(|error| {
-        tracing::debug!(error = %error, revision = revision_id, "inspect_unit_read_failed");
-        format!("revision not found or unreadable: {revision_id}")
-    })?;
+    let result =
+        show_revision_for_inspector(revision_show_options(repo, revision_id)).map_err(|error| {
+            tracing::debug!(error = %error, revision = revision_id, "inspect_unit_read_failed");
+            format!("revision not found or unreadable: {revision_id}")
+        })?;
     serialize_revision_result(repo, revision_id, result, None, None)
 }
 
@@ -2455,7 +2456,8 @@ mod tests {
                 .unwrap()
                 .revision_id;
         let result =
-            show_revision(revision_show_options(repo.path(), revision_id.as_str())).unwrap();
+            show_revision_for_inspector(revision_show_options(repo.path(), revision_id.as_str()))
+                .unwrap();
         let (events, _) = read_events_for_display(repo.path()).unwrap();
         let supersession = SupersessionView::from_events(&events).unwrap();
         let mut active: serde_json::Value = serde_json::from_str(

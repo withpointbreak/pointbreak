@@ -500,6 +500,13 @@ responses, an instrumented bounded exact-detail fallback, and one intentional ex
 search. Every fallback and unavailable response emits request-scoped counters. Ordinary active routes may
 not list, decode, fold, sort, hash, or retain complete history merely to preserve a version wire.
 
+Inspector exact revision detail deliberately scopes diagnostics to the addressed revision's supersession
+component and its authoritative support carriers. The default-off path still scans truth to retain the
+complete `eventSetHash` and `eventCount`, but unrelated store-wide warnings do not repeat on every detail
+page. The CLI `pointbreak revision show` remains the store-audit surface and continues to report store-wide
+diagnostics. Both Inspector modes use the same component closure: revision facts, removals of content those
+facts reference, and detached signatures over those facts or removals.
+
 ## Incremental derived-access falsifier contract
 
 The candidate-independent incremental derived-access contract is compiled into the benchmark target as

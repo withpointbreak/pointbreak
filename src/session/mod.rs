@@ -127,8 +127,8 @@ pub use workflow::{
     preview_link_to_family, record_assessment, record_event_signature, record_observation,
     record_validation_check, referenced_artifacts, remove_content, resolve_default_integration_ref,
     respond_input_request, review_history, show_assessments, show_revision,
-    show_revision_overviews, stale_review_fact_count, store_identity, store_status,
-    unlink_store_from_family, withdraw_commit, withdraw_ref,
+    show_revision_for_inspector, show_revision_overviews, stale_review_fact_count, store_identity,
+    store_status, unlink_store_from_family, withdraw_commit, withdraw_ref,
 };
 pub(in crate::session) use workflow::{assessment, input_request, observation};
 #[cfg(any(test, feature = "bench"))]

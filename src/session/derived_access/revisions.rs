@@ -336,12 +336,13 @@ mod tests {
     use crate::session::derived_access::lifecycle::{DerivedAccessLifecycle, LifecycleControl};
     use crate::session::derived_access::product_contract::DerivedAccessProfile;
     use crate::session::event::{
-        EventTarget, EventType, ReviewInitializedPayload, ShoreEvent, Writer,
+        ArtifactRemovedPayload, EventTarget, EventType, ReviewInitializedPayload, ShoreEvent,
+        Writer,
     };
     use crate::session::store::resolution::resolve_read_store;
     use crate::session::workflow::{
         CaptureOptions, RevisionOverviewsOptions, capture_worktree_review, list_revisions,
-        show_revision, show_revision_overviews,
+        show_revision, show_revision_for_inspector, show_revision_overviews,
     };
     use crate::session::{EventStore, EventWriteOutcome};
 
@@ -402,6 +403,21 @@ mod tests {
                 EventWriteOutcome::Created
             );
         }
+        let unrelated_removal = ShoreEvent::new(
+            EventType::ArtifactRemoved,
+            ArtifactRemovedPayload::idempotency_key(&format!("sha256:{}", "ab".repeat(32))),
+            EventTarget::for_journal(JournalId::new("journal:unrelated-removal")),
+            Writer::shore_local("test"),
+            ArtifactRemovedPayload {
+                content_hash: format!("sha256:{}", "ab".repeat(32)),
+            },
+            "2026-07-28T13:01:00Z",
+        )
+        .unwrap();
+        assert_eq!(
+            event_store.record_event_once(&unrelated_removal).unwrap(),
+            EventWriteOutcome::Created
+        );
         let lifecycle = DerivedAccessLifecycle::new(
             DerivedAccessProfile::SqliteWalBodylessV1,
             read_store.store_dir(),
@@ -526,7 +542,23 @@ mod tests {
                 .with_read_for_display(true)
                 .with_verification_policy(crate::session::EventVerificationPolicy::advisory())
         };
-        let authoritative = show_revision(options()).expect("read authoritative detail");
+        let audit = show_revision(options()).expect("read store-wide authoritative detail");
+        let authoritative =
+            show_revision_for_inspector(options()).expect("read authoritative detail");
+        assert!(
+            audit
+                .diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic.code == "snapshot_content_removed_target_missing" })
+        );
+        assert!(
+            !authoritative
+                .diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic.code == "snapshot_content_removed_target_missing" })
+        );
+        assert_eq!(authoritative.event_count, audit.event_count);
+        assert_eq!(authoritative.event_set_hash, audit.event_set_hash);
         let DerivedRevisionDetailRoute::Ready(Some(derived)) = access
             .revision_detail(&revision_id, options())
             .expect("read derived detail")
