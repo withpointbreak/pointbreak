@@ -172,6 +172,16 @@ impl GenerationLayout {
         completed: usize,
         total: usize,
     ) -> Result<(), GenerationError> {
+        self.record_progress_with_hook(generation_id, completed, total, |_| {})
+    }
+
+    fn record_progress_with_hook(
+        &self,
+        generation_id: &str,
+        completed: usize,
+        total: usize,
+        mut before_publish: impl FnMut(&Path),
+    ) -> Result<(), GenerationError> {
         if completed != 0 && completed != total && !completed.is_multiple_of(PROGRESS_INTERVAL) {
             return Ok(());
         }
@@ -186,7 +196,25 @@ impl GenerationLayout {
             .map_err(|error| metadata_error(&directory, error.to_string()))?;
         let bytes = canonical_json_bytes(&value)
             .map_err(|error| metadata_error(&directory, error.to_string()))?;
-        write_new_synced(&directory.join(format!("{completed:020}.json")), &bytes)
+        let published = directory.join(format!("{completed:020}.json"));
+        let temporary = directory.join(format!(
+            ".{completed:020}.{}-{}.tmp",
+            std::process::id(),
+            UNIQUE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        // The final `.json` name is the progress state machine's publication
+        // marker. Opening that name before writing made a concurrent status
+        // reader interpret an empty/partial file as corrupt generation state.
+        // Readers ignore `.tmp`; publish only after the bytes and file metadata
+        // are durable. The store-scoped rebuild lease guarantees one writer for
+        // a generation, so this rename cannot replace a competing progress row.
+        write_new_synced(&temporary, &bytes)?;
+        before_publish(&temporary);
+        if let Err(error) = std::fs::rename(&temporary, &published) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(io_error(&temporary, error));
+        }
+        Ok(())
     }
 
     pub(crate) fn staging_progress(&self) -> Result<Option<GenerationProgress>, GenerationError> {
@@ -783,5 +811,33 @@ mod tests {
 
         assert!(removed);
         assert_eq!(progress, None);
+    }
+
+    #[test]
+    fn staging_progress_never_observes_an_unpublished_progress_file() {
+        let temp = TempDir::new().unwrap();
+        let layout = GenerationLayout::new(temp.path());
+        layout.ensure_scaffold().unwrap();
+        let mut observed_before_publish = None;
+
+        layout
+            .record_progress_with_hook("g-test", 0, 1, |temporary| {
+                assert_eq!(
+                    temporary.extension().and_then(|value| value.to_str()),
+                    Some("tmp")
+                );
+                observed_before_publish = Some(layout.staging_progress().unwrap());
+            })
+            .unwrap();
+
+        assert_eq!(observed_before_publish, Some(None));
+        assert_eq!(
+            layout.staging_progress().unwrap(),
+            Some(GenerationProgress {
+                schema: PROGRESS_SCHEMA.to_owned(),
+                completed: 0,
+                total: 1,
+            })
+        );
     }
 }
