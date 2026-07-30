@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 
 use super::cursor::{HistoryCursor, cmp_key, next_cursor_for};
-use super::projection::{BaseEntry, BaseHistoryProjection};
+use super::projection::{BaseEntry, BaseHistoryProjection, entry_body_states};
 use super::search::{
     QueryClause, QueryDiagnostic, QuerySurface, entry_actor, entry_track, event_type_wire,
     matches_query, parse_search_query_for, tag_completion_key,
@@ -10,6 +10,7 @@ use super::search::{
 use super::summary::{ReviewHistoryEntry, ReviewHistorySummary};
 use crate::model::{EventId, ReviewTargetRef, RevisionId};
 use crate::session::ProjectionDiagnostic;
+use crate::session::projection::body_content::body_content_diagnostics;
 
 /// The display order of the queried history page. The base is stored ascending
 /// `(occurred_at, event_id)`; `Desc` reverses the filtered set before windowing.
@@ -101,6 +102,13 @@ pub struct QueriedHistory {
 /// track + object + types page set) → facets (excluding the types page set, INV-3)
 /// → order → window (`at` › `offset`, INV-2). Identity is always the full replayed
 /// set (INV-2).
+///
+/// Most projection diagnostics describe the full replayed store and therefore
+/// survive every query. Body-removal diagnostics are intentionally different:
+/// they explain absent body text in returned entries, so this seam drops the
+/// cache base's store-wide body diagnostics and rebuilds them from the final
+/// window. Keeping that exception here is essential because Inspector cache
+/// hits call this function directly, bypassing the CLI result adapter.
 pub fn apply_history_query(
     base: &BaseHistoryProjection,
     query: &HistoryQuery,
@@ -212,7 +220,7 @@ pub fn apply_history_query(
     } else {
         None
     };
-    let entries = {
+    let entries: Vec<ReviewHistoryEntry> = {
         let span = tracing::debug_span!(
             "shore.history.query.clone_window_entries",
             window_count = range.len()
@@ -222,6 +230,19 @@ pub fn apply_history_query(
             .iter()
             .map(|entry| entry.entry.clone())
             .collect()
+    };
+    let diagnostics = {
+        let mut diagnostics = base.diagnostics.clone();
+        diagnostics.retain(|diagnostic| {
+            !matches!(
+                diagnostic.code.as_str(),
+                "body_content_suppressed_present" | "body_content_physically_removed"
+            )
+        });
+        diagnostics.extend(body_content_diagnostics(
+            entries.iter().flat_map(entry_body_states),
+        ));
+        diagnostics
     };
 
     QueriedHistory {
@@ -233,7 +254,7 @@ pub fn apply_history_query(
         match_index,
         event_set_hash: base.event_set_hash.clone(),
         event_count: base.event_count,
-        diagnostics: base.diagnostics.clone(),
+        diagnostics,
         query_notices: parsed.diagnostics,
         distinct_values,
     }
@@ -634,6 +655,77 @@ mod tests {
         assert_eq!(out.offset, 0);
         assert_eq!(out.event_count, base.event_count);
         assert_eq!(out.event_set_hash, base.event_set_hash);
+    }
+
+    #[test]
+    fn body_removal_diagnostics_follow_the_returned_window() {
+        let mut first = entry(
+            "2026-05-13T10:00:01Z",
+            "evt:sha256:01",
+            EventType::ReviewObservationRecorded,
+            "first observation",
+            "agent:codex",
+            "rev:sha256:one",
+        );
+        let mut second = entry(
+            "2026-05-13T10:00:02Z",
+            "evt:sha256:02",
+            EventType::ReviewObservationRecorded,
+            "second observation",
+            "agent:codex",
+            "rev:sha256:one",
+        );
+        for (entry, hash) in [
+            (&mut first, "sha256:first-body"),
+            (&mut second, "sha256:second-body"),
+        ] {
+            let ReviewHistorySummary::ReviewObservationRecorded {
+                body_content_hash,
+                body_content_state,
+                ..
+            } = &mut entry.summary
+            else {
+                unreachable!("fixture is an observation");
+            };
+            *body_content_hash = Some(hash.to_owned());
+            *body_content_state = crate::session::BodyContentState::PhysicallyRemoved;
+        }
+        let mut base = base_from(vec![(first, "obj:sha256:one"), (second, "obj:sha256:one")]);
+        base.diagnostics = vec![
+            ProjectionDiagnostic {
+                code: "store_integrity_warning".to_owned(),
+                message: "store-wide warning".to_owned(),
+            },
+            ProjectionDiagnostic {
+                code: "body_content_physically_removed".to_owned(),
+                message: "body content sha256:first-body was removed".to_owned(),
+            },
+            ProjectionDiagnostic {
+                code: "body_content_physically_removed".to_owned(),
+                message: "body content sha256:second-body was removed".to_owned(),
+            },
+        ];
+
+        let out = apply_history_query(&base, &HistoryQuery::default(), &page(Some(1)));
+
+        assert_eq!(out.entries.len(), 1);
+        assert_eq!(
+            out.diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.code.as_str())
+                .collect::<Vec<_>>(),
+            vec!["store_integrity_warning", "body_content_physically_removed"]
+        );
+        assert!(
+            out.diagnostics[1].message.contains("sha256:first-body"),
+            "the page reports removal state only for its returned body"
+        );
+        assert!(
+            !out.diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("sha256:second-body")),
+            "store-wide removal diagnostics must not leak across page boundaries"
+        );
     }
 
     #[test]
