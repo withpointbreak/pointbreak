@@ -691,6 +691,13 @@ impl DerivedAccessLifecycle {
     }
 
     fn quarantine_error(&self, reason: String) -> LifecycleError {
+        // This path follows an error while opening immutable metadata that was
+        // made visible by atomic generation/publication renames. Unlike
+        // `quarantine_status`, it is not classifying a mutable WAL/checkpoint
+        // snapshot that a governed writer can repair between observation and
+        // lock acquisition. The writer lock therefore protects the rename;
+        // re-running the status classifier here would discard the typed open
+        // error without adding a stronger observation.
         match StoreWriterLock::try_acquire(&self.store_root) {
             Ok(_lock) => match self.paths.quarantine(&reason) {
                 Ok(_) => LifecycleError::Quarantined(reason),
@@ -1163,7 +1170,7 @@ mod tests {
             .unwrap();
         let mut replaced = false;
 
-        let (publication, _lease) = lifecycle
+        let (publication, lease) = lifecycle
             .stable_current_publication_with_hook(|| {
                 if !replaced {
                     lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
@@ -1185,6 +1192,61 @@ mod tests {
             !lifecycle.paths().generation(&first_generation).exists(),
             "the replacement reclaimed the generation selected before the lease"
         );
+        let delayed_reader_lease = lifecycle.paths().generation_lease_path(&first_generation);
+        assert!(
+            delayed_reader_lease.exists(),
+            "the delayed reader can recreate the reclaimed generation's lease path"
+        );
+        drop(lease);
+
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        assert!(
+            !delayed_reader_lease.exists(),
+            "the next rebuild must collect a lease recreated by a delayed reader"
+        );
+    }
+
+    #[test]
+    fn repeated_rebuilds_collect_reclaimed_generation_leases() {
+        let temp = populated_store(7);
+        let lifecycle = active_lifecycle(temp.path());
+
+        for _ in 0..6 {
+            lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        }
+
+        let generations = lifecycle.paths().root().join("generations");
+        let generation_count = std::fs::read_dir(&generations).unwrap().count();
+        let lease_generation_ids = std::fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                name.strip_prefix(".pointbreak-derived.generation-lease-")
+                    .and_then(|name| name.strip_suffix(".lock"))
+                    .map(str::to_owned)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(generation_count, 1);
+        assert!(
+            lease_generation_ids
+                .iter()
+                .all(|generation_id| generations.join(generation_id).exists()),
+            "every retained lease must still protect a generation"
+        );
+    }
+
+    #[test]
+    fn writer_idle_confirmation_distinguishes_current_from_rebuild_required() {
+        let temp = populated_store(1);
+        let lifecycle = active_lifecycle(temp.path());
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+
+        assert!(!lifecycle.rebuild_required_while_writer_idle().unwrap());
+        EventStore::open(temp.path())
+            .record_event_once(&lifecycle_event(2))
+            .unwrap();
+        assert!(lifecycle.rebuild_required_while_writer_idle().unwrap());
     }
 
     #[test]

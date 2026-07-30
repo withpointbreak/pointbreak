@@ -310,6 +310,12 @@ impl GenerationLayout {
         current_generation_id: &str,
     ) -> Result<GenerationReclaim, GenerationError> {
         validate_generation_id(current_generation_id)?;
+        // A delayed reader can keep an already-reclaimed generation's lease
+        // inode alive until it observes the newer publication and retries.
+        // Sweep before and after reclaim so those store-root lock files are
+        // eventually collected without ever unlinking a lease that protects a
+        // live generation.
+        self.sweep_orphaned_generation_leases()?;
         let directory = self.root.join("generations");
         let mut receipt = GenerationReclaim::default();
         for entry in read_directory(&directory)? {
@@ -335,8 +341,9 @@ impl GenerationLayout {
                     // Keep the lease path stable. A reader may already have
                     // opened this inode while waiting for the exclusive lock;
                     // after it acquires the lock, the lifecycle publication
-                    // recheck redirects it to the new generation. Explicit
-                    // retire/delete/purge removes orphaned lease files.
+                    // recheck redirects it to the new generation. The orphan
+                    // sweep removes the empty lock file only after the
+                    // generation directory is absent and no reader holds it.
                     receipt.reclaimed.push(generation_id);
                 }
                 Err(std::fs::TryLockError::WouldBlock) => {
@@ -347,9 +354,54 @@ impl GenerationLayout {
                 }
             }
         }
+        self.sweep_orphaned_generation_leases()?;
         receipt.reclaimed.sort();
         receipt.retained_by_readers.sort();
         Ok(receipt)
+    }
+
+    fn sweep_orphaned_generation_leases(&self) -> Result<(), GenerationError> {
+        let Some(entries) = read_directory_if_present(&self.store_root)? else {
+            return Ok(());
+        };
+        for entry in entries {
+            let path = entry.path();
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(generation_id) = name
+                .strip_prefix(GENERATION_LEASE_PREFIX)
+                .and_then(|name| name.strip_suffix(".lock"))
+            else {
+                continue;
+            };
+            if validate_generation_id(generation_id).is_err()
+                || self.generation(generation_id).exists()
+            {
+                continue;
+            }
+            let lease = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .map_err(|error| io_error(&path, error))?;
+            match lease.try_lock() {
+                Ok(()) => {
+                    let _ = lease.unlock();
+                    drop(lease);
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(io_error(&path, error)),
+                    }
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {}
+                Err(std::fs::TryLockError::Error(error)) => {
+                    return Err(io_error(&path, error));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn current_publication(

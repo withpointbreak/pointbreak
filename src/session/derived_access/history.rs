@@ -528,7 +528,14 @@ fn background_rebuild(lifecycle: DerivedAccessLifecycle, in_flight: Arc<AtomicBo
             Ok(status) if status.availability == DerivedAccessAvailability::RebuildRequired => {
                 match lifecycle.rebuild_required_while_writer_idle() {
                     Ok(true) => {}
-                    Ok(false) => continue,
+                    Ok(false) => {
+                        // A governed writer closed the transient pre-receipt
+                        // gap while we acquired its lock. Throttle repeated
+                        // confirmations so a sustained append stream cannot
+                        // turn recovery into writer-lock contention.
+                        std::thread::sleep(BACKGROUND_REBUILD_REQUIRED_CONFIRMATION);
+                        continue;
+                    }
                     Err(error) => {
                         tracing::warn!(
                             error = %error,
