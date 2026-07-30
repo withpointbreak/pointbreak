@@ -985,8 +985,9 @@ fn normalized_history_cursor(cursor: &HistoryCursor) -> String {
 /// retained scale. A connection-local TEMP table carries each complete set into
 /// a set-oriented join without changing the immutable generation. Complete
 /// phase 1 before replacing that table with the phase-2 targets; otherwise
-/// signatures on removal carriers would be omitted. The transaction makes the
-/// two table populations request-local, while `BTreeSet` preserves deterministic,
+/// signatures on removal carriers would be omitted. Each product read owns its
+/// connection, so the TEMP table is isolated from other requests; the transaction
+/// batches both populations, while `BTreeSet` preserves deterministic,
 /// duplicate-free output.
 pub(super) fn support_event_ids(
     connection: &rusqlite::Connection,
