@@ -449,6 +449,13 @@ Inspector joins a rebuild already owned by another process and requests a fresh 
 writer advances authoritative truth; neither case requires restarting the Inspector. This does not migrate
 truth or select a production default.
 
+`RebuildBusy` waits for the other process to publish, while rebuilds invalidated by changing truth retry with
+capped exponential backoff. Normal governed `CatchingUp` remains an in-place bounded-delta state and never
+starts a competing full rebuild. If the worker thread cannot be spawned, Inspector logs the failure and keeps
+the shell available so a later request can retry. Process shutdown may leave disposable staging behind; the
+next active startup discards incomplete staging before rebuilding rather than delaying shutdown to join a
+large-root rebuild.
+
 Print, verify, and smoke the contract without opening a store or performing filesystem actions:
 
 ```sh

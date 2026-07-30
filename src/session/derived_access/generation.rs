@@ -86,6 +86,8 @@ pub(crate) enum GenerationError {
     RebuildBusy,
     #[error("a derived generation is still in use")]
     GenerationInUse,
+    #[error("the current derived generation changed repeatedly while opening")]
+    PublicationUnstable,
 }
 
 impl GenerationLayout {
@@ -188,25 +190,34 @@ impl GenerationLayout {
     }
 
     pub(crate) fn staging_progress(&self) -> Result<Option<GenerationProgress>, GenerationError> {
+        self.staging_progress_with_hook(|_| {})
+    }
+
+    fn staging_progress_with_hook(
+        &self,
+        mut before_progress_read: impl FnMut(&Path),
+    ) -> Result<Option<GenerationProgress>, GenerationError> {
         let staging = self.root.join("staging");
-        if !staging.exists() {
+        let Some(generations) = read_directory_if_present(&staging)? else {
             return Ok(None);
-        }
+        };
         let mut latest: Option<GenerationProgress> = None;
-        for generation in read_directory(&staging)? {
+        for generation in generations {
             let progress_root = generation.path().join("progress");
-            if !progress_root.exists() {
+            let Some(entries) = read_directory_if_present(&progress_root)? else {
                 continue;
-            }
-            for entry in read_directory(&progress_root)? {
+            };
+            for entry in entries {
                 let path = entry.path();
                 if path.extension().and_then(|value| value.to_str()) != Some("json") {
                     continue;
                 }
-                let progress: GenerationProgress = serde_json::from_slice(
-                    &std::fs::read(&path).map_err(|error| io_error(&path, error))?,
-                )
-                .map_err(|error| metadata_error(&path, error.to_string()))?;
+                before_progress_read(&path);
+                let Some(bytes) = read_file_if_present(&path)? else {
+                    continue;
+                };
+                let progress: GenerationProgress = serde_json::from_slice(&bytes)
+                    .map_err(|error| metadata_error(&path, error.to_string()))?;
                 if progress.schema != PROGRESS_SCHEMA || progress.completed > progress.total {
                     return Err(metadata_error(
                         &path,
@@ -321,9 +332,11 @@ impl GenerationLayout {
                     let generation = entry.path();
                     std::fs::remove_dir_all(&generation)
                         .map_err(|error| io_error(&generation, error))?;
-                    let _ = lease.unlock();
-                    drop(lease);
-                    let _ = std::fs::remove_file(&lease_path);
+                    // Keep the lease path stable. A reader may already have
+                    // opened this inode while waiting for the exclusive lock;
+                    // after it acquires the lock, the lifecycle publication
+                    // recheck redirects it to the new generation. Explicit
+                    // retire/delete/purge removes orphaned lease files.
                     receipt.reclaimed.push(generation_id);
                 }
                 Err(std::fs::TryLockError::WouldBlock) => {
@@ -634,6 +647,27 @@ fn read_directory(path: &Path) -> Result<Vec<std::fs::DirEntry>, GenerationError
         .map_err(|error| io_error(path, error))
 }
 
+fn read_directory_if_present(
+    path: &Path,
+) -> Result<Option<Vec<std::fs::DirEntry>>, GenerationError> {
+    match std::fs::read_dir(path) {
+        Ok(entries) => entries
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
+            .map_err(|error| io_error(path, error)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io_error(path, error)),
+    }
+}
+
+fn read_file_if_present(path: &Path) -> Result<Option<Vec<u8>>, GenerationError> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(io_error(path, error)),
+    }
+}
+
 fn write_new_synced(path: &Path, bytes: &[u8]) -> Result<(), GenerationError> {
     let mut file = OpenOptions::new()
         .create_new(true)
@@ -669,5 +703,33 @@ fn metadata_error(path: &Path, message: String) -> GenerationError {
     GenerationError::Metadata {
         path: path.to_path_buf(),
         message,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn staging_progress_treats_concurrent_cleanup_as_absence() {
+        let temp = TempDir::new().unwrap();
+        let layout = GenerationLayout::new(temp.path());
+        layout.ensure_scaffold().unwrap();
+        layout.record_progress("g-test", 0, 1).unwrap();
+        let mut removed = false;
+
+        let progress = layout
+            .staging_progress_with_hook(|path| {
+                if !removed {
+                    std::fs::remove_file(path).unwrap();
+                    removed = true;
+                }
+            })
+            .unwrap();
+
+        assert!(removed);
+        assert_eq!(progress, None);
     }
 }

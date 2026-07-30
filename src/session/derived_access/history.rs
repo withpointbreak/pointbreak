@@ -31,6 +31,8 @@ const PRODUCT_HISTORY_SCHEMA_V2: &str = "pointbreak.sqlite-derived-access-histor
 const PROJECTION_STAMP_SCHEMA_V1: &str = "pointbreak.derived-access-projection-stamp.v1";
 const ACTIVE_PROFILE: &str = "sqlite-wal-bodyless-v1";
 const BACKGROUND_REBUILD_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+const BACKGROUND_REBUILD_REQUIRED_CONFIRMATION: Duration = Duration::from_millis(250);
+const BACKGROUND_TRUTH_CHANGED_MAX_INTERVAL: Duration = Duration::from_secs(5);
 const REVIEW_EVENT_CTE: &str = "
 WITH revision_object_ranked AS (
     SELECT event.revision_id, revision.object_id,
@@ -366,15 +368,30 @@ impl DerivedHistoryAccess {
             *guard = None;
         }
         if let Some(existing) = guard.as_ref() {
-            let head = existing
-                .service()
-                .truth_head()
-                .map_err(|error| error.to_string())?
-                .cursor;
-            let applied = existing
-                .service()
-                .locator_checkpoint()
-                .map_err(|error| error.to_string())?;
+            let head = match existing.service().truth_head() {
+                Ok(head) => head.cursor,
+                Err(error) => {
+                    *guard = None;
+                    drop(guard);
+                    self.request_background_rebuild();
+                    return Ok(CurrentRead::Unavailable(status(
+                        DerivedHistoryAvailability::Unavailable,
+                        error.to_string(),
+                    )));
+                }
+            };
+            let applied = match existing.service().locator_checkpoint() {
+                Ok(applied) => applied,
+                Err(error) => {
+                    *guard = None;
+                    drop(guard);
+                    self.request_background_rebuild();
+                    return Ok(CurrentRead::Unavailable(status(
+                        DerivedHistoryAvailability::Unavailable,
+                        error.to_string(),
+                    )));
+                }
+            };
             if head.sequence == truth_count && applied == head {
                 return Ok(CurrentRead::Ready(Arc::clone(existing)));
             }
@@ -387,7 +404,6 @@ impl DerivedHistoryAccess {
                 )));
             }
             drop(guard);
-            self.request_background_rebuild();
             return Ok(CurrentRead::Unavailable(status(
                 DerivedHistoryAvailability::CatchingUp,
                 "derived history is catching up to authoritative truth",
@@ -448,9 +464,52 @@ impl Drop for BackgroundRebuildGuard {
 
 fn background_rebuild(lifecycle: DerivedAccessLifecycle, in_flight: Arc<AtomicBool>) {
     let _guard = BackgroundRebuildGuard(in_flight);
+    let mut truth_changed_retry_interval = BACKGROUND_REBUILD_RETRY_INTERVAL;
+    let mut rebuild_required_confirmed = false;
+    // The availability state is also the recovery state machine:
+    //
+    // - Current/CatchingUp: serve or finish bounded in-place projection work;
+    //   never replace the generation.
+    // - RebuildRequired: observe twice, then confirm once more while the
+    //   canonical writer is idle. A governed append temporarily enters this
+    //   state between loose truth publication and cursor receipt finalization.
+    // - Absent/Bootstrapping/Unavailable/Quarantined: attempt or join the
+    //   disposable full rebuild.
+    //
+    // RebuildBusy is another process making progress. TruthChanged means this
+    // worker lost a race to a writer and backs off without publishing stale
+    // state.
     loop {
         match lifecycle.status() {
-            Ok(status) if status.availability == DerivedAccessAvailability::Current => return,
+            Ok(status)
+                if matches!(
+                    status.availability,
+                    DerivedAccessAvailability::Current | DerivedAccessAvailability::CatchingUp
+                ) =>
+            {
+                return;
+            }
+            Ok(status)
+                if status.availability == DerivedAccessAvailability::RebuildRequired
+                    && !rebuild_required_confirmed =>
+            {
+                rebuild_required_confirmed = true;
+                std::thread::sleep(BACKGROUND_REBUILD_REQUIRED_CONFIRMATION);
+                continue;
+            }
+            Ok(status) if status.availability == DerivedAccessAvailability::RebuildRequired => {
+                match lifecycle.rebuild_required_while_writer_idle() {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "derived_access_background_rebuild_confirmation_failed"
+                        );
+                        return;
+                    }
+                }
+            }
             Ok(_) => {}
             Err(error) => {
                 tracing::warn!(error = %error, "derived_access_background_status_failed");
@@ -459,8 +518,14 @@ fn background_rebuild(lifecycle: DerivedAccessLifecycle, in_flight: Arc<AtomicBo
         }
         match lifecycle.rebuild(|_| LifecycleControl::Continue) {
             Ok(_) => return,
-            Err(LifecycleError::RebuildBusy | LifecycleError::TruthChanged) => {
+            Err(LifecycleError::RebuildBusy) => {
                 std::thread::sleep(BACKGROUND_REBUILD_RETRY_INTERVAL);
+            }
+            Err(LifecycleError::TruthChanged) => {
+                std::thread::sleep(truth_changed_retry_interval);
+                truth_changed_retry_interval = truth_changed_retry_interval
+                    .saturating_mul(2)
+                    .min(BACKGROUND_TRUTH_CHANGED_MAX_INTERVAL);
             }
             Err(error) => {
                 tracing::warn!(error = %error, "derived_access_background_rebuild_failed");
@@ -1147,6 +1212,17 @@ mod tests {
         (temp, access)
     }
 
+    fn wait_for_background_rebuild(access: &DerivedHistoryAccess, context: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while access.background_rebuild_in_flight.load(Ordering::Acquire) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{context} worker did not finish"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     #[test]
     fn active_access_bootstraps_an_absent_generation_in_the_background() {
         let (_temp, access) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
@@ -1443,6 +1519,8 @@ mod tests {
             status.availability,
             DerivedHistoryAvailability::Quarantined | DerivedHistoryAvailability::Unavailable
         ));
+        wait_for_background_rebuild(&access, "invalid publication recovery");
+        assert!(matches!(access.current().unwrap(), CurrentRead::Ready(_)));
     }
 
     #[cfg(unix)]
@@ -1464,6 +1542,7 @@ mod tests {
             started.is_ok(),
             "sidecar status must be read in the worker: {started:?}"
         );
+        wait_for_background_rebuild(&access, "unreadable sidecar status");
     }
 
     #[test]
@@ -1760,6 +1839,48 @@ mod tests {
             panic!("a lagging semantic checkpoint must not look current");
         };
         assert_eq!(status.availability, DerivedHistoryAvailability::CatchingUp);
+
+        let rebuild_lease = lifecycle.paths().try_rebuild_lease().unwrap();
+        let DerivedHistoryRoute::Unavailable(status) = cold.freshness().unwrap() else {
+            panic!("a cached lagging checkpoint must not look current");
+        };
+        assert_eq!(status.availability, DerivedHistoryAvailability::CatchingUp);
+        assert!(
+            !cold.background_rebuild_in_flight.load(Ordering::Acquire),
+            "bounded governed catch-up must not start a full rebuild"
+        );
+        drop(rebuild_lease);
+    }
+
+    #[test]
+    fn cached_generation_failure_is_typed_and_recovers_without_restart() {
+        let (_temp, access) = active_history(1);
+        assert!(matches!(
+            access.freshness().unwrap(),
+            DerivedHistoryRoute::Ready(_)
+        ));
+        let DerivedHistoryMode::Active { lifecycle, .. } = &access.mode else {
+            unreachable!("test access is active");
+        };
+        let generation_id = lifecycle
+            .published_generation_id()
+            .unwrap()
+            .expect("generation is published");
+        let database = lifecycle
+            .paths()
+            .generation(&generation_id)
+            .join("cursor.sqlite3");
+        rusqlite::Connection::open(database)
+            .unwrap()
+            .execute_batch("DROP TABLE cursor_meta;")
+            .unwrap();
+
+        let CurrentRead::Unavailable(status) = access.current().unwrap() else {
+            panic!("a damaged cached generation must not be served");
+        };
+        assert_eq!(status.availability, DerivedHistoryAvailability::Unavailable);
+        wait_for_background_rebuild(&access, "cached generation recovery");
+        assert!(matches!(access.current().unwrap(), CurrentRead::Ready(_)));
     }
 
     #[test]

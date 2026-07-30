@@ -18,6 +18,8 @@ use super::verification::strict_bodyless_materialized_snapshot_at;
 use crate::session::EventStore;
 use crate::session::derived_access::QualificationLocalJournal;
 
+const STABLE_PUBLICATION_ATTEMPTS: usize = 8;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LifecycleControl {
     Continue,
@@ -139,12 +141,19 @@ impl DerivedAccessLifecycle {
     }
 
     pub(crate) fn status(&self) -> Result<LifecycleStatus, LifecycleError> {
+        self.status_with_quarantine(true)
+    }
+
+    fn status_with_quarantine(
+        &self,
+        allow_quarantine: bool,
+    ) -> Result<LifecycleStatus, LifecycleError> {
         if self.profile == DerivedAccessProfile::Off || !self.paths.root().exists() {
             return Ok(status(DerivedAccessAvailability::Absent, None, None));
         }
         let publication = match self.paths.current_publication() {
             Ok(publication) => publication,
-            Err(error) => return self.generation_error_status(error),
+            Err(error) => return self.generation_error_status(error, allow_quarantine),
         };
         let staging_progress = match self.staging_progress() {
             Ok(progress) => progress,
@@ -181,20 +190,27 @@ impl DerivedAccessLifecycle {
                 detail: Some("current generation remains readable during rebuild".to_owned()),
             });
         }
-        let _lease = match self.paths.acquire_read_lease(&publication.generation_id) {
-            Ok(lease) => lease,
-            Err(error) => return self.generation_error_status(error),
+        let stable_publication = match self.stable_current_publication() {
+            Ok(publication) => publication,
+            Err(error) => return self.generation_error_status(error, allow_quarantine),
+        };
+        let Some((publication, _lease)) = stable_publication else {
+            return Ok(status(
+                DerivedAccessAvailability::RebuildRequired,
+                None,
+                Some("current generation changed while reading lifecycle status".to_owned()),
+            ));
         };
         let descriptor = match self.paths.descriptor(&publication) {
             Ok(descriptor) => descriptor,
-            Err(error) => return self.generation_error_status(error),
+            Err(error) => return self.generation_error_status(error, allow_quarantine),
         };
         if let Err(error) = self.validate_descriptor(&descriptor) {
-            return self.quarantine_status(error.to_string());
+            return self.invalid_status(error.to_string(), allow_quarantine);
         }
         let generation_root = self.paths.generation(&publication.generation_id);
         if let Err(error) = validate_wal_shape(&generation_root) {
-            return self.lifecycle_error_status(error);
+            return self.lifecycle_error_status(error, allow_quarantine);
         }
         let service = match DerivedAccessService::open_at(
             &self.store_root,
@@ -210,7 +226,7 @@ impl DerivedAccessLifecycle {
                 ));
             }
             Err(error) if service_error_requires_quarantine(&error) => {
-                return self.quarantine_status(error.to_string());
+                return self.invalid_status(error.to_string(), allow_quarantine);
             }
             Err(error) => {
                 return Ok(status(
@@ -250,7 +266,7 @@ impl DerivedAccessLifecycle {
             ));
         }
         if let Err(error) = validate_published(&service, &descriptor, truth_count) {
-            return self.quarantine_status(error.to_string());
+            return self.invalid_status(error.to_string(), allow_quarantine);
         }
         if service.locator_checkpoint()? != service.truth_head()?.cursor {
             return Ok(status(
@@ -271,6 +287,15 @@ impl DerivedAccessLifecycle {
         progress: impl FnMut(LifecycleProgress) -> LifecycleControl,
     ) -> Result<LifecycleReceipt, LifecycleError> {
         self.rebuild_with_hook(progress, |_| {})
+    }
+
+    pub(crate) fn rebuild_required_while_writer_idle(&self) -> Result<bool, LifecycleError> {
+        // A governed append publishes loose truth before finalizing its cursor
+        // receipt. `RebuildRequired` during that bounded gap is expected. The
+        // writer lock makes this second observation authoritative: if the gap
+        // has closed, the background worker must not start a full rebuild.
+        let _writer_lock = StoreWriterLock::acquire(&self.store_root)?;
+        Ok(self.status()?.availability == DerivedAccessAvailability::RebuildRequired)
     }
 
     pub(crate) fn rebuild_with_hook(
@@ -415,17 +440,12 @@ impl DerivedAccessLifecycle {
         if self.profile == DerivedAccessProfile::Off || !self.paths.root().exists() {
             return Ok(None);
         }
-        let publication = match self.paths.current_publication() {
-            Ok(publication) => publication,
-            Err(error) => return Err(self.generation_open_error(error)),
-        };
-        let Some(publication) = publication else {
+        let Some((publication, lease)) = self
+            .stable_current_publication()
+            .map_err(|error| self.generation_open_error(error))?
+        else {
             return Ok(None);
         };
-        let lease = self
-            .paths
-            .acquire_read_lease(&publication.generation_id)
-            .map_err(|error| self.generation_open_error(error))?;
         let descriptor = self
             .paths
             .descriptor(&publication)
@@ -467,6 +487,29 @@ impl DerivedAccessLifecycle {
             service,
             _lease: lease,
         }))
+    }
+
+    fn stable_current_publication(
+        &self,
+    ) -> Result<Option<(GenerationPublication, GenerationReadLease)>, GenerationError> {
+        self.stable_current_publication_with_hook(|| {})
+    }
+
+    fn stable_current_publication_with_hook(
+        &self,
+        mut after_publication_selected: impl FnMut(),
+    ) -> Result<Option<(GenerationPublication, GenerationReadLease)>, GenerationError> {
+        for _ in 0..STABLE_PUBLICATION_ATTEMPTS {
+            let Some(publication) = self.paths.current_publication()? else {
+                return Ok(None);
+            };
+            after_publication_selected();
+            let lease = self.paths.acquire_read_lease(&publication.generation_id)?;
+            if self.paths.current_publication()?.as_ref() == Some(&publication) {
+                return Ok(Some((publication, lease)));
+            }
+        }
+        Err(GenerationError::PublicationUnstable)
     }
 
     /// Open the generation selected while the caller holds the canonical writer
@@ -620,11 +663,22 @@ impl DerivedAccessLifecycle {
     fn quarantine_status(&self, reason: String) -> Result<LifecycleStatus, LifecycleError> {
         match StoreWriterLock::try_acquire(&self.store_root) {
             Ok(_lock) => {
-                self.paths.quarantine(&reason)?;
+                // The observation that led here was made without the writer
+                // lock. A normal append can temporarily expose an incomplete
+                // WAL/header/checkpoint relationship, then finish before this
+                // lock is acquired. Never quarantine from that stale
+                // observation: re-run the complete classifier under the lock
+                // and rename only if it still reports invalid state.
+                let observed = self.status_with_quarantine(false)?;
+                if observed.availability != DerivedAccessAvailability::Quarantined {
+                    return Ok(observed);
+                }
+                let confirmed_reason = observed.detail.unwrap_or(reason);
+                self.paths.quarantine(&confirmed_reason)?;
                 Ok(status(
                     DerivedAccessAvailability::Quarantined,
                     None,
-                    Some(reason),
+                    Some(confirmed_reason),
                 ))
             }
             Err(WriterLockError::Busy) => Ok(status(
@@ -649,9 +703,10 @@ impl DerivedAccessLifecycle {
     fn generation_error_status(
         &self,
         error: GenerationError,
+        allow_quarantine: bool,
     ) -> Result<LifecycleStatus, LifecycleError> {
         if generation_error_requires_quarantine(&error) {
-            self.quarantine_status(error.to_string())
+            self.invalid_status(error.to_string(), allow_quarantine)
         } else {
             Ok(status(
                 DerivedAccessAvailability::Unavailable,
@@ -664,14 +719,31 @@ impl DerivedAccessLifecycle {
     fn lifecycle_error_status(
         &self,
         error: LifecycleError,
+        allow_quarantine: bool,
     ) -> Result<LifecycleStatus, LifecycleError> {
         if lifecycle_error_requires_quarantine(&error) {
-            self.quarantine_status(error.to_string())
+            self.invalid_status(error.to_string(), allow_quarantine)
         } else {
             Ok(status(
                 DerivedAccessAvailability::Unavailable,
                 None,
                 Some(error.to_string()),
+            ))
+        }
+    }
+
+    fn invalid_status(
+        &self,
+        reason: String,
+        allow_quarantine: bool,
+    ) -> Result<LifecycleStatus, LifecycleError> {
+        if allow_quarantine {
+            self.quarantine_status(reason)
+        } else {
+            Ok(status(
+                DerivedAccessAvailability::Quarantined,
+                None,
+                Some(reason),
             ))
         }
     }
@@ -1081,6 +1153,41 @@ mod tests {
     }
 
     #[test]
+    fn reader_retries_when_publication_changes_before_lease_acquisition() {
+        let temp = populated_store(7);
+        let lifecycle = active_lifecycle(temp.path());
+        let first_generation = lifecycle
+            .rebuild(|_| LifecycleControl::Continue)
+            .unwrap()
+            .generation_id
+            .unwrap();
+        let mut replaced = false;
+
+        let (publication, _lease) = lifecycle
+            .stable_current_publication_with_hook(|| {
+                if !replaced {
+                    lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+                    replaced = true;
+                }
+            })
+            .unwrap()
+            .unwrap();
+
+        assert!(replaced);
+        assert_ne!(publication.generation_id, first_generation);
+        assert!(
+            lifecycle
+                .paths()
+                .generation(&publication.generation_id)
+                .exists()
+        );
+        assert!(
+            !lifecycle.paths().generation(&first_generation).exists(),
+            "the replacement reclaimed the generation selected before the lease"
+        );
+    }
+
+    #[test]
     fn corrupt_visible_generation_is_quarantined_without_touching_truth() {
         let temp = populated_store(1);
         let lifecycle = active_lifecycle(temp.path());
@@ -1097,6 +1204,24 @@ mod tests {
         assert_eq!(
             EventStore::open(temp.path()).list_events().unwrap().len(),
             1
+        );
+    }
+
+    #[test]
+    fn stale_quarantine_observation_is_revalidated_under_the_writer_lock() {
+        let temp = populated_store(7);
+        let lifecycle = active_lifecycle(temp.path());
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+
+        let status = lifecycle
+            .quarantine_status("stale transient observation".to_owned())
+            .unwrap();
+
+        assert_eq!(status.availability, DerivedAccessAvailability::Current);
+        assert!(lifecycle.paths().root().exists());
+        assert_eq!(
+            EventStore::open(temp.path()).list_events().unwrap().len(),
+            7
         );
     }
 
