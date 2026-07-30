@@ -49,6 +49,64 @@ pub struct DerivedRevisionDetail {
     pub supersession: SupersessionView,
 }
 
+/// Selects the authoritative events needed to render one exact revision and
+/// its fork-tolerant supersession component at a frozen truth cursor.
+///
+/// The `CROSS JOIN` order and `INDEXED BY` clauses are deliberate planner
+/// fences. Without them, SQLite is free to begin each recursive step from the
+/// bounded-but-large locator range, then scan that range once per component
+/// member. That turns a point read into `O(history * component)` work. The
+/// fenced order advances the state machine from one known revision identity:
+///
+/// 1. expand backward through the selected revision's outgoing edges;
+/// 2. expand forward through the target index;
+/// 3. deduplicate identities through recursive `UNION`;
+/// 4. scan the retained event range once and test membership in the
+///    materialized component set.
+///
+/// Do not rewrite these joins as ordinary inner joins without checking the
+/// `EXPLAIN QUERY PLAN` regression below on the bundled SQLite version.
+const REVISION_COMPONENT_EVENT_IDS_SQL: &str = "WITH RECURSIVE component(revision_id) AS (
+             SELECT ?3
+             UNION
+             SELECT edge.superseded_revision_id
+             FROM component
+             CROSS JOIN product_revision AS revision
+               INDEXED BY product_revision_identity
+             CROSS JOIN semantic_representative AS representative
+             CROSS JOIN locator_event_text AS revision_locator
+             CROSS JOIN product_revision_edge AS edge
+             WHERE revision.revision_id = component.revision_id
+               AND representative.family_id = 1
+               AND representative.sequence = revision.sequence
+               AND revision_locator.sequence = revision.sequence
+               AND edge.sequence = revision.sequence
+               AND revision_locator.epoch = ?1
+               AND revision.sequence <= ?2
+             UNION
+             SELECT revision.revision_id
+             FROM component
+             CROSS JOIN product_revision_edge AS edge
+               INDEXED BY product_revision_edge_target
+             CROSS JOIN product_revision AS revision
+             CROSS JOIN semantic_representative AS representative
+             CROSS JOIN locator_event_text AS revision_locator
+             WHERE edge.superseded_revision_id = component.revision_id
+               AND revision.sequence = edge.sequence
+               AND representative.family_id = 1
+               AND representative.sequence = revision.sequence
+               AND revision_locator.sequence = revision.sequence
+               AND revision_locator.epoch = ?1
+               AND revision.sequence <= ?2
+         )
+         SELECT locator.event_id
+         FROM semantic_event_fact_text AS event
+         JOIN locator_event_text AS locator ON locator.sequence = event.sequence
+         WHERE locator.epoch = ?1
+           AND locator.sequence <= ?2
+           AND event.revision_id IN (SELECT revision_id FROM component)
+         ORDER BY locator.replay_key, locator.event_id";
+
 impl DerivedHistoryAccess {
     pub fn revisions(
         &self,
@@ -186,44 +244,7 @@ fn revision_event_ids(
     revision_id: Option<&RevisionId>,
 ) -> Result<Vec<String>, String> {
     let sql = if revision_id.is_some() {
-        "WITH RECURSIVE component(revision_id) AS (
-             SELECT ?3
-             UNION
-             SELECT edge.superseded_revision_id
-             FROM component AS component
-             JOIN product_revision AS revision
-               ON revision.revision_id = component.revision_id
-             JOIN semantic_representative AS representative
-               ON representative.family_id = 1
-              AND representative.sequence = revision.sequence
-             JOIN locator_event_text AS revision_locator
-               ON revision_locator.sequence = revision.sequence
-             JOIN product_revision_edge AS edge
-               ON edge.sequence = revision.sequence
-             WHERE revision_locator.epoch = ?1
-               AND revision.sequence <= ?2
-             UNION
-             SELECT revision.revision_id
-             FROM component AS component
-             JOIN product_revision_edge AS edge
-               ON edge.superseded_revision_id = component.revision_id
-             JOIN product_revision AS revision ON revision.sequence = edge.sequence
-             JOIN semantic_representative AS representative
-               ON representative.family_id = 1
-              AND representative.sequence = revision.sequence
-             JOIN locator_event_text AS revision_locator
-               ON revision_locator.sequence = revision.sequence
-             WHERE revision_locator.epoch = ?1
-               AND revision.sequence <= ?2
-         )
-         SELECT locator.event_id
-         FROM component
-         JOIN semantic_event_fact_text AS event
-           ON event.revision_id = component.revision_id
-         JOIN locator_event_text AS locator ON locator.sequence = event.sequence
-         WHERE locator.epoch = ?1
-           AND locator.sequence <= ?2
-         ORDER BY locator.replay_key, locator.event_id"
+        REVISION_COMPONENT_EVENT_IDS_SQL
     } else {
         "SELECT locator.event_id
          FROM semantic_event_fact_text AS event
@@ -569,6 +590,53 @@ mod tests {
         assert_eq!(
             derived.supersession,
             SupersessionView::from_events(&events).expect("project full supersession")
+        );
+    }
+
+    #[test]
+    fn exact_detail_anchors_component_walks_before_scanning_retained_history() {
+        let (_repo, access, revision_id) = active_bridged_repo();
+        let CurrentRead::Ready(current) = access.current().expect("read current generation") else {
+            panic!("published generation should be current");
+        };
+        let service = current.service();
+        let LocatorRead::Ready((connection, _)) = service
+            .product_history_connection()
+            .expect("open product history")
+        else {
+            panic!("published generation should not require catch-up");
+        };
+        let as_of = service.locator_checkpoint().expect("read checkpoint");
+        let mut statement = connection
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {REVISION_COMPONENT_EVENT_IDS_SQL}"
+            ))
+            .expect("prepare exact-detail query plan");
+        let details = statement
+            .query_map(
+                rusqlite::params![
+                    to_sql_integer(as_of.epoch).unwrap(),
+                    to_sql_integer(as_of.sequence).unwrap(),
+                    revision_id.as_str(),
+                ],
+                |row| row.get::<_, String>(3),
+            )
+            .expect("query exact-detail plan")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read exact-detail plan");
+
+        assert!(
+            details.iter().any(|detail| {
+                detail.contains("product_revision_identity") && detail.contains("revision_id=?")
+            }),
+            "backward component expansion must start from the selected revision: {details:?}"
+        );
+        assert!(
+            details.iter().any(|detail| {
+                detail.contains("product_revision_edge_target")
+                    && detail.contains("superseded_revision_id=?")
+            }),
+            "forward component expansion must start from the selected revision: {details:?}"
         );
     }
 

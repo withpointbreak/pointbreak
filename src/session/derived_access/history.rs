@@ -973,22 +973,26 @@ fn normalized_history_cursor(cursor: &HistoryCursor) -> String {
 
 /// Find the authoritative carriers needed to interpret selected product rows.
 ///
-/// Support closure has two ordered phases:
+/// Support closure has three ordered phases:
 ///
-/// 1. Referenced content hashes select `artifact_removed` carriers. Those
+/// 1. Payload extraction retains multi-value references such as validation
+///    logs, while the indexed semantic fact for every selected carrier adds
+///    canonical references nested inside typed payloads (notably a captured
+///    revision's object artifact).
+/// 2. Referenced content hashes select `artifact_removed` carriers. Those
 ///    carriers are also targets because a detached signature can attest to a
 ///    removal event.
-/// 2. The original selection plus those removal carriers select detached
+/// 3. The original selection plus those removal carriers select detached
 ///    `event_signature_recorded` carriers.
 ///
-/// Both phases may contain more values than SQLite can bind in one statement at
+/// Every phase may contain more values than SQLite can bind in one statement at
 /// retained scale. A connection-local TEMP table carries each complete set into
-/// a set-oriented join without changing the immutable generation. Complete
-/// phase 1 before replacing that table with the phase-2 targets; otherwise
-/// signatures on removal carriers would be omitted. Each product read owns its
-/// connection, so the TEMP table is isolated from other requests; the transaction
-/// batches both populations, while `BTreeSet` preserves deterministic,
-/// duplicate-free output.
+/// a set-oriented join without changing the immutable generation. Complete the
+/// removal phase before replacing that table with the signature targets;
+/// otherwise signatures on removal carriers would be omitted. Each product
+/// read owns its connection, so the TEMP table is isolated from other requests;
+/// the transaction batches all populations, while `BTreeSet` preserves
+/// deterministic, duplicate-free output.
 pub(super) fn support_event_ids(
     connection: &rusqlite::Connection,
     selected: &[ShoreEvent],
@@ -998,7 +1002,7 @@ pub(super) fn support_event_ids(
         .iter()
         .map(|event| event.event_id.as_str().to_owned())
         .collect::<BTreeSet<_>>();
-    let content_hashes = selected
+    let mut content_hashes = selected
         .iter()
         .flat_map(event_content_hashes)
         .collect::<BTreeSet<_>>();
@@ -1013,6 +1017,23 @@ pub(super) fn support_event_ids(
              ) STRICT, WITHOUT ROWID;",
         )
         .map_err(|error| error.to_string())?;
+    if !targets.is_empty() {
+        replace_support_lookup_values(&transaction, targets.iter())?;
+        let sql = "SELECT DISTINCT event.content_hash
+                   FROM semantic_event_fact_text AS event
+                   JOIN locator_event_text AS locator ON locator.sequence = event.sequence
+                   JOIN temp.pointbreak_product_support_lookup AS selected
+                     ON selected.value = locator.event_id
+                   WHERE event.content_hash IS NOT NULL
+                     AND locator.epoch = ?
+                     AND locator.sequence <= ?
+                   ORDER BY event.content_hash";
+        let parameters = [
+            Value::from(to_sql_integer(as_of.epoch)?),
+            Value::from(to_sql_integer(as_of.sequence)?),
+        ];
+        content_hashes.extend(query_string_rows(&transaction, sql, &parameters)?);
+    }
     if !content_hashes.is_empty() {
         replace_support_lookup_values(&transaction, content_hashes.iter())?;
         let sql = "SELECT locator.event_id
@@ -1570,6 +1591,82 @@ mod tests {
 
         assert_eq!(
             support_event_ids(&connection, &selected, TruthCursor::new(0, 2)).unwrap(),
+            vec!["event:removed".to_owned(), "event:signature".to_owned()]
+        );
+    }
+
+    #[test]
+    fn selected_support_uses_indexed_semantic_content_for_nested_payloads() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE locator_event_text (
+                     sequence INTEGER NOT NULL,
+                     event_id TEXT NOT NULL,
+                     event_type TEXT NOT NULL,
+                     epoch INTEGER NOT NULL
+                 );
+                 CREATE TABLE semantic_event_fact_text (
+                     sequence INTEGER NOT NULL,
+                     content_hash TEXT
+                 );
+                 CREATE TABLE product_history_signature (
+                     sequence INTEGER NOT NULL,
+                     target_event_id TEXT NOT NULL
+                 );",
+            )
+            .unwrap();
+        let selected = review_initialized(1);
+        let selected_id = selected.event_id.as_str();
+        let removed_hash = "sha256:nested-object-content";
+        connection
+            .execute(
+                "INSERT INTO locator_event_text
+                     (sequence, event_id, event_type, epoch)
+                 VALUES (1, ?1, 'work_object_proposed', 0)",
+                [selected_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO semantic_event_fact_text (sequence, content_hash)
+                 VALUES (1, ?1)",
+                [removed_hash],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO locator_event_text
+                     (sequence, event_id, event_type, epoch)
+                 VALUES (2, 'event:removed', 'artifact_removed', 0)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO semantic_event_fact_text (sequence, content_hash)
+                 VALUES (2, ?1)",
+                [removed_hash],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO locator_event_text
+                     (sequence, event_id, event_type, epoch)
+                 VALUES (3, 'event:signature', 'event_signature_recorded', 0)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO product_history_signature (sequence, target_event_id)
+                 VALUES (3, 'event:removed')",
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(
+            support_event_ids(&connection, &[selected], TruthCursor::new(0, 3)).unwrap(),
             vec!["event:removed".to_owned(), "event:signature".to_owned()]
         );
     }
