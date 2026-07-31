@@ -16,6 +16,32 @@ struct ParsedPage {
     relevant_change: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ContinuityFailure {
+    SourceIdentityChanged,
+    JournalIdentityChanged,
+    CursorOutsideRetainedInterval,
+}
+
+fn validate_continuity(
+    before: &super::JournalNativeCursor,
+    current: &super::JournalNativeCursor,
+    retained_start_usn: i64,
+) -> Result<(), ContinuityFailure> {
+    if current.volume_serial_number != before.volume_serial_number
+        || current.directory_file_reference != before.directory_file_reference
+    {
+        return Err(ContinuityFailure::SourceIdentityChanged);
+    }
+    if current.journal_id != before.journal_id {
+        return Err(ContinuityFailure::JournalIdentityChanged);
+    }
+    if before.next_usn < retained_start_usn || before.next_usn > current.next_usn {
+        return Err(ContinuityFailure::CursorOutsideRetainedInterval);
+    }
+    Ok(())
+}
+
 fn parse_page(
     bytes: &[u8],
     target_usn: i64,
@@ -137,7 +163,9 @@ mod native {
     use super::super::{
         JournalChangeCheck, JournalChangeStamp, JournalChangeVerdict, JournalNativeCursor,
     };
-    use super::{DEFAULT_MAX_BYTES, DEFAULT_MAX_RECORDS, parse_page};
+    use super::{
+        ContinuityFailure, DEFAULT_MAX_BYTES, DEFAULT_MAX_RECORDS, parse_page, validate_continuity,
+    };
     use crate::error::{Result, ShoreError};
 
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
@@ -188,7 +216,7 @@ mod native {
     struct CurrentObservation {
         stamp: JournalChangeStamp,
         cursor: JournalNativeCursor,
-        first_usn: i64,
+        retained_start_usn: i64,
         volume: File,
     }
 
@@ -245,33 +273,30 @@ mod native {
                 ));
             }
         };
-        if current.cursor.volume_serial_number != before_cursor.volume_serial_number
-            || current.cursor.directory_file_reference != before_cursor.directory_file_reference
+        if let Err(failure) =
+            validate_continuity(before_cursor, &current.cursor, current.retained_start_usn)
         {
-            return Ok(changed(
-                current.stamp,
-                0,
-                0,
-                "NTFS volume or events-directory identity changed".to_owned(),
-            ));
-        }
-        if current.cursor.journal_id != before_cursor.journal_id {
-            return Ok(indeterminate(
-                current.stamp,
-                0,
-                0,
-                "NTFS journal identity changed".to_owned(),
-            ));
-        }
-        if before_cursor.next_usn < current.first_usn
-            || before_cursor.next_usn > current.cursor.next_usn
-        {
-            return Ok(indeterminate(
-                current.stamp,
-                0,
-                0,
-                "saved NTFS journal cursor is outside the retained interval".to_owned(),
-            ));
+            let (verdict, mechanism) = match failure {
+                ContinuityFailure::SourceIdentityChanged => (
+                    JournalChangeVerdict::Changed,
+                    "NTFS volume or events-directory identity changed",
+                ),
+                ContinuityFailure::JournalIdentityChanged => (
+                    JournalChangeVerdict::Indeterminate,
+                    "NTFS journal identity changed",
+                ),
+                ContinuityFailure::CursorOutsideRetainedInterval => (
+                    JournalChangeVerdict::Indeterminate,
+                    "saved NTFS journal cursor is outside the retained interval",
+                ),
+            };
+            return Ok(JournalChangeCheck {
+                after: current.stamp,
+                verdict,
+                native_bytes_examined: 0,
+                native_records_examined: 0,
+                mechanism: mechanism.to_owned(),
+            });
         }
         read_interval(
             current,
@@ -335,7 +360,7 @@ mod native {
         Ok(CurrentObservation {
             stamp,
             cursor,
-            first_usn: journal.first_usn,
+            retained_start_usn: journal.first_usn.max(journal.lowest_valid_usn),
             volume,
         })
     }
@@ -345,6 +370,7 @@ mod native {
         journal_id: u64,
         first_usn: i64,
         next_usn: i64,
+        lowest_valid_usn: i64,
     }
 
     fn query_journal(volume: &File) -> Result<JournalData> {
@@ -367,7 +393,7 @@ mod native {
         if ok == 0 {
             return Err(last_native_error("query NTFS USN journal"));
         }
-        if returned < 24 {
+        if returned < 32 {
             return Err(ShoreError::Message(
                 "NTFS USN journal query returned a truncated header".to_owned(),
             ));
@@ -377,7 +403,36 @@ mod native {
             journal_id: super::read_u64(bytes, 0).map_err(ShoreError::Message)?,
             first_usn: super::read_i64(bytes, 8).map_err(ShoreError::Message)?,
             next_usn: super::read_i64(bytes, 16).map_err(ShoreError::Message)?,
+            lowest_valid_usn: super::read_i64(bytes, 24).map_err(ShoreError::Message)?,
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn changes_since_with_limits(
+        events_dir: &Path,
+        before: &JournalChangeStamp,
+        max_bytes: u64,
+        max_records: u64,
+    ) -> Result<JournalChangeCheck> {
+        let Some(before_cursor) = before.native_cursor() else {
+            return Ok(JournalChangeStamp::compared(before, capture(events_dir)?));
+        };
+        let current = match observe_current(events_dir) {
+            Ok(current) => current,
+            Err(error) => {
+                return Ok(indeterminate(
+                    before.clone(),
+                    0,
+                    0,
+                    format!("could not establish current NTFS journal head: {error}"),
+                ));
+            }
+        };
+        if validate_continuity(before_cursor, &current.cursor, current.retained_start_usn).is_err()
+        {
+            return changes_since(events_dir, before);
+        }
+        read_interval(current, before_cursor.next_usn, max_bytes, max_records)
     }
 
     fn read_interval(
@@ -582,6 +637,42 @@ pub(super) use native::{capture, changes_since};
 mod tests {
     use super::*;
 
+    fn cursor(journal_id: u64, next_usn: i64) -> super::super::JournalNativeCursor {
+        super::super::JournalNativeCursor {
+            journal_id,
+            next_usn,
+            directory_file_reference: 41,
+            volume_serial_number: 73,
+        }
+    }
+
+    #[test]
+    fn continuity_accepts_only_the_retained_interval_on_the_same_source() {
+        let before = cursor(11, 50);
+        let current = cursor(11, 80);
+        assert_eq!(validate_continuity(&before, &current, 40), Ok(()));
+
+        let mut replaced_source = current.clone();
+        replaced_source.directory_file_reference += 1;
+        assert_eq!(
+            validate_continuity(&before, &replaced_source, 40),
+            Err(ContinuityFailure::SourceIdentityChanged)
+        );
+
+        assert_eq!(
+            validate_continuity(&before, &cursor(12, 80), 40),
+            Err(ContinuityFailure::JournalIdentityChanged)
+        );
+        assert_eq!(
+            validate_continuity(&before, &current, 51),
+            Err(ContinuityFailure::CursorOutsideRetainedInterval)
+        );
+        assert_eq!(
+            validate_continuity(&cursor(11, 81), &current, 40),
+            Err(ContinuityFailure::CursorOutsideRetainedInterval)
+        );
+    }
+
     #[test]
     fn parser_finds_direct_event_carrier_before_target() {
         let page = page(
@@ -757,6 +848,112 @@ mod tests {
             .expect("write direct event carrier under restricted token");
         let changed = changes_since(&events, &first).expect("check under restricted token");
         assert_eq!(changed.verdict, super::super::JournalChangeVerdict::Changed);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_fast_publication_shapes_never_return_stable() {
+        use super::super::JournalChangeVerdict;
+
+        let root = tempfile::tempdir().expect("temporary root");
+        let events = root.path().join("events");
+        std::fs::create_dir(&events).expect("events directory");
+
+        for index in 0..100_u64 {
+            let before = capture(&events).expect("capture before direct create");
+            std::fs::write(events.join(format!("{index:064x}.json")), b"direct")
+                .expect("direct create");
+            assert_ne!(
+                changes_since(&events, &before)
+                    .expect("check direct create")
+                    .verdict,
+                JournalChangeVerdict::Stable,
+                "direct create repetition {index}"
+            );
+
+            let before = capture(&events).expect("capture before temp rename");
+            let temp = events.join(format!(".{index:064x}.tmp"));
+            let carrier = events.join(format!("{:064x}.json", index + 100));
+            std::fs::write(&temp, b"rename").expect("temporary create");
+            std::fs::rename(temp, carrier).expect("publish rename");
+            assert_ne!(
+                changes_since(&events, &before)
+                    .expect("check temp rename")
+                    .verdict,
+                JournalChangeVerdict::Stable,
+                "temp rename repetition {index}"
+            );
+
+            let before = capture(&events).expect("capture before concurrent create");
+            let concurrent = events.join(format!("{:064x}.json", index + 200));
+            std::thread::spawn(move || std::fs::write(concurrent, b"concurrent"))
+                .join()
+                .expect("concurrent writer thread")
+                .expect("concurrent create");
+            assert_ne!(
+                changes_since(&events, &before)
+                    .expect("check concurrent create")
+                    .verdict,
+                JournalChangeVerdict::Stable,
+                "concurrent create repetition {index}"
+            );
+
+            let aliased = events.join("..").join("events");
+            let before = capture(&aliased).expect("capture through canonical alias");
+            for burst in 0..8_u64 {
+                std::fs::write(
+                    events.join(format!("{:064x}.json", 1_000 + index * 8 + burst)),
+                    b"rapid",
+                )
+                .expect("rapid create");
+            }
+            assert_ne!(
+                changes_since(&events, &before)
+                    .expect("check rapid alias create")
+                    .verdict,
+                JournalChangeVerdict::Stable,
+                "rapid alias repetition {index}"
+            );
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_volume_churn_is_counted_and_caps_fail_closed() {
+        use super::super::JournalChangeVerdict;
+
+        let root = tempfile::tempdir().expect("temporary root");
+        let events = root.path().join("events");
+        let churn = root.path().join("unrelated");
+        std::fs::create_dir(&events).expect("events directory");
+        std::fs::create_dir(&churn).expect("churn directory");
+
+        let before = capture(&events).expect("capture before unrelated volume churn");
+        for index in 0..64_u64 {
+            std::fs::write(churn.join(format!("noise-{index}")), b"noise")
+                .expect("unrelated volume write");
+        }
+        let observed = changes_since(&events, &before).expect("bounded churn observation");
+        assert_eq!(observed.verdict, JournalChangeVerdict::Stable);
+        assert!(observed.native_bytes_examined > 8);
+        assert!(observed.native_records_examined > 0);
+        assert!(observed.native_bytes_examined <= DEFAULT_MAX_BYTES);
+        assert!(observed.native_records_examined <= DEFAULT_MAX_RECORDS);
+
+        let before = capture(&events).expect("capture before byte-cap probe");
+        std::fs::write(churn.join("byte-cap"), b"noise").expect("byte-cap churn");
+        let byte_capped =
+            native::changes_since_with_limits(&events, &before, 0, DEFAULT_MAX_RECORDS)
+                .expect("byte-cap observation");
+        assert_eq!(byte_capped.verdict, JournalChangeVerdict::Indeterminate);
+        assert_eq!(byte_capped.native_bytes_examined, 0);
+
+        let before = capture(&events).expect("capture before record-cap probe");
+        std::fs::write(churn.join("record-cap"), b"noise").expect("record-cap churn");
+        let record_capped =
+            native::changes_since_with_limits(&events, &before, DEFAULT_MAX_BYTES, 0)
+                .expect("record-cap observation");
+        assert_eq!(record_capped.verdict, JournalChangeVerdict::Indeterminate);
     }
 
     fn page(next_usn: i64, records: &[Vec<u8>]) -> Vec<u8> {
