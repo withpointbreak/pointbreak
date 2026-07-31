@@ -628,6 +628,8 @@ valid whether the candidate passes or exposes a falsifier. `allScenariosAccepted
 failure, not missing evidence. Existing-carrier overwrite remains outside the stamp guarantee and is accepted
 only when selected-carrier validation detects the injected corruption. The scope is accidental and
 mixed-version publication detection, not resistance to malicious tampering.
+Sidecar deletion and experiment-off rollback are explicit not-applicable rows: this directory-only candidate
+observes neither derived authority metadata nor the disabled profile.
 
 After copying both receipts to one host, verify their hashes and common source/tree/lock authority read-only:
 

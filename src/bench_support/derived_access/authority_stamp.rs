@@ -208,7 +208,8 @@ impl AuthorityStampNativeReceiptV1 {
                         .is_none(),
                 };
             let stamp_shape_is_valid = match row.scenario {
-                AuthorityStampScenarioV1::ExperimentOffRollback => {
+                AuthorityStampScenarioV1::SidecarDeletion
+                | AuthorityStampScenarioV1::ExperimentOffRollback => {
                     row.stamp_before_sha256.is_none() && row.stamp_after_sha256.is_none()
                 }
                 _ => [&row.stamp_before_sha256, &row.stamp_after_sha256]
@@ -348,15 +349,7 @@ pub fn verify_authority_stamp_native_receipts_v1(
         .iter()
         .find(|receipt| receipt.execution.platform == AuthorityStampPlatformV1::WindowsNtfs)
         .ok_or_else(|| "authority-stamp package lacks NTFS evidence".to_owned())?;
-    if !apfs.all_scenarios_accepted || !ntfs.all_scenarios_accepted {
-        return Err("authority-stamp native evidence contains a qualifying falsifier".to_owned());
-    }
-    if apfs.execution.source_commit != ntfs.execution.source_commit
-        || apfs.execution.source_tree != ntfs.execution.source_tree
-        || apfs.execution.cargo_lock_sha256 != ntfs.execution.cargo_lock_sha256
-    {
-        return Err("authority-stamp native receipts do not share source authority".to_owned());
-    }
+    validate_native_pair(apfs, ntfs)?;
     let mut package = AuthorityStampNativePackageV1 {
         schema: AUTHORITY_STAMP_NATIVE_PACKAGE_SCHEMA_V1.to_owned(),
         source_commit: apfs.execution.source_commit.clone(),
@@ -374,6 +367,22 @@ pub fn verify_authority_stamp_native_receipts_v1(
         sha256_bytes_hex(&serde_json::to_vec(&preimage).map_err(|error| error.to_string())?);
     package.validate()?;
     Ok(package)
+}
+
+fn validate_native_pair(
+    apfs: &AuthorityStampNativeReceiptV1,
+    ntfs: &AuthorityStampNativeReceiptV1,
+) -> Result<(), String> {
+    if apfs.execution.source_commit != ntfs.execution.source_commit
+        || apfs.execution.source_tree != ntfs.execution.source_tree
+        || apfs.execution.cargo_lock_sha256 != ntfs.execution.cargo_lock_sha256
+    {
+        return Err("authority-stamp native receipts do not share source authority".to_owned());
+    }
+    if !apfs.all_scenarios_accepted || !ntfs.all_scenarios_accepted {
+        return Err("authority-stamp native evidence contains a qualifying falsifier".to_owned());
+    }
+    Ok(())
 }
 
 /// Internal subprocess endpoint used to exercise crash and fresh-process
@@ -700,16 +709,12 @@ fn run_scenario(
             fs::create_dir_all(sidecar.parent().expect("sidecar parent"))
                 .map_err(|error| error.to_string())?;
             fs::write(&sidecar, b"authority").map_err(|error| error.to_string())?;
-            let first = capture_stamp(&journal)?;
             fs::remove_file(&sidecar).map_err(|error| error.to_string())?;
-            let second = capture_stamp(&journal)?;
-            before = Some(first.opaque_sha256());
-            after = Some(second.opaque_sha256());
             mechanism =
-                "missing authority metadata makes the composed snapshot indeterminate".to_owned();
+                "the directory-only candidate makes no sidecar-deletion observation".to_owned();
             (
-                AuthorityStampExpectationV1::ChangedOrIndeterminate,
-                AuthorityStampObservationV1::Indeterminate,
+                AuthorityStampExpectationV1::ObservationNotApplicable,
+                AuthorityStampObservationV1::NotApplicable,
             )
         }
         AuthorityStampScenarioV1::ExperimentOffRollback => {
@@ -857,11 +862,11 @@ fn scenario_expectation(scenario: AuthorityStampScenarioV1) -> AuthorityStampExp
         | AuthorityStampScenarioV1::CrashAfterCarrierPublication
         | AuthorityStampScenarioV1::RapidMutations
         | AuthorityStampScenarioV1::CanonicalPathAlias
-        | AuthorityStampScenarioV1::ProductionDirectoryLayout
-        | AuthorityStampScenarioV1::SidecarDeletion => {
+        | AuthorityStampScenarioV1::ProductionDirectoryLayout => {
             AuthorityStampExpectationV1::ChangedOrIndeterminate
         }
-        AuthorityStampScenarioV1::ExperimentOffRollback => {
+        AuthorityStampScenarioV1::SidecarDeletion
+        | AuthorityStampScenarioV1::ExperimentOffRollback => {
             AuthorityStampExpectationV1::ObservationNotApplicable
         }
         AuthorityStampScenarioV1::UnrelatedFile | AuthorityStampScenarioV1::TemporaryFile => {
@@ -1085,5 +1090,70 @@ mod tests {
             Some(true)
         );
         assert!(row.accepted);
+    }
+
+    #[test]
+    fn sidecar_deletion_is_an_explicit_non_observation() {
+        let root = tempfile::tempdir().expect("temp root");
+        let row = run_scenario(root.path(), AuthorityStampScenarioV1::SidecarDeletion, None)
+            .expect("sidecar scenario");
+
+        assert_eq!(
+            row.expectation,
+            AuthorityStampExpectationV1::ObservationNotApplicable
+        );
+        assert_eq!(row.observation, AuthorityStampObservationV1::NotApplicable);
+        assert!(row.stamp_before_sha256.is_none());
+        assert!(row.stamp_after_sha256.is_none());
+        assert!(row.accepted);
+    }
+
+    #[test]
+    fn native_pair_checks_source_authority_before_the_qualification_result() {
+        fn receipt(
+            commit: &str,
+            platform: AuthorityStampPlatformV1,
+            accepted: bool,
+        ) -> AuthorityStampNativeReceiptV1 {
+            let (operating_system, filesystem) = match platform {
+                AuthorityStampPlatformV1::MacosApfs => ("macos", "apfs"),
+                AuthorityStampPlatformV1::WindowsNtfs => ("windows", "ntfs"),
+            };
+            AuthorityStampNativeReceiptV1 {
+                schema: String::new(),
+                execution: AuthorityStampExecutionIdentityV1 {
+                    platform,
+                    source_commit: commit.to_owned(),
+                    source_tree: "1".repeat(40),
+                    cargo_lock_sha256: "2".repeat(64),
+                    binary_sha256: "3".repeat(64),
+                    operating_system: operating_system.to_owned(),
+                    architecture: "test".to_owned(),
+                    filesystem: filesystem.to_owned(),
+                    host_identity_sha256: "4".repeat(64),
+                    command_sha256: "5".repeat(64),
+                    probe_root_identity_sha256: "6".repeat(64),
+                },
+                scope: String::new(),
+                malicious_tamper_detection_claimed: false,
+                scenarios: Vec::new(),
+                all_scenarios_accepted: accepted,
+                completion_published_last: true,
+                receipt_sha256: String::new(),
+            }
+        }
+
+        let apfs = receipt("a", AuthorityStampPlatformV1::MacosApfs, true);
+        let mixed_ntfs = receipt("b", AuthorityStampPlatformV1::WindowsNtfs, false);
+        assert_eq!(
+            validate_native_pair(&apfs, &mixed_ntfs).unwrap_err(),
+            "authority-stamp native receipts do not share source authority"
+        );
+
+        let rejected_ntfs = receipt("a", AuthorityStampPlatformV1::WindowsNtfs, false);
+        assert_eq!(
+            validate_native_pair(&apfs, &rejected_ntfs).unwrap_err(),
+            "authority-stamp native evidence contains a qualifying falsifier"
+        );
     }
 }
