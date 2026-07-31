@@ -63,7 +63,9 @@ pub use signing::{
 };
 pub(crate) use signing::{sign_event_if_requested, verify_events_for_ingest};
 #[cfg(any(test, feature = "bench"))]
-pub(crate) use store::backend::{Journal, JournalChangeStamp, LocalJournal};
+pub(crate) use store::backend::{
+    Journal, JournalChangeCheck, JournalChangeStamp, JournalChangeVerdict, LocalJournal,
+};
 #[cfg(test)]
 pub(crate) use store::compute_revision_fingerprint;
 pub(crate) use store::{

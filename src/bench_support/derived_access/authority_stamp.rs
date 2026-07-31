@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::model::JournalId;
 use crate::session::event::{EventTarget, EventType, ReviewInitializedPayload, ShoreEvent, Writer};
-use crate::session::{EventStore, EventWriteOutcome, Journal, JournalChangeStamp, LocalJournal};
+use crate::session::{
+    EventStore, EventWriteOutcome, Journal, JournalChangeCheck, JournalChangeStamp,
+    JournalChangeVerdict, LocalJournal,
+};
 
 pub const DERIVED_ACCESS_AUTHORITY_STAMP_MODE_V1: &str = "--derived-access-authority-stamp";
 pub const DERIVED_ACCESS_AUTHORITY_STAMP_VERIFY_MODE_V1: &str =
@@ -388,6 +391,21 @@ fn validate_native_pair(
 /// Internal subprocess endpoint used to exercise crash and fresh-process
 /// boundaries. The caller owns the exit status.
 pub fn run_authority_stamp_child_v1(action: &str, store_dir: &Path) -> Result<String, String> {
+    if let Some(token) = action.strip_prefix("check,") {
+        let before = JournalChangeStamp::from_continuation_token(token)
+            .ok_or_else(|| "invalid authority-stamp continuation token".to_owned())?;
+        let check = observe_since(&LocalJournal::new(store_dir), &before)?;
+        let verdict = match check.verdict {
+            JournalChangeVerdict::Stable => "stable",
+            JournalChangeVerdict::Changed => "changed",
+            JournalChangeVerdict::Indeterminate => "indeterminate",
+        };
+        return Ok(format!(
+            "{verdict}\n{}\n{}",
+            check.after.opaque_sha256(),
+            check.mechanism
+        ));
+    }
     match action {
         "capture" => {
             capture_stamp(&LocalJournal::new(store_dir)).map(|stamp| stamp.opaque_sha256())
@@ -431,23 +449,25 @@ fn run_scenario(
     let (expectation, observation) = match scenario {
         AuthorityStampScenarioV1::AbsentDirectory => {
             let first = capture_stamp(&journal)?;
-            let second = capture_stamp(&journal)?;
+            let check = observe_since(&journal, &first)?;
             before = Some(first.opaque_sha256());
-            after = Some(second.opaque_sha256());
+            after = Some(check.after.opaque_sha256());
+            mechanism = check.mechanism.clone();
             (
                 AuthorityStampExpectationV1::Stable,
-                compare(&first, &second),
+                receipt_observation(&check),
             )
         }
         AuthorityStampScenarioV1::EmptyDirectory => {
             fs::create_dir_all(store_dir.join("events")).map_err(|error| error.to_string())?;
             let first = capture_stamp(&journal)?;
-            let second = capture_stamp(&journal)?;
+            let check = observe_since(&journal, &first)?;
             before = Some(first.opaque_sha256());
-            after = Some(second.opaque_sha256());
+            after = Some(check.after.opaque_sha256());
+            mechanism = check.mechanism.clone();
             (
                 AuthorityStampExpectationV1::Stable,
-                compare(&first, &second),
+                receipt_observation(&check),
             )
         }
         AuthorityStampScenarioV1::GovernedCreate => {
@@ -457,12 +477,13 @@ fn run_scenario(
                 .create_event_once("governed:create", b"created")
                 .map_err(|error| error.to_string())?
                 == crate::storage::CreateOutcome::Created;
-            let second = capture_stamp(&journal)?;
+            let check = observe_since(&journal, &first)?;
             before = Some(first.opaque_sha256());
-            after = Some(second.opaque_sha256());
+            after = Some(check.after.opaque_sha256());
+            mechanism = check.mechanism.clone();
             (
                 AuthorityStampExpectationV1::ChangedOrIndeterminate,
-                compare(&first, &second),
+                receipt_observation(&check),
             )
         }
         AuthorityStampScenarioV1::GovernedBurst => {
@@ -474,12 +495,13 @@ fn run_scenario(
                     .map_err(|error| error.to_string())?;
             }
             created = true;
-            let second = capture_stamp(&journal)?;
+            let check = observe_since(&journal, &first)?;
             before = Some(first.opaque_sha256());
-            after = Some(second.opaque_sha256());
+            after = Some(check.after.opaque_sha256());
+            mechanism = check.mechanism.clone();
             (
                 AuthorityStampExpectationV1::ChangedOrIndeterminate,
-                compare(&first, &second),
+                receipt_observation(&check),
             )
         }
         AuthorityStampScenarioV1::EqualDuplicateNoCreate
@@ -498,12 +520,13 @@ fn run_scenario(
                     },
                 )
                 .map_err(|error| error.to_string())?;
-            let second = capture_stamp(&journal)?;
+            let check = observe_since(&journal, &first)?;
             before = Some(first.opaque_sha256());
-            after = Some(second.opaque_sha256());
+            after = Some(check.after.opaque_sha256());
+            mechanism = check.mechanism.clone();
             (
                 AuthorityStampExpectationV1::Stable,
-                compare(&first, &second),
+                receipt_observation(&check),
             )
         }
         AuthorityStampScenarioV1::OutOfBandCreate => {
@@ -511,12 +534,13 @@ fn run_scenario(
             let first = capture_stamp(&journal)?;
             write_direct_carrier(&store_dir, "out-of-band", b"direct")?;
             created = true;
-            let second = capture_stamp(&journal)?;
+            let check = observe_since(&journal, &first)?;
             before = Some(first.opaque_sha256());
-            after = Some(second.opaque_sha256());
+            after = Some(check.after.opaque_sha256());
+            mechanism = check.mechanism.clone();
             (
                 AuthorityStampExpectationV1::ChangedOrIndeterminate,
-                compare(&first, &second),
+                receipt_observation(&check),
             )
         }
         AuthorityStampScenarioV1::TempCreateThenRename => {
@@ -529,12 +553,13 @@ fn run_scenario(
             fs::write(&temporary, b"temporary").map_err(|error| error.to_string())?;
             fs::rename(&temporary, &final_path).map_err(|error| error.to_string())?;
             created = true;
-            let second = capture_stamp(&journal)?;
+            let check = observe_since(&journal, &first)?;
             before = Some(first.opaque_sha256());
-            after = Some(second.opaque_sha256());
+            after = Some(check.after.opaque_sha256());
+            mechanism = check.mechanism.clone();
             (
                 AuthorityStampExpectationV1::ChangedOrIndeterminate,
-                compare(&first, &second),
+                receipt_observation(&check),
             )
         }
         AuthorityStampScenarioV1::ConcurrentCreateObservation => {
@@ -552,12 +577,13 @@ fn run_scenario(
                 .join()
                 .map_err(|_| "concurrent authority writer panicked".to_owned())??;
             created = true;
-            let second = capture_stamp(&journal)?;
+            let check = observe_since(&journal, &first)?;
             before = Some(first.opaque_sha256());
-            after = Some(second.opaque_sha256());
+            after = Some(check.after.opaque_sha256());
+            mechanism = check.mechanism.clone();
             (
                 AuthorityStampExpectationV1::ChangedOrIndeterminate,
-                compare(&first, &second),
+                receipt_observation(&check),
             )
         }
         AuthorityStampScenarioV1::CrashBeforeCarrierPublication
@@ -583,46 +609,51 @@ fn run_scenario(
                 write_direct_carrier(&store_dir, "crash-after", b"published-before-crash")?;
             }
             created = action == "crash-after";
-            let second = capture_stamp(&journal)?;
+            let check = observe_since(&journal, &first)?;
             before = Some(first.opaque_sha256());
-            after = Some(second.opaque_sha256());
+            after = Some(check.after.opaque_sha256());
+            mechanism = check.mechanism.clone();
             let expectation = if created {
                 AuthorityStampExpectationV1::ChangedOrIndeterminate
             } else {
                 AuthorityStampExpectationV1::Stable
             };
-            (expectation, compare(&first, &second))
+            (expectation, receipt_observation(&check))
         }
         AuthorityStampScenarioV1::RapidMutations => {
             fs::create_dir_all(store_dir.join("events")).map_err(|error| error.to_string())?;
             let first = capture_stamp(&journal)?;
             let mut prior = first.clone();
             let mut preserved_at = None;
+            let mut last_observation = AuthorityStampObservationV1::Changed;
             for index in 0..64 {
                 write_direct_carrier(
                     &store_dir,
                     &format!("rapid-{index}"),
                     format!("rapid-{index}").as_bytes(),
                 )?;
-                let current = capture_stamp(&journal)?;
-                if current == prior {
+                let check = observe_since(&journal, &prior)?;
+                last_observation = receipt_observation(&check);
+                if last_observation == AuthorityStampObservationV1::Stable {
                     preserved_at = Some(index);
                     before = Some(prior.opaque_sha256());
-                    after = Some(current.opaque_sha256());
+                    after = Some(check.after.opaque_sha256());
+                    mechanism = check.mechanism;
                     break;
                 }
-                prior = current;
+                mechanism = check.mechanism;
+                prior = check.after;
             }
             created = true;
             let observation = if let Some(index) = preserved_at {
                 mechanism = format!(
-                    "completed carrier creation {index} preserved the combined native directory stamp"
+                    "completed carrier creation {index} was classified stable: {mechanism}"
                 );
                 AuthorityStampObservationV1::Stable
             } else {
                 before = Some(first.opaque_sha256());
                 after = Some(prior.opaque_sha256());
-                AuthorityStampObservationV1::Changed
+                last_observation
             };
             (
                 AuthorityStampExpectationV1::ChangedOrIndeterminate,
@@ -633,48 +664,93 @@ fn run_scenario(
             write_direct_carrier(&store_dir, "close-reopen", b"created")?;
             let first = capture_stamp(&journal)?;
             drop(journal);
-            let second = capture_stamp(&LocalJournal::new(&store_dir))?;
+            let reopened = LocalJournal::new(&store_dir);
+            let check = observe_since(&reopened, &first)?;
             before = Some(first.opaque_sha256());
-            after = Some(second.opaque_sha256());
-            mechanism = "close and reopen a native directory observation".to_owned();
+            after = Some(check.after.opaque_sha256());
+            mechanism = format!("close and reopen: {}", check.mechanism);
             (
                 AuthorityStampExpectationV1::Stable,
-                compare(&first, &second),
+                receipt_observation(&check),
             )
         }
         AuthorityStampScenarioV1::MachineOrVmRestart => {
             write_direct_carrier(&store_dir, "fresh-process", b"created")?;
             let first = capture_stamp(&journal)?;
-            let second_digest = if let Some(executable) = executable {
-                let output = Command::new(executable)
-                    .arg(DERIVED_ACCESS_AUTHORITY_STAMP_CHILD_MODE_V1)
-                    .arg("--derived-access-authority-action=capture")
-                    .arg(format!("--derived-access-root={}", store_dir.display()))
-                    .output()
-                    .map_err(|error| error.to_string())?;
-                if !output.status.success() {
-                    return Err(String::from_utf8_lossy(&output.stderr).into_owned());
-                }
-                String::from_utf8(output.stdout)
-                    .map_err(|error| error.to_string())?
-                    .trim()
-                    .to_owned()
-            } else {
-                capture_stamp(&LocalJournal::new(&store_dir))?.opaque_sha256()
-            };
             let first_digest = first.opaque_sha256();
+            let (observation, second_digest, child_mechanism) =
+                if let (Some(executable), Some(token)) = (executable, first.continuation_token()) {
+                    let output = Command::new(executable)
+                        .arg(DERIVED_ACCESS_AUTHORITY_STAMP_CHILD_MODE_V1)
+                        .arg(format!("--derived-access-authority-action=check,{token}"))
+                        .arg(format!("--derived-access-root={}", store_dir.display()))
+                        .output()
+                        .map_err(|error| error.to_string())?;
+                    if !output.status.success() {
+                        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+                    }
+                    let stdout = String::from_utf8(output.stdout)
+                        .map_err(|error| error.to_string())?
+                        .trim()
+                        .to_owned();
+                    let mut lines = stdout.lines();
+                    let observation = match lines.next() {
+                        Some("stable") => AuthorityStampObservationV1::Stable,
+                        Some("changed") => AuthorityStampObservationV1::Changed,
+                        Some("indeterminate") => AuthorityStampObservationV1::Indeterminate,
+                        _ => {
+                            return Err(
+                                "fresh-process authority check omitted its verdict".to_owned()
+                            );
+                        }
+                    };
+                    let digest = lines
+                        .next()
+                        .filter(|value| is_lower_hex(value, 64))
+                        .ok_or_else(|| {
+                            "fresh-process authority check omitted its stamp digest".to_owned()
+                        })?
+                        .to_owned();
+                    let mechanism = lines.collect::<Vec<_>>().join("\n");
+                    (observation, digest, mechanism)
+                } else if let Some(executable) = executable {
+                    let output = Command::new(executable)
+                        .arg(DERIVED_ACCESS_AUTHORITY_STAMP_CHILD_MODE_V1)
+                        .arg("--derived-access-authority-action=capture")
+                        .arg(format!("--derived-access-root={}", store_dir.display()))
+                        .output()
+                        .map_err(|error| error.to_string())?;
+                    if !output.status.success() {
+                        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+                    }
+                    let digest = String::from_utf8(output.stdout)
+                        .map_err(|error| error.to_string())?
+                        .trim()
+                        .to_owned();
+                    let observation = if digest == first_digest {
+                        AuthorityStampObservationV1::Stable
+                    } else {
+                        AuthorityStampObservationV1::Changed
+                    };
+                    (
+                        observation,
+                        digest,
+                        "fresh-process comparable stamp capture".to_owned(),
+                    )
+                } else {
+                    let check = observe_since(&LocalJournal::new(&store_dir), &first)?;
+                    (
+                        receipt_observation(&check),
+                        check.after.opaque_sha256(),
+                        check.mechanism,
+                    )
+                };
             before = Some(first_digest.clone());
             after = Some(second_digest.clone());
-            mechanism =
-                "fresh-process reopen; machine restart remains a practical follow-up".to_owned();
-            (
-                AuthorityStampExpectationV1::Stable,
-                if first_digest == second_digest {
-                    AuthorityStampObservationV1::Stable
-                } else {
-                    AuthorityStampObservationV1::Changed
-                },
-            )
+            mechanism = format!(
+                "fresh-process reopen: {child_mechanism}; machine restart remains a practical follow-up"
+            );
+            (AuthorityStampExpectationV1::Stable, observation)
         }
         AuthorityStampScenarioV1::CanonicalPathAlias => {
             fs::create_dir_all(store_dir.join("events")).map_err(|error| error.to_string())?;
@@ -682,12 +758,13 @@ fn run_scenario(
             let first = capture_stamp(&LocalJournal::new(&alias_store))?;
             write_direct_carrier(&store_dir, "canonical-alias", b"created")?;
             created = true;
-            let second = capture_stamp(&journal)?;
+            let check = observe_since(&journal, &first)?;
             before = Some(first.opaque_sha256());
-            after = Some(second.opaque_sha256());
+            after = Some(check.after.opaque_sha256());
+            mechanism = check.mechanism.clone();
             (
                 AuthorityStampExpectationV1::ChangedOrIndeterminate,
-                compare(&first, &second),
+                receipt_observation(&check),
             )
         }
         AuthorityStampScenarioV1::ProductionDirectoryLayout => {
@@ -695,12 +772,13 @@ fn run_scenario(
             let first = capture_stamp(&journal)?;
             write_direct_carrier(&store_dir, "production-layout", b"created")?;
             created = true;
-            let second = capture_stamp(&journal)?;
+            let check = observe_since(&journal, &first)?;
             before = Some(first.opaque_sha256());
-            after = Some(second.opaque_sha256());
+            after = Some(check.after.opaque_sha256());
+            mechanism = check.mechanism.clone();
             (
                 AuthorityStampExpectationV1::ChangedOrIndeterminate,
-                compare(&first, &second),
+                receipt_observation(&check),
             )
         }
         AuthorityStampScenarioV1::SidecarDeletion => {
@@ -735,13 +813,13 @@ fn run_scenario(
             };
             fs::write(events.join(name), b"not an event carrier")
                 .map_err(|error| error.to_string())?;
-            let second = capture_stamp(&journal)?;
+            let check = observe_since(&journal, &first)?;
             before = Some(first.opaque_sha256());
-            after = Some(second.opaque_sha256());
-            mechanism = "a conservative change never proves an event was created".to_owned();
+            after = Some(check.after.opaque_sha256());
+            mechanism = check.mechanism.clone();
             (
                 AuthorityStampExpectationV1::StableOrChangedWithoutTruthClaim,
-                compare(&first, &second),
+                receipt_observation(&check),
             )
         }
         AuthorityStampScenarioV1::ExistingCarrierOverwrite => {
@@ -760,16 +838,17 @@ fn run_scenario(
                 b"corrupt existing carrier",
             )
             .map_err(|error| error.to_string())?;
-            let second = capture_stamp(&journal)?;
+            let check = observe_since(&journal, &first)?;
             before = Some(first.opaque_sha256());
-            after = Some(second.opaque_sha256());
+            after = Some(check.after.opaque_sha256());
             corruption_detected = Some(EventStore::open(&store_dir).list_events().is_err());
-            mechanism =
-                "stamp outcome is a non-claim; selected-carrier validation detects corruption"
-                    .to_owned();
+            mechanism = format!(
+                "{}; stamp outcome is a non-claim and selected-carrier validation detects corruption",
+                check.mechanism
+            );
             (
                 AuthorityStampExpectationV1::ExplicitNonClaim,
-                compare(&first, &second),
+                receipt_observation(&check),
             )
         }
     };
@@ -816,11 +895,37 @@ fn capture_stamp(journal: &LocalJournal) -> Result<JournalChangeStamp, String> {
     }
 }
 
-fn compare(before: &JournalChangeStamp, after: &JournalChangeStamp) -> AuthorityStampObservationV1 {
-    if before == after {
-        AuthorityStampObservationV1::Stable
-    } else {
-        AuthorityStampObservationV1::Changed
+fn observe_since(
+    journal: &LocalJournal,
+    before: &JournalChangeStamp,
+) -> Result<JournalChangeCheck, String> {
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    {
+        use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
+        let scope = LongitudinalCountingScopeV1::new("00".repeat(32))?;
+        let guard = scope.enter();
+        let check = journal
+            .changes_since(before)
+            .map_err(|error| error.to_string())?;
+        drop(guard);
+        let counters = scope.snapshot().counters;
+        if counters.directory_entries_walked != 0 || counters.carrier_opens != 0 {
+            return Err("authority change check performed event-directory work".to_owned());
+        }
+        Ok(check)
+    }
+    #[cfg(not(any(test, feature = "longitudinal-counting")))]
+    {
+        let _ = (journal, before);
+        Err("authority change check requires counting instrumentation".to_owned())
+    }
+}
+
+fn receipt_observation(check: &JournalChangeCheck) -> AuthorityStampObservationV1 {
+    match check.verdict {
+        JournalChangeVerdict::Stable => AuthorityStampObservationV1::Stable,
+        JournalChangeVerdict::Changed => AuthorityStampObservationV1::Changed,
+        JournalChangeVerdict::Indeterminate => AuthorityStampObservationV1::Indeterminate,
     }
 }
 

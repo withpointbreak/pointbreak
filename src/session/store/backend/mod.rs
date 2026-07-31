@@ -11,6 +11,8 @@
 mod local;
 #[cfg(test)]
 mod memory;
+#[cfg(any(test, all(feature = "bench", windows)))]
+mod ntfs_journal;
 
 use std::fmt::Debug;
 use std::path::PathBuf;
@@ -39,16 +41,115 @@ pub(crate) enum JournalChangeStamp {
     Observed {
         identity_sha256: String,
         change_sha256: String,
+        native_cursor: Option<JournalNativeCursor>,
     },
+}
+
+/// Native state needed to continue an exact change observation without
+/// exposing platform layouts to consumers.
+#[cfg(any(test, feature = "bench"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct JournalNativeCursor {
+    pub(super) journal_id: u64,
+    pub(super) next_usn: i64,
+    pub(super) directory_file_reference: u64,
+    pub(super) volume_serial_number: u64,
+}
+
+#[cfg(any(test, feature = "bench"))]
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum JournalChangeVerdict {
+    Stable,
+    Changed,
+    Indeterminate,
+}
+
+/// Result of continuing a native change observation from a saved stamp.
+#[cfg(any(test, feature = "bench"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct JournalChangeCheck {
+    pub(crate) after: JournalChangeStamp,
+    pub(crate) verdict: JournalChangeVerdict,
+    pub(crate) native_bytes_examined: u64,
+    pub(crate) native_records_examined: u64,
+    pub(crate) mechanism: String,
 }
 
 #[cfg(any(test, feature = "bench"))]
 impl JournalChangeStamp {
+    #[cfg_attr(windows, allow(dead_code))]
     pub(super) fn observed(identity: &[u8], change: &[u8]) -> Self {
         Self::Observed {
             identity_sha256: crate::canonical_hash::sha256_bytes_hex(identity),
             change_sha256: crate::canonical_hash::sha256_bytes_hex(change),
+            native_cursor: None,
         }
+    }
+
+    #[cfg(windows)]
+    pub(super) fn observed_with_native_cursor(
+        identity: &[u8],
+        change: &[u8],
+        native_cursor: JournalNativeCursor,
+    ) -> Self {
+        Self::Observed {
+            identity_sha256: crate::canonical_hash::sha256_bytes_hex(identity),
+            change_sha256: crate::canonical_hash::sha256_bytes_hex(change),
+            native_cursor: Some(native_cursor),
+        }
+    }
+
+    #[cfg(windows)]
+    pub(super) fn native_cursor(&self) -> Option<&JournalNativeCursor> {
+        match self {
+            Self::Absent => None,
+            Self::Observed { native_cursor, .. } => native_cursor.as_ref(),
+        }
+    }
+
+    pub(crate) fn continuation_token(&self) -> Option<String> {
+        let Self::Observed {
+            identity_sha256,
+            change_sha256,
+            native_cursor: Some(cursor),
+        } = self
+        else {
+            return None;
+        };
+        Some(format!(
+            "ntfs-v1,{identity_sha256},{change_sha256},{},{},{},{}",
+            cursor.journal_id,
+            cursor.next_usn,
+            cursor.directory_file_reference,
+            cursor.volume_serial_number
+        ))
+    }
+
+    pub(crate) fn from_continuation_token(token: &str) -> Option<Self> {
+        let mut parts = token.split(',');
+        if parts.next()? != "ntfs-v1" {
+            return None;
+        }
+        let identity_sha256 = parts.next()?.to_owned();
+        let change_sha256 = parts.next()?.to_owned();
+        let cursor = JournalNativeCursor {
+            journal_id: parts.next()?.parse().ok()?,
+            next_usn: parts.next()?.parse().ok()?,
+            directory_file_reference: parts.next()?.parse().ok()?,
+            volume_serial_number: parts.next()?.parse().ok()?,
+        };
+        if parts.next().is_some()
+            || !is_lower_sha256(&identity_sha256)
+            || !is_lower_sha256(&change_sha256)
+        {
+            return None;
+        }
+        Some(Self::Observed {
+            identity_sha256,
+            change_sha256,
+            native_cursor: Some(cursor),
+        })
     }
 
     pub(crate) fn opaque_sha256(&self) -> String {
@@ -57,11 +158,35 @@ impl JournalChangeStamp {
             Self::Observed {
                 identity_sha256,
                 change_sha256,
+                ..
             } => crate::canonical_hash::sha256_bytes_hex(
                 format!("journal-change-stamp:v1:{identity_sha256}:{change_sha256}").as_bytes(),
             ),
         }
     }
+
+    pub(super) fn compared(before: &Self, after: Self) -> JournalChangeCheck {
+        let verdict = if before == &after {
+            JournalChangeVerdict::Stable
+        } else {
+            JournalChangeVerdict::Changed
+        };
+        JournalChangeCheck {
+            after,
+            verdict,
+            native_bytes_examined: 0,
+            native_records_examined: 0,
+            mechanism: "compare native directory observations".to_owned(),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "bench"))]
+fn is_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// The closed set of durable-storage backends, and the one place that dispatches
@@ -161,6 +286,11 @@ pub(crate) trait Journal: Debug {
     /// event is valid.
     #[cfg(any(test, feature = "bench"))]
     fn change_stamp(&self) -> Result<JournalChangeStamp>;
+
+    #[cfg(any(test, feature = "bench"))]
+    fn changes_since(&self, before: &JournalChangeStamp) -> Result<JournalChangeCheck> {
+        Ok(JournalChangeStamp::compared(before, self.change_stamp()?))
+    }
 
     /// Test-only tamper hook: write `bytes` at the slot this backend would use
     /// for `idempotency_key`, bypassing create-side validation and dedup

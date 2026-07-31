@@ -5,9 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
-#[cfg(any(test, feature = "bench"))]
-use super::JournalChangeStamp;
 use super::{ContentStore, Journal, JournalEntry};
+#[cfg(any(test, feature = "bench"))]
+use super::{JournalChangeCheck, JournalChangeStamp};
 use crate::error::{Result, ShoreError};
 use crate::session::store::event_store::{event_filename_stem, is_event_file};
 use crate::storage::{CreateOutcome, Durability, LocalStorage, RemoveOutcome, is_temp_file_path};
@@ -157,8 +157,19 @@ impl Journal for LocalJournal {
                 events_dir.display()
             ))
         })?;
-        let (identity, change) = local_directory_observation(&canonical, &metadata)?;
-        Ok(JournalChangeStamp::observed(&identity, &change))
+        local_directory_stamp(&canonical, &metadata)
+    }
+
+    #[cfg(any(test, feature = "bench"))]
+    fn changes_since(&self, before: &JournalChangeStamp) -> Result<JournalChangeCheck> {
+        #[cfg(windows)]
+        {
+            super::ntfs_journal::changes_since(&self.events_dir(), before)
+        }
+        #[cfg(not(windows))]
+        {
+            Ok(JournalChangeStamp::compared(before, self.change_stamp()?))
+        }
     }
 
     #[cfg(test)]
@@ -174,10 +185,7 @@ impl Journal for LocalJournal {
 }
 
 #[cfg(all(any(test, feature = "bench"), unix))]
-fn local_directory_observation(
-    path: &Path,
-    metadata: &std::fs::Metadata,
-) -> Result<(Vec<u8>, Vec<u8>)> {
+fn local_directory_stamp(path: &Path, metadata: &std::fs::Metadata) -> Result<JournalChangeStamp> {
     use std::os::unix::ffi::OsStrExt as _;
     use std::os::unix::fs::MetadataExt as _;
 
@@ -191,159 +199,19 @@ fn local_directory_observation(
     change.extend_from_slice(&metadata.ctime().to_le_bytes());
     change.extend_from_slice(&metadata.ctime_nsec().to_le_bytes());
     change.extend_from_slice(&metadata.len().to_le_bytes());
-    Ok((identity, change))
+    Ok(JournalChangeStamp::observed(&identity, &change))
 }
 
 #[cfg(all(any(test, feature = "bench"), windows))]
-fn local_directory_observation(
-    path: &Path,
-    _metadata: &std::fs::Metadata,
-) -> Result<(Vec<u8>, Vec<u8>)> {
-    use std::ffi::c_void;
-    use std::fs::OpenOptions;
-    use std::os::windows::fs::OpenOptionsExt as _;
-    use std::os::windows::io::AsRawHandle as _;
-
-    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-    const FILE_BASIC_INFO_CLASS: i32 = 0;
-    const FILE_ID_INFO_CLASS: i32 = 18;
-    // CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 58, METHOD_NEITHER, FILE_ANY_ACCESS).
-    // Include the directory's NTFS USN so the native falsifier can test a
-    // stronger candidate than directory timestamps alone.
-    const FSCTL_READ_FILE_USN_DATA: u32 = 0x0009_00eb;
-
-    #[repr(C)]
-    struct FileBasicInfo {
-        creation_time: i64,
-        last_access_time: i64,
-        last_write_time: i64,
-        change_time: i64,
-        file_attributes: u32,
-    }
-    #[repr(C)]
-    struct FileIdInfo {
-        volume_serial_number: u64,
-        file_id: [u8; 16],
-    }
-    #[repr(C)]
-    struct ReadFileUsnData {
-        minimum_major_version: u16,
-        maximum_major_version: u16,
-    }
-    #[repr(C, align(8))]
-    struct UsnRecordBuffer([u8; 80]);
-    unsafe extern "system" {
-        fn GetFileInformationByHandleEx(
-            file: *mut c_void,
-            info_class: i32,
-            info: *mut c_void,
-            info_size: u32,
-        ) -> i32;
-        fn DeviceIoControl(
-            device: *mut c_void,
-            control_code: u32,
-            input: *mut c_void,
-            input_size: u32,
-            output: *mut c_void,
-            output_size: u32,
-            bytes_returned: *mut u32,
-            overlapped: *mut c_void,
-        ) -> i32;
-    }
-
-    let directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)
-        .map_err(|error| {
-            ShoreError::Message(format!(
-                "could not open journal events directory {}: {error}",
-                path.display()
-            ))
-        })?;
-    let mut basic = std::mem::MaybeUninit::<FileBasicInfo>::zeroed();
-    let mut id = std::mem::MaybeUninit::<FileIdInfo>::zeroed();
-    let mut usn_request = ReadFileUsnData {
-        minimum_major_version: 2,
-        maximum_major_version: 2,
-    };
-    let mut usn_record = UsnRecordBuffer([0_u8; 80]);
-    let mut usn_bytes = 0_u32;
-    // SAFETY: both output pointers name correctly sized writable structures and
-    // the directory handle remains open for both synchronous metadata queries.
-    let basic_ok = unsafe {
-        GetFileInformationByHandleEx(
-            directory.as_raw_handle(),
-            FILE_BASIC_INFO_CLASS,
-            basic.as_mut_ptr().cast(),
-            std::mem::size_of::<FileBasicInfo>() as u32,
-        )
-    };
-    // SAFETY: same contract as the basic-info query above.
-    let id_ok = unsafe {
-        GetFileInformationByHandleEx(
-            directory.as_raw_handle(),
-            FILE_ID_INFO_CLASS,
-            id.as_mut_ptr().cast(),
-            std::mem::size_of::<FileIdInfo>() as u32,
-        )
-    };
-    // SAFETY: the directory handle is synchronous, the input names the
-    // documented READ_FILE_USN_DATA v2 range, and the aligned byte buffer is
-    // writable for the duration of the call.
-    let usn_ok = unsafe {
-        DeviceIoControl(
-            directory.as_raw_handle(),
-            FSCTL_READ_FILE_USN_DATA,
-            (&raw mut usn_request).cast(),
-            std::mem::size_of::<ReadFileUsnData>() as u32,
-            usn_record.0.as_mut_ptr().cast(),
-            usn_record.0.len() as u32,
-            &raw mut usn_bytes,
-            std::ptr::null_mut(),
-        )
-    };
-    if basic_ok == 0 || id_ok == 0 || usn_ok == 0 {
-        return Err(ShoreError::Message(format!(
-            "could not query journal events directory {}: {}",
-            path.display(),
-            std::io::Error::last_os_error()
-        )));
-    }
-    // SAFETY: successful calls initialized the complete output structures.
-    let basic = unsafe { basic.assume_init() };
-    // SAFETY: successful calls initialized the complete output structures.
-    let id = unsafe { id.assume_init() };
-    if usn_bytes < 32 || u16::from_le_bytes([usn_record.0[4], usn_record.0[5]]) != 2 {
-        return Err(ShoreError::Message(format!(
-            "journal events directory {} returned an unsupported NTFS USN record",
-            path.display()
-        )));
-    }
-    let directory_usn = i64::from_le_bytes(
-        usn_record.0[24..32]
-            .try_into()
-            .expect("USN v2 byte range is fixed"),
-    );
-
-    let mut identity = b"windows-directory-identity-v1\0".to_vec();
-    identity.extend_from_slice(&id.volume_serial_number.to_le_bytes());
-    identity.extend_from_slice(&id.file_id);
-    let mut change = b"windows-directory-change-v2\0".to_vec();
-    change.extend_from_slice(&basic.last_write_time.to_le_bytes());
-    change.extend_from_slice(&basic.change_time.to_le_bytes());
-    change.extend_from_slice(&directory_usn.to_le_bytes());
-    Ok((identity, change))
+fn local_directory_stamp(path: &Path, _metadata: &std::fs::Metadata) -> Result<JournalChangeStamp> {
+    super::ntfs_journal::capture(path)
 }
 
 #[cfg(all(any(test, feature = "bench"), not(any(unix, windows))))]
-fn local_directory_observation(
-    path: &Path,
-    metadata: &std::fs::Metadata,
-) -> Result<(Vec<u8>, Vec<u8>)> {
-    Ok((
-        path.to_string_lossy().as_bytes().to_vec(),
-        format!("{:?}:{}", metadata.modified(), metadata.len()).into_bytes(),
+fn local_directory_stamp(path: &Path, metadata: &std::fs::Metadata) -> Result<JournalChangeStamp> {
+    Ok(JournalChangeStamp::observed(
+        path.to_string_lossy().as_bytes(),
+        format!("{:?}:{}", metadata.modified(), metadata.len()).as_bytes(),
     ))
 }
 
