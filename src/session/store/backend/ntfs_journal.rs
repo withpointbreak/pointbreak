@@ -100,10 +100,10 @@ fn parse_page(
         // parent file reference. Conservatively invalidate on any direct child
         // record under `events/`; unrelated/temp children may trigger an audit,
         // while a supported carrier publication cannot hide.
-        if parent_reference == directory_file_reference {
-            if !relevant_file_references.contains(&file_reference) {
-                relevant_file_references.push(file_reference);
-            }
+        if parent_reference == directory_file_reference
+            && !relevant_file_references.contains(&file_reference)
+        {
+            relevant_file_references.push(file_reference);
         }
         offset = record_end;
     }

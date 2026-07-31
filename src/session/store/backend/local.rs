@@ -5,9 +5,11 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use super::JournalCreatedTransitionVerdict;
 use super::{
     ContentStore, Journal, JournalChangeCheck, JournalChangeStamp, JournalCreatedTransition,
-    JournalCreatedTransitionVerdict, JournalEntry,
+    JournalEntry,
 };
 use crate::error::{Result, ShoreError};
 use crate::session::store::event_store::{event_filename_stem, is_event_file};
