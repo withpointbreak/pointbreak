@@ -507,6 +507,57 @@ page. The CLI `pointbreak revision show` remains the store-audit surface and con
 diagnostics. Both Inspector modes use the same component closure: revision facts, removals of content those
 facts reference, and detached signatures over those facts or removals.
 
+## Derived-access production-readiness contract
+
+The additive production-readiness contract freezes the gates that must pass before
+`sqlite-wal-bodyless-v1` can be considered for a separate default decision. It does not implement the
+filesystem authority stamp, change product routing, rebuild a store, collect evidence, or authorize a
+default change. The existing product-integration contract remains its frozen parent.
+
+Print, verify, and smoke the contract without opening a store or running retained-scale work:
+
+```sh
+just derived-access-readiness-contract
+just derived-access-readiness-contract-verify
+just derived-access-readiness-contract-smoke
+```
+
+The compiled schema is `pointbreak.derived-access-production-readiness-contract.v1`; its canonical SHA-256
+is `0053072600a2746b5967e49b22d0848c1e977289dfd85fe457846996e7725672`. The embedded canonical fixture
+SHA-256 is `e4cef6cdb35c0f029d176ccfb3f55d7df35771ec911938509d9a08c47def1cfe`.
+
+<!-- derived-access-production-readiness-contract-v1:start -->
+| Decision | Frozen production-readiness requirement |
+| --- | --- |
+| Identity | exact profile, parent/readiness contract, source commit/tree, Cargo.lock, binary, OS/architecture/filesystem, root manifest, and evidence-package identities; parent `3afe3a1fd65f0d5c58246dbe426c35a32325dc42bd9931d78f0e2354411dd00d` |
+| Authority | `selected_and_frozen_by_native_falsifier_before_integration` selects and freezes the observable before integration; each scenario names its mutation locus; observation opens at most `0` carriers and walks at most `0` event entries; changed/indeterminate never proves truth: `true`; every mismatch fails closed; existing-carrier overwrite remains a validation/audit non-claim |
+| Ordinary work | active no-change fixed-output routes walk at most `0` event-directory entries and fresh writer admission walks at most `0`; audits, bootstrap, fallback, default-off comparison, and body search remain explicitly classified |
+| Bootstrap | preflight → population → strict_oracle_verification → authority_stability_check → publication; population carrier-open ceiling `1` per input and maximum `1` overlapping complete decoded histories; strict oracle serial/isolated: `true`; completion published last: `true` |
+| Bootstrap availability | status/progress fields `phase, completed_events, total_events, elapsed_milliseconds` required and `completed_bytes, total_bytes, eta_milliseconds` optional; maximum automatic fallbacks `1`; long unexplained absent allowed: `false`; no availability case may serve stale as current: `true` |
+| Revision pages | `pointbreak.inspect-revisions-page.v1`; absent limit uses default `100`: `true`; maximum `500` with over-maximum `invalid_request`; requested entries mean the accepted limit: `true`; `(capturedAt, revisionId)` ascending; opaque snapshot-bound token; revision count comes from `derived_indexed_aggregate`; active work `output_proportional`; default-off same shape through `history_proportional` |
+| Qualification | required completion-last, read-only verified gates: `native_macos_apfs_d0_l7, native_windows_ntfs_d0_l7, package_closure, rollback_and_backup, retained_l100_apfs, retained_c262_apfs, evidence_authority`; parent contract `3afe3a1fd65f0d5c58246dbe426c35a32325dc42bd9931d78f0e2354411dd00d` and all of its gates and matched-operation ceilings remain load-bearing |
+| Retained inputs | tiers `L100, C262`; identity-verified read-only: `true`; rematerialization authorized: `false`; preserve sources/outputs: `true`; C524 admitted: `false` |
+| Timing | this readiness contract adds no host-sensitive numeric wall-time thresholds; the parent contract's matched-operation wall/CPU ceilings still apply; counter, semantic, lifecycle, native, and evidence-authority gates decide readiness |
+| Outcomes | `ready_for_default_decision`, `remain_default_off`, `reject`; all unknown outcomes match: `true` (`remain_default_off`); production default change authorized: `false` |
+| Protected boundary | `owner_store`, `private_corpus`, `private_snapshot_bytes`, `qualification_corpus`, `credentials`, `installed_artifacts`, `installed_extension_dogfood_evidence`, `remote_mirror_automation_state`, `archived_evidence`, `external_participant_evidence`, `production_default`, `deferred_content_format_experiment`; physical implementation: `false`; evidence collection: `false`; migration: `false`; release: `false` |
+<!-- derived-access-production-readiness-contract-v1:end -->
+
+The page contract retains the current `(capturedAt, revisionId)` ascending order and adds an opaque
+continuation token bound to the profile, page schema, observed snapshot, and ordering cursor. An absent
+`limit` means `100`; a value above `500` is an invalid request. The counter's requested-entry value is the
+accepted limit. Active mode may examine at most `limit + 1` revision rows to produce a page and continuation
+decision; it may not materialize the complete collection. Its `revisionCount` comes from a derived indexed
+aggregate rather than the examined rows. Default-off returns the same page shape, but its existing
+whole-history projection remains an explicitly exhaustive authoritative comparator and is never credited as
+bounded work. Exact revision detail remains an independent entity-primary read.
+
+The readiness evaluator requires one result for every frozen gate, including one result proving that all
+parent product-integration gates and matched-operation limits passed. A failed correctness, native-authority,
+pagination-integrity, lifecycle/package, rollback, protected-input, or default-posture gate rejects the exact
+product shape. Other failed or unknown operational/evidence gates keep it default-off. Only a complete
+passing matrix yields `ready_for_default_decision`, which still requires a separate decision before any
+configuration default changes.
+
 ## Incremental derived-access falsifier contract
 
 The candidate-independent incremental derived-access contract is compiled into the benchmark target as

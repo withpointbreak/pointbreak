@@ -297,6 +297,21 @@ derived-access-product-contract-verify:
 derived-access-product-contract-smoke:
     cargo +stable bench --locked --features bench --bench store_foundation -- --derived-access-product-contract-smoke
 
+# Print and validate the production-readiness contract.
+[group('quality')]
+derived-access-readiness-contract:
+    cargo +stable bench --locked --features bench --bench store_foundation -- --derived-access-readiness-contract
+
+# Verify the embedded production-readiness fixture against the compiled contract.
+[group('quality')]
+derived-access-readiness-contract-verify:
+    cargo +stable bench --locked --features bench --bench store_foundation -- --derived-access-readiness-contract-verify
+
+# Exercise the production-readiness contract without opening a store or running scale work.
+[group('quality')]
+derived-access-readiness-contract-smoke:
+    cargo +stable bench --locked --features bench --bench store_foundation -- --derived-access-readiness-contract-smoke
+
 # List the derived-access qualification modes without creating a store.
 [group('quality')]
 derived-access-help:

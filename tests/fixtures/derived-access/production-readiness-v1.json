@@ -1,0 +1,676 @@
+{
+  "schema": "pointbreak.derived-access-production-readiness-contract-fixture.v1",
+  "contractSchema": "pointbreak.derived-access-production-readiness-contract.v1",
+  "contractSha256": "0053072600a2746b5967e49b22d0848c1e977289dfd85fe457846996e7725672",
+  "contract": {
+    "schema": "pointbreak.derived-access-production-readiness-contract.v1",
+    "contractId": "derived-access-production-readiness-v1",
+    "profile": "sqlite-wal-bodyless-v1",
+    "defaultProfile": "off",
+    "parentContractSchema": "pointbreak.derived-access-product-integration-contract.v1",
+    "parentContractSha256": "3afe3a1fd65f0d5c58246dbe426c35a32325dc42bd9931d78f0e2354411dd00d",
+    "profileIdentityFields": [
+      "profile",
+      "parent_contract_sha256",
+      "readiness_contract_sha256"
+    ],
+    "sourceIdentityFields": [
+      "source_commit",
+      "source_tree",
+      "cargo_lock_sha256",
+      "binary_sha256"
+    ],
+    "evidenceIdentityFields": [
+      "operating_system",
+      "architecture",
+      "filesystem",
+      "root_manifest_sha256",
+      "evidence_package_sha256"
+    ],
+    "counterCeilings": [
+      {
+        "operation": "active_ordinary_no_change",
+        "counter": "event_directory_entries_walked",
+        "basis": "constant",
+        "multiplier": 0,
+        "additive": 0
+      },
+      {
+        "operation": "active_ordinary_no_change",
+        "counter": "full_history_fallbacks",
+        "basis": "constant",
+        "multiplier": 0,
+        "additive": 0
+      },
+      {
+        "operation": "fresh_writer_admission_no_change",
+        "counter": "event_directory_entries_walked",
+        "basis": "constant",
+        "multiplier": 0,
+        "additive": 0
+      },
+      {
+        "operation": "active_revisions_page",
+        "counter": "event_directory_entries_walked",
+        "basis": "constant",
+        "multiplier": 0,
+        "additive": 0
+      },
+      {
+        "operation": "active_revisions_page",
+        "counter": "revision_rows_examined",
+        "basis": "requested_entries",
+        "multiplier": 1,
+        "additive": 1
+      },
+      {
+        "operation": "active_revisions_page",
+        "counter": "page_entries_returned",
+        "basis": "requested_entries",
+        "multiplier": 1,
+        "additive": 0
+      },
+      {
+        "operation": "bootstrap_population",
+        "counter": "event_carrier_opens",
+        "basis": "source_carriers",
+        "multiplier": 1,
+        "additive": 0
+      },
+      {
+        "operation": "bootstrap_population",
+        "counter": "full_decoded_histories_retained",
+        "basis": "constant",
+        "multiplier": 0,
+        "additive": 1
+      },
+      {
+        "operation": "first_bootstrap_availability",
+        "counter": "automatic_authoritative_fallbacks",
+        "basis": "constant",
+        "multiplier": 0,
+        "additive": 1
+      }
+    ],
+    "authorityStamp": {
+      "scope": "supported local-filesystem accidental and mixed-version event publication detection",
+      "observablePolicy": "selected_and_frozen_by_native_falsifier_before_integration",
+      "scenarios": [
+        {
+          "scenario": "absent_directory",
+          "mutationLocus": "none",
+          "expectation": "stable",
+          "authoritativeCarrierCreated": false,
+          "eventDirectoryEntriesWalkedCeiling": 0,
+          "eventCarrierOpensCeiling": 0
+        },
+        {
+          "scenario": "empty_directory",
+          "mutationLocus": "none",
+          "expectation": "stable",
+          "authoritativeCarrierCreated": false,
+          "eventDirectoryEntriesWalkedCeiling": 0,
+          "eventCarrierOpensCeiling": 0
+        },
+        {
+          "scenario": "governed_create",
+          "mutationLocus": "event_directory_authoritative_carrier",
+          "expectation": "changed_or_indeterminate",
+          "authoritativeCarrierCreated": true,
+          "eventDirectoryEntriesWalkedCeiling": 0,
+          "eventCarrierOpensCeiling": 0
+        },
+        {
+          "scenario": "governed_burst",
+          "mutationLocus": "event_directory_authoritative_carrier",
+          "expectation": "changed_or_indeterminate",
+          "authoritativeCarrierCreated": true,
+          "eventDirectoryEntriesWalkedCeiling": 0,
+          "eventCarrierOpensCeiling": 0
+        },
+        {
+          "scenario": "equal_duplicate_no_create",
+          "mutationLocus": "none",
+          "expectation": "stable",
+          "authoritativeCarrierCreated": false,
+          "eventDirectoryEntriesWalkedCeiling": 0,
+          "eventCarrierOpensCeiling": 0
+        },
+        {
+          "scenario": "conflicting_duplicate_no_create",
+          "mutationLocus": "none",
+          "expectation": "stable",
+          "authoritativeCarrierCreated": false,
+          "eventDirectoryEntriesWalkedCeiling": 0,
+          "eventCarrierOpensCeiling": 0
+        },
+        {
+          "scenario": "out_of_band_create",
+          "mutationLocus": "event_directory_authoritative_carrier",
+          "expectation": "changed_or_indeterminate",
+          "authoritativeCarrierCreated": true,
+          "eventDirectoryEntriesWalkedCeiling": 0,
+          "eventCarrierOpensCeiling": 0
+        },
+        {
+          "scenario": "temp_create_then_rename",
+          "mutationLocus": "event_directory_authoritative_carrier",
+          "expectation": "changed_or_indeterminate",
+          "authoritativeCarrierCreated": true,
+          "eventDirectoryEntriesWalkedCeiling": 0,
+          "eventCarrierOpensCeiling": 0
+        },
+        {
+          "scenario": "concurrent_create_observation",
+          "mutationLocus": "event_directory_authoritative_carrier",
+          "expectation": "changed_or_indeterminate",
+          "authoritativeCarrierCreated": true,
+          "eventDirectoryEntriesWalkedCeiling": 0,
+          "eventCarrierOpensCeiling": 0
+        },
+        {
+          "scenario": "crash_before_carrier_publication",
+          "mutationLocus": "none",
+          "expectation": "stable",
+          "authoritativeCarrierCreated": false,
+          "eventDirectoryEntriesWalkedCeiling": 0,
+          "eventCarrierOpensCeiling": 0
+        },
+        {
+          "scenario": "crash_after_carrier_publication",
+          "mutationLocus": "event_directory_authoritative_carrier",
+          "expectation": "changed_or_indeterminate",
+          "authoritativeCarrierCreated": true,
+          "eventDirectoryEntriesWalkedCeiling": 0,
+          "eventCarrierOpensCeiling": 0
+        },
+        {
+          "scenario": "rapid_mutations",
+          "mutationLocus": "event_directory_authoritative_carrier",
+          "expectation": "changed_or_indeterminate",
+          "authoritativeCarrierCreated": true,
+          "eventDirectoryEntriesWalkedCeiling": 0,
+          "eventCarrierOpensCeiling": 0
+        },
+        {
+          "scenario": "close_reopen",
+          "mutationLocus": "process_lifecycle",
+          "expectation": "stable",
+          "authoritativeCarrierCreated": false,
+          "eventDirectoryEntriesWalkedCeiling": 0,
+          "eventCarrierOpensCeiling": 0
+        },
+        {
+          "scenario": "machine_or_vm_restart",
+          "mutationLocus": "process_lifecycle",
+          "expectation": "stable",
+          "authoritativeCarrierCreated": false,
+          "eventDirectoryEntriesWalkedCeiling": 0,
+          "eventCarrierOpensCeiling": 0
+        },
+        {
+          "scenario": "canonical_path_alias",
+          "mutationLocus": "event_directory_authoritative_carrier",
+          "expectation": "changed_or_indeterminate",
+          "authoritativeCarrierCreated": true,
+          "eventDirectoryEntriesWalkedCeiling": 0,
+          "eventCarrierOpensCeiling": 0
+        },
+        {
+          "scenario": "production_directory_layout",
+          "mutationLocus": "event_directory_authoritative_carrier",
+          "expectation": "changed_or_indeterminate",
+          "authoritativeCarrierCreated": true,
+          "eventDirectoryEntriesWalkedCeiling": 0,
+          "eventCarrierOpensCeiling": 0
+        },
+        {
+          "scenario": "sidecar_deletion",
+          "mutationLocus": "authority_metadata",
+          "expectation": "changed_or_indeterminate",
+          "authoritativeCarrierCreated": false,
+          "eventDirectoryEntriesWalkedCeiling": 0,
+          "eventCarrierOpensCeiling": 0
+        },
+        {
+          "scenario": "experiment_off_rollback",
+          "mutationLocus": "authority_metadata",
+          "expectation": "observation_not_applicable",
+          "authoritativeCarrierCreated": false,
+          "eventDirectoryEntriesWalkedCeiling": 0,
+          "eventCarrierOpensCeiling": 0
+        },
+        {
+          "scenario": "unrelated_file",
+          "mutationLocus": "event_directory_non_carrier_entry",
+          "expectation": "stable_or_changed_without_truth_claim",
+          "authoritativeCarrierCreated": false,
+          "eventDirectoryEntriesWalkedCeiling": 0,
+          "eventCarrierOpensCeiling": 0
+        },
+        {
+          "scenario": "temporary_file",
+          "mutationLocus": "event_directory_non_carrier_entry",
+          "expectation": "stable_or_changed_without_truth_claim",
+          "authoritativeCarrierCreated": false,
+          "eventDirectoryEntriesWalkedCeiling": 0,
+          "eventCarrierOpensCeiling": 0
+        },
+        {
+          "scenario": "existing_carrier_overwrite",
+          "mutationLocus": "existing_authoritative_carrier",
+          "expectation": "explicit_non_claim",
+          "authoritativeCarrierCreated": false,
+          "eventDirectoryEntriesWalkedCeiling": 0,
+          "eventCarrierOpensCeiling": 0
+        }
+      ],
+      "failures": [
+        {
+          "failure": "changed_without_receipt",
+          "outcome": "rebuild_required",
+          "truthSuccessIsPreserved": false,
+          "mayReportCurrent": false
+        },
+        {
+          "failure": "indeterminate_stamp",
+          "outcome": "rebuild_required",
+          "truthSuccessIsPreserved": false,
+          "mayReportCurrent": false
+        },
+        {
+          "failure": "cursor_stamp_mismatch",
+          "outcome": "rebuild_required",
+          "truthSuccessIsPreserved": false,
+          "mayReportCurrent": false
+        },
+        {
+          "failure": "legacy_descriptor",
+          "outcome": "rebuild_required",
+          "truthSuccessIsPreserved": false,
+          "mayReportCurrent": false
+        },
+        {
+          "failure": "stamp_publication_failed_after_truth_create",
+          "outcome": "unavailable",
+          "truthSuccessIsPreserved": true,
+          "mayReportCurrent": false
+        }
+      ],
+      "changedOrIndeterminateNeverProvesTruth": true,
+      "existingCarrierOverwriteRequiresSelectedValidationOrAudit": true,
+      "maliciousTamperDetectionClaimed": false
+    },
+    "bootstrap": {
+      "phases": [
+        "preflight",
+        "population",
+        "strict_oracle_verification",
+        "authority_stability_check",
+        "publication"
+      ],
+      "requiredProgressFields": [
+        "phase",
+        "completed_events",
+        "total_events",
+        "elapsed_milliseconds"
+      ],
+      "optionalProgressFields": [
+        "completed_bytes",
+        "total_bytes",
+        "eta_milliseconds"
+      ],
+      "populationCarrierOpenCeiling": 1,
+      "maximumOverlappingFullDecodedHistories": 1,
+      "strictOracleIsSerialOrIsolated": true,
+      "prePostStabilityDecodesFullHistory": false,
+      "transactionBatchesAreBounded": true,
+      "cancellationAndRestartAreIdentityBound": true,
+      "completionIsPublishedLast": true,
+      "etaRequiresObservedStableRate": true,
+      "maximumAutomaticFallbacks": 1,
+      "longUnexplainedAbsentResponseAllowed": false,
+      "availability": [
+        {
+          "case": "first_bootstrap",
+          "shellStatusAndProgressAvailable": true,
+          "offersExplicitFallbackOrWait": true,
+          "mayServeValidOldCurrent": false,
+          "mayServeStaleAsCurrent": false
+        },
+        {
+          "case": "replacement_with_valid_current",
+          "shellStatusAndProgressAvailable": true,
+          "offersExplicitFallbackOrWait": false,
+          "mayServeValidOldCurrent": true,
+          "mayServeStaleAsCurrent": false
+        },
+        {
+          "case": "replacement_after_stamp_drift",
+          "shellStatusAndProgressAvailable": true,
+          "offersExplicitFallbackOrWait": true,
+          "mayServeValidOldCurrent": false,
+          "mayServeStaleAsCurrent": false
+        },
+        {
+          "case": "cancelled",
+          "shellStatusAndProgressAvailable": true,
+          "offersExplicitFallbackOrWait": true,
+          "mayServeValidOldCurrent": false,
+          "mayServeStaleAsCurrent": false
+        },
+        {
+          "case": "restarting",
+          "shellStatusAndProgressAvailable": true,
+          "offersExplicitFallbackOrWait": true,
+          "mayServeValidOldCurrent": false,
+          "mayServeStaleAsCurrent": false
+        }
+      ]
+    },
+    "revisionsPage": {
+      "schema": "pointbreak.inspect-revisions-page.v1",
+      "requestFields": [
+        "limit",
+        "after"
+      ],
+      "responseFields": [
+        "schema",
+        "event_set_hash",
+        "projection_stamp",
+        "event_count",
+        "revision_count",
+        "entries",
+        "diagnostics",
+        "as_of",
+        "next"
+      ],
+      "defaultLimit": 100,
+      "maximumLimit": 500,
+      "absentLimitUsesDefault": true,
+      "overMaximumLimit": "invalid_request",
+      "requestedEntriesAreAcceptedLimit": true,
+      "order": [
+        "captured_at_ascending",
+        "revision_id_ascending"
+      ],
+      "tokenIsOpaque": true,
+      "tokenBindsProfileSchemaSnapshotAndOrder": true,
+      "invalidToken": "invalid_request",
+      "staleOrWrongProfileToken": "restart_required",
+      "sameWireShapeForActiveAndDefaultOff": true,
+      "activeWork": "output_proportional",
+      "defaultOffWork": "history_proportional",
+      "defaultOffExhaustiveComparatorIsExplicit": true,
+      "activeCompleteCollectionMaterializationAllowed": false,
+      "defaultOffCompleteCollectionMaterializationAllowed": true,
+      "revisionCountIsPresent": true,
+      "revisionCountSource": "derived_indexed_aggregate",
+      "exactDetailIsEntityPrimary": true
+    },
+    "workClassifications": [
+      {
+        "operation": "initial_authority_census",
+        "classification": "exhaustive_audit"
+      },
+      {
+        "operation": "authority_stamp_check",
+        "classification": "bounded_metadata"
+      },
+      {
+        "operation": "ordinary_active_read",
+        "classification": "bounded_metadata"
+      },
+      {
+        "operation": "fresh_writer_admission",
+        "classification": "bounded_metadata"
+      },
+      {
+        "operation": "bootstrap_population",
+        "classification": "exhaustive_bootstrap"
+      },
+      {
+        "operation": "strict_replay",
+        "classification": "exhaustive_audit"
+      },
+      {
+        "operation": "explicit_integrity_audit",
+        "classification": "exhaustive_audit"
+      },
+      {
+        "operation": "first_bootstrap_authoritative_fallback",
+        "classification": "explicit_authoritative_fallback"
+      },
+      {
+        "operation": "default_off_revisions_page",
+        "classification": "exhaustive_default_off_comparator"
+      },
+      {
+        "operation": "intentional_body_search",
+        "classification": "intentional_exhaustive_search"
+      },
+      {
+        "operation": "active_revisions_page",
+        "classification": "requested_output_proportional"
+      },
+      {
+        "operation": "backup_restore_verification",
+        "classification": "exhaustive_audit"
+      }
+    ],
+    "evidenceGates": [
+      {
+        "evidence": "native_macos_apfs_d0_l7",
+        "required": true,
+        "nativePlatform": "macos/apfs",
+        "tiers": [
+          "D0",
+          "L7"
+        ],
+        "completionLast": true,
+        "readOnlyVerification": true
+      },
+      {
+        "evidence": "native_windows_ntfs_d0_l7",
+        "required": true,
+        "nativePlatform": "windows/ntfs",
+        "tiers": [
+          "D0",
+          "L7"
+        ],
+        "completionLast": true,
+        "readOnlyVerification": true
+      },
+      {
+        "evidence": "package_closure",
+        "required": true,
+        "nativePlatform": null,
+        "tiers": [],
+        "completionLast": true,
+        "readOnlyVerification": true
+      },
+      {
+        "evidence": "rollback_and_backup",
+        "required": true,
+        "nativePlatform": null,
+        "tiers": [],
+        "completionLast": true,
+        "readOnlyVerification": true
+      },
+      {
+        "evidence": "retained_l100_apfs",
+        "required": true,
+        "nativePlatform": "macos/apfs",
+        "tiers": [
+          "L100"
+        ],
+        "completionLast": true,
+        "readOnlyVerification": true
+      },
+      {
+        "evidence": "retained_c262_apfs",
+        "required": true,
+        "nativePlatform": "macos/apfs",
+        "tiers": [
+          "C262"
+        ],
+        "completionLast": true,
+        "readOnlyVerification": true
+      },
+      {
+        "evidence": "evidence_authority",
+        "required": true,
+        "nativePlatform": null,
+        "tiers": [],
+        "completionLast": true,
+        "readOnlyVerification": true
+      }
+    ],
+    "retainedRoots": {
+      "tiers": [
+        "L100",
+        "C262"
+      ],
+      "identityVerifiedReadOnly": true,
+      "cloneAuthoritativeTruthOnly": true,
+      "rematerializationAuthorized": false,
+      "preserveSourcesAndOutputs": true,
+      "c524Admitted": false
+    },
+    "protectedInputs": [
+      "owner_store",
+      "private_corpus",
+      "private_snapshot_bytes",
+      "qualification_corpus",
+      "credentials",
+      "installed_artifacts",
+      "installed_extension_dogfood_evidence",
+      "remote_mirror_automation_state",
+      "archived_evidence",
+      "external_participant_evidence",
+      "production_default",
+      "deferred_content_format_experiment"
+    ],
+    "gates": [
+      {
+        "gate": "exact_identity",
+        "requirement": "profile, source, root, platform, binary, and package identities agree exactly",
+        "failedOutcome": "remain_default_off",
+        "unknownOutcome": "remain_default_off"
+      },
+      {
+        "gate": "parent_contract_satisfied",
+        "requirement": "every parent product-integration gate and matched-operation ceiling passes",
+        "failedOutcome": "remain_default_off",
+        "unknownOutcome": "remain_default_off"
+      },
+      {
+        "gate": "no_false_current_state",
+        "requirement": "no changed, indeterminate, mismatched, or unsupported authority may report current",
+        "failedOutcome": "reject",
+        "unknownOutcome": "remain_default_off"
+      },
+      {
+        "gate": "active_ordinary_work_bounded",
+        "requirement": "active no-change fixed-output routes walk zero event entries",
+        "failedOutcome": "remain_default_off",
+        "unknownOutcome": "remain_default_off"
+      },
+      {
+        "gate": "fresh_writer_admission_bounded",
+        "requirement": "fresh writer admission at a no-change head walks zero event entries",
+        "failedOutcome": "remain_default_off",
+        "unknownOutcome": "remain_default_off"
+      },
+      {
+        "gate": "native_authority_apfs",
+        "requirement": "every supported authority scenario passes natively on macOS/APFS",
+        "failedOutcome": "reject",
+        "unknownOutcome": "remain_default_off"
+      },
+      {
+        "gate": "native_authority_ntfs",
+        "requirement": "every supported authority scenario passes natively on Windows/NTFS",
+        "failedOutcome": "reject",
+        "unknownOutcome": "remain_default_off"
+      },
+      {
+        "gate": "bootstrap_single_population",
+        "requirement": "bootstrap opens each carrier at most once for population and overlaps no complete histories",
+        "failedOutcome": "remain_default_off",
+        "unknownOutcome": "remain_default_off"
+      },
+      {
+        "gate": "bootstrap_availability",
+        "requirement": "bootstrap exposes progress and explicit bounded fallback-or-wait without stale current state",
+        "failedOutcome": "remain_default_off",
+        "unknownOutcome": "remain_default_off"
+      },
+      {
+        "gate": "revision_pagination_correctness",
+        "requirement": "snapshot-bound pages have no gaps or duplicates and exact detail remains entity-primary",
+        "failedOutcome": "reject",
+        "unknownOutcome": "remain_default_off"
+      },
+      {
+        "gate": "active_revision_page_bounded",
+        "requirement": "active page work is requested-page/output-proportional and never materializes the complete collection",
+        "failedOutcome": "remain_default_off",
+        "unknownOutcome": "remain_default_off"
+      },
+      {
+        "gate": "native_lifecycle_and_packaging",
+        "requirement": "native lifecycle, shutdown, package closure, and read-only verification pass",
+        "failedOutcome": "reject",
+        "unknownOutcome": "remain_default_off"
+      },
+      {
+        "gate": "rollback_and_backup",
+        "requirement": "rollback and backup reconstruction preserve authoritative truth and recoverability",
+        "failedOutcome": "reject",
+        "unknownOutcome": "remain_default_off"
+      },
+      {
+        "gate": "retained_l100",
+        "requirement": "retained L100 product evidence passes without rematerialization",
+        "failedOutcome": "remain_default_off",
+        "unknownOutcome": "remain_default_off"
+      },
+      {
+        "gate": "retained_c262",
+        "requirement": "retained C262 product evidence passes without rematerialization",
+        "failedOutcome": "remain_default_off",
+        "unknownOutcome": "remain_default_off"
+      },
+      {
+        "gate": "evidence_authority",
+        "requirement": "raw evidence, manifests, completion markers, and recursive verification bind one exact source",
+        "failedOutcome": "remain_default_off",
+        "unknownOutcome": "remain_default_off"
+      },
+      {
+        "gate": "protected_inputs_untouched",
+        "requirement": "protected owner, private, installed, release, and held-work boundaries remain untouched",
+        "failedOutcome": "reject",
+        "unknownOutcome": "remain_default_off"
+      },
+      {
+        "gate": "default_remains_off",
+        "requirement": "qualification and recommendation do not change the production default",
+        "failedOutcome": "reject",
+        "unknownOutcome": "remain_default_off"
+      }
+    ],
+    "terminalOutcomes": [
+      "ready_for_default_decision",
+      "remain_default_off",
+      "reject"
+    ],
+    "numericWallTimeThresholdsPresent": false,
+    "physicalImplementationInContract": false,
+    "evidenceCollectionInContract": false,
+    "productionDefaultChangeAuthorized": false,
+    "migrationAuthorized": false,
+    "releaseAuthorized": false
+  }
+}
