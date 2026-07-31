@@ -410,6 +410,9 @@ pub fn run_authority_stamp_child_v1(action: &str, store_dir: &Path) -> Result<St
         "capture" => {
             capture_stamp(&LocalJournal::new(store_dir)).map(|stamp| stamp.opaque_sha256())
         }
+        "capture-token" => capture_stamp(&LocalJournal::new(store_dir))?
+            .continuation_token()
+            .ok_or_else(|| "native authority stamp has no continuation token".to_owned()),
         "crash-before" => Err("intentional crash before carrier publication".to_owned()),
         "crash-after" => {
             write_direct_carrier(store_dir, "crash-after", b"published-before-crash")?;
