@@ -162,6 +162,9 @@ impl Journal for LocalJournal {
 
     #[cfg(any(test, feature = "bench"))]
     fn changes_since(&self, before: &JournalChangeStamp) -> Result<JournalChangeCheck> {
+        if matches!(before, JournalChangeStamp::Absent) {
+            return Ok(JournalChangeStamp::compared(before, self.change_stamp()?));
+        }
         #[cfg(windows)]
         {
             super::ntfs_journal::changes_since(&self.events_dir(), before)

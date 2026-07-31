@@ -664,6 +664,101 @@ mod tests {
         assert!(changed.native_records_examined > 0);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn unprivileged_native_interval_works_under_restricted_token() {
+        use std::ffi::c_void;
+
+        const DISABLE_MAX_PRIVILEGE: u32 = 0x1;
+        const LUA_TOKEN: u32 = 0x4;
+        const TOKEN_DUPLICATE: u32 = 0x0002;
+        const TOKEN_IMPERSONATE: u32 = 0x0004;
+        const TOKEN_QUERY: u32 = 0x0008;
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentProcess() -> *mut c_void;
+            fn CloseHandle(handle: *mut c_void) -> i32;
+        }
+        #[link(name = "advapi32")]
+        unsafe extern "system" {
+            fn OpenProcessToken(
+                process: *mut c_void,
+                desired_access: u32,
+                token: *mut *mut c_void,
+            ) -> i32;
+            fn CreateRestrictedToken(
+                existing_token: *mut c_void,
+                flags: u32,
+                disable_sid_count: u32,
+                sids_to_disable: *mut c_void,
+                delete_privilege_count: u32,
+                privileges_to_delete: *mut c_void,
+                restricted_sid_count: u32,
+                sids_to_restrict: *mut c_void,
+                new_token: *mut *mut c_void,
+            ) -> i32;
+            fn ImpersonateLoggedOnUser(token: *mut c_void) -> i32;
+            fn RevertToSelf() -> i32;
+        }
+
+        struct RestrictedTokenGuard(*mut c_void, *mut c_void);
+
+        impl Drop for RestrictedTokenGuard {
+            fn drop(&mut self) {
+                // SAFETY: both handles were returned by the token APIs, and
+                // reverting before closing ends this thread's impersonation.
+                unsafe {
+                    RevertToSelf();
+                    CloseHandle(self.1);
+                    CloseHandle(self.0);
+                }
+            }
+        }
+
+        let root = tempfile::tempdir().expect("temporary root");
+        let events = root.path().join("events");
+        std::fs::create_dir(&events).expect("events directory");
+        let mut process_token = std::ptr::null_mut();
+        // SAFETY: output pointers are writable and the pseudo-process handle is
+        // valid for the current process.
+        let opened = unsafe {
+            OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_DUPLICATE | TOKEN_IMPERSONATE | TOKEN_QUERY,
+                &raw mut process_token,
+            )
+        };
+        assert_ne!(opened, 0, "open current process token");
+        let mut restricted_token = std::ptr::null_mut();
+        // SAFETY: the source token is valid and every optional list has a zero
+        // count with a null pointer.
+        let restricted = unsafe {
+            CreateRestrictedToken(
+                process_token,
+                DISABLE_MAX_PRIVILEGE | LUA_TOKEN,
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &raw mut restricted_token,
+            )
+        };
+        assert_ne!(restricted, 0, "create restricted token");
+        // SAFETY: the new token remains open through the guard's lifetime.
+        let impersonated = unsafe { ImpersonateLoggedOnUser(restricted_token) };
+        assert_ne!(impersonated, 0, "impersonate restricted token");
+        let _guard = RestrictedTokenGuard(process_token, restricted_token);
+
+        let first = capture(&events).expect("capture under restricted token");
+        std::fs::write(events.join(format!("{}.json", "cd".repeat(32))), b"event")
+            .expect("write direct event carrier under restricted token");
+        let changed = changes_since(&events, &first).expect("check under restricted token");
+        assert_eq!(changed.verdict, super::super::JournalChangeVerdict::Changed);
+    }
+
     fn page(next_usn: i64, records: &[Vec<u8>]) -> Vec<u8> {
         let mut bytes = next_usn.to_le_bytes().to_vec();
         for record in records {
