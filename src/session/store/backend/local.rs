@@ -107,6 +107,7 @@ impl LocalJournal {
         Ok(bytes)
     }
 
+    #[cfg(not(target_os = "linux"))]
     fn created_transition(&self, before: &JournalChangeStamp) -> Result<JournalCreatedTransition> {
         #[cfg(windows)]
         {
@@ -557,6 +558,7 @@ impl QualificationLocalJournal {
         self.journal.changes_since(before)
     }
 
+    #[cfg(not(target_os = "linux"))]
     pub(crate) fn created_transition(
         &self,
         before: &JournalChangeStamp,
