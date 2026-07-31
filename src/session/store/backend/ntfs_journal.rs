@@ -1,7 +1,6 @@
-//! Bounded NTFS change-journal observation used only by the authority
-//! qualification probe. The parser and continuity rules are platform-neutral
-//! so their fail-closed behavior is testable off Windows; native I/O stays
-//! behind `cfg(windows)`.
+//! Bounded NTFS change-journal observation for derived-access authority.
+//! The parser and continuity rules are platform-neutral so their fail-closed
+//! behavior is testable off Windows; native I/O stays behind `cfg(windows)`.
 
 const USN_V2_MINIMUM_RECORD_LENGTH: usize = 60;
 #[cfg(windows)]
@@ -13,7 +12,7 @@ const DEFAULT_MAX_RECORDS: u64 = 8192;
 struct ParsedPage {
     next_usn: i64,
     records_examined: u64,
-    relevant_change: bool,
+    relevant_file_references: Vec<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -54,7 +53,7 @@ fn parse_page(
     let next_usn = read_i64(bytes, 0)?;
     let mut offset = 8_usize;
     let mut records_examined = 0_u64;
-    let mut relevant_change = false;
+    let mut relevant_file_references = Vec::new();
     while offset < bytes.len() {
         if bytes.len() - offset < 8 {
             return Err("NTFS journal page ended inside a record header".to_owned());
@@ -83,6 +82,7 @@ fn parse_page(
             return Err("NTFS journal record work cap was exhausted".to_owned());
         }
         let parent_reference = read_u64(bytes, offset + 16)?;
+        let file_reference = read_u64(bytes, offset + 8)?;
         let name_length = read_u16(bytes, offset + 56)? as usize;
         let name_offset = read_u16(bytes, offset + 58)? as usize;
         let name_end = name_offset
@@ -100,13 +100,17 @@ fn parse_page(
         // parent file reference. Conservatively invalidate on any direct child
         // record under `events/`; unrelated/temp children may trigger an audit,
         // while a supported carrier publication cannot hide.
-        relevant_change |= parent_reference == directory_file_reference;
+        if parent_reference == directory_file_reference {
+            if !relevant_file_references.contains(&file_reference) {
+                relevant_file_references.push(file_reference);
+            }
+        }
         offset = record_end;
     }
     Ok(ParsedPage {
         next_usn,
         records_examined,
-        relevant_change,
+        relevant_file_references,
     })
 }
 
@@ -161,7 +165,8 @@ mod native {
     use std::path::{Path, PathBuf};
 
     use super::super::{
-        JournalChangeCheck, JournalChangeStamp, JournalChangeVerdict, JournalNativeCursor,
+        JournalChangeCheck, JournalChangeStamp, JournalChangeVerdict, JournalCreatedTransition,
+        JournalCreatedTransitionVerdict, JournalNativeCursor,
     };
     use super::{
         ContinuityFailure, DEFAULT_MAX_BYTES, DEFAULT_MAX_RECORDS, parse_page, validate_continuity,
@@ -295,6 +300,7 @@ mod native {
                 verdict,
                 native_bytes_examined: 0,
                 native_records_examined: 0,
+                relevant_file_references: Vec::new(),
                 mechanism: mechanism.to_owned(),
             });
         }
@@ -304,6 +310,31 @@ mod native {
             DEFAULT_MAX_BYTES,
             DEFAULT_MAX_RECORDS,
         )
+    }
+
+    pub(crate) fn created_transition(
+        events_dir: &Path,
+        before: &JournalChangeStamp,
+    ) -> Result<JournalCreatedTransition> {
+        let check = changes_since(events_dir, before)?;
+        let verdict = match check.verdict {
+            JournalChangeVerdict::Changed if check.relevant_file_references.len() == 1 => {
+                JournalCreatedTransitionVerdict::Accepted
+            }
+            JournalChangeVerdict::Changed => JournalCreatedTransitionVerdict::Contended,
+            JournalChangeVerdict::Stable | JournalChangeVerdict::Indeterminate => {
+                JournalCreatedTransitionVerdict::Indeterminate
+            }
+        };
+        Ok(JournalCreatedTransition {
+            after: check.after,
+            verdict,
+            mechanism: format!(
+                "{}; observed {} distinct event-directory file reference(s)",
+                check.mechanism,
+                check.relevant_file_references.len()
+            ),
+        })
     }
 
     fn observe_current(events_dir: &Path) -> Result<CurrentObservation> {
@@ -444,6 +475,7 @@ mod native {
         let target_usn = current.cursor.next_usn;
         let mut bytes_examined = 0_u64;
         let mut records_examined = 0_u64;
+        let mut relevant_file_references = Vec::new();
         let mut storage = vec![0_u64; JOURNAL_READ_BUFFER_BYTES / 8];
         while start_usn < target_usn {
             if bytes_examined + JOURNAL_READ_BUFFER_BYTES as u64 > max_bytes {
@@ -517,13 +549,10 @@ mod native {
                 }
             };
             records_examined += page.records_examined;
-            if page.relevant_change {
-                return Ok(changed(
-                    current.stamp,
-                    bytes_examined,
-                    records_examined,
-                    "continuous NTFS journal interval contains an event-carrier change".to_owned(),
-                ));
+            for file_reference in page.relevant_file_references {
+                if !relevant_file_references.contains(&file_reference) {
+                    relevant_file_references.push(file_reference);
+                }
             }
             if page.next_usn <= start_usn {
                 return Ok(indeterminate(
@@ -535,13 +564,23 @@ mod native {
             }
             start_usn = page.next_usn.min(target_usn);
         }
+        let relevant_change = !relevant_file_references.is_empty();
         Ok(JournalChangeCheck {
             after: current.stamp,
-            verdict: JournalChangeVerdict::Stable,
+            verdict: if relevant_change {
+                JournalChangeVerdict::Changed
+            } else {
+                JournalChangeVerdict::Stable
+            },
             native_bytes_examined: bytes_examined,
             native_records_examined: records_examined,
-            mechanism: "continuous bounded NTFS journal interval contains no event-carrier change"
-                .to_owned(),
+            relevant_file_references,
+            mechanism: if relevant_change {
+                "continuous NTFS journal interval contains an event-carrier change".to_owned()
+            } else {
+                "continuous bounded NTFS journal interval contains no event-carrier change"
+                    .to_owned()
+            },
         })
     }
 
@@ -588,21 +627,6 @@ mod native {
         unsafe { std::slice::from_raw_parts(words.as_ptr().cast(), std::mem::size_of_val(words)) }
     }
 
-    fn changed(
-        after: JournalChangeStamp,
-        bytes: u64,
-        records: u64,
-        mechanism: String,
-    ) -> JournalChangeCheck {
-        JournalChangeCheck {
-            after,
-            verdict: JournalChangeVerdict::Changed,
-            native_bytes_examined: bytes,
-            native_records_examined: records,
-            mechanism,
-        }
-    }
-
     fn indeterminate(
         after: JournalChangeStamp,
         bytes: u64,
@@ -614,6 +638,7 @@ mod native {
             verdict: JournalChangeVerdict::Indeterminate,
             native_bytes_examined: bytes,
             native_records_examined: records,
+            relevant_file_references: Vec::new(),
             mechanism,
         }
     }
@@ -631,7 +656,7 @@ mod native {
 }
 
 #[cfg(windows)]
-pub(super) use native::{capture, changes_since};
+pub(super) use native::{capture, changes_since, created_transition};
 
 #[cfg(test)]
 mod tests {
@@ -685,7 +710,7 @@ mod tests {
             ParsedPage {
                 next_usn: 90,
                 records_examined: 1,
-                relevant_change: true,
+                relevant_file_references: vec![0],
             }
         );
     }
@@ -694,10 +719,22 @@ mod tests {
     fn parser_conservatively_invalidates_any_direct_child_record() {
         let page = page(90, &[record(2, 41, 7, "")]);
         assert!(
-            parse_page(&page, 100, 41, 8)
+            !parse_page(&page, 100, 41, 8)
                 .expect("page parses")
-                .relevant_change
+                .relevant_file_references
+                .is_empty()
         );
+    }
+
+    #[test]
+    fn parser_retains_distinct_file_references_for_created_transition_proof() {
+        let mut first = record(2, 41, 7, "");
+        first[8..16].copy_from_slice(&101_u64.to_le_bytes());
+        let mut second = record(2, 41, 8, "");
+        second[8..16].copy_from_slice(&202_u64.to_le_bytes());
+        let parsed = parse_page(&page(90, &[first, second]), 100, 41, 8).expect("page parses");
+
+        assert_eq!(parsed.relevant_file_references, vec![101, 202]);
     }
 
     #[test]
@@ -711,7 +748,7 @@ mod tests {
         );
         let parsed = parse_page(&page, 100, 41, 8).expect("page parses");
         assert_eq!(parsed.records_examined, 1);
-        assert!(!parsed.relevant_change);
+        assert!(parsed.relevant_file_references.is_empty());
     }
 
     #[test]
@@ -753,6 +790,37 @@ mod tests {
         assert_eq!(changed.verdict, super::super::JournalChangeVerdict::Changed);
         assert!(changed.native_bytes_examined > 0);
         assert!(changed.native_records_examined > 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_created_transition_accepts_one_file_identity_and_rejects_two() {
+        use super::super::JournalCreatedTransitionVerdict;
+
+        let root = tempfile::tempdir().expect("temporary root");
+        let events = root.path().join("events");
+        std::fs::create_dir(&events).expect("events directory");
+        let before = capture(&events).expect("capture before one create");
+        std::fs::write(events.join(format!("{}.json", "11".repeat(32))), b"one")
+            .expect("write one carrier");
+        assert_eq!(
+            created_transition(&events, &before)
+                .expect("classify one create")
+                .verdict,
+            JournalCreatedTransitionVerdict::Accepted
+        );
+
+        let before = capture(&events).expect("capture before two creates");
+        std::fs::write(events.join(format!("{}.json", "22".repeat(32))), b"two")
+            .expect("write first raced carrier");
+        std::fs::write(events.join(format!("{}.json", "33".repeat(32))), b"three")
+            .expect("write second raced carrier");
+        assert_eq!(
+            created_transition(&events, &before)
+                .expect("classify raced creates")
+                .verdict,
+            JournalCreatedTransitionVerdict::Contended
+        );
     }
 
     #[cfg(windows)]

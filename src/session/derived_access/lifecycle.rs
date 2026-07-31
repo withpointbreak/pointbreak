@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::cursor::TruthAuthoritySnapshot;
 use super::generation::{
     GenerationDescriptor, GenerationError, GenerationLayout, GenerationPublication,
     GenerationReadLease,
@@ -17,6 +18,7 @@ use super::sqlite::{
 use super::verification::strict_bodyless_materialized_snapshot_at;
 use crate::session::EventStore;
 use crate::session::derived_access::QualificationLocalJournal;
+use crate::session::store::backend::JournalChangeVerdict;
 
 const STABLE_PUBLICATION_ATTEMPTS: usize = 8;
 
@@ -236,8 +238,15 @@ impl DerivedAccessLifecycle {
                 ));
             }
         };
-        let observed_sequence = match service.truth_head() {
-            Ok(head) => head.cursor.sequence,
+        let authority = match self.validate_current_authority(&service) {
+            Ok(authority) => authority,
+            Err(LifecycleError::RebuildRequired(detail)) => {
+                return Ok(status(
+                    DerivedAccessAvailability::RebuildRequired,
+                    Some(publication.generation_id),
+                    Some(detail),
+                ));
+            }
             Err(error) => {
                 return Ok(status(
                     DerivedAccessAvailability::Unavailable,
@@ -246,29 +255,10 @@ impl DerivedAccessLifecycle {
                 ));
             }
         };
-        let truth_count = match self.truth_head_marker() {
-            Ok(count) => count,
-            Err(error) => {
-                return Ok(status(
-                    DerivedAccessAvailability::Unavailable,
-                    Some(publication.generation_id),
-                    Some(error.to_string()),
-                ));
-            }
-        };
-        if observed_sequence != truth_count {
-            return Ok(status(
-                DerivedAccessAvailability::RebuildRequired,
-                Some(publication.generation_id),
-                Some(format!(
-                    "derived head {observed_sequence} does not cover truth count {truth_count}"
-                )),
-            ));
-        }
-        if let Err(error) = validate_published(&service, &descriptor, truth_count) {
+        if let Err(error) = validate_published(&service, &descriptor, &authority) {
             return self.invalid_status(error.to_string(), allow_quarantine);
         }
-        if service.locator_checkpoint()? != service.truth_head()?.cursor {
+        if service.locator_checkpoint()? != authority.head.cursor {
             return Ok(status(
                 DerivedAccessAvailability::CatchingUp,
                 Some(publication.generation_id),
@@ -354,7 +344,8 @@ impl DerivedAccessLifecycle {
                 CursorLedgerIdentity::new(self.store_id.clone()),
             )?;
             service.catch_up_to_head(512)?;
-            let head = service.truth_head()?.cursor;
+            let authority = service.truth_authority_snapshot()?;
+            let head = authority.head.cursor;
             let semantic_snapshot = validate_candidate(
                 &service,
                 &GenerationDescriptor::new(
@@ -363,26 +354,16 @@ impl DerivedAccessLifecycle {
                     self.profile,
                     sequence,
                     head.sequence,
+                    authority.change_stamp.clone(),
                     "",
                 ),
                 &truth_before,
             )?;
             let semantic_receipt = semantic_snapshot.semantic_receipt;
-            let descriptor = GenerationDescriptor::new(
-                &generation_id,
-                &self.store_id,
-                self.profile,
-                head.epoch,
-                head.sequence,
-                &semantic_receipt,
-            );
-            let descriptor_sha256 = self.paths.write_descriptor(&staging, &descriptor)?;
             hook(PublicationBoundary::CandidateValidated);
-            drop(service);
-            self.paths.clear_progress(&generation_id)?;
-            Ok((head, semantic_receipt, descriptor_sha256))
+            Ok((service, head, semantic_receipt, authority.change_stamp))
         })();
-        let (head, semantic_receipt, descriptor_sha256) = match candidate_result {
+        let (service, head, semantic_receipt, bootstrap_stamp) = match candidate_result {
             Ok(candidate) => candidate,
             Err(error) => {
                 self.paths.discard_staging(&generation_id)?;
@@ -390,7 +371,7 @@ impl DerivedAccessLifecycle {
             }
         };
 
-        let _writer_lock = StoreWriterLock::acquire(&self.store_root)?;
+        let writer_lock = StoreWriterLock::acquire(&self.store_root)?;
         let truth_after = match self.truth_events() {
             Ok(events) => events,
             Err(error) => {
@@ -402,6 +383,37 @@ impl DerivedAccessLifecycle {
             self.paths.discard_staging(&generation_id)?;
             return Err(LifecycleError::TruthChanged);
         }
+        let authority_check = QualificationLocalJournal::new(&self.store_root)
+            .changes_since(&bootstrap_stamp)
+            .map_err(|error| LifecycleError::Truth(error.to_string()))?;
+        if authority_check.verdict != JournalChangeVerdict::Stable {
+            self.paths.discard_staging(&generation_id)?;
+            return Err(LifecycleError::TruthChanged);
+        }
+        if let Err(error) =
+            service.bind_truth_authority_stamp_locked(head, &authority_check.after, &writer_lock)
+        {
+            self.paths.discard_staging(&generation_id)?;
+            return Err(error.into());
+        }
+        let descriptor = GenerationDescriptor::new(
+            &generation_id,
+            &self.store_id,
+            self.profile,
+            head.epoch,
+            head.sequence,
+            authority_check.after,
+            &semantic_receipt,
+        );
+        let descriptor_sha256 = match self.paths.write_descriptor(&staging, &descriptor) {
+            Ok(sha256) => sha256,
+            Err(error) => {
+                self.paths.discard_staging(&generation_id)?;
+                return Err(error.into());
+            }
+        };
+        self.paths.clear_progress(&generation_id)?;
+        drop(service);
         if let Err(error) = self.paths.promote_staging(&generation_id) {
             self.paths.discard_staging(&generation_id)?;
             return Err(error.into());
@@ -474,13 +486,8 @@ impl DerivedAccessLifecycle {
                 LifecycleError::Service(error)
             }
         })?;
-        let truth_count = self.truth_head_marker()?;
-        if service.truth_head()?.cursor.sequence != truth_count {
-            return Err(LifecycleError::RebuildRequired(format!(
-                "published generation does not cover {truth_count} truth events"
-            )));
-        }
-        validate_published(&service, &descriptor, truth_count)
+        let authority = self.validate_current_authority(&service)?;
+        validate_published(&service, &descriptor, &authority)
             .map_err(|error| self.quarantine_error(error.to_string()))?;
         Ok(Some(CurrentGeneration {
             generation_id: publication.generation_id,
@@ -555,8 +562,8 @@ impl DerivedAccessLifecycle {
                 LifecycleError::Service(error)
             }
         })?;
-        let derived_head = service.truth_head()?.cursor.sequence;
-        validate_published(&service, &descriptor, derived_head)?;
+        let authority = self.validate_current_authority(&service)?;
+        validate_published(&service, &descriptor, &authority)?;
         Ok(Some(CurrentGeneration {
             generation_id: publication.generation_id,
             service,
@@ -564,21 +571,14 @@ impl DerivedAccessLifecycle {
         }))
     }
 
-    /// Admit a product writer against a stable current generation. The exact
-    /// loose-directory audit runs while the canonical writer lock excludes both
-    /// truth publication and the separately reacquired projection catch-up phase.
+    /// Admit a product writer against a stable current generation. The bounded
+    /// authority continuation runs while the canonical writer lock excludes
+    /// governed truth publication; no loose-directory census is repeated.
     pub(crate) fn admit_writer(&self) -> Result<bool, LifecycleError> {
         let writer_lock = StoreWriterLock::acquire(&self.store_root)?;
-        let Some(current) = self.open_current_for_write_locked(&writer_lock)? else {
+        let Some(_current) = self.open_current_for_write_locked(&writer_lock)? else {
             return Ok(false);
         };
-        let truth_count = self.truth_head_marker()?;
-        let derived_count = current.service().truth_head()?.cursor.sequence;
-        if derived_count != truth_count {
-            return Err(LifecycleError::RebuildRequired(format!(
-                "published generation does not cover {truth_count} truth events"
-            )));
-        }
         Ok(true)
     }
 
@@ -654,10 +654,27 @@ impl DerivedAccessLifecycle {
             }))
     }
 
-    fn truth_head_marker(&self) -> Result<u64, LifecycleError> {
-        QualificationLocalJournal::new(&self.store_root)
-            .head_marker()
-            .map_err(|error| LifecycleError::Truth(error.to_string()))
+    /// Continue the authority cursor bound atomically to the service's current
+    /// head. `Stable` is the only serving verdict; changed, truncated, reset,
+    /// capped, or otherwise indeterminate observations all require an explicit
+    /// rebuild/audit before this generation can be current again.
+    pub(crate) fn validate_current_authority(
+        &self,
+        service: &DerivedAccessService,
+    ) -> Result<TruthAuthoritySnapshot, LifecycleError> {
+        let snapshot = service.truth_authority_snapshot()?;
+        let check = QualificationLocalJournal::new(&self.store_root)
+            .changes_since(&snapshot.change_stamp)
+            .map_err(|error| LifecycleError::Truth(error.to_string()))?;
+        match check.verdict {
+            JournalChangeVerdict::Stable => Ok(snapshot),
+            JournalChangeVerdict::Changed | JournalChangeVerdict::Indeterminate => {
+                Err(LifecycleError::RebuildRequired(format!(
+                    "authoritative truth freshness is {:?} via {}",
+                    check.verdict, check.mechanism
+                )))
+            }
+        }
     }
 
     fn quarantine_status(&self, reason: String) -> Result<LifecycleStatus, LifecycleError> {
@@ -712,7 +729,13 @@ impl DerivedAccessLifecycle {
         error: GenerationError,
         allow_quarantine: bool,
     ) -> Result<LifecycleStatus, LifecycleError> {
-        if generation_error_requires_quarantine(&error) {
+        if generation_error_requires_rebuild(&error) {
+            Ok(status(
+                DerivedAccessAvailability::RebuildRequired,
+                None,
+                Some(error.to_string()),
+            ))
+        } else if generation_error_requires_quarantine(&error) {
             self.invalid_status(error.to_string(), allow_quarantine)
         } else {
             Ok(status(
@@ -756,7 +779,9 @@ impl DerivedAccessLifecycle {
     }
 
     fn generation_open_error(&self, error: GenerationError) -> LifecycleError {
-        if generation_error_requires_quarantine(&error) {
+        if generation_error_requires_rebuild(&error) {
+            LifecycleError::RebuildRequired(error.to_string())
+        } else if generation_error_requires_quarantine(&error) {
             self.quarantine_error(error.to_string())
         } else {
             LifecycleError::Generation(error)
@@ -849,19 +874,20 @@ fn validate_candidate(
 fn validate_published(
     service: &DerivedAccessService,
     descriptor: &GenerationDescriptor,
-    truth_count: u64,
+    authority: &TruthAuthoritySnapshot,
 ) -> Result<(), LifecycleError> {
-    let head = service.truth_head()?.cursor;
+    let head = authority.head.cursor;
     let checkpoint = service.locator_checkpoint()?;
     if head.epoch != descriptor.epoch
         || head.sequence < descriptor.head_sequence
-        || head.sequence != truth_count
+        || (head.sequence == descriptor.head_sequence
+            && authority.change_stamp != descriptor.authority_stamp)
         || checkpoint.epoch != head.epoch
         || checkpoint.sequence > head.sequence
     {
         return Err(LifecycleError::Validation(format!(
             "published coverage mismatch: head={head:?}, checkpoint={checkpoint:?}, \
-             descriptor={}:{}, truth={truth_count}",
+             descriptor={}:{}",
             descriptor.epoch, descriptor.head_sequence
         )));
     }
@@ -941,6 +967,10 @@ fn generation_error_requires_quarantine(error: &GenerationError) -> bool {
     )
 }
 
+fn generation_error_requires_rebuild(error: &GenerationError) -> bool {
+    matches!(error, GenerationError::LegacyDescriptor { .. })
+}
+
 fn lifecycle_error_requires_quarantine(error: &LifecycleError) -> bool {
     matches!(error, LifecycleError::Validation(_))
         || matches!(
@@ -974,7 +1004,10 @@ fn service_error_requires_quarantine(error: &DerivedAccessServiceError) -> bool 
 fn service_error_requires_rebuild(error: &DerivedAccessServiceError) -> bool {
     matches!(
         error,
-        DerivedAccessServiceError::Semantic(SqliteSemanticError::ProductHistoryUpgradeRequired(_))
+        DerivedAccessServiceError::Cursor(CursorLedgerError::UpgradeRequired(_))
+            | DerivedAccessServiceError::Semantic(
+                SqliteSemanticError::ProductHistoryUpgradeRequired(_)
+            )
     )
 }
 
@@ -1037,6 +1070,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
     use crate::model::JournalId;
     use crate::session::derived_access::product_contract::{
         DerivedAccessAvailability, DerivedAccessProfile,
@@ -1558,6 +1592,69 @@ mod tests {
             lifecycle.open_current(),
             Err(LifecycleError::RebuildRequired(_))
         ));
+    }
+
+    #[test]
+    fn legacy_generation_descriptor_requires_rebuild_without_quarantine() {
+        let temp = populated_store(1);
+        let lifecycle = active_lifecycle(temp.path());
+        let receipt = lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let generation = lifecycle
+            .paths()
+            .generation(receipt.generation_id.as_deref().unwrap());
+        let descriptor_path = generation.join("generation.json");
+        let mut descriptor: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&descriptor_path).unwrap()).unwrap();
+        descriptor["schema"] =
+            serde_json::Value::String("pointbreak.derived-access-generation.v1".to_owned());
+        descriptor.as_object_mut().unwrap().remove("authorityStamp");
+        let descriptor_bytes = canonical_json_bytes(&descriptor).unwrap();
+        std::fs::write(&descriptor_path, &descriptor_bytes).unwrap();
+
+        let publication_path = std::fs::read_dir(lifecycle.paths().root().join("publications"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let mut publication: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&publication_path).unwrap()).unwrap();
+        publication["descriptorSha256"] =
+            serde_json::Value::String(sha256_bytes_hex(&descriptor_bytes));
+        std::fs::write(
+            publication_path,
+            canonical_json_bytes(&publication).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            lifecycle.status().unwrap().availability,
+            DerivedAccessAvailability::RebuildRequired
+        );
+        assert!(lifecycle.paths().root().exists());
+    }
+
+    #[test]
+    fn legacy_cursor_schema_requires_rebuild_without_quarantine() {
+        let temp = populated_store(1);
+        let lifecycle = active_lifecycle(temp.path());
+        let receipt = lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let database = lifecycle
+            .paths()
+            .generation(receipt.generation_id.as_deref().unwrap())
+            .join("cursor.sqlite3");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection.pragma_update(None, "user_version", 3).unwrap();
+        connection
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+        drop(connection);
+
+        assert_eq!(
+            lifecycle.status().unwrap().availability,
+            DerivedAccessAvailability::RebuildRequired
+        );
+        assert!(lifecycle.paths().root().exists());
     }
 
     #[test]

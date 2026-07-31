@@ -5,9 +5,10 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{ContentStore, Journal, JournalEntry};
-#[cfg(any(test, feature = "bench"))]
-use super::{JournalChangeCheck, JournalChangeStamp};
+use super::{
+    ContentStore, Journal, JournalChangeCheck, JournalChangeStamp, JournalCreatedTransition,
+    JournalCreatedTransitionVerdict, JournalEntry,
+};
 use crate::error::{Result, ShoreError};
 use crate::session::store::event_store::{event_filename_stem, is_event_file};
 use crate::storage::{CreateOutcome, Durability, LocalStorage, RemoveOutcome, is_temp_file_path};
@@ -18,6 +19,14 @@ use crate::storage::{CreateOutcome, Durability, LocalStorage, RemoveOutcome, is_
 pub(crate) struct LocalJournal {
     storage: LocalStorage,
     store_dir: PathBuf,
+}
+
+#[derive(Debug)]
+pub(crate) struct JournalCreateObservation {
+    #[cfg(not(target_os = "linux"))]
+    before: JournalChangeStamp,
+    #[cfg(target_os = "linux")]
+    watcher: LinuxCreateWatcher,
 }
 
 impl LocalJournal {
@@ -36,6 +45,43 @@ impl LocalJournal {
     fn event_path(&self, idempotency_key: &str) -> PathBuf {
         self.events_dir()
             .join(format!("{}.json", event_filename_stem(idempotency_key)))
+    }
+
+    fn begin_created_transition(
+        &self,
+        _before: &JournalChangeStamp,
+        _idempotency_key: &str,
+    ) -> Result<JournalCreateObservation> {
+        #[cfg(target_os = "linux")]
+        let watcher = LinuxCreateWatcher::new(
+            &self.events_dir(),
+            format!("{}.json", event_filename_stem(_idempotency_key)),
+        )?;
+        Ok(JournalCreateObservation {
+            #[cfg(not(target_os = "linux"))]
+            before: _before.clone(),
+            #[cfg(target_os = "linux")]
+            watcher,
+        })
+    }
+
+    fn finish_created_transition(
+        &self,
+        observation: JournalCreateObservation,
+    ) -> Result<JournalCreatedTransition> {
+        #[cfg(target_os = "linux")]
+        {
+            let verdict = observation.watcher.finish()?;
+            Ok(JournalCreatedTransition {
+                after: self.change_stamp()?,
+                verdict,
+                mechanism: "inotify interval around one governed carrier publication".to_owned(),
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.created_transition(&observation.before)
+        }
     }
 
     fn read_event_bytes_by_key_digest(&self, key_digest: &str) -> Result<Option<Vec<u8>>> {
@@ -57,6 +103,167 @@ impl LocalJournal {
             crate::bench_support::longitudinal::record_carrier_bytes(bytes.len());
         }
         Ok(bytes)
+    }
+
+    fn created_transition(&self, before: &JournalChangeStamp) -> Result<JournalCreatedTransition> {
+        #[cfg(windows)]
+        {
+            super::ntfs_journal::created_transition(&self.events_dir(), before)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let after = self.change_stamp()?;
+            let expected_count = before
+                .entry_count()
+                .map(|count| count.checked_add(1))
+                .unwrap_or(Some(1));
+            let accepted = expected_count == after.entry_count() && before != &after;
+            Ok(JournalCreatedTransition {
+                after,
+                verdict: if accepted {
+                    JournalCreatedTransitionVerdict::Accepted
+                } else {
+                    JournalCreatedTransitionVerdict::Contended
+                },
+                mechanism: "APFS directory entry count must advance by exactly one".to_owned(),
+            })
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        {
+            let after = self.change_stamp()?;
+            Ok(JournalCreatedTransition {
+                after,
+                verdict: JournalCreatedTransitionVerdict::Indeterminate,
+                mechanism: "platform has no qualified single-create transition proof".to_owned(),
+            })
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct LinuxCreateWatcher {
+    descriptor: std::os::fd::OwnedFd,
+    expected_filename: String,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxCreateWatcher {
+    fn new(events_dir: &Path, expected_filename: String) -> Result<Self> {
+        use std::os::fd::FromRawFd as _;
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let path = std::ffi::CString::new(events_dir.as_os_str().as_bytes()).map_err(|_| {
+            ShoreError::Message(format!(
+                "journal events directory contains an interior NUL: {}",
+                events_dir.display()
+            ))
+        })?;
+        // SAFETY: no borrowed pointer crosses the call; the returned descriptor
+        // is transferred immediately to `OwnedFd` on success.
+        let raw = unsafe { libc::inotify_init1(libc::IN_CLOEXEC | libc::IN_NONBLOCK) };
+        if raw < 0 {
+            return Err(ShoreError::Message(format!(
+                "could not initialize journal publication watch: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        // SAFETY: `raw` is a fresh owned descriptor from `inotify_init1`.
+        let descriptor = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+        // SAFETY: `path` is NUL-terminated and the descriptor remains owned.
+        let watch = unsafe {
+            libc::inotify_add_watch(
+                std::os::fd::AsRawFd::as_raw_fd(&descriptor),
+                path.as_ptr(),
+                libc::IN_CREATE | libc::IN_MOVED_TO | libc::IN_Q_OVERFLOW,
+            )
+        };
+        if watch < 0 {
+            return Err(ShoreError::Message(format!(
+                "could not watch journal publication directory {}: {}",
+                events_dir.display(),
+                std::io::Error::last_os_error()
+            )));
+        }
+        Ok(Self {
+            descriptor,
+            expected_filename,
+        })
+    }
+
+    fn finish(self) -> Result<JournalCreatedTransitionVerdict> {
+        use std::os::fd::AsRawFd as _;
+
+        let mut observed_expected = false;
+        let mut buffer = [0_u8; 16 * 1024];
+        loop {
+            // SAFETY: the descriptor is valid and `buffer` is writable for its
+            // full declared length.
+            let read = unsafe {
+                libc::read(
+                    self.descriptor.as_raw_fd(),
+                    buffer.as_mut_ptr().cast(),
+                    buffer.len(),
+                )
+            };
+            if read < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::WouldBlock {
+                    break;
+                }
+                return Err(ShoreError::Message(format!(
+                    "could not read journal publication watch: {error}"
+                )));
+            }
+            if read == 0 {
+                break;
+            }
+            let mut offset = 0_usize;
+            let read = read as usize;
+            while offset < read {
+                let header_size = std::mem::size_of::<libc::inotify_event>();
+                if read - offset < header_size {
+                    return Ok(JournalCreatedTransitionVerdict::Indeterminate);
+                }
+                // SAFETY: the complete header is present and an unaligned read
+                // produces an owned value.
+                let event = unsafe {
+                    std::ptr::read_unaligned(
+                        buffer.as_ptr().add(offset).cast::<libc::inotify_event>(),
+                    )
+                };
+                let event_len = header_size.checked_add(event.len as usize).ok_or_else(|| {
+                    ShoreError::Message("inotify event length overflowed".to_owned())
+                })?;
+                if event_len > read - offset {
+                    return Ok(JournalCreatedTransitionVerdict::Indeterminate);
+                }
+                if event.mask & libc::IN_Q_OVERFLOW != 0 {
+                    return Ok(JournalCreatedTransitionVerdict::Indeterminate);
+                }
+                let name_bytes = &buffer[offset + header_size..offset + event_len];
+                let name_end = name_bytes
+                    .iter()
+                    .position(|byte| *byte == 0)
+                    .unwrap_or(name_bytes.len());
+                let name = std::str::from_utf8(&name_bytes[..name_end]).map_err(|_| {
+                    ShoreError::Message(
+                        "journal publication watch returned a non-UTF-8 name".to_owned(),
+                    )
+                })?;
+                if name == self.expected_filename {
+                    observed_expected = true;
+                } else if !is_temp_file_path(Path::new(name)) {
+                    return Ok(JournalCreatedTransitionVerdict::Contended);
+                }
+                offset += event_len;
+            }
+        }
+        Ok(if observed_expected {
+            JournalCreatedTransitionVerdict::Accepted
+        } else {
+            JournalCreatedTransitionVerdict::Indeterminate
+        })
     }
 }
 
@@ -130,7 +337,6 @@ impl Journal for LocalJournal {
             .count() as u64)
     }
 
-    #[cfg(any(test, feature = "bench"))]
     fn change_stamp(&self) -> Result<JournalChangeStamp> {
         let events_dir = self.events_dir();
         let metadata = match std::fs::metadata(&events_dir) {
@@ -160,7 +366,6 @@ impl Journal for LocalJournal {
         local_directory_stamp(&canonical, &metadata)
     }
 
-    #[cfg(any(test, feature = "bench"))]
     fn changes_since(&self, before: &JournalChangeStamp) -> Result<JournalChangeCheck> {
         if matches!(before, JournalChangeStamp::Absent) {
             return Ok(JournalChangeStamp::compared(before, self.change_stamp()?));
@@ -187,7 +392,7 @@ impl Journal for LocalJournal {
     }
 }
 
-#[cfg(all(any(test, feature = "bench"), unix))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn local_directory_stamp(path: &Path, metadata: &std::fs::Metadata) -> Result<JournalChangeStamp> {
     use std::os::unix::ffi::OsStrExt as _;
     use std::os::unix::fs::MetadataExt as _;
@@ -205,12 +410,82 @@ fn local_directory_stamp(path: &Path, metadata: &std::fs::Metadata) -> Result<Jo
     Ok(JournalChangeStamp::observed(&identity, &change))
 }
 
-#[cfg(all(any(test, feature = "bench"), windows))]
+#[cfg(target_os = "macos")]
+fn local_directory_stamp(path: &Path, metadata: &std::fs::Metadata) -> Result<JournalChangeStamp> {
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::MetadataExt as _;
+
+    let entry_count = macos_directory_entry_count(path)?;
+    let mut identity = b"unix-directory-identity-v1\0".to_vec();
+    identity.extend_from_slice(path.as_os_str().as_bytes());
+    identity.extend_from_slice(&metadata.dev().to_le_bytes());
+    identity.extend_from_slice(&metadata.ino().to_le_bytes());
+    let mut change = b"unix-directory-change-v1\0".to_vec();
+    change.extend_from_slice(&metadata.mtime().to_le_bytes());
+    change.extend_from_slice(&metadata.mtime_nsec().to_le_bytes());
+    change.extend_from_slice(&metadata.ctime().to_le_bytes());
+    change.extend_from_slice(&metadata.ctime_nsec().to_le_bytes());
+    change.extend_from_slice(&metadata.len().to_le_bytes());
+    change.extend_from_slice(&entry_count.to_le_bytes());
+    Ok(JournalChangeStamp::observed_with_entry_count(
+        &identity,
+        &change,
+        entry_count,
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_directory_entry_count(path: &Path) -> Result<u64> {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        ShoreError::Message(format!(
+            "journal events directory contains an interior NUL: {}",
+            path.display()
+        ))
+    })?;
+    let mut attributes = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: 0,
+        volattr: 0,
+        dirattr: libc::ATTR_DIR_ENTRYCOUNT,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    let mut output = [0_u32; 2];
+    // SAFETY: `path` is NUL-terminated, the attribute list requests one u32
+    // directory field, and `output` is writable for the declared size.
+    let status = unsafe {
+        libc::getattrlist(
+            path.as_ptr(),
+            (&raw mut attributes).cast(),
+            output.as_mut_ptr().cast(),
+            std::mem::size_of_val(&output),
+            0,
+        )
+    };
+    if status != 0 {
+        return Err(ShoreError::Message(format!(
+            "could not query journal directory entry count: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    if output[0] as usize != std::mem::size_of_val(&output) {
+        return Err(ShoreError::Message(format!(
+            "journal directory entry-count query returned {} bytes",
+            output[0]
+        )));
+    }
+    Ok(u64::from(output[1]))
+}
+
+#[cfg(windows)]
 fn local_directory_stamp(path: &Path, _metadata: &std::fs::Metadata) -> Result<JournalChangeStamp> {
     super::ntfs_journal::capture(path)
 }
 
-#[cfg(all(any(test, feature = "bench"), not(any(unix, windows))))]
+#[cfg(not(any(unix, windows)))]
 fn local_directory_stamp(path: &Path, metadata: &std::fs::Metadata) -> Result<JournalChangeStamp> {
     Ok(JournalChangeStamp::observed(
         path.to_string_lossy().as_bytes(),
@@ -258,6 +533,52 @@ impl QualificationLocalJournal {
         self.journal.read_event_bytes_by_key_digest(key_digest)
     }
 
+    pub(crate) fn ensure_authority_directory(&self) -> Result<()> {
+        std::fs::create_dir_all(self.store_dir.join("events")).map_err(|error| {
+            ShoreError::Message(format!(
+                "could not create journal events directory {}: {error}",
+                self.store_dir.join("events").display()
+            ))
+        })
+    }
+
+    /// Capture the backend-specific authority cursor without enumerating event
+    /// entries. The result is persisted only in disposable derived metadata.
+    pub(crate) fn change_stamp(&self) -> Result<JournalChangeStamp> {
+        self.journal.change_stamp()
+    }
+
+    /// Continue from a previously persisted authority cursor. Any inability to
+    /// prove one continuous interval is returned as `Indeterminate`, never as
+    /// a false `Stable` verdict.
+    pub(crate) fn changes_since(&self, before: &JournalChangeStamp) -> Result<JournalChangeCheck> {
+        self.journal.changes_since(before)
+    }
+
+    pub(crate) fn created_transition(
+        &self,
+        before: &JournalChangeStamp,
+    ) -> Result<JournalCreatedTransition> {
+        self.journal.created_transition(before)
+    }
+
+    pub(crate) fn begin_created_transition(
+        &self,
+        before: &JournalChangeStamp,
+        idempotency_key: &str,
+    ) -> Result<JournalCreateObservation> {
+        self.journal
+            .begin_created_transition(before, idempotency_key)
+    }
+
+    pub(crate) fn finish_created_transition(
+        &self,
+        observation: JournalCreateObservation,
+    ) -> Result<JournalCreatedTransition> {
+        self.journal.finish_created_transition(observation)
+    }
+
+    #[cfg(target_os = "linux")]
     pub(crate) fn head_marker(&self) -> Result<u64> {
         self.journal.head_marker()
     }

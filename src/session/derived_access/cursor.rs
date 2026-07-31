@@ -1,6 +1,7 @@
 #[cfg(any(test, feature = "bench"))]
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::session::store::backend::JournalChangeStamp;
 #[cfg(any(test, feature = "bench"))]
 use crate::session::store::backend::QualificationJournalCursor;
 
@@ -22,6 +23,16 @@ impl TruthCursor {
 pub(crate) struct TruthHead {
     pub(crate) store_id: String,
     pub(crate) cursor: TruthCursor,
+}
+
+/// One atomically published derived cursor head and the local truth-change
+/// cursor captured for that same head. This is a freshness detector for the
+/// disposable sidecar, never a replacement for loose truth or an event-set
+/// integrity proof.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TruthAuthoritySnapshot {
+    pub(crate) head: TruthHead,
+    pub(crate) change_stamp: JournalChangeStamp,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

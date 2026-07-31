@@ -16,16 +16,17 @@ use super::{DERIVED_QUARANTINE_PREFIX, DERIVED_SIDECAR_DIRECTORY};
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::error::ShoreError;
 use crate::session::derived_access::cursor::{
-    AppendResolution, CursorDelta, CursorIntent, CursorReceipt, RecoveryResolution, TruthCursor,
-    TruthHead,
+    AppendResolution, CursorDelta, CursorIntent, CursorReceipt, RecoveryResolution,
+    TruthAuthoritySnapshot, TruthCursor, TruthHead,
 };
 use crate::session::derived_access::{QualificationJournalCursor, QualificationLocalJournal};
 use crate::session::event::ShoreEvent;
+use crate::session::store::backend::{JournalChangeStamp, JournalCreatedTransitionVerdict};
 use crate::session::{EventStore, EventWriteOutcome};
 
 const DATABASE_FILE: &str = "cursor.sqlite3";
 const PROFILE_ID: &str = "pointbreak.sqlite-derived-access-cursor.v1";
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const APPLICATION_ID: i64 = 0x5042_4443;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 static QUARANTINE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -118,6 +119,10 @@ pub(crate) enum CursorLedgerError {
     IdentityMismatch(String),
     #[error("cursor-ledger schema mismatch: {0}")]
     SchemaMismatch(String),
+    #[error("cursor-ledger schema requires rebuild: {0}")]
+    UpgradeRequired(String),
+    #[error("cursor-ledger could not bind the created truth carrier: {0}")]
+    AuthorityTransition(String),
     #[error("cursor {cursor:?} is ahead of head {head:?}")]
     CursorAhead {
         cursor: TruthCursor,
@@ -174,6 +179,7 @@ struct Metadata {
     schema_version: i64,
     epoch: u64,
     head_sequence: u64,
+    authority_stamp: JournalChangeStamp,
     state: String,
     quarantine_reason: Option<String>,
 }
@@ -223,7 +229,20 @@ impl SqliteCursorLedger {
         std::fs::create_dir_all(ledger.sidecar_path())
             .map_err(|error| io_error(ledger.sidecar_path(), error))?;
         let connection = open_connection(&ledger.database_path, true)?;
-        initialize_schema(&connection, &ledger.identity, 1, "complete")?;
+        let journal = QualificationLocalJournal::new(&ledger.store_root);
+        journal
+            .ensure_authority_directory()
+            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        let authority_stamp = journal
+            .change_stamp()
+            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        initialize_schema(
+            &connection,
+            &ledger.identity,
+            1,
+            "complete",
+            &authority_stamp,
+        )?;
         validate_completed_metadata(&connection, &ledger.identity)?;
         Ok(ledger)
     }
@@ -294,15 +313,27 @@ impl SqliteCursorLedger {
             hook(BootstrapCrashPoint::AfterQuarantineBeforeNewEpoch);
         }
 
+        QualificationLocalJournal::new(&ledger.store_root)
+            .ensure_authority_directory()
+            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
         let events = EventStore::open(&ledger.store_root)
             .list_events()
+            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        let journal = QualificationLocalJournal::new(&ledger.store_root);
+        let authority_stamp = journal
+            .change_stamp()
             .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
         std::fs::create_dir_all(ledger.sidecar_path())
             .map_err(|error| io_error(ledger.sidecar_path(), error))?;
         let mut connection = open_connection(&ledger.database_path, true)?;
-        initialize_schema(&connection, &ledger.identity, epoch, "staging")?;
+        initialize_schema(
+            &connection,
+            &ledger.identity,
+            epoch,
+            "staging",
+            &authority_stamp,
+        )?;
 
-        let journal = QualificationLocalJournal::new(&ledger.store_root);
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| sqlite_error("begin bootstrap", error))?;
@@ -389,9 +420,8 @@ impl SqliteCursorLedger {
         };
         match validate_recoverable_metadata(&connection, &ledger.identity) {
             Ok(_) => Ok(ledger),
-            Err(CursorLedgerError::IncompleteBootstrap) => {
-                Err(CursorLedgerError::IncompleteBootstrap)
-            }
+            Err(error @ CursorLedgerError::IncompleteBootstrap)
+            | Err(error @ CursorLedgerError::UpgradeRequired(_)) => Err(error),
             Err(error) => {
                 let reason = error.to_string();
                 let _ = mark_quarantined(&connection, &reason);
@@ -424,6 +454,51 @@ impl SqliteCursorLedger {
             store_id: metadata.store_id,
             cursor: TruthCursor::new(metadata.epoch, metadata.head_sequence),
         })
+    }
+
+    /// Read the cursor head and its bound local authority cursor from the same
+    /// SQLite snapshot. Callers must continue the stamp before treating the
+    /// disposable generation as current.
+    pub(crate) fn authority_snapshot(&self) -> Result<TruthAuthoritySnapshot, CursorLedgerError> {
+        let (_connection, metadata) = self.hot_read_connection()?;
+        Ok(TruthAuthoritySnapshot {
+            head: TruthHead {
+                store_id: metadata.store_id,
+                cursor: TruthCursor::new(metadata.epoch, metadata.head_sequence),
+            },
+            change_stamp: metadata.authority_stamp,
+        })
+    }
+
+    /// Replace only the authority cursor for an unchanged derived head. Rebuild
+    /// uses this after an exact census and a continuous native no-change proof,
+    /// while still holding the canonical truth writer lock.
+    pub(crate) fn bind_authority_stamp_locked(
+        &self,
+        expected: TruthCursor,
+        authority_stamp: &JournalChangeStamp,
+        _writer_lock: &StoreWriterLock,
+    ) -> Result<(), CursorLedgerError> {
+        let connection = open_connection(&self.database_path, false)?;
+        validate_completed_metadata(&connection, &self.identity)?;
+        let updated = connection
+            .execute(
+                "UPDATE cursor_meta
+                 SET authority_stamp_json = ?1
+                 WHERE singleton = 1 AND epoch = ?2 AND head_sequence = ?3",
+                params![
+                    encode_authority_stamp(authority_stamp)?,
+                    u64_to_i64(expected.epoch, "authority epoch")?,
+                    u64_to_i64(expected.sequence, "authority head")?,
+                ],
+            )
+            .map_err(|error| sqlite_error("bind authority stamp", error))?;
+        if updated != 1 {
+            return Err(CursorLedgerError::SchemaMismatch(
+                "cursor head changed while binding authority stamp".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -531,6 +606,10 @@ impl SqliteCursorLedger {
         recover_locked(&mut connection, &self.store_root, &self.identity)?;
 
         let metadata = read_metadata(&connection)?;
+        let journal = QualificationLocalJournal::new(&self.store_root);
+        let authority_observation = journal
+            .begin_created_transition(&metadata.authority_stamp, &event.idempotency_key)
+            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
         let proposed_cursor = TruthCursor::new(
             metadata.epoch,
             metadata.head_sequence.checked_add(1).ok_or_else(|| {
@@ -554,7 +633,6 @@ impl SqliteCursorLedger {
             .map_err(|error| sqlite_error("commit intent", error))?;
         hook(AppendCrashPoint::AfterIntentCommit);
 
-        let journal = QualificationLocalJournal::new(&self.store_root);
         let existing_receipt = receipt_for_key(&connection, &journal, &event.idempotency_key)?;
         let publication = match publish() {
             Ok(outcome) => outcome,
@@ -602,6 +680,16 @@ impl SqliteCursorLedger {
             ));
         }
         validate_named_carrier(&journal, &event.idempotency_key, &expected_witness)?;
+        let transition = journal
+            .finish_created_transition(authority_observation)
+            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        if transition.verdict != JournalCreatedTransitionVerdict::Accepted {
+            return Err(CursorLedgerError::AuthorityTransition(format!(
+                "{:?}: {}",
+                transition.verdict, transition.mechanism
+            )));
+        }
+        let authority_stamp = transition.after;
 
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -616,7 +704,7 @@ impl SqliteCursorLedger {
             },
         )?;
         hook(AppendCrashPoint::AfterReceiptBeforeHead);
-        advance_head(&transaction, proposed_cursor)?;
+        advance_head(&transaction, proposed_cursor, &authority_stamp)?;
         transaction
             .commit()
             .map_err(|error| sqlite_error("commit receipt and head", error))?;
@@ -900,6 +988,18 @@ fn validate_nonempty(field: &'static str, value: &str) -> Result<(), CursorLedge
     Ok(())
 }
 
+fn encode_authority_stamp(stamp: &JournalChangeStamp) -> Result<String, CursorLedgerError> {
+    serde_json::to_string(stamp).map_err(|error| {
+        CursorLedgerError::SchemaMismatch(format!("could not encode authority stamp: {error}"))
+    })
+}
+
+fn decode_authority_stamp(value: &str) -> Result<JournalChangeStamp, CursorLedgerError> {
+    serde_json::from_str(value).map_err(|error| {
+        CursorLedgerError::SchemaMismatch(format!("could not decode authority stamp: {error}"))
+    })
+}
+
 fn sha256_digest(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
@@ -983,6 +1083,7 @@ fn initialize_schema(
     identity: &CursorLedgerIdentity,
     epoch: u64,
     state: &str,
+    authority_stamp: &JournalChangeStamp,
 ) -> Result<(), CursorLedgerError> {
     connection
         .execute_batch(
@@ -990,9 +1091,11 @@ fn initialize_schema(
                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                  store_id TEXT NOT NULL,
                  profile_id TEXT NOT NULL,
-                 schema_version INTEGER NOT NULL CHECK (schema_version = 3),
+                 schema_version INTEGER NOT NULL CHECK (schema_version = 4),
                  epoch INTEGER NOT NULL CHECK (epoch > 0),
                  head_sequence INTEGER NOT NULL CHECK (head_sequence >= 0),
+                 authority_stamp_json TEXT NOT NULL
+                     CHECK (length(authority_stamp_json) > 0),
                  bootstrap_state TEXT NOT NULL
                      CHECK (bootstrap_state IN ('staging', 'complete', 'quarantined')),
                  quarantine_reason TEXT
@@ -1037,14 +1140,15 @@ fn initialize_schema(
         .execute(
             "INSERT INTO cursor_meta
              (singleton, store_id, profile_id, schema_version, epoch, head_sequence,
-              bootstrap_state, quarantine_reason)
-             VALUES (1, ?1, ?2, ?3, ?4, 0, ?5, NULL)",
+              authority_stamp_json, bootstrap_state, quarantine_reason)
+             VALUES (1, ?1, ?2, ?3, ?4, 0, ?5, ?6, NULL)",
             params![
                 identity.store_id,
                 identity.profile_id,
                 SCHEMA_VERSION,
                 u64_to_i64(epoch, "epoch")?,
-                state
+                encode_authority_stamp(authority_stamp)?,
+                state,
             ],
         )
         .map_err(|error| sqlite_error("insert cursor metadata", error))?;
@@ -1055,7 +1159,7 @@ fn read_metadata(connection: &Connection) -> Result<Metadata, CursorLedgerError>
     connection
         .query_row(
             "SELECT store_id, profile_id, schema_version, epoch, head_sequence,
-                    bootstrap_state, quarantine_reason
+                    authority_stamp_json, bootstrap_state, quarantine_reason
              FROM cursor_meta WHERE singleton = 1",
             [],
             |row| {
@@ -1066,7 +1170,8 @@ fn read_metadata(connection: &Connection) -> Result<Metadata, CursorLedgerError>
                     row.get::<_, i64>(3)?,
                     row.get::<_, i64>(4)?,
                     row.get::<_, String>(5)?,
-                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                 ))
             },
         )
@@ -1078,6 +1183,7 @@ fn read_metadata(connection: &Connection) -> Result<Metadata, CursorLedgerError>
                 schema_version,
                 epoch,
                 head_sequence,
+                authority_stamp_json,
                 state,
                 quarantine_reason,
             )| {
@@ -1087,6 +1193,7 @@ fn read_metadata(connection: &Connection) -> Result<Metadata, CursorLedgerError>
                     schema_version,
                     epoch: i64_to_u64(epoch, "epoch")?,
                     head_sequence: i64_to_u64(head_sequence, "head sequence")?,
+                    authority_stamp: decode_authority_stamp(&authority_stamp_json)?,
                     state,
                     quarantine_reason,
                 })
@@ -1118,6 +1225,11 @@ fn validate_metadata_header(
 ) -> Result<Metadata, CursorLedgerError> {
     let application_id = pragma_i64(connection, "application_id")?;
     let user_version = pragma_i64(connection, "user_version")?;
+    if application_id == APPLICATION_ID && user_version < SCHEMA_VERSION {
+        return Err(CursorLedgerError::UpgradeRequired(format!(
+            "expected schema {SCHEMA_VERSION}, observed {user_version}"
+        )));
+    }
     if application_id != APPLICATION_ID || user_version != SCHEMA_VERSION {
         return Err(CursorLedgerError::SchemaMismatch(format!(
             "application_id={application_id}, user_version={user_version}"
@@ -1128,6 +1240,12 @@ fn validate_metadata_header(
         return Err(CursorLedgerError::IdentityMismatch(format!(
             "expected {}/{}, observed {}/{}",
             identity.store_id, identity.profile_id, metadata.store_id, metadata.profile_id
+        )));
+    }
+    if metadata.schema_version < SCHEMA_VERSION {
+        return Err(CursorLedgerError::UpgradeRequired(format!(
+            "expected schema {SCHEMA_VERSION}, observed {}",
+            metadata.schema_version
         )));
     }
     if metadata.schema_version != SCHEMA_VERSION {
@@ -1293,6 +1411,51 @@ fn note_full_chain_query() {
     FULL_CHAIN_QUERY_COUNT.with(|count| count.set(count.get() + 1));
 }
 
+fn capture_created_authority_stamp(
+    store_root: &Path,
+    before: &JournalChangeStamp,
+    _expected_truth_count: u64,
+) -> Result<JournalChangeStamp, CursorLedgerError> {
+    let journal = QualificationLocalJournal::new(store_root);
+    let unchanged = journal
+        .changes_since(before)
+        .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+    if unchanged.verdict == crate::session::store::backend::JournalChangeVerdict::Stable {
+        return Ok(before.clone());
+    }
+    #[cfg(target_os = "linux")]
+    let transition = {
+        let after = journal
+            .change_stamp()
+            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        let observed = journal
+            .head_marker()
+            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        crate::session::store::backend::JournalCreatedTransition {
+            after,
+            verdict: if observed == _expected_truth_count {
+                JournalCreatedTransitionVerdict::Accepted
+            } else {
+                JournalCreatedTransitionVerdict::Contended
+            },
+            mechanism: format!(
+                "explicit recovery counted {observed} truth carriers; expected {_expected_truth_count}"
+            ),
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let transition = journal
+        .created_transition(before)
+        .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+    if transition.verdict != JournalCreatedTransitionVerdict::Accepted {
+        return Err(CursorLedgerError::AuthorityTransition(format!(
+            "{:?}: {}",
+            transition.verdict, transition.mechanism
+        )));
+    }
+    Ok(transition.after)
+}
+
 fn recover_locked(
     connection: &mut Connection,
     store_root: &Path,
@@ -1315,10 +1478,15 @@ fn recover_locked(
                 mark_quarantined(connection, &reason)?;
                 return Err(CursorLedgerError::Quarantined(reason));
             }
+            let authority_stamp = capture_created_authority_stamp(
+                store_root,
+                &metadata.authority_stamp,
+                receipt.cursor.sequence,
+            )?;
             let transaction = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(|error| sqlite_error("begin head recovery", error))?;
-            advance_head(&transaction, receipt.cursor)?;
+            advance_head(&transaction, receipt.cursor, &authority_stamp)?;
             transaction
                 .execute("DELETE FROM cursor_intent WHERE singleton = 1", [])
                 .map_err(|error| sqlite_error("retire recovered intent", error))?;
@@ -1369,6 +1537,11 @@ fn recover_locked(
         return Err(CursorLedgerError::Quarantined(reason));
     }
 
+    let authority_stamp = capture_created_authority_stamp(
+        store_root,
+        &metadata.authority_stamp,
+        intent.proposed_cursor.sequence,
+    )?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| sqlite_error("begin intent recovery", error))?;
@@ -1379,7 +1552,7 @@ fn recover_locked(
         attempt_token: intent.attempt_token,
     };
     insert_receipt(&transaction, &receipt)?;
-    advance_head(&transaction, receipt.cursor)?;
+    advance_head(&transaction, receipt.cursor, &authority_stamp)?;
     transaction
         .execute("DELETE FROM cursor_intent WHERE singleton = 1", [])
         .map_err(|error| sqlite_error("retire recovered intent", error))?;
@@ -1408,10 +1581,15 @@ fn recover_head_only(
         }
         return Ok(RecoveryResolution::NoIntent);
     };
+    let authority_stamp = capture_created_authority_stamp(
+        store_root,
+        &metadata.authority_stamp,
+        receipt.cursor.sequence,
+    )?;
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| sqlite_error("begin orphan-head recovery", error))?;
-    advance_head(&transaction, receipt.cursor)?;
+    advance_head(&transaction, receipt.cursor, &authority_stamp)?;
     transaction
         .commit()
         .map_err(|error| sqlite_error("commit orphan-head recovery", error))?;
@@ -1491,14 +1669,16 @@ fn insert_receipt(
 fn advance_head(
     transaction: &Transaction<'_>,
     cursor: TruthCursor,
+    authority_stamp: &JournalChangeStamp,
 ) -> Result<(), CursorLedgerError> {
     let updated = transaction
         .execute(
             "UPDATE cursor_meta
-             SET head_sequence = ?1
-             WHERE singleton = 1 AND epoch = ?2 AND head_sequence = ?3",
+             SET head_sequence = ?1, authority_stamp_json = ?2
+             WHERE singleton = 1 AND epoch = ?3 AND head_sequence = ?4",
             params![
                 u64_to_i64(cursor.sequence, "head sequence")?,
+                encode_authority_stamp(authority_stamp)?,
                 u64_to_i64(cursor.epoch, "head epoch")?,
                 u64_to_i64(cursor.sequence - 1, "previous head")?,
             ],

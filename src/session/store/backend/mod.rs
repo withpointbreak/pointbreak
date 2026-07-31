@@ -11,7 +11,7 @@
 mod local;
 #[cfg(test)]
 mod memory;
-#[cfg(any(test, all(feature = "bench", windows)))]
+#[cfg(any(test, windows))]
 mod ntfs_journal;
 
 use std::fmt::Debug;
@@ -22,6 +22,7 @@ use std::sync::Arc;
 pub(crate) use local::{LocalContentStore, LocalJournal, QualificationLocalJournal};
 #[cfg(test)]
 pub(crate) use memory::InMemoryStore;
+use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::session::derived_access::cursor::{CursorDelta, TruthCursor, TruthHead};
@@ -34,21 +35,22 @@ use crate::storage::{CreateOutcome, RemoveOutcome};
 /// not move; inequality means an exact audit is required. Platform-specific
 /// metadata stays inside the local backend. Equality proves only that the
 /// observable stayed equal; it is not itself a no-change guarantee.
-#[cfg(any(test, feature = "bench"))]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum JournalChangeStamp {
     Absent,
     Observed {
         identity_sha256: String,
         change_sha256: String,
+        entry_count: Option<u64>,
         native_cursor: Option<JournalNativeCursor>,
     },
 }
 
 /// Native state needed to continue an exact change observation without
 /// exposing platform layouts to consumers.
-#[cfg(any(test, feature = "bench"))]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct JournalNativeCursor {
     pub(super) journal_id: u64,
     pub(super) next_usn: i64,
@@ -56,7 +58,6 @@ pub(crate) struct JournalNativeCursor {
     pub(super) volume_serial_number: u64,
 }
 
-#[cfg(any(test, feature = "bench"))]
 #[cfg_attr(not(windows), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum JournalChangeVerdict {
@@ -66,23 +67,52 @@ pub(crate) enum JournalChangeVerdict {
 }
 
 /// Result of continuing a native change observation from a saved stamp.
-#[cfg(any(test, feature = "bench"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct JournalChangeCheck {
     pub(crate) after: JournalChangeStamp,
     pub(crate) verdict: JournalChangeVerdict,
     pub(crate) native_bytes_examined: u64,
     pub(crate) native_records_examined: u64,
+    pub(crate) relevant_file_references: Vec<u64>,
     pub(crate) mechanism: String,
 }
 
-#[cfg(any(test, feature = "bench"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+pub(crate) enum JournalCreatedTransitionVerdict {
+    Accepted,
+    Contended,
+    Indeterminate,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct JournalCreatedTransition {
+    pub(crate) after: JournalChangeStamp,
+    pub(crate) verdict: JournalCreatedTransitionVerdict,
+    pub(crate) mechanism: String,
+}
+
 impl JournalChangeStamp {
-    #[cfg_attr(windows, allow(dead_code))]
+    #[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
     pub(super) fn observed(identity: &[u8], change: &[u8]) -> Self {
         Self::Observed {
             identity_sha256: crate::canonical_hash::sha256_bytes_hex(identity),
             change_sha256: crate::canonical_hash::sha256_bytes_hex(change),
+            entry_count: None,
+            native_cursor: None,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn observed_with_entry_count(
+        identity: &[u8],
+        change: &[u8],
+        entry_count: u64,
+    ) -> Self {
+        Self::Observed {
+            identity_sha256: crate::canonical_hash::sha256_bytes_hex(identity),
+            change_sha256: crate::canonical_hash::sha256_bytes_hex(change),
+            entry_count: Some(entry_count),
             native_cursor: None,
         }
     }
@@ -96,6 +126,7 @@ impl JournalChangeStamp {
         Self::Observed {
             identity_sha256: crate::canonical_hash::sha256_bytes_hex(identity),
             change_sha256: crate::canonical_hash::sha256_bytes_hex(change),
+            entry_count: None,
             native_cursor: Some(native_cursor),
         }
     }
@@ -108,10 +139,20 @@ impl JournalChangeStamp {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    pub(super) fn entry_count(&self) -> Option<u64> {
+        match self {
+            Self::Absent => None,
+            Self::Observed { entry_count, .. } => *entry_count,
+        }
+    }
+
+    #[cfg(any(test, feature = "bench"))]
     pub(crate) fn continuation_token(&self) -> Option<String> {
         let Self::Observed {
             identity_sha256,
             change_sha256,
+            entry_count: _,
             native_cursor: Some(cursor),
         } = self
         else {
@@ -126,6 +167,7 @@ impl JournalChangeStamp {
         ))
     }
 
+    #[cfg(any(test, feature = "bench"))]
     pub(crate) fn from_continuation_token(token: &str) -> Option<Self> {
         let mut parts = token.split(',');
         if parts.next()? != "ntfs-v1" {
@@ -148,10 +190,12 @@ impl JournalChangeStamp {
         Some(Self::Observed {
             identity_sha256,
             change_sha256,
+            entry_count: None,
             native_cursor: Some(cursor),
         })
     }
 
+    #[cfg(any(test, feature = "bench"))]
     pub(crate) fn opaque_sha256(&self) -> String {
         match self {
             Self::Absent => crate::canonical_hash::sha256_bytes_hex(b"journal-change-stamp:absent"),
@@ -176,6 +220,7 @@ impl JournalChangeStamp {
             verdict,
             native_bytes_examined: 0,
             native_records_examined: 0,
+            relevant_file_references: Vec::new(),
             mechanism: "compare native directory observations".to_owned(),
         }
     }
@@ -284,10 +329,8 @@ pub(crate) trait Journal: Debug {
     /// directory entries or opening a carrier. This is a conservative drift
     /// signal only; a changed value never proves which event changed or that any
     /// event is valid.
-    #[cfg(any(test, feature = "bench"))]
     fn change_stamp(&self) -> Result<JournalChangeStamp>;
 
-    #[cfg(any(test, feature = "bench"))]
     fn changes_since(&self, before: &JournalChangeStamp) -> Result<JournalChangeCheck> {
         Ok(JournalChangeStamp::compared(before, self.change_stamp()?))
     }

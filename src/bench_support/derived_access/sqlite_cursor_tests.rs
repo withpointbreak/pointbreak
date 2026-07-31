@@ -54,12 +54,19 @@ fn physical_cursor_ledger_matches_reference_for_unique_equal_and_conflicting_wri
     let mut reference = ReferenceCursorLedger::new("store:test", 1);
     let first = event(1);
     let first_witness = event_witness(&first);
+    let initial_authority = ledger.authority_snapshot().expect("initial authority");
 
     assert_eq!(
         ledger.append_event(&first, "attempt:1").expect("create"),
         reference
             .append(&first.idempotency_key, &first_witness, "attempt:1")
             .expect("reference create")
+    );
+    let created_authority = ledger.authority_snapshot().expect("created authority");
+    assert_eq!(created_authority.head.cursor, TruthCursor::new(1, 1));
+    assert_ne!(
+        created_authority.change_stamp,
+        initial_authority.change_stamp
     );
     assert_eq!(
         ledger
@@ -68,6 +75,10 @@ fn physical_cursor_ledger_matches_reference_for_unique_equal_and_conflicting_wri
         reference
             .append(&first.idempotency_key, &first_witness, "attempt:2")
             .expect("reference equal duplicate")
+    );
+    assert_eq!(
+        ledger.authority_snapshot().expect("duplicate authority"),
+        created_authority
     );
 
     let mut conflict = first.clone();
@@ -81,6 +92,10 @@ fn physical_cursor_ledger_matches_reference_for_unique_equal_and_conflicting_wri
         reference
             .append(&conflict.idempotency_key, &conflict_witness, "attempt:3",)
             .expect("reference conflicting duplicate")
+    );
+    assert_eq!(
+        ledger.authority_snapshot().expect("conflict authority"),
+        created_authority
     );
     assert_eq!(ledger.head().expect("head"), reference.head());
     assert_eq!(
@@ -99,7 +114,7 @@ fn physical_cursor_ledger_matches_reference_for_unique_equal_and_conflicting_wri
         inventory.profile_id,
         "pointbreak.sqlite-derived-access-cursor.v1"
     );
-    assert_eq!(inventory.schema_version, 3);
+    assert_eq!(inventory.schema_version, 4);
     assert_eq!(inventory.epoch, 1);
     assert_eq!(inventory.head_sequence, 1);
     assert_eq!(inventory.receipt_count, 1);

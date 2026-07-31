@@ -346,18 +346,11 @@ impl DerivedHistoryAccess {
         retry_current_transition: bool,
     ) -> Result<CurrentRead, String> {
         let DerivedHistoryMode::Active {
-            lifecycle,
-            current,
-            backend,
-            ..
+            lifecycle, current, ..
         } = &self.mode
         else {
             return Err("derived history is disabled".to_owned());
         };
-        let truth_count = backend
-            .journal()
-            .head_marker()
-            .map_err(|error| error.to_string())?;
         let published_generation_id = match lifecycle.published_generation_id() {
             Ok(generation_id) => generation_id,
             Err(error) => {
@@ -375,8 +368,16 @@ impl DerivedHistoryAccess {
             *guard = None;
         }
         if let Some(existing) = guard.as_ref() {
-            let head = match existing.service().truth_head() {
-                Ok(head) => head.cursor,
+            let head = match lifecycle.validate_current_authority(existing.service()) {
+                Ok(authority) => authority.head.cursor,
+                Err(LifecycleError::RebuildRequired(detail)) => {
+                    drop(guard);
+                    self.request_background_rebuild();
+                    return Ok(CurrentRead::Unavailable(status(
+                        DerivedHistoryAvailability::RebuildRequired,
+                        detail,
+                    )));
+                }
                 Err(error) => {
                     *guard = None;
                     drop(guard);
@@ -399,16 +400,8 @@ impl DerivedHistoryAccess {
                     )));
                 }
             };
-            if head.sequence == truth_count && applied == head {
+            if applied == head {
                 return Ok(CurrentRead::Ready(Arc::clone(existing)));
-            }
-            if head.sequence != truth_count {
-                drop(guard);
-                self.request_background_rebuild();
-                return Ok(CurrentRead::Unavailable(status(
-                    DerivedHistoryAvailability::RebuildRequired,
-                    "derived cursor does not exactly cover authoritative truth",
-                )));
             }
             drop(guard);
             return Ok(CurrentRead::Unavailable(status(
@@ -1675,6 +1668,7 @@ mod tests {
         let counters = scope.snapshot();
         assert_eq!(counters.counters.carrier_opens, 2);
         assert_eq!(counters.counters.event_decodes, 2);
+        assert_eq!(counters.counters.directory_entries_walked, 0);
         assert_eq!(
             counters
                 .capacity_ownership

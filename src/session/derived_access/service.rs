@@ -15,7 +15,7 @@ use crate::error::Result as ShoreResult;
 use crate::model::RevisionId;
 use crate::session::EventWriteOutcome;
 use crate::session::derived_access::cursor::{
-    AppendResolution, CursorDelta, TruthCursor, TruthHead,
+    AppendResolution, CursorDelta, TruthAuthoritySnapshot, TruthCursor, TruthHead,
 };
 use crate::session::derived_access::locator::{
     ChronologicalWindowRequest, HydratedWindow, LocatorModelError, LocatorRead, LocatorRow,
@@ -27,6 +27,7 @@ use crate::session::derived_access::semantic::{
     HydratedRevisionDetail, SemanticFact, SemanticModelError, SemanticSnapshot,
 };
 use crate::session::event::{ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload};
+use crate::session::store::backend::JournalChangeStamp;
 
 const DEFAULT_DELTA_LIMIT: usize = 512;
 type DerivedRows = (Vec<LocatorRow>, Vec<SemanticFact>, Vec<ProductHistoryFact>);
@@ -351,6 +352,23 @@ impl DerivedAccessService {
 
     pub(crate) fn truth_head(&self) -> Result<TruthHead, DerivedAccessServiceError> {
         Ok(self.cursor.head()?)
+    }
+
+    pub(crate) fn truth_authority_snapshot(
+        &self,
+    ) -> Result<TruthAuthoritySnapshot, DerivedAccessServiceError> {
+        Ok(self.cursor.authority_snapshot()?)
+    }
+
+    pub(crate) fn bind_truth_authority_stamp_locked(
+        &self,
+        expected: TruthCursor,
+        authority_stamp: &JournalChangeStamp,
+        writer_lock: &StoreWriterLock,
+    ) -> Result<(), DerivedAccessServiceError> {
+        Ok(self
+            .cursor
+            .bind_authority_stamp_locked(expected, authority_stamp, writer_lock)?)
     }
 
     pub(crate) fn locator_checkpoint(&self) -> Result<TruthCursor, DerivedAccessServiceError> {

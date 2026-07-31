@@ -11,9 +11,11 @@ use serde::{Deserialize, Serialize};
 
 use super::product_contract::DerivedAccessProfile;
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
+use crate::session::store::backend::JournalChangeStamp;
 
 const GENERATION_DESCRIPTOR: &str = "generation.json";
-const GENERATION_SCHEMA: &str = "pointbreak.derived-access-generation.v1";
+const GENERATION_SCHEMA: &str = "pointbreak.derived-access-generation.v2";
+const LEGACY_GENERATION_SCHEMA: &str = "pointbreak.derived-access-generation.v1";
 const PUBLICATION_SCHEMA: &str = "pointbreak.derived-access-publication.v1";
 const PROGRESS_SCHEMA: &str = "pointbreak.derived-access-generation-progress.v1";
 const PROGRESS_INTERVAL: usize = 256;
@@ -36,6 +38,7 @@ pub(crate) struct GenerationDescriptor {
     pub(crate) profile: DerivedAccessProfile,
     pub(crate) epoch: u64,
     pub(crate) head_sequence: u64,
+    pub(crate) authority_stamp: JournalChangeStamp,
     pub(crate) semantic_receipt: String,
 }
 
@@ -80,6 +83,8 @@ pub(crate) enum GenerationError {
     Io { path: PathBuf, message: String },
     #[error("derived generation metadata at {path} is invalid: {message}")]
     Metadata { path: PathBuf, message: String },
+    #[error("derived generation metadata at {path} uses legacy schema {schema}")]
+    LegacyDescriptor { path: PathBuf, schema: String },
     #[error("derived generation publication sequence overflow")]
     SequenceOverflow,
     #[error("another derived generation rebuild is already running")]
@@ -477,7 +482,19 @@ impl GenerationLayout {
                 "descriptor hash does not match publication".to_owned(),
             ));
         }
-        let descriptor: GenerationDescriptor = serde_json::from_slice(&bytes)
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|error| metadata_error(&path, error.to_string()))?;
+        let schema = value
+            .get("schema")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| metadata_error(&path, "descriptor schema is absent".to_owned()))?;
+        if schema == LEGACY_GENERATION_SCHEMA {
+            return Err(GenerationError::LegacyDescriptor {
+                path,
+                schema: schema.to_owned(),
+            });
+        }
+        let descriptor: GenerationDescriptor = serde_json::from_value(value)
             .map_err(|error| metadata_error(&path, error.to_string()))?;
         if descriptor.schema != GENERATION_SCHEMA
             || descriptor.generation_id != publication.generation_id
@@ -636,6 +653,7 @@ impl GenerationDescriptor {
         profile: DerivedAccessProfile,
         epoch: u64,
         head_sequence: u64,
+        authority_stamp: JournalChangeStamp,
         semantic_receipt: impl Into<String>,
     ) -> Self {
         Self {
@@ -645,6 +663,7 @@ impl GenerationDescriptor {
             profile,
             epoch,
             head_sequence,
+            authority_stamp,
             semantic_receipt: semantic_receipt.into(),
         }
     }

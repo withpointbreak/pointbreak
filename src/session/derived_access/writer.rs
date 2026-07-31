@@ -284,7 +284,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{AppendCrashPoint, DerivedWriteCoordinator};
+    use super::{AppendCrashPoint, DerivedWriteCoordinator, catch_up_after_publication};
     use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
     use crate::crypto::SignerId;
     use crate::model::JournalId;
@@ -380,6 +380,45 @@ mod tests {
     }
 
     #[test]
+    fn out_of_band_create_during_stamp_publication_cannot_be_absorbed() {
+        let root = TempDir::new().unwrap();
+        let truth = EventStore::open(root.path());
+        truth.record_event_once(&event(0)).unwrap();
+        let lifecycle = active_lifecycle(&root);
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let coordinator =
+            DerivedWriteCoordinator::new(active_lifecycle(&root)).expect("current generation");
+        let raced = std::cell::Cell::new(false);
+
+        let outcome = coordinator
+            .record_event_once_with_hook(
+                &event(1),
+                |point| {
+                    if point == AppendCrashPoint::AfterEventPublication && !raced.replace(true) {
+                        assert_eq!(
+                            truth.record_event_once(&event(2)).unwrap(),
+                            EventWriteOutcome::Created
+                        );
+                    }
+                },
+                || truth.record_event_once(&event(1)),
+                catch_up_after_publication,
+            )
+            .unwrap();
+
+        assert_eq!(outcome, EventWriteOutcome::Created);
+        assert_ne!(
+            active_lifecycle(&root).status().unwrap().availability,
+            DerivedAccessAvailability::Current
+        );
+        assert_eq!(truth.list_events().unwrap().len(), 3);
+        assert_eq!(
+            coordinator.take_diagnostics()[0].code,
+            "derived_access_receipt_finalization_failed"
+        );
+    }
+
+    #[test]
     fn production_event_publishers_use_the_resolved_event_store_factory() {
         const WRITERS: &[(&str, &str)] = &[
             ("capture", include_str!("../workflow/capture.rs")),
@@ -431,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_admission_audits_directory_once_and_append_does_not_repeat_it() {
+    fn bounded_admission_and_append_do_not_walk_event_directory_entries() {
         let root = TempDir::new().unwrap();
         let truth = EventStore::open(root.path());
         for index in 0..3 {
@@ -444,7 +483,7 @@ mod tests {
             let _guard = admission.enter();
             DerivedWriteCoordinator::new(active_lifecycle(&root)).unwrap()
         };
-        assert_eq!(admission.snapshot().counters.directory_entries_walked, 3);
+        assert_eq!(admission.snapshot().counters.directory_entries_walked, 0);
 
         let append = counting_scope('b');
         {
