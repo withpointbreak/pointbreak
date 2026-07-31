@@ -6,9 +6,10 @@
 use std::process::{Command, ExitCode};
 
 use pointbreak::bench_support::derived_access::{
-    DERIVED_ACCESS_PRODUCT_CONTRACT_MODE_V1, DERIVED_ACCESS_PRODUCT_CONTRACT_SMOKE_MODE_V1,
-    DERIVED_ACCESS_PRODUCT_CONTRACT_VERIFY_MODE_V1, DERIVED_ACCESS_READINESS_CONTRACT_MODE_V1,
-    DERIVED_ACCESS_READINESS_CONTRACT_SMOKE_MODE_V1,
+    DERIVED_ACCESS_AUTHORITY_STAMP_CHILD_MODE_V1, DERIVED_ACCESS_AUTHORITY_STAMP_MODE_V1,
+    DERIVED_ACCESS_AUTHORITY_STAMP_VERIFY_MODE_V1, DERIVED_ACCESS_PRODUCT_CONTRACT_MODE_V1,
+    DERIVED_ACCESS_PRODUCT_CONTRACT_SMOKE_MODE_V1, DERIVED_ACCESS_PRODUCT_CONTRACT_VERIFY_MODE_V1,
+    DERIVED_ACCESS_READINESS_CONTRACT_MODE_V1, DERIVED_ACCESS_READINESS_CONTRACT_SMOKE_MODE_V1,
     DERIVED_ACCESS_READINESS_CONTRACT_VERIFY_MODE_V1,
     QUALIFICATION_DERIVED_ACCESS_CONTRACT_MODE_V1, QUALIFICATION_DERIVED_ACCESS_FRAGMENT_MODE_V1,
     QUALIFICATION_DERIVED_ACCESS_HELP_MODE_V1,
@@ -30,8 +31,8 @@ use pointbreak::bench_support::derived_access::{
     derived_access_readiness_contract_smoke_json_v1,
     derived_access_readiness_contract_verify_json_v1,
     preflight_qualification_derived_access_retained_root_v1,
-    qualification_derived_access_contract_v1_publication,
-    run_qualification_derived_access_lifecycle_child_v1,
+    qualification_derived_access_contract_v1_publication, run_authority_stamp_child_v1,
+    run_authority_stamp_native_probe_v1, run_qualification_derived_access_lifecycle_child_v1,
     run_qualification_derived_access_lifecycle_v1,
     run_qualification_derived_access_longitudinal_smoke_at_v1,
     run_qualification_derived_access_longitudinal_smoke_v1,
@@ -41,7 +42,7 @@ use pointbreak::bench_support::derived_access::{
     run_qualification_derived_access_resource_child_v1,
     run_qualification_derived_access_resource_v1,
     run_qualification_derived_access_restart_child_v1, run_qualification_derived_access_scale_v1,
-    verify_qualification_derived_access_package_v1,
+    verify_authority_stamp_native_receipts_v1, verify_qualification_derived_access_package_v1,
 };
 use pointbreak::bench_support::foundation::{
     DisposableBundleDestinationV2, ExactBundleClosureV2, ExactBundleFailurePointV2,
@@ -97,13 +98,16 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 const USAGE: &str = "\
-Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--generated-workload-smoke|--longitudinal-contract|--longitudinal-help|--longitudinal-smoke|--longitudinal-carry-forward|--longitudinal-carry-forward-smoke|--longitudinal-verify-package|--longitudinal-verify-package-receipt|--longitudinal-verify-carry-forward|--derived-access-product-contract|--derived-access-product-contract-verify|--derived-access-product-contract-smoke|--derived-access-readiness-contract|--derived-access-readiness-contract-verify|--derived-access-readiness-contract-smoke|--derived-access-contract|--derived-access-help|--derived-access-smoke|--derived-access-lifecycle|--derived-access-retained-preflight|--derived-access-retained-bootstrap|--derived-access-scale-evidence|--derived-access-resource-evidence|--derived-access-fragment|--derived-access-package|--derived-access-verify-package|--loose-baseline-smoke|--loose-baseline-evidence|--prospective-contract|--content-only-contract|--transfer-smoke|--sqlite-smoke|--segments-smoke|--lmdb-proof-open-close|--lmdb-smoke|--lmdb-lifecycle-smoke|--lmdb-prospective-smoke|--lmdb-prospective-evidence|--lmdb-prospective-package|--qualification-smoke|--qualification-evidence|--qualification-diagnostics|--qualification-contract|--qualification-final-evidence|--qualification-package|--help]\n\
+Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--generated-workload-smoke|--longitudinal-contract|--longitudinal-help|--longitudinal-smoke|--longitudinal-carry-forward|--longitudinal-carry-forward-smoke|--longitudinal-verify-package|--longitudinal-verify-package-receipt|--longitudinal-verify-carry-forward|--derived-access-product-contract|--derived-access-product-contract-verify|--derived-access-product-contract-smoke|--derived-access-readiness-contract|--derived-access-readiness-contract-verify|--derived-access-readiness-contract-smoke|--derived-access-authority-stamp|--derived-access-authority-stamp-verify|--derived-access-contract|--derived-access-help|--derived-access-smoke|--derived-access-lifecycle|--derived-access-retained-preflight|--derived-access-retained-bootstrap|--derived-access-scale-evidence|--derived-access-resource-evidence|--derived-access-fragment|--derived-access-package|--derived-access-verify-package|--loose-baseline-smoke|--loose-baseline-evidence|--prospective-contract|--content-only-contract|--transfer-smoke|--sqlite-smoke|--segments-smoke|--lmdb-proof-open-close|--lmdb-smoke|--lmdb-lifecycle-smoke|--lmdb-prospective-smoke|--lmdb-prospective-evidence|--lmdb-prospective-package|--qualification-smoke|--qualification-evidence|--qualification-diagnostics|--qualification-contract|--qualification-final-evidence|--qualification-package|--help]\n\
        --longitudinal-carry-forward --longitudinal-carry-forward-request=<path>\n\
        --longitudinal-verify-package --longitudinal-package-root=<path>\n\
        --longitudinal-verify-package-receipt --longitudinal-package-root=<path>\n\
        --longitudinal-verify-carry-forward --longitudinal-authority-package=<path> --longitudinal-package-root=<path>\n\
        --derived-access-smoke [--derived-access-tier=D0-128|L1|L7] [--derived-access-root=<empty-path>]\n\
                               [--derived-access-request=<path>]\n\
+       --derived-access-authority-stamp --derived-access-source=<clean-checkout> --derived-access-root=<empty-path> --derived-access-output=<receipt.json>\n\
+       --derived-access-authority-stamp-verify --derived-access-input=<apfs.json> --derived-access-input=<ntfs.json>\n\
+       (authority-stamp modes require --features longitudinal-counting)\n\
        --derived-access-verify-package --derived-access-package-root=<path>\n\
        --qualification-diagnostics [--qualification-pair-order=alternating|candidate_then_baseline|baseline_then_candidate]\n\
        --qualification-package --qualification-input=<path> [--qualification-input=<path> ...]\n\
@@ -222,6 +226,33 @@ struct ReceiptAlternativeMetadataV1 {
 
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == DERIVED_ACCESS_AUTHORITY_STAMP_CHILD_MODE_V1)
+    {
+        let actions = arguments
+            .iter()
+            .filter_map(|argument| argument.strip_prefix("--derived-access-authority-action="))
+            .collect::<Vec<_>>();
+        let roots = arguments
+            .iter()
+            .filter_map(|argument| argument.strip_prefix("--derived-access-root="))
+            .collect::<Vec<_>>();
+        if actions.len() != 1 || roots.len() != 1 {
+            eprintln!("authority-stamp child requires one action and one root");
+            return ExitCode::from(2);
+        }
+        return match run_authority_stamp_child_v1(actions[0], std::path::Path::new(roots[0])) {
+            Ok(output) => {
+                println!("{output}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("store foundation authority-stamp child stopped: {error}");
+                ExitCode::from(1)
+            }
+        };
+    }
     if arguments
         .first()
         .is_some_and(|argument| argument == QUALIFICATION_DERIVED_ACCESS_LIFECYCLE_CHILD_MODE_V1)
@@ -398,6 +429,8 @@ fn main() -> ExitCode {
         DERIVED_ACCESS_READINESS_CONTRACT_MODE_V1,
         DERIVED_ACCESS_READINESS_CONTRACT_VERIFY_MODE_V1,
         DERIVED_ACCESS_READINESS_CONTRACT_SMOKE_MODE_V1,
+        DERIVED_ACCESS_AUTHORITY_STAMP_MODE_V1,
+        DERIVED_ACCESS_AUTHORITY_STAMP_VERIFY_MODE_V1,
         QUALIFICATION_DERIVED_ACCESS_CONTRACT_MODE_V1,
         QUALIFICATION_DERIVED_ACCESS_FRAGMENT_MODE_V1,
         QUALIFICATION_DERIVED_ACCESS_HELP_MODE_V1,
@@ -497,6 +530,8 @@ fn main() -> ExitCode {
             && argument != DERIVED_ACCESS_READINESS_CONTRACT_MODE_V1
             && argument != DERIVED_ACCESS_READINESS_CONTRACT_VERIFY_MODE_V1
             && argument != DERIVED_ACCESS_READINESS_CONTRACT_SMOKE_MODE_V1
+            && argument != DERIVED_ACCESS_AUTHORITY_STAMP_MODE_V1
+            && argument != DERIVED_ACCESS_AUTHORITY_STAMP_VERIFY_MODE_V1
             && argument != QUALIFICATION_DERIVED_ACCESS_CONTRACT_MODE_V1
             && argument != QUALIFICATION_DERIVED_ACCESS_FRAGMENT_MODE_V1
             && argument != QUALIFICATION_DERIVED_ACCESS_HELP_MODE_V1
@@ -539,6 +574,8 @@ fn main() -> ExitCode {
             && !argument.starts_with("--derived-access-input=")
             && !argument.starts_with("--derived-access-package-root=")
             && !argument.starts_with("--derived-access-root=")
+            && !argument.starts_with("--derived-access-source=")
+            && !argument.starts_with("--derived-access-output=")
     }) || requested_modes > 1
         || (!diagnostics_requested && diagnostic_pair_order.is_some())
         || (!package_requested && !package_inputs.is_empty())
@@ -581,6 +618,45 @@ fn main() -> ExitCode {
                 ExitCode::from(1)
             }
         };
+    }
+
+    if arguments
+        .iter()
+        .any(|argument| argument == DERIVED_ACCESS_AUTHORITY_STAMP_MODE_V1)
+    {
+        let roots = arguments
+            .iter()
+            .filter_map(|argument| argument.strip_prefix("--derived-access-root="))
+            .collect::<Vec<_>>();
+        let sources = arguments
+            .iter()
+            .filter_map(|argument| argument.strip_prefix("--derived-access-source="))
+            .collect::<Vec<_>>();
+        let outputs = arguments
+            .iter()
+            .filter_map(|argument| argument.strip_prefix("--derived-access-output="))
+            .collect::<Vec<_>>();
+        if roots.len() != 1 || sources.len() != 1 || outputs.len() != 1 {
+            eprintln!("authority-stamp probe requires one source, root, and output");
+            return ExitCode::from(2);
+        }
+        return report_derived_access_smoke(run_authority_stamp_native_probe_v1(
+            std::path::Path::new(sources[0]),
+            std::path::Path::new(roots[0]),
+            std::path::Path::new(outputs[0]),
+        ));
+    }
+
+    if arguments
+        .iter()
+        .any(|argument| argument == DERIVED_ACCESS_AUTHORITY_STAMP_VERIFY_MODE_V1)
+    {
+        let inputs = arguments
+            .iter()
+            .filter_map(|argument| argument.strip_prefix("--derived-access-input="))
+            .map(std::path::PathBuf::from)
+            .collect::<Vec<_>>();
+        return report_derived_access_smoke(verify_authority_stamp_native_receipts_v1(&inputs));
     }
 
     if arguments

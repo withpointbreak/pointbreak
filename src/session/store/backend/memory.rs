@@ -11,10 +11,10 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use super::{ContentStore, Journal, JournalEntry};
+use super::{ContentStore, Journal, JournalChangeStamp, JournalEntry};
 use crate::error::{Result, ShoreError};
 use crate::session::store::event_store::event_filename_stem;
 use crate::storage::{CreateOutcome, RemoveOutcome};
@@ -24,7 +24,7 @@ use crate::storage::{CreateOutcome, RemoveOutcome};
 /// `content_ref`. A single `Arc<InMemoryStore>` hands out journal and content
 /// handles that all read and write these same maps, so a test can hold one
 /// handle to inject raw bytes while the wrapper reads through another.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct InMemoryStore {
     events: Mutex<HashMap<String, Vec<u8>>>,
     blobs: Mutex<HashMap<String, Vec<u8>>>,
@@ -35,6 +35,23 @@ pub(crate) struct InMemoryStore {
     /// How many times any journal handle over this store has read an event's
     /// bytes. Lets a test prove `head_marker` reads no event bytes.
     read_event_bytes_calls: AtomicUsize,
+    stamp_identity: u64,
+    stamp_generation: AtomicU64,
+}
+
+static NEXT_STAMP_IDENTITY: AtomicU64 = AtomicU64::new(1);
+
+impl Default for InMemoryStore {
+    fn default() -> Self {
+        Self {
+            events: Mutex::new(HashMap::new()),
+            blobs: Mutex::new(HashMap::new()),
+            list_event_entries_calls: AtomicUsize::new(0),
+            read_event_bytes_calls: AtomicUsize::new(0),
+            stamp_identity: NEXT_STAMP_IDENTITY.fetch_add(1, Ordering::Relaxed),
+            stamp_generation: AtomicU64::new(0),
+        }
+    }
 }
 
 impl InMemoryStore {
@@ -84,6 +101,7 @@ impl Journal for InMemoryJournal {
         match lock(&self.store.events).entry(idempotency_key.to_owned()) {
             Entry::Vacant(slot) => {
                 slot.insert(bytes.to_vec());
+                self.store.stamp_generation.fetch_add(1, Ordering::Relaxed);
                 Ok(CreateOutcome::Created)
             }
             Entry::Occupied(_) => Ok(CreateOutcome::AlreadyExists),
@@ -129,11 +147,27 @@ impl Journal for InMemoryJournal {
         Ok(lock(&self.store.events).len() as u64)
     }
 
+    fn change_stamp(&self) -> Result<JournalChangeStamp> {
+        Ok(JournalChangeStamp::observed(
+            &self.store.stamp_identity.to_le_bytes(),
+            &self
+                .store
+                .stamp_generation
+                .load(Ordering::Relaxed)
+                .to_le_bytes(),
+        ))
+    }
+
     #[cfg(test)]
     fn insert_raw(&self, idempotency_key: &str, bytes: &[u8]) -> Result<()> {
         // A raw map insert, overwriting any existing entry — the create-if-absent
         // dedup is deliberately skipped.
-        lock(&self.store.events).insert(idempotency_key.to_owned(), bytes.to_vec());
+        let created = lock(&self.store.events)
+            .insert(idempotency_key.to_owned(), bytes.to_vec())
+            .is_none();
+        if created {
+            self.store.stamp_generation.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(())
     }
 }

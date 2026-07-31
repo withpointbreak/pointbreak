@@ -25,6 +25,45 @@ use crate::error::Result;
 use crate::session::derived_access::cursor::{CursorDelta, TruthCursor, TruthHead};
 use crate::storage::{CreateOutcome, RemoveOutcome};
 
+/// Opaque, comparable observation of the local journal directory.
+///
+/// The value is deliberately not an event count or event-set proof. Consumers
+/// may only compare two observations: equality means the native observable did
+/// not move; inequality means an exact audit is required. Platform-specific
+/// metadata stays inside the local backend. Equality proves only that the
+/// observable stayed equal; it is not itself a no-change guarantee.
+#[cfg(any(test, feature = "bench"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum JournalChangeStamp {
+    Absent,
+    Observed {
+        identity_sha256: String,
+        change_sha256: String,
+    },
+}
+
+#[cfg(any(test, feature = "bench"))]
+impl JournalChangeStamp {
+    pub(super) fn observed(identity: &[u8], change: &[u8]) -> Self {
+        Self::Observed {
+            identity_sha256: crate::canonical_hash::sha256_bytes_hex(identity),
+            change_sha256: crate::canonical_hash::sha256_bytes_hex(change),
+        }
+    }
+
+    pub(crate) fn opaque_sha256(&self) -> String {
+        match self {
+            Self::Absent => crate::canonical_hash::sha256_bytes_hex(b"journal-change-stamp:absent"),
+            Self::Observed {
+                identity_sha256,
+                change_sha256,
+            } => crate::canonical_hash::sha256_bytes_hex(
+                format!("journal-change-stamp:v1:{identity_sha256}:{change_sha256}").as_bytes(),
+            ),
+        }
+    }
+}
+
 /// The closed set of durable-storage backends, and the one place that dispatches
 /// to a concrete impl. A resolution carries a `StoreBackend` handle and the
 /// event/content wrappers are built from it, so the selection made once at the
@@ -115,6 +154,13 @@ pub(crate) trait Journal: Debug {
     /// entry — so the hash stays the authoritative confirm stamp on the full-read
     /// surfaces.
     fn head_marker(&self) -> Result<u64>;
+
+    /// Capture the backend's O(1) local change observable without enumerating
+    /// directory entries or opening a carrier. This is a conservative drift
+    /// signal only; a changed value never proves which event changed or that any
+    /// event is valid.
+    #[cfg(any(test, feature = "bench"))]
+    fn change_stamp(&self) -> Result<JournalChangeStamp>;
 
     /// Test-only tamper hook: write `bytes` at the slot this backend would use
     /// for `idempotency_key`, bypassing create-side validation and dedup
@@ -317,6 +363,51 @@ mod tests {
             journal.insert_raw("k:a", b"edited-in-place").unwrap();
 
             assert_eq!(journal.head_marker().unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn journal_change_stamp_detects_created_carriers_without_proving_their_truth() {
+        for (_guard, backend) in each_backend() {
+            let journal = backend.journal();
+            let absent = journal.change_stamp().unwrap();
+
+            journal.create_event_once("k:a", b"first").unwrap();
+            let created = journal.change_stamp().unwrap();
+            assert_ne!(created, absent, "a created carrier changes the observation");
+
+            journal.create_event_once("k:a", b"different").unwrap();
+            assert_eq!(
+                journal.change_stamp().unwrap(),
+                created,
+                "a duplicate attempt that creates no carrier leaves the stamp stable"
+            );
+
+            journal.create_event_once("k:b", b"second").unwrap();
+            assert_ne!(
+                journal.change_stamp().unwrap(),
+                created,
+                "a second created carrier changes the observation again"
+            );
+        }
+    }
+
+    #[test]
+    fn journal_change_stamp_has_an_explicit_existing_carrier_overwrite_non_claim() {
+        for (_guard, backend) in each_backend() {
+            let journal = backend.journal();
+            journal.create_event_once("k:a", b"original").unwrap();
+            let before = journal.change_stamp().unwrap();
+
+            journal.insert_raw("k:a", b"tampered").unwrap();
+
+            let after = journal.change_stamp().unwrap();
+            let _observed_stamp_change = before != after;
+            assert_eq!(
+                journal.read_event_bytes("k:a").unwrap(),
+                Some(b"tampered".to_vec()),
+                "the selected-carrier read still exposes bytes for validation"
+            );
         }
     }
 

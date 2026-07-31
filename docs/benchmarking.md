@@ -603,6 +603,46 @@ The sole success outcome,
 `survives_apfs_falsifier`, authorizes only a later decision; it does not select or activate storage, authorize
 migration, persist search/body material, change release promises, or make derived data authoritative.
 
+### Native authority-stamp falsifier
+
+The developer-only authority-stamp mode tests whether one O(1) observation of the loose journal's local
+`events/` directory can detect every supported append without enumerating directory entries or opening an
+event carrier. It exercises the same 21-scenario matrix on native macOS/APFS and Windows/NTFS, including
+governed and out-of-band creates, duplicate no-create attempts, rapid mutations, crash boundaries, aliases,
+temporary files, and an explicit in-place-overwrite non-claim. A changed stamp is only a reason to perform a
+later exact audit; it never proves that an event is present or valid.
+
+Run each native receipt from the same exact clean commit. The probe root must be absent or empty, and the
+output must be outside source control:
+
+```sh
+cargo bench --locked --features longitudinal-counting --bench store_foundation -- \
+  --derived-access-authority-stamp \
+  --derived-access-source=/absolute/path/to/clean-pointbreak \
+  --derived-access-root=/absolute/path/to/empty-native-probe \
+  --derived-access-output=/absolute/path/to/native-receipt.json
+```
+
+The completion-last `pointbreak.derived-access-authority-stamp-native-receipt.v1` document is structurally
+valid whether the candidate passes or exposes a falsifier. `allScenariosAccepted: false` is a terminal native
+failure, not missing evidence. Existing-carrier overwrite remains outside the stamp guarantee and is accepted
+only when selected-carrier validation detects the injected corruption. The scope is accidental and
+mixed-version publication detection, not resistance to malicious tampering.
+
+After copying both receipts to one host, verify their hashes and common source/tree/lock authority read-only:
+
+```sh
+cargo bench --locked --features longitudinal-counting --bench store_foundation -- \
+  --derived-access-authority-stamp-verify \
+  --derived-access-input=/absolute/path/to/macos-apfs.json \
+  --derived-access-input=/absolute/path/to/windows-ntfs.json
+```
+
+Verification emits `pointbreak.derived-access-authority-stamp-native-package.v1` only when both native
+matrices pass. A structurally valid rejected receipt makes package verification fail closed. These modes use
+only disposable public fixtures and do not route product reads or writers, create derived production state,
+select a default, migrate a store, or read `POINTBREAK_QUALIFICATION_CORPUS`.
+
 ### Derived-access qualification runner
 
 The runner exercises a qualification-only SQLite/WAL adapter. It does not change the Inspector, CLI,

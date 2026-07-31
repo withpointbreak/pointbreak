@@ -1,4 +1,5 @@
 mod adapter;
+mod authority_stamp;
 mod contract;
 mod evidence;
 mod lifecycle;
@@ -14,6 +15,7 @@ pub(crate) mod sqlite_locator {
     pub(crate) use crate::session::derived_access::sqlite::*;
 }
 
+pub use authority_stamp::*;
 pub use contract::*;
 pub use evidence::*;
 pub use lifecycle::*;
