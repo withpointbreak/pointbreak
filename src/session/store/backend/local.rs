@@ -73,11 +73,21 @@ impl LocalJournal {
     ) -> Result<JournalCreatedTransition> {
         #[cfg(target_os = "linux")]
         {
-            let verdict = observation.watcher.finish()?;
+            let mut watcher = observation.watcher;
+            // Drain once before capturing the persisted stamp and once after.
+            // A create before the stamp is therefore classified in this
+            // transition; a create after the stamp is either observed by the
+            // second drain (conservatively contended) or remains newer than the
+            // saved stamp for the next ordinary authority continuation.
+            watcher.drain()?;
+            let after = self.change_stamp()?;
+            watcher.drain()?;
             Ok(JournalCreatedTransition {
-                after: self.change_stamp()?,
-                verdict,
-                mechanism: "inotify interval around one governed carrier publication".to_owned(),
+                after,
+                verdict: watcher.verdict(),
+                mechanism:
+                    "inotify interval with pre/post-stamp drains around one governed carrier publication"
+                        .to_owned(),
             })
         }
         #[cfg(not(target_os = "linux"))]
@@ -148,6 +158,9 @@ impl LocalJournal {
 struct LinuxCreateWatcher {
     descriptor: std::os::fd::OwnedFd,
     expected_filename: String,
+    observed_expected: bool,
+    contended: bool,
+    indeterminate: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -191,13 +204,15 @@ impl LinuxCreateWatcher {
         Ok(Self {
             descriptor,
             expected_filename,
+            observed_expected: false,
+            contended: false,
+            indeterminate: false,
         })
     }
 
-    fn finish(self) -> Result<JournalCreatedTransitionVerdict> {
+    fn drain(&mut self) -> Result<()> {
         use std::os::fd::AsRawFd as _;
 
-        let mut observed_expected = false;
         let mut buffer = [0_u8; 16 * 1024];
         loop {
             // SAFETY: the descriptor is valid and `buffer` is writable for its
@@ -226,7 +241,8 @@ impl LinuxCreateWatcher {
             while offset < read {
                 let header_size = std::mem::size_of::<libc::inotify_event>();
                 if read - offset < header_size {
-                    return Ok(JournalCreatedTransitionVerdict::Indeterminate);
+                    self.indeterminate = true;
+                    return Ok(());
                 }
                 // SAFETY: the complete header is present and an unaligned read
                 // produces an owned value.
@@ -239,10 +255,13 @@ impl LinuxCreateWatcher {
                     ShoreError::Message("inotify event length overflowed".to_owned())
                 })?;
                 if event_len > read - offset {
-                    return Ok(JournalCreatedTransitionVerdict::Indeterminate);
+                    self.indeterminate = true;
+                    return Ok(());
                 }
                 if event.mask & libc::IN_Q_OVERFLOW != 0 {
-                    return Ok(JournalCreatedTransitionVerdict::Indeterminate);
+                    self.indeterminate = true;
+                    offset += event_len;
+                    continue;
                 }
                 let name_bytes = &buffer[offset + header_size..offset + event_len];
                 let name_end = name_bytes
@@ -255,18 +274,24 @@ impl LinuxCreateWatcher {
                     )
                 })?;
                 if name == self.expected_filename {
-                    observed_expected = true;
+                    self.observed_expected = true;
                 } else if !is_temp_file_path(Path::new(name)) {
-                    return Ok(JournalCreatedTransitionVerdict::Contended);
+                    self.contended = true;
                 }
                 offset += event_len;
             }
         }
-        Ok(if observed_expected {
-            JournalCreatedTransitionVerdict::Accepted
-        } else {
+        Ok(())
+    }
+
+    fn verdict(&self) -> JournalCreatedTransitionVerdict {
+        if self.contended {
+            JournalCreatedTransitionVerdict::Contended
+        } else if self.indeterminate || !self.observed_expected {
             JournalCreatedTransitionVerdict::Indeterminate
-        })
+        } else {
+            JournalCreatedTransitionVerdict::Accepted
+        }
     }
 }
 
@@ -714,5 +739,25 @@ mod tests {
         assert_eq!(head.directory_entries_walked, 3);
         assert_eq!(head.carrier_opens, 0);
         assert_eq!(head.carrier_bytes_read, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_watch_second_drain_rejects_a_create_after_the_first_drain() {
+        let root = tempfile::tempdir().unwrap();
+        let events = root.path().join("events");
+        std::fs::create_dir(&events).unwrap();
+        let mut watcher = LinuxCreateWatcher::new(&events, "expected.json".to_owned()).unwrap();
+
+        std::fs::write(events.join("expected.json"), b"expected").unwrap();
+        watcher.drain().unwrap();
+        assert_eq!(watcher.verdict(), JournalCreatedTransitionVerdict::Accepted);
+
+        std::fs::write(events.join("out-of-band.json"), b"unexpected").unwrap();
+        watcher.drain().unwrap();
+        assert_eq!(
+            watcher.verdict(),
+            JournalCreatedTransitionVerdict::Contended
+        );
     }
 }
