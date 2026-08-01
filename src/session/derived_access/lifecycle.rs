@@ -870,11 +870,20 @@ impl DerivedAccessLifecycle {
 
         // NTFS continuation advances a volume-wide USN cursor even when every
         // observed record is irrelevant to the event directory. Persist that
-        // successor before the next bounded read, or unrelated volume churn
-        // eventually consumes the byte/record budget. The first native read is
-        // lock-free; only a proven-stable successor takes the writer lock, then
-        // re-reads both the derived head and native interval before binding.
-        let writer_lock = StoreWriterLock::acquire(&self.store_root)?;
+        // successor before a later bounded read, or unrelated volume churn can
+        // eventually consume the byte/record budget. A current stable read must
+        // not wait behind publication, however: it may use the already-proven
+        // successor for this response and let the next idle read persist it.
+        let writer_lock = match StoreWriterLock::try_acquire(&self.store_root) {
+            Ok(writer_lock) => writer_lock,
+            Err(WriterLockError::Busy) => {
+                return Ok(TruthAuthoritySnapshot {
+                    head: snapshot.head,
+                    change_stamp: check.after,
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
         let locked_snapshot = service.truth_authority_snapshot()?;
         let locked_check = changes_since(&locked_snapshot.change_stamp)?;
         require_stable_authority(&locked_check)?;
@@ -1633,6 +1642,40 @@ mod tests {
                 .change_stamp,
             successor_two
         );
+    }
+
+    #[test]
+    fn stable_authority_successor_does_not_wait_for_a_busy_writer() {
+        let temp = populated_store(1);
+        let lifecycle = active_lifecycle(temp.path());
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let current = lifecycle.open_current().unwrap().unwrap();
+        let initial = current.service().truth_authority_snapshot().unwrap();
+        let successor = JournalChangeStamp::Observed {
+            identity_sha256: "4".repeat(64),
+            change_sha256: "5".repeat(64),
+            entry_count: None,
+            native_cursor: None,
+        };
+        let writer_lock = StoreWriterLock::acquire(temp.path()).unwrap();
+
+        let continued = lifecycle
+            .validate_current_authority_with(current.service(), |_| {
+                Ok(stable_change_check(successor.clone()))
+            })
+            .unwrap();
+
+        assert_eq!(continued.change_stamp, successor);
+        assert_eq!(
+            current
+                .service()
+                .truth_authority_snapshot()
+                .unwrap()
+                .change_stamp,
+            initial.change_stamp,
+            "the busy read may use but must not claim to persist the successor"
+        );
+        drop(writer_lock);
     }
 
     #[cfg(windows)]
