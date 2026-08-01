@@ -163,8 +163,9 @@ function currentSurface(): QuerySurface {
   return getState().lens === "list" ? "revision" : "event";
 }
 
-// Client-side distinct values for the revisions lens, mirroring query.rs's
-// derivation: read the STRUCTURED overview lists (the same fact-meta
+// Client-side distinct values for the revisions lens, intentionally limited to
+// loaded pages (the lens labels that partial scope). Read the STRUCTURED overview
+// lists (the same fact-meta
 // aggregation `revisionSearchIndex` encodes), never the space-wrapped index
 // fields — the set encoding cannot carry a space-bearing actor id losslessly,
 // and splitting it would fragment such ids into junk completions. Tags reduce

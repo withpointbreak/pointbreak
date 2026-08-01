@@ -91,6 +91,9 @@ fn blanked_value(key: &str) -> Option<&'static str> {
         "commitOidShort" => Some("<commitOidShort>"),
         "label" => Some("<label>"),
         "eventSetHash" => Some("<eventSetHash>"),
+        // `/api/revisions` uses the event-set hash (default-off) or projection
+        // stamp (active) as its opaque page snapshot identity.
+        "asOf" => Some("<asOf>"),
         "payloadHash" => Some("<payloadHash>"),
         _ => None,
     }

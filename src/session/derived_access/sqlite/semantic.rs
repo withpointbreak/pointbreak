@@ -8,7 +8,6 @@ use sha2::{Digest, Sha256};
 
 use super::locator::{SqliteLocator, SqliteLocatorError, read_locator_checkpoint};
 use crate::canonical_hash::sha256_bytes_hex;
-use crate::session::EventStore;
 use crate::session::derived_access::QualificationLocalJournal;
 use crate::session::derived_access::cursor::{CursorDelta, TruthCursor};
 use crate::session::derived_access::locator::{LocatorRead, LocatorRow};
@@ -26,11 +25,12 @@ use crate::session::event::{
     WorkObjectProposal, WorkObjectProposedPayload,
 };
 use crate::session::workflow::tag_completion_key;
+use crate::session::{EventStore, parse_event_instant};
 
 const SEMANTIC_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-semantic.v1";
-const SEMANTIC_SCHEMA_VERSION: i64 = 4;
+const SEMANTIC_SCHEMA_VERSION: i64 = 5;
 const PRODUCT_HISTORY_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-history.v1";
-const PRODUCT_HISTORY_SCHEMA_VERSION: i64 = 2;
+const PRODUCT_HISTORY_SCHEMA_VERSION: i64 = 3;
 
 #[derive(Clone, Debug)]
 pub(crate) struct SqliteSemantic {
@@ -65,6 +65,8 @@ pub(crate) struct ProductHistoryFact {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ProductRevisionFact {
     revision_id: String,
+    captured_at: String,
+    captured_at_millis: i64,
     supersedes: Vec<String>,
 }
 
@@ -86,8 +88,14 @@ impl ProductHistoryFact {
                     ..
                 } = payload.work_object
                 {
+                    let captured_at_millis =
+                        parse_event_instant(&event.occurred_at).ok_or_else(|| {
+                            SemanticModelError::InvalidEventInstant(event.occurred_at.clone())
+                        })?;
                     revision = Some(ProductRevisionFact {
                         revision_id: proposed.id.as_str().to_owned(),
+                        captured_at: event.occurred_at.clone(),
+                        captured_at_millis,
                         supersedes: supersedes
                             .iter()
                             .map(|revision| revision.as_str().to_owned())
@@ -133,6 +141,8 @@ pub(crate) enum SqliteSemanticError {
     Metadata(String),
     #[error("derived product history requires rebuild: {0}")]
     ProductHistoryUpgradeRequired(String),
+    #[error("semantic projection requires rebuild: {0}")]
+    UpgradeRequired(String),
     #[error("semantic delta does not follow its checkpoint: {0}")]
     Delta(String),
     #[error("semantic SQLite failure during {operation}: {message}")]
@@ -148,6 +158,37 @@ impl SqliteSemantic {
     pub(crate) fn open(locator: SqliteLocator) -> Result<Self, SqliteSemanticError> {
         let connection = locator.validated_connection()?;
         let locator_checkpoint = read_locator_checkpoint(&connection)?;
+        let semantic_schema_exists = connection
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM sqlite_schema
+                     WHERE type = 'table' AND name = 'semantic_meta'
+                 )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| sqlite_error("inspect semantic schema", error))?;
+        if semantic_schema_exists {
+            let schema_version = connection
+                .query_row(
+                    "SELECT schema_version FROM semantic_meta WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(|error| sqlite_error("inspect semantic version", error))?;
+            if schema_version < SEMANTIC_SCHEMA_VERSION {
+                return Err(SqliteSemanticError::UpgradeRequired(format!(
+                    "existing semantic schema {schema_version} predates version \
+                     {SEMANTIC_SCHEMA_VERSION}"
+                )));
+            }
+            if schema_version > SEMANTIC_SCHEMA_VERSION {
+                return Err(SqliteSemanticError::Metadata(format!(
+                    "existing semantic schema {schema_version} is newer than version \
+                     {SEMANTIC_SCHEMA_VERSION}"
+                )));
+            }
+        }
         let product_history_exists = connection
             .query_row(
                 "SELECT EXISTS(
@@ -184,7 +225,7 @@ impl SqliteSemantic {
                 "CREATE TABLE IF NOT EXISTS semantic_meta (
                      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                      profile_id TEXT NOT NULL,
-                     schema_version INTEGER NOT NULL CHECK (schema_version = 4),
+                     schema_version INTEGER NOT NULL CHECK (schema_version = 5),
                      epoch INTEGER NOT NULL CHECK (epoch > 0),
                      applied_sequence INTEGER NOT NULL CHECK (applied_sequence >= 0)
                  ) STRICT;
@@ -397,7 +438,7 @@ impl SqliteSemantic {
                  CREATE TABLE IF NOT EXISTS product_history_meta (
                      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                      profile_id TEXT NOT NULL,
-                     schema_version INTEGER NOT NULL CHECK (schema_version = 2),
+                     schema_version INTEGER NOT NULL CHECK (schema_version = 3),
                      epoch INTEGER NOT NULL CHECK (epoch > 0),
                      applied_sequence INTEGER NOT NULL CHECK (applied_sequence >= 0)
                  ) STRICT;
@@ -416,10 +457,14 @@ impl SqliteSemantic {
                      ON product_history_signature(target_event_id, sequence);
                  CREATE TABLE IF NOT EXISTS product_revision (
                      sequence INTEGER PRIMARY KEY REFERENCES semantic_event_fact(sequence),
-                     revision_id TEXT NOT NULL
+                     revision_id TEXT NOT NULL,
+                     captured_at TEXT NOT NULL,
+                     captured_at_millis INTEGER NOT NULL
                  ) STRICT;
                  CREATE INDEX IF NOT EXISTS product_revision_identity
                      ON product_revision(revision_id, sequence);
+                 CREATE INDEX IF NOT EXISTS product_revision_chronological
+                     ON product_revision(captured_at_millis DESC, revision_id DESC, sequence);
                  CREATE TABLE IF NOT EXISTS product_revision_edge (
                      sequence INTEGER NOT NULL REFERENCES product_revision(sequence),
                      superseded_revision_id TEXT NOT NULL,
@@ -1042,8 +1087,15 @@ fn insert_product_history_facts(
         if let Some(revision) = &fact.revision {
             transaction
                 .execute(
-                    "INSERT INTO product_revision (sequence, revision_id) VALUES (?1, ?2)",
-                    params![sequence, revision.revision_id],
+                    "INSERT INTO product_revision
+                         (sequence, revision_id, captured_at, captured_at_millis)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        sequence,
+                        revision.revision_id,
+                        revision.captured_at,
+                        revision.captured_at_millis
+                    ],
                 )
                 .map_err(|error| locator_sqlite_error("insert product revision", error))?;
             for superseded_revision_id in &revision.supersedes {

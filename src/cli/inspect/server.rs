@@ -104,21 +104,13 @@ pub(super) struct InspectState {
     /// retain the legacy behavior; the active derived profile touches it only
     /// for explicit body search.
     pub history_cache: super::cache::HistoryProjectionCache,
-    /// The default-off `/api/revisions` response cache (#426): one payload per
-    /// store version, rebuilt only when the head marker moves. The active
-    /// derived profile neither warms nor reads this full serialized response.
-    pub revisions_cache: super::cache::RevisionsResponseCache,
-    /// Content-hash-keyed snapshot summary counts shared across every
-    /// `/api/revisions` rebuild (#426): each snapshot artifact is decoded once
-    /// per server process, not once per rebuild.
+    /// Content-hash-keyed snapshot summary counts shared across requested
+    /// `/api/revisions` pages: an artifact loaded on more than one page is
+    /// decoded once per server process.
     pub snapshot_summaries: Arc<SnapshotSummaryCache>,
     /// The eager cache warm is delayed until the first authenticated API request,
     /// so serving the recovery shell never opens the store.
     initial_warm_started: AtomicBool,
-    /// Dedup flag for the background `/api/revisions` rewarm: at most one warm
-    /// thread runs at a time, no matter how many freshness polls observe a
-    /// moved marker.
-    revisions_warm_in_flight: AtomicBool,
     /// One service-wide permit for user-elected authoritative fallback. The
     /// fallback is intentionally expensive and request-local; concurrent
     /// callers receive a typed busy response instead of multiplying complete
@@ -137,10 +129,8 @@ impl InspectState {
             derived_history,
             highlight_cache: RwLock::new(HighlightCache::new(HIGHLIGHT_CACHE_CAPACITY)),
             history_cache: super::cache::HistoryProjectionCache::new(),
-            revisions_cache: super::cache::RevisionsResponseCache::new(),
             snapshot_summaries: Arc::new(SnapshotSummaryCache::new()),
             initial_warm_started: AtomicBool::new(false),
-            revisions_warm_in_flight: AtomicBool::new(false),
             authoritative_fallback: AuthoritativeFallbackGate::new(),
         })
     }
@@ -385,40 +375,6 @@ pub(super) fn serve(
     Ok(())
 }
 
-/// Kick a deduped background rebuild of the `/api/revisions` payload when the
-/// freshness poll observes a store version the cache does not hold. The poll
-/// is the client's own change detector, so by the time it refetches
-/// `/api/revisions` the rebuild has usually already started (or finished)
-/// instead of blocking that request for the full build.
-fn maybe_warm_revisions_cache(state: &Arc<InspectState>, commit_graph_stamp: Option<&str>) {
-    if state.derived_history.is_active() {
-        return;
-    }
-    if api::revisions_cache_is_warm(
-        state.repo.as_path(),
-        &state.revisions_cache,
-        commit_graph_stamp,
-    ) {
-        return;
-    }
-    if state.revisions_warm_in_flight.swap(true, Ordering::AcqRel) {
-        return;
-    }
-    let state = Arc::clone(state);
-    thread::spawn(move || {
-        if let Err(error) = api::warm_revisions_cache(
-            state.repo.as_path(),
-            &state.revisions_cache,
-            &state.snapshot_summaries,
-        ) {
-            tracing::debug!(error = %error, "inspect_revisions_cache_rewarm_failed");
-        }
-        state
-            .revisions_warm_in_flight
-            .store(false, Ordering::Release);
-    });
-}
-
 fn handle_connection(
     stream: TcpStream,
     state: &Arc<InspectState>,
@@ -528,15 +484,6 @@ fn warm_caches_after_auth(state: &Arc<InspectState>) {
             && let Err(error) = api::warm_history_cache(state.repo.as_path(), &state.history_cache)
         {
             tracing::debug!(error = %error, "inspect_history_cache_warm_failed");
-        }
-        if !state.derived_history.is_active()
-            && let Err(error) = api::warm_revisions_cache(
-                state.repo.as_path(),
-                &state.revisions_cache,
-                &state.snapshot_summaries,
-            )
-        {
-            tracing::debug!(error = %error, "inspect_revisions_cache_warm_failed");
         }
     });
 }
@@ -740,17 +687,20 @@ fn route(
             },
             Err(message) => Response::json_error("400 Bad Request", &message),
         },
-        "/api/revisions" => match requested_authoritative_access(query) {
-            Ok(true) => {
-                explicit_authoritative_response(state, || api::authoritative_revisions_json(repo))
-            }
-            Ok(false) => routed_api_response(api::routed_revisions_json(
-                repo,
-                &state.derived_history,
-                &state.revisions_cache,
-                &state.snapshot_summaries,
-            )),
-            Err(message) => Response::json_error("400 Bad Request", &message),
+        "/api/revisions" => match revision_page_request(query) {
+            Ok(request) => match requested_authoritative_access(query) {
+                Ok(true) => explicit_authoritative_routed_response(state, || {
+                    api::authoritative_revisions_json(repo, &request)
+                }),
+                Ok(false) => routed_api_response(api::routed_revisions_json(
+                    repo,
+                    &state.derived_history,
+                    &state.snapshot_summaries,
+                    &request,
+                )),
+                Err(message) => Response::json_error("400 Bad Request", &message),
+            },
+            Err(_) => Response::json_error("400 Bad Request", "invalid revision page request"),
         },
         "/api/threads" => match requested_authoritative_access(query) {
             Ok(true) => explicit_authoritative_response(state, || api::threads_json(repo)),
@@ -777,12 +727,7 @@ fn route(
         }
         "/api/freshness" => {
             // The freshness poll is the client's change detector; ride it to
-            // start rebuilding the expensive revisions payload before the
-            // client's follow-up refetch arrives. The commit-graph stamp is
-            // derived ONCE per poll (two git spawns) and shared by the warm
-            // gate and the payload.
             let stamp = api::freshness_commit_graph_stamp(repo);
-            maybe_warm_revisions_cache(state, stamp.as_deref());
             api_response(api::routed_freshness_json(
                 repo,
                 &state.derived_history,
@@ -819,6 +764,22 @@ fn explicit_authoritative_response(
         );
     };
     api_response(build()).with_header("X-Pointbreak-Access-Source", "authoritative-fallback")
+}
+
+fn explicit_authoritative_routed_response(
+    state: &InspectState,
+    build: impl FnOnce() -> Result<api::RoutedJson, String>,
+) -> Response {
+    if !state.derived_history.is_active() {
+        return routed_api_response(build());
+    }
+    let Some(_permit) = state.authoritative_fallback.try_acquire() else {
+        return Response::json_error(
+            "429 Too Many Requests",
+            "an authoritative fallback is already in progress",
+        );
+    };
+    routed_api_response(build()).with_header("X-Pointbreak-Access-Source", "authoritative-fallback")
 }
 
 fn derived_access_control_response(state: &InspectState, retry: bool) -> Response {
@@ -992,6 +953,21 @@ fn history_query(query: Option<&str>) -> Result<HistoryRequest, String> {
     })
 }
 
+fn revision_page_request(
+    query: Option<&str>,
+) -> Result<pointbreak::session::RevisionPageRequest, pointbreak::session::RevisionPageRequestError>
+{
+    let limit = match query_param(query, "limit") {
+        Some(raw) => Some(
+            raw.parse::<usize>()
+                .map_err(|_| pointbreak::session::RevisionPageRequestError::InvalidRequest)?,
+        ),
+        None => None,
+    };
+    let after = query_param(query, "after");
+    pointbreak::session::RevisionPageRequest::new(limit, after.as_deref())
+}
+
 /// Parse an optional numeric query param; a present but non-numeric value is a
 /// usage error (`message`), an absent one is `None`.
 fn parse_usize(value: Option<String>, message: &'static str) -> Result<Option<usize>, String> {
@@ -1063,6 +1039,9 @@ fn routed_api_response(result: Result<api::RoutedJson, String>) -> Response {
             ),
             Err(error) => Response::json_error("500 Internal Server Error", &error.to_string()),
         },
+        Ok(api::RoutedJson::RestartRequired) => {
+            Response::json_error("409 Conflict", "restart_required")
+        }
         Err(message) => Response::json_error("500 Internal Server Error", &message),
     }
 }
@@ -1315,6 +1294,19 @@ mod tests {
                 .revision
                 .is_none()
         );
+    }
+
+    #[test]
+    fn revision_page_query_enforces_the_frozen_default_and_maximum() {
+        assert_eq!(revision_page_request(None).unwrap().limit(), 100);
+        assert_eq!(
+            revision_page_request(Some("limit=500")).unwrap().limit(),
+            500
+        );
+        assert!(revision_page_request(Some("limit=0")).is_err());
+        assert!(revision_page_request(Some("limit=501")).is_err());
+        assert!(revision_page_request(Some("limit=lots")).is_err());
+        assert!(revision_page_request(Some("after=not-base64!!")).is_err());
     }
 
     #[test]

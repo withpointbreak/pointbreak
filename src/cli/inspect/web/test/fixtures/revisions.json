@@ -1,4 +1,5 @@
 {
+  "asOf": "sha256:e81f297a301ad7d9df6bd90ceeb257511f661b4fc108460e7f2bdc3f76de0164",
   "diagnostics": [],
   "entries": [
     {
@@ -95,6 +96,8 @@
   ],
   "eventCount": 8,
   "eventSetHash": "sha256:e81f297a301ad7d9df6bd90ceeb257511f661b4fc108460e7f2bdc3f76de0164",
+  "next": null,
+  "projectionStamp": null,
   "revisionCount": 1,
-  "schema": "pointbreak.inspect-revisions"
+  "schema": "pointbreak.inspect-revisions-page.v1"
 }

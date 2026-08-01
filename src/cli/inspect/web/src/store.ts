@@ -71,14 +71,19 @@ export interface HistoryDoc {
   distinctValues?: DistinctValues;
 }
 
-/** The `/api/revisions` document: one entry per captured revision. */
+/** One snapshot-bound `/api/revisions` page plus client paging state. */
 export interface RevisionsDoc {
+  schema?: string;
   entries: Revision[];
-  // Whole-store generation for the revision summaries. Unlike the windowed
-  // history document, this advances on every whole-document poll refresh.
+  // Active derived reads expose an opaque projection version; loose reads retain
+  // the exhaustive event-set hash. `asOf` is the token snapshot in either mode.
   projectionStamp?: string;
   eventSetHash?: string;
-  // The captured-revision count the stat row reads (present in the committed fixture).
+  asOf?: string;
+  next?: string | null;
+  // Client-only in-flight cue. It is never sent by the server.
+  loadingMore?: boolean;
+  // The total captured-revision count, not merely the number loaded so far.
   revisionCount?: number;
 }
 

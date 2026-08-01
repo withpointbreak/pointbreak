@@ -469,7 +469,7 @@ disposable sidecar worker.
 
 First bootstrap never silently switches read models. The web client offers wait or the explicit
 `access=authoritative` selector. That selector runs existing authoritative domain readers with request-local
-ownership, does not populate the retained history/revisions caches, carries
+ownership, does not populate the retained history cache or shared revision-summary cache, carries
 `X-Pointbreak-Access-Source: authoritative-fallback`, and is serialized by one service-wide permit. A
 concurrent fallback receives `429` instead of multiplying whole-history replay. The web client also queues its
 own collection, paging, polling, and detail fallbacks so its requests do not race each other for that permit.
@@ -542,8 +542,8 @@ just derived-access-readiness-contract-smoke
 ```
 
 The compiled schema is `pointbreak.derived-access-production-readiness-contract.v1`; its canonical SHA-256
-is `0053072600a2746b5967e49b22d0848c1e977289dfd85fe457846996e7725672`. The embedded canonical fixture
-SHA-256 is `e4cef6cdb35c0f029d176ccfb3f55d7df35771ec911938509d9a08c47def1cfe`.
+is `5445781aadff791537746f1596f577ea1415fd37daf6d0da4fbc0ded94375eb3`. The embedded canonical fixture
+SHA-256 is `b2e2656f6f37a1173bbeb7ce9101e1c703d03b600468fc4b62fb2dc25a05ab6a`.
 
 <!-- derived-access-production-readiness-contract-v1:start -->
 | Decision | Frozen production-readiness requirement |
@@ -553,7 +553,7 @@ SHA-256 is `e4cef6cdb35c0f029d176ccfb3f55d7df35771ec911938509d9a08c47def1cfe`.
 | Ordinary work | active no-change fixed-output routes walk at most `0` event-directory entries and fresh writer admission walks at most `0`; audits, bootstrap, fallback, default-off comparison, and body search remain explicitly classified |
 | Bootstrap | preflight → population → strict_oracle_verification → authority_stability_check → publication; population carrier-open ceiling `1` per input and maximum `1` overlapping complete decoded histories; strict oracle serial/isolated: `true`; completion published last: `true` |
 | Bootstrap availability | status/progress fields `phase, completed_events, total_events, elapsed_milliseconds` required and `completed_bytes, total_bytes, eta_milliseconds` optional; maximum automatic fallbacks `1`; long unexplained absent allowed: `false`; no availability case may serve stale as current: `true` |
-| Revision pages | `pointbreak.inspect-revisions-page.v1`; absent limit uses default `100`: `true`; maximum `500` with over-maximum `invalid_request`; requested entries mean the accepted limit: `true`; `(capturedAt, revisionId)` ascending; opaque snapshot-bound token; revision count comes from `derived_indexed_aggregate`; active work `output_proportional`; default-off same shape through `history_proportional` |
+| Revision pages | `pointbreak.inspect-revisions-page.v1`; absent limit uses default `100`: `true`; maximum `500` with over-maximum `invalid_request`; requested entries mean the accepted limit: `true`; normalized `(capturedAt, revisionId)` descending so page one contains current work; opaque snapshot-bound token; revision count comes from `derived_indexed_aggregate`; active work `output_proportional`; default-off same shape through `history_proportional` |
 | Qualification | required completion-last, read-only verified gates: `native_macos_apfs_d0_l7, native_windows_ntfs_d0_l7, package_closure, rollback_and_backup, retained_l100_apfs, retained_c262_apfs, evidence_authority`; parent contract `3afe3a1fd65f0d5c58246dbe426c35a32325dc42bd9931d78f0e2354411dd00d` and all of its gates and matched-operation ceilings remain load-bearing |
 | Retained inputs | tiers `L100, C262`; identity-verified read-only: `true`; rematerialization authorized: `false`; preserve sources/outputs: `true`; C524 admitted: `false` |
 | Timing | this readiness contract adds no host-sensitive numeric wall-time thresholds; the parent contract's matched-operation wall/CPU ceilings still apply; counter, semantic, lifecycle, native, and evidence-authority gates decide readiness |
@@ -561,7 +561,7 @@ SHA-256 is `e4cef6cdb35c0f029d176ccfb3f55d7df35771ec911938509d9a08c47def1cfe`.
 | Protected boundary | `owner_store`, `private_corpus`, `private_snapshot_bytes`, `qualification_corpus`, `credentials`, `installed_artifacts`, `installed_extension_dogfood_evidence`, `remote_mirror_automation_state`, `archived_evidence`, `external_participant_evidence`, `production_default`, `deferred_content_format_experiment`; physical implementation: `false`; evidence collection: `false`; migration: `false`; release: `false` |
 <!-- derived-access-production-readiness-contract-v1:end -->
 
-The page contract retains the current `(capturedAt, revisionId)` ascending order and adds an opaque
+The page contract uses normalized `(capturedAt, revisionId)` descending order and adds an opaque
 continuation token bound to the profile, page schema, observed snapshot, and ordering cursor. An absent
 `limit` means `100`; a value above `500` is an invalid request. The counter's requested-entry value is the
 accepted limit. Active mode may examine at most `limit + 1` revision rows to produce a page and continuation

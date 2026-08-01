@@ -28,7 +28,7 @@ use crate::session::workflow::{
     QueryDiagnostic, ReviewHistoryEntry, history_entries_from_selected_events,
 };
 
-const PRODUCT_HISTORY_SCHEMA_V2: &str = "pointbreak.sqlite-derived-access-history.v2";
+const PRODUCT_HISTORY_SCHEMA_V3: &str = "pointbreak.sqlite-derived-access-history.v3";
 const PROJECTION_STAMP_SCHEMA_V1: &str = "pointbreak.derived-access-projection-stamp.v1";
 const ACTIVE_PROFILE: &str = "sqlite-wal-bodyless-v1";
 const BACKGROUND_REBUILD_RETRY_INTERVAL: Duration = Duration::from_millis(100);
@@ -1433,7 +1433,7 @@ pub(super) fn projection_stamp(
         schema: PROJECTION_STAMP_SCHEMA_V1,
         store_identity,
         profile: ACTIVE_PROFILE,
-        schema_version: PRODUCT_HISTORY_SCHEMA_V2,
+        schema_version: PRODUCT_HISTORY_SCHEMA_V3,
         epoch: cursor.epoch,
         applied_sequence: cursor.sequence,
     })
@@ -1806,7 +1806,7 @@ mod tests {
 
         assert_eq!(
             base,
-            "sha256:c50da80445d7cd5848e72ef2a5bec07331051ac2c205f00dfe0c7be26779b742"
+            "sha256:ddca3c8f113829ad5465604156ca561bce0f2147b06e665dd65ac236c41760d6"
         );
         assert_eq!(
             base,

@@ -7,8 +7,9 @@
 //
 // The history timeline query (search / filter / facet counts) moved to the server,
 // so the timeline lens paints the server-filtered page window rather than matching
-// client-side. The revisions lens still matches over the fully-loaded list, so its
-// predicate (matchesRevisionFilters) uses the pure `query` grammar here.
+// client-side. The revisions lens matches only the explicitly loaded pages, so
+// its predicate (matchesRevisionFilters) uses the pure `query` grammar here and
+// the lens labels that partial scope.
 
 import { CLASS } from "./classNames";
 import { parseMs } from "./format";
@@ -326,8 +327,8 @@ export function supersessionBadge(revisionId: string): string {
 //
 // The timeline history query is server-owned now (search / filter / facets are
 // applied to `/api/history`), so there is no client history predicate. The
-// revisions lens still filters client-side over the fully-loaded list, so it
-// parses the active `filterText` here.
+// revisions lens filters client-side over the explicitly loaded pages, so it
+// parses the active `filterText` here. The lens labels that partial scope.
 // ---------------------------------------------------------------------------
 
 /** Whether a revision passes the object filter and the query clauses. */

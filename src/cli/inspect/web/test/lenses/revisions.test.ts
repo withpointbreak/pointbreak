@@ -84,6 +84,49 @@ describe("renderRevisionList first-open capture handoff", () => {
 });
 
 describe("renderRevisionList (the flat revision list lens)", () => {
+  it("labels partial results and exposes an accessible load-more action", () => {
+    seedFixtures();
+    const current = store.getState().revisions as RevisionsDoc;
+    store.commit({
+      revisions: {
+        ...current,
+        next: "cursor:next",
+        revisionCount: 25,
+      },
+    });
+    mountListBody();
+    revisions.renderRevisionList();
+
+    const status = document.querySelector("#revision-page-status");
+    expect(status?.textContent).toContain("1 of 25 revisions loaded");
+    expect(status?.textContent).toContain(
+      "Filters and suggestions use loaded revisions only",
+    );
+    expect(
+      document.querySelector<HTMLButtonElement>("#load-more-revisions")
+        ?.textContent,
+    ).toContain("Load more revisions");
+  });
+
+  it("does not describe a partial filtered page as an empty store", () => {
+    store.commit({
+      revisions: {
+        entries: [],
+        next: "cursor:next",
+        revisionCount: 25,
+      },
+    });
+    mountListBody();
+    revisions.renderRevisionList();
+
+    expect(document.querySelector("#units")?.textContent).toContain(
+      "No loaded revisions match the current view",
+    );
+    expect(document.querySelector("#units")?.textContent).not.toContain(
+      "No captured revisions in this store",
+    );
+  });
+
   it("paints one card per revision with the delegation datasets and the open-diff control", () => {
     seedFixtures();
     mountListBody();

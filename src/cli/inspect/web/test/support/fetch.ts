@@ -50,10 +50,10 @@ export function resetDerivedAccessStatus(): void {
 
 resetDerivedAccessStatus();
 
-/** Override the `/api/revisions` response (whole-document polling tests). */
+/** Override the `/api/revisions` response (page and polling tests). */
 export function setRevisionsResponse(payload: unknown): void {
   FIXTURES["/api/revisions"] = {
-    schema: "pointbreak.review-revision-list",
+    schema: "pointbreak.inspect-revisions-page.v1",
     ...(payload as Record<string, unknown>),
   };
 }

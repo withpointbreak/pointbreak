@@ -4,7 +4,26 @@ use std::time::{Duration, Instant};
 
 use support::common_dir_store;
 use support::git_repo::GitRepo;
-use support::inspect::{Inspector, capture};
+use support::inspect::{Inspector, capture, urlencode};
+
+fn assert_revision_page_parity(active: &serde_json::Value, authoritative: &serde_json::Value) {
+    for field in [
+        "schema",
+        "eventCount",
+        "revisionCount",
+        "entries",
+        "diagnostics",
+    ] {
+        assert_eq!(
+            active[field], authoritative[field],
+            "revision page field {field} diverged"
+        );
+    }
+    assert!(active["projectionStamp"].is_string());
+    assert!(active["eventSetHash"].is_null());
+    assert!(authoritative["projectionStamp"].is_null());
+    assert!(authoritative["eventSetHash"].is_string());
+}
 
 #[test]
 fn active_inspector_first_start_bootstraps_and_serves_history() {
@@ -196,4 +215,74 @@ fn active_inspector_first_start_bootstraps_and_serves_history() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[test]
+fn active_and_authoritative_revision_routes_match_across_page_boundaries() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    let mut revision_ids = Vec::new();
+    for value in 2..=4 {
+        repo.write(
+            "src/lib.rs",
+            format!("pub fn value() -> u32 {{ {value} }}\n"),
+        );
+        revision_ids.push(capture(repo.path()));
+    }
+
+    let inspector = Inspector::spawn_authenticated_with_env(
+        repo.path(),
+        &[("POINTBREAK_DERIVED_ACCESS", "sqlite-wal-bodyless-v1")],
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let active_first = loop {
+        let (status, body) = inspector.raw_get("/api/revisions?limit=1");
+        if status.contains("200 OK") {
+            break serde_json::from_str::<serde_json::Value>(&body)
+                .expect("active first page JSON");
+        }
+        assert!(
+            status.contains("503 Service Unavailable"),
+            "active first page returned {status}: {body}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "active revision page never became available: {body}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let (fallback_head, fallback_body) =
+        inspector.raw_get("/api/revisions?limit=1&access=authoritative");
+    assert!(fallback_head.contains("200 OK"), "{fallback_head}");
+    assert!(
+        fallback_head.contains("X-Pointbreak-Access-Source: authoritative-fallback"),
+        "explicit fallback is visibly labeled: {fallback_head}"
+    );
+    let authoritative_first = serde_json::from_str::<serde_json::Value>(&fallback_body)
+        .expect("authoritative first page JSON");
+    assert_revision_page_parity(&active_first, &authoritative_first);
+    assert_eq!(
+        active_first["entries"][0]["revisionId"],
+        revision_ids.last().unwrap().as_str(),
+        "page one starts with the newest capture"
+    );
+
+    let active_next = active_first["next"].as_str().expect("active continuation");
+    let authoritative_next = authoritative_first["next"]
+        .as_str()
+        .expect("authoritative continuation");
+    let active_second = inspector.get_json(&format!(
+        "/api/revisions?limit=1&after={}",
+        urlencode(active_next)
+    ));
+    let authoritative_second = inspector.get_json(&format!(
+        "/api/revisions?limit=1&after={}&access=authoritative",
+        urlencode(authoritative_next)
+    ));
+    assert_revision_page_parity(&active_second, &authoritative_second);
+    assert_ne!(
+        active_first["entries"][0]["revisionId"],
+        active_second["entries"][0]["revisionId"]
+    );
 }

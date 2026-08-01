@@ -7,7 +7,9 @@ import { mountInspectorDom, resetDom } from "./support/dom";
 import {
   installFetchMock,
   resetHistoryResponse,
+  resetRevisionsResponse,
   setHistoryResponse,
+  setRevisionsResponse,
   uninstallFetchMock,
 } from "./support/fetch";
 
@@ -74,6 +76,7 @@ beforeEach(async () => {
 afterEach(() => {
   document.removeEventListener("keydown", keyboard.onKey);
   resetHistoryResponse();
+  resetRevisionsResponse();
   uninstallFetchMock();
   resetDom();
 });
@@ -663,6 +666,95 @@ function mountRevisionViewport(visibleRows: number): void {
 }
 
 describe("revision-centric timeline navigation", () => {
+  it("loads one continuation when stepping across the descending page frontier", async () => {
+    const ids = ["rev:b", "rev:a"];
+    store.commit({
+      revisions: {
+        entries: [
+          {
+            revisionId: ids[0],
+            snapshotId: "obj:b",
+            capturedAt: "unix-ms:1001",
+          },
+          {
+            revisionId: ids[1],
+            snapshotId: "obj:a",
+            capturedAt: "unix-ms:1000",
+          },
+        ],
+        asOf: "projection:a",
+        next: "cursor:next",
+        revisionCount: 3,
+      },
+      lens: "list",
+      order: "desc",
+      selected: { kind: "revision", id: ids[1] },
+    });
+    setRevisionsResponse({
+      entries: [
+        {
+          revisionId: "rev:c",
+          snapshotId: "obj:c",
+          capturedAt: "unix-ms:999",
+        },
+      ],
+      asOf: "projection:a",
+      next: null,
+      revisionCount: 3,
+      projectionStamp: "projection:a",
+      eventSetHash: null,
+    });
+
+    await keyboard.stepSelectionAsync(1);
+
+    expect(store.getState().selected.id).toBe("rev:c");
+    expect(store.getState().revisions?.entries).toHaveLength(3);
+  });
+
+  it("loads one continuation from the opposite edge when visually ascending", async () => {
+    store.commit({
+      revisions: {
+        entries: [
+          {
+            revisionId: "rev:b",
+            snapshotId: "obj:b",
+            capturedAt: "unix-ms:1001",
+          },
+          {
+            revisionId: "rev:a",
+            snapshotId: "obj:a",
+            capturedAt: "unix-ms:1000",
+          },
+        ],
+        asOf: "projection:a",
+        next: "cursor:next",
+        revisionCount: 3,
+      },
+      lens: "list",
+      order: "asc",
+      selected: { kind: "revision", id: "rev:a" },
+    });
+    setRevisionsResponse({
+      entries: [
+        {
+          revisionId: "rev:c",
+          snapshotId: "obj:c",
+          capturedAt: "unix-ms:999",
+        },
+      ],
+      asOf: "projection:a",
+      next: null,
+      revisionCount: 3,
+      projectionStamp: "projection:a",
+      eventSetHash: null,
+    });
+
+    await keyboard.stepSelectionAsync(-1);
+
+    expect(store.getState().selected.id).toBe("rev:c");
+    expect(store.getState().revisions?.entries).toHaveLength(3);
+  });
+
   it("g/G jump to the revision-list bounds", () => {
     const ids = seedRevisionNavigationLens();
     key({ key: "g" });

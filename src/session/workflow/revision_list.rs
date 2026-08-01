@@ -61,6 +61,7 @@ pub struct RevisionListOptions {
     integration_ref: Option<String>,
     worktree_scope: Option<PathBuf>,
     read_for_display: bool,
+    group_shared_commits: bool,
 }
 
 impl RevisionListOptions {
@@ -72,6 +73,7 @@ impl RevisionListOptions {
             integration_ref: None,
             worktree_scope: None,
             read_for_display: false,
+            group_shared_commits: true,
         }
     }
 
@@ -113,6 +115,16 @@ impl RevisionListOptions {
     /// default, so the relay and other strict callers keep the typed error.
     pub fn with_read_for_display(mut self, value: bool) -> Self {
         self.read_for_display = value;
+        self
+    }
+
+    /// Keep every captured revision as its own row instead of collapsing
+    /// shared-commit siblings. The Inspector's snapshot-bound collection uses
+    /// this internal mode so its indexed revision count, ordering cursor, and
+    /// page boundaries all name the same stable entity set.
+    #[doc(hidden)]
+    pub fn with_group_shared_commits(mut self, value: bool) -> Self {
+        self.group_shared_commits = value;
         self
     }
 }
@@ -282,16 +294,18 @@ fn list_revisions_from_events_with_diagnostics(
     // (a `--ref`/`--worktree`/reachability filter that drops a member shrinks its group; a
     // group whose only surviving member matched still surfaces via that member), and
     // before merge-status, which is attached over the grouped entries.
-    let grouping = {
-        let span = tracing::debug_span!("shore.revisions.list.grouping_projection");
-        let _guard = span.enter();
-        CommitOidGroupingProjection::from_events(&events)?
-    };
-    result.entries = {
-        let span = tracing::debug_span!("shore.revisions.list.group_entries");
-        let _guard = span.enter();
-        group_entries(result.entries, &grouping)
-    };
+    if options.group_shared_commits {
+        let grouping = {
+            let span = tracing::debug_span!("shore.revisions.list.grouping_projection");
+            let _guard = span.enter();
+            CommitOidGroupingProjection::from_events(&events)?
+        };
+        result.entries = {
+            let span = tracing::debug_span!("shore.revisions.list.group_entries");
+            let _guard = span.enter();
+            group_entries(result.entries, &grouping)
+        };
+    }
     result.revision_count = result.entries.len();
 
     {

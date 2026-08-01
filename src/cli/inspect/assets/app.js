@@ -1829,7 +1829,7 @@
         schema: "pointbreak.inspect-history-new-count"
       },
       "/api/identity": { schema: "pointbreak.inspect-identity" },
-      "/api/revisions": { schema: "pointbreak.inspect-revisions" },
+      "/api/revisions": { schema: "pointbreak.inspect-revisions-page.v1" },
       "/api/threads": { schema: "pointbreak.inspect-threads" },
       "/api/version": { schema: "pointbreak.version", version: 1 }
     };
@@ -1923,6 +1923,55 @@
 
   // src/data.ts
   var HISTORY_PAGE = 100;
+  var REVISION_PAGE = 100;
+  function revisionsPagePath(after) {
+    const params = new URLSearchParams({ limit: String(REVISION_PAGE) });
+    if (after) params.set("after", after);
+    return `/api/revisions?${params.toString()}`;
+  }
+  __name(revisionsPagePath, "revisionsPagePath");
+  function fetchRevisionsPage(after) {
+    const path = withSelectedAccess(revisionsPagePath(after));
+    return runWithSelectedAccess(() => fetchJSON(path));
+  }
+  __name(fetchRevisionsPage, "fetchRevisionsPage");
+  function mergeRevisionEntries(current, incoming) {
+    const byId = new Map(current.map((entry) => [entry.revisionId ?? "", entry]));
+    for (const entry of incoming) byId.set(entry.revisionId ?? "", entry);
+    byId.delete("");
+    return [...byId.values()];
+  }
+  __name(mergeRevisionEntries, "mergeRevisionEntries");
+  async function fetchRevisionsWindow(minimumEntries) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const head = await fetchRevisionsPage();
+      let window2 = { ...head, loadingMore: false };
+      let restart = false;
+      while (window2.next && window2.entries.length < minimumEntries) {
+        try {
+          const page = await fetchRevisionsPage(window2.next);
+          if (page.asOf !== head.asOf) {
+            restart = true;
+            break;
+          }
+          window2 = {
+            ...page,
+            entries: mergeRevisionEntries(window2.entries, page.entries),
+            loadingMore: false
+          };
+        } catch (err) {
+          if (err instanceof RequestFailure && err.status === 409) {
+            restart = true;
+            break;
+          }
+          throw err;
+        }
+      }
+      if (!restart) return window2;
+    }
+    throw new RequestFailure("protocol", 409);
+  }
+  __name(fetchRevisionsWindow, "fetchRevisionsWindow");
   function historyQueryParams(s) {
     const p = new URLSearchParams();
     if (s.filterText) p.set("q", s.filterText);
@@ -2012,14 +2061,18 @@
   async function loadWholeDocuments() {
     try {
       const previousAttentionCount = getState().attention?.items?.length;
+      const loadedRevisionCount = getState().revisions?.entries.length ?? 0;
       const revisionsScrollTop = $("#units")?.scrollTop;
-      const paths = ["/api/revisions", "/api/threads", "/api/attention"];
-      const [revisionsRaw, threadsRaw, attentionRaw] = await Promise.all(
-        paths.map((path) => {
-          const selectedPath = withSelectedAccess(path);
-          return runWithSelectedAccess(() => fetchJSON(selectedPath));
-        })
-      );
+      const paths = ["/api/threads", "/api/attention"];
+      const [revisionsRaw, [threadsRaw, attentionRaw]] = await Promise.all([
+        fetchRevisionsWindow(loadedRevisionCount),
+        Promise.all(
+          paths.map((path) => {
+            const selectedPath = withSelectedAccess(path);
+            return runWithSelectedAccess(() => fetchJSON(selectedPath));
+          })
+        )
+      ]);
       const attention = attentionRaw;
       showError(null);
       commit({
@@ -2039,6 +2092,55 @@
     }
   }
   __name(loadWholeDocuments, "loadWholeDocuments");
+  async function loadMoreRevisions() {
+    const current = getState().revisions;
+    const token = current?.next;
+    if (!current || !token || current.loadingMore) return true;
+    const asOf = current.asOf;
+    commit({ revisions: { ...current, loadingMore: true } });
+    try {
+      const page = await fetchRevisionsPage(token);
+      const latest = getState().revisions;
+      if (!latest || latest.asOf !== asOf || latest.next !== token) return true;
+      if (page.asOf !== asOf) return loadRevisionsHead();
+      commit({
+        revisions: {
+          ...page,
+          entries: mergeRevisionEntries(latest.entries, page.entries),
+          loadingMore: false
+        }
+      });
+      showError(null);
+      return true;
+    } catch (err) {
+      if (err instanceof RequestFailure && err.status === 409)
+        return loadRevisionsHead();
+      const latest = getState().revisions;
+      if (latest && latest.asOf === asOf)
+        commit({ revisions: { ...latest, loadingMore: false } });
+      showLoadError(err);
+      return false;
+    }
+  }
+  __name(loadMoreRevisions, "loadMoreRevisions");
+  async function loadRevisionsHead() {
+    const revisionsScrollTop = $("#units")?.scrollTop;
+    const loadedRevisionCount = getState().revisions?.entries.length ?? 0;
+    try {
+      const page = await fetchRevisionsWindow(loadedRevisionCount);
+      commit({ revisions: { ...page, loadingMore: false } });
+      if (revisionsScrollTop != null) {
+        const units = $("#units");
+        if (units) units.scrollTop = revisionsScrollTop;
+      }
+      showError(null);
+      return true;
+    } catch (err) {
+      showLoadError(err);
+      return false;
+    }
+  }
+  __name(loadRevisionsHead, "loadRevisionsHead");
   async function load() {
     const status = await loadDerivedAccessStatus();
     if (status === null) return false;
@@ -2503,7 +2605,9 @@
     }
     const sel = patch.selected ?? { kind: null, id: null };
     if (sel.kind === "revision" && sel.id && !revisionExists(sel.id)) {
-      if (revisionInAnyThread(sel.id)) {
+      const revisions = getState().revisions;
+      const partialRevisions = revisions != null && (revisions.next != null || (revisions.revisionCount ?? revisions.entries.length) > revisions.entries.length);
+      if (revisionInAnyThread(sel.id) || partialRevisions) {
         next.open = true;
       } else {
         const lens = patch.lens || DEFAULT_LENS2;
@@ -6418,7 +6522,14 @@
     navigate({ selected: ids[target] }, { replace: true });
   }
   __name(selectLoadedLensIndex, "selectLoadedLensIndex");
-  function stepList(delta) {
+  async function stepList(delta) {
+    const before = lensEntryIds();
+    const selected = getState().selected.id;
+    const index = before.findIndex((entry) => entry.id === selected);
+    const unloadedDirection = getState().order === "desc" ? 1 : -1;
+    const atFrontier = index >= 0 && (unloadedDirection > 0 && index === before.length - 1 || unloadedDirection < 0 && index === 0);
+    if (delta === unloadedDirection && atFrontier && getState().revisions?.next)
+      await loadMoreRevisions();
     const next = loadedLensIndex(delta);
     if (next !== null) selectLoadedLensIndex(next);
   }
@@ -6570,7 +6681,7 @@
       await stepTimeline(delta);
       return;
     }
-    stepList(delta);
+    await stepList(delta);
   }
   __name(stepSelectionAsync, "stepSelectionAsync");
   function activateSelection() {
@@ -6825,15 +6936,28 @@
       state2.order,
       state2.sortKey
     );
+    const loadedCount = state2.revisions?.entries.length ?? 0;
+    const revisionCount = state2.revisions?.revisionCount ?? loadedCount;
+    const partial = state2.revisions != null && (state2.revisions.next != null || loadedCount < revisionCount);
+    const pagingStatus = partial ? `<div id="revision-page-status" role="status" aria-live="polite" style="color:var(--fg-dim);padding:8px 0">
+        ${loadedCount} of ${revisionCount} revisions loaded. Filters and suggestions use loaded revisions only.
+        ${state2.revisions?.next ? `<button id="load-more-revisions" class="${CLASS.ghost}" type="button"${state2.revisions.loadingMore ? " disabled" : ""}>${state2.revisions.loadingMore ? "Loading revisions…" : "Load more revisions"}</button>` : ""}
+      </div>` : "";
+    const wireLoadMore = /* @__PURE__ */ __name(() => {
+      $("#load-more-revisions")?.addEventListener("click", () => {
+        void loadMoreRevisions();
+      });
+    }, "wireLoadMore");
     if (!entries.length) {
       const filtered = Boolean(state2.filterText || state2.filterSnapshot);
-      const genuinelyEmpty = !filtered && state2.revisions != null && (state2.revisions.entries ?? []).length === 0;
-      el.innerHTML = `<p class="${CLASS.empty}" style="color:var(--fg-dim)">${filtered ? "No revisions match the current filters." : "No captured revisions in this store."}</p>${genuinelyEmpty ? renderWorkflowHandoff(firstReviewHandoff()) : ""}`;
+      const genuinelyEmpty = !filtered && state2.revisions != null && revisionCount === 0 && !partial;
+      el.innerHTML = `${pagingStatus}<p class="${CLASS.empty}" style="color:var(--fg-dim)">${partial ? "No loaded revisions match the current view. Load another page or adjust the filters." : filtered ? "No revisions match the current filters." : "No captured revisions in this store."}</p>${genuinelyEmpty ? renderWorkflowHandoff(firstReviewHandoff()) : ""}`;
+      wireLoadMore();
       return;
     }
     const selected = state2.selected;
     const kv = /* @__PURE__ */ __name(([k, v]) => `<span>${escapeHtml(k)}</span><b>${escapeHtml(v)}</b>`, "kv");
-    el.innerHTML = entries.map((u) => {
+    el.innerHTML = pagingStatus + entries.map((u) => {
       const base = u.base ?? {};
       const overview = u.overview ?? overviewForRevision(u.revisionId ?? "");
       const revisionId = u.revisionId ?? "";
@@ -6862,6 +6986,7 @@ click to open the revision page">
       <div class="${CLASS.actions}">${snapshotUnavailable ? `<button class="${CLASS.ghost} ${CLASS.diffBtn}" type="button" disabled title="captured snapshot content is unavailable">snapshot unavailable</button>` : `<button class="${CLASS.ghost} ${CLASS.diffBtn}" type="button" data-open-diff="${escapeHtml(u.snapshotId ?? "")}" data-diff-hash="${escapeHtml(u.snapshotContentHash ?? "")}">view snapshot diff</button>`}</div>
     </div>`;
     }).join("");
+    wireLoadMore();
   }
   __name(renderRevisionList, "renderRevisionList");
 

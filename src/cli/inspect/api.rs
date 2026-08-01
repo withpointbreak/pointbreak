@@ -19,24 +19,26 @@ use pointbreak::git::git_commit_subjects;
 use pointbreak::model::{EventId, ObjectId, ReviewEndpoint, RevisionId, RevisionSource};
 use pointbreak::session::event::{GitProvenance, ReviewAssessment};
 use pointbreak::session::{
-    AssessmentRecordStatus, AssessmentView, AttentionItem, AttentionListOptions,
-    BaseHistoryProjection, BaseProjectionConfig, CurrentAssessmentStatus, DerivedAttention,
-    DerivedAttentionRoute, DerivedHistoryAccess, DerivedHistoryLifecycleStatus,
+    AUTHORITATIVE_REVISION_PAGE_PROFILE, AssessmentRecordStatus, AssessmentView, AttentionItem,
+    AttentionListOptions, BaseHistoryProjection, BaseProjectionConfig, CurrentAssessmentStatus,
+    DerivedAttention, DerivedAttentionRoute, DerivedHistoryAccess, DerivedHistoryLifecycleStatus,
     DerivedHistoryNewCount, DerivedHistoryPage, DerivedHistoryRoute, DerivedHistoryStatus,
-    DerivedRevisionCollection, DerivedRevisionCollectionRoute, DerivedRevisionDetail,
-    DerivedRevisionDetailRoute, DerivedThreads, DerivedThreadsRoute, DistinctValues,
+    DerivedRevisionDetail, DerivedRevisionDetailRoute, DerivedRevisionPage,
+    DerivedRevisionPageRoute, DerivedThreads, DerivedThreadsRoute, DistinctValues,
     EventVerificationPolicy, HistoryCursor, HistoryPage, HistoryQuery, InputRequestStatus,
     LivenessEnrichment, ObservationStatus, ObservationView, ProjectionDiagnostic, QueryDiagnostic,
-    ReviewHistoryEntry, RevisionCommitRangeView, RevisionListEntry, RevisionListOptions,
-    RevisionOverview, RevisionOverviewsOptions, RevisionShowOptions, RevisionShowResult,
+    REVISION_PAGE_SCHEMA, ReviewHistoryEntry, RevisionCommitRangeView, RevisionListEntry,
+    RevisionListOptions, RevisionOverview, RevisionOverviewsOptions, RevisionPageCursor,
+    RevisionPageRequest, RevisionPageRequestError, RevisionShowOptions, RevisionShowResult,
     SessionState, SnapshotSummaryCache, StoreIdentity, StoreIdentityOptions, SupersessionView,
     TrustSet, ValidationContinuitySummary, ValidationContinuityView, apply_history_query,
     classify_validation_continuity, commit_graph_stamp, compare_event_instants, count_new_since,
     current_assessment_includes_follow_up, default_history_page_projection,
     diagnose_ref_continuity, effective_integration_ref, enrich_liveness, event_log_head_marker,
-    history_base_projection, list_attention, list_revisions, read_bound_object_artifact,
-    read_events_for_display, read_object_artifact, revision_supersession_classification,
-    show_revision_for_inspector, show_revision_overviews, stale_review_fact_count, store_identity,
+    history_base_projection, list_attention, list_revisions, parse_event_instant,
+    read_bound_object_artifact, read_events_for_display, read_object_artifact,
+    revision_supersession_classification, show_revision_for_inspector, show_revision_overviews,
+    stale_review_fact_count, store_identity,
 };
 use serde::Serialize;
 
@@ -89,6 +91,7 @@ struct HistoryNewCountPayload {
 pub(super) enum RoutedJson {
     Ok(String),
     Unavailable(DerivedHistoryStatus),
+    RestartRequired,
 }
 
 #[derive(Serialize)]
@@ -143,14 +146,14 @@ pub(super) fn derived_access_status_json(
 #[serde(rename_all = "camelCase")]
 struct RevisionsPayload {
     schema: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
     event_set_hash: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     projection_stamp: Option<String>,
     event_count: usize,
     revision_count: usize,
     entries: Vec<RevisionEntryDocument>,
     diagnostics: Vec<ProjectionDiagnostic>,
+    as_of: String,
+    next: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -749,12 +752,11 @@ fn to_unit_entry_documents(
         .collect()
 }
 
-/// Server-side overview seam for `/api/revisions`. One store-wide pass
-/// (`show_revision_overviews`) builds every revision's overview, replacing the
-/// per-revision N+1 (`show_revision` once per revision, each re-reading and
-/// re-folding the whole event log). Snapshot-read failures add a diagnostic to
-/// only their revision; an `eventSetHash`-keyed projection cache can still layer
-/// on top (#255).
+/// Default-off overview seam for one `/api/revisions` page. One exhaustive
+/// authoritative pass builds the requested revisions' overviews, replacing the
+/// per-revision N+1 (`show_revision` once per entry). Snapshot-read failures add
+/// a diagnostic only to their revision. The active route bypasses this helper and
+/// hydrates only the requested revisions from the derived generation.
 fn revision_overviews(
     repo: &Path,
     entries: &[RevisionListEntry],
@@ -771,9 +773,8 @@ fn revision_overviews(
     // may remove captures). The overview slice reads no member readbacks or
     // principal diagnostics, so the verification-policy / actor-attributes /
     // delegation-map inputs are dropped; the trust set is retained — it drives the
-    // operative-removal decision behind file_count/row_count. The CALLER discovers
-    // it (once) because the same value keys the response cache (#426): key and
-    // build must never disagree on the trust configuration.
+    // operative-removal decision behind file_count/row_count. The caller discovers
+    // it once so this page build uses one coherent reader configuration.
     let overviews = {
         let span = tracing::debug_span!("shore.inspect.revisions.show_revision_overviews");
         let _guard = span.enter();
@@ -1263,175 +1264,141 @@ fn cached_history_base(
     Ok(base)
 }
 
-/// Captured Revisions with their base/target/snapshot identity. Served from the
-/// head-marker-keyed response cache: the endpoint takes no query parameters, so
-/// one store version has exactly one payload, rebuilt only when the marker
-/// moves (#426). Concurrent requests during a rebuild coalesce on the cache's
-/// write lock instead of duplicating the build.
+/// Test-only shorthand for the first authoritative revision page.
+#[cfg(test)]
 pub(super) fn revisions_json(
     repo: &Path,
-    cache: &super::cache::RevisionsResponseCache,
     snapshot_summaries: &Arc<SnapshotSummaryCache>,
 ) -> Result<String, String> {
-    cached_revisions_json(repo, cache, snapshot_summaries).map(|payload| (*payload).clone())
+    let request = RevisionPageRequest::new(None, None)
+        .map_err(|_| "invalid revision page request".to_owned())?;
+    build_revisions_page_json(repo, snapshot_summaries, &request).and_then(|result| match result {
+        RoutedJson::Ok(body) => Ok(body),
+        RoutedJson::RestartRequired => Err("revision page restart required".to_owned()),
+        RoutedJson::Unavailable(_) => unreachable!("authoritative page is always available"),
+    })
 }
 
 /// Build the default-off revisions document with request-local ownership. The
 /// temporary summary cache may deduplicate content reads inside this one build,
 /// but is dropped with the response and never populates the server's retained
 /// revisions or snapshot-summary caches.
-pub(super) fn authoritative_revisions_json(repo: &Path) -> Result<String, String> {
-    let trust_set = crate::cli::common::discover_trust_set(repo);
+pub(super) fn authoritative_revisions_json(
+    repo: &Path,
+    request: &RevisionPageRequest,
+) -> Result<RoutedJson, String> {
     let snapshot_summaries = Arc::new(SnapshotSummaryCache::new());
-    build_revisions_json(repo, &trust_set, &snapshot_summaries)
+    build_revisions_page_json(repo, &snapshot_summaries, request)
 }
 
 pub(super) fn routed_revisions_json(
     repo: &Path,
     derived: &DerivedHistoryAccess,
-    cache: &super::cache::RevisionsResponseCache,
     snapshot_summaries: &Arc<SnapshotSummaryCache>,
+    request: &RevisionPageRequest,
 ) -> Result<RoutedJson, String> {
     if !derived.is_active() {
-        return revisions_json(repo, cache, snapshot_summaries).map(RoutedJson::Ok);
+        return build_revisions_page_json(repo, snapshot_summaries, request);
     }
     let trust_set = crate::cli::common::discover_trust_set(repo);
-    match derived.revisions(repo, trust_set, Arc::clone(snapshot_summaries))? {
-        DerivedRevisionCollectionRoute::Off => {
-            revisions_json(repo, cache, snapshot_summaries).map(RoutedJson::Ok)
+    match derived.revisions_page(repo, trust_set, Arc::clone(snapshot_summaries), request)? {
+        DerivedRevisionPageRoute::Off => {
+            build_revisions_page_json(repo, snapshot_summaries, request)
         }
-        DerivedRevisionCollectionRoute::Ready(collection) => {
-            serialize_derived_revisions_payload(repo, collection).map(RoutedJson::Ok)
+        DerivedRevisionPageRoute::Ready(page) => {
+            serialize_derived_revisions_page(repo, page).map(RoutedJson::Ok)
         }
-        DerivedRevisionCollectionRoute::Unavailable(status) => Ok(RoutedJson::Unavailable(status)),
+        DerivedRevisionPageRoute::Unavailable(status) => Ok(RoutedJson::Unavailable(status)),
+        DerivedRevisionPageRoute::RestartRequired => Ok(RoutedJson::RestartRequired),
     }
-}
-
-/// Warm the `/api/revisions` response cache without serializing a response.
-///
-/// Best-effort, exactly like [`warm_history_cache`]: endpoint requests use the
-/// same cache path and surface any real error to the client.
-pub(super) fn warm_revisions_cache(
-    repo: &Path,
-    cache: &super::cache::RevisionsResponseCache,
-    snapshot_summaries: &Arc<SnapshotSummaryCache>,
-) -> Result<(), String> {
-    let span = tracing::debug_span!("shore.inspect.warm_revisions_cache");
-    let _guard = span.enter();
-
-    cached_revisions_json(repo, cache, snapshot_summaries).map(|_| ())
-}
-
-/// Whether the `/api/revisions` cache already holds the payload for the store's
-/// current head marker AND the current reader trust configuration. `false` on
-/// any key-derivation error — the caller only uses this to decide whether a
-/// background warm is worth spawning.
-pub(super) fn revisions_cache_is_warm(
-    repo: &Path,
-    cache: &super::cache::RevisionsResponseCache,
-    commit_graph_stamp: Option<&str>,
-) -> bool {
-    let trust_set = crate::cli::common::discover_trust_set(repo);
-    revisions_cache_key(repo, &trust_set, commit_graph_stamp)
-        .ok()
-        .and_then(|key| cache.try_get(&key))
-        .is_some()
-}
-
-/// The `/api/revisions` cache key: store version + the trust configuration +
-/// the commit-graph stamp the build will read. The trust set is held by value
-/// (structural equality), so `pointbreak key enroll` — which changes operative-
-/// removal decisions without appending an event — always misses the cache. The
-/// stamp covers pure-git ref moves, most importantly the landing fast-forward
-/// that flips `mergeStatus` with no event (#467); a repo where the stamp
-/// cannot be derived keys on a sentinel, matching the build's own graceful
-/// liveness degradation.
-fn revisions_cache_key(
-    repo: &Path,
-    trust_set: &TrustSet,
-    commit_graph_stamp: Option<&str>,
-) -> Result<super::cache::RevisionsCacheKey, String> {
-    let marker = {
-        let span = tracing::debug_span!("shore.inspect.revisions.event_log_head_marker");
-        let _guard = span.enter();
-        event_log_head_marker(repo).map_err(|error| error.to_string())?
-    };
-    Ok(super::cache::RevisionsCacheKey {
-        marker,
-        trust_set: trust_set.clone(),
-        commit_graph_stamp: stamp_or_sentinel(commit_graph_stamp),
-    })
-}
-
-/// The key form of a possibly-underivable commit-graph stamp: a repo where the
-/// stamp cannot be read keys on a stable sentinel, matching the build's own
-/// graceful liveness degradation. One mapping shared by every key derivation,
-/// so the warm gate and the request path can never disagree on the error form.
-fn stamp_or_sentinel(commit_graph_stamp: Option<&str>) -> String {
-    commit_graph_stamp
-        .map(str::to_owned)
-        .unwrap_or_else(|| "unavailable".to_owned())
 }
 
 /// Derive the commit-graph stamp for one request, degrading to `None` on any
-/// git failure. Hoisted by the freshness route so one derivation (two git
-/// spawns) serves both the warm gate and the freshness payload in a single
-/// poll tick.
+/// git failure. The freshness route uses it to expose ref-only changes without
+/// making revision collection paging depend on a retained whole response.
 pub(super) fn freshness_commit_graph_stamp(repo: &Path) -> Option<String> {
     let span = tracing::debug_span!("shore.inspect.commit_graph_stamp");
     let _guard = span.enter();
     commit_graph_stamp(repo).ok()
 }
 
-fn cached_revisions_json(
+fn build_revisions_page_json(
     repo: &Path,
-    cache: &super::cache::RevisionsResponseCache,
     snapshot_summaries: &Arc<SnapshotSummaryCache>,
-) -> Result<Arc<String>, String> {
-    // Discover the trust set ONCE, key the cache with it, and build with the
-    // same value: the key and the payload can never disagree on the trust
-    // configuration they describe.
-    let trust_set = {
-        let span = tracing::debug_span!("shore.inspect.revisions.discover_trust_set");
-        let _guard = span.enter();
-        crate::cli::common::discover_trust_set(repo)
-    };
-    let stamp = freshness_commit_graph_stamp(repo);
-    let key = revisions_cache_key(repo, &trust_set, stamp.as_deref())?;
-    let span = tracing::debug_span!(
-        "shore.inspect.revisions.cache_get_or_build",
-        marker = key.marker
-    );
-    let _guard = span.enter();
-    let payload = cache.get_or_build(key, |key| {
-        build_revisions_json(repo, &key.trust_set, snapshot_summaries)
-    })?;
-    #[cfg(feature = "longitudinal-counting")]
-    record_revisions_cache_ownership(&payload);
-    Ok(payload)
-}
-
-#[cfg(feature = "longitudinal-counting")]
-fn record_revisions_cache_ownership(payload: &str) {
-    pointbreak::bench_support::longitudinal::set_retained_serialized_response_cache_bytes(
-        payload.len(),
-    );
-}
-
-fn build_revisions_json(
-    repo: &Path,
-    trust_set: &TrustSet,
-    snapshot_summaries: &Arc<SnapshotSummaryCache>,
-) -> Result<String, String> {
+    request: &RevisionPageRequest,
+) -> Result<RoutedJson, String> {
     let span = tracing::debug_span!("shore.inspect.api.revisions_json");
     let _guard = span.enter();
 
-    let result = {
+    let mut result = {
         let span = tracing::debug_span!("shore.inspect.revisions.list_revisions");
         let _guard = span.enter();
-        list_revisions(RevisionListOptions::new(repo).with_read_for_display(true))
-            .map_err(|error| error.to_string())?
+        list_revisions(
+            RevisionListOptions::new(repo)
+                .with_read_for_display(true)
+                .with_group_shared_commits(false),
+        )
+        .map_err(|error| error.to_string())?
     };
+    let normalized_instants = result
+        .entries
+        .iter()
+        .map(|entry| {
+            parse_event_instant(&entry.captured_at)
+                .map(|instant| (entry.revision_id.clone(), instant))
+                .ok_or_else(|| {
+                    format!(
+                        "captured revision {} has an invalid instant",
+                        entry.revision_id.as_str()
+                    )
+                })
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    result.entries.sort_by(|left, right| {
+        normalized_instants[&right.revision_id]
+            .cmp(&normalized_instants[&left.revision_id])
+            .then_with(|| right.revision_id.as_str().cmp(left.revision_id.as_str()))
+    });
+    let snapshot = result.event_set_hash.clone();
+    let cursor = match request.cursor(AUTHORITATIVE_REVISION_PAGE_PROFILE, &snapshot) {
+        Ok(cursor) => cursor,
+        Err(RevisionPageRequestError::RestartRequired) => {
+            return Ok(RoutedJson::RestartRequired);
+        }
+        Err(RevisionPageRequestError::InvalidRequest) => {
+            return Err("invalid revision page token".to_owned());
+        }
+    };
+    let start = cursor.as_ref().map_or(0, |cursor| {
+        result.entries.partition_point(|entry| {
+            let captured_at_millis = normalized_instants[&entry.revision_id];
+            captured_at_millis > cursor.captured_at_millis
+                || (captured_at_millis == cursor.captured_at_millis
+                    && entry.revision_id.as_str() >= cursor.revision_id.as_str())
+        })
+    });
+    let total = result.revision_count;
+    let mut entries = result.entries.split_off(start.min(result.entries.len()));
+    let has_more = entries.len() > request.limit();
+    entries.truncate(request.limit());
+    let next = if has_more {
+        let entry = entries.last().expect("nonempty truncated revision page");
+        let captured_at_millis = parse_event_instant(&entry.captured_at)
+            .ok_or_else(|| "captured revision has an invalid instant".to_owned())?;
+        Some(request.next(
+            AUTHORITATIVE_REVISION_PAGE_PROFILE,
+            &snapshot,
+            &RevisionPageCursor {
+                captured_at_millis,
+                revision_id: entry.revision_id.clone(),
+            },
+        ))
+    } else {
+        None
+    };
+    result.entries = entries;
+    result.revision_count = total;
+    let trust_set = crate::cli::common::discover_trust_set(repo);
     let subject_oids = result
         .entries
         .iter()
@@ -1439,7 +1406,7 @@ fn build_revisions_json(
         .filter_map(|provenance| commit_subject_oids(&provenance.source, &provenance.target))
         .collect::<BTreeSet<_>>();
     let commit_subjects = git_commit_subjects(repo, &subject_oids).unwrap_or_default();
-    let overviews = revision_overviews(repo, &result.entries, trust_set, snapshot_summaries)?;
+    let overviews = revision_overviews(repo, &result.entries, &trust_set, snapshot_summaries)?;
     let entries = {
         let span = tracing::debug_span!(
             "shore.inspect.revisions.to_entry_documents",
@@ -1449,24 +1416,28 @@ fn build_revisions_json(
         to_unit_entry_documents(result.entries, overviews, &commit_subjects)?
     };
     let payload = RevisionsPayload {
-        schema: "pointbreak.inspect-revisions",
-        event_set_hash: Some(result.event_set_hash),
+        schema: REVISION_PAGE_SCHEMA,
+        event_set_hash: Some(snapshot.clone()),
         projection_stamp: None,
         event_count: result.event_count,
         revision_count: result.revision_count,
         entries,
         diagnostics: result.diagnostics,
+        as_of: snapshot,
+        next,
     };
     let span = tracing::debug_span!("shore.inspect.revisions.serialize_json");
     let _guard = span.enter();
-    serde_json::to_string(&payload).map_err(|error| error.to_string())
+    serde_json::to_string(&payload)
+        .map(RoutedJson::Ok)
+        .map_err(|error| error.to_string())
 }
 
-fn serialize_derived_revisions_payload(
+fn serialize_derived_revisions_page(
     repo: &Path,
-    collection: DerivedRevisionCollection,
+    page: DerivedRevisionPage,
 ) -> Result<String, String> {
-    let subject_oids = collection
+    let subject_oids = page
         .result
         .entries
         .iter()
@@ -1474,17 +1445,18 @@ fn serialize_derived_revisions_payload(
         .filter_map(|provenance| commit_subject_oids(&provenance.source, &provenance.target))
         .collect::<BTreeSet<_>>();
     let commit_subjects = git_commit_subjects(repo, &subject_oids).unwrap_or_default();
-    let overviews =
-        selected_revision_overview_documents(&collection.result.entries, &collection.overviews)?;
-    let entries = to_unit_entry_documents(collection.result.entries, overviews, &commit_subjects)?;
+    let overviews = selected_revision_overview_documents(&page.result.entries, &page.overviews)?;
+    let entries = to_unit_entry_documents(page.result.entries, overviews, &commit_subjects)?;
     let payload = RevisionsPayload {
-        schema: "pointbreak.inspect-revisions",
+        schema: REVISION_PAGE_SCHEMA,
         event_set_hash: None,
-        projection_stamp: Some(collection.projection_stamp),
-        event_count: collection.result.event_count,
-        revision_count: collection.result.revision_count,
+        projection_stamp: Some(page.projection_stamp),
+        event_count: page.result.event_count,
+        revision_count: page.result.revision_count,
         entries,
-        diagnostics: collection.result.diagnostics,
+        diagnostics: page.result.diagnostics,
+        as_of: page.as_of,
+        next: page.next,
     };
     #[cfg(feature = "longitudinal-counting")]
     pointbreak::bench_support::longitudinal::set_retained_serialized_response_cache_bytes(0);
@@ -2498,46 +2470,6 @@ mod tests {
     }
 
     #[test]
-    fn active_revision_collection_wire_matches_default_off_except_for_projection_stamp() {
-        let (repo, _, _) = captured_repo();
-        let summaries = Arc::new(SnapshotSummaryCache::new());
-        let trust_set = crate::cli::common::discover_trust_set(repo.path());
-        let result =
-            list_revisions(RevisionListOptions::new(repo.path()).with_read_for_display(true))
-                .unwrap();
-        let overviews = show_revision_overviews(
-            RevisionOverviewsOptions::new(repo.path())
-                .with_revisions(result.entries.iter().map(|entry| entry.revision_id.clone()))
-                .with_read_for_display(true)
-                .with_trust_set(trust_set)
-                .with_snapshot_summary_cache(Arc::clone(&summaries)),
-        )
-        .unwrap();
-        let mut active: serde_json::Value = serde_json::from_str(
-            &serialize_derived_revisions_payload(
-                repo.path(),
-                DerivedRevisionCollection {
-                    projection_stamp: "sha256:projection".to_owned(),
-                    result,
-                    overviews,
-                },
-            )
-            .unwrap(),
-        )
-        .unwrap();
-        let cache = super::super::cache::RevisionsResponseCache::new();
-        let mut default_off: serde_json::Value =
-            serde_json::from_str(&revisions_json(repo.path(), &cache, &summaries).unwrap())
-                .unwrap();
-
-        assert_eq!(active["projectionStamp"], "sha256:projection");
-        assert!(active.get("eventSetHash").is_none());
-        active.as_object_mut().unwrap().remove("projectionStamp");
-        default_off.as_object_mut().unwrap().remove("eventSetHash");
-        assert_eq!(active, default_off);
-    }
-
-    #[test]
     fn active_revision_detail_wire_matches_default_off_except_for_projection_stamp() {
         let (repo, _, _) = captured_repo();
         let revision_id =
@@ -2582,26 +2514,6 @@ mod tests {
             text: "working-tree changes".to_owned(),
             source: WorkLabelSource::SourceFallback,
         }
-    }
-
-    #[cfg(feature = "longitudinal-counting")]
-    #[test]
-    fn counting_calibrates_serialized_revisions_cache_ownership() {
-        let scope = pointbreak::bench_support::longitudinal::LongitudinalCountingScopeV1::new(
-            "c".repeat(64),
-        )
-        .expect("valid scope");
-        let _guard = scope.enter();
-
-        record_revisions_cache_ownership("{\"entries\":[]}");
-
-        assert_eq!(
-            scope
-                .snapshot()
-                .capacity_ownership
-                .retained_serialized_response_cache_bytes,
-            14
-        );
     }
 
     #[test]
@@ -3814,10 +3726,9 @@ mod tests {
         git(path, &["add", "--all"]);
         git(path, &["commit", "--amend", "--no-edit"]);
 
-        let cache = super::super::cache::RevisionsResponseCache::new();
         let summaries = Arc::new(SnapshotSummaryCache::new());
         let value: serde_json::Value =
-            serde_json::from_str(&revisions_json(path, &cache, &summaries).unwrap()).unwrap();
+            serde_json::from_str(&revisions_json(path, &summaries).unwrap()).unwrap();
 
         assert_eq!(value["revisionCount"], 1);
         let entry = value["entries"]
@@ -3833,12 +3744,10 @@ mod tests {
     fn revisions_json_represents_provenance_free_revision_end_to_end() {
         let (repo, object_id, content_hash) = captured_repo();
         let revision_id = append_provenance_free_revision(repo.path(), &object_id, &content_hash);
-        let cache = super::super::cache::RevisionsResponseCache::new();
         let summaries = Arc::new(SnapshotSummaryCache::new());
 
         let value: serde_json::Value =
-            serde_json::from_str(&revisions_json(repo.path(), &cache, &summaries).unwrap())
-                .unwrap();
+            serde_json::from_str(&revisions_json(repo.path(), &summaries).unwrap()).unwrap();
         let entry = value["entries"]
             .as_array()
             .unwrap()
@@ -3883,10 +3792,9 @@ mod tests {
         ))
         .expect("remove one bound snapshot artifact");
 
-        let cache = super::super::cache::RevisionsResponseCache::new();
         let summaries = Arc::new(SnapshotSummaryCache::new());
         let value: serde_json::Value =
-            serde_json::from_str(&revisions_json(path, &cache, &summaries).unwrap()).unwrap();
+            serde_json::from_str(&revisions_json(path, &summaries).unwrap()).unwrap();
         let entries = value["entries"].as_array().expect("revision entries");
         assert_eq!(value["revisionCount"], 2);
         assert_eq!(entries.len(), 2);
@@ -4098,38 +4006,24 @@ mod tests {
         .expect("associate sibling revision with the same commit");
         let repo = root;
 
-        // Arrange check (non-vacuity): the list really does fold the pair — one
-        // entry whose grouped member set carries BOTH ids, so exactly one of the
-        // two is absent from the top-level entries.
-        let cache = super::super::cache::RevisionsResponseCache::new();
+        // The paged collection keys its cursor and count to captured revisions,
+        // so shared-commit siblings remain separate rows with singleton member
+        // sets instead of straddling an opaque page boundary.
         let summaries = Arc::new(SnapshotSummaryCache::new());
         let listed: serde_json::Value =
-            serde_json::from_str(&revisions_json(repo.path(), &cache, &summaries).unwrap())
-                .unwrap();
+            serde_json::from_str(&revisions_json(repo.path(), &summaries).unwrap()).unwrap();
         let entries = listed["entries"].as_array().unwrap();
-        assert_eq!(entries.len(), 1, "the two captures fold into one entry");
-        let grouped: Vec<&str> = entries[0]["groupedRevisionIds"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|id| id.as_str().unwrap())
-            .collect();
-        assert!(
-            grouped.contains(&main_revision.as_str())
-                && grouped.contains(&sibling_revision.as_str())
-        );
-        let representative = entries[0]["revisionId"].as_str().unwrap().to_owned();
-        let grouped_away = if representative == main_revision {
-            sibling_revision
-        } else {
-            main_revision
-        };
+        assert_eq!(entries.len(), 2, "one page row per captured revision");
+        assert!(entries.iter().all(|entry| {
+            entry["groupedRevisionIds"]
+                .as_array()
+                .is_some_and(|ids| ids.len() == 1 && ids[0] == entry["revisionId"])
+        }));
 
-        // The composite endpoint resolves the grouped-away id exactly
-        // (event-derived resolution, independent of list grouping/visibility).
+        // The composite endpoint remains entity-primary for either id.
         let doc: serde_json::Value =
-            serde_json::from_str(&revision_json(repo.path(), &grouped_away).unwrap()).unwrap();
-        assert_eq!(doc["revision"]["id"], serde_json::json!(grouped_away));
+            serde_json::from_str(&revision_json(repo.path(), &sibling_revision).unwrap()).unwrap();
+        assert_eq!(doc["revision"]["id"], serde_json::json!(sibling_revision));
     }
 
     #[test]
@@ -4248,10 +4142,9 @@ mod tests {
         assert_eq!(resolve_head_live_branch(&ambiguous, "baseoid"), None);
     }
 
-    /// The trust set keys the `/api/revisions` cache by value (#426): an
-    /// enrollment change must compare unequal (or a stale trust-dependent
-    /// payload serves until an unrelated event moves the marker), and an
-    /// unchanged document must compare equal (or the cache never hits).
+    /// Trust-set equality is structural: enrollment changes compare unequal and
+    /// unchanged documents compare equal for any projection cache key that owns
+    /// reader-relative rendering.
     #[test]
     fn trust_set_equality_tracks_enrollment_changes_and_nothing_else() {
         let dir = tempfile::tempdir().expect("temp allowed-signers dir");
@@ -4320,37 +4213,6 @@ mod tests {
         assert!(
             !Arc::ptr_eq(&rebuilt, &redelegated),
             "a delegation change must miss the history cache"
-        );
-    }
-
-    #[test]
-    fn revisions_cache_rebuilds_when_ref_state_moves() {
-        let (repo, _, _) = captured_repo();
-        let cache = super::super::cache::RevisionsResponseCache::new();
-        let summaries = Arc::new(SnapshotSummaryCache::new());
-
-        let first =
-            cached_revisions_json(repo.path(), &cache, &summaries).expect("warm revisions cache");
-        let warm_stamp = freshness_commit_graph_stamp(repo.path());
-        assert!(
-            revisions_cache_is_warm(repo.path(), &cache, warm_stamp.as_deref()),
-            "freshly built cache reads warm"
-        );
-
-        // A pure-git ref move changes the liveness inputs the payload's
-        // mergeStatus is derived from without appending a Pointbreak event — the
-        // cache must read cold and rebuild (#467).
-        git(repo.path(), &["branch", "stamp-probe"]);
-        let moved_stamp = freshness_commit_graph_stamp(repo.path());
-        assert!(
-            !revisions_cache_is_warm(repo.path(), &cache, moved_stamp.as_deref()),
-            "a ref move must read cold so the freshness-poll rewarm fires"
-        );
-        let rebuilt =
-            cached_revisions_json(repo.path(), &cache, &summaries).expect("rebuild after ref move");
-        assert!(
-            !Arc::ptr_eq(&first, &rebuilt),
-            "a ref move must rebuild the payload"
         );
     }
 

@@ -1032,6 +1032,30 @@ describe("applyHash (derive the view from the fragment, repaint via the subscrip
     );
   });
 
+  it("keeps an exact revision route outside a partial loaded page", () => {
+    store.commit({
+      history: { entries: [], diagnostics: [] } as unknown as HistoryDoc,
+      revisions: {
+        entries: [],
+        next: "cursor:next",
+        revisionCount: 100,
+      } as unknown as RevisionsDoc,
+      threads: {
+        threads: [],
+        revisionClassification: {},
+      } as unknown as ThreadsDoc,
+    });
+    mountInspectorDom();
+    history.replaceState(null, "", `#/revision/${encodeURIComponent(REV)}`);
+    router.applyHash();
+
+    expect(store.getState().selected).toEqual({ kind: "revision", id: REV });
+    expect(store.getState().open).toBe(true);
+    expect(
+      document.querySelector("#route-diagnostic")?.textContent,
+    ).not.toContain("is not in this store");
+  });
+
   it("clears the diagnostic for an unproblematic fragment", () => {
     seed();
     mountInspectorDom();

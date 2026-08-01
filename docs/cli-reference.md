@@ -254,6 +254,18 @@ startup emits `pointbreak.inspect-startup`. `/api/version` mirrors the exact `po
 v1 document emitted by `pointbreak version`. The remaining endpoints and inspector-private payloads are
 not promoted contracts.
 
+The Inspector-private `/api/revisions` collection is snapshot-bound and paged. `limit` defaults to
+`100` and may not exceed `500`; `after` carries an opaque continuation for the page's `asOf`
+snapshot. Pages use normalized `(capturedAt, revisionId)` descending order so page one contains the
+most recent captures, and include `revisionCount`,
+`asOf`, and nullable `next`. An invalid request returns `400`; a continuation from an expired,
+different-profile, or different-schema snapshot returns `409` with `restart_required`, after which
+the client restarts at page one. The bundled revisions lens labels when only some revisions are
+loaded: its filters, suggestions, ordering, and keyboard bounds then apply to those loaded pages.
+Each capture remains its own page row, including shared-commit siblings; the CLI's default
+`revision list` presentation may fold those siblings into a grouped row. Exact
+`/api/revisions/{id}` reads remain entity-primary and do not depend on collection-page membership.
+
 Every worktree of a clone resolves the shared common-dir store (`<git-common-dir>/pointbreak`), so the inspector
 renders snapshots captured in sibling worktrees as well as the current one. The `/api/snapshots/{id}`
 payload is **content-only**: it carries the immutable diff content and its `contentHash` only — no

@@ -1,20 +1,16 @@
-//! One-slot, head-marker-keyed projection caches for the inspect server (#255,
-//! #426).
+//! One-slot, head-marker-keyed projection cache for Inspector history (#255).
 //!
 //! Server-side `q` search needs the full body-hydrated haystack, so it cannot
 //! slice-before-hydrate; without a cache every `/api/history` query would re-read,
-//! re-fold, and re-hydrate the whole log. `/api/revisions` has the same shape:
-//! every request rebuilds every revision's overview. Both amortize the full
-//! build to once per store version: change is detected with the cheap monotonic
-//! `event_log_head_marker` (plan 0090, no event-byte decode) and the cached
-//! `Arc` value is served until the marker moves, then dropped and rebuilt.
-//! Single-slot (one store version), read-side lazy, no store-dir lock (INV-5).
-//! This is ADR-0024 D4's detect-vs-confirm model applied WITHOUT building the
-//! deferred redb index.
+//! re-fold, and re-hydrate the whole log. The full build is amortized once per
+//! store version: change is detected with the cheap monotonic
+//! `event_log_head_marker` and the cached `Arc` is served until the marker
+//! moves. Revision collection paging deliberately owns no complete serialized
+//! response cache.
 
 use std::sync::{Arc, RwLock};
 
-use pointbreak::session::{BaseHistoryProjection, BaseProjectionConfig, TrustSet};
+use pointbreak::session::{BaseHistoryProjection, BaseProjectionConfig};
 
 /// The history base projection cache: one fully-hydrated base per store
 /// version and reader configuration. Keyed by [`HistoryCacheKey`], not the
@@ -36,29 +32,6 @@ pub(super) type HistoryProjectionCache = MarkerCache<HistoryCacheKey, BaseHistor
 pub(super) struct HistoryCacheKey {
     pub(super) marker: u64,
     pub(super) config: BaseProjectionConfig,
-}
-
-/// The `/api/revisions` response cache: the endpoint takes no query parameters,
-/// so the serialized payload itself is the cacheable unit (#426). Keyed by
-/// [`RevisionsCacheKey`], not the bare marker: the payload embeds
-/// trust-dependent removal decisions and git-derived merge statuses, and both
-/// inputs can change without moving the marker.
-pub(super) type RevisionsResponseCache = MarkerCache<RevisionsCacheKey, String>;
-
-/// Cache key for the `/api/revisions` payload: the store version (head marker)
-/// plus the two non-event inputs the build reads. The trust set (held by
-/// value — the allowed-signers document is small and structurally comparable)
-/// covers `pointbreak key enroll` and allowed-signers edits, which change
-/// operative-removal decisions without appending an event (#426). The
-/// commit-graph stamp covers pure-git ref moves — most importantly the landing
-/// itself, a fast-forward that flips `mergeStatus` open→merged with no Pointbreak
-/// event — which would otherwise serve stale until an unrelated event moved
-/// the marker (#467).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(super) struct RevisionsCacheKey {
-    pub(super) marker: u64,
-    pub(super) trust_set: TrustSet,
-    pub(super) commit_graph_stamp: String,
 }
 
 /// A single-slot cache of one expensive derivation, keyed by the store version
@@ -198,52 +171,5 @@ mod tests {
         let hit = cache.try_get(&7).expect("matching marker hits");
         assert!(Arc::ptr_eq(&built, &hit));
         assert!(cache.try_get(&8).is_none(), "stale marker misses");
-    }
-
-    fn revisions_key(marker: u64, stamp: &str) -> RevisionsCacheKey {
-        RevisionsCacheKey {
-            marker,
-            trust_set: TrustSet::default(),
-            commit_graph_stamp: stamp.to_owned(),
-        }
-    }
-
-    #[test]
-    fn revisions_cache_reuses_only_on_identical_marker_and_ref_state() {
-        let cache = RevisionsResponseCache::new();
-        let v1 = cache
-            .get_or_build(revisions_key(1, "stamp-a"), |_| {
-                Ok("{\"entries\":[]}".to_owned())
-            })
-            .unwrap();
-        let hit = cache
-            .get_or_build(revisions_key(1, "stamp-a"), |_| {
-                panic!("identical key must not rebuild")
-            })
-            .unwrap();
-        assert!(Arc::ptr_eq(&v1, &hit));
-
-        // Same store version, moved commit-graph stamp: MUST rebuild — a
-        // pure-git landing flips merge statuses without moving the marker
-        // (#467). Trust changes rebuild the same way (structural key
-        // inequality; covered end-to-end in the api tests).
-        let restamped = cache
-            .get_or_build(revisions_key(1, "stamp-b"), |_| {
-                Ok("{\"entries\":[\"landed\"]}".to_owned())
-            })
-            .unwrap();
-        assert_eq!(*restamped, "{\"entries\":[\"landed\"]}");
-        assert!(
-            cache.try_get(&revisions_key(1, "stamp-a")).is_none(),
-            "the single slot now holds the re-stamped payload"
-        );
-
-        // Marker move rebuilds as before.
-        let v2 = cache
-            .get_or_build(revisions_key(2, "stamp-b"), |_| {
-                Ok("{\"entries\":[1]}".to_owned())
-            })
-            .unwrap();
-        assert_eq!(*v2, "{\"entries\":[1]}");
     }
 }

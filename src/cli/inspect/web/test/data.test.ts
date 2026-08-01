@@ -132,6 +132,154 @@ function deferredResponse(payload: unknown): {
 }
 
 describe("load", () => {
+  it("requests only the frozen first revisions page", async () => {
+    const inner = globalThis.fetch;
+    let revisionsTarget = "";
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const target =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      if (
+        new URL(target, "http://inspector.test").pathname === "/api/revisions"
+      )
+        revisionsTarget = target;
+      return inner(input as RequestInfo, init);
+    }) as typeof fetch;
+    try {
+      await expect(data.load()).resolves.toBe(true);
+    } finally {
+      globalThis.fetch = inner;
+    }
+
+    expect(
+      new URL(revisionsTarget, "http://inspector.test").searchParams.get(
+        "limit",
+      ),
+    ).toBe("100");
+  });
+
+  it("loads and deterministically merges a continuation without duplicates", async () => {
+    const first = structuredClone(revisionsJson);
+    const repeated = first.entries[0];
+    setRevisionsResponse({
+      ...first,
+      asOf: "projection:a",
+      next: "cursor:next",
+      revisionCount: 2,
+    });
+    await data.load();
+
+    const inner = globalThis.fetch;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const target = new URL(
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url,
+        "http://inspector.test",
+      );
+      if (
+        target.pathname === "/api/revisions" &&
+        target.searchParams.get("after") === "cursor:next"
+      ) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              schema: "pointbreak.inspect-revisions-page.v1",
+              asOf: "projection:a",
+              next: null,
+              revisionCount: 2,
+              projectionStamp: "projection:a",
+              eventSetHash: null,
+              entries: [
+                repeated,
+                {
+                  ...repeated,
+                  revisionId: "rev:sha256:second",
+                  snapshotId: "obj:sha256:second",
+                },
+              ],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        );
+      }
+      return inner(input as RequestInfo, init);
+    }) as typeof fetch;
+    try {
+      await expect(data.loadMoreRevisions()).resolves.toBe(true);
+    } finally {
+      globalThis.fetch = inner;
+    }
+
+    expect(
+      store.getState().revisions?.entries.map((entry) => entry.revisionId),
+    ).toEqual([repeated.revisionId, "rev:sha256:second"]);
+    expect(store.getState().revisions?.next).toBeNull();
+  });
+
+  it("restarts from page one when a continuation snapshot expires", async () => {
+    setRevisionsResponse({
+      ...revisionsJson,
+      asOf: "projection:old",
+      next: "cursor:stale",
+      revisionCount: 2,
+    });
+    await data.load();
+    const inner = globalThis.fetch;
+    const targets: string[] = [];
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const target =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      if (
+        new URL(target, "http://inspector.test").pathname === "/api/revisions"
+      ) {
+        targets.push(target);
+        if (new URL(target, "http://inspector.test").searchParams.has("after"))
+          return Promise.resolve(
+            new Response(JSON.stringify({ error: "restart_required" }), {
+              status: 409,
+              headers: { "content-type": "application/json" },
+            }),
+          );
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ...revisionsJson,
+              asOf: "projection:new",
+              next: null,
+              projectionStamp: "projection:new",
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          ),
+        );
+      }
+      return inner(input as RequestInfo, init);
+    }) as typeof fetch;
+    try {
+      await expect(data.loadMoreRevisions()).resolves.toBe(true);
+    } finally {
+      globalThis.fetch = inner;
+    }
+
+    expect(targets).toHaveLength(2);
+    expect(
+      new URL(targets[0], "http://inspector.test").searchParams.has("after"),
+    ).toBe(true);
+    expect(
+      new URL(targets[1], "http://inspector.test").searchParams.has("after"),
+    ).toBe(false);
+    expect(store.getState().revisions?.asOf).toBe("projection:new");
+  });
+
   it("stops at typed recovery state without requesting unavailable data routes", async () => {
     setDerivedAccessStatus({
       active: true,
@@ -684,6 +832,70 @@ describe("load", () => {
 });
 
 describe("pollFreshness", () => {
+  it("refreshes the already-loaded revision window instead of collapsing to page one", async () => {
+    const firstEntry = revisionsJson.entries[0];
+    const secondEntry = {
+      ...firstEntry,
+      revisionId: "rev:sha256:second",
+      snapshotId: "obj:sha256:second",
+      summary: "second revision",
+    };
+    const firstPage = {
+      ...revisionsJson,
+      asOf: "projection:stable",
+      projectionStamp: "projection:stable",
+      next: "cursor:second",
+      revisionCount: 2,
+    };
+    const secondPage = {
+      ...firstPage,
+      entries: [secondEntry],
+      next: null,
+    };
+    setRevisionsResponse(firstPage);
+    await data.load();
+
+    const inner = globalThis.fetch;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const target = new URL(
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url,
+        "http://inspector.test",
+      );
+      if (target.pathname === "/api/revisions") {
+        const payload = target.searchParams.has("after")
+          ? secondPage
+          : firstPage;
+        return Promise.resolve(
+          new Response(JSON.stringify(payload), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      }
+      return inner(input as RequestInfo, init);
+    }) as typeof fetch;
+    try {
+      await data.loadMoreRevisions();
+      expect(store.getState().revisions?.entries).toHaveLength(2);
+      setFreshnessResponse({
+        eventCount: HISTORY_EVENT_COUNT,
+        commitGraphStamp: "stamp-after-ref-move",
+      });
+
+      await data.pollFreshness();
+    } finally {
+      globalThis.fetch = inner;
+    }
+
+    expect(
+      store.getState().revisions?.entries.map((entry) => entry.revisionId),
+    ).toEqual([firstEntry.revisionId, secondEntry.revisionId]);
+  });
+
   it("computes a signed attention delta across a poll reload", async () => {
     await data.load();
     const fewer = {

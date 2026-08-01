@@ -446,11 +446,17 @@ export function resolve(patch: RoutePatch): Partial<State> {
   }
   const sel = patch.selected ?? { kind: null, id: null };
   if (sel.kind === "revision" && sel.id && !revisionExists(sel.id)) {
-    if (revisionInAnyThread(sel.id)) {
+    const revisions = getState().revisions;
+    const partialRevisions =
+      revisions != null &&
+      (revisions.next != null ||
+        (revisions.revisionCount ?? revisions.entries.length) >
+          revisions.entries.length);
+    if (revisionInAnyThread(sel.id) || partialRevisions) {
       // Grouped away from the loaded list but known to the store: the detail
-      // pane's entity-primary `/api/revisions/{id}` fetch resolves the exact
-      // id, so the selection stands — and it always opens, because no list
-      // card exists for the id and a parked cursor would be invisible state.
+      // pane's entity-primary `/api/revisions/{id}` fetch resolves it exactly.
+      // A partial page cannot prove absence either, so the same exact route
+      // stays authoritative. Always open: no loaded card can show the cursor.
       next.open = true;
     } else {
       // Keep the requested lens (only the selection was absent); name it in the

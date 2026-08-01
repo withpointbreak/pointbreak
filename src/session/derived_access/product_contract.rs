@@ -987,9 +987,9 @@ pub(crate) const PRODUCTION_READINESS_CONTRACT_FIXTURE_SCHEMA_V1: &str =
 pub(crate) const PRODUCTION_READINESS_CONTRACT_SMOKE_SCHEMA_V1: &str =
     "pointbreak.derived-access-production-readiness-contract-smoke.v1";
 pub(crate) const PRODUCTION_READINESS_CONTRACT_SHA256_V1: &str =
-    "0053072600a2746b5967e49b22d0848c1e977289dfd85fe457846996e7725672";
+    "5445781aadff791537746f1596f577ea1415fd37daf6d0da4fbc0ded94375eb3";
 pub(crate) const PRODUCTION_READINESS_FIXTURE_SHA256_V1: &str =
-    "e4cef6cdb35c0f029d176ccfb3f55d7df35771ec911938509d9a08c47def1cfe";
+    "b2e2656f6f37a1173bbeb7ce9101e1c703d03b600468fc4b62fb2dc25a05ab6a";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1354,8 +1354,8 @@ impl RevisionPageResponseField {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RevisionPageOrderField {
-    CapturedAtAscending,
-    RevisionIdAscending,
+    CapturedAtDescending,
+    RevisionIdDescending,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -1852,7 +1852,7 @@ impl ProductionReadinessContractV1 {
                     .all(|row| !row.may_serve_stale_as_current)
             ),
             format!(
-                "| Revision pages | `{}`; absent limit uses default `{}`: `{}`; maximum `{}` with over-maximum `{}`; requested entries mean the accepted limit: `{}`; `(capturedAt, revisionId)` ascending; opaque snapshot-bound token; revision count comes from `{}`; active work `{}`; default-off same shape through `{}` |",
+                "| Revision pages | `{}`; absent limit uses default `{}`: `{}`; maximum `{}` with over-maximum `{}`; requested entries mean the accepted limit: `{}`; normalized `(capturedAt, revisionId)` descending so page one contains current work; opaque snapshot-bound token; revision count comes from `{}`; active work `{}`; default-off same shape through `{}` |",
                 self.revisions_page.schema,
                 self.revisions_page.default_limit,
                 self.revisions_page.absent_limit_uses_default,
@@ -2255,8 +2255,8 @@ fn revision_page_contract() -> RevisionPageContractV1 {
         over_maximum_limit: RevisionPageLimitOverflow::InvalidRequest,
         requested_entries_are_accepted_limit: true,
         order: vec![
-            RevisionPageOrderField::CapturedAtAscending,
-            RevisionPageOrderField::RevisionIdAscending,
+            RevisionPageOrderField::CapturedAtDescending,
+            RevisionPageOrderField::RevisionIdDescending,
         ],
         token_is_opaque: true,
         token_binds_profile_schema_snapshot_and_order: true,

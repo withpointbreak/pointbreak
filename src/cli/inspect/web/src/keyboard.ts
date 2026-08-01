@@ -16,7 +16,7 @@
 // the frame the diff-page block does the same scoping — so every lens key is
 // scoped to the record, and keyboard imports no sibling overlay module.
 
-import { fetchHistoryPage, HISTORY_PAGE } from "./data";
+import { fetchHistoryPage, HISTORY_PAGE, loadMoreRevisions } from "./data";
 import {
   closeDiff,
   jumpChange,
@@ -192,8 +192,19 @@ function selectLoadedLensIndex(index: number): void {
   navigate({ selected: ids[target] }, { replace: true });
 }
 
-// Step the fully-loaded revisions lens over its in-memory entries.
-function stepList(delta: number): void {
+// Step over loaded revision pages. Crossing the server-order frontier fetches
+// one continuation page, then resumes from the same visual cursor.
+async function stepList(delta: number): Promise<void> {
+  const before = lensEntryIds();
+  const selected = getState().selected.id;
+  const index = before.findIndex((entry) => entry.id === selected);
+  const unloadedDirection = getState().order === "desc" ? 1 : -1;
+  const atFrontier =
+    index >= 0 &&
+    ((unloadedDirection > 0 && index === before.length - 1) ||
+      (unloadedDirection < 0 && index === 0));
+  if (delta === unloadedDirection && atFrontier && getState().revisions?.next)
+    await loadMoreRevisions();
   const next = loadedLensIndex(delta);
   if (next !== null) selectLoadedLensIndex(next);
 }
@@ -355,7 +366,7 @@ export async function stepSelectionAsync(delta: number): Promise<void> {
     await stepTimeline(delta);
     return;
   }
-  stepList(delta);
+  await stepList(delta);
 }
 
 // The Enter descend ladder: a parked cursor opens the detail pane; an open

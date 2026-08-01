@@ -52,7 +52,7 @@ function expectedDocument(path: string): ExpectedDocument | null {
       schema: "pointbreak.inspect-history-new-count",
     },
     "/api/identity": { schema: "pointbreak.inspect-identity" },
-    "/api/revisions": { schema: "pointbreak.inspect-revisions" },
+    "/api/revisions": { schema: "pointbreak.inspect-revisions-page.v1" },
     "/api/threads": { schema: "pointbreak.inspect-threads" },
     "/api/version": { schema: "pointbreak.version", version: 1 },
   };

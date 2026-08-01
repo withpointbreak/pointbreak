@@ -1,7 +1,7 @@
 {
   "schema": "pointbreak.derived-access-production-readiness-contract-fixture.v1",
   "contractSchema": "pointbreak.derived-access-production-readiness-contract.v1",
-  "contractSha256": "0053072600a2746b5967e49b22d0848c1e977289dfd85fe457846996e7725672",
+  "contractSha256": "5445781aadff791537746f1596f577ea1415fd37daf6d0da4fbc0ded94375eb3",
   "contract": {
     "schema": "pointbreak.derived-access-production-readiness-contract.v1",
     "contractId": "derived-access-production-readiness-v1",
@@ -391,8 +391,8 @@
       "overMaximumLimit": "invalid_request",
       "requestedEntriesAreAcceptedLimit": true,
       "order": [
-        "captured_at_ascending",
-        "revision_id_ascending"
+        "captured_at_descending",
+        "revision_id_descending"
       ],
       "tokenIsOpaque": true,
       "tokenBindsProfileSchemaSnapshotAndOrder": true,

@@ -20,8 +20,10 @@ pub use derived_access::history::{
 };
 #[doc(hidden)]
 pub use derived_access::revisions::{
-    DerivedRevisionCollection, DerivedRevisionCollectionRoute, DerivedRevisionDetail,
-    DerivedRevisionDetailRoute,
+    ACTIVE_REVISION_PAGE_PROFILE, AUTHORITATIVE_REVISION_PAGE_PROFILE, DerivedRevisionDetail,
+    DerivedRevisionDetailRoute, DerivedRevisionPage, DerivedRevisionPageRoute,
+    REVISION_PAGE_DEFAULT_LIMIT, REVISION_PAGE_MAXIMUM_LIMIT, REVISION_PAGE_SCHEMA,
+    RevisionPageCursor, RevisionPageRequest, RevisionPageRequestError, RevisionPageWork,
 };
 #[doc(hidden)]
 pub use derived_access::threads::{DerivedThreads, DerivedThreadsRoute};

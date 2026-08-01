@@ -292,7 +292,9 @@ fn api_units_lists_captured_unit_with_counts_and_target_display() {
     let inspector = Inspector::spawn(store.repo.path());
     let units = inspector.get_json("/api/revisions");
 
-    assert_eq!(units["schema"], "pointbreak.inspect-revisions");
+    assert_eq!(units["schema"], "pointbreak.inspect-revisions-page.v1");
+    assert!(units["asOf"].is_string());
+    assert!(units["next"].is_null());
     assert_eq!(units["revisionCount"], 1);
     let entry = &units["entries"][0];
     assert_eq!(entry["revisionId"], store.revision_id.as_str());
@@ -466,12 +468,10 @@ fn api_units_include_additive_overview_summary() {
     assert_eq!(overview["tags"], serde_json::json!([]));
 }
 
-/// `/api/revisions` is served from a head-marker-keyed response cache (#426):
-/// an unchanged store version serves the identical payload again, and a store
-/// write moves the marker so the next request reflects the new revision — never
-/// a stale hit.
+/// A fresh page request reflects the current store snapshot; it never relies on
+/// the retired complete serialized response cache.
 #[test]
-fn api_revisions_cache_serves_fresh_payload_after_store_writes() {
+fn api_revisions_page_serves_fresh_payload_after_store_writes() {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
     repo.commit_all("base");
@@ -483,12 +483,11 @@ fn api_revisions_cache_serves_fresh_payload_after_store_writes() {
     assert_eq!(initial["revisionCount"], 1);
     assert_eq!(initial["entries"][0]["revisionId"], first_revision.as_str());
 
-    // Unchanged store version: the identical payload serves again.
+    // Unchanged store version: the deterministic first page is identical.
     let repeat = inspector.get_json("/api/revisions");
     assert_eq!(repeat, initial);
 
-    // A store write moves the head marker: the cache rebuilds and the new
-    // revision appears.
+    // A store write moves the snapshot and the new revision appears.
     repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
     let second_revision = capture(repo.path());
     let refreshed = inspector.get_json("/api/revisions");
@@ -502,6 +501,46 @@ fn api_revisions_cache_serves_fresh_payload_after_store_writes() {
     assert!(ids.contains(&first_revision.as_str()), "{ids:?}");
     assert!(ids.contains(&second_revision.as_str()), "{ids:?}");
     assert_ne!(refreshed["eventSetHash"], initial["eventSetHash"]);
+}
+
+#[test]
+fn api_revisions_pages_are_bounded_and_stale_tokens_require_restart() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    let first_revision = capture(repo.path());
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    let second_revision = capture(repo.path());
+
+    let inspector = Inspector::spawn(repo.path());
+    let first = inspector.get_json("/api/revisions?limit=1");
+    assert_eq!(first["schema"], "pointbreak.inspect-revisions-page.v1");
+    assert_eq!(first["revisionCount"], 2);
+    assert_eq!(first["entries"].as_array().unwrap().len(), 1);
+    let next = first["next"].as_str().expect("first page continuation");
+
+    let second = inspector.get_json(&format!("/api/revisions?limit=1&after={next}"));
+    assert_eq!(second["asOf"], first["asOf"]);
+    assert!(second["next"].is_null());
+    let ids = [
+        first["entries"][0]["revisionId"].as_str().unwrap(),
+        second["entries"][0]["revisionId"].as_str().unwrap(),
+    ];
+    assert_ne!(ids[0], ids[1]);
+    assert!(ids.contains(&first_revision.as_str()));
+    assert!(ids.contains(&second_revision.as_str()));
+
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 4 }\n");
+    capture(repo.path());
+    let (status, body) = inspector.get_error(&format!("/api/revisions?limit=1&after={next}"));
+    assert!(status.contains("409 Conflict"));
+    assert_eq!(body["error"], "restart_required");
+
+    let (status, _) = inspector.get_error("/api/revisions?limit=501");
+    assert!(status.contains("400 Bad Request"));
+    let (status, _) = inspector.get_error("/api/revisions?after=not-base64!!");
+    assert!(status.contains("400 Bad Request"));
 }
 
 #[test]

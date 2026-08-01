@@ -9,6 +9,7 @@
 // root) handles selection, open-diff, and cue filtering.
 
 import { CLASS } from "../classNames";
+import { loadMoreRevisions } from "../data";
 import { $ } from "../dom";
 import { escapeHtml } from "../escape";
 import { fmtDateTime } from "../format";
@@ -45,6 +46,26 @@ export function renderRevisionList(): void {
     state.order,
     state.sortKey,
   );
+  const loadedCount = state.revisions?.entries.length ?? 0;
+  const revisionCount = state.revisions?.revisionCount ?? loadedCount;
+  const partial =
+    state.revisions != null &&
+    (state.revisions.next != null || loadedCount < revisionCount);
+  const pagingStatus = partial
+    ? `<div id="revision-page-status" role="status" aria-live="polite" style="color:var(--fg-dim);padding:8px 0">
+        ${loadedCount} of ${revisionCount} revisions loaded. Filters and suggestions use loaded revisions only.
+        ${
+          state.revisions?.next
+            ? `<button id="load-more-revisions" class="${CLASS.ghost}" type="button"${state.revisions.loadingMore ? " disabled" : ""}>${state.revisions.loadingMore ? "Loading revisions…" : "Load more revisions"}</button>`
+            : ""
+        }
+      </div>`
+    : "";
+  const wireLoadMore = (): void => {
+    $("#load-more-revisions")?.addEventListener("click", () => {
+      void loadMoreRevisions();
+    });
+  };
   if (!entries.length) {
     const filtered = Boolean(state.filterText || state.filterSnapshot);
     // The capture suggestion is first-open-only: the revisions document has
@@ -52,54 +73,57 @@ export function renderRevisionList(): void {
     // A filtered-empty result keeps its recovery message and never suggests a
     // capture (recapturing is not the answer to a filter miss).
     const genuinelyEmpty =
-      !filtered &&
-      state.revisions != null &&
-      (state.revisions.entries ?? []).length === 0;
-    el.innerHTML = `<p class="${CLASS.empty}" style="color:var(--fg-dim)">${
-      filtered
-        ? "No revisions match the current filters."
-        : "No captured revisions in this store."
+      !filtered && state.revisions != null && revisionCount === 0 && !partial;
+    el.innerHTML = `${pagingStatus}<p class="${CLASS.empty}" style="color:var(--fg-dim)">${
+      partial
+        ? "No loaded revisions match the current view. Load another page or adjust the filters."
+        : filtered
+          ? "No revisions match the current filters."
+          : "No captured revisions in this store."
     }</p>${genuinelyEmpty ? renderWorkflowHandoff(firstReviewHandoff()) : ""}`;
+    wireLoadMore();
     return;
   }
   const selected = state.selected;
   const kv = ([k, v]: [string, string]): string =>
     `<span>${escapeHtml(k)}</span><b>${escapeHtml(v)}</b>`;
-  el.innerHTML = entries
-    .map((u) => {
-      const base = u.base ?? {};
-      const overview = u.overview ?? overviewForRevision(u.revisionId ?? "");
-      const revisionId = u.revisionId ?? "";
-      const isSelected =
-        selected.kind === "revision" && selected.id === revisionId;
-      const badge = supersessionBadge(revisionId);
-      const snapshotUnavailable = revisionSnapshotUnavailable(u);
-      const rows: [string, string][] = [
-        ["captured", fmtDateTime(u.capturedAt ?? "")],
-        [
-          "base",
-          base.commitOid
-            ? `${shortId(base.commitOid)} (${base.kind ?? ""})`
-            : (base.kind ?? "—"),
-        ],
-      ];
-      // The landing cell mirrors the CLI merge-status vocabulary
-      // (merged/open/unreachable/unknown) so the surfaces agree.
-      const tail: [string, string][] = [
-        ["revision", shortId(revisionId)],
-        ["landing", u.mergeStatus || "unknown"],
-        ["snapshot", shortId(u.snapshotId)],
-      ];
-      // The target cell carries pre-escaped derived HTML (label + head badge), so
-      // it bypasses the generic escaping cell renderer rather than double-escaping.
-      const targetCell = `<span>target</span><b>${targetDisplayLabel(u.targetDisplay)}${targetHeadBadge(u.targetDisplay)}</b>`;
-      // The diff button and the card both carry delegation datasets; the #master
-      // delegate (wired by the composition root) opens the diff and selects the
-      // card. The data-open-diff value is the captured snapshot id, paired with
-      // its content hash for rebased-recapture disambiguation.
-      return `<div class="${CLASS.unitCard}" data-revision-id="${escapeHtml(revisionId)}"${
-        isSelected ? ' aria-selected="true"' : ""
-      } title="${escapeHtml(revisionId)}\nclick to open the revision page">
+  el.innerHTML =
+    pagingStatus +
+    entries
+      .map((u) => {
+        const base = u.base ?? {};
+        const overview = u.overview ?? overviewForRevision(u.revisionId ?? "");
+        const revisionId = u.revisionId ?? "";
+        const isSelected =
+          selected.kind === "revision" && selected.id === revisionId;
+        const badge = supersessionBadge(revisionId);
+        const snapshotUnavailable = revisionSnapshotUnavailable(u);
+        const rows: [string, string][] = [
+          ["captured", fmtDateTime(u.capturedAt ?? "")],
+          [
+            "base",
+            base.commitOid
+              ? `${shortId(base.commitOid)} (${base.kind ?? ""})`
+              : (base.kind ?? "—"),
+          ],
+        ];
+        // The landing cell mirrors the CLI merge-status vocabulary
+        // (merged/open/unreachable/unknown) so the surfaces agree.
+        const tail: [string, string][] = [
+          ["revision", shortId(revisionId)],
+          ["landing", u.mergeStatus || "unknown"],
+          ["snapshot", shortId(u.snapshotId)],
+        ];
+        // The target cell carries pre-escaped derived HTML (label + head badge), so
+        // it bypasses the generic escaping cell renderer rather than double-escaping.
+        const targetCell = `<span>target</span><b>${targetDisplayLabel(u.targetDisplay)}${targetHeadBadge(u.targetDisplay)}</b>`;
+        // The diff button and the card both carry delegation datasets; the #master
+        // delegate (wired by the composition root) opens the diff and selects the
+        // card. The data-open-diff value is the captured snapshot id, paired with
+        // its content hash for rebased-recapture disambiguation.
+        return `<div class="${CLASS.unitCard}" data-revision-id="${escapeHtml(revisionId)}"${
+          isSelected ? ' aria-selected="true"' : ""
+        } title="${escapeHtml(revisionId)}\nclick to open the revision page">
       <h3>${typeof u.summary === "string" && u.summary ? escapeHtml(u.summary) : workLabelText(u.targetDisplay)}</h3>
       ${badge ? `<div class="${CLASS.supersessionBadges}">${badge}</div>` : ""}
       ${renderRevisionOverview(u, overview)}
@@ -110,6 +134,7 @@ export function renderRevisionList(): void {
           : `<button class="${CLASS.ghost} ${CLASS.diffBtn}" type="button" data-open-diff="${escapeHtml(u.snapshotId ?? "")}" data-diff-hash="${escapeHtml(u.snapshotContentHash ?? "")}">view snapshot diff</button>`
       }</div>
     </div>`;
-    })
-    .join("");
+      })
+      .join("");
+  wireLoadMore();
 }

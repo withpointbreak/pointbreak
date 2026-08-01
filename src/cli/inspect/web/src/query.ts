@@ -7,8 +7,9 @@
 //
 // The timeline history query (its haystack, filter predicates, and facet counts)
 // moved to the server; the client no longer indexes or searches history entries.
-// The revisions lens keeps matching client-side over the fully-loaded list, so
-// this grammar stays. Import direction stays downward.
+// The revisions lens keeps matching client-side over explicitly loaded pages,
+// so this grammar stays. The lens labels that partial scope. Import direction
+// stays downward.
 
 import { parseMs } from "./format";
 import {

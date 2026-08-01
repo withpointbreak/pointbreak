@@ -1300,6 +1300,7 @@ fn service_error_requires_rebuild(error: &DerivedAccessServiceError) -> bool {
             | DerivedAccessServiceError::Semantic(
                 SqliteSemanticError::ProductHistoryUpgradeRequired(_)
             )
+            | DerivedAccessServiceError::Semantic(SqliteSemanticError::UpgradeRequired(_))
     )
 }
 
@@ -1321,7 +1322,8 @@ fn semantic_error_requires_quarantine(error: &SqliteSemanticError) -> bool {
         | SqliteSemanticError::Metadata(_)
         | SqliteSemanticError::Delta(_)
         | SqliteSemanticError::CarrierMismatch(_) => true,
-        SqliteSemanticError::ProductHistoryUpgradeRequired(_) => false,
+        SqliteSemanticError::ProductHistoryUpgradeRequired(_)
+        | SqliteSemanticError::UpgradeRequired(_) => false,
         SqliteSemanticError::Sqlite { .. } => false,
     }
 }
@@ -2299,6 +2301,39 @@ mod tests {
         assert!(
             generation.exists(),
             "stale generation must not be quarantined"
+        );
+    }
+
+    #[test]
+    fn published_generation_with_older_semantic_schema_requires_rebuild_before_ddl() {
+        let temp = populated_store(1);
+        let lifecycle = active_lifecycle(temp.path());
+        let receipt = lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let generation = lifecycle
+            .paths()
+            .generation(receipt.generation_id.as_deref().unwrap());
+        let database = generation.join("cursor.sqlite3");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA ignore_check_constraints = ON;
+                 UPDATE semantic_meta SET schema_version = 4 WHERE singleton = 1;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert_eq!(
+            lifecycle.status().unwrap().availability,
+            DerivedAccessAvailability::RebuildRequired
+        );
+        assert!(matches!(
+            lifecycle.open_current(),
+            Err(LifecycleError::RebuildRequired(_))
+        ));
+        assert!(
+            generation.exists(),
+            "upgradeable generation must not be quarantined"
         );
     }
 

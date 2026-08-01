@@ -964,7 +964,7 @@ fn append_restart_and_selected_detail_do_not_rebuild_full_projections() {
         inventory.profile_id,
         "pointbreak.sqlite-derived-access-semantic.v1"
     );
-    assert_eq!(inventory.schema_version, 4);
+    assert_eq!(inventory.schema_version, 5);
     assert_eq!(inventory.fact_count, 1);
     assert_eq!(inventory.retained_body_object_bytes, 0);
     assert_eq!(

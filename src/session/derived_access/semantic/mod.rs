@@ -424,6 +424,8 @@ pub(crate) enum SemanticModelError {
     InvalidWitness,
     #[error("semantic fact is missing required field {0}")]
     MissingField(&'static str),
+    #[error("semantic fact has invalid event instant {0}")]
+    InvalidEventInstant(String),
     #[error(transparent)]
     Product(#[from] ShoreError),
     #[error(transparent)]

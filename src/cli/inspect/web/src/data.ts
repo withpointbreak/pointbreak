@@ -21,7 +21,7 @@ import {
   resetTimelineReadForQueryChange,
   timelineFollowGeneration,
 } from "./follow";
-import { fetchJSON } from "./http";
+import { fetchJSON, RequestFailure } from "./http";
 import { presentTypes } from "./model";
 import {
   type AttentionDoc,
@@ -53,6 +53,66 @@ interface NewCountDoc {
 
 /** The first-page size — large enough to fill a viewport, small enough to keep the transfer cheap. */
 export const HISTORY_PAGE = 100;
+/** The frozen first and continuation page size for `/api/revisions`. */
+export const REVISION_PAGE = 100;
+
+function revisionsPagePath(after?: string): string {
+  const params = new URLSearchParams({ limit: String(REVISION_PAGE) });
+  if (after) params.set("after", after);
+  return `/api/revisions?${params.toString()}`;
+}
+
+function fetchRevisionsPage(after?: string): Promise<unknown> {
+  const path = withSelectedAccess(revisionsPagePath(after));
+  return runWithSelectedAccess(() => fetchJSON(path));
+}
+
+function mergeRevisionEntries(
+  current: RevisionsDoc["entries"],
+  incoming: RevisionsDoc["entries"],
+): RevisionsDoc["entries"] {
+  const byId = new Map(current.map((entry) => [entry.revisionId ?? "", entry]));
+  for (const entry of incoming) byId.set(entry.revisionId ?? "", entry);
+  byId.delete("");
+  return [...byId.values()];
+}
+
+/**
+ * Read page one and enough continuations to preserve the already-visible window.
+ * One mid-walk snapshot change restarts the bounded refresh; a second surfaces as
+ * a protocol failure instead of mixing pages from different snapshots.
+ */
+async function fetchRevisionsWindow(
+  minimumEntries: number,
+): Promise<RevisionsDoc> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const head = (await fetchRevisionsPage()) as RevisionsDoc;
+    let window = { ...head, loadingMore: false };
+    let restart = false;
+    while (window.next && window.entries.length < minimumEntries) {
+      try {
+        const page = (await fetchRevisionsPage(window.next)) as RevisionsDoc;
+        if (page.asOf !== head.asOf) {
+          restart = true;
+          break;
+        }
+        window = {
+          ...page,
+          entries: mergeRevisionEntries(window.entries, page.entries),
+          loadingMore: false,
+        };
+      } catch (err) {
+        if (err instanceof RequestFailure && err.status === 409) {
+          restart = true;
+          break;
+        }
+        throw err;
+      }
+    }
+    if (!restart) return window;
+  }
+  throw new RequestFailure("protocol", 409);
+}
 
 /**
  * Build the `/api/history` query string from the current filter/search/order/type
@@ -177,18 +237,22 @@ export async function loadHistoryHead(
   }
 }
 
-/** Fetch and commit the full revisions, threads, and attention documents. */
+/** Fetch page one of revisions plus the complete threads and attention documents. */
 export async function loadWholeDocuments(): Promise<boolean> {
   try {
     const previousAttentionCount = getState().attention?.items?.length;
+    const loadedRevisionCount = getState().revisions?.entries.length ?? 0;
     const revisionsScrollTop = $<HTMLElement>("#units")?.scrollTop;
-    const paths = ["/api/revisions", "/api/threads", "/api/attention"];
-    const [revisionsRaw, threadsRaw, attentionRaw] = await Promise.all(
-      paths.map((path) => {
-        const selectedPath = withSelectedAccess(path);
-        return runWithSelectedAccess(() => fetchJSON(selectedPath));
-      }),
-    );
+    const paths = ["/api/threads", "/api/attention"];
+    const [revisionsRaw, [threadsRaw, attentionRaw]] = await Promise.all([
+      fetchRevisionsWindow(loadedRevisionCount),
+      Promise.all(
+        paths.map((path) => {
+          const selectedPath = withSelectedAccess(path);
+          return runWithSelectedAccess(() => fetchJSON(selectedPath));
+        }),
+      ),
+    ]);
     const attention = attentionRaw as AttentionDoc;
     showError(null);
     commit({
@@ -204,6 +268,62 @@ export async function loadWholeDocuments(): Promise<boolean> {
       const units = $<HTMLElement>("#units");
       if (units) units.scrollTop = revisionsScrollTop;
     }
+    return true;
+  } catch (err) {
+    showLoadError(err);
+    return false;
+  }
+}
+
+/**
+ * Fetch the next snapshot-bound revisions page and merge it by revision identity.
+ * A stale token restarts at page one instead of combining two snapshots.
+ */
+export async function loadMoreRevisions(): Promise<boolean> {
+  const current = getState().revisions;
+  const token = current?.next;
+  if (!current || !token || current.loadingMore) return true;
+  const asOf = current.asOf;
+  commit({ revisions: { ...current, loadingMore: true } });
+  try {
+    const page = (await fetchRevisionsPage(token)) as RevisionsDoc;
+    const latest = getState().revisions;
+    // A freshness reload won the race. Its new page is authoritative for the UI;
+    // discard this now-obsolete continuation rather than mixing snapshots.
+    if (!latest || latest.asOf !== asOf || latest.next !== token) return true;
+    if (page.asOf !== asOf) return loadRevisionsHead();
+    commit({
+      revisions: {
+        ...page,
+        entries: mergeRevisionEntries(latest.entries, page.entries),
+        loadingMore: false,
+      },
+    });
+    showError(null);
+    return true;
+  } catch (err) {
+    if (err instanceof RequestFailure && err.status === 409)
+      return loadRevisionsHead();
+    const latest = getState().revisions;
+    if (latest && latest.asOf === asOf)
+      commit({ revisions: { ...latest, loadingMore: false } });
+    showLoadError(err);
+    return false;
+  }
+}
+
+/** Refresh the current revision window from one coherent snapshot. */
+async function loadRevisionsHead(): Promise<boolean> {
+  const revisionsScrollTop = $<HTMLElement>("#units")?.scrollTop;
+  const loadedRevisionCount = getState().revisions?.entries.length ?? 0;
+  try {
+    const page = await fetchRevisionsWindow(loadedRevisionCount);
+    commit({ revisions: { ...page, loadingMore: false } });
+    if (revisionsScrollTop != null) {
+      const units = $<HTMLElement>("#units");
+      if (units) units.scrollTop = revisionsScrollTop;
+    }
+    showError(null);
     return true;
   } catch (err) {
     showLoadError(err);
