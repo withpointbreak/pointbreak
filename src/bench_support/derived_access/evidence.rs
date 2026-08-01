@@ -244,6 +244,12 @@ impl QualificationDerivedAccessPhaseReceiptV1 {
             if sample.phase != *expected_phase || usize::from(sample.ordinal) != index {
                 return Err("derived-access phase receipt order drifted".to_owned());
             }
+            let expected_parent = (sample.phase
+                == LongitudinalDerivedAccessPhaseV1::RevisionPageSnapshotSummaries)
+                .then_some(5_u16);
+            if sample.parent_ordinal != expected_parent {
+                return Err("derived-access phase nesting drifted".to_owned());
+            }
             if sample.ownership != sample.phase.ownership() {
                 return Err("derived-access phase ownership drifted".to_owned());
             }
@@ -256,7 +262,7 @@ impl QualificationDerivedAccessPhaseReceiptV1 {
             match (
                 sample.resident_bytes_before,
                 sample.resident_bytes_after,
-                sample.resident_bytes_high_water,
+                sample.resident_bytes_observed_max,
             ) {
                 (None, None, None) => {}
                 (Some(before), Some(after), Some(high_water))
@@ -413,6 +419,7 @@ pub struct QualificationDerivedAccessPhaseRunRequestV1 {
     pub source_checkout: PathBuf,
     pub execution: QualificationDerivedAccessExecutionIdentityV1,
     pub tier: QualificationDerivedAccessTierV1,
+    pub immutable_input_root: PathBuf,
     pub root: PathBuf,
     pub root_identity_sha256: String,
     pub request_sha256: String,
@@ -442,8 +449,11 @@ impl QualificationDerivedAccessPhaseRunRequestV1 {
     pub fn validate(&self) -> Result<(), String> {
         if self.schema != QUALIFICATION_DERIVED_ACCESS_PHASE_REQUEST_SCHEMA_V1
             || !self.source_checkout.is_absolute()
+            || !self.immutable_input_root.is_absolute()
             || !self.root.is_absolute()
             || self.source_checkout == self.root
+            || self.source_checkout == self.immutable_input_root
+            || self.immutable_input_root == self.root
             || !matches!(
                 self.tier,
                 QualificationDerivedAccessTierV1::D0_128
@@ -480,6 +490,22 @@ pub fn run_qualification_derived_access_phase_v1(
 
     let request: QualificationDerivedAccessPhaseRunRequestV1 = read_json(request_path)?;
     request.validate()?;
+    if DerivedAccessProfile::from_environment().map_err(|error| error.to_string())?
+        != DerivedAccessProfile::SqliteWalBodylessV1
+    {
+        return Err(
+            "phase evidence requires POINTBREAK_DERIVED_ACCESS=sqlite-wal-bodyless-v1".to_owned(),
+        );
+    }
+    let immutable_input_root =
+        std::fs::canonicalize(&request.immutable_input_root).map_err(|error| error.to_string())?;
+    let mutable_root = std::fs::canonicalize(&request.root).map_err(|error| error.to_string())?;
+    if immutable_input_root == mutable_root
+        || immutable_input_root.starts_with(&mutable_root)
+        || mutable_root.starts_with(&immutable_input_root)
+    {
+        return Err("derived-access phase roots must be filesystem-disjoint".to_owned());
+    }
     validate_current_execution_identity_v1(
         &request.execution,
         &request.source_checkout,
@@ -487,7 +513,13 @@ pub fn run_qualification_derived_access_phase_v1(
     )?;
     let inventory = longitudinal_authoritative_store_data_inventory_v1(&request.root)
         .map_err(|error| error.to_string())?;
-    if inventory.inventory_sha256 != request.root_identity_sha256 {
+    let immutable_inventory =
+        longitudinal_authoritative_store_data_inventory_v1(&request.immutable_input_root)
+            .map_err(|error| error.to_string())?;
+    if inventory.inventory_sha256 != request.root_identity_sha256
+        || immutable_inventory.inventory_sha256 != request.root_identity_sha256
+        || inventory != immutable_inventory
+    {
         return Err("derived-access phase root identity drifted".to_owned());
     }
     let source_identity_sha256 = request.source_identity_sha256()?;
@@ -536,11 +568,7 @@ pub fn run_qualification_derived_access_phase_v1(
     );
     let page_scope = LongitudinalCountingScopeV1::new(page_run_identity.clone())?;
     let access = DerivedHistoryAccess::resolve(&request.root)?;
-    if !access.is_active() {
-        return Err(
-            "phase evidence requires POINTBREAK_DERIVED_ACCESS=sqlite-wal-bodyless-v1".to_owned(),
-        );
-    }
+    debug_assert!(access.is_active());
     let page_guard = page_scope.enter();
     let page = access.revisions_page(
         &request.root,
@@ -616,6 +644,13 @@ pub fn run_qualification_derived_access_phase_v1(
         digest_text(&format!("{}:{outcome:?}", write_event.event_id.as_str())),
         write_scope.snapshot().derived_access_phases,
     )?);
+
+    let immutable_after =
+        longitudinal_authoritative_store_data_inventory_v1(&request.immutable_input_root)
+            .map_err(|error| error.to_string())?;
+    if immutable_after != immutable_inventory {
+        return Err("derived-access phase immutable input changed during the run".to_owned());
+    }
 
     QualificationDerivedAccessPhaseBundleV1::new(source_identity_sha256, request.tier, receipts)
 }

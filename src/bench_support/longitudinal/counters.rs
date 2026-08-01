@@ -14,6 +14,8 @@ use super::{
 thread_local! {
     static ACTIVE_SCOPES: RefCell<Vec<LongitudinalCountingScopeV1>> =
         const { RefCell::new(Vec::new()) };
+    static ACTIVE_DERIVED_ACCESS_PHASES: RefCell<Vec<u16>> =
+        const { RefCell::new(Vec::new()) };
 }
 
 #[derive(Debug, Default)]
@@ -98,6 +100,7 @@ pub struct LongitudinalDerivedAccessPhaseSampleV1 {
     pub phase: LongitudinalDerivedAccessPhaseV1,
     pub ownership: LongitudinalDerivedAccessPhaseOwnershipV1,
     pub ordinal: u16,
+    pub parent_ordinal: Option<u16>,
     pub wall_nanos: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_cpu_nanos: Option<u64>,
@@ -106,7 +109,9 @@ pub struct LongitudinalDerivedAccessPhaseSampleV1 {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resident_bytes_after: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub resident_bytes_high_water: Option<u64>,
+    /// Maximum of the before/after endpoint observations, not a continuous
+    /// within-phase peak.
+    pub resident_bytes_observed_max: Option<u64>,
     pub counters: LongitudinalCountersV1,
 }
 
@@ -119,6 +124,7 @@ pub struct LongitudinalDerivedAccessPhaseGuardV1 {
     state: Option<Arc<Mutex<ObserverState>>>,
     phase: LongitudinalDerivedAccessPhaseV1,
     ordinal: u16,
+    parent_ordinal: Option<u16>,
     started: Instant,
     counters_before: LongitudinalCountersV1,
     process_before: Option<super::LongitudinalProcessSnapshotV1>,
@@ -288,6 +294,14 @@ pub fn enter_derived_access_phase_v1(
         }
         None => (None, 0, LongitudinalCountersV1::default()),
     };
+    let parent_ordinal = state.as_ref().and_then(|_| {
+        ACTIVE_DERIVED_ACCESS_PHASES.with(|phases| {
+            let mut phases = phases.borrow_mut();
+            let parent = phases.last().copied();
+            phases.push(ordinal);
+            parent
+        })
+    });
     let process_before = state
         .as_ref()
         .and_then(|_| super::capture_longitudinal_process_snapshot_v1(std::process::id()).ok());
@@ -295,6 +309,7 @@ pub fn enter_derived_access_phase_v1(
         state,
         phase,
         ordinal,
+        parent_ordinal,
         started: Instant::now(),
         counters_before,
         process_before,
@@ -328,6 +343,13 @@ impl Drop for LongitudinalDerivedAccessPhaseGuardV1 {
         let Some(state) = &self.state else {
             return;
         };
+        ACTIVE_DERIVED_ACCESS_PHASES.with(|phases| {
+            assert_eq!(
+                phases.borrow_mut().pop(),
+                Some(self.ordinal),
+                "derived-access phases must complete in nesting order"
+            );
+        });
         let wall_nanos = u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX);
         let process_after =
             super::capture_longitudinal_process_snapshot_v1(std::process::id()).ok();
@@ -346,7 +368,7 @@ impl Drop for LongitudinalDerivedAccessPhaseGuardV1 {
                 }
                 _ => (None, None, None),
             };
-        let resident_bytes_high_water = resident_bytes_before
+        let resident_bytes_observed_max = resident_bytes_before
             .zip(resident_bytes_after)
             .map(|(before, after)| before.max(after));
         let mut state = lock_state(state);
@@ -357,11 +379,12 @@ impl Drop for LongitudinalDerivedAccessPhaseGuardV1 {
                 phase: self.phase,
                 ownership: self.phase.ownership(),
                 ordinal: self.ordinal,
+                parent_ordinal: self.parent_ordinal,
                 wall_nanos,
                 process_cpu_nanos,
                 resident_bytes_before,
                 resident_bytes_after,
-                resident_bytes_high_water,
+                resident_bytes_observed_max,
                 counters,
             });
     }
@@ -653,6 +676,7 @@ mod tests {
         assert_eq!(phases.len(), 2);
         assert_eq!(phases[0].ordinal, 0);
         assert_eq!(phases[1].ordinal, 1);
+        assert!(phases.iter().all(|phase| phase.parent_ordinal.is_none()));
         assert_eq!(
             phases.iter().map(|phase| phase.phase).collect::<Vec<_>>(),
             vec![
@@ -666,15 +690,43 @@ mod tests {
         assert_eq!(phases[1].counters.event_folds, 17);
         assert!(phases.iter().all(|phase| phase.wall_nanos < u64::MAX));
         assert!(phases.iter().all(|phase| {
-            phase.resident_bytes_high_water.is_none_or(|high_water| {
-                phase
-                    .resident_bytes_before
-                    .is_some_and(|before| high_water >= before)
-                    && phase
-                        .resident_bytes_after
-                        .is_some_and(|after| high_water >= after)
-            })
+            phase
+                .resident_bytes_observed_max
+                .is_none_or(|observed_max| {
+                    phase
+                        .resident_bytes_before
+                        .is_some_and(|before| observed_max >= before)
+                        && phase
+                            .resident_bytes_after
+                            .is_some_and(|after| observed_max >= after)
+                })
         }));
+    }
+
+    #[test]
+    fn phase_scope_marks_nested_samples_with_their_parent_ordinal() {
+        let scope = LongitudinalCountingScopeV1::new(hash('9')).expect("valid scope");
+        let _scope_guard = scope.enter();
+
+        let outer = enter_derived_access_phase_v1(
+            LongitudinalDerivedAccessPhaseV1::RevisionPageOverviewConstruction,
+        );
+        {
+            let _inner = enter_derived_access_phase_v1(
+                LongitudinalDerivedAccessPhaseV1::RevisionPageSnapshotSummaries,
+            );
+            record_object_artifact_read(Some(13));
+        }
+        drop(outer);
+
+        let phases = scope.snapshot().derived_access_phases;
+        assert_eq!(phases.len(), 2);
+        assert_eq!(phases[0].ordinal, 0);
+        assert_eq!(phases[0].parent_ordinal, None);
+        assert_eq!(phases[1].ordinal, 1);
+        assert_eq!(phases[1].parent_ordinal, Some(0));
+        assert_eq!(phases[0].counters.object_artifact_reads, 1);
+        assert_eq!(phases[1].counters.object_artifact_reads, 1);
     }
 
     #[test]

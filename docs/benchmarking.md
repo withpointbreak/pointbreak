@@ -696,6 +696,30 @@ values are `null` elsewhere. This non-timing developer smoke does not change the
 qualification-smoke schemas, consume a retained or owner root, or activate the derived profile for
 product reads.
 
+Phase attribution is a separate diagnostic mode for revision-page, bootstrap, and governed-write work:
+
+```sh
+just derived-access-phase /absolute/path/to/phase-request.json > /absolute/path/to/phase-bundle.json
+just derived-access-phase-verify \
+  /absolute/path/to/phase-request.json \
+  /absolute/path/to/phase-bundle.json
+```
+
+The typed request binds one clean source identity, D0-128/L7/L100 tier, admitted authoritative inventory,
+read-only `immutableInputRoot`, and filesystem-disjoint mutable `root`. Both roots must begin with the admitted
+inventory. The runner rechecks the immutable input after the governed append and emits the completion-last
+`pointbreak.qualification-derived-access-phase-bundle.v1` only when it remained unchanged. The mutable root
+is intentionally single-use: bootstrap writes its disposable `.pointbreak-derived/` generation and the
+governed-write probe appends one public synthetic event to authoritative truth, so make a fresh clone for
+every run. `POINTBREAK_DERIVED_ACCESS=sqlite-wal-bodyless-v1` is required and is checked before bootstrap.
+
+Each operation receipt carries ordered typed samples, optional process CPU/RSS endpoints, counters, and
+ownership. `parentOrdinal` makes nested samples explicit; a child sample is already included in its parent's
+wall time, process CPU, and counters and must not be summed again. `residentBytesObservedMax` is the maximum
+of the before/after endpoint readings, not a continuously sampled peak. The separate verifier revalidates
+request/source/tier/root binding, raw-receipt hashes, phase completeness and nesting, and the completion-last
+bundle manifest without opening or mutating either root.
+
 Native smoke, lifecycle, retained-root, scale, resource, and fragment modes consume typed JSON requests:
 
 ```sh

@@ -81,11 +81,14 @@ fn phase_receipt(
                 phase: *phase,
                 ownership: phase.ownership(),
                 ordinal: ordinal.try_into().expect("small phase list"),
+                parent_ordinal: (*phase
+                    == crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseV1::RevisionPageSnapshotSummaries)
+                    .then_some(5),
                 wall_nanos: 1,
                 process_cpu_nanos: Some(1),
                 resident_bytes_before: Some(100),
                 resident_bytes_after: Some(101),
-                resident_bytes_high_water: Some(101),
+                resident_bytes_observed_max: Some(101),
                 counters: crate::bench_support::longitudinal::LongitudinalCountersV1::default(),
             }
         })
@@ -149,6 +152,13 @@ fn phase_receipts_reject_missing_duplicate_wrong_operation_and_source_samples() 
             .validate_against(&digest(43), QualificationDerivedAccessTierV1::L7, operation)
             .is_err()
     );
+
+    let mut flattened = receipt.clone();
+    flattened.phases[6].parent_ordinal = None;
+    flattened
+        .refresh_sha256()
+        .expect("rehash flattened receipt");
+    assert!(flattened.validate().is_err());
 }
 
 #[test]
@@ -209,12 +219,16 @@ fn phase_request_and_separate_verifier_bind_source_tier_and_root() {
         source_checkout: PathBuf::from("/tmp/pointbreak-phase-source"),
         execution,
         tier: QualificationDerivedAccessTierV1::L7,
+        immutable_input_root: PathBuf::from("/tmp/pointbreak-phase-input"),
         root: PathBuf::from("/tmp/pointbreak-phase-root"),
         root_identity_sha256: digest(46),
         request_sha256: String::new(),
     };
     request.refresh_sha256().expect("hash request");
     request.validate().expect("valid request");
+    let mut aliased = request.clone();
+    aliased.immutable_input_root = aliased.root.clone();
+    assert!(aliased.validate().is_err());
     let source = request.source_identity_sha256().expect("source identity");
     let receipts = QualificationDerivedAccessPhaseOperationV1::ALL
         .into_iter()
