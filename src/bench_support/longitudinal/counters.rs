@@ -42,7 +42,10 @@ pub struct LongitudinalCountingGuardV1 {
 /// Unlike the legacy point-in-time setter, this guard adds its population to
 /// the live total and removes exactly that population on drop. Overlapping
 /// decoded histories therefore remain observable instead of overwriting one
-/// another's ownership count.
+/// another's ownership count. Callers must not use
+/// [`set_retained_decoded_events`] while a guard is live in the same scope: the
+/// setter describes an independent point-in-time owner rather than an additive
+/// population.
 #[derive(Debug)]
 pub(crate) struct RetainedDecodedEventsGuardV1 {
     state: Option<Arc<Mutex<ObserverState>>>,
@@ -481,6 +484,36 @@ mod tests {
                 retained_snapshot_highlight_entries: 47,
                 retained_snapshot_highlight_bytes: 53,
             }
+        );
+    }
+
+    #[test]
+    fn decoded_event_guards_add_and_release_their_own_populations() {
+        let scope = LongitudinalCountingScopeV1::new(hash('7')).expect("valid scope");
+        let _scope_guard = scope.enter();
+
+        let first = RetainedDecodedEventsGuardV1::new(2);
+        assert_eq!(
+            scope.snapshot().capacity_ownership.retained_decoded_events,
+            2
+        );
+
+        let second = RetainedDecodedEventsGuardV1::new(3);
+        assert_eq!(
+            scope.snapshot().capacity_ownership.retained_decoded_events,
+            5
+        );
+
+        drop(first);
+        assert_eq!(
+            scope.snapshot().capacity_ownership.retained_decoded_events,
+            3
+        );
+
+        drop(second);
+        assert_eq!(
+            scope.snapshot().capacity_ownership.retained_decoded_events,
+            0
         );
     }
 
