@@ -7,9 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::product_contract::DerivedAccessProfile;
 use super::sqlite::{
-    AppendCrashPoint, CursorLedgerError, CursorLedgerIdentity, CursorLedgerInventory,
-    LocatorInventory, ProductHistoryFact, SemanticInventory, SqliteCursorLedger, SqliteLocator,
-    SqliteLocatorError, SqliteSemantic, SqliteSemanticError, StoreWriterLock,
+    AppendCrashPoint, BootstrapPopulationEntry, CursorLedgerError, CursorLedgerIdentity,
+    CursorLedgerInventory, LocatorInventory, ProductHistoryFact, SemanticInventory,
+    SqliteCursorLedger, SqliteLocator, SqliteLocatorError, SqliteSemantic, SqliteSemanticError,
+    StoreWriterLock,
 };
 use crate::error::Result as ShoreResult;
 use crate::model::RevisionId;
@@ -31,6 +32,19 @@ use crate::session::store::backend::JournalChangeStamp;
 
 const DEFAULT_DELTA_LIMIT: usize = 512;
 type DerivedRows = (Vec<LocatorRow>, Vec<SemanticFact>, Vec<ProductHistoryFact>);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BootstrapProjectionControl {
+    Continue,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BootstrapProjectionProgress {
+    pub(crate) completed: usize,
+    pub(crate) total: usize,
+    pub(crate) bytes_processed: u64,
+}
 
 #[derive(Debug)]
 pub(crate) struct DerivedAccessService {
@@ -59,6 +73,8 @@ pub(crate) enum DerivedAccessServiceError {
     ZeroBatchLimit,
     #[error("derived catch-up returned no receipts before observed head {0:?}")]
     EmptyIncompleteDelta(TruthCursor),
+    #[error("derived bootstrap projection was cancelled")]
+    BootstrapCancelled,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -266,6 +282,93 @@ impl DerivedAccessService {
                 return Ok(applied);
             }
         }
+    }
+
+    /// Populate locator and semantic projections from the exact decoded events
+    /// and receipts produced by cursor bootstrap. This avoids reopening every
+    /// authoritative carrier through `events_after_hydrated`; batches remain
+    /// bounded even though the strict replay oracle runs later over a separate
+    /// complete traversal.
+    pub(crate) fn populate_bootstrap_with_hook(
+        &self,
+        entries: &[BootstrapPopulationEntry],
+        batch_limit: usize,
+        mut progress: impl FnMut(BootstrapProjectionProgress) -> BootstrapProjectionControl,
+    ) -> Result<TruthCursor, DerivedAccessServiceError> {
+        if batch_limit == 0 {
+            return Err(DerivedAccessServiceError::ZeroBatchLimit);
+        }
+        let head = self.cursor.head()?.cursor;
+        if u64::try_from(entries.len()).ok() != Some(head.sequence) {
+            return Err(DerivedAccessServiceError::Truth(format!(
+                "{} bootstrap events for cursor head {:?}",
+                entries.len(),
+                head
+            )));
+        }
+        let mut applied = self.locator.checkpoint()?.applied;
+        let mut completed = 0_usize;
+        let mut bytes_processed = 0_u64;
+        for chunk in entries.chunks(batch_limit) {
+            let receipts = chunk
+                .iter()
+                .map(|entry| entry.receipt.clone())
+                .collect::<Vec<_>>();
+            for (offset, receipt) in receipts.iter().enumerate() {
+                let expected = applied
+                    .sequence
+                    .checked_add(u64::try_from(offset).unwrap_or(u64::MAX))
+                    .and_then(|sequence| sequence.checked_add(1))
+                    .ok_or_else(|| {
+                        DerivedAccessServiceError::Truth(
+                            "bootstrap projection sequence overflow".to_owned(),
+                        )
+                    })?;
+                if receipt.cursor != TruthCursor::new(applied.epoch, expected) {
+                    return Err(DerivedAccessServiceError::Truth(format!(
+                        "bootstrap projection expected {:?}, observed {:?}",
+                        TruthCursor::new(applied.epoch, expected),
+                        receipt.cursor
+                    )));
+                }
+            }
+            let complete = receipts
+                .last()
+                .is_some_and(|receipt| receipt.cursor == head);
+            let delta = CursorDelta {
+                after: applied,
+                observed_head: head,
+                complete,
+                receipts,
+            };
+            let (rows, semantic_facts, product_history_facts) =
+                self.derived_rows_from_bootstrap(&delta, chunk)?;
+            applied = self.semantic.apply_delta(
+                &delta,
+                &rows,
+                &semantic_facts,
+                &product_history_facts,
+            )?;
+            completed = completed.saturating_add(chunk.len());
+            bytes_processed = bytes_processed.saturating_add(
+                chunk
+                    .iter()
+                    .map(|entry| entry.carrier_bytes)
+                    .fold(0_u64, u64::saturating_add),
+            );
+            if progress(BootstrapProjectionProgress {
+                completed,
+                total: entries.len(),
+                bytes_processed,
+            }) == BootstrapProjectionControl::Cancel
+            {
+                return Err(DerivedAccessServiceError::BootstrapCancelled);
+            }
+        }
+        if applied != head {
+            return Err(DerivedAccessServiceError::EmptyIncompleteDelta(head));
+        }
+        Ok(applied)
     }
 
     pub(crate) fn freshness(&self) -> Result<DerivedAccessFreshness, DerivedAccessServiceError> {
@@ -525,6 +628,46 @@ impl DerivedAccessService {
             product_history_facts.push(ProductHistoryFact::from_event(
                 receipt.cursor.sequence,
                 event,
+            )?);
+        }
+        Ok((locator_rows, semantic_facts, product_history_facts))
+    }
+
+    fn derived_rows_from_bootstrap(
+        &self,
+        delta: &CursorDelta,
+        entries: &[BootstrapPopulationEntry],
+    ) -> Result<DerivedRows, DerivedAccessServiceError> {
+        if entries.len() != delta.receipts.len() {
+            return Err(DerivedAccessServiceError::Truth(format!(
+                "{} bootstrap events for {} cursor receipts",
+                entries.len(),
+                delta.receipts.len()
+            )));
+        }
+        let mut locator_rows = Vec::with_capacity(entries.len());
+        let mut semantic_facts = Vec::with_capacity(entries.len());
+        let mut product_history_facts = Vec::with_capacity(entries.len());
+        for (receipt, entry) in delta.receipts.iter().zip(entries) {
+            if receipt != &entry.receipt {
+                return Err(DerivedAccessServiceError::Truth(format!(
+                    "bootstrap receipt drift at {:?}",
+                    receipt.cursor
+                )));
+            }
+            locator_rows.push(LocatorRow::from_event(
+                receipt.cursor,
+                &entry.event,
+                receipt.validation_witness.clone(),
+            )?);
+            semantic_facts.push(SemanticFact::from_event(
+                receipt.cursor,
+                &entry.event,
+                receipt.validation_witness.clone(),
+            )?);
+            product_history_facts.push(ProductHistoryFact::from_event(
+                receipt.cursor.sequence,
+                &entry.event,
             )?);
         }
         Ok((locator_rows, semantic_facts, product_history_facts))

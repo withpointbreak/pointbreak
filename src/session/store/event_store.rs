@@ -21,6 +21,17 @@ pub struct EventStore {
     files: Option<LocalEventFiles>,
 }
 
+/// One strict journal entry decoded and validated from the same carrier read
+/// that produced its durable byte witness. Bootstrap uses this paired shape so
+/// cursor, locator, and semantic population never reopen a carrier merely to
+/// recover bytes that were already validated.
+#[derive(Debug)]
+pub(crate) struct ValidatedJournalEntry {
+    pub(crate) event: ShoreEvent,
+    pub(crate) validation_witness: String,
+    pub(crate) carrier_bytes: u64,
+}
+
 /// The file-layout half of a file-backed event store: the events directory and a
 /// `LocalStorage` for the path-keyed reads (`read_event`, `list_event_file_names`)
 /// that sit beside, not on, the key-addressed [`Journal`].
@@ -305,6 +316,34 @@ impl EventStore {
             .list_event_entries()?
             .iter()
             .map(Self::decode_validated_entry)
+            .collect::<Result<Vec<_>>>()?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        crate::bench_support::longitudinal::set_retained_decoded_events(events.len());
+        Ok(events)
+    }
+
+    /// Read every event carrier once, validating its address and content while
+    /// retaining the byte witness needed by the derived cursor ledger.
+    ///
+    /// This is intentionally narrower than a generic iterator API: bootstrap is
+    /// the only consumer that needs the decoded event and raw-byte witness from
+    /// one physical read. The raw entry bytes are consumed while building the
+    /// decoded population, so no second decoded history is created here.
+    pub(crate) fn list_events_with_witnesses(&self) -> Result<Vec<ValidatedJournalEntry>> {
+        let events = self
+            .journal
+            .list_event_entries()?
+            .into_iter()
+            .map(|entry| {
+                let carrier_bytes = u64::try_from(entry.bytes.len()).unwrap_or(u64::MAX);
+                let validation_witness = sha256_bytes_hex(&entry.bytes);
+                let event = Self::decode_validated_entry(&entry)?;
+                Ok(ValidatedJournalEntry {
+                    event,
+                    validation_witness,
+                    carrier_bytes,
+                })
+            })
             .collect::<Result<Vec<_>>>()?;
         #[cfg(any(test, feature = "longitudinal-counting"))]
         crate::bench_support::longitudinal::set_retained_decoded_events(events.len());

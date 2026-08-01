@@ -21,7 +21,9 @@ use crate::session::derived_access::cursor::{
 };
 use crate::session::derived_access::{QualificationJournalCursor, QualificationLocalJournal};
 use crate::session::event::ShoreEvent;
-use crate::session::store::backend::{JournalChangeStamp, JournalCreatedTransitionVerdict};
+use crate::session::store::backend::{
+    JournalChangeStamp, JournalChangeVerdict, JournalCreatedTransitionVerdict,
+};
 use crate::session::{EventStore, EventWriteOutcome};
 
 const DATABASE_FILE: &str = "cursor.sqlite3";
@@ -61,6 +63,7 @@ pub(crate) enum BootstrapControl {
 pub(crate) struct BootstrapProgress {
     pub(crate) completed: usize,
     pub(crate) total: usize,
+    pub(crate) bytes_processed: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -205,6 +208,21 @@ pub(crate) struct HydratedCursorDelta {
     pub(crate) events: Vec<ShoreEvent>,
 }
 
+#[derive(Debug)]
+pub(crate) struct BootstrapPopulationEntry {
+    pub(crate) receipt: CursorReceipt,
+    pub(crate) event: ShoreEvent,
+    pub(crate) carrier_bytes: u64,
+}
+
+#[derive(Debug)]
+pub(crate) struct BootstrapPopulation {
+    pub(crate) ledger: SqliteCursorLedger,
+    pub(crate) entries: Vec<BootstrapPopulationEntry>,
+}
+
+const BOOTSTRAP_TRANSACTION_BATCH: usize = 512;
+
 impl SqliteCursorLedger {
     pub(crate) fn initialize_empty(
         store_root: &Path,
@@ -256,23 +274,6 @@ impl SqliteCursorLedger {
         Self::bootstrap_from_truth_with_hook(store_root, identity, epoch, progress, |_| {})
     }
 
-    pub(crate) fn bootstrap_from_truth_at(
-        store_root: &Path,
-        sidecar_root: &Path,
-        identity: CursorLedgerIdentity,
-        epoch: u64,
-        progress: impl FnMut(BootstrapProgress) -> BootstrapControl,
-    ) -> Result<Self, CursorLedgerError> {
-        Self::bootstrap_from_truth_at_with_hook(
-            store_root,
-            sidecar_root,
-            identity,
-            epoch,
-            progress,
-            |_| {},
-        )
-    }
-
     pub(crate) fn bootstrap_from_truth_with_hook(
         store_root: &Path,
         identity: CursorLedgerIdentity,
@@ -297,9 +298,28 @@ impl SqliteCursorLedger {
         sidecar_root: &Path,
         identity: CursorLedgerIdentity,
         epoch: u64,
+        progress: impl FnMut(BootstrapProgress) -> BootstrapControl,
+        hook: impl FnMut(BootstrapCrashPoint),
+    ) -> Result<Self, CursorLedgerError> {
+        Ok(Self::bootstrap_population_from_truth_at_with_hook(
+            store_root,
+            sidecar_root,
+            identity,
+            epoch,
+            progress,
+            hook,
+        )?
+        .ledger)
+    }
+
+    pub(crate) fn bootstrap_population_from_truth_at_with_hook(
+        store_root: &Path,
+        sidecar_root: &Path,
+        identity: CursorLedgerIdentity,
+        epoch: u64,
         mut progress: impl FnMut(BootstrapProgress) -> BootstrapControl,
         mut hook: impl FnMut(BootstrapCrashPoint),
-    ) -> Result<Self, CursorLedgerError> {
+    ) -> Result<BootstrapPopulation, CursorLedgerError> {
         validate_identity(&identity)?;
         if epoch == 0 {
             return Err(CursorLedgerError::SchemaMismatch(
@@ -316,16 +336,26 @@ impl SqliteCursorLedger {
         QualificationLocalJournal::new(&ledger.store_root)
             .ensure_authority_directory()
             .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
-        let events = EventStore::open(&ledger.store_root)
-            .list_events()
-            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
         let journal = QualificationLocalJournal::new(&ledger.store_root);
-        let authority_stamp = journal
+        let authority_before = journal
             .change_stamp()
             .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        let events = EventStore::open(&ledger.store_root)
+            .list_events_with_witnesses()
+            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        let authority_check = journal
+            .changes_since(&authority_before)
+            .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        if authority_check.verdict != JournalChangeVerdict::Stable {
+            return Err(CursorLedgerError::AuthorityTransition(format!(
+                "authoritative truth changed during bootstrap population via {}",
+                authority_check.mechanism
+            )));
+        }
+        let authority_stamp = authority_check.after;
         std::fs::create_dir_all(ledger.sidecar_path())
             .map_err(|error| io_error(ledger.sidecar_path(), error))?;
-        let mut connection = open_connection(&ledger.database_path, true)?;
+        let connection = open_connection(&ledger.database_path, true)?;
         initialize_schema(
             &connection,
             &ledger.identity,
@@ -334,59 +364,91 @@ impl SqliteCursorLedger {
             &authority_stamp,
         )?;
 
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(|error| sqlite_error("begin bootstrap", error))?;
         let total = events.len();
         if progress(BootstrapProgress {
             completed: 0,
             total,
+            bytes_processed: 0,
         }) == BootstrapControl::Cancel
         {
             return Err(CursorLedgerError::BootstrapCancelled);
         }
-        for (offset, event) in events.iter().enumerate() {
-            let sequence = u64::try_from(offset + 1).map_err(|_| {
-                CursorLedgerError::SchemaMismatch("bootstrap sequence overflow".to_owned())
-            })?;
-            let bytes = journal
-                .read_event_bytes(&event.idempotency_key)
-                .map_err(|error| CursorLedgerError::Truth(error.to_string()))?
-                .ok_or_else(|| CursorLedgerError::CarrierAbsent(event.idempotency_key.clone()))?;
-            let witness = sha256_bytes_hex(&bytes);
-            let attempt_token = format!("bootstrap:{epoch}:{sequence}:{witness}");
-            insert_attempt(&transaction, &attempt_token)?;
-            insert_receipt(
-                &transaction,
-                &CursorReceipt {
-                    cursor: TruthCursor::new(epoch, sequence),
-                    logical_reread_key: event.idempotency_key.clone(),
-                    validation_witness: witness,
-                    attempt_token,
-                },
-            )?;
-            hook(BootstrapCrashPoint::DuringStaging);
-            if progress(BootstrapProgress {
-                completed: offset + 1,
-                total,
-            }) == BootstrapControl::Cancel
-            {
-                return Err(CursorLedgerError::BootstrapCancelled);
+        let mut connection = connection;
+        let mut population = Vec::with_capacity(total);
+        let mut events = events.into_iter();
+        let mut completed = 0_usize;
+        let mut bytes_processed = 0_u64;
+        loop {
+            let batch = events
+                .by_ref()
+                .take(BOOTSTRAP_TRANSACTION_BATCH)
+                .collect::<Vec<_>>();
+            if batch.is_empty() {
+                break;
             }
+            let batch_start = completed;
+            let transaction = connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(|error| sqlite_error("begin bootstrap batch", error))?;
+            for (batch_offset, entry) in batch.into_iter().enumerate() {
+                let offset = batch_start.checked_add(batch_offset).ok_or_else(|| {
+                    CursorLedgerError::SchemaMismatch("bootstrap offset overflow".to_owned())
+                })?;
+                let sequence = u64::try_from(offset + 1).map_err(|_| {
+                    CursorLedgerError::SchemaMismatch("bootstrap sequence overflow".to_owned())
+                })?;
+                let attempt_token =
+                    format!("bootstrap:{epoch}:{sequence}:{}", entry.validation_witness);
+                let receipt = CursorReceipt {
+                    cursor: TruthCursor::new(epoch, sequence),
+                    logical_reread_key: entry.event.idempotency_key.clone(),
+                    validation_witness: entry.validation_witness,
+                    attempt_token,
+                };
+                insert_attempt(&transaction, &receipt.attempt_token)?;
+                insert_receipt(&transaction, &receipt)?;
+                bytes_processed = bytes_processed.saturating_add(entry.carrier_bytes);
+                population.push(BootstrapPopulationEntry {
+                    receipt,
+                    event: entry.event,
+                    carrier_bytes: entry.carrier_bytes,
+                });
+                hook(BootstrapCrashPoint::DuringStaging);
+                if progress(BootstrapProgress {
+                    completed: offset + 1,
+                    total,
+                    bytes_processed,
+                }) == BootstrapControl::Cancel
+                {
+                    return Err(CursorLedgerError::BootstrapCancelled);
+                }
+            }
+            completed = population.len();
+            transaction
+                .execute(
+                    "UPDATE cursor_meta
+                     SET head_sequence = ?1
+                     WHERE singleton = 1 AND bootstrap_state = 'staging'",
+                    [usize_to_i64(completed, "bootstrap head")?],
+                )
+                .map_err(|error| sqlite_error("advance bootstrap head", error))?;
+            transaction
+                .commit()
+                .map_err(|error| sqlite_error("commit bootstrap batch", error))?;
         }
-        transaction
+        connection
             .execute(
                 "UPDATE cursor_meta
-                 SET head_sequence = ?1, bootstrap_state = 'complete'
-                 WHERE singleton = 1",
+                 SET bootstrap_state = 'complete'
+                 WHERE singleton = 1 AND bootstrap_state = 'staging' AND head_sequence = ?1",
                 [usize_to_i64(total, "bootstrap head")?],
             )
             .map_err(|error| sqlite_error("publish bootstrap completion", error))?;
-        transaction
-            .commit()
-            .map_err(|error| sqlite_error("commit bootstrap", error))?;
         validate_completed_metadata(&connection, &ledger.identity)?;
-        Ok(ledger)
+        Ok(BootstrapPopulation {
+            ledger,
+            entries: population,
+        })
     }
 
     pub(crate) fn open(

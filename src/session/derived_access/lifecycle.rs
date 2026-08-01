@@ -2,23 +2,26 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use super::cursor::TruthAuthoritySnapshot;
 use super::generation::{
-    GenerationDescriptor, GenerationError, GenerationLayout, GenerationPublication,
-    GenerationReadLease,
+    GenerationDescriptor, GenerationError, GenerationLayout, GenerationProgress,
+    GenerationProgressPhase, GenerationPublication, GenerationReadLease,
 };
 use super::locator::LocatorRead;
 use super::product_contract::{DerivedAccessAvailability, DerivedAccessProfile};
-use super::service::{DerivedAccessService, DerivedAccessServiceError};
+use super::service::{BootstrapProjectionControl, DerivedAccessService, DerivedAccessServiceError};
 use super::sqlite::{
-    BootstrapControl, BootstrapProgress, CursorLedgerError, CursorLedgerIdentity,
-    SqliteCursorLedger, SqliteLocatorError, SqliteSemanticError, StoreWriterLock, WriterLockError,
+    BootstrapControl, CursorLedgerError, CursorLedgerIdentity, SqliteCursorLedger,
+    SqliteLocatorError, SqliteSemanticError, StoreWriterLock, WriterLockError,
 };
 use super::verification::strict_bodyless_materialized_snapshot_at;
 use crate::session::EventStore;
 use crate::session::derived_access::QualificationLocalJournal;
-use crate::session::store::backend::JournalChangeVerdict;
+use crate::session::store::backend::{
+    JournalChangeCheck, JournalChangeStamp, JournalChangeVerdict,
+};
 
 const STABLE_PUBLICATION_ATTEMPTS: usize = 8;
 
@@ -40,16 +43,24 @@ pub(crate) enum PublicationBoundary {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct LifecycleProgress {
+    pub(crate) phase: GenerationProgressPhase,
     pub(crate) completed: usize,
     pub(crate) total: usize,
+    pub(crate) bytes_processed: u64,
+    pub(crate) elapsed_ms: u64,
+    pub(crate) estimated_remaining_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LifecycleStatus {
     pub(crate) availability: DerivedAccessAvailability,
     pub(crate) generation_id: Option<String>,
+    pub(crate) phase: Option<GenerationProgressPhase>,
     pub(crate) completed: Option<usize>,
     pub(crate) total: Option<usize>,
+    pub(crate) bytes_processed: Option<u64>,
+    pub(crate) elapsed_ms: Option<u64>,
+    pub(crate) estimated_remaining_ms: Option<u64>,
     pub(crate) detail: Option<String>,
 }
 
@@ -178,8 +189,13 @@ impl DerivedAccessLifecycle {
             return Ok(LifecycleStatus {
                 availability,
                 generation_id: None,
+                phase: staging_progress.map(|progress| progress.phase),
                 completed: staging_progress.map(|progress| progress.completed),
                 total: staging_progress.map(|progress| progress.total),
+                bytes_processed: staging_progress.map(|progress| progress.bytes_processed),
+                elapsed_ms: staging_progress.map(|progress| progress.elapsed_ms),
+                estimated_remaining_ms: staging_progress
+                    .and_then(|progress| progress.estimated_remaining_ms),
                 detail: None,
             });
         };
@@ -187,8 +203,12 @@ impl DerivedAccessLifecycle {
             return Ok(LifecycleStatus {
                 availability: DerivedAccessAvailability::Bootstrapping,
                 generation_id: Some(publication.generation_id),
+                phase: Some(progress.phase),
                 completed: Some(progress.completed),
                 total: Some(progress.total),
+                bytes_processed: Some(progress.bytes_processed),
+                elapsed_ms: Some(progress.elapsed_ms),
+                estimated_remaining_ms: progress.estimated_remaining_ms,
                 detail: Some("current generation remains readable during rebuild".to_owned()),
             });
         }
@@ -301,51 +321,142 @@ impl DerivedAccessLifecycle {
             Err(GenerationError::RebuildBusy) => return Err(LifecycleError::RebuildBusy),
             Err(error) => return Err(error.into()),
         };
-        let truth_before = self.truth_events()?;
         self.paths.ensure_scaffold()?;
         self.paths.discard_all_staging()?;
         let (sequence, generation_id) = self.paths.next_generation()?;
         let staging = self.paths.staging(&generation_id);
         hook(PublicationBoundary::StagingPrepared);
+        let rebuild_started = Instant::now();
 
         let candidate_result: Result<_, LifecycleError> = (|| {
+            let cursor_phase_started = Instant::now();
             let mut progress_error = None;
-            let bootstrap = SqliteCursorLedger::bootstrap_from_truth_at(
+            let bootstrap = SqliteCursorLedger::bootstrap_population_from_truth_at_with_hook(
                 &self.store_root,
                 &staging,
                 CursorLedgerIdentity::new(self.store_id.clone()),
                 sequence,
                 |update| {
-                    if let Err(error) =
-                        self.paths
-                            .record_progress(&generation_id, update.completed, update.total)
-                    {
-                        progress_error = Some(error);
-                        return BootstrapControl::Cancel;
-                    }
-                    match progress(LifecycleProgress::from(update)) {
+                    let update = lifecycle_progress(
+                        GenerationProgressPhase::CursorPopulation,
+                        update.completed,
+                        update.total,
+                        update.bytes_processed,
+                        rebuild_started,
+                        cursor_phase_started,
+                    );
+                    let control = match record_and_report_progress(
+                        &self.paths,
+                        &generation_id,
+                        update,
+                        &mut progress,
+                    ) {
+                        Ok(control) => control,
+                        Err(error) => {
+                            progress_error = Some(error);
+                            return BootstrapControl::Cancel;
+                        }
+                    };
+                    match control {
                         LifecycleControl::Continue => BootstrapControl::Continue,
                         LifecycleControl::Cancel => BootstrapControl::Cancel,
                     }
                 },
+                |_| {},
             );
             if let Some(error) = progress_error {
-                return Err(error.into());
+                return Err(error);
             }
             if matches!(bootstrap, Err(CursorLedgerError::BootstrapCancelled)) {
                 return Err(LifecycleError::Cancelled);
             }
-            bootstrap?;
-            hook(PublicationBoundary::CandidatePopulated);
+            let bootstrap = bootstrap?;
 
             let service = DerivedAccessService::open_at(
                 &self.store_root,
                 &staging,
                 CursorLedgerIdentity::new(self.store_id.clone()),
             )?;
-            service.catch_up_to_head(512)?;
+            let population_total = bootstrap.entries.len();
+            let population_bytes = bootstrap.entries.iter().fold(0_u64, |total, entry| {
+                total.saturating_add(entry.carrier_bytes)
+            });
+            let projection_phase_started = Instant::now();
+            let initial_projection = lifecycle_progress(
+                GenerationProgressPhase::ProjectionPopulation,
+                0,
+                population_total,
+                0,
+                rebuild_started,
+                projection_phase_started,
+            );
+            if record_and_report_progress(
+                &self.paths,
+                &generation_id,
+                initial_projection,
+                &mut progress,
+            )? == LifecycleControl::Cancel
+            {
+                return Err(LifecycleError::Cancelled);
+            }
+            let mut projection_progress_error = None;
+            let population_result =
+                service.populate_bootstrap_with_hook(&bootstrap.entries, 512, |projection| {
+                    let update = lifecycle_progress(
+                        GenerationProgressPhase::ProjectionPopulation,
+                        projection.completed,
+                        projection.total,
+                        projection.bytes_processed,
+                        rebuild_started,
+                        projection_phase_started,
+                    );
+                    match record_and_report_progress(
+                        &self.paths,
+                        &generation_id,
+                        update,
+                        &mut progress,
+                    ) {
+                        Ok(LifecycleControl::Continue) => BootstrapProjectionControl::Continue,
+                        Ok(LifecycleControl::Cancel) => BootstrapProjectionControl::Cancel,
+                        Err(error) => {
+                            projection_progress_error = Some(error);
+                            BootstrapProjectionControl::Cancel
+                        }
+                    }
+                });
+            if let Some(error) = projection_progress_error {
+                return Err(error);
+            }
+            if matches!(
+                population_result,
+                Err(DerivedAccessServiceError::BootstrapCancelled)
+            ) {
+                return Err(LifecycleError::Cancelled);
+            }
+            population_result?;
+            hook(PublicationBoundary::CandidatePopulated);
             let authority = service.truth_authority_snapshot()?;
             let head = authority.head.cursor;
+            let bootstrap_stamp = authority.change_stamp.clone();
+            drop(bootstrap);
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            crate::bench_support::longitudinal::set_retained_decoded_events(0);
+
+            let strict_phase_started = Instant::now();
+            let strict_start = lifecycle_progress(
+                GenerationProgressPhase::StrictVerification,
+                0,
+                population_total,
+                0,
+                rebuild_started,
+                strict_phase_started,
+            );
+            if record_and_report_progress(&self.paths, &generation_id, strict_start, &mut progress)?
+                == LifecycleControl::Cancel
+            {
+                return Err(LifecycleError::Cancelled);
+            }
+            let strict_events = self.truth_events()?;
             let semantic_snapshot = validate_candidate(
                 &service,
                 &GenerationDescriptor::new(
@@ -357,11 +468,30 @@ impl DerivedAccessLifecycle {
                     authority.change_stamp.clone(),
                     "",
                 ),
-                &truth_before,
+                strict_events,
             )?;
+            let strict_complete = lifecycle_progress(
+                GenerationProgressPhase::StrictVerification,
+                population_total,
+                population_total,
+                population_bytes,
+                rebuild_started,
+                strict_phase_started,
+            );
+            if record_and_report_progress(
+                &self.paths,
+                &generation_id,
+                strict_complete,
+                &mut progress,
+            )? == LifecycleControl::Cancel
+            {
+                return Err(LifecycleError::Cancelled);
+            }
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            crate::bench_support::longitudinal::set_retained_decoded_events(0);
             let semantic_receipt = semantic_snapshot.semantic_receipt;
             hook(PublicationBoundary::CandidateValidated);
-            Ok((service, head, semantic_receipt, authority.change_stamp))
+            Ok((service, head, semantic_receipt, bootstrap_stamp))
         })();
         let (service, head, semantic_receipt, bootstrap_stamp) = match candidate_result {
             Ok(candidate) => candidate,
@@ -371,18 +501,33 @@ impl DerivedAccessLifecycle {
             }
         };
 
-        let writer_lock = StoreWriterLock::acquire(&self.store_root)?;
-        let truth_after = match self.truth_events() {
-            Ok(events) => events,
+        let finalizing_phase_started = Instant::now();
+        let finalizing_start = lifecycle_progress(
+            GenerationProgressPhase::Finalizing,
+            0,
+            1,
+            0,
+            rebuild_started,
+            finalizing_phase_started,
+        );
+        match record_and_report_progress(
+            &self.paths,
+            &generation_id,
+            finalizing_start,
+            &mut progress,
+        ) {
+            Ok(LifecycleControl::Continue) => {}
+            Ok(LifecycleControl::Cancel) => {
+                self.paths.discard_staging(&generation_id)?;
+                return Err(LifecycleError::Cancelled);
+            }
             Err(error) => {
                 self.paths.discard_staging(&generation_id)?;
                 return Err(error);
             }
-        };
-        if truth_after != truth_before {
-            self.paths.discard_staging(&generation_id)?;
-            return Err(LifecycleError::TruthChanged);
         }
+
+        let writer_lock = StoreWriterLock::acquire(&self.store_root)?;
         let authority_check = QualificationLocalJournal::new(&self.store_root)
             .changes_since(&bootstrap_stamp)
             .map_err(|error| LifecycleError::Truth(error.to_string()))?;
@@ -412,6 +557,30 @@ impl DerivedAccessLifecycle {
                 return Err(error.into());
             }
         };
+        let finalizing_complete = lifecycle_progress(
+            GenerationProgressPhase::Finalizing,
+            1,
+            1,
+            0,
+            rebuild_started,
+            finalizing_phase_started,
+        );
+        match record_and_report_progress(
+            &self.paths,
+            &generation_id,
+            finalizing_complete,
+            &mut progress,
+        ) {
+            Ok(LifecycleControl::Continue) => {}
+            Ok(LifecycleControl::Cancel) => {
+                self.paths.discard_staging(&generation_id)?;
+                return Err(LifecycleError::Cancelled);
+            }
+            Err(error) => {
+                self.paths.discard_staging(&generation_id)?;
+                return Err(error);
+            }
+        }
         self.paths.clear_progress(&generation_id)?;
         drop(service);
         if let Err(error) = self.paths.promote_staging(&generation_id) {
@@ -649,8 +818,12 @@ impl DerivedAccessLifecycle {
             .paths
             .staging_progress()?
             .map(|progress| LifecycleProgress {
+                phase: progress.phase,
                 completed: progress.completed,
                 total: progress.total,
+                bytes_processed: progress.bytes_processed,
+                elapsed_ms: progress.elapsed_ms,
+                estimated_remaining_ms: progress.estimated_remaining_ms,
             }))
     }
 
@@ -662,19 +835,47 @@ impl DerivedAccessLifecycle {
         &self,
         service: &DerivedAccessService,
     ) -> Result<TruthAuthoritySnapshot, LifecycleError> {
+        let journal = QualificationLocalJournal::new(&self.store_root);
+        self.validate_current_authority_with(service, |before| {
+            journal
+                .changes_since(before)
+                .map_err(|error| LifecycleError::Truth(error.to_string()))
+        })
+    }
+
+    fn validate_current_authority_with(
+        &self,
+        service: &DerivedAccessService,
+        mut changes_since: impl FnMut(&JournalChangeStamp) -> Result<JournalChangeCheck, LifecycleError>,
+    ) -> Result<TruthAuthoritySnapshot, LifecycleError> {
         let snapshot = service.truth_authority_snapshot()?;
-        let check = QualificationLocalJournal::new(&self.store_root)
-            .changes_since(&snapshot.change_stamp)
-            .map_err(|error| LifecycleError::Truth(error.to_string()))?;
-        match check.verdict {
-            JournalChangeVerdict::Stable => Ok(snapshot),
-            JournalChangeVerdict::Changed | JournalChangeVerdict::Indeterminate => {
-                Err(LifecycleError::RebuildRequired(format!(
-                    "authoritative truth freshness is {:?} via {}",
-                    check.verdict, check.mechanism
-                )))
-            }
+        let check = changes_since(&snapshot.change_stamp)?;
+        require_stable_authority(&check)?;
+        if check.after == snapshot.change_stamp {
+            return Ok(snapshot);
         }
+
+        // NTFS continuation advances a volume-wide USN cursor even when every
+        // observed record is irrelevant to the event directory. Persist that
+        // successor before the next bounded read, or unrelated volume churn
+        // eventually consumes the byte/record budget. The first native read is
+        // lock-free; only a proven-stable successor takes the writer lock, then
+        // re-reads both the derived head and native interval before binding.
+        let writer_lock = StoreWriterLock::acquire(&self.store_root)?;
+        let locked_snapshot = service.truth_authority_snapshot()?;
+        let locked_check = changes_since(&locked_snapshot.change_stamp)?;
+        require_stable_authority(&locked_check)?;
+        if locked_check.after != locked_snapshot.change_stamp {
+            service.bind_truth_authority_stamp_locked(
+                locked_snapshot.head.cursor,
+                &locked_check.after,
+                &writer_lock,
+            )?;
+        }
+        Ok(TruthAuthoritySnapshot {
+            head: locked_snapshot.head,
+            change_stamp: locked_check.after,
+        })
     }
 
     fn quarantine_status(&self, reason: String) -> Result<LifecycleStatus, LifecycleError> {
@@ -799,12 +1000,72 @@ impl CurrentGeneration {
     }
 }
 
-impl From<BootstrapProgress> for LifecycleProgress {
-    fn from(progress: BootstrapProgress) -> Self {
-        Self {
-            completed: progress.completed,
-            total: progress.total,
+fn lifecycle_progress(
+    phase: GenerationProgressPhase,
+    completed: usize,
+    total: usize,
+    bytes_processed: u64,
+    rebuild_started: Instant,
+    phase_started: Instant,
+) -> LifecycleProgress {
+    let elapsed_ms = u64::try_from(rebuild_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let phase_elapsed_ms = u64::try_from(phase_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let estimated_remaining_ms = if completed >= total {
+        Some(0)
+    } else if completed == 0 || phase_elapsed_ms == 0 {
+        None
+    } else {
+        let remaining = u64::try_from(total - completed).unwrap_or(u64::MAX);
+        let completed = u64::try_from(completed).unwrap_or(u64::MAX);
+        Some(
+            phase_elapsed_ms
+                .saturating_mul(remaining)
+                .checked_div(completed)
+                .unwrap_or(u64::MAX),
+        )
+    };
+    LifecycleProgress {
+        phase,
+        completed,
+        total,
+        bytes_processed,
+        elapsed_ms,
+        estimated_remaining_ms,
+    }
+}
+
+fn require_stable_authority(check: &JournalChangeCheck) -> Result<(), LifecycleError> {
+    match check.verdict {
+        JournalChangeVerdict::Stable => Ok(()),
+        JournalChangeVerdict::Changed | JournalChangeVerdict::Indeterminate => {
+            Err(LifecycleError::RebuildRequired(format!(
+                "authoritative truth freshness is {:?} via {}",
+                check.verdict, check.mechanism
+            )))
         }
+    }
+}
+
+fn record_and_report_progress(
+    paths: &GenerationLayout,
+    generation_id: &str,
+    update: LifecycleProgress,
+    progress: &mut impl FnMut(LifecycleProgress) -> LifecycleControl,
+) -> Result<LifecycleControl, LifecycleError> {
+    paths.record_progress(generation_id, update.into())?;
+    Ok(progress(update))
+}
+
+impl From<LifecycleProgress> for GenerationProgress {
+    fn from(progress: LifecycleProgress) -> Self {
+        Self::new(
+            progress.phase,
+            progress.completed,
+            progress.total,
+            progress.bytes_processed,
+            progress.elapsed_ms,
+            progress.estimated_remaining_ms,
+        )
     }
 }
 
@@ -818,7 +1079,7 @@ pub(crate) fn lifecycle_transition_allowed(
 fn validate_candidate(
     service: &DerivedAccessService,
     descriptor: &GenerationDescriptor,
-    truth_events: &[crate::session::event::ShoreEvent],
+    truth_events: Vec<crate::session::event::ShoreEvent>,
 ) -> Result<super::semantic::SemanticSnapshot, LifecycleError> {
     let head = service.truth_head()?.cursor;
     let checkpoint = service.locator_checkpoint()?;
@@ -997,7 +1258,9 @@ fn service_error_requires_quarantine(error: &DerivedAccessServiceError) -> bool 
         | DerivedAccessServiceError::LocatorModel(_)
         | DerivedAccessServiceError::Freshness(_)
         | DerivedAccessServiceError::EmptyIncompleteDelta(_) => true,
-        DerivedAccessServiceError::Truth(_) | DerivedAccessServiceError::ZeroBatchLimit => false,
+        DerivedAccessServiceError::Truth(_)
+        | DerivedAccessServiceError::ZeroBatchLimit
+        | DerivedAccessServiceError::BootstrapCancelled => false,
     }
 }
 
@@ -1042,8 +1305,12 @@ fn status(
     LifecycleStatus {
         availability,
         generation_id,
+        phase: None,
         completed: None,
         total: None,
+        bytes_processed: None,
+        elapsed_ms: None,
+        estimated_remaining_ms: None,
         detail,
     }
 }
@@ -1285,6 +1552,95 @@ mod tests {
     }
 
     #[test]
+    fn stable_authority_successors_are_persisted_before_the_next_bounded_interval() {
+        let temp = populated_store(1);
+        let lifecycle = active_lifecycle(temp.path());
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let current = lifecycle.open_current().unwrap().unwrap();
+        let initial = current.service().truth_authority_snapshot().unwrap();
+        let successor_one = JournalChangeStamp::Observed {
+            identity_sha256: "1".repeat(64),
+            change_sha256: "2".repeat(64),
+            entry_count: None,
+            native_cursor: None,
+        };
+
+        let continued = lifecycle
+            .validate_current_authority_with(current.service(), |before| {
+                assert_eq!(before, &initial.change_stamp);
+                Ok(stable_change_check(successor_one.clone()))
+            })
+            .unwrap();
+        assert_eq!(continued.change_stamp, successor_one);
+        assert_eq!(
+            current
+                .service()
+                .truth_authority_snapshot()
+                .unwrap()
+                .change_stamp,
+            successor_one
+        );
+
+        let successor_two = JournalChangeStamp::Observed {
+            identity_sha256: "1".repeat(64),
+            change_sha256: "3".repeat(64),
+            entry_count: None,
+            native_cursor: None,
+        };
+        let continued = lifecycle
+            .validate_current_authority_with(current.service(), |before| {
+                if before == &successor_one {
+                    Ok(stable_change_check(successor_two.clone()))
+                } else {
+                    Ok(JournalChangeCheck {
+                        after: before.clone(),
+                        verdict: JournalChangeVerdict::Indeterminate,
+                        native_bytes_examined: 0,
+                        native_records_examined: 0,
+                        relevant_file_references: Vec::new(),
+                        mechanism: "bounded interval would be exhausted from stale cursor"
+                            .to_owned(),
+                    })
+                }
+            })
+            .unwrap();
+        assert_eq!(continued.change_stamp, successor_two);
+        assert_eq!(
+            current
+                .service()
+                .truth_authority_snapshot()
+                .unwrap()
+                .change_stamp,
+            successor_two
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_ntfs_stable_continuation_persists_unrelated_volume_churn() {
+        let temp = populated_store(1);
+        let lifecycle = active_lifecycle(temp.path());
+        lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let current = lifecycle.open_current().unwrap().unwrap();
+        let before = current.service().truth_authority_snapshot().unwrap();
+        std::fs::write(temp.path().join("unrelated-to-events.bin"), b"volume churn").unwrap();
+
+        let continued = lifecycle
+            .validate_current_authority(current.service())
+            .expect("unrelated NTFS churn remains stable");
+
+        assert_ne!(continued.change_stamp, before.change_stamp);
+        assert_eq!(
+            current
+                .service()
+                .truth_authority_snapshot()
+                .unwrap()
+                .change_stamp,
+            continued.change_stamp
+        );
+    }
+
+    #[test]
     fn bootstrap_population_and_serial_oracle_open_each_carrier_once() {
         let temp = populated_store(7);
         let lifecycle = active_lifecycle(temp.path());
@@ -1301,6 +1657,101 @@ mod tests {
         assert_eq!(observed.counters.event_decodes, 14);
         assert_eq!(observed.counters.event_validations, 14);
         assert_eq!(observed.capacity_ownership.retained_decoded_events, 0);
+    }
+
+    #[test]
+    fn bootstrap_reports_durable_phase_and_resource_progress() {
+        let temp = populated_store(7);
+        let lifecycle = active_lifecycle(temp.path());
+        let mut updates = Vec::new();
+
+        lifecycle
+            .rebuild(|update| {
+                updates.push(update);
+                LifecycleControl::Continue
+            })
+            .expect("bounded bootstrap");
+
+        let phases = updates
+            .iter()
+            .map(|update| update.phase)
+            .collect::<Vec<_>>();
+        assert!(phases.contains(&GenerationProgressPhase::CursorPopulation));
+        assert!(phases.contains(&GenerationProgressPhase::ProjectionPopulation));
+        assert!(phases.contains(&GenerationProgressPhase::StrictVerification));
+        assert!(phases.contains(&GenerationProgressPhase::Finalizing));
+        assert!(
+            phases.windows(2).all(|pair| pair[0] <= pair[1]),
+            "progress phases must be monotonic: {phases:?}"
+        );
+        assert!(
+            updates
+                .iter()
+                .all(|update| update.completed <= update.total)
+        );
+        assert!(
+            updates
+                .iter()
+                .filter(|update| update.completed < update.total)
+                .all(|update| update
+                    .estimated_remaining_ms
+                    .is_none_or(|_| update.completed > 0))
+        );
+        for phase in [
+            GenerationProgressPhase::CursorPopulation,
+            GenerationProgressPhase::ProjectionPopulation,
+            GenerationProgressPhase::StrictVerification,
+        ] {
+            let completed = updates
+                .iter()
+                .rev()
+                .find(|update| update.phase == phase)
+                .expect("phase progress");
+            assert_eq!((completed.completed, completed.total), (7, 7));
+            assert!(completed.bytes_processed > 0);
+            assert_eq!(completed.estimated_remaining_ms, Some(0));
+        }
+        assert_eq!(
+            updates.last().map(|update| (
+                update.phase,
+                update.completed,
+                update.total,
+                update.estimated_remaining_ms,
+            )),
+            Some((GenerationProgressPhase::Finalizing, 1, 1, Some(0)))
+        );
+    }
+
+    #[test]
+    fn cancellation_between_projection_batches_restarts_from_clean_staging() {
+        let temp = populated_store(513);
+        let lifecycle = active_lifecycle(temp.path());
+
+        let cancelled = lifecycle.rebuild(|update| {
+            if update.phase == GenerationProgressPhase::ProjectionPopulation
+                && update.completed == 512
+            {
+                LifecycleControl::Cancel
+            } else {
+                LifecycleControl::Continue
+            }
+        });
+
+        assert!(matches!(cancelled, Err(LifecycleError::Cancelled)));
+        assert_eq!(
+            lifecycle.status().unwrap().availability,
+            DerivedAccessAvailability::Absent
+        );
+        assert!(lifecycle.open_current().unwrap().is_none());
+
+        let completed = lifecycle
+            .rebuild(|_| LifecycleControl::Continue)
+            .expect("clean restart");
+        assert_eq!(completed.head_sequence, 513);
+        assert_eq!(
+            lifecycle.status().unwrap().availability,
+            DerivedAccessAvailability::Current
+        );
     }
 
     #[test]
@@ -1892,6 +2343,17 @@ mod tests {
             EventStore::open(temp.path()).list_events().unwrap().len(),
             7
         );
+    }
+
+    fn stable_change_check(after: JournalChangeStamp) -> JournalChangeCheck {
+        JournalChangeCheck {
+            after,
+            verdict: JournalChangeVerdict::Stable,
+            native_bytes_examined: 4096,
+            native_records_examined: 1,
+            relevant_file_references: Vec::new(),
+            mechanism: "bounded stable continuation".to_owned(),
+        }
     }
 
     fn active_lifecycle(root: &std::path::Path) -> DerivedAccessLifecycle {

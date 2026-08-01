@@ -17,7 +17,7 @@ const GENERATION_DESCRIPTOR: &str = "generation.json";
 const GENERATION_SCHEMA: &str = "pointbreak.derived-access-generation.v2";
 const LEGACY_GENERATION_SCHEMA: &str = "pointbreak.derived-access-generation.v1";
 const PUBLICATION_SCHEMA: &str = "pointbreak.derived-access-publication.v1";
-const PROGRESS_SCHEMA: &str = "pointbreak.derived-access-generation-progress.v1";
+const PROGRESS_SCHEMA: &str = "pointbreak.derived-access-generation-progress.v2";
 const PROGRESS_INTERVAL: usize = 256;
 const REBUILD_LOCK_FILE: &str = ".pointbreak-derived.rebuild.lock";
 const GENERATION_LEASE_PREFIX: &str = ".pointbreak-derived.generation-lease-";
@@ -51,12 +51,58 @@ pub(crate) struct GenerationPublication {
     pub(crate) descriptor_sha256: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum GenerationProgressPhase {
+    CursorPopulation,
+    ProjectionPopulation,
+    StrictVerification,
+    Finalizing,
+}
+
+impl GenerationProgressPhase {
+    const fn order(self) -> u8 {
+        match self {
+            Self::CursorPopulation => 1,
+            Self::ProjectionPopulation => 2,
+            Self::StrictVerification => 3,
+            Self::Finalizing => 4,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct GenerationProgress {
     schema: String,
+    pub(crate) phase: GenerationProgressPhase,
     pub(crate) completed: usize,
     pub(crate) total: usize,
+    pub(crate) bytes_processed: u64,
+    pub(crate) elapsed_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) estimated_remaining_ms: Option<u64>,
+}
+
+impl GenerationProgress {
+    pub(crate) fn new(
+        phase: GenerationProgressPhase,
+        completed: usize,
+        total: usize,
+        bytes_processed: u64,
+        elapsed_ms: u64,
+        estimated_remaining_ms: Option<u64>,
+    ) -> Self {
+        Self {
+            schema: PROGRESS_SCHEMA.to_owned(),
+            phase,
+            completed,
+            total,
+            bytes_processed,
+            elapsed_ms,
+            estimated_remaining_ms,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -174,36 +220,34 @@ impl GenerationLayout {
     pub(crate) fn record_progress(
         &self,
         generation_id: &str,
-        completed: usize,
-        total: usize,
+        progress: GenerationProgress,
     ) -> Result<(), GenerationError> {
-        self.record_progress_with_hook(generation_id, completed, total, |_| {})
+        self.record_progress_with_hook(generation_id, progress, |_| {})
     }
 
     fn record_progress_with_hook(
         &self,
         generation_id: &str,
-        completed: usize,
-        total: usize,
+        progress: GenerationProgress,
         mut before_publish: impl FnMut(&Path),
     ) -> Result<(), GenerationError> {
-        if completed != 0 && completed != total && !completed.is_multiple_of(PROGRESS_INTERVAL) {
+        if progress.completed != 0
+            && progress.completed != progress.total
+            && !progress.completed.is_multiple_of(PROGRESS_INTERVAL)
+        {
             return Ok(());
         }
         let directory = self.staging(generation_id).join("progress");
         std::fs::create_dir_all(&directory).map_err(|error| io_error(&directory, error))?;
-        let progress = GenerationProgress {
-            schema: PROGRESS_SCHEMA.to_owned(),
-            completed,
-            total,
-        };
+        let phase_order = progress.phase.order();
+        let completed = progress.completed;
         let value = serde_json::to_value(progress)
             .map_err(|error| metadata_error(&directory, error.to_string()))?;
         let bytes = canonical_json_bytes(&value)
             .map_err(|error| metadata_error(&directory, error.to_string()))?;
-        let published = directory.join(format!("{completed:020}.json"));
+        let published = directory.join(format!("{phase_order:02}-{completed:020}.json"));
         let temporary = directory.join(format!(
-            ".{completed:020}.{}-{}.tmp",
+            ".{phase_order:02}-{completed:020}.{}-{}.tmp",
             std::process::id(),
             UNIQUE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
@@ -257,10 +301,9 @@ impl GenerationLayout {
                         "invalid generation progress".to_owned(),
                     ));
                 }
-                if latest
-                    .as_ref()
-                    .is_none_or(|observed| progress.completed > observed.completed)
-                {
+                if latest.as_ref().is_none_or(|observed| {
+                    (progress.phase, progress.completed) > (observed.phase, observed.completed)
+                }) {
                     latest = Some(progress);
                 }
             }
@@ -816,7 +859,19 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let layout = GenerationLayout::new(temp.path());
         layout.ensure_scaffold().unwrap();
-        layout.record_progress("g-test", 0, 1).unwrap();
+        layout
+            .record_progress(
+                "g-test",
+                GenerationProgress::new(
+                    GenerationProgressPhase::CursorPopulation,
+                    0,
+                    1,
+                    0,
+                    0,
+                    None,
+                ),
+            )
+            .unwrap();
         let mut removed = false;
 
         let progress = layout
@@ -840,23 +895,37 @@ mod tests {
         let mut observed_before_publish = None;
 
         layout
-            .record_progress_with_hook("g-test", 0, 1, |temporary| {
-                assert_eq!(
-                    temporary.extension().and_then(|value| value.to_str()),
-                    Some("tmp")
-                );
-                observed_before_publish = Some(layout.staging_progress().unwrap());
-            })
+            .record_progress_with_hook(
+                "g-test",
+                GenerationProgress::new(
+                    GenerationProgressPhase::CursorPopulation,
+                    0,
+                    1,
+                    0,
+                    0,
+                    None,
+                ),
+                |temporary| {
+                    assert_eq!(
+                        temporary.extension().and_then(|value| value.to_str()),
+                        Some("tmp")
+                    );
+                    observed_before_publish = Some(layout.staging_progress().unwrap());
+                },
+            )
             .unwrap();
 
         assert_eq!(observed_before_publish, Some(None));
         assert_eq!(
             layout.staging_progress().unwrap(),
-            Some(GenerationProgress {
-                schema: PROGRESS_SCHEMA.to_owned(),
-                completed: 0,
-                total: 1,
-            })
+            Some(GenerationProgress::new(
+                GenerationProgressPhase::CursorPopulation,
+                0,
+                1,
+                0,
+                0,
+                None,
+            ))
         );
     }
 }

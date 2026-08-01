@@ -1300,8 +1300,12 @@ mod tests {
             super::super::lifecycle::LifecycleStatus {
                 availability: DerivedAccessAvailability::Current,
                 generation_id: Some("g-current".to_owned()),
+                phase: None,
                 completed: None,
                 total: None,
+                bytes_processed: None,
+                elapsed_ms: None,
+                estimated_remaining_ms: None,
                 detail: None,
             },
             "publication handoff requires a retry",

@@ -8,9 +8,8 @@ use crate::session::event::ShoreEvent;
 
 pub(crate) fn strict_bodyless_materialized_snapshot_at(
     as_of: TruthCursor,
-    events: &[ShoreEvent],
+    mut events: Vec<ShoreEvent>,
 ) -> Result<SemanticSnapshot, SemanticModelError> {
-    let mut events = events.to_vec();
     events.sort_by(|left, right| {
         replay_key_for(&left.idempotency_key)
             .cmp(&replay_key_for(&right.idempotency_key))
