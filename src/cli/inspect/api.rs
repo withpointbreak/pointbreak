@@ -21,16 +21,16 @@ use pointbreak::session::event::{GitProvenance, ReviewAssessment};
 use pointbreak::session::{
     AssessmentRecordStatus, AssessmentView, AttentionItem, AttentionListOptions,
     BaseHistoryProjection, BaseProjectionConfig, CurrentAssessmentStatus, DerivedAttention,
-    DerivedAttentionRoute, DerivedHistoryAccess, DerivedHistoryNewCount, DerivedHistoryPage,
-    DerivedHistoryRoute, DerivedHistoryStatus, DerivedRevisionCollection,
-    DerivedRevisionCollectionRoute, DerivedRevisionDetail, DerivedRevisionDetailRoute,
-    DerivedThreads, DerivedThreadsRoute, DistinctValues, EventVerificationPolicy, HistoryCursor,
-    HistoryPage, HistoryQuery, InputRequestStatus, LivenessEnrichment, ObservationStatus,
-    ObservationView, ProjectionDiagnostic, QueryDiagnostic, ReviewHistoryEntry,
-    RevisionCommitRangeView, RevisionListEntry, RevisionListOptions, RevisionOverview,
-    RevisionOverviewsOptions, RevisionShowOptions, RevisionShowResult, SessionState,
-    SnapshotSummaryCache, StoreIdentity, StoreIdentityOptions, SupersessionView, TrustSet,
-    ValidationContinuitySummary, ValidationContinuityView, apply_history_query,
+    DerivedAttentionRoute, DerivedHistoryAccess, DerivedHistoryLifecycleStatus,
+    DerivedHistoryNewCount, DerivedHistoryPage, DerivedHistoryRoute, DerivedHistoryStatus,
+    DerivedRevisionCollection, DerivedRevisionCollectionRoute, DerivedRevisionDetail,
+    DerivedRevisionDetailRoute, DerivedThreads, DerivedThreadsRoute, DistinctValues,
+    EventVerificationPolicy, HistoryCursor, HistoryPage, HistoryQuery, InputRequestStatus,
+    LivenessEnrichment, ObservationStatus, ObservationView, ProjectionDiagnostic, QueryDiagnostic,
+    ReviewHistoryEntry, RevisionCommitRangeView, RevisionListEntry, RevisionListOptions,
+    RevisionOverview, RevisionOverviewsOptions, RevisionShowOptions, RevisionShowResult,
+    SessionState, SnapshotSummaryCache, StoreIdentity, StoreIdentityOptions, SupersessionView,
+    TrustSet, ValidationContinuitySummary, ValidationContinuityView, apply_history_query,
     classify_validation_continuity, commit_graph_stamp, compare_event_instants, count_new_since,
     current_assessment_includes_follow_up, default_history_page_projection,
     diagnose_ref_continuity, effective_integration_ref, enrich_liveness, event_log_head_marker,
@@ -89,6 +89,54 @@ struct HistoryNewCountPayload {
 pub(super) enum RoutedJson {
     Ok(String),
     Unavailable(DerivedHistoryStatus),
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DerivedAccessStatusPayload {
+    schema: &'static str,
+    version: u8,
+    #[serde(flatten)]
+    lifecycle: DerivedHistoryLifecycleStatus,
+    serving_current: bool,
+    fallback_in_flight: bool,
+    actions: Vec<&'static str>,
+}
+
+/// Serialize the recovery plane independently from data-generation
+/// availability. A corrupt or unreadable sidecar is represented by typed
+/// `unavailable` state in a successful document, so the shell can always
+/// explain what happened and offer only actions that are currently valid.
+pub(super) fn derived_access_status_json(
+    derived: &DerivedHistoryAccess,
+    fallback_in_flight: bool,
+) -> Result<String, String> {
+    let serving_current = derived.current_readable();
+    // `current_readable` may discover an absent/stale generation and start the
+    // recovery worker. Observe lifecycle second so `rebuildInFlight` and the
+    // returned actions describe that same post-discovery state.
+    let lifecycle = derived.lifecycle_status();
+    let mut actions = Vec::new();
+    if lifecycle.active && !serving_current {
+        if lifecycle.rebuild_in_flight {
+            actions.push("wait");
+        }
+        actions.push("authoritative_fallback");
+        actions.push(if lifecycle.rebuild_in_flight {
+            "cancel"
+        } else {
+            "retry"
+        });
+    }
+    serde_json::to_string(&DerivedAccessStatusPayload {
+        schema: "pointbreak.inspect-derived-access-status",
+        version: 1,
+        lifecycle,
+        serving_current,
+        fallback_in_flight,
+        actions,
+    })
+    .map_err(|error| error.to_string())
 }
 
 #[derive(Serialize)]
@@ -967,6 +1015,26 @@ pub(super) fn history_json(
     serialize_history_payload(out)
 }
 
+/// Build one explicit authoritative history response without consulting or
+/// populating the server's retained whole-history cache. The default page keeps
+/// the existing slice-before-hydrate fast path; non-default queries may remain
+/// history-proportional, but their decoded base dies with this request.
+pub(super) fn authoritative_history_json(
+    repo: &Path,
+    query: &HistoryQuery,
+    page: &HistoryPage,
+) -> Result<String, String> {
+    let config = inspect_base_config(repo);
+    let out = if let Some(limit) = default_history_page_limit(query, page) {
+        default_history_page_projection(repo, &config, limit, query.order)
+            .map_err(|error| error.to_string())?
+    } else {
+        let base = history_base_projection(repo, &config).map_err(|error| error.to_string())?;
+        apply_history_query(&base, query, page)
+    };
+    serialize_history_payload(out)
+}
+
 pub(super) fn routed_history_json(
     repo: &Path,
     derived: &DerivedHistoryAccess,
@@ -995,6 +1063,21 @@ pub(super) fn new_count_json(
     since_event_id: &str,
 ) -> Result<String, String> {
     let base = cached_history_base(repo, cache)?;
+    let since = HistoryCursor {
+        occurred_at: since_occurred_at.to_owned(),
+        event_id: EventId::new(since_event_id),
+    };
+    serialize_new_count(count_new_since(&base, query, &since))
+}
+
+pub(super) fn authoritative_new_count_json(
+    repo: &Path,
+    query: &HistoryQuery,
+    since_occurred_at: &str,
+    since_event_id: &str,
+) -> Result<String, String> {
+    let base = history_base_projection(repo, &inspect_base_config(repo))
+        .map_err(|error| error.to_string())?;
     let since = HistoryCursor {
         occurred_at: since_occurred_at.to_owned(),
         event_id: EventId::new(since_event_id),
@@ -1191,6 +1274,16 @@ pub(super) fn revisions_json(
     snapshot_summaries: &Arc<SnapshotSummaryCache>,
 ) -> Result<String, String> {
     cached_revisions_json(repo, cache, snapshot_summaries).map(|payload| (*payload).clone())
+}
+
+/// Build the default-off revisions document with request-local ownership. The
+/// temporary summary cache may deduplicate content reads inside this one build,
+/// but is dropped with the response and never populates the server's retained
+/// revisions or snapshot-summary caches.
+pub(super) fn authoritative_revisions_json(repo: &Path) -> Result<String, String> {
+    let trust_set = crate::cli::common::discover_trust_set(repo);
+    let snapshot_summaries = Arc::new(SnapshotSummaryCache::new());
+    build_revisions_json(repo, &trust_set, &snapshot_summaries)
 }
 
 pub(super) fn routed_revisions_json(

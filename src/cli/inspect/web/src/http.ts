@@ -39,6 +39,10 @@ function expectedDocument(path: string): ExpectedDocument | null {
   const pathname = new URL(path, location.origin).pathname;
   const collections: Record<string, ExpectedDocument> = {
     "/api/attention": { schema: "pointbreak.inspect-attention" },
+    "/api/derived-access/status": {
+      schema: "pointbreak.inspect-derived-access-status",
+      version: 1,
+    },
     "/api/freshness": {
       schema: "pointbreak.inspect-freshness",
       version: 1,
@@ -53,6 +57,15 @@ function expectedDocument(path: string): ExpectedDocument | null {
     "/api/version": { schema: "pointbreak.version", version: 1 },
   };
   if (collections[pathname]) return collections[pathname];
+  if (
+    pathname === "/api/derived-access/cancel" ||
+    pathname === "/api/derived-access/retry"
+  ) {
+    return {
+      schema: "pointbreak.inspect-derived-access-status",
+      version: 1,
+    };
+  }
   if (/^\/api\/revisions\/[^/]+$/.test(pathname)) {
     return { schema: "pointbreak.review-revision", version: 2 };
   }
@@ -83,7 +96,10 @@ function hasPayloadError(data: unknown): boolean {
   );
 }
 
-async function fetchOnce(path: string): Promise<unknown> {
+async function fetchOnce(
+  path: string,
+  method: "GET" | "POST",
+): Promise<unknown> {
   const headers: Record<string, string> = {};
   const token = getSessionToken();
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -91,6 +107,7 @@ async function fetchOnce(path: string): Promise<unknown> {
   let response: Response;
   try {
     response = await fetch(path, {
+      method,
       cache: "no-store",
       credentials: "omit",
       referrerPolicy: "no-referrer",
@@ -127,10 +144,13 @@ async function fetchOnce(path: string): Promise<unknown> {
 }
 
 /** Fetch one authenticated API document, retrying once after shared 401 recovery. */
-export async function fetchJSON(path: string): Promise<unknown> {
+export async function fetchJSON(
+  path: string,
+  method: "GET" | "POST" = "GET",
+): Promise<unknown> {
   const requestCredentialVersion = sessionCredentialVersion();
   try {
-    return await fetchOnce(path);
+    return await fetchOnce(path, method);
   } catch (error) {
     if (!(error instanceof RequestFailure) || error.kind !== "unauthorized") {
       throw error;
@@ -141,7 +161,7 @@ export async function fetchJSON(path: string): Promise<unknown> {
     sessionCredentialVersion() !== requestCredentialVersion;
   if (credentialAlreadyRenewed || (await recoverUnauthorized())) {
     try {
-      return await fetchOnce(path);
+      return await fetchOnce(path, method);
     } catch (error) {
       if (error instanceof RequestFailure && error.kind === "unauthorized") {
         throw failure("unauthorized", 401);

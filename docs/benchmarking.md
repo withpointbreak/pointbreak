@@ -452,9 +452,28 @@ truth or select a production default.
 `RebuildBusy` waits for the other process to publish, while rebuilds invalidated by changing truth retry with
 capped exponential backoff. Normal governed `CatchingUp` remains an in-place bounded-delta state and never
 starts a competing full rebuild. If the worker thread cannot be spawned, Inspector logs the failure and keeps
-the shell available so a later request can retry. Process shutdown may leave disposable staging behind; the
-next active startup discards incomplete staging before rebuilding rather than delaying shutdown to join a
-large-root rebuild.
+the shell available so a later request can retry. The Inspector owns its local worker handle: cancel, retry,
+and orderly server-state shutdown cooperatively interrupt the worker at bounded progress/retry boundaries and
+join it. Explicit cancellation stays latched until retry, so status polling cannot silently restart the worker.
+A cancelled in-progress candidate is discarded; stale staging from an abrupt interruption is discarded when
+the next rebuild begins. Once the completion-last publication critical section begins, publication wins and
+the join returns the new current state. Abrupt process termination remains a crash.
+
+`GET /api/derived-access/status` is the generation-independent recovery document. It returns `200` with
+schema `pointbreak.inspect-derived-access-status`, version `1`, including availability, current readability,
+worker/fallback activity, the local rebuild-pause latch, detail, allowed actions, and any durable
+phase/event/byte/time progress. A valid old
+generation may remain readable while a replacement stages; any authority-stamp drift invalidates that option.
+`POST /api/derived-access/cancel` and `/retry` are the only mutating Inspector routes and affect only the
+disposable sidecar worker.
+
+First bootstrap never silently switches read models. The web client offers wait or the explicit
+`access=authoritative` selector. That selector runs existing authoritative domain readers with request-local
+ownership, does not populate the retained history/revisions caches, carries
+`X-Pointbreak-Access-Source: authoritative-fallback`, and is serialized by one service-wide permit. A
+concurrent fallback receives `429` instead of multiplying whole-history replay. The web client also queues its
+own collection, paging, polling, and detail fallbacks so its requests do not race each other for that permit.
+Default-off continues to use authoritative reads as its primary path and is not labeled fallback.
 
 Print, verify, and smoke the contract without opening a store or performing filesystem actions:
 

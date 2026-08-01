@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use rusqlite::OptionalExtension;
@@ -94,6 +95,42 @@ pub struct DerivedHistoryStatus {
     pub detail: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[doc(hidden)]
+pub enum DerivedHistoryProgressPhase {
+    CursorPopulation,
+    ProjectionPopulation,
+    StrictVerification,
+    Finalizing,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[doc(hidden)]
+pub struct DerivedHistoryLifecycleStatus {
+    pub active: bool,
+    pub availability: DerivedHistoryAvailability,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<DerivedHistoryProgressPhase>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_events: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_events: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed_milliseconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub eta_milliseconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub rebuild_in_flight: bool,
+    pub rebuild_paused: bool,
+}
+
 #[doc(hidden)]
 pub enum DerivedHistoryRoute<T> {
     Off,
@@ -135,6 +172,8 @@ pub struct DerivedHistoryFreshness {
 pub struct DerivedHistoryAccess {
     pub(super) mode: DerivedHistoryMode,
     background_rebuild_in_flight: Arc<AtomicBool>,
+    background_rebuild_cancel: Arc<AtomicBool>,
+    background_rebuild_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 pub(super) enum DerivedHistoryMode {
@@ -152,6 +191,8 @@ impl DerivedHistoryAccess {
         Self {
             mode,
             background_rebuild_in_flight: Arc::new(AtomicBool::new(false)),
+            background_rebuild_cancel: Arc::new(AtomicBool::new(false)),
+            background_rebuild_handle: Mutex::new(None),
         }
     }
 
@@ -179,6 +220,70 @@ impl DerivedHistoryAccess {
         matches!(self.mode, DerivedHistoryMode::Active { .. })
     }
 
+    /// Report lifecycle progress without requiring a current generation.
+    ///
+    /// This is the Inspector's recovery-plane read: it never opens a derived
+    /// generation and remains available while a first or replacement build is
+    /// staging. The normal data routes still decide independently whether a
+    /// validated old generation can be served.
+    #[doc(hidden)]
+    pub fn lifecycle_status(&self) -> DerivedHistoryLifecycleStatus {
+        let DerivedHistoryMode::Active { lifecycle, .. } = &self.mode else {
+            return DerivedHistoryLifecycleStatus {
+                active: false,
+                availability: DerivedHistoryAvailability::Absent,
+                generation_id: None,
+                phase: None,
+                completed_events: None,
+                total_events: None,
+                completed_bytes: None,
+                elapsed_milliseconds: None,
+                eta_milliseconds: None,
+                detail: Some("derived access is disabled".to_owned()),
+                rebuild_in_flight: false,
+                rebuild_paused: false,
+            };
+        };
+        match lifecycle.status() {
+            Ok(observed) => DerivedHistoryLifecycleStatus {
+                active: true,
+                availability: map_availability(observed.availability),
+                generation_id: observed.generation_id,
+                phase: observed.phase.map(map_progress_phase),
+                completed_events: observed.completed,
+                total_events: observed.total,
+                completed_bytes: observed.bytes_processed,
+                elapsed_milliseconds: observed.elapsed_ms,
+                eta_milliseconds: observed.estimated_remaining_ms,
+                detail: observed.detail,
+                rebuild_in_flight: self.background_rebuild_in_flight.load(Ordering::Acquire),
+                rebuild_paused: self.background_rebuild_cancel.load(Ordering::Acquire),
+            },
+            Err(error) => DerivedHistoryLifecycleStatus {
+                active: true,
+                availability: DerivedHistoryAvailability::Unavailable,
+                generation_id: None,
+                phase: None,
+                completed_events: None,
+                total_events: None,
+                completed_bytes: None,
+                elapsed_milliseconds: None,
+                eta_milliseconds: None,
+                detail: Some(error.to_string()),
+                rebuild_in_flight: self.background_rebuild_in_flight.load(Ordering::Acquire),
+                rebuild_paused: self.background_rebuild_cancel.load(Ordering::Acquire),
+            },
+        }
+    }
+
+    /// Whether an active data route can truthfully serve a validated current
+    /// generation now. During a replacement build this may remain true even
+    /// though lifecycle availability is `bootstrapping`.
+    #[doc(hidden)]
+    pub fn current_readable(&self) -> bool {
+        self.is_active() && matches!(self.current(), Ok(CurrentRead::Ready(_)))
+    }
+
     /// Start rebuilding a non-current active profile without delaying the
     /// caller. The lifecycle's store-scoped lease deduplicates concurrent
     /// Inspector processes; readers continue to report the typed lifecycle
@@ -188,6 +293,14 @@ impl DerivedHistoryAccess {
         let DerivedHistoryMode::Active { lifecycle, .. } = &self.mode else {
             return Ok(());
         };
+        // The handle mutex is also the worker-control mutex. Holding it through
+        // completed-worker join and new-worker publication makes start vs.
+        // cancel linearizable: cancel cannot return while an overlapping start
+        // leaves an unjoined replacement behind.
+        let mut handle_slot = lock(&self.background_rebuild_handle);
+        if self.background_rebuild_cancel.load(Ordering::Acquire) {
+            return Ok(());
+        }
         if self
             .background_rebuild_in_flight
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -197,17 +310,60 @@ impl DerivedHistoryAccess {
         }
         let lifecycle = lifecycle.clone();
         let in_flight = Arc::clone(&self.background_rebuild_in_flight);
+        let cancel = Arc::clone(&self.background_rebuild_cancel);
+        if let Some(prior) = handle_slot.take()
+            && prior.join().is_err()
+        {
+            self.background_rebuild_in_flight
+                .store(false, Ordering::Release);
+            return Err("prior derived-access rebuild worker panicked".to_owned());
+        }
         let spawned = std::thread::Builder::new()
             .name("pointbreak-derived-rebuild".to_owned())
-            .spawn(move || background_rebuild(lifecycle, in_flight));
+            .spawn(move || background_rebuild(lifecycle, in_flight, cancel));
         match spawned {
-            Ok(_) => Ok(()),
+            Ok(handle) => {
+                *handle_slot = Some(handle);
+                Ok(())
+            }
             Err(error) => {
                 self.background_rebuild_in_flight
                     .store(false, Ordering::Release);
                 Err(format!("could not start derived-access rebuild: {error}"))
             }
         }
+    }
+
+    /// Cooperatively cancel and join this process's rebuild worker.
+    ///
+    /// Explicit cancellation stays latched so status and data-route discovery
+    /// cannot immediately start a replacement worker. Only an explicit retry
+    /// clears the latch.
+    ///
+    /// Cancellation is observed at bounded bootstrap progress boundaries and
+    /// between retry waits. Once the completion-last publication critical
+    /// section begins, publication wins and the join returns the new Current
+    /// state rather than abandoning a half-published generation.
+    #[doc(hidden)]
+    pub fn cancel_background_rebuild(&self) -> Result<(), String> {
+        let mut handle_slot = lock(&self.background_rebuild_handle);
+        self.background_rebuild_cancel
+            .store(true, Ordering::Release);
+        if let Some(handle) = handle_slot.take() {
+            handle
+                .join()
+                .map_err(|_| "derived-access rebuild worker panicked".to_owned())?;
+        }
+        Ok(())
+    }
+
+    /// Cancel any local worker, join it, and start one fresh lifecycle attempt.
+    #[doc(hidden)]
+    pub fn restart_background_rebuild(&self) -> Result<(), String> {
+        self.cancel_background_rebuild()?;
+        self.background_rebuild_cancel
+            .store(false, Ordering::Release);
+        self.start_background_rebuild()
     }
 
     pub fn history(
@@ -475,6 +631,14 @@ impl DerivedHistoryAccess {
     }
 }
 
+impl Drop for DerivedHistoryAccess {
+    fn drop(&mut self) {
+        if let Err(error) = self.cancel_background_rebuild() {
+            tracing::warn!(error = %error, "derived_access_background_rebuild_join_failed");
+        }
+    }
+}
+
 struct BackgroundRebuildGuard(Arc<AtomicBool>);
 
 impl Drop for BackgroundRebuildGuard {
@@ -483,7 +647,11 @@ impl Drop for BackgroundRebuildGuard {
     }
 }
 
-fn background_rebuild(lifecycle: DerivedAccessLifecycle, in_flight: Arc<AtomicBool>) {
+fn background_rebuild(
+    lifecycle: DerivedAccessLifecycle,
+    in_flight: Arc<AtomicBool>,
+    cancel: Arc<AtomicBool>,
+) {
     let _guard = BackgroundRebuildGuard(in_flight);
     let mut truth_changed_retry_interval = BACKGROUND_REBUILD_RETRY_INTERVAL;
     let mut rebuild_required_confirmed = false;
@@ -501,6 +669,9 @@ fn background_rebuild(lifecycle: DerivedAccessLifecycle, in_flight: Arc<AtomicBo
     // worker lost a race to a writer and backs off without publishing stale
     // state.
     loop {
+        if cancel.load(Ordering::Acquire) {
+            return;
+        }
         match lifecycle.status() {
             Ok(status)
                 if matches!(
@@ -515,7 +686,9 @@ fn background_rebuild(lifecycle: DerivedAccessLifecycle, in_flight: Arc<AtomicBo
                     && !rebuild_required_confirmed =>
             {
                 rebuild_required_confirmed = true;
-                std::thread::sleep(BACKGROUND_REBUILD_REQUIRED_CONFIRMATION);
+                if wait_or_cancel(&cancel, BACKGROUND_REBUILD_REQUIRED_CONFIRMATION) {
+                    return;
+                }
                 continue;
             }
             Ok(status) if status.availability == DerivedAccessAvailability::RebuildRequired => {
@@ -526,7 +699,9 @@ fn background_rebuild(lifecycle: DerivedAccessLifecycle, in_flight: Arc<AtomicBo
                         // gap while we acquired its lock. Throttle repeated
                         // confirmations so a sustained append stream cannot
                         // turn recovery into writer-lock contention.
-                        std::thread::sleep(BACKGROUND_REBUILD_REQUIRED_CONFIRMATION);
+                        if wait_or_cancel(&cancel, BACKGROUND_REBUILD_REQUIRED_CONFIRMATION) {
+                            return;
+                        }
                         continue;
                     }
                     Err(error) => {
@@ -544,23 +719,48 @@ fn background_rebuild(lifecycle: DerivedAccessLifecycle, in_flight: Arc<AtomicBo
                 return;
             }
         }
-        match lifecycle.rebuild(|_| LifecycleControl::Continue) {
+        match lifecycle.rebuild(|_| {
+            if cancel.load(Ordering::Acquire) {
+                LifecycleControl::Cancel
+            } else {
+                LifecycleControl::Continue
+            }
+        }) {
             Ok(_) => return,
             Err(LifecycleError::RebuildBusy) => {
-                std::thread::sleep(BACKGROUND_REBUILD_RETRY_INTERVAL);
+                if wait_or_cancel(&cancel, BACKGROUND_REBUILD_RETRY_INTERVAL) {
+                    return;
+                }
             }
             Err(LifecycleError::TruthChanged) => {
-                std::thread::sleep(truth_changed_retry_interval);
+                if wait_or_cancel(&cancel, truth_changed_retry_interval) {
+                    return;
+                }
                 truth_changed_retry_interval = truth_changed_retry_interval
                     .saturating_mul(2)
                     .min(BACKGROUND_TRUTH_CHANGED_MAX_INTERVAL);
             }
+            Err(LifecycleError::Cancelled) => return,
             Err(error) => {
                 tracing::warn!(error = %error, "derived_access_background_rebuild_failed");
                 return;
             }
         }
     }
+}
+
+fn wait_or_cancel(cancel: &AtomicBool, duration: Duration) -> bool {
+    const POLL: Duration = Duration::from_millis(25);
+    let mut remaining = duration;
+    while !remaining.is_zero() {
+        if cancel.load(Ordering::Acquire) {
+            return true;
+        }
+        let wait = remaining.min(POLL);
+        std::thread::sleep(wait);
+        remaining = remaining.saturating_sub(wait);
+    }
+    cancel.load(Ordering::Acquire)
 }
 
 pub(super) enum CurrentRead {
@@ -1159,6 +1359,25 @@ fn map_availability(value: DerivedAccessAvailability) -> DerivedHistoryAvailabil
     }
 }
 
+fn map_progress_phase(
+    value: super::generation::GenerationProgressPhase,
+) -> DerivedHistoryProgressPhase {
+    match value {
+        super::generation::GenerationProgressPhase::CursorPopulation => {
+            DerivedHistoryProgressPhase::CursorPopulation
+        }
+        super::generation::GenerationProgressPhase::ProjectionPopulation => {
+            DerivedHistoryProgressPhase::ProjectionPopulation
+        }
+        super::generation::GenerationProgressPhase::StrictVerification => {
+            DerivedHistoryProgressPhase::StrictVerification
+        }
+        super::generation::GenerationProgressPhase::Finalizing => {
+            DerivedHistoryProgressPhase::Finalizing
+        }
+    }
+}
+
 fn unavailable_lifecycle_status(
     observed: super::lifecycle::LifecycleStatus,
     fallback_detail: &str,
@@ -1232,6 +1451,7 @@ mod tests {
         EngagementId, InputRequestId, InputRequestResponseId, JournalId, ObjectId, ObservationId,
         ReviewTargetRef, RevisionId, TargetRef, TaskTargetRef, TrackId, WorkObjectId,
     };
+    use crate::session::derived_access::generation::{GenerationProgress, GenerationProgressPhase};
     use crate::session::derived_access::lifecycle::LifecycleControl;
     use crate::session::event::{
         AssertionMode, EventTarget, EventType, InputRequestResponseOutcome,
@@ -1369,6 +1589,141 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn lifecycle_status_maps_staging_progress_before_a_generation_is_current() {
+        let (_temp, access) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
+        let DerivedHistoryMode::Active { lifecycle, .. } = &access.mode else {
+            unreachable!("test access is active");
+        };
+        lifecycle.paths().ensure_scaffold().unwrap();
+        let (_, generation_id) = lifecycle.paths().next_generation().unwrap();
+        std::fs::create_dir_all(lifecycle.paths().staging(&generation_id)).unwrap();
+        lifecycle
+            .paths()
+            .record_progress(
+                &generation_id,
+                GenerationProgress::new(
+                    GenerationProgressPhase::ProjectionPopulation,
+                    256,
+                    512,
+                    4096,
+                    250,
+                    Some(350),
+                ),
+            )
+            .unwrap();
+        assert!(lifecycle.paths().root().is_dir());
+        assert!(lifecycle.paths().staging_progress().unwrap().is_some());
+
+        let status = access.lifecycle_status();
+        assert!(status.active);
+        assert_eq!(
+            status.availability,
+            DerivedHistoryAvailability::Bootstrapping
+        );
+        assert_eq!(
+            status.phase,
+            Some(DerivedHistoryProgressPhase::ProjectionPopulation)
+        );
+        assert_eq!(status.completed_events, Some(256));
+        assert_eq!(status.total_events, Some(512));
+        assert_eq!(status.completed_bytes, Some(4096));
+        assert_eq!(status.elapsed_milliseconds, Some(250));
+        assert_eq!(status.eta_milliseconds, Some(350));
+    }
+
+    #[test]
+    fn valid_old_generation_serves_during_replacement_but_stamp_drift_fails_closed() {
+        let (temp, access) = active_history(1);
+        let lifecycle = match &access.mode {
+            DerivedHistoryMode::Active { lifecycle, .. } => lifecycle.clone(),
+            DerivedHistoryMode::Off => unreachable!("test access is active"),
+        };
+        lifecycle.paths().ensure_scaffold().unwrap();
+        let (_, generation_id) = lifecycle.paths().next_generation().unwrap();
+        std::fs::create_dir_all(lifecycle.paths().staging(&generation_id)).unwrap();
+        lifecycle
+            .paths()
+            .record_progress(
+                &generation_id,
+                GenerationProgress::new(
+                    GenerationProgressPhase::CursorPopulation,
+                    0,
+                    1,
+                    0,
+                    0,
+                    None,
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(
+            access.lifecycle_status().availability,
+            DerivedHistoryAvailability::Bootstrapping
+        );
+        assert!(
+            access.current_readable(),
+            "unchanged old current remains readable"
+        );
+
+        let rebuild_lease = lifecycle.paths().try_rebuild_lease().unwrap();
+        EventStore::open(temp.path())
+            .record_event_once(&review_initialized(2))
+            .unwrap();
+        assert!(
+            !access.current_readable(),
+            "authority drift invalidates the old generation"
+        );
+        access.cancel_background_rebuild().unwrap();
+        drop(rebuild_lease);
+    }
+
+    #[test]
+    fn cancellation_joins_a_contended_worker_and_retry_can_publish() {
+        let (_temp, access) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
+        let lifecycle = match &access.mode {
+            DerivedHistoryMode::Active { lifecycle, .. } => lifecycle.clone(),
+            DerivedHistoryMode::Off => unreachable!("test access is active"),
+        };
+        let rebuild_lease = lifecycle.paths().try_rebuild_lease().unwrap();
+        for _ in 0..100 {
+            access.restart_background_rebuild().unwrap();
+            assert!(access.background_rebuild_in_flight.load(Ordering::Acquire));
+
+            access.cancel_background_rebuild().unwrap();
+            assert!(!access.background_rebuild_in_flight.load(Ordering::Acquire));
+            assert!(lock(&access.background_rebuild_handle).is_none());
+            assert!(!access.current_readable());
+            assert!(
+                !access.background_rebuild_in_flight.load(Ordering::Acquire),
+                "status/read discovery must honor explicit cancellation"
+            );
+        }
+
+        drop(rebuild_lease);
+        access.restart_background_rebuild().unwrap();
+        wait_for_background_rebuild(&access, "retry after cancellation");
+        assert!(access.current_readable());
+    }
+
+    #[test]
+    fn dropping_access_cancels_and_joins_a_contended_worker() {
+        let (_temp, access) = unbuilt_active_history_from_events(vec![review_initialized(0)]);
+        let lifecycle = match &access.mode {
+            DerivedHistoryMode::Active { lifecycle, .. } => lifecycle.clone(),
+            DerivedHistoryMode::Off => unreachable!("test access is active"),
+        };
+        let _rebuild_lease = lifecycle.paths().try_rebuild_lease().unwrap();
+        access.start_background_rebuild().unwrap();
+
+        let started = std::time::Instant::now();
+        drop(access);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "drop interrupts retry sleep and joins promptly"
+        );
     }
 
     fn review_initialized(index: usize) -> ShoreEvent {

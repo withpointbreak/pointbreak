@@ -40,6 +40,33 @@ describe("fetchJSON", () => {
     expect(getConnectionSnapshot().connection).toBe("connected");
   });
 
+  it("posts only the exact lifecycle control while preserving schema validation", async () => {
+    let method = "";
+    globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) => {
+      method = init?.method ?? "";
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            schema: "pointbreak.inspect-derived-access-status",
+            version: 1,
+            active: true,
+            availability: "absent",
+            rebuildInFlight: false,
+            rebuildPaused: false,
+            servingCurrent: false,
+            fallbackInFlight: false,
+            actions: ["retry"],
+          }),
+        ),
+      );
+    }) as typeof fetch;
+
+    await expect(
+      fetchJSON("/api/derived-access/retry", "POST"),
+    ).resolves.toMatchObject({ availability: "absent" });
+    expect(method).toBe("POST");
+  });
+
   it("attaches the session bearer centrally without changing the request target", async () => {
     const token = "request_leaf_secret_0123456789";
     setSessionToken(token);

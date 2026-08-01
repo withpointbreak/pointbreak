@@ -9,12 +9,14 @@ import {
   installFetchMock,
   resetAttentionResponse,
   resetCompositeResponse,
+  resetDerivedAccessStatus,
   resetFreshnessResponse,
   resetHistoryResponse,
   resetNewCountResponse,
   resetRevisionsResponse,
   setAttentionResponse,
   setCompositeResponse,
+  setDerivedAccessStatus,
   setFreshnessResponse,
   setHistoryError,
   setHistoryResponse,
@@ -55,6 +57,7 @@ afterEach(() => {
   resetHistoryResponse();
   resetNewCountResponse();
   resetRevisionsResponse();
+  resetDerivedAccessStatus();
   resetDom();
 });
 
@@ -129,6 +132,105 @@ function deferredResponse(payload: unknown): {
 }
 
 describe("load", () => {
+  it("stops at typed recovery state without requesting unavailable data routes", async () => {
+    setDerivedAccessStatus({
+      active: true,
+      availability: "bootstrapping",
+      phase: "projection_population",
+      completedEvents: 256,
+      totalEvents: 512,
+      elapsedMilliseconds: 1200,
+      rebuildInFlight: true,
+      rebuildPaused: false,
+      servingCurrent: false,
+      fallbackInFlight: false,
+      actions: ["wait", "authoritative_fallback", "cancel"],
+    });
+    const requests = captureRequestPaths();
+    try {
+      await expect(data.load()).resolves.toBe(false);
+    } finally {
+      requests.restore();
+    }
+
+    expect(requests.paths).toEqual(["/api/derived-access/status"]);
+    expect(store.getState().derivedAccessStatus).toMatchObject({
+      availability: "bootstrapping",
+      completedEvents: 256,
+      totalEvents: 512,
+    });
+    expect(document.querySelector("#error")?.classList.contains("hidden")).toBe(
+      true,
+    );
+  });
+
+  it("adds the explicit authoritative selector to every fallback collection", async () => {
+    setDerivedAccessStatus({
+      active: true,
+      availability: "bootstrapping",
+      rebuildInFlight: true,
+      rebuildPaused: false,
+      servingCurrent: false,
+      fallbackInFlight: false,
+      actions: ["wait", "authoritative_fallback", "cancel"],
+    });
+    store.commit({ authoritativeFallback: true });
+    const inner = globalThis.fetch;
+    const targets: string[] = [];
+    let activeFallbackRequests = 0;
+    let maxActiveFallbackRequests = 0;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const target =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      targets.push(target);
+      const pathname = new URL(target, "http://inspector.test").pathname;
+      const isExpensive = [
+        "/api/history",
+        "/api/revisions",
+        "/api/threads",
+        "/api/attention",
+      ].includes(pathname);
+      if (isExpensive) {
+        activeFallbackRequests += 1;
+        maxActiveFallbackRequests = Math.max(
+          maxActiveFallbackRequests,
+          activeFallbackRequests,
+        );
+      }
+      return inner(input as RequestInfo, init).finally(() => {
+        if (isExpensive) activeFallbackRequests -= 1;
+      });
+    }) as typeof fetch;
+    try {
+      await expect(data.load()).resolves.toBe(true);
+    } finally {
+      globalThis.fetch = inner;
+    }
+
+    for (const path of [
+      "/api/history",
+      "/api/revisions",
+      "/api/threads",
+      "/api/attention",
+    ]) {
+      const target = targets.find(
+        (candidate) =>
+          new URL(candidate, "http://inspector.test").pathname === path,
+      );
+      expect(target, `${path} was requested`).toBeDefined();
+      expect(
+        new URL(target ?? "", "http://inspector.test").searchParams.get(
+          "access",
+        ),
+      ).toBe("authoritative");
+    }
+    expect(maxActiveFallbackRequests).toBe(1);
+  });
+
   it("commits history, revisions, and objects to the store", async () => {
     await data.load();
     const s = store.getState();

@@ -108,6 +108,67 @@ describe("render is a no-arg projection of getState()", () => {
     expect(diag?.textContent).toContain("stale-store");
     expect(diag?.textContent).toContain("reload to refresh");
   });
+
+  it("renders bootstrap progress and only the server-authorized recovery actions", () => {
+    store.commit({
+      derivedAccessStatus: {
+        schema: "pointbreak.inspect-derived-access-status",
+        version: 1,
+        active: true,
+        availability: "bootstrapping",
+        phase: "projection_population",
+        completedEvents: 256,
+        totalEvents: 512,
+        elapsedMilliseconds: 1200,
+        rebuildInFlight: true,
+        rebuildPaused: false,
+        servingCurrent: false,
+        fallbackInFlight: false,
+        actions: ["wait", "authoritative_fallback", "cancel"],
+      },
+    });
+
+    render.render();
+
+    expect($("#derived-access-status")?.classList.contains("hidden")).toBe(
+      false,
+    );
+    expect($("#derived-access-summary")?.textContent).toContain("256/512");
+    expect($<HTMLProgressElement>("#derived-access-progress")?.value).toBe(256);
+    expect($("#derived-access-fallback")?.classList.contains("hidden")).toBe(
+      false,
+    );
+    expect($("#derived-access-cancel")?.classList.contains("hidden")).toBe(
+      false,
+    );
+    expect($("#derived-access-retry")?.classList.contains("hidden")).toBe(true);
+  });
+
+  it("labels an explicitly paused rebuild and offers retry", () => {
+    store.commit({
+      derivedAccessStatus: {
+        schema: "pointbreak.inspect-derived-access-status",
+        version: 1,
+        active: true,
+        availability: "bootstrapping",
+        rebuildInFlight: false,
+        rebuildPaused: true,
+        servingCurrent: false,
+        fallbackInFlight: false,
+        actions: ["authoritative_fallback", "retry"],
+      },
+    });
+
+    render.render();
+
+    expect($("#derived-access-summary")?.textContent).toContain("paused");
+    expect($("#derived-access-retry")?.classList.contains("hidden")).toBe(
+      false,
+    );
+    expect($("#derived-access-cancel")?.classList.contains("hidden")).toBe(
+      true,
+    );
+  });
 });
 
 describe("the Filters panel's event-type facets", () => {

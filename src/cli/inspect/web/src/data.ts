@@ -14,6 +14,7 @@
 // the composition root, so a filter/search/order change re-fetches page 1 without
 // the controls having to reach the network themselves.
 
+import { runWithSelectedAccess, withSelectedAccess } from "./access";
 import { setRefreshState } from "./connection";
 import { $ } from "./dom";
 import {
@@ -25,6 +26,7 @@ import { presentTypes } from "./model";
 import {
   type AttentionDoc,
   commit,
+  type DerivedAccessStatusDoc,
   getState,
   type HistoryDoc,
   type IdentityDoc,
@@ -70,6 +72,7 @@ export function historyQueryParams(s: State): string {
     p.set("type", present.filter((id) => s.enabledTypes.has(id)).join(","));
   }
   p.set("limit", String(HISTORY_PAGE));
+  if (s.authoritativeFallback) p.set("access", "authoritative");
   return p.toString();
 }
 
@@ -92,8 +95,8 @@ export async function probeNewCount(): Promise<boolean> {
   params.set("sinceEventId", anchor.eventId);
   let doc: NewCountDoc;
   try {
-    doc = (await fetchJSON(
-      `/api/history/new-count?${params.toString()}`,
+    doc = (await runWithSelectedAccess(() =>
+      fetchJSON(`/api/history/new-count?${params.toString()}`),
     )) as NewCountDoc;
   } catch (err) {
     showLoadError(err);
@@ -160,7 +163,9 @@ export async function loadHistoryHead(
     // `history.eventCount`) also keeps a retired/skipped event — where the event-file
     // marker exceeds the post-skip history count — from forcing a reload every tick.
     const freshness = (await fetchJSON("/api/freshness")) as FreshnessDoc;
-    const historyRaw = await fetchJSON(`/api/history?${params}`);
+    const historyRaw = await runWithSelectedAccess(() =>
+      fetchJSON(`/api/history?${params}`),
+    );
     if (!isCurrent()) return false;
     showError(null);
     commitHistoryHead(historyRaw as HistoryDoc, params);
@@ -177,11 +182,13 @@ export async function loadWholeDocuments(): Promise<boolean> {
   try {
     const previousAttentionCount = getState().attention?.items?.length;
     const revisionsScrollTop = $<HTMLElement>("#units")?.scrollTop;
-    const [revisionsRaw, threadsRaw, attentionRaw] = await Promise.all([
-      fetchJSON("/api/revisions"),
-      fetchJSON("/api/threads"),
-      fetchJSON("/api/attention"),
-    ]);
+    const paths = ["/api/revisions", "/api/threads", "/api/attention"];
+    const [revisionsRaw, threadsRaw, attentionRaw] = await Promise.all(
+      paths.map((path) => {
+        const selectedPath = withSelectedAccess(path);
+        return runWithSelectedAccess(() => fetchJSON(selectedPath));
+      }),
+    );
     const attention = attentionRaw as AttentionDoc;
     showError(null);
     commit({
@@ -209,8 +216,50 @@ export async function loadWholeDocuments(): Promise<boolean> {
  * store subscriber repaints. A load failure surfaces in `#error` rather than throwing.
  */
 export async function load(): Promise<boolean> {
+  const status = await loadDerivedAccessStatus();
+  if (status === null) return false;
+  if (
+    status.active &&
+    !status.servingCurrent &&
+    !getState().authoritativeFallback
+  ) {
+    showError(null);
+    return false;
+  }
   if (!(await loadHistoryHead())) return false;
   return loadWholeDocuments();
+}
+
+/** Refresh the recovery plane without depending on a current generation. */
+export async function loadDerivedAccessStatus(): Promise<DerivedAccessStatusDoc | null> {
+  try {
+    const status = (await fetchJSON(
+      "/api/derived-access/status",
+    )) as DerivedAccessStatusDoc;
+    commit({ derivedAccessStatus: status });
+    return status;
+  } catch (err) {
+    showLoadError(err);
+    return null;
+  }
+}
+
+/** Execute one exact lifecycle control and commit the returned status. */
+export async function controlDerivedAccess(
+  action: "cancel" | "retry",
+): Promise<DerivedAccessStatusDoc | null> {
+  try {
+    const status = (await fetchJSON(
+      `/api/derived-access/${action}`,
+      "POST",
+    )) as DerivedAccessStatusDoc;
+    commit({ derivedAccessStatus: status });
+    showError(null);
+    return status;
+  } catch (err) {
+    showLoadError(err);
+    return null;
+  }
 }
 
 /**
@@ -290,7 +339,7 @@ function pageUrl(s: State, selector: HistoryPageSelector): string {
 // reveal paths. A failure surfaces in `#error` and yields null.
 async function fetchHistoryDoc(url: string): Promise<HistoryDoc | null> {
   try {
-    return (await fetchJSON(url)) as HistoryDoc;
+    return (await runWithSelectedAccess(() => fetchJSON(url))) as HistoryDoc;
   } catch (err) {
     showError(err instanceof Error ? err.message : String(err));
     return null;

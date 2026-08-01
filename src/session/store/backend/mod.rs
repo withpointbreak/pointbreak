@@ -547,20 +547,24 @@ mod tests {
 
             journal.create_event_once("k:a", b"first").unwrap();
             let created = journal.change_stamp().unwrap();
-            assert_ne!(created, absent, "a created carrier changes the observation");
+            assert_eq!(
+                journal.changes_since(&absent).unwrap().verdict,
+                JournalChangeVerdict::Changed,
+                "a created carrier changes the bounded observation"
+            );
 
             journal.create_event_once("k:a", b"different").unwrap();
             assert_eq!(
-                journal.change_stamp().unwrap(),
-                created,
-                "a duplicate attempt that creates no carrier leaves the stamp stable"
+                journal.changes_since(&created).unwrap().verdict,
+                JournalChangeVerdict::Stable,
+                "a duplicate attempt that creates no carrier leaves the bounded observation stable"
             );
 
             journal.create_event_once("k:b", b"second").unwrap();
-            assert_ne!(
-                journal.change_stamp().unwrap(),
-                created,
-                "a second created carrier changes the observation again"
+            assert_eq!(
+                journal.changes_since(&created).unwrap().verdict,
+                JournalChangeVerdict::Changed,
+                "a second created carrier changes the bounded observation again"
             );
         }
     }

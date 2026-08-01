@@ -15,7 +15,8 @@ pub use derived_access::attention::{DerivedAttention, DerivedAttentionRoute};
 #[doc(hidden)]
 pub use derived_access::history::{
     DerivedHistoryAccess, DerivedHistoryAvailability, DerivedHistoryFreshness,
-    DerivedHistoryNewCount, DerivedHistoryPage, DerivedHistoryRoute, DerivedHistoryStatus,
+    DerivedHistoryLifecycleStatus, DerivedHistoryNewCount, DerivedHistoryPage,
+    DerivedHistoryProgressPhase, DerivedHistoryRoute, DerivedHistoryStatus,
 };
 #[doc(hidden)]
 pub use derived_access::revisions::{

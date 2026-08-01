@@ -1,10 +1,11 @@
 //! Minimal synchronous HTTP/1.1 server for the Pointbreak Review inspector.
 //!
 //! This is deliberately small and blocking: one OS thread per connection,
-//! `Connection: close` responses, GET-only routing. It introduces no async
-//! runtime and no third-party HTTP crate, in keeping with the storage-model
-//! rule against pulling in a runtime before a remote backend forces it. It is
-//! a localhost developer tool, not a production server.
+//! `Connection: close` responses, and read-only GET routing plus two exact
+//! lifecycle-control POSTs. It introduces no async runtime and no third-party
+//! HTTP crate, in keeping with the storage-model rule against pulling in a
+//! runtime before a remote backend forces it. It is a localhost developer
+//! tool, not a production server.
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -118,6 +119,11 @@ pub(super) struct InspectState {
     /// thread runs at a time, no matter how many freshness polls observe a
     /// moved marker.
     revisions_warm_in_flight: AtomicBool,
+    /// One service-wide permit for user-elected authoritative fallback. The
+    /// fallback is intentionally expensive and request-local; concurrent
+    /// callers receive a typed busy response instead of multiplying complete
+    /// loose-store replay and decoded ownership.
+    authoritative_fallback: AuthoritativeFallbackGate,
 }
 
 impl InspectState {
@@ -135,7 +141,39 @@ impl InspectState {
             snapshot_summaries: Arc::new(SnapshotSummaryCache::new()),
             initial_warm_started: AtomicBool::new(false),
             revisions_warm_in_flight: AtomicBool::new(false),
+            authoritative_fallback: AuthoritativeFallbackGate::new(),
         })
+    }
+}
+
+struct AuthoritativeFallbackGate {
+    in_flight: AtomicBool,
+}
+
+impl AuthoritativeFallbackGate {
+    const fn new() -> Self {
+        Self {
+            in_flight: AtomicBool::new(false),
+        }
+    }
+
+    fn is_in_flight(&self) -> bool {
+        self.in_flight.load(Ordering::Acquire)
+    }
+
+    fn try_acquire(&self) -> Option<AuthoritativeFallbackGuard<'_>> {
+        self.in_flight
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| AuthoritativeFallbackGuard(&self.in_flight))
+    }
+}
+
+struct AuthoritativeFallbackGuard<'a>(&'a AtomicBool);
+
+impl Drop for AuthoritativeFallbackGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -214,6 +252,7 @@ struct Response {
     content_type: &'static str,
     body: Vec<u8>,
     content_security_policy: bool,
+    headers: Vec<(&'static str, &'static str)>,
 }
 
 impl Response {
@@ -223,7 +262,13 @@ impl Response {
             content_type,
             body,
             content_security_policy: false,
+            headers: Vec::new(),
         }
+    }
+
+    fn with_header(mut self, name: &'static str, value: &'static str) -> Self {
+        self.headers.push((name, value));
+        self
     }
 
     fn asset(content_type: &'static str, body: &str) -> Self {
@@ -614,6 +659,13 @@ fn route(
     path: &str,
     query: Option<&str>,
 ) -> Response {
+    if method == "POST" {
+        return match path {
+            "/api/derived-access/cancel" => derived_access_control_response(state, false),
+            "/api/derived-access/retry" => derived_access_control_response(state, true),
+            _ => Response::text("405 Method Not Allowed", "method not allowed"),
+        };
+    }
     if method != "GET" {
         return Response::text("405 Method Not Allowed", "method not allowed");
     }
@@ -627,24 +679,45 @@ fn route(
 
     let repo = state.repo.as_path();
     match path {
+        "/api/derived-access/status" => api_response(api::derived_access_status_json(
+            &state.derived_history,
+            state.authoritative_fallback.is_in_flight(),
+        )),
         // The poll probe shares `/api/history` filtering but returns no entries.
         "/api/history/new-count" => match history_query(query) {
             Ok(request) => {
                 let since_occurred_at = query_param(query, "sinceOccurredAt");
                 let since_event_id = query_param(query, "sinceEventId");
                 match (since_occurred_at, since_event_id) {
-                    (None, None) => {
-                        routed_api_response(api::routed_zero_new_count_json(&state.derived_history))
-                    }
-                    (Some(occurred_at), Some(event_id)) => {
-                        routed_api_response(api::routed_new_count_json(
-                            repo,
+                    (None, None) => match requested_authoritative_access(query) {
+                        Ok(true) => {
+                            explicit_authoritative_response(state, api::zero_new_count_json)
+                        }
+                        Ok(false) => routed_api_response(api::routed_zero_new_count_json(
                             &state.derived_history,
-                            &state.history_cache,
-                            &request.query,
-                            &occurred_at,
-                            &event_id,
-                        ))
+                        )),
+                        Err(message) => Response::json_error("400 Bad Request", &message),
+                    },
+                    (Some(occurred_at), Some(event_id)) => {
+                        match requested_authoritative_access(query) {
+                            Ok(true) => explicit_authoritative_response(state, || {
+                                api::authoritative_new_count_json(
+                                    repo,
+                                    &request.query,
+                                    &occurred_at,
+                                    &event_id,
+                                )
+                            }),
+                            Ok(false) => routed_api_response(api::routed_new_count_json(
+                                repo,
+                                &state.derived_history,
+                                &state.history_cache,
+                                &request.query,
+                                &occurred_at,
+                                &event_id,
+                            )),
+                            Err(message) => Response::json_error("400 Bad Request", &message),
+                        }
                     }
                     _ => Response::json_error("400 Bad Request", "incomplete history cursor"),
                 }
@@ -652,33 +725,55 @@ fn route(
             Err(message) => Response::json_error("400 Bad Request", &message),
         },
         "/api/history" => match history_query(query) {
-            Ok(request) => routed_api_response(api::routed_history_json(
+            Ok(request) => match requested_authoritative_access(query) {
+                Ok(true) => explicit_authoritative_response(state, || {
+                    api::authoritative_history_json(repo, &request.query, &request.page)
+                }),
+                Ok(false) => routed_api_response(api::routed_history_json(
+                    repo,
+                    &state.derived_history,
+                    &state.history_cache,
+                    &request.query,
+                    &request.page,
+                )),
+                Err(message) => Response::json_error("400 Bad Request", &message),
+            },
+            Err(message) => Response::json_error("400 Bad Request", &message),
+        },
+        "/api/revisions" => match requested_authoritative_access(query) {
+            Ok(true) => {
+                explicit_authoritative_response(state, || api::authoritative_revisions_json(repo))
+            }
+            Ok(false) => routed_api_response(api::routed_revisions_json(
                 repo,
                 &state.derived_history,
-                &state.history_cache,
-                &request.query,
-                &request.page,
+                &state.revisions_cache,
+                &state.snapshot_summaries,
             )),
             Err(message) => Response::json_error("400 Bad Request", &message),
         },
-        "/api/revisions" => routed_api_response(api::routed_revisions_json(
-            repo,
-            &state.derived_history,
-            &state.revisions_cache,
-            &state.snapshot_summaries,
-        )),
-        "/api/threads" => {
-            routed_api_response(api::routed_threads_json(repo, &state.derived_history))
-        }
+        "/api/threads" => match requested_authoritative_access(query) {
+            Ok(true) => explicit_authoritative_response(state, || api::threads_json(repo)),
+            Ok(false) => {
+                routed_api_response(api::routed_threads_json(repo, &state.derived_history))
+            }
+            Err(message) => Response::json_error("400 Bad Request", &message),
+        },
         "/api/attention" => {
             // An empty `revision=` is absent, matching the exact-match history
             // params (`track=`/`snapshot=`).
             let revision = query_param(query, "revision").filter(|value| !value.is_empty());
-            routed_api_response(api::routed_attention_json(
-                repo,
-                &state.derived_history,
-                revision.as_deref(),
-            ))
+            match requested_authoritative_access(query) {
+                Ok(true) => explicit_authoritative_response(state, || {
+                    api::attention_json(repo, revision.as_deref())
+                }),
+                Ok(false) => routed_api_response(api::routed_attention_json(
+                    repo,
+                    &state.derived_history,
+                    revision.as_deref(),
+                )),
+                Err(message) => Response::json_error("400 Bad Request", &message),
+            }
         }
         "/api/freshness" => {
             // The freshness poll is the client's change detector; ride it to
@@ -699,6 +794,48 @@ fn route(
         ),
         "/api/identity" => api_response(api::identity_json(repo)),
         _ => route_member(state, path, query),
+    }
+}
+
+fn requested_authoritative_access(query: Option<&str>) -> Result<bool, String> {
+    match query_param(query, "access").as_deref() {
+        None | Some("") | Some("derived") => Ok(false),
+        Some("authoritative") => Ok(true),
+        Some(_) => Err("invalid access mode".to_owned()),
+    }
+}
+
+fn explicit_authoritative_response(
+    state: &InspectState,
+    build: impl FnOnce() -> Result<String, String>,
+) -> Response {
+    if !state.derived_history.is_active() {
+        return api_response(build());
+    }
+    let Some(_permit) = state.authoritative_fallback.try_acquire() else {
+        return Response::json_error(
+            "429 Too Many Requests",
+            "an authoritative fallback is already in progress",
+        );
+    };
+    api_response(build()).with_header("X-Pointbreak-Access-Source", "authoritative-fallback")
+}
+
+fn derived_access_control_response(state: &InspectState, retry: bool) -> Response {
+    if !state.derived_history.is_active() {
+        return Response::json_error("409 Conflict", "derived access is disabled");
+    }
+    let result = if retry {
+        state.derived_history.restart_background_rebuild()
+    } else {
+        state.derived_history.cancel_background_rebuild()
+    };
+    match result {
+        Ok(()) => api_response(api::derived_access_status_json(
+            &state.derived_history,
+            state.authoritative_fallback.is_in_flight(),
+        )),
+        Err(message) => Response::json_error("500 Internal Server Error", &message),
     }
 }
 
@@ -727,9 +864,17 @@ fn route_member(state: &Arc<InspectState>, path: &str, query: Option<&str>) -> R
     let repo = state.repo.as_path();
     if let Some(raw) = path_member(path, "/api/revisions/") {
         return match decode_member(raw) {
-            Some(id) => {
-                routed_api_response(api::routed_revision_json(repo, &state.derived_history, &id))
-            }
+            Some(id) => match requested_authoritative_access(query) {
+                Ok(true) => {
+                    explicit_authoritative_response(state, || api::revision_json(repo, &id))
+                }
+                Ok(false) => routed_api_response(api::routed_revision_json(
+                    repo,
+                    &state.derived_history,
+                    &id,
+                )),
+                Err(message) => Response::json_error("400 Bad Request", &message),
+            },
             None => Response::json_error("400 Bad Request", "missing revision id"),
         };
     }
@@ -949,6 +1094,12 @@ fn write_response_inner(
         header.push_str(
             "Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'\r\n",
         );
+    }
+    for (name, value) in &response.headers {
+        header.push_str(name);
+        header.push_str(": ");
+        header.push_str(value);
+        header.push_str("\r\n");
     }
     if let Some((name, value)) = extra_header {
         header.push_str(name);
@@ -1222,6 +1373,37 @@ mod tests {
         assert_eq!(
             route_for("POST", "/api/history").status,
             "405 Method Not Allowed"
+        );
+    }
+
+    #[test]
+    fn authoritative_fallback_gate_is_single_flight_and_reusable() {
+        let gate = AuthoritativeFallbackGate::new();
+        for _ in 0..100 {
+            let permit = gate.try_acquire().expect("first fallback acquires permit");
+            assert!(gate.is_in_flight());
+            assert!(
+                gate.try_acquire().is_none(),
+                "concurrent fallback is rejected"
+            );
+            drop(permit);
+            assert!(!gate.is_in_flight());
+        }
+    }
+
+    #[test]
+    fn lifecycle_post_surface_is_exact() {
+        assert_eq!(
+            route_for("POST", "/api/history").status,
+            "405 Method Not Allowed"
+        );
+        assert_eq!(
+            route_for("POST", "/api/derived-access/retry").status,
+            "409 Conflict"
+        );
+        assert_eq!(
+            route_for("POST", "/api/derived-access/cancel").status,
+            "409 Conflict"
         );
     }
 

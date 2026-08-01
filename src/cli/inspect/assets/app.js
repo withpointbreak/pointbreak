@@ -1323,6 +1323,8 @@
     threads: null,
     attention: null,
     identity: null,
+    derivedAccessStatus: null,
+    authoritativeFallback: false,
     lens: "timeline",
     selected: { kind: null, id: null },
     open: false,
@@ -1576,6 +1578,26 @@
   }
   __name(eventExists, "eventExists");
 
+  // src/access.ts
+  var fallbackTail = Promise.resolve();
+  function withSelectedAccess(path) {
+    if (!getState().authoritativeFallback) return path;
+    const url = new URL(path, location.origin);
+    url.searchParams.set("access", "authoritative");
+    return `${url.pathname}${url.search}`;
+  }
+  __name(withSelectedAccess, "withSelectedAccess");
+  function runWithSelectedAccess(operation) {
+    if (!getState().authoritativeFallback) return operation();
+    const result = fallbackTail.then(operation, operation);
+    fallbackTail = result.then(
+      () => void 0,
+      () => void 0
+    );
+    return result;
+  }
+  __name(runWithSelectedAccess, "runWithSelectedAccess");
+
   // src/connection.ts
   var snapshot = {
     connection: "connecting",
@@ -1794,6 +1816,10 @@
     const pathname = new URL(path, location.origin).pathname;
     const collections = {
       "/api/attention": { schema: "pointbreak.inspect-attention" },
+      "/api/derived-access/status": {
+        schema: "pointbreak.inspect-derived-access-status",
+        version: 1
+      },
       "/api/freshness": {
         schema: "pointbreak.inspect-freshness",
         version: 1
@@ -1808,6 +1834,12 @@
       "/api/version": { schema: "pointbreak.version", version: 1 }
     };
     if (collections[pathname]) return collections[pathname];
+    if (pathname === "/api/derived-access/cancel" || pathname === "/api/derived-access/retry") {
+      return {
+        schema: "pointbreak.inspect-derived-access-status",
+        version: 1
+      };
+    }
     if (/^\/api\/revisions\/[^/]+$/.test(pathname)) {
       return { schema: "pointbreak.review-revision", version: 2 };
     }
@@ -1827,13 +1859,14 @@
     return typeof data === "object" && data !== null && "error" in data && Boolean(data.error);
   }
   __name(hasPayloadError, "hasPayloadError");
-  async function fetchOnce(path) {
+  async function fetchOnce(path, method) {
     const headers = {};
     const token = getSessionToken();
     if (token) headers.Authorization = `Bearer ${token}`;
     let response;
     try {
       response = await fetch(path, {
+        method,
         cache: "no-store",
         credentials: "omit",
         referrerPolicy: "no-referrer",
@@ -1864,10 +1897,10 @@
     return data;
   }
   __name(fetchOnce, "fetchOnce");
-  async function fetchJSON(path) {
+  async function fetchJSON(path, method = "GET") {
     const requestCredentialVersion = sessionCredentialVersion();
     try {
-      return await fetchOnce(path);
+      return await fetchOnce(path, method);
     } catch (error) {
       if (!(error instanceof RequestFailure) || error.kind !== "unauthorized") {
         throw error;
@@ -1876,7 +1909,7 @@
     const credentialAlreadyRenewed = sessionCredentialVersion() !== requestCredentialVersion;
     if (credentialAlreadyRenewed || await recoverUnauthorized()) {
       try {
-        return await fetchOnce(path);
+        return await fetchOnce(path, method);
       } catch (error) {
         if (error instanceof RequestFailure && error.kind === "unauthorized") {
           throw failure("unauthorized", 401);
@@ -1901,6 +1934,7 @@
       p.set("type", present.filter((id) => s.enabledTypes.has(id)).join(","));
     }
     p.set("limit", String(HISTORY_PAGE));
+    if (s.authoritativeFallback) p.set("access", "authoritative");
     return p.toString();
   }
   __name(historyQueryParams, "historyQueryParams");
@@ -1918,8 +1952,8 @@
     params.set("sinceEventId", anchor.eventId);
     let doc;
     try {
-      doc = await fetchJSON(
-        `/api/history/new-count?${params.toString()}`
+      doc = await runWithSelectedAccess(
+        () => fetchJSON(`/api/history/new-count?${params.toString()}`)
       );
     } catch (err) {
       showLoadError(err);
@@ -1961,7 +1995,9 @@
     try {
       const params = historyQueryParams(getState());
       const freshness = await fetchJSON("/api/freshness");
-      const historyRaw = await fetchJSON(`/api/history?${params}`);
+      const historyRaw = await runWithSelectedAccess(
+        () => fetchJSON(`/api/history?${params}`)
+      );
       if (!isCurrent()) return false;
       showError(null);
       commitHistoryHead(historyRaw, params);
@@ -1977,11 +2013,13 @@
     try {
       const previousAttentionCount = getState().attention?.items?.length;
       const revisionsScrollTop = $("#units")?.scrollTop;
-      const [revisionsRaw, threadsRaw, attentionRaw] = await Promise.all([
-        fetchJSON("/api/revisions"),
-        fetchJSON("/api/threads"),
-        fetchJSON("/api/attention")
-      ]);
+      const paths = ["/api/revisions", "/api/threads", "/api/attention"];
+      const [revisionsRaw, threadsRaw, attentionRaw] = await Promise.all(
+        paths.map((path) => {
+          const selectedPath = withSelectedAccess(path);
+          return runWithSelectedAccess(() => fetchJSON(selectedPath));
+        })
+      );
       const attention = attentionRaw;
       showError(null);
       commit({
@@ -2002,10 +2040,44 @@
   }
   __name(loadWholeDocuments, "loadWholeDocuments");
   async function load() {
+    const status = await loadDerivedAccessStatus();
+    if (status === null) return false;
+    if (status.active && !status.servingCurrent && !getState().authoritativeFallback) {
+      showError(null);
+      return false;
+    }
     if (!await loadHistoryHead()) return false;
     return loadWholeDocuments();
   }
   __name(load, "load");
+  async function loadDerivedAccessStatus() {
+    try {
+      const status = await fetchJSON(
+        "/api/derived-access/status"
+      );
+      commit({ derivedAccessStatus: status });
+      return status;
+    } catch (err) {
+      showLoadError(err);
+      return null;
+    }
+  }
+  __name(loadDerivedAccessStatus, "loadDerivedAccessStatus");
+  async function controlDerivedAccess(action) {
+    try {
+      const status = await fetchJSON(
+        `/api/derived-access/${action}`,
+        "POST"
+      );
+      commit({ derivedAccessStatus: status });
+      showError(null);
+      return status;
+    } catch (err) {
+      showLoadError(err);
+      return null;
+    }
+  }
+  __name(controlDerivedAccess, "controlDerivedAccess");
   async function loadIdentity() {
     try {
       const doc = await fetchJSON("/api/identity");
@@ -2047,7 +2119,7 @@
   __name(pageUrl, "pageUrl");
   async function fetchHistoryDoc(url) {
     try {
-      return await fetchJSON(url);
+      return await runWithSelectedAccess(() => fetchJSON(url));
     } catch (err) {
       showError(err instanceof Error ? err.message : String(err));
       return null;
@@ -4512,7 +4584,10 @@
       return Promise.resolve(cached.doc);
     const pending = compositeInFlight.get(revisionId);
     if (pending && pending.generation === generation) return pending.promise;
-    const read = fetchJSON(`/api/revisions/${encodeURIComponent(revisionId)}`).then((d) => {
+    const path = withSelectedAccess(
+      `/api/revisions/${encodeURIComponent(revisionId)}`
+    );
+    const read = runWithSelectedAccess(() => fetchJSON(path)).then((d) => {
       const doc = d;
       if (revisionCompositeGeneration() === generation)
         compositeCache.set(revisionId, { doc, generation });
@@ -4994,8 +5069,11 @@
     scopedAttentionPending = { revisionId, generation: attentionGeneration };
     let items;
     try {
-      const doc = await fetchJSON(
+      const path = withSelectedAccess(
         `/api/attention?revision=${encodeURIComponent(revisionId)}`
+      );
+      const doc = await runWithSelectedAccess(
+        () => fetchJSON(path)
       );
       items = doc.items ?? [];
     } catch {
@@ -6823,6 +6901,55 @@ click to open the revision page">
     document.title = `${id.repository} · ${INSPECTOR_TITLE}`;
   }
   __name(renderIdentity, "renderIdentity");
+  function renderDerivedAccessStatus() {
+    const root = $("#derived-access-status");
+    if (!root) return;
+    const state2 = getState();
+    const status = state2.derivedAccessStatus;
+    const visible = Boolean(
+      status?.active && (!status.servingCurrent || status.rebuildInFlight || state2.authoritativeFallback)
+    );
+    root.classList.toggle("hidden", !visible);
+    if (!visible || !status) return;
+    const summary = $("#derived-access-summary");
+    if (summary) {
+      if (state2.authoritativeFallback) {
+        summary.textContent = "Reading authoritative journal data directly while the derived view is unavailable.";
+      } else if (status.rebuildPaused) {
+        summary.textContent = "Derived view rebuild paused. Retry when ready.";
+      } else if (status.servingCurrent) {
+        summary.textContent = "A replacement derived view is building; the validated current generation remains readable.";
+      } else {
+        const phase = status.phase?.replaceAll("_", " ");
+        const count = status.completedEvents != null && status.totalEvents != null ? ` ${status.completedEvents}/${status.totalEvents} events.` : "";
+        summary.textContent = `Derived view: ${phase ?? status.availability}.${count}`;
+      }
+    }
+    const detail = $("#derived-access-detail");
+    if (detail) detail.textContent = status.detail ?? "";
+    const progress = $("#derived-access-progress");
+    if (progress) {
+      const hasProgress = status.completedEvents != null && status.totalEvents != null && status.totalEvents > 0;
+      progress.classList.toggle("hidden", !hasProgress);
+      if (hasProgress) {
+        progress.max = status.totalEvents ?? 1;
+        progress.value = status.completedEvents ?? 0;
+      }
+    }
+    for (const [id, action] of [
+      ["#derived-access-wait", "wait"],
+      ["#derived-access-fallback", "authoritative_fallback"],
+      ["#derived-access-cancel", "cancel"],
+      ["#derived-access-retry", "retry"]
+    ]) {
+      $(id)?.classList.toggle("hidden", !status.actions.includes(action));
+    }
+    $("#derived-access-use-derived")?.classList.toggle(
+      "hidden",
+      !state2.authoritativeFallback || !status.servingCurrent
+    );
+  }
+  __name(renderDerivedAccessStatus, "renderDerivedAccessStatus");
   function renderStats() {
     const h = getState().history;
     const r = getState().revisions;
@@ -7155,6 +7282,7 @@ click to open the revision page">
   __name(applyDiffPageMode, "applyDiffPageMode");
   function render() {
     renderIdentity();
+    renderDerivedAccessStatus();
     renderStats();
     renderDiagnostics();
     renderLensSwitcher();
@@ -7280,6 +7408,7 @@ click to open the revision page">
   // src/main.ts
   var pollTimer = null;
   var unsubscribers = [];
+  var derivedWaitGeneration = 0;
   function stopPolling() {
     if (pollTimer !== null) {
       clearInterval(pollTimer);
@@ -7369,6 +7498,50 @@ click to open the revision page">
     });
   }
   __name(wireToolbar, "wireToolbar");
+  async function resumeLoadedInspector() {
+    if (!await load()) return;
+    applyHash();
+    startPolling();
+  }
+  __name(resumeLoadedInspector, "resumeLoadedInspector");
+  async function waitForDerivedAccess() {
+    const generation = ++derivedWaitGeneration;
+    while (generation === derivedWaitGeneration) {
+      const status = await loadDerivedAccessStatus();
+      if (status === null) return;
+      if (status.servingCurrent) {
+        commit({ authoritativeFallback: false });
+        await resumeLoadedInspector();
+        return;
+      }
+      await new Promise((resolve2) => setTimeout(resolve2, 500));
+    }
+  }
+  __name(waitForDerivedAccess, "waitForDerivedAccess");
+  function wireDerivedAccessControls() {
+    $("#derived-access-wait")?.addEventListener("click", () => {
+      void waitForDerivedAccess();
+    });
+    $("#derived-access-fallback")?.addEventListener("click", () => {
+      derivedWaitGeneration += 1;
+      commit({ authoritativeFallback: true });
+      void resumeLoadedInspector();
+    });
+    $("#derived-access-use-derived")?.addEventListener("click", () => {
+      derivedWaitGeneration += 1;
+      commit({ authoritativeFallback: false });
+      void resumeLoadedInspector();
+    });
+    $("#derived-access-cancel")?.addEventListener("click", () => {
+      derivedWaitGeneration += 1;
+      void controlDerivedAccess("cancel");
+    });
+    $("#derived-access-retry")?.addEventListener("click", async () => {
+      derivedWaitGeneration += 1;
+      if (await controlDerivedAccess("retry")) void waitForDerivedAccess();
+    });
+  }
+  __name(wireDerivedAccessControls, "wireDerivedAccessControls");
   function main(options = {}) {
     stopPolling();
     const capability = bootstrapCapability();
@@ -7389,6 +7562,7 @@ click to open the revision page">
     initControls();
     initConnectionControls();
     wireToolbar();
+    wireDerivedAccessControls();
     document.addEventListener("keydown", onKey);
     document.addEventListener("click", onDocumentClick);
     window.addEventListener("popstate", applyHash);

@@ -26,6 +26,7 @@
 //     payload seam), so detail and diff/controller reference each other — safe
 //     because both edges are called-at-event-time, never at module init.
 
+import { runWithSelectedAccess, withSelectedAccess } from "./access";
 import {
   currentAssessmentSummary,
   type FactSupersession,
@@ -373,7 +374,10 @@ export function ensureRevisionComposite(
     return Promise.resolve(cached.doc);
   const pending = compositeInFlight.get(revisionId);
   if (pending && pending.generation === generation) return pending.promise;
-  const read = fetchJSON(`/api/revisions/${encodeURIComponent(revisionId)}`)
+  const path = withSelectedAccess(
+    `/api/revisions/${encodeURIComponent(revisionId)}`,
+  );
+  const read = runWithSelectedAccess(() => fetchJSON(path))
     .then((d) => {
       const doc = d as RevisionPageDoc;
       // An older request may finish after freshness polling advanced the page.
@@ -995,8 +999,11 @@ async function fetchScopedAttention(revisionId: string): Promise<void> {
   scopedAttentionPending = { revisionId, generation: attentionGeneration };
   let items: AttentionItem[] | null;
   try {
-    const doc = (await fetchJSON(
+    const path = withSelectedAccess(
       `/api/attention?revision=${encodeURIComponent(revisionId)}`,
+    );
+    const doc = (await runWithSelectedAccess(() =>
+      fetchJSON(path),
     )) as AttentionDoc;
     items = doc.items ?? [];
   } catch {

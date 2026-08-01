@@ -109,6 +109,68 @@ function renderIdentity(): void {
   document.title = `${id.repository} · ${INSPECTOR_TITLE}`;
 }
 
+/** Paint the recovery plane independently of the data documents. */
+function renderDerivedAccessStatus(): void {
+  const root = $("#derived-access-status");
+  if (!root) return;
+  const state = getState();
+  const status = state.derivedAccessStatus;
+  const visible = Boolean(
+    status?.active &&
+      (!status.servingCurrent ||
+        status.rebuildInFlight ||
+        state.authoritativeFallback),
+  );
+  root.classList.toggle("hidden", !visible);
+  if (!visible || !status) return;
+
+  const summary = $("#derived-access-summary");
+  if (summary) {
+    if (state.authoritativeFallback) {
+      summary.textContent =
+        "Reading authoritative journal data directly while the derived view is unavailable.";
+    } else if (status.rebuildPaused) {
+      summary.textContent = "Derived view rebuild paused. Retry when ready.";
+    } else if (status.servingCurrent) {
+      summary.textContent =
+        "A replacement derived view is building; the validated current generation remains readable.";
+    } else {
+      const phase = status.phase?.replaceAll("_", " ");
+      const count =
+        status.completedEvents != null && status.totalEvents != null
+          ? ` ${status.completedEvents}/${status.totalEvents} events.`
+          : "";
+      summary.textContent = `Derived view: ${phase ?? status.availability}.${count}`;
+    }
+  }
+  const detail = $("#derived-access-detail");
+  if (detail) detail.textContent = status.detail ?? "";
+  const progress = $<HTMLProgressElement>("#derived-access-progress");
+  if (progress) {
+    const hasProgress =
+      status.completedEvents != null &&
+      status.totalEvents != null &&
+      status.totalEvents > 0;
+    progress.classList.toggle("hidden", !hasProgress);
+    if (hasProgress) {
+      progress.max = status.totalEvents ?? 1;
+      progress.value = status.completedEvents ?? 0;
+    }
+  }
+  for (const [id, action] of [
+    ["#derived-access-wait", "wait"],
+    ["#derived-access-fallback", "authoritative_fallback"],
+    ["#derived-access-cancel", "cancel"],
+    ["#derived-access-retry", "retry"],
+  ] as const) {
+    $(id)?.classList.toggle("hidden", !status.actions.includes(action));
+  }
+  $("#derived-access-use-derived")?.classList.toggle(
+    "hidden",
+    !state.authoritativeFallback || !status.servingCurrent,
+  );
+}
+
 /** Paint the topbar stat row from the loaded counts and preferred projection version. */
 function renderStats(): void {
   const h = getState().history;
@@ -586,6 +648,7 @@ function applyDiffPageMode(): boolean {
  */
 export function render(): void {
   renderIdentity();
+  renderDerivedAccessStatus();
   renderStats();
   renderDiagnostics();
   renderLensSwitcher();

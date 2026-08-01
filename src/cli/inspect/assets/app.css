@@ -824,6 +824,10 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-directio
 .fact-status.competing { color: var(--warning); }
 
 .error { background: var(--error-bg); color: var(--danger); padding: 8px 16px; border-top: 1px solid var(--error-border); font-family: var(--mono); font-size: var(--fs-sm); }
+.derived-access-status { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 16px; border-top: 1px solid var(--border); background: var(--bg-elev); color: var(--fg); font-family: var(--mono); font-size: var(--fs-sm); }
+.derived-access-status > div:first-child { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.derived-access-status progress { width: min(220px, 35vw); }
+.derived-access-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 
 .badge { font-family: var(--mono); font-size: var(--fs-xs); padding: 1px 6px; border-radius: var(--r-sm); background: var(--bg-row); color: var(--fg-dim); }
 .badge.stale { color: var(--danger); background: color-mix(in srgb, var(--danger) 10%, transparent); }

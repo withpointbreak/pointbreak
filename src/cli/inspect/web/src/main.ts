@@ -25,7 +25,14 @@ import {
   renderConnectionChrome,
   setRefreshState,
 } from "./connection";
-import { load, loadIdentity, maybeReloadForQuery, pollFreshness } from "./data";
+import {
+  controlDerivedAccess,
+  load,
+  loadDerivedAccessStatus,
+  loadIdentity,
+  maybeReloadForQuery,
+  pollFreshness,
+} from "./data";
 import { initControls as initDetail } from "./detail";
 import {
   DIFF_ROUTE_CLEARED,
@@ -43,11 +50,12 @@ import { applyPrefs, initControls as initPrefs } from "./prefs";
 import { initControls as initRender, render } from "./render";
 import { applyHash, navigate } from "./router";
 import { initControls as initSplit } from "./split";
-import { getState, subscribe } from "./store";
+import { commit, getState, subscribe } from "./store";
 import { DEFAULT_LENS, LENSES } from "./types";
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 let unsubscribers: Array<() => void> = [];
+let derivedWaitGeneration = 0;
 
 export function stopPolling(): void {
   if (pollTimer !== null) {
@@ -143,6 +151,50 @@ function wireToolbar(): void {
   });
 }
 
+async function resumeLoadedInspector(): Promise<void> {
+  if (!(await load())) return;
+  applyHash();
+  startPolling();
+}
+
+async function waitForDerivedAccess(): Promise<void> {
+  const generation = ++derivedWaitGeneration;
+  while (generation === derivedWaitGeneration) {
+    const status = await loadDerivedAccessStatus();
+    if (status === null) return;
+    if (status.servingCurrent) {
+      commit({ authoritativeFallback: false });
+      await resumeLoadedInspector();
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
+function wireDerivedAccessControls(): void {
+  $("#derived-access-wait")?.addEventListener("click", () => {
+    void waitForDerivedAccess();
+  });
+  $("#derived-access-fallback")?.addEventListener("click", () => {
+    derivedWaitGeneration += 1;
+    commit({ authoritativeFallback: true });
+    void resumeLoadedInspector();
+  });
+  $("#derived-access-use-derived")?.addEventListener("click", () => {
+    derivedWaitGeneration += 1;
+    commit({ authoritativeFallback: false });
+    void resumeLoadedInspector();
+  });
+  $("#derived-access-cancel")?.addEventListener("click", () => {
+    derivedWaitGeneration += 1;
+    void controlDerivedAccess("cancel");
+  });
+  $("#derived-access-retry")?.addEventListener("click", async () => {
+    derivedWaitGeneration += 1;
+    if (await controlDerivedAccess("retry")) void waitForDerivedAccess();
+  });
+}
+
 /**
  * Bootstrap the inspector: apply prefs before first paint, register the single
  * render subscriber, wire every module's controls + the toolbar + the two document
@@ -173,6 +225,7 @@ export function main(
   initAutocomplete();
   initConnectionControls();
   wireToolbar();
+  wireDerivedAccessControls();
   document.addEventListener("keydown", onKey);
   document.addEventListener("click", onDocumentClick);
   window.addEventListener("popstate", applyHash);

@@ -976,6 +976,36 @@ describe("staleFactSectionContext (state-bound, fed into the pure factSection)",
 });
 
 describe("showComposite (shownCompositeId guards re-fetch)", () => {
+  it("keeps explicit authoritative fallback on the composite read", async () => {
+    store.commit({ authoritativeFallback: true });
+    let requested = "";
+    const baseFetch = globalThis.fetch;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      if (
+        new URL(url, "http://inspector.test").pathname.startsWith(
+          "/api/revisions/",
+        )
+      )
+        requested = url;
+      return baseFetch(input, init);
+    }) as typeof fetch;
+
+    try {
+      await detail.showComposite(REV);
+      expect(
+        new URL(requested, "http://inspector.test").searchParams.get("access"),
+      ).toBe("authoritative");
+    } finally {
+      globalThis.fetch = baseFetch;
+    }
+  });
+
   it("renders on first selection and is a no-op on an unchanged re-selection", async () => {
     store.commit({ selected: { kind: "revision", id: REV } });
     await detail.showComposite(REV);

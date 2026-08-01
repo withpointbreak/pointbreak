@@ -22,6 +22,34 @@ const FIXTURES: Record<string, unknown> = {
   "/api/identity": identityJson,
 };
 
+function derivedAccessStatus(payload: unknown = {}): unknown {
+  return {
+    schema: "pointbreak.inspect-derived-access-status",
+    version: 1,
+    active: false,
+    availability: "absent",
+    rebuildInFlight: false,
+    rebuildPaused: false,
+    servingCurrent: false,
+    fallbackInFlight: false,
+    actions: [],
+    ...(payload as Record<string, unknown>),
+  };
+}
+
+export function setDerivedAccessStatus(payload: unknown): void {
+  const status = derivedAccessStatus(payload);
+  FIXTURES["/api/derived-access/status"] = status;
+  FIXTURES["/api/derived-access/cancel"] = status;
+  FIXTURES["/api/derived-access/retry"] = status;
+}
+
+export function resetDerivedAccessStatus(): void {
+  setDerivedAccessStatus({});
+}
+
+resetDerivedAccessStatus();
+
 /** Override the `/api/revisions` response (whole-document polling tests). */
 export function setRevisionsResponse(payload: unknown): void {
   FIXTURES["/api/revisions"] = {

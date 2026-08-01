@@ -168,6 +168,38 @@ export interface AttentionDoc {
   eventSetHash?: string;
 }
 
+/** The always-available derived-access recovery-plane document. */
+export interface DerivedAccessStatusDoc {
+  schema: "pointbreak.inspect-derived-access-status";
+  version: 1;
+  active: boolean;
+  availability:
+    | "absent"
+    | "bootstrapping"
+    | "current"
+    | "catching_up"
+    | "rebuild_required"
+    | "quarantined"
+    | "unavailable";
+  generationId?: string;
+  phase?:
+    | "cursor_population"
+    | "projection_population"
+    | "strict_verification"
+    | "finalizing";
+  completedEvents?: number;
+  totalEvents?: number;
+  completedBytes?: number;
+  elapsedMilliseconds?: number;
+  etaMilliseconds?: number;
+  detail?: string;
+  rebuildInFlight: boolean;
+  rebuildPaused: boolean;
+  servingCurrent: boolean;
+  fallbackInFlight: boolean;
+  actions: Array<"wait" | "authoritative_fallback" | "cancel" | "retry">;
+}
+
 /**
  * The single selection through-line. The detail pane is a pure projection of
  * this; `kind`/`id` are null when nothing is selected.
@@ -192,6 +224,12 @@ export interface State {
   // The served repo/store identity (issue #391); null until the one-shot bootstrap
   // fetch lands, and left null on a fetch failure (best-effort chrome cue).
   identity: IdentityDoc | null;
+  // Recovery-plane state is independent of the data documents: it remains
+  // available before a first generation publishes and during replacement.
+  derivedAccessStatus: DerivedAccessStatusDoc | null;
+  // A session-local, explicit user choice. It is never persisted or inferred
+  // from a failed derived read.
+  authoritativeFallback: boolean;
   // The master-pane projection, serialized into the URL fragment by the router.
   lens: string;
   selected: Selection;
@@ -260,6 +298,8 @@ const state: State = {
   threads: null,
   attention: null,
   identity: null,
+  derivedAccessStatus: null,
+  authoritativeFallback: false,
   lens: "timeline",
   selected: { kind: null, id: null },
   open: false,

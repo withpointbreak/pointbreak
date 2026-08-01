@@ -166,6 +166,21 @@ const INDEX_BODY = `
   </section>
 </main>
 
+<section id="derived-access-status" class="derived-access-status hidden" role="status">
+  <div>
+    <strong id="derived-access-summary"></strong>
+    <span id="derived-access-detail"></span>
+    <progress id="derived-access-progress" class="hidden"></progress>
+  </div>
+  <div class="derived-access-actions">
+    <button id="derived-access-wait" class="ghost hidden">wait</button>
+    <button id="derived-access-fallback" class="ghost hidden">read authoritative journal</button>
+    <button id="derived-access-cancel" class="ghost hidden">cancel build</button>
+    <button id="derived-access-retry" class="ghost hidden">retry build</button>
+    <button id="derived-access-use-derived" class="ghost hidden">use derived view</button>
+  </div>
+</section>
+
 <div id="error" class="error hidden"></div>
 
 <div id="cmd-palette" class="modal hidden" role="dialog" aria-modal="true" aria-label="Command palette">
