@@ -24,7 +24,7 @@ use crate::session::event::ShoreEvent;
 const DATABASE_FILE: &str = "cursor.sqlite3";
 const CURSOR_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-cursor.v1";
 const LOCATOR_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-locator.v1";
-const LOCATOR_SCHEMA_VERSION: i64 = 2;
+const LOCATOR_SCHEMA_VERSION: i64 = 3;
 const APPLICATION_ID: i64 = 0x5042_4443;
 const CURSOR_SCHEMA_VERSION: i64 = 4;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -73,6 +73,8 @@ pub(crate) enum SqliteLocatorError {
     },
     #[error("locator metadata mismatch: {0}")]
     Metadata(String),
+    #[error("locator schema requires rebuild: {0}")]
+    UpgradeRequired(String),
     #[error("locator delta does not follow its checkpoint: {0}")]
     Delta(String),
     #[error(transparent)]
@@ -620,7 +622,7 @@ fn initialize_locator_schema(
                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                  store_id TEXT NOT NULL,
                  profile_id TEXT NOT NULL,
-                 schema_version INTEGER NOT NULL CHECK (schema_version = 2),
+                 schema_version INTEGER NOT NULL CHECK (schema_version = 3),
                  epoch INTEGER NOT NULL CHECK (epoch > 0),
                  applied_sequence INTEGER NOT NULL CHECK (applied_sequence >= 0),
                  observed_sequence INTEGER NOT NULL
@@ -632,7 +634,6 @@ fn initialize_locator_schema(
                  epoch INTEGER NOT NULL CHECK (epoch > 0),
                  event_hash BLOB NOT NULL UNIQUE CHECK (length(event_hash) = 32),
                  normalized_occurred_at TEXT NOT NULL,
-                 replay_hash BLOB NOT NULL UNIQUE CHECK (length(replay_hash) = 32),
                  event_type_id INTEGER NOT NULL REFERENCES locator_event_type(id),
                  journal_id INTEGER NOT NULL REFERENCES locator_journal(id),
                  subject_id INTEGER REFERENCES locator_subject(id),
@@ -665,7 +666,7 @@ fn initialize_locator_schema(
              SELECT locator.sequence, locator.epoch,
                     'evt:sha256:' || lower(hex(locator.event_hash)) AS event_id,
                     locator.normalized_occurred_at,
-                    lower(hex(locator.replay_hash)) AS replay_key,
+                    lower(hex(locator.event_hash)) AS replay_key,
                     event_type.value AS event_type,
                     journal.value AS journal_id,
                     subject.value AS subject_id,
@@ -765,13 +766,22 @@ fn validate_locator_checkpoint(
         .map_err(|error| sqlite_error("validate locator checkpoint", error))?;
     if store_id != cursor.store_id
         || profile_id != LOCATOR_PROFILE_ID
-        || schema_version != LOCATOR_SCHEMA_VERSION
         || to_u64(epoch, "locator epoch")? != cursor.epoch
     {
         return Err(SqliteLocatorError::Metadata(format!(
             "locator identity {store_id}/{profile_id}/{schema_version}/{epoch} \
              does not match cursor {}/{}/{}/{:?}",
             cursor.store_id, LOCATOR_PROFILE_ID, LOCATOR_SCHEMA_VERSION, cursor.epoch
+        )));
+    }
+    if schema_version < LOCATOR_SCHEMA_VERSION {
+        return Err(SqliteLocatorError::UpgradeRequired(format!(
+            "expected schema {LOCATOR_SCHEMA_VERSION}, observed {schema_version}"
+        )));
+    }
+    if schema_version != LOCATOR_SCHEMA_VERSION {
+        return Err(SqliteLocatorError::Metadata(format!(
+            "expected locator schema {LOCATOR_SCHEMA_VERSION}, observed {schema_version}"
         )));
     }
     let applied = to_u64(applied, "locator applied")?;
@@ -815,8 +825,7 @@ fn insert_locator_row(
     transaction: &rusqlite::Transaction<'_>,
     row: &LocatorRow,
 ) -> Result<(), SqliteLocatorError> {
-    let event_hash = required_prefixed_digest(&row.event_id, "evt:sha256:", "locator event id")?;
-    let replay_hash = required_digest(&row.replay_key, "locator replay key")?;
+    let event_hash = validated_locator_event_hash(row)?;
     let payload_hash =
         required_prefixed_digest(&row.payload_hash, "sha256:", "locator payload hash")?;
     let event_type_id = dimension_id(transaction, "locator_event_type", &row.event_type)?;
@@ -834,15 +843,14 @@ fn insert_locator_row(
     transaction
         .execute(
             "INSERT INTO locator_event
-             (sequence, epoch, event_hash, normalized_occurred_at, replay_hash,
+             (sequence, epoch, event_hash, normalized_occurred_at,
               event_type_id, journal_id, subject_id, track_id, payload_hash)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 to_i64(row.cursor.sequence, "locator sequence")?,
                 to_i64(row.cursor.epoch, "locator epoch")?,
                 event_hash.as_slice(),
                 row.normalized_occurred_at,
-                replay_hash.as_slice(),
                 event_type_id,
                 journal_id,
                 subject_id,
@@ -852,6 +860,23 @@ fn insert_locator_row(
         )
         .map_err(|error| sqlite_error("insert locator row", error))?;
     Ok(())
+}
+
+/// Return the one physical digest shared by the event-id and replay-key views.
+///
+/// The two values retain distinct domain meanings, so validate their equality
+/// at the storage boundary instead of silently deriving one from untrusted row
+/// input. Event construction and authoritative store validation enforce the
+/// same SHA-256-of-idempotency-key invariant before rows reach this point.
+fn validated_locator_event_hash(row: &LocatorRow) -> Result<[u8; 32], SqliteLocatorError> {
+    let event_hash = required_prefixed_digest(&row.event_id, "evt:sha256:", "locator event id")?;
+    let replay_hash = required_digest(&row.replay_key, "locator replay key")?;
+    if replay_hash != event_hash {
+        return Err(SqliteLocatorError::Delta(
+            "locator replay key does not match the event id digest".to_owned(),
+        ));
+    }
+    Ok(event_hash)
 }
 
 fn query_locator_rows(
@@ -932,7 +957,7 @@ fn locator_select(suffix: &str) -> String {
     format!(
         "SELECT locator.epoch, locator.sequence, receipt.logical_reread_key_hash,
                 locator.event_hash, locator.normalized_occurred_at,
-                locator.replay_hash, event_type.value, journal.value,
+                locator.event_hash, event_type.value, journal.value,
                 subject.value, track.value, locator.payload_hash,
                 receipt.validation_witness, receipt.epoch
          FROM locator_event AS locator
@@ -1066,4 +1091,35 @@ fn to_i64(value: u64, label: &'static str) -> Result<i64, SqliteLocatorError> {
 
 fn to_u64(value: i64, label: &'static str) -> Result<u64, SqliteLocatorError> {
     u64::try_from(value).map_err(|_| SqliteLocatorError::Metadata(format!("{label} is negative")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::derived_access::cursor::TruthCursor;
+    use crate::session::derived_access::locator::LocatorRow;
+
+    #[test]
+    fn locator_insert_rejects_divergent_event_and_replay_digests() {
+        let row = LocatorRow {
+            cursor: TruthCursor::new(1, 1),
+            logical_reread_key: "logical:key".to_owned(),
+            event_id: format!("evt:sha256:{}", "1".repeat(64)),
+            normalized_occurred_at: "2026-08-01T20:00:00.000Z".to_owned(),
+            replay_key: "2".repeat(64),
+            event_type: "review_initialized".to_owned(),
+            journal_id: "journal:test".to_owned(),
+            subject_id: None,
+            track_id: None,
+            payload_hash: format!("sha256:{}", "3".repeat(64)),
+            validation_witness: "4".repeat(64),
+        };
+
+        let error = validated_locator_event_hash(&row)
+            .expect_err("divergent event and replay digests must fail before insertion");
+        assert!(
+            matches!(error, SqliteLocatorError::Delta(ref message) if message.contains("replay key")),
+            "unexpected error: {error:?}"
+        );
+    }
 }

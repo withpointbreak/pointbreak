@@ -1297,6 +1297,10 @@ fn service_error_requires_rebuild(error: &DerivedAccessServiceError) -> bool {
     matches!(
         error,
         DerivedAccessServiceError::Cursor(CursorLedgerError::UpgradeRequired(_))
+            | DerivedAccessServiceError::Locator(SqliteLocatorError::UpgradeRequired(_))
+            | DerivedAccessServiceError::Semantic(SqliteSemanticError::Locator(
+                SqliteLocatorError::UpgradeRequired(_)
+            ))
             | DerivedAccessServiceError::Semantic(
                 SqliteSemanticError::ProductHistoryUpgradeRequired(_)
             )
@@ -2301,6 +2305,39 @@ mod tests {
         assert!(
             generation.exists(),
             "stale generation must not be quarantined"
+        );
+    }
+
+    #[test]
+    fn published_generation_with_older_locator_schema_requires_rebuild() {
+        let temp = populated_store(1);
+        let lifecycle = active_lifecycle(temp.path());
+        let receipt = lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let generation = lifecycle
+            .paths()
+            .generation(receipt.generation_id.as_deref().unwrap());
+        let database = generation.join("cursor.sqlite3");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA ignore_check_constraints = ON;
+                 UPDATE locator_checkpoint SET schema_version = 2 WHERE singleton = 1;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert_eq!(
+            lifecycle.status().unwrap().availability,
+            DerivedAccessAvailability::RebuildRequired
+        );
+        assert!(matches!(
+            lifecycle.open_current(),
+            Err(LifecycleError::RebuildRequired(_))
+        ));
+        assert!(
+            generation.exists(),
+            "older locator generation must remain available for deliberate rebuild"
         );
     }
 
