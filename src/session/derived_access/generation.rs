@@ -61,6 +61,16 @@ pub(crate) enum GenerationProgressPhase {
 }
 
 impl GenerationProgressPhase {
+    #[cfg(feature = "longitudinal-counting")]
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::CursorPopulation => "cursor_population",
+            Self::ProjectionPopulation => "projection_population",
+            Self::StrictVerification => "strict_verification",
+            Self::Finalizing => "finalizing",
+        }
+    }
+
     const fn order(self) -> u8 {
         match self {
             Self::CursorPopulation => 1,

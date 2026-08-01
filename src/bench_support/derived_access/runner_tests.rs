@@ -12,6 +12,32 @@ fn digest(value: u8) -> String {
     format!("{value:02x}").repeat(32)
 }
 
+#[cfg(feature = "longitudinal-counting")]
+#[test]
+fn bounded_bootstrap_smoke_reports_two_pass_work_and_completed_phases() {
+    let receipt = run_qualification_derived_access_bootstrap_smoke_v1(
+        QualificationDerivedAccessTierV1::D0_128,
+    )
+    .expect("bounded D0 bootstrap smoke");
+
+    receipt.validate().expect("valid bootstrap receipt");
+    assert_eq!(receipt.event_count, 128);
+    assert_eq!(receipt.counters.carrier_opens, 343);
+    assert_eq!(
+        receipt
+            .phases
+            .iter()
+            .map(|progress| progress.phase.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "cursor_population",
+            "projection_population",
+            "strict_verification",
+            "finalizing",
+        ]
+    );
+}
+
 #[test]
 fn raw_samples_reject_ambiguous_cpu_units_and_scope() {
     let mut sample = QualificationDerivedAccessRawSampleV1::test_fixture();

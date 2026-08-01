@@ -323,6 +323,12 @@ derived-access-smoke tier="D0-128":
     cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \
         --derived-access-smoke --derived-access-tier="{{ tier }}"
 
+# Measure bounded production bootstrap work and process resources on a disposable public root.
+[group('quality')]
+derived-access-bootstrap-smoke tier="D0-128":
+    cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \
+        --derived-access-bootstrap-smoke --derived-access-tier="{{ tier }}"
+
 # Run one evidence-bound D0-128, L1, or L7 native smoke request.
 [group('quality')]
 derived-access-native-smoke request:

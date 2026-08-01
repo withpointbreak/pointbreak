@@ -82,6 +82,8 @@ pub const QUALIFICATION_DERIVED_ACCESS_NATIVE_SMOKE_RECEIPT_SCHEMA_V1: &str =
 
 pub const QUALIFICATION_DERIVED_ACCESS_HELP_MODE_V1: &str = "--derived-access-help";
 pub const QUALIFICATION_DERIVED_ACCESS_SMOKE_MODE_V1: &str = "--derived-access-smoke";
+pub const QUALIFICATION_DERIVED_ACCESS_BOOTSTRAP_SMOKE_MODE_V1: &str =
+    "--derived-access-bootstrap-smoke";
 pub const QUALIFICATION_DERIVED_ACCESS_LIFECYCLE_MODE_V1: &str = "--derived-access-lifecycle";
 pub const QUALIFICATION_DERIVED_ACCESS_RETAINED_PREFLIGHT_MODE_V1: &str =
     "--derived-access-retained-preflight";

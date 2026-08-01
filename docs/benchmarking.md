@@ -669,6 +669,12 @@ receipts require both the `longitudinal-counting` feature and an execution-bound
 just derived-access-native-smoke /absolute/path/to/native-smoke-request.json
 ```
 
+`just derived-access-bootstrap-smoke D0-128`, `L1`, or `L7` exercises the production lifecycle
+bootstrap over one disposable public root. Its separate receipt records completed progress phases,
+carrier opens/decodes/validations, retained decoded-event ownership, and observed process RSS. This
+non-timing developer smoke does not change the frozen qualification-smoke schemas, consume a retained
+or owner root, or activate the derived profile for product reads.
+
 Native smoke, lifecycle, retained-root, scale, resource, and fragment modes consume typed JSON requests:
 
 ```sh

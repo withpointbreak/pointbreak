@@ -11,10 +11,14 @@ use super::{
     qualification_derived_access_contract_v1,
 };
 use crate::bench_support::longitudinal::{
-    LongitudinalExecutionIdentityV1, LongitudinalMaterializeOptionsV1,
-    LongitudinalStoreDataInventoryV1, LongitudinalStrictSemanticReceiptV1, LongitudinalTierV1,
-    longitudinal_store_data_inventory_v1, materialize_longitudinal_workload_v1,
-    verify_longitudinal_materialization_pair_v1,
+    LongitudinalCapacityOwnershipV1, LongitudinalExecutionIdentityV1,
+    LongitudinalMaterializeOptionsV1, LongitudinalStoreDataInventoryV1,
+    LongitudinalStrictSemanticReceiptV1, LongitudinalTierV1, longitudinal_store_data_inventory_v1,
+    materialize_longitudinal_workload_v1, verify_longitudinal_materialization_pair_v1,
+};
+#[cfg(feature = "longitudinal-counting")]
+use crate::bench_support::longitudinal::{
+    LongitudinalCountersV1, LongitudinalCountingScopeV1, capture_longitudinal_process_snapshot_v1,
 };
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
 use crate::model::JournalId;
@@ -22,8 +26,12 @@ use crate::session::benchmark::{
     LongitudinalRecordShapeV1, LongitudinalRecordSpecV1, prepare_longitudinal_record_v1,
     write_longitudinal_records_v1,
 };
+#[cfg(feature = "longitudinal-counting")]
+use crate::session::derived_access::lifecycle::{DerivedAccessLifecycle, LifecycleControl};
 use crate::session::derived_access::locator::{ChronologicalWindowRequest, LocatorRead};
 use crate::session::derived_access::oracle::strict_bodyless_materialized_snapshot;
+#[cfg(feature = "longitudinal-counting")]
+use crate::session::derived_access::product_contract::DerivedAccessProfile;
 use crate::session::event::{
     EventTarget, EventType, ReviewInitializedPayload, ShoreEvent, WorkObjectProposal,
     WorkObjectProposedPayload, Writer,
@@ -38,6 +46,8 @@ pub const QUALIFICATION_DERIVED_ACCESS_SMOKE_SCHEMA_V1: &str =
     "pointbreak.qualification-derived-access-smoke.v1";
 pub const QUALIFICATION_DERIVED_ACCESS_LONGITUDINAL_SMOKE_SCHEMA_V1: &str =
     "pointbreak.qualification-derived-access-longitudinal-smoke.v1";
+pub const QUALIFICATION_DERIVED_ACCESS_BOOTSTRAP_SMOKE_SCHEMA_V1: &str =
+    "pointbreak.qualification-derived-access-bootstrap-smoke.v1";
 pub const QUALIFICATION_DERIVED_ACCESS_D0_PUBLIC_SEED_HEX_V1: &str =
     "27894b1b25292789e3e33911fa1d3e8ec80a7bc8e39069b09e9bf528a6e4b33c";
 
@@ -158,6 +168,116 @@ pub struct QualificationDerivedAccessLongitudinalSmokeReceiptV1 {
     pub counters_captured: bool,
     pub incremental_matches_full_replay: bool,
     pub smoke_sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedAccessBootstrapProgressV1 {
+    pub phase: String,
+    pub completed: u64,
+    pub total: u64,
+    pub bytes_processed: u64,
+    pub elapsed_ms: u64,
+    pub estimated_remaining_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedAccessBootstrapSmokeReceiptV1 {
+    pub schema: String,
+    pub tier: super::QualificationDerivedAccessTierV1,
+    pub event_count: u64,
+    pub head_sequence: u64,
+    pub progress_updates: u64,
+    pub phases: Vec<QualificationDerivedAccessBootstrapProgressV1>,
+    pub counters: QualificationDerivedAccessCountersV1,
+    pub capacity_ownership: LongitudinalCapacityOwnershipV1,
+    pub baseline_rss_bytes: Option<u64>,
+    pub peak_observed_rss_bytes: Option<u64>,
+    pub steady_rss_bytes: Option<u64>,
+    pub semantic_receipt_sha256: String,
+    pub receipt_sha256: String,
+}
+
+impl QualificationDerivedAccessBootstrapSmokeReceiptV1 {
+    pub fn canonical_sha256(&self) -> Result<String, String> {
+        let mut preimage = self.clone();
+        preimage.receipt_sha256.clear();
+        canonical_sha256(&preimage)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        let expected_events = match self.tier {
+            super::QualificationDerivedAccessTierV1::D0_128 => 128,
+            super::QualificationDerivedAccessTierV1::L1 => 1_024,
+            super::QualificationDerivedAccessTierV1::L7 => 7_168,
+            _ => return Err("bootstrap smoke supports only D0-128, L1, and L7".to_owned()),
+        };
+        let expected_phases = [
+            "cursor_population",
+            "projection_population",
+            "strict_verification",
+            "finalizing",
+        ];
+        if self.schema != QUALIFICATION_DERIVED_ACCESS_BOOTSTRAP_SMOKE_SCHEMA_V1 {
+            return Err("bounded bootstrap smoke schema drifted".to_owned());
+        }
+        if self.event_count != expected_events || self.head_sequence != expected_events {
+            return Err(format!(
+                "bounded bootstrap event/head count drifted: events={}, head={}, expected={expected_events}",
+                self.event_count, self.head_sequence
+            ));
+        }
+        if self.progress_updates == 0
+            || self.phases.len() != expected_phases.len()
+            || self
+                .phases
+                .iter()
+                .map(|progress| progress.phase.as_str())
+                .ne(expected_phases)
+            || self
+                .phases
+                .iter()
+                .any(|progress| progress.completed != progress.total)
+        {
+            return Err("bounded bootstrap progress receipt drifted".to_owned());
+        }
+        let minimum_carrier_work = expected_events.saturating_mul(2);
+        let maximum_carrier_work = expected_events.saturating_mul(3);
+        if self.counters.carrier_opens < minimum_carrier_work
+            || self.counters.carrier_opens > maximum_carrier_work
+            || self.counters.event_decodes != self.counters.carrier_opens
+            || self.counters.event_validations != self.counters.carrier_opens
+        {
+            return Err(format!(
+                "bounded bootstrap carrier work drifted: opens={}, decodes={}, validations={}, expected={minimum_carrier_work}..={maximum_carrier_work}",
+                self.counters.carrier_opens,
+                self.counters.event_decodes,
+                self.counters.event_validations
+            ));
+        }
+        if self.capacity_ownership.retained_decoded_events != 0 {
+            return Err(format!(
+                "bounded bootstrap retained {} decoded events",
+                self.capacity_ownership.retained_decoded_events
+            ));
+        }
+        if self.semantic_receipt_sha256.len() != 64 {
+            return Err("bounded bootstrap semantic receipt is not a SHA-256".to_owned());
+        }
+        if self.receipt_sha256 != self.canonical_sha256()? {
+            return Err("bounded bootstrap receipt hash drifted".to_owned());
+        }
+        if let (Some(baseline), Some(peak), Some(steady)) = (
+            self.baseline_rss_bytes,
+            self.peak_observed_rss_bytes,
+            self.steady_rss_bytes,
+        ) && (peak < baseline || peak < steady)
+        {
+            return Err("bounded bootstrap RSS observations are inconsistent".to_owned());
+        }
+        Ok(())
+    }
 }
 
 impl QualificationDerivedAccessLongitudinalSmokeReceiptV1 {
@@ -429,6 +549,176 @@ pub fn run_qualification_derived_access_longitudinal_smoke_v1(
         )),
         (Err(error), _) => Err(error),
     }
+}
+
+#[cfg(feature = "longitudinal-counting")]
+pub fn run_qualification_derived_access_bootstrap_smoke_v1(
+    tier: super::QualificationDerivedAccessTierV1,
+) -> Result<QualificationDerivedAccessBootstrapSmokeReceiptV1, String> {
+    let parent = std::env::temp_dir().join(format!(
+        "pointbreak-derived-bootstrap-{tier:?}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos()
+    ));
+    std::fs::create_dir(&parent).map_err(|error| error.to_string())?;
+    let result = run_bootstrap_smoke_in_root(tier, &parent);
+    let cleanup = std::fs::remove_dir_all(&parent);
+    match (result, cleanup) {
+        (Ok(receipt), Ok(())) => Ok(receipt),
+        (Ok(_), Err(error)) => Err(format!(
+            "bounded bootstrap smoke succeeded but cleanup failed: {error}"
+        )),
+        (Err(error), _) => Err(error),
+    }
+}
+
+#[cfg(not(feature = "longitudinal-counting"))]
+pub fn run_qualification_derived_access_bootstrap_smoke_v1(
+    _tier: super::QualificationDerivedAccessTierV1,
+) -> Result<QualificationDerivedAccessBootstrapSmokeReceiptV1, String> {
+    Err("bounded bootstrap smoke requires --features longitudinal-counting".to_owned())
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn run_bootstrap_smoke_in_root(
+    tier: super::QualificationDerivedAccessTierV1,
+    parent: &Path,
+) -> Result<QualificationDerivedAccessBootstrapSmokeReceiptV1, String> {
+    let root = parent.join("root");
+    let event_count = match tier {
+        super::QualificationDerivedAccessTierV1::D0_128 => u64::from(
+            materialize_qualification_derived_access_d0_v1(
+                QualificationDerivedAccessD0MaterializeOptionsV1::new(&root),
+            )?
+            .event_count,
+        ),
+        super::QualificationDerivedAccessTierV1::L1
+        | super::QualificationDerivedAccessTierV1::L7 => {
+            initialize_disposable_root(&root)?;
+            let longitudinal_tier = if tier == super::QualificationDerivedAccessTierV1::L1 {
+                LongitudinalTierV1::L1
+            } else {
+                LongitudinalTierV1::L7
+            };
+            materialize_longitudinal_workload_v1(LongitudinalMaterializeOptionsV1::new(
+                &root,
+                longitudinal_tier,
+                smoke_longitudinal_execution_identity(),
+            ))
+            .map_err(|error| error.to_string())?
+            .manifest
+            .event_count
+        }
+        _ => return Err("bootstrap smoke supports only D0-128, L1, and L7".to_owned()),
+    };
+    let store = store_dir_for_repo(&root).map_err(|error| error.to_string())?;
+    let lifecycle = DerivedAccessLifecycle::new(
+        DerivedAccessProfile::SqliteWalBodylessV1,
+        &store,
+        format!("store:derived-bootstrap-{tier:?}"),
+    )
+    .map_err(|error| error.to_string())?;
+    let scope = LongitudinalCountingScopeV1::new(canonical_sha256(&(
+        "derived-access-bootstrap-smoke",
+        tier,
+    ))?)?;
+    let baseline_rss_bytes = current_process_rss();
+    let mut peak_observed_rss_bytes = baseline_rss_bytes;
+    let mut progress_updates = 0_u64;
+    let mut phase_progress = BTreeMap::new();
+    let guard = scope.enter();
+    let lifecycle_receipt = lifecycle
+        .rebuild(|progress| {
+            progress_updates = progress_updates.saturating_add(1);
+            if let Some(observed) = current_process_rss() {
+                peak_observed_rss_bytes =
+                    Some(peak_observed_rss_bytes.unwrap_or_default().max(observed));
+            }
+            phase_progress.insert(
+                progress.phase.as_str().to_owned(),
+                QualificationDerivedAccessBootstrapProgressV1 {
+                    phase: progress.phase.as_str().to_owned(),
+                    completed: u64::try_from(progress.completed).unwrap_or(u64::MAX),
+                    total: u64::try_from(progress.total).unwrap_or(u64::MAX),
+                    bytes_processed: progress.bytes_processed,
+                    elapsed_ms: progress.elapsed_ms,
+                    estimated_remaining_ms: progress.estimated_remaining_ms,
+                },
+            );
+            LifecycleControl::Continue
+        })
+        .map_err(|error| error.to_string())?;
+    drop(guard);
+    let observed = scope.snapshot();
+    let steady_rss_bytes = current_process_rss();
+    if let Some(steady) = steady_rss_bytes {
+        peak_observed_rss_bytes = Some(peak_observed_rss_bytes.unwrap_or_default().max(steady));
+    }
+    let phases = [
+        "cursor_population",
+        "projection_population",
+        "strict_verification",
+        "finalizing",
+    ]
+    .into_iter()
+    .map(|phase| {
+        phase_progress
+            .remove(phase)
+            .ok_or_else(|| format!("bootstrap did not report {phase}"))
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+    if !phase_progress.is_empty() {
+        return Err("bootstrap reported an unknown phase".to_owned());
+    }
+    let semantic_receipt = lifecycle_receipt
+        .semantic_receipt
+        .ok_or_else(|| "bootstrap did not produce a semantic receipt".to_owned())?;
+    let semantic_receipt_sha256 = semantic_receipt
+        .strip_prefix("sha256:")
+        .ok_or_else(|| "bootstrap semantic receipt omitted its SHA-256 algorithm".to_owned())?
+        .to_owned();
+    let current = lifecycle
+        .open_current()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "bootstrap did not publish a current generation".to_owned())?;
+    if current
+        .service()
+        .truth_head()
+        .map_err(|error| error.to_string())?
+        .cursor
+        .sequence
+        != event_count
+    {
+        return Err("published bootstrap head differs from materialized truth".to_owned());
+    }
+    let mut receipt = QualificationDerivedAccessBootstrapSmokeReceiptV1 {
+        schema: QUALIFICATION_DERIVED_ACCESS_BOOTSTRAP_SMOKE_SCHEMA_V1.to_owned(),
+        tier,
+        event_count,
+        head_sequence: lifecycle_receipt.head_sequence,
+        progress_updates,
+        phases,
+        counters: qualification_smoke_counters(&observed.counters, 0),
+        capacity_ownership: observed.capacity_ownership,
+        baseline_rss_bytes,
+        peak_observed_rss_bytes,
+        steady_rss_bytes,
+        semantic_receipt_sha256,
+        receipt_sha256: String::new(),
+    };
+    receipt.receipt_sha256 = receipt.canonical_sha256()?;
+    receipt.validate()?;
+    Ok(receipt)
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn current_process_rss() -> Option<u64> {
+    capture_longitudinal_process_snapshot_v1(std::process::id())
+        .ok()
+        .map(|snapshot| snapshot.resident_bytes)
 }
 
 pub fn run_qualification_derived_access_longitudinal_smoke_at_v1(
@@ -778,24 +1068,7 @@ fn capture_smoke_operation(
     #[cfg(feature = "longitudinal-counting")]
     let counters = {
         let observed = scope.snapshot().counters;
-        QualificationDerivedAccessCountersV1 {
-            directory_entries_walked: observed.directory_entries_walked,
-            carrier_opens: observed.carrier_opens,
-            carrier_bytes_read: observed.carrier_bytes_read,
-            event_decodes: observed.event_decodes,
-            event_validations: observed.event_validations,
-            event_folds: observed.event_folds,
-            chronological_sort_items: observed.chronological_sort_items,
-            body_artifact_reads: observed.body_artifact_reads,
-            body_bytes_read: observed.body_bytes_read,
-            object_artifact_reads: observed.object_artifact_reads,
-            object_bytes_read: observed.object_bytes_read,
-            unselected_body_artifact_reads: 0,
-            unselected_object_artifact_reads: 0,
-            projection_rebuilds: observed.projection_rebuilds,
-            state_rebuilds: observed.state_rebuilds,
-            response_bytes: value.len() as u64,
-        }
+        qualification_smoke_counters(&observed, value.len() as u64)
     };
     #[cfg(not(feature = "longitudinal-counting"))]
     let counters = QualificationDerivedAccessCountersV1 {
@@ -821,6 +1094,31 @@ fn capture_smoke_operation(
         semantic_receipt_sha256: canonical_sha256(&(operation, &value))?,
         counters,
     })
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn qualification_smoke_counters(
+    observed: &LongitudinalCountersV1,
+    response_bytes: u64,
+) -> QualificationDerivedAccessCountersV1 {
+    QualificationDerivedAccessCountersV1 {
+        directory_entries_walked: observed.directory_entries_walked,
+        carrier_opens: observed.carrier_opens,
+        carrier_bytes_read: observed.carrier_bytes_read,
+        event_decodes: observed.event_decodes,
+        event_validations: observed.event_validations,
+        event_folds: observed.event_folds,
+        chronological_sort_items: observed.chronological_sort_items,
+        body_artifact_reads: observed.body_artifact_reads,
+        body_bytes_read: observed.body_bytes_read,
+        object_artifact_reads: observed.object_artifact_reads,
+        object_bytes_read: observed.object_bytes_read,
+        unselected_body_artifact_reads: 0,
+        unselected_object_artifact_reads: 0,
+        projection_rebuilds: observed.projection_rebuilds,
+        state_rebuilds: observed.state_rebuilds,
+        response_bytes,
+    }
 }
 
 fn smoke_append_event() -> Result<ShoreEvent, String> {
