@@ -15,7 +15,7 @@ thread_local! {
         const { RefCell::new(Vec::new()) };
 }
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct ObserverState {
     counters: LongitudinalCountersV1,
     capacity_ownership: LongitudinalCapacityOwnershipV1,
@@ -35,6 +35,47 @@ pub struct LongitudinalCountingScopeV1 {
 pub struct LongitudinalCountingGuardV1 {
     state: Arc<Mutex<ObserverState>>,
     _not_send: PhantomData<Rc<()>>,
+}
+
+/// Tracks one live decoded-event population in the active counting scope.
+///
+/// Unlike the legacy point-in-time setter, this guard adds its population to
+/// the live total and removes exactly that population on drop. Overlapping
+/// decoded histories therefore remain observable instead of overwriting one
+/// another's ownership count.
+#[derive(Debug)]
+pub(crate) struct RetainedDecodedEventsGuardV1 {
+    state: Option<Arc<Mutex<ObserverState>>>,
+    retained: u64,
+}
+
+impl RetainedDecodedEventsGuardV1 {
+    pub(crate) fn new(retained: usize) -> Self {
+        let retained = retained as u64;
+        let state = LongitudinalCountingScopeV1::current().map(|scope| scope.state);
+        if let Some(state) = &state {
+            add(
+                &mut lock_state(state).capacity_ownership.retained_decoded_events,
+                retained,
+                "retained_decoded_events",
+            );
+        }
+        Self { state, retained }
+    }
+}
+
+impl Drop for RetainedDecodedEventsGuardV1 {
+    fn drop(&mut self) {
+        let Some(state) = &self.state else {
+            return;
+        };
+        let mut state = lock_state(state);
+        state.capacity_ownership.retained_decoded_events = state
+            .capacity_ownership
+            .retained_decoded_events
+            .checked_sub(self.retained)
+            .expect("retained decoded-event ownership underflow");
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]

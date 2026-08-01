@@ -192,6 +192,7 @@ pub struct QualificationDerivedAccessBootstrapSmokeReceiptV1 {
     pub phases: Vec<QualificationDerivedAccessBootstrapProgressV1>,
     pub counters: QualificationDerivedAccessCountersV1,
     pub capacity_ownership: LongitudinalCapacityOwnershipV1,
+    pub rss_observed: bool,
     pub baseline_rss_bytes: Option<u64>,
     pub peak_observed_rss_bytes: Option<u64>,
     pub steady_rss_bytes: Option<u64>,
@@ -268,13 +269,21 @@ impl QualificationDerivedAccessBootstrapSmokeReceiptV1 {
         if self.receipt_sha256 != self.canonical_sha256()? {
             return Err("bounded bootstrap receipt hash drifted".to_owned());
         }
-        if let (Some(baseline), Some(peak), Some(steady)) = (
+        let rss_values = (
             self.baseline_rss_bytes,
             self.peak_observed_rss_bytes,
             self.steady_rss_bytes,
-        ) && (peak < baseline || peak < steady)
-        {
-            return Err("bounded bootstrap RSS observations are inconsistent".to_owned());
+        );
+        match rss_values {
+            (Some(baseline), Some(peak), Some(steady)) if self.rss_observed => {
+                if peak < baseline || peak < steady {
+                    return Err("bounded bootstrap RSS observations are inconsistent".to_owned());
+                }
+            }
+            (None, None, None) if !self.rss_observed => {}
+            _ => {
+                return Err("bounded bootstrap RSS observation status is inconsistent".to_owned());
+            }
         }
         Ok(())
     }
@@ -703,6 +712,9 @@ fn run_bootstrap_smoke_in_root(
         phases,
         counters: qualification_smoke_counters(&observed.counters, 0),
         capacity_ownership: observed.capacity_ownership,
+        rss_observed: baseline_rss_bytes.is_some()
+            && peak_observed_rss_bytes.is_some()
+            && steady_rss_bytes.is_some(),
         baseline_rss_bytes,
         peak_observed_rss_bytes,
         steady_rss_bytes,

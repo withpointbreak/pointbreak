@@ -23,6 +23,10 @@ fn bounded_bootstrap_smoke_reports_two_pass_work_and_completed_phases() {
     receipt.validate().expect("valid bootstrap receipt");
     assert_eq!(receipt.event_count, 128);
     assert_eq!(receipt.counters.carrier_opens, 343);
+    #[cfg(target_os = "macos")]
+    assert!(receipt.rss_observed);
+    #[cfg(not(target_os = "macos"))]
+    assert!(!receipt.rss_observed);
     assert_eq!(
         receipt
             .phases

@@ -452,8 +452,6 @@ impl DerivedAccessLifecycle {
             let head = authority.head.cursor;
             let bootstrap_stamp = authority.change_stamp.clone();
             drop(bootstrap);
-            #[cfg(any(test, feature = "longitudinal-counting"))]
-            crate::bench_support::longitudinal::set_retained_decoded_events(0);
 
             let strict_phase_started = Instant::now();
             let strict_start = lifecycle_progress(
@@ -470,6 +468,11 @@ impl DerivedAccessLifecycle {
                 return Err(LifecycleError::Cancelled);
             }
             let strict_events = self.truth_events()?;
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            let strict_event_ownership =
+                crate::bench_support::longitudinal::RetainedDecodedEventsGuardV1::new(
+                    strict_events.len(),
+                );
             let semantic_snapshot = validate_candidate(
                 &service,
                 &GenerationDescriptor::new(
@@ -501,7 +504,7 @@ impl DerivedAccessLifecycle {
                 return Err(LifecycleError::Cancelled);
             }
             #[cfg(any(test, feature = "longitudinal-counting"))]
-            crate::bench_support::longitudinal::set_retained_decoded_events(0);
+            drop(strict_event_ownership);
             let semantic_receipt = semantic_snapshot.semantic_receipt;
             hook(PublicationBoundary::CandidateValidated);
             Ok((service, head, semantic_receipt, bootstrap_stamp))
@@ -822,7 +825,7 @@ impl DerivedAccessLifecycle {
 
     fn truth_events(&self) -> Result<Vec<crate::session::event::ShoreEvent>, LifecycleError> {
         EventStore::open(&self.store_root)
-            .list_events()
+            .list_events_untracked()
             .map_err(|error| LifecycleError::Truth(error.to_string()))
     }
 
@@ -1709,9 +1712,16 @@ mod tests {
         let lifecycle = active_lifecycle(temp.path());
         let scope = LongitudinalCountingScopeV1::new("b".repeat(64)).unwrap();
         let guard = scope.enter();
+        let mut retained_by_phase = Vec::new();
 
         lifecycle
-            .rebuild(|_| LifecycleControl::Continue)
+            .rebuild(|update| {
+                retained_by_phase.push((
+                    update.phase,
+                    scope.snapshot().capacity_ownership.retained_decoded_events,
+                ));
+                LifecycleControl::Continue
+            })
             .expect("bounded bootstrap");
 
         drop(guard);
@@ -1720,6 +1730,30 @@ mod tests {
         assert_eq!(observed.counters.event_decodes, 14);
         assert_eq!(observed.counters.event_validations, 14);
         assert_eq!(observed.capacity_ownership.retained_decoded_events, 0);
+        for phase in [
+            GenerationProgressPhase::CursorPopulation,
+            GenerationProgressPhase::ProjectionPopulation,
+            GenerationProgressPhase::StrictVerification,
+        ] {
+            assert_eq!(
+                retained_by_phase
+                    .iter()
+                    .filter(|(observed, _)| *observed == phase)
+                    .map(|(_, retained)| *retained)
+                    .max(),
+                Some(7),
+                "{phase:?} must retain exactly one decoded population"
+            );
+        }
+        assert_eq!(
+            retained_by_phase
+                .iter()
+                .filter(|(phase, _)| *phase == GenerationProgressPhase::Finalizing)
+                .map(|(_, retained)| *retained)
+                .max(),
+            Some(0),
+            "finalization must retain no decoded population"
+        );
     }
 
     #[test]

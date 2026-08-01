@@ -311,15 +311,24 @@ impl EventStore {
     }
 
     pub fn list_events(&self) -> Result<Vec<ShoreEvent>> {
-        let events = self
-            .journal
-            .list_event_entries()?
-            .iter()
-            .map(Self::decode_validated_entry)
-            .collect::<Result<Vec<_>>>()?;
+        let events = self.list_events_untracked()?;
         #[cfg(any(test, feature = "longitudinal-counting"))]
         crate::bench_support::longitudinal::set_retained_decoded_events(events.len());
         Ok(events)
+    }
+
+    /// Read and validate the complete event set without publishing a
+    /// point-in-time ownership value.
+    ///
+    /// Lifecycle bootstrap wraps this result in an additive RAII ownership
+    /// guard, so two simultaneously live histories are counted as two rather
+    /// than one setter silently replacing the other.
+    pub(crate) fn list_events_untracked(&self) -> Result<Vec<ShoreEvent>> {
+        self.journal
+            .list_event_entries()?
+            .iter()
+            .map(Self::decode_validated_entry)
+            .collect::<Result<Vec<_>>>()
     }
 
     /// Read every event carrier once, validating its address and content while
@@ -345,8 +354,6 @@ impl EventStore {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        #[cfg(any(test, feature = "longitudinal-counting"))]
-        crate::bench_support::longitudinal::set_retained_decoded_events(events.len());
         Ok(events)
     }
 

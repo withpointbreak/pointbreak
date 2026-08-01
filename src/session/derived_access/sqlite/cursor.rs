@@ -13,6 +13,8 @@ use sha2::{Digest, Sha256};
 
 use super::writer_lock::{StoreWriterLock, WriterLockError};
 use super::{DERIVED_QUARANTINE_PREFIX, DERIVED_SIDECAR_DIRECTORY};
+#[cfg(any(test, feature = "longitudinal-counting"))]
+use crate::bench_support::longitudinal::RetainedDecodedEventsGuardV1;
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::error::ShoreError;
 use crate::session::derived_access::cursor::{
@@ -219,6 +221,8 @@ pub(crate) struct BootstrapPopulationEntry {
 pub(crate) struct BootstrapPopulation {
     pub(crate) ledger: SqliteCursorLedger,
     pub(crate) entries: Vec<BootstrapPopulationEntry>,
+    #[cfg(any(test, feature = "longitudinal-counting"))]
+    _decoded_event_ownership: RetainedDecodedEventsGuardV1,
 }
 
 const BOOTSTRAP_TRANSACTION_BATCH: usize = 512;
@@ -343,6 +347,8 @@ impl SqliteCursorLedger {
         let events = EventStore::open(&ledger.store_root)
             .list_events_with_witnesses()
             .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let decoded_event_ownership = RetainedDecodedEventsGuardV1::new(events.len());
         let authority_check = journal
             .changes_since(&authority_before)
             .map_err(|error| CursorLedgerError::Truth(error.to_string()))?;
@@ -448,6 +454,8 @@ impl SqliteCursorLedger {
         Ok(BootstrapPopulation {
             ledger,
             entries: population,
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            _decoded_event_ownership: decoded_event_ownership,
         })
     }
 
