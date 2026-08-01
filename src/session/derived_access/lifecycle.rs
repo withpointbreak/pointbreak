@@ -1070,6 +1070,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
     use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
     use crate::model::JournalId;
     use crate::session::derived_access::product_contract::{
@@ -1281,6 +1282,25 @@ mod tests {
             .record_event_once(&lifecycle_event(2))
             .unwrap();
         assert!(lifecycle.rebuild_required_while_writer_idle().unwrap());
+    }
+
+    #[test]
+    fn bootstrap_population_and_serial_oracle_open_each_carrier_once() {
+        let temp = populated_store(7);
+        let lifecycle = active_lifecycle(temp.path());
+        let scope = LongitudinalCountingScopeV1::new("b".repeat(64)).unwrap();
+        let guard = scope.enter();
+
+        lifecycle
+            .rebuild(|_| LifecycleControl::Continue)
+            .expect("bounded bootstrap");
+
+        drop(guard);
+        let observed = scope.snapshot();
+        assert_eq!(observed.counters.carrier_opens, 14);
+        assert_eq!(observed.counters.event_decodes, 14);
+        assert_eq!(observed.counters.event_validations, 14);
+        assert_eq!(observed.capacity_ownership.retained_decoded_events, 0);
     }
 
     #[test]
