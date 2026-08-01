@@ -346,9 +346,16 @@ impl DerivedHistoryAccess {
             .iter()
             .map(|entry| entry.revision_id.clone())
             .collect::<Vec<_>>();
+        let mut overview_events = events;
+        overview_events.extend(hydrate_events(
+            service,
+            &page_revision_superseder_event_ids(&connection, as_of, &revision_ids)?,
+            as_of,
+        )?);
+        normalize_hydrated_events(&mut overview_events);
         let overviews = revision_overviews_from_selected_events(
             backend,
-            events,
+            overview_events,
             &revision_ids,
             &trust_set,
             RemovalPolicy::default(),
@@ -535,6 +542,59 @@ fn page_revision_event_ids(
         .map_err(|error| error.to_string())
 }
 
+/// Select only the proposal carriers for direct successors of the page's
+/// revisions. A successor may sit on a later/earlier page, but its edge is
+/// still needed to compute the selected revision's `superseded_by` and stale
+/// review-fact attention readback. Keeping these carriers out of
+/// `page_revision_event_ids` prevents the successor itself from leaking into
+/// the page collection; the target index keeps the supplemental work bounded
+/// by the selected identities and their direct edges.
+fn page_revision_superseder_event_ids(
+    connection: &rusqlite::Connection,
+    as_of: super::cursor::TruthCursor,
+    revision_ids: &[RevisionId],
+) -> Result<Vec<String>, String> {
+    if revision_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = (0..revision_ids.len())
+        .map(|index| format!("?{}", index + 3))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT locator.event_id
+         FROM product_revision_edge AS edge
+           INDEXED BY product_revision_edge_target
+         JOIN locator_event_text AS locator ON locator.sequence = edge.sequence
+         WHERE locator.epoch = ?1
+           AND locator.sequence <= ?2
+           AND edge.superseded_revision_id IN ({placeholders})
+         ORDER BY locator.replay_key, locator.event_id"
+    );
+    let mut parameters = vec![
+        Value::Integer(to_sql_integer(as_of.epoch)?),
+        Value::Integer(to_sql_integer(as_of.sequence)?),
+    ];
+    parameters.extend(
+        revision_ids
+            .iter()
+            .map(|revision_id| Value::Text(revision_id.as_str().to_owned())),
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(rusqlite::params_from_iter(parameters.iter()), |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| error.to_string())?;
+    let mut event_ids = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    event_ids.dedup();
+    Ok(event_ids)
+}
+
 fn revision_event_ids(
     connection: &rusqlite::Connection,
     epoch: u64,
@@ -607,12 +667,16 @@ fn hydrate_revision_events(
     let support_ids = support_event_ids(connection, &selected, as_of)?;
     let mut events = selected;
     events.extend(hydrate_events(service, &support_ids, as_of)?);
+    normalize_hydrated_events(&mut events);
+    Ok(events)
+}
+
+fn normalize_hydrated_events(events: &mut Vec<ShoreEvent>) {
     events.sort_by(|left, right| {
         sha256_bytes_hex(left.idempotency_key.as_bytes())
             .cmp(&sha256_bytes_hex(right.idempotency_key.as_bytes()))
     });
     events.dedup_by(|left, right| left.event_id == right.event_id);
-    Ok(events)
 }
 
 fn to_sql_integer(value: impl TryInto<i64>) -> Result<i64, String> {
@@ -640,7 +704,8 @@ mod tests {
     };
     use crate::session::store::resolution::resolve_read_store;
     use crate::session::workflow::{
-        CaptureOptions, capture_worktree_review, show_revision, show_revision_for_inspector,
+        CaptureOptions, RevisionOverviewsOptions, capture_worktree_review, show_revision,
+        show_revision_for_inspector, show_revision_overviews,
     };
     use crate::session::{EventStore, EventWriteOutcome};
 
@@ -1061,6 +1126,54 @@ mod tests {
         assert_ne!(second.result.entries[0].revision_id, first_id);
         assert_eq!(second.as_of, first.as_of);
         assert!(second.work.rows_selected <= 2);
+    }
+
+    #[test]
+    fn active_revision_page_overview_includes_off_page_superseders() {
+        let (repo, access, superseded_revision_id) = active_captured_repo();
+        let expected = show_revision_overviews(
+            RevisionOverviewsOptions::new(repo.path())
+                .with_revisions([superseded_revision_id.clone()])
+                .with_read_for_display(true),
+        )
+        .expect("read authoritative overview")
+        .remove(&superseded_revision_id)
+        .expect("authoritative overview includes selected revision");
+        assert!(
+            !expected.superseded_by.is_empty(),
+            "fixture revision must be superseded"
+        );
+
+        let summaries = Arc::new(SnapshotSummaryCache::new());
+        let mut after = None;
+        loop {
+            let request = RevisionPageRequest::new(Some(1), after.as_deref())
+                .expect("build revision page request");
+            let DerivedRevisionPageRoute::Ready(page) = access
+                .revisions_page(
+                    repo.path(),
+                    TrustSet::default(),
+                    Arc::clone(&summaries),
+                    &request,
+                )
+                .expect("read active revision page")
+            else {
+                panic!("published generation should serve a revision page");
+            };
+            if page.result.entries[0].revision_id == superseded_revision_id {
+                let actual = page
+                    .overviews
+                    .get(&superseded_revision_id)
+                    .expect("derived overview includes selected revision");
+                assert_eq!(actual.superseded_by, expected.superseded_by);
+                break;
+            }
+            after = page.next;
+            assert!(
+                after.is_some(),
+                "selected superseded revision was not paged"
+            );
+        }
     }
 
     #[test]
