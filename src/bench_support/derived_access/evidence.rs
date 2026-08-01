@@ -3135,12 +3135,59 @@ pub(super) fn validate_current_execution_identity_v1(
         evidence_root,
     )?;
     if &observed != expected {
-        return Err(
-            "derived-access execution identity differs from the running source and binary"
-                .to_owned(),
-        );
+        return Err(format!(
+            "derived-access execution identity differs in: {}",
+            execution_identity_mismatches(expected, &observed).join(", ")
+        ));
     }
     Ok(())
+}
+
+pub(super) fn execution_identity_mismatches(
+    expected: &QualificationDerivedAccessExecutionIdentityV1,
+    observed: &QualificationDerivedAccessExecutionIdentityV1,
+) -> Vec<&'static str> {
+    let QualificationDerivedAccessExecutionIdentityV1 {
+        platform: _,
+        source_commit: _,
+        source_tree: _,
+        cargo_lock_sha256: _,
+        binary_sha256: _,
+        contract_schema: _,
+        contract_sha256: _,
+        root_provenance_sha256: _,
+        command_sha256: _,
+        operating_system: _,
+        architecture: _,
+        filesystem: _,
+        host_identity_sha256: _,
+        source_dirty: _,
+        private_corpus_configured: _,
+    } = expected;
+    let mut fields = Vec::new();
+    macro_rules! compare {
+        ($field:ident) => {
+            if expected.$field != observed.$field {
+                fields.push(stringify!($field));
+            }
+        };
+    }
+    compare!(platform);
+    compare!(source_commit);
+    compare!(source_tree);
+    compare!(cargo_lock_sha256);
+    compare!(binary_sha256);
+    compare!(contract_schema);
+    compare!(contract_sha256);
+    compare!(root_provenance_sha256);
+    compare!(command_sha256);
+    compare!(operating_system);
+    compare!(architecture);
+    compare!(filesystem);
+    compare!(host_identity_sha256);
+    compare!(source_dirty);
+    compare!(private_corpus_configured);
+    fields
 }
 
 pub(super) fn observe_current_execution_identity_v1(

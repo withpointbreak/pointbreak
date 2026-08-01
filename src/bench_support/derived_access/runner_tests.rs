@@ -12,6 +12,20 @@ fn digest(value: u8) -> String {
     format!("{value:02x}").repeat(32)
 }
 
+#[test]
+fn execution_identity_diagnostic_names_every_drifted_field() {
+    let expected = QualificationDerivedAccessExpectedAuthorityV1::test_fixture().execution;
+    let mut observed = expected.clone();
+    observed.platform = QualificationDerivedAccessPlatformV1::WindowsNtfs;
+    observed.binary_sha256 = digest(9);
+    observed.architecture = "x86_64".to_owned();
+
+    assert_eq!(
+        super::evidence::execution_identity_mismatches(&expected, &observed),
+        ["platform", "binary_sha256", "architecture"]
+    );
+}
+
 #[cfg(feature = "longitudinal-counting")]
 #[test]
 fn bounded_bootstrap_smoke_reports_two_pass_work_and_completed_phases() {
