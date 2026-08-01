@@ -3,6 +3,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(any(test, feature = "longitudinal-counting"))]
+use crate::bench_support::longitudinal::{
+    LongitudinalDerivedAccessPhaseV1 as Phase, enter_derived_access_phase_v1,
+};
 use crate::error::Result;
 use crate::model::{DiffSnapshot, EventId, ReviewId, RevisionId};
 use crate::session::assessment::{
@@ -874,6 +878,8 @@ fn revision_overviews_from_events(
     let seeds = {
         let span = tracing::debug_span!("shore.revisions.overviews.snapshot_seeds");
         let _guard = span.enter();
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let _phase = enter_derived_access_phase_v1(Phase::RevisionPageSnapshotSummaries);
         snapshot_summary_seeds(
             backend,
             &requested,

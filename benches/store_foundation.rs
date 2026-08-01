@@ -16,6 +16,7 @@ use pointbreak::bench_support::derived_access::{
     QUALIFICATION_DERIVED_ACCESS_HELP_MODE_V1,
     QUALIFICATION_DERIVED_ACCESS_LIFECYCLE_CHILD_MODE_V1,
     QUALIFICATION_DERIVED_ACCESS_LIFECYCLE_MODE_V1, QUALIFICATION_DERIVED_ACCESS_PACKAGE_MODE_V1,
+    QUALIFICATION_DERIVED_ACCESS_PHASE_MODE_V1, QUALIFICATION_DERIVED_ACCESS_PHASE_VERIFY_MODE_V1,
     QUALIFICATION_DERIVED_ACCESS_RESOURCE_CHILD_MODE_V1,
     QUALIFICATION_DERIVED_ACCESS_RESOURCE_MODE_V1,
     QUALIFICATION_DERIVED_ACCESS_RESTART_CHILD_MODE_V1,
@@ -41,10 +42,11 @@ use pointbreak::bench_support::derived_access::{
     run_qualification_derived_access_native_smoke_v1,
     run_qualification_derived_access_non_timing_smoke_at_v1,
     run_qualification_derived_access_non_timing_smoke_v1,
-    run_qualification_derived_access_resource_child_v1,
+    run_qualification_derived_access_phase_v1, run_qualification_derived_access_resource_child_v1,
     run_qualification_derived_access_resource_v1,
     run_qualification_derived_access_restart_child_v1, run_qualification_derived_access_scale_v1,
     verify_authority_stamp_native_receipts_v1, verify_qualification_derived_access_package_v1,
+    verify_qualification_derived_access_phase_v1,
 };
 use pointbreak::bench_support::foundation::{
     DisposableBundleDestinationV2, ExactBundleClosureV2, ExactBundleFailurePointV2,
@@ -100,7 +102,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 const USAGE: &str = "\
-Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--generated-workload-smoke|--longitudinal-contract|--longitudinal-help|--longitudinal-smoke|--longitudinal-carry-forward|--longitudinal-carry-forward-smoke|--longitudinal-verify-package|--longitudinal-verify-package-receipt|--longitudinal-verify-carry-forward|--derived-access-product-contract|--derived-access-product-contract-verify|--derived-access-product-contract-smoke|--derived-access-readiness-contract|--derived-access-readiness-contract-verify|--derived-access-readiness-contract-smoke|--derived-access-authority-stamp|--derived-access-authority-stamp-verify|--derived-access-contract|--derived-access-help|--derived-access-smoke|--derived-access-bootstrap-smoke|--derived-access-lifecycle|--derived-access-retained-preflight|--derived-access-retained-bootstrap|--derived-access-scale-evidence|--derived-access-resource-evidence|--derived-access-fragment|--derived-access-package|--derived-access-verify-package|--loose-baseline-smoke|--loose-baseline-evidence|--prospective-contract|--content-only-contract|--transfer-smoke|--sqlite-smoke|--segments-smoke|--lmdb-proof-open-close|--lmdb-smoke|--lmdb-lifecycle-smoke|--lmdb-prospective-smoke|--lmdb-prospective-evidence|--lmdb-prospective-package|--qualification-smoke|--qualification-evidence|--qualification-diagnostics|--qualification-contract|--qualification-final-evidence|--qualification-package|--help]\n\
+Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--generated-workload-smoke|--longitudinal-contract|--longitudinal-help|--longitudinal-smoke|--longitudinal-carry-forward|--longitudinal-carry-forward-smoke|--longitudinal-verify-package|--longitudinal-verify-package-receipt|--longitudinal-verify-carry-forward|--derived-access-product-contract|--derived-access-product-contract-verify|--derived-access-product-contract-smoke|--derived-access-readiness-contract|--derived-access-readiness-contract-verify|--derived-access-readiness-contract-smoke|--derived-access-authority-stamp|--derived-access-authority-stamp-verify|--derived-access-contract|--derived-access-help|--derived-access-smoke|--derived-access-bootstrap-smoke|--derived-access-phase-evidence|--derived-access-phase-verify|--derived-access-lifecycle|--derived-access-retained-preflight|--derived-access-retained-bootstrap|--derived-access-scale-evidence|--derived-access-resource-evidence|--derived-access-fragment|--derived-access-package|--derived-access-verify-package|--loose-baseline-smoke|--loose-baseline-evidence|--prospective-contract|--content-only-contract|--transfer-smoke|--sqlite-smoke|--segments-smoke|--lmdb-proof-open-close|--lmdb-smoke|--lmdb-lifecycle-smoke|--lmdb-prospective-smoke|--lmdb-prospective-evidence|--lmdb-prospective-package|--qualification-smoke|--qualification-evidence|--qualification-diagnostics|--qualification-contract|--qualification-final-evidence|--qualification-package|--help]\n\
        --longitudinal-carry-forward --longitudinal-carry-forward-request=<path>\n\
        --longitudinal-verify-package --longitudinal-package-root=<path>\n\
        --longitudinal-verify-package-receipt --longitudinal-package-root=<path>\n\
@@ -108,6 +110,8 @@ Usage: cargo bench --features bench --bench store_foundation -- [--smoke|--gener
        --derived-access-smoke [--derived-access-tier=D0-128|L1|L7] [--derived-access-root=<empty-path>]\n\
                               [--derived-access-request=<path>]\n\
        --derived-access-bootstrap-smoke [--derived-access-tier=D0-128|L1|L7]\n\
+       --derived-access-phase-evidence --derived-access-request=<path>\n\
+       --derived-access-phase-verify --derived-access-request=<path> --derived-access-input=<bundle.json>\n\
        --derived-access-authority-stamp --derived-access-source=<clean-checkout> --derived-access-root=<empty-path> --derived-access-output=<receipt.json>\n\
        --derived-access-authority-stamp-verify --derived-access-input=<apfs.json> --derived-access-input=<ntfs.json>\n\
        (authority-stamp modes require --features longitudinal-counting)\n\
@@ -697,6 +701,8 @@ fn main() -> ExitCode {
              --derived-access-smoke [--derived-access-tier=D0-128|L1|L7] [--derived-access-root=<empty-path>]\n\
                                       [--derived-access-request=<path>]\n\
              --derived-access-bootstrap-smoke [--derived-access-tier=D0-128|L1|L7]\n\
+             --derived-access-phase-evidence --derived-access-request=<path>\n\
+             --derived-access-phase-verify --derived-access-request=<path> --derived-access-input=<bundle.json>\n\
              --derived-access-lifecycle --derived-access-request=<path>\n\
              --derived-access-retained-preflight --derived-access-request=<path>\n\
              --derived-access-retained-bootstrap --derived-access-request=<path>\n\
@@ -857,6 +863,37 @@ fn main() -> ExitCode {
         .iter()
         .filter_map(|argument| argument.strip_prefix("--derived-access-request="))
         .collect::<Vec<_>>();
+    if arguments
+        .iter()
+        .any(|argument| argument == QUALIFICATION_DERIVED_ACCESS_PHASE_MODE_V1)
+    {
+        if derived_requests.len() != 1 {
+            eprintln!("derived-access phase evidence requires exactly one typed request");
+            return ExitCode::from(2);
+        }
+        return report_derived_access_smoke(run_qualification_derived_access_phase_v1(
+            std::path::Path::new(derived_requests[0]),
+        ));
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == QUALIFICATION_DERIVED_ACCESS_PHASE_VERIFY_MODE_V1)
+    {
+        let inputs = arguments
+            .iter()
+            .filter_map(|argument| argument.strip_prefix("--derived-access-input="))
+            .collect::<Vec<_>>();
+        if derived_requests.len() != 1 || inputs.len() != 1 {
+            eprintln!(
+                "derived-access phase verification requires one typed request and one bundle input"
+            );
+            return ExitCode::from(2);
+        }
+        return report_derived_access_smoke(verify_qualification_derived_access_phase_v1(
+            std::path::Path::new(derived_requests[0]),
+            std::path::Path::new(inputs[0]),
+        ));
+    }
     if arguments
         .iter()
         .any(|argument| argument == QUALIFICATION_DERIVED_ACCESS_RETAINED_PREFLIGHT_MODE_V1)

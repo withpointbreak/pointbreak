@@ -329,6 +329,20 @@ derived-access-bootstrap-smoke tier="D0-128":
     cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \
         --derived-access-bootstrap-smoke --derived-access-tier="{{ tier }}"
 
+# Attribute revision-page, bootstrap, and governed-write work on one typed root.
+[group('quality')]
+derived-access-phase request:
+    POINTBREAK_DERIVED_ACCESS=sqlite-wal-bodyless-v1 \
+        cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \
+        --derived-access-phase-evidence --derived-access-request="{{ request }}"
+
+# Verify a phase bundle against its typed source/tier/root request.
+[group('quality')]
+derived-access-phase-verify request bundle:
+    cargo +stable bench --locked --features "bench longitudinal-counting" --bench store_foundation -- \
+        --derived-access-phase-verify --derived-access-request="{{ request }}" \
+        --derived-access-input="{{ bundle }}"
+
 # Run one evidence-bound D0-128, L1, or L7 native smoke request.
 [group('quality')]
 derived-access-native-smoke request:

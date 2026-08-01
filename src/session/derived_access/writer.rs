@@ -8,6 +8,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use super::cursor::AppendResolution;
 use super::lifecycle::DerivedAccessLifecycle;
 use super::sqlite::{AppendCrashPoint, StoreWriterLock};
+#[cfg(any(test, feature = "longitudinal-counting"))]
+use crate::bench_support::longitudinal::{
+    LongitudinalDerivedAccessPhaseV1 as Phase, enter_derived_access_phase_v1,
+};
 use crate::error::{Result, ShoreError};
 use crate::session::EventWriteOutcome;
 use crate::session::event::ShoreEvent;
@@ -64,6 +68,8 @@ impl DerivedWriteCoordinator {
         publish: impl FnOnce() -> Result<EventWriteOutcome>,
         catch_up: impl FnOnce(&super::service::DerivedAccessService) -> std::result::Result<(), String>,
     ) -> Result<EventWriteOutcome> {
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let admission_phase = enter_derived_access_phase_v1(Phase::GovernedWriteAdmission);
         let writer_lock = StoreWriterLock::acquire(self.lifecycle.store_root())
             .map_err(|error| ShoreError::Message(error.to_string()))?;
         let current = self
@@ -76,8 +82,12 @@ impl DerivedWriteCoordinator {
                         .to_owned(),
                 )
             })?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        drop(admission_phase);
         let publication = Cell::new(None);
         let attempt_token = next_attempt_token(event);
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let truth_phase = enter_derived_access_phase_v1(Phase::GovernedWriteTruth);
         let append = current.service().append_event_with_publisher_locked(
             event,
             &attempt_token,
@@ -89,6 +99,8 @@ impl DerivedWriteCoordinator {
                 Ok(outcome)
             },
         );
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        drop(truth_phase);
 
         let resolution = match append {
             Ok(resolution) => resolution,
@@ -122,6 +134,8 @@ impl DerivedWriteCoordinator {
         };
         drop(writer_lock);
 
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let catch_up_phase = enter_derived_access_phase_v1(Phase::GovernedWriteCatchUp);
         let catch_up_lock = match StoreWriterLock::acquire(self.lifecycle.store_root()) {
             Ok(lock) => lock,
             Err(error) => {
@@ -135,6 +149,12 @@ impl DerivedWriteCoordinator {
             drop(current);
             self.record_catch_up_pending(&error);
         }
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        drop(catch_up_phase);
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let response_phase = enter_derived_access_phase_v1(Phase::GovernedWriteResponse);
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        drop(response_phase);
         Ok(outcome)
     }
 
@@ -315,10 +335,23 @@ mod tests {
         let coordinator =
             DerivedWriteCoordinator::new(active_lifecycle(&root)).expect("current generation");
         let governed = EventStore::open(root.path()).with_coordinator(coordinator);
+        let scope = LongitudinalCountingScopeV1::new("d".repeat(64)).unwrap();
+        let guard = scope.enter();
 
         assert_eq!(
             governed.record_event_once(&event(1)).unwrap(),
             EventWriteOutcome::Created
+        );
+        drop(guard);
+        assert_eq!(
+            scope
+                .snapshot()
+                .derived_access_phases
+                .iter()
+                .map(|sample| sample.phase)
+                .collect::<Vec<_>>(),
+            crate::bench_support::derived_access::QualificationDerivedAccessPhaseOperationV1::GovernedWrite
+                .expected_phases()
         );
         assert_eq!(
             governed.record_event_once(&event(1)).unwrap(),

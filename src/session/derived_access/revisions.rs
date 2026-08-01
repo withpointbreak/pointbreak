@@ -14,6 +14,10 @@ use super::history::{
     catching_up_status, hydrate_events, projection_stamp, state_diagnostics, support_event_ids,
 };
 use super::locator::LocatorRead;
+#[cfg(any(test, feature = "longitudinal-counting"))]
+use crate::bench_support::longitudinal::{
+    LongitudinalDerivedAccessPhaseV1 as Phase, enter_derived_access_phase_v1,
+};
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::model::RevisionId;
 use crate::session::event::ShoreEvent;
@@ -292,12 +296,16 @@ impl DerivedHistoryAccess {
                 return Err("invalid revision page token".to_owned());
             }
         };
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let sql_selection_phase = enter_derived_access_phase_v1(Phase::RevisionPageSqlSelection);
         let mut rows = revision_page_rows(
             &connection,
             as_of,
             cursor.as_ref(),
             request.limit().saturating_add(1),
         )?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        drop(sql_selection_phase);
         let rows_selected = rows.len();
         let has_more = rows.len() > request.limit();
         rows.truncate(request.limit());
@@ -305,12 +313,21 @@ impl DerivedHistoryAccess {
             .iter()
             .map(|row| row.revision_id.clone())
             .collect::<Vec<_>>();
-        let events = hydrate_revision_events(
-            service,
-            &connection,
-            page_revision_event_ids(&connection, as_of, &selected_ids)?,
-            as_of,
-        )?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let event_id_expansion_phase =
+            enter_derived_access_phase_v1(Phase::RevisionPageEventIdExpansion);
+        let selected_event_ids = page_revision_event_ids(&connection, as_of, &selected_ids)?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        drop(event_id_expansion_phase);
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let carrier_hydration_phase =
+            enter_derived_access_phase_v1(Phase::RevisionPageCarrierHydrationValidation);
+        let events = hydrate_revision_events(service, &connection, selected_event_ids, as_of)?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        drop(carrier_hydration_phase);
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let list_projection_phase =
+            enter_derived_access_phase_v1(Phase::RevisionPageListProjection);
         let mut result = list_revisions_from_selected_events(
             RevisionListOptions::new(repo)
                 .with_read_for_display(true)
@@ -341,18 +358,26 @@ impl DerivedHistoryAccess {
             .map_err(|_| "derived revision event count does not fit usize".to_owned())?;
         result.revision_count = indexed_revision_count(&connection)?;
         result.diagnostics.extend(state_diagnostics(&state)?);
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        drop(list_projection_phase);
         let revision_ids = result
             .entries
             .iter()
             .map(|entry| entry.revision_id.clone())
             .collect::<Vec<_>>();
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let support_expansion_phase =
+            enter_derived_access_phase_v1(Phase::RevisionPageSupersederSupportExpansion);
         let mut overview_events = events;
-        overview_events.extend(hydrate_events(
-            service,
-            &page_revision_superseder_event_ids(&connection, as_of, &revision_ids)?,
-            as_of,
-        )?);
+        let support_event_ids =
+            page_revision_superseder_event_ids(&connection, as_of, &revision_ids)?;
+        overview_events.extend(hydrate_events(service, &support_event_ids, as_of)?);
         normalize_hydrated_events(&mut overview_events);
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        drop(support_expansion_phase);
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let overview_construction_phase =
+            enter_derived_access_phase_v1(Phase::RevisionPageOverviewConstruction);
         let overviews = revision_overviews_from_selected_events(
             backend,
             overview_events,
@@ -362,6 +387,8 @@ impl DerivedHistoryAccess {
             Some(snapshot_summaries.as_ref()),
         )
         .map_err(|error| error.to_string())?;
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        drop(overview_construction_phase);
         let next = has_more
             .then(|| rows.last())
             .flatten()
@@ -1092,6 +1119,10 @@ mod tests {
         let (repo, access, _) = active_captured_repo();
         let summaries = Arc::new(SnapshotSummaryCache::new());
         let request = RevisionPageRequest::new(Some(1), None).unwrap();
+        let scope =
+            crate::bench_support::longitudinal::LongitudinalCountingScopeV1::new("c".repeat(64))
+                .unwrap();
+        let guard = scope.enter();
         let DerivedRevisionPageRoute::Ready(first) = access
             .revisions_page(
                 repo.path(),
@@ -1103,6 +1134,17 @@ mod tests {
         else {
             panic!("published generation should serve a revision page");
         };
+        drop(guard);
+        assert_eq!(
+            scope
+                .snapshot()
+                .derived_access_phases
+                .iter()
+                .map(|sample| sample.phase)
+                .collect::<Vec<_>>(),
+            crate::bench_support::derived_access::QualificationDerivedAccessPhaseOperationV1::RevisionPage
+                .expected_phases()
+        );
         assert_eq!(first.result.entries.len(), 1);
         assert_eq!(first.work.rows_selected, 2);
         assert_eq!(first.work.entries_returned, 1);

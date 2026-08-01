@@ -2,6 +2,7 @@ use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +20,8 @@ thread_local! {
 struct ObserverState {
     counters: LongitudinalCountersV1,
     capacity_ownership: LongitudinalCapacityOwnershipV1,
+    derived_access_phases: Vec<LongitudinalDerivedAccessPhaseSampleV1>,
+    next_phase_ordinal: u16,
 }
 
 /// One request/run-local counting scope.
@@ -34,6 +37,91 @@ pub struct LongitudinalCountingScopeV1 {
 /// Restores the previously active scope when dropped.
 pub struct LongitudinalCountingGuardV1 {
     state: Arc<Mutex<ObserverState>>,
+    _not_send: PhantomData<Rc<()>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LongitudinalDerivedAccessPhaseV1 {
+    RevisionPageSqlSelection,
+    RevisionPageEventIdExpansion,
+    RevisionPageCarrierHydrationValidation,
+    RevisionPageListProjection,
+    RevisionPageSupersederSupportExpansion,
+    RevisionPageOverviewConstruction,
+    RevisionPageSnapshotSummaries,
+    BootstrapPopulation,
+    BootstrapOracle,
+    BootstrapFinalization,
+    GovernedWriteAdmission,
+    GovernedWriteTruth,
+    GovernedWriteCatchUp,
+    GovernedWriteResponse,
+}
+
+impl LongitudinalDerivedAccessPhaseV1 {
+    pub const fn ownership(self) -> LongitudinalDerivedAccessPhaseOwnershipV1 {
+        use LongitudinalDerivedAccessPhaseOwnershipV1 as Ownership;
+        match self {
+            Self::RevisionPageSqlSelection | Self::RevisionPageEventIdExpansion => {
+                Ownership::DerivedAccess
+            }
+            Self::RevisionPageCarrierHydrationValidation | Self::GovernedWriteTruth => {
+                Ownership::AuthoritativeTruth
+            }
+            Self::RevisionPageListProjection
+            | Self::RevisionPageOverviewConstruction
+            | Self::RevisionPageSnapshotSummaries => Ownership::ProductProjection,
+            Self::RevisionPageSupersederSupportExpansion
+            | Self::BootstrapPopulation
+            | Self::BootstrapOracle
+            | Self::GovernedWriteCatchUp => Ownership::MixedDerivedAndTruth,
+            Self::BootstrapFinalization
+            | Self::GovernedWriteAdmission
+            | Self::GovernedWriteResponse => Ownership::DerivedAccess,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LongitudinalDerivedAccessPhaseOwnershipV1 {
+    DerivedAccess,
+    AuthoritativeTruth,
+    ProductProjection,
+    MixedDerivedAndTruth,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LongitudinalDerivedAccessPhaseSampleV1 {
+    pub phase: LongitudinalDerivedAccessPhaseV1,
+    pub ownership: LongitudinalDerivedAccessPhaseOwnershipV1,
+    pub ordinal: u16,
+    pub wall_nanos: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_cpu_nanos: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resident_bytes_before: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resident_bytes_after: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resident_bytes_high_water: Option<u64>,
+    pub counters: LongitudinalCountersV1,
+}
+
+/// Completes one coarse, request-scoped derived-access phase on drop.
+///
+/// The guard records no data without an active [`LongitudinalCountingScopeV1`].
+/// Samples are assigned their ordinal on entry, so nested coarse phases retain
+/// start order even though their guards necessarily complete in reverse order.
+pub struct LongitudinalDerivedAccessPhaseGuardV1 {
+    state: Option<Arc<Mutex<ObserverState>>>,
+    phase: LongitudinalDerivedAccessPhaseV1,
+    ordinal: u16,
+    started: Instant,
+    counters_before: LongitudinalCountersV1,
+    process_before: Option<super::LongitudinalProcessSnapshotV1>,
     _not_send: PhantomData<Rc<()>>,
 }
 
@@ -87,6 +175,7 @@ pub struct LongitudinalCountingSnapshotV1 {
     pub run_identity: String,
     pub counters: LongitudinalCountersV1,
     pub capacity_ownership: LongitudinalCapacityOwnershipV1,
+    pub derived_access_phases: Vec<LongitudinalDerivedAccessPhaseSampleV1>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -138,10 +227,13 @@ impl LongitudinalCountingScopeV1 {
 
     pub fn snapshot(&self) -> LongitudinalCountingSnapshotV1 {
         let state = lock_state(&self.state);
+        let mut derived_access_phases = state.derived_access_phases.clone();
+        derived_access_phases.sort_by_key(|sample| sample.ordinal);
         LongitudinalCountingSnapshotV1 {
             run_identity: self.run_identity.clone(),
             counters: state.counters.clone(),
             capacity_ownership: state.capacity_ownership.clone(),
+            derived_access_phases,
         }
     }
 
@@ -174,6 +266,42 @@ impl LongitudinalCountingScopeV1 {
     }
 }
 
+/// Enter one coarse derived-access phase in the current counting scope.
+///
+/// Process CPU/RSS data is optional because the existing normalized process
+/// snapshot is currently available only on native macOS. Missing capture stays
+/// `None`; it is never translated to zero.
+pub fn enter_derived_access_phase_v1(
+    phase: LongitudinalDerivedAccessPhaseV1,
+) -> LongitudinalDerivedAccessPhaseGuardV1 {
+    let active = LongitudinalCountingScopeV1::current();
+    let (state, ordinal, counters_before) = match active {
+        Some(scope) => {
+            let mut state = lock_state(&scope.state);
+            let ordinal = state.next_phase_ordinal;
+            state.next_phase_ordinal = state
+                .next_phase_ordinal
+                .checked_add(1)
+                .expect("derived-access phase ordinal overflow");
+            let counters = state.counters.clone();
+            (Some(Arc::clone(&scope.state)), ordinal, counters)
+        }
+        None => (None, 0, LongitudinalCountersV1::default()),
+    };
+    let process_before = state
+        .as_ref()
+        .and_then(|_| super::capture_longitudinal_process_snapshot_v1(std::process::id()).ok());
+    LongitudinalDerivedAccessPhaseGuardV1 {
+        state,
+        phase,
+        ordinal,
+        started: Instant::now(),
+        counters_before,
+        process_before,
+        _not_send: PhantomData,
+    }
+}
+
 impl Drop for LongitudinalCountingGuardV1 {
     fn drop(&mut self) {
         ACTIVE_SCOPES.with(|scopes| {
@@ -192,6 +320,80 @@ impl Drop for LongitudinalCountingGuardV1 {
                 scopes.remove(index);
             }
         });
+    }
+}
+
+impl Drop for LongitudinalDerivedAccessPhaseGuardV1 {
+    fn drop(&mut self) {
+        let Some(state) = &self.state else {
+            return;
+        };
+        let wall_nanos = u64::try_from(self.started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        let process_after =
+            super::capture_longitudinal_process_snapshot_v1(std::process::id()).ok();
+        let (process_cpu_nanos, resident_bytes_before, resident_bytes_after) =
+            match (self.process_before, process_after) {
+                (Some(before), Some(after)) => {
+                    let before_cpu = before.user_cpu_nanos.checked_add(before.system_cpu_nanos);
+                    let after_cpu = after.user_cpu_nanos.checked_add(after.system_cpu_nanos);
+                    (
+                        before_cpu
+                            .zip(after_cpu)
+                            .and_then(|(before, after)| after.checked_sub(before)),
+                        Some(before.resident_bytes),
+                        Some(after.resident_bytes),
+                    )
+                }
+                _ => (None, None, None),
+            };
+        let resident_bytes_high_water = resident_bytes_before
+            .zip(resident_bytes_after)
+            .map(|(before, after)| before.max(after));
+        let mut state = lock_state(state);
+        let counters = counter_delta(&self.counters_before, &state.counters);
+        state
+            .derived_access_phases
+            .push(LongitudinalDerivedAccessPhaseSampleV1 {
+                phase: self.phase,
+                ownership: self.phase.ownership(),
+                ordinal: self.ordinal,
+                wall_nanos,
+                process_cpu_nanos,
+                resident_bytes_before,
+                resident_bytes_after,
+                resident_bytes_high_water,
+                counters,
+            });
+    }
+}
+
+fn counter_delta(
+    before: &LongitudinalCountersV1,
+    after: &LongitudinalCountersV1,
+) -> LongitudinalCountersV1 {
+    macro_rules! delta {
+        ($field:ident) => {
+            after
+                .$field
+                .checked_sub(before.$field)
+                .expect("longitudinal counter decreased within a phase")
+        };
+    }
+    LongitudinalCountersV1 {
+        directory_entries_walked: delta!(directory_entries_walked),
+        carrier_opens: delta!(carrier_opens),
+        carrier_bytes_read: delta!(carrier_bytes_read),
+        event_decodes: delta!(event_decodes),
+        event_validations: delta!(event_validations),
+        event_folds: delta!(event_folds),
+        chronological_sort_items: delta!(chronological_sort_items),
+        body_artifact_reads: delta!(body_artifact_reads),
+        body_bytes_read: delta!(body_bytes_read),
+        object_artifact_reads: delta!(object_artifact_reads),
+        object_bytes_read: delta!(object_bytes_read),
+        projection_rebuilds: delta!(projection_rebuilds),
+        state_rebuilds: delta!(state_rebuilds),
+        response_bytes: delta!(response_bytes),
     }
 }
 
@@ -402,6 +604,9 @@ mod tests {
 
     #[test]
     fn no_scope_has_zero_effect_and_new_scope_starts_empty() {
+        let phase = enter_derived_access_phase_v1(
+            LongitudinalDerivedAccessPhaseV1::RevisionPageSqlSelection,
+        );
         record_directory_entries_walked(9);
         record_carrier_read(11);
         record_event_decode();
@@ -413,14 +618,63 @@ mod tests {
         record_projection_rebuild();
         record_state_rebuild();
         record_response_bytes(29);
+        drop(phase);
 
         let scope = LongitudinalCountingScopeV1::new(hash('1')).expect("valid scope");
         let _guard = scope.enter();
         assert_eq!(scope.snapshot().counters, LongitudinalCountersV1::default());
+        assert!(scope.snapshot().derived_access_phases.is_empty());
         assert_eq!(
             scope.snapshot().capacity_ownership,
             LongitudinalCapacityOwnershipV1::default()
         );
+    }
+
+    #[test]
+    fn phase_scope_records_ordered_counter_and_resource_deltas() {
+        let scope = LongitudinalCountingScopeV1::new(hash('8')).expect("valid scope");
+        let _scope_guard = scope.enter();
+
+        {
+            let _phase = enter_derived_access_phase_v1(
+                LongitudinalDerivedAccessPhaseV1::RevisionPageSqlSelection,
+            );
+            record_carrier_read(13);
+            record_event_decode();
+        }
+        {
+            let _phase = enter_derived_access_phase_v1(
+                LongitudinalDerivedAccessPhaseV1::RevisionPageEventIdExpansion,
+            );
+            record_event_folds(17);
+        }
+
+        let phases = scope.snapshot().derived_access_phases;
+        assert_eq!(phases.len(), 2);
+        assert_eq!(phases[0].ordinal, 0);
+        assert_eq!(phases[1].ordinal, 1);
+        assert_eq!(
+            phases.iter().map(|phase| phase.phase).collect::<Vec<_>>(),
+            vec![
+                LongitudinalDerivedAccessPhaseV1::RevisionPageSqlSelection,
+                LongitudinalDerivedAccessPhaseV1::RevisionPageEventIdExpansion,
+            ]
+        );
+        assert_eq!(phases[0].counters.carrier_opens, 1);
+        assert_eq!(phases[0].counters.carrier_bytes_read, 13);
+        assert_eq!(phases[0].counters.event_decodes, 1);
+        assert_eq!(phases[1].counters.event_folds, 17);
+        assert!(phases.iter().all(|phase| phase.wall_nanos < u64::MAX));
+        assert!(phases.iter().all(|phase| {
+            phase.resident_bytes_high_water.is_none_or(|high_water| {
+                phase
+                    .resident_bytes_before
+                    .is_some_and(|before| high_water >= before)
+                    && phase
+                        .resident_bytes_after
+                        .is_some_and(|after| high_water >= after)
+            })
+        }));
     }
 
     #[test]

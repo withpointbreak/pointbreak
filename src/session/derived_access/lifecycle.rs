@@ -17,6 +17,10 @@ use super::sqlite::{
     SqliteLocatorError, SqliteSemanticError, StoreWriterLock, WriterLockError,
 };
 use super::verification::strict_bodyless_materialized_snapshot_at;
+#[cfg(any(test, feature = "longitudinal-counting"))]
+use crate::bench_support::longitudinal::{
+    LongitudinalDerivedAccessPhaseV1 as Phase, enter_derived_access_phase_v1,
+};
 use crate::session::EventStore;
 use crate::session::derived_access::QualificationLocalJournal;
 use crate::session::store::backend::{
@@ -339,6 +343,8 @@ impl DerivedAccessLifecycle {
         let rebuild_started = Instant::now();
 
         let candidate_result: Result<_, LifecycleError> = (|| {
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            let population_phase = enter_derived_access_phase_v1(Phase::BootstrapPopulation);
             let cursor_phase_started = Instant::now();
             let mut progress_error = None;
             let bootstrap = SqliteCursorLedger::bootstrap_population_from_truth_at_with_hook(
@@ -452,7 +458,11 @@ impl DerivedAccessLifecycle {
             let head = authority.head.cursor;
             let bootstrap_stamp = authority.change_stamp.clone();
             drop(bootstrap);
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            drop(population_phase);
 
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            let oracle_phase = enter_derived_access_phase_v1(Phase::BootstrapOracle);
             let strict_phase_started = Instant::now();
             let strict_start = lifecycle_progress(
                 GenerationProgressPhase::StrictVerification,
@@ -506,6 +516,8 @@ impl DerivedAccessLifecycle {
             #[cfg(any(test, feature = "longitudinal-counting"))]
             drop(strict_event_ownership);
             let semantic_receipt = semantic_snapshot.semantic_receipt;
+            #[cfg(any(test, feature = "longitudinal-counting"))]
+            drop(oracle_phase);
             hook(PublicationBoundary::CandidateValidated);
             Ok((service, head, semantic_receipt, bootstrap_stamp))
         })();
@@ -517,6 +529,8 @@ impl DerivedAccessLifecycle {
             }
         };
 
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        let finalization_phase = enter_derived_access_phase_v1(Phase::BootstrapFinalization);
         let finalizing_phase_started = Instant::now();
         let finalizing_start = lifecycle_progress(
             GenerationProgressPhase::Finalizing,
@@ -621,6 +635,8 @@ impl DerivedAccessLifecycle {
                 ),
                 Err(error) => (0, 0, Some(error.to_string())),
             };
+        #[cfg(any(test, feature = "longitudinal-counting"))]
+        drop(finalization_phase);
 
         Ok(LifecycleReceipt {
             availability: DerivedAccessAvailability::Current,
@@ -1732,6 +1748,15 @@ mod tests {
 
         drop(guard);
         let observed = scope.snapshot();
+        assert_eq!(
+            observed
+                .derived_access_phases
+                .iter()
+                .map(|sample| sample.phase)
+                .collect::<Vec<_>>(),
+            crate::bench_support::derived_access::QualificationDerivedAccessPhaseOperationV1::Bootstrap
+                .expected_phases()
+        );
         assert_eq!(observed.counters.carrier_opens, 14);
         assert_eq!(observed.counters.event_decodes, 14);
         assert_eq!(observed.counters.event_validations, 14);

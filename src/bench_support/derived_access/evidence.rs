@@ -19,9 +19,14 @@ use super::{
     QualificationDerivedAccessStatusV1, QualificationDerivedAccessTierV1,
     evaluate_qualification_derived_access_v1,
 };
+#[cfg(any(test, feature = "longitudinal-counting"))]
+use crate::bench_support::longitudinal::{
+    LongitudinalCountersV1, LongitudinalDerivedAccessPhaseSampleV1,
+    LongitudinalDerivedAccessPhaseV1,
+};
 #[cfg(feature = "longitudinal-counting")]
 use crate::bench_support::longitudinal::{
-    LongitudinalCountersV1, LongitudinalCountingScopeV1, capture_longitudinal_process_snapshot_v1,
+    LongitudinalCountingScopeV1, capture_longitudinal_process_snapshot_v1,
 };
 use crate::bench_support::longitudinal::{
     LongitudinalStoreDataInventoryV1, is_governed_derived_store_entry_v1,
@@ -79,11 +84,22 @@ pub const QUALIFICATION_DERIVED_ACCESS_NATIVE_SMOKE_REQUEST_SCHEMA_V1: &str =
     "pointbreak.qualification-derived-access-native-smoke-request.v1";
 pub const QUALIFICATION_DERIVED_ACCESS_NATIVE_SMOKE_RECEIPT_SCHEMA_V1: &str =
     "pointbreak.qualification-derived-access-native-smoke-receipt.v1";
+#[cfg(any(test, feature = "longitudinal-counting"))]
+pub const QUALIFICATION_DERIVED_ACCESS_PHASE_RECEIPT_SCHEMA_V1: &str =
+    "pointbreak.qualification-derived-access-phase-receipt.v1";
+#[cfg(any(test, feature = "longitudinal-counting"))]
+pub const QUALIFICATION_DERIVED_ACCESS_PHASE_BUNDLE_SCHEMA_V1: &str =
+    "pointbreak.qualification-derived-access-phase-bundle.v1";
+#[cfg(any(test, feature = "longitudinal-counting"))]
+pub const QUALIFICATION_DERIVED_ACCESS_PHASE_REQUEST_SCHEMA_V1: &str =
+    "pointbreak.qualification-derived-access-phase-request.v1";
 
 pub const QUALIFICATION_DERIVED_ACCESS_HELP_MODE_V1: &str = "--derived-access-help";
 pub const QUALIFICATION_DERIVED_ACCESS_SMOKE_MODE_V1: &str = "--derived-access-smoke";
 pub const QUALIFICATION_DERIVED_ACCESS_BOOTSTRAP_SMOKE_MODE_V1: &str =
     "--derived-access-bootstrap-smoke";
+pub const QUALIFICATION_DERIVED_ACCESS_PHASE_MODE_V1: &str = "--derived-access-phase-evidence";
+pub const QUALIFICATION_DERIVED_ACCESS_PHASE_VERIFY_MODE_V1: &str = "--derived-access-phase-verify";
 pub const QUALIFICATION_DERIVED_ACCESS_LIFECYCLE_MODE_V1: &str = "--derived-access-lifecycle";
 pub const QUALIFICATION_DERIVED_ACCESS_RETAINED_PREFLIGHT_MODE_V1: &str =
     "--derived-access-retained-preflight";
@@ -106,6 +122,569 @@ pub const QUALIFICATION_DERIVED_ACCESS_VERIFY_PACKAGE_MODE_V1: &str =
 pub enum QualificationDerivedAccessCpuUnitV1 {
     Nanoseconds,
     NativeTicks,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualificationDerivedAccessPhaseOperationV1 {
+    RevisionPage,
+    Bootstrap,
+    GovernedWrite,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+impl QualificationDerivedAccessPhaseOperationV1 {
+    pub const ALL: [Self; 3] = [Self::RevisionPage, Self::Bootstrap, Self::GovernedWrite];
+
+    pub fn expected_phases(self) -> &'static [LongitudinalDerivedAccessPhaseV1] {
+        use LongitudinalDerivedAccessPhaseV1 as Phase;
+        match self {
+            Self::RevisionPage => &[
+                Phase::RevisionPageSqlSelection,
+                Phase::RevisionPageEventIdExpansion,
+                Phase::RevisionPageCarrierHydrationValidation,
+                Phase::RevisionPageListProjection,
+                Phase::RevisionPageSupersederSupportExpansion,
+                Phase::RevisionPageOverviewConstruction,
+                Phase::RevisionPageSnapshotSummaries,
+            ],
+            Self::Bootstrap => &[
+                Phase::BootstrapPopulation,
+                Phase::BootstrapOracle,
+                Phase::BootstrapFinalization,
+            ],
+            Self::GovernedWrite => &[
+                Phase::GovernedWriteAdmission,
+                Phase::GovernedWriteTruth,
+                Phase::GovernedWriteCatchUp,
+                Phase::GovernedWriteResponse,
+            ],
+        }
+    }
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedAccessPhaseReceiptV1 {
+    pub schema: String,
+    pub tier: QualificationDerivedAccessTierV1,
+    pub operation: QualificationDerivedAccessPhaseOperationV1,
+    pub source_identity_sha256: String,
+    pub root_identity_sha256: String,
+    pub run_identity: String,
+    pub semantic_result_sha256: String,
+    pub phases: Vec<LongitudinalDerivedAccessPhaseSampleV1>,
+    pub receipt_sha256: String,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+impl QualificationDerivedAccessPhaseReceiptV1 {
+    pub fn new(
+        tier: QualificationDerivedAccessTierV1,
+        operation: QualificationDerivedAccessPhaseOperationV1,
+        source_identity_sha256: String,
+        root_identity_sha256: String,
+        run_identity: String,
+        semantic_result_sha256: String,
+        phases: Vec<LongitudinalDerivedAccessPhaseSampleV1>,
+    ) -> Result<Self, String> {
+        let mut receipt = Self {
+            schema: QUALIFICATION_DERIVED_ACCESS_PHASE_RECEIPT_SCHEMA_V1.to_owned(),
+            tier,
+            operation,
+            source_identity_sha256,
+            root_identity_sha256,
+            run_identity,
+            semantic_result_sha256,
+            phases,
+            receipt_sha256: String::new(),
+        };
+        receipt.refresh_sha256()?;
+        receipt.validate()?;
+        Ok(receipt)
+    }
+
+    fn canonical_sha256(&self) -> Result<String, String> {
+        let mut preimage = self.clone();
+        preimage.receipt_sha256.clear();
+        serde_json::to_vec(&preimage)
+            .map(|bytes| sha256_bytes_hex(&bytes))
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn refresh_sha256(&mut self) -> Result<(), String> {
+        self.receipt_sha256 = self.canonical_sha256()?;
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != QUALIFICATION_DERIVED_ACCESS_PHASE_RECEIPT_SCHEMA_V1 {
+            return Err("unsupported derived-access phase receipt".to_owned());
+        }
+        for (value, label) in [
+            (&self.source_identity_sha256, "phase source identity"),
+            (&self.root_identity_sha256, "phase root identity"),
+            (&self.run_identity, "phase run identity"),
+            (&self.semantic_result_sha256, "phase semantic result"),
+            (&self.receipt_sha256, "phase receipt"),
+        ] {
+            validate_digest(value, label)?;
+        }
+        if self.receipt_sha256 != self.canonical_sha256()? {
+            return Err("derived-access phase receipt hash drifted".to_owned());
+        }
+        let expected = self.operation.expected_phases();
+        if self.phases.len() != expected.len() {
+            return Err("derived-access phase receipt is incomplete".to_owned());
+        }
+        for (index, (sample, expected_phase)) in self.phases.iter().zip(expected.iter()).enumerate()
+        {
+            if sample.phase != *expected_phase || usize::from(sample.ordinal) != index {
+                return Err("derived-access phase receipt order drifted".to_owned());
+            }
+            if sample.ownership != sample.phase.ownership() {
+                return Err("derived-access phase ownership drifted".to_owned());
+            }
+            if sample.wall_nanos == u64::MAX
+                || sample.process_cpu_nanos == Some(u64::MAX)
+                || phase_counters_overflowed(&sample.counters)
+            {
+                return Err("derived-access phase measurement overflowed".to_owned());
+            }
+            match (
+                sample.resident_bytes_before,
+                sample.resident_bytes_after,
+                sample.resident_bytes_high_water,
+            ) {
+                (None, None, None) => {}
+                (Some(before), Some(after), Some(high_water))
+                    if high_water >= before && high_water >= after => {}
+                _ => return Err("derived-access phase RSS snapshot is inconsistent".to_owned()),
+            }
+        }
+        Ok(())
+    }
+
+    pub fn validate_against(
+        &self,
+        source_identity_sha256: &str,
+        tier: QualificationDerivedAccessTierV1,
+        operation: QualificationDerivedAccessPhaseOperationV1,
+    ) -> Result<(), String> {
+        self.validate()?;
+        if self.source_identity_sha256 != source_identity_sha256
+            || self.tier != tier
+            || self.operation != operation
+        {
+            return Err("derived-access phase receipt authority drifted".to_owned());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+fn phase_counters_overflowed(counters: &LongitudinalCountersV1) -> bool {
+    [
+        counters.directory_entries_walked,
+        counters.carrier_opens,
+        counters.carrier_bytes_read,
+        counters.event_decodes,
+        counters.event_validations,
+        counters.event_folds,
+        counters.chronological_sort_items,
+        counters.body_artifact_reads,
+        counters.body_bytes_read,
+        counters.object_artifact_reads,
+        counters.object_bytes_read,
+        counters.projection_rebuilds,
+        counters.state_rebuilds,
+        counters.response_bytes,
+    ]
+    .contains(&u64::MAX)
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedAccessPhaseBundleEntryV1 {
+    pub tier: QualificationDerivedAccessTierV1,
+    pub operation: QualificationDerivedAccessPhaseOperationV1,
+    pub receipt_sha256: String,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedAccessPhaseBundleV1 {
+    pub schema: String,
+    pub source_identity_sha256: String,
+    pub tier: QualificationDerivedAccessTierV1,
+    pub entries: Vec<QualificationDerivedAccessPhaseBundleEntryV1>,
+    pub raw_receipts: Vec<QualificationDerivedAccessPhaseReceiptV1>,
+    pub complete: bool,
+    pub bundle_sha256: String,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+impl QualificationDerivedAccessPhaseBundleV1 {
+    pub fn new(
+        source_identity_sha256: String,
+        tier: QualificationDerivedAccessTierV1,
+        raw_receipts: Vec<QualificationDerivedAccessPhaseReceiptV1>,
+    ) -> Result<Self, String> {
+        let entries = raw_receipts
+            .iter()
+            .map(|receipt| QualificationDerivedAccessPhaseBundleEntryV1 {
+                tier: receipt.tier,
+                operation: receipt.operation,
+                receipt_sha256: receipt.receipt_sha256.clone(),
+            })
+            .collect();
+        let mut bundle = Self {
+            schema: QUALIFICATION_DERIVED_ACCESS_PHASE_BUNDLE_SCHEMA_V1.to_owned(),
+            source_identity_sha256,
+            tier,
+            entries,
+            raw_receipts,
+            complete: true,
+            bundle_sha256: String::new(),
+        };
+        bundle.refresh_sha256()?;
+        bundle.validate()?;
+        Ok(bundle)
+    }
+
+    fn canonical_sha256(&self) -> Result<String, String> {
+        let mut preimage = self.clone();
+        preimage.bundle_sha256.clear();
+        serde_json::to_vec(&preimage)
+            .map(|bytes| sha256_bytes_hex(&bytes))
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn refresh_sha256(&mut self) -> Result<(), String> {
+        self.bundle_sha256 = self.canonical_sha256()?;
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != QUALIFICATION_DERIVED_ACCESS_PHASE_BUNDLE_SCHEMA_V1
+            || !self.complete
+            || self.entries.is_empty()
+            || self.entries.len() != self.raw_receipts.len()
+        {
+            return Err("derived-access phase bundle is incomplete".to_owned());
+        }
+        validate_digest(&self.source_identity_sha256, "phase bundle source identity")?;
+        validate_digest(&self.bundle_sha256, "phase bundle")?;
+        if self.bundle_sha256 != self.canonical_sha256()? {
+            return Err("derived-access phase bundle hash drifted".to_owned());
+        }
+        let mut subjects = BTreeSet::new();
+        for (entry, receipt) in self.entries.iter().zip(&self.raw_receipts) {
+            validate_digest(&entry.receipt_sha256, "phase bundle entry")?;
+            receipt.validate_against(&self.source_identity_sha256, entry.tier, entry.operation)?;
+            if entry.receipt_sha256 != receipt.receipt_sha256
+                || entry.tier != self.tier
+                || !subjects.insert((entry.tier, entry.operation))
+            {
+                return Err("derived-access phase bundle entry drifted".to_owned());
+            }
+        }
+        if subjects
+            != QualificationDerivedAccessPhaseOperationV1::ALL
+                .into_iter()
+                .map(|operation| (self.tier, operation))
+                .collect()
+        {
+            return Err("derived-access phase bundle omitted an operation".to_owned());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QualificationDerivedAccessPhaseRunRequestV1 {
+    pub schema: String,
+    pub source_checkout: PathBuf,
+    pub execution: QualificationDerivedAccessExecutionIdentityV1,
+    pub tier: QualificationDerivedAccessTierV1,
+    pub root: PathBuf,
+    pub root_identity_sha256: String,
+    pub request_sha256: String,
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+impl QualificationDerivedAccessPhaseRunRequestV1 {
+    fn canonical_sha256(&self) -> Result<String, String> {
+        let mut preimage = self.clone();
+        preimage.request_sha256.clear();
+        serde_json::to_vec(&preimage)
+            .map(|bytes| sha256_bytes_hex(&bytes))
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn refresh_sha256(&mut self) -> Result<(), String> {
+        self.request_sha256 = self.canonical_sha256()?;
+        Ok(())
+    }
+
+    pub fn source_identity_sha256(&self) -> Result<String, String> {
+        serde_json::to_vec(&self.execution)
+            .map(|bytes| sha256_bytes_hex(&bytes))
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema != QUALIFICATION_DERIVED_ACCESS_PHASE_REQUEST_SCHEMA_V1
+            || !self.source_checkout.is_absolute()
+            || !self.root.is_absolute()
+            || self.source_checkout == self.root
+            || !matches!(
+                self.tier,
+                QualificationDerivedAccessTierV1::D0_128
+                    | QualificationDerivedAccessTierV1::L7
+                    | QualificationDerivedAccessTierV1::L100
+            )
+        {
+            return Err("invalid derived-access phase request".to_owned());
+        }
+        self.execution.validate()?;
+        validate_digest(&self.root_identity_sha256, "phase request root identity")?;
+        validate_digest(&self.request_sha256, "phase request")?;
+        if self.request_sha256 != self.canonical_sha256()? {
+            return Err("derived-access phase request hash drifted".to_owned());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "longitudinal-counting")]
+pub fn run_qualification_derived_access_phase_v1(
+    request_path: &Path,
+) -> Result<QualificationDerivedAccessPhaseBundleV1, String> {
+    use std::sync::Arc;
+
+    use crate::session::derived_access::history::DerivedHistoryAccess;
+    use crate::session::derived_access::lifecycle::{DerivedAccessLifecycle, LifecycleControl};
+    use crate::session::derived_access::product_contract::DerivedAccessProfile;
+    use crate::session::derived_access::revisions::{
+        DerivedRevisionPageRoute, RevisionPageRequest,
+    };
+    use crate::session::derived_access::writer::DerivedWriteCoordinator;
+    use crate::session::{EventWriteOutcome, SnapshotSummaryCache, TrustSet, opaque_path_identity};
+
+    let request: QualificationDerivedAccessPhaseRunRequestV1 = read_json(request_path)?;
+    request.validate()?;
+    validate_current_execution_identity_v1(
+        &request.execution,
+        &request.source_checkout,
+        &request.root,
+    )?;
+    let inventory = longitudinal_authoritative_store_data_inventory_v1(&request.root)
+        .map_err(|error| error.to_string())?;
+    if inventory.inventory_sha256 != request.root_identity_sha256 {
+        return Err("derived-access phase root identity drifted".to_owned());
+    }
+    let source_identity_sha256 = request.source_identity_sha256()?;
+    let store_root = store_dir_for_repo(&request.root).map_err(|error| error.to_string())?;
+    let store_identity =
+        opaque_path_identity("store", &store_root).map_err(|error| error.to_string())?;
+    let root_identity_sha256 = request.root_identity_sha256.clone();
+    let mut receipts = Vec::new();
+
+    // Bootstrap is intentionally first: the later page and governed-write
+    // probes must observe the exact generation produced by this same-source
+    // attribution run rather than inherited disposable state.
+    let bootstrap_run_identity = phase_run_identity(
+        request.tier,
+        QualificationDerivedAccessPhaseOperationV1::Bootstrap,
+        &request.request_sha256,
+    );
+    let bootstrap_scope = LongitudinalCountingScopeV1::new(bootstrap_run_identity.clone())?;
+    let bootstrap_guard = bootstrap_scope.enter();
+    let bootstrap = DerivedAccessLifecycle::new(
+        DerivedAccessProfile::SqliteWalBodylessV1,
+        &store_root,
+        store_identity.clone(),
+    )
+    .map_err(|error| error.to_string())?
+    .rebuild(|_| LifecycleControl::Continue)
+    .map_err(|error| error.to_string())?;
+    drop(bootstrap_guard);
+    let bootstrap_semantic = bootstrap
+        .semantic_receipt
+        .ok_or_else(|| "phase bootstrap omitted its semantic receipt".to_owned())?;
+    receipts.push(QualificationDerivedAccessPhaseReceiptV1::new(
+        request.tier,
+        QualificationDerivedAccessPhaseOperationV1::Bootstrap,
+        source_identity_sha256.clone(),
+        root_identity_sha256.clone(),
+        bootstrap_run_identity,
+        digest_text(&bootstrap_semantic),
+        bootstrap_scope.snapshot().derived_access_phases,
+    )?);
+
+    let page_run_identity = phase_run_identity(
+        request.tier,
+        QualificationDerivedAccessPhaseOperationV1::RevisionPage,
+        &request.request_sha256,
+    );
+    let page_scope = LongitudinalCountingScopeV1::new(page_run_identity.clone())?;
+    let access = DerivedHistoryAccess::resolve(&request.root)?;
+    if !access.is_active() {
+        return Err(
+            "phase evidence requires POINTBREAK_DERIVED_ACCESS=sqlite-wal-bodyless-v1".to_owned(),
+        );
+    }
+    let page_guard = page_scope.enter();
+    let page = access.revisions_page(
+        &request.root,
+        TrustSet::default(),
+        Arc::new(SnapshotSummaryCache::new()),
+        &RevisionPageRequest::new(Some(100), None)
+            .map_err(|_| "phase revision-page request is invalid".to_owned())?,
+    )?;
+    drop(page_guard);
+    let DerivedRevisionPageRoute::Ready(page) = page else {
+        return Err("phase revision-page route was not ready".to_owned());
+    };
+    let page_semantic = serde_json::to_vec(&serde_json::json!({
+        "projectionStamp": page.projection_stamp,
+        "next": page.next,
+        "rowsSelected": page.work.rows_selected,
+        "entries": page
+            .result
+            .entries
+            .iter()
+            .map(|entry| entry.revision_id.as_str())
+            .collect::<Vec<_>>(),
+        "overviews": page
+            .overviews
+            .keys()
+            .map(|revision_id| revision_id.as_str())
+            .collect::<Vec<_>>(),
+    }))
+    .map_err(|error| error.to_string())?;
+    receipts.push(QualificationDerivedAccessPhaseReceiptV1::new(
+        request.tier,
+        QualificationDerivedAccessPhaseOperationV1::RevisionPage,
+        source_identity_sha256.clone(),
+        root_identity_sha256.clone(),
+        page_run_identity,
+        sha256_bytes_hex(&page_semantic),
+        page_scope.snapshot().derived_access_phases,
+    )?);
+
+    // Event construction is outside the scope; the governed-write phases begin
+    // at admission and retain the authoritative loose publish as a separately
+    // typed truth-owned sample.
+    let write_event = phase_attribution_event(&request.request_sha256)?;
+    let write_run_identity = phase_run_identity(
+        request.tier,
+        QualificationDerivedAccessPhaseOperationV1::GovernedWrite,
+        &request.request_sha256,
+    );
+    let write_scope = LongitudinalCountingScopeV1::new(write_run_identity.clone())?;
+    let write_lifecycle = DerivedAccessLifecycle::new(
+        DerivedAccessProfile::SqliteWalBodylessV1,
+        &store_root,
+        store_identity,
+    )
+    .map_err(|error| error.to_string())?;
+    let coordinator =
+        DerivedWriteCoordinator::new(write_lifecycle).map_err(|error| error.to_string())?;
+    let governed = EventStore::open(&store_root).with_coordinator(coordinator);
+    let write_guard = write_scope.enter();
+    let outcome = governed
+        .record_event_once(&write_event)
+        .map_err(|error| error.to_string())?;
+    drop(write_guard);
+    if outcome != EventWriteOutcome::Created {
+        return Err("phase governed write did not create exactly one event".to_owned());
+    }
+    receipts.push(QualificationDerivedAccessPhaseReceiptV1::new(
+        request.tier,
+        QualificationDerivedAccessPhaseOperationV1::GovernedWrite,
+        source_identity_sha256.clone(),
+        root_identity_sha256,
+        write_run_identity,
+        digest_text(&format!("{}:{outcome:?}", write_event.event_id.as_str())),
+        write_scope.snapshot().derived_access_phases,
+    )?);
+
+    QualificationDerivedAccessPhaseBundleV1::new(source_identity_sha256, request.tier, receipts)
+}
+
+#[cfg(not(feature = "longitudinal-counting"))]
+pub fn run_qualification_derived_access_phase_v1(
+    _request_path: &Path,
+) -> Result<serde_json::Value, String> {
+    Err("phase evidence requires --features longitudinal-counting".to_owned())
+}
+
+#[cfg(any(test, feature = "longitudinal-counting"))]
+pub fn verify_qualification_derived_access_phase_v1(
+    request_path: &Path,
+    bundle_path: &Path,
+) -> Result<QualificationDerivedAccessPhaseBundleV1, String> {
+    let request: QualificationDerivedAccessPhaseRunRequestV1 = read_json(request_path)?;
+    let bundle: QualificationDerivedAccessPhaseBundleV1 = read_json(bundle_path)?;
+    request.validate()?;
+    bundle.validate()?;
+    if bundle.source_identity_sha256 != request.source_identity_sha256()?
+        || bundle.tier != request.tier
+        || bundle
+            .raw_receipts
+            .iter()
+            .any(|receipt| receipt.root_identity_sha256 != request.root_identity_sha256)
+    {
+        return Err("derived-access phase bundle does not match its request".to_owned());
+    }
+    Ok(bundle)
+}
+
+#[cfg(not(any(test, feature = "longitudinal-counting")))]
+pub fn verify_qualification_derived_access_phase_v1(
+    _request_path: &Path,
+    _bundle_path: &Path,
+) -> Result<serde_json::Value, String> {
+    Err("phase verification requires --features longitudinal-counting".to_owned())
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn phase_run_identity(
+    tier: QualificationDerivedAccessTierV1,
+    operation: QualificationDerivedAccessPhaseOperationV1,
+    request_sha256: &str,
+) -> String {
+    digest_text(&format!("{tier:?}/{operation:?}/{request_sha256}"))
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn digest_text(value: &str) -> String {
+    sha256_bytes_hex(value.as_bytes())
+}
+
+#[cfg(feature = "longitudinal-counting")]
+fn phase_attribution_event(request_sha256: &str) -> Result<ShoreEvent, String> {
+    let journal_id = JournalId::new(format!(
+        "journal:phase-attribution:{}",
+        &request_sha256[..16]
+    ));
+    ShoreEvent::new(
+        EventType::ReviewInitialized,
+        ReviewInitializedPayload::idempotency_key(&journal_id),
+        EventTarget::for_journal(journal_id),
+        Writer::shore_local("phase-attribution"),
+        ReviewInitializedPayload {},
+        "2026-08-01T00:00:00Z",
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]

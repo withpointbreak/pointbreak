@@ -67,6 +67,192 @@ fn raw_samples_reject_ambiguous_cpu_units_and_scope() {
     assert!(sample.validate().is_err());
 }
 
+fn phase_receipt(
+    tier: QualificationDerivedAccessTierV1,
+    operation: QualificationDerivedAccessPhaseOperationV1,
+    source_identity_sha256: String,
+) -> QualificationDerivedAccessPhaseReceiptV1 {
+    let phases = operation
+        .expected_phases()
+        .iter()
+        .enumerate()
+        .map(|(ordinal, phase)| {
+            crate::bench_support::longitudinal::LongitudinalDerivedAccessPhaseSampleV1 {
+                phase: *phase,
+                ownership: phase.ownership(),
+                ordinal: ordinal.try_into().expect("small phase list"),
+                wall_nanos: 1,
+                process_cpu_nanos: Some(1),
+                resident_bytes_before: Some(100),
+                resident_bytes_after: Some(101),
+                resident_bytes_high_water: Some(101),
+                counters: crate::bench_support::longitudinal::LongitudinalCountersV1::default(),
+            }
+        })
+        .collect();
+    QualificationDerivedAccessPhaseReceiptV1::new(
+        tier,
+        operation,
+        source_identity_sha256,
+        digest(41),
+        digest(42),
+        digest(43),
+        phases,
+    )
+    .expect("valid phase receipt")
+}
+
+#[test]
+fn phase_receipts_reject_missing_duplicate_wrong_operation_and_source_samples() {
+    let source = digest(40);
+    let operation = QualificationDerivedAccessPhaseOperationV1::RevisionPage;
+    let receipt = phase_receipt(
+        QualificationDerivedAccessTierV1::L7,
+        operation,
+        source.clone(),
+    );
+    receipt
+        .validate_against(&source, QualificationDerivedAccessTierV1::L7, operation)
+        .expect("valid phase receipt");
+
+    let mut missing = receipt.clone();
+    missing.phases.pop();
+    missing.refresh_sha256().expect("rehash missing receipt");
+    assert!(
+        missing
+            .validate_against(&source, QualificationDerivedAccessTierV1::L7, operation)
+            .is_err()
+    );
+
+    let mut duplicate = receipt.clone();
+    duplicate.phases[1].phase = duplicate.phases[0].phase;
+    duplicate
+        .refresh_sha256()
+        .expect("rehash duplicate receipt");
+    assert!(
+        duplicate
+            .validate_against(&source, QualificationDerivedAccessTierV1::L7, operation)
+            .is_err()
+    );
+
+    assert!(
+        receipt
+            .validate_against(
+                &source,
+                QualificationDerivedAccessTierV1::L7,
+                QualificationDerivedAccessPhaseOperationV1::Bootstrap,
+            )
+            .is_err()
+    );
+    assert!(
+        receipt
+            .validate_against(&digest(43), QualificationDerivedAccessTierV1::L7, operation)
+            .is_err()
+    );
+}
+
+#[test]
+fn phase_receipt_json_rejects_negative_and_overflowed_measurements() {
+    let receipt = phase_receipt(
+        QualificationDerivedAccessTierV1::D0_128,
+        QualificationDerivedAccessPhaseOperationV1::Bootstrap,
+        digest(44),
+    );
+    let mut negative = serde_json::to_value(&receipt).expect("phase receipt JSON");
+    negative["phases"][0]["wallNanos"] = serde_json::json!(-1);
+    assert!(serde_json::from_value::<QualificationDerivedAccessPhaseReceiptV1>(negative).is_err());
+
+    let mut overflowed = receipt;
+    overflowed.phases[0].wall_nanos = u64::MAX;
+    overflowed
+        .refresh_sha256()
+        .expect("rehash overflowed receipt");
+    assert!(overflowed.validate().is_err());
+}
+
+#[test]
+fn phase_bundle_hash_binds_raw_receipts_to_their_tier_and_operation() {
+    let source = digest(45);
+    let revision_page = phase_receipt(
+        QualificationDerivedAccessTierV1::L100,
+        QualificationDerivedAccessPhaseOperationV1::RevisionPage,
+        source.clone(),
+    );
+    let bootstrap = phase_receipt(
+        QualificationDerivedAccessTierV1::L100,
+        QualificationDerivedAccessPhaseOperationV1::Bootstrap,
+        source.clone(),
+    );
+    let governed_write = phase_receipt(
+        QualificationDerivedAccessTierV1::L100,
+        QualificationDerivedAccessPhaseOperationV1::GovernedWrite,
+        source.clone(),
+    );
+    let mut bundle = QualificationDerivedAccessPhaseBundleV1::new(
+        source.clone(),
+        QualificationDerivedAccessTierV1::L100,
+        vec![revision_page, bootstrap, governed_write],
+    )
+    .expect("valid phase bundle");
+    bundle.validate().expect("phase bundle validates");
+
+    bundle.raw_receipts.swap(0, 1);
+    bundle.refresh_sha256().expect("rehash substituted bundle");
+    assert!(bundle.validate().is_err());
+}
+
+#[test]
+fn phase_request_and_separate_verifier_bind_source_tier_and_root() {
+    let execution = QualificationDerivedAccessExpectedAuthorityV1::test_fixture().execution;
+    let mut request = QualificationDerivedAccessPhaseRunRequestV1 {
+        schema: QUALIFICATION_DERIVED_ACCESS_PHASE_REQUEST_SCHEMA_V1.to_owned(),
+        source_checkout: PathBuf::from("/tmp/pointbreak-phase-source"),
+        execution,
+        tier: QualificationDerivedAccessTierV1::L7,
+        root: PathBuf::from("/tmp/pointbreak-phase-root"),
+        root_identity_sha256: digest(46),
+        request_sha256: String::new(),
+    };
+    request.refresh_sha256().expect("hash request");
+    request.validate().expect("valid request");
+    let source = request.source_identity_sha256().expect("source identity");
+    let receipts = QualificationDerivedAccessPhaseOperationV1::ALL
+        .into_iter()
+        .map(|operation| phase_receipt(request.tier, operation, source.clone()))
+        .map(|mut receipt| {
+            receipt.root_identity_sha256 = request.root_identity_sha256.clone();
+            receipt.refresh_sha256().expect("rehash bound receipt");
+            receipt
+        })
+        .collect();
+    let bundle = QualificationDerivedAccessPhaseBundleV1::new(source, request.tier, receipts)
+        .expect("valid bundle");
+    let root = tempfile::tempdir().expect("phase verifier root");
+    let request_path = root.path().join("request.json");
+    let bundle_path = root.path().join("bundle.json");
+    std::fs::write(
+        &request_path,
+        serde_json::to_vec_pretty(&request).expect("request JSON"),
+    )
+    .expect("write request");
+    std::fs::write(
+        &bundle_path,
+        serde_json::to_vec_pretty(&bundle).expect("bundle JSON"),
+    )
+    .expect("write bundle");
+    verify_qualification_derived_access_phase_v1(&request_path, &bundle_path)
+        .expect("separate verifier accepts exact request and bundle");
+
+    request.tier = QualificationDerivedAccessTierV1::D0_128;
+    request.refresh_sha256().expect("rehash drifted request");
+    std::fs::write(
+        &request_path,
+        serde_json::to_vec_pretty(&request).expect("drifted request JSON"),
+    )
+    .expect("write drifted request");
+    assert!(verify_qualification_derived_access_phase_v1(&request_path, &bundle_path).is_err());
+}
+
 #[test]
 fn raw_samples_reject_semantic_failure_and_hidden_whole_history_work() {
     let mut sample = QualificationDerivedAccessRawSampleV1::test_fixture();

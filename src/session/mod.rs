@@ -71,6 +71,8 @@ pub(crate) use store::backend::{
 };
 #[cfg(test)]
 pub(crate) use store::compute_revision_fingerprint;
+#[cfg(feature = "longitudinal-counting")]
+pub(crate) use store::resolution::opaque_path_identity;
 pub(crate) use store::{
     EventStore, RepositoryPaths, RevisionFingerprint, SkippedEvent, sweep_stale_temp_files,
     worktree_fingerprint_for_files,
