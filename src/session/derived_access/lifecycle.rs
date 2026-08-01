@@ -1139,10 +1139,14 @@ fn validate_published(
 ) -> Result<(), LifecycleError> {
     let head = authority.head.cursor;
     let checkpoint = service.locator_checkpoint()?;
+    // The descriptor freezes the publication-time authority anchor. The cursor
+    // ledger may later carry that anchor forward after a bounded stable check
+    // (or advance it with a governed append). `validate_current_authority` has
+    // already proved the live cursor before this structural coverage check, so
+    // requiring byte equality with the immutable anchor would reject valid NTFS
+    // continuations that observed only unrelated volume churn.
     if head.epoch != descriptor.epoch
         || head.sequence < descriptor.head_sequence
-        || (head.sequence == descriptor.head_sequence
-            && authority.change_stamp != descriptor.authority_stamp)
         || checkpoint.epoch != head.epoch
         || checkpoint.sequence > head.sequence
     {
@@ -1557,6 +1561,8 @@ mod tests {
         let lifecycle = active_lifecycle(temp.path());
         lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
         let current = lifecycle.open_current().unwrap().unwrap();
+        let publication = lifecycle.paths.current_publication().unwrap().unwrap();
+        let descriptor = lifecycle.paths.descriptor(&publication).unwrap();
         let initial = current.service().truth_authority_snapshot().unwrap();
         let successor_one = JournalChangeStamp::Observed {
             identity_sha256: "1".repeat(64),
@@ -1572,6 +1578,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(continued.change_stamp, successor_one);
+        validate_published(current.service(), &descriptor, &continued).unwrap();
         assert_eq!(
             current
                 .service()
