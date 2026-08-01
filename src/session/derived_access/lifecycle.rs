@@ -24,6 +24,7 @@ use crate::session::store::backend::{
 };
 
 const STABLE_PUBLICATION_ATTEMPTS: usize = 8;
+const BOOTSTRAP_PROJECTION_BATCH: usize = 512;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LifecycleControl {
@@ -310,6 +311,15 @@ impl DerivedAccessLifecycle {
 
     pub(crate) fn rebuild_with_hook(
         &self,
+        progress: impl FnMut(LifecycleProgress) -> LifecycleControl,
+        hook: impl FnMut(PublicationBoundary),
+    ) -> Result<LifecycleReceipt, LifecycleError> {
+        self.rebuild_with_hook_and_batch_limit(BOOTSTRAP_PROJECTION_BATCH, progress, hook)
+    }
+
+    fn rebuild_with_hook_and_batch_limit(
+        &self,
+        bootstrap_batch_limit: usize,
         mut progress: impl FnMut(LifecycleProgress) -> LifecycleControl,
         mut hook: impl FnMut(PublicationBoundary),
     ) -> Result<LifecycleReceipt, LifecycleError> {
@@ -400,8 +410,10 @@ impl DerivedAccessLifecycle {
                 return Err(LifecycleError::Cancelled);
             }
             let mut projection_progress_error = None;
-            let population_result =
-                service.populate_bootstrap_with_hook(&bootstrap.entries, 512, |projection| {
+            let population_result = service.populate_bootstrap_with_hook(
+                &bootstrap.entries,
+                bootstrap_batch_limit,
+                |projection| {
                     let update = lifecycle_progress(
                         GenerationProgressPhase::ProjectionPopulation,
                         projection.completed,
@@ -423,7 +435,8 @@ impl DerivedAccessLifecycle {
                             BootstrapProjectionControl::Cancel
                         }
                     }
-                });
+                },
+            );
             if let Some(error) = projection_progress_error {
                 return Err(error);
             }
@@ -1731,18 +1744,22 @@ mod tests {
 
     #[test]
     fn cancellation_between_projection_batches_restarts_from_clean_staging() {
-        let temp = populated_store(513);
+        let temp = populated_store(7);
         let lifecycle = active_lifecycle(temp.path());
 
-        let cancelled = lifecycle.rebuild(|update| {
-            if update.phase == GenerationProgressPhase::ProjectionPopulation
-                && update.completed == 512
-            {
-                LifecycleControl::Cancel
-            } else {
-                LifecycleControl::Continue
-            }
-        });
+        let cancelled = lifecycle.rebuild_with_hook_and_batch_limit(
+            4,
+            |update| {
+                if update.phase == GenerationProgressPhase::ProjectionPopulation
+                    && update.completed == 4
+                {
+                    LifecycleControl::Cancel
+                } else {
+                    LifecycleControl::Continue
+                }
+            },
+            |_| {},
+        );
 
         assert!(matches!(cancelled, Err(LifecycleError::Cancelled)));
         assert_eq!(
@@ -1754,7 +1771,7 @@ mod tests {
         let completed = lifecycle
             .rebuild(|_| LifecycleControl::Continue)
             .expect("clean restart");
-        assert_eq!(completed.head_sequence, 513);
+        assert_eq!(completed.head_sequence, 7);
         assert_eq!(
             lifecycle.status().unwrap().availability,
             DerivedAccessAvailability::Current
