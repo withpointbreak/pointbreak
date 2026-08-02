@@ -30,7 +30,13 @@ use crate::session::{RemovalPolicy, SupersessionView, TrustSet};
 
 pub const REVISION_PAGE_SCHEMA: &str = "pointbreak.inspect-revisions-page.v1";
 pub const REVISION_PAGE_DEFAULT_LIMIT: usize = 100;
-pub const REVISION_PAGE_MAXIMUM_LIMIT: usize = 500;
+// `page_revision_event_query` emits one compound-SELECT term per selected
+// revision. Keep the public maximum pinned to SQLite's default 500-term
+// `SQLITE_LIMIT_COMPOUND_SELECT` ceiling unless the query is chunked or the
+// connection limit is deliberately raised. The production-schema boundary
+// test below prepares and executes a full maximum page.
+const SQLITE_DEFAULT_COMPOUND_SELECT_LIMIT: usize = 500;
+pub const REVISION_PAGE_MAXIMUM_LIMIT: usize = SQLITE_DEFAULT_COMPOUND_SELECT_LIMIT;
 pub const ACTIVE_REVISION_PAGE_PROFILE: &str = "sqlite-wal-bodyless-v1";
 pub const AUTHORITATIVE_REVISION_PAGE_PROFILE: &str = "authoritative-loose-v1";
 const REVISION_PAGE_TOKEN_SCHEMA: &str = "pointbreak.inspect-revisions-page-token.v1";
@@ -555,8 +561,9 @@ fn page_revision_event_ids(
 /// `IN` predicate on that expression cannot drive
 /// `semantic_event_fact_revision`. Each unique page identity therefore gets
 /// one index-anchored branch over the same canonical/raw columns used by the
-/// semantic encoder. The public page limit bounds the compound query at 500
-/// branches, and the outer ordering preserves replay/event order exactly.
+/// semantic encoder. The public page limit is intentionally pinned to
+/// SQLite's default compound-SELECT ceiling, and the outer ordering preserves
+/// replay/event order exactly.
 fn page_revision_event_query(
     as_of: super::cursor::TruthCursor,
     revision_ids: &[RevisionId],
