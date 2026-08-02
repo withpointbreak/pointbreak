@@ -709,9 +709,10 @@ The typed request binds one clean source identity, D0-128/L7/L100 tier, admitted
 read-only `immutableInputRoot`, and filesystem-disjoint mutable `root`. Both roots must begin with the admitted
 inventory. The runner rechecks the immutable input after the governed append and emits the completion-last
 `pointbreak.qualification-derived-access-phase-bundle.v1` only when it remained unchanged. The mutable root
-is intentionally single-use: bootstrap writes its disposable `.pointbreak-derived/` generation and the
-governed-write probe appends one public synthetic event to authoritative truth, so make a fresh clone for
-every run. `POINTBREAK_DERIVED_ACCESS=sqlite-wal-bodyless-v1` is required and is checked before bootstrap.
+is intentionally single-use: bootstrap writes its disposable `derived/` generation (or reuses a compatible
+legacy `.pointbreak-derived/` root) and the governed-write probe appends one public synthetic event to
+authoritative truth, so make a fresh clone for every run. `POINTBREAK_DERIVED_ACCESS=sqlite-wal-bodyless-v1`
+is required and is checked before bootstrap.
 
 Each operation receipt carries ordered typed samples, optional process CPU/RSS endpoints, counters, and
 ownership. `parentOrdinal` makes nested samples explicit; a child sample is already included in its parent's
@@ -733,9 +734,9 @@ just derived-access-fragment /absolute/path/to/fragment-request.json
 
 The retained-root modes accept L7, L100, or C262. They require a separately admitted immutable input and
 a distinct, precreated qualification clone; no runner mode can materialize those tiers. Preflight compares
-the complete authoritative inventory. Bootstrap writes only `.pointbreak-derived/`, reports progress and
-high-water allocation, compares the incremental semantic receipt with strict full replay, and rechecks both
-the input and clone truth inventories.
+the complete authoritative inventory. Bootstrap writes only the selected disposable derived root, reports
+progress and high-water allocation, compares the incremental semantic receipt with strict full replay, and
+rechecks both the input and clone truth inventories.
 
 Scale evidence requires two already-bootstrapped roots. Each warm read receives one untimed request, three
 excluded warmups, and 30 retained samples per root. Append/post uses 30 pairs per root, and restart uses ten

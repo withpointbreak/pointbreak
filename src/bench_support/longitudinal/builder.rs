@@ -1475,6 +1475,16 @@ mod tests {
             "a malformed quarantine name remains authoritative"
         );
 
+        let lookalike_path = layouts[1].quarantine("pid-7");
+        fs::create_dir_all(&lookalike_path).unwrap();
+        fs::write(lookalike_path.join("cursor.sqlite3"), b"lookalike").unwrap();
+        let lookalike = longitudinal_authoritative_store_data_inventory_v1(repo.path()).unwrap();
+        assert_eq!(
+            lookalike.file_count,
+            malformed.file_count + 1,
+            "a quarantine lookalike remains authoritative"
+        );
+
         let nested_root = store
             .join("events")
             .join(layouts[1].root().file_name().unwrap());
@@ -1484,7 +1494,7 @@ mod tests {
             longitudinal_authoritative_store_data_inventory_v1(repo.path()).unwrap();
         assert_eq!(
             nested_sidecar.file_count,
-            malformed.file_count + 1,
+            lookalike.file_count + 1,
             "an exactly named nested sidecar remains authoritative"
         );
 

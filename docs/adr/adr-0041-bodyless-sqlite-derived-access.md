@@ -105,17 +105,17 @@ signature input. Active responses use it; loose responses retain `eventSetHash`.
 The implementation is `sqlite-wal-bodyless-v1`, shared by product and qualification callers. SQLite-specific
 implementation details are confined to `src/session/derived_access/`: the `sqlite/` adapter core plus sibling
 query and lifecycle modules. No substrate type crosses the `session` public boundary; higher-level consumers
-use domain-shaped services. Its `.pointbreak-derived/` generation is rooted beneath the
+use domain-shaped services. Its `derived/` generation is rooted beneath the
 exact resolved authoritative store directory, so clone-local, ephemeral, and user-level family stores each
 own their corresponding sidecar without a second path registry
 (`src/session/derived_access/history.rs:199-216`; `src/session/derived_access/generation.rs:154-159`). The
 stable store-level container name is `derived/`. “Projection” remains the query-serving
 subset; the container also owns cursor, receipt, authority, and generation-lifecycle state. The checked-in
-path remains `.pointbreak-derived/`, and the separate rollout must implement a compatible transition rather
-than making this record rewrite local state. That transition covers the container and every sibling
-`.pointbreak-derived*` lock, lease, quarantine, and retired artifact. Bundled SQLite is in the normal binary
-dependency closure (`Cargo.toml:89,91`). A public `ProjectionStore` trait is not introduced for one
-implementation.
+path authority selects `derived/` for a store with no derived namespace and continues to reuse a legacy-only
+`.pointbreak-derived/` root. It does not move or rebuild existing state. The compatible transition must cover
+the container and every sibling `.pointbreak-derived*` lock, lease, quarantine, and retired artifact. Bundled
+SQLite is in the normal binary dependency closure (`Cargo.toml:89,91`). A public `ProjectionStore` trait is
+not introduced for one implementation.
 
 The cursor ledger uses WAL plus `synchronous=FULL` because its receipt/head transaction participates in
 writer admission and recovery. The locator and semantic store uses WAL plus `synchronous=NORMAL` because it
@@ -205,8 +205,9 @@ These residuals are accepted, and **default-on** is the target posture. This ADR
 decision but does not change `DerivedAccessProfile::parse`: an unset selector still resolves to `off` in the
 checked-in source (`src/session/derived_access/product_contract.rs:23-57`). A separate rollout change must
 own the actual default, release/package behavior, user-visible diagnostics, first-build expectations,
-fallback, non-Inspector first use, the `.pointbreak-derived*`-to-`derived/` path transition, and rollback. No
-truth migration or authoritative-store rewrite is required to activate a disposable sidecar.
+fallback, non-Inspector first use, completion of the compatible `.pointbreak-derived*`-to-`derived/`
+transition, and rollback. No truth migration or authoritative-store rewrite is required to activate a
+disposable sidecar.
 
 ## Consequences
 

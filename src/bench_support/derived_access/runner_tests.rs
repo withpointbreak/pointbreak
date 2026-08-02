@@ -602,7 +602,7 @@ fn candidate_open_preserves_admitted_truth_and_accounts_for_governed_namespaces(
         "well-formed quarantine bytes enter derived high-water accounting"
     );
 
-    let malformed = layout.quarantine("");
+    let malformed = layout.quarantine("pid-7");
     std::fs::create_dir_all(&malformed).expect("create malformed quarantine");
     std::fs::write(malformed.join("cursor.sqlite3"), b"not derived")
         .expect("write malformed quarantine");

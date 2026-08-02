@@ -292,14 +292,15 @@ as-built architecture is [ADR-0041](./adr-0041-bodyless-sqlite-derived-access.md
 This amendment also supersedes the header's builds-nothing and not-yet-implemented framing: the
 derived-access implementation now exists, although the checked-in runtime default remains `off`.
 
-The checked-in implementation is one private `sqlite-wal-bodyless-v1` generation under
-`.pointbreak-derived/` beneath the resolved authoritative store root. It therefore follows clone-local,
-ephemeral, and user-level family-store placement rather than defining a second path authority
+The checked-in implementation is one private `sqlite-wal-bodyless-v1` generation beneath the resolved
+authoritative store root. A store with no derived namespace selects `derived/`; a legacy-only
+`.pointbreak-derived/` root remains usable. It therefore follows clone-local, ephemeral, and user-level
+family-store placement rather than defining a second path authority
 (`src/session/derived_access/history.rs:199-216`; `src/session/derived_access/generation.rs:154-159`).
 The accepted stable store-level name is `derived/`: “projection” is too narrow because this container also
-owns cursor, receipt, authority, and generation-lifecycle state. The separate rollout owns a compatible path
-transition for the container and every sibling `.pointbreak-derived*` lock, lease, quarantine, and retired
-artifact; this amendment does not rename or rebuild anything.
+owns cursor, receipt, authority, and generation-lifecycle state. The compatible transition covers the
+container and every sibling `.pointbreak-derived*` lock, lease, quarantine, and retired artifact; namespace
+selection alone does not rename or rebuild anything.
 `rusqlite` and bundled `libsqlite3-sys` are part of the normal binary dependency
 closure (`Cargo.toml:89,91`), so this decision explicitly accepts a native C dependency. Pure Rust remains a
 preference to weigh against build, provenance, update, FFI, packaging, and support costs; it is not an

@@ -38,7 +38,9 @@ pub(crate) enum DerivedStorageDiscovery {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-#[error("both stable and legacy derived-access roots exist at {stable} and {legacy}")]
+#[error(
+    "both stable and legacy derived-access roots exist at {stable} and {legacy}; derived state is disposable, so set POINTBREAK_DERIVED_ACCESS=off or move one root aside before retrying"
+)]
 pub(crate) struct DerivedStorageConflict {
     pub(crate) stable: PathBuf,
     pub(crate) legacy: PathBuf,
@@ -110,9 +112,12 @@ impl DerivedStorageLayout {
     }
 
     pub(crate) fn generation_lease_id<'a>(&self, name: &'a str) -> Option<&'a str> {
-        name.strip_prefix(self.generation_lease_prefix())?
-            .strip_suffix(".lock")
-            .filter(|id| !id.is_empty())
+        Self::namespaces().find_map(|namespace| {
+            let layout = Self::for_namespace(Path::new(""), namespace);
+            name.strip_prefix(layout.generation_lease_prefix())?
+                .strip_suffix(".lock")
+                .filter(|id| !id.is_empty())
+        })
     }
 
     pub(crate) fn is_disposable_root(&self, path: &Path) -> bool {
@@ -121,19 +126,17 @@ impl DerivedStorageLayout {
                 .file_name()
                 .and_then(|value| value.to_str())
                 .is_some_and(|name| {
-                    name.strip_prefix(self.quarantine_prefix())
-                        .or_else(|| name.strip_prefix(self.retired_prefix()))
-                        .is_some_and(|suffix| !suffix.is_empty())
+                    Self::namespaces().any(|namespace| {
+                        let layout = Self::for_namespace(Path::new(""), namespace);
+                        name.strip_prefix(layout.quarantine_prefix())
+                            .or_else(|| name.strip_prefix(layout.retired_prefix()))
+                            .is_some_and(is_well_formed_disposable_suffix)
+                    })
                 })
     }
 
     pub(crate) fn is_governed_store_entry(name: &str, is_directory: bool, is_file: bool) -> bool {
-        [
-            DerivedStorageNamespace::Stable,
-            DerivedStorageNamespace::Legacy,
-        ]
-        .into_iter()
-        .any(|namespace| {
+        Self::namespaces().any(|namespace| {
             let layout = Self::for_namespace(Path::new(""), namespace);
             (is_directory && name == layout.root_name())
                 || (is_file && name == layout.writer_lock_name())
@@ -146,12 +149,20 @@ impl DerivedStorageLayout {
                 || (is_directory
                     && name
                         .strip_prefix(layout.quarantine_prefix())
-                        .is_some_and(|suffix| !suffix.is_empty()))
+                        .is_some_and(is_well_formed_disposable_suffix))
                 || (is_directory
                     && name
                         .strip_prefix(layout.retired_prefix())
-                        .is_some_and(|suffix| !suffix.is_empty()))
+                        .is_some_and(is_well_formed_disposable_suffix))
         })
+    }
+
+    fn namespaces() -> impl Iterator<Item = DerivedStorageNamespace> {
+        [
+            DerivedStorageNamespace::Stable,
+            DerivedStorageNamespace::Legacy,
+        ]
+        .into_iter()
     }
 
     const fn root_name(&self) -> &'static str {
@@ -195,6 +206,21 @@ impl DerivedStorageLayout {
             DerivedStorageNamespace::Legacy => LEGACY_RETIRED_PREFIX,
         }
     }
+}
+
+fn is_well_formed_disposable_suffix(suffix: &str) -> bool {
+    let mut components = suffix.split('-');
+    let Some(process_id) = components.next() else {
+        return false;
+    };
+    let Some(sequence) = components.next() else {
+        return false;
+    };
+    components.next().is_none()
+        && !process_id.is_empty()
+        && process_id.bytes().all(|byte| byte.is_ascii_digit())
+        && !sequence.is_empty()
+        && sequence.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -259,6 +285,11 @@ mod tests {
             DerivedStorageLayout::discover(root.path()),
             DerivedStorageDiscovery::Conflict { .. }
         ));
+        let conflict = DerivedStorageLayout::resolve(root.path())
+            .expect_err("both namespaces must not be selected")
+            .to_string();
+        assert!(conflict.contains("POINTBREAK_DERIVED_ACCESS=off"));
+        assert!(conflict.contains("move one root aside"));
 
         for namespace in [
             DerivedStorageNamespace::Stable,
@@ -281,7 +312,24 @@ mod tests {
                     !is_directory,
                 ));
             }
+            for path in [layout.quarantine("pid-7"), layout.retired("42")] {
+                assert!(!DerivedStorageLayout::is_governed_store_entry(
+                    path.file_name().unwrap().to_str().unwrap(),
+                    true,
+                    false,
+                ));
+            }
         }
+        let stable =
+            DerivedStorageLayout::for_namespace(root.path(), DerivedStorageNamespace::Stable);
+        let legacy =
+            DerivedStorageLayout::for_namespace(root.path(), DerivedStorageNamespace::Legacy);
+        assert!(stable.is_disposable_root(&legacy.quarantine("42-7")));
+        let legacy_lease = legacy.generation_lease("g-1");
+        assert_eq!(
+            stable.generation_lease_id(legacy_lease.file_name().unwrap().to_str().unwrap()),
+            Some("g-1"),
+        );
         assert!(!DerivedStorageLayout::is_governed_store_entry(
             "derived-notes",
             true,
