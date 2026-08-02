@@ -657,6 +657,16 @@ impl GenerationLayout {
     }
 
     fn generation_lease_paths_under(&self, root: &Path) -> Result<Vec<PathBuf>, GenerationError> {
+        let lease_layout = if root == self.root() {
+            self.storage_layout.clone()
+        } else {
+            self.storage_layout
+                .layout_for_disposable_root(root)
+                .ok_or_else(|| GenerationError::Metadata {
+                    path: root.to_path_buf(),
+                    message: "cannot resolve the disposable root namespace".to_owned(),
+                })?
+        };
         let generations = root.join("generations");
         if !generations.exists() {
             return Ok(Vec::new());
@@ -672,7 +682,7 @@ impl GenerationLayout {
             }
             let generation_id = entry.file_name().to_string_lossy().into_owned();
             if validate_generation_id(&generation_id).is_ok() {
-                paths.push(self.generation_lease_path(&generation_id));
+                paths.push(lease_layout.generation_lease(&generation_id));
             }
         }
         paths.sort();
@@ -934,5 +944,37 @@ mod tests {
                 None,
             ))
         );
+    }
+
+    #[test]
+    fn cross_namespace_purge_honors_the_disposable_roots_reader_lease() {
+        let temp = TempDir::new().unwrap();
+        let stable = DerivedStorageLayout::for_namespace(
+            temp.path(),
+            super::super::layout::DerivedStorageNamespace::Stable,
+        );
+        std::fs::create_dir(stable.root()).unwrap();
+        let layout = GenerationLayout::new(temp.path()).unwrap();
+        let legacy = DerivedStorageLayout::for_namespace(
+            temp.path(),
+            super::super::layout::DerivedStorageNamespace::Legacy,
+        );
+        let retired = legacy.retired("42-7");
+        std::fs::create_dir_all(retired.join("generations/g-test")).unwrap();
+        let legacy_lease_path = legacy.generation_lease("g-test");
+        let legacy_lease = open_lock_file(&legacy_lease_path).unwrap();
+        legacy_lease.lock_shared().unwrap();
+
+        assert!(matches!(
+            layout.purge_disposable_root(&retired),
+            Err(GenerationError::GenerationInUse)
+        ));
+        assert!(retired.exists());
+
+        legacy_lease.unlock().unwrap();
+        drop(legacy_lease);
+        layout.purge_disposable_root(&retired).unwrap();
+        assert!(!retired.exists());
+        assert!(!legacy_lease_path.exists());
     }
 }

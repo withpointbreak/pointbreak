@@ -121,18 +121,21 @@ impl DerivedStorageLayout {
     }
 
     pub(crate) fn is_disposable_root(&self, path: &Path) -> bool {
-        path.parent() == Some(self.store_root())
-            && path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .is_some_and(|name| {
-                    Self::namespaces().any(|namespace| {
-                        let layout = Self::for_namespace(Path::new(""), namespace);
-                        name.strip_prefix(layout.quarantine_prefix())
-                            .or_else(|| name.strip_prefix(layout.retired_prefix()))
-                            .is_some_and(is_well_formed_disposable_suffix)
-                    })
-                })
+        self.layout_for_disposable_root(path).is_some()
+    }
+
+    pub(crate) fn layout_for_disposable_root(&self, path: &Path) -> Option<Self> {
+        if path.parent() != Some(self.store_root()) {
+            return None;
+        }
+        let name = path.file_name()?.to_str()?;
+        Self::namespaces().find_map(|namespace| {
+            let layout = Self::for_namespace(self.store_root(), namespace);
+            name.strip_prefix(layout.quarantine_prefix())
+                .or_else(|| name.strip_prefix(layout.retired_prefix()))
+                .filter(|suffix| is_well_formed_disposable_suffix(suffix))
+                .map(|_| layout)
+        })
     }
 
     pub(crate) fn is_governed_store_entry(name: &str, is_directory: bool, is_file: bool) -> bool {
