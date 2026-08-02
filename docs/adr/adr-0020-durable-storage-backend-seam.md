@@ -481,3 +481,44 @@ Revisit only if a concrete user or operator workflow demonstrates that raw physi
 itself necessary in addition to the retained logical, inventory, integrity, backup, and repair contracts.
 Preference for readable files, debugging convenience, or a candidate's implementation shape is not
 sufficient by itself to restore a production constraint.
+
+## Amendment: Derived Access Adds a Cursor beside Loose Truth (2026-08-02)
+
+ADR-0020's byte-oriented `Journal` and `ContentStore`, wrapper-owned identity and conflict policy,
+append-only journal meaning, independently removable content, deterministic strict replay, and
+truth/projection separation stand. The 2026-07-20 amendment also stands: physical diffability is not a
+storage constraint.
+
+This amendment supersedes only D11's prediction that a stable incremental cursor likely requires replacing
+the loose journal and its implication that the future projection layer is primarily analytical. Pointbreak
+now has an as-built incremental derived-access layer beside unchanged loose authoritative carriers. The
+`Journal` exposes a bounded local change observable, while a separate private ledger supplies
+`TruthCursor { epoch, sequence }`, receipts, and bounded successor reads
+(`src/session/store/backend/mod.rs:294-367`; `src/session/derived_access/cursor.rs:8-68`). The cursor is an
+operational position, not an event identity, signature input, display key, replay key, bundle coordinate, or
+public API value.
+
+The derived path also introduces a store-directory-scoped writer lock
+(`src/session/store/resolution.rs:264-267`; `src/session/derived_access/sqlite/writer_lock.rs:17-58`). This
+does not change loose `create_once` semantics: direct loose writers retain the lock-free, cross-process
+create-once contract. The lock serializes governed derived-access admission, receipt finalization, and
+derived generation lifecycle transitions; it never gates direct loose writes.
+
+Loose `Journal` and `ContentStore` bytes remain the sole authority for event and content identity,
+create-once classification, selected reread, validation, strict replay, transfer, backup, repair, and
+removal. Cursor, locator, semantic, and checkpoint state is private, bodyless, disposable, and rebuildable.
+Its loss never loses truth; its corruption or incompatibility fails closed to quarantine or rebuild.
+
+Append order, display order, and canonical replay order are intentionally distinct. `TruthCursor` orders
+admission and catch-up; normalized `(occurredAt, eventId)` orders chronological display; the existing
+deterministic replay key orders semantic reconstruction. A backdated or canonical-earlier event advances the
+append cursor without becoming the newest display or replay item.
+
+SQLite-WAL is selected for this private derived layer, not for the durable truth traits. No SQLite row id,
+page, WAL frame, path, or SQL expression enters event/content identity, logical transfer, or a public domain
+document. A public `ProjectionStore` trait remains deferred until a second implementation earns the seam.
+The complete as-built decision is [ADR-0041](./adr-0041-bodyless-sqlite-derived-access.md).
+
+These mechanics apply only when the selected `sqlite-wal-bodyless-v1` profile is active. The checked-in
+runtime default remains `off`; this amendment authorizes no rollout, truth migration, production activation,
+or release promise.

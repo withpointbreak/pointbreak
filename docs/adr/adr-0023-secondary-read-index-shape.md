@@ -207,3 +207,49 @@ concrete target (e.g. p95 inspector latency, or an event-count threshold) set wh
   per-column row digest or extend read-path validation; this shape deliberately omits it.
 - **ADR-0020 D11's `ProjectionStore` seam is opened** → this row shape is its contract; reconcile the two so
   the seam and the index do not drift apart.
+
+## Amendment: Locator plus Bodyless Semantic Checkpoints (2026-08-02)
+
+ADR-0023's locator-not-authority rule, positions-not-bodies privacy boundary, authoritative reread,
+chronological display order, private format, and rebuildability stand. This amendment supersedes D1 only
+where it prohibited compact semantic state, D3's whole-set `eventSetHash` polling and unconditional lazy
+drop/rebuild maintenance, and D7's untriggered build deferral. The measured long-horizon access problem fired
+the build trigger, and the resulting implementation is recorded in
+[ADR-0041](./adr-0041-bodyless-sqlite-derived-access.md).
+
+This amendment also supersedes the header's not-yet-implemented framing: the derived-access implementation
+now exists, although the checked-in runtime default remains `off`.
+
+The locator remains a bodyless input index. Beside it, separately versioned bodyless semantic tables persist
+the compact revision, history, thread, attention, state, relation, and validation facts needed to avoid
+repeating complete-history folds. These rows are derived answers, never authoritative facts. They carry
+identities, ordering keys, targets, references, counts, statuses, edges, and validation witnesses, but never
+complete event bytes, object or note-body bytes, summaries, reasons, snippets, tokens, embeddings, or other
+body-derived search material. Input-request titles and validation check names are the two authorized short,
+output-bearing label exceptions; the sidecar-bytes qualification test distinguishes them from prohibited
+prose bodies (`src/session/derived_access/semantic/mod.rs:32-38,113-223`;
+`src/bench_support/derived_access/sqlite_semantic_tests.rs:852-876`).
+
+For an active `sqlite-wal-bodyless-v1` profile, ordinary freshness is a conjunction of two bounded checks:
+
+1. the persisted platform change stamp must continue as `Stable`; changed, truncated, reset, capped, gapped,
+   or indeterminate observations require audit or rebuild; and
+2. the compatible derived checkpoint's `applied_cursor` must equal the validated truth head, or bounded
+   catch-up applies successor receipts atomically with the new checkpoint
+   (`src/session/derived_access/checkpoint.rs:29-108`).
+
+`eventSetHash` remains an exhaustive replay/integrity receipt and the loose response token. It is not the
+ordinary active freshness mechanism because recomputing it requires the complete event set. Ordinary active
+reads and fresh writer admission perform no event-directory enumeration. Existing-carrier overwrite remains
+outside the bounded change-stamp claim and is detected when the selected carrier is reread or by an explicit
+exhaustive audit.
+
+Every returned domain result reopens and validates its selected authoritative event/content carriers. The
+selection includes removal carriers for referenced content and detached signatures over selected or removal
+events (`src/session/derived_access/history.rs:1167-1265`). Exact revision detail scopes diagnostics to the
+addressed fork-tolerant supersession component and its support carriers. Revision collection pages scope
+diagnostics and body-removal effects to the returned page. The CLI's exact revision read remains the
+store-wide audit surface.
+
+The checked-in runtime default remains `off`. This amendment authorizes no rollout, truth migration,
+production activation, or release promise.

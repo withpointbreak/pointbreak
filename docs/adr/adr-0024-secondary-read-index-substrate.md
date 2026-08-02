@@ -281,3 +281,53 @@ here so the decision is auditable.
 - **KurrentDB secondary index** (the positions-not-bodies, disposable/rebuildable DuckDB `idx_all`
   precedent at ~130 M events, mutated in place) — <https://www.kurrent.io/blog/secondary-indexes/>,
   <https://docs.kurrent.io/server/v26.0/features/indexes/secondary>.
+
+## Amendment: Select SQLite-WAL for Derived Access (2026-08-02)
+
+ADR-0024's containment principle and its rejection of DuckDB for this OLTP-shaped workload stand. This
+amendment supersedes, for the derived-access role, D1's redb selection, D4's count-marker plus lazy
+full-rebuild maintenance, D6's untriggered build deferral, and D7's forward redb preference. The selected
+as-built architecture is [ADR-0041](./adr-0041-bodyless-sqlite-derived-access.md).
+
+This amendment also supersedes the header's builds-nothing and not-yet-implemented framing: the
+derived-access implementation now exists, although the checked-in runtime default remains `off`.
+
+The checked-in implementation is one private `sqlite-wal-bodyless-v1` generation under
+`.pointbreak-derived/` beneath the resolved authoritative store root. It therefore follows clone-local,
+ephemeral, and user-level family-store placement rather than defining a second path authority
+(`src/session/derived_access/history.rs:199-216`; `src/session/derived_access/generation.rs:154-159`).
+The accepted stable store-level name is `derived/`: “projection” is too narrow because this container also
+owns cursor, receipt, authority, and generation-lifecycle state. The separate rollout owns a compatible path
+transition for the container and every sibling `.pointbreak-derived*` lock, lease, quarantine, and retired
+artifact; this amendment does not rename or rebuild anything.
+`rusqlite` and bundled `libsqlite3-sys` are part of the normal binary dependency
+closure (`Cargo.toml:89,91`), so this decision explicitly accepts a native C dependency. Pure Rust remains a
+preference to weigh against build, provenance, update, FFI, packaging, and support costs; it is not an
+eligibility gate.
+
+SQLite-specific implementation details remain confined to `src/session/derived_access/`: the `sqlite/`
+adapter core plus sibling query and lifecycle modules. No substrate type crosses the `session` public
+boundary; higher-level consumers use domain-shaped services. The cursor database uses WAL with
+`synchronous=FULL`
+because its receipt/head transaction participates in bounded writer admission and recovery. The locator and
+semantic database uses WAL with `synchronous=NORMAL`: those rows are atomic but disposable, and losing the
+latest projection transaction after power loss leaves the separately durable cursor head to force bounded
+catch-up. Both databases enable `fullfsync` on macOS
+(`src/session/derived_access/sqlite/cursor.rs:1098-1148`;
+`src/session/derived_access/sqlite/locator.rs:555-587`).
+
+When the selected profile is active, incremental checkpoint maintenance replaces drop-and-full-rebuild on
+each append. This supersedes D4's lock premise: governed derived writes now use the store-directory-scoped
+derived-access writer lock recorded by ADR-0041, while direct loose `create_once` remains lock-free.
+Deliberate first build, schema/projector incompatibility, missing or restored sidecar,
+corruption/quarantine, and authority gaps may still require an exhaustive rebuild. Rebuild validates truth,
+reports progress, supports cancellation and restart, and publishes an immutable generation only after strict
+replay and authority stability succeed.
+
+redb is not rejected generally. It is not selected here because the implemented multi-process reader/writer,
+incremental checkpoint, backup/rebuild, and native lifecycle shape was qualified with SQLite. A future
+substrate change requires a new decision and equivalent semantic, authority, lifecycle, native, allocation,
+and product evidence; it is not implied by adding another query.
+
+These mechanics apply only when `sqlite-wal-bodyless-v1` is active. The checked-in runtime default remains
+`off`; this amendment authorizes no rollout, truth migration, production activation, or release promise.
