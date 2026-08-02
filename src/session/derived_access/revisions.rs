@@ -574,8 +574,14 @@ fn page_revision_event_ids(
 /// still needed to compute the selected revision's `superseded_by` and stale
 /// review-fact attention readback. Keeping these carriers out of
 /// `page_revision_event_ids` prevents the successor itself from leaking into
-/// the page collection; the target index keeps the supplemental work bounded
-/// by the selected identities and their direct edges.
+/// the page collection.
+///
+/// The `CROSS JOIN` is a deliberate planner fence. With an ordinary join,
+/// SQLite may start from every locator row inside the retained cursor and then
+/// probe the edge index, making fixed page work grow with unrelated history.
+/// Starting from `product_revision_edge_target` keeps the supplemental work
+/// bounded by the selected identities and their direct edges; each matching
+/// edge then resolves one locator row by its integer primary key.
 fn page_revision_superseder_event_ids(
     connection: &rusqlite::Connection,
     as_of: super::cursor::TruthCursor,
@@ -584,29 +590,7 @@ fn page_revision_superseder_event_ids(
     if revision_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let placeholders = (0..revision_ids.len())
-        .map(|index| format!("?{}", index + 3))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT locator.event_id
-         FROM product_revision_edge AS edge
-           INDEXED BY product_revision_edge_target
-         JOIN locator_event_text AS locator ON locator.sequence = edge.sequence
-         WHERE locator.epoch = ?1
-           AND locator.sequence <= ?2
-           AND edge.superseded_revision_id IN ({placeholders})
-         ORDER BY locator.replay_key, locator.event_id"
-    );
-    let mut parameters = vec![
-        Value::Integer(to_sql_integer(as_of.epoch)?),
-        Value::Integer(to_sql_integer(as_of.sequence)?),
-    ];
-    parameters.extend(
-        revision_ids
-            .iter()
-            .map(|revision_id| Value::Text(revision_id.as_str().to_owned())),
-    );
+    let (sql, parameters) = page_revision_superseder_query(as_of, revision_ids)?;
     let mut statement = connection
         .prepare(&sql)
         .map_err(|error| error.to_string())?;
@@ -620,6 +604,37 @@ fn page_revision_superseder_event_ids(
         .map_err(|error| error.to_string())?;
     event_ids.dedup();
     Ok(event_ids)
+}
+
+fn page_revision_superseder_query(
+    as_of: super::cursor::TruthCursor,
+    revision_ids: &[RevisionId],
+) -> Result<(String, Vec<Value>), String> {
+    let placeholders = (0..revision_ids.len())
+        .map(|index| format!("?{}", index + 3))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT locator.event_id
+         FROM product_revision_edge AS edge
+           INDEXED BY product_revision_edge_target
+         CROSS JOIN locator_event_text AS locator
+         WHERE locator.epoch = ?1
+           AND locator.sequence = edge.sequence
+           AND locator.sequence <= ?2
+           AND edge.superseded_revision_id IN ({placeholders})
+         ORDER BY locator.replay_key, locator.event_id"
+    );
+    let mut parameters = vec![
+        Value::Integer(to_sql_integer(as_of.epoch)?),
+        Value::Integer(to_sql_integer(as_of.sequence)?),
+    ];
+    parameters.extend(
+        revision_ids
+            .iter()
+            .map(|revision_id| Value::Text(revision_id.as_str().to_owned())),
+    );
+    Ok((sql, parameters))
 }
 
 fn revision_event_ids(
@@ -717,6 +732,7 @@ mod tests {
     use std::process::Command;
     use std::sync::Mutex;
 
+    use rusqlite::StatementStatus;
     use tempfile::TempDir;
 
     use super::*;
@@ -1111,6 +1127,87 @@ mod tests {
         assert_eq!(
             RevisionPageRequest::new(Some(1), Some("not-base64!!")).unwrap_err(),
             RevisionPageRequestError::InvalidRequest
+        );
+    }
+
+    fn superseder_query_vm_steps(history_rows: usize) -> (Vec<String>, u64) {
+        let mut connection = rusqlite::Connection::open_in_memory().expect("open SQLite fixture");
+        connection
+            .execute_batch(
+                "CREATE TABLE locator_event_text (
+                     sequence INTEGER PRIMARY KEY,
+                     epoch INTEGER NOT NULL,
+                     event_id TEXT NOT NULL,
+                     replay_key TEXT NOT NULL
+                 ) STRICT;
+                 CREATE INDEX locator_event_cursor
+                     ON locator_event_text(epoch, sequence);
+                 CREATE TABLE product_revision_edge (
+                     sequence INTEGER NOT NULL,
+                     superseded_revision_id TEXT NOT NULL,
+                     PRIMARY KEY (sequence, superseded_revision_id)
+                 ) STRICT, WITHOUT ROWID;
+                 CREATE INDEX product_revision_edge_target
+                     ON product_revision_edge(superseded_revision_id, sequence);",
+            )
+            .expect("create support-query fixture");
+        let transaction = connection.transaction().expect("begin fixture transaction");
+        {
+            let mut insert = transaction
+                .prepare(
+                    "INSERT INTO locator_event_text
+                     (sequence, epoch, event_id, replay_key)
+                     VALUES (?1, 1, ?2, ?3)",
+                )
+                .expect("prepare locator insert");
+            for sequence in 1..=history_rows {
+                let digest = format!("{sequence:064x}");
+                insert
+                    .execute(rusqlite::params![
+                        i64::try_from(sequence).unwrap(),
+                        format!("evt:sha256:{digest}"),
+                        digest,
+                    ])
+                    .expect("insert locator row");
+            }
+        }
+        transaction
+            .execute(
+                "INSERT INTO product_revision_edge (sequence, superseded_revision_id)
+                 VALUES (?1, 'rev:sha256:selected')",
+                [i64::try_from(history_rows).unwrap()],
+            )
+            .expect("insert selected edge");
+        transaction.commit().expect("commit fixture");
+
+        let (sql, parameters) = page_revision_superseder_query(
+            super::super::cursor::TruthCursor::new(1, history_rows as u64),
+            &[RevisionId::new("rev:sha256:selected")],
+        )
+        .expect("build support query");
+        let mut statement = connection.prepare(&sql).expect("prepare support query");
+        let event_ids = statement
+            .query_map(rusqlite::params_from_iter(parameters.iter()), |row| {
+                row.get::<_, String>(0)
+            })
+            .expect("run support query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read support event ids");
+        let vm_steps = u64::try_from(statement.get_status(StatementStatus::VmStep))
+            .expect("VM step count is nonnegative");
+        (event_ids, vm_steps)
+    }
+
+    #[test]
+    fn superseder_support_work_is_selected_identity_proportional() {
+        let (small_ids, small_steps) = superseder_query_vm_steps(128);
+        let (large_ids, large_steps) = superseder_query_vm_steps(4_096);
+
+        assert_eq!(small_ids.len(), 1);
+        assert_eq!(large_ids.len(), 1);
+        assert!(
+            large_steps <= small_steps.saturating_mul(2),
+            "fixed selected/support work grew with unrelated history: small={small_steps}, large={large_steps}"
         );
     }
 
