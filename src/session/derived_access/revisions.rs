@@ -1,6 +1,6 @@
 //! Product revision collection and exact-detail reads over the active derived generation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -535,28 +535,7 @@ fn page_revision_event_ids(
     if revision_ids.is_empty() {
         return Ok(Vec::new());
     }
-    let placeholders = (0..revision_ids.len())
-        .map(|index| format!("?{}", index + 3))
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT locator.event_id
-         FROM semantic_event_fact_text AS event
-         JOIN locator_event_text AS locator ON locator.sequence = event.sequence
-         WHERE locator.epoch = ?1
-           AND locator.sequence <= ?2
-           AND event.revision_id IN ({placeholders})
-         ORDER BY locator.replay_key, locator.event_id"
-    );
-    let mut parameters = vec![
-        Value::Integer(to_sql_integer(as_of.epoch)?),
-        Value::Integer(to_sql_integer(as_of.sequence)?),
-    ];
-    parameters.extend(
-        revision_ids
-            .iter()
-            .map(|revision_id| Value::Text(revision_id.as_str().to_owned())),
-    );
+    let (sql, parameters) = page_revision_event_query(as_of, revision_ids)?;
     let mut statement = connection
         .prepare(&sql)
         .map_err(|error| error.to_string())?;
@@ -567,6 +546,95 @@ fn page_revision_event_ids(
         .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
+}
+
+/// Select page carriers from the physical revision index rather than scanning
+/// the retained locator cursor through `semantic_event_fact_text`.
+///
+/// The text view reconstructs `revision_id` with `coalesce` and `hex`, so an
+/// `IN` predicate on that expression cannot drive
+/// `semantic_event_fact_revision`. Each unique page identity therefore gets
+/// one index-anchored branch over the same canonical/raw columns used by the
+/// semantic encoder. The public page limit bounds the compound query at 500
+/// branches, and the outer ordering preserves replay/event order exactly.
+fn page_revision_event_query(
+    as_of: super::cursor::TruthCursor,
+    revision_ids: &[RevisionId],
+) -> Result<(String, Vec<Value>), String> {
+    let mut parameters = vec![
+        Value::Integer(to_sql_integer(as_of.epoch)?),
+        Value::Integer(to_sql_integer(as_of.sequence)?),
+    ];
+    let mut branches = Vec::new();
+    for revision_id in revision_ids
+        .iter()
+        .map(RevisionId::as_str)
+        .collect::<BTreeSet<_>>()
+    {
+        let identity_predicate =
+            if let Some((prefix, digest)) = split_page_revision_digest(revision_id) {
+                let prefix_parameter = parameters.len() + 1;
+                parameters.push(Value::Text(prefix.to_owned()));
+                let digest_parameter = parameters.len() + 1;
+                parameters.push(Value::Blob(digest.to_vec()));
+                format!(
+                    "event.revision_prefix_id = (
+                     SELECT id FROM semantic_identity_prefix
+                     WHERE value = ?{prefix_parameter}
+                 )
+                 AND event.revision_digest = ?{digest_parameter}
+                 AND event.revision_raw IS NULL"
+                )
+            } else {
+                let raw_parameter = parameters.len() + 1;
+                parameters.push(Value::Text(revision_id.to_owned()));
+                format!(
+                    "event.revision_prefix_id IS NULL
+                 AND event.revision_digest IS NULL
+                 AND event.revision_raw = ?{raw_parameter}"
+                )
+            };
+        branches.push(format!(
+            "SELECT locator.event_id AS event_id,
+                    locator.replay_key AS replay_key
+             FROM semantic_event_fact AS event
+               INDEXED BY semantic_event_fact_revision
+             CROSS JOIN locator_event_text AS locator
+             WHERE {identity_predicate}
+               AND event.sequence <= ?2
+               AND locator.sequence = event.sequence
+               AND locator.epoch = ?1"
+        ));
+    }
+    let sql = format!(
+        "SELECT event_id
+         FROM ({})
+         ORDER BY replay_key, event_id",
+        branches.join(" UNION ALL ")
+    );
+    Ok((sql, parameters))
+}
+
+/// Decode the identity shape used by `semantic_event_fact_revision` without
+/// reconstructing the text view for every retained event. This deliberately
+/// mirrors the semantic-store encoder: only a nonempty prefix followed by 64
+/// lowercase hexadecimal digits uses the compact prefix/digest columns; every
+/// other accepted revision identifier remains in `revision_raw`.
+fn split_page_revision_digest(value: &str) -> Option<(&str, [u8; 32])> {
+    let split = value.len().checked_sub(64)?;
+    let (prefix, hex) = value.split_at(split);
+    if prefix.is_empty()
+        || !hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return None;
+    }
+    let mut digest = [0_u8; 32];
+    for (index, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+        digest[index] = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some((prefix, digest))
 }
 
 /// Select only the proposal carriers for direct successors of the page's
@@ -1209,6 +1277,214 @@ mod tests {
             large_steps <= small_steps.saturating_mul(2),
             "fixed selected/support work grew with unrelated history: small={small_steps}, large={large_steps}"
         );
+    }
+
+    fn page_event_query_vm_steps(history_rows: usize) -> (Vec<String>, u64) {
+        let mut connection = rusqlite::Connection::open_in_memory().expect("open SQLite fixture");
+        connection
+            .execute_batch(
+                "CREATE TABLE locator_event (
+                     sequence INTEGER PRIMARY KEY,
+                     epoch INTEGER NOT NULL,
+                     event_id TEXT NOT NULL,
+                     replay_key TEXT NOT NULL
+                 ) STRICT;
+                 CREATE INDEX locator_event_cursor ON locator_event(epoch, sequence);
+                 CREATE VIEW locator_event_text AS
+                     SELECT sequence, epoch, event_id, replay_key FROM locator_event;
+                 CREATE TABLE semantic_identity_prefix (
+                     id INTEGER PRIMARY KEY,
+                     value TEXT NOT NULL UNIQUE
+                 ) STRICT;
+                 INSERT INTO semantic_identity_prefix (id, value)
+                     VALUES (1, 'rev:sha256:');
+                 CREATE TABLE semantic_event_fact (
+                     sequence INTEGER PRIMARY KEY,
+                     revision_prefix_id INTEGER,
+                     revision_digest BLOB,
+                     revision_raw TEXT
+                 ) STRICT;
+                 CREATE INDEX semantic_event_fact_revision
+                     ON semantic_event_fact(
+                         revision_prefix_id, revision_digest, revision_raw, sequence
+                     );
+                 CREATE VIEW semantic_event_fact_text AS
+                     SELECT event.sequence,
+                            coalesce(
+                                event.revision_raw,
+                                prefix.value || lower(hex(event.revision_digest))
+                            ) AS revision_id
+                     FROM semantic_event_fact AS event
+                     LEFT JOIN semantic_identity_prefix AS prefix
+                       ON prefix.id = event.revision_prefix_id;",
+            )
+            .expect("create page-event query fixture");
+        let transaction = connection.transaction().expect("begin fixture transaction");
+        {
+            let mut insert_locator = transaction
+                .prepare(
+                    "INSERT INTO locator_event (sequence, epoch, event_id, replay_key)
+                     VALUES (?1, 1, ?2, ?3)",
+                )
+                .expect("prepare locator insert");
+            let mut insert_event = transaction
+                .prepare(
+                    "INSERT INTO semantic_event_fact
+                     (sequence, revision_prefix_id, revision_digest, revision_raw)
+                     VALUES (?1, 1, ?2, NULL)",
+                )
+                .expect("prepare semantic event insert");
+            for sequence in 1..=history_rows {
+                let mut digest = [0_u8; 32];
+                digest[24..].copy_from_slice(
+                    &u64::try_from(sequence)
+                        .expect("fixture sequence fits u64")
+                        .to_be_bytes(),
+                );
+                insert_locator
+                    .execute(rusqlite::params![
+                        i64::try_from(sequence).unwrap(),
+                        format!("evt:sha256:{sequence:064x}"),
+                        format!("{sequence:064x}"),
+                    ])
+                    .expect("insert locator row");
+                insert_event
+                    .execute(rusqlite::params![
+                        i64::try_from(sequence).unwrap(),
+                        digest.as_slice(),
+                    ])
+                    .expect("insert semantic event row");
+            }
+        }
+        transaction.commit().expect("commit fixture");
+
+        let selected = RevisionId::new(format!("rev:sha256:{history_rows:064x}"));
+        let (sql, parameters) = page_revision_event_query(
+            super::super::cursor::TruthCursor::new(1, history_rows as u64),
+            &[selected],
+        )
+        .expect("build page event query");
+        let mut statement = connection.prepare(&sql).expect("prepare page event query");
+        let event_ids = statement
+            .query_map(rusqlite::params_from_iter(parameters.iter()), |row| {
+                row.get::<_, String>(0)
+            })
+            .expect("run page event query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read page event ids");
+        let vm_steps = u64::try_from(statement.get_status(StatementStatus::VmStep))
+            .expect("VM step count is nonnegative");
+        (event_ids, vm_steps)
+    }
+
+    #[test]
+    fn page_event_id_work_is_selected_identity_proportional() {
+        let (small_ids, small_steps) = page_event_query_vm_steps(128);
+        let (large_ids, large_steps) = page_event_query_vm_steps(4_096);
+
+        assert_eq!(small_ids.len(), 1);
+        assert_eq!(large_ids.len(), 1);
+        assert!(
+            large_steps <= small_steps.saturating_mul(2),
+            "fixed selected/event-id work grew with unrelated history: small={small_steps}, large={large_steps}"
+        );
+    }
+
+    #[test]
+    fn page_revision_identity_split_matches_semantic_storage_encoding() {
+        let canonical = format!("rev:sha256:{}", "ab".repeat(32));
+        let (prefix, digest) =
+            split_page_revision_digest(&canonical).expect("split canonical revision identity");
+        assert_eq!(prefix, "rev:sha256:");
+        assert_eq!(digest, [0xab; 32]);
+
+        assert!(split_page_revision_digest("rev:git:sha256:def").is_none());
+        assert!(split_page_revision_digest(&format!("rev:sha256:{}", "AB".repeat(32))).is_none());
+    }
+
+    #[test]
+    fn active_page_support_queries_start_from_selected_identity_indexes() {
+        let (_repo, access, revision_id) = active_bridged_repo();
+        let CurrentRead::Ready(current) = access.current().expect("read current generation") else {
+            panic!("published generation should be current");
+        };
+        let service = current.service();
+        let LocatorRead::Ready((connection, _)) = service
+            .product_history_connection()
+            .expect("open product history")
+        else {
+            panic!("published generation should not require catch-up");
+        };
+        let as_of = service.locator_checkpoint().expect("read checkpoint");
+
+        let (event_sql, event_parameters) =
+            page_revision_event_query(as_of, std::slice::from_ref(&revision_id))
+                .expect("build page event query");
+        let event_details = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {event_sql}"))
+            .expect("prepare page event plan")
+            .query_map(rusqlite::params_from_iter(event_parameters.iter()), |row| {
+                row.get::<_, String>(3)
+            })
+            .expect("query page event plan")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read page event plan");
+        assert!(
+            event_details
+                .iter()
+                .any(|detail| detail.contains("semantic_event_fact_revision")),
+            "page event expansion must start from the selected revision index: {event_details:?}"
+        );
+        assert!(
+            !event_details
+                .iter()
+                .any(|detail| detail.contains("locator_event_cursor")),
+            "page event expansion must not scan the retained locator cursor: {event_details:?}"
+        );
+
+        let (support_sql, support_parameters) =
+            page_revision_superseder_query(as_of, &[revision_id])
+                .expect("build page support query");
+        let support_details = connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {support_sql}"))
+            .expect("prepare page support plan")
+            .query_map(
+                rusqlite::params_from_iter(support_parameters.iter()),
+                |row| row.get::<_, String>(3),
+            )
+            .expect("query page support plan")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read page support plan");
+        assert!(
+            support_details.iter().any(|detail| {
+                detail.contains("product_revision_edge_target")
+                    && detail.contains("superseded_revision_id=?")
+            }),
+            "page support expansion must start from the selected revision index: {support_details:?}"
+        );
+        assert!(
+            !support_details
+                .iter()
+                .any(|detail| detail.contains("locator_event_cursor")),
+            "page support expansion must not scan the retained locator cursor: {support_details:?}"
+        );
+
+        let maximum_page = (0..REVISION_PAGE_MAXIMUM_LIMIT)
+            .map(|index| RevisionId::new(format!("rev:test:{index:064x}")))
+            .collect::<Vec<_>>();
+        let (maximum_sql, maximum_parameters) =
+            page_revision_event_query(as_of, &maximum_page).expect("build maximum page query");
+        let maximum_event_ids = connection
+            .prepare(&maximum_sql)
+            .expect("prepare maximum page query")
+            .query_map(
+                rusqlite::params_from_iter(maximum_parameters.iter()),
+                |row| row.get::<_, String>(0),
+            )
+            .expect("query maximum page")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("read maximum page event ids");
+        assert!(maximum_event_ids.is_empty());
     }
 
     #[test]
