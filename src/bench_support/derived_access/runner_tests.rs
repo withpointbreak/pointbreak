@@ -589,7 +589,8 @@ fn candidate_open_preserves_admitted_truth_and_accounts_for_governed_namespaces(
 
     let active_bytes =
         super::evidence::governed_derived_state_bytes(&store).expect("active derived bytes");
-    let quarantine = store.join(".pointbreak-derived.quarantine-42-7");
+    let layout = super::DerivedStorageLayout::resolve(&store).expect("derived layout");
+    let quarantine = layout.quarantine("42-7");
     std::fs::create_dir_all(&quarantine).expect("create governed quarantine");
     std::fs::write(quarantine.join("cursor.sqlite3"), b"quarantine")
         .expect("write governed quarantine");
@@ -601,7 +602,7 @@ fn candidate_open_preserves_admitted_truth_and_accounts_for_governed_namespaces(
         "well-formed quarantine bytes enter derived high-water accounting"
     );
 
-    let malformed = store.join(".pointbreak-derived.quarantine-pid-7");
+    let malformed = layout.quarantine("");
     std::fs::create_dir_all(&malformed).expect("create malformed quarantine");
     std::fs::write(malformed.join("cursor.sqlite3"), b"not derived")
         .expect("write malformed quarantine");

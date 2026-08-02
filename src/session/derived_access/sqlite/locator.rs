@@ -8,13 +8,13 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Params, StatementStatus, TransactionBehavior, params,
 };
 
-use super::DERIVED_SIDECAR_DIRECTORY;
 #[cfg(any(test, feature = "longitudinal-counting"))]
 use crate::bench_support::longitudinal::record_chronological_sort_items;
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::session::EventStore;
 use crate::session::derived_access::QualificationLocalJournal;
 use crate::session::derived_access::cursor::{CursorDelta, TruthCursor};
+use crate::session::derived_access::layout::DerivedStorageLayout;
 use crate::session::derived_access::locator::{
     ChronologicalWindowRequest, LocatorCheckpoint, LocatorModelError, LocatorRead, LocatorRow,
     LocatorWindow, WindowContinuation, WindowPosition,
@@ -97,7 +97,9 @@ impl SqliteLocator {
         let store_root = store_root
             .canonicalize()
             .map_err(|error| SqliteLocatorError::Metadata(error.to_string()))?;
-        let sidecar_root = store_root.join(DERIVED_SIDECAR_DIRECTORY);
+        let sidecar_root = DerivedStorageLayout::resolve(&store_root)
+            .map_err(|error| SqliteLocatorError::Metadata(error.to_string()))?
+            .root();
         Self::open_at(&store_root, &sidecar_root)
     }
 

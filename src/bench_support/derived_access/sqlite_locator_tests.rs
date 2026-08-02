@@ -1,3 +1,4 @@
+use crate::bench_support::derived_access::DerivedStorageLayout;
 use crate::bench_support::derived_access::adapter::QualificationDerivedAccessAdapter;
 use crate::bench_support::derived_access::sqlite_cursor::{
     CursorLedgerIdentity, SqliteCursorLedger,
@@ -19,6 +20,13 @@ use crate::session::event::{
 };
 
 const STORE_ID: &str = "store:locator-test";
+
+fn derived_database(root: &std::path::Path) -> std::path::PathBuf {
+    DerivedStorageLayout::resolve(root)
+        .expect("derived layout")
+        .root()
+        .join("cursor.sqlite3")
+}
 
 fn event(index: usize, occurred_at: &str) -> ShoreEvent {
     let journal = format!("journal:locator-{index}");
@@ -187,12 +195,8 @@ fn selected_locator_row_is_revalidated_against_its_cursor_receipt() {
     let selected = event(1, "2026-07-27T01:00:00Z");
     append(&adapter, &selected, 1);
 
-    let connection = rusqlite::Connection::open(
-        root.path()
-            .join(".pointbreak-derived")
-            .join("cursor.sqlite3"),
-    )
-    .expect("open sidecar");
+    let connection =
+        rusqlite::Connection::open(derived_database(root.path())).expect("open sidecar");
     connection
         .execute(
             "UPDATE cursor_receipt
@@ -448,12 +452,8 @@ fn chronological_sort_counter_observes_a_regressed_sqlite_plan() {
             index,
         );
     }
-    let connection = rusqlite::Connection::open(
-        root.path()
-            .join(".pointbreak-derived")
-            .join("cursor.sqlite3"),
-    )
-    .expect("open sidecar");
+    let connection =
+        rusqlite::Connection::open(derived_database(root.path())).expect("open sidecar");
     connection
         .execute_batch(
             "DROP INDEX locator_event_display;

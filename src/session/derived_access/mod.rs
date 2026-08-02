@@ -7,6 +7,7 @@ pub(crate) mod checkpoint;
 pub(crate) mod cursor;
 pub(crate) mod generation;
 pub(crate) mod history;
+pub(crate) mod layout;
 pub(crate) mod lifecycle;
 pub(crate) mod locator;
 #[cfg(any(test, feature = "bench"))]

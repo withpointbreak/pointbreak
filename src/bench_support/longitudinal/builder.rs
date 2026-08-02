@@ -3,9 +3,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::bench_support::derived_access::{
-    DERIVED_QUARANTINE_PREFIX, DERIVED_SIDECAR_DIRECTORY, DERIVED_WRITER_LOCK_FILE,
-};
+use crate::bench_support::derived_access::DerivedStorageLayout;
+#[cfg(test)]
+use crate::bench_support::derived_access::DerivedStorageNamespace;
 use crate::bench_support::longitudinal::contract::{
     LONGITUDINAL_CAPACITY_MATERIALIZATION_RECEIPT_SCHEMA_V1,
     LONGITUDINAL_MATERIALIZATION_RECEIPT_SCHEMA_V1,
@@ -872,27 +872,7 @@ pub(crate) fn is_governed_derived_store_entry_v1(
     is_directory: bool,
     is_file: bool,
 ) -> bool {
-    (is_directory && name == DERIVED_SIDECAR_DIRECTORY)
-        || (is_file && name == DERIVED_WRITER_LOCK_FILE)
-        || (is_directory && is_well_formed_derived_quarantine_v1(name))
-}
-
-fn is_well_formed_derived_quarantine_v1(name: &str) -> bool {
-    let Some(suffix) = name.strip_prefix(DERIVED_QUARANTINE_PREFIX) else {
-        return false;
-    };
-    let mut components = suffix.split('-');
-    let Some(process_id) = components.next() else {
-        return false;
-    };
-    let Some(sequence) = components.next() else {
-        return false;
-    };
-    components.next().is_none()
-        && !process_id.is_empty()
-        && process_id.bytes().all(|byte| byte.is_ascii_digit())
-        && !sequence.is_empty()
-        && sequence.bytes().all(|byte| byte.is_ascii_digit())
+    DerivedStorageLayout::is_governed_store_entry(name, is_directory, is_file)
 }
 
 pub fn verify_longitudinal_materializer_equivalence_v1(
@@ -1456,15 +1436,25 @@ mod tests {
             longitudinal_store_data_inventory_v1(repo.path()).unwrap()
         );
 
-        fs::create_dir_all(store.join(".pointbreak-derived")).unwrap();
-        fs::write(store.join(".pointbreak-derived/cursor.sqlite3"), b"derived").unwrap();
-        fs::write(store.join(".pointbreak-derived.writer.lock"), b"lock").unwrap();
-        fs::create_dir_all(store.join(".pointbreak-derived.quarantine-42-7")).unwrap();
-        fs::write(
-            store.join(".pointbreak-derived.quarantine-42-7/cursor.sqlite3"),
-            b"quarantine",
-        )
-        .unwrap();
+        let layouts = [
+            DerivedStorageLayout::for_namespace(&store, DerivedStorageNamespace::Stable),
+            DerivedStorageLayout::for_namespace(&store, DerivedStorageNamespace::Legacy),
+        ];
+        for layout in &layouts {
+            fs::create_dir_all(layout.root()).unwrap();
+            fs::write(layout.root().join("cursor.sqlite3"), b"derived").unwrap();
+            fs::write(layout.writer_lock(), b"writer lock").unwrap();
+            fs::write(layout.rebuild_lock(), b"rebuild lock").unwrap();
+            fs::write(layout.generation_lease("g-1"), b"generation lease").unwrap();
+            fs::create_dir_all(layout.quarantine("42-7")).unwrap();
+            fs::write(
+                layout.quarantine("42-7").join("cursor.sqlite3"),
+                b"quarantine",
+            )
+            .unwrap();
+            fs::create_dir_all(layout.retired("42-7")).unwrap();
+            fs::write(layout.retired("42-7").join("cursor.sqlite3"), b"retired").unwrap();
+        }
 
         assert_ne!(
             longitudinal_store_data_inventory_v1(repo.path()).unwrap(),
@@ -1475,12 +1465,9 @@ mod tests {
             baseline
         );
 
-        fs::create_dir_all(store.join(".pointbreak-derived.quarantine-42")).unwrap();
-        fs::write(
-            store.join(".pointbreak-derived.quarantine-42/cursor.sqlite3"),
-            b"malformed",
-        )
-        .unwrap();
+        let malformed_path = layouts[0].quarantine("");
+        fs::create_dir_all(&malformed_path).unwrap();
+        fs::write(malformed_path.join("cursor.sqlite3"), b"malformed").unwrap();
         let malformed = longitudinal_authoritative_store_data_inventory_v1(repo.path()).unwrap();
         assert_eq!(
             malformed.file_count,
@@ -1488,38 +1475,23 @@ mod tests {
             "a malformed quarantine name remains authoritative"
         );
 
-        fs::create_dir_all(store.join(".pointbreak-derived.quarantine-pid-7")).unwrap();
-        fs::write(
-            store.join(".pointbreak-derived.quarantine-pid-7/cursor.sqlite3"),
-            b"lookalike",
-        )
-        .unwrap();
-        let lookalike = longitudinal_authoritative_store_data_inventory_v1(repo.path()).unwrap();
-        assert_eq!(
-            lookalike.file_count,
-            malformed.file_count + 1,
-            "a quarantine lookalike remains authoritative"
-        );
-
-        fs::create_dir_all(store.join("events/.pointbreak-derived")).unwrap();
-        fs::write(
-            store.join("events/.pointbreak-derived/nested.sqlite3"),
-            b"nested truth",
-        )
-        .unwrap();
+        let nested_root = store
+            .join("events")
+            .join(layouts[1].root().file_name().unwrap());
+        fs::create_dir_all(&nested_root).unwrap();
+        fs::write(nested_root.join("nested.sqlite3"), b"nested truth").unwrap();
         let nested_sidecar =
             longitudinal_authoritative_store_data_inventory_v1(repo.path()).unwrap();
         assert_eq!(
             nested_sidecar.file_count,
-            lookalike.file_count + 1,
+            malformed.file_count + 1,
             "an exactly named nested sidecar remains authoritative"
         );
 
-        fs::write(
-            store.join("events/.pointbreak-derived.writer.lock"),
-            b"nested lock truth",
-        )
-        .unwrap();
+        let nested_lock = store
+            .join("events")
+            .join(layouts[1].writer_lock().file_name().unwrap());
+        fs::write(nested_lock, b"nested lock truth").unwrap();
         let nested_lock = longitudinal_authoritative_store_data_inventory_v1(repo.path()).unwrap();
         assert_eq!(
             nested_lock.file_count,

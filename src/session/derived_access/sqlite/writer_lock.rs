@@ -3,7 +3,7 @@
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
-use super::DERIVED_WRITER_LOCK_FILE;
+use crate::session::derived_access::layout::DerivedStorageLayout;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum WriterLockError {
@@ -11,6 +11,8 @@ pub(crate) enum WriterLockError {
     Busy,
     #[error("writer-lock I/O failed at {path}: {message}")]
     Io { path: PathBuf, message: String },
+    #[error("writer-lock layout resolution failed: {0}")]
+    Layout(String),
 }
 
 #[derive(Debug)]
@@ -46,7 +48,9 @@ fn open_lock_file(store_root: &Path) -> Result<(File, PathBuf), WriterLockError>
     let canonical_root = store_root
         .canonicalize()
         .map_err(|error| io_error(store_root, error))?;
-    let path = canonical_root.join(DERIVED_WRITER_LOCK_FILE);
+    let path = DerivedStorageLayout::resolve(&canonical_root)
+        .map_err(|error| WriterLockError::Layout(error.to_string()))?
+        .writer_lock();
     let file = OpenOptions::new()
         .create(true)
         .read(true)

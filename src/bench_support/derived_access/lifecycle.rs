@@ -9,9 +9,9 @@ use super::sqlite_cursor::{
     SqliteCursorLedger,
 };
 use super::{
-    QualificationDerivedAccessLifecycleCriterionV1, QualificationDerivedAccessLifecycleEvidenceV1,
-    QualificationDerivedAccessPlatformV1, QualificationDerivedAccessStatusV1,
-    QualificationDerivedAccessTierV1,
+    DerivedStorageLayout, QualificationDerivedAccessLifecycleCriterionV1,
+    QualificationDerivedAccessLifecycleEvidenceV1, QualificationDerivedAccessPlatformV1,
+    QualificationDerivedAccessStatusV1, QualificationDerivedAccessTierV1,
 };
 use crate::bench_support::longitudinal::{
     LongitudinalStoreDataInventoryV1, longitudinal_store_data_inventory_v1,
@@ -725,7 +725,9 @@ fn crash_bootstrap_vector(
 ) -> Result<String, String> {
     let store = store_dir_for_repo(repo_root).map_err(|error| error.to_string())?;
     if quarantine {
-        let sidecar = store.join(".pointbreak-derived");
+        let sidecar = DerivedStorageLayout::resolve(&store)
+            .map_err(|error| error.to_string())?
+            .root();
         std::fs::create_dir_all(&sidecar).map_err(|error| error.to_string())?;
         std::fs::write(sidecar.join("cursor.sqlite3"), b"corrupt")
             .map_err(|error| error.to_string())?;
@@ -810,8 +812,10 @@ fn backup_rebuild_vector(repo_root: &Path) -> Result<String, String> {
     let (store, _identity, ledger) = bootstrap_vector_root(repo_root)?;
     let expected = ledger.head().map_err(|error| error.to_string())?.cursor;
     drop(ledger);
-    std::fs::remove_dir_all(store.join(".pointbreak-derived"))
-        .map_err(|error| error.to_string())?;
+    let sidecar = DerivedStorageLayout::resolve(&store)
+        .map_err(|error| error.to_string())?
+        .root();
+    std::fs::remove_dir_all(sidecar).map_err(|error| error.to_string())?;
     let rebuilt = SqliteCursorLedger::bootstrap_from_truth(
         &store,
         CursorLedgerIdentity::new("store:derived-access-lifecycle"),
@@ -841,7 +845,10 @@ fn corrupt_metadata_vector(repo_root: &Path, column: &str, value: &str) -> Resul
     }
     let (store, _identity, ledger) = bootstrap_vector_root(repo_root)?;
     drop(ledger);
-    let database = store.join(".pointbreak-derived/cursor.sqlite3");
+    let database = DerivedStorageLayout::resolve(&store)
+        .map_err(|error| error.to_string())?
+        .root()
+        .join("cursor.sqlite3");
     let connection = rusqlite::Connection::open(&database).map_err(|error| error.to_string())?;
     let statement = if column == "user_version" {
         format!("PRAGMA user_version = {value}")
@@ -871,7 +878,10 @@ fn corruption_rebuild_vector(repo_root: &Path) -> Result<String, String> {
         .cursor
         .sequence;
     drop(ledger);
-    let database = store.join(".pointbreak-derived/cursor.sqlite3");
+    let database = DerivedStorageLayout::resolve(&store)
+        .map_err(|error| error.to_string())?
+        .root()
+        .join("cursor.sqlite3");
     std::fs::write(&database, b"not a sqlite database").map_err(|error| error.to_string())?;
     if SqliteCursorLedger::open(
         &store,
@@ -920,8 +930,10 @@ fn reader_retirement_vector(executable: &Path, repo_root: &Path) -> Result<Strin
     wait_for_path(&ready)?;
     std::fs::write(&release, b"release\n").map_err(|error| error.to_string())?;
     require_success(reader.wait().map_err(|error| error.to_string())?, "reader")?;
-    std::fs::remove_dir_all(store.join(".pointbreak-derived"))
-        .map_err(|error| error.to_string())?;
+    let sidecar = DerivedStorageLayout::resolve(&store)
+        .map_err(|error| error.to_string())?
+        .root();
+    std::fs::remove_dir_all(sidecar).map_err(|error| error.to_string())?;
     let rebuilt = SqliteCursorLedger::bootstrap_from_truth(
         &store,
         CursorLedgerIdentity::new("store:derived-access-lifecycle"),

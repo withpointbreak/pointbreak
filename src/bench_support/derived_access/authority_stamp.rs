@@ -6,6 +6,7 @@ use std::sync::{Arc, Barrier};
 
 use serde::{Deserialize, Serialize};
 
+use super::DerivedStorageLayout;
 use crate::canonical_hash::sha256_bytes_hex;
 use crate::model::JournalId;
 use crate::session::event::{EventTarget, EventType, ReviewInitializedPayload, ShoreEvent, Writer};
@@ -786,7 +787,10 @@ fn run_scenario(
         }
         AuthorityStampScenarioV1::SidecarDeletion => {
             write_direct_carrier(&store_dir, "sidecar", b"created")?;
-            let sidecar = store_dir.join(".pointbreak-derived/authority.json");
+            let sidecar = DerivedStorageLayout::resolve(&store_dir)
+                .map_err(|error| error.to_string())?
+                .root()
+                .join("authority.json");
             fs::create_dir_all(sidecar.parent().expect("sidecar parent"))
                 .map_err(|error| error.to_string())?;
             fs::write(&sidecar, b"authority").map_err(|error| error.to_string())?;

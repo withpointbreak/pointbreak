@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use super::layout::DerivedStorageLayout;
 use super::product_contract::DerivedAccessProfile;
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
 use crate::session::store::backend::JournalChangeStamp;
@@ -19,14 +20,12 @@ const LEGACY_GENERATION_SCHEMA: &str = "pointbreak.derived-access-generation.v1"
 const PUBLICATION_SCHEMA: &str = "pointbreak.derived-access-publication.v1";
 const PROGRESS_SCHEMA: &str = "pointbreak.derived-access-generation-progress.v2";
 const PROGRESS_INTERVAL: usize = 256;
-const REBUILD_LOCK_FILE: &str = ".pointbreak-derived.rebuild.lock";
-const GENERATION_LEASE_PREFIX: &str = ".pointbreak-derived.generation-lease-";
 static UNIQUE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug)]
 pub(crate) struct GenerationLayout {
-    store_root: PathBuf,
     root: PathBuf,
+    storage_layout: DerivedStorageLayout,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -152,11 +151,17 @@ pub(crate) enum GenerationError {
 }
 
 impl GenerationLayout {
-    pub(crate) fn new(store_root: &Path) -> Self {
-        Self {
-            store_root: store_root.to_path_buf(),
-            root: store_root.join(super::sqlite::DERIVED_SIDECAR_DIRECTORY),
-        }
+    pub(crate) fn new(store_root: &Path) -> Result<Self, GenerationError> {
+        let storage_layout = DerivedStorageLayout::resolve(store_root).map_err(|error| {
+            GenerationError::Metadata {
+                path: store_root.to_path_buf(),
+                message: error.to_string(),
+            }
+        })?;
+        Ok(Self {
+            root: storage_layout.root(),
+            storage_layout,
+        })
     }
 
     pub(crate) fn root(&self) -> &Path {
@@ -169,6 +174,10 @@ impl GenerationLayout {
 
     pub(crate) fn generation(&self, generation_id: &str) -> PathBuf {
         self.root.join("generations").join(generation_id)
+    }
+
+    pub(crate) fn generation_lease_id<'a>(&self, name: &'a str) -> Option<&'a str> {
+        self.storage_layout.generation_lease_id(name)
     }
 
     pub(crate) fn ensure_scaffold(&self) -> Result<(), GenerationError> {
@@ -184,9 +193,9 @@ impl GenerationLayout {
     }
 
     pub(crate) fn try_rebuild_lease(&self) -> Result<RebuildLease, GenerationError> {
-        std::fs::create_dir_all(&self.store_root)
-            .map_err(|error| io_error(&self.store_root, error))?;
-        let path = self.store_root.join(REBUILD_LOCK_FILE);
+        std::fs::create_dir_all(self.storage_layout.store_root())
+            .map_err(|error| io_error(self.storage_layout.store_root(), error))?;
+        let path = self.storage_layout.rebuild_lock();
         let file = open_lock_file(&path)?;
         match file.try_lock() {
             Ok(()) => Ok(RebuildLease { file }),
@@ -447,7 +456,7 @@ impl GenerationLayout {
     }
 
     fn sweep_orphaned_generation_leases(&self) -> Result<(), GenerationError> {
-        let Some(entries) = read_directory_if_present(&self.store_root)? else {
+        let Some(entries) = read_directory_if_present(self.storage_layout.store_root())? else {
             return Ok(());
         };
         for entry in entries {
@@ -455,10 +464,7 @@ impl GenerationLayout {
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
-            let Some(generation_id) = name
-                .strip_prefix(GENERATION_LEASE_PREFIX)
-                .and_then(|name| name.strip_suffix(".lock"))
-            else {
+            let Some(generation_id) = self.storage_layout.generation_lease_id(&name) else {
                 continue;
             };
             if validate_generation_id(generation_id).is_err()
@@ -586,9 +592,8 @@ impl GenerationLayout {
         if self.root.exists() {
             let _ = std::fs::write(&reason_path, reason.as_bytes());
         }
-        let destination = self.store_root.join(format!(
-            "{}{}-{}",
-            super::sqlite::DERIVED_QUARANTINE_PREFIX,
+        let destination = self.storage_layout.quarantine(&format!(
+            "{}-{}",
             std::process::id(),
             UNIQUE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
@@ -600,8 +605,8 @@ impl GenerationLayout {
         if !self.root.exists() {
             return Ok(None);
         }
-        let destination = self.store_root.join(format!(
-            ".pointbreak-derived.retired-{}-{}",
+        let destination = self.storage_layout.retired(&format!(
+            "{}-{}",
             std::process::id(),
             UNIQUE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
@@ -614,14 +619,7 @@ impl GenerationLayout {
     }
 
     pub(crate) fn purge_disposable_root(&self, path: &Path) -> Result<(), GenerationError> {
-        let parent = path.parent();
-        let name = path.file_name().and_then(|value| value.to_str());
-        let allowed = parent == Some(self.store_root.as_path())
-            && name.is_some_and(|name| {
-                name.starts_with(super::sqlite::DERIVED_QUARANTINE_PREFIX)
-                    || name.starts_with(".pointbreak-derived.retired-")
-            });
-        if !allowed {
+        if !self.storage_layout.is_disposable_root(path) {
             return Err(GenerationError::Metadata {
                 path: path.to_path_buf(),
                 message: "refused to purge a path outside the exact disposable-root namespace"
@@ -682,8 +680,7 @@ impl GenerationLayout {
     }
 
     pub(crate) fn generation_lease_path(&self, generation_id: &str) -> PathBuf {
-        self.store_root
-            .join(format!("{GENERATION_LEASE_PREFIX}{generation_id}.lock"))
+        self.storage_layout.generation_lease(generation_id)
     }
 }
 
@@ -867,7 +864,7 @@ mod tests {
     #[test]
     fn staging_progress_treats_concurrent_cleanup_as_absence() {
         let temp = TempDir::new().unwrap();
-        let layout = GenerationLayout::new(temp.path());
+        let layout = GenerationLayout::new(temp.path()).unwrap();
         layout.ensure_scaffold().unwrap();
         layout
             .record_progress(
@@ -900,7 +897,7 @@ mod tests {
     #[test]
     fn staging_progress_never_observes_an_unpublished_progress_file() {
         let temp = TempDir::new().unwrap();
-        let layout = GenerationLayout::new(temp.path());
+        let layout = GenerationLayout::new(temp.path()).unwrap();
         layout.ensure_scaffold().unwrap();
         let mut observed_before_publish = None;
 

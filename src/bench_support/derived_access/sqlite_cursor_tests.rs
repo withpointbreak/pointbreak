@@ -3,6 +3,7 @@ use std::process::{Child, Command};
 use std::thread;
 use std::time::Duration;
 
+use crate::bench_support::derived_access::DerivedStorageLayout;
 use crate::bench_support::derived_access::sqlite_cursor::{
     AppendCrashPoint, BootstrapControl, BootstrapCrashPoint, CursorLedgerError,
     CursorLedgerIdentity, SqliteCursorLedger, full_chain_query_count_for_test,
@@ -27,6 +28,14 @@ const CHILD_READY: &str = "POINTBREAK_CURSOR_LEDGER_CHILD_READY";
 const CHILD_RELEASE: &str = "POINTBREAK_CURSOR_LEDGER_CHILD_RELEASE";
 const CHILD_INDEX: &str = "POINTBREAK_CURSOR_LEDGER_CHILD_INDEX";
 const CHILD_ATTEMPT: &str = "POINTBREAK_CURSOR_LEDGER_CHILD_ATTEMPT";
+
+fn derived_layout(root: &Path) -> DerivedStorageLayout {
+    DerivedStorageLayout::resolve(root).expect("derived layout")
+}
+
+fn derived_database(root: &Path) -> PathBuf {
+    derived_layout(root).root().join("cursor.sqlite3")
+}
 
 fn event(index: usize) -> ShoreEvent {
     let session = format!("session:cursor-{index}");
@@ -143,8 +152,7 @@ fn cursor_receipts_persist_only_digest_addressed_carrier_identity() {
     drop(ledger);
 
     let connection =
-        rusqlite::Connection::open(root.path().join(".pointbreak-derived/cursor.sqlite3"))
-            .expect("open sidecar");
+        rusqlite::Connection::open(derived_database(root.path())).expect("open sidecar");
     let columns = connection
         .prepare("PRAGMA table_info(cursor_receipt)")
         .expect("prepare receipt columns")
@@ -541,8 +549,7 @@ fn orphan_receipt_advances_only_the_single_expected_head() {
         .append_event(&event(1), "attempt:first")
         .expect("first append");
     let connection =
-        rusqlite::Connection::open(root.path().join(".pointbreak-derived/cursor.sqlite3"))
-            .expect("raw test connection");
+        rusqlite::Connection::open(derived_database(root.path())).expect("raw test connection");
     connection
         .execute(
             "UPDATE cursor_meta SET head_sequence = 0 WHERE singleton = 1",
@@ -728,14 +735,12 @@ fn bootstrap_and_quarantine_publication_crashes_preserve_restartable_truth() {
         quarantine_child.wait().expect("quarantine child").code(),
         Some(88)
     );
+    let layout = derived_layout(quarantine_root.path());
     assert!(
         std::fs::read_dir(quarantine_root.path())
             .expect("root inventory")
             .filter_map(Result::ok)
-            .any(|entry| entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".pointbreak-derived.quarantine-"))
+            .any(|entry| layout.is_disposable_root(&entry.path()))
     );
     let rebuilt = SqliteCursorLedger::bootstrap_from_truth(
         quarantine_root.path(),
@@ -781,8 +786,7 @@ fn cursor_chain_corruption_is_quarantined_without_repairing_truth() {
         .append_event(&first, "attempt:1")
         .expect("append first");
     let connection =
-        rusqlite::Connection::open(root.path().join(".pointbreak-derived/cursor.sqlite3"))
-            .expect("raw test connection");
+        rusqlite::Connection::open(derived_database(root.path())).expect("raw test connection");
     connection
         .execute(
             "UPDATE cursor_meta SET head_sequence = 2 WHERE singleton = 1",
@@ -806,7 +810,8 @@ fn cursor_chain_corruption_is_quarantined_without_repairing_truth() {
 #[test]
 fn structurally_corrupt_sidecar_is_rotated_out_of_the_canonical_path() {
     let root = tempfile::tempdir().expect("root");
-    let sidecar = root.path().join(".pointbreak-derived");
+    let layout = derived_layout(root.path());
+    let sidecar = layout.root();
     std::fs::create_dir_all(&sidecar).expect("sidecar directory");
     std::fs::write(sidecar.join("cursor.sqlite3"), b"not a sqlite database")
         .expect("corrupt database");
@@ -820,10 +825,7 @@ fn structurally_corrupt_sidecar_is_rotated_out_of_the_canonical_path() {
         std::fs::read_dir(root.path())
             .expect("root inventory")
             .filter_map(Result::ok)
-            .any(|entry| entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".pointbreak-derived.quarantine-"))
+            .any(|entry| layout.is_disposable_root(&entry.path()))
     );
     assert!(
         EventStore::open(root.path())

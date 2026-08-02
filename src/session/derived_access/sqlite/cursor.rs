@@ -12,7 +12,6 @@ use rusqlite::{
 use sha2::{Digest, Sha256};
 
 use super::writer_lock::{StoreWriterLock, WriterLockError};
-use super::{DERIVED_QUARANTINE_PREFIX, DERIVED_SIDECAR_DIRECTORY};
 #[cfg(any(test, feature = "longitudinal-counting"))]
 use crate::bench_support::longitudinal::RetainedDecodedEventsGuardV1;
 use crate::canonical_hash::sha256_bytes_hex;
@@ -21,6 +20,7 @@ use crate::session::derived_access::cursor::{
     AppendResolution, CursorDelta, CursorIntent, CursorReceipt, RecoveryResolution,
     TruthAuthoritySnapshot, TruthCursor, TruthHead,
 };
+use crate::session::derived_access::layout::DerivedStorageLayout;
 use crate::session::derived_access::{QualificationJournalCursor, QualificationLocalJournal};
 use crate::session::event::ShoreEvent;
 use crate::session::store::backend::{
@@ -147,6 +147,8 @@ pub(crate) enum CursorLedgerError {
     WitnessMismatch(String),
     #[error("truth operation failed: {0}")]
     Truth(String),
+    #[error("derived-access layout resolution failed: {0}")]
+    Layout(String),
     #[error("SQLite operation {operation} failed: {message}")]
     Sqlite {
         operation: &'static str,
@@ -161,6 +163,7 @@ impl From<WriterLockError> for CursorLedgerError {
         match error {
             WriterLockError::Busy => Self::WriterBusy,
             WriterLockError::Io { path, message } => Self::Io { path, message },
+            WriterLockError::Layout(message) => Self::Layout(message),
         }
     }
 }
@@ -244,7 +247,7 @@ impl SqliteCursorLedger {
                 "empty initialization refused an existing loose journal".to_owned(),
             ));
         }
-        let ledger = Self::for_root(store_root, identity);
+        let ledger = Self::for_root(store_root, identity)?;
         if ledger.sidecar_path().exists() {
             return Err(CursorLedgerError::AlreadyInitialized);
         }
@@ -286,7 +289,7 @@ impl SqliteCursorLedger {
         hook: impl FnMut(BootstrapCrashPoint),
     ) -> Result<Self, CursorLedgerError> {
         let store_root = canonical_store_root(store_root)?;
-        let sidecar_root = store_root.join(DERIVED_SIDECAR_DIRECTORY);
+        let sidecar_root = resolve_layout(&store_root)?.root();
         Self::bootstrap_from_truth_at_with_hook(
             &store_root,
             &sidecar_root,
@@ -464,7 +467,7 @@ impl SqliteCursorLedger {
         identity: CursorLedgerIdentity,
     ) -> Result<Self, CursorLedgerError> {
         let store_root = canonical_store_root(store_root)?;
-        let sidecar_root = store_root.join(DERIVED_SIDECAR_DIRECTORY);
+        let sidecar_root = resolve_layout(&store_root)?.root();
         Self::open_at(&store_root, &sidecar_root, identity)
     }
 
@@ -940,9 +943,12 @@ impl SqliteCursorLedger {
         })
     }
 
-    fn for_root(store_root: PathBuf, identity: CursorLedgerIdentity) -> Self {
-        let sidecar_root = store_root.join(DERIVED_SIDECAR_DIRECTORY);
-        Self::for_paths(store_root, sidecar_root, identity)
+    fn for_root(
+        store_root: PathBuf,
+        identity: CursorLedgerIdentity,
+    ) -> Result<Self, CursorLedgerError> {
+        let sidecar_root = resolve_layout(&store_root)?.root();
+        Ok(Self::for_paths(store_root, sidecar_root, identity))
     }
 
     fn for_paths(
@@ -1008,14 +1014,19 @@ impl SqliteCursorLedger {
 
     fn rotate_sidecar(&self) -> Result<PathBuf, CursorLedgerError> {
         let sidecar = self.sidecar_path();
-        let quarantine = self.store_root.join(format!(
-            "{DERIVED_QUARANTINE_PREFIX}{}-{}",
+        let quarantine = resolve_layout(&self.store_root)?.quarantine(&format!(
+            "{}-{}",
             std::process::id(),
             QUARANTINE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::rename(sidecar, &quarantine).map_err(|error| io_error(sidecar, error))?;
         Ok(quarantine)
     }
+}
+
+fn resolve_layout(store_root: &Path) -> Result<DerivedStorageLayout, CursorLedgerError> {
+    DerivedStorageLayout::resolve(store_root)
+        .map_err(|error| CursorLedgerError::Layout(error.to_string()))
 }
 
 #[cfg(test)]

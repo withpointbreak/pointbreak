@@ -2221,7 +2221,9 @@ fn derived_inventory(
     {
         return Err("derived schema contains body/object persistence".to_owned());
     }
-    let sidecar = state.store_root.join(super::DERIVED_SIDECAR_DIRECTORY);
+    let sidecar = super::DerivedStorageLayout::resolve(&state.store_root)
+        .map_err(|error| error.to_string())?
+        .root();
     let database = sidecar.join("cursor.sqlite3");
     let page_count = rusqlite::Connection::open_with_flags(
         &database,

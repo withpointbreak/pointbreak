@@ -33,9 +33,9 @@ fn active_inspector_first_start_bootstraps_and_serves_history() {
     repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
     let revision_id = capture(repo.path());
 
-    let derived_root = common_dir_store(repo.path()).join(".pointbreak-derived");
+    let derived_root = common_dir_store(repo.path()).join("derived");
     assert!(!derived_root.exists(), "fixture starts without a sidecar");
-    let rebuild_lock_path = common_dir_store(repo.path()).join(".pointbreak-derived.rebuild.lock");
+    let rebuild_lock_path = common_dir_store(repo.path()).join("derived.rebuild.lock");
     let rebuild_lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)

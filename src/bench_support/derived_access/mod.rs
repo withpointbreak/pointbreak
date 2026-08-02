@@ -22,9 +22,9 @@ pub use lifecycle::*;
 pub use materializer::*;
 pub use product_contract::*;
 
-pub(crate) use crate::session::derived_access::sqlite::{
-    DERIVED_QUARANTINE_PREFIX, DERIVED_SIDECAR_DIRECTORY, DERIVED_WRITER_LOCK_FILE,
-};
+pub(crate) use crate::session::derived_access::layout::DerivedStorageLayout;
+#[cfg(test)]
+pub(crate) use crate::session::derived_access::layout::DerivedStorageNamespace;
 
 #[cfg(test)]
 mod runner_tests;

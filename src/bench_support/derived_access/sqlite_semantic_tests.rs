@@ -1,3 +1,4 @@
+use crate::bench_support::derived_access::DerivedStorageLayout;
 use crate::bench_support::derived_access::adapter::QualificationDerivedAccessAdapter;
 use crate::bench_support::derived_access::sqlite_cursor::{
     CursorLedgerIdentity, SqliteCursorLedger,
@@ -32,6 +33,13 @@ const STORE_ID: &str = "store:semantic-test";
 const JOURNAL: &str = "journal:sha256:semantic-test";
 const TRACK: &str = "agent:semantic-test";
 const ENGAGEMENT: &str = "engagement:sha256:semantic-test";
+
+fn derived_database(root: &std::path::Path) -> std::path::PathBuf {
+    DerivedStorageLayout::resolve(root)
+        .expect("derived layout")
+        .root()
+        .join("cursor.sqlite3")
+}
 
 fn revision_id(suffix: &str) -> RevisionId {
     RevisionId::new(format!("rev:sha256:{suffix}"))
@@ -797,10 +805,7 @@ fn semantic_sidecar_is_bodyless_and_restart_stable() {
     let after = ready(reopened.semantic_audit_snapshot().expect("after restart"));
     assert_eq!(before, after);
 
-    let sidecar = root
-        .path()
-        .join(".pointbreak-derived")
-        .join("cursor.sqlite3");
+    let sidecar = derived_database(root.path());
     let connection = rusqlite::Connection::open(&sidecar).expect("open semantic sidecar");
     let representative_columns = connection
         .prepare("PRAGMA table_info(semantic_representative)")
@@ -1031,12 +1036,8 @@ fn materialized_audit_looks_up_representatives_by_sequence() {
     );
     drop(adapter);
 
-    let connection = rusqlite::Connection::open(
-        root.path()
-            .join(".pointbreak-derived")
-            .join("cursor.sqlite3"),
-    )
-    .expect("open sidecar");
+    let connection =
+        rusqlite::Connection::open(derived_database(root.path())).expect("open sidecar");
     let mut statement = connection
         .prepare(
             "EXPLAIN QUERY PLAN
@@ -1079,10 +1080,7 @@ fn semantic_inventory_measures_retained_body_or_object_payload_columns() {
     let root = tempfile::tempdir().expect("root");
     let adapter = open_adapter(root.path());
     drop(adapter);
-    let database = root
-        .path()
-        .join(".pointbreak-derived")
-        .join("cursor.sqlite3");
+    let database = derived_database(root.path());
     let connection = rusqlite::Connection::open(database).expect("open sidecar");
     connection
         .execute_batch(

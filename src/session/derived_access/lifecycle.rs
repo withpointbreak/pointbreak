@@ -139,7 +139,7 @@ impl DerivedAccessLifecycle {
             profile,
             store_root: store_root.to_path_buf(),
             store_id,
-            paths: GenerationLayout::new(store_root),
+            paths: GenerationLayout::new(store_root)?,
         })
     }
 
@@ -1575,8 +1575,9 @@ mod tests {
             .filter_map(Result::ok)
             .filter_map(|entry| {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                name.strip_prefix(".pointbreak-derived.generation-lease-")
-                    .and_then(|name| name.strip_suffix(".lock"))
+                lifecycle
+                    .paths()
+                    .generation_lease_id(&name)
                     .map(str::to_owned)
             })
             .collect::<Vec<_>>();

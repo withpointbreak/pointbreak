@@ -96,10 +96,11 @@ fn active_missing_sidecar_records_only_the_writer_lock_and_path_resolution() {
     assert_eq!(snapshot.root_resolutions, 1);
     assert_eq!(snapshot.sqlite_physical_opens, 0);
     assert_eq!(snapshot.total(), 1);
-    assert!(!store.path().join(".pointbreak-derived").exists());
+    let layout = super::layout::DerivedStorageLayout::resolve(store.path()).unwrap();
+    assert!(!layout.root().exists());
     assert_eq!(
         directory_entries(store.path()),
-        vec![std::ffi::OsString::from(".pointbreak-derived.writer.lock")]
+        vec![layout.writer_lock().file_name().unwrap().to_owned()]
     );
 }
 
