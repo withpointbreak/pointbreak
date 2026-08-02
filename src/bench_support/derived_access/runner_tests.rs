@@ -214,13 +214,14 @@ fn phase_bundle_hash_binds_raw_receipts_to_their_tier_and_operation() {
 #[test]
 fn phase_request_and_separate_verifier_bind_source_tier_and_root() {
     let execution = QualificationDerivedAccessExpectedAuthorityV1::test_fixture().execution;
+    let root = std::env::temp_dir().join("pointbreak-phase-request");
     let mut request = QualificationDerivedAccessPhaseRunRequestV1 {
         schema: QUALIFICATION_DERIVED_ACCESS_PHASE_REQUEST_SCHEMA_V1.to_owned(),
-        source_checkout: PathBuf::from("/tmp/pointbreak-phase-source"),
+        source_checkout: root.join("source"),
         execution,
         tier: QualificationDerivedAccessTierV1::L7,
-        immutable_input_root: PathBuf::from("/tmp/pointbreak-phase-input"),
-        root: PathBuf::from("/tmp/pointbreak-phase-root"),
+        immutable_input_root: root.join("immutable-input"),
+        root: root.join("mutable-root"),
         root_identity_sha256: digest(46),
         request_sha256: String::new(),
     };
@@ -241,9 +242,9 @@ fn phase_request_and_separate_verifier_bind_source_tier_and_root() {
         .collect();
     let bundle = QualificationDerivedAccessPhaseBundleV1::new(source, request.tier, receipts)
         .expect("valid bundle");
-    let root = tempfile::tempdir().expect("phase verifier root");
-    let request_path = root.path().join("request.json");
-    let bundle_path = root.path().join("bundle.json");
+    let workspace = tempfile::tempdir().expect("phase verifier root");
+    let request_path = workspace.path().join("request.json");
+    let bundle_path = workspace.path().join("bundle.json");
     std::fs::write(
         &request_path,
         serde_json::to_vec_pretty(&request).expect("request JSON"),
