@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Hermetic Cargo package and release-archive layout test.
 # Run through `just package-archive-selftest`; it writes only temporary package/archive fixtures.
+# Windows hosts without symlink privilege report and skip only the alias-negative fixture.
 set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)

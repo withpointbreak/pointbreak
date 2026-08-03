@@ -25,6 +25,9 @@ row=$(jq -er --arg target "$target" '
     end
 ' "$targets_file")
 IFS=$'\t' read -r ext bin <<<"$row"
+# Keep the manifest boundary explicit even under Bash environments that do
+# not apply MSYS text-mode conversion to command substitution.
+bin=${bin%$'\r'}
 
 src="${bin_dir}/${bin}"
 if [ ! -f "$src" ] || [ -L "$src" ]; then
