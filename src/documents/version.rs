@@ -146,12 +146,19 @@ mod tests {
             actual.as_object_mut().unwrap().remove("build").is_some(),
             "current v1 adds build without rewriting the historical v1 fixture"
         );
-        if let Some(store_paths) = actual["documents"]
-            .as_object_mut()
-            .unwrap()
-            .remove("pointbreak.store-paths")
-        {
-            assert_eq!(store_paths, 1, "the approved registry addition stays v1");
+        for approved_addition in [
+            "pointbreak.store-paths",
+            "pointbreak.store-derived-build",
+            "pointbreak.store-derived-rebuild",
+            "pointbreak.store-derived-status",
+        ] {
+            if let Some(version) = actual["documents"]
+                .as_object_mut()
+                .unwrap()
+                .remove(approved_addition)
+            {
+                assert_eq!(version, 1, "the approved registry addition stays v1");
+            }
         }
         let expected: serde_json::Value = serde_json::from_slice(
             &crate::test_fixtures::naming_cutover_contract_bytes("protocol/version-v1.json"),

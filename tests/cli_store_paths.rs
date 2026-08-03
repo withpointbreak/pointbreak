@@ -89,18 +89,22 @@ fn store_paths_text_reports_the_same_five_paths() {
 }
 
 #[test]
-fn version_registry_adds_only_store_paths_to_the_frozen_document_set() {
+fn version_registry_additions_preserve_the_frozen_document_set() {
     let output = support::pointbreak(["version"]);
     assert!(output.status.success());
     let mut actual: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(
-        actual["documents"]["pointbreak.store-paths"],
-        serde_json::json!(1)
-    );
-    actual["documents"]
-        .as_object_mut()
-        .unwrap()
-        .remove("pointbreak.store-paths");
+    for approved_addition in [
+        "pointbreak.store-paths",
+        "pointbreak.store-derived-build",
+        "pointbreak.store-derived-rebuild",
+        "pointbreak.store-derived-status",
+    ] {
+        assert_eq!(actual["documents"][approved_addition], serde_json::json!(1));
+        actual["documents"]
+            .as_object_mut()
+            .unwrap()
+            .remove(approved_addition);
+    }
     actual["cliVersion"] = serde_json::json!("0.6.0");
     assert!(
         actual.as_object_mut().unwrap().remove("build").is_some(),
