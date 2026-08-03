@@ -332,3 +332,23 @@ and product evidence; it is not implied by adding another query.
 
 These mechanics apply only when `sqlite-wal-bodyless-v1` is active. The checked-in runtime default remains
 `off`; this amendment authorizes no rollout, truth migration, production activation, or release promise.
+
+## Amendment: Default-On Derived-Access Rollout (2026-08-03)
+
+Earlier statements in this ADR that the checked-in runtime default remains `off` describe the qualified
+pre-rollout source cut. The contained SQLite-WAL substrate is now active when
+`POINTBREAK_DERIVED_ACCESS` is unset; explicit `POINTBREAK_DERIVED_ACCESS=off` remains the immediate
+artifact-free rollback. This follow-through does not reopen the rejected redb/DuckDB comparison or earn a
+public `ProjectionStore` trait.
+
+The stable store-level container is `derived/`, located beneath the exact resolved authoritative store root.
+Compatible legacy `.pointbreak-derived*` state transitions without replay when leases and locks permit;
+ambiguous dual namespaces fail closed and remain operator-controlled. Synchronous lifecycle operations are
+`pointbreak store derived status|build|rebuild`; ordinary reads and writes never trigger a synchronous
+whole-history rebuild.
+
+Native rollout and lifecycle evidence passes on macOS/APFS and real Windows/NTFS. Linux remains compile/CI
+qualified, while the retained L100/C262 packages remain the scale evidence. Missing or incompatible
+disposable state, schema/projector change, corruption/quarantine, and authority gaps can still require an
+exceptional full rebuild. No authoritative truth migration, SQLite truth role, or release-format promise is
+introduced.

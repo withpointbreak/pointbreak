@@ -437,8 +437,8 @@ unset POINTBREAK_DERIVED_ACCESS
 export POINTBREAK_DERIVED_ACCESS=off
 ```
 
-The current runtime default is recorded separately in the rollout contract below; this historical contract
-and its hash are intentionally unchanged. Only `off` and `sqlite-wal-bodyless-v1` are valid. Unknown or
+The authoritative current runtime posture is the derived-access rollout contract below. This historical
+contract and its hash are intentionally unchanged. Only `off` and `sqlite-wal-bodyless-v1` are valid. Unknown or
 non-Unicode values are errors. The normal Pointbreak library and binary build the bundled
 `rusqlite`/`libsqlite3-sys` closure so the profile
 can be exercised without a developer feature. That compilation and package cost is present even while the

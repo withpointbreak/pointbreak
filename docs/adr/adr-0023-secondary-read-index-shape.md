@@ -253,3 +253,23 @@ store-wide audit surface.
 
 The checked-in runtime default remains `off`. This amendment authorizes no rollout, truth migration,
 production activation, or release promise.
+
+## Amendment: Default-On Derived-Access Rollout (2026-08-03)
+
+Earlier statements in this ADR that the checked-in runtime default remains `off` describe the qualified
+pre-rollout source cut. The implemented bodyless locator and semantic checkpoints now run by default when
+`POINTBREAK_DERIVED_ACCESS` is unset; explicit
+`POINTBREAK_DERIVED_ACCESS=off` remains the immediate artifact-free rollback.
+
+The default does not promote the index into authority. Bounded history, attention, and explicitly limited
+revision-list pages select through the derived service, then reopen and validate the required loose carriers.
+Unavailable derived state falls back to authoritative loose reads with a bounded hint; exhaustive history,
+search, exact audit, replay, transfer, backup, repair, migration, removal, compaction reconciliation, and
+deliberate rebuild remain truth-primary operations. `projectionStamp` identifies a served derived snapshot,
+not event-set identity or a signature input.
+
+The private state lives in the stable `derived/` container beneath the exact resolved authoritative store
+root and can transition from a compatible legacy `.pointbreak-derived*` namespace without rebuilding.
+Operators use `pointbreak store derived status|build|rebuild`; namespace conflict reports both local paths and
+never chooses or deletes one. No authoritative truth migration, body caching, second erasure surface, or
+public index-addressing contract is introduced.

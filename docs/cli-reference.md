@@ -455,6 +455,10 @@ for the exact store selected by `--repo`. The event journal and content store re
 these commands do not replace, migrate, or mutate loose truth.
 When `POINTBREAK_DERIVED_ACCESS` is unset, the derived profile is active; set it explicitly to `off` for
 immediate rollback.
+The stable `derived/` container and its locks, leases, quarantine, and retired artifacts live directly
+beneath the exact resolved authoritative store root. Clone-local, ephemeral, and user-level family stores
+therefore each keep their own matching disposable generation; Pointbreak does not maintain a second global
+derived-path registry.
 
 - `status` is strictly read-only. It reports the selected namespace and lifecycle availability without
   creating a directory, acquiring a rebuild lease, or starting background work. Its
@@ -475,6 +479,12 @@ that does not understand the stable `derived/` namespace. If a live lease defers
 both namespaces conflict, the command still emits its machine-readable receipt to stdout but exits non-zero;
 the requested build did not complete, so shell callers must not proceed as though a generation is usable.
 
+A first bounded CLI read with no usable generation falls back to authoritative loose data and emits one
+actionable hint for the exact store and process; it does not synchronously rebuild history. A first write
+publishes authoritative loose truth once and reports derived degradation, leaving the disposable generation
+for a later `build` or `rebuild`. Inspector is the interactive exception: it starts one asynchronous first
+build while keeping the shell and explicit authoritative fallback available.
+
 When the derived profile is active and current, output-bounded `history` pages, `attention list`, and
 explicitly bounded `revision list --limit` pages use it without enumerating the event directory. These
 commands keep their domain document schemas and expose `projectionStamp` instead of pretending that the
@@ -482,6 +492,11 @@ bounded freshness identity is an `eventSetHash`. An absent or unusable generatio
 authoritative journal for that invocation and prints one `store derived status|build` hint. Unbounded,
 search, ref-filtered, audit, replay, transfer, repair, migration, removal, and compaction work remains
 authoritative.
+
+The rollout and lifecycle are natively qualified on macOS/APFS and Windows/NTFS. Linux remains compile/CI
+qualified; that support surface does not substitute for retained-scale Linux measurements. Existing retained
+L100/C262 packages remain the scale authority, and first build or deliberate rebuild remains exceptional,
+history-proportional maintenance rather than an ordinary read or write path.
 
 `pointbreak store paths` is the supported path-discovery seam. It emits
 `pointbreak.store-paths` version 1 with the selected `tier` and exact `worktreeStore`, `commonStore`,

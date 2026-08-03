@@ -1,7 +1,6 @@
 # ADR-0041: Bodyless SQLite Derived Access over Loose Authority
 
-**Status:** Accepted (2026-08-02). The selected target posture is default-on, but the checked-in
-runtime remains default-off pending a separate rollout change.
+**Status:** Accepted (2026-08-02); default-on rollout implemented and natively qualified (2026-08-03).
 **Date:** 2026-08-02
 **See also:** [ADR-0020](./adr-0020-durable-storage-backend-seam.md) (authoritative Journal and
 ContentStore seam), [ADR-0023](./adr-0023-secondary-read-index-shape.md) (positions-not-bodies and selected
@@ -250,3 +249,32 @@ disposable sidecar.
 - A second substrate is proposed with evidence strong enough to justify the migration and support cost; only
   then earn an internal projection-storage seam.
 - Authoritative truth topology, rather than derived access, becomes the measured bottleneck.
+
+## Amendment: Default-On Derived-Access Rollout (2026-08-03)
+
+The default-on target selected by D8 is now the as-built runtime posture. An unset
+`POINTBREAK_DERIVED_ACCESS` selects `sqlite-wal-bodyless-v1`; explicit
+`POINTBREAK_DERIVED_ACCESS=off` remains the immediate artifact-free rollback. Earlier statements in this ADR
+that the checked-in runtime remains off describe the qualified pre-rollout source cut and are superseded only
+for current selector and interaction behavior.
+
+The rollout completed the prerequisites D6 left open. `pointbreak store derived status|build|rebuild`
+provides read-only diagnosis plus explicit synchronous build/rebuild. Bounded history, attention, and
+explicitly limited revision-list reads use a current generation and otherwise fall back to authoritative
+loose work with one actionable hint per exact store and process. A write without a usable generation
+publishes loose truth once and reports derived degradation; it does not synchronously reconstruct history.
+Inspector keeps its asynchronous first-build and explicit authoritative fallback behavior.
+
+The stable `derived/` container and sibling locks, leases, quarantine, and retired artifacts live beneath the
+exact resolved authoritative store root. Compatible legacy `.pointbreak-derived*` state moves without replay
+only under exclusive, lease-aware transition. If stable and legacy namespaces conflict, Pointbreak reports
+both local paths and keeps loose reads/writes available; it never guesses, merges, deletes, or labels one
+authoritative.
+
+Disposable D0/L1/L7 rollout qualification passes on macOS/APFS and real Windows/NTFS. Linux remains
+compile/CI qualified, and the prior retained L100/C262 packages remain the scale authority; no C524 or new
+retained-scale run was required. The rollout contract is
+`pointbreak.derived-access-rollout-contract.v1`, SHA-256
+`69650f18f89329aac602ecbf34a552084decd9f48556ce0e3f5a4aa2cc711fb1`, and preserves the immutable historical
+integration/readiness hashes. No authoritative truth migration, production-store rewrite, body persistence,
+or broad substrate seam is authorized by activation.

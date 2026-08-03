@@ -72,6 +72,41 @@ pointbreak inspect --open
 author/reviewer loop. The sections below cover installer options, checksum verification, supported
 platforms, and manual downloads; return to them when you need them.
 
+## Derived access after upgrade
+
+Current Pointbreak builds enable the private `sqlite-wal-bodyless-v1` derived-access profile when
+`POINTBREAK_DERIVED_ACCESS` is unset. Loose Journal and ContentStore bytes remain the sole authority; the
+SQLite state is bodyless, disposable, and rebuildable. Set `POINTBREAK_DERIVED_ACCESS=off` for immediate,
+artifact-free rollback before starting Pointbreak. This is also the safe runtime posture before temporarily
+using an older binary that does not understand the current derived layout.
+
+The stable `derived/` container lives directly beneath the exact resolved authoritative store root. A
+clone-local, ephemeral, or user-level family store therefore owns its corresponding sidecar. An existing
+legacy `.pointbreak-derived/` namespace remains readable and is moved to the stable namespace only when its
+generation and sibling lock/lease state can transition safely; the move does not replay or rewrite truth.
+
+Use the lifecycle commands against the repository whose store you intend to inspect:
+
+```sh
+pointbreak store derived status --repo <path>
+pointbreak store derived build --repo <path>
+pointbreak store derived rebuild --repo <path>
+```
+
+`status` is read-only. `build` synchronously creates or repairs a generation only when needed, while
+`rebuild` always stages and publishes a replacement generation. Build and rebuild may scan the complete
+event history, so they can take substantial time on a large store; cancellation or failure preserves loose
+truth and any previously valid generation.
+
+If both `derived/` and the legacy namespace exist, text status identifies both local paths. Inspect them,
+retain one disposable copy and move the other aside, then retry. Pointbreak never chooses, merges, deletes,
+or labels either copy authoritative. If derived state is absent or unavailable, bounded CLI reads fall back
+to loose truth with one actionable hint, writes still publish loose truth, and Inspector can build in the
+background.
+
+The rollout and lifecycle have native qualification on macOS/APFS and Windows/NTFS. Linux remains covered by
+the normal compile and CI lanes; retained-scale Linux behavior has not been separately measured.
+
 ## Checksum verification
 
 Verification is on by default and fails closed. The installer stops without replacing `pointbreak` if:

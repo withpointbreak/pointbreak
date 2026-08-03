@@ -218,6 +218,37 @@ fn documentation_table_is_generated_from_the_frozen_contract() {
         table,
         product_integration_contract_publication_v1().decision_table_markdown
     );
+
+    let historical_heading = docs
+        .find("## Derived-access product-integration contract")
+        .expect("historical contract heading");
+    let historical_label = docs
+        .find("Pointbreak retains this historical contract for the source cut")
+        .expect("historical qualification label");
+    let marker = docs
+        .find("<!-- derived-access-product-integration-contract-v1:start -->")
+        .expect("historical contract marker");
+    assert!(historical_heading < historical_label && historical_label < marker);
+    assert!(
+        docs.contains(
+            "The authoritative current runtime posture is the derived-access rollout contract below."
+        ),
+        "the immutable historical table must not be mistaken for the current runtime contract"
+    );
+    let current_docs = docs
+        .split_once("<!-- derived-access-product-integration-contract-v1:end -->")
+        .expect("historical contract end marker")
+        .1;
+    for stale in [
+        "The checked-in runtime remains default-off",
+        "The checked-in runtime default remains `off`",
+        "an unset selector still resolves to `off`",
+    ] {
+        assert!(
+            !current_docs.contains(stale),
+            "live-current docs must not repeat historical default-off prose: {stale}"
+        );
+    }
 }
 
 #[test]
@@ -642,4 +673,66 @@ fn current_rollout_contract_is_separate_canonical_and_inert() {
     assert_eq!(smoke.filesystem_actions, 0);
     assert_eq!(smoke.store_roots_opened, 0);
     assert!(!smoke.evidence_collected);
+}
+
+#[test]
+fn live_documentation_tracks_the_default_on_rollout() {
+    let cli = include_str!("../../../docs/cli-reference.md");
+    let installation = include_str!("../../../docs/installation.md");
+    let benchmarking = include_str!("../../../docs/benchmarking.md");
+    let normalized_cli = cli.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    for docs in [cli, installation, benchmarking] {
+        assert!(
+            docs.contains("POINTBREAK_DERIVED_ACCESS=off"),
+            "every operator-facing surface must retain the explicit-off rollback"
+        );
+        assert!(
+            docs.contains("pointbreak store derived status"),
+            "every operator-facing surface must name the read-only diagnostic command"
+        );
+    }
+
+    assert!(cli.contains("exact resolved authoritative store root"));
+    assert!(cli.contains("A first bounded CLI read"));
+    assert!(cli.contains("A first write"));
+    assert!(cli.contains("macOS/APFS and Windows/NTFS"));
+    assert!(normalized_cli.contains(
+        "Linux remains compile/CI qualified; that support surface does not substitute for retained-scale \
+         Linux measurements"
+    ));
+    assert!(cli.contains("both the stable `derived/` namespace"));
+    assert!(normalized_cli.contains("retain one disposable copy and move the other aside"));
+    assert!(cli.contains("Pointbreak never guesses, merges, or deletes either"));
+
+    assert!(installation.contains("## Derived access after upgrade"));
+    assert!(installation.contains("legacy `.pointbreak-derived/`"));
+    assert!(installation.contains("retain one disposable copy and move the other aside"));
+    assert!(installation.contains("may scan the complete"));
+    assert!(installation.contains("event history"));
+
+    assert!(benchmarking.contains("## Derived-access default rollout contract"));
+    assert!(benchmarking.contains("authoritative current runtime posture"));
+    assert!(benchmarking.contains("Platform scope | native `macOS APFS`, `Windows NTFS`"));
+}
+
+#[test]
+fn coupled_storage_adrs_record_the_as_built_default_on_follow_through() {
+    let adrs = [
+        include_str!("../../../docs/adr/adr-0020-durable-storage-backend-seam.md"),
+        include_str!("../../../docs/adr/adr-0023-secondary-read-index-shape.md"),
+        include_str!("../../../docs/adr/adr-0024-secondary-read-index-substrate.md"),
+        include_str!("../../../docs/adr/adr-0041-bodyless-sqlite-derived-access.md"),
+    ];
+
+    for adr in adrs {
+        let amendment = adr
+            .rsplit_once("## Amendment: Default-On Derived-Access Rollout (2026-08-03)")
+            .expect("as-built rollout amendment")
+            .1;
+        assert!(amendment.contains("`pointbreak store derived status|build|rebuild`"));
+        assert!(amendment.contains("POINTBREAK_DERIVED_ACCESS=off"));
+        assert!(amendment.contains("rollback"));
+        assert!(amendment.contains("No authoritative truth migration"));
+    }
 }

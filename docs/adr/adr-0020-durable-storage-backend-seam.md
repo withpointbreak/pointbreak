@@ -522,3 +522,23 @@ The complete as-built decision is [ADR-0041](./adr-0041-bodyless-sqlite-derived-
 These mechanics apply only when the selected `sqlite-wal-bodyless-v1` profile is active. The checked-in
 runtime default remains `off`; this amendment authorizes no rollout, truth migration, production activation,
 or release promise.
+
+## Amendment: Default-On Derived-Access Rollout (2026-08-03)
+
+The preceding default-off sentence is the historical source-cut boundary for the 2026-08-02 amendment. The
+as-built runtime now selects `sqlite-wal-bodyless-v1` when `POINTBREAK_DERIVED_ACCESS` is unset. Explicit
+`POINTBREAK_DERIVED_ACCESS=off` remains the immediate artifact-free rollback.
+
+This does not alter the durable storage seam: loose `Journal` and `ContentStore` carriers remain the sole
+authority, direct loose create-once remains lock-free, and cursor/locator/semantic state remains private,
+bodyless, disposable, and reconstructible. A missing, incompatible, corrupt, busy, or transitioning derived
+generation cannot make a valid loose read or write unavailable. First bounded reads fall back to truth with
+one actionable hint; first writes publish truth once and report derived degradation rather than rebuilding
+history synchronously.
+
+The store-level `derived/` container follows the exact resolved authoritative store root. A compatible
+legacy `.pointbreak-derived*` namespace transitions without replay only when its generation, writer/rebuild
+locks, and reader leases permit an exclusive move; conflicts are reported rather than guessed, merged, or
+deleted. Operators diagnose or repair disposable state with
+`pointbreak store derived status|build|rebuild`. No authoritative truth migration, backend replacement, or
+logical-transfer change is part of this rollout.
