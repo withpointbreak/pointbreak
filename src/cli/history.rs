@@ -1,15 +1,18 @@
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Args, ValueEnum};
-use pointbreak::documents::history_document;
+use pointbreak::documents::{derived_history_document, history_document};
 use pointbreak::model::RevisionId;
 use pointbreak::session::event::EventType;
 use pointbreak::session::{
-    EventVerificationPolicy, HistoryCursor, HistoryOrder, LivenessToken, RefFilterMode,
-    ReviewHistoryEntry, ReviewHistoryOptions, ReviewHistoryResult, ReviewHistorySummary,
-    read_events_for_display, review_history,
+    BaseProjectionConfig, DerivedHistoryAccess, DerivedHistoryRoute, EventVerificationPolicy,
+    HistoryCursor, HistoryOrder, HistoryPage, HistoryQuery, LivenessToken, RefFilterMode,
+    ReviewHistoryEntry, ReviewHistoryFilters, ReviewHistoryOptions, ReviewHistoryResult,
+    ReviewHistorySummary, read_events_for_display, redact_history_bodies, review_history,
+    validated_track_id,
 };
 
 use crate::cli::common::{clamp_title, count_label, endpoint_label, wire_label};
@@ -133,7 +136,8 @@ fn render_once(
     args: &HistoryArgs,
     stdout: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut result = review_history(history_options(args)?)?;
+    let mut routed = read_history(args)?;
+    let result = routed.result_mut();
     for notice in &result.query_notices {
         eprintln!("hint: {}", notice.message);
     }
@@ -144,11 +148,162 @@ fn render_once(
     // `history_document` consumes the result by value; render the digest up
     // front on the text lane only, so the machine lanes pay nothing extra.
     let text =
-        matches!(format.format, output::OutputFormat::Text).then(|| render_history_text(&result));
-    let document = history_document(result);
-    output::write_document(stdout, format, &document, || {
-        text.expect("text lane resolves the digest source")
-    })
+        matches!(format.format, output::OutputFormat::Text).then(|| render_history_text(result));
+    match routed {
+        RoutedHistory::Authoritative(result) => {
+            let document = history_document(result);
+            output::write_document(stdout, format, &document, || {
+                text.expect("text lane resolves the digest source")
+            })
+        }
+        RoutedHistory::Derived {
+            result,
+            projection_stamp,
+        } => {
+            let document = derived_history_document(result, projection_stamp);
+            output::write_document(stdout, format, &document, || {
+                text.expect("text lane resolves the digest source")
+            })
+        }
+    }
+}
+
+enum RoutedHistory {
+    Authoritative(ReviewHistoryResult),
+    Derived {
+        result: ReviewHistoryResult,
+        projection_stamp: String,
+    },
+}
+
+impl RoutedHistory {
+    fn result_mut(&mut self) -> &mut ReviewHistoryResult {
+        match self {
+            Self::Authoritative(result) | Self::Derived { result, .. } => result,
+        }
+    }
+}
+
+fn read_history(args: &HistoryArgs) -> Result<RoutedHistory, Box<dyn std::error::Error>> {
+    if !eligible_for_derived_history(args) {
+        return Ok(RoutedHistory::Authoritative(review_history(
+            history_options(args)?,
+        )?));
+    }
+
+    let revision_id = args
+        .revision
+        .as_deref()
+        .map(|revision| {
+            crate::cli::id_resolver::IdResolver::new(&args.repo)
+                .rev(revision)
+                .map(RevisionId::new)
+        })
+        .transpose()?;
+    let track_id = args.track.as_deref().map(validated_track_id).transpose()?;
+    let event_types = args
+        .event_types
+        .iter()
+        .copied()
+        .map(EventType::from)
+        .collect::<Vec<_>>();
+    let query = HistoryQuery {
+        q: String::new(),
+        track: track_id.as_ref().map(|track| track.as_str().to_owned()),
+        snapshot: None,
+        revision: revision_id.clone(),
+        revisions: None,
+        types: (!event_types.is_empty()).then(|| {
+            event_types
+                .iter()
+                .map(|event_type| event_type.as_str().to_owned())
+                .collect::<BTreeSet<_>>()
+        }),
+        order: effective_order(args),
+    };
+    let page = HistoryPage {
+        limit: effective_limit(args),
+        after: args
+            .cursor
+            .as_deref()
+            .map(HistoryCursor::decode)
+            .transpose()
+            .map_err(|_| "invalid --cursor: pass an opaque nextCursor from a prior response")?,
+        offset: None,
+        at: None,
+    };
+    let config = history_projection_config(&args.repo);
+    let access = DerivedHistoryAccess::resolve(&args.repo).map_err(std::io::Error::other)?;
+    match access
+        .history(&query, &page, &config)
+        .map_err(std::io::Error::other)?
+    {
+        DerivedHistoryRoute::Ready(mut derived) => {
+            let next_cursor = (query.order == HistoryOrder::Asc
+                && !derived.entries.is_empty()
+                && derived.offset.saturating_add(derived.entries.len()) < derived.match_count)
+                .then(|| {
+                    let last = derived.entries.last().expect("nonempty page");
+                    HistoryCursor {
+                        occurred_at: last.occurred_at.clone(),
+                        event_id: last.event_id.clone(),
+                    }
+                    .encode()
+                });
+            if !args.include_body {
+                redact_history_bodies(&mut derived.entries);
+            }
+            Ok(RoutedHistory::Derived {
+                result: ReviewHistoryResult {
+                    event_set_hash: String::new(),
+                    event_count: derived.event_count,
+                    filters: ReviewHistoryFilters {
+                        revision_id,
+                        track_id,
+                        event_types,
+                        include_body: args.include_body,
+                    },
+                    entries: derived.entries,
+                    next_cursor,
+                    query_notices: derived.query_notices,
+                    diagnostics: derived.diagnostics,
+                },
+                projection_stamp: derived.projection_stamp,
+            })
+        }
+        DerivedHistoryRoute::Off if !access.is_active() => Ok(RoutedHistory::Authoritative(
+            review_history(history_options(args)?)?,
+        )),
+        DerivedHistoryRoute::Off | DerivedHistoryRoute::Unavailable(_) => {
+            crate::cli::derived_read::emit_authoritative_fallback_hint(&args.repo);
+            Ok(RoutedHistory::Authoritative(review_history(
+                history_options(args)?,
+            )?))
+        }
+        DerivedHistoryRoute::ExhaustiveSearchFallback => Ok(RoutedHistory::Authoritative(
+            review_history(history_options(args)?)?,
+        )),
+    }
+}
+
+fn eligible_for_derived_history(args: &HistoryArgs) -> bool {
+    effective_limit(args).is_some()
+        && !args.watch
+        && args.ref_name.is_none()
+        && args
+            .filter
+            .as_deref()
+            .is_none_or(|filter| filter.trim().is_empty())
+}
+
+fn history_projection_config(repo: &std::path::Path) -> BaseProjectionConfig {
+    BaseProjectionConfig {
+        verification_policy: Some(EventVerificationPolicy::advisory()),
+        trust_set: crate::cli::common::discover_trust_set(repo),
+        actor_attributes: crate::cli::common::discover_actor_attributes(repo),
+        delegation_map: crate::cli::common::discover_delegation_map(repo),
+        removal_policy: pointbreak::session::RemovalPolicy::default(),
+    }
 }
 
 /// Bespoke text lane for `history`: a count headline naming the active filters,

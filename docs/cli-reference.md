@@ -467,6 +467,14 @@ that does not understand the stable `derived/` namespace. If a live lease defers
 both namespaces conflict, the command still emits its machine-readable receipt to stdout but exits non-zero;
 the requested build did not complete, so shell callers must not proceed as though a generation is usable.
 
+When the derived profile is active and current, output-bounded `history` pages, `attention list`, and
+explicitly bounded `revision list --limit` pages use it without enumerating the event directory. These
+commands keep their domain document schemas and expose `projectionStamp` instead of pretending that the
+bounded freshness identity is an `eventSetHash`. An absent or unusable generation falls back to the
+authoritative journal for that invocation and prints one `store derived status|build` hint. Unbounded,
+search, ref-filtered, audit, replay, transfer, repair, migration, removal, and compaction work remains
+authoritative.
+
 `pointbreak store paths` is the supported path-discovery seam. It emits
 `pointbreak.store-paths` version 1 with the selected `tier` and exact `worktreeStore`, `commonStore`,
 `binding`, `home`, and `keys` paths. The binding is
@@ -504,7 +512,9 @@ not print the secret text or file path.
 Every review read command resolves the shared common-dir store: `revision list` and `revision show`,
 `history`, the observation, input-request, and validation lists, the association list, and
 `assessment show` read it from any worktree of the clone, including hydrated bodies and the captured
-snapshot, so their `eventCount` and `eventSetHash` reflect that one store.
+snapshot. Authoritative documents identify that store state with `eventSetHash`; eligible bounded reads
+served by a current derived generation carry `projectionStamp` instead. Both identities move when the
+visible journal state moves, but a projection stamp is not a full-set hash.
 
 `pointbreak store mode` reads or sets a per-worktree store mode that controls where the worktree's review
 data lands. `pointbreak store mode ephemeral` pins the worktree to a discardable worktree-local
@@ -935,6 +945,10 @@ state — the first product surface of "Pointbreak surfaces the moments that nee
 guides, never gates (ADR-0019): nothing here is a write precondition. The emitted document is
 `pointbreak.attention-list`, version 1.
 
+With a current active derived profile, the command reads the incrementally maintained attention projection
+and carries `projectionStamp`; otherwise it reads authoritative journal data and carries `eventSetHash`.
+The item and filter fields are identical in both cases.
+
 - `--repo` defaults to `.`; `--revision` scopes the read to one revision — its anchored items plus
   the competing-heads thread that covers it (a short id resolves via the shared id resolver).
 - Each item carries a kind-qualified `id`, a `tier` (`primary` or `secondary`), the anchoring
@@ -1071,10 +1085,12 @@ pointbreak history [--repo <path>] [--revision <id>] [--track <track-id>] \
 
 `pointbreak history` reads the chronological ledger of durable Pointbreak events.
 
-- History replays the resolved store's `events/` and emits compact `pointbreak.review-history` v1 JSON by
-  default.
-- `eventSetHash` and `eventCount` describe the full validated event set used to build the output,
-  even when filters return only a subset of entries.
+- History emits compact `pointbreak.review-history` v1 JSON by default. A bounded `--limit` or `--tail`
+  request uses a current active derived generation when `--filter`, `--ref`, and `--watch` are absent;
+  typed revision, track, event-type, and selected-body hydration remain supported on that route.
+- A derived page carries `projectionStamp`; an authoritative page carries `eventSetHash`. `eventCount`
+  describes the complete validated event population behind either page. Non-empty search filters, ref
+  filters, watch mode, and unbounded reads deliberately use the authoritative journal.
 - `historyCount` is the number of returned entries after filters.
 - Entries are sorted by `occurredAt`, then `eventId`, as display chronology.
 - `--revision`, `--track`, and repeated `--event-type` narrow the returned entries.
@@ -1157,17 +1173,27 @@ narrative-first plus snapshot-complete view of one captured revision.
 
 ```bash
 pointbreak revision list [--repo <path>] [--object <object-id>] [--ref <name> [--by label|liveness]] \
-  [--filter <query>] [--integration-ref <name>] [--worktree <path>] [--all | --unreachable] [--format <fmt>]
+  [--filter <query>] [--integration-ref <name>] [--worktree <path>] [--all | --unreachable] \
+  [--limit <1..500> [--cursor <cursor>]] [--format <fmt>]
 ```
 
 `pointbreak revision list` is the discovery surface for captured revisions. It emits
-`pointbreak.review-revision-list` JSON with `eventSetHash`, `eventCount`, `revisionCount`, and entries
+`pointbreak.review-revision-list` JSON with `eventCount`, `revisionCount`, and entries
 sorted by capture time. Each entry carries the revision id, the content-only object id, the capture
 endpoints when Git provenance exists, the optional capture `summary`, and
 `objectArtifactContentHash`. Provenance-free revisions remain first-class entries and omit
 `source`, `base`, and `target` together rather than inventing Git coordinates. Text output places the
 summary beside the short revision id and labels provenance-free entries explicitly; Inspector and VS Code
 use the summary as the primary selection label.
+
+- `--limit <n>` opts into newest-first, one-captured-revision-per-row paging and accepts values from 1
+  through 500. `nextCursor` is present when another page remains; pass it back with the same options via
+  `--cursor`. A cursor binds the serving profile and snapshot. If either changes, the command exits with
+  `revision page changed; retry without --cursor` instead of translating or silently restarting it.
+- A flagless bounded page uses a current active derived generation and carries `projectionStamp`. Object,
+  ref, review-filter, reachability, integration-ref, and worktree-scoped pages retain the authoritative
+  implementation and carry `eventSetHash`. If an active generation is unavailable, a first page falls
+  back authoritatively with one build hint; its returned cursor is therefore authoritative too.
 
 - `--object <object-id>` lists only the revisions that share one content object. Coincident content
   may span supersession threads, so this is a listing/grouping lens, never a head selector.

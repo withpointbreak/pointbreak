@@ -35,7 +35,9 @@ pub(crate) fn staged_body(body: Option<&str>) -> Result<StagedBody> {
     }
 }
 
-pub(crate) fn validated_track_id(value: &str) -> Result<TrackId> {
+/// Parse the shared track-id syntax for CLI and workflow entry points.
+#[doc(hidden)]
+pub fn validated_track_id(value: &str) -> Result<TrackId> {
     let value = value.trim();
     if value.is_empty() {
         return Err(invalid_track_id("track id cannot be empty"));

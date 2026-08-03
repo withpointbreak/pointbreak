@@ -149,10 +149,11 @@ pub use workflow::{
     list_revisions, list_units_for_ref, list_validation_checks, matches_query,
     migrate_store_to_common_dir, open_input_request, parse_search_query, parse_search_query_for,
     preview_link_to_family, record_assessment, record_event_signature, record_observation,
-    record_validation_check, referenced_artifacts, remove_content, resolve_default_integration_ref,
-    respond_input_request, review_history, show_assessments, show_revision,
-    show_revision_for_inspector, show_revision_overviews, stale_review_fact_count, store_identity,
-    store_status, unlink_store_from_family, withdraw_commit, withdraw_ref,
+    record_validation_check, redact_history_bodies, referenced_artifacts, remove_content,
+    resolve_default_integration_ref, respond_input_request, review_history, show_assessments,
+    show_revision, show_revision_for_inspector, show_revision_overviews, stale_review_fact_count,
+    store_identity, store_status, unlink_store_from_family, validated_track_id, withdraw_commit,
+    withdraw_ref,
 };
 pub(in crate::session) use workflow::{assessment, input_request, observation};
 #[cfg(any(test, feature = "bench"))]

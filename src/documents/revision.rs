@@ -35,10 +35,15 @@ pub struct RevisionShowBody {
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RevisionListBody {
-    event_set_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event_set_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    projection_stamp: Option<String>,
     event_count: usize,
     revision_count: usize,
     entries: Vec<RevisionListEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -200,13 +205,44 @@ pub fn revision_show_document(
 
 /// Build the `pointbreak.review-revision-list` document from a list result.
 pub fn revision_list_document(result: RevisionListResult) -> DiagnosticDocument<RevisionListBody> {
+    revision_list_page_document(result, None)
+}
+
+/// Build an authoritative, output-bounded revision-list page.
+#[doc(hidden)]
+pub fn revision_list_page_document(
+    result: RevisionListResult,
+    next_cursor: Option<String>,
+) -> DiagnosticDocument<RevisionListBody> {
+    revision_list_document_with_identity(result, None, next_cursor)
+}
+
+/// Build the same bounded revision-list document from a validated derived
+/// projection. Projection and event-set identities are never relabeled.
+#[doc(hidden)]
+pub fn derived_revision_list_page_document(
+    result: RevisionListResult,
+    projection_stamp: String,
+    next_cursor: Option<String>,
+) -> DiagnosticDocument<RevisionListBody> {
+    revision_list_document_with_identity(result, Some(projection_stamp), next_cursor)
+}
+
+fn revision_list_document_with_identity(
+    result: RevisionListResult,
+    projection_stamp: Option<String>,
+    next_cursor: Option<String>,
+) -> DiagnosticDocument<RevisionListBody> {
+    let event_set_hash = projection_stamp.is_none().then_some(result.event_set_hash);
     DiagnosticDocument::new(
         "pointbreak.review-revision-list",
         RevisionListBody {
-            event_set_hash: result.event_set_hash,
+            event_set_hash,
+            projection_stamp,
             event_count: result.event_count,
             revision_count: result.revision_count,
             entries: result.entries,
+            next_cursor,
         },
         result.diagnostics,
     )

@@ -16,6 +16,7 @@ mod association;
 mod attention;
 mod capture;
 pub(crate) mod common;
+mod derived_read;
 mod diff;
 mod endorse;
 mod history;

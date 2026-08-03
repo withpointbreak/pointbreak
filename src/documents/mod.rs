@@ -40,9 +40,12 @@ pub use association::{
     WithdrawRefBody, associate_commit_document, associate_ref_document, list_associations_document,
     withdraw_commit_document, withdraw_ref_document,
 };
-pub use attention::{ATTENTION_LIST_SCHEMA, AttentionListBody, attention_list_document};
+pub use attention::{
+    ATTENTION_LIST_SCHEMA, AttentionListBody, attention_list_document,
+    derived_attention_list_document,
+};
 pub use capture::{CaptureBody, capture_document};
-pub use history::{HistoryBody, history_document};
+pub use history::{HistoryBody, derived_history_document, history_document};
 pub use identity::{
     IDENTITY_WHOAMI_SCHEMA, IdentityWhoamiBody, IdentityWhoamiDocument, identity_whoami_document,
 };
@@ -60,7 +63,8 @@ pub use observation::{
     ObservationAddBody, ObservationListBody, observation_add_document, observation_list_document,
 };
 pub use revision::{
-    RevisionListBody, RevisionShowBody, revision_list_document, revision_show_document,
+    RevisionListBody, RevisionShowBody, derived_revision_list_page_document,
+    revision_list_document, revision_list_page_document, revision_show_document,
 };
 pub use validation::{
     ValidationAddBody, ValidationListBody, validation_add_document, validation_list_document,

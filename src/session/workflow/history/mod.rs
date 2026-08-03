@@ -169,9 +169,7 @@ fn apply_review_history_options(
     diagnostics.extend(skip_diagnostics);
 
     if !options.include_body {
-        for entry in &mut entries {
-            redact_hydrated_bodies(entry);
-        }
+        redact_history_bodies(&mut entries);
     }
 
     Ok(ReviewHistoryResult {
@@ -185,14 +183,21 @@ fn apply_review_history_options(
     })
 }
 
-fn redact_hydrated_bodies(entry: &mut ReviewHistoryEntry) {
-    match &mut entry.summary {
-        ReviewHistorySummary::ReviewObservationRecorded { body, .. }
-        | ReviewHistorySummary::InputRequestOpened { body, .. } => *body = None,
-        ReviewHistorySummary::ReviewAssessmentRecorded { summary, .. }
-        | ReviewHistorySummary::ValidationCheckRecorded { summary, .. } => *summary = None,
-        ReviewHistorySummary::InputRequestResponded { reason, .. } => *reason = None,
-        _ => {}
+/// Apply the history document's default body-redaction policy to an already
+/// hydrated bounded page. Keeping this in the workflow prevents derived and
+/// authoritative adapters from drifting when another body-bearing event is
+/// added.
+#[doc(hidden)]
+pub fn redact_history_bodies(entries: &mut [ReviewHistoryEntry]) {
+    for entry in entries {
+        match &mut entry.summary {
+            ReviewHistorySummary::ReviewObservationRecorded { body, .. }
+            | ReviewHistorySummary::InputRequestOpened { body, .. } => *body = None,
+            ReviewHistorySummary::ReviewAssessmentRecorded { summary, .. }
+            | ReviewHistorySummary::ValidationCheckRecorded { summary, .. } => *summary = None,
+            ReviewHistorySummary::InputRequestResponded { reason, .. } => *reason = None,
+            _ => {}
+        }
     }
 }
 

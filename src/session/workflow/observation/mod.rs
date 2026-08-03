@@ -13,7 +13,8 @@ pub(crate) use self::target::{
     CurrentRevisionContext, ResolvedRevision, RevisionScope, RevisionSelection,
     resolve_observation_target, resolve_revision, revision_ids_in_worktree,
 };
-pub(crate) use self::util::{required_title, staged_body, validated_track_id};
+pub use self::util::validated_track_id;
+pub(crate) use self::util::{required_title, staged_body};
 #[cfg(test)]
 use self::view::sort_observation_views;
 pub(crate) use self::view::{

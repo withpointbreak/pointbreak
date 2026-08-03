@@ -1,14 +1,21 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use clap::{Args, ValueEnum};
-use pointbreak::documents::revision_list_document;
-use pointbreak::session::{
-    QueryDiagnosticCode, QuerySurface, RefFilterMode, RevisionListOptions,
-    RevisionOverviewsOptions, RevisionRecordInputs, SupersessionView, UnreachableVisibility,
-    build_revision_search_record, list_revisions, matches_query, parse_search_query_for,
-    read_events_for_display, revision_supersession_classification, show_revision_overviews,
+use pointbreak::documents::{
+    derived_revision_list_page_document, revision_list_document, revision_list_page_document,
 };
+use pointbreak::session::{
+    AUTHORITATIVE_REVISION_PAGE_PROFILE, DerivedHistoryAccess, DerivedRevisionPageRoute,
+    QueryDiagnosticCode, QuerySurface, RefFilterMode, RevisionListOptions,
+    RevisionOverviewsOptions, RevisionPageCursor, RevisionPageRequest, RevisionPageRequestError,
+    RevisionRecordInputs, SnapshotSummaryCache, SupersessionView, UnreachableVisibility,
+    build_revision_search_record, list_revisions, matches_query, parse_event_instant,
+    parse_search_query_for, read_events_for_display, revision_supersession_classification,
+    show_revision_overviews,
+};
+use sha2::{Digest, Sha256};
 
 use crate::cli::common::{count_label, endpoint_label};
 use crate::cli::output;
@@ -64,6 +71,16 @@ pub(super) struct RevisionListArgs {
     #[arg(long)]
     worktree: Option<PathBuf>,
 
+    /// Return at most N captured revisions in newest-first order. This explicit
+    /// bounded mode emits a nextCursor when another page remains.
+    #[arg(long, value_name = "N")]
+    limit: Option<usize>,
+
+    /// Continue a bounded listing from an opaque nextCursor. If the selected
+    /// projection changes, retry without this cursor.
+    #[arg(long, requires = "limit")]
+    cursor: Option<String>,
+
     #[command(flatten)]
     format_args: output::FormatArgs,
 }
@@ -93,44 +110,10 @@ pub(super) fn run(
     let _entered = span.enter();
     tracing::debug!(command = "revision.list", "command_start");
 
-    let ids = crate::cli::id_resolver::IdResolver::new(&args.repo);
-    let object = match &args.object {
-        Some(object) => Some(ids.object(object)?),
-        None => None,
-    };
-
-    let mut options = RevisionListOptions::new(&args.repo).with_read_for_display(true);
-    if let Some(ref_name) = args.ref_name {
-        options = options.with_ref_filter(ref_name, args.by.into());
+    if args.limit.is_some() {
+        return run_bounded(args, stdout);
     }
-    // `--all` is the default and remains accepted for compatibility.
-    // `--unreachable` (deprecated alias `--orphans`) is the only CLI
-    // reachability filter and keeps precedence when both flags are supplied.
-    let visibility = if args.unreachable {
-        UnreachableVisibility::UnreachableOnly
-    } else {
-        UnreachableVisibility::All
-    };
-    options = options.with_unreachable_visibility(visibility);
-    if let Some(integration_ref) = args.integration_ref {
-        options = options.with_integration_ref(integration_ref);
-    }
-    if let Some(worktree) = args.worktree {
-        options = options.with_worktree_scope(worktree);
-    }
-    let mut result = list_revisions(options)?;
-
-    // `--object` is a listing lens: filter to revisions over the same content
-    // object id (coincident content, which may span threads). It never resolves a
-    // head and never force-disambiguates.
-    if let Some(object) = object.as_deref() {
-        result
-            .entries
-            .retain(|entry| entry.object_id.as_str() == object);
-        result.revision_count = result.entries.len();
-    }
-
-    apply_revision_filter(&args.repo, args.filter.as_deref(), &mut result)?;
+    let result = authoritative_result(&args, true)?;
 
     let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
     // `revision_list_document` consumes the result by value; render the digest
@@ -141,6 +124,248 @@ pub(super) fn run(
     output::write_document(stdout, format, &document, || {
         text.expect("text lane resolves the digest source")
     })
+}
+
+enum RoutedRevisionPage {
+    Authoritative {
+        result: pointbreak::session::RevisionListResult,
+        next: Option<String>,
+    },
+    Derived {
+        result: pointbreak::session::RevisionListResult,
+        projection_stamp: String,
+        next: Option<String>,
+    },
+}
+
+impl RoutedRevisionPage {
+    fn result(&self) -> &pointbreak::session::RevisionListResult {
+        match self {
+            Self::Authoritative { result, .. } | Self::Derived { result, .. } => result,
+        }
+    }
+}
+
+fn eligible_for_bounded_route(args: &RevisionListArgs) -> bool {
+    args.limit.is_some()
+        && args.object.is_none()
+        && args.ref_name.is_none()
+        && args
+            .filter
+            .as_deref()
+            .is_none_or(|filter| filter.trim().is_empty())
+        && !args.unreachable
+        && args.integration_ref.is_none()
+        && args.worktree.is_none()
+}
+
+fn run_bounded(
+    args: RevisionListArgs,
+    stdout: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let limit = args.limit.expect("bounded route has a limit");
+    if !(1..=500).contains(&limit) {
+        return Err("--limit must be between 1 and 500".into());
+    }
+    let request = RevisionPageRequest::new(Some(limit), args.cursor.as_deref())
+        .map_err(|_| "invalid --cursor: pass an opaque nextCursor from a prior response")?;
+    let routed = read_bounded_page(&args, &request)?;
+    let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
+    let text = matches!(format.format, output::OutputFormat::Text)
+        .then(|| render_revision_list_text(routed.result()));
+    match routed {
+        RoutedRevisionPage::Authoritative { result, next } => {
+            let document = revision_list_page_document(result, next);
+            output::write_document(stdout, format, &document, || {
+                text.expect("text lane resolves the digest source")
+            })
+        }
+        RoutedRevisionPage::Derived {
+            result,
+            projection_stamp,
+            next,
+        } => {
+            let document = derived_revision_list_page_document(result, projection_stamp, next);
+            output::write_document(stdout, format, &document, || {
+                text.expect("text lane resolves the digest source")
+            })
+        }
+    }
+}
+
+fn read_bounded_page(
+    args: &RevisionListArgs,
+    request: &RevisionPageRequest,
+) -> Result<RoutedRevisionPage, Box<dyn std::error::Error>> {
+    if !eligible_for_bounded_route(args) {
+        return authoritative_page(args, request);
+    }
+    let repo = &args.repo;
+    let access = DerivedHistoryAccess::resolve(repo).map_err(std::io::Error::other)?;
+    let trust_set = crate::cli::common::discover_trust_set(repo);
+    match access
+        .revisions_page(
+            repo,
+            trust_set,
+            Arc::new(SnapshotSummaryCache::new()),
+            request,
+        )
+        .map_err(std::io::Error::other)?
+    {
+        DerivedRevisionPageRoute::Ready(page) => Ok(RoutedRevisionPage::Derived {
+            result: page.result,
+            projection_stamp: page.projection_stamp,
+            next: page.next,
+        }),
+        DerivedRevisionPageRoute::RestartRequired => Err(revision_page_restart_error()),
+        DerivedRevisionPageRoute::Off if !access.is_active() => authoritative_page(args, request),
+        DerivedRevisionPageRoute::Off | DerivedRevisionPageRoute::Unavailable(_) => {
+            crate::cli::derived_read::emit_authoritative_fallback_hint(repo);
+            authoritative_page(args, request)
+        }
+    }
+}
+
+fn authoritative_page(
+    args: &RevisionListArgs,
+    request: &RevisionPageRequest,
+) -> Result<RoutedRevisionPage, Box<dyn std::error::Error>> {
+    let mut result = authoritative_result(args, false)?;
+    let normalized = result
+        .entries
+        .iter()
+        .map(|entry| {
+            parse_event_instant(&entry.captured_at)
+                .map(|instant| (entry.revision_id.clone(), instant))
+                .ok_or_else(|| {
+                    format!(
+                        "captured revision {} has an invalid instant",
+                        entry.revision_id.as_str()
+                    )
+                })
+        })
+        .collect::<Result<std::collections::BTreeMap<_, _>, _>>()?;
+    result.entries.sort_by(|left, right| {
+        normalized[&right.revision_id]
+            .cmp(&normalized[&left.revision_id])
+            .then_with(|| right.revision_id.as_str().cmp(left.revision_id.as_str()))
+    });
+    let snapshot = authoritative_cursor_snapshot(args, &result.event_set_hash);
+    let cursor = match request.cursor(AUTHORITATIVE_REVISION_PAGE_PROFILE, &snapshot) {
+        Ok(cursor) => cursor,
+        Err(RevisionPageRequestError::RestartRequired) => {
+            return Err(revision_page_restart_error());
+        }
+        Err(RevisionPageRequestError::InvalidRequest) => {
+            return Err("invalid revision page cursor".into());
+        }
+    };
+    let start = cursor.as_ref().map_or(0, |cursor| {
+        result.entries.partition_point(|entry| {
+            let captured_at = normalized[&entry.revision_id];
+            captured_at > cursor.captured_at_millis
+                || (captured_at == cursor.captured_at_millis
+                    && entry.revision_id.as_str() >= cursor.revision_id.as_str())
+        })
+    });
+    let mut entries = result.entries.split_off(start.min(result.entries.len()));
+    let has_more = entries.len() > request.limit();
+    entries.truncate(request.limit());
+    let next = if has_more {
+        let entry = entries.last().expect("nonempty bounded page");
+        Some(request.next(
+            AUTHORITATIVE_REVISION_PAGE_PROFILE,
+            &snapshot,
+            &RevisionPageCursor {
+                captured_at_millis: normalized[&entry.revision_id],
+                revision_id: entry.revision_id.clone(),
+            },
+        ))
+    } else {
+        None
+    };
+    result.entries = entries;
+    Ok(RoutedRevisionPage::Authoritative { result, next })
+}
+
+fn authoritative_cursor_snapshot(args: &RevisionListArgs, event_set_hash: &str) -> String {
+    // The token must not be reusable with a different authoritative selector:
+    // event-set freshness alone cannot distinguish two filters over the same
+    // journal. Hash the local request shape so potentially sensitive filter or
+    // path text never appears in the otherwise-decodable opaque token.
+    let selector = serde_json::json!({
+        "eventSetHash": event_set_hash,
+        "object": args.object,
+        "filter": args.filter,
+        "ref": args.ref_name,
+        "by": match args.by {
+            RefFilterByArg::Label => "label",
+            RefFilterByArg::Liveness => "liveness",
+        },
+        "unreachable": args.unreachable,
+        "integrationRef": args.integration_ref,
+        "worktree": args.worktree.as_ref().map(|path| path.to_string_lossy()),
+    });
+    let digest = Sha256::digest(
+        serde_json::to_vec(&selector)
+            .expect("selector JSON")
+            .as_slice(),
+    );
+    let mut encoded = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(encoded, "{byte:02x}").expect("write to string");
+    }
+    format!("sha256:{encoded}")
+}
+
+fn authoritative_result(
+    args: &RevisionListArgs,
+    group_shared_commits: bool,
+) -> Result<pointbreak::session::RevisionListResult, Box<dyn std::error::Error>> {
+    let ids = crate::cli::id_resolver::IdResolver::new(&args.repo);
+    let object = args
+        .object
+        .as_deref()
+        .map(|object| ids.object(object))
+        .transpose()?;
+    let mut options = RevisionListOptions::new(&args.repo)
+        .with_read_for_display(true)
+        .with_group_shared_commits(group_shared_commits);
+    if let Some(ref_name) = &args.ref_name {
+        options = options.with_ref_filter(ref_name.clone(), args.by.into());
+    }
+    // `--all` is the default and remains accepted for compatibility.
+    // `--unreachable` (deprecated alias `--orphans`) is the only CLI
+    // reachability filter and keeps precedence when both flags are supplied.
+    let visibility = if args.unreachable {
+        UnreachableVisibility::UnreachableOnly
+    } else {
+        UnreachableVisibility::All
+    };
+    options = options.with_unreachable_visibility(visibility);
+    if let Some(integration_ref) = &args.integration_ref {
+        options = options.with_integration_ref(integration_ref.clone());
+    }
+    if let Some(worktree) = &args.worktree {
+        options = options.with_worktree_scope(worktree);
+    }
+    let mut result = list_revisions(options)?;
+    // `--object` is a listing lens: filter to revisions over the same content
+    // object id (coincident content, which may span threads). It never resolves a
+    // head and never force-disambiguates.
+    if let Some(object) = object.as_deref() {
+        result
+            .entries
+            .retain(|entry| entry.object_id.as_str() == object);
+        result.revision_count = result.entries.len();
+    }
+    apply_revision_filter(&args.repo, args.filter.as_deref(), &mut result)?;
+    Ok(result)
+}
+
+fn revision_page_restart_error() -> Box<dyn std::error::Error> {
+    "revision page changed; retry without --cursor".into()
 }
 
 /// Bespoke text lane for `revision list`: a count headline, then one scannable

@@ -2,11 +2,11 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use clap::{Args, Subcommand};
-use pointbreak::documents::attention_list_document;
+use pointbreak::documents::{attention_list_document, derived_attention_list_document};
 use pointbreak::model::RevisionId;
 use pointbreak::session::{
     AttentionDetail, AttentionItem, AttentionListOptions, AttentionListResult, AttentionTier,
-    list_attention,
+    DerivedAttentionRoute, DerivedHistoryAccess, list_attention,
 };
 
 use crate::cli::common::clamp_title;
@@ -58,24 +58,97 @@ fn attention_list(
     let format_explicit = args.format_args.explicit();
     let format = output::resolve_format(format_explicit, output::OutputFormat::Json)?;
 
-    let mut options = AttentionListOptions::new(&args.repo);
-    if let Some(revision) = &args.revision {
-        let ids = crate::cli::id_resolver::IdResolver::new(&args.repo);
-        options = options.with_revision(RevisionId::new(ids.rev(revision)?));
-    }
-
-    let result = list_attention(options)?;
+    let revision = args
+        .revision
+        .as_deref()
+        .map(|revision| {
+            crate::cli::id_resolver::IdResolver::new(&args.repo)
+                .rev(revision)
+                .map(RevisionId::new)
+        })
+        .transpose()?;
+    let routed = read_attention(&args.repo, revision)?;
+    let result = routed.result();
     // The text lane reads the same result the document consumes; clone it only
     // when that lane will render (eager-clone rule).
     let text_source = matches!(format.format, output::OutputFormat::Text).then(|| result.clone());
-    let document = attention_list_document(result);
-    output::write_document(stdout, format, &document, || {
-        render_attention_list_text(
-            text_source
-                .as_ref()
-                .expect("text lane resolves the attention source"),
-        )
-    })
+    match routed {
+        RoutedAttention::Authoritative(result) => {
+            let document = attention_list_document(result);
+            output::write_document(stdout, format, &document, || {
+                render_attention_list_text(
+                    text_source
+                        .as_ref()
+                        .expect("text lane resolves the attention source"),
+                )
+            })
+        }
+        RoutedAttention::Derived {
+            result,
+            projection_stamp,
+        } => {
+            let document = derived_attention_list_document(result, projection_stamp);
+            output::write_document(stdout, format, &document, || {
+                render_attention_list_text(
+                    text_source
+                        .as_ref()
+                        .expect("text lane resolves the attention source"),
+                )
+            })
+        }
+    }
+}
+
+enum RoutedAttention {
+    Authoritative(AttentionListResult),
+    Derived {
+        result: AttentionListResult,
+        projection_stamp: String,
+    },
+}
+
+impl RoutedAttention {
+    fn result(&self) -> &AttentionListResult {
+        match self {
+            Self::Authoritative(result) | Self::Derived { result, .. } => result,
+        }
+    }
+}
+
+fn read_attention(
+    repo: &std::path::Path,
+    revision: Option<RevisionId>,
+) -> Result<RoutedAttention, Box<dyn std::error::Error>> {
+    let authoritative = || {
+        let mut options = AttentionListOptions::new(repo);
+        if let Some(revision) = &revision {
+            options = options.with_revision(revision.clone());
+        }
+        list_attention(options)
+            .map(RoutedAttention::Authoritative)
+            .map_err(Into::into)
+    };
+    let access = DerivedHistoryAccess::resolve(repo).map_err(std::io::Error::other)?;
+    match access
+        .attention(revision.as_ref())
+        .map_err(std::io::Error::other)?
+    {
+        DerivedAttentionRoute::Ready(derived) => Ok(RoutedAttention::Derived {
+            result: AttentionListResult {
+                event_set_hash: String::new(),
+                event_count: derived.event_count,
+                revision,
+                items: derived.items,
+                diagnostics: derived.diagnostics,
+            },
+            projection_stamp: derived.projection_stamp,
+        }),
+        DerivedAttentionRoute::Off if !access.is_active() => authoritative(),
+        DerivedAttentionRoute::Off | DerivedAttentionRoute::Unavailable(_) => {
+            crate::cli::derived_read::emit_authoritative_fallback_hint(repo);
+            authoritative()
+        }
+    }
 }
 
 /// Bespoke text lane for `attention list` (ADR-0029: text is disposable, never

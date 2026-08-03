@@ -68,7 +68,7 @@ pub use history::{
     ReviewHistoryFilters, ReviewHistoryOptions, ReviewHistoryResult, ReviewHistorySummary,
     SearchRecord, apply_history_query, build_haystack, count_new_since,
     default_history_page_projection, history_base_projection, matches_query, parse_search_query,
-    parse_search_query_for, review_history,
+    parse_search_query_for, redact_history_bodies, review_history,
 };
 pub(crate) use history::{history_entries_from_selected_events, tag_completion_key};
 #[cfg(any(test, feature = "bench"))]
@@ -88,7 +88,7 @@ pub use input_request::{
 pub use observation::{
     ObservationAddOptions, ObservationAddResult, ObservationListOptions, ObservationListResult,
     ObservationStatus, ObservationTargetSelector, ObservationView, list_observations,
-    record_observation,
+    record_observation, validated_track_id,
 };
 pub(crate) use revision_list::list_revisions_from_selected_events;
 pub use revision_list::{
