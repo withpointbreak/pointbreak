@@ -13,7 +13,8 @@ use super::{
 use crate::bench_support::longitudinal::{
     LongitudinalCapacityOwnershipV1, LongitudinalExecutionIdentityV1,
     LongitudinalMaterializeOptionsV1, LongitudinalStoreDataInventoryV1,
-    LongitudinalStrictSemanticReceiptV1, LongitudinalTierV1, longitudinal_store_data_inventory_v1,
+    LongitudinalStrictSemanticReceiptV1, LongitudinalTierV1,
+    longitudinal_authoritative_store_data_inventory_v1, longitudinal_store_data_inventory_v1,
     materialize_longitudinal_workload_v1, verify_longitudinal_materialization_pair_v1,
 };
 #[cfg(feature = "longitudinal-counting")]
@@ -464,7 +465,7 @@ pub fn materialize_qualification_derived_access_d0_v1(
         independently_referenced_objects: u16::try_from(written.object_artifact_count)
             .map_err(|_| "D0-128 object count exceeds u16".to_owned())?,
         by_type,
-        store_inventory: longitudinal_store_data_inventory_v1(&options.root)
+        store_inventory: longitudinal_authoritative_store_data_inventory_v1(&options.root)
             .map_err(|error| error.to_string())?,
         strict: written.strict,
         receipt_sha256: String::new(),

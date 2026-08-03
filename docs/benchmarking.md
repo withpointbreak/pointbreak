@@ -606,7 +606,7 @@ the historical integration and readiness contracts.
 | Authority | loose Journal and ContentStore carriers remain the sole truth; derived state is disposable and rebuildable |
 | Layout | stable `derived` with compatible transition from legacy `.pointbreak-derived` |
 | First use | Inspector: serve the shell and start one asynchronous build when no current generation exists; bounded CLI: remain available through authoritative truth and emit one actionable fallback hint; write: publish authoritative truth once and report disposable-generation degradation |
-| Recovery | `pointbreak store derived status|build|rebuild`; unavailable hint at most once per exact store per process |
+| Recovery | `pointbreak store derived status\|build\|rebuild`; unavailable hint at most once per exact store per process |
 | Bounded CLI | history page with an effective limit and without watch, ref filter, or body search; attention list; revision list with an explicit accepted limit at most 500; cursor binds profile, schema, snapshot, normalized descending order |
 | Rollback | explicit off artifact-free: `true`; ordinary synchronous rebuild allowed: `false` |
 | Platform scope | native `macOS APFS`, `Windows NTFS`; Linux compile/CI only: `true` |

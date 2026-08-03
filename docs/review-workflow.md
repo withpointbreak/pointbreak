@@ -259,7 +259,7 @@ flat directory of revisions. It is the discovery surface — start here when
 Git reachability enriches each entry's status but never removes a recorded
 revision from this unfiltered directory, even if its commit objects later disappear.
 
-It returns `pointbreak.review-revision-list` JSON with `eventSetHash`, `eventCount`,
+It returns `pointbreak.review-revision-list` JSON with `eventCount`,
 `revisionCount`, and an `entries` array whose elements include
 `revisionId`, `capturedAt`, `objectId`, and `objectArtifactContentHash`. Git-backed entries also include
 the complete `source`, `base`, and `target` provenance triple. A provenance-free revision omits all three
@@ -267,6 +267,11 @@ and remains independently listable and showable; later commit/ref associations m
 not manufacture capture provenance or collapse it into another revision. Entries are sorted by capture
 time so the newest revision appears last. Pass `--object <object-id>` to list only the revisions
 that share one content object — a listing lens that may span threads, never a head selector.
+
+Snapshot identity follows the access source. An eligible bounded page served by the current derived
+generation carries `projectionStamp`; an authoritative read — including explicit `off`, fallback, or
+the unbounded list — carries `eventSetHash`. Treat either field as opaque and do not continue a cursor
+after its bound snapshot identity changes.
 
 ```bash
 pointbreak revision list --format json-pretty
@@ -317,8 +322,10 @@ pointbreak history --event-type review-observation-recorded
 pointbreak history --revision <id> --include-body
 ```
 
-`eventSetHash` and `eventCount` describe the full validated event set used to
-build the document, even when filters return only a subset of entries.
+`eventCount` describes the full validated event set used to build the document,
+even when filters return only a subset of entries. An eligible bounded page
+served by the current derived generation carries `projectionStamp`; an
+authoritative read carries `eventSetHash`. Both are opaque snapshot identities.
 History preserves duplicate semantic events as separate entries; it does not
 collapse them or pick "winners".
 

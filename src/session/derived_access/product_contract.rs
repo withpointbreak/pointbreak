@@ -2179,7 +2179,7 @@ impl DerivedAccessRolloutContractV1 {
             ),
             format!(
                 "| Recovery | `pointbreak store derived {}`; unavailable hint {} |",
-                self.lifecycle_commands.join("|"), self.unavailable_hint_cadence
+                self.lifecycle_commands.join("\\|"), self.unavailable_hint_cadence
             ),
             format!(
                 "| Bounded CLI | {}; cursor binds {} |",
