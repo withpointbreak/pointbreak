@@ -14,9 +14,11 @@ mod workflow;
 pub use derived_access::attention::{DerivedAttention, DerivedAttentionRoute};
 #[doc(hidden)]
 pub use derived_access::history::{
-    DerivedHistoryAccess, DerivedHistoryAvailability, DerivedHistoryFreshness,
-    DerivedHistoryLifecycleStatus, DerivedHistoryNewCount, DerivedHistoryPage,
-    DerivedHistoryProgressPhase, DerivedHistoryRoute, DerivedHistoryStatus,
+    DerivedHistoryAccess, DerivedHistoryAvailability, DerivedHistoryConflictPaths,
+    DerivedHistoryControl, DerivedHistoryFreshness, DerivedHistoryLifecycleReceipt,
+    DerivedHistoryLifecycleStatus, DerivedHistoryNamespace, DerivedHistoryNewCount,
+    DerivedHistoryPage, DerivedHistoryProgress, DerivedHistoryProgressPhase, DerivedHistoryRoute,
+    DerivedHistoryStatus, DerivedHistoryTransition,
 };
 #[doc(hidden)]
 pub use derived_access::revisions::{

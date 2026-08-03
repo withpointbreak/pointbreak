@@ -788,6 +788,65 @@ mod tests {
     }
 
     #[test]
+    fn non_directory_root_and_retired_collision_fail_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let stable =
+            DerivedStorageLayout::for_namespace(root.path(), DerivedStorageNamespace::Stable);
+        fs::write(stable.root(), b"not a directory").unwrap();
+
+        let receipt = DerivedStorageLayout::transition_legacy(root.path()).unwrap();
+
+        assert_eq!(receipt.disposition, DerivedStorageTransition::Conflict);
+        assert_eq!(fs::read(stable.root()).unwrap(), b"not a directory");
+
+        let artifacts = tempfile::tempdir().unwrap();
+        let stable =
+            DerivedStorageLayout::for_namespace(artifacts.path(), DerivedStorageNamespace::Stable);
+        let legacy =
+            DerivedStorageLayout::for_namespace(artifacts.path(), DerivedStorageNamespace::Legacy);
+        fs::create_dir_all(legacy.retired("7-9")).unwrap();
+        fs::create_dir_all(stable.retired("7-9")).unwrap();
+        fs::write(legacy.retired("7-9").join("legacy"), b"legacy").unwrap();
+        fs::write(stable.retired("7-9").join("stable"), b"stable").unwrap();
+
+        let receipt = DerivedStorageLayout::transition_legacy(artifacts.path()).unwrap();
+
+        assert_eq!(receipt.disposition, DerivedStorageTransition::Conflict);
+        assert_eq!(
+            fs::read(legacy.retired("7-9").join("legacy")).unwrap(),
+            b"legacy"
+        );
+        assert_eq!(
+            fs::read(stable.retired("7-9").join("stable")).unwrap(),
+            b"stable"
+        );
+    }
+
+    #[test]
+    fn stable_side_generation_lease_defers_a_legacy_transition() {
+        let root = tempfile::tempdir().unwrap();
+        let legacy =
+            DerivedStorageLayout::for_namespace(root.path(), DerivedStorageNamespace::Legacy);
+        let stable =
+            DerivedStorageLayout::for_namespace(root.path(), DerivedStorageNamespace::Stable);
+        fs::create_dir_all(legacy.root().join("generations/g-test")).unwrap();
+        let stable_lease = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(stable.generation_lease("g-test"))
+            .unwrap();
+        stable_lease.lock_shared().unwrap();
+
+        let receipt = DerivedStorageLayout::transition_legacy(root.path()).unwrap();
+
+        assert_eq!(receipt.disposition, DerivedStorageTransition::Deferred);
+        assert!(legacy.root().is_dir());
+        assert!(!stable.root().exists());
+    }
+
+    #[test]
     fn live_reader_writer_and_rebuilder_each_defer_without_moving_data() {
         for mode in ["reader", "writer", "rebuild"] {
             let root = tempfile::tempdir().unwrap();

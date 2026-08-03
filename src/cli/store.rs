@@ -4,16 +4,17 @@ use std::path::PathBuf;
 use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use pointbreak::model::{ObjectId, RevisionId};
 use pointbreak::session::{
-    CompactOptions, CompactResult, MigrateToCommonDirOptions, MigrateToCommonDirResult,
-    ProjectionDiagnostic, RemovalOperativeStatus, RemoveOptions, RemoveResult, RemoveSelector,
-    RemovedContent, SkippedRemoval, StoreForgetOptions, StoreForgetResult, StoreLinkOptions,
-    StoreLinkPreview, StoreLinkResult, StoreListEntry, StoreListResult, StoreMode, StoreModeSource,
-    StoreSensitivityPathGroup, StoreStatusInventory, StoreStatusOptions, StoreStatusResult,
-    StoreStatusSensitivity, StoreUnlinkOptions, StoreUnlinkResult, SweepOutcome, SweptBlob,
-    compact_store, explain_store_sensitivity, forget_family_store, link_store_to_family,
-    list_family_stores, migrate_store_to_common_dir, preview_link_to_family, remove_content,
-    resolve_store_mode_for_repo, set_store_mode_for_repo, store_paths_for_repo, store_status,
-    unlink_store_from_family,
+    CompactOptions, CompactResult, DerivedHistoryAccess, DerivedHistoryControl,
+    DerivedHistoryLifecycleReceipt, DerivedHistoryLifecycleStatus, MigrateToCommonDirOptions,
+    MigrateToCommonDirResult, ProjectionDiagnostic, RemovalOperativeStatus, RemoveOptions,
+    RemoveResult, RemoveSelector, RemovedContent, SkippedRemoval, StoreForgetOptions,
+    StoreForgetResult, StoreLinkOptions, StoreLinkPreview, StoreLinkResult, StoreListEntry,
+    StoreListResult, StoreMode, StoreModeSource, StoreSensitivityPathGroup, StoreStatusInventory,
+    StoreStatusOptions, StoreStatusResult, StoreStatusSensitivity, StoreUnlinkOptions,
+    StoreUnlinkResult, SweepOutcome, SweptBlob, compact_store, explain_store_sensitivity,
+    forget_family_store, link_store_to_family, list_family_stores, migrate_store_to_common_dir,
+    preview_link_to_family, remove_content, resolve_store_mode_for_repo, set_store_mode_for_repo,
+    store_paths_for_repo, store_status, unlink_store_from_family,
 };
 
 use crate::cli::common::{
@@ -31,6 +32,7 @@ pub(super) struct StoreArgs {
 #[derive(Debug, Subcommand)]
 enum StoreCommand {
     Status(StoreStatusArgs),
+    Derived(StoreDerivedArgs),
     Paths(StorePathsArgs),
     Mode(StoreModeArgs),
     Migrate(StoreMigrateArgs),
@@ -42,6 +44,31 @@ enum StoreCommand {
     /// Alias of `compact`.
     Gc(StoreCompactArgs),
     Compact(StoreCompactArgs),
+}
+
+#[derive(Debug, Args)]
+struct StoreDerivedArgs {
+    #[command(subcommand)]
+    command: StoreDerivedCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum StoreDerivedCommand {
+    /// Report derived-access availability without creating or rebuilding state.
+    Status(StoreDerivedOperationArgs),
+    /// Build a generation only when no current generation is usable.
+    Build(StoreDerivedOperationArgs),
+    /// Publish a replacement generation even when one is already current.
+    Rebuild(StoreDerivedOperationArgs),
+}
+
+#[derive(Debug, Args)]
+struct StoreDerivedOperationArgs {
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+
+    #[command(flatten)]
+    format_args: output::FormatArgs,
 }
 
 /// Show the store's status: mode, size, and sensitivity findings.
@@ -424,6 +451,10 @@ pub(super) fn run(
             tracing::debug!(command = "store.status", "command_start");
             status(args, stdout)
         }
+        StoreCommand::Derived(args) => {
+            tracing::debug!(command = "store.derived", "command_start");
+            derived(args, stdout, stderr)
+        }
         StoreCommand::Paths(args) => {
             tracing::debug!(command = "store.paths", "command_start");
             paths(args, stdout)
@@ -461,6 +492,102 @@ pub(super) fn run(
             compact(args, stdout)
         }
     }
+}
+
+fn derived(
+    args: StoreDerivedArgs,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match args.command {
+        StoreDerivedCommand::Status(args) => derived_status(args, stdout),
+        StoreDerivedCommand::Build(args) => derived_mutation(args, false, stdout, stderr),
+        StoreDerivedCommand::Rebuild(args) => derived_mutation(args, true, stdout, stderr),
+    }
+}
+
+fn derived_status(
+    args: StoreDerivedOperationArgs,
+    stdout: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let access = DerivedHistoryAccess::resolve(&args.repo).map_err(std::io::Error::other)?;
+    let status = access.lifecycle_status();
+    let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
+    let digest = derived_status_digest(&status);
+    let document = json::DiagnosticDocument::new("pointbreak.store-derived-status", status, vec![]);
+    output::write_document(stdout, format, &document, || digest)
+}
+
+fn derived_mutation(
+    args: StoreDerivedOperationArgs,
+    force: bool,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let access = DerivedHistoryAccess::resolve(&args.repo).map_err(std::io::Error::other)?;
+    let mut progress_error = None;
+    let progress = |update: pointbreak::session::DerivedHistoryProgress| {
+        if let Err(error) = writeln!(
+            stderr,
+            "derived {:?}: {}/{} events, {} bytes, {} ms elapsed",
+            update.phase,
+            update.completed_events,
+            update.total_events,
+            update.completed_bytes,
+            update.elapsed_milliseconds,
+        ) {
+            progress_error = Some(error);
+            DerivedHistoryControl::Cancel
+        } else {
+            DerivedHistoryControl::Continue
+        }
+    };
+    let receipt = if force {
+        access.rebuild(progress)
+    } else {
+        access.build(progress)
+    }
+    .map_err(std::io::Error::other)?;
+    if let Some(error) = progress_error {
+        return Err(error.into());
+    }
+    let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
+    let digest = derived_receipt_digest(&receipt);
+    let schema = if force {
+        "pointbreak.store-derived-rebuild"
+    } else {
+        "pointbreak.store-derived-build"
+    };
+    let document = json::DiagnosticDocument::new(schema, receipt, vec![]);
+    output::write_document(stdout, format, &document, || digest)
+}
+
+fn derived_status_digest(status: &DerivedHistoryLifecycleStatus) -> String {
+    let mut digest = format!(
+        "derived access: {:?}; availability: {:?}; namespace: {:?}",
+        status.active, status.availability, status.namespace
+    );
+    if let Some(paths) = &status.conflict_paths {
+        digest.push_str(&format!(
+            "\nstable derived root: {}\nlegacy derived root: {}",
+            paths.stable.display(),
+            paths.legacy.display()
+        ));
+    }
+    if let Some(detail) = &status.detail {
+        digest.push_str(&format!("\ndetail: {detail}"));
+    }
+    digest
+}
+
+fn derived_receipt_digest(receipt: &DerivedHistoryLifecycleReceipt) -> String {
+    format!(
+        "derived access: {:?}; transition: {:?}; rebuilt: {}; generation: {}",
+        receipt.availability,
+        receipt.transition,
+        receipt.rebuilt,
+        receipt.generation_id.as_deref().unwrap_or("none")
+    )
 }
 
 fn paths(args: StorePathsArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::error::Error>> {

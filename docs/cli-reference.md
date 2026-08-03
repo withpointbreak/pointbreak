@@ -419,6 +419,9 @@ worktree, and the fact lands directly in that shared store, visible to every wor
 
 ```bash
 pointbreak store status [--repo <path>] [--format <fmt>] [--show-paths]
+pointbreak store derived status [--repo <path>] [--format <fmt>]
+pointbreak store derived build [--repo <path>] [--format <fmt>]
+pointbreak store derived rebuild [--repo <path>] [--format <fmt>]
 pointbreak store paths [--repo <path>] [--format <fmt>]
 pointbreak store mode (shared | ephemeral | show) [--repo <path>] [--format <fmt>]
 pointbreak store migrate [--repo <path>] [--include-ephemeral] [--retire-source] [--format <fmt>]
@@ -440,6 +443,27 @@ per-clone store, not a user-level multi-repository store or remote sync service;
 the machine-wide **user-level family store tier** with `pointbreak store link` (see below).
 
 `pointbreak store status` resolves the store and emits `pointbreak.store-status` JSON.
+
+`pointbreak store derived status|build|rebuild` operates on the disposable derived-access generation
+for the exact store selected by `--repo`. The event journal and content store remain authoritative:
+these commands do not replace, migrate, or mutate loose truth.
+
+- `status` is strictly read-only. It reports the selected namespace and lifecycle availability without
+  creating a directory, acquiring a rebuild lease, or starting background work. Its
+  `pointbreak.store-derived-status` document is path-free. If both the stable `derived/` namespace and
+  its legacy predecessor are present, text output identifies both local paths so the operator can retain
+  one disposable copy and move the other aside; Pointbreak never guesses, merges, or deletes either.
+- `build` synchronously creates or repairs a usable generation only when needed. If a validated current
+  generation already exists, it emits a no-op `pointbreak.store-derived-build` receipt.
+- `rebuild` synchronously constructs and publishes a replacement generation even when the old generation
+  remains readable. It emits a `pointbreak.store-derived-rebuild` receipt after publication.
+
+Build and rebuild may scan the complete event history and can therefore be expensive on a large store.
+Progress is written to stderr; stdout contains exactly one completion document, so scripts can consume it
+without parsing progress. A cancellation or failure preserves authoritative loose truth and any previously
+valid generation. Set `POINTBREAK_DERIVED_ACCESS=off` to disable all derived reads and writes immediately;
+while it is set, `build` and `rebuild` refuse to run. This is also the rollback posture for an older binary
+that does not understand the stable `derived/` namespace.
 
 `pointbreak store paths` is the supported path-discovery seam. It emits
 `pointbreak.store-paths` version 1 with the selected `tier` and exact `worktreeStore`, `commonStore`,

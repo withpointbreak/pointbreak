@@ -1,0 +1,252 @@
+mod support;
+
+use std::fs::{self, OpenOptions};
+
+use serde_json::Value;
+use support::git_repo::GitRepo;
+use support::{common_dir_store, pointbreak, pointbreak_env};
+
+const ACTIVE: &[(&str, &str)] = &[("POINTBREAK_DERIVED_ACCESS", "sqlite-wal-bodyless-v1")];
+
+#[test]
+fn derived_status_is_side_effect_free_when_off_or_absent() {
+    let repo = GitRepo::new();
+    let repo_arg = repo.path().to_str().unwrap();
+    let store = common_dir_store(repo.path());
+
+    let off = pointbreak(["store", "derived", "status", "--repo", repo_arg]);
+    assert!(
+        off.status.success(),
+        "{}",
+        String::from_utf8_lossy(&off.stderr)
+    );
+    let off_json = parse_json(&off.stdout);
+    assert_eq!(off_json["schema"], "pointbreak.store-derived-status");
+    assert_eq!(off_json["version"], 1);
+    assert_eq!(off_json["active"], false);
+    assert_eq!(off_json["availability"], "absent");
+    assert!(off.stderr.is_empty());
+    assert!(!store.join("derived").exists());
+    assert!(!store.join(".pointbreak-derived").exists());
+
+    let active = pointbreak_env(["store", "derived", "status", "--repo", repo_arg], ACTIVE);
+    assert!(
+        active.status.success(),
+        "{}",
+        String::from_utf8_lossy(&active.stderr)
+    );
+    let active_json = parse_json(&active.stdout);
+    assert_eq!(active_json["active"], true);
+    assert_eq!(active_json["availability"], "absent");
+    assert_eq!(active_json["namespace"], "stable");
+    assert!(active.stderr.is_empty());
+    assert!(!store.join("derived").exists());
+    assert!(!store.join("derived.rebuild.lock").exists());
+
+    fs::create_dir_all(store.join("derived/generations/orphaned")).unwrap();
+    let rebuild_required =
+        pointbreak_env(["store", "derived", "status", "--repo", repo_arg], ACTIVE);
+    assert!(rebuild_required.status.success());
+    let rebuild_required = parse_single_json(&rebuild_required.stdout);
+    assert_eq!(rebuild_required["availability"], "rebuild_required");
+    assert_eq!(rebuild_required["namespace"], "stable");
+    assert!(
+        !store.join("derived.rebuild.lock").exists(),
+        "status must not acquire or create the rebuild lock"
+    );
+}
+
+#[test]
+fn derived_build_and_rebuild_are_synchronous_and_publish_one_document() {
+    let repo = populated_repo();
+    let repo_arg = repo.path().to_str().unwrap();
+    let store = common_dir_store(repo.path());
+
+    let built = pointbreak_env(["store", "derived", "build", "--repo", repo_arg], ACTIVE);
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let built_json = parse_single_json(&built.stdout);
+    assert_eq!(built_json["schema"], "pointbreak.store-derived-build");
+    assert_eq!(built_json["version"], 1);
+    assert_eq!(built_json["availability"], "current");
+    assert_eq!(built_json["transition"], "not_needed");
+    assert_eq!(built_json["rebuilt"], true);
+    let first_generation = built_json["generationId"].as_str().unwrap().to_owned();
+    assert!(store.join("derived").is_dir());
+    assert_progress_is_stderr_only(&built);
+
+    let no_op = pointbreak_env(["store", "derived", "build", "--repo", repo_arg], ACTIVE);
+    assert!(no_op.status.success());
+    let no_op_json = parse_single_json(&no_op.stdout);
+    assert_eq!(no_op_json["generationId"], first_generation);
+    assert_eq!(no_op_json["rebuilt"], false);
+
+    let current_status = pointbreak_env(
+        [
+            "store", "derived", "status", "--repo", repo_arg, "--format", "text",
+        ],
+        ACTIVE,
+    );
+    assert!(current_status.status.success());
+    let current_status = String::from_utf8(current_status.stdout).unwrap();
+    assert!(
+        current_status.contains("availability: Current"),
+        "{current_status}"
+    );
+    assert!(
+        current_status.contains("namespace: Stable"),
+        "{current_status}"
+    );
+
+    let rebuilt = pointbreak_env(["store", "derived", "rebuild", "--repo", repo_arg], ACTIVE);
+    assert!(
+        rebuilt.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rebuilt.stderr)
+    );
+    let rebuilt_json = parse_single_json(&rebuilt.stdout);
+    assert_eq!(rebuilt_json["schema"], "pointbreak.store-derived-rebuild");
+    assert_eq!(rebuilt_json["availability"], "current");
+    assert_eq!(rebuilt_json["rebuilt"], true);
+    assert_ne!(rebuilt_json["generationId"], first_generation);
+    assert_progress_is_stderr_only(&rebuilt);
+}
+
+#[test]
+fn compatible_legacy_generation_transitions_before_build_without_replay() {
+    let repo = populated_repo();
+    let repo_arg = repo.path().to_str().unwrap();
+    let store = common_dir_store(repo.path());
+    let first = pointbreak_env(["store", "derived", "build", "--repo", repo_arg], ACTIVE);
+    assert!(first.status.success());
+    let generation = parse_json(&first.stdout)["generationId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fs::rename(store.join("derived"), store.join(".pointbreak-derived")).unwrap();
+
+    let transitioned = pointbreak_env(["store", "derived", "build", "--repo", repo_arg], ACTIVE);
+    assert!(
+        transitioned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&transitioned.stderr)
+    );
+    let json = parse_single_json(&transitioned.stdout);
+    assert_eq!(json["transition"], "moved");
+    assert_eq!(json["generationId"], generation);
+    assert_eq!(json["rebuilt"], false);
+    assert!(store.join("derived").is_dir());
+    assert!(!store.join(".pointbreak-derived").exists());
+}
+
+#[test]
+fn conflict_status_names_both_local_roots_without_mutating_them() {
+    let repo = GitRepo::new();
+    let repo_arg = repo.path().to_str().unwrap();
+    let store = common_dir_store(repo.path());
+    let stable = store.join("derived");
+    let legacy = store.join(".pointbreak-derived");
+    fs::create_dir_all(&stable).unwrap();
+    fs::create_dir_all(&legacy).unwrap();
+    fs::write(stable.join("stable-only"), b"stable").unwrap();
+    fs::write(legacy.join("legacy-only"), b"legacy").unwrap();
+
+    let json_output = pointbreak_env(["store", "derived", "status", "--repo", repo_arg], ACTIVE);
+    assert!(json_output.status.success());
+    let json = parse_single_json(&json_output.stdout);
+    assert_eq!(json["active"], true);
+    assert_eq!(json["availability"], "unavailable");
+    assert_eq!(json["namespace"], "conflict");
+    assert!(!String::from_utf8_lossy(&json_output.stdout).contains(repo_arg));
+
+    let text = pointbreak_env(
+        [
+            "store", "derived", "status", "--repo", repo_arg, "--format", "text",
+        ],
+        ACTIVE,
+    );
+    assert!(text.status.success());
+    let text = String::from_utf8(text.stdout).unwrap();
+    assert!(text.contains(stable.to_str().unwrap()), "{text}");
+    assert!(text.contains(legacy.to_str().unwrap()), "{text}");
+    assert_eq!(fs::read(stable.join("stable-only")).unwrap(), b"stable");
+    assert_eq!(fs::read(legacy.join("legacy-only")).unwrap(), b"legacy");
+}
+
+#[test]
+fn explicit_off_and_busy_rebuild_fail_without_a_completion_document() {
+    let repo = populated_repo();
+    let repo_arg = repo.path().to_str().unwrap();
+    let store = common_dir_store(repo.path());
+
+    let off = pointbreak_env(
+        ["store", "derived", "build", "--repo", repo_arg],
+        &[("POINTBREAK_DERIVED_ACCESS", "off")],
+    );
+    assert!(!off.status.success());
+    assert!(off.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&off.stderr).contains("disabled"));
+    assert!(!store.join("derived").exists());
+
+    fs::create_dir_all(&store).unwrap();
+    let rebuild_lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(store.join("derived.rebuild.lock"))
+        .unwrap();
+    rebuild_lock.lock().unwrap();
+    let busy = pointbreak_env(["store", "derived", "build", "--repo", repo_arg], ACTIVE);
+
+    assert!(!busy.status.success());
+    assert!(busy.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&busy.stderr).contains("already running"),
+        "{}",
+        String::from_utf8_lossy(&busy.stderr)
+    );
+    assert!(!store.join("derived").exists());
+}
+
+fn populated_repo() -> GitRepo {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    let capture = pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]);
+    assert!(capture.status.success());
+    repo
+}
+
+fn parse_json(bytes: &[u8]) -> Value {
+    serde_json::from_slice(bytes).unwrap_or_else(|error| {
+        panic!("expected JSON: {error}: {}", String::from_utf8_lossy(bytes))
+    })
+}
+
+fn parse_single_json(bytes: &[u8]) -> Value {
+    let text = String::from_utf8_lossy(bytes);
+    assert_eq!(
+        text.lines().count(),
+        1,
+        "stdout must contain one document: {text}"
+    );
+    parse_json(bytes)
+}
+
+fn assert_progress_is_stderr_only(output: &std::process::Output) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("derived"),
+        "expected progress on stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("events"),
+        "expected event progress on stderr: {stderr}"
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("progress"));
+}

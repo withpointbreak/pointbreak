@@ -1,7 +1,7 @@
 //! Product history and freshness reads over the derived-access profile.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -12,8 +12,12 @@ use rusqlite::types::Value;
 use serde::Serialize;
 
 use super::cursor::TruthCursor;
+use super::layout::{
+    DerivedStorageDiscovery, DerivedStorageLayout, DerivedStorageNamespace,
+    DerivedStorageTransition,
+};
 use super::lifecycle::{
-    CurrentGeneration, DerivedAccessLifecycle, LifecycleControl, LifecycleError,
+    CurrentGeneration, DerivedAccessLifecycle, LifecycleControl, LifecycleError, LifecycleProgress,
 };
 use super::locator::{LocatorRead, normalize_occurred_at};
 use super::product_contract::{DerivedAccessAvailability, DerivedAccessProfile};
@@ -111,6 +115,7 @@ pub enum DerivedHistoryProgressPhase {
 pub struct DerivedHistoryLifecycleStatus {
     pub active: bool,
     pub availability: DerivedHistoryAvailability,
+    pub namespace: DerivedHistoryNamespace,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generation_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -129,6 +134,71 @@ pub struct DerivedHistoryLifecycleStatus {
     pub detail: Option<String>,
     pub rebuild_in_flight: bool,
     pub rebuild_paused: bool,
+    #[serde(skip)]
+    pub conflict_paths: Option<DerivedHistoryConflictPaths>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[doc(hidden)]
+pub enum DerivedHistoryNamespace {
+    Absent,
+    Stable,
+    Legacy,
+    Conflict,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub struct DerivedHistoryConflictPaths {
+    pub stable: PathBuf,
+    pub legacy: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[doc(hidden)]
+pub enum DerivedHistoryTransition {
+    NotNeeded,
+    Deferred,
+    Moved,
+    Conflict,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub enum DerivedHistoryControl {
+    Continue,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[doc(hidden)]
+pub struct DerivedHistoryProgress {
+    pub phase: DerivedHistoryProgressPhase,
+    pub completed_events: usize,
+    pub total_events: usize,
+    pub completed_bytes: u64,
+    pub elapsed_milliseconds: u64,
+    pub eta_milliseconds: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[doc(hidden)]
+pub struct DerivedHistoryLifecycleReceipt {
+    pub availability: DerivedHistoryAvailability,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head_sequence: Option<u64>,
+    pub rebuilt: bool,
+    pub transition: DerivedHistoryTransition,
+    pub moved_artifact_count: usize,
+    pub reclaimed_generation_count: usize,
+    pub retained_reader_generation_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[doc(hidden)]
@@ -171,9 +241,17 @@ pub struct DerivedHistoryFreshness {
 #[doc(hidden)]
 pub struct DerivedHistoryAccess {
     pub(super) mode: DerivedHistoryMode,
+    maintenance: Option<DerivedHistoryMaintenance>,
     background_rebuild_in_flight: Arc<AtomicBool>,
     background_rebuild_cancel: Arc<AtomicBool>,
     background_rebuild_handle: Mutex<Option<JoinHandle<()>>>,
+}
+
+#[derive(Clone)]
+struct DerivedHistoryMaintenance {
+    profile: DerivedAccessProfile,
+    store_root: PathBuf,
+    store_identity: String,
 }
 
 pub(super) enum DerivedHistoryMode {
@@ -190,6 +268,7 @@ impl DerivedHistoryAccess {
     pub(super) fn from_mode(mode: DerivedHistoryMode) -> Self {
         Self {
             mode,
+            maintenance: None,
             background_rebuild_in_flight: Arc::new(AtomicBool::new(false)),
             background_rebuild_cancel: Arc::new(AtomicBool::new(false)),
             background_rebuild_handle: Mutex::new(None),
@@ -205,19 +284,30 @@ impl DerivedHistoryAccess {
         let read_store = resolve_read_store(repo).map_err(|error| error.to_string())?;
         let store_identity = opaque_path_identity("store", read_store.store_dir())
             .map_err(|error| error.to_string())?;
-        let lifecycle =
-            DerivedAccessLifecycle::new(profile, read_store.store_dir(), store_identity.clone())
-                .map_err(|error| error.to_string())?;
-        Ok(Self::from_mode(DerivedHistoryMode::Active {
-            lifecycle,
-            current: Mutex::new(None),
-            store_identity,
-            backend: read_store.backend().clone(),
-        }))
+        let maintenance = DerivedHistoryMaintenance {
+            profile,
+            store_root: read_store.store_dir().to_path_buf(),
+            store_identity: store_identity.clone(),
+        };
+        let mode = match DerivedStorageLayout::discover(read_store.store_dir()) {
+            DerivedStorageDiscovery::Conflict { .. } => DerivedHistoryMode::Off,
+            DerivedStorageDiscovery::Selected(_) => {
+                let lifecycle = maintenance.lifecycle()?;
+                DerivedHistoryMode::Active {
+                    lifecycle,
+                    current: Mutex::new(None),
+                    store_identity,
+                    backend: read_store.backend().clone(),
+                }
+            }
+        };
+        let mut access = Self::from_mode(mode);
+        access.maintenance = Some(maintenance);
+        Ok(access)
     }
 
     pub const fn is_active(&self) -> bool {
-        matches!(self.mode, DerivedHistoryMode::Active { .. })
+        matches!(self.mode, DerivedHistoryMode::Active { .. }) || self.maintenance.is_some()
     }
 
     /// Report lifecycle progress without requiring a current generation.
@@ -228,10 +318,17 @@ impl DerivedHistoryAccess {
     /// validated old generation can be served.
     #[doc(hidden)]
     pub fn lifecycle_status(&self) -> DerivedHistoryLifecycleStatus {
+        if let Some(maintenance) = &self.maintenance {
+            return maintenance.status_read_only(
+                self.background_rebuild_in_flight.load(Ordering::Acquire),
+                self.background_rebuild_cancel.load(Ordering::Acquire),
+            );
+        }
         let DerivedHistoryMode::Active { lifecycle, .. } = &self.mode else {
             return DerivedHistoryLifecycleStatus {
                 active: false,
                 availability: DerivedHistoryAvailability::Absent,
+                namespace: DerivedHistoryNamespace::Absent,
                 generation_id: None,
                 phase: None,
                 completed_events: None,
@@ -242,12 +339,14 @@ impl DerivedHistoryAccess {
                 detail: Some("derived access is disabled".to_owned()),
                 rebuild_in_flight: false,
                 rebuild_paused: false,
+                conflict_paths: None,
             };
         };
-        match lifecycle.status() {
+        match lifecycle.status_read_only() {
             Ok(observed) => DerivedHistoryLifecycleStatus {
                 active: true,
                 availability: map_availability(observed.availability),
+                namespace: namespace_for_layout(lifecycle.paths()),
                 generation_id: observed.generation_id,
                 phase: observed.phase.map(map_progress_phase),
                 completed_events: observed.completed,
@@ -258,10 +357,12 @@ impl DerivedHistoryAccess {
                 detail: observed.detail,
                 rebuild_in_flight: self.background_rebuild_in_flight.load(Ordering::Acquire),
                 rebuild_paused: self.background_rebuild_cancel.load(Ordering::Acquire),
+                conflict_paths: None,
             },
             Err(error) => DerivedHistoryLifecycleStatus {
                 active: true,
                 availability: DerivedHistoryAvailability::Unavailable,
+                namespace: namespace_for_layout(lifecycle.paths()),
                 generation_id: None,
                 phase: None,
                 completed_events: None,
@@ -272,8 +373,106 @@ impl DerivedHistoryAccess {
                 detail: Some(error.to_string()),
                 rebuild_in_flight: self.background_rebuild_in_flight.load(Ordering::Acquire),
                 rebuild_paused: self.background_rebuild_cancel.load(Ordering::Acquire),
+                conflict_paths: None,
             },
         }
+    }
+
+    /// Build a missing or unusable generation synchronously. A current
+    /// generation is returned unchanged.
+    #[doc(hidden)]
+    pub fn build(
+        &self,
+        progress: impl FnMut(DerivedHistoryProgress) -> DerivedHistoryControl,
+    ) -> Result<DerivedHistoryLifecycleReceipt, String> {
+        self.run_lifecycle(false, progress)
+    }
+
+    /// Publish a replacement generation synchronously while preserving any
+    /// previously valid generation until completion.
+    #[doc(hidden)]
+    pub fn rebuild(
+        &self,
+        progress: impl FnMut(DerivedHistoryProgress) -> DerivedHistoryControl,
+    ) -> Result<DerivedHistoryLifecycleReceipt, String> {
+        self.run_lifecycle(true, progress)
+    }
+
+    fn run_lifecycle(
+        &self,
+        force: bool,
+        mut progress: impl FnMut(DerivedHistoryProgress) -> DerivedHistoryControl,
+    ) -> Result<DerivedHistoryLifecycleReceipt, String> {
+        let maintenance = self
+            .maintenance
+            .as_ref()
+            .ok_or_else(|| "derived-access lifecycle is disabled".to_owned())?;
+        if maintenance.profile == DerivedAccessProfile::Off {
+            return Err("derived-access lifecycle is disabled".to_owned());
+        }
+        let transition = DerivedStorageLayout::transition_legacy(&maintenance.store_root)
+            .map_err(|error| error.to_string())?;
+        let mapped_transition = map_transition(transition.disposition);
+        if matches!(
+            transition.disposition,
+            DerivedStorageTransition::Deferred | DerivedStorageTransition::Conflict
+        ) {
+            let status = maintenance.status_read_only(false, false);
+            return Ok(DerivedHistoryLifecycleReceipt {
+                availability: status.availability,
+                generation_id: status.generation_id,
+                head_sequence: None,
+                rebuilt: false,
+                transition: mapped_transition,
+                moved_artifact_count: 0,
+                reclaimed_generation_count: 0,
+                retained_reader_generation_count: 0,
+                detail: status.detail,
+            });
+        }
+
+        // The transition may have changed the selected namespace. Construct a
+        // fresh lifecycle only after it releases both namespace lock sets.
+        let lifecycle = maintenance.lifecycle()?;
+        if !force {
+            let status = lifecycle.status().map_err(|error| error.to_string())?;
+            if status.availability == DerivedAccessAvailability::Current {
+                let head_sequence = lifecycle
+                    .open_current()
+                    .map_err(|error| error.to_string())?
+                    .and_then(|current| current.service().locator_checkpoint().ok())
+                    .map(|cursor| cursor.sequence);
+                return Ok(DerivedHistoryLifecycleReceipt {
+                    availability: DerivedHistoryAvailability::Current,
+                    generation_id: status.generation_id,
+                    head_sequence,
+                    rebuilt: false,
+                    transition: mapped_transition,
+                    moved_artifact_count: transition.moved_artifacts.len(),
+                    reclaimed_generation_count: 0,
+                    retained_reader_generation_count: 0,
+                    detail: status.detail,
+                });
+            }
+        }
+
+        let receipt = lifecycle
+            .rebuild(|update| match progress(map_lifecycle_progress(update)) {
+                DerivedHistoryControl::Continue => LifecycleControl::Continue,
+                DerivedHistoryControl::Cancel => LifecycleControl::Cancel,
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(DerivedHistoryLifecycleReceipt {
+            availability: map_availability(receipt.availability),
+            generation_id: receipt.generation_id,
+            head_sequence: Some(receipt.head_sequence),
+            rebuilt: true,
+            transition: mapped_transition,
+            moved_artifact_count: transition.moved_artifacts.len(),
+            reclaimed_generation_count: receipt.reclaimed_generation_count,
+            retained_reader_generation_count: receipt.retained_reader_generation_count,
+            detail: receipt.reclaim_detail,
+        })
     }
 
     /// Whether an active data route can truthfully serve a validated current
@@ -290,7 +489,11 @@ impl DerivedHistoryAccess {
     /// state until the immutable generation is published.
     #[doc(hidden)]
     pub fn start_background_rebuild(&self) -> Result<(), String> {
-        let DerivedHistoryMode::Active { lifecycle, .. } = &self.mode else {
+        let DerivedHistoryMode::Active {
+            lifecycle: configured_lifecycle,
+            ..
+        } = &self.mode
+        else {
             return Ok(());
         };
         // The handle mutex is also the worker-control mutex. Holding it through
@@ -308,7 +511,10 @@ impl DerivedHistoryAccess {
         {
             return Ok(());
         }
-        let lifecycle = lifecycle.clone();
+        let lifecycle = match &self.maintenance {
+            Some(maintenance) => maintenance.lifecycle()?,
+            None => configured_lifecycle.clone(),
+        };
         let in_flight = Arc::clone(&self.background_rebuild_in_flight);
         let cancel = Arc::clone(&self.background_rebuild_cancel);
         if let Some(prior) = handle_slot.take()
@@ -502,10 +708,25 @@ impl DerivedHistoryAccess {
         retry_current_transition: bool,
     ) -> Result<CurrentRead, String> {
         let DerivedHistoryMode::Active {
-            lifecycle, current, ..
+            lifecycle: configured_lifecycle,
+            current,
+            ..
         } = &self.mode
         else {
             return Err("derived history is disabled".to_owned());
+        };
+        // A compatible namespace transition may have completed since this
+        // long-lived access object was constructed. Resolve a fresh lifecycle
+        // before selecting a publication; `open_current` then re-resolves once
+        // more after acquiring the generation lease, closing both sides of the
+        // transition-vs-reader race.
+        let refreshed_lifecycle;
+        let lifecycle = match &self.maintenance {
+            Some(maintenance) => {
+                refreshed_lifecycle = maintenance.lifecycle()?;
+                &refreshed_lifecycle
+            }
+            None => configured_lifecycle,
         };
         let published_generation_id = match lifecycle.published_generation_id() {
             Ok(generation_id) => generation_id,
@@ -635,6 +856,87 @@ impl Drop for DerivedHistoryAccess {
     fn drop(&mut self) {
         if let Err(error) = self.cancel_background_rebuild() {
             tracing::warn!(error = %error, "derived_access_background_rebuild_join_failed");
+        }
+    }
+}
+
+impl DerivedHistoryMaintenance {
+    fn lifecycle(&self) -> Result<DerivedAccessLifecycle, String> {
+        DerivedAccessLifecycle::new(self.profile, &self.store_root, self.store_identity.clone())
+            .map_err(|error| error.to_string())
+    }
+
+    fn status_read_only(
+        &self,
+        rebuild_in_flight: bool,
+        rebuild_paused: bool,
+    ) -> DerivedHistoryLifecycleStatus {
+        let discovery = DerivedStorageLayout::discover(&self.store_root);
+        let DerivedStorageDiscovery::Selected(layout) = discovery else {
+            let DerivedStorageDiscovery::Conflict { stable, legacy } = discovery else {
+                unreachable!("derived storage discovery is exhaustive")
+            };
+            return DerivedHistoryLifecycleStatus {
+                active: true,
+                availability: DerivedHistoryAvailability::Unavailable,
+                namespace: DerivedHistoryNamespace::Conflict,
+                generation_id: None,
+                phase: None,
+                completed_events: None,
+                total_events: None,
+                completed_bytes: None,
+                elapsed_milliseconds: None,
+                eta_milliseconds: None,
+                detail: Some(
+                    "both stable and legacy derived-access roots exist; move one disposable root aside or select explicit off"
+                        .to_owned(),
+                ),
+                rebuild_in_flight,
+                rebuild_paused,
+                conflict_paths: Some(DerivedHistoryConflictPaths {
+                    stable: stable.root(),
+                    legacy: legacy.root(),
+                }),
+            };
+        };
+        let namespace = map_namespace(layout.namespace());
+        match self.lifecycle().and_then(|lifecycle| {
+            lifecycle
+                .status_read_only()
+                .map_err(|error| error.to_string())
+        }) {
+            Ok(observed) => DerivedHistoryLifecycleStatus {
+                active: true,
+                availability: map_availability(observed.availability),
+                namespace,
+                generation_id: observed.generation_id,
+                phase: observed.phase.map(map_progress_phase),
+                completed_events: observed.completed,
+                total_events: observed.total,
+                completed_bytes: observed.bytes_processed,
+                elapsed_milliseconds: observed.elapsed_ms,
+                eta_milliseconds: observed.estimated_remaining_ms,
+                detail: observed.detail,
+                rebuild_in_flight,
+                rebuild_paused,
+                conflict_paths: None,
+            },
+            Err(error) => DerivedHistoryLifecycleStatus {
+                active: true,
+                availability: DerivedHistoryAvailability::Unavailable,
+                namespace,
+                generation_id: None,
+                phase: None,
+                completed_events: None,
+                total_events: None,
+                completed_bytes: None,
+                elapsed_milliseconds: None,
+                eta_milliseconds: None,
+                detail: Some(error),
+                rebuild_in_flight,
+                rebuild_paused,
+                conflict_paths: None,
+            },
         }
     }
 }
@@ -1359,6 +1661,37 @@ fn map_availability(value: DerivedAccessAvailability) -> DerivedHistoryAvailabil
     }
 }
 
+fn map_namespace(value: DerivedStorageNamespace) -> DerivedHistoryNamespace {
+    match value {
+        DerivedStorageNamespace::Stable => DerivedHistoryNamespace::Stable,
+        DerivedStorageNamespace::Legacy => DerivedHistoryNamespace::Legacy,
+    }
+}
+
+fn namespace_for_layout(layout: &super::generation::GenerationLayout) -> DerivedHistoryNamespace {
+    map_namespace(layout.namespace())
+}
+
+fn map_transition(value: DerivedStorageTransition) -> DerivedHistoryTransition {
+    match value {
+        DerivedStorageTransition::NotNeeded => DerivedHistoryTransition::NotNeeded,
+        DerivedStorageTransition::Deferred => DerivedHistoryTransition::Deferred,
+        DerivedStorageTransition::Moved => DerivedHistoryTransition::Moved,
+        DerivedStorageTransition::Conflict => DerivedHistoryTransition::Conflict,
+    }
+}
+
+fn map_lifecycle_progress(value: LifecycleProgress) -> DerivedHistoryProgress {
+    DerivedHistoryProgress {
+        phase: map_progress_phase(value.phase),
+        completed_events: value.completed,
+        total_events: value.total,
+        completed_bytes: value.bytes_processed,
+        elapsed_milliseconds: value.elapsed_ms,
+        eta_milliseconds: value.estimated_remaining_ms,
+    }
+}
+
 fn map_progress_phase(
     value: super::generation::GenerationProgressPhase,
 ) -> DerivedHistoryProgressPhase {
@@ -1494,13 +1827,41 @@ mod tests {
             "store:test",
         )
         .unwrap();
-        let access = DerivedHistoryAccess::from_mode(DerivedHistoryMode::Active {
+        let mut access = DerivedHistoryAccess::from_mode(DerivedHistoryMode::Active {
             lifecycle,
             current: Mutex::new(None),
             store_identity: "store:test".to_owned(),
             backend: StoreBackend::Local(temp.path().to_path_buf()),
         });
+        access.maintenance = Some(DerivedHistoryMaintenance {
+            profile: DerivedAccessProfile::SqliteWalBodylessV1,
+            store_root: temp.path().to_path_buf(),
+            store_identity: "store:test".to_owned(),
+        });
         (temp, access)
+    }
+
+    #[test]
+    fn synchronous_build_cancellation_preserves_truth_and_publishes_nothing() {
+        let (temp, access) =
+            unbuilt_active_history_from_events((0..7).map(review_initialized).collect::<Vec<_>>());
+        let mut progress_calls = 0;
+
+        let result = access.build(|_| {
+            progress_calls += 1;
+            DerivedHistoryControl::Cancel
+        });
+
+        assert!(result.unwrap_err().contains("cancelled"));
+        assert!(progress_calls > 0);
+        assert_eq!(
+            EventStore::open(temp.path()).list_events().unwrap().len(),
+            7
+        );
+        assert_eq!(
+            access.lifecycle_status().availability,
+            DerivedHistoryAvailability::Absent
+        );
     }
 
     fn wait_for_background_rebuild(access: &DerivedHistoryAccess, context: &str) {

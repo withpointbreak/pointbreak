@@ -168,6 +168,10 @@ impl GenerationLayout {
         &self.root
     }
 
+    pub(crate) const fn namespace(&self) -> super::layout::DerivedStorageNamespace {
+        self.storage_layout.namespace()
+    }
+
     pub(crate) fn staging(&self, generation_id: &str) -> PathBuf {
         self.root.join("staging").join(generation_id)
     }

@@ -162,6 +162,10 @@ impl DerivedAccessLifecycle {
         self.status_with_quarantine(true)
     }
 
+    pub(crate) fn status_read_only(&self) -> Result<LifecycleStatus, LifecycleError> {
+        self.status_with_quarantine(false)
+    }
+
     fn status_with_quarantine(
         &self,
         allow_quarantine: bool,
@@ -221,21 +225,21 @@ impl DerivedAccessLifecycle {
             Ok(publication) => publication,
             Err(error) => return self.generation_error_status(error, allow_quarantine),
         };
-        let Some((publication, _lease)) = stable_publication else {
+        let Some((paths, publication, _lease)) = stable_publication else {
             return Ok(status(
                 DerivedAccessAvailability::RebuildRequired,
                 None,
                 Some("current generation changed while reading lifecycle status".to_owned()),
             ));
         };
-        let descriptor = match self.paths.descriptor(&publication) {
+        let descriptor = match paths.descriptor(&publication) {
             Ok(descriptor) => descriptor,
             Err(error) => return self.generation_error_status(error, allow_quarantine),
         };
         if let Err(error) = self.validate_descriptor(&descriptor) {
             return self.invalid_status(error.to_string(), allow_quarantine);
         }
-        let generation_root = self.paths.generation(&publication.generation_id);
+        let generation_root = paths.generation(&publication.generation_id);
         if let Err(error) = validate_wal_shape(&generation_root) {
             return self.lifecycle_error_status(error, allow_quarantine);
         }
@@ -650,22 +654,21 @@ impl DerivedAccessLifecycle {
     }
 
     pub(crate) fn open_current(&self) -> Result<Option<CurrentGeneration>, LifecycleError> {
-        if self.profile == DerivedAccessProfile::Off || !self.paths.root().exists() {
+        if self.profile == DerivedAccessProfile::Off {
             return Ok(None);
         }
-        let Some((publication, lease)) = self
+        let Some((paths, publication, lease)) = self
             .stable_current_publication()
             .map_err(|error| self.generation_open_error(error))?
         else {
             return Ok(None);
         };
-        let descriptor = self
-            .paths
+        let descriptor = paths
             .descriptor(&publication)
             .map_err(|error| self.generation_open_error(error))?;
         self.validate_descriptor(&descriptor)
             .map_err(|error| self.quarantine_error(error.to_string()))?;
-        let generation_root = self.paths.generation(&publication.generation_id);
+        let generation_root = paths.generation(&publication.generation_id);
         if let Err(error) = validate_wal_shape(&generation_root) {
             return Err(if lifecycle_error_requires_quarantine(&error) {
                 self.quarantine_error(error.to_string())
@@ -699,22 +702,38 @@ impl DerivedAccessLifecycle {
 
     fn stable_current_publication(
         &self,
-    ) -> Result<Option<(GenerationPublication, GenerationReadLease)>, GenerationError> {
+    ) -> Result<
+        Option<(GenerationLayout, GenerationPublication, GenerationReadLease)>,
+        GenerationError,
+    > {
         self.stable_current_publication_with_hook(|| {})
     }
 
     fn stable_current_publication_with_hook(
         &self,
         mut after_publication_selected: impl FnMut(),
-    ) -> Result<Option<(GenerationPublication, GenerationReadLease)>, GenerationError> {
+    ) -> Result<
+        Option<(GenerationLayout, GenerationPublication, GenerationReadLease)>,
+        GenerationError,
+    > {
         for _ in 0..STABLE_PUBLICATION_ATTEMPTS {
-            let Some(publication) = self.paths.current_publication()? else {
+            // Namespace selection and generation lease acquisition form one
+            // optimistic read transaction. A transition can win after the
+            // first resolution but before this reader obtains its lease. In
+            // that case the second resolution observes a different root, the
+            // stale lease is dropped, and the reader retries against the
+            // published namespace instead of waking against a renamed path.
+            let paths = GenerationLayout::new(&self.store_root)?;
+            let Some(publication) = paths.current_publication()? else {
                 return Ok(None);
             };
             after_publication_selected();
-            let lease = self.paths.acquire_read_lease(&publication.generation_id)?;
-            if self.paths.current_publication()?.as_ref() == Some(&publication) {
-                return Ok(Some((publication, lease)));
+            let lease = paths.acquire_read_lease(&publication.generation_id)?;
+            let confirmed = GenerationLayout::new(&self.store_root)?;
+            if confirmed.root() == paths.root()
+                && confirmed.current_publication()?.as_ref() == Some(&publication)
+            {
+                return Ok(Some((confirmed, publication, lease)));
             }
         }
         Err(GenerationError::PublicationUnstable)
@@ -1502,6 +1521,50 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_re_resolves_when_transition_wins_before_reader_lease() {
+        let temp = populated_store(7);
+        let built = active_lifecycle(temp.path())
+            .rebuild(|_| LifecycleControl::Continue)
+            .unwrap();
+        let stable =
+            DerivedStorageLayout::for_namespace(temp.path(), DerivedStorageNamespace::Stable);
+        let legacy =
+            DerivedStorageLayout::for_namespace(temp.path(), DerivedStorageNamespace::Legacy);
+        fs::rename(stable.root(), legacy.root()).unwrap();
+        let lifecycle = active_lifecycle(temp.path());
+        let mut transitioned = false;
+
+        let selected = lifecycle.stable_current_publication_with_hook(|| {
+            if !transitioned {
+                let receipt = DerivedStorageLayout::transition_legacy(temp.path()).unwrap();
+                assert_eq!(receipt.disposition, DerivedStorageTransition::Moved);
+                transitioned = true;
+            }
+        });
+
+        assert!(transitioned);
+        assert!(
+            selected.is_ok(),
+            "reader must re-resolve after the move: {selected:?}"
+        );
+        assert_eq!(
+            selected.unwrap().unwrap().1.generation_id,
+            built.generation_id.unwrap()
+        );
+        assert_eq!(
+            lifecycle
+                .open_current()
+                .unwrap()
+                .unwrap()
+                .service()
+                .locator_checkpoint()
+                .unwrap()
+                .sequence,
+            built.head_sequence
+        );
+    }
+
+    #[test]
     fn cancelled_bootstrap_never_publishes_a_partial_generation() {
         let temp = populated_store(7);
         let lifecycle = active_lifecycle(temp.path());
@@ -1581,7 +1644,7 @@ mod tests {
             .unwrap();
         let mut replaced = false;
 
-        let (publication, lease) = lifecycle
+        let (_paths, publication, lease) = lifecycle
             .stable_current_publication_with_hook(|| {
                 if !replaced {
                     lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
