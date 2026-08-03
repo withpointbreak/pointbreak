@@ -428,8 +428,8 @@ bounded APFS falsifier.
 
 ## Derived-access product-integration contract
 
-Pointbreak carries a dormant contract for evaluating the previously qualified
-`sqlite-wal-bodyless-v1` profile in normal product paths. The experiment is off by default:
+Pointbreak retains this historical contract for the source cut that first evaluated
+`sqlite-wal-bodyless-v1` in normal product paths. That qualified source cut was off by default:
 
 ```sh
 unset POINTBREAK_DERIVED_ACCESS
@@ -437,8 +437,10 @@ unset POINTBREAK_DERIVED_ACCESS
 export POINTBREAK_DERIVED_ACCESS=off
 ```
 
-Only `off` and `sqlite-wal-bodyless-v1` are valid. Unknown or non-Unicode values are errors. The normal
-Pointbreak library and binary build the bundled `rusqlite`/`libsqlite3-sys` closure so the dormant profile
+The current runtime default is recorded separately in the rollout contract below; this historical contract
+and its hash are intentionally unchanged. Only `off` and `sqlite-wal-bodyless-v1` are valid. Unknown or
+non-Unicode values are errors. The normal Pointbreak library and binary build the bundled
+`rusqlite`/`libsqlite3-sys` closure so the profile
 can be exercised without a developer feature. That compilation and package cost is present even while the
 selector is `off`. The profile implementation is owned once under `session::derived_access::sqlite`;
 qualification adapters and active product routes call that same core. Selecting the active profile for
@@ -447,7 +449,7 @@ generation exists. The Inspector shell remains available while derived routes re
 availability, and the routes begin serving from the immutable generation after publication. A running
 Inspector joins a rebuild already owned by another process and requests a fresh rebuild when an out-of-band
 writer advances authoritative truth; neither case requires restarting the Inspector. This does not migrate
-truth or select a production default.
+truth. The historical default decision described here is not the current selector.
 
 `RebuildBusy` waits for the other process to publish, while rebuilds invalidated by changing truth retry with
 capped exponential backoff. Normal governed `CatchingUp` remains an in-place bounded-delta state and never
@@ -573,9 +575,43 @@ bounded work. Exact revision detail remains an independent entity-primary read.
 The readiness evaluator requires one result for every frozen gate, including one result proving that all
 parent product-integration gates and matched-operation limits passed. A failed correctness, native-authority,
 pagination-integrity, lifecycle/package, rollback, protected-input, or default-posture gate rejects the exact
-product shape. Other failed or unknown operational/evidence gates keep it default-off. Only a complete
-passing matrix yields `ready_for_default_decision`, which still requires a separate decision before any
-configuration default changes.
+product shape. Other failed or unknown operational/evidence gates kept it default-off. Only a complete
+passing matrix yielded `ready_for_default_decision`, which required the separate rollout decision recorded
+below before the configuration default changed.
+
+## Derived-access default rollout contract
+
+Unset `POINTBREAK_DERIVED_ACCESS` now selects `sqlite-wal-bodyless-v1`. Explicit
+`POINTBREAK_DERIVED_ACCESS=off` remains the immediate, artifact-free rollback. An absent or unusable
+generation never blocks authoritative reads or writes: Inspector starts one asynchronous build, bounded CLI
+reads use loose truth with one actionable hint per exact store and process, and writes publish loose truth
+once while reporting derived degradation. Ordinary reads and writes never synchronously rebuild history.
+
+Print, verify, and smoke the current contract without opening a store:
+
+```sh
+just derived-access-rollout-contract
+just derived-access-rollout-contract-verify
+just derived-access-rollout-contract-smoke
+```
+
+The compiled schema is `pointbreak.derived-access-rollout-contract.v1`; its canonical SHA-256 is
+`69650f18f89329aac602ecbf34a552084decd9f48556ce0e3f5a4aa2cc711fb1`. It links to, but does not rewrite,
+the historical integration and readiness contracts.
+
+<!-- derived-access-rollout-contract-v1:start -->
+| Decision | Current rollout requirement |
+| --- | --- |
+| Selector | unset `POINTBREAK_DERIVED_ACCESS` selects `sqlite-wal-bodyless-v1`; explicit `off` remains the immediate rollback |
+| Authority | loose Journal and ContentStore carriers remain the sole truth; derived state is disposable and rebuildable |
+| Layout | stable `derived` with compatible transition from legacy `.pointbreak-derived` |
+| First use | Inspector: serve the shell and start one asynchronous build when no current generation exists; bounded CLI: remain available through authoritative truth and emit one actionable fallback hint; write: publish authoritative truth once and report disposable-generation degradation |
+| Recovery | `pointbreak store derived status|build|rebuild`; unavailable hint at most once per exact store per process |
+| Bounded CLI | history page with an effective limit and without watch, ref filter, or body search; attention list; revision list with an explicit accepted limit at most 500; cursor binds profile, schema, snapshot, normalized descending order |
+| Rollback | explicit off artifact-free: `true`; ordinary synchronous rebuild allowed: `false` |
+| Platform scope | native `macOS APFS`, `Windows NTFS`; Linux compile/CI only: `true` |
+| Historical boundary | integration `3afe3a1fd65f0d5c58246dbe426c35a32325dc42bd9931d78f0e2354411dd00d` and readiness `5445781aadff791537746f1596f577ea1415fd37daf6d0da4fbc0ded94375eb3` remain immutable; truth migration authorized: `false` |
+<!-- derived-access-rollout-contract-v1:end -->
 
 ## Incremental derived-access falsifier contract
 

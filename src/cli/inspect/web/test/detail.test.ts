@@ -710,6 +710,7 @@ describe("openRevision / renderRevisionPage (the composite page, fetched via htt
       store.commit({
         revisions: {
           ...(store.getState().revisions as RevisionsDoc),
+          projectionStamp: undefined,
           eventSetHash: `case-${index}`,
         },
         selected: { kind: "revision", id: REV },
@@ -1025,6 +1026,7 @@ describe("showComposite (shownCompositeId guards re-fetch)", () => {
     store.commit({
       revisions: {
         ...(store.getState().revisions as RevisionsDoc),
+        projectionStamp: undefined,
         eventSetHash: "sha256:before-poll",
       },
       selected: { kind: "revision", id: REV },
@@ -1041,6 +1043,7 @@ describe("showComposite (shownCompositeId guards re-fetch)", () => {
     store.commit({
       revisions: {
         ...(store.getState().revisions as RevisionsDoc),
+        projectionStamp: undefined,
         eventSetHash: "sha256:after-poll",
       },
     });
@@ -1097,6 +1100,7 @@ describe("showComposite (shownCompositeId guards re-fetch)", () => {
     store.commit({
       revisions: {
         ...(store.getState().revisions as RevisionsDoc),
+        projectionStamp: undefined,
         eventSetHash: "sha256:before-mounted-refresh",
       },
       selected: { kind: "revision", id: REV },
@@ -1135,6 +1139,7 @@ describe("showComposite (shownCompositeId guards re-fetch)", () => {
       store.commit({
         revisions: {
           ...(store.getState().revisions as RevisionsDoc),
+          projectionStamp: undefined,
           eventSetHash: "sha256:after-mounted-refresh",
         },
       });
@@ -1195,6 +1200,7 @@ describe("showComposite (shownCompositeId guards re-fetch)", () => {
       store.commit({
         revisions: {
           ...(store.getState().revisions as RevisionsDoc),
+          projectionStamp: undefined,
           eventSetHash: "sha256:before-in-flight-poll",
         },
         selected: { kind: "revision", id: REV },
@@ -1212,6 +1218,7 @@ describe("showComposite (shownCompositeId guards re-fetch)", () => {
       store.commit({
         revisions: {
           ...(store.getState().revisions as RevisionsDoc),
+          projectionStamp: undefined,
           eventSetHash: "sha256:after-in-flight-poll",
         },
       });

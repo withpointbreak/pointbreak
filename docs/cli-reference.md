@@ -453,6 +453,8 @@ the machine-wide **user-level family store tier** with `pointbreak store link` (
 `pointbreak store derived status|build|rebuild` operates on the disposable derived-access generation
 for the exact store selected by `--repo`. The event journal and content store remain authoritative:
 these commands do not replace, migrate, or mutate loose truth.
+When `POINTBREAK_DERIVED_ACCESS` is unset, the derived profile is active; set it explicitly to `off` for
+immediate rollback.
 
 - `status` is strictly read-only. It reports the selected namespace and lifecycle availability without
   creating a directory, acquiring a rebuild lease, or starting background work. Its

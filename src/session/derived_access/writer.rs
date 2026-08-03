@@ -13,12 +13,13 @@
 //! and admitting a new immutable generation requires a fresh coordinator.
 
 use std::cell::Cell;
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use super::cursor::AppendResolution;
+use super::interaction::{RECOVERY_ACTION, claim_unavailable_hint};
 use super::lifecycle::DerivedAccessLifecycle;
 use super::sqlite::{AppendCrashPoint, StoreWriterLock};
 #[cfg(any(test, feature = "longitudinal-counting"))]
@@ -33,7 +34,6 @@ const MAX_DIAGNOSTICS: usize = 8;
 const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 512;
 static ATTEMPT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static PROCESS_DIAGNOSTICS: OnceLock<Mutex<VecDeque<DerivedWriteDiagnostic>>> = OnceLock::new();
-static UNAVAILABLE_HINTED_STORES: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DerivedWriteDiagnostic {
@@ -382,12 +382,7 @@ fn enqueue_unavailable_process_hint(
     store_root: &std::path::Path,
     diagnostic: DerivedWriteDiagnostic,
 ) {
-    let first_for_store = UNAVAILABLE_HINTED_STORES
-        .get_or_init(|| Mutex::new(HashSet::new()))
-        .lock()
-        .expect("derived hint store lock poisoned")
-        .insert(store_root.to_path_buf());
-    if !first_for_store {
+    if !claim_unavailable_hint(store_root) {
         return;
     }
     enqueue_process_diagnostic(diagnostic);
@@ -448,13 +443,12 @@ fn diagnostic(code: &'static str, detail: &str, quarantine: &str) -> DerivedWrit
 
 fn unavailable_diagnostic(detail: &str) -> DerivedWriteDiagnostic {
     const PREFIX: &str = "derived acceleration is unavailable (";
-    const ACTION: &str =
-        "); run `pointbreak store derived status` or `pointbreak store derived build`";
+    let action = format!("); {RECOVERY_ACTION}");
     let detail = truncate_utf8(
         detail,
-        MAX_DIAGNOSTIC_MESSAGE_BYTES - PREFIX.len() - ACTION.len(),
+        MAX_DIAGNOSTIC_MESSAGE_BYTES - PREFIX.len() - action.len(),
     );
-    let message = format!("{PREFIX}{detail}{ACTION}");
+    let message = format!("{PREFIX}{detail}{action}");
     DerivedWriteDiagnostic {
         code: "derived_access_generation_unavailable",
         message: truncate_utf8(&message, MAX_DIAGNOSTIC_MESSAGE_BYTES),

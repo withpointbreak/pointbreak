@@ -33,7 +33,7 @@ impl DerivedAccessProfile {
 
     pub(crate) fn parse(value: Option<&OsStr>) -> Result<Self, DerivedAccessProfileError> {
         let Some(value) = value else {
-            return Ok(Self::Off);
+            return Ok(Self::SqliteWalBodylessV1);
         };
         let value = value
             .to_str()
@@ -990,6 +990,16 @@ pub(crate) const PRODUCTION_READINESS_CONTRACT_SHA256_V1: &str =
     "5445781aadff791537746f1596f577ea1415fd37daf6d0da4fbc0ded94375eb3";
 pub(crate) const PRODUCTION_READINESS_FIXTURE_SHA256_V1: &str =
     "b2e2656f6f37a1173bbeb7ce9101e1c703d03b600468fc4b62fb2dc25a05ab6a";
+pub(crate) const DERIVED_ACCESS_ROLLOUT_CONTRACT_SCHEMA_V1: &str =
+    "pointbreak.derived-access-rollout-contract.v1";
+pub(crate) const DERIVED_ACCESS_ROLLOUT_CONTRACT_PUBLICATION_SCHEMA_V1: &str =
+    "pointbreak.derived-access-rollout-contract-publication.v1";
+pub(crate) const DERIVED_ACCESS_ROLLOUT_CONTRACT_FIXTURE_SCHEMA_V1: &str =
+    "pointbreak.derived-access-rollout-contract-fixture.v1";
+pub(crate) const DERIVED_ACCESS_ROLLOUT_CONTRACT_SMOKE_SCHEMA_V1: &str =
+    "pointbreak.derived-access-rollout-contract-smoke.v1";
+pub(crate) const DERIVED_ACCESS_ROLLOUT_CONTRACT_SHA256_V1: &str =
+    "69650f18f89329aac602ecbf34a552084decd9f48556ce0e3f5a4aa2cc711fb1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -2017,6 +2027,260 @@ pub(crate) fn production_readiness_contract_smoke_v1()
         store_roots_opened: 0,
         expensive_scale_work_run: false,
         physical_implementation_opened: false,
+        evidence_collected: false,
+    })
+}
+
+/// Current runtime rollout posture layered over the immutable historical
+/// integration and readiness evidence.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DerivedAccessRolloutContractV1 {
+    pub(crate) schema: String,
+    pub(crate) contract_id: String,
+    pub(crate) parent_product_integration_sha256: String,
+    pub(crate) parent_production_readiness_sha256: String,
+    pub(crate) selector_environment: String,
+    pub(crate) default_profile: DerivedAccessProfile,
+    pub(crate) explicit_off_profile: DerivedAccessProfile,
+    pub(crate) authoritative_truth: String,
+    pub(crate) stable_layout: Vec<String>,
+    pub(crate) legacy_layout: Vec<String>,
+    pub(crate) lifecycle_commands: Vec<String>,
+    pub(crate) first_inspector_use: String,
+    pub(crate) first_bounded_read: String,
+    pub(crate) first_write: String,
+    pub(crate) unavailable_hint_cadence: String,
+    pub(crate) bounded_cli_eligibility: Vec<String>,
+    pub(crate) bounded_cursor_binding: Vec<String>,
+    pub(crate) explicit_off_is_artifact_free: bool,
+    pub(crate) ordinary_synchronous_rebuild_allowed: bool,
+    pub(crate) native_platform_scope: Vec<String>,
+    pub(crate) linux_compile_ci_only: bool,
+    pub(crate) historical_contracts_immutable: bool,
+    pub(crate) truth_migration_authorized: bool,
+}
+
+impl DerivedAccessRolloutContractV1 {
+    fn frozen() -> Self {
+        Self {
+            schema: DERIVED_ACCESS_ROLLOUT_CONTRACT_SCHEMA_V1.to_owned(),
+            contract_id: "derived-access-default-rollout-v1".to_owned(),
+            parent_product_integration_sha256: PRODUCT_INTEGRATION_CONTRACT_SHA256_V1.to_owned(),
+            parent_production_readiness_sha256: PRODUCTION_READINESS_CONTRACT_SHA256_V1.to_owned(),
+            selector_environment: DERIVED_ACCESS_PROFILE_ENV.to_owned(),
+            default_profile: DerivedAccessProfile::SqliteWalBodylessV1,
+            explicit_off_profile: DerivedAccessProfile::Off,
+            authoritative_truth: "loose Journal and ContentStore carriers".to_owned(),
+            stable_layout: [
+                "derived",
+                "derived.writer.lock",
+                "derived.rebuild.lock",
+                "derived.generation-lease-",
+                "derived.quarantine-",
+                "derived.retired-",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            legacy_layout: [
+                ".pointbreak-derived",
+                ".pointbreak-derived.writer.lock",
+                ".pointbreak-derived.rebuild.lock",
+                ".pointbreak-derived.generation-lease-",
+                ".pointbreak-derived.quarantine-",
+                ".pointbreak-derived.retired-",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            lifecycle_commands: ["status", "build", "rebuild"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            first_inspector_use:
+                "serve the shell and start one asynchronous build when no current generation exists"
+                    .to_owned(),
+            first_bounded_read:
+                "remain available through authoritative truth and emit one actionable fallback hint"
+                    .to_owned(),
+            first_write:
+                "publish authoritative truth once and report disposable-generation degradation"
+                    .to_owned(),
+            unavailable_hint_cadence: "at most once per exact store per process".to_owned(),
+            bounded_cli_eligibility: [
+                "history page with an effective limit and without watch, ref filter, or body search",
+                "attention list",
+                "revision list with an explicit accepted limit at most 500",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            bounded_cursor_binding: [
+                "profile",
+                "schema",
+                "snapshot",
+                "normalized descending order",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+            explicit_off_is_artifact_free: true,
+            ordinary_synchronous_rebuild_allowed: false,
+            native_platform_scope: ["macOS APFS", "Windows NTFS"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            linux_compile_ci_only: true,
+            historical_contracts_immutable: true,
+            truth_migration_authorized: false,
+        }
+    }
+
+    pub(crate) fn canonical_sha256(&self) -> Result<String, String> {
+        canonical_sha256(self)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self != &Self::frozen() {
+            return Err("unsupported derived-access rollout contract".to_owned());
+        }
+        let actual = self.canonical_sha256()?;
+        if actual != DERIVED_ACCESS_ROLLOUT_CONTRACT_SHA256_V1 {
+            return Err(format!(
+                "derived-access rollout contract hash is not frozen: expected {}, actual {actual}",
+                DERIVED_ACCESS_ROLLOUT_CONTRACT_SHA256_V1
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn decision_table_markdown(&self) -> String {
+        [
+            "| Decision | Current rollout requirement |".to_owned(),
+            "| --- | --- |".to_owned(),
+            format!(
+                "| Selector | unset `{}` selects `{}`; explicit `{}` remains the immediate rollback |",
+                self.selector_environment,
+                self.default_profile.as_str(),
+                self.explicit_off_profile.as_str()
+            ),
+            format!(
+                "| Authority | {} remain the sole truth; derived state is disposable and rebuildable |",
+                self.authoritative_truth
+            ),
+            format!(
+                "| Layout | stable `{}` with compatible transition from legacy `{}` |",
+                self.stable_layout[0], self.legacy_layout[0]
+            ),
+            format!(
+                "| First use | Inspector: {}; bounded CLI: {}; write: {} |",
+                self.first_inspector_use, self.first_bounded_read, self.first_write
+            ),
+            format!(
+                "| Recovery | `pointbreak store derived {}`; unavailable hint {} |",
+                self.lifecycle_commands.join("|"), self.unavailable_hint_cadence
+            ),
+            format!(
+                "| Bounded CLI | {}; cursor binds {} |",
+                self.bounded_cli_eligibility.join("; "),
+                self.bounded_cursor_binding.join(", ")
+            ),
+            format!(
+                "| Rollback | explicit off artifact-free: `{}`; ordinary synchronous rebuild allowed: `{}` |",
+                self.explicit_off_is_artifact_free, self.ordinary_synchronous_rebuild_allowed
+            ),
+            format!(
+                "| Platform scope | native `{}`; Linux compile/CI only: `{}` |",
+                self.native_platform_scope.join("`, `"), self.linux_compile_ci_only
+            ),
+            format!(
+                "| Historical boundary | integration `{}` and readiness `{}` remain immutable; truth migration authorized: `{}` |",
+                self.parent_product_integration_sha256,
+                self.parent_production_readiness_sha256,
+                self.truth_migration_authorized
+            ),
+        ]
+        .join("\n")
+    }
+}
+
+pub(crate) fn derived_access_rollout_contract_v1() -> DerivedAccessRolloutContractV1 {
+    DerivedAccessRolloutContractV1::frozen()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DerivedAccessRolloutContractFixtureV1 {
+    pub(crate) schema: String,
+    pub(crate) contract_schema: String,
+    pub(crate) contract_sha256: String,
+    pub(crate) contract: DerivedAccessRolloutContractV1,
+}
+
+pub(crate) fn derived_access_rollout_contract_fixture_v1() -> DerivedAccessRolloutContractFixtureV1
+{
+    DerivedAccessRolloutContractFixtureV1 {
+        schema: DERIVED_ACCESS_ROLLOUT_CONTRACT_FIXTURE_SCHEMA_V1.to_owned(),
+        contract_schema: DERIVED_ACCESS_ROLLOUT_CONTRACT_SCHEMA_V1.to_owned(),
+        contract_sha256: DERIVED_ACCESS_ROLLOUT_CONTRACT_SHA256_V1.to_owned(),
+        contract: derived_access_rollout_contract_v1(),
+    }
+}
+
+pub(crate) fn verify_derived_access_rollout_contract_fixture_v1() -> Result<(), String> {
+    let fixture: DerivedAccessRolloutContractFixtureV1 = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/derived-access/default-rollout-v1.json"
+    ))
+    .map_err(|error| format!("derived-access rollout fixture is invalid: {error}"))?;
+    if fixture != derived_access_rollout_contract_fixture_v1() {
+        return Err("derived-access rollout fixture differs from the frozen contract".to_owned());
+    }
+    derived_access_rollout_contract_v1().validate()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DerivedAccessRolloutContractPublicationV1 {
+    pub(crate) schema: String,
+    pub(crate) mode: String,
+    pub(crate) contract: DerivedAccessRolloutContractV1,
+    pub(crate) contract_sha256: String,
+    pub(crate) decision_table_markdown: String,
+}
+
+pub(crate) fn derived_access_rollout_contract_publication_v1()
+-> DerivedAccessRolloutContractPublicationV1 {
+    let contract = derived_access_rollout_contract_v1();
+    DerivedAccessRolloutContractPublicationV1 {
+        schema: DERIVED_ACCESS_ROLLOUT_CONTRACT_PUBLICATION_SCHEMA_V1.to_owned(),
+        mode: "non_timing_contract_publication".to_owned(),
+        contract_sha256: contract
+            .canonical_sha256()
+            .expect("the frozen rollout contract is canonical"),
+        decision_table_markdown: contract.decision_table_markdown(),
+        contract,
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct DerivedAccessRolloutContractSmokeV1 {
+    pub(crate) schema: String,
+    pub(crate) contract_sha256: String,
+    pub(crate) filesystem_actions: u64,
+    pub(crate) store_roots_opened: u64,
+    pub(crate) evidence_collected: bool,
+}
+
+pub(crate) fn derived_access_rollout_contract_smoke_v1()
+-> Result<DerivedAccessRolloutContractSmokeV1, String> {
+    verify_derived_access_rollout_contract_fixture_v1()?;
+    Ok(DerivedAccessRolloutContractSmokeV1 {
+        schema: DERIVED_ACCESS_ROLLOUT_CONTRACT_SMOKE_SCHEMA_V1.to_owned(),
+        contract_sha256: DERIVED_ACCESS_ROLLOUT_CONTRACT_SHA256_V1.to_owned(),
+        filesystem_actions: 0,
+        store_roots_opened: 0,
         evidence_collected: false,
     })
 }

@@ -84,7 +84,7 @@
   },
   "diagnostics": [],
   "eventCount": 8,
-  "eventSetHash": "sha256:e81f297a301ad7d9df6bd90ceeb257511f661b4fc108460e7f2bdc3f76de0164",
+  "projectionStamp": "sha256:e81f297a301ad7d9df6bd90ceeb257511f661b4fc108460e7f2bdc3f76de0164",
   "filters": {
     "includeBody": true,
     "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"

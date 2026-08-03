@@ -275,7 +275,7 @@ fn read_history(args: &HistoryArgs) -> Result<RoutedHistory, Box<dyn std::error:
             review_history(history_options(args)?)?,
         )),
         DerivedHistoryRoute::Off | DerivedHistoryRoute::Unavailable(_) => {
-            crate::cli::derived_read::emit_authoritative_fallback_hint(&args.repo);
+            crate::cli::derived_read::emit_authoritative_fallback_hint(&access);
             Ok(RoutedHistory::Authoritative(review_history(
                 history_options(args)?,
             )?))

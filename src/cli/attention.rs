@@ -145,7 +145,7 @@ fn read_attention(
         }),
         DerivedAttentionRoute::Off if !access.is_active() => authoritative(),
         DerivedAttentionRoute::Off | DerivedAttentionRoute::Unavailable(_) => {
-            crate::cli::derived_read::emit_authoritative_fallback_hint(repo);
+            crate::cli::derived_read::emit_authoritative_fallback_hint(&access);
             authoritative()
         }
     }

@@ -1,9 +1,11 @@
 use serde::Serialize;
 
 use crate::session::derived_access::product_contract::{
-    PRODUCT_INTEGRATION_CONTRACT_SHA256_V1, product_integration_contract_publication_v1,
-    product_integration_contract_smoke_v1, product_integration_contract_v1,
-    production_readiness_contract_publication_v1, production_readiness_contract_smoke_v1,
+    DERIVED_ACCESS_ROLLOUT_CONTRACT_SHA256_V1, PRODUCT_INTEGRATION_CONTRACT_SHA256_V1,
+    derived_access_rollout_contract_publication_v1, derived_access_rollout_contract_smoke_v1,
+    product_integration_contract_publication_v1, product_integration_contract_smoke_v1,
+    product_integration_contract_v1, production_readiness_contract_publication_v1,
+    production_readiness_contract_smoke_v1, verify_derived_access_rollout_contract_fixture_v1,
     verify_product_integration_contract_fixture_v1,
     verify_production_readiness_contract_fixture_v1,
 };
@@ -22,6 +24,11 @@ pub const DERIVED_ACCESS_READINESS_CONTRACT_VERIFY_MODE_V1: &str =
     "--derived-access-readiness-contract-verify";
 pub const DERIVED_ACCESS_READINESS_CONTRACT_SMOKE_MODE_V1: &str =
     "--derived-access-readiness-contract-smoke";
+pub const DERIVED_ACCESS_ROLLOUT_CONTRACT_MODE_V1: &str = "--derived-access-rollout-contract";
+pub const DERIVED_ACCESS_ROLLOUT_CONTRACT_VERIFY_MODE_V1: &str =
+    "--derived-access-rollout-contract-verify";
+pub const DERIVED_ACCESS_ROLLOUT_CONTRACT_SMOKE_MODE_V1: &str =
+    "--derived-access-rollout-contract-smoke";
 
 pub fn derived_access_product_contract_publication_json_v1() -> Result<String, String> {
     let publication = product_integration_contract_publication_v1();
@@ -60,6 +67,35 @@ pub fn derived_access_readiness_contract_verify_json_v1() -> Result<String, Stri
 pub fn derived_access_readiness_contract_smoke_json_v1() -> Result<String, String> {
     let receipt = production_readiness_contract_smoke_v1()?;
     readiness_mode_receipt_json("non_timing_smoke", &receipt)
+}
+
+pub fn derived_access_rollout_contract_publication_json_v1() -> Result<String, String> {
+    let publication = derived_access_rollout_contract_publication_v1();
+    publication.contract.validate()?;
+    serde_json::to_string(&publication)
+        .map_err(|error| format!("derived-access rollout publication failed: {error}"))
+}
+
+pub fn derived_access_rollout_contract_verify_json_v1() -> Result<String, String> {
+    verify_derived_access_rollout_contract_fixture_v1()?;
+    rollout_mode_receipt_json("verify")
+}
+
+pub fn derived_access_rollout_contract_smoke_json_v1() -> Result<String, String> {
+    derived_access_rollout_contract_smoke_v1()?;
+    rollout_mode_receipt_json("non_timing_smoke")
+}
+
+fn rollout_mode_receipt_json(mode: &'static str) -> Result<String, String> {
+    serde_json::to_string(&DerivedAccessRolloutContractModeReceiptV1 {
+        schema: "pointbreak.derived-access-rollout-mode-receipt.v1",
+        mode,
+        contract_sha256: DERIVED_ACCESS_ROLLOUT_CONTRACT_SHA256_V1,
+        filesystem_actions: 0,
+        store_roots_opened: 0,
+        evidence_collected: false,
+    })
+    .map_err(|error| format!("derived-access rollout mode receipt failed: {error}"))
 }
 
 fn readiness_mode_receipt_json(
@@ -131,6 +167,17 @@ struct ProductionReadinessContractModeReceiptV1<'a> {
     store_roots_opened: u64,
     expensive_scale_work_run: bool,
     physical_implementation_opened: bool,
+    evidence_collected: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DerivedAccessRolloutContractModeReceiptV1 {
+    schema: &'static str,
+    mode: &'static str,
+    contract_sha256: &'static str,
+    filesystem_actions: u64,
+    store_roots_opened: u64,
     evidence_collected: bool,
 }
 
@@ -223,6 +270,28 @@ mod tests {
             assert_eq!(receipt["storeRootsOpened"], 0);
             assert_eq!(receipt["expensiveScaleWorkRun"], false);
             assert_eq!(receipt["physicalImplementationOpened"], false);
+            assert_eq!(receipt["evidenceCollected"], false);
+        }
+    }
+
+    #[test]
+    fn rollout_contract_modes_emit_the_current_inert_receipts() {
+        let publication: serde_json::Value = serde_json::from_str(
+            &derived_access_rollout_contract_publication_json_v1().expect("publication"),
+        )
+        .expect("publication JSON");
+        assert_eq!(
+            publication["contractSha256"],
+            DERIVED_ACCESS_ROLLOUT_CONTRACT_SHA256_V1
+        );
+        for json in [
+            derived_access_rollout_contract_verify_json_v1().expect("verify"),
+            derived_access_rollout_contract_smoke_json_v1().expect("smoke"),
+        ] {
+            let receipt: serde_json::Value =
+                serde_json::from_str(&json).expect("mode receipt JSON");
+            assert_eq!(receipt["filesystemActions"], 0);
+            assert_eq!(receipt["storeRootsOpened"], 0);
             assert_eq!(receipt["evidenceCollected"], false);
         }
     }

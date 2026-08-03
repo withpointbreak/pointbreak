@@ -1,0 +1,60 @@
+{
+  "schema": "pointbreak.derived-access-rollout-contract-fixture.v1",
+  "contractSchema": "pointbreak.derived-access-rollout-contract.v1",
+  "contractSha256": "69650f18f89329aac602ecbf34a552084decd9f48556ce0e3f5a4aa2cc711fb1",
+  "contract": {
+    "schema": "pointbreak.derived-access-rollout-contract.v1",
+    "contractId": "derived-access-default-rollout-v1",
+    "parentProductIntegrationSha256": "3afe3a1fd65f0d5c58246dbe426c35a32325dc42bd9931d78f0e2354411dd00d",
+    "parentProductionReadinessSha256": "5445781aadff791537746f1596f577ea1415fd37daf6d0da4fbc0ded94375eb3",
+    "selectorEnvironment": "POINTBREAK_DERIVED_ACCESS",
+    "defaultProfile": "sqlite-wal-bodyless-v1",
+    "explicitOffProfile": "off",
+    "authoritativeTruth": "loose Journal and ContentStore carriers",
+    "stableLayout": [
+      "derived",
+      "derived.writer.lock",
+      "derived.rebuild.lock",
+      "derived.generation-lease-",
+      "derived.quarantine-",
+      "derived.retired-"
+    ],
+    "legacyLayout": [
+      ".pointbreak-derived",
+      ".pointbreak-derived.writer.lock",
+      ".pointbreak-derived.rebuild.lock",
+      ".pointbreak-derived.generation-lease-",
+      ".pointbreak-derived.quarantine-",
+      ".pointbreak-derived.retired-"
+    ],
+    "lifecycleCommands": [
+      "status",
+      "build",
+      "rebuild"
+    ],
+    "firstInspectorUse": "serve the shell and start one asynchronous build when no current generation exists",
+    "firstBoundedRead": "remain available through authoritative truth and emit one actionable fallback hint",
+    "firstWrite": "publish authoritative truth once and report disposable-generation degradation",
+    "unavailableHintCadence": "at most once per exact store per process",
+    "boundedCliEligibility": [
+      "history page with an effective limit and without watch, ref filter, or body search",
+      "attention list",
+      "revision list with an explicit accepted limit at most 500"
+    ],
+    "boundedCursorBinding": [
+      "profile",
+      "schema",
+      "snapshot",
+      "normalized descending order"
+    ],
+    "explicitOffIsArtifactFree": true,
+    "ordinarySynchronousRebuildAllowed": false,
+    "nativePlatformScope": [
+      "macOS APFS",
+      "Windows NTFS"
+    ],
+    "linuxCompileCiOnly": true,
+    "historicalContractsImmutable": true,
+    "truthMigrationAuthorized": false
+  }
+}

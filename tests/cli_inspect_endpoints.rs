@@ -176,11 +176,12 @@ fn api_attention_serves_projection() {
 
     assert_eq!(attention["schema"], "pointbreak.inspect-attention");
     assert!(
-        attention["eventSetHash"]
+        attention["projectionStamp"]
             .as_str()
             .unwrap()
             .starts_with("sha256:")
     );
+    assert!(attention.get("eventSetHash").is_none());
 
     let items = attention["items"].as_array().unwrap();
     let kinds: Vec<&str> = items
@@ -229,11 +230,12 @@ fn api_history_returns_chronological_typed_summaries() {
 
     assert_eq!(history["schema"], "pointbreak.inspect-history");
     assert!(
-        history["eventSetHash"]
+        history["projectionStamp"]
             .as_str()
             .unwrap()
             .starts_with("sha256:")
     );
+    assert!(history.get("eventSetHash").is_none());
     let entries = history["entries"].as_array().unwrap();
     // capture + auto-recorded ref association + observation + input-request
     // + 2 assessments + 2 validation checks.
@@ -500,7 +502,7 @@ fn api_revisions_page_serves_fresh_payload_after_store_writes() {
         .collect();
     assert!(ids.contains(&first_revision.as_str()), "{ids:?}");
     assert!(ids.contains(&second_revision.as_str()), "{ids:?}");
-    assert_ne!(refreshed["eventSetHash"], initial["eventSetHash"]);
+    assert_ne!(refreshed["projectionStamp"], initial["projectionStamp"]);
 }
 
 #[test]

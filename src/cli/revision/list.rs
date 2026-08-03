@@ -226,7 +226,7 @@ fn read_bounded_page(
         DerivedRevisionPageRoute::RestartRequired => Err(revision_page_restart_error()),
         DerivedRevisionPageRoute::Off if !access.is_active() => authoritative_page(args, request),
         DerivedRevisionPageRoute::Off | DerivedRevisionPageRoute::Unavailable(_) => {
-            crate::cli::derived_read::emit_authoritative_fallback_hint(repo);
+            crate::cli::derived_read::emit_authoritative_fallback_hint(&access);
             authoritative_page(args, request)
         }
     }

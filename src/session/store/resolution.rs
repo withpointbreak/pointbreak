@@ -179,9 +179,8 @@ impl ReadStore {
         self.resolution.backend()
     }
 
-    // Dormant read routes consume the value resolved at the store boundary
-    // rather than consulting process configuration again.
-    #[allow(dead_code)]
+    // Read routes consume the value resolved at the store boundary rather than
+    // consulting process configuration again.
     pub(crate) const fn derived_access_profile(&self) -> DerivedAccessProfile {
         self.resolution.derived_access_profile()
     }
@@ -210,6 +209,15 @@ impl ReadStore {
 pub(crate) fn resolve_read_store(repo: impl AsRef<Path>) -> Result<ReadStore> {
     Ok(ReadStore {
         resolution: resolve_store(repo)?,
+    })
+}
+
+pub(crate) fn resolve_read_store_with_derived_access_profile(
+    repo: impl AsRef<Path>,
+    derived_access_profile: DerivedAccessProfile,
+) -> Result<ReadStore> {
+    Ok(ReadStore {
+        resolution: resolve_store_with_derived_access_profile(repo, derived_access_profile)?,
     })
 }
 
@@ -373,6 +381,15 @@ pub(crate) fn prepare_write_landing(
 }
 
 pub(crate) fn resolve_store(repo: impl AsRef<Path>) -> Result<StoreResolution> {
+    let derived_access_profile = DerivedAccessProfile::from_environment()
+        .map_err(|error| ShoreError::Message(error.to_string()))?;
+    resolve_store_with_derived_access_profile(repo, derived_access_profile)
+}
+
+fn resolve_store_with_derived_access_profile(
+    repo: impl AsRef<Path>,
+    derived_access_profile: DerivedAccessProfile,
+) -> Result<StoreResolution> {
     let paths = RepositoryPaths::resolve(repo.as_ref())?;
 
     // Binding-configuration validation is UNCONDITIONAL: a committed or half
@@ -389,6 +406,7 @@ pub(crate) fn resolve_store(repo: impl AsRef<Path>) -> Result<StoreResolution> {
         return store_resolution_for(
             paths.worktree_store().to_path_buf(),
             ResolvedTier::Ephemeral,
+            derived_access_profile,
         );
     }
 
@@ -439,6 +457,7 @@ pub(crate) fn resolve_store(repo: impl AsRef<Path>) -> Result<StoreResolution> {
                 family_ref: binding.family_ref,
                 clone_ref: binding.clone_ref,
             },
+            derived_access_profile,
         );
     }
 
@@ -447,15 +466,18 @@ pub(crate) fn resolve_store(repo: impl AsRef<Path>) -> Result<StoreResolution> {
     store_resolution_for(
         clone_local_store_dir(paths.worktree_root())?,
         ResolvedTier::CloneLocal,
+        derived_access_profile,
     )
 }
 
 /// Pair a resolved store directory with the selected backend handle and its tier.
 /// Both `resolve_store` return paths route through here so the `POINTBREAK_BACKEND`
 /// selection is applied in exactly one place.
-fn store_resolution_for(store_dir: PathBuf, tier: ResolvedTier) -> Result<StoreResolution> {
-    let derived_access_profile = DerivedAccessProfile::from_environment()
-        .map_err(|error| ShoreError::Message(error.to_string()))?;
+fn store_resolution_for(
+    store_dir: PathBuf,
+    tier: ResolvedTier,
+    derived_access_profile: DerivedAccessProfile,
+) -> Result<StoreResolution> {
     let backend = select_backend(store_dir.clone())?;
     Ok(StoreResolution {
         store_dir,
@@ -734,6 +756,27 @@ mod tests {
     }
 
     #[test]
+    fn read_store_threads_the_already_resolved_derived_profile() {
+        let repo = GitRepo::new();
+
+        let off =
+            resolve_read_store_with_derived_access_profile(repo.path(), DerivedAccessProfile::Off)
+                .unwrap();
+        let active = resolve_read_store_with_derived_access_profile(
+            repo.path(),
+            DerivedAccessProfile::SqliteWalBodylessV1,
+        )
+        .unwrap();
+
+        assert_eq!(off.derived_access_profile(), DerivedAccessProfile::Off);
+        assert_eq!(
+            active.derived_access_profile(),
+            DerivedAccessProfile::SqliteWalBodylessV1
+        );
+        assert_eq!(off.store_dir(), active.store_dir());
+    }
+
+    #[test]
     fn event_log_head_marker_equals_the_event_count() {
         // The cheap marker matches the count a full read would report — without
         // doing the full read.
@@ -795,8 +838,12 @@ mod tests {
     fn command_view_maps_clone_local_tier_to_local_mode() {
         // The existing wire shape is unchanged: mode "local", store_ref "local",
         // no clone/family refs.
-        let resolution =
-            store_resolution_for(PathBuf::from("/tmp/cl"), ResolvedTier::CloneLocal).unwrap();
+        let resolution = store_resolution_for(
+            PathBuf::from("/tmp/cl"),
+            ResolvedTier::CloneLocal,
+            DerivedAccessProfile::SqliteWalBodylessV1,
+        )
+        .unwrap();
         let view = resolution.command_view();
         assert_eq!(view.mode, "local");
         assert_eq!(view.store_ref, "local");
@@ -808,8 +855,12 @@ mod tests {
     fn command_view_maps_ephemeral_tier_to_ephemeral_mode() {
         // Behavior change: an ephemeral resolution now reports "ephemeral", not the
         // old hardcoded "local".
-        let resolution =
-            store_resolution_for(PathBuf::from("/tmp/eph"), ResolvedTier::Ephemeral).unwrap();
+        let resolution = store_resolution_for(
+            PathBuf::from("/tmp/eph"),
+            ResolvedTier::Ephemeral,
+            DerivedAccessProfile::SqliteWalBodylessV1,
+        )
+        .unwrap();
         let view = resolution.command_view();
         assert_eq!(view.mode, "ephemeral");
         assert_eq!(view.store_ref, "local");
@@ -825,6 +876,7 @@ mod tests {
                 family_ref: "acme-web".to_owned(),
                 clone_ref: "0123abcd4567ef89".to_owned(),
             },
+            DerivedAccessProfile::SqliteWalBodylessV1,
         )
         .unwrap();
         let view = resolution.command_view();

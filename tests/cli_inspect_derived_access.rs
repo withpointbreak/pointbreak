@@ -26,6 +26,34 @@ fn assert_revision_page_parity(active: &serde_json::Value, authoritative: &serde
 }
 
 #[test]
+fn unset_inspector_first_start_builds_the_default_projection() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    capture(repo.path());
+
+    let derived_root = common_dir_store(repo.path()).join("derived");
+    assert!(
+        !derived_root.exists(),
+        "writes do not synchronously bootstrap"
+    );
+
+    let inspector = Inspector::spawn_authenticated(repo.path());
+    let status = inspector.get_json("/api/derived-access/status");
+    let history = inspector.get_json("/api/history");
+
+    assert_eq!(status["active"], true);
+    assert_eq!(status["availability"], "current");
+    assert!(history["projectionStamp"].is_string());
+    assert!(history.get("eventSetHash").is_none());
+    assert!(
+        derived_root.is_dir(),
+        "first Inspector use built the sidecar"
+    );
+}
+
+#[test]
 fn active_inspector_first_start_bootstraps_and_serves_history() {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");

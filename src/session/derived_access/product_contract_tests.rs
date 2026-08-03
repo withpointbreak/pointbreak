@@ -5,25 +5,28 @@ use std::ffi::OsString;
 use super::product_contract::{
     AuthorityStampExpectation, AuthorityStampMutationLocus, AuthorityStampObservablePolicy,
     AuthorityStampScenarioId, BootstrapAvailabilityCase, CounterCeilingContextV1,
-    DERIVED_ACCESS_PROFILE_ENV, DerivedAccessAvailability, DerivedAccessFallback,
-    DerivedAccessProfile, PRODUCT_INTEGRATION_CONTRACT_SHA256_V1,
-    PRODUCTION_READINESS_CONTRACT_SHA256_V1, ProductIntegrationContractFixtureV1,
-    ProductParityFixtureId, ProductRouteId, ProductWorkClass, ProjectionStampComponent,
-    ProjectionVersionDecision, ProtectedInputId, ReadinessCounterId, ReadinessGateId,
-    ReadinessGateResultV1, ReadinessOperationId, ReadinessOutcome, RevisionCountSource,
-    RevisionPageLimitOverflow, WireProjectionVersion, product_integration_contract_fixture_v1,
-    product_integration_contract_publication_v1, product_integration_contract_smoke_v1,
-    product_integration_contract_v1, production_readiness_contract_fixture_v1,
-    production_readiness_contract_publication_v1, production_readiness_contract_smoke_v1,
-    production_readiness_contract_v1, verify_product_integration_contract_fixture_v1,
+    DERIVED_ACCESS_PROFILE_ENV, DERIVED_ACCESS_ROLLOUT_CONTRACT_SHA256_V1,
+    DerivedAccessAvailability, DerivedAccessFallback, DerivedAccessProfile,
+    PRODUCT_INTEGRATION_CONTRACT_SHA256_V1, PRODUCTION_READINESS_CONTRACT_SHA256_V1,
+    ProductIntegrationContractFixtureV1, ProductParityFixtureId, ProductRouteId, ProductWorkClass,
+    ProjectionStampComponent, ProjectionVersionDecision, ProtectedInputId, ReadinessCounterId,
+    ReadinessGateId, ReadinessGateResultV1, ReadinessOperationId, ReadinessOutcome,
+    RevisionCountSource, RevisionPageLimitOverflow, WireProjectionVersion,
+    derived_access_rollout_contract_fixture_v1, derived_access_rollout_contract_publication_v1,
+    derived_access_rollout_contract_smoke_v1, derived_access_rollout_contract_v1,
+    product_integration_contract_fixture_v1, product_integration_contract_publication_v1,
+    product_integration_contract_smoke_v1, product_integration_contract_v1,
+    production_readiness_contract_fixture_v1, production_readiness_contract_publication_v1,
+    production_readiness_contract_smoke_v1, production_readiness_contract_v1,
+    verify_product_integration_contract_fixture_v1,
     verify_production_readiness_contract_fixture_v1,
 };
 
 #[test]
-fn selector_defaults_off_and_accepts_only_the_two_frozen_values() {
+fn selector_defaults_active_and_accepts_only_the_two_frozen_values() {
     assert_eq!(
-        DerivedAccessProfile::parse(None).expect("unset defaults off"),
-        DerivedAccessProfile::Off
+        DerivedAccessProfile::parse(None).expect("unset defaults active"),
+        DerivedAccessProfile::SqliteWalBodylessV1
     );
     assert_eq!(
         DerivedAccessProfile::parse(Some(OsStr::new("off"))).expect("explicit off"),
@@ -586,4 +589,57 @@ fn readiness_fixture_docs_and_non_timing_smoke_share_one_contract_hash() {
             ProtectedInputId::DeferredContentFormatExperiment,
         ]
     );
+}
+
+#[test]
+fn current_rollout_contract_is_separate_canonical_and_inert() {
+    let contract = derived_access_rollout_contract_v1();
+    let actual_hash = contract
+        .canonical_sha256()
+        .expect("rollout contract is canonical");
+    let expected_fixture = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&derived_access_rollout_contract_fixture_v1())
+            .expect("rollout fixture serializes")
+    );
+    assert_eq!(actual_hash, DERIVED_ACCESS_ROLLOUT_CONTRACT_SHA256_V1);
+    assert_eq!(
+        expected_fixture,
+        include_str!("../../../tests/fixtures/derived-access/default-rollout-v1.json")
+    );
+    assert_eq!(
+        contract.parent_product_integration_sha256,
+        PRODUCT_INTEGRATION_CONTRACT_SHA256_V1
+    );
+    assert_eq!(
+        contract.parent_production_readiness_sha256,
+        PRODUCTION_READINESS_CONTRACT_SHA256_V1
+    );
+    assert_eq!(
+        contract.default_profile,
+        DerivedAccessProfile::SqliteWalBodylessV1
+    );
+    assert_eq!(contract.explicit_off_profile, DerivedAccessProfile::Off);
+    assert_eq!(contract.stable_layout[0], "derived");
+    assert_eq!(contract.legacy_layout[0], ".pointbreak-derived");
+    assert!(!contract.ordinary_synchronous_rebuild_allowed);
+    assert!(contract.explicit_off_is_artifact_free);
+    assert!(contract.historical_contracts_immutable);
+    assert!(!contract.truth_migration_authorized);
+
+    let publication = derived_access_rollout_contract_publication_v1();
+    assert_eq!(publication.contract_sha256, actual_hash);
+    let docs = include_str!("../../../docs/benchmarking.md");
+    let table = docs
+        .split_once("<!-- derived-access-rollout-contract-v1:start -->\n")
+        .expect("rollout docs start marker")
+        .1
+        .split_once("\n<!-- derived-access-rollout-contract-v1:end -->")
+        .expect("rollout docs end marker")
+        .0;
+    assert_eq!(table, publication.decision_table_markdown);
+    let smoke = derived_access_rollout_contract_smoke_v1().expect("rollout smoke");
+    assert_eq!(smoke.filesystem_actions, 0);
+    assert_eq!(smoke.store_roots_opened, 0);
+    assert!(!smoke.evidence_collected);
 }

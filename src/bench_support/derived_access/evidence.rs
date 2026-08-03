@@ -2727,9 +2727,9 @@ pub fn bootstrap_qualification_derived_access_retained_root_v1(
         &request.qualification_clone_root,
     )?;
     let immutable_before = preflight.immutable_inventory;
-    let clone_truth_before = preflight
-        .qualification_clone_inventory
-        .ok_or_else(|| "retained bootstrap clone preflight is missing".to_owned())?;
+    let clone_truth_before =
+        longitudinal_authoritative_store_data_inventory_v1(&request.qualification_clone_root)
+            .map_err(|error| error.to_string())?;
     let store =
         store_dir_for_repo(&request.qualification_clone_root).map_err(|error| error.to_string())?;
     let store_id = format!("store:derived-access:{}", request.admitted_root_sha256);
@@ -2782,7 +2782,21 @@ pub fn bootstrap_qualification_derived_access_retained_root_v1(
         longitudinal_authoritative_store_data_inventory_v1(&request.qualification_clone_root)
             .map_err(|error| error.to_string())?;
     if immutable_after != immutable_before || clone_truth_after != clone_truth_before {
-        return Err("retained truth changed during derived bootstrap".to_owned());
+        return Err(format!(
+            "retained truth changed during derived bootstrap: immutable {} files/{} bytes/{} -> {} files/{} bytes/{}; clone {} files/{} bytes/{} -> {} files/{} bytes/{}",
+            immutable_before.file_count,
+            immutable_before.byte_count,
+            immutable_before.inventory_sha256,
+            immutable_after.file_count,
+            immutable_after.byte_count,
+            immutable_after.inventory_sha256,
+            clone_truth_before.file_count,
+            clone_truth_before.byte_count,
+            clone_truth_before.inventory_sha256,
+            clone_truth_after.file_count,
+            clone_truth_after.byte_count,
+            clone_truth_after.inventory_sha256
+        ));
     }
     Ok(QualificationDerivedAccessRetainedBootstrapReceiptV1 {
         schema: QUALIFICATION_DERIVED_ACCESS_RETAINED_BOOTSTRAP_SCHEMA_V1.to_owned(),

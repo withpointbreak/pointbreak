@@ -10,6 +10,8 @@ use serde_json::Value;
 use support::git_repo::GitRepo;
 use support::inspect::{InspectOutput, InspectSurface, Inspector, representative_store, urlencode};
 
+const OFF: &[(&str, &str)] = &[("POINTBREAK_DERIVED_ACCESS", "off")];
+
 fn inspect_output(repo: &std::path::Path, extra: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_pointbreak"))
         .args([
@@ -178,8 +180,8 @@ fn assert_unauthorized(response: (String, String), token: &str) {
 fn every_api_surface_requires_one_exact_host_and_bearer_before_routing() {
     let invalid_repo = tempfile::tempdir().unwrap();
     for inspector in [
-        Inspector::spawn_web_text(invalid_repo.path()),
-        Inspector::spawn_api_json(invalid_repo.path()),
+        Inspector::spawn_web_text_with_env(invalid_repo.path(), OFF),
+        Inspector::spawn_authenticated_with_env(invalid_repo.path(), OFF),
     ] {
         let host = inspector.canonical_host().to_owned();
         let token = inspector.token().unwrap().to_owned();
@@ -258,8 +260,8 @@ fn every_api_surface_requires_one_exact_host_and_bearer_before_routing() {
 fn exact_host_is_global_while_web_assets_are_bearer_free_and_api_only_has_none() {
     let invalid_repo = tempfile::tempdir().unwrap();
     for web in [
-        Inspector::spawn_web_text(invalid_repo.path()),
-        Inspector::spawn_web_json(invalid_repo.path()),
+        Inspector::spawn_web_text_with_env(invalid_repo.path(), OFF),
+        Inspector::spawn_web_json_with_env(invalid_repo.path(), OFF),
     ] {
         let token = web.token().unwrap();
         let host = web.canonical_host();
@@ -279,8 +281,8 @@ fn exact_host_is_global_while_web_assets_are_bearer_free_and_api_only_has_none()
     }
 
     for api in [
-        Inspector::spawn_api_text(invalid_repo.path()),
-        Inspector::spawn_api_json(invalid_repo.path()),
+        Inspector::spawn_api_text_with_env(invalid_repo.path(), OFF),
+        Inspector::spawn_authenticated_with_env(invalid_repo.path(), OFF),
     ] {
         for path in ["/", "/index.html", "/tokens.css", "/app.css", "/app.js"] {
             let (head, _) = api.raw_request("GET", path, &[("Host", api.canonical_host())]);

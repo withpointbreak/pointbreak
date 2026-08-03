@@ -120,8 +120,15 @@ pub(super) struct InspectState {
 
 impl InspectState {
     pub(super) fn new(repo: PathBuf) -> Result<Self, String> {
+        Self::new_with_background_rebuild(repo, true)
+    }
+
+    fn new_with_background_rebuild(
+        repo: PathBuf,
+        start_background_rebuild: bool,
+    ) -> Result<Self, String> {
         let derived_history = pointbreak::session::DerivedHistoryAccess::resolve(&repo)?;
-        if let Err(error) = derived_history.start_background_rebuild() {
+        if start_background_rebuild && let Err(error) = derived_history.start_background_rebuild() {
             tracing::warn!(error = %error, "derived_access_background_rebuild_start_failed");
         }
         Ok(Self {
@@ -1114,10 +1121,19 @@ mod tests {
     use super::*;
 
     fn route_for(method: &str, path: &str) -> Response {
-        // Static assets, 404, 405, and the missing-id snapshot case do not
-        // touch the store, so the repo path is never read for these cases.
-        let state =
-            Arc::new(InspectState::new(PathBuf::from("/inspect-routing-test-unused")).unwrap());
+        // The active default resolves the repository before serving even a
+        // store-independent route. Use one real empty repository so these
+        // router tests exercise the production constructor honestly.
+        let repo = tempfile::tempdir().expect("routing test repository");
+        let initialized = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(repo.path())
+            .status()
+            .expect("initialize routing test repository");
+        assert!(initialized.success());
+        let state = Arc::new(
+            InspectState::new_with_background_rebuild(repo.path().to_path_buf(), false).unwrap(),
+        );
         route(&state, true, method, path, None)
     }
 
@@ -1391,11 +1407,11 @@ mod tests {
         );
         assert_eq!(
             route_for("POST", "/api/derived-access/retry").status,
-            "409 Conflict"
+            "200 OK"
         );
         assert_eq!(
             route_for("POST", "/api/derived-access/cancel").status,
-            "409 Conflict"
+            "200 OK"
         );
     }
 

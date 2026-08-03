@@ -12,6 +12,7 @@ use rusqlite::types::Value;
 use serde::Serialize;
 
 use super::cursor::TruthCursor;
+use super::interaction::{AUTHORITATIVE_FALLBACK_HINT, claim_unavailable_hint};
 use super::layout::{
     DerivedStorageDiscovery, DerivedStorageLayout, DerivedStorageNamespace,
     DerivedStorageTransition,
@@ -26,7 +27,9 @@ use crate::session::ProjectionDiagnostic;
 use crate::session::derived_access::semantic::state::SemanticStateSnapshot;
 use crate::session::event::ShoreEvent;
 use crate::session::store::backend::StoreBackend;
-use crate::session::store::resolution::{opaque_path_identity, resolve_read_store};
+use crate::session::store::resolution::{
+    opaque_path_identity, resolve_read_store_with_derived_access_profile,
+};
 use crate::session::workflow::{
     BaseProjectionConfig, DistinctValues, HistoryCursor, HistoryOrder, HistoryPage, HistoryQuery,
     QueryDiagnostic, ReviewHistoryEntry, history_entries_from_selected_events,
@@ -281,7 +284,9 @@ impl DerivedHistoryAccess {
         if profile == DerivedAccessProfile::Off {
             return Ok(Self::from_mode(DerivedHistoryMode::Off));
         }
-        let read_store = resolve_read_store(repo).map_err(|error| error.to_string())?;
+        let read_store = resolve_read_store_with_derived_access_profile(repo, profile)
+            .map_err(|error| error.to_string())?;
+        let profile = read_store.derived_access_profile();
         let store_identity = opaque_path_identity("store", read_store.store_dir())
             .map_err(|error| error.to_string())?;
         let maintenance = DerivedHistoryMaintenance {
@@ -308,6 +313,16 @@ impl DerivedHistoryAccess {
 
     pub const fn is_active(&self) -> bool {
         matches!(self.mode, DerivedHistoryMode::Active { .. }) || self.maintenance.is_some()
+    }
+
+    /// Claim the shared process-local fallback hint for this exact store.
+    ///
+    /// Returning `None` means this access is explicitly off or another read or
+    /// write already surfaced the same recovery action for this store.
+    #[doc(hidden)]
+    pub fn claim_authoritative_fallback_hint(&self) -> Option<&'static str> {
+        let store_root = &self.maintenance.as_ref()?.store_root;
+        claim_unavailable_hint(store_root).then_some(AUTHORITATIVE_FALLBACK_HINT)
     }
 
     /// Report lifecycle progress without requiring a current generation.

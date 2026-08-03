@@ -7,6 +7,7 @@ use support::git_repo::GitRepo;
 use support::{common_dir_store, pointbreak, pointbreak_env};
 
 const ACTIVE: &[(&str, &str)] = &[("POINTBREAK_DERIVED_ACCESS", "sqlite-wal-bodyless-v1")];
+const OFF: &[(&str, &str)] = &[("POINTBREAK_DERIVED_ACCESS", "off")];
 
 #[test]
 fn derived_status_is_side_effect_free_when_off_or_absent() {
@@ -14,7 +15,7 @@ fn derived_status_is_side_effect_free_when_off_or_absent() {
     let repo_arg = repo.path().to_str().unwrap();
     let store = common_dir_store(repo.path());
 
-    let off = pointbreak(["store", "derived", "status", "--repo", repo_arg]);
+    let off = pointbreak_env(["store", "derived", "status", "--repo", repo_arg], OFF);
     assert!(
         off.status.success(),
         "{}",

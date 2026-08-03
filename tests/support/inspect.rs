@@ -91,6 +91,18 @@ impl Inspector {
         Self::spawn_with_env(repo, InspectSurface::ApiOnly, InspectOutput::Json, env)
     }
 
+    pub fn spawn_web_text_with_env(repo: &Path, env: &[(&str, &str)]) -> Self {
+        Self::spawn_with_env(repo, InspectSurface::Web, InspectOutput::Text, env)
+    }
+
+    pub fn spawn_web_json_with_env(repo: &Path, env: &[(&str, &str)]) -> Self {
+        Self::spawn_with_env(repo, InspectSurface::Web, InspectOutput::Json, env)
+    }
+
+    pub fn spawn_api_text_with_env(repo: &Path, env: &[(&str, &str)]) -> Self {
+        Self::spawn_with_env(repo, InspectSurface::ApiOnly, InspectOutput::Text, env)
+    }
+
     pub fn spawn_web_text(repo: &Path) -> Self {
         Self::spawn_with(repo, InspectSurface::Web, InspectOutput::Text)
     }
@@ -108,7 +120,9 @@ impl Inspector {
     }
 
     fn spawn_with(repo: &Path, surface: InspectSurface, output: InspectOutput) -> Self {
-        Self::spawn_with_env(repo, surface, output, &[])
+        let inspector = Self::spawn_with_env(repo, surface, output, &[]);
+        inspector.wait_for_default_derived_generation();
+        inspector
     }
 
     fn spawn_with_env(
@@ -132,6 +146,14 @@ impl Inspector {
         }
         if output == InspectOutput::Json {
             command.args(["--format", "json"]);
+        }
+        if !env
+            .iter()
+            .any(|(name, _)| *name == "POINTBREAK_DERIVED_ACCESS")
+        {
+            // Default-rollout coverage must remain hermetic when the parent
+            // developer shell happens to carry an explicit rollback selector.
+            command.env_remove("POINTBREAK_DERIVED_ACCESS");
         }
         command.envs(env.iter().copied());
         let mut child = command
@@ -190,7 +212,12 @@ impl Inspector {
                 .unwrap_or_default();
             let (addr, fragment) = capability
                 .split_once("/#")
-                .expect("text capability has a fragment route");
+                .unwrap_or_else(|| {
+                    panic!(
+                        "text capability has a fragment route; startup output: {startup_output:?}; stderr: {}",
+                        drained(&stderr)
+                    )
+                });
             let token = fragment
                 .split_once('?')
                 .map(|(_, query)| query)
@@ -271,6 +298,32 @@ impl Inspector {
 
     pub fn stderr_text(&self) -> String {
         drained(&self.stderr)
+    }
+
+    fn wait_for_default_derived_generation(&self) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Ok((_, body)) = self.try_get("/api/derived-access/status")
+                && let Ok(status) = serde_json::from_str::<Value>(&body)
+            {
+                match status["availability"].as_str() {
+                    Some("current") => return,
+                    Some("rebuild_required" | "quarantined" | "unavailable")
+                        if status["rebuildInFlight"] != true =>
+                    {
+                        panic!("default derived generation failed to become current: {status}")
+                    }
+                    _ => {}
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "default derived generation did not become current; stderr: {}",
+                    drained(&self.stderr)
+                );
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     pub fn get_json(&self, path: &str) -> Value {

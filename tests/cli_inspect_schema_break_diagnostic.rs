@@ -43,7 +43,10 @@ fn has_schema_break_diagnostic(body: &Value) -> bool {
 #[test]
 fn inspector_endpoints_return_200_with_schema_break_diagnostic() {
     let (repo, revision_id) = store_with_retired_event();
-    let inspector = Inspector::spawn(repo.path());
+    let inspector = Inspector::spawn_authenticated_with_env(
+        repo.path(),
+        &[("POINTBREAK_DERIVED_ACCESS", "off")],
+    );
 
     // `get_json` asserts a 200; a retired event that previously 500'd now renders.
     for path in ["/api/history", "/api/revisions", "/api/threads"] {

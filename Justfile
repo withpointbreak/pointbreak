@@ -312,6 +312,18 @@ derived-access-readiness-contract-verify:
 derived-access-readiness-contract-smoke:
     cargo +stable bench --locked --features bench --bench store_foundation -- --derived-access-readiness-contract-smoke
 
+# Print the current derived-access rollout contract without opening a store.
+derived-access-rollout-contract:
+    cargo +stable bench --locked --features bench --bench store_foundation -- --derived-access-rollout-contract
+
+# Verify the embedded current derived-access rollout fixture without opening a store.
+derived-access-rollout-contract-verify:
+    cargo +stable bench --locked --features bench --bench store_foundation -- --derived-access-rollout-contract-verify
+
+# Run the non-timing current derived-access rollout smoke without opening a store.
+derived-access-rollout-contract-smoke:
+    cargo +stable bench --locked --features bench --bench store_foundation -- --derived-access-rollout-contract-smoke
+
 # List the derived-access qualification modes without creating a store.
 [group('quality')]
 derived-access-help:
