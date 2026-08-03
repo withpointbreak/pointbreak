@@ -30,7 +30,7 @@ use crate::bench_support::longitudinal::{
 };
 use crate::bench_support::longitudinal::{
     LongitudinalStoreDataInventoryV1, is_governed_derived_store_entry_v1,
-    longitudinal_authoritative_store_data_inventory_v1, longitudinal_store_data_inventory_v1,
+    longitudinal_authoritative_store_data_inventory_v1,
 };
 use crate::canonical_hash::sha256_bytes_hex;
 #[cfg(feature = "longitudinal-counting")]
@@ -2681,14 +2681,16 @@ pub fn preflight_qualification_derived_access_retained_root_v1(
         &request.source_checkout,
         &request.immutable_input_root,
     )?;
-    let immutable_before = longitudinal_store_data_inventory_v1(&request.immutable_input_root)
-        .map_err(|error| error.to_string())?;
+    let immutable_before =
+        longitudinal_authoritative_store_data_inventory_v1(&request.immutable_input_root)
+            .map_err(|error| error.to_string())?;
     if immutable_before.inventory_sha256 != request.admitted_root_sha256 {
         return Err("retained input does not match its admitted root identity".to_owned());
     }
     let clone_inventory = if request.qualification_clone_root.exists() {
-        let inventory = longitudinal_store_data_inventory_v1(&request.qualification_clone_root)
-            .map_err(|error| error.to_string())?;
+        let inventory =
+            longitudinal_authoritative_store_data_inventory_v1(&request.qualification_clone_root)
+                .map_err(|error| error.to_string())?;
         if inventory != immutable_before {
             return Err("retained qualification clone differs from admitted truth".to_owned());
         }
@@ -2696,8 +2698,9 @@ pub fn preflight_qualification_derived_access_retained_root_v1(
     } else {
         None
     };
-    let immutable_after = longitudinal_store_data_inventory_v1(&request.immutable_input_root)
-        .map_err(|error| error.to_string())?;
+    let immutable_after =
+        longitudinal_authoritative_store_data_inventory_v1(&request.immutable_input_root)
+            .map_err(|error| error.to_string())?;
     if immutable_before != immutable_after {
         return Err("retained input changed during preflight".to_owned());
     }
@@ -2776,8 +2779,9 @@ pub fn bootstrap_qualification_derived_access_retained_root_v1(
     let full_replay_matches_incremental = incremental == strict && incremental.as_of == applied;
     let semantic_receipt_sha256 = incremental.semantic_receipt;
     drop(adapter);
-    let immutable_after = longitudinal_store_data_inventory_v1(&request.immutable_input_root)
-        .map_err(|error| error.to_string())?;
+    let immutable_after =
+        longitudinal_authoritative_store_data_inventory_v1(&request.immutable_input_root)
+            .map_err(|error| error.to_string())?;
     let clone_truth_after =
         longitudinal_authoritative_store_data_inventory_v1(&request.qualification_clone_root)
             .map_err(|error| error.to_string())?;

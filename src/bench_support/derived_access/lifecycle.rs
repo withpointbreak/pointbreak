@@ -14,7 +14,7 @@ use super::{
     QualificationDerivedAccessStatusV1, QualificationDerivedAccessTierV1,
 };
 use crate::bench_support::longitudinal::{
-    LongitudinalStoreDataInventoryV1, longitudinal_store_data_inventory_v1,
+    LongitudinalStoreDataInventoryV1, longitudinal_authoritative_store_data_inventory_v1,
 };
 use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::model::JournalId;
@@ -380,7 +380,7 @@ pub fn run_qualification_derived_access_lifecycle_v1(
         &request.source_checkout,
         &request.workspace_root,
     )?;
-    let source_before = longitudinal_store_data_inventory_v1(&request.source_root)
+    let source_before = longitudinal_authoritative_store_data_inventory_v1(&request.source_root)
         .map_err(|error| error.to_string())?;
     if source_before.inventory_sha256 != request.admitted_root_sha256 {
         return Err("lifecycle source root does not match its admitted identity".to_owned());
@@ -438,7 +438,7 @@ pub fn run_qualification_derived_access_lifecycle_v1(
         }
     }
     rows.sort_by_key(|row| row.criterion);
-    let source_after = longitudinal_store_data_inventory_v1(&request.source_root)
+    let source_after = longitudinal_authoritative_store_data_inventory_v1(&request.source_root)
         .map_err(|error| error.to_string())?;
     let source_unchanged = source_before == source_after;
     if !source_unchanged {
