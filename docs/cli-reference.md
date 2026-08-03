@@ -23,7 +23,13 @@ narrow **hard core** is frozen within each document's `version`:
 Removing or renaming a hard-core field-path or value is a coordinated break: bump that document's
 `version` and migrate consumers. Everything else in the documents is **soft shell** — stable but additive-evolvable within
 a `version`: fields may be added, consumers must select by field name and tolerate unknown fields,
-and removing, renaming, or reshaping an existing field bumps the `version`. Raw event files,
+and removing, renaming, or reshaping an existing field bumps the `version`. One documented exception
+is a command with multiple authority lanes: it may expose mutually exclusive soft-shell identity
+fields within one version when the command documents every alternative and the selected identity is
+unambiguous by field presence. Consumers of such a command must accept the documented identity
+union rather than requiring one lane's field. `eventSetHash` (authoritative journal reads) and
+`projectionStamp` (derived reads) are that pair on the history, attention, and bounded revision-list
+documents. Raw event files,
 artifact paths, event filenames, and the store's `state.json` are internal storage details unless a
 command explicitly returns them.
 
@@ -1178,7 +1184,8 @@ pointbreak revision list [--repo <path>] [--object <object-id>] [--ref <name> [-
 ```
 
 `pointbreak revision list` is the discovery surface for captured revisions. It emits
-`pointbreak.review-revision-list` JSON with `eventCount`, `revisionCount`, and entries
+`pointbreak.review-revision-list` JSON with `eventCount`, `revisionCount`, entries, and the serving
+lane's identity (`eventSetHash` or `projectionStamp`)
 sorted by capture time. Each entry carries the revision id, the content-only object id, the capture
 endpoints when Git provenance exists, the optional capture `summary`, and
 `objectArtifactContentHash`. Provenance-free revisions remain first-class entries and omit
@@ -1190,6 +1197,8 @@ use the summary as the primary selection label.
   through 500. `nextCursor` is present when another page remains; pass it back with the same options via
   `--cursor`. A cursor binds the serving profile and snapshot. If either changes, the command exits with
   `revision page changed; retry without --cursor` instead of translating or silently restarting it.
+  Text output reports the displayed rows separately from the total and prints a continuation cue when
+  another page remains.
 - A flagless bounded page uses a current active derived generation and carries `projectionStamp`. Object,
   ref, review-filter, reachability, integration-ref, and worktree-scoped pages retain the authoritative
   implementation and carry `eventSetHash`. If an active generation is unavailable, a first page falls

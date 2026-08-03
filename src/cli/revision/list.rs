@@ -119,7 +119,7 @@ pub(super) fn run(
     // `revision_list_document` consumes the result by value; render the digest
     // up front on the text lane only, so the machine lanes pay nothing extra.
     let text = matches!(format.format, output::OutputFormat::Text)
-        .then(|| render_revision_list_text(&result));
+        .then(|| render_revision_list_text(&result, None));
     let document = revision_list_document(result);
     output::write_document(stdout, format, &document, || {
         text.expect("text lane resolves the digest source")
@@ -142,6 +142,12 @@ impl RoutedRevisionPage {
     fn result(&self) -> &pointbreak::session::RevisionListResult {
         match self {
             Self::Authoritative { result, .. } | Self::Derived { result, .. } => result,
+        }
+    }
+
+    fn next(&self) -> Option<&str> {
+        match self {
+            Self::Authoritative { next, .. } | Self::Derived { next, .. } => next.as_deref(),
         }
     }
 }
@@ -172,7 +178,7 @@ fn run_bounded(
     let routed = read_bounded_page(&args, &request)?;
     let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
     let text = matches!(format.format, output::OutputFormat::Text)
-        .then(|| render_revision_list_text(routed.result()));
+        .then(|| render_revision_list_text(routed.result(), routed.next()));
     match routed {
         RoutedRevisionPage::Authoritative { result, next } => {
             let document = revision_list_page_document(result, next);
@@ -370,16 +376,26 @@ fn revision_page_restart_error() -> Box<dyn std::error::Error> {
 
 /// Bespoke text lane for `revision list`: a count headline, then one scannable
 /// line per listed row — short id, endpoints, merge status, capture time, and
-/// the member count for a grouped row. An empty listing renders a
-/// `no revisions` line, never silence.
-fn render_revision_list_text(result: &pointbreak::session::RevisionListResult) -> String {
+/// the member count for a grouped row. Bounded pages distinguish the displayed
+/// row count from the total and name the cursor needed to continue. An empty
+/// listing renders a `no revisions` line, never silence.
+fn render_revision_list_text(
+    result: &pointbreak::session::RevisionListResult,
+    next_cursor: Option<&str>,
+) -> String {
     if result.entries.is_empty() {
         return "no revisions".to_owned();
     }
-    let mut lines = vec![format!(
-        "{}:",
+    let headline = if result.entries.len() == result.revision_count {
         count_label(result.revision_count, "revision", "revisions")
-    )];
+    } else {
+        format!(
+            "{} of {}",
+            result.entries.len(),
+            count_label(result.revision_count, "revision", "revisions")
+        )
+    };
+    let mut lines = vec![format!("{}:", headline)];
     for entry in &result.entries {
         let captured_from = entry.git_provenance.as_ref().map_or_else(
             || "non-git revision".to_owned(),
@@ -412,6 +428,9 @@ fn render_revision_list_text(result: &pointbreak::session::RevisionListResult) -
             ));
         }
         lines.push(line);
+    }
+    if next_cursor.is_some() {
+        lines.push("… more revisions remain (continue with --cursor)".to_owned());
     }
     lines.join("\n")
 }

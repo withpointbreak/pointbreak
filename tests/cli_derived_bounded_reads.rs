@@ -232,6 +232,27 @@ fn revision_page_rejects_invalid_limits_and_continues_with_an_opaque_cursor() {
 }
 
 #[test]
+fn bounded_revision_text_names_the_page_and_continuation() {
+    let (repo, _, _) = superseded_dump_repo();
+    build(&repo);
+    let repo_arg = repo.path().to_str().unwrap();
+
+    let output = pointbreak_env(
+        [
+            "revision", "list", "--repo", repo_arg, "--limit", "1", "--format", "text",
+        ],
+        ACTIVE,
+    );
+    assert_success(&output);
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.lines().next().unwrap().starts_with("1 of "), "{text}");
+    assert!(
+        text.contains("… more revisions remain (continue with --cursor)"),
+        "{text}"
+    );
+}
+
+#[test]
 fn revision_page_profile_or_snapshot_changes_require_a_cursor_restart() {
     let (repo, _, _) = superseded_dump_repo();
     build(&repo);
