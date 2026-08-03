@@ -63,6 +63,7 @@ pub(crate) struct DerivedWriteCoordinator {
     store_root: PathBuf,
     lifecycle: Option<DerivedAccessLifecycle>,
     mode: AtomicU8,
+    process_hint: Mutex<DerivedWriteDiagnostic>,
     diagnostics: Mutex<VecDeque<DerivedWriteDiagnostic>>,
 }
 
@@ -79,28 +80,34 @@ impl DerivedWriteCoordinator {
             ),
             Err(error) => (DerivedWriteMode::DegradedLoose, Some(error.to_string())),
         };
+        let process_hint = unavailable_diagnostic(
+            unavailable_detail
+                .as_deref()
+                .unwrap_or("no usable derived generation is current"),
+        );
         let coordinator = Self {
             store_root,
             lifecycle: Some(lifecycle),
             mode: AtomicU8::new(mode as u8),
+            process_hint: Mutex::new(process_hint.clone()),
             diagnostics: Mutex::new(VecDeque::new()),
         };
-        if let Some(detail) = unavailable_detail {
-            let diagnostic = unavailable_diagnostic(&detail);
-            coordinator.push_diagnostic(diagnostic);
+        if unavailable_detail.is_some() {
+            coordinator.push_diagnostic(process_hint);
         }
         Ok(coordinator)
     }
 
     pub(crate) fn degraded(store_root: impl Into<PathBuf>, detail: &str) -> Self {
+        let process_hint = unavailable_diagnostic(detail);
         let coordinator = Self {
             store_root: store_root.into(),
             lifecycle: None,
             mode: AtomicU8::new(DerivedWriteMode::DegradedLoose as u8),
+            process_hint: Mutex::new(process_hint.clone()),
             diagnostics: Mutex::new(VecDeque::new()),
         };
-        let diagnostic = unavailable_diagnostic(detail);
-        coordinator.push_diagnostic(diagnostic);
+        coordinator.push_diagnostic(process_hint);
         coordinator
     }
 
@@ -327,10 +334,12 @@ impl DerivedWriteCoordinator {
     ) -> Result<EventWriteOutcome> {
         let outcome = publish();
         if outcome.is_ok() {
-            enqueue_unavailable_process_hint(
-                &self.store_root,
-                unavailable_diagnostic("no usable derived generation is current"),
-            );
+            let process_hint = self
+                .process_hint
+                .lock()
+                .expect("derived process hint lock poisoned")
+                .clone();
+            enqueue_unavailable_process_hint(&self.store_root, process_hint);
         }
         outcome
     }
@@ -338,6 +347,10 @@ impl DerivedWriteCoordinator {
     fn enter_degraded(&self, diagnostic: DerivedWriteDiagnostic) {
         self.mode
             .store(DerivedWriteMode::DegradedLoose as u8, Ordering::Release);
+        *self
+            .process_hint
+            .lock()
+            .expect("derived process hint lock poisoned") = diagnostic.clone();
         self.push_diagnostic(diagnostic);
     }
 
@@ -937,7 +950,7 @@ mod tests {
     }
 
     #[test]
-    fn product_writers_serialize_across_processes() {
+    fn concurrent_product_writers_preserve_authoritative_events() {
         let root = TempDir::new().unwrap();
         let identity = opaque_path_identity("store", root.path()).unwrap();
         DerivedAccessLifecycle::new(
@@ -970,7 +983,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "spawned by product_writers_serialize_across_processes"]
+    #[ignore = "spawned by concurrent_product_writers_preserve_authoritative_events"]
     fn product_writer_child_entrypoint() {
         let root =
             std::path::PathBuf::from(std::env::var_os("POINTBREAK_TEST_WRITER_ROOT").unwrap());

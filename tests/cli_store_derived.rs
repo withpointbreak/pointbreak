@@ -363,6 +363,13 @@ fn busy_governed_writer_degrades_without_blocking_or_bootstrapping() {
             .count(),
         1
     );
+    assert!(
+        stderr
+            .lines()
+            .find(|line| line.starts_with("advisory:"))
+            .is_some_and(|line| line.contains("derived-access writer is busy")),
+        "the operator advisory should retain the specific cause: {stderr}"
+    );
     assert!(stderr.contains("store derived status"), "{stderr}");
     assert!(store.join("derived").is_dir());
 }
