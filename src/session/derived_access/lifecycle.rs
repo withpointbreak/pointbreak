@@ -1381,6 +1381,7 @@ fn directory_has_entries(path: &Path) -> Result<bool, LifecycleError> {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::fs;
     use std::process::Command;
     use std::sync::mpsc;
     use std::time::Duration;
@@ -1391,6 +1392,9 @@ mod tests {
     use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
     use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex};
     use crate::model::JournalId;
+    use crate::session::derived_access::layout::{
+        DerivedStorageLayout, DerivedStorageNamespace, DerivedStorageTransition,
+    };
     use crate::session::derived_access::product_contract::{
         DerivedAccessAvailability, DerivedAccessProfile,
     };
@@ -1441,6 +1445,60 @@ mod tests {
             DerivedAccessAvailability::Absent
         );
         assert!(!store_root.exists());
+    }
+
+    #[test]
+    fn compatible_legacy_generation_moves_without_replay_and_reopens_the_same_head() {
+        let temp = populated_store(7);
+        let lifecycle = active_lifecycle(temp.path());
+        let built = lifecycle.rebuild(|_| LifecycleControl::Continue).unwrap();
+        let stable =
+            DerivedStorageLayout::for_namespace(temp.path(), DerivedStorageNamespace::Stable);
+        let legacy =
+            DerivedStorageLayout::for_namespace(temp.path(), DerivedStorageNamespace::Legacy);
+        let generation_id = built.generation_id.clone().unwrap();
+        let descriptor_before = fs::read(
+            stable
+                .root()
+                .join("generations")
+                .join(&generation_id)
+                .join("generation.json"),
+        )
+        .unwrap();
+        fs::rename(stable.root(), legacy.root()).unwrap();
+
+        let transition = DerivedStorageLayout::transition_legacy(temp.path()).unwrap();
+
+        assert_eq!(transition.disposition, DerivedStorageTransition::Moved);
+        assert_eq!(
+            fs::read(
+                stable
+                    .root()
+                    .join("generations")
+                    .join(&generation_id)
+                    .join("generation.json")
+            )
+            .unwrap(),
+            descriptor_before
+        );
+        let reopened = active_lifecycle(temp.path());
+        let status = reopened.status().unwrap();
+        assert_eq!(status.availability, DerivedAccessAvailability::Current);
+        assert_eq!(
+            status.generation_id.as_deref(),
+            Some(generation_id.as_str())
+        );
+        assert_eq!(
+            reopened
+                .open_current()
+                .unwrap()
+                .unwrap()
+                .service()
+                .locator_checkpoint()
+                .unwrap()
+                .sequence,
+            built.head_sequence
+        );
     }
 
     #[test]
