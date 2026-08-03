@@ -28,7 +28,7 @@ actual_archives="$temp_dir/actual-archives"
 
 jq -r --arg version "$version" \
   '.[] | "pointbreak-\($version)-\(.target).\(.archive)"' \
-  "$targets_file" | LC_ALL=C sort >"$expected_archives"
+  "$targets_file" | tr -d '\r' | LC_ALL=C sort >"$expected_archives"
 find "$archive_dir" -mindepth 1 -maxdepth 1 ! -type d \
   \( -name '*.tar.gz' -o -name '*.zip' \) \
   -exec basename {} \; | LC_ALL=C sort >"$actual_archives"
@@ -39,6 +39,9 @@ if ! diff -u "$expected_archives" "$actual_archives"; then
 fi
 
 while IFS=$'\t' read -r target archive executable; do
+  # Native Windows jq writes CRLF, leaving a carriage return on the final TSV
+  # field when Bash consumes the line-feed delimiter.
+  executable=${executable%$'\r'}
   archive_name="pointbreak-${version}-${target}.${archive}"
   archive_path="$archive_dir/$archive_name"
   actual_payload="$temp_dir/${target}-actual"
@@ -98,7 +101,10 @@ fi
 
 if [ -f "$checksum_file" ]; then
   checksum_names="$temp_dir/checksum-names"
-  awk '{print $2}' "$checksum_file" | LC_ALL=C sort >"$checksum_names"
+  # GNU sha256sum may prefix binary-mode names with `*`; the marker is not
+  # part of the archive name and varies by host/tool build.
+  awk '{ name = $2; sub(/^\*/, "", name); print name }' "$checksum_file" \
+    | LC_ALL=C sort >"$checksum_names"
   if ! diff -u "$expected_archives" "$checksum_names"; then
     echo "checksums.txt does not contain exactly one entry per archive" >&2
     exit 1

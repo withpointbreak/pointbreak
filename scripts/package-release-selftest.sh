@@ -65,6 +65,9 @@ archives_dir="$temp_dir/archives"
 mkdir -p "$archives_dir"
 
 while IFS=$'\t' read -r target archive executable; do
+  # Native Windows jq writes CRLF. Bash removes the line-feed delimiter but
+  # retains the trailing carriage return on the final TSV field.
+  executable=${executable%$'\r'}
   out=$(cd "$archives_dir" && "$package_script" "$target" "$version" "$bin_dir")
   expected="pointbreak-${version}-${target}.${archive}"
   if [ "$out" != "$expected" ] || [ ! -f "$archives_dir/$expected" ]; then
@@ -114,17 +117,32 @@ expect_rejected legacy-unix "$case_dir"
 
 case_dir=$(prepare_case legacy-windows)
 printf 'legacy\n' >"$payload_dir/shore.exe"
-(cd "$payload_dir" && zip -q "$case_dir/pointbreak-${version}-win32-x64.zip" shore.exe LICENSE NOTICE)
+if command -v 7z >/dev/null 2>&1; then
+  (cd "$payload_dir" && 7z a -tzip \
+    "$case_dir/pointbreak-${version}-win32-x64.zip" shore.exe LICENSE NOTICE >/dev/null)
+elif command -v zip >/dev/null 2>&1; then
+  (cd "$payload_dir" && zip -q \
+    "$case_dir/pointbreak-${version}-win32-x64.zip" shore.exe LICENSE NOTICE)
+else
+  echo "zip or 7z is required to create the legacy Windows fixture" >&2
+  exit 1
+fi
 expect_rejected legacy-windows "$case_dir"
 
 case_dir=$(prepare_case alias)
 alias_dir="$temp_dir/alias-payload"
 mkdir -p "$alias_dir"
 cp "$payload_dir/LICENSE" "$payload_dir/NOTICE" "$alias_dir/"
-ln -s shore "$alias_dir/pointbreak"
-tar -czf "$case_dir/pointbreak-${version}-darwin-x64.tar.gz" \
-  -C "$alias_dir" pointbreak LICENSE NOTICE
-expect_rejected alias "$case_dir"
+if ln -s shore "$alias_dir/pointbreak" 2>/dev/null; then
+  tar -czf "$case_dir/pointbreak-${version}-darwin-x64.tar.gz" \
+    -C "$alias_dir" pointbreak LICENSE NOTICE
+  expect_rejected alias "$case_dir"
+elif [ "${OS:-}" = "Windows_NT" ]; then
+  echo "skipping alias fixture: Windows host cannot create a symbolic link" >&2
+else
+  echo "failed to create the alias fixture symbolic link" >&2
+  exit 1
+fi
 
 case_dir=$(prepare_case duplicate-executable)
 tar -czf "$case_dir/pointbreak-${version}-darwin-x64.tar.gz" \
