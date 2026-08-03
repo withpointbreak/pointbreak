@@ -174,6 +174,52 @@ fn conflict_status_names_both_local_roots_without_mutating_them() {
     assert!(text.contains(legacy.to_str().unwrap()), "{text}");
     assert_eq!(fs::read(stable.join("stable-only")).unwrap(), b"stable");
     assert_eq!(fs::read(legacy.join("legacy-only")).unwrap(), b"legacy");
+
+    for command in ["build", "rebuild"] {
+        let refused = pointbreak_env(["store", "derived", command, "--repo", repo_arg], ACTIVE);
+        assert!(!refused.status.success());
+        let receipt = parse_single_json(&refused.stdout);
+        assert_eq!(receipt["transition"], "conflict");
+        assert_eq!(receipt["rebuilt"], false);
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("Conflict"));
+    }
+    assert_eq!(fs::read(stable.join("stable-only")).unwrap(), b"stable");
+    assert_eq!(fs::read(legacy.join("legacy-only")).unwrap(), b"legacy");
+}
+
+#[test]
+fn deferred_transition_returns_a_receipt_and_a_failure_exit() {
+    let repo = populated_repo();
+    let repo_arg = repo.path().to_str().unwrap();
+    let store = common_dir_store(repo.path());
+    let built = pointbreak_env(["store", "derived", "build", "--repo", repo_arg], ACTIVE);
+    assert!(built.status.success());
+    let generation = parse_single_json(&built.stdout)["generationId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fs::rename(store.join("derived"), store.join(".pointbreak-derived")).unwrap();
+    let lease_path = store.join(format!(
+        ".pointbreak-derived.generation-lease-{generation}.lock"
+    ));
+    let lease = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lease_path)
+        .unwrap();
+    lease.lock_shared().unwrap();
+
+    let deferred = pointbreak_env(["store", "derived", "build", "--repo", repo_arg], ACTIVE);
+
+    assert!(!deferred.status.success());
+    let receipt = parse_single_json(&deferred.stdout);
+    assert_eq!(receipt["transition"], "deferred");
+    assert_eq!(receipt["rebuilt"], false);
+    assert!(String::from_utf8_lossy(&deferred.stderr).contains("Deferred"));
+    assert!(store.join(".pointbreak-derived").is_dir());
+    assert!(!store.join("derived").exists());
 }
 
 #[test]

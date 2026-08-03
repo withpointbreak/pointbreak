@@ -5,16 +5,17 @@ use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use pointbreak::model::{ObjectId, RevisionId};
 use pointbreak::session::{
     CompactOptions, CompactResult, DerivedHistoryAccess, DerivedHistoryControl,
-    DerivedHistoryLifecycleReceipt, DerivedHistoryLifecycleStatus, MigrateToCommonDirOptions,
-    MigrateToCommonDirResult, ProjectionDiagnostic, RemovalOperativeStatus, RemoveOptions,
-    RemoveResult, RemoveSelector, RemovedContent, SkippedRemoval, StoreForgetOptions,
-    StoreForgetResult, StoreLinkOptions, StoreLinkPreview, StoreLinkResult, StoreListEntry,
-    StoreListResult, StoreMode, StoreModeSource, StoreSensitivityPathGroup, StoreStatusInventory,
-    StoreStatusOptions, StoreStatusResult, StoreStatusSensitivity, StoreUnlinkOptions,
-    StoreUnlinkResult, SweepOutcome, SweptBlob, compact_store, explain_store_sensitivity,
-    forget_family_store, link_store_to_family, list_family_stores, migrate_store_to_common_dir,
-    preview_link_to_family, remove_content, resolve_store_mode_for_repo, set_store_mode_for_repo,
-    store_paths_for_repo, store_status, unlink_store_from_family,
+    DerivedHistoryLifecycleReceipt, DerivedHistoryLifecycleStatus, DerivedHistoryTransition,
+    MigrateToCommonDirOptions, MigrateToCommonDirResult, ProjectionDiagnostic,
+    RemovalOperativeStatus, RemoveOptions, RemoveResult, RemoveSelector, RemovedContent,
+    SkippedRemoval, StoreForgetOptions, StoreForgetResult, StoreLinkOptions, StoreLinkPreview,
+    StoreLinkResult, StoreListEntry, StoreListResult, StoreMode, StoreModeSource,
+    StoreSensitivityPathGroup, StoreStatusInventory, StoreStatusOptions, StoreStatusResult,
+    StoreStatusSensitivity, StoreUnlinkOptions, StoreUnlinkResult, SweepOutcome, SweptBlob,
+    compact_store, explain_store_sensitivity, forget_family_store, link_store_to_family,
+    list_family_stores, migrate_store_to_common_dir, preview_link_to_family, remove_content,
+    resolve_store_mode_for_repo, set_store_mode_for_repo, store_paths_for_repo, store_status,
+    unlink_store_from_family,
 };
 
 use crate::cli::common::{
@@ -542,15 +543,20 @@ fn derived_mutation(
             DerivedHistoryControl::Continue
         }
     };
-    let receipt = if force {
+    let result = if force {
         access.rebuild(progress)
     } else {
         access.build(progress)
-    }
-    .map_err(std::io::Error::other)?;
+    };
     if let Some(error) = progress_error {
         return Err(error.into());
     }
+    let receipt = result.map_err(std::io::Error::other)?;
+    let refusal = matches!(
+        receipt.transition,
+        DerivedHistoryTransition::Deferred | DerivedHistoryTransition::Conflict
+    )
+    .then(|| format!("{:?}", receipt.transition));
     let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
     let digest = derived_receipt_digest(&receipt);
     let schema = if force {
@@ -559,7 +565,14 @@ fn derived_mutation(
         "pointbreak.store-derived-build"
     };
     let document = json::DiagnosticDocument::new(schema, receipt, vec![]);
-    output::write_document(stdout, format, &document, || digest)
+    output::write_document(stdout, format, &document, || digest)?;
+    if let Some(disposition) = refusal {
+        return Err(std::io::Error::other(format!(
+            "derived-access lifecycle was {disposition}; no generation was built"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 fn derived_status_digest(status: &DerivedHistoryLifecycleStatus) -> String {

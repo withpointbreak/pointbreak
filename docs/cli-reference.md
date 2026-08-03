@@ -463,7 +463,9 @@ Progress is written to stderr; stdout contains exactly one completion document, 
 without parsing progress. A cancellation or failure preserves authoritative loose truth and any previously
 valid generation. Set `POINTBREAK_DERIVED_ACCESS=off` to disable all derived reads and writes immediately;
 while it is set, `build` and `rebuild` refuse to run. This is also the rollback posture for an older binary
-that does not understand the stable `derived/` namespace.
+that does not understand the stable `derived/` namespace. If a live lease defers the namespace transition or
+both namespaces conflict, the command still emits its machine-readable receipt to stdout but exits non-zero;
+the requested build did not complete, so shell callers must not proceed as though a generation is usable.
 
 `pointbreak store paths` is the supported path-discovery seam. It emits
 `pointbreak.store-paths` version 1 with the selected `tier` and exact `worktreeStore`, `commonStore`,
