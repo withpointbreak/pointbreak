@@ -258,6 +258,145 @@ fn explicit_off_and_busy_rebuild_fail_without_a_completion_document() {
     assert!(!store.join("derived").exists());
 }
 
+#[test]
+fn active_first_write_falls_back_to_truth_with_one_actionable_hint() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    let repo_arg = repo.path().to_str().unwrap();
+    let store = common_dir_store(repo.path());
+
+    let capture = pointbreak_env(["capture", "--repo", repo_arg], ACTIVE);
+
+    assert!(
+        capture.status.success(),
+        "{}",
+        String::from_utf8_lossy(&capture.stderr)
+    );
+    let document = parse_single_json(&capture.stdout);
+    assert_eq!(document["schema"], "pointbreak.review-capture");
+    let stderr = String::from_utf8_lossy(&capture.stderr);
+    assert_eq!(
+        stderr
+            .matches("derived acceleration is unavailable")
+            .count(),
+        1
+    );
+    assert!(stderr.contains("store derived status"), "{stderr}");
+    assert!(stderr.contains("store derived build"), "{stderr}");
+    assert!(
+        !store.join("derived").exists(),
+        "ordinary writes never bootstrap disposable history"
+    );
+    assert!(
+        store.join("events").read_dir().unwrap().next().is_some(),
+        "authoritative event bytes were published"
+    );
+}
+
+#[test]
+fn namespace_conflict_preserves_authoritative_capture_and_both_roots() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    let repo_arg = repo.path().to_str().unwrap();
+    let store = common_dir_store(repo.path());
+    let stable = store.join("derived");
+    let legacy = store.join(".pointbreak-derived");
+    fs::create_dir_all(&stable).unwrap();
+    fs::create_dir_all(&legacy).unwrap();
+    fs::write(stable.join("stable-only"), b"stable").unwrap();
+    fs::write(legacy.join("legacy-only"), b"legacy").unwrap();
+
+    let capture = pointbreak_env(["capture", "--repo", repo_arg], ACTIVE);
+
+    assert!(
+        capture.status.success(),
+        "{}",
+        String::from_utf8_lossy(&capture.stderr)
+    );
+    assert_eq!(
+        parse_single_json(&capture.stdout)["schema"],
+        "pointbreak.review-capture"
+    );
+    assert!(
+        String::from_utf8_lossy(&capture.stderr).contains("derived acceleration is unavailable")
+    );
+    assert_eq!(fs::read(stable.join("stable-only")).unwrap(), b"stable");
+    assert_eq!(fs::read(legacy.join("legacy-only")).unwrap(), b"legacy");
+}
+
+#[test]
+fn busy_governed_writer_degrades_without_blocking_or_bootstrapping() {
+    let repo = populated_repo();
+    let repo_arg = repo.path().to_str().unwrap();
+    let store = common_dir_store(repo.path());
+    let built = pointbreak_env(["store", "derived", "build", "--repo", repo_arg], ACTIVE);
+    assert!(built.status.success());
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    let writer_lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(store.join("derived.writer.lock"))
+        .unwrap();
+    writer_lock.lock().unwrap();
+
+    let capture = pointbreak_env(["capture", "--repo", repo_arg], ACTIVE);
+
+    assert!(
+        capture.status.success(),
+        "{}",
+        String::from_utf8_lossy(&capture.stderr)
+    );
+    assert_eq!(
+        parse_single_json(&capture.stdout)["schema"],
+        "pointbreak.review-capture"
+    );
+    let stderr = String::from_utf8_lossy(&capture.stderr);
+    assert_eq!(
+        stderr
+            .matches("derived acceleration is unavailable")
+            .count(),
+        1
+    );
+    assert!(stderr.contains("store derived status"), "{stderr}");
+    assert!(store.join("derived").is_dir());
+}
+
+#[test]
+fn explicit_off_write_creates_no_derived_artifact_or_hint() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    let repo_arg = repo.path().to_str().unwrap();
+    let store = common_dir_store(repo.path());
+
+    let capture = pointbreak_env(
+        ["capture", "--repo", repo_arg],
+        &[("POINTBREAK_DERIVED_ACCESS", "off")],
+    );
+
+    assert!(capture.status.success());
+    assert_eq!(
+        parse_single_json(&capture.stdout)["schema"],
+        "pointbreak.review-capture"
+    );
+    assert!(!String::from_utf8_lossy(&capture.stderr).contains("derived acceleration"));
+    for path in [
+        "derived",
+        "derived.writer.lock",
+        "derived.rebuild.lock",
+        ".pointbreak-derived",
+    ] {
+        assert!(!store.join(path).exists(), "explicit off created {path}");
+    }
+}
+
 fn populated_repo() -> GitRepo {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");

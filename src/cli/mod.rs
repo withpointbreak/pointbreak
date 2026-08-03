@@ -472,7 +472,7 @@ fn run_cli(
     pointbreak::git::validate_backend_selector()?;
     crate::cli_tracing::init_tracing(&cli.tracing)?;
 
-    match cli.command {
+    let result = match cli.command {
         Command::Assessment(args) => assessment::run(*args, stdout, stderr),
         Command::Association(args) => association::run(*args, stdout, stderr),
         Command::Attention(args) => attention::run(args, stdout),
@@ -489,7 +489,11 @@ fn run_cli(
         Command::Store(args) => store::run(args, stdout, stderr),
         Command::Validation(args) => validation::run(args, stdout, stderr),
         Command::Version(args) => version::run(args, stdout),
+    };
+    for diagnostic in pointbreak::session::take_derived_write_diagnostics() {
+        let _ = writeln!(stderr, "advisory: {}", diagnostic.message);
     }
+    result
 }
 
 #[cfg(all(test, feature = "longitudinal-counting"))]

@@ -29,6 +29,19 @@ pub use derived_access::revisions::{
 };
 #[doc(hidden)]
 pub use derived_access::threads::{DerivedThreads, DerivedThreadsRoute};
+
+/// Drain process-local, user-actionable diagnostics produced while coordinating
+/// disposable derived state around authoritative writes.
+#[doc(hidden)]
+pub fn take_derived_write_diagnostics() -> Vec<ProjectionDiagnostic> {
+    derived_access::writer::take_process_diagnostics()
+        .into_iter()
+        .map(|diagnostic| ProjectionDiagnostic {
+            code: diagnostic.code.to_owned(),
+            message: diagnostic.message,
+        })
+        .collect()
+}
 pub use event::{
     BodyContentType, IngestProvenance, IngestVia, event_signature_pre_authentication_encoding,
     event_to_be_signed,

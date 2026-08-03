@@ -318,12 +318,28 @@ fn coordinate_event_store(
     store_dir: &Path,
     profile: DerivedAccessProfile,
 ) -> Result<EventStore> {
-    let lifecycle = DerivedAccessLifecycle::new(
-        profile,
-        store_dir,
-        opaque_path_identity("store", store_dir)?,
-    )
-    .map_err(|error| ShoreError::Message(error.to_string()))?;
+    let store_identity = match opaque_path_identity("store", store_dir) {
+        Ok(identity) => identity,
+        Err(error) => {
+            return Ok(
+                event_store.with_coordinator(DerivedWriteCoordinator::degraded(
+                    store_dir,
+                    &error.to_string(),
+                )),
+            );
+        }
+    };
+    let lifecycle = match DerivedAccessLifecycle::new(profile, store_dir, store_identity) {
+        Ok(lifecycle) => lifecycle,
+        Err(error) => {
+            return Ok(
+                event_store.with_coordinator(DerivedWriteCoordinator::degraded(
+                    store_dir,
+                    &error.to_string(),
+                )),
+            );
+        }
+    };
     let coordinator = DerivedWriteCoordinator::new(lifecycle)?;
     Ok(event_store.with_coordinator(coordinator))
 }
@@ -1150,6 +1166,60 @@ mod tests {
         // The common-dir store, not the worktree-local one.
         let worktree_local = RepositoryPaths::resolve(repo.path()).unwrap();
         assert_ne!(write.store_dir(), worktree_local.worktree_store());
+    }
+
+    #[test]
+    fn active_profile_without_a_generation_preserves_the_authoritative_write() {
+        let root = TempDir::new().expect("create disposable store root");
+        let event_store =
+            event_store_for_explicit_target(root.path(), DerivedAccessProfile::SqliteWalBodylessV1)
+                .expect("missing disposable state must not block the authoritative store");
+        let event = review_initialized_event_for_session("session:degraded-first-use");
+
+        assert_eq!(
+            event_store.record_event_once(&event).unwrap(),
+            crate::session::EventWriteOutcome::Created
+        );
+        assert_eq!(
+            event_store.record_event_once(&event).unwrap(),
+            crate::session::EventWriteOutcome::Existing,
+            "degraded mode preserves authoritative idempotency classification"
+        );
+        assert_eq!(
+            EventStore::open(root.path())
+                .read_stored_event(&event.idempotency_key)
+                .unwrap(),
+            event
+        );
+        assert!(
+            !root.path().join("derived").exists(),
+            "write fallback must not synchronously bootstrap disposable state"
+        );
+
+        let diagnostics = event_store.take_write_diagnostics();
+        assert_eq!(diagnostics.len(), 1, "one actionable first-use hint");
+        assert_eq!(diagnostics[0].code, "derived_access_generation_unavailable");
+        assert!(diagnostics[0].message.contains("store derived status"));
+        assert!(diagnostics[0].message.contains("store derived build"));
+        assert!(
+            event_store.take_write_diagnostics().is_empty(),
+            "the hint is bounded for the resolved store"
+        );
+        let process_diagnostics = crate::session::take_derived_write_diagnostics();
+        assert_eq!(process_diagnostics.len(), 1);
+        assert_eq!(
+            process_diagnostics[0].code,
+            "derived_access_generation_unavailable"
+        );
+
+        let second_handle =
+            event_store_for_explicit_target(root.path(), DerivedAccessProfile::SqliteWalBodylessV1)
+                .expect("another handle still degrades to loose authority");
+        assert_eq!(second_handle.take_write_diagnostics().len(), 1);
+        assert!(
+            crate::session::take_derived_write_diagnostics().is_empty(),
+            "the process channel emits at most once for the exact store"
+        );
     }
 
     fn record_review_initialized(store_dir: &Path, session: &str) -> ShoreEvent {

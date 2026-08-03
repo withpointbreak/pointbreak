@@ -1,9 +1,22 @@
-//! Governed product writes for an active derived-access generation.
+//! Product write coordination around disposable derived access.
+//!
+//! The coordinator is a two-state machine. `Governed` owns the existing
+//! current-generation admission, truth publication, receipt finalization, and
+//! catch-up protocol. `DegradedLoose` deliberately bypasses all derived work and
+//! invokes the authoritative publisher exactly once. Missing, stale, corrupt,
+//! busy, or ambiguous derived state selects the latter state; it can reduce
+//! acceleration but cannot make an otherwise valid loose write unavailable.
+//!
+//! A governed coordinator may transition to degraded before truth publication
+//! if its admitted generation disappears, or after publication if receipt
+//! finalization fails. It never transitions in the other direction: rebuilding
+//! and admitting a new immutable generation requires a fresh coordinator.
 
 use std::cell::Cell;
-use std::collections::VecDeque;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::collections::{HashSet, VecDeque};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use super::cursor::AppendResolution;
 use super::lifecycle::DerivedAccessLifecycle;
@@ -19,6 +32,8 @@ use crate::session::event::ShoreEvent;
 const MAX_DIAGNOSTICS: usize = 8;
 const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 512;
 static ATTEMPT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static PROCESS_DIAGNOSTICS: OnceLock<Mutex<VecDeque<DerivedWriteDiagnostic>>> = OnceLock::new();
+static UNAVAILABLE_HINTED_STORES: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DerivedWriteDiagnostic {
@@ -26,28 +41,67 @@ pub(crate) struct DerivedWriteDiagnostic {
     pub(crate) message: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum DerivedWriteMode {
+    Governed = 0,
+    DegradedLoose = 1,
+}
+
+impl DerivedWriteMode {
+    fn load(value: &AtomicU8) -> Self {
+        match value.load(Ordering::Acquire) {
+            0 => Self::Governed,
+            1 => Self::DegradedLoose,
+            _ => unreachable!("derived write mode has a closed representation"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct DerivedWriteCoordinator {
-    lifecycle: DerivedAccessLifecycle,
-    degraded: AtomicBool,
+    store_root: PathBuf,
+    lifecycle: Option<DerivedAccessLifecycle>,
+    mode: AtomicU8,
     diagnostics: Mutex<VecDeque<DerivedWriteDiagnostic>>,
 }
 
 impl DerivedWriteCoordinator {
     /// Admit the active generation with one exact authoritative-head audit.
     pub(crate) fn new(lifecycle: DerivedAccessLifecycle) -> Result<Self> {
-        match lifecycle.admit_writer() {
-            Ok(true) => Ok(Self {
-                lifecycle,
-                degraded: AtomicBool::new(false),
-                diagnostics: Mutex::new(VecDeque::new()),
-            }),
-            Ok(false) => Err(ShoreError::Message(
-                "active derived access has no current generation; rebuild before writing"
-                    .to_owned(),
-            )),
-            Err(error) => Err(ShoreError::Message(error.to_string())),
+        let store_root = lifecycle.store_root().to_path_buf();
+        let admission = lifecycle.admit_writer();
+        let (mode, unavailable_detail) = match admission {
+            Ok(true) => (DerivedWriteMode::Governed, None),
+            Ok(false) => (
+                DerivedWriteMode::DegradedLoose,
+                Some("no usable derived generation is current".to_owned()),
+            ),
+            Err(error) => (DerivedWriteMode::DegradedLoose, Some(error.to_string())),
+        };
+        let coordinator = Self {
+            store_root,
+            lifecycle: Some(lifecycle),
+            mode: AtomicU8::new(mode as u8),
+            diagnostics: Mutex::new(VecDeque::new()),
+        };
+        if let Some(detail) = unavailable_detail {
+            let diagnostic = unavailable_diagnostic(&detail);
+            coordinator.push_diagnostic(diagnostic);
         }
+        Ok(coordinator)
+    }
+
+    pub(crate) fn degraded(store_root: impl Into<PathBuf>, detail: &str) -> Self {
+        let coordinator = Self {
+            store_root: store_root.into(),
+            lifecycle: None,
+            mode: AtomicU8::new(DerivedWriteMode::DegradedLoose as u8),
+            diagnostics: Mutex::new(VecDeque::new()),
+        };
+        let diagnostic = unavailable_diagnostic(detail);
+        coordinator.push_diagnostic(diagnostic);
+        coordinator
     }
 
     pub(crate) fn record_event_once(
@@ -55,8 +109,8 @@ impl DerivedWriteCoordinator {
         event: &ShoreEvent,
         publish: impl FnOnce() -> Result<EventWriteOutcome>,
     ) -> Result<EventWriteOutcome> {
-        if self.degraded.load(Ordering::Acquire) {
-            return publish();
+        if DerivedWriteMode::load(&self.mode) == DerivedWriteMode::DegradedLoose {
+            return self.publish_degraded(publish);
         }
         self.record_event_once_with_hook(event, |_| {}, publish, catch_up_after_publication)
     }
@@ -70,30 +124,46 @@ impl DerivedWriteCoordinator {
     ) -> Result<EventWriteOutcome> {
         #[cfg(any(test, feature = "longitudinal-counting"))]
         let admission_phase = enter_derived_access_phase_v1(Phase::GovernedWriteAdmission);
-        let writer_lock = StoreWriterLock::acquire(self.lifecycle.store_root())
-            .map_err(|error| ShoreError::Message(error.to_string()))?;
-        let current = self
+        let lifecycle = self
             .lifecycle
-            .open_current_for_write_locked(&writer_lock)
-            .map_err(|error| ShoreError::Message(error.to_string()))?
-            .ok_or_else(|| {
-                ShoreError::Message(
-                    "active derived access has no current generation; rebuild before writing"
-                        .to_owned(),
-                )
-            })?;
+            .as_ref()
+            .expect("governed derived writes retain their admitted lifecycle");
+        let writer_lock = match StoreWriterLock::try_acquire(&self.store_root) {
+            Ok(lock) => lock,
+            Err(error) => {
+                self.record_unavailable(&error.to_string());
+                return self.publish_degraded(publish);
+            }
+        };
+        let current = match lifecycle.open_current_for_write_locked(&writer_lock) {
+            Ok(Some(current)) => current,
+            Ok(None) => {
+                drop(writer_lock);
+                self.record_unavailable("no usable derived generation is current");
+                return self.publish_degraded(publish);
+            }
+            Err(error) => {
+                drop(writer_lock);
+                self.record_unavailable(&error.to_string());
+                return self.publish_degraded(publish);
+            }
+        };
         #[cfg(any(test, feature = "longitudinal-counting"))]
         drop(admission_phase);
         let publication = Cell::new(None);
         let attempt_token = next_attempt_token(event);
         #[cfg(any(test, feature = "longitudinal-counting"))]
         let truth_phase = enter_derived_access_phase_v1(Phase::GovernedWriteTruth);
+        let mut publish = Some(publish);
         let append = current.service().append_event_with_publisher_locked(
             event,
             &attempt_token,
             &writer_lock,
             hook,
             || {
+                let publish = publish
+                    .take()
+                    .expect("authoritative publisher is invoked at most once");
                 let outcome = publish()?;
                 publication.set(Some(outcome));
                 Ok(outcome)
@@ -104,19 +174,31 @@ impl DerivedWriteCoordinator {
 
         let resolution = match append {
             Ok(resolution) => resolution,
-            Err(error) if publication.get() == Some(EventWriteOutcome::Created) => {
-                drop(current);
-                let diagnostic = self.degrade_locked(
-                    "derived_access_receipt_finalization_failed",
-                    &error.to_string(),
-                    &writer_lock,
-                );
-                drop(writer_lock);
-                self.degraded.store(true, Ordering::Release);
-                self.push_diagnostic(diagnostic);
-                return Ok(EventWriteOutcome::Created);
-            }
             Err(error) => {
+                if let Some(outcome) = publication.get() {
+                    drop(current);
+                    let diagnostic = self.degrade_locked(
+                        "derived_access_receipt_finalization_failed",
+                        &error.to_string(),
+                        &writer_lock,
+                    );
+                    drop(writer_lock);
+                    self.enter_degraded(diagnostic.clone());
+                    enqueue_process_diagnostic(diagnostic);
+                    return Ok(outcome);
+                }
+                if let Some(publish) = publish.take() {
+                    drop(current);
+                    let quarantine = self.degrade_locked(
+                        "derived_access_generation_unavailable",
+                        &error.to_string(),
+                        &writer_lock,
+                    );
+                    drop(writer_lock);
+                    let diagnostic = unavailable_diagnostic(&quarantine.message);
+                    self.enter_degraded(diagnostic);
+                    return self.publish_degraded(publish);
+                }
                 return Err(ShoreError::Message(error.to_string()));
             }
         };
@@ -136,7 +218,7 @@ impl DerivedWriteCoordinator {
 
         #[cfg(any(test, feature = "longitudinal-counting"))]
         let catch_up_phase = enter_derived_access_phase_v1(Phase::GovernedWriteCatchUp);
-        let catch_up_lock = match StoreWriterLock::acquire(self.lifecycle.store_root()) {
+        let catch_up_lock = match StoreWriterLock::try_acquire(&self.store_root) {
             Ok(lock) => lock,
             Err(error) => {
                 drop(current);
@@ -181,8 +263,8 @@ impl DerivedWriteCoordinator {
             Err(_) => {
                 let detail = "derived writer interrupted after authoritative truth publication";
                 let diagnostic = self.degrade("derived_access_receipt_finalization_failed", detail);
-                self.degraded.store(true, Ordering::Release);
-                self.push_diagnostic(diagnostic);
+                self.enter_degraded(diagnostic.clone());
+                enqueue_process_diagnostic(diagnostic);
                 Ok(EventWriteOutcome::Created)
             }
         }
@@ -204,6 +286,8 @@ impl DerivedWriteCoordinator {
     ) -> DerivedWriteDiagnostic {
         let quarantine = self
             .lifecycle
+            .as_ref()
+            .expect("governed derived writes retain their admitted lifecycle")
             .quarantine_current_locked(detail, writer_lock)
             .map(|path| format!("derived state quarantined at {}", path.display()))
             .unwrap_or_else(|error| format!("derived quarantine also failed: {error}"));
@@ -213,6 +297,8 @@ impl DerivedWriteCoordinator {
     fn degrade(&self, code: &'static str, detail: &str) -> DerivedWriteDiagnostic {
         let quarantine = self
             .lifecycle
+            .as_ref()
+            .expect("governed derived writes retain their admitted lifecycle")
             .quarantine_current(detail)
             .map(|path| format!("derived state quarantined at {}", path.display()))
             .unwrap_or_else(|error| format!("derived quarantine also failed: {error}"));
@@ -223,7 +309,7 @@ impl DerivedWriteCoordinator {
         tracing::warn!(
             code = diagnostic.code,
             message = diagnostic.message,
-            "derived_write_degraded_after_truth"
+            "derived_write_diagnostic"
         );
         let mut diagnostics = self
             .diagnostics
@@ -235,14 +321,74 @@ impl DerivedWriteCoordinator {
         diagnostics.push_back(diagnostic);
     }
 
+    fn publish_degraded(
+        &self,
+        publish: impl FnOnce() -> Result<EventWriteOutcome>,
+    ) -> Result<EventWriteOutcome> {
+        let outcome = publish();
+        if outcome.is_ok() {
+            enqueue_unavailable_process_hint(
+                &self.store_root,
+                unavailable_diagnostic("no usable derived generation is current"),
+            );
+        }
+        outcome
+    }
+
+    fn enter_degraded(&self, diagnostic: DerivedWriteDiagnostic) {
+        self.mode
+            .store(DerivedWriteMode::DegradedLoose as u8, Ordering::Release);
+        self.push_diagnostic(diagnostic);
+    }
+
+    fn record_unavailable(&self, detail: &str) {
+        self.enter_degraded(unavailable_diagnostic(detail));
+    }
+
     fn record_catch_up_pending(&self, detail: &str) {
         let diagnostic = diagnostic(
             "derived_access_projection_catch_up_deferred",
             detail,
             "derived generation remains published as CatchingUp",
         );
-        self.push_diagnostic(diagnostic);
+        self.push_diagnostic(diagnostic.clone());
+        enqueue_process_diagnostic(diagnostic);
     }
+}
+
+pub(crate) fn take_process_diagnostics() -> Vec<DerivedWriteDiagnostic> {
+    PROCESS_DIAGNOSTICS
+        .get_or_init(|| Mutex::new(VecDeque::new()))
+        .lock()
+        .expect("derived process diagnostic lock poisoned")
+        .drain(..)
+        .collect()
+}
+
+fn enqueue_unavailable_process_hint(
+    store_root: &std::path::Path,
+    diagnostic: DerivedWriteDiagnostic,
+) {
+    let first_for_store = UNAVAILABLE_HINTED_STORES
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .expect("derived hint store lock poisoned")
+        .insert(store_root.to_path_buf());
+    if !first_for_store {
+        return;
+    }
+    enqueue_process_diagnostic(diagnostic);
+}
+
+fn enqueue_process_diagnostic(diagnostic: DerivedWriteDiagnostic) {
+    let mut diagnostics = PROCESS_DIAGNOSTICS
+        .get_or_init(|| Mutex::new(VecDeque::new()))
+        .lock()
+        .expect("derived process diagnostic lock poisoned");
+    if diagnostics.len() == MAX_DIAGNOSTICS {
+        diagnostics.pop_front();
+    }
+    diagnostics.push_back(diagnostic);
 }
 
 fn catch_up_after_publication(
@@ -283,6 +429,21 @@ fn diagnostic(code: &'static str, detail: &str, quarantine: &str) -> DerivedWrit
     let message = format!("{detail}; {quarantine}");
     DerivedWriteDiagnostic {
         code,
+        message: truncate_utf8(&message, MAX_DIAGNOSTIC_MESSAGE_BYTES),
+    }
+}
+
+fn unavailable_diagnostic(detail: &str) -> DerivedWriteDiagnostic {
+    const PREFIX: &str = "derived acceleration is unavailable (";
+    const ACTION: &str =
+        "); run `pointbreak store derived status` or `pointbreak store derived build`";
+    let detail = truncate_utf8(
+        detail,
+        MAX_DIAGNOSTIC_MESSAGE_BYTES - PREFIX.len() - ACTION.len(),
+    );
+    let message = format!("{PREFIX}{detail}{ACTION}");
+    DerivedWriteDiagnostic {
+        code: "derived_access_generation_unavailable",
         message: truncate_utf8(&message, MAX_DIAGNOSTIC_MESSAGE_BYTES),
     }
 }
@@ -380,6 +541,32 @@ mod tests {
             active_lifecycle(&root).open_current(),
             Err(LifecycleError::RebuildRequired(_))
         ));
+    }
+
+    #[test]
+    fn generation_lost_after_admission_degrades_before_truth_publication() {
+        let root = TempDir::new().unwrap();
+        let truth = EventStore::open(root.path());
+        truth.record_event_once(&event(0)).unwrap();
+        active_lifecycle(&root)
+            .rebuild(|_| LifecycleControl::Continue)
+            .unwrap();
+        let coordinator =
+            DerivedWriteCoordinator::new(active_lifecycle(&root)).expect("current generation");
+        active_lifecycle(&root)
+            .quarantine_current("forced pre-truth unavailability")
+            .unwrap();
+
+        assert_eq!(
+            coordinator
+                .record_event_once(&event(1), || truth.record_event_once(&event(1)))
+                .unwrap(),
+            EventWriteOutcome::Created
+        );
+        assert!(truth.event_exists(&event(1).idempotency_key).unwrap());
+        let diagnostics = coordinator.take_diagnostics();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].code, "derived_access_generation_unavailable");
     }
 
     #[test]
@@ -571,13 +758,20 @@ mod tests {
             off.record_event_once(&event(1)).unwrap(),
             EventWriteOutcome::Created
         );
-        let error =
+        let reopened =
             event_store_for_explicit_target(root.path(), DerivedAccessProfile::SqliteWalBodylessV1)
-                .unwrap_err();
-        assert!(error.to_string().contains("requires rebuild"));
+                .expect("stale disposable state degrades instead of blocking truth");
+        assert_eq!(
+            reopened.record_event_once(&event(2)).unwrap(),
+            EventWriteOutcome::Created
+        );
+        assert_eq!(
+            reopened.take_write_diagnostics()[0].code,
+            "derived_access_generation_unavailable"
+        );
         assert_eq!(
             EventStore::open(root.path()).list_events().unwrap().len(),
-            2
+            3
         );
     }
 

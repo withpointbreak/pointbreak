@@ -793,9 +793,11 @@ impl DerivedAccessLifecycle {
 
     /// Admit a product writer against a stable current generation. The bounded
     /// authority continuation runs while the canonical writer lock excludes
-    /// governed truth publication; no loose-directory census is repeated.
+    /// governed truth publication; no loose-directory census is repeated. Busy
+    /// admission is reported immediately so the product writer can preserve
+    /// authoritative availability through its degraded-loose mode.
     pub(crate) fn admit_writer(&self) -> Result<bool, LifecycleError> {
-        let writer_lock = StoreWriterLock::acquire(&self.store_root)?;
+        let writer_lock = StoreWriterLock::try_acquire(&self.store_root)?;
         let Some(_current) = self.open_current_for_write_locked(&writer_lock)? else {
             return Ok(false);
         };
