@@ -1,8 +1,6 @@
 mod support;
 
-#[cfg(feature = "longitudinal-counting")]
 use base64::Engine as _;
-#[cfg(feature = "longitudinal-counting")]
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::Value;
 use support::git_repo::GitRepo;
@@ -48,6 +46,7 @@ fn bounded_active_documents_preserve_authoritative_domain_content() {
         vec!["attention", "list", "--repo", repo_arg],
         vec!["revision", "list", "--repo", repo_arg, "--limit", "2"],
     ] {
+        let revision_page = args.starts_with(&["revision", "list"]);
         let active = pointbreak_env(&args, ACTIVE);
         let loose = pointbreak_env(&args, OFF);
         assert_success(&active);
@@ -56,8 +55,30 @@ fn bounded_active_documents_preserve_authoritative_domain_content() {
         let mut loose = parse_json(&loose.stdout);
         active.as_object_mut().unwrap().remove("projectionStamp");
         loose.as_object_mut().unwrap().remove("eventSetHash");
+        if revision_page {
+            active.as_object_mut().unwrap().remove("nextCursor");
+            loose.as_object_mut().unwrap().remove("nextCursor");
+        }
         assert_eq!(active, loose, "command: {args:?}");
     }
+}
+
+#[test]
+fn revision_page_cursors_share_a_position_but_bind_the_serving_lane() {
+    let (repo, _, _) = superseded_dump_repo();
+    build(&repo);
+    let repo_arg = repo.path().to_str().unwrap();
+
+    let active = run_revision_page(repo_arg, ACTIVE, None);
+    let loose = run_revision_page(repo_arg, OFF, None);
+    let active = decode_revision_cursor(active["nextCursor"].as_str().unwrap());
+    let loose = decode_revision_cursor(loose["nextCursor"].as_str().unwrap());
+
+    for field in ["capturedAtMillis", "revisionId", "order"] {
+        assert_eq!(active[field], loose[field], "field: {field}");
+    }
+    assert_ne!(active["profile"], loose["profile"]);
+    assert_ne!(active["snapshot"], loose["snapshot"]);
 }
 
 #[test]
@@ -426,6 +447,11 @@ fn assert_restart_required(output: &std::process::Output) {
 
 fn parse_json(bytes: &[u8]) -> Value {
     serde_json::from_slice(bytes).expect("valid JSON")
+}
+
+fn decode_revision_cursor(token: &str) -> Value {
+    let bytes = URL_SAFE_NO_PAD.decode(token).expect("base64url cursor");
+    parse_json(&bytes)
 }
 
 fn assert_success(output: &std::process::Output) {
