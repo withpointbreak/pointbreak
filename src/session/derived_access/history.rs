@@ -257,6 +257,11 @@ struct DerivedHistoryMaintenance {
     store_identity: String,
 }
 
+/// Keeps the active state inline because it is the default, request-scoped hot
+/// path. Windows makes `DerivedAccessLifecycle` large enough to trigger
+/// Clippy's enum-size heuristic, but boxing it would add an allocation to each
+/// active-state construction only to shrink the exceptional `Off` representation.
+#[cfg_attr(windows, allow(clippy::large_enum_variant))]
 pub(super) enum DerivedHistoryMode {
     Off,
     Active {
