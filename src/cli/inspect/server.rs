@@ -1621,6 +1621,7 @@ mod tests {
         let value: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
         assert_eq!(value["schema"], "pointbreak.inspect-reader-profile");
         assert_eq!(value["availability"], "migration_required");
+        assert!(value["commitGraphStamp"].is_string());
     }
 
     #[test]

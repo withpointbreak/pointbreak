@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceFolder } from "vscode";
 import type { ResolvedBinary } from "../src/binary";
+import { CHANGE_READER_DOCUMENTS } from "../src/changeProtocol";
 import type { PointbreakCli } from "../src/cli";
 import {
   probeReview,
@@ -101,6 +102,16 @@ describe("probeReview", () => {
   it("uses only the secret-free origin for authenticated version and identity requests", async () => {
     const fetch = vi
       .fn<FetchFn>()
+      .mockResolvedValueOnce(
+        response({
+          schema: "pointbreak.inspect-reader-profile",
+          version: 1,
+          availability: "ready",
+          minimumReaderProfile: "review_change_revision_v1",
+          authorityCursor: { eventCount: 1 },
+          documents: { ...CHANGE_READER_DOCUMENTS },
+        }),
+      )
       .mockResolvedValueOnce(response(VERSION_DOC))
       .mockResolvedValueOnce(
         response({ schema: "pointbreak.inspect-identity", ...IDENTITY }),
@@ -111,6 +122,7 @@ describe("probeReview", () => {
     );
 
     expect(fetch.mock.calls.map(([url]) => url.toString())).toEqual([
+      `${CAPABILITY.origin}/api/v2/profile`,
       `${CAPABILITY.origin}/api/version`,
       `${CAPABILITY.origin}/api/identity`,
     ]);

@@ -1,6 +1,7 @@
 export interface BinaryEvidence {
   sha256: string;
   versionDocument: string;
+  readerProfileDocument?: string;
 }
 
 export function assertExactPackageFiles(

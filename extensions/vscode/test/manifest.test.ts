@@ -34,12 +34,10 @@ it("contributes the Review view and its commands", () => {
     "onCommand:pointbreak.refreshAttention",
     "onCommand:pointbreak.capture",
     "onCommand:pointbreak.openAnnotatedDiff",
+    "onCommand:pointbreak.openChangeRevision",
     "onCommand:pointbreak.openInReview",
     "onCommand:pointbreak.stopInspect",
     "onCommand:pointbreak.addObservationFromSelection",
-    "onCommand:pointbreak.respondInputRequest",
-    "onCommand:pointbreak.assessAttention",
-    "onCommand:pointbreak.captureAttentionResolution",
     "onCommand:pointbreak.recordProblemsSnapshot",
     "onCommand:pointbreak.runTaskAndRecordValidation",
   ]);
@@ -51,12 +49,10 @@ it("contributes the Review view and its commands", () => {
     "pointbreak.refreshAttention",
     "pointbreak.capture",
     "pointbreak.openAnnotatedDiff",
+    "pointbreak.openChangeRevision",
     "pointbreak.openInReview",
     "pointbreak.stopInspect",
     "pointbreak.addObservationFromSelection",
-    "pointbreak.respondInputRequest",
-    "pointbreak.assessAttention",
-    "pointbreak.captureAttentionResolution",
     "pointbreak.recordProblemsSnapshot",
     "pointbreak.runTaskAndRecordValidation",
   ]);
@@ -67,40 +63,12 @@ it("contributes the Review view and its commands", () => {
   ).toMatchObject({
     enablement: "pointbreak.hasSourceReviewContext",
   });
-  expect(pkg.contributes.menus["view/item/context"]).toContainEqual({
-    command: "pointbreak.openInReview",
-    when: "view == pointbreak.attention && (viewItem == pointbreak.revision || viewItem == pointbreak.attentionItem || viewItem == pointbreak.attention.inputRequest || viewItem == pointbreak.attention.assessment || viewItem == pointbreak.attention.failedValidation)",
-    group: "navigation@2",
-  });
-  expect(pkg.contributes.menus["view/item/context"]).toContainEqual({
-    command: "pointbreak.recordProblemsSnapshot",
-    when: "view == pointbreak.attention && (viewItem == pointbreak.revision || viewItem == pointbreak.attention.inputRequest || viewItem == pointbreak.attention.assessment || viewItem == pointbreak.attention.failedValidation)",
-    group: "inline@2",
-  });
-  expect(pkg.contributes.menus["view/item/context"]).toContainEqual({
-    command: "pointbreak.runTaskAndRecordValidation",
-    when: "view == pointbreak.attention && viewItem == pointbreak.attention.failedValidation",
-    group: "inline@1",
-  });
-  expect(pkg.contributes.menus["view/item/context"]).toContainEqual({
-    command: "pointbreak.captureAttentionResolution",
-    when: "view == pointbreak.attention && viewItem == pointbreak.attention.headResolution",
-    group: "inline@1",
-  });
-  expect(pkg.contributes.menus["view/item/context"]).toContainEqual({
-    command: "pointbreak.assessAttention",
-    when: "view == pointbreak.attention && (viewItem == pointbreak.attention.assessment || viewItem == pointbreak.attention.failedValidation)",
-    group: "inline@1",
-  });
-  expect(pkg.contributes.menus["view/item/context"]).toContainEqual({
-    command: "pointbreak.respondInputRequest",
-    when: "view == pointbreak.attention && viewItem == pointbreak.attention.inputRequest",
-    group: "inline@1",
-  });
-  expect(pkg.contributes.menus.commandPalette).toEqual([
-    { command: "pointbreak.respondInputRequest", when: "false" },
-    { command: "pointbreak.assessAttention", when: "false" },
-    { command: "pointbreak.captureAttentionResolution", when: "false" },
+  expect(pkg.contributes.menus["view/item/context"]).toEqual([
+    {
+      command: "pointbreak.openChangeRevision",
+      when: "view == pointbreak.attention && viewItem == pointbreak.changeRevision",
+      group: "navigation@1",
+    },
   ]);
   expect(
     pkg.contributes.configuration.properties["pointbreak.reviewUrl"],

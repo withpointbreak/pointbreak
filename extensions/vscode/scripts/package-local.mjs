@@ -3,11 +3,13 @@ import { createHash } from "node:crypto";
 import {
   copyFileSync,
   existsSync,
+  mkdtempSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   rmSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -20,6 +22,9 @@ import {
 const scriptRoot = path.dirname(fileURLToPath(import.meta.url));
 const extensionRoot = path.resolve(scriptRoot, "..");
 const repoRoot = path.resolve(extensionRoot, "../..");
+const readerProfileContract = JSON.parse(
+  readFileSync(path.join(extensionRoot, "src/changeReaderProfile.json"), "utf8"),
+);
 const targetManifest = JSON.parse(
   readFileSync(path.join(repoRoot, ".github/binary-targets.json"), "utf8"),
 );
@@ -131,6 +136,7 @@ assertArchiveFiles(artifact, bundledRelative);
 const archivedEvidence = {
   sha256: archiveBinarySha256(artifact, bundledRelative),
   versionDocument: bundledEvidence.versionDocument,
+  readerProfileDocument: bundledEvidence.readerProfileDocument,
 };
 verifyBundledBinary(approvedEvidence, archivedEvidence);
 console.log(
@@ -153,6 +159,7 @@ console.log(
         path: bundledRelative,
         sha256: archivedEvidence.sha256,
         version: JSON.parse(archivedEvidence.versionDocument),
+        readerProfile: JSON.parse(archivedEvidence.readerProfileDocument),
       },
     },
     null,
@@ -207,7 +214,70 @@ function binaryEvidence(binary) {
       `Pointbreak executable returned an incompatible machine identity: ${binary}`,
     );
   }
-  return { sha256: sha256File(binary), versionDocument };
+  const readerProfileDocument = profileEvidence(binary);
+  return { sha256: sha256File(binary), versionDocument, readerProfileDocument };
+}
+
+function profileEvidence(binary) {
+  const root = mkdtempSync(path.join(tmpdir(), "pointbreak-vsix-profile-"));
+  const repo = path.join(root, "repo");
+  const home = path.join(root, "home");
+  mkdirSync(repo);
+  try {
+    run("git", ["init", "-q"], repo);
+    const result = spawnSync(
+      binary,
+      ["change", "profile", "--repo", repo, "--format", "json"],
+      {
+        cwd: repo,
+        env: { ...process.env, POINTBREAK_HOME: home },
+        encoding: "utf8",
+        maxBuffer: 16 * 1024 * 1024,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    if (result.error) throw result.error;
+    if (result.status !== 0) {
+      throw new Error(
+        `Pointbreak executable could not advertise its Change reader profile: ${result.stderr.trim()}`,
+      );
+    }
+    const document = result.stdout.trim();
+    let profile;
+    try {
+      profile = JSON.parse(document);
+    } catch {
+      throw new Error(
+        `Pointbreak executable returned invalid Change reader profile JSON: ${binary}`,
+      );
+    }
+    if (
+      profile.schema !== "pointbreak.inspect-reader-profile" ||
+      profile.version !== 1 ||
+      !["migration_required", "migration_in_progress", "ready"].includes(
+        profile.availability,
+      ) ||
+      !sameVersionMap(profile.documents, readerProfileContract.documents)
+    ) {
+      throw new Error(
+        `Pointbreak executable returned an incompatible Change reader profile: ${binary}`,
+      );
+    }
+    return document;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function sameVersionMap(actual, expected) {
+  if (!actual || typeof actual !== "object") return false;
+  const actualEntries = Object.entries(actual).sort(([left], [right]) =>
+    left.localeCompare(right),
+  );
+  const expectedEntries = Object.entries(expected).sort(([left], [right]) =>
+    left.localeCompare(right),
+  );
+  return JSON.stringify(actualEntries) === JSON.stringify(expectedEntries);
 }
 
 function sha256File(file) {

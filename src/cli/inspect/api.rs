@@ -58,8 +58,9 @@ pub(super) fn change_v2_profile_json(
     cache: &super::server::ChangeReaderCache,
 ) -> Result<String, String> {
     let state = cache.load(repo)?;
-    serde_json::to_string(&ReaderProfileDocumentV1::from(&state.capability))
-        .map_err(|error| error.to_string())
+    let mut profile = ReaderProfileDocumentV1::from(&state.capability);
+    profile.commit_graph_stamp = freshness_commit_graph_stamp(repo);
+    serde_json::to_string(&profile).map_err(|error| error.to_string())
 }
 
 pub(super) fn changes_v2_json(

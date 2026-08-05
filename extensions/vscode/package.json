@@ -27,12 +27,10 @@
     "onCommand:pointbreak.refreshAttention",
     "onCommand:pointbreak.capture",
     "onCommand:pointbreak.openAnnotatedDiff",
+    "onCommand:pointbreak.openChangeRevision",
     "onCommand:pointbreak.openInReview",
     "onCommand:pointbreak.stopInspect",
     "onCommand:pointbreak.addObservationFromSelection",
-    "onCommand:pointbreak.respondInputRequest",
-    "onCommand:pointbreak.assessAttention",
-    "onCommand:pointbreak.captureAttentionResolution",
     "onCommand:pointbreak.recordProblemsSnapshot",
     "onCommand:pointbreak.runTaskAndRecordValidation"
   ],
@@ -54,6 +52,11 @@
         "category": "Pointbreak"
       },
       {
+        "command": "pointbreak.openChangeRevision",
+        "title": "Open Exact Change Revision",
+        "category": "Pointbreak"
+      },
+      {
         "command": "pointbreak.openInReview",
         "title": "Open in Review",
         "category": "Pointbreak"
@@ -68,24 +71,6 @@
         "title": "Add Observation from Selection",
         "category": "Pointbreak",
         "enablement": "pointbreak.hasSourceReviewContext"
-      },
-      {
-        "command": "pointbreak.respondInputRequest",
-        "title": "Respond to Input Request",
-        "category": "Pointbreak",
-        "icon": "$(reply)"
-      },
-      {
-        "command": "pointbreak.assessAttention",
-        "title": "Record Assessment",
-        "category": "Pointbreak",
-        "icon": "$(checklist)"
-      },
-      {
-        "command": "pointbreak.captureAttentionResolution",
-        "title": "Capture Head Resolution",
-        "category": "Pointbreak",
-        "icon": "$(git-merge)"
       },
       {
         "command": "pointbreak.recordProblemsSnapshot",
@@ -103,48 +88,9 @@
     "menus": {
       "view/item/context": [
         {
-          "command": "pointbreak.openInReview",
-          "when": "view == pointbreak.attention && (viewItem == pointbreak.revision || viewItem == pointbreak.attentionItem || viewItem == pointbreak.attention.inputRequest || viewItem == pointbreak.attention.assessment || viewItem == pointbreak.attention.failedValidation)",
-          "group": "navigation@2"
-        },
-        {
-          "command": "pointbreak.respondInputRequest",
-          "when": "view == pointbreak.attention && viewItem == pointbreak.attention.inputRequest",
-          "group": "inline@1"
-        },
-        {
-          "command": "pointbreak.assessAttention",
-          "when": "view == pointbreak.attention && (viewItem == pointbreak.attention.assessment || viewItem == pointbreak.attention.failedValidation)",
-          "group": "inline@1"
-        },
-        {
-          "command": "pointbreak.recordProblemsSnapshot",
-          "when": "view == pointbreak.attention && (viewItem == pointbreak.revision || viewItem == pointbreak.attention.inputRequest || viewItem == pointbreak.attention.assessment || viewItem == pointbreak.attention.failedValidation)",
-          "group": "inline@2"
-        },
-        {
-          "command": "pointbreak.runTaskAndRecordValidation",
-          "when": "view == pointbreak.attention && viewItem == pointbreak.attention.failedValidation",
-          "group": "inline@1"
-        },
-        {
-          "command": "pointbreak.captureAttentionResolution",
-          "when": "view == pointbreak.attention && viewItem == pointbreak.attention.headResolution",
-          "group": "inline@1"
-        }
-      ],
-      "commandPalette": [
-        {
-          "command": "pointbreak.respondInputRequest",
-          "when": "false"
-        },
-        {
-          "command": "pointbreak.assessAttention",
-          "when": "false"
-        },
-        {
-          "command": "pointbreak.captureAttentionResolution",
-          "when": "false"
+          "command": "pointbreak.openChangeRevision",
+          "when": "view == pointbreak.attention && viewItem == pointbreak.changeRevision",
+          "group": "navigation@1"
         }
       ]
     },

@@ -1,10 +1,9 @@
 import { commands, type ExtensionContext, window, workspace } from "vscode";
-import { AttentionTreeProvider } from "./attentionView";
 import { resolveBinary } from "./binary";
+import { ChangeResourcePanelManager } from "./changeResourcePanel";
+import { type ChangeRevisionNode, ChangeTreeProvider } from "./changeView";
 import { PointbreakCli } from "./cli";
 import { runAddObservationFromSelectionCommand } from "./commands/addObservationFromSelection";
-import { runAssessmentFromAttentionCommand } from "./commands/assessmentFromAttention";
-import { runAttentionHeadResolutionCommand } from "./commands/attentionHeadResolution";
 import { runCaptureCommand } from "./commands/capture";
 import { runOpenAnnotatedDiffCommand } from "./commands/openAnnotatedDiff";
 import { runOpenInReviewCommand } from "./commands/openInReview";
@@ -13,7 +12,6 @@ import {
   SourceReviewContextStore,
 } from "./commands/openInSource";
 import { runRecordProblemsSnapshotCommand } from "./commands/recordProblemsSnapshot";
-import { runRespondInputRequestCommand } from "./commands/respondInputRequest";
 import { runTaskAndRecordValidationCommand } from "./commands/runTaskAndRecordValidation";
 import { InspectApiDiffDataSource } from "./diffDataSource";
 import { FreshnessCoordinator } from "./freshnessCoordinator";
@@ -83,14 +81,15 @@ export async function activate(context: ExtensionContext): Promise<void> {
     openInSource,
   );
   activeInspectManager = inspectManager;
-  const provider = new AttentionTreeProvider(cli, resolutions);
+  const provider = new ChangeTreeProvider(cli, resolutions);
   const treeView = window.createTreeView("pointbreak.attention", {
     treeDataProvider: provider,
   });
+  const changeResourcePanel = new ChangeResourcePanelManager(inspectManager);
   const freshness = new FreshnessCoordinator(
     inspectManager,
     provider,
-    reviewPanel,
+    changeResourcePanel,
     {
       reportError: (error) => {
         void window.showWarningMessage(error.message);
@@ -114,6 +113,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
     inspectManager,
     openInSource,
     reviewPanel,
+    changeResourcePanel,
     freshness,
     taskRunner,
     window.onDidChangeActiveTextEditor(() => {
@@ -133,6 +133,31 @@ export async function activate(context: ExtensionContext): Promise<void> {
     commands.registerCommand("pointbreak.openAnnotatedDiff", (node) =>
       runOpenAnnotatedDiffCommand(cli, resolutions, reviewPanel, node),
     ),
+    commands.registerCommand(
+      "pointbreak.openChangeRevision",
+      async (node: ChangeRevisionNode) => {
+        const resolution = resolutions.find(
+          (candidate) =>
+            candidate.kind === "resolved" &&
+            candidate.target.key === node?.targetKey,
+        );
+        if (
+          resolution?.kind !== "resolved" ||
+          node?.kind !== "change-revision"
+        ) {
+          await window.showWarningMessage(
+            "Pointbreak could not resolve this exact Change revision.",
+          );
+          return;
+        }
+        await changeResourcePanel.open({
+          resolution,
+          changeId: node.changeId,
+          revision: node.revision,
+          projectionStamp: node.projectionStamp,
+        });
+      },
+    ),
     commands.registerCommand("pointbreak.openInReview", (node) =>
       runOpenInReviewCommand(cli, binary, resolutions, node),
     ),
@@ -151,21 +176,6 @@ export async function activate(context: ExtensionContext): Promise<void> {
         },
       }),
     ),
-    commands.registerCommand("pointbreak.respondInputRequest", (node) =>
-      runRespondInputRequestCommand(cli, node, { humanWrites }),
-    ),
-    commands.registerCommand("pointbreak.assessAttention", (node) =>
-      runAssessmentFromAttentionCommand(cli, node, { humanWrites }),
-    ),
-    commands.registerCommand("pointbreak.captureAttentionResolution", (node) =>
-      runAttentionHeadResolutionCommand(cli, resolutions, node, {
-        humanWrites,
-        findAttentionItem: (targetKey, attentionId) =>
-          provider.findAttentionItem(targetKey, attentionId),
-        routeAssessment: async (refreshedNode) =>
-          commands.executeCommand("pointbreak.assessAttention", refreshedNode),
-      }),
-    ),
     commands.registerCommand("pointbreak.recordProblemsSnapshot", (node) =>
       runRecordProblemsSnapshotCommand(cli, resolutions, node, {
         humanWrites,
@@ -175,8 +185,6 @@ export async function activate(context: ExtensionContext): Promise<void> {
       runTaskAndRecordValidationCommand(cli, resolutions, node, {
         humanWrites,
         taskRunner,
-        findAttentionItem: (targetKey, attentionId) =>
-          provider.findAttentionItem(targetKey, attentionId),
       }),
     ),
   );

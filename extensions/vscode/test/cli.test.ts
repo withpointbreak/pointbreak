@@ -12,6 +12,150 @@ import { ATTENTION_JSON, REVISION_LIST_JSON, VERSION_JSON } from "./fixtures";
 
 const binary: ResolvedBinary = { path: "/bin/pointbreak", source: "setting" };
 
+const READY_PROFILE = JSON.stringify({
+  schema: "pointbreak.inspect-reader-profile",
+  version: 1,
+  availability: "ready",
+  minimumReaderProfile: "review_change_revision_v1",
+  authorityCursor: { eventCount: 7 },
+  documents: {
+    "pointbreak.inspect-reader-profile": 1,
+    "pointbreak.review-change-list": 1,
+    "pointbreak.inspect-changes-page": 1,
+    "pointbreak.review-change": 1,
+    "pointbreak.review-change-revision": 1,
+    "pointbreak.review-revision": 3,
+    "pointbreak.review-revision-resource": 1,
+    "pointbreak.review-association-comparison": 1,
+    "pointbreak.review-revision-interdiff": 1,
+    "pointbreak.attention-list": 2,
+    "pointbreak.inspect-attention": 2,
+    "pointbreak.reader-upgrade-required": 1,
+    "pointbreak.store-migration-required": 1,
+    "pointbreak.store-migration-in-progress": 1,
+  },
+});
+
+it("validates the capable profile before a cold Change semantic read", async () => {
+  const calls: string[][] = [];
+  const exec: ExecFn = async (_file, args) => {
+    calls.push(args);
+    const stdout =
+      args[0] === "version"
+        ? VERSION_JSON
+        : args[0] === "change" && args[1] === "profile"
+          ? READY_PROFILE
+          : JSON.stringify({
+              schema: "pointbreak.review-change-list",
+              version: 1,
+              changes: [],
+              diagnostics: [],
+              projectionStamp: "sha256:one",
+            });
+    return { stdout, stderr: "", exitCode: 0 };
+  };
+  const cli = new PointbreakCli(binary, exec);
+
+  await expect(cli.changeList("/repo")).resolves.toMatchObject({
+    schema: "pointbreak.review-change-list",
+    changes: [],
+  });
+  expect(calls).toEqual([
+    ["version"],
+    ["change", "profile"],
+    ["change", "list"],
+  ]);
+});
+
+it("does not fetch cold Change semantics while migration is incomplete", async () => {
+  const calls: string[][] = [];
+  const exec: ExecFn = async (_file, args) => {
+    calls.push(args);
+    return {
+      stdout:
+        args[0] === "version"
+          ? VERSION_JSON
+          : JSON.stringify({
+              ...JSON.parse(READY_PROFILE),
+              availability: "migration_in_progress",
+              minimumReaderProfile: undefined,
+            }),
+      stderr: "",
+      exitCode: 0,
+    };
+  };
+  const cli = new PointbreakCli(binary, exec);
+
+  await expect(cli.changeList("/repo")).rejects.toMatchObject({
+    availability: "migration_in_progress",
+  });
+  expect(calls).toEqual([["version"], ["change", "profile"]]);
+});
+
+it("binds cold contextual Revision reads to exact Change and artifact identity", async () => {
+  const reference = {
+    revisionId: "rev:sha256:one",
+    objectArtifactContentHash: `sha256:${"a".repeat(64)}`,
+  };
+  const calls: string[][] = [];
+  const exec: ExecFn = async (_file, args) => {
+    calls.push(args);
+    const stdout =
+      args[0] === "version"
+        ? VERSION_JSON
+        : args[1] === "profile"
+          ? READY_PROFILE
+          : JSON.stringify({
+              schema: "pointbreak.review-change-revision",
+              version: 1,
+              changeId: "change:sha256:one",
+              revision: reference,
+              membershipSupport: [],
+              revisionCurrency: "current",
+              relationClassification: "current",
+              exactRevisionDocument: {
+                schema: "pointbreak.review-revision-resource",
+                version: 1,
+                resource: { revision: reference, objectId: "obj:sha256:one" },
+                projection: { includeBody: true },
+                availability: "available",
+                capturedDocumentHash: `sha256:${"b".repeat(64)}`,
+                capturedDocument: {
+                  schema: "pointbreak.review-revision",
+                  version: 3,
+                  revisionRef: reference,
+                },
+                diagnostics: [],
+                cacheKey: `sha256:${"c".repeat(64)}`,
+              },
+              factPresentations: [],
+              associations: [],
+              availability: "available",
+              diagnostics: [],
+              projectionStamp: `sha256:${"d".repeat(64)}`,
+            });
+    return { stdout, stderr: "", exitCode: 0 };
+  };
+  const cli = new PointbreakCli(binary, exec);
+
+  await expect(
+    cli.changeRevision("/repo", "change:sha256:one", reference),
+  ).resolves.toMatchObject({ revision: reference });
+  expect(calls).toEqual([
+    ["version"],
+    ["change", "profile"],
+    [
+      "change",
+      "revision",
+      "change:sha256:one",
+      "rev:sha256:one",
+      "--artifact-hash",
+      reference.objectArtifactContentHash,
+      "--include-body",
+    ],
+  ]);
+});
+
 afterEach(() => {
   delete process.env.POINTBREAK_ACTOR_ID;
   delete process.env.POINTBREAK_FORMAT;

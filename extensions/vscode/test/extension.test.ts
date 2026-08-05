@@ -27,13 +27,20 @@ vi.mock("vscode", () => ({
   },
 }));
 
-vi.mock("../src/attentionView", () => ({
-  AttentionTreeProvider: class {
+vi.mock("../src/changeView", () => ({
+  ChangeTreeProvider: class {
     attachTreeView = vi.fn(() => ({ dispose: vi.fn() }));
     dispose = vi.fn();
     refresh = vi.fn();
   },
   refreshAfterWrite: vi.fn(async () => undefined),
+}));
+vi.mock("../src/changeResourcePanel", () => ({
+  ChangeResourcePanelManager: class {
+    dispose = vi.fn();
+    open = vi.fn();
+    reloadActive = vi.fn();
+  },
 }));
 vi.mock("../src/binary", () => ({
   resolveBinary: vi.fn(() => ({ path: "/pointbreak", source: "setting" })),

@@ -49,6 +49,11 @@ export function verifyBundledBinary(approved, bundled) {
       "Bundled executable machine identity does not match the approved input.",
     );
   }
+  if (bundled.readerProfileDocument !== approved.readerProfileDocument) {
+    throw new Error(
+      "Bundled executable Change reader profile does not match the approved input.",
+    );
+  }
 }
 
 export function powershellCommand(script) {

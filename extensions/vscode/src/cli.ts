@@ -1,5 +1,24 @@
 import { execFile } from "node:child_process";
 import { POINTBREAK_CLI_NAME, type ResolvedBinary } from "./binary";
+import {
+  CHANGE_READER_DOCUMENTS,
+  type ChangeAttentionDoc,
+  type ChangeDetailDoc,
+  type ChangeListDoc,
+  type ChangeRevisionDoc,
+  type ReaderProfileDoc,
+  type RevisionInterdiffDoc,
+  type RevisionRefV1,
+  type RevisionResourceDoc,
+  requireReadyReaderProfile,
+  validateChangeAttention,
+  validateChangeDetail,
+  validateChangeList,
+  validateChangeRevision,
+  validateReaderProfile,
+  validateRevisionInterdiff,
+  validateRevisionResource,
+} from "./changeProtocol";
 
 export type ExecFn = (
   file: string,
@@ -451,9 +470,6 @@ export const REQUIRED_DOCUMENTS: Record<string, number> = {
   "pointbreak.store-status": 1,
 };
 
-// This extension targets the CLI minor that first provides the version handshake.
-export const COMPATIBLE_CLI_RANGE = "0.7";
-
 export type HandshakeResult =
   | { ok: true; cliVersion: string }
   | { ok: false; reason: string };
@@ -497,17 +513,6 @@ export function verifyHandshake(doc: VersionDoc): HandshakeResult {
     };
   }
 
-  const minor = doc.cliVersion
-    .match(/^(\d+)\.(\d+)(?:\.|$)/)
-    ?.slice(1, 3)
-    .join(".");
-  if (minor !== COMPATIBLE_CLI_RANGE) {
-    return {
-      ok: false,
-      reason: `CLI ${doc.cliVersion} is outside compatible minor ${COMPATIBLE_CLI_RANGE}`,
-    };
-  }
-
   for (const [schema, version] of Object.entries(REQUIRED_DOCUMENTS)) {
     if (doc.documents[schema] !== version) {
       return {
@@ -532,6 +537,133 @@ export class PointbreakCli {
     const doc = await this.readVersion(repo);
     this.handshake = Promise.resolve();
     return doc;
+  }
+
+  async changeProfile(repo: string): Promise<ReaderProfileDoc> {
+    await this.ensureHandshake(repo);
+    const document = await this.executeDocument<ReaderProfileDoc>(
+      repo,
+      ["change", "profile"],
+      "pointbreak.inspect-reader-profile",
+      undefined,
+      CHANGE_READER_DOCUMENTS["pointbreak.inspect-reader-profile"],
+    );
+    return validateReaderProfile(document);
+  }
+
+  async changeList(repo: string): Promise<ChangeListDoc> {
+    requireReadyReaderProfile(await this.changeProfile(repo));
+    const document = await this.executeDocument<ChangeListDoc>(
+      repo,
+      ["change", "list"],
+      "pointbreak.review-change-list",
+      undefined,
+      CHANGE_READER_DOCUMENTS["pointbreak.review-change-list"],
+    );
+    return validateChangeList(document, "pointbreak.review-change-list");
+  }
+
+  async changeAttention(repo: string): Promise<ChangeAttentionDoc> {
+    requireReadyReaderProfile(await this.changeProfile(repo));
+    const document = await this.executeDocument<ChangeAttentionDoc>(
+      repo,
+      ["change", "attention"],
+      "pointbreak.attention-list",
+      undefined,
+      CHANGE_READER_DOCUMENTS["pointbreak.attention-list"],
+    );
+    return validateChangeAttention(document, "pointbreak.attention-list");
+  }
+
+  async changeShow(
+    repo: string,
+    changeId: string,
+    projectionStamp?: string,
+  ): Promise<ChangeDetailDoc> {
+    requireReadyReaderProfile(await this.changeProfile(repo));
+    const document = await this.executeDocument<ChangeDetailDoc>(
+      repo,
+      ["change", "show", changeId],
+      "pointbreak.review-change",
+      undefined,
+      CHANGE_READER_DOCUMENTS["pointbreak.review-change"],
+    );
+    return validateChangeDetail(document, changeId, projectionStamp);
+  }
+
+  async changeRevision(
+    repo: string,
+    changeId: string,
+    revision: RevisionRefV1,
+  ): Promise<ChangeRevisionDoc> {
+    requireReadyReaderProfile(await this.changeProfile(repo));
+    const document = await this.executeDocument<ChangeRevisionDoc>(
+      repo,
+      [
+        "change",
+        "revision",
+        changeId,
+        revision.revisionId,
+        "--artifact-hash",
+        revision.objectArtifactContentHash,
+        "--include-body",
+      ],
+      "pointbreak.review-change-revision",
+      undefined,
+      CHANGE_READER_DOCUMENTS["pointbreak.review-change-revision"],
+    );
+    return validateChangeRevision(document, changeId, revision);
+  }
+
+  async changeResource(
+    repo: string,
+    changeId: string,
+    revision: RevisionRefV1,
+  ): Promise<RevisionResourceDoc> {
+    requireReadyReaderProfile(await this.changeProfile(repo));
+    const document = await this.executeDocument<RevisionResourceDoc>(
+      repo,
+      [
+        "change",
+        "resource",
+        changeId,
+        revision.revisionId,
+        "--artifact-hash",
+        revision.objectArtifactContentHash,
+        "--include-body",
+      ],
+      "pointbreak.review-revision-resource",
+      undefined,
+      CHANGE_READER_DOCUMENTS["pointbreak.review-revision-resource"],
+    );
+    return validateRevisionResource(document, revision);
+  }
+
+  async changeInterdiff(
+    repo: string,
+    changeId: string,
+    from: RevisionRefV1,
+    to: RevisionRefV1,
+  ): Promise<RevisionInterdiffDoc> {
+    requireReadyReaderProfile(await this.changeProfile(repo));
+    const document = await this.executeDocument<RevisionInterdiffDoc>(
+      repo,
+      [
+        "change",
+        "interdiff",
+        changeId,
+        from.revisionId,
+        to.revisionId,
+        "--from-artifact-hash",
+        from.objectArtifactContentHash,
+        "--to-artifact-hash",
+        to.objectArtifactContentHash,
+      ],
+      "pointbreak.review-revision-interdiff",
+      undefined,
+      CHANGE_READER_DOCUMENTS["pointbreak.review-revision-interdiff"],
+    );
+    return validateRevisionInterdiff(document, from, to);
   }
 
   async attentionList(repo: string): Promise<AttentionListDoc> {
@@ -682,6 +814,7 @@ export class PointbreakCli {
     args: string[],
     schema: string,
     stdin?: Uint8Array,
+    expectedVersion = REQUIRED_DOCUMENTS[schema],
   ): Promise<T> {
     const result = await this.exec(this.binary.path, args, {
       cwd: repo,
@@ -711,7 +844,6 @@ export class PointbreakCli {
       );
     }
 
-    const expectedVersion = REQUIRED_DOCUMENTS[schema];
     if (parsed.schema !== schema || parsed.version !== expectedVersion) {
       throw new PointbreakCliError(
         `Expected ${schema} version ${expectedVersion}, received ${parsed.schema} version ${parsed.version}`,

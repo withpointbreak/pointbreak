@@ -1,6 +1,18 @@
 import http from "node:http";
 import https from "node:https";
 import {
+  type ChangeDetailDoc,
+  ChangeProtocolError,
+  ChangeReaderUnavailableError,
+  type ChangeRevisionDoc,
+  type ReaderProfileDoc,
+  type RevisionRefV1,
+  requireReadyReaderProfile,
+  validateChangeDetail,
+  validateChangeRevision,
+  validateReaderProfile,
+} from "./changeProtocol";
+import {
   type InspectFreshnessDoc,
   type ReviewSnapshotDoc,
   type RevisionDoc,
@@ -30,7 +42,9 @@ export type InspectClientErrorKind =
   | "unreachable"
   | "protocol"
   | "version-incompatible"
-  | "identity-mismatch";
+  | "identity-mismatch"
+  | "migration-required"
+  | "migration-in-progress";
 
 /** Checks whether an exact inspector revision is still a writable thread head. */
 export function revisionIsCurrent(
@@ -63,6 +77,7 @@ export class InspectClient {
   readonly #fetch: FetchFn;
   readonly #timeoutMs: number;
   #versionVerification?: Promise<VersionDoc>;
+  #profileVerification?: Promise<ReaderProfileDoc>;
 
   constructor(
     origin: string,
@@ -88,8 +103,14 @@ export class InspectClient {
   }
 
   async verify(identity: InspectIdentity): Promise<void> {
+    await this.profile();
     await this.verifyVersion();
     await this.verifyIdentity(identity);
+  }
+
+  async profile(): Promise<ReaderProfileDoc> {
+    this.#profileVerification ??= this.readProfile();
+    return this.#profileVerification;
   }
 
   async verifyVersion(): Promise<VersionDoc> {
@@ -129,14 +150,68 @@ export class InspectClient {
   }
 
   async freshness(): Promise<InspectFreshnessDoc> {
-    await this.verifyVersion();
-    const document = await this.document(
-      new URL("/api/freshness", this.#origin),
-    );
-    if (!isInspectFreshnessDocument(document)) {
+    const profile = await this.readProfile();
+    const eventCount = profile.authorityCursor.eventCount;
+    if (!Number.isSafeInteger(eventCount) || Number(eventCount) < 0) {
       throw new InspectClientError("protocol");
     }
-    return document;
+    return {
+      schema: "pointbreak.inspect-freshness",
+      version: 1,
+      eventCount: Number(eventCount),
+      commitGraphStamp: profile.commitGraphStamp,
+    };
+  }
+
+  async changeRevision(
+    changeId: string,
+    revision: RevisionRefV1,
+    projectionStamp?: string,
+  ): Promise<ChangeRevisionDoc> {
+    try {
+      requireReadyReaderProfile(await this.profile());
+      const url = changeRevisionUrl(this.#origin, changeId, revision);
+      return validateChangeRevision(
+        await this.document(url),
+        changeId,
+        revision,
+        projectionStamp,
+      );
+    } catch (error) {
+      throw inspectProtocolError(error);
+    }
+  }
+
+  async changeDetail(
+    changeId: string,
+    projectionStamp: string,
+  ): Promise<ChangeDetailDoc> {
+    try {
+      requireReadyReaderProfile(await this.profile());
+      if (!changeId || !projectionStamp) {
+        throw new InspectClientError("protocol");
+      }
+      const document = await this.document(
+        new URL(
+          `/api/v2/changes/${encodeURIComponent(changeId)}`,
+          this.#origin,
+        ),
+      );
+      return validateChangeDetail(document, changeId, projectionStamp);
+    } catch (error) {
+      throw inspectProtocolError(error);
+    }
+  }
+
+  private async readProfile(): Promise<ReaderProfileDoc> {
+    try {
+      return validateReaderProfile(
+        await this.document(new URL("/api/v2/profile", this.#origin)),
+      );
+    } catch (error) {
+      if (error instanceof InspectClientError) throw error;
+      throw new InspectClientError("version-incompatible");
+    }
   }
 
   private async readVersion(): Promise<VersionDoc> {
@@ -225,6 +300,41 @@ function resourceUrl(origin: URL, collection: string, id: string): URL {
   return new URL(`/api/${collection}/${encodeURIComponent(id)}`, origin);
 }
 
+function changeRevisionUrl(
+  origin: URL,
+  changeId: string,
+  revision: RevisionRefV1,
+): URL {
+  if (
+    !changeId ||
+    !revision.revisionId ||
+    !revision.objectArtifactContentHash
+  ) {
+    throw new InspectClientError("protocol");
+  }
+  const url = new URL(
+    `/api/v2/changes/${encodeURIComponent(changeId)}/revisions/${encodeURIComponent(revision.revisionId)}`,
+    origin,
+  );
+  url.searchParams.set("artifactHash", revision.objectArtifactContentHash);
+  return url;
+}
+
+function inspectProtocolError(error: unknown): InspectClientError {
+  if (error instanceof InspectClientError) return error;
+  if (error instanceof ChangeReaderUnavailableError) {
+    return new InspectClientError(
+      error.availability === "migration_required"
+        ? "migration-required"
+        : "migration-in-progress",
+    );
+  }
+  if (error instanceof ChangeProtocolError) {
+    return new InspectClientError("protocol");
+  }
+  return new InspectClientError("protocol");
+}
+
 function isVersionDocument(value: unknown): value is VersionDoc {
   return (
     isObject(value) &&
@@ -306,19 +416,6 @@ function isReviewSnapshotRow(value: unknown): boolean {
   );
 }
 
-function isInspectFreshnessDocument(
-  value: unknown,
-): value is InspectFreshnessDoc {
-  return (
-    isObject(value) &&
-    value.schema === "pointbreak.inspect-freshness" &&
-    value.version === 1 &&
-    Number.isSafeInteger(value.eventCount) &&
-    Number(value.eventCount) >= 0 &&
-    isOptionalString(value.commitGraphStamp)
-  );
-}
-
 function isObjectArray(value: unknown): value is Record<string, unknown>[] {
   return Array.isArray(value) && value.every(isObject);
 }
@@ -343,6 +440,10 @@ function errorMessage(kind: InspectClientErrorKind): string {
       return "Pointbreak Review is incompatible with this extension.";
     case "identity-mismatch":
       return "Pointbreak Review belongs to another review target.";
+    case "migration-required":
+      return "Pointbreak store migration is required before Change state can be read.";
+    case "migration-in-progress":
+      return "Pointbreak store migration is in progress; partial Change state is unavailable.";
   }
 }
 

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import revisionFixture from "../../../src/cli/inspect/web/test/fixtures/revision.json";
 import snapshotFixture from "../../../src/cli/inspect/web/test/fixtures/snapshot.json";
+import { CHANGE_READER_DOCUMENTS } from "../src/changeProtocol";
 import {
   type FetchFn,
   InspectClient,
@@ -15,9 +16,176 @@ const IDENTITY = {
 };
 
 describe("InspectClient", () => {
-  it("authenticates version then identity without exposing its credentials", async () => {
+  it("validates the reader profile before version, identity, or semantic reads", async () => {
     const fetch = vi
       .fn<FetchFn>()
+      .mockResolvedValueOnce(response(readerProfile()))
+      .mockResolvedValueOnce(response(VERSION_DOC))
+      .mockResolvedValueOnce(
+        response({ schema: "pointbreak.inspect-identity", ...IDENTITY }),
+      );
+    const client = new InspectClient(
+      "http://127.0.0.1:63831",
+      "secret-bearer",
+      fetch,
+    );
+
+    await expect(client.verify(IDENTITY)).resolves.toBeUndefined();
+    expect(fetch.mock.calls.map(([url]) => url.pathname)).toEqual([
+      "/api/v2/profile",
+      "/api/version",
+      "/api/identity",
+    ]);
+  });
+
+  it("uses exact Change and Revision identity on warm reads", async () => {
+    const reference = {
+      revisionId: "rev:sha256:one",
+      objectArtifactContentHash: `sha256:${"a".repeat(64)}`,
+    };
+    const document = {
+      schema: "pointbreak.review-change-revision",
+      version: 1,
+      changeId: "change:sha256:one",
+      revision: reference,
+      membershipSupport: [],
+      revisionCurrency: "current",
+      relationClassification: "current",
+      exactRevisionDocument: {
+        schema: "pointbreak.review-revision-resource",
+        version: 1,
+        resource: { revision: reference, objectId: "obj:sha256:one" },
+        projection: { includeBody: true },
+        availability: "available",
+        capturedDocumentHash: `sha256:${"b".repeat(64)}`,
+        capturedDocument: {
+          schema: "pointbreak.review-revision",
+          version: 3,
+          revisionRef: reference,
+        },
+        diagnostics: [],
+        cacheKey: `sha256:${"c".repeat(64)}`,
+      },
+      factPresentations: [],
+      associations: [],
+      availability: "available",
+      diagnostics: [],
+      projectionStamp: `sha256:${"d".repeat(64)}`,
+    };
+    const fetch = vi
+      .fn<FetchFn>()
+      .mockResolvedValueOnce(response(readerProfile()))
+      .mockResolvedValueOnce(response(document));
+    const client = new InspectClient(
+      "http://127.0.0.1:63831",
+      "secret-bearer",
+      fetch,
+    );
+
+    await expect(
+      client.changeRevision("change:sha256:one", reference),
+    ).resolves.toMatchObject({ revision: reference });
+    expect(
+      fetch.mock.calls.map(([url]) => `${url.pathname}${url.search}`),
+    ).toEqual([
+      "/api/v2/profile",
+      `/api/v2/changes/change%3Asha256%3Aone/revisions/rev%3Asha256%3Aone?artifactHash=${encodeURIComponent(reference.objectArtifactContentHash)}`,
+    ]);
+  });
+
+  it("refuses a warm Revision from another projection generation", async () => {
+    const reference = {
+      revisionId: "rev:sha256:one",
+      objectArtifactContentHash: `sha256:${"a".repeat(64)}`,
+    };
+    const document = changeRevisionDocument(reference, "sha256:returned");
+    const fetch = vi
+      .fn<FetchFn>()
+      .mockResolvedValueOnce(response(readerProfile()))
+      .mockResolvedValueOnce(response(document));
+    const client = new InspectClient(
+      "http://127.0.0.1:63831",
+      "secret-bearer",
+      fetch,
+    );
+
+    await expect(
+      client.changeRevision("change:sha256:one", reference, "sha256:requested"),
+    ).rejects.toMatchObject({ kind: "protocol" });
+  });
+
+  it("loads Change relation provenance only from the exact warm generation", async () => {
+    const reference = {
+      revisionId: "rev:sha256:one",
+      objectArtifactContentHash: `sha256:${"a".repeat(64)}`,
+    };
+    const document = {
+      schema: "pointbreak.review-change",
+      version: 1,
+      summary: {
+        changeId: "change:sha256:one",
+        declarationState: "authoritative",
+        memberCount: 1,
+        currentRevisionRefs: [reference],
+        topology: "linear",
+        lifecycle: "active",
+        attentionSummary: "none",
+        availabilitySummary: "available",
+        diagnostics: [],
+        projectionStamp: "sha256:projection",
+      },
+      relationClaims: [{ kind: "declared_by" }],
+      currentRevisionRefs: [reference],
+      diagnostics: [],
+      projectionStamp: "sha256:projection",
+    };
+    const fetch = vi
+      .fn<FetchFn>()
+      .mockResolvedValueOnce(response(readerProfile()))
+      .mockResolvedValueOnce(response(document));
+    const client = new InspectClient(
+      "http://127.0.0.1:63831",
+      "secret-bearer",
+      fetch,
+    );
+
+    await expect(
+      client.changeDetail("change:sha256:one", "sha256:projection"),
+    ).resolves.toMatchObject({ relationClaims: [{ kind: "declared_by" }] });
+    expect(fetch.mock.calls.map(([url]) => url.pathname)).toEqual([
+      "/api/v2/profile",
+      "/api/v2/changes/change%3Asha256%3Aone",
+    ]);
+  });
+
+  it("polls both event and commit-graph freshness from the capable profile", async () => {
+    const fetch = vi
+      .fn<FetchFn>()
+      .mockResolvedValueOnce(response(readerProfile(41, "sha256:graph-one")))
+      .mockResolvedValueOnce(response(readerProfile(42, "sha256:graph-two")));
+    const client = new InspectClient(
+      "http://127.0.0.1:63831",
+      "secret-bearer",
+      fetch,
+    );
+
+    await client.profile();
+    await expect(client.freshness()).resolves.toEqual({
+      schema: "pointbreak.inspect-freshness",
+      version: 1,
+      eventCount: 42,
+      commitGraphStamp: "sha256:graph-two",
+    });
+    expect(fetch.mock.calls.map(([url]) => url.pathname)).toEqual([
+      "/api/v2/profile",
+      "/api/v2/profile",
+    ]);
+  });
+
+  it("authenticates profile, version, then identity without exposing its credentials", async () => {
+    const fetch = vi
+      .fn<FetchFn>()
+      .mockResolvedValueOnce(response(readerProfile()))
       .mockResolvedValueOnce(response(VERSION_DOC))
       .mockResolvedValueOnce(
         response({ schema: "pointbreak.inspect-identity", ...IDENTITY }),
@@ -31,6 +199,7 @@ describe("InspectClient", () => {
     await expect(client.verify(IDENTITY)).resolves.toBeUndefined();
 
     expect(fetch.mock.calls.map(([url]) => url.pathname)).toEqual([
+      "/api/v2/profile",
       "/api/version",
       "/api/identity",
     ]);
@@ -103,6 +272,7 @@ describe("InspectClient", () => {
 
     const mismatchFetch = vi
       .fn<FetchFn>()
+      .mockResolvedValueOnce(response(readerProfile()))
       .mockResolvedValueOnce(response(VERSION_DOC))
       .mockResolvedValueOnce(
         response({
@@ -122,18 +292,12 @@ describe("InspectClient", () => {
   });
 
   it("verifies once, decodes typed warm documents, and keeps credentials internal", async () => {
-    const freshness = {
-      schema: "pointbreak.inspect-freshness",
-      version: 1,
-      eventCount: 42,
-      commitGraphStamp: "sha256:graph",
-    };
     const fetch = vi
       .fn<FetchFn>()
       .mockResolvedValueOnce(response(VERSION_DOC))
       .mockResolvedValueOnce(response(revisionFixture))
       .mockResolvedValueOnce(response(snapshotFixture))
-      .mockResolvedValueOnce(response(freshness));
+      .mockResolvedValueOnce(response(readerProfile(42)));
     const client = new InspectClient(
       "http://127.0.0.1:63831",
       "secret-bearer",
@@ -154,7 +318,11 @@ describe("InspectClient", () => {
       version: 1,
     });
     const freshnessDocument = await client.freshness();
-    expect(freshnessDocument).toEqual(freshness);
+    expect(freshnessDocument).toEqual({
+      schema: "pointbreak.inspect-freshness",
+      version: 1,
+      eventCount: 42,
+    });
 
     expect(
       fetch.mock.calls.map(([url]) => `${url.pathname}${url.search}`),
@@ -162,7 +330,7 @@ describe("InspectClient", () => {
       "/api/version",
       `/api/revisions/${encodeURIComponent(revisionFixture.revision.id)}`,
       `/api/snapshots/${encodeURIComponent(snapshotFixture.snapshot.object_id)}?contentHash=${encodeURIComponent(snapshotFixture.contentHash)}`,
-      "/api/freshness",
+      "/api/v2/profile",
     ]);
     expect(
       fetch.mock.calls.filter(([url]) => url.pathname === "/api/version"),
@@ -195,10 +363,16 @@ describe("InspectClient", () => {
     ],
     ["freshness", { schema: "pointbreak.inspect-freshness", version: 1 }],
   ] as const)("fails closed when the %s document omits hard-core fields", async (kind, document) => {
-    const fetch = vi
-      .fn<FetchFn>()
-      .mockResolvedValueOnce(response(VERSION_DOC))
-      .mockResolvedValueOnce(response(document));
+    const fetch = vi.fn<FetchFn>();
+    if (kind === "freshness") {
+      fetch.mockResolvedValueOnce(
+        response({ ...readerProfile(), authorityCursor: {} }),
+      );
+    } else {
+      fetch
+        .mockResolvedValueOnce(response(VERSION_DOC))
+        .mockResolvedValueOnce(response(document));
+    }
     const client = new InspectClient(
       "http://127.0.0.1:63831",
       "secret-bearer",
@@ -313,5 +487,52 @@ function response(document: unknown) {
   return {
     status: 200,
     text: async () => JSON.stringify(document),
+  };
+}
+
+function readerProfile(eventCount = 7, commitGraphStamp?: string) {
+  return {
+    schema: "pointbreak.inspect-reader-profile",
+    version: 1,
+    availability: "ready",
+    minimumReaderProfile: "review_change_revision_v1",
+    authorityCursor: { eventCount },
+    commitGraphStamp,
+    documents: { ...CHANGE_READER_DOCUMENTS },
+  };
+}
+
+function changeRevisionDocument(
+  reference: { revisionId: string; objectArtifactContentHash: string },
+  projectionStamp: string,
+) {
+  return {
+    schema: "pointbreak.review-change-revision",
+    version: 1,
+    changeId: "change:sha256:one",
+    revision: reference,
+    membershipSupport: [],
+    revisionCurrency: "current",
+    relationClassification: "current",
+    exactRevisionDocument: {
+      schema: "pointbreak.review-revision-resource",
+      version: 1,
+      resource: { revision: reference, objectId: "obj:sha256:one" },
+      projection: { includeBody: true },
+      availability: "available",
+      capturedDocumentHash: `sha256:${"b".repeat(64)}`,
+      capturedDocument: {
+        schema: "pointbreak.review-revision",
+        version: 3,
+        revisionRef: reference,
+      },
+      diagnostics: [],
+      cacheKey: `sha256:${"c".repeat(64)}`,
+    },
+    factPresentations: [],
+    associations: [],
+    availability: "available",
+    diagnostics: [],
+    projectionStamp,
   };
 }

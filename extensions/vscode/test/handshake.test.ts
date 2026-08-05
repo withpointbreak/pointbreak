@@ -1,6 +1,10 @@
 import { expect, it } from "vitest";
 import type { ResolvedBinary } from "../src/binary";
 import {
+  CHANGE_READER_DOCUMENTS,
+  validateReaderProfile,
+} from "../src/changeProtocol";
+import {
   type BuildIdentityV1,
   type ExecFn,
   PointbreakCli,
@@ -34,6 +38,54 @@ it("pins the exact extension document handshake", () => {
   });
 });
 
+it("pins the separate Change-capable reader profile registry", () => {
+  expect(CHANGE_READER_DOCUMENTS).toEqual({
+    "pointbreak.inspect-reader-profile": 1,
+    "pointbreak.review-change-list": 1,
+    "pointbreak.inspect-changes-page": 1,
+    "pointbreak.review-change": 1,
+    "pointbreak.review-change-revision": 1,
+    "pointbreak.review-revision": 3,
+    "pointbreak.review-revision-resource": 1,
+    "pointbreak.review-association-comparison": 1,
+    "pointbreak.review-revision-interdiff": 1,
+    "pointbreak.attention-list": 2,
+    "pointbreak.inspect-attention": 2,
+    "pointbreak.reader-upgrade-required": 1,
+    "pointbreak.store-migration-required": 1,
+    "pointbreak.store-migration-in-progress": 1,
+  });
+});
+
+it("rejects additive Change documents until the client registry is updated", () => {
+  expect(() =>
+    validateReaderProfile({
+      schema: "pointbreak.inspect-reader-profile",
+      version: 1,
+      availability: "ready",
+      minimumReaderProfile: "review_change_revision_v1",
+      authorityCursor: { eventCount: 1 },
+      documents: {
+        ...CHANGE_READER_DOCUMENTS,
+        "pointbreak.future-change-document": 1,
+      },
+    }),
+  ).toThrow(/unrecognized document contract/i);
+});
+
+it("rejects an array-shaped authority cursor before semantic reads", () => {
+  expect(() =>
+    validateReaderProfile({
+      schema: "pointbreak.inspect-reader-profile",
+      version: 1,
+      availability: "ready",
+      minimumReaderProfile: "review_change_revision_v1",
+      authorityCursor: [],
+      documents: CHANGE_READER_DOCUMENTS,
+    }),
+  ).toThrow(/incompatible Change reader document/i);
+});
+
 it("fails closed when a required document version mismatches", () => {
   const doc = {
     ...VERSION_DOC,
@@ -49,10 +101,14 @@ it("fails closed when a required document version mismatches", () => {
   expect(result.ok === false && result.reason).toMatch(/attention-list/);
 });
 
-it("accepts the exact Pointbreak 0.7 handshake through an arbitrary path", () => {
+it("accepts a capable registry without treating product version as store authority", () => {
   expect(verifyHandshake(VERSION_DOC)).toEqual({
     ok: true,
     cliVersion: "0.7.0",
+  });
+  expect(verifyHandshake({ ...VERSION_DOC, cliVersion: "9.0.0" })).toEqual({
+    ok: true,
+    cliVersion: "9.0.0",
   });
 });
 
@@ -90,13 +146,6 @@ it("executes an arbitrary configured path only through the exact handshake", asy
 
   await expect(cli.version("/repo")).resolves.toEqual(VERSION_DOC);
   expect(invocations).toEqual([{ file: binary.path, args: ["version"] }]);
-});
-
-it("fails closed when the CLI minor is incompatible", () => {
-  const result = verifyHandshake({ ...VERSION_DOC, cliVersion: "0.8.0" });
-
-  expect(result.ok).toBe(false);
-  expect(result.ok === false && result.reason).toMatch(/0\.8\.0/);
 });
 
 it("fails closed when the document map omits a required member", () => {

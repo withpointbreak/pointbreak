@@ -53,7 +53,9 @@ export type ReviewProbeResult =
   | { kind: "unauthorized" }
   | { kind: "version-incompatible" }
   | { kind: "protocol" }
-  | { kind: "identity-mismatch" };
+  | { kind: "identity-mismatch" }
+  | { kind: "migration-required" }
+  | { kind: "migration-in-progress" };
 
 type ReviewProbe = (
   capability: ReviewCapability,
@@ -376,6 +378,12 @@ function startedServerFailureMessage(result: ReviewProbeResult): string {
   }
   if (result.kind === "protocol") {
     return "Pointbreak Review returned an invalid startup response.";
+  }
+  if (result.kind === "migration-required") {
+    return "Pointbreak store migration is required before Change state can be read.";
+  }
+  if (result.kind === "migration-in-progress") {
+    return "Pointbreak store migration is in progress; partial Change state is unavailable.";
   }
   return "Pointbreak Review did not become available.";
 }

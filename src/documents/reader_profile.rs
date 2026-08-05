@@ -33,6 +33,8 @@ pub struct ReaderProfileDocumentV1 {
     pub manifest_hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completion_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_graph_stamp: Option<String>,
     pub documents: std::collections::BTreeMap<String, u32>,
 }
 
@@ -74,6 +76,7 @@ impl From<&StoreCapabilityInspection> for ReaderProfileDocumentV1 {
             activation_id,
             manifest_hash,
             completion_id,
+            commit_graph_stamp: None,
             documents: super::change_revision_document_registry()
                 .iter()
                 .map(|(schema, version)| ((*schema).to_owned(), *version))

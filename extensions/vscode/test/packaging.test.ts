@@ -153,3 +153,20 @@ it("rejects a bundled executable machine-identity mismatch", () => {
     ),
   ).toThrow(/machine identity/i);
 });
+
+it("rejects a bundled executable Change reader profile mismatch", () => {
+  expect(() =>
+    verifyBundledBinary(
+      {
+        sha256: "a".repeat(64),
+        versionDocument: '{"schema":"pointbreak.version"}',
+        readerProfileDocument: '{"documents":{"pointbreak.review-change":1}}',
+      },
+      {
+        sha256: "a".repeat(64),
+        versionDocument: '{"schema":"pointbreak.version"}',
+        readerProfileDocument: '{"documents":{"pointbreak.review-change":0}}',
+      },
+    ),
+  ).toThrow(/reader profile/i);
+});
