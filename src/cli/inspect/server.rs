@@ -134,7 +134,8 @@ impl InspectState {
         repo: PathBuf,
         start_background_rebuild: bool,
     ) -> Result<Self, String> {
-        let derived_history = pointbreak::session::DerivedHistoryAccess::resolve(&repo)?;
+        let derived_history =
+            pointbreak::session::DerivedHistoryAccess::resolve_for_inspector(&repo)?;
         if start_background_rebuild && let Err(error) = derived_history.start_background_rebuild() {
             tracing::warn!(error = %error, "derived_access_background_rebuild_start_failed");
         }

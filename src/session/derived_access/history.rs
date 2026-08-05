@@ -28,7 +28,8 @@ use crate::session::derived_access::semantic::state::SemanticStateSnapshot;
 use crate::session::event::ShoreEvent;
 use crate::session::store::backend::StoreBackend;
 use crate::session::store::resolution::{
-    opaque_path_identity, resolve_read_store_with_derived_access_profile,
+    activated_store_capability_for_repo, opaque_path_identity,
+    resolve_read_store_with_derived_access_profile,
 };
 use crate::session::workflow::{
     BaseProjectionConfig, DistinctValues, HistoryCursor, HistoryOrder, HistoryPage, HistoryQuery,
@@ -286,6 +287,10 @@ impl DerivedHistoryAccess {
     pub fn resolve(repo: impl AsRef<Path>) -> Result<Self, String> {
         let profile =
             DerivedAccessProfile::from_environment().map_err(|error| error.to_string())?;
+        Self::resolve_with_profile(repo.as_ref(), profile)
+    }
+
+    fn resolve_with_profile(repo: &Path, profile: DerivedAccessProfile) -> Result<Self, String> {
         if profile == DerivedAccessProfile::Off {
             return Ok(Self::from_mode(DerivedHistoryMode::Off));
         }
@@ -314,6 +319,38 @@ impl DerivedHistoryAccess {
         let mut access = Self::from_mode(mode);
         access.maintenance = Some(maintenance);
         Ok(access)
+    }
+
+    /// Resolve the legacy derived-history service for a mixed-cohort Inspector.
+    ///
+    /// Once a Change/Revision capability activation exists, legacy aggregate
+    /// routes are unavailable by contract and the Inspector gates them before
+    /// dispatch. Keeping this service explicitly off prevents its event-only
+    /// bootstrap from blocking the Change-capable server or mutating a stale
+    /// pre-activation sidecar. The Change reader retains its own complete,
+    /// capability-validated authority path. An explicit off profile retains
+    /// highest precedence and returns before repository capability discovery.
+    #[doc(hidden)]
+    pub fn resolve_for_inspector(repo: impl AsRef<Path>) -> Result<Self, String> {
+        let profile =
+            DerivedAccessProfile::from_environment().map_err(|error| error.to_string())?;
+        Self::resolve_for_inspector_with_profile(repo.as_ref(), profile)
+    }
+
+    fn resolve_for_inspector_with_profile(
+        repo: &Path,
+        profile: DerivedAccessProfile,
+    ) -> Result<Self, String> {
+        if profile == DerivedAccessProfile::Off {
+            return Ok(Self::from_mode(DerivedHistoryMode::Off));
+        }
+        if activated_store_capability_for_repo(repo)
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            return Ok(Self::from_mode(DerivedHistoryMode::Off));
+        }
+        Self::resolve_with_profile(repo, profile)
     }
 
     pub const fn is_active(&self) -> bool {
@@ -1814,6 +1851,10 @@ mod tests {
     use crate::session::projection::test_support::{
         task_input_request_event_with_target, user_response_event,
     };
+    use crate::session::store::capabilities::{
+        CapabilityFixtureState, write_capability_fixture_for_test,
+    };
+    use crate::session::store::resolution::resolve_store;
     use crate::session::workflow::history_base_from_events;
     use crate::session::{EventStore, EventWriteOutcome, apply_history_query, count_new_since};
 
@@ -1859,6 +1900,57 @@ mod tests {
             store_identity: "store:test".to_owned(),
         });
         (temp, access)
+    }
+
+    #[test]
+    fn activated_change_roots_do_not_start_the_legacy_inspector_sidecar() {
+        let l0_repo = TempDir::new().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(l0_repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let l0_resolution = resolve_store(l0_repo.path()).unwrap();
+        let l0_access = DerivedHistoryAccess::resolve_for_inspector_with_profile(
+            l0_repo.path(),
+            DerivedAccessProfile::SqliteWalBodylessV1,
+        )
+        .unwrap();
+        assert!(l0_access.is_active());
+        l0_access
+            .build(|_| DerivedHistoryControl::Continue)
+            .unwrap();
+        assert!(l0_resolution.store_dir().join("derived").is_dir());
+
+        for state in [CapabilityFixtureState::M1, CapabilityFixtureState::L2] {
+            let repo = TempDir::new().unwrap();
+            assert!(
+                std::process::Command::new("git")
+                    .args(["init", "--quiet"])
+                    .current_dir(repo.path())
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let resolution = resolve_store(repo.path()).unwrap();
+            write_capability_fixture_for_test(resolution.backend().journal().as_ref(), state)
+                .unwrap();
+
+            let access = DerivedHistoryAccess::resolve_for_inspector_with_profile(
+                repo.path(),
+                DerivedAccessProfile::SqliteWalBodylessV1,
+            )
+            .unwrap();
+            assert!(!access.is_active());
+            assert_eq!(
+                access.lifecycle_status().availability,
+                DerivedHistoryAvailability::Absent
+            );
+            assert!(!resolution.store_dir().join("derived").exists());
+        }
     }
 
     #[test]
