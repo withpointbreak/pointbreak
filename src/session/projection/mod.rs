@@ -19,8 +19,10 @@ pub(crate) mod test_support;
 pub use artifact_removal::{ArtifactRemovalProjection, RemovalClaim, RemovalOperativeStatus};
 pub use body_content::BodyContentState;
 pub use change::{
-    ChangeLifecycleV1, ChangeLinkView, ChangeProjection, ChangeTopologyV1, ChangeView,
-    project_changes,
+    ChangeClaimSupportV1, ChangeDocumentProjectionV1, ChangeLifecycleV1, ChangeLinkView,
+    ChangeMembershipClaimViewV1, ChangeProjection, ChangeRelationClaimViewV1, ChangeTopologyV1,
+    ChangeView, RevisionRefUnavailableReasonV1, change_document_projection_stamp,
+    project_change_documents, project_changes,
 };
 pub use commit_oid_grouping::CommitOidGroupingProjection;
 pub use commit_range::{

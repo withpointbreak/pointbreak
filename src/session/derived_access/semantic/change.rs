@@ -28,12 +28,12 @@ use crate::session::store::capabilities::{
     JournalInspection, REVIEW_CHANGE_REVISION_COHORT_V1, StoreCapabilityStatus,
     reader_profile_versions_v1,
 };
-use crate::session::{AuthorityCursorV2, ChangeProjection};
+use crate::session::{AuthorityCursorV2, ChangeDocumentProjectionV1, ChangeProjection};
 
-pub(crate) const CHANGE_SEMANTIC_GENERATION_SCHEMA_V1: &str =
-    "pointbreak.derived-change-semantic-generation.v1";
-pub(crate) const CHANGE_READER_PROFILE_RECEIPT_SCHEMA_V1: &str =
-    "pointbreak.derived-change-reader-profile-receipt.v1";
+pub(crate) const CHANGE_SEMANTIC_GENERATION_SCHEMA_V2: &str =
+    "pointbreak.derived-change-semantic-generation.v2";
+pub(crate) const CHANGE_READER_PROFILE_RECEIPT_SCHEMA_V2: &str =
+    "pointbreak.derived-change-reader-profile-receipt.v2";
 #[cfg(any(test, feature = "bench"))]
 const CHANGE_SEMANTIC_RESOURCE: &str = "change-semantic.json";
 
@@ -59,7 +59,7 @@ pub(crate) struct ReaderDocumentVersionV1 {
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ChangeReaderProfileReceiptV1 {
+pub(crate) struct ChangeReaderProfileReceiptV2 {
     pub(crate) schema: String,
     pub(crate) version: u32,
     pub(crate) minimum_reader_profile: String,
@@ -68,18 +68,23 @@ pub(crate) struct ChangeReaderProfileReceiptV1 {
     pub(crate) fact_availability: Vec<ChangeFactAvailabilityV1>,
     pub(crate) resource_availability: Vec<ChangeResourceAvailabilityV1>,
     pub(crate) projection_sha256: String,
+    pub(crate) document_projection_sha256: String,
     pub(crate) semantic_receipt: String,
     pub(crate) receipt_sha256: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ChangeSemanticGenerationV1 {
+/// V2 binds the claim-provenance document projection in addition to the
+/// effective semantic projection. V1 readers therefore fail closed instead of
+/// serving Change documents that would require reconstructing actor support.
+pub(crate) struct ChangeSemanticGenerationV2 {
     pub(crate) schema: String,
     pub(crate) version: u32,
     pub(crate) facts: Vec<ChangeProjectionFact>,
     pub(crate) projection: ChangeProjection,
-    pub(crate) reader_profile: ChangeReaderProfileReceiptV1,
+    pub(crate) document_projection: ChangeDocumentProjectionV1,
+    pub(crate) reader_profile: ChangeReaderProfileReceiptV2,
 }
 
 #[derive(Serialize)]
@@ -93,12 +98,13 @@ struct ReaderReceiptPreimage<'a> {
     fact_availability: &'a [ChangeFactAvailabilityV1],
     resource_availability: &'a [ChangeResourceAvailabilityV1],
     projection_sha256: &'a str,
+    document_projection_sha256: &'a str,
     semantic_receipt: &'a str,
 }
 
 pub(crate) fn build_change_semantic_generation(
     inspection: &JournalInspection,
-) -> Result<ChangeSemanticGenerationV1> {
+) -> Result<ChangeSemanticGenerationV2> {
     match inspection.status {
         StoreCapabilityStatus::MigrationRequired => {
             return Err(ShoreError::Message(
@@ -134,6 +140,7 @@ pub(crate) fn build_change_semantic_generation(
         .flatten()
         .collect::<Vec<_>>();
     let projection = crate::session::project_changes(&events)?;
+    let document_projection = crate::session::project_change_documents(&events)?;
     if project_changes_from_facts(&facts)? != projection {
         return Err(ShoreError::Message(
             "bodyless Change facts diverge from strict replay".to_owned(),
@@ -181,32 +188,36 @@ pub(crate) fn build_change_semantic_generation(
         })
         .collect();
     let projection_sha256 = sha256_json_prefixed(&serde_json::to_value(&projection)?)?;
-    let mut reader_profile = ChangeReaderProfileReceiptV1 {
-        schema: CHANGE_READER_PROFILE_RECEIPT_SCHEMA_V1.to_owned(),
-        version: 1,
+    let mut reader_profile = ChangeReaderProfileReceiptV2 {
+        schema: CHANGE_READER_PROFILE_RECEIPT_SCHEMA_V2.to_owned(),
+        version: 2,
         minimum_reader_profile: REVIEW_CHANGE_REVISION_COHORT_V1.to_owned(),
         authority_cursor: inspection.cursor.clone(),
         document_versions,
         fact_availability,
         resource_availability,
         projection_sha256,
+        document_projection_sha256: sha256_json_prefixed(&serde_json::to_value(
+            &document_projection,
+        )?)?,
         semantic_receipt: semantic_snapshot.semantic_receipt,
         receipt_sha256: String::new(),
     };
     reader_profile.receipt_sha256 = reader_receipt_sha256(&reader_profile)?;
 
-    Ok(ChangeSemanticGenerationV1 {
-        schema: CHANGE_SEMANTIC_GENERATION_SCHEMA_V1.to_owned(),
-        version: 1,
+    Ok(ChangeSemanticGenerationV2 {
+        schema: CHANGE_SEMANTIC_GENERATION_SCHEMA_V2.to_owned(),
+        version: 2,
         facts,
         projection,
+        document_projection,
         reader_profile,
     })
 }
 
-impl ChangeSemanticGenerationV1 {
+impl ChangeSemanticGenerationV2 {
     pub(crate) fn validate(&self) -> Result<()> {
-        if self.schema != CHANGE_SEMANTIC_GENERATION_SCHEMA_V1 || self.version != 1 {
+        if self.schema != CHANGE_SEMANTIC_GENERATION_SCHEMA_V2 || self.version != 2 {
             return Err(ShoreError::Message(
                 "incompatible Change semantic generation schema".to_owned(),
             ));
@@ -217,8 +228,8 @@ impl ChangeSemanticGenerationV1 {
             ));
         }
         if self.reader_profile.minimum_reader_profile != REVIEW_CHANGE_REVISION_COHORT_V1
-            || self.reader_profile.schema != CHANGE_READER_PROFILE_RECEIPT_SCHEMA_V1
-            || self.reader_profile.version != 1
+            || self.reader_profile.schema != CHANGE_READER_PROFILE_RECEIPT_SCHEMA_V2
+            || self.reader_profile.version != 2
             || self.reader_profile.document_versions
                 != reader_profile_versions_v1()
                     .iter()
@@ -229,6 +240,13 @@ impl ChangeSemanticGenerationV1 {
                     .collect::<Vec<_>>()
             || self.reader_profile.projection_sha256
                 != sha256_json_prefixed(&serde_json::to_value(&self.projection)?)?
+            || self.reader_profile.document_projection_sha256
+                != sha256_json_prefixed(&serde_json::to_value(&self.document_projection)?)?
+            || self.document_projection.projection_stamp
+                != crate::session::change_document_projection_stamp(
+                    &self.projection,
+                    &self.document_projection,
+                )?
             || self.reader_profile.receipt_sha256 != reader_receipt_sha256(&self.reader_profile)?
             || self
                 .reader_profile
@@ -270,6 +288,7 @@ pub(crate) enum ChangeSemanticRouteV1 {
 pub(crate) struct ChangeSemanticReadV1 {
     pub(crate) route: ChangeSemanticRouteV1,
     pub(crate) projection: ChangeProjection,
+    pub(crate) document_projection: ChangeDocumentProjectionV1,
 }
 
 #[cfg(any(test, feature = "bench"))]
@@ -364,11 +383,12 @@ pub(crate) fn read_change_semantics_for_qualification(
         }
         StoreCapabilityStatus::Ready { .. } => {}
     }
-    let strict = strict_projection(inspection)?;
+    let (strict, strict_documents) = strict_projections(inspection)?;
     if !enabled {
         return Ok(ChangeSemanticReadV1 {
             route: ChangeSemanticRouteV1::ExplicitOff,
             projection: strict,
+            document_projection: strict_documents,
         });
     }
     let derived = (|| {
@@ -386,32 +406,37 @@ pub(crate) fn read_change_semantics_for_qualification(
         let bytes = std::fs::read(&path).map_err(|error| {
             ShoreError::Message(format!("read Change semantic generation: {error}"))
         })?;
-        let generation: ChangeSemanticGenerationV1 = serde_json::from_slice(&bytes)?;
+        let generation: ChangeSemanticGenerationV2 = serde_json::from_slice(&bytes)?;
         generation.validate()?;
         if generation.reader_profile.authority_cursor != inspection.cursor
             || descriptor.semantic_receipt != generation.reader_profile.receipt_sha256
             || generation.projection != strict
+            || generation.document_projection != strict_documents
         {
             return Err(ShoreError::Message(
                 "Change semantic generation is stale or divergent".to_owned(),
             ));
         }
-        Ok(generation.projection)
+        Ok((generation.projection, generation.document_projection))
     })();
     Ok(match derived {
-        Ok(projection) => ChangeSemanticReadV1 {
+        Ok((projection, document_projection)) => ChangeSemanticReadV1 {
             route: ChangeSemanticRouteV1::Current,
             projection,
+            document_projection,
         },
         Err(_) => ChangeSemanticReadV1 {
             route: ChangeSemanticRouteV1::LooseFallback,
             projection: strict,
+            document_projection: strict_documents,
         },
     })
 }
 
 #[cfg(any(test, feature = "bench"))]
-fn strict_projection(inspection: &JournalInspection) -> Result<ChangeProjection> {
+fn strict_projections(
+    inspection: &JournalInspection,
+) -> Result<(ChangeProjection, ChangeDocumentProjectionV1)> {
     let events = inspection
         .event_entries
         .iter()
@@ -419,7 +444,10 @@ fn strict_projection(inspection: &JournalInspection) -> Result<ChangeProjection>
             EventStore::decode_qualification_entry(entry.key_digest.clone(), entry.bytes.clone())
         })
         .collect::<Result<Vec<_>>>()?;
-    crate::session::project_changes(&events)
+    Ok((
+        crate::session::project_changes(&events)?,
+        crate::session::project_change_documents(&events)?,
+    ))
 }
 
 #[cfg(any(test, feature = "bench"))]
@@ -429,7 +457,7 @@ fn generation_error(error: impl std::fmt::Display) -> ShoreError {
     ))
 }
 
-fn reader_receipt_sha256(receipt: &ChangeReaderProfileReceiptV1) -> Result<String> {
+fn reader_receipt_sha256(receipt: &ChangeReaderProfileReceiptV2) -> Result<String> {
     sha256_json_prefixed(&serde_json::to_value(ReaderReceiptPreimage {
         schema: &receipt.schema,
         version: receipt.version,
@@ -439,6 +467,7 @@ fn reader_receipt_sha256(receipt: &ChangeReaderProfileReceiptV1) -> Result<Strin
         fact_availability: &receipt.fact_availability,
         resource_availability: &receipt.resource_availability,
         projection_sha256: &receipt.projection_sha256,
+        document_projection_sha256: &receipt.document_projection_sha256,
         semantic_receipt: &receipt.semantic_receipt,
     })?)
 }
@@ -468,6 +497,10 @@ fn resource_availability(events: &[ShoreEvent]) -> Result<Vec<ChangeResourceAvai
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{EngagementId, JournalId, ObjectId, RevisionId};
+    use crate::session::event::{
+        EventTarget, Revision, ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload, Writer,
+    };
     use crate::session::store::backend::StoreBackend;
     use crate::session::store::capabilities::{
         CapabilityFixtureState, inspect_journal_records, write_capability_fixture_for_test,
@@ -542,9 +575,9 @@ mod tests {
         );
 
         let mut unsupported = generation;
-        unsupported.version = 2;
+        unsupported.version = 3;
         assert!(unsupported.validate().is_err());
-        assert!(serde_json::from_slice::<ChangeSemanticGenerationV1>(b"not-json").is_err());
+        assert!(serde_json::from_slice::<ChangeSemanticGenerationV2>(b"not-json").is_err());
     }
 
     fn l2_inspection() -> (StoreBackend, JournalInspection) {
@@ -569,7 +602,9 @@ mod tests {
         .unwrap();
         let read = read_change_semantics_for_qualification(root.path(), &l2, true).unwrap();
         assert_eq!(read.route, ChangeSemanticRouteV1::Current);
-        assert_eq!(read.projection, strict_projection(&l2).unwrap());
+        let (strict, strict_documents) = strict_projections(&l2).unwrap();
+        assert_eq!(read.projection, strict);
+        assert_eq!(read.document_projection, strict_documents);
         assert!(
             GenerationLayout::new(root.path())
                 .unwrap()
@@ -641,10 +676,11 @@ mod tests {
     fn off_missing_corrupt_and_pre_l2_routes_never_serve_derived_authority() {
         let root = tempfile::tempdir().unwrap();
         let (_backend, l2) = l2_inspection();
-        let strict = strict_projection(&l2).unwrap();
+        let (strict, strict_documents) = strict_projections(&l2).unwrap();
         let off = read_change_semantics_for_qualification(root.path(), &l2, false).unwrap();
         assert_eq!(off.route, ChangeSemanticRouteV1::ExplicitOff);
         assert_eq!(off.projection, strict);
+        assert_eq!(off.document_projection, strict_documents);
         assert!(!root.path().join("derived").exists());
 
         let missing = read_change_semantics_for_qualification(root.path(), &l2, true).unwrap();
@@ -669,6 +705,7 @@ mod tests {
         let corrupt = read_change_semantics_for_qualification(root.path(), &l2, true).unwrap();
         assert_eq!(corrupt.route, ChangeSemanticRouteV1::LooseFallback);
         assert_eq!(corrupt.projection, strict);
+        assert_eq!(corrupt.document_projection, strict_documents);
 
         let l0_backend = StoreBackend::memory();
         let l0 = inspect_journal_records(l0_backend.journal().as_ref()).unwrap();
@@ -690,6 +727,52 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("migration_in_progress")
+        );
+    }
+
+    #[test]
+    fn legacy_revision_refs_do_not_abort_off_or_loose_fallback_routes() {
+        let backend = StoreBackend::memory();
+        write_capability_fixture_for_test(backend.journal().as_ref(), CapabilityFixtureState::L2)
+            .unwrap();
+        let payload = WorkObjectProposedPayload {
+            engagement_id: EngagementId::new("engagement:sha256:legacy"),
+            work_object: WorkObjectProposal::Revision {
+                revision: Revision {
+                    id: RevisionId::new("review-unit:sha256:legacy"),
+                    object_id: ObjectId::new("obj:sha256:legacy"),
+                    git_provenance: None,
+                },
+                summary: None,
+                object_artifact_content_hash: "legacy-artifact-hash".to_owned(),
+                supersedes: Vec::new(),
+            },
+        };
+        let event = ShoreEvent::new(
+            crate::session::event::EventType::WorkObjectProposed,
+            "revision:legacy",
+            EventTarget::for_journal(JournalId::new("journal:test")),
+            Writer::shore_local("test"),
+            payload,
+            "2026-08-05T00:00:00Z",
+        )
+        .unwrap();
+        backend
+            .journal()
+            .insert_raw(&event.idempotency_key, &serde_json::to_vec(&event).unwrap())
+            .unwrap();
+        let inspection = inspect_journal_records(backend.journal().as_ref()).unwrap();
+        let root = tempfile::tempdir().unwrap();
+
+        let off = read_change_semantics_for_qualification(root.path(), &inspection, false).unwrap();
+        assert_eq!(off.route, ChangeSemanticRouteV1::ExplicitOff);
+        assert_eq!(off.document_projection.unavailable_revision_refs.len(), 1);
+        let fallback =
+            read_change_semantics_for_qualification(root.path(), &inspection, true).unwrap();
+        assert_eq!(fallback.route, ChangeSemanticRouteV1::LooseFallback);
+        assert_eq!(
+            fallback.document_projection.unavailable_revision_refs.len(),
+            1
         );
     }
 }

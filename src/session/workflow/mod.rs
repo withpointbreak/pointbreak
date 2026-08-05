@@ -9,6 +9,7 @@ mod commit_range_liveness;
 mod event_signature;
 mod history;
 mod ingest;
+mod review_cursor;
 mod revision_list;
 mod revision_projection;
 mod store_family;
@@ -90,6 +91,12 @@ pub use observation::{
     ObservationAddOptions, ObservationAddResult, ObservationListOptions, ObservationListResult,
     ObservationStatus, ObservationTargetSelector, ObservationView, list_observations,
     record_observation, validated_track_id,
+};
+pub use review_cursor::{
+    CommitProofStateV1, CommitSourceStateV1, REVIEW_CURSOR_SCHEMA_V1, ReviewCursorRefusalV1,
+    ReviewCursorSelectionV1, ReviewCursorV1, ReviewSourceBindingV1, ReviewSourceFingerprintV1,
+    ReviewSourcePathStateV1, WorktreeSourceStateV1, change_graph_token, select_review_cursor,
+    validate_review_cursor_for_write,
 };
 pub(crate) use revision_list::list_revisions_from_selected_events;
 pub use revision_list::{

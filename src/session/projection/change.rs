@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::model::{
-    AssessmentId, ChangeId, ChangeIdentityDescriptorV1, ChangeLinkClaimId, ChangeMembershipClaimId,
-    ChangeRevisionRelationClaimId, EventId, InputRequestId, ReviewTargetRef, RevisionId,
-    RevisionRefV1, current_revisions, replacement_heads_diverge, revision_graph_has_cycle,
+    ActorId, AssessmentId, ChangeId, ChangeIdentityDescriptorV1, ChangeLinkClaimId,
+    ChangeMembershipClaimId, ChangeRevisionRelationClaimId, EventId, InputRequestId,
+    ReviewTargetRef, RevisionId, RevisionRefV1, TrackId, current_revisions,
+    replacement_heads_diverge, revision_graph_has_cycle,
 };
 use crate::session::event::{
     AssertionMode, ChangeDeclaredPayload, ChangeLinkAssertedPayload,
@@ -49,6 +50,11 @@ pub struct ChangeView {
     pub supersedes: BTreeSet<(RevisionId, RevisionId)>,
     pub topology: ChangeTopologyV1,
     pub lifecycle: ChangeLifecycleV1,
+    /// Current Revisions with exactly one effective accepting assessment.
+    /// Aggregate acceptance additionally requires every current Revision to
+    /// appear here and no unresolved operative obligations.
+    pub qualified_current_revisions: BTreeSet<RevisionId>,
+    pub operative_obligations: BTreeSet<InputRequestId>,
     pub diagnostics: Vec<String>,
 }
 
@@ -65,6 +71,334 @@ pub struct ChangeLinkView {
 pub struct ChangeProjection {
     pub changes: BTreeMap<ChangeId, ChangeView>,
     pub links: Vec<ChangeLinkView>,
+}
+
+/// One event that supports or withdraws a Change claim.
+///
+/// Effective Change state intentionally ignores duplicate carriers, arrival
+/// order, and actor locality. Headless readers still need the complete support
+/// provenance so they can explain why a claim is active, withdrawn, duplicated,
+/// or withdrawn by a different actor without reconstructing that policy.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeClaimSupportV1 {
+    pub event_id: EventId,
+    pub actor_id: ActorId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub track_id: Option<TrackId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeMembershipClaimViewV1 {
+    pub claim_id: ChangeMembershipClaimId,
+    pub change_id: ChangeId,
+    pub revision_id: RevisionId,
+    pub supports: Vec<ChangeClaimSupportV1>,
+    pub withdrawals: Vec<ChangeClaimSupportV1>,
+    pub active: bool,
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRelationClaimViewV1 {
+    pub claim_id: ChangeRevisionRelationClaimId,
+    pub change_id: ChangeId,
+    pub successor: RevisionRefV1,
+    pub predecessor: RevisionRefV1,
+    pub supports: Vec<ChangeClaimSupportV1>,
+    pub withdrawals: Vec<ChangeClaimSupportV1>,
+    pub active: bool,
+    pub diagnostics: Vec<String>,
+}
+
+/// Bodyless, deterministic provenance needed by Change documents.
+///
+/// This projection is derived directly from validated journal events and is
+/// safe to persist beside [`ChangeProjection`]. It deliberately excludes prose,
+/// commands, paths, signatures, timestamps, and ingest metadata.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeDocumentProjectionV1 {
+    pub revision_refs: BTreeMap<RevisionId, Vec<RevisionRefV1>>,
+    pub unavailable_revision_refs: BTreeMap<RevisionId, RevisionRefUnavailableReasonV1>,
+    pub membership_claims: Vec<ChangeMembershipClaimViewV1>,
+    pub relation_claims: Vec<ChangeRelationClaimViewV1>,
+    pub diagnostics: Vec<String>,
+    pub projection_stamp: String,
+}
+
+/// Typed reason an older proposal cannot furnish the strict exact-Revision
+/// reference required by Change documents. The semantic projection remains
+/// readable; document consumers expose the unavailable member instead of
+/// turning one legacy carrier into a store-wide error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevisionRefUnavailableReasonV1 {
+    InvalidRevisionId,
+    InvalidObjectArtifactContentHash,
+}
+
+#[derive(Default)]
+struct ClaimProvenanceInput {
+    revisions: BTreeMap<RevisionId, BTreeSet<String>>,
+    memberships:
+        BTreeMap<ChangeMembershipClaimId, (ChangeId, RevisionId, BTreeSet<ChangeClaimSupportV1>)>,
+    membership_withdrawals: BTreeMap<ChangeMembershipClaimId, BTreeSet<ChangeClaimSupportV1>>,
+    relations: BTreeMap<
+        ChangeRevisionRelationClaimId,
+        (
+            ChangeId,
+            RevisionRefV1,
+            RevisionRefV1,
+            BTreeSet<ChangeClaimSupportV1>,
+        ),
+    >,
+    relation_withdrawals: BTreeMap<ChangeRevisionRelationClaimId, BTreeSet<ChangeClaimSupportV1>>,
+}
+
+/// Project complete Change claim provenance without changing effective-state
+/// policy or requiring a document consumer to inspect raw events.
+pub fn project_change_documents(events: &[ShoreEvent]) -> Result<ChangeDocumentProjectionV1> {
+    let semantic = project_changes(events)?;
+    let mut input = ClaimProvenanceInput::default();
+    for event in events {
+        let support = ChangeClaimSupportV1 {
+            event_id: event.event_id.clone(),
+            actor_id: event.writer.actor_id.clone(),
+            track_id: event.target.track_id.clone(),
+        };
+        match event.event_type {
+            EventType::WorkObjectProposed => {
+                let payload: WorkObjectProposedPayload =
+                    serde_json::from_value(event.payload.clone())?;
+                if let WorkObjectProposal::Revision {
+                    revision,
+                    object_artifact_content_hash,
+                    ..
+                } = payload.work_object
+                {
+                    input
+                        .revisions
+                        .entry(revision.id)
+                        .or_default()
+                        .insert(object_artifact_content_hash);
+                }
+            }
+            EventType::ChangeMembershipAsserted => {
+                let payload: ChangeMembershipAssertedPayload =
+                    serde_json::from_value(event.payload.clone())?;
+                payload.validate()?;
+                let entry = input
+                    .memberships
+                    .entry(payload.membership_claim_id)
+                    .or_insert_with(|| {
+                        (
+                            payload.change_id.clone(),
+                            payload.revision_id.clone(),
+                            BTreeSet::new(),
+                        )
+                    });
+                entry.2.insert(support);
+            }
+            EventType::ChangeMembershipWithdrawn => {
+                let payload: ChangeMembershipWithdrawnPayload =
+                    serde_json::from_value(event.payload.clone())?;
+                payload.validate()?;
+                input
+                    .membership_withdrawals
+                    .entry(payload.membership_claim_id)
+                    .or_default()
+                    .insert(support);
+            }
+            EventType::ChangeRevisionRelationAsserted => {
+                let payload: ChangeRevisionRelationAssertedPayload =
+                    serde_json::from_value(event.payload.clone())?;
+                payload.validate()?;
+                let entry = input
+                    .relations
+                    .entry(payload.relation_claim_id)
+                    .or_insert_with(|| {
+                        (
+                            payload.change_id.clone(),
+                            payload.successor.clone(),
+                            payload.predecessor.clone(),
+                            BTreeSet::new(),
+                        )
+                    });
+                entry.3.insert(support);
+            }
+            EventType::ChangeRevisionRelationWithdrawn => {
+                let payload: ChangeRevisionRelationWithdrawnPayload =
+                    serde_json::from_value(event.payload.clone())?;
+                payload.validate()?;
+                input
+                    .relation_withdrawals
+                    .entry(payload.relation_claim_id)
+                    .or_default()
+                    .insert(support);
+            }
+            _ => {}
+        }
+    }
+
+    let mut revision_refs = BTreeMap::new();
+    let mut unavailable_revision_refs = BTreeMap::new();
+    for (revision_id, hashes) in input.revisions {
+        if !revision_id.as_str().starts_with("rev:") {
+            unavailable_revision_refs.insert(
+                revision_id,
+                RevisionRefUnavailableReasonV1::InvalidRevisionId,
+            );
+            continue;
+        }
+        let refs = hashes
+            .into_iter()
+            .map(|hash| RevisionRefV1::new(revision_id.clone(), hash))
+            .collect::<Result<Vec<_>>>();
+        match refs {
+            Ok(refs) => {
+                revision_refs.insert(revision_id, refs);
+            }
+            Err(_) => {
+                unavailable_revision_refs.insert(
+                    revision_id,
+                    RevisionRefUnavailableReasonV1::InvalidObjectArtifactContentHash,
+                );
+            }
+        }
+    }
+
+    let mut diagnostics = unavailable_revision_refs
+        .iter()
+        .map(|(revision_id, reason)| {
+            format!(
+                "change_revision_ref_unavailable:{}:{}",
+                revision_id.as_str(),
+                match reason {
+                    RevisionRefUnavailableReasonV1::InvalidRevisionId => "invalid_revision_id",
+                    RevisionRefUnavailableReasonV1::InvalidObjectArtifactContentHash => {
+                        "invalid_object_artifact_content_hash"
+                    }
+                }
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    diagnostics.extend(
+        input
+            .membership_withdrawals
+            .keys()
+            .filter(|claim_id| !input.memberships.contains_key(*claim_id))
+            .map(|claim_id| {
+                format!(
+                    "change_membership_withdrawal_claim_missing:{}",
+                    claim_id.as_str()
+                )
+            }),
+    );
+    diagnostics.extend(
+        input
+            .relation_withdrawals
+            .keys()
+            .filter(|claim_id| !input.relations.contains_key(*claim_id))
+            .map(|claim_id| {
+                format!(
+                    "change_relation_withdrawal_claim_missing:{}",
+                    claim_id.as_str()
+                )
+            }),
+    );
+
+    let membership_claims = input
+        .memberships
+        .into_iter()
+        .map(|(claim_id, (change_id, revision_id, supports))| {
+            let withdrawals = input
+                .membership_withdrawals
+                .get(&claim_id)
+                .cloned()
+                .unwrap_or_default();
+            ChangeMembershipClaimViewV1 {
+                claim_id,
+                change_id,
+                revision_id,
+                diagnostics: claim_diagnostics(&supports, &withdrawals),
+                active: withdrawals.is_empty(),
+                supports: supports.into_iter().collect(),
+                withdrawals: withdrawals.into_iter().collect(),
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let relation_claims = input
+        .relations
+        .into_iter()
+        .map(
+            |(claim_id, (change_id, successor, predecessor, supports))| {
+                let withdrawals = input
+                    .relation_withdrawals
+                    .get(&claim_id)
+                    .cloned()
+                    .unwrap_or_default();
+                ChangeRelationClaimViewV1 {
+                    claim_id,
+                    change_id,
+                    successor,
+                    predecessor,
+                    diagnostics: claim_diagnostics(&supports, &withdrawals),
+                    active: withdrawals.is_empty(),
+                    supports: supports.into_iter().collect(),
+                    withdrawals: withdrawals.into_iter().collect(),
+                }
+            },
+        )
+        .collect::<Vec<_>>();
+
+    let mut projection = ChangeDocumentProjectionV1 {
+        revision_refs,
+        unavailable_revision_refs,
+        membership_claims,
+        relation_claims,
+        diagnostics: diagnostics.into_iter().collect(),
+        projection_stamp: String::new(),
+    };
+    projection.projection_stamp = change_document_projection_stamp(&semantic, &projection)?;
+    Ok(projection)
+}
+
+pub fn change_document_projection_stamp(
+    semantic: &ChangeProjection,
+    projection: &ChangeDocumentProjectionV1,
+) -> Result<String> {
+    crate::canonical_hash::sha256_json_prefixed(&serde_json::json!({
+        "semantic": semantic,
+        "revisionRefs": projection.revision_refs,
+        "unavailableRevisionRefs": projection.unavailable_revision_refs,
+        "membershipClaims": projection.membership_claims,
+        "relationClaims": projection.relation_claims,
+        "diagnostics": projection.diagnostics,
+    }))
+}
+
+fn claim_diagnostics(
+    supports: &BTreeSet<ChangeClaimSupportV1>,
+    withdrawals: &BTreeSet<ChangeClaimSupportV1>,
+) -> Vec<String> {
+    let mut diagnostics = BTreeSet::new();
+    if supports.len() > 1 {
+        diagnostics.insert("duplicate_claim_support".to_owned());
+    }
+    if !withdrawals.is_empty()
+        && withdrawals.iter().any(|withdrawal| {
+            !supports
+                .iter()
+                .any(|support| support.actor_id == withdrawal.actor_id)
+        })
+    {
+        diagnostics.insert("cross_actor_withdrawal".to_owned());
+    }
+    diagnostics.into_iter().collect()
 }
 
 /// Bodyless semantic input shared by strict replay and disposable projections.
@@ -584,15 +918,18 @@ pub(crate) fn project_changes_from_facts(
             ChangeTopologyV1::Mixed
         };
 
+        let qualified_current_revisions = current_revisions
+            .iter()
+            .filter(|revision| has_one_accepting_assessment(revision, &input.assessments))
+            .cloned()
+            .collect::<BTreeSet<_>>();
         let lifecycle = if incomplete {
             ChangeLifecycleV1::Incomplete
         } else if cycle || divergent || declaration_conflict || revision_conflict {
             ChangeLifecycleV1::Conflicted
         } else if current_revisions.is_empty()
-            || !current_revisions
-                .iter()
-                .all(|revision| has_one_accepting_assessment(revision, &input.assessments))
-            || obligation_status.unresolved
+            || qualified_current_revisions.len() != current_revisions.len()
+            || !obligation_status.unresolved_requests.is_empty()
         {
             ChangeLifecycleV1::InProgress
         } else {
@@ -608,6 +945,8 @@ pub(crate) fn project_changes_from_facts(
                 supersedes,
                 topology,
                 lifecycle,
+                qualified_current_revisions,
+                operative_obligations: obligation_status.unresolved_requests,
                 diagnostics: diagnostics.into_iter().collect(),
             },
         );
@@ -657,9 +996,9 @@ fn has_one_accepting_assessment(
         )
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct OperativeObligationStatus {
-    unresolved: bool,
+    unresolved_requests: BTreeSet<InputRequestId>,
     ambiguous_response: bool,
 }
 
@@ -676,7 +1015,7 @@ fn operative_obligation_status(
         match input.request_response_count.get(request_id).copied() {
             Some(1) => continue,
             Some(_) => {
-                status.unresolved = true;
+                status.unresolved_requests.insert(request_id.clone());
                 status.ambiguous_response = true;
                 continue;
             }
@@ -705,7 +1044,9 @@ fn operative_obligation_status(
                 },
             )
             .collect();
-        status.unresolved |= carried_to != *current;
+        if carried_to != *current {
+            status.unresolved_requests.insert(request_id.clone());
+        }
     }
     status
 }
@@ -748,11 +1089,21 @@ mod tests {
     }
 
     fn event<P: EventPayload>(payload: P, key: impl Into<String>) -> ShoreEvent {
+        event_with_actor(payload, key, crate::model::ActorId::new("actor:local"))
+    }
+
+    fn event_with_actor<P: EventPayload>(
+        payload: P,
+        key: impl Into<String>,
+        actor_id: crate::model::ActorId,
+    ) -> ShoreEvent {
+        let mut writer = Writer::shore_local("test");
+        writer.actor_id = actor_id;
         ShoreEvent::new(
             payload.event_type(),
             key,
             EventTarget::for_journal(JournalId::new("journal:test")),
-            Writer::shore_local("test"),
+            writer,
             payload,
             "2026-08-04T00:00:00Z",
         )
@@ -848,6 +1199,121 @@ mod tests {
     }
 
     #[test]
+    fn document_projection_retains_duplicate_and_cross_actor_claim_provenance() {
+        let (change_id, declared) = declaration_with_nonce(41);
+        let (revision_id, revision_ref, revision_event) = revision("provenance-a", 'a');
+        let (_, membership_event) = membership(&change_id, &revision_id, 42);
+        let membership_payload: ChangeMembershipAssertedPayload =
+            serde_json::from_value(membership_event.payload.clone()).unwrap();
+        let duplicate_membership = event(membership_payload.clone(), "membership:duplicate");
+        let membership_withdrawal = event_with_actor(
+            build_membership_withdrawn(&membership_payload.membership_claim_id, [43; 32]).unwrap(),
+            "membership:cross-actor-withdrawal",
+            crate::model::ActorId::new("actor:reviewer"),
+        );
+
+        let relation_event = relation(&change_id, revision_ref.clone(), revision_ref, 44);
+        let relation_payload: ChangeRevisionRelationAssertedPayload =
+            serde_json::from_value(relation_event.payload.clone()).unwrap();
+        let duplicate_relation = event(relation_payload.clone(), "relation:duplicate");
+        let relation_withdrawal = event_with_actor(
+            build_revision_relation_withdrawn(&relation_payload.relation_claim_id, [45; 32])
+                .unwrap(),
+            "relation:cross-actor-withdrawal",
+            crate::model::ActorId::new("actor:reviewer"),
+        );
+
+        let events = vec![
+            declared,
+            revision_event,
+            membership_event,
+            duplicate_membership,
+            membership_withdrawal,
+            relation_event,
+            duplicate_relation,
+            relation_withdrawal,
+        ];
+        let projection = project_change_documents(&events).unwrap();
+        assert_eq!(projection.membership_claims[0].supports.len(), 2);
+        assert_eq!(projection.membership_claims[0].withdrawals.len(), 1);
+        assert!(!projection.membership_claims[0].active);
+        assert_eq!(
+            projection.membership_claims[0].diagnostics,
+            ["cross_actor_withdrawal", "duplicate_claim_support"]
+        );
+        assert_eq!(projection.relation_claims[0].supports.len(), 2);
+        assert_eq!(
+            projection.relation_claims[0].diagnostics,
+            ["cross_actor_withdrawal", "duplicate_claim_support"]
+        );
+
+        let mut reversed = events;
+        reversed.reverse();
+        assert_eq!(project_change_documents(&reversed).unwrap(), projection);
+    }
+
+    #[test]
+    fn legacy_revision_bindings_become_typed_unavailable_refs_without_aborting_projection() {
+        let revision_id = RevisionId::new("review-unit:sha256:legacy");
+        let payload = WorkObjectProposedPayload {
+            engagement_id: EngagementId::new("engagement:sha256:test"),
+            work_object: WorkObjectProposal::Revision {
+                revision: Revision {
+                    id: revision_id.clone(),
+                    object_id: ObjectId::new("obj:sha256:legacy"),
+                    git_provenance: None,
+                },
+                summary: None,
+                object_artifact_content_hash: "legacy-artifact-hash".to_owned(),
+                supersedes: Vec::new(),
+            },
+        };
+
+        let projection = project_change_documents(&[event(payload, "revision:legacy")]).unwrap();
+
+        assert!(projection.revision_refs.is_empty());
+        assert_eq!(
+            projection.unavailable_revision_refs[&revision_id],
+            RevisionRefUnavailableReasonV1::InvalidRevisionId
+        );
+        assert!(projection.diagnostics.iter().any(|diagnostic| {
+            diagnostic.contains("change_revision_ref_unavailable:review-unit:sha256:legacy")
+        }));
+    }
+
+    #[test]
+    fn document_projection_diagnoses_orphan_claim_withdrawals() {
+        let membership_id = crate::model::ChangeMembershipClaimId::new("membership:sha256:missing");
+        let relation_id =
+            crate::model::ChangeRevisionRelationClaimId::new("change-relation:sha256:missing");
+        let events = vec![
+            event(
+                build_membership_withdrawn(&membership_id, [46; 32]).unwrap(),
+                "membership:orphan-withdrawal",
+            ),
+            event(
+                build_revision_relation_withdrawn(&relation_id, [47; 32]).unwrap(),
+                "relation:orphan-withdrawal",
+            ),
+        ];
+        let projection = project_change_documents(&events).unwrap();
+        assert_eq!(projection.membership_claims.len(), 0);
+        assert_eq!(projection.relation_claims.len(), 0);
+        assert!(
+            projection
+                .diagnostics
+                .iter()
+                .any(|code| code.starts_with("change_membership_withdrawal_claim_missing:"))
+        );
+        assert!(
+            projection
+                .diagnostics
+                .iter()
+                .any(|code| code.starts_with("change_relation_withdrawal_claim_missing:"))
+        );
+    }
+
+    #[test]
     fn replacement_divergence_survives_descendants_and_consolidation_resolves_it() {
         let (change_id, declared) = declaration();
         let (a, a_ref, a_event) = revision("a", 'a');
@@ -915,6 +1381,7 @@ mod tests {
         ];
         let view = &project_changes(&events).unwrap().changes[&change_id];
         assert_eq!(view.current_revisions, [b].into());
+        assert!(view.qualified_current_revisions.is_empty());
         assert_eq!(view.lifecycle, ChangeLifecycleV1::InProgress);
     }
 
@@ -979,6 +1446,10 @@ mod tests {
         assert_eq!(
             projection.changes[&change_id].lifecycle,
             ChangeLifecycleV1::Accepted
+        );
+        assert_eq!(
+            projection.changes[&change_id].qualified_current_revisions,
+            [revision_id].into()
         );
     }
 

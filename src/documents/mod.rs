@@ -20,14 +20,19 @@ use crate::session::ProjectionDiagnostic;
 
 mod assessment;
 mod association;
+mod association_comparison;
 mod attention;
 mod capture;
+mod change;
 mod history;
 mod identity;
 mod input_request;
 mod inspect;
 mod observation;
+mod reader_profile;
 mod revision;
+mod revision_interdiff;
+mod revision_resource;
 mod validation;
 mod version;
 mod view;
@@ -40,11 +45,24 @@ pub use association::{
     WithdrawRefBody, associate_commit_document, associate_ref_document, list_associations_document,
     withdraw_commit_document, withdraw_ref_document,
 };
+pub use association_comparison::{
+    ASSOCIATION_COMPARISON_SCHEMA, AssociationComparisonDocumentV1, AssociationComparisonRefV1,
+    AssociationComparisonStateV1, AssociationProofAvailabilityV1,
+};
 pub use attention::{
     ATTENTION_LIST_SCHEMA, AttentionListBody, attention_list_document,
     derived_attention_list_document,
 };
 pub use capture::{CaptureBody, capture_document};
+pub use change::{
+    ATTENTION_LIST_SCHEMA_V2, ChangeAttentionDocumentV2, ChangeClaimWithdrawalV1,
+    ChangeDeclarationStateV1, ChangeDetailDocumentV1, ChangeDetailV1, ChangeDocumentFacadeV1,
+    ChangeListDocumentV1, ChangeMemberRevisionV1, ChangeRevisionCurrencyV1, ChangeRevisionDetailV1,
+    ChangeRevisionDocumentV1, ChangeSummaryV1, FactFamilyStateV1, FactPresentationV1,
+    INSPECT_ATTENTION_SCHEMA_V2, INSPECT_CHANGES_PAGE_SCHEMA, REVIEW_CHANGE_LIST_SCHEMA,
+    REVIEW_CHANGE_REVISION_SCHEMA, REVIEW_CHANGE_SCHEMA, RevisionQualificationV1,
+    UnavailableChangeMemberRevisionV1,
+};
 pub use history::{HistoryBody, derived_history_document, history_document};
 pub use identity::{
     IDENTITY_WHOAMI_SCHEMA, IdentityWhoamiBody, IdentityWhoamiDocument, identity_whoami_document,
@@ -62,9 +80,24 @@ pub use inspect::{
 pub use observation::{
     ObservationAddBody, ObservationListBody, observation_add_document, observation_list_document,
 };
+pub use reader_profile::{
+    ChangeQueryUnavailableDocumentV1, INSPECT_READER_PROFILE_SCHEMA,
+    READER_UPGRADE_REQUIRED_SCHEMA, ReaderProfileAvailabilityV1, ReaderProfileDocumentV1,
+    ReaderUpgradeRequiredDocumentV1, STORE_MIGRATION_IN_PROGRESS_SCHEMA,
+    STORE_MIGRATION_REQUIRED_SCHEMA,
+};
 pub use revision::{
-    RevisionListBody, RevisionShowBody, derived_revision_list_page_document,
+    RevisionListBody, RevisionShowBody, RevisionShowBodyV3, derived_revision_list_page_document,
     revision_list_document, revision_list_page_document, revision_show_document,
+    revision_show_document_v3,
+};
+pub use revision_interdiff::{
+    REVISION_INTERDIFF_SCHEMA, RevisionInterdiffAvailabilityV1, RevisionInterdiffDocumentV1,
+    RevisionInterdiffRefV1,
+};
+pub use revision_resource::{
+    ContentAvailabilityV1, REVISION_RESOURCE_SCHEMA, RevisionResourceAvailabilityV1,
+    RevisionResourceDocumentV1, RevisionResourceProjectionV1, RevisionResourceRefV1,
 };
 pub use validation::{
     ValidationAddBody, ValidationListBody, validation_add_document, validation_list_document,
@@ -126,6 +159,30 @@ const CLI_DOCUMENT_REGISTRY: &[(&str, u32)] = &[
     ("pointbreak.store-unlink", 1),
     (version::VERSION_SCHEMA, 1),
 ];
+
+/// Headless documents reserved by the Change-capable reader cohort. These are
+/// public library contracts but are not advertised as active CLI/Inspector
+/// routes until the later client cutover wires those routes atomically.
+const CHANGE_REVISION_DOCUMENT_REGISTRY: &[(&str, u32)] = &[
+    (INSPECT_READER_PROFILE_SCHEMA, 1),
+    (REVIEW_CHANGE_LIST_SCHEMA, 1),
+    (INSPECT_CHANGES_PAGE_SCHEMA, 1),
+    (REVIEW_CHANGE_SCHEMA, 1),
+    (REVIEW_CHANGE_REVISION_SCHEMA, 1),
+    ("pointbreak.review-revision", 3),
+    (REVISION_RESOURCE_SCHEMA, 1),
+    (ASSOCIATION_COMPARISON_SCHEMA, 1),
+    (REVISION_INTERDIFF_SCHEMA, 1),
+    (ATTENTION_LIST_SCHEMA_V2, 2),
+    (INSPECT_ATTENTION_SCHEMA_V2, 2),
+    (READER_UPGRADE_REQUIRED_SCHEMA, 1),
+    (STORE_MIGRATION_REQUIRED_SCHEMA, 1),
+    (STORE_MIGRATION_IN_PROGRESS_SCHEMA, 1),
+];
+
+pub fn change_revision_document_registry() -> &'static [(&'static str, u32)] {
+    CHANGE_REVISION_DOCUMENT_REGISTRY
+}
 
 pub(crate) fn cli_document_registry() -> &'static [(&'static str, u32)] {
     CLI_DOCUMENT_REGISTRY
@@ -237,6 +294,32 @@ mod tests {
         let mut buf = Vec::new();
         serde_json::to_writer(&mut buf, document).unwrap();
         String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn change_revision_cohort_documents_are_registered_at_frozen_versions() {
+        let registry = super::change_revision_document_registry();
+        for expected in [
+            ("pointbreak.inspect-reader-profile", 1),
+            ("pointbreak.review-change-list", 1),
+            ("pointbreak.inspect-changes-page", 1),
+            ("pointbreak.review-change", 1),
+            ("pointbreak.review-change-revision", 1),
+            ("pointbreak.review-revision", 3),
+            ("pointbreak.review-revision-resource", 1),
+            ("pointbreak.review-association-comparison", 1),
+            ("pointbreak.review-revision-interdiff", 1),
+            ("pointbreak.attention-list", 2),
+            ("pointbreak.inspect-attention", 2),
+            ("pointbreak.reader-upgrade-required", 1),
+            ("pointbreak.store-migration-required", 1),
+            ("pointbreak.store-migration-in-progress", 1),
+        ] {
+            assert!(
+                registry.contains(&expected),
+                "missing frozen document reservation {expected:?}"
+            );
+        }
     }
 
     #[test]
@@ -477,6 +560,47 @@ mod tests {
             row["relatedValidationCheckIds"].as_array().unwrap().len(),
             1
         );
+    }
+
+    #[test]
+    fn revision_show_v3_requires_the_exact_revision_and_artifact_hash() {
+        use crate::documents::revision_show_document_v3;
+        use crate::model::{RevisionId, RevisionRefV1};
+        use crate::session::{
+            CaptureOptions, RevisionShowOptions, capture_worktree_review, show_revision,
+        };
+
+        let repo = modified_repo();
+        let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        let result = show_revision(
+            RevisionShowOptions::new(repo.path()).with_revision_id(capture.revision_id.clone()),
+        )
+        .unwrap();
+        let artifact_hash = result.revision.object_artifact_content_hash.clone();
+        let wrong_revision = RevisionRefV1::new(
+            RevisionId::new("rev:sha256:substituted"),
+            artifact_hash.clone(),
+        )
+        .unwrap();
+        assert!(revision_show_document_v3(result, wrong_revision, Vec::new()).is_err());
+
+        let result = show_revision(
+            RevisionShowOptions::new(repo.path()).with_revision_id(capture.revision_id.clone()),
+        )
+        .unwrap();
+        let wrong_hash = RevisionRefV1::new(
+            capture.revision_id.clone(),
+            format!("sha256:{}", "f".repeat(64)),
+        )
+        .unwrap();
+        assert!(revision_show_document_v3(result, wrong_hash, Vec::new()).is_err());
+
+        let result = show_revision(
+            RevisionShowOptions::new(repo.path()).with_revision_id(capture.revision_id.clone()),
+        )
+        .unwrap();
+        let exact = RevisionRefV1::new(capture.revision_id, artifact_hash).unwrap();
+        assert!(revision_show_document_v3(result, exact, Vec::new()).is_ok());
     }
 
     fn validation_view() -> crate::session::ValidationCheckView {

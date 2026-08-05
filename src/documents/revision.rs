@@ -5,12 +5,13 @@ use crate::documents::{
     AssessmentViewDocument, CurrentAssessmentDocument, DiagnosticDocument,
     InputRequestViewDocument, ObservationViewDocument, ValidationCheckViewDocument,
 };
-use crate::model::{EventId, ReviewTargetRef};
+use crate::model::{EventId, ReviewTargetRef, RevisionRefV1};
 use crate::session::{
-    CurrentCommitAssociation, CurrentRefAssociation, EndorsementReadback, EventVerificationStatus,
-    MemberReadback, RevisionCommitRangeView, RevisionListEntry, RevisionListResult,
-    RevisionProjectionIdentity, RevisionProjectionRow, RevisionProjectionSummary,
-    RevisionShowFilters, RevisionShowResult, WithdrawnCommitAssociation, WithdrawnRefAssociation,
+    ChangeMembershipClaimViewV1, CurrentCommitAssociation, CurrentRefAssociation,
+    EndorsementReadback, EventVerificationStatus, MemberReadback, RevisionCommitRangeView,
+    RevisionListEntry, RevisionListResult, RevisionProjectionIdentity, RevisionProjectionRow,
+    RevisionProjectionSummary, RevisionShowFilters, RevisionShowResult, WithdrawnCommitAssociation,
+    WithdrawnRefAssociation,
 };
 
 /// Documented body for `pointbreak.review-revision`.
@@ -29,6 +30,17 @@ pub struct RevisionShowBody {
     validation_checks: Vec<ValidationCheckViewDocument>,
     rows: Vec<RevisionProjectionRowDocument>,
     commit_range: CommitRangeDocument,
+}
+
+/// Context-free exact Revision document for the Change-capable reader cohort.
+/// Membership is complete but currency requires a named Change context.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevisionShowBodyV3 {
+    revision_ref: RevisionRefV1,
+    change_memberships: Vec<ChangeMembershipClaimViewV1>,
+    change_currency: &'static str,
+    exact_revision: RevisionShowBody,
 }
 
 /// Documented body for `pointbreak.review-revision-list`.
@@ -153,54 +165,82 @@ struct SnapshotOrderDocument {
 }
 
 /// Build the `pointbreak.review-revision` composite document from a show result.
-pub fn revision_show_document(
+pub fn revision_show_document(result: RevisionShowResult) -> DiagnosticDocument<RevisionShowBody> {
+    let (body, diagnostics) = revision_show_parts(result);
+    // Version 2 remains the historical pre-Change document. Capable callers
+    // use `revision_show_document_v3` and never infer one scalar Change.
+    DiagnosticDocument::with_version("pointbreak.review-revision", 2, body, diagnostics)
+}
+
+/// Build the Change-capable context-free exact Revision document.
+pub fn revision_show_document_v3(
+    result: RevisionShowResult,
+    revision_ref: RevisionRefV1,
+    change_memberships: Vec<ChangeMembershipClaimViewV1>,
+) -> crate::error::Result<DiagnosticDocument<RevisionShowBodyV3>> {
+    if result.revision.revision_id != revision_ref.revision_id
+        || result.revision.object_artifact_content_hash != revision_ref.object_artifact_content_hash
+    {
+        return Err(crate::error::ShoreError::Message(
+            "context-free Revision document requires an exact matching RevisionRefV1".to_owned(),
+        ));
+    }
+    let (exact_revision, diagnostics) = revision_show_parts(result);
+    Ok(DiagnosticDocument::with_version(
+        "pointbreak.review-revision",
+        3,
+        RevisionShowBodyV3 {
+            revision_ref,
+            change_memberships,
+            change_currency: "requires_change_context",
+            exact_revision,
+        },
+        diagnostics,
+    ))
+}
+
+fn revision_show_parts(
     mut result: RevisionShowResult,
-) -> DiagnosticDocument<RevisionShowBody> {
+) -> (RevisionShowBody, Vec<crate::session::ProjectionDiagnostic>) {
     // The readback side table is keyed by event id; attach it to each member and to
     // the capture identity at the document layer. Take it out before the by-value
     // moves below.
     let readbacks = std::mem::take(&mut result.member_readbacks);
-    // Version 2: the adapterNotes/adapterNoteCount fields left the document when
-    // the imported-notes pipeline retired (soft-shell removal, ADR-0029 D7).
-    DiagnosticDocument::with_version(
-        "pointbreak.review-revision",
-        2,
-        RevisionShowBody {
-            event_set_hash: result.event_set_hash,
-            event_count: result.event_count,
-            revision: ShowRevisionDocument::from(result.revision).with_readback(&readbacks),
-            filters: RevisionShowFiltersDocument::from(result.filters),
-            summary: RevisionShowSummaryDocument::from(result.summary),
-            current_assessment: CurrentAssessmentDocument::from(result.current_assessment),
-            observations: result
-                .observations
-                .into_iter()
-                .map(|view| ObservationViewDocument::from(view).with_readback(&readbacks))
-                .collect(),
-            input_requests: result
-                .input_requests
-                .into_iter()
-                .map(|view| InputRequestViewDocument::from(view).with_readback(&readbacks))
-                .collect(),
-            assessments: result
-                .assessments
-                .into_iter()
-                .map(|view| AssessmentViewDocument::from(view).with_readback(&readbacks))
-                .collect(),
-            validation_checks: result
-                .validation_checks
-                .into_iter()
-                .map(|view| ValidationCheckViewDocument::from(view).with_readback(&readbacks))
-                .collect(),
-            rows: result
-                .rows
-                .into_iter()
-                .map(RevisionProjectionRowDocument::from)
-                .collect(),
-            commit_range: CommitRangeDocument::from(result.commit_range),
-        },
-        result.diagnostics,
-    )
+    let body = RevisionShowBody {
+        event_set_hash: result.event_set_hash,
+        event_count: result.event_count,
+        revision: ShowRevisionDocument::from(result.revision).with_readback(&readbacks),
+        filters: RevisionShowFiltersDocument::from(result.filters),
+        summary: RevisionShowSummaryDocument::from(result.summary),
+        current_assessment: CurrentAssessmentDocument::from(result.current_assessment),
+        observations: result
+            .observations
+            .into_iter()
+            .map(|view| ObservationViewDocument::from(view).with_readback(&readbacks))
+            .collect(),
+        input_requests: result
+            .input_requests
+            .into_iter()
+            .map(|view| InputRequestViewDocument::from(view).with_readback(&readbacks))
+            .collect(),
+        assessments: result
+            .assessments
+            .into_iter()
+            .map(|view| AssessmentViewDocument::from(view).with_readback(&readbacks))
+            .collect(),
+        validation_checks: result
+            .validation_checks
+            .into_iter()
+            .map(|view| ValidationCheckViewDocument::from(view).with_readback(&readbacks))
+            .collect(),
+        rows: result
+            .rows
+            .into_iter()
+            .map(RevisionProjectionRowDocument::from)
+            .collect(),
+        commit_range: CommitRangeDocument::from(result.commit_range),
+    };
+    (body, result.diagnostics)
 }
 
 /// Build the `pointbreak.review-revision-list` document from a list result.

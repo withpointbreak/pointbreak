@@ -178,7 +178,18 @@ mod tests {
             .iter()
             .map(|(schema, _)| (*schema).to_owned())
             .collect::<BTreeSet<_>>();
-        assert_eq!(emitted, cli_registered);
+        let headless_noninspect = crate::documents::change_revision_document_registry()
+            .iter()
+            .map(|(schema, _)| (*schema).to_owned())
+            .filter(|schema| !schema.starts_with("pointbreak.inspect-"))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            emitted,
+            cli_registered
+                .union(&headless_noninspect)
+                .cloned()
+                .collect()
+        );
 
         let promoted = crate::documents::promoted_inspect_document_registry()
             .iter()

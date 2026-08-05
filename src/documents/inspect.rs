@@ -19,6 +19,9 @@ use crate::session::ObjectArtifact;
 pub const REVIEW_SNAPSHOT_SCHEMA: &str = "pointbreak.review-snapshot";
 pub const INSPECT_FRESHNESS_SCHEMA: &str = "pointbreak.inspect-freshness";
 pub const INSPECT_STARTUP_SCHEMA: &str = "pointbreak.inspect-startup";
+pub const INSPECT_READER_PROFILE_SCHEMA: &str = "pointbreak.inspect-reader-profile";
+pub const INSPECT_CHANGES_PAGE_SCHEMA: &str = "pointbreak.inspect-changes-page";
+pub const INSPECT_ATTENTION_SCHEMA_V2: &str = "pointbreak.inspect-attention";
 
 const PROMOTED_INSPECT_DOCUMENTS: [(&str, u32); 3] = [
     (REVIEW_SNAPSHOT_SCHEMA, 1),

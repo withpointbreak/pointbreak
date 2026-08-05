@@ -63,14 +63,17 @@ pub use projection::cosignature::{
 };
 pub(crate) use projection::state;
 pub use projection::{
-    ArtifactRemovalProjection, BodyContentState, ChangeLifecycleV1, ChangeLinkView,
-    ChangeProjection, ChangeTopologyV1, ChangeView, CommitEdgeSource, CommitOidGroupingProjection,
-    CurrentCommitAssociation, CurrentRefAssociation, EngagementGrouping, EngagementLifecycle,
-    EngagementView, LivenessScope, LivenessToken, ProjectionDiagnostic, RemovalClaim,
-    RemovalOperativeStatus, RevisionClassificationFacet, RevisionCommitRangeProjection,
-    RevisionCommitRangeView, RevisionsByBase, SessionState, StoreIdIndex, SupersessionView,
-    WithdrawnCommitAssociation, WithdrawnRefAssociation, project_changes, read_events,
-    read_events_for_display, rebuild_state, revision_supersession_classification, store_id_index,
+    ArtifactRemovalProjection, BodyContentState, ChangeClaimSupportV1, ChangeDocumentProjectionV1,
+    ChangeLifecycleV1, ChangeLinkView, ChangeMembershipClaimViewV1, ChangeProjection,
+    ChangeRelationClaimViewV1, ChangeTopologyV1, ChangeView, CommitEdgeSource,
+    CommitOidGroupingProjection, CurrentCommitAssociation, CurrentRefAssociation,
+    EngagementGrouping, EngagementLifecycle, EngagementView, LivenessScope, LivenessToken,
+    ProjectionDiagnostic, RemovalClaim, RemovalOperativeStatus, RevisionClassificationFacet,
+    RevisionCommitRangeProjection, RevisionCommitRangeView, RevisionRefUnavailableReasonV1,
+    RevisionsByBase, SessionState, StoreIdIndex, SupersessionView, WithdrawnCommitAssociation,
+    WithdrawnRefAssociation, change_document_projection_stamp, project_change_documents,
+    project_changes, read_events, read_events_for_display, rebuild_state,
+    revision_supersession_classification, store_id_index,
 };
 pub use sensitivity_vocabulary::{SensitivityKind, SensitivityPolicyOutcome, SensitivitySeverity};
 pub use signing::{
@@ -87,6 +90,8 @@ pub(crate) use signing::{sign_event_if_requested, verify_events_for_ingest};
 pub(crate) use store::backend::{
     Journal, JournalChangeCheck, JournalChangeStamp, JournalChangeVerdict, LocalJournal,
 };
+#[cfg(test)]
+pub(crate) use store::capabilities::AUTHORITY_CURSOR_SCHEMA_V2;
 #[cfg(test)]
 pub(crate) use store::compute_revision_fingerprint;
 #[cfg(feature = "longitudinal-counting")]
@@ -112,24 +117,26 @@ pub use workflow::{
     AttentionFreshness, AttentionFreshnessState, AttentionItem, AttentionListOptions,
     AttentionListResult, AttentionProjection, AttentionTier, BaseEntry, BaseHistoryProjection,
     BaseProjectionConfig, CaptureDiffstat, CaptureOptions, CaptureResult, CommitGraphCondition,
-    CommitLiveness, CommitRangeSpec, CompactOptions, CompactResult, CurrentAssessmentStatus,
-    CurrentAssessmentView, DistinctValues, EVENT_QUERY_FIELDS, EventRecordExtras,
-    EventSignatureRecordOptions, EventSignatureRecordResult, HistoryCursor, HistoryOrder,
-    HistoryPage, HistoryQuery, ImportArtifactOptions, ImportArtifactOutcome, ImportArtifactResult,
-    ImportEventOptions, IngestEventsOptions, IngestEventsResult, InputRequestFetchOptions,
-    InputRequestFetchResult, InputRequestListOptions, InputRequestListResult,
-    InputRequestOpenOptions, InputRequestOpenResult, InputRequestRespondOptions,
-    InputRequestRespondResult, InputRequestResponseView, InputRequestStatus,
-    InputRequestStatusFilter, InputRequestTargetSelector, InputRequestView, KNOWN_QUERY_KEYS,
-    ListAssociationsOptions, ListAssociationsResult, LivenessEnrichment, MemberReadback,
-    MigrateToCommonDirOptions, MigrateToCommonDirResult, ObservationAddOptions,
+    CommitLiveness, CommitProofStateV1, CommitRangeSpec, CommitSourceStateV1, CompactOptions,
+    CompactResult, CurrentAssessmentStatus, CurrentAssessmentView, DistinctValues,
+    EVENT_QUERY_FIELDS, EventRecordExtras, EventSignatureRecordOptions, EventSignatureRecordResult,
+    HistoryCursor, HistoryOrder, HistoryPage, HistoryQuery, ImportArtifactOptions,
+    ImportArtifactOutcome, ImportArtifactResult, ImportEventOptions, IngestEventsOptions,
+    IngestEventsResult, InputRequestFetchOptions, InputRequestFetchResult, InputRequestListOptions,
+    InputRequestListResult, InputRequestOpenOptions, InputRequestOpenResult,
+    InputRequestRespondOptions, InputRequestRespondResult, InputRequestResponseView,
+    InputRequestStatus, InputRequestStatusFilter, InputRequestTargetSelector, InputRequestView,
+    KNOWN_QUERY_KEYS, ListAssociationsOptions, ListAssociationsResult, LivenessEnrichment,
+    MemberReadback, MigrateToCommonDirOptions, MigrateToCommonDirResult, ObservationAddOptions,
     ObservationAddResult, ObservationListOptions, ObservationListResult, ObservationStatus,
     ObservationTargetSelector, ObservationView, ParsedQuery, QueriedHistory, QueryClause,
     QueryDiagnostic, QueryDiagnosticCode, QuerySurface, RANGE_ANCHOR_FIELD, REF_REWRITTEN_CODE,
-    REVISION_ATTENTION_VALUES, REVISION_QUERY_FIELDS, RefContinuity, RefContinuityReport,
-    RefContinuityView, RefFilterMode, RemoveOptions, RemoveResult, RemoveSelector, RemovedContent,
-    Retention, ReviewHistoryEntry, ReviewHistoryFilters, ReviewHistoryOptions, ReviewHistoryResult,
-    ReviewHistorySummary, RevisionListEntry, RevisionListOptions, RevisionListResult,
+    REVIEW_CURSOR_SCHEMA_V1, REVISION_ATTENTION_VALUES, REVISION_QUERY_FIELDS, RefContinuity,
+    RefContinuityReport, RefContinuityView, RefFilterMode, RemoveOptions, RemoveResult,
+    RemoveSelector, RemovedContent, Retention, ReviewCursorRefusalV1, ReviewCursorSelectionV1,
+    ReviewCursorV1, ReviewHistoryEntry, ReviewHistoryFilters, ReviewHistoryOptions,
+    ReviewHistoryResult, ReviewHistorySummary, ReviewSourceBindingV1, ReviewSourceFingerprintV1,
+    ReviewSourcePathStateV1, RevisionListEntry, RevisionListOptions, RevisionListResult,
     RevisionOverview, RevisionOverviewsOptions, RevisionProjectionIdentity, RevisionProjectionRow,
     RevisionProjectionSummary, RevisionRecordInputs, RevisionSearchRecord, RevisionShowFilters,
     RevisionShowOptions, RevisionShowResult, RootCommitSpec, SearchRecord, SkippedRemoval,
@@ -143,10 +150,11 @@ pub use workflow::{
     ValidationAddOptions, ValidationAddResult, ValidationCheckDisposition, ValidationCheckView,
     ValidationContinuitySummary, ValidationContinuityView, ValidationListFilters,
     ValidationListOptions, ValidationListResult, WithdrawCommitOptions, WithdrawCommitResult,
-    WithdrawRefOptions, WithdrawRefResult, WorktreeSpec, apply_history_query, associate_commit,
-    associate_ref, build_haystack, build_revision_search_record, capture_review,
-    capture_worktree_review, classify_validation_continuity, commit_graph_stamp, compact_store,
-    count_new_since, current_assessment_includes_follow_up, default_history_page_projection,
+    WithdrawRefOptions, WithdrawRefResult, WorktreeSourceStateV1, WorktreeSpec,
+    apply_history_query, associate_commit, associate_ref, build_haystack,
+    build_revision_search_record, capture_review, capture_worktree_review, change_graph_token,
+    classify_validation_continuity, commit_graph_stamp, compact_store, count_new_since,
+    current_assessment_includes_follow_up, default_history_page_projection,
     diagnose_ref_continuity, diffstat_from_files, effective_integration_ref, enrich_liveness,
     explain_store_sensitivity, export_artifact, fetch_input_request, forget_family_store,
     history_base_projection, import_artifact, import_event, ingest_events, link_store_to_family,
@@ -155,10 +163,10 @@ pub use workflow::{
     migrate_store_to_common_dir, open_input_request, parse_search_query, parse_search_query_for,
     preview_link_to_family, record_assessment, record_event_signature, record_observation,
     record_validation_check, redact_history_bodies, referenced_artifacts, remove_content,
-    resolve_default_integration_ref, respond_input_request, review_history, show_assessments,
-    show_revision, show_revision_for_inspector, show_revision_overviews, stale_review_fact_count,
-    store_identity, store_status, unlink_store_from_family, validated_track_id, withdraw_commit,
-    withdraw_ref,
+    resolve_default_integration_ref, respond_input_request, review_history, select_review_cursor,
+    show_assessments, show_revision, show_revision_for_inspector, show_revision_overviews,
+    stale_review_fact_count, store_identity, store_status, unlink_store_from_family,
+    validate_review_cursor_for_write, validated_track_id, withdraw_commit, withdraw_ref,
 };
 pub(in crate::session) use workflow::{assessment, input_request, observation};
 #[cfg(any(test, feature = "bench"))]
