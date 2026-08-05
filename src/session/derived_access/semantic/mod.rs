@@ -17,8 +17,12 @@ use crate::session::event::{
     ShoreEvent, ValidationCheckRecordedPayload, WorkObjectProposal, WorkObjectProposedPayload,
     decode_input_request_opened_payload,
 };
+use crate::session::projection::change::{
+    ChangeProjectionFact, extract_change_projection_fact, project_changes_from_facts,
+};
 
 pub(crate) mod attention;
+pub(crate) mod change;
 pub(crate) mod revision;
 pub(crate) mod state;
 pub(crate) mod thread;
@@ -131,6 +135,7 @@ pub(crate) struct SemanticFact {
     pub(crate) actor_id: String,
     pub(crate) validation_witness: String,
     pub(crate) kind: SemanticFactKind,
+    pub(crate) change: Option<ChangeProjectionFact>,
 }
 
 impl SemanticFact {
@@ -152,6 +157,7 @@ impl SemanticFact {
         }
 
         let classified = classify_event(event)?;
+        let change = extract_change_projection_fact(event)?;
         Ok(Self {
             cursor,
             logical_reread_key: event.idempotency_key.clone(),
@@ -173,6 +179,7 @@ impl SemanticFact {
             actor_id: event.writer.actor_id.as_str().to_owned(),
             validation_witness,
             kind: classified.kind,
+            change,
         })
     }
 }
@@ -185,6 +192,7 @@ pub(crate) struct SemanticSnapshot {
     pub(crate) threads: serde_json::Value,
     pub(crate) attention: AttentionSemanticSnapshot,
     pub(crate) removed_content: BTreeSet<String>,
+    pub(crate) changes: crate::session::ChangeProjection,
     pub(crate) semantic_receipt: String,
 }
 
@@ -211,7 +219,16 @@ impl SemanticSnapshot {
                 .claimed_hashes()
                 .map(str::to_owned)
                 .collect();
-        Self::finish(as_of, state, revisions, threads, attention, removed_content)
+        let changes = crate::session::project_changes(events)?;
+        Self::finish(
+            as_of,
+            state,
+            revisions,
+            threads,
+            attention,
+            removed_content,
+            changes,
+        )
     }
 
     /// Exact differential audit over compact facts.
@@ -242,7 +259,16 @@ impl SemanticSnapshot {
                 _ => None,
             })
             .collect();
-        Self::finish(as_of, state, revisions, threads, attention, removed_content)
+        let changes = change_projection_from_facts(facts)?;
+        Self::finish(
+            as_of,
+            state,
+            revisions,
+            threads,
+            attention,
+            removed_content,
+            changes,
+        )
     }
 
     /// Ordinary-operation assembly over incrementally maintained current rows.
@@ -256,6 +282,20 @@ impl SemanticSnapshot {
         state: SemanticStateSnapshot,
         facts: &[SemanticFact],
     ) -> Result<Self, SemanticModelError> {
+        let changes = change_projection_from_facts(facts)?;
+        Self::from_materialized_with_changes(as_of, state, facts, changes)
+    }
+
+    /// Assemble a scoped materialized response while retaining the store-wide
+    /// Change projection. Change identity and topology span engagements; they
+    /// must not make unrelated revision/thread facts visible in the scoped
+    /// response merely because the same compact row contributes to Change.
+    pub(crate) fn from_materialized_with_changes(
+        as_of: TruthCursor,
+        state: SemanticStateSnapshot,
+        facts: &[SemanticFact],
+        changes: crate::session::ChangeProjection,
+    ) -> Result<Self, SemanticModelError> {
         let revisions = revision_documents_from_facts(facts)?;
         let threads = thread_documents_from_facts(facts)?;
         let attention = AttentionSemanticSnapshot::from_facts(facts)?;
@@ -266,7 +306,15 @@ impl SemanticSnapshot {
                 _ => None,
             })
             .collect();
-        Self::finish(as_of, state, revisions, threads, attention, removed_content)
+        Self::finish(
+            as_of,
+            state,
+            revisions,
+            threads,
+            attention,
+            removed_content,
+            changes,
+        )
     }
 
     /// Strict full replay projected onto the ordinary-operation shape.
@@ -284,7 +332,16 @@ impl SemanticSnapshot {
                 .claimed_hashes()
                 .map(str::to_owned)
                 .collect();
-        Self::finish(as_of, state, revisions, threads, attention, removed_content)
+        let changes = crate::session::project_changes(events)?;
+        Self::finish(
+            as_of,
+            state,
+            revisions,
+            threads,
+            attention,
+            removed_content,
+            changes,
+        )
     }
 
     /// Strict full replay projected onto one selected engagement.
@@ -363,7 +420,16 @@ impl SemanticSnapshot {
                 .claimed_hashes()
                 .map(str::to_owned)
                 .collect();
-        Self::finish(as_of, state, revisions, threads, attention, removed_content)
+        let changes = crate::session::project_changes(events)?;
+        Self::finish(
+            as_of,
+            state,
+            revisions,
+            threads,
+            attention,
+            removed_content,
+            changes,
+        )
     }
 
     fn finish(
@@ -373,6 +439,7 @@ impl SemanticSnapshot {
         threads: serde_json::Value,
         attention: AttentionSemanticSnapshot,
         removed_content: BTreeSet<String>,
+        changes: crate::session::ChangeProjection,
     ) -> Result<Self, SemanticModelError> {
         #[derive(Serialize)]
         #[serde(rename_all = "camelCase")]
@@ -384,6 +451,7 @@ impl SemanticSnapshot {
             threads: &'a serde_json::Value,
             attention: &'a AttentionSemanticSnapshot,
             removed_content: &'a BTreeSet<String>,
+            changes: &'a crate::session::ChangeProjection,
         }
         let semantic_receipt = sha256_json_prefixed(&serde_json::to_value(ReceiptMaterial {
             epoch: as_of.epoch,
@@ -393,6 +461,7 @@ impl SemanticSnapshot {
             threads: &threads,
             attention: &attention,
             removed_content: &removed_content,
+            changes: &changes,
         })?)?;
 
         Ok(Self {
@@ -402,9 +471,20 @@ impl SemanticSnapshot {
             threads,
             attention,
             removed_content,
+            changes,
             semantic_receipt,
         })
     }
+}
+
+fn change_projection_from_facts(
+    facts: &[SemanticFact],
+) -> Result<crate::session::ChangeProjection, SemanticModelError> {
+    let compact = facts
+        .iter()
+        .filter_map(|fact| fact.change.clone())
+        .collect::<Vec<_>>();
+    Ok(project_changes_from_facts(&compact)?)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

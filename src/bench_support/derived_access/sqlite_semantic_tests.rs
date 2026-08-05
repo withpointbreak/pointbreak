@@ -6,10 +6,11 @@ use crate::bench_support::derived_access::sqlite_cursor::{
 use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
 use crate::crypto::SignerId;
 use crate::model::{
-    AssessmentId, CheckpointId, EngagementId, InputRequestId, InputRequestResponseId, JournalId,
-    ObjectId, ObservationId, ReviewEndpoint, ReviewTargetRef, RevisionId, RevisionSource,
-    TargetRef, TaskTargetRef, TrackId, ValidationCheckId, ValidationStatus, ValidationTarget,
-    ValidationTrigger, WorkObjectId, WorkObjectType, WorktreeCaptureMode,
+    AssessmentId, ChangeIdentityDescriptorV1, CheckpointId, EngagementId, InputRequestId,
+    InputRequestResponseId, JournalId, ObjectId, ObservationId, ReviewEndpoint, ReviewTargetRef,
+    RevisionId, RevisionSource, TargetRef, TaskTargetRef, TrackId, ValidationCheckId,
+    ValidationStatus, ValidationTarget, ValidationTrigger, WorkObjectId, WorkObjectType,
+    WorktreeCaptureMode,
 };
 use crate::session::EventStore;
 use crate::session::derived_access::cursor::{AppendResolution, TruthCursor};
@@ -19,14 +20,16 @@ use crate::session::derived_access::oracle::{
     strict_bodyless_semantic_snapshot,
 };
 use crate::session::event::{
-    ArtifactRemovedPayload, BodyContentType, EventSignature, EventSignatureRecordedPayload,
-    EventTarget, EventType, GitProvenance, InputRequestOpenedPayload, InputRequestReasonCode,
-    InputRequestRespondedPayload, InputRequestResponseOutcome, ReviewAssessment,
-    ReviewAssessmentRecordedPayload, ReviewInitializedPayload, ReviewObservationRecordedPayload,
-    Revision, RevisionCommitAssociatedPayload, RevisionCommitWithdrawnPayload,
-    RevisionRefAssociatedPayload, RevisionRefWithdrawnPayload, ShoreEvent,
-    TaskCheckpointCapturedPayload, TaskObservationRecordedPayload, ValidationCheckRecordedPayload,
-    WorkObjectProposal, WorkObjectProposedPayload, Writer,
+    ArtifactRemovedPayload, BodyContentType, EventPayload, EventSignature,
+    EventSignatureRecordedPayload, EventTarget, EventType, GitProvenance,
+    InputRequestOpenedPayload, InputRequestReasonCode, InputRequestRespondedPayload,
+    InputRequestResponseOutcome, ReviewAssessment, ReviewAssessmentRecordedPayload,
+    ReviewInitializedPayload, ReviewObservationRecordedPayload, Revision,
+    RevisionCommitAssociatedPayload, RevisionCommitWithdrawnPayload, RevisionRefAssociatedPayload,
+    RevisionRefWithdrawnPayload, ShoreEvent, TaskCheckpointCapturedPayload,
+    TaskObservationRecordedPayload, ValidationCheckRecordedPayload, WorkObjectProposal,
+    WorkObjectProposedPayload, Writer, build_change_declared, build_membership_asserted,
+    build_membership_withdrawn,
 };
 
 const STORE_ID: &str = "store:semantic-test";
@@ -571,6 +574,129 @@ fn required_schedule() -> Vec<ShoreEvent> {
     events
 }
 
+fn change_schedule() -> Vec<ShoreEvent> {
+    let revision = revision_id("change-member");
+    let descriptor = ChangeIdentityDescriptorV1::opaque_nonce([41; 32]);
+    let declaration = build_change_declared(descriptor, [42; 32]).unwrap();
+    let membership =
+        build_membership_asserted(&declaration.change_id, &revision, [43; 32]).unwrap();
+    let withdrawal = build_membership_withdrawn(&membership.membership_claim_id, [44; 32]).unwrap();
+    let assessment_id = "assess:sha256:change-duplicate";
+    vec![
+        revision_event_for_engagement(
+            "change-member",
+            Vec::new(),
+            "2026-08-04T00:00:00Z",
+            ENGAGEMENT,
+        ),
+        change_event(1, declaration),
+        change_event(2, membership),
+        assessment_event(
+            &revision,
+            "change-assessment-first",
+            assessment_id,
+            ReviewAssessment::Accepted,
+            Vec::new(),
+            Some("PRIVATE CHANGE ASSESSMENT SUMMARY"),
+            "2026-08-04T00:00:03Z",
+        ),
+        assessment_event(
+            &revision,
+            "change-assessment-second",
+            assessment_id,
+            ReviewAssessment::Accepted,
+            Vec::new(),
+            None,
+            "2026-08-04T00:00:04Z",
+        ),
+        change_event(5, withdrawal),
+    ]
+}
+
+fn change_event<P: EventPayload>(index: usize, payload: P) -> ShoreEvent {
+    ShoreEvent::new(
+        payload.event_type(),
+        format!("change-semantic:{index}"),
+        EventTarget::for_journal(JournalId::new(JOURNAL)),
+        Writer::shore_local("0.9.0"),
+        payload,
+        format!("2026-08-04T00:00:{index:02}Z"),
+    )
+    .unwrap()
+}
+
+#[test]
+fn sqlite_change_facts_match_strict_replay_without_storing_event_bodies() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let schedule = change_schedule();
+    let mut stored = Vec::new();
+
+    for (attempt, event) in schedule.iter().enumerate() {
+        append(&adapter, event, attempt);
+        stored.push(event.clone());
+        let candidate = ready(adapter.semantic_audit_snapshot().expect("Change audit"));
+        let materialized = ready(
+            adapter
+                .semantic_materialized_audit_snapshot()
+                .expect("materialized Change audit"),
+        );
+        assert_eq!(
+            candidate,
+            strict_bodyless_semantic_snapshot(&stored).unwrap()
+        );
+        assert_eq!(
+            materialized,
+            strict_bodyless_materialized_snapshot(&stored).unwrap()
+        );
+    }
+
+    let final_snapshot = ready(adapter.semantic_audit_snapshot().unwrap());
+    assert_eq!(final_snapshot.changes.changes.len(), 1);
+    assert!(
+        !std::fs::read(derived_database(root.path()))
+            .unwrap()
+            .windows(b"PRIVATE CHANGE ASSESSMENT SUMMARY".len())
+            .any(|window| window == b"PRIVATE CHANGE ASSESSMENT SUMMARY"),
+        "the SQLite carrier retains compact facts, not public event envelopes"
+    );
+}
+
+#[test]
+fn selected_engagement_retains_store_wide_change_semantics() {
+    let root = tempfile::tempdir().expect("root");
+    let adapter = open_adapter(root.path());
+    let mut schedule = change_schedule();
+    let other_revision = revision_id("other-change-member");
+    let other_declaration =
+        build_change_declared(ChangeIdentityDescriptorV1::opaque_nonce([51; 32]), [52; 32])
+            .unwrap();
+    let other_membership =
+        build_membership_asserted(&other_declaration.change_id, &other_revision, [53; 32]).unwrap();
+    schedule.extend([
+        revision_event_for_engagement(
+            "other-change-member",
+            Vec::new(),
+            "2026-08-04T00:01:00Z",
+            "engagement:sha256:other-change",
+        ),
+        change_event(11, other_declaration),
+        change_event(12, other_membership),
+    ]);
+    for (attempt, event) in schedule.iter().enumerate() {
+        append(&adapter, event, attempt);
+    }
+
+    let selected = ready(
+        adapter
+            .semantic_materialized_engagement_snapshot(ENGAGEMENT)
+            .unwrap(),
+    );
+    let strict = strict_bodyless_materialized_engagement_snapshot(&schedule, ENGAGEMENT).unwrap();
+    assert_eq!(selected, strict);
+    assert_eq!(selected.changes.changes.len(), 2);
+}
+
 #[test]
 fn incremental_semantic_snapshot_equals_strict_full_replay_after_every_prefix() {
     let root = tempfile::tempdir().expect("root");
@@ -969,7 +1095,7 @@ fn append_restart_and_selected_detail_do_not_rebuild_full_projections() {
         inventory.profile_id,
         "pointbreak.sqlite-derived-access-semantic.v1"
     );
-    assert_eq!(inventory.schema_version, 5);
+    assert_eq!(inventory.schema_version, 7);
     assert_eq!(inventory.fact_count, 1);
     assert_eq!(inventory.retained_body_object_bytes, 0);
     assert_eq!(
@@ -977,6 +1103,7 @@ fn append_restart_and_selected_detail_do_not_rebuild_full_projections() {
         vec![
             "semantic_actor",
             "semantic_assessment_fact",
+            "semantic_change_fact",
             "semantic_commit_association_fact",
             "semantic_commit_withdrawal_fact",
             "semantic_duplicate_projection",

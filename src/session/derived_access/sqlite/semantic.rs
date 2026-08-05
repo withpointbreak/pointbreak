@@ -24,11 +24,12 @@ use crate::session::event::{
     EventSignatureRecordedPayload, EventType, ReviewObservationRecordedPayload, ShoreEvent,
     WorkObjectProposal, WorkObjectProposedPayload,
 };
+use crate::session::projection::change::{ChangeProjectionFact, project_changes_from_facts};
 use crate::session::workflow::tag_completion_key;
 use crate::session::{EventStore, parse_event_instant};
 
 const SEMANTIC_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-semantic.v1";
-const SEMANTIC_SCHEMA_VERSION: i64 = 5;
+const SEMANTIC_SCHEMA_VERSION: i64 = 7;
 const PRODUCT_HISTORY_PROFILE_ID: &str = "pointbreak.sqlite-derived-access-history.v1";
 const PRODUCT_HISTORY_SCHEMA_VERSION: i64 = 3;
 
@@ -225,7 +226,7 @@ impl SqliteSemantic {
                 "CREATE TABLE IF NOT EXISTS semantic_meta (
                      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                      profile_id TEXT NOT NULL,
-                     schema_version INTEGER NOT NULL CHECK (schema_version = 5),
+                     schema_version INTEGER NOT NULL CHECK (schema_version = 7),
                      epoch INTEGER NOT NULL CHECK (epoch > 0),
                      applied_sequence INTEGER NOT NULL CHECK (applied_sequence >= 0)
                  ) STRICT;
@@ -321,8 +322,12 @@ impl SqliteSemantic {
                      sequence INTEGER PRIMARY KEY REFERENCES semantic_event_fact(sequence),
                      association_id TEXT NOT NULL
                  ) STRICT;
+                 CREATE TABLE IF NOT EXISTS semantic_change_fact (
+                     sequence INTEGER PRIMARY KEY REFERENCES semantic_event_fact(sequence),
+                     fact_json TEXT NOT NULL
+                 ) STRICT;
                  CREATE TABLE IF NOT EXISTS semantic_representative (
-                     family_id INTEGER NOT NULL CHECK (family_id BETWEEN 1 AND 11),
+                     family_id INTEGER NOT NULL CHECK (family_id BETWEEN 1 AND 12),
                      semantic_key_prefix_id INTEGER
                          REFERENCES semantic_identity_prefix(id),
                      semantic_key_digest BLOB CHECK (length(semantic_key_digest) = 32),
@@ -359,6 +364,7 @@ impl SqliteSemantic {
                             WHEN 9 THEN 'ref_association'
                             WHEN 10 THEN 'ref_withdrawal'
                             WHEN 11 THEN 'removal'
+                            WHEN 12 THEN 'change_record'
                         END AS family,
                         coalesce(
                             representative.semantic_key_raw,
@@ -788,9 +794,11 @@ impl SqliteSemantic {
             Some(engagement_id),
             MaterializedFactFamilies::AllExceptObservations,
         )?);
-        Ok(LocatorRead::Ready(SemanticSnapshot::from_materialized(
-            observed, state, &facts,
-        )?))
+        let changes =
+            query_materialized_change_projection(&connection, observed.epoch, observed.sequence)?;
+        Ok(LocatorRead::Ready(
+            SemanticSnapshot::from_materialized_with_changes(observed, state, &facts, changes)?,
+        ))
     }
 
     pub(crate) fn facts_for_revision_hydrated(
@@ -1188,6 +1196,16 @@ fn insert_family_fact(
     fact: &SemanticFact,
 ) -> Result<(), SqliteLocatorError> {
     let sequence = to_i64_locator(fact.cursor.sequence, "semantic family sequence")?;
+    if let Some(change) = &fact.change {
+        let fact_json = serde_json::to_string(change)
+            .map_err(|error| SqliteLocatorError::Delta(error.to_string()))?;
+        transaction
+            .execute(
+                "INSERT INTO semantic_change_fact (sequence, fact_json) VALUES (?1, ?2)",
+                params![sequence, fact_json],
+            )
+            .map_err(|error| locator_sqlite_error("insert Change semantic fact", error))?;
+    }
     match &fact.kind {
         SemanticFactKind::Revision(revision) => transaction.execute(
             "INSERT INTO semantic_revision_fact
@@ -1467,7 +1485,10 @@ fn materialized_identity(fact: &SemanticFact) -> Option<(&'static str, &str)> {
         SemanticFactKind::ArtifactRemoved => {
             fact.content_hash.as_deref().map(|key| ("removal", key))
         }
-        SemanticFactKind::Other => None,
+        SemanticFactKind::Other => fact
+            .change
+            .as_ref()
+            .map(|_| ("change_record", fact.event_id.as_str())),
     }
 }
 
@@ -1491,6 +1512,7 @@ fn family_code(family: &str) -> Result<i64, SqliteLocatorError> {
         "ref_association" => Ok(9),
         "ref_withdrawal" => Ok(10),
         "removal" => Ok(11),
+        "change_record" => Ok(12),
         _ => Err(SqliteLocatorError::Delta(format!(
             "unsupported semantic representative family {family}"
         ))),
@@ -1848,6 +1870,7 @@ fn query_materialized_compact_facts(
                 commit_withdrawal.association_id,
                 ref_association.ref_name, ref_association.head_oid,
                 ref_withdrawal.association_id,
+                change_fact.fact_json,
                 receipt.epoch
          FROM semantic_representative AS representative
          JOIN semantic_event_fact_text AS event ON event.sequence = representative.sequence
@@ -1871,6 +1894,8 @@ fn query_materialized_compact_facts(
            ON ref_association.sequence = event.sequence
          LEFT JOIN semantic_ref_withdrawal_fact AS ref_withdrawal
            ON ref_withdrawal.sequence = event.sequence
+         LEFT JOIN semantic_change_fact AS change_fact
+           ON change_fact.sequence = event.sequence
          WHERE {}
            AND locator.epoch = ?1 AND event.sequence <= ?2
            AND (
@@ -1889,6 +1914,7 @@ fn query_materialized_compact_facts(
                      AND selected_locator.epoch = ?1
                      AND selected_event.sequence <= ?2
                )
+               OR representative.family_id = 12
                OR (
                    representative.family_id = 11
                    AND event.content_hash IN (
@@ -1928,8 +1954,14 @@ fn query_materialized_compact_facts(
         let mut fact = semantic_fact_from_sql(row)
             .map_err(|error| sqlite_error("read materialized semantic fact", error))?;
         fact.kind = materialized_kind_from_sql(&fact, row)?;
+        fact.change = row
+            .get::<_, Option<String>>(41)
+            .map_err(|error| sqlite_error("read materialized Change fact", error))?
+            .map(|value| serde_json::from_str::<ChangeProjectionFact>(&value))
+            .transpose()
+            .map_err(|error| SqliteSemanticError::Model(SemanticModelError::Json(error)))?;
         let receipt_epoch = row
-            .get::<_, i64>(41)
+            .get::<_, i64>(42)
             .map_err(|error| sqlite_error("read materialized receipt epoch", error))?;
         if receipt_epoch != to_i64(fact.cursor.epoch, "materialized receipt epoch")? {
             return Err(SqliteSemanticError::Metadata(format!(
@@ -2095,6 +2127,7 @@ fn query_facts(
     for fact in rows {
         let mut fact = fact.map_err(|error| sqlite_error("read semantic fact", error))?;
         fact.kind = query_family_fact(connection, &fact)?;
+        fact.change = query_change_fact(connection, fact.cursor.sequence)?;
         facts.push(hydrate_semantic_fact(journal, fact)?);
     }
     Ok(facts)
@@ -2174,7 +2207,61 @@ fn semantic_fact_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<SemanticF
         actor_id: row.get(14)?,
         validation_witness: row.get(15)?,
         kind: SemanticFactKind::Other,
+        change: None,
     })
+}
+
+fn query_change_fact(
+    connection: &rusqlite::Connection,
+    sequence: u64,
+) -> Result<Option<ChangeProjectionFact>, SqliteSemanticError> {
+    let value = connection
+        .query_row(
+            "SELECT fact_json FROM semantic_change_fact WHERE sequence = ?1",
+            [to_i64(sequence, "Change semantic fact sequence")?],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| sqlite_error("query Change semantic fact", error))?;
+    value
+        .map(|value| serde_json::from_str(&value))
+        .transpose()
+        .map_err(|error| SqliteSemanticError::Model(SemanticModelError::Json(error)))
+}
+
+fn query_materialized_change_projection(
+    connection: &rusqlite::Connection,
+    epoch: u64,
+    sequence: u64,
+) -> Result<crate::session::ChangeProjection, SqliteSemanticError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT change_fact.fact_json
+             FROM semantic_change_fact AS change_fact
+             JOIN locator_event_text AS locator ON locator.sequence = change_fact.sequence
+             WHERE locator.epoch = ?1 AND change_fact.sequence <= ?2
+             ORDER BY locator.replay_key, change_fact.sequence",
+        )
+        .map_err(|error| sqlite_error("prepare materialized Change projection", error))?;
+    let rows = statement
+        .query_map(
+            params![
+                to_i64(epoch, "materialized Change epoch")?,
+                to_i64(sequence, "materialized Change sequence")?,
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|error| sqlite_error("query materialized Change projection", error))?;
+    let mut facts = Vec::new();
+    for row in rows {
+        let json = row.map_err(|error| sqlite_error("read materialized Change fact", error))?;
+        facts.push(
+            serde_json::from_str::<ChangeProjectionFact>(&json)
+                .map_err(|error| SqliteSemanticError::Model(SemanticModelError::Json(error)))?,
+        );
+    }
+    project_changes_from_facts(&facts)
+        .map_err(|error| SqliteSemanticError::Model(SemanticModelError::Product(error)))
 }
 
 fn semantic_fact_from_joined_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<SemanticFact> {

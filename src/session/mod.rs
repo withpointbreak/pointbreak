@@ -9,6 +9,7 @@ mod projection;
 mod sensitivity_vocabulary;
 mod signing;
 mod store;
+pub mod transfer;
 mod workflow;
 
 #[doc(hidden)]

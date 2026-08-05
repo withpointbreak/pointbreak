@@ -357,6 +357,30 @@ impl GenerationLayout {
         Ok(sha256_bytes_hex(&bytes))
     }
 
+    /// Write one immutable, hash-addressed semantic resource into a staging
+    /// generation. Publication remains the descriptor/publication pair; this
+    /// helper only makes the resource durable before either marker exists.
+    pub(crate) fn write_resource(
+        &self,
+        staging_root: &Path,
+        file_name: &str,
+        bytes: &[u8],
+    ) -> Result<String, GenerationError> {
+        if file_name.is_empty()
+            || file_name == "."
+            || file_name == ".."
+            || file_name.contains(['/', '\\'])
+        {
+            return Err(metadata_error(
+                staging_root,
+                "invalid generation resource name".to_owned(),
+            ));
+        }
+        let path = staging_root.join(file_name);
+        write_new_synced(&path, bytes)?;
+        Ok(sha256_bytes_hex(bytes))
+    }
+
     pub(crate) fn promote_staging(&self, generation_id: &str) -> Result<PathBuf, GenerationError> {
         validate_generation_id(generation_id)?;
         let staging = self.staging(generation_id);

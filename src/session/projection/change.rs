@@ -4,8 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::model::{
-    AssessmentId, ChangeId, ChangeMembershipClaimId, InputRequestId, ReviewTargetRef, RevisionId,
-    current_revisions, replacement_heads_diverge, revision_graph_has_cycle,
+    AssessmentId, ChangeId, ChangeIdentityDescriptorV1, ChangeLinkClaimId, ChangeMembershipClaimId,
+    ChangeRevisionRelationClaimId, EventId, InputRequestId, ReviewTargetRef, RevisionId,
+    RevisionRefV1, current_revisions, replacement_heads_diverge, revision_graph_has_cycle,
 };
 use crate::session::event::{
     AssertionMode, ChangeDeclaredPayload, ChangeLinkAssertedPayload,
@@ -13,7 +14,7 @@ use crate::session::event::{
     ChangeRevisionRelationAssertedPayload, ChangeRevisionRelationWithdrawnPayload, EventType,
     FactPortRelationV1, FactRefV1, InputRequestRespondedPayload, ReviewAssessment,
     ReviewAssessmentRecordedPayload, ReviewFactPortedPayload, ShoreEvent, WorkObjectProposal,
-    WorkObjectProposedPayload,
+    WorkObjectProposedPayload, decode_input_request_opened_payload,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -66,19 +67,240 @@ pub struct ChangeProjection {
     pub links: Vec<ChangeLinkView>,
 }
 
+/// Bodyless semantic input shared by strict replay and disposable projections.
+///
+/// This is deliberately smaller than a [`ShoreEvent`]. It retains only the
+/// values that can affect Change membership, topology, lifecycle, or links;
+/// prose bodies, summaries, commands, paths, signatures, and ingest provenance
+/// never enter the derived semantic layer. A source event ID is retained only
+/// where semantic duplicates need the same deterministic representative rule
+/// as the store-wide projection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum ChangeProjectionFact {
+    Revision {
+        revision_id: RevisionId,
+        object_artifact_content_hash: String,
+    },
+    Declaration {
+        change_id: ChangeId,
+        identity_descriptor: ChangeIdentityDescriptorV1,
+    },
+    MembershipAsserted {
+        claim_id: ChangeMembershipClaimId,
+        change_id: ChangeId,
+        revision_id: RevisionId,
+    },
+    MembershipWithdrawn {
+        claim_id: ChangeMembershipClaimId,
+    },
+    RelationAsserted {
+        claim_id: ChangeRevisionRelationClaimId,
+        change_id: ChangeId,
+        successor: RevisionRefV1,
+        predecessor: RevisionRefV1,
+    },
+    RelationWithdrawn {
+        claim_id: ChangeRevisionRelationClaimId,
+    },
+    LinkAsserted {
+        claim_id: ChangeLinkClaimId,
+        left_change_id: ChangeId,
+        right_change_id: ChangeId,
+        relation: crate::session::event::ChangeLinkRelationV1,
+    },
+    Assessment {
+        source_event_id: EventId,
+        revision_id: RevisionId,
+        assessment_id: AssessmentId,
+        assessment: ReviewAssessment,
+        replaces: Vec<AssessmentId>,
+    },
+    OperativeRequest {
+        request_id: InputRequestId,
+        revision_id: RevisionId,
+    },
+    RequestResponse {
+        request_id: InputRequestId,
+    },
+    FactPort {
+        port: ReviewFactPortedPayload,
+    },
+}
+
+/// Extract the one compact semantic fact an event contributes to Change state.
+///
+/// Payload validation and fact-port attribution happen here so every consumer
+/// observes the same fail-closed interpretation. `None` means the event has no
+/// Change-level semantic effect; it is not a parse or validation failure.
+pub(crate) fn extract_change_projection_fact(
+    event: &ShoreEvent,
+) -> Result<Option<ChangeProjectionFact>> {
+    let fact = match event.event_type {
+        EventType::WorkObjectProposed => {
+            let payload: WorkObjectProposedPayload = serde_json::from_value(event.payload.clone())?;
+            match payload.work_object {
+                WorkObjectProposal::Revision {
+                    revision,
+                    object_artifact_content_hash,
+                    ..
+                } => Some(ChangeProjectionFact::Revision {
+                    // Legacy proposal carriers predate `RevisionRefV1`'s strict
+                    // constructor. The pure projection preserves their exact
+                    // recorded binding here; new Change claims validate their
+                    // exact references in their own payload contract.
+                    revision_id: revision.id,
+                    object_artifact_content_hash,
+                }),
+                WorkObjectProposal::TaskAttempt { .. } => None,
+            }
+        }
+        EventType::ChangeDeclared => {
+            let payload: ChangeDeclaredPayload = serde_json::from_value(event.payload.clone())?;
+            payload.validate()?;
+            Some(ChangeProjectionFact::Declaration {
+                change_id: payload.change_id,
+                identity_descriptor: payload.identity_descriptor,
+            })
+        }
+        EventType::ChangeMembershipAsserted => {
+            let payload: ChangeMembershipAssertedPayload =
+                serde_json::from_value(event.payload.clone())?;
+            payload.validate()?;
+            Some(ChangeProjectionFact::MembershipAsserted {
+                claim_id: payload.membership_claim_id,
+                change_id: payload.change_id,
+                revision_id: payload.revision_id,
+            })
+        }
+        EventType::ChangeMembershipWithdrawn => {
+            let payload: ChangeMembershipWithdrawnPayload =
+                serde_json::from_value(event.payload.clone())?;
+            payload.validate()?;
+            Some(ChangeProjectionFact::MembershipWithdrawn {
+                claim_id: payload.membership_claim_id,
+            })
+        }
+        EventType::ChangeRevisionRelationAsserted => {
+            let payload: ChangeRevisionRelationAssertedPayload =
+                serde_json::from_value(event.payload.clone())?;
+            payload.validate()?;
+            Some(ChangeProjectionFact::RelationAsserted {
+                claim_id: payload.relation_claim_id,
+                change_id: payload.change_id,
+                successor: payload.successor,
+                predecessor: payload.predecessor,
+            })
+        }
+        EventType::ChangeRevisionRelationWithdrawn => {
+            let payload: ChangeRevisionRelationWithdrawnPayload =
+                serde_json::from_value(event.payload.clone())?;
+            payload.validate()?;
+            Some(ChangeProjectionFact::RelationWithdrawn {
+                claim_id: payload.relation_claim_id,
+            })
+        }
+        EventType::ChangeLinkAsserted => {
+            let payload: ChangeLinkAssertedPayload = serde_json::from_value(event.payload.clone())?;
+            payload.validate()?;
+            Some(ChangeProjectionFact::LinkAsserted {
+                claim_id: payload.link_claim_id,
+                left_change_id: payload.left_change_id,
+                right_change_id: payload.right_change_id,
+                relation: payload.relation,
+            })
+        }
+        EventType::ReviewAssessmentRecorded => {
+            let payload: ReviewAssessmentRecordedPayload =
+                serde_json::from_value(event.payload.clone())?;
+            Some(ChangeProjectionFact::Assessment {
+                source_event_id: event.event_id.clone(),
+                revision_id: review_target_revision(&payload.target),
+                assessment_id: payload.assessment_id,
+                assessment: payload.assessment,
+                replaces: payload.replaces_assessment_ids,
+            })
+        }
+        EventType::InputRequestOpened if event.assertion_mode == AssertionMode::Operative => {
+            let payload = decode_input_request_opened_payload(event.payload.clone())?;
+            payload
+                .task_target
+                .is_none()
+                .then(|| ChangeProjectionFact::OperativeRequest {
+                    request_id: payload.input_request_id,
+                    revision_id: review_target_revision(&payload.target),
+                })
+        }
+        EventType::InputRequestResponded => {
+            let payload: InputRequestRespondedPayload =
+                serde_json::from_value(event.payload.clone())?;
+            Some(ChangeProjectionFact::RequestResponse {
+                request_id: payload.input_request_id,
+            })
+        }
+        EventType::ReviewFactPorted => {
+            let payload: ReviewFactPortedPayload = serde_json::from_value(event.payload.clone())?;
+            let track_id = event.target.track_id.as_ref().ok_or_else(|| {
+                crate::error::ShoreError::InvalidEvent {
+                    message: "review_fact_ported requires an attributed review track".to_owned(),
+                }
+            })?;
+            payload.validate_attribution(&event.writer.actor_id, track_id)?;
+            Some(ChangeProjectionFact::FactPort { port: payload })
+        }
+        EventType::ReviewInitialized
+        | EventType::ReviewNoteImported
+        | EventType::ReviewObservationRecorded
+        | EventType::ValidationCheckRecorded
+        | EventType::RevisionRefAssociated
+        | EventType::RevisionRefWithdrawn
+        | EventType::RevisionCommitAssociated
+        | EventType::RevisionCommitWithdrawn
+        | EventType::TaskCheckpointCaptured
+        | EventType::TaskObservationRecorded
+        | EventType::EventSignatureRecorded
+        | EventType::ArtifactRemoved
+        | EventType::RevisionRelationAttested
+        | EventType::InputRequestOpened => None,
+    };
+    Ok(fact)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ChangeDeclarationFact {
+    identity_descriptor: ChangeIdentityDescriptorV1,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ChangeMembershipFact {
+    change_id: ChangeId,
+    revision_id: RevisionId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ChangeRelationFact {
+    change_id: ChangeId,
+    successor: RevisionRefV1,
+    predecessor: RevisionRefV1,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ChangeAssessmentFact {
+    assessment_id: AssessmentId,
+    assessment: ReviewAssessment,
+    replaces: Vec<AssessmentId>,
+}
+
 #[derive(Default)]
 struct FoldInput {
     revisions: BTreeMap<RevisionId, BTreeSet<String>>,
-    declarations: BTreeMap<ChangeId, Vec<ChangeDeclaredPayload>>,
-    memberships: BTreeMap<ChangeMembershipClaimId, ChangeMembershipAssertedPayload>,
+    declarations: BTreeMap<ChangeId, Vec<ChangeDeclarationFact>>,
+    memberships: BTreeMap<ChangeMembershipClaimId, ChangeMembershipFact>,
     membership_withdrawals: BTreeSet<ChangeMembershipClaimId>,
-    relations: BTreeMap<
-        crate::model::ChangeRevisionRelationClaimId,
-        ChangeRevisionRelationAssertedPayload,
-    >,
-    relation_withdrawals: BTreeSet<crate::model::ChangeRevisionRelationClaimId>,
-    links: BTreeMap<crate::model::ChangeLinkClaimId, ChangeLinkAssertedPayload>,
-    assessments: BTreeMap<RevisionId, Vec<ReviewAssessmentRecordedPayload>>,
+    relations: BTreeMap<ChangeRevisionRelationClaimId, ChangeRelationFact>,
+    relation_withdrawals: BTreeSet<ChangeRevisionRelationClaimId>,
+    links: BTreeMap<ChangeLinkClaimId, ChangeLinkView>,
+    assessments: BTreeMap<RevisionId, BTreeMap<AssessmentId, (EventId, ChangeAssessmentFact)>>,
     operative_requests: BTreeMap<InputRequestId, RevisionId>,
     request_response_count: BTreeMap<InputRequestId, usize>,
     fact_ports: Vec<ReviewFactPortedPayload>,
@@ -89,126 +311,130 @@ struct FoldInput {
 /// Event order, timestamps, actor locality, and lexical Revision order never
 /// choose membership, replacement currency, or a winning current Revision.
 pub fn project_changes(events: &[ShoreEvent]) -> Result<ChangeProjection> {
-    let mut input = FoldInput::default();
+    let mut facts = Vec::new();
     for event in events {
-        match event.event_type {
-            EventType::WorkObjectProposed => {
-                let payload: WorkObjectProposedPayload =
-                    serde_json::from_value(event.payload.clone())?;
-                if let WorkObjectProposal::Revision {
-                    revision,
-                    object_artifact_content_hash,
-                    ..
-                } = payload.work_object
-                {
-                    input
-                        .revisions
-                        .entry(revision.id)
-                        .or_default()
-                        .insert(object_artifact_content_hash);
-                }
-            }
-            EventType::ChangeDeclared => {
-                let payload: ChangeDeclaredPayload = serde_json::from_value(event.payload.clone())?;
-                payload.validate()?;
+        if let Some(fact) = extract_change_projection_fact(event)? {
+            facts.push(fact);
+        }
+    }
+    project_changes_from_facts(&facts)
+}
+
+pub(crate) fn project_changes_from_facts(
+    facts: &[ChangeProjectionFact],
+) -> Result<ChangeProjection> {
+    let mut input = FoldInput::default();
+    for fact in facts {
+        match fact {
+            ChangeProjectionFact::Revision {
+                revision_id,
+                object_artifact_content_hash,
+            } => {
                 input
-                    .declarations
-                    .entry(payload.change_id.clone())
+                    .revisions
+                    .entry(revision_id.clone())
                     .or_default()
-                    .push(payload);
+                    .insert(object_artifact_content_hash.clone());
             }
-            EventType::ChangeMembershipAsserted => {
-                let payload: ChangeMembershipAssertedPayload =
-                    serde_json::from_value(event.payload.clone())?;
-                payload.validate()?;
-                input
-                    .memberships
-                    .insert(payload.membership_claim_id.clone(), payload);
+            ChangeProjectionFact::Declaration {
+                change_id,
+                identity_descriptor,
+            } => input
+                .declarations
+                .entry(change_id.clone())
+                .or_default()
+                .push(ChangeDeclarationFact {
+                    identity_descriptor: identity_descriptor.clone(),
+                }),
+            ChangeProjectionFact::MembershipAsserted {
+                claim_id,
+                change_id,
+                revision_id,
+            } => {
+                input.memberships.insert(
+                    claim_id.clone(),
+                    ChangeMembershipFact {
+                        change_id: change_id.clone(),
+                        revision_id: revision_id.clone(),
+                    },
+                );
             }
-            EventType::ChangeMembershipWithdrawn => {
-                let payload: ChangeMembershipWithdrawnPayload =
-                    serde_json::from_value(event.payload.clone())?;
-                payload.validate()?;
-                input
-                    .membership_withdrawals
-                    .insert(payload.membership_claim_id);
+            ChangeProjectionFact::MembershipWithdrawn { claim_id } => {
+                input.membership_withdrawals.insert(claim_id.clone());
             }
-            EventType::ChangeRevisionRelationAsserted => {
-                let payload: ChangeRevisionRelationAssertedPayload =
-                    serde_json::from_value(event.payload.clone())?;
-                payload.validate()?;
-                input
-                    .relations
-                    .insert(payload.relation_claim_id.clone(), payload);
+            ChangeProjectionFact::RelationAsserted {
+                claim_id,
+                change_id,
+                successor,
+                predecessor,
+            } => {
+                input.relations.insert(
+                    claim_id.clone(),
+                    ChangeRelationFact {
+                        change_id: change_id.clone(),
+                        successor: successor.clone(),
+                        predecessor: predecessor.clone(),
+                    },
+                );
             }
-            EventType::ChangeRevisionRelationWithdrawn => {
-                let payload: ChangeRevisionRelationWithdrawnPayload =
-                    serde_json::from_value(event.payload.clone())?;
-                payload.validate()?;
-                input.relation_withdrawals.insert(payload.relation_claim_id);
+            ChangeProjectionFact::RelationWithdrawn { claim_id } => {
+                input.relation_withdrawals.insert(claim_id.clone());
             }
-            EventType::ChangeLinkAsserted => {
-                let payload: ChangeLinkAssertedPayload =
-                    serde_json::from_value(event.payload.clone())?;
-                payload.validate()?;
-                input.links.insert(payload.link_claim_id.clone(), payload);
+            ChangeProjectionFact::LinkAsserted {
+                claim_id,
+                left_change_id,
+                right_change_id,
+                relation,
+            } => {
+                input.links.insert(
+                    claim_id.clone(),
+                    ChangeLinkView {
+                        left_change_id: left_change_id.clone(),
+                        right_change_id: right_change_id.clone(),
+                        relation: *relation,
+                    },
+                );
             }
-            EventType::ReviewAssessmentRecorded => {
-                let payload: ReviewAssessmentRecordedPayload =
-                    serde_json::from_value(event.payload.clone())?;
-                if let ReviewTargetRef::Revision { revision_id } = &payload.target {
-                    input
-                        .assessments
-                        .entry(revision_id.clone())
-                        .or_default()
-                        .push(payload);
+            ChangeProjectionFact::Assessment {
+                source_event_id,
+                revision_id,
+                assessment_id,
+                assessment,
+                replaces,
+            } => {
+                let records = input.assessments.entry(revision_id.clone()).or_default();
+                let candidate = ChangeAssessmentFact {
+                    assessment_id: assessment_id.clone(),
+                    assessment: *assessment,
+                    replaces: replaces.clone(),
+                };
+                match records.entry(assessment_id.clone()) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert((source_event_id.clone(), candidate));
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry)
+                        if source_event_id < &entry.get().0 =>
+                    {
+                        entry.insert((source_event_id.clone(), candidate));
+                    }
+                    std::collections::btree_map::Entry::Occupied(_) => {}
                 }
             }
-            EventType::InputRequestOpened if event.assertion_mode == AssertionMode::Operative => {
-                let payload = crate::session::event::decode_input_request_opened_payload(
-                    event.payload.clone(),
-                )?;
-                if payload.task_target.is_none() {
-                    input.operative_requests.insert(
-                        payload.input_request_id,
-                        review_target_revision(&payload.target),
-                    );
-                }
+            ChangeProjectionFact::OperativeRequest {
+                request_id,
+                revision_id,
+            } => {
+                input
+                    .operative_requests
+                    .insert(request_id.clone(), revision_id.clone());
             }
-            EventType::InputRequestResponded => {
-                let payload: InputRequestRespondedPayload =
-                    serde_json::from_value(event.payload.clone())?;
+            ChangeProjectionFact::RequestResponse { request_id } => {
                 *input
                     .request_response_count
-                    .entry(payload.input_request_id)
+                    .entry(request_id.clone())
                     .or_default() += 1;
             }
-            EventType::ReviewFactPorted => {
-                let payload: ReviewFactPortedPayload =
-                    serde_json::from_value(event.payload.clone())?;
-                let track_id = event.target.track_id.as_ref().ok_or_else(|| {
-                    crate::error::ShoreError::InvalidEvent {
-                        message: "review_fact_ported requires an attributed review track"
-                            .to_owned(),
-                    }
-                })?;
-                payload.validate_attribution(&event.writer.actor_id, track_id)?;
-                input.fact_ports.push(payload);
-            }
-            EventType::ReviewInitialized
-            | EventType::ReviewNoteImported
-            | EventType::ReviewObservationRecorded
-            | EventType::ValidationCheckRecorded
-            | EventType::RevisionRefAssociated
-            | EventType::RevisionRefWithdrawn
-            | EventType::RevisionCommitAssociated
-            | EventType::RevisionCommitWithdrawn
-            | EventType::TaskCheckpointCaptured
-            | EventType::TaskObservationRecorded
-            | EventType::EventSignatureRecorded
-            | EventType::ArtifactRemoved
-            | EventType::RevisionRelationAttested => {}
-            EventType::InputRequestOpened => {}
+            ChangeProjectionFact::FactPort { port } => input.fact_ports.push(port.clone()),
         }
     }
 
@@ -387,15 +613,7 @@ pub fn project_changes(events: &[ShoreEvent]) -> Result<ChangeProjection> {
         );
     }
 
-    projection.links = input
-        .links
-        .into_values()
-        .map(|link| ChangeLinkView {
-            left_change_id: link.left_change_id,
-            right_change_id: link.right_change_id,
-            relation: link.relation,
-        })
-        .collect();
+    projection.links = input.links.into_values().collect();
     projection.links.sort_by(|left, right| {
         (&left.left_change_id, &left.right_change_id)
             .cmp(&(&right.left_change_id, &right.right_change_id))
@@ -417,17 +635,19 @@ fn review_target_revision(target: &ReviewTargetRef) -> RevisionId {
 
 fn has_one_accepting_assessment(
     revision_id: &RevisionId,
-    assessments: &BTreeMap<RevisionId, Vec<ReviewAssessmentRecordedPayload>>,
+    assessments: &BTreeMap<RevisionId, BTreeMap<AssessmentId, (EventId, ChangeAssessmentFact)>>,
 ) -> bool {
     let Some(records) = assessments.get(revision_id) else {
         return false;
     };
     let replaced: BTreeSet<AssessmentId> = records
-        .iter()
-        .flat_map(|record| record.replaces_assessment_ids.iter().cloned())
+        .values()
+        .map(|(_, record)| record)
+        .flat_map(|record| record.replaces.iter().cloned())
         .collect();
     let current: Vec<_> = records
-        .iter()
+        .values()
+        .map(|(_, record)| record)
         .filter(|record| !replaced.contains(&record.assessment_id))
         .collect();
     current.len() == 1
@@ -577,11 +797,25 @@ mod tests {
     }
 
     fn assessment(revision_id: RevisionId, nonce: u8) -> ShoreEvent {
+        assessment_for_target(
+            ReviewTargetRef::Revision { revision_id },
+            AssessmentId::new(format!("assess:sha256:{nonce}")),
+            ReviewAssessment::Accepted,
+            format!("assessment:{nonce}"),
+        )
+    }
+
+    fn assessment_for_target(
+        target: ReviewTargetRef,
+        assessment_id: AssessmentId,
+        assessment: ReviewAssessment,
+        key: impl Into<String>,
+    ) -> ShoreEvent {
         event(
             ReviewAssessmentRecordedPayload {
-                assessment_id: crate::model::AssessmentId::new(format!("assess:sha256:{nonce}")),
-                target: ReviewTargetRef::Revision { revision_id },
-                assessment: ReviewAssessment::Accepted,
+                assessment_id,
+                target,
+                assessment,
                 summary: None,
                 summary_content_type: Default::default(),
                 summary_artifact_path: None,
@@ -591,7 +825,7 @@ mod tests {
                 related_observation_ids: Vec::new(),
                 related_input_request_ids: Vec::new(),
             },
-            format!("assessment:{nonce}"),
+            key,
         )
     }
 
@@ -682,6 +916,92 @@ mod tests {
         let view = &project_changes(&events).unwrap().changes[&change_id];
         assert_eq!(view.current_revisions, [b].into());
         assert_eq!(view.lifecycle, ChangeLifecycleV1::InProgress);
+    }
+
+    #[test]
+    fn compact_change_facts_are_the_single_projection_input() {
+        let (change_id, declared) = declaration_with_nonce(90);
+        let (first, first_ref, first_event) = revision("compact-first", '3');
+        let (second, second_ref, second_event) = revision("compact-second", '4');
+        let (_, first_membership) = membership(&change_id, &first, 91);
+        let (_, second_membership) = membership(&change_id, &second, 92);
+        let events = vec![
+            second_event,
+            relation(&change_id, second_ref, first_ref, 93),
+            first_membership,
+            declared,
+            second_membership,
+            first_event,
+            assessment(second, 94),
+        ];
+        let facts = events
+            .iter()
+            .map(extract_change_projection_fact)
+            .collect::<Result<Vec<_>>>()
+            .expect("compact facts")
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            project_changes_from_facts(&facts).unwrap(),
+            project_changes(&events).unwrap()
+        );
+    }
+
+    #[test]
+    fn duplicate_assessment_carriers_fold_once_by_semantic_id() {
+        let (change_id, declared) = declaration_with_nonce(95);
+        let (revision_id, _, revision_event) = revision("duplicate-assessment", '5');
+        let (_, membership) = membership(&change_id, &revision_id, 96);
+        let assessment_id = AssessmentId::new("assess:sha256:duplicate");
+        let first = assessment_for_target(
+            ReviewTargetRef::Revision {
+                revision_id: revision_id.clone(),
+            },
+            assessment_id.clone(),
+            ReviewAssessment::Accepted,
+            "assessment:duplicate:first",
+        );
+        let second = assessment_for_target(
+            ReviewTargetRef::Revision {
+                revision_id: revision_id.clone(),
+            },
+            assessment_id,
+            ReviewAssessment::Accepted,
+            "assessment:duplicate:second",
+        );
+        let events = vec![declared, revision_event, membership, first, second];
+        let projection = project_changes(&events).unwrap();
+        let mut reversed = events;
+        reversed.reverse();
+        assert_eq!(project_changes(&reversed).unwrap(), projection);
+        assert_eq!(
+            projection.changes[&change_id].lifecycle,
+            ChangeLifecycleV1::Accepted
+        );
+    }
+
+    #[test]
+    fn file_targeted_assessment_contributes_to_revision_lifecycle() {
+        let (change_id, declared) = declaration_with_nonce(97);
+        let (revision_id, _, revision_event) = revision("file-assessment", '6');
+        let (_, membership) = membership(&change_id, &revision_id, 98);
+        let assessment = assessment_for_target(
+            ReviewTargetRef::File {
+                revision_id,
+                file_path: "src/lib.rs".to_owned(),
+            },
+            AssessmentId::new("assess:sha256:file-target"),
+            ReviewAssessment::Accepted,
+            "assessment:file-target",
+        );
+        let projection =
+            project_changes(&[declared, revision_event, membership, assessment]).unwrap();
+        assert_eq!(
+            projection.changes[&change_id].lifecycle,
+            ChangeLifecycleV1::Accepted
+        );
     }
 
     #[test]

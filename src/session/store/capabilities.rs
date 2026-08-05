@@ -534,7 +534,54 @@ pub(crate) struct JournalInspection {
     pub(crate) status: StoreCapabilityStatus,
     pub(crate) cursor: AuthorityCursorV2,
     pub(crate) minimum_reader_profile: Option<String>,
+    #[cfg(any(test, feature = "bench"))]
+    pub(crate) record_entries: Vec<JournalEntry>,
     pub(crate) event_entries: Vec<JournalEntry>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TransferControlRecordKind {
+    CapabilityActivation,
+    BulkAdoptionCompletion,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TransferControlRecord {
+    pub(crate) kind: TransferControlRecordKind,
+    pub(crate) logical_key: String,
+    pub(crate) minimum_reader_profile: Option<String>,
+    pub(crate) required_capabilities: Vec<String>,
+}
+
+/// Validate a transfer-carried Journal control record through the same typed
+/// signature and manifest checks used by the authoritative router.
+pub(crate) fn transfer_control_record(bytes: &[u8]) -> Result<TransferControlRecord> {
+    let probe: SchemaProbe = serde_json::from_slice(bytes)?;
+    match probe.schema.as_str() {
+        ACTIVATION_SCHEMA_V1 => {
+            let activation: StoreCapabilityActivationV1 = serde_json::from_slice(bytes)?;
+            activation.validate()?;
+            Ok(TransferControlRecord {
+                kind: TransferControlRecordKind::CapabilityActivation,
+                logical_key: activation.logical_key(),
+                minimum_reader_profile: Some(activation.minimum_reader_profile),
+                required_capabilities: activation.required_capabilities,
+            })
+        }
+        COMPLETION_SCHEMA_V1 => {
+            let completion: BulkAdoptionCompletionV1 = serde_json::from_slice(bytes)?;
+            completion.validate()?;
+            Ok(TransferControlRecord {
+                kind: TransferControlRecordKind::BulkAdoptionCompletion,
+                logical_key: completion.logical_key(),
+                minimum_reader_profile: None,
+                required_capabilities: Vec::new(),
+            })
+        }
+        other => capability_error(format!(
+            "Journal record schema {other:?} is not an exact-transfer control record"
+        )),
+    }
 }
 
 /// The capability authority exposed at the store/domain boundary.
@@ -650,6 +697,8 @@ pub(crate) fn event_entries_for_event_only_product(
 }
 
 pub(crate) fn route_journal_entries(entries: Vec<JournalEntry>) -> Result<JournalInspection> {
+    #[cfg(any(test, feature = "bench"))]
+    let record_entries = entries.clone();
     let mut event_entries = Vec::new();
     let mut event_probes = Vec::new();
     let mut activations = Vec::new();
@@ -718,6 +767,8 @@ pub(crate) fn route_journal_entries(entries: Vec<JournalEntry>) -> Result<Journa
             status: StoreCapabilityStatus::MigrationRequired,
             cursor,
             minimum_reader_profile: None,
+            #[cfg(any(test, feature = "bench"))]
+            record_entries,
             event_entries,
         });
     }
@@ -752,6 +803,8 @@ pub(crate) fn route_journal_entries(entries: Vec<JournalEntry>) -> Result<Journa
         status,
         cursor,
         minimum_reader_profile: Some(active.minimum_reader_profile.clone()),
+        #[cfg(any(test, feature = "bench"))]
+        record_entries,
         event_entries,
     })
 }
