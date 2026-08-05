@@ -1638,6 +1638,7 @@ mod tests {
             vec!["init", "--quiet"],
             vec!["config", "user.name", "Pointbreak Test"],
             vec!["config", "user.email", "pointbreak@example.test"],
+            vec!["config", "commit.gpgsign", "false"],
         ] {
             assert!(
                 std::process::Command::new("git")
