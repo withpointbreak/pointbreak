@@ -240,6 +240,7 @@ describe("repoRelativeFile", () => {
     ["C:\\repo", "D:\\outside\\file.ts", path.win32],
     ["/repo", "src/file.ts", path.posix],
     ["/repo", "/repo", path.posix],
+    ["/repo", "/repo/src\\unsafe.ts", path.posix],
   ])("rejects outside, non-absolute, and non-file paths", (root, filePath, api) => {
     expect(() => repoRelativeFile(root, filePath, api)).toThrow();
   });
