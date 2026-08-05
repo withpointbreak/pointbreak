@@ -170,6 +170,17 @@ impl StateReducer {
                 // Content removal is a local-blob fact rendered by the dedicated
                 // removal projection join; it does not change session state.
             }
+            EventType::ChangeDeclared
+            | EventType::ChangeMembershipAsserted
+            | EventType::ChangeMembershipWithdrawn
+            | EventType::ChangeLinkAsserted
+            | EventType::ChangeRevisionRelationAsserted
+            | EventType::ChangeRevisionRelationWithdrawn
+            | EventType::RevisionRelationAttested
+            | EventType::ReviewFactPorted => {
+                // The writer-dark Change cohort is folded by the dedicated
+                // Change projection. Legacy session state remains Revision-local.
+            }
         }
 
         Ok(())

@@ -9,6 +9,7 @@ mod artifact_removal;
 mod assertion;
 mod assessment;
 mod association;
+mod change;
 mod event_signature;
 mod input_request;
 mod kind;
@@ -16,6 +17,7 @@ mod observation;
 mod payload;
 mod provenance;
 mod record_hash;
+mod relation;
 mod review;
 mod signature;
 mod source;
@@ -40,6 +42,19 @@ pub(crate) use association::{
     build_commit_association_id, build_commit_withdrawal_id, build_ref_association_id,
     build_ref_withdrawal_id,
 };
+pub use change::{
+    ChangeDeclaredPayload, ChangeLinkAssertedPayload, ChangeLinkRelationV1,
+    ChangeMembershipAssertedPayload, ChangeMembershipWithdrawnPayload,
+    ChangeRevisionRelationAssertedPayload, ChangeRevisionRelationV1,
+    ChangeRevisionRelationWithdrawnPayload,
+};
+pub(crate) use change::{
+    build_change_declared, build_membership_asserted, build_revision_relation_asserted,
+};
+#[cfg(test)]
+pub(crate) use change::{
+    build_change_link_asserted, build_membership_withdrawn, build_revision_relation_withdrawn,
+};
 pub use event_signature::{EventSignatureRecordedPayload, InclusionProof};
 pub(crate) use input_request::decode_input_request_opened_payload;
 pub use input_request::{
@@ -52,6 +67,15 @@ pub use payload::{BodyContentType, EventPayload};
 pub(crate) use provenance::stamp_ingest_provenance;
 pub use provenance::{IngestProvenance, IngestVia};
 pub use record_hash::EventRecordView;
+pub use relation::{
+    FactPortRelationV1, FactRefV1, RelationProofStatusV1, ReviewFactPortedPayload,
+    RevisionRelationAttestedPayload, SemanticRevisionRelationV1,
+};
+#[cfg(test)]
+pub(crate) use relation::{
+    ReviewFactPortDraftV1, RevisionRelationAttestationDraftV1, build_review_fact_ported,
+    build_revision_relation_attested,
+};
 pub use review::ReviewInitializedPayload;
 pub use signature::{EffectiveSignerError, EventSignature, resolve_effective_signer};
 pub use source::SourceRef;

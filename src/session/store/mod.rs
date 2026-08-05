@@ -15,6 +15,7 @@ pub(in crate::session) mod store_init;
 pub(in crate::session) mod user_level;
 
 pub use capabilities::{AuthorityCursorV2, StoreCapabilityInspection, StoreCapabilityStatus};
+pub(crate) use capabilities::{BulkAdoptionManifestV1, ReservedCohortRecordV1};
 pub use event_store::EventWriteOutcome;
 pub(crate) use event_store::{EventStore, SkippedEvent};
 #[cfg(test)]

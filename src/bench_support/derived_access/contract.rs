@@ -1982,13 +1982,30 @@ mod tests {
 
         let mut live_event_types = EventType::ALL
             .iter()
+            // D0 is the frozen pre-activation workload. The writer-dark
+            // Change/Revision cohort is separately qualified before a capable
+            // derived schema may consume it; it must not silently rewrite this
+            // historical baseline's contract identity.
+            .filter(|event_type| {
+                !matches!(
+                    event_type,
+                    EventType::ChangeDeclared
+                        | EventType::ChangeMembershipAsserted
+                        | EventType::ChangeMembershipWithdrawn
+                        | EventType::ChangeLinkAsserted
+                        | EventType::ChangeRevisionRelationAsserted
+                        | EventType::ChangeRevisionRelationWithdrawn
+                        | EventType::RevisionRelationAttested
+                        | EventType::ReviewFactPorted
+                )
+            })
             .map(|event_type| event_type.as_str())
             .collect::<Vec<_>>();
         live_event_types.sort_unstable();
 
         assert_eq!(
             contract_event_types, live_event_types,
-            "a changed EventType vocabulary requires a new D0 schedule and contract identity"
+            "a changed L0 EventType vocabulary requires a new D0 schedule and contract identity"
         );
     }
 

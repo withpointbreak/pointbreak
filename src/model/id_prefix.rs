@@ -21,6 +21,24 @@ pub(crate) const EVENT: &str = "evt";
 pub(crate) const REVISION: &str = "rev";
 /// Content-object ids: `obj:sha256:<hex>` and the `obj:git:sha256:<hex>` variant.
 pub(crate) const OBJECT: &str = "obj";
+/// Stable review-work identities: `change:sha256:<hex>`.
+pub(crate) const CHANGE: &str = "change";
+/// Attributed Change declaration claims.
+pub(crate) const CHANGE_DECLARATION: &str = "change-declaration";
+/// Attributed Change/Revision membership claims.
+pub(crate) const CHANGE_MEMBERSHIP: &str = "change-membership";
+/// Exact membership-claim withdrawals.
+pub(crate) const CHANGE_MEMBERSHIP_WITHDRAWAL: &str = "change-membership-withdrawal";
+/// Attributed links between stable Changes.
+pub(crate) const CHANGE_LINK: &str = "change-link";
+/// Change-scoped exact Revision-relation claims.
+pub(crate) const CHANGE_REVISION_RELATION: &str = "change-revision-relation";
+/// Exact Revision-relation-claim withdrawals.
+pub(crate) const CHANGE_REVISION_RELATION_WITHDRAWAL: &str = "change-revision-relation-withdrawal";
+/// Exact Revision/commit relation attestations.
+pub(crate) const REVISION_RELATION_ATTESTATION: &str = "relation-attestation";
+/// Cross-Revision fact ports.
+pub(crate) const REVIEW_FACT_PORT: &str = "fact-port";
 /// Engagement grouping ids: `engagement:sha256:<hex>`.
 pub(crate) const ENGAGEMENT: &str = "engagement";
 /// Observation ids: `obs:sha256:<hex>`.
@@ -121,6 +139,60 @@ pub(crate) const ID_PREFIXES: &[IdPrefix] = &[
         kind: PrefixKind::ContentId,
         minted: true,
         linkified: true,
+    },
+    IdPrefix {
+        prefix: CHANGE,
+        kind: PrefixKind::ContentId,
+        minted: true,
+        linkified: false,
+    },
+    IdPrefix {
+        prefix: CHANGE_DECLARATION,
+        kind: PrefixKind::ContentId,
+        minted: true,
+        linkified: false,
+    },
+    IdPrefix {
+        prefix: CHANGE_MEMBERSHIP,
+        kind: PrefixKind::ContentId,
+        minted: true,
+        linkified: false,
+    },
+    IdPrefix {
+        prefix: CHANGE_MEMBERSHIP_WITHDRAWAL,
+        kind: PrefixKind::ContentId,
+        minted: true,
+        linkified: false,
+    },
+    IdPrefix {
+        prefix: CHANGE_LINK,
+        kind: PrefixKind::ContentId,
+        minted: true,
+        linkified: false,
+    },
+    IdPrefix {
+        prefix: CHANGE_REVISION_RELATION,
+        kind: PrefixKind::ContentId,
+        minted: true,
+        linkified: false,
+    },
+    IdPrefix {
+        prefix: CHANGE_REVISION_RELATION_WITHDRAWAL,
+        kind: PrefixKind::ContentId,
+        minted: true,
+        linkified: false,
+    },
+    IdPrefix {
+        prefix: REVISION_RELATION_ATTESTATION,
+        kind: PrefixKind::ContentId,
+        minted: true,
+        linkified: false,
+    },
+    IdPrefix {
+        prefix: REVIEW_FACT_PORT,
+        kind: PrefixKind::ContentId,
+        minted: true,
+        linkified: false,
     },
     IdPrefix {
         prefix: ENGAGEMENT,
@@ -263,6 +335,18 @@ mod tests {
         assert_eq!(EVENT, "evt");
         assert_eq!(REVISION, "rev");
         assert_eq!(OBJECT, "obj");
+        assert_eq!(CHANGE, "change");
+        assert_eq!(CHANGE_DECLARATION, "change-declaration");
+        assert_eq!(CHANGE_MEMBERSHIP, "change-membership");
+        assert_eq!(CHANGE_MEMBERSHIP_WITHDRAWAL, "change-membership-withdrawal");
+        assert_eq!(CHANGE_LINK, "change-link");
+        assert_eq!(CHANGE_REVISION_RELATION, "change-revision-relation");
+        assert_eq!(
+            CHANGE_REVISION_RELATION_WITHDRAWAL,
+            "change-revision-relation-withdrawal"
+        );
+        assert_eq!(REVISION_RELATION_ATTESTATION, "relation-attestation");
+        assert_eq!(REVIEW_FACT_PORT, "fact-port");
         assert_eq!(ENGAGEMENT, "engagement");
         assert_eq!(OBSERVATION, "obs");
         assert_eq!(ASSESSMENT, "assess");
@@ -326,6 +410,15 @@ mod tests {
             EVENT,
             REVISION,
             OBJECT,
+            CHANGE,
+            CHANGE_DECLARATION,
+            CHANGE_MEMBERSHIP,
+            CHANGE_MEMBERSHIP_WITHDRAWAL,
+            CHANGE_LINK,
+            CHANGE_REVISION_RELATION,
+            CHANGE_REVISION_RELATION_WITHDRAWAL,
+            REVISION_RELATION_ATTESTATION,
+            REVIEW_FACT_PORT,
             ENGAGEMENT,
             OBSERVATION,
             ASSESSMENT,
@@ -366,11 +459,11 @@ mod tests {
     #[test]
     fn registry_kind_partition_is_stable() {
         let count = |kind: PrefixKind| ID_PREFIXES.iter().filter(|e| e.kind == kind).count();
-        // 16 minted content-id prefixes: the 2 legacy display entries were retired
+        // 25 minted content-id prefixes: the 2 legacy display entries were retired
         // in #344, and `note:` retired with the imported-notes pipeline (nothing
         // mints or links it; recorded ids inside old t:07 payloads are opaque
         // strings that no surface projects).
-        assert_eq!(count(PrefixKind::ContentId), 16);
+        assert_eq!(count(PrefixKind::ContentId), 25);
         assert_eq!(count(PrefixKind::StructuralId), 4);
         assert_eq!(count(PrefixKind::ArtifactRef), 4);
     }

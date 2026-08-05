@@ -4,6 +4,7 @@ pub(in crate::session) mod assessment;
 mod association;
 pub(in crate::session) mod attention;
 mod capture;
+mod change_migration;
 mod commit_range_liveness;
 mod event_signature;
 mod history;

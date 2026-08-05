@@ -20,13 +20,12 @@ use super::EventType;
 /// The single source of truth for the frozen registry. Forward and inverse lookups
 /// both read this table so they cannot drift.
 ///
-/// **Append-only, never reassigned.** Codes `t:17` through `t:24` are already
-/// reserved by the writer-dark `review_change_revision_v1` capability contract.
-/// Until that cohort joins this registry, any unrelated new family starts at
-/// `t:25`; an existing entry's code is never changed and a retired family keeps
-/// its code reserved forever (so old signed events stay decodable). Do not reorder
-/// this table.
-const REGISTRY: [(EventType, &str); 16] = [
+/// **Append-only, never reassigned.** Codes `t:17` through `t:24` join the
+/// writer-dark `review_change_revision_v1` capability contract here. The next
+/// unrelated family starts at `t:25`; an existing entry's code is never changed
+/// and a retired family keeps its code reserved forever (so old signed events
+/// stay decodable). Do not reorder this table.
+const REGISTRY: [(EventType, &str); 24] = [
     (EventType::ReviewInitialized, "t:01"),
     (EventType::WorkObjectProposed, "t:02"),
     (EventType::ReviewObservationRecorded, "t:03"),
@@ -47,6 +46,14 @@ const REGISTRY: [(EventType, &str); 16] = [
     (EventType::TaskObservationRecorded, "t:14"),
     (EventType::EventSignatureRecorded, "t:15"),
     (EventType::ArtifactRemoved, "t:16"),
+    (EventType::ChangeDeclared, "t:17"),
+    (EventType::ChangeMembershipAsserted, "t:18"),
+    (EventType::ChangeMembershipWithdrawn, "t:19"),
+    (EventType::ChangeLinkAsserted, "t:20"),
+    (EventType::ChangeRevisionRelationAsserted, "t:21"),
+    (EventType::ChangeRevisionRelationWithdrawn, "t:22"),
+    (EventType::RevisionRelationAttested, "t:23"),
+    (EventType::ReviewFactPorted, "t:24"),
 ];
 
 /// The frozen opaque type code (`"t:NN"`) for an event family. This is the signed /
@@ -100,7 +107,7 @@ mod tests {
 
     /// The frozen registry. A reorder, rename, or reassignment must make this test
     /// fail — the codes are identity and can never shift.
-    const FROZEN: [(EventType, &str); 16] = [
+    const FROZEN: [(EventType, &str); 24] = [
         (EventType::ReviewInitialized, "t:01"),
         (EventType::WorkObjectProposed, "t:02"),
         (EventType::ReviewObservationRecorded, "t:03"),
@@ -117,6 +124,14 @@ mod tests {
         (EventType::TaskObservationRecorded, "t:14"),
         (EventType::EventSignatureRecorded, "t:15"),
         (EventType::ArtifactRemoved, "t:16"),
+        (EventType::ChangeDeclared, "t:17"),
+        (EventType::ChangeMembershipAsserted, "t:18"),
+        (EventType::ChangeMembershipWithdrawn, "t:19"),
+        (EventType::ChangeLinkAsserted, "t:20"),
+        (EventType::ChangeRevisionRelationAsserted, "t:21"),
+        (EventType::ChangeRevisionRelationWithdrawn, "t:22"),
+        (EventType::RevisionRelationAttested, "t:23"),
+        (EventType::ReviewFactPorted, "t:24"),
     ];
 
     #[test]

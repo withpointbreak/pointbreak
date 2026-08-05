@@ -2,7 +2,7 @@
     not(test),
     allow(
         dead_code,
-        reason = "Task 1.1 freezes writer-dark reservations consumed by later tasks"
+        reason = "writer-dark capability constructors are not routed yet"
     )
 )]
 
@@ -228,15 +228,31 @@ pub(crate) struct ReservedCohortRecordV1 {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct BulkAdoptionManifestV1 {
-    schema: String,
-    version: u32,
-    cohort_manifest_hash: String,
-    source_authority_cursor: AuthorityCursorV2,
-    reserved_records: Vec<ReservedCohortRecordV1>,
+    pub(crate) schema: String,
+    pub(crate) version: u32,
+    pub(crate) cohort_manifest_hash: String,
+    pub(crate) source_authority_cursor: AuthorityCursorV2,
+    pub(crate) reserved_records: Vec<ReservedCohortRecordV1>,
 }
 
 impl BulkAdoptionManifestV1 {
-    fn canonical_hash(&self) -> Result<String> {
+    pub(crate) fn from_reserved_records(
+        source_authority_cursor: AuthorityCursorV2,
+        mut reserved_records: Vec<ReservedCohortRecordV1>,
+    ) -> Result<Self> {
+        reserved_records.sort_by(|left, right| left.logical_key.cmp(&right.logical_key));
+        let manifest = Self {
+            schema: BULK_MANIFEST_SCHEMA_V1.to_owned(),
+            version: 1,
+            cohort_manifest_hash: REVIEW_CHANGE_REVISION_MANIFEST_HASH_V1.to_owned(),
+            source_authority_cursor,
+            reserved_records,
+        };
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    pub(crate) fn canonical_hash(&self) -> Result<String> {
         sha256_json_prefixed(&serde_json::to_value(self)?)
     }
 
@@ -961,7 +977,7 @@ fn validate_record_signature<T: Serialize>(
 ) -> Result<()> {
     // This proves record-local key possession and byte integrity. It does not
     // authorize activation: the future production writer must apply operator
-    // policy before publication. Task 1.1 deliberately exposes no such writer.
+    // policy before publication. The writer-dark cohort exposes no such writer.
     if signature.alg != "ed25519" || signature.sig_version != 1 || !signature.sig.is_base64() {
         return capability_error("Journal control record has an unsupported signature");
     }
@@ -1272,25 +1288,194 @@ fn publish_test_record<T: Serialize>(
 
 #[cfg(test)]
 fn qualification_events() -> Vec<(String, &'static str, Vec<u8>)> {
-    REVIEW_CHANGE_REVISION_RECORD_FAMILIES_V1.iter().enumerate().map(|(index, family)| {
-        let logical_key = format!("qualification:{}:{index}", family.name);
-        let payload = serde_json::json!({
-            "schema": family.payload_schema,
-            "version": family.payload_version,
-            "fixtureOrdinal": index,
-            "topologyShape": if index == 4 { "replacement_divergent" } else if index == 1 { "parallel_current" } else { "ordinary" },
-        });
-        let payload_hash = sha256_json_prefixed(&payload).expect("fixture payload hash");
-        let digest = sha256_bytes_hex(logical_key.as_bytes());
-        let event = serde_json::json!({
-            "schema": "shore.event", "version": 1, "eventId": format!("evt:sha256:{digest}"), "eventType": family.event_type_code,
-            "idempotencyKey": logical_key, "target": { "journalId": "journal:qualification", "subjectId": "s:journal", "trackId": "track:qualification" },
-            "writer": { "actorId": "actor:qualification", "producer": { "name": "pointbreak-qualification", "version": "1" } },
-            "occurredAt": format!("2026-08-04T00:00:{:02}Z", index + 2), "payloadHash": payload_hash, "payload": payload,
-        });
-        let bytes = canonical_json_bytes(&event).expect("fixture event bytes");
-        (logical_key, family.name, bytes)
-    }).collect()
+    use crate::model::{
+        ActorId, ChangeIdentityDescriptorV1, CommitAssociationId, InputRequestId, JournalId,
+        ReviewTargetRef, RevisionId, RevisionRefV1, TargetRef, TrackId,
+    };
+    use crate::session::event::{
+        ChangeLinkRelationV1, EventTarget, FactPortRelationV1, FactRefV1, RelationProofStatusV1,
+        ReviewFactPortDraftV1, RevisionRelationAttestationDraftV1, SemanticRevisionRelationV1,
+        WriterProducer, build_change_declared, build_change_link_asserted,
+        build_membership_asserted, build_membership_withdrawn, build_review_fact_ported,
+        build_revision_relation_asserted, build_revision_relation_attested,
+        build_revision_relation_withdrawn,
+    };
+
+    let journal_id = JournalId::new("journal:qualification");
+    let track_id = TrackId::new("track:qualification");
+    let writer = Writer {
+        actor_id: ActorId::new("actor:qualification"),
+        producer: WriterProducer {
+            name: "pointbreak-qualification".to_owned(),
+            version: "1".to_owned(),
+        },
+    };
+    let declared =
+        build_change_declared(ChangeIdentityDescriptorV1::opaque_nonce([1; 32]), [2; 32])
+            .expect("Change declaration");
+    let linked = crate::model::derive_change_id(&ChangeIdentityDescriptorV1::opaque_nonce([3; 32]))
+        .expect("linked Change identity");
+    let revision_a = RevisionRefV1::new(
+        RevisionId::new("rev:sha256:qualification-a"),
+        format!("sha256:{}", "a".repeat(64)),
+    )
+    .expect("Revision A");
+    let revision_b = RevisionRefV1::new(
+        RevisionId::new("rev:sha256:qualification-b"),
+        format!("sha256:{}", "b".repeat(64)),
+    )
+    .expect("Revision B");
+    let attestation_revision_id = revision_b.revision_id.clone();
+    let membership =
+        build_membership_asserted(&declared.change_id, &revision_a.revision_id, [4; 32])
+            .expect("membership assertion");
+    let membership_withdrawal =
+        build_membership_withdrawn(&membership.membership_claim_id, [5; 32])
+            .expect("membership withdrawal");
+    let link = build_change_link_asserted(
+        &declared.change_id,
+        &linked,
+        ChangeLinkRelationV1::RelatedWork,
+        [6; 32],
+    )
+    .expect("Change link");
+    let relation = build_revision_relation_asserted(
+        &declared.change_id,
+        revision_b.clone(),
+        revision_a.clone(),
+        [7; 32],
+    )
+    .expect("Revision relation");
+    let relation_withdrawal =
+        build_revision_relation_withdrawn(&relation.relation_claim_id, [8; 32])
+            .expect("Revision relation withdrawal");
+    let attestation = build_revision_relation_attested(RevisionRelationAttestationDraftV1 {
+        revision: revision_b.clone(),
+        commit_association_id: CommitAssociationId::new("assoc-commit:sha256:qualification"),
+        semantic_relation: SemanticRevisionRelationV1::LandingProvenance,
+        proof_status: RelationProofStatusV1::Asserted,
+        proof_method: "qualification".to_owned(),
+        proof_algorithm_version: "1".to_owned(),
+        capture_scope: Vec::new(),
+        comparison_base_or_parent: None,
+        endpoint_oids: Vec::new(),
+        evidence_content_hash: None,
+        result_digest: format!("sha256:{}", "c".repeat(64)),
+    })
+    .expect("relation attestation");
+    let fact_port = build_review_fact_ported(
+        ReviewFactPortDraftV1 {
+            origin_revision: revision_a.clone(),
+            origin_fact: FactRefV1::InputRequest {
+                input_request_id: InputRequestId::new("input-request:sha256:qualification"),
+            },
+            target_revision: revision_b,
+            relation: FactPortRelationV1::ContextOnly,
+            target_fact: None,
+            rationale_content_hash: None,
+            context_change_id: Some(declared.change_id.clone()),
+        },
+        &writer.actor_id,
+        &track_id,
+    )
+    .expect("fact port");
+
+    vec![
+        qualification_event(
+            0,
+            "change_declared_v1",
+            declared,
+            EventTarget::for_journal(journal_id.clone()),
+            &writer,
+        ),
+        qualification_event(
+            1,
+            "change_membership_asserted_v1",
+            membership,
+            EventTarget::for_journal(journal_id.clone()),
+            &writer,
+        ),
+        qualification_event(
+            2,
+            "change_membership_withdrawn_v1",
+            membership_withdrawal,
+            EventTarget::for_journal(journal_id.clone()),
+            &writer,
+        ),
+        qualification_event(
+            3,
+            "change_link_asserted_v1",
+            link,
+            EventTarget::for_journal(journal_id.clone()),
+            &writer,
+        ),
+        qualification_event(
+            4,
+            "change_revision_relation_asserted_v1",
+            relation,
+            EventTarget::for_journal(journal_id.clone()),
+            &writer,
+        ),
+        qualification_event(
+            5,
+            "change_revision_relation_withdrawn_v1",
+            relation_withdrawal,
+            EventTarget::for_journal(journal_id.clone()),
+            &writer,
+        ),
+        qualification_event(
+            6,
+            "revision_relation_attested_v1",
+            attestation,
+            EventTarget::for_revision(
+                journal_id.clone(),
+                attestation_revision_id,
+                Some(track_id.clone()),
+            )
+            .expect("attestation target"),
+            &writer,
+        ),
+        qualification_event(
+            7,
+            "review_fact_ported_v1",
+            fact_port,
+            EventTarget::for_subject(
+                journal_id,
+                TargetRef::Review(ReviewTargetRef::InputRequest {
+                    revision_id: revision_a.revision_id,
+                    input_request_id: InputRequestId::new("input-request:sha256:qualification"),
+                }),
+                Some(track_id),
+            )
+            .expect("fact-port target"),
+            &writer,
+        ),
+    ]
+}
+
+#[cfg(test)]
+fn qualification_event<P: crate::session::event::EventPayload>(
+    index: usize,
+    family: &'static str,
+    payload: P,
+    target: crate::session::event::EventTarget,
+    writer: &Writer,
+) -> (String, &'static str, Vec<u8>) {
+    let logical_key = format!("qualification:{family}:{index}");
+    let event = crate::session::event::ShoreEvent::new(
+        payload.event_type(),
+        logical_key.clone(),
+        target,
+        writer.clone(),
+        payload,
+        format!("2026-08-04T00:00:{:02}Z", index + 2),
+    )
+    .expect("qualification event");
+    (
+        logical_key,
+        family,
+        serde_json::to_vec(&event).expect("fixture bytes"),
+    )
 }
 
 #[cfg(test)]
@@ -1323,8 +1508,8 @@ mod tests {
         assert!(
             REVIEW_CHANGE_REVISION_RECORD_FAMILIES_V1
                 .iter()
-                .all(|family| event_type_from_code(family.event_type_code).is_none()),
-            "writer-dark reservations must remain disjoint from the live registry"
+                .all(|family| event_type_from_code(family.event_type_code).is_some()),
+            "the frozen reservations must resolve after the writer-dark semantic core lands"
         );
     }
 

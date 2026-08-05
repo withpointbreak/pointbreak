@@ -3,6 +3,7 @@ pub mod adapter;
 pub(crate) mod benchmark;
 pub(crate) mod derived_access;
 pub mod event;
+pub mod evidence;
 mod identity;
 mod projection;
 mod sensitivity_vocabulary;
@@ -61,13 +62,14 @@ pub use projection::cosignature::{
 };
 pub(crate) use projection::state;
 pub use projection::{
-    ArtifactRemovalProjection, BodyContentState, CommitEdgeSource, CommitOidGroupingProjection,
+    ArtifactRemovalProjection, BodyContentState, ChangeLifecycleV1, ChangeLinkView,
+    ChangeProjection, ChangeTopologyV1, ChangeView, CommitEdgeSource, CommitOidGroupingProjection,
     CurrentCommitAssociation, CurrentRefAssociation, EngagementGrouping, EngagementLifecycle,
     EngagementView, LivenessScope, LivenessToken, ProjectionDiagnostic, RemovalClaim,
     RemovalOperativeStatus, RevisionClassificationFacet, RevisionCommitRangeProjection,
     RevisionCommitRangeView, RevisionsByBase, SessionState, StoreIdIndex, SupersessionView,
-    WithdrawnCommitAssociation, WithdrawnRefAssociation, read_events, read_events_for_display,
-    rebuild_state, revision_supersession_classification, store_id_index,
+    WithdrawnCommitAssociation, WithdrawnRefAssociation, project_changes, read_events,
+    read_events_for_display, rebuild_state, revision_supersession_classification, store_id_index,
 };
 pub use sensitivity_vocabulary::{SensitivityKind, SensitivityPolicyOutcome, SensitivitySeverity};
 pub use signing::{

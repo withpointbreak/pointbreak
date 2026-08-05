@@ -14,11 +14,12 @@
 
 use super::input_request::decode_input_request_opened_payload;
 use super::{
-    EventType, InputRequestRespondedPayload, ReviewAssessmentRecordedPayload,
-    ReviewObservationRecordedPayload, RevisionCommitAssociatedPayload,
+    EventType, FactRefV1, InputRequestRespondedPayload, ReviewAssessmentRecordedPayload,
+    ReviewFactPortedPayload, ReviewObservationRecordedPayload, RevisionCommitAssociatedPayload,
     RevisionCommitWithdrawnPayload, RevisionRefAssociatedPayload, RevisionRefWithdrawnPayload,
-    ShoreEvent, TaskCheckpointCapturedPayload, TaskObservationRecordedPayload,
-    ValidationCheckRecordedPayload, WorkObjectProposal, WorkObjectProposedPayload,
+    RevisionRelationAttestedPayload, ShoreEvent, TaskCheckpointCapturedPayload,
+    TaskObservationRecordedPayload, ValidationCheckRecordedPayload, WorkObjectProposal,
+    WorkObjectProposedPayload,
 };
 use crate::error::{Result, ShoreError};
 use crate::model::{ReviewTargetRef, RevisionId, TargetRef, TaskTargetRef, ValidationTarget};
@@ -36,7 +37,36 @@ impl ShoreEvent {
             EventType::ReviewInitialized
             | EventType::ReviewNoteImported
             | EventType::EventSignatureRecorded
-            | EventType::ArtifactRemoved => TargetRef::Journal,
+            | EventType::ArtifactRemoved
+            | EventType::ChangeDeclared
+            | EventType::ChangeMembershipAsserted
+            | EventType::ChangeMembershipWithdrawn
+            | EventType::ChangeLinkAsserted
+            | EventType::ChangeRevisionRelationAsserted
+            | EventType::ChangeRevisionRelationWithdrawn => TargetRef::Journal,
+
+            EventType::RevisionRelationAttested => {
+                let payload: RevisionRelationAttestedPayload =
+                    serde_json::from_value(self.payload.clone())?;
+                TargetRef::Review(ReviewTargetRef::Revision {
+                    revision_id: payload.revision.revision_id,
+                })
+            }
+            EventType::ReviewFactPorted => {
+                let payload: ReviewFactPortedPayload =
+                    serde_json::from_value(self.payload.clone())?;
+                let revision_id = payload.origin_revision.revision_id;
+                TargetRef::Review(match payload.origin_fact {
+                    FactRefV1::Observation { observation_id } => ReviewTargetRef::Observation {
+                        revision_id,
+                        observation_id,
+                    },
+                    FactRefV1::InputRequest { input_request_id } => ReviewTargetRef::InputRequest {
+                        revision_id,
+                        input_request_id,
+                    },
+                })
+            }
 
             // The generative move proposes either a revision (review) or a task
             // attempt (task); the arm discriminates the domain.

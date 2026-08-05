@@ -1,3 +1,4 @@
+mod change;
 mod cursor;
 mod file;
 mod hunk;
@@ -17,20 +18,27 @@ where
     Ok(serde_json::from_str(json)?)
 }
 
+pub use change::{ChangeIdentityDescriptorV1, derive_change_id};
+pub(crate) use change::{
+    current_revisions, derive_membership_claim_id, lowercase_hex, replacement_heads_diverge,
+    revision_graph_has_cycle,
+};
 pub use cursor::CursorState;
 pub use file::{DiffFile, FileStatus};
 pub use hunk::ReviewHunk;
 pub use ids::{
-    ActorId, AssessmentId, CheckpointId, CommitAssociationId, CommitWithdrawalId, EngagementId,
-    EventId, FileId, HunkId, InputRequestId, InputRequestResponseId, JournalId, ObjectId,
-    ObservationId, RefAssociationId, RefWithdrawalId, ReviewId, RevisionId, RowId, TrackId,
-    ValidationCheckId, WorkObjectId,
+    ActorId, AssessmentId, ChangeDeclarationClaimId, ChangeId, ChangeLinkClaimId,
+    ChangeMembershipClaimId, ChangeMembershipWithdrawalId, ChangeRevisionRelationClaimId,
+    ChangeRevisionRelationWithdrawalId, CheckpointId, CommitAssociationId, CommitWithdrawalId,
+    EngagementId, EventId, FileId, HunkId, InputRequestId, InputRequestResponseId, JournalId,
+    ObjectId, ObservationId, RefAssociationId, RefWithdrawalId, ReviewFactPortId, ReviewId,
+    RevisionId, RevisionRelationAttestationId, RowId, TrackId, ValidationCheckId, WorkObjectId,
 };
 pub use review::DiffSnapshot;
 pub use review_note::Side;
 pub use revision::{
-    CommitRangeCaptureMode, ReviewEndpoint, ReviewTargetRef, RevisionSource, RootCommitCaptureMode,
-    StagedCaptureMode, UnstagedCaptureMode, WorktreeCaptureMode,
+    CommitRangeCaptureMode, ReviewEndpoint, ReviewTargetRef, RevisionRefV1, RevisionSource,
+    RootCommitCaptureMode, StagedCaptureMode, UnstagedCaptureMode, WorktreeCaptureMode,
 };
 pub use row::{DiffRow, DiffRowKind, FileMetadataKind, FileMetadataRow};
 pub use validation::{ValidationStatus, ValidationTarget, ValidationTrigger};

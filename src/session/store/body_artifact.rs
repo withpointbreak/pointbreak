@@ -232,7 +232,15 @@ pub(in crate::session) fn body_artifact_field(event_type: EventType) -> Option<B
         | EventType::RevisionCommitWithdrawn
         | EventType::TaskCheckpointCaptured
         | EventType::EventSignatureRecorded
-        | EventType::ArtifactRemoved => None,
+        | EventType::ArtifactRemoved
+        | EventType::ChangeDeclared
+        | EventType::ChangeMembershipAsserted
+        | EventType::ChangeMembershipWithdrawn
+        | EventType::ChangeLinkAsserted
+        | EventType::ChangeRevisionRelationAsserted
+        | EventType::ChangeRevisionRelationWithdrawn
+        | EventType::RevisionRelationAttested
+        | EventType::ReviewFactPorted => None,
     }
 }
 

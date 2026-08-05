@@ -2,6 +2,68 @@ use serde::{Deserialize, Serialize};
 
 use super::{AssessmentId, EventId, InputRequestId, ObservationId, RevisionId, Side};
 
+/// Integrity-qualified reference to one immutable captured Revision.
+///
+/// The Revision id identifies the logical captured position; the required
+/// object-artifact hash authenticates the concrete stored representation.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(
+    rename_all = "camelCase",
+    deny_unknown_fields,
+    try_from = "RevisionRefWireV1"
+)]
+pub struct RevisionRefV1 {
+    pub revision_id: RevisionId,
+    pub object_artifact_content_hash: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RevisionRefWireV1 {
+    revision_id: RevisionId,
+    object_artifact_content_hash: String,
+}
+
+impl TryFrom<RevisionRefWireV1> for RevisionRefV1 {
+    type Error = crate::error::ShoreError;
+
+    fn try_from(value: RevisionRefWireV1) -> Result<Self, Self::Error> {
+        Self::new(value.revision_id, value.object_artifact_content_hash)
+    }
+}
+
+impl RevisionRefV1 {
+    pub fn new(
+        revision_id: RevisionId,
+        object_artifact_content_hash: impl Into<String>,
+    ) -> crate::error::Result<Self> {
+        let object_artifact_content_hash = object_artifact_content_hash.into();
+        if !revision_id.as_str().starts_with("rev:") {
+            return Err(crate::error::ShoreError::Message(
+                "RevisionRefV1 requires a rev: RevisionId".to_owned(),
+            ));
+        }
+        if !is_prefixed_sha256(&object_artifact_content_hash) {
+            return Err(crate::error::ShoreError::Message(
+                "RevisionRefV1 requires a lowercase sha256 object artifact hash".to_owned(),
+            ));
+        }
+        Ok(Self {
+            revision_id,
+            object_artifact_content_hash,
+        })
+    }
+}
+
+fn is_prefixed_sha256(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    })
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",

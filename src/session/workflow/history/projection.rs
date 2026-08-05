@@ -591,6 +591,11 @@ pub(super) fn history_entry_from_event(
     backend: Option<&StoreBackend>,
     removal_lens: Option<&BodyRemovalLens<'_>>,
 ) -> Result<ReviewHistoryEntry> {
+    if is_non_revision_content_event(event.event_type) {
+        return Err(ShoreError::Message(
+            "review history projects review-domain Revision content facts only; a carrier or non-content event reached this projector — upstream filter missing".to_owned(),
+        ));
+    }
     let summary = match event.event_type {
         EventType::ReviewInitialized => {
             let _payload: ReviewInitializedPayload = serde_json::from_value(event.payload.clone())?;
@@ -802,10 +807,16 @@ pub(super) fn history_entry_from_event(
         EventType::TaskCheckpointCaptured
         | EventType::TaskObservationRecorded
         | EventType::EventSignatureRecorded
-        | EventType::ArtifactRemoved => {
-            return Err(ShoreError::Message(
-                "review history projects review-domain content events only; a task, co-signature, or content-removal event reached this match arm — upstream filter missing".to_owned(),
-            ));
+        | EventType::ArtifactRemoved
+        | EventType::ChangeDeclared
+        | EventType::ChangeMembershipAsserted
+        | EventType::ChangeMembershipWithdrawn
+        | EventType::ChangeLinkAsserted
+        | EventType::ChangeRevisionRelationAsserted
+        | EventType::ChangeRevisionRelationWithdrawn
+        | EventType::RevisionRelationAttested
+        | EventType::ReviewFactPorted => {
+            unreachable!("non-content event rejected before summary projection")
         }
     };
 
@@ -936,18 +947,31 @@ fn optional_text(
     }
 }
 
-fn event_is_review_history(event: &ShoreEvent) -> bool {
+pub(super) const NON_REVISION_CONTENT_EVENT_TYPES: [EventType; 12] = [
+    EventType::TaskCheckpointCaptured,
+    EventType::TaskObservationRecorded,
+    EventType::EventSignatureRecorded,
+    EventType::ArtifactRemoved,
+    EventType::ChangeDeclared,
+    EventType::ChangeMembershipAsserted,
+    EventType::ChangeMembershipWithdrawn,
+    EventType::ChangeLinkAsserted,
+    EventType::ChangeRevisionRelationAsserted,
+    EventType::ChangeRevisionRelationWithdrawn,
+    EventType::RevisionRelationAttested,
+    EventType::ReviewFactPorted,
+];
+
+fn is_non_revision_content_event(event_type: EventType) -> bool {
+    NON_REVISION_CONTENT_EVENT_TYPES.contains(&event_type)
+}
+
+pub(super) fn event_is_review_history(event: &ShoreEvent) -> bool {
     // Review history is a review-domain content projection by name and contract. Task-domain
     // events have a sibling projection; detached co-signatures are read through the dedicated
     // co-signature-set projection; content-removal facts are session-anchored store maintenance
     // rendered through the removal projection. None is summarized in this content stream.
-    if matches!(
-        event.event_type,
-        EventType::TaskCheckpointCaptured
-            | EventType::TaskObservationRecorded
-            | EventType::EventSignatureRecorded
-            | EventType::ArtifactRemoved
-    ) {
+    if is_non_revision_content_event(event.event_type) {
         return false;
     }
     // A generative move can propose either a revision or a task attempt; the

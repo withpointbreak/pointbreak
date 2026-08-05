@@ -300,6 +300,14 @@ mod tests {
             EventType::TaskObservationRecorded,
             EventType::EventSignatureRecorded,
             EventType::ArtifactRemoved,
+            EventType::ChangeDeclared,
+            EventType::ChangeMembershipAsserted,
+            EventType::ChangeMembershipWithdrawn,
+            EventType::ChangeLinkAsserted,
+            EventType::ChangeRevisionRelationAsserted,
+            EventType::ChangeRevisionRelationWithdrawn,
+            EventType::RevisionRelationAttested,
+            EventType::ReviewFactPorted,
         ]
         .into_iter()
         .enumerate()

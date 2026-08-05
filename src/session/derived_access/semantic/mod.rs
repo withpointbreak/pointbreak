@@ -615,7 +615,15 @@ fn classify_event(event: &ShoreEvent) -> Result<ClassifiedFact, SemanticModelErr
         | EventType::ReviewNoteImported
         | EventType::TaskCheckpointCaptured
         | EventType::TaskObservationRecorded
-        | EventType::EventSignatureRecorded => SemanticFactKind::Other,
+        | EventType::EventSignatureRecorded
+        | EventType::ChangeDeclared
+        | EventType::ChangeMembershipAsserted
+        | EventType::ChangeMembershipWithdrawn
+        | EventType::ChangeLinkAsserted
+        | EventType::ChangeRevisionRelationAsserted
+        | EventType::ChangeRevisionRelationWithdrawn
+        | EventType::RevisionRelationAttested
+        | EventType::ReviewFactPorted => SemanticFactKind::Other,
     };
     Ok(ClassifiedFact {
         revision_id,

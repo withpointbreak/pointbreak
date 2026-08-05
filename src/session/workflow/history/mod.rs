@@ -277,7 +277,8 @@ pub fn default_history_page_projection(
 #[cfg(test)]
 mod tests {
     use super::projection::{
-        HistoryProjectionOptions, history_base_from_events, history_entry_from_event,
+        HistoryProjectionOptions, NON_REVISION_CONTENT_EVENT_TYPES, event_is_review_history,
+        history_base_from_events, history_entry_from_event,
     };
     use super::summary::ReviewHistorySummary;
     use super::*;
@@ -1270,6 +1271,47 @@ mod tests {
             message.contains("review-domain") || message.contains("task event"),
             "error message must document the review-domain contract; got: {message}"
         );
+    }
+
+    #[test]
+    fn history_filter_and_projection_reject_the_same_non_content_event_families() {
+        for event_type in NON_REVISION_CONTENT_EVENT_TYPES {
+            let event = ShoreEvent {
+                schema: "shore.event".to_owned(),
+                version: 1,
+                event_id: EventId::new(format!("evt:sha256:{event_type:?}")),
+                event_type,
+                idempotency_key: format!("excluded:{event_type:?}"),
+                target: EventTarget::for_journal(JournalId::new("journal:test")),
+                writer: Writer::shore_local("test"),
+                occurred_at: "2026-08-05T00:00:00Z".to_owned(),
+                payload_hash: "sha256:placeholder".to_owned(),
+                assertion_mode: AssertionMode::Advisory,
+                signer: None,
+                signature: None,
+                source_ref: None,
+                ingest: None,
+                content_encoding: Vec::new(),
+                payload_version: 1,
+                payload: serde_json::Value::Null,
+            };
+
+            assert!(
+                !event_is_review_history(&event),
+                "{event_type:?} must be filtered before review-history projection"
+            );
+            assert!(
+                history_entry_from_event(
+                    &event,
+                    &HistoryProjectionOptions::default(),
+                    None,
+                    None,
+                    None,
+                )
+                .is_err(),
+                "{event_type:?} must remain outside the Revision-content history contract"
+            );
+        }
     }
 
     #[test]

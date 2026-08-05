@@ -22,6 +22,14 @@ pub enum EventType {
     TaskObservationRecorded,
     EventSignatureRecorded,
     ArtifactRemoved,
+    ChangeDeclared,
+    ChangeMembershipAsserted,
+    ChangeMembershipWithdrawn,
+    ChangeLinkAsserted,
+    ChangeRevisionRelationAsserted,
+    ChangeRevisionRelationWithdrawn,
+    RevisionRelationAttested,
+    ReviewFactPorted,
 }
 
 impl EventType {
@@ -45,6 +53,14 @@ impl EventType {
             Self::TaskObservationRecorded => "task_observation_recorded",
             Self::EventSignatureRecorded => "event_signature_recorded",
             Self::ArtifactRemoved => "artifact_removed",
+            Self::ChangeDeclared => "change_declared",
+            Self::ChangeMembershipAsserted => "change_membership_asserted",
+            Self::ChangeMembershipWithdrawn => "change_membership_withdrawn",
+            Self::ChangeLinkAsserted => "change_link_asserted",
+            Self::ChangeRevisionRelationAsserted => "change_revision_relation_asserted",
+            Self::ChangeRevisionRelationWithdrawn => "change_revision_relation_withdrawn",
+            Self::RevisionRelationAttested => "revision_relation_attested",
+            Self::ReviewFactPorted => "review_fact_ported",
         }
     }
 
@@ -54,7 +70,7 @@ impl EventType {
     /// registries/agreement tests, so gating it keeps the lib pass free of a
     /// dead-code warning under `-D warnings`.
     #[cfg(test)]
-    pub(crate) const ALL: [EventType; 16] = [
+    pub(crate) const ALL: [EventType; 24] = [
         Self::ReviewInitialized,
         Self::WorkObjectProposed,
         Self::ReviewObservationRecorded,
@@ -71,6 +87,14 @@ impl EventType {
         Self::TaskObservationRecorded,
         Self::EventSignatureRecorded,
         Self::ArtifactRemoved,
+        Self::ChangeDeclared,
+        Self::ChangeMembershipAsserted,
+        Self::ChangeMembershipWithdrawn,
+        Self::ChangeLinkAsserted,
+        Self::ChangeRevisionRelationAsserted,
+        Self::ChangeRevisionRelationWithdrawn,
+        Self::RevisionRelationAttested,
+        Self::ReviewFactPorted,
     ];
 }
 
@@ -96,7 +120,15 @@ fn all_is_exhaustive(event_type: EventType) {
         | EventType::TaskCheckpointCaptured
         | EventType::TaskObservationRecorded
         | EventType::EventSignatureRecorded
-        | EventType::ArtifactRemoved => {}
+        | EventType::ArtifactRemoved
+        | EventType::ChangeDeclared
+        | EventType::ChangeMembershipAsserted
+        | EventType::ChangeMembershipWithdrawn
+        | EventType::ChangeLinkAsserted
+        | EventType::ChangeRevisionRelationAsserted
+        | EventType::ChangeRevisionRelationWithdrawn
+        | EventType::RevisionRelationAttested
+        | EventType::ReviewFactPorted => {}
     }
 }
 
@@ -107,7 +139,7 @@ mod tests {
     #[test]
     fn all_lists_every_variant_once() {
         // Every variant appears exactly once, and the count matches the enum arity.
-        assert_eq!(EventType::ALL.len(), 16);
+        assert_eq!(EventType::ALL.len(), 24);
         for variant in EventType::ALL {
             let occurrences = EventType::ALL.iter().filter(|&&v| v == variant).count();
             assert_eq!(
@@ -144,6 +176,14 @@ mod tests {
             EventType::TaskObservationRecorded,
             EventType::EventSignatureRecorded,
             EventType::ArtifactRemoved,
+            EventType::ChangeDeclared,
+            EventType::ChangeMembershipAsserted,
+            EventType::ChangeMembershipWithdrawn,
+            EventType::ChangeLinkAsserted,
+            EventType::ChangeRevisionRelationAsserted,
+            EventType::ChangeRevisionRelationWithdrawn,
+            EventType::RevisionRelationAttested,
+            EventType::ReviewFactPorted,
         ] {
             let serde_wire = serde_json::to_value(variant).unwrap();
             assert_eq!(
