@@ -7,7 +7,7 @@ use crate::git::git_worktree_root;
 use crate::session::store::inventory::{
     ArtifactInventoryEntry, RevisionObjectInventory, StoreInventory, scan_store_inventory,
 };
-use crate::session::store::resolution::{opaque_path_identity, resolve_store};
+use crate::session::store::resolution::{opaque_path_identity, resolve_read_store};
 use crate::session::store::sensitivity::{
     SensitivityFinding, SensitivityScan, explain_worktree_sensitivity, scan_worktree_sensitivity,
 };
@@ -114,7 +114,12 @@ pub struct StoreStatusSensitivityFinding {
 
 pub fn store_status(options: StoreStatusOptions) -> Result<StoreStatusResult> {
     let worktree_root = git_worktree_root(&options.repo)?;
-    let resolution = resolve_store(&options.repo)?;
+    // Status consumes the authoritative inventory, so activated roots enter the
+    // same capability preflight as every other event-only read. `store paths`
+    // remains the bounded placement-only diagnostic that intentionally bypasses
+    // semantic store access.
+    let read_store = resolve_read_store(&options.repo)?;
+    let resolution = &read_store.resolution;
     let store_identity = opaque_path_identity("store", resolution.store_dir())?;
     let context_identity = opaque_path_identity("context", &worktree_root)?;
     let inventory = scan_store_inventory(resolution.store_dir(), Some(&worktree_root))?;
@@ -280,6 +285,10 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::session::store::capabilities::{
+        CapabilityFixtureState, write_capability_fixture_for_test,
+    };
+    use crate::session::store::resolution::resolve_store;
     use crate::session::{
         CaptureOptions, StoreLinkOptions, capture_worktree_review, link_store_to_family,
     };
@@ -356,6 +365,29 @@ mod tests {
             json.get("lastWrite").is_none(),
             "serde skip verified: {json}"
         );
+    }
+
+    #[test]
+    fn activated_store_status_fails_with_the_typed_capability_diagnostic() {
+        for state in [CapabilityFixtureState::M1, CapabilityFixtureState::L2] {
+            let repo = TestRepo::new();
+            repo.write("README.md", "base\n");
+            repo.commit_all("base");
+            let resolution = resolve_store(repo.path()).unwrap();
+            write_capability_fixture_for_test(resolution.backend().journal().as_ref(), state)
+                .unwrap();
+
+            let error = store_status(StoreStatusOptions::new(repo.path()))
+                .unwrap_err()
+                .to_string();
+
+            assert!(
+                error.contains("migration_in_progress")
+                    || error.contains("reader_upgrade_required"),
+                "unexpected capability diagnostic: {error}"
+            );
+            assert!(!error.contains("json parse failed"));
+        }
     }
 
     #[test]

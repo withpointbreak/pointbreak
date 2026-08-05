@@ -8,6 +8,9 @@ use crate::model::id_prefix;
 use crate::session::derived_access::writer::{DerivedWriteCoordinator, DerivedWriteDiagnostic};
 use crate::session::event::{AssertionMode, EventType, ShoreEvent, event_type_from_code};
 use crate::session::store::backend::{Journal, JournalEntry, LocalJournal, StoreBackend};
+use crate::session::store::capabilities::{
+    event_entries_for_event_only_product, preflight_event_only_product,
+};
 use crate::storage::{CreateOutcome, LocalStorage};
 
 #[derive(Debug)]
@@ -113,6 +116,11 @@ impl EventStore {
             idempotency_key = event.idempotency_key.as_str(),
         );
         let _entered = span.enter();
+
+        // The event-only writer is intentionally dark once the non-event
+        // activation root exists. This keyed probe is O(1) for ordinary L0
+        // stores and the full router runs before any activated-store mutation.
+        preflight_event_only_product(self.journal.as_ref())?;
 
         // The journal owns key→address mapping, so the write needs no on-disk path;
         // the prior path-stem check was a tautology over the key-derived filename.
@@ -324,8 +332,7 @@ impl EventStore {
     /// guard, so two simultaneously live histories are counted as two rather
     /// than one setter silently replacing the other.
     pub(crate) fn list_events_untracked(&self) -> Result<Vec<ShoreEvent>> {
-        self.journal
-            .list_event_entries()?
+        event_entries_for_event_only_product(self.journal.as_ref())?
             .iter()
             .map(Self::decode_validated_entry)
             .collect::<Result<Vec<_>>>()
@@ -339,9 +346,7 @@ impl EventStore {
     /// one physical read. The raw entry bytes are consumed while building the
     /// decoded population, so no second decoded history is created here.
     pub(crate) fn list_events_with_witnesses(&self) -> Result<Vec<ValidatedJournalEntry>> {
-        let events = self
-            .journal
-            .list_event_entries()?
+        let events = event_entries_for_event_only_product(self.journal.as_ref())?
             .into_iter()
             .map(|entry| {
                 let carrier_bytes = u64::try_from(entry.bytes.len()).unwrap_or(u64::MAX);
@@ -364,7 +369,7 @@ impl EventStore {
     pub fn list_events_lenient(&self) -> Result<(Vec<ShoreEvent>, Vec<SkippedEvent>)> {
         let mut events = Vec::new();
         let mut skipped = Vec::new();
-        for entry in self.journal.list_event_entries()? {
+        for entry in event_entries_for_event_only_product(self.journal.as_ref())? {
             match Self::decode_validated_entry(&entry) {
                 Ok(event) => events.push(event),
                 Err(ShoreError::UnsupportedEventType(record)) => skipped.push(SkippedEvent {
@@ -562,6 +567,9 @@ mod tests {
         Writer,
     };
     use crate::session::state::SessionState;
+    use crate::session::store::capabilities::{
+        CapabilityFixtureState, write_capability_fixture_for_test,
+    };
 
     fn counting_scope(byte: char) -> LongitudinalCountingScopeV1 {
         LongitudinalCountingScopeV1::new(std::iter::repeat_n(byte, 64).collect::<String>())
@@ -681,6 +689,36 @@ mod tests {
             EventWriteOutcome::Existing
         );
         assert_eq!(store.list_events().unwrap(), vec![event]);
+    }
+
+    #[test]
+    fn activated_store_refuses_event_write_before_mutation() {
+        for state in [CapabilityFixtureState::M1, CapabilityFixtureState::L2] {
+            let root = tempfile::tempdir().unwrap();
+            let backend = StoreBackend::Local(root.path().to_path_buf());
+            let journal = backend.journal();
+            write_capability_fixture_for_test(journal.as_ref(), state).unwrap();
+            let before = journal.list_record_entries().unwrap();
+
+            let error = EventStore::from_backend(&backend)
+                .record_event_once(&review_initialized_event())
+                .unwrap_err()
+                .to_string();
+
+            assert!(
+                error.contains("migration_in_progress")
+                    || error.contains("reader_upgrade_required")
+            );
+            let after = journal.list_record_entries().unwrap();
+            assert_eq!(before.len(), after.len());
+            assert!(
+                before
+                    .iter()
+                    .zip(after.iter())
+                    .all(|(left, right)| left.key_digest == right.key_digest
+                        && left.bytes == right.bytes)
+            );
+        }
     }
 
     #[test]

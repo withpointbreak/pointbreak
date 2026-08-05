@@ -88,15 +88,17 @@ pub(crate) use store::backend::{
 pub(crate) use store::compute_revision_fingerprint;
 #[cfg(feature = "longitudinal-counting")]
 pub(crate) use store::resolution::opaque_path_identity;
+pub use store::{
+    AuthorityCursorV2, EventWriteOutcome, ObjectArtifact, StoreCapabilityInspection,
+    StoreCapabilityStatus, StoreMode, StoreModeOutcome, StoreModeSource, StorePaths,
+    capture_worktree_fingerprint, ensure_pointbreak_gitignore, event_log_head_marker,
+    family_link_advisory, read_bound_object_artifact, read_object_artifact,
+    resolve_store_mode_for_repo, set_store_mode_for_repo, store_capability_for_repo,
+    store_dir_for_repo, store_paths_for_repo,
+};
 pub(crate) use store::{
     EventStore, RepositoryPaths, RevisionFingerprint, SkippedEvent, sweep_stale_temp_files,
     worktree_fingerprint_for_files,
-};
-pub use store::{
-    EventWriteOutcome, ObjectArtifact, StoreMode, StoreModeOutcome, StoreModeSource, StorePaths,
-    capture_worktree_fingerprint, ensure_pointbreak_gitignore, event_log_head_marker,
-    family_link_advisory, read_bound_object_artifact, read_object_artifact,
-    resolve_store_mode_for_repo, set_store_mode_for_repo, store_dir_for_repo, store_paths_for_repo,
 };
 pub(in crate::session) use store::{body_artifact, fingerprint, object_artifact, store_init};
 pub use workflow::{

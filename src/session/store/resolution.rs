@@ -12,6 +12,9 @@ use crate::session::derived_access::product_contract::DerivedAccessProfile;
 use crate::session::derived_access::writer::DerivedWriteCoordinator;
 use crate::session::event::ShoreEvent;
 use crate::session::store::backend::StoreBackend;
+use crate::session::store::capabilities::{
+    StoreCapabilityInspection, inspect_journal_records, preflight_event_only_product,
+};
 use crate::session::store::event_store::EventStore;
 use crate::session::store::store_config::{StoreMode, resolve_family_binding, resolve_store_mode};
 use crate::session::store::store_init::{
@@ -207,17 +210,34 @@ impl ReadStore {
 /// per clone (shared via the common dir, or worktree-local when Ephemeral), a read
 /// opens exactly that store.
 pub(crate) fn resolve_read_store(repo: impl AsRef<Path>) -> Result<ReadStore> {
-    Ok(ReadStore {
-        resolution: resolve_store(repo)?,
-    })
+    read_store_from_resolution(resolve_store(repo)?)
 }
 
 pub(crate) fn resolve_read_store_with_derived_access_profile(
     repo: impl AsRef<Path>,
     derived_access_profile: DerivedAccessProfile,
 ) -> Result<ReadStore> {
-    Ok(ReadStore {
-        resolution: resolve_store_with_derived_access_profile(repo, derived_access_profile)?,
+    read_store_from_resolution(resolve_store_with_derived_access_profile(
+        repo,
+        derived_access_profile,
+    )?)
+}
+
+fn read_store_from_resolution(resolution: StoreResolution) -> Result<ReadStore> {
+    preflight_event_only_product(resolution.backend().journal().as_ref())?;
+    Ok(ReadStore { resolution })
+}
+
+/// Inspect the typed store-capability authority without entering a normal
+/// product route. This is the bounded, mutation-free facade used by reader
+/// negotiation and future migration planning.
+pub fn store_capability_for_repo(repo: impl AsRef<Path>) -> Result<StoreCapabilityInspection> {
+    let resolution = resolve_store(repo)?;
+    let inspection = inspect_journal_records(resolution.backend().journal().as_ref())?;
+    Ok(StoreCapabilityInspection {
+        status: inspection.status,
+        cursor: inspection.cursor,
+        minimum_reader_profile: inspection.minimum_reader_profile,
     })
 }
 
@@ -357,6 +377,7 @@ fn coordinate_event_store(
 pub(crate) fn resolve_write_store(repo: impl AsRef<Path>) -> Result<WriteStore> {
     let paths = RepositoryPaths::resolve(repo.as_ref())?;
     let resolution = resolve_store(repo.as_ref())?;
+    preflight_event_only_product(resolution.backend().journal().as_ref())?;
     Ok(WriteStore {
         store_dir: resolution.store_dir().to_path_buf(),
         worktree_root: paths.worktree_root().to_path_buf(),
@@ -596,6 +617,9 @@ mod tests {
     use crate::session::event::{
         EventTarget, EventType, ReviewInitializedPayload, ShoreEvent, Writer,
     };
+    use crate::session::store::capabilities::{
+        CapabilityFixtureState, StoreCapabilityStatus, write_capability_fixture_for_test,
+    };
     use crate::session::store::store_config::write_store_config;
     use crate::session::store::store_init::RepositoryPaths;
 
@@ -632,6 +656,58 @@ mod tests {
         // the single-store world.
         let validation = resolve_write_validation_store(repo.path()).unwrap();
         let _ = validation.validation_events().unwrap();
+    }
+
+    #[test]
+    fn capability_facade_and_product_preflight_share_the_resolved_store() {
+        for (mode, state) in [
+            (StoreMode::Shared, CapabilityFixtureState::M1),
+            (StoreMode::Ephemeral, CapabilityFixtureState::L2),
+        ] {
+            let repo = GitRepo::new();
+            write_store_config(repo.path(), mode).unwrap();
+            let resolution = resolve_store(repo.path()).unwrap();
+            write_capability_fixture_for_test(resolution.backend().journal().as_ref(), state)
+                .unwrap();
+
+            let capability = store_capability_for_repo(repo.path()).unwrap();
+            match state {
+                CapabilityFixtureState::M1 => assert!(matches!(
+                    capability.status,
+                    StoreCapabilityStatus::MigrationInProgress { .. }
+                )),
+                CapabilityFixtureState::L2 => {
+                    assert!(matches!(
+                        capability.status,
+                        StoreCapabilityStatus::Ready { .. }
+                    ))
+                }
+            }
+            assert!(capability.cursor.journal_record_count > 0);
+            assert_eq!(
+                capability.minimum_reader_profile.as_deref(),
+                Some("review_change_revision_v1")
+            );
+
+            let read_error = resolve_read_store(repo.path()).unwrap_err().to_string();
+            let off_error = resolve_read_store_with_derived_access_profile(
+                repo.path(),
+                DerivedAccessProfile::Off,
+            )
+            .unwrap_err()
+            .to_string();
+            let write_error = resolve_write_store(repo.path()).unwrap_err().to_string();
+            assert!(
+                read_error.contains("migration_in_progress")
+                    || read_error.contains("reader_upgrade_required")
+            );
+            assert_eq!(read_error, off_error);
+            assert_eq!(read_error, write_error);
+
+            // Placement diagnosis is repo-only: it reports where the store is
+            // without opening the activated Journal and is classified separately.
+            assert!(store_paths_for_repo(repo.path()).is_ok());
+        }
     }
 
     #[test]

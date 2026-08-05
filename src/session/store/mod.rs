@@ -1,6 +1,7 @@
 pub(in crate::session) mod backend;
 pub(in crate::session) mod body_artifact;
 pub(in crate::session) mod bundle;
+pub(in crate::session) mod capabilities;
 pub(in crate::session) mod content;
 mod event_store;
 pub(in crate::session) mod fingerprint;
@@ -13,6 +14,7 @@ pub(in crate::session) mod store_config;
 pub(in crate::session) mod store_init;
 pub(in crate::session) mod user_level;
 
+pub use capabilities::{AuthorityCursorV2, StoreCapabilityInspection, StoreCapabilityStatus};
 pub use event_store::EventWriteOutcome;
 pub(crate) use event_store::{EventStore, SkippedEvent};
 #[cfg(test)]
@@ -21,7 +23,8 @@ pub(crate) use fingerprint::worktree_fingerprint_for_files;
 pub use fingerprint::{RevisionFingerprint, capture_worktree_fingerprint};
 pub use object_artifact::{ObjectArtifact, read_bound_object_artifact, read_object_artifact};
 pub use resolution::{
-    StorePaths, event_log_head_marker, family_link_advisory, store_paths_for_repo,
+    StorePaths, event_log_head_marker, family_link_advisory, store_capability_for_repo,
+    store_paths_for_repo,
 };
 // `StoreMode` and the thin repo-level entry points re-export from `session::mod`
 // for the binary crate. The underlying read/write helpers stay crate-internal:

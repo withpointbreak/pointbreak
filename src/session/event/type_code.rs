@@ -20,9 +20,12 @@ use super::EventType;
 /// The single source of truth for the frozen registry. Forward and inverse lookups
 /// both read this table so they cannot drift.
 ///
-/// **Append-only, never reassigned.** A new family appends a new `t:NN` at the end;
-/// an existing entry's code is never changed and a retired family keeps its code
-/// reserved forever (so old signed events stay decodable). Do not reorder this table.
+/// **Append-only, never reassigned.** Codes `t:17` through `t:24` are already
+/// reserved by the writer-dark `review_change_revision_v1` capability contract.
+/// Until that cohort joins this registry, any unrelated new family starts at
+/// `t:25`; an existing entry's code is never changed and a retired family keeps
+/// its code reserved forever (so old signed events stay decodable). Do not reorder
+/// this table.
 const REGISTRY: [(EventType, &str); 16] = [
     (EventType::ReviewInitialized, "t:01"),
     (EventType::WorkObjectProposed, "t:02"),

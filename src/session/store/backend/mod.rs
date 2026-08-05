@@ -296,6 +296,14 @@ pub(crate) struct JournalEntry {
 /// store, never the journal). The `Debug` supertrait lets a wrapper hold the
 /// trait object in a `#[derive(Debug)]` struct.
 pub(crate) trait Journal: Debug {
+    /// Store one opaque Journal record under its logical key. Event-only callers
+    /// keep using `create_event_once`; capability records use this deliberately
+    /// generic spelling so they never masquerade as an event in typed code.
+    #[cfg(test)]
+    fn create_record_once(&self, logical_key: &str, bytes: &[u8]) -> Result<CreateOutcome> {
+        self.create_event_once(logical_key, bytes)
+    }
+
     /// Store the event for `idempotency_key` only if absent, atomically and safe
     /// against a concurrent writer. Reports whether the bytes were written or an
     /// entry already existed; an existing entry is never overwritten.
@@ -307,12 +315,22 @@ pub(crate) trait Journal: Debug {
     /// Whether an event is stored for `idempotency_key`.
     fn event_exists(&self, idempotency_key: &str) -> Result<bool>;
 
+    fn record_exists(&self, logical_key: &str) -> Result<bool> {
+        self.event_exists(logical_key)
+    }
+
     /// Every stored event, paired with its content-address digest, in a
     /// deterministic order. The order is part of the contract: the projection
     /// folds events in this order, so it must be stable across backends. The
     /// per-entry digest lets the wrapper verify each blob still sits at its
     /// content-addressed home.
     fn list_event_entries(&self) -> Result<Vec<JournalEntry>>;
+
+    /// Every opaque record in the Journal namespace. A capable router must call
+    /// this before attempting `ShoreEvent` decoding.
+    fn list_record_entries(&self) -> Result<Vec<JournalEntry>> {
+        self.list_event_entries()
+    }
 
     /// A cheap, monotonic staleness signal — the count of stored events —
     /// computed **without reading any event bytes** (no decode, no hash). It is
