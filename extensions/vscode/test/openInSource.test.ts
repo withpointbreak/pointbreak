@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("vscode", () => ({
@@ -40,7 +41,9 @@ describe("OpenInSourceCommand", () => {
       },
     });
 
-    expect(host.openDocument).toHaveBeenCalledWith("/repo/src/lib.rs");
+    expect(host.openDocument).toHaveBeenCalledWith(
+      path.resolve("/repo", "src", "lib.rs"),
+    );
     expect(host.reveal).toHaveBeenCalledWith(document, {
       start: { line: 1, character: 0 },
       end: { line: 1, character: 4 },

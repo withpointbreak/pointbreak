@@ -3,7 +3,12 @@ import { describe, expect, it } from "vitest";
 import { resolveBinary } from "../src/binary";
 
 const extensionRoot = "/extension";
-const bundled = path.join(extensionRoot, "bin", "darwin-arm64", "pointbreak");
+const bundled = path.posix.join(
+  extensionRoot,
+  "bin",
+  "darwin-arm64",
+  "pointbreak",
+);
 const global = "/tools/pointbreak";
 
 describe("resolveBinary", () => {
@@ -109,7 +114,7 @@ describe("resolveBinary", () => {
 
   it("ignores the retired executable in the bundle and on PATH", () => {
     const retired = new Set([
-      path.join(extensionRoot, "bin", "darwin-arm64", "shore"),
+      path.posix.join(extensionRoot, "bin", "darwin-arm64", "shore"),
       "/tools/shore",
     ]);
 

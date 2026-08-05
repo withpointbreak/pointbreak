@@ -35,8 +35,9 @@ export function resolveBinary(
 
   const platform = config.platform ?? process.platform;
   const arch = config.arch ?? process.arch;
+  const pathApi = platform === "win32" ? path.win32 : path.posix;
   const executable = pointbreakExecutable(platform);
-  const bundledPath = path.join(
+  const bundledPath = pathApi.join(
     extensionRoot,
     "bin",
     `${platform}-${arch}`,
@@ -47,6 +48,7 @@ export function resolveBinary(
     executable,
     config.path ?? process.env.PATH ?? "",
     platform,
+    pathApi,
     candidateExists,
   );
 
@@ -80,6 +82,7 @@ function findOnPath(
   executable: string,
   searchPath: string,
   platform: NodeJS.Platform,
+  pathApi: Pick<typeof path, "join">,
   exists: (candidate: string) => boolean,
 ): string | undefined {
   const delimiter = platform === "win32" ? ";" : ":";
@@ -87,7 +90,7 @@ function findOnPath(
     if (!directory) {
       continue;
     }
-    const candidate = path.join(directory, executable);
+    const candidate = pathApi.join(directory, executable);
     if (exists(candidate)) {
       return candidate;
     }

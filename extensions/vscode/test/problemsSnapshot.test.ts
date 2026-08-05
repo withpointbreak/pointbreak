@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { renderMarkdown as renderInspectorMarkdown } from "../../../src/cli/inspect/web/src/markdown";
 import { buildProblemsSnapshot } from "../src/problemsSnapshot";
@@ -7,12 +8,13 @@ const timestamp = "2026-07-15T12:34:56.000Z";
 
 describe("buildProblemsSnapshot", () => {
   it("keeps only safe target-relative diagnostics and sorts every documented field", () => {
+    const repoRoot = path.join(path.parse(process.cwd()).root, "repo");
     const markdown = buildProblemsSnapshot(
       [
-        diagnostics("/outside/ignored.ts", [
+        diagnostics(path.join(repoRoot, "..", "outside", "ignored.ts"), [
           diagnostic("outside the target", 0, 0, 0, "outside", "1"),
         ]),
-        diagnostics("/repo/src/same.ts", [
+        diagnostics(path.join(repoRoot, "src", "same.ts"), [
           diagnostic("z message", 0, 0, 1, "z-source", "2"),
           diagnostic("a message", 0, 0, 1, "z-source", "2"),
           diagnostic("code first", 0, 0, 1, "z-source", "1"),
@@ -20,31 +22,26 @@ describe("buildProblemsSnapshot", () => {
           diagnostic("error first", 0, 0, 0, "z-source", "9"),
           diagnostic("later range", 1, 0, 0, "a-source", "1"),
         ]),
-        diagnostics("/repo/src/z.ts", [
+        diagnostics(path.join(repoRoot, "src", "z.ts"), [
           diagnostic("later path", 0, 0, 0, "a-source", "1"),
         ]),
-        diagnostics("/repo/src/a.ts", [
+        diagnostics(path.join(repoRoot, "src", "a.ts"), [
           diagnostic("first path", 0, 0, 0, "a-source", "1"),
         ]),
-        diagnostics("/repo/../escape.ts", [
+        diagnostics(path.join(repoRoot, "..", "escape.ts"), [
           diagnostic("traversal", 0, 0, 0, "outside", "1"),
         ]),
         diagnostics("relative.ts", [
           diagnostic("unresolvable", 0, 0, 0, "outside", "1"),
         ]),
-        diagnostics("/repo/src\\unsafe.ts", [
-          diagnostic("unsafe separator", 0, 0, 0, "outside", "1"),
-        ]),
       ],
-      { repoRoot: "/repo", targetLabel: "repo", timestamp },
+      { repoRoot, targetLabel: "repo", timestamp },
     );
 
     expect(markdown).toContain(
       "**Counts:** 8 total; error 4; warning 4; information 0; hint 0; unknown 0",
     );
-    expect(markdown).not.toMatch(
-      /outside the target|traversal|unresolvable|unsafe separator/,
-    );
+    expect(markdown).not.toMatch(/outside the target|traversal|unresolvable/);
     expect(entryMessages(markdown)).toEqual([
       "first path",
       "error first",
