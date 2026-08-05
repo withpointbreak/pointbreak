@@ -109,10 +109,10 @@ for (const dir of [extensionRoot, outDir]) {
   }
 }
 
-run(nodePackageCommand("npm"), ["run", "build"], extensionRoot);
+runNodePackageCommand("npm", ["run", "build"], extensionRoot);
 assertListedFiles(bundledRelative);
-run(
-  nodePackageCommand("npx"),
+runNodePackageCommand(
+  "npx",
   [
     "--no-install",
     "vsce",
@@ -168,8 +168,8 @@ console.log(
 );
 
 function assertListedFiles(binary) {
-  const result = run(
-    nodePackageCommand("npx"),
+  const result = runNodePackageCommand(
+    "npx",
     ["--no-install", "vsce", "ls"],
     extensionRoot,
     true,
@@ -181,8 +181,26 @@ function assertListedFiles(binary) {
   );
 }
 
-function nodePackageCommand(command) {
-  return process.platform === "win32" ? `${command}.cmd` : command;
+function runNodePackageCommand(command, args, cwd, capture = false) {
+  if (process.platform !== "win32") return run(command, args, cwd, capture);
+
+  const scripts = {
+    npm: "npm-cli.js",
+    npx: "npx-cli.js",
+  };
+  const script = scripts[command];
+  if (!script) throw new Error(`Unsupported Node package command: ${command}`);
+  const scriptPath = path.join(
+    path.dirname(process.execPath),
+    "node_modules",
+    "npm",
+    "bin",
+    script,
+  );
+  if (!existsSync(scriptPath)) {
+    throw new Error(`Node package command entry point does not exist: ${scriptPath}`);
+  }
+  return run(process.execPath, [scriptPath, ...args], cwd, capture);
 }
 
 function assertArchiveFiles(artifact, binary) {
@@ -339,18 +357,7 @@ function archiveEntries(artifact) {
 }
 
 function run(command, args, cwd, capture = false, encoding = "utf8") {
-  // Windows cannot execute npm.cmd/npx.cmd directly through CreateProcess.
-  // Invoke these trusted toolchain shims through cmd.exe without enabling a
-  // shell for any other packaging subprocess.
-  const isWindowsCommandShim =
-    process.platform === "win32" && command.endsWith(".cmd");
-  const executable = isWindowsCommandShim
-    ? (process.env.ComSpec ?? "cmd.exe")
-    : command;
-  const executableArgs = isWindowsCommandShim
-    ? ["/d", "/s", "/c", command, ...args]
-    : args;
-  const result = spawnSync(executable, executableArgs, {
+  const result = spawnSync(command, args, {
     cwd,
     encoding,
     // Captured stdout has to hold a whole binary when archiveBinarySha256 pipes

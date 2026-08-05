@@ -50,12 +50,14 @@ it("binds arguments through a PowerShell scriptblock on Windows", () => {
   expect(packageScript.match(/powershellCommand\(/g)).toHaveLength(2);
 });
 
-it("uses Windows command shims for npm and npx packaging subprocesses", () => {
-  expect(packageScript).toMatch(
-    /process\.platform === "win32" \? `\$\{command\}\.cmd` : command/,
+it("runs only npm and npx entry points directly through Node on Windows", () => {
+  expect(packageScript).toContain('npm: "npm-cli.js"');
+  expect(packageScript).toContain('npx: "npx-cli.js"');
+  expect(packageScript).toContain(
+    "return run(process.execPath, [scriptPath, ...args], cwd, capture)",
   );
-  expect(packageScript).toContain('["/d", "/s", "/c", command, ...args]');
-  expect(packageScript).not.toMatch(/run\("np[62x]"/);
+  expect(packageScript).not.toMatch(/run\("np[mx]"/);
+  expect(packageScript).not.toContain('"cmd.exe"');
 });
 
 it("excludes source and local-only build inputs from the VSIX", () => {
