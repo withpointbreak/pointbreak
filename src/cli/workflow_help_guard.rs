@@ -39,7 +39,7 @@ fn long_help_maps_the_five_stages_in_order() {
     assert_ordered_anchors(
         &help,
         &[
-            "Work — what changed: capture, revision, inspect",
+            "Work — what changed: capture, change, revision, inspect",
             "Claims — what an author or reviewer asserts: observation",
             "Evidence — what was checked: validation",
             "Questions — what still needs judgment: input-request",
@@ -121,6 +121,7 @@ fn command_inventory_is_exactly_the_shipped_flat_grammar() {
         "association",
         "attention",
         "capture",
+        "change",
         "diff",
         "endorse",
         "history",

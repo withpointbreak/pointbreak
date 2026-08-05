@@ -19,10 +19,12 @@ enum StartupOutputFormat {
 /// `pointbreak inspect` starts a loopback-only web server over the repository's
 /// resolved Pointbreak store — the same store every other command reads and
 /// writes, whichever storage tier the repository resolves (`pointbreak store
-/// paths` reports it). It renders the event timeline, captured revisions,
-/// supersession threads, and annotated diffs, and it never executes commands
-/// or mutates authoritative truth. The explicitly selected experimental
-/// derived-access profile may build its private, disposable sidecar.
+/// paths` reports it). It negotiates the Change/Revision reader profile before
+/// rendering Change cards, exact current Revisions, provenance, and captured
+/// resources. Legacy and in-progress stores show only typed transition status;
+/// the server never executes commands or mutates authoritative truth. The
+/// explicitly selected derived-access profile may build its private,
+/// disposable sidecar.
 #[derive(Debug, Args)]
 pub(super) struct InspectArgs {
     /// Repository root or a path inside the repository.

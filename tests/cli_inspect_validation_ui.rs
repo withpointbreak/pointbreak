@@ -136,18 +136,18 @@ fn served_app_css_styles_validation_facts() {
 }
 
 #[test]
-fn served_diff_frames_validation_as_decision_context_only() {
+fn served_change_reader_preserves_facade_fact_state_without_client_authority() {
     let store = representative_store();
     let inspector = Inspector::spawn(store.repo.path());
     let app = inspector.get_text("/app.js");
 
     assert!(
-        app.contains("Validation remains context only."),
-        "the diff bundle must not present validation as assessment authority"
-    );
-    assert!(
-        app.contains("validation") && app.contains("Decision context"),
-        "validation annotations remain visible in the named context region"
+        app.contains("Facts")
+            && app.contains("fact.originRevision.revisionId")
+            && app.contains("fact.revisionCurrency")
+            && app.contains("fact.familyState")
+            && app.contains("fact.availability"),
+        "the Change reader must render facade-owned fact provenance, currency, state, and availability"
     );
 }
 

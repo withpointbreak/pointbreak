@@ -333,6 +333,11 @@ documents, **byte-identical** to their CLI/server producers:
   `validation_list_document`, `history_document`, and the body/view document types they return.
 - Shared compatibility builders: `version_document`, `review_snapshot_document`,
   `InspectFreshnessDocument`, and `InspectStartupDocument`.
+- Change-reader contracts: `ReaderProfileDocumentV1`, `ChangeDocumentFacadeV1`, the Change list/detail/
+  contextual-Revision documents, and the exact Revision resource, association comparison, and interdiff
+  documents. `change_reader_state_for_repo` supplies the facade's authoritative semantic and provenance
+  projections as one complete-or-refuse state; consumers must not reconstruct membership, currency, or
+  lifecycle from raw events.
 
 A consumer that wants exactly the documented JSON contract calls a read/write workflow, passes the
 typed result to the matching builder, and serializes the document with `serde_json`.

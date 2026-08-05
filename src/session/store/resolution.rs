@@ -13,7 +13,8 @@ use crate::session::derived_access::writer::DerivedWriteCoordinator;
 use crate::session::event::ShoreEvent;
 use crate::session::store::backend::StoreBackend;
 use crate::session::store::capabilities::{
-    StoreCapabilityInspection, inspect_journal_records, preflight_event_only_product,
+    JournalInspection, StoreCapabilityInspection, inspect_activated_journal_records,
+    inspect_change_reader_journal_records, inspect_journal_records, preflight_event_only_product,
 };
 use crate::session::store::event_store::EventStore;
 use crate::session::store::store_config::{StoreMode, resolve_family_binding, resolve_store_mode};
@@ -213,6 +214,43 @@ pub(crate) fn resolve_read_store(repo: impl AsRef<Path>) -> Result<ReadStore> {
     read_store_from_resolution(resolve_store(repo)?)
 }
 
+/// Resolve the store for a reader that understands the activated Change
+/// cohort. Unlike [`resolve_read_store`], this seam does not enter the
+/// event-only compatibility preflight: it routes the complete Journal first
+/// and returns the typed L0/M1/L2 inspection beside the resolved backend.
+///
+/// Keeping this separate makes it impossible for an old aggregate reader to
+/// acquire the bypass accidentally. Only the Change-capable reader workflow
+/// calls it.
+pub(crate) fn resolve_change_read_store(
+    repo: impl AsRef<Path>,
+) -> Result<(ReadStore, JournalInspection)> {
+    let resolution = resolve_store(repo)?;
+    let inspection =
+        inspect_change_reader_journal_records(resolution.backend().journal().as_ref())?;
+    Ok((ReadStore { resolution }, inspection))
+}
+
+/// Reopen the backend after a cached Change authority snapshot was validated.
+/// This bypasses only the legacy event-only preflight and performs no Journal
+/// fold; callers may use it solely for immutable exact-resource reads bound to
+/// that already-validated snapshot.
+pub(crate) fn resolve_change_read_backend(repo: impl AsRef<Path>) -> Result<ReadStore> {
+    Ok(ReadStore {
+        resolution: resolve_store(repo)?,
+    })
+}
+
+/// Cheap append-only marker used to invalidate the Inspector's Change cache.
+///
+/// Unlike [`event_log_head_marker`], this bypasses the legacy semantic
+/// preflight so it remains available on activated M1/L2 roots. The marker is a
+/// detector, not authority: a changed value forces a complete validated fold.
+#[doc(hidden)]
+pub fn change_reader_head_marker_for_repo(repo: impl AsRef<Path>) -> Result<u64> {
+    resolve_store(repo)?.backend().journal().head_marker()
+}
+
 pub(crate) fn resolve_read_store_with_derived_access_profile(
     repo: impl AsRef<Path>,
     derived_access_profile: DerivedAccessProfile,
@@ -239,6 +277,30 @@ pub fn store_capability_for_repo(repo: impl AsRef<Path>) -> Result<StoreCapabili
         cursor: inspection.cursor,
         minimum_reader_profile: inspection.minimum_reader_profile,
     })
+}
+
+/// Inspect Change-cohort capability authority only after activation.
+///
+/// `None` is the bounded answer for an untouched L0 store. In particular, this
+/// check does not decode legacy event bytes before deciding that old semantic
+/// routes remain available. An activated M1/L2 store is always routed through
+/// the complete capability validator and therefore still fails closed on any
+/// malformed or unknown Journal record.
+#[doc(hidden)]
+pub fn activated_store_capability_for_repo(
+    repo: impl AsRef<Path>,
+) -> Result<Option<StoreCapabilityInspection>> {
+    let resolution = resolve_store(repo)?;
+    let Some(inspection) =
+        inspect_activated_journal_records(resolution.backend().journal().as_ref())?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(StoreCapabilityInspection {
+        status: inspection.status,
+        cursor: inspection.cursor,
+        minimum_reader_profile: inspection.minimum_reader_profile,
+    }))
 }
 
 /// The cheap freshness detector for a repo's event log: the journal's head marker
@@ -708,6 +770,31 @@ mod tests {
             // without opening the activated Journal and is classified separately.
             assert!(store_paths_for_repo(repo.path()).is_ok());
         }
+    }
+
+    #[test]
+    fn activation_probe_does_not_decode_untouched_l0_event_bytes() {
+        let repo = GitRepo::new();
+        let resolution = resolve_store(repo.path()).unwrap();
+        resolution
+            .backend()
+            .journal()
+            .create_record_once(
+                "legacy-retired-event",
+                br#"{"eventType":"review_disposition_recorded"}"#,
+            )
+            .unwrap();
+
+        assert!(
+            activated_store_capability_for_repo(repo.path())
+                .unwrap()
+                .is_none(),
+            "an untouched L0 store is classified by the fixed activation key"
+        );
+        assert!(
+            store_capability_for_repo(repo.path()).is_err(),
+            "the complete capability inspection remains strict when explicitly requested"
+        );
     }
 
     #[test]

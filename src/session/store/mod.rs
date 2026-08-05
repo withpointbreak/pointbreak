@@ -24,8 +24,8 @@ pub(crate) use fingerprint::worktree_fingerprint_for_files;
 pub use fingerprint::{RevisionFingerprint, capture_worktree_fingerprint};
 pub use object_artifact::{ObjectArtifact, read_bound_object_artifact, read_object_artifact};
 pub use resolution::{
-    StorePaths, event_log_head_marker, family_link_advisory, store_capability_for_repo,
-    store_paths_for_repo,
+    StorePaths, activated_store_capability_for_repo, change_reader_head_marker_for_repo,
+    event_log_head_marker, family_link_advisory, store_capability_for_repo, store_paths_for_repo,
 };
 // `StoreMode` and the thin repo-level entry points re-export from `session::mod`
 // for the binary crate. The underlying read/write helpers stay crate-internal:

@@ -1,13 +1,16 @@
+#[cfg(test)]
 use std::path::Path;
 
 use super::identity::{RevisionProjectionIdentity, SnapshotContentState};
 use crate::error::{Result, ShoreError};
 use crate::model::{DiffSnapshot, ObjectId};
+#[cfg(test)]
+use crate::session::object_artifact::read_bound_object_artifact;
 use crate::session::object_artifact::{
-    object_artifact_path, object_artifact_path_for_hash, read_bound_object_artifact,
-    read_bound_object_artifact_from_backend,
+    object_artifact_path, object_artifact_path_for_hash, read_bound_object_artifact_from_backend,
 };
 use crate::session::projection::RemovalOperativeStatus;
+#[cfg(test)]
 use crate::session::store::resolution::resolve_read_store;
 
 /// The resolved read state of a content-addressed snapshot. The join layer
@@ -56,6 +59,7 @@ impl From<&SnapshotContent> for SnapshotContentState {
 /// absent bytes falls through to the reader's hard "import referenced artifacts"
 /// error (an untrusted/advisory removal does not suppress, so the content is
 /// treated as expected-present-but-missing, the same as not-yet-synced).
+#[cfg(test)]
 pub(super) fn resolve_snapshot_content(
     repo: &Path,
     revision: &RevisionProjectionIdentity,
@@ -84,9 +88,41 @@ pub(super) fn resolve_snapshot_content(
     )?))
 }
 
+/// Backend-injected twin used after a capable reader has already resolved and
+/// validated the complete Journal. It must not re-enter the legacy event-only
+/// repo preflight while loading the exact captured bytes.
+pub(super) fn resolve_snapshot_content_from_backend(
+    backend: &crate::session::store::backend::StoreBackend,
+    revision: &RevisionProjectionIdentity,
+    status: RemovalOperativeStatus,
+) -> Result<SnapshotContent> {
+    let operative = matches!(
+        status,
+        RemovalOperativeStatus::OperativePossession | RemovalOperativeStatus::OperativeTrusted
+    );
+    if operative {
+        let content_hash = revision.object_artifact_content_hash.clone();
+        return Ok(
+            if bound_blob_present_from_backend(
+                backend,
+                &revision.object_id,
+                &revision.object_artifact_content_hash,
+            )? {
+                SnapshotContent::SuppressedPresent { content_hash }
+            } else {
+                SnapshotContent::PhysicallyRemoved { content_hash }
+            },
+        );
+    }
+    Ok(SnapshotContent::Present(
+        load_bound_object_artifact_from_backend(backend, revision)?,
+    ))
+}
+
 /// Cheap read-path presence check: does the bound object artifact file exist? A
 /// stat, never a decode — the removed-vs-swept split must not pay a full read of
 /// every still-present blob.
+#[cfg(test)]
 fn bound_blob_present(repo: &Path, object_id: &ObjectId, content_hash: &str) -> Result<bool> {
     let store_dir = resolve_read_store(repo)?.store_dir().to_path_buf();
     Ok(
@@ -95,6 +131,34 @@ fn bound_blob_present(repo: &Path, object_id: &ObjectId, content_hash: &str) -> 
     )
 }
 
+fn bound_blob_present_from_backend(
+    backend: &crate::session::store::backend::StoreBackend,
+    object_id: &ObjectId,
+    content_hash: &str,
+) -> Result<bool> {
+    match backend {
+        crate::session::store::backend::StoreBackend::Local(store_dir) => Ok(
+            object_artifact_path_for_hash(store_dir, content_hash).exists()
+                || object_artifact_path(store_dir, object_id).exists(),
+        ),
+        #[cfg(test)]
+        crate::session::store::backend::StoreBackend::Memory(_) => {
+            let stem = content_hash
+                .strip_prefix("sha256:")
+                .filter(|stem| {
+                    stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                .expect("bound Revision content hashes are validated before storage access");
+            let content_ref = format!("artifacts/objects/{stem}.json");
+            Ok(backend
+                .content_store()
+                .get_if_exists(&content_ref)?
+                .is_some())
+        }
+    }
+}
+
+#[cfg(test)]
 pub(super) fn load_bound_object_artifact(
     repo: &Path,
     revision: &RevisionProjectionIdentity,
@@ -107,9 +171,8 @@ pub(super) fn load_bound_object_artifact(
     validate_loaded_artifact(artifact, revision)
 }
 
-/// The store-injected twin of [`load_bound_object_artifact`]: the overview batch
-/// resolves the read store once and threads its backend through every artifact
-/// load, instead of re-resolving the store per revision.
+/// The store-injected artifact loader: callers resolve once and thread the
+/// backend through every artifact load instead of re-entering repo resolution.
 pub(super) fn load_bound_object_artifact_from_backend(
     backend: &crate::session::store::backend::StoreBackend,
     revision: &RevisionProjectionIdentity,

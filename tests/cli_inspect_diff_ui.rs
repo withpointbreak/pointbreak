@@ -75,25 +75,22 @@ fn diff_page_has_a_sticky_file_navigator() {
 }
 
 #[test]
-fn diff_page_serves_decision_context_and_true_unanchored_regions() {
+fn change_reader_keeps_revision_interdiff_separate_from_assessed_content() {
     let store = representative_store();
     let inspector = Inspector::spawn(store.repo.path());
     let app = inspector.get_text("/app.js");
-    let css = inspector.get_text("/app.css");
 
     assert!(
-        app.contains("Decision context"),
-        "the routed diff bundle names its revision-level fact region"
+        app.contains("Revision interdiff"),
+        "the Change bundle names the separately identified Revision interdiff"
     );
     assert!(
-        app.contains("Unanchored facts"),
-        "the routed diff bundle separately names genuine anchor failures"
+        app.contains("/interdiff/") && app.contains("availability:"),
+        "the Change bundle reads and labels a distinct typed interdiff resource"
     );
     assert!(
-        css.contains(".diff-decision-context")
-            && css.contains(".diff-unanchored-facts")
-            && css.contains(".diff-decision-context-nav"),
-        "body and navigator regions are styled by the served CSS"
+        !app.contains("Decision context"),
+        "the interdiff is not presented as the complete assessed Revision"
     );
 }
 

@@ -15,6 +15,7 @@ mod assessment;
 mod association;
 mod attention;
 mod capture;
+mod change;
 pub(crate) mod common;
 mod derived_read;
 mod diff;
@@ -55,7 +56,7 @@ agents build together.
 
 A review moves through five stages: Work -> Claims -> Evidence -> Questions -> Call.
 
-  Work — what changed: capture, revision, inspect
+  Work — what changed: capture, change, revision, inspect
   Claims — what an author or reviewer asserts: observation
   Evidence — what was checked: validation
   Questions — what still needs judgment: input-request
@@ -118,6 +119,8 @@ enum Command {
     /// List what still needs an actor's judgment across the review record
     Attention(attention::AttentionArgs),
     Capture(capture::CaptureArgs),
+    /// Read stable Changes and their exact captured Revisions
+    Change(change::ChangeArgs),
     Diff(diff::DiffArgs),
     Endorse(endorse::EndorseArgs),
     History(history::HistoryArgs),
@@ -478,6 +481,7 @@ fn run_cli(
         Command::Association(args) => association::run(*args, stdout, stderr),
         Command::Attention(args) => attention::run(args, stdout),
         Command::Capture(args) => capture::run(args, &cli.tracing, stdout, stderr),
+        Command::Change(args) => change::run(args, stdout),
         Command::Diff(args) => diff::run(args, stdout),
         Command::Endorse(args) => endorse::run(args, stdout, stderr),
         Command::History(args) => history::run(args, stdout),
@@ -495,6 +499,70 @@ fn run_cli(
         let _ = writeln!(stderr, "advisory: {}", diagnostic.message);
     }
     result
+}
+
+#[cfg(test)]
+mod change_reader_cli_tests {
+    use super::*;
+
+    #[test]
+    fn change_reader_commands_are_a_distinct_cold_cli_family() {
+        for args in [
+            vec!["pointbreak", "change", "profile"],
+            vec!["pointbreak", "change", "list"],
+            vec!["pointbreak", "change", "show", "change:sha256:one"],
+            vec!["pointbreak", "change", "select", "change:sha256:one"],
+            vec![
+                "pointbreak",
+                "change",
+                "revision",
+                "change:sha256:one",
+                "rev:sha256:one",
+                "--artifact-hash",
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ],
+        ] {
+            Cli::try_parse_from(args).expect("Change-capable command parses");
+        }
+    }
+
+    #[test]
+    fn cold_change_read_on_l0_emits_only_the_typed_migration_document() {
+        let repo = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let exit = run_with_io(
+            [
+                "pointbreak",
+                "change",
+                "list",
+                "--repo",
+                repo.path().to_str().unwrap(),
+                "--format",
+                "json",
+            ],
+            &mut stdout,
+            &mut stderr,
+        );
+        assert_eq!(
+            exit,
+            ExitCode::SUCCESS,
+            "{}",
+            String::from_utf8_lossy(&stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(value["schema"], "pointbreak.store-migration-required");
+        assert_eq!(value["state"], "migration_required");
+        assert_eq!(stdout.iter().filter(|byte| **byte == b'\n').count(), 1);
+    }
 }
 
 #[cfg(all(test, feature = "longitudinal-counting"))]

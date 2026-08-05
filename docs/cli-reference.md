@@ -61,8 +61,10 @@ pointbreak version [--format <fmt>]
 
 `pointbreak version` emits the `pointbreak.version` version 1 compatibility document. Its hard core is
 `cliVersion`, the semantic version of the running CLI; `build`, the build provenance described below; and
-`documents`, a schema-to-version map covering every CLI document in the handshake surface. Inspector API
-payloads are versioned separately. Clients use this handshake before decoding other command output.
+`documents`, the frozen legacy schema-to-version compatibility map. Change-capable readers negotiate their
+larger coherent document set through `pointbreak change profile` or `/api/v2/profile`; those documents are
+deliberately not added to this legacy map. Inspector API payloads are versioned separately. Clients use the
+handshake that owns their reader cohort before decoding other command output.
 
 `build.source` is `git` when the crate's manifest root contains checkout metadata (including a linked
 worktree `.git` file). In that mode, `build.commit` is the full lowercase commit ID,
@@ -199,6 +201,42 @@ revision recorded; its subject is always the captured snapshot, never the live w
 - When a revision's captured content has been removed from the store, `pointbreak diff` prints a short
   "content is unavailable" line (with the removed content's short id) instead of a diff body.
 
+## `pointbreak change`
+
+```bash
+pointbreak change profile [--repo <path>] [--format <fmt>]
+pointbreak change list [--repo <path>] [--format <fmt>]
+pointbreak change attention [--repo <path>] [--format <fmt>]
+pointbreak change show <change-id> [--repo <path>] [--format <fmt>]
+pointbreak change select <change-id> [--revision <revision-id>] [--allow-historical]
+  [--cursor <token>] [--repo <path>] [--format <fmt>]
+pointbreak change revision <change-id> <revision-id> --artifact-hash <sha256>
+  [--include-body] [--repo <path>] [--format <fmt>]
+pointbreak change resource <change-id> <revision-id> --artifact-hash <sha256>
+  [--include-body] [--repo <path>] [--format <fmt>]
+pointbreak change interdiff <change-id> <from-revision-id> <to-revision-id>
+  --from-artifact-hash <sha256> --to-artifact-hash <sha256>
+  [--repo <path>] [--format <fmt>]
+```
+
+The Change reader begins with a complete capability profile. An untouched legacy root reports
+`migration_required`; a root with an admitted but incomplete transition reports `migration_in_progress`.
+In either state, semantic Change commands emit only the matching typed status document. A ready root names
+the durable minimum reader profile `review_change_revision_v1` and advertises the exact document registry
+that must be accepted as one cohort before any Change payload is decoded.
+
+`list`, `attention`, and `show` render the authoritative Change projection. A Change may have multiple
+legitimate current Revisions; `select` therefore requires `--revision` when there is no unique current
+candidate and returns a self-hashed cursor rather than writing state. Supplying a previous `--cursor`
+revalidates the graph before returning a new selection. `revision` and `resource` require the exact
+Revision id plus its captured object-artifact hash; no current or successor Revision is substituted.
+Association comparisons and Revision interdiffs have their own typed identities and availability. The
+first reader cohort reports native Revision interdiff material as unavailable instead of substituting a
+live Git diff.
+
+The signed v0.9 reader remains compatible only with untouched legacy roots. It is not a reader for a root
+once the Change/Revision capability transition begins or completes.
+
 ## `pointbreak inspect`
 
 ```bash
@@ -232,28 +270,43 @@ files or per-command output.
   documented startup/session credential carriers.
 - The server runs until interrupted with Ctrl-C.
 
-The page provides a chronological event timeline (filterable by track, revision, thread, and
+The bundled page negotiates `/api/v2/profile` before any semantic fetch or paint. On a ready root it
+renders Change cards, explicit current-Revision choices, relation-claim provenance, exact captured
+resources, fact origin/currency, association comparisons, and separately identified Revision interdiffs.
+Parallel current Revisions remain distinct from a divergent replacement graph; choosing a Revision never
+turns either topology into acceptance. On a legacy or in-progress root the page renders only the typed
+migration state.
+
+The signed v0.9 page provided a chronological event timeline (filterable by track, revision, thread, and
 event type, newest-first by default), a per-event detail view, a composite per-revision page showing
 the current-assessment status plus grouped observations, input requests, assessments, and
 competing-head badges, a supersession-thread list/detail view showing heads, threaded revisions,
 diagnostics, and stale superseded-revision facts, and the captured diff for a revision annotated with
 the review facts anchored to each line. Validation checks recorded with `pointbreak validation add`
-appear throughout — as a labeled timeline event type, a "Validation checks" section on the revision
-page (with the check name, status, trigger, and exit code), and on thread cards — shown for context
-only; they do not affect the current assessment and carry no merge or acceptance authority. The
+appeared throughout — as a labeled timeline event type, a "Validation checks" section on the revision
+page (with the check name, status, trigger, and exit code), and on thread cards — for context only;
+they did not affect the current assessment or carry merge or acceptance authority. The
 reader-relative `verificationStatus` and `endorsements` readback (see
 [Verification status and endorsement readback](#verification-status-and-endorsement-readback))
-renders beside events and review facts: the per-event signature status as a chip on the timeline,
+rendered beside events and review facts: the per-event signature status as a chip on the timeline,
 detail view, and revision fact cards, and the endorsement classification with its resolved
-`endorser` and `endorserAttributes` on the detail view and revision page — presented as advisory,
-render-only information, never as a gate or verdict. Long IDs render as
-truncated, clickable references that navigate to the resource they name, and the page auto-refreshes
-when the store changes or a freshness diagnostic appears or clears.
+`endorser` and `endorserAttributes` on the detail view and revision page. That information was
+advisory and render-only, never a gate or verdict. Long IDs rendered as truncated, clickable
+references, and the page auto-refreshed when the store changed or a freshness diagnostic changed.
 
 The inspector is a read-only, single-store, localhost developer tool. It reads through the same
 validated projections as `pointbreak history` and `pointbreak revision show` rather than parsing raw
 storage, and it serves over a synchronous, dependency-free HTTP server with no async runtime. The
-Most of the small JSON API remains an internal surface for the bundled page. Three v1 bundled-pair
+Most of the small JSON API remains an internal surface for the bundled page. The Change cohort begins at
+`/api/v2/profile`; `/api/v2/changes`, `/api/v2/attention`, and exact Change/Revision member routes are
+accepted only against that profile's complete registry and coherent projection stamp. Once a root is ready,
+legacy aggregate routes return a typed `426 Upgrade Required` before any partial legacy payload. On legacy
+roots those aggregate routes remain readable by the signed v0.9 binary; the capable bundled page does not
+fall back to them and paints only `migration_required`. Store activation is a separate explicit operator
+transition. Once a transition enters the in-progress state, legacy
+aggregate routes return a typed `409 Conflict` migration document.
+
+Three v1 bundled-pair
 documents are compatibility-advertised by `pointbreak version`: `/api/snapshots/{id}` returns
 `pointbreak.review-snapshot`, `/api/freshness` returns `pointbreak.inspect-freshness`, and JSON
 startup emits `pointbreak.inspect-startup`. `/api/version` mirrors the exact `pointbreak.version`

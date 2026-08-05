@@ -250,8 +250,20 @@ impl ChangeDocumentFacadeV1 {
     }
 
     pub fn list_document(&self) -> ChangeListDocumentV1 {
+        self.list_document_with_schema(REVIEW_CHANGE_LIST_SCHEMA)
+    }
+
+    /// Build the Inspector page from the same ordered Change summaries as the
+    /// cold CLI list. Pagination is intentionally absent in the first capable
+    /// cohort; the distinct schema keeps a later bounded page additive without
+    /// weakening the CLI document.
+    pub fn list_document_for_inspector(&self) -> ChangeListDocumentV1 {
+        self.list_document_with_schema(INSPECT_CHANGES_PAGE_SCHEMA)
+    }
+
+    fn list_document_with_schema(&self, schema: &str) -> ChangeListDocumentV1 {
         ChangeListDocumentV1 {
-            schema: REVIEW_CHANGE_LIST_SCHEMA.to_owned(),
+            schema: schema.to_owned(),
             version: 1,
             changes: self
                 .semantic

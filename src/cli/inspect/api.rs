@@ -13,10 +13,11 @@ use std::sync::{Arc, RwLock};
 use mmdflux::graph::{Direction, Edge, Graph, Node};
 use mmdflux::layout::{LaidOutGraph, LayoutOptions, layout_graph};
 use pointbreak::documents::{
-    InspectFreshnessDocument, review_snapshot_document, revision_show_document,
+    ChangeDocumentFacadeV1, ChangeQueryUnavailableDocumentV1, InspectFreshnessDocument,
+    ReaderProfileDocumentV1, review_snapshot_document, revision_show_document,
 };
 use pointbreak::git::git_commit_subjects;
-use pointbreak::model::{EventId, ObjectId, ReviewEndpoint, RevisionId, RevisionSource};
+use pointbreak::model::{ChangeId, EventId, ObjectId, ReviewEndpoint, RevisionId, RevisionSource};
 use pointbreak::session::event::{GitProvenance, ReviewAssessment};
 use pointbreak::session::{
     AUTHORITATIVE_REVISION_PAGE_PROFILE, AssessmentRecordStatus, AssessmentView, AttentionItem,
@@ -43,6 +44,138 @@ use pointbreak::session::{
 use serde::Serialize;
 
 use super::server::HighlightCache;
+
+/// Result of a Change-capable `/api/v2` semantic route. The server owns the
+/// status code; this layer owns the exact typed body and never wraps it in a
+/// generic error envelope.
+pub(super) enum ChangeV2Json {
+    Ok(String),
+    Unavailable(String),
+}
+
+pub(super) fn change_v2_profile_json(
+    repo: &Path,
+    cache: &super::server::ChangeReaderCache,
+) -> Result<String, String> {
+    let state = cache.load(repo)?;
+    serde_json::to_string(&ReaderProfileDocumentV1::from(&state.capability))
+        .map_err(|error| error.to_string())
+}
+
+pub(super) fn changes_v2_json(
+    repo: &Path,
+    cache: &super::server::ChangeReaderCache,
+) -> Result<ChangeV2Json, String> {
+    with_change_v2(repo, cache, |facade, _| {
+        serde_json::to_string(&facade.list_document_for_inspector())
+            .map_err(|error| error.to_string())
+    })
+}
+
+pub(super) fn change_attention_v2_json(
+    repo: &Path,
+    cache: &super::server::ChangeReaderCache,
+) -> Result<ChangeV2Json, String> {
+    with_change_v2(repo, cache, |facade, _| {
+        serde_json::to_string(&facade.attention_document(true)).map_err(|error| error.to_string())
+    })
+}
+
+pub(super) fn change_detail_v2_json(
+    repo: &Path,
+    cache: &super::server::ChangeReaderCache,
+    change_id: &str,
+) -> Result<ChangeV2Json, String> {
+    with_change_v2(repo, cache, |facade, _| {
+        let document = facade
+            .detail_document(&ChangeId::new(change_id))
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&document).map_err(|error| error.to_string())
+    })
+}
+
+pub(super) fn change_revision_v2_json(
+    repo: &Path,
+    cache: &super::server::ChangeReaderCache,
+    change_id: &str,
+    revision_id: &str,
+    artifact_hash: &str,
+    resource_only: bool,
+) -> Result<ChangeV2Json, String> {
+    with_change_v2(repo, cache, |facade, ready| {
+        let change_id = ChangeId::new(change_id);
+        let exact = crate::cli::change::exact_ref(
+            ready,
+            &change_id,
+            &RevisionId::new(revision_id),
+            artifact_hash,
+        )
+        .map_err(|error| error.to_string())?;
+        let exact_read = crate::cli::change::build_exact_read(repo, ready, &exact, true)
+            .map_err(|error| error.to_string())?;
+        if resource_only {
+            serde_json::to_string(&exact_read.resource).map_err(|error| error.to_string())
+        } else {
+            let document = facade
+                .contextual_revision_document(
+                    &change_id,
+                    &exact,
+                    exact_read.resource,
+                    exact_read.facts,
+                    exact_read.associations,
+                )
+                .map_err(|error| error.to_string())?;
+            serde_json::to_string(&document).map_err(|error| error.to_string())
+        }
+    })
+}
+
+pub(super) fn change_interdiff_v2_json(
+    repo: &Path,
+    cache: &super::server::ChangeReaderCache,
+    change_id: &str,
+    from_revision_id: &str,
+    from_artifact_hash: &str,
+    to_revision_id: &str,
+    to_artifact_hash: &str,
+) -> Result<ChangeV2Json, String> {
+    with_change_v2(repo, cache, |_facade, ready| {
+        let change_id = ChangeId::new(change_id);
+        let document = crate::cli::change::build_interdiff(
+            ready,
+            &change_id,
+            &RevisionId::new(from_revision_id),
+            from_artifact_hash,
+            &RevisionId::new(to_revision_id),
+            to_artifact_hash,
+        )
+        .map_err(|error| error.to_string())?;
+        serde_json::to_string(&document).map_err(|error| error.to_string())
+    })
+}
+
+fn with_change_v2(
+    repo: &Path,
+    cache: &super::server::ChangeReaderCache,
+    build: impl FnOnce(
+        &ChangeDocumentFacadeV1,
+        &pointbreak::session::ChangeReaderReadyV1,
+    ) -> Result<String, String>,
+) -> Result<ChangeV2Json, String> {
+    let state = cache.load(repo)?;
+    if let Some(unavailable) = ChangeQueryUnavailableDocumentV1::for_inspection(&state.capability) {
+        return serde_json::to_string(&unavailable)
+            .map(ChangeV2Json::Unavailable)
+            .map_err(|error| error.to_string());
+    }
+    let ready = state
+        .ready()
+        .ok_or_else(|| "Change reader state has no complete semantic projection".to_owned())?;
+    let facade =
+        ChangeDocumentFacadeV1::new(ready.projection.clone(), ready.document_projection.clone())
+            .map_err(|error| error.to_string())?;
+    build(&facade, ready).map(ChangeV2Json::Ok)
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]

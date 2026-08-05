@@ -48,6 +48,17 @@ fn inspector_endpoints_return_200_with_schema_break_diagnostic() {
         &[("POINTBREAK_DERIVED_ACCESS", "off")],
     );
 
+    let profile = inspector.get_json("/api/v2/profile");
+    assert_eq!(profile["availability"], "migration_required");
+    assert!(
+        profile["authorityCursor"]["journalRecordCount"].as_u64()
+            > profile["authorityCursor"]["eventCount"].as_u64(),
+        "the typed cursor retains the retired raw record without treating it as a supported event: {profile}"
+    );
+    let (status, unavailable) = inspector.get_error("/api/v2/changes");
+    assert!(status.contains("409"), "unexpected status: {status}");
+    assert_eq!(unavailable["state"], "migration_required");
+
     // `get_json` asserts a 200; a retired event that previously 500'd now renders.
     for path in ["/api/history", "/api/revisions", "/api/threads"] {
         let body = inspector.get_json(path);

@@ -17,6 +17,40 @@ import threadsJson from "../fixtures/threads.json";
 // below; their id member is ignored (any id resolves to the single committed
 // fixture), mirroring how the old `?id=` mock ignored the query.
 const FIXTURES: Record<string, unknown> = {
+  "/api/v2/profile": {
+    schema: "pointbreak.inspect-reader-profile",
+    version: 1,
+    availability: "ready",
+    minimumReaderProfile: "review_change_revision_v1",
+    authorityCursor: { eventCount: 0 },
+    documents: {
+      "pointbreak.inspect-reader-profile": 1,
+      "pointbreak.inspect-changes-page": 1,
+      "pointbreak.review-change": 1,
+      "pointbreak.review-change-revision": 1,
+      "pointbreak.review-revision": 3,
+      "pointbreak.review-revision-resource": 1,
+      "pointbreak.review-association-comparison": 1,
+      "pointbreak.review-revision-interdiff": 1,
+      "pointbreak.inspect-attention": 2,
+      "pointbreak.reader-upgrade-required": 1,
+      "pointbreak.store-migration-required": 1,
+      "pointbreak.store-migration-in-progress": 1,
+    },
+  },
+  "/api/v2/changes": {
+    schema: "pointbreak.inspect-changes-page",
+    version: 1,
+    changes: [],
+    diagnostics: [],
+    projectionStamp: "sha256:empty-change-generation",
+  },
+  "/api/v2/attention": {
+    schema: "pointbreak.inspect-attention",
+    version: 2,
+    changes: [],
+    projectionStamp: "sha256:empty-change-generation",
+  },
   "/api/revisions": revisionsJson,
   "/api/threads": threadsJson,
   "/api/identity": identityJson,

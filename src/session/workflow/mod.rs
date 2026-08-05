@@ -5,6 +5,7 @@ mod association;
 pub(in crate::session) mod attention;
 mod capture;
 mod change_migration;
+mod change_read;
 mod commit_range_liveness;
 mod event_signature;
 mod history;
@@ -52,6 +53,7 @@ pub use capture::{
     CaptureDiffstat, CaptureOptions, CaptureResult, CommitRangeSpec, RootCommitSpec, StagedSpec,
     UnstagedSpec, WorktreeSpec, capture_review, capture_worktree_review, diffstat_from_files,
 };
+pub use change_read::{ChangeReaderReadyV1, ChangeReaderStateV1, change_reader_state_for_repo};
 pub use commit_range_liveness::{
     CommitGraphCondition, CommitLiveness, LivenessEnrichment, REF_REWRITTEN_CODE, RefContinuity,
     RefContinuityReport, RefContinuityView, Retention, commit_graph_stamp, diagnose_ref_continuity,
@@ -110,6 +112,7 @@ pub use revision_projection::{
     SnapshotOrder, SnapshotSummaryCache, SnapshotSummaryCounts, ValidationCheckDisposition,
     ValidationContinuitySummary, ValidationContinuityView, build_revision_search_record,
     classify_validation_continuity, current_assessment_includes_follow_up, show_revision,
+    show_revision_for_change_reader, show_revision_for_change_reader_ready,
     show_revision_for_inspector, show_revision_overviews, stale_review_fact_count,
 };
 pub(crate) use revision_projection::{

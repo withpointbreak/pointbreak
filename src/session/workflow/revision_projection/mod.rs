@@ -31,14 +31,16 @@ use crate::session::projection::{
 };
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::backend::StoreBackend;
-use crate::session::store::resolution::{ReadStore, resolve_read_store};
+use crate::session::store::resolution::{
+    ReadStore, resolve_change_read_backend, resolve_read_store,
+};
 use crate::session::workflow::{
     ValidationCheckProjectionOptions, ValidationCheckView, annotate_validation_supersession,
     project_validation_checks, selected_support_content_hashes,
 };
 use crate::session::{
     EventStore, RemovalPolicy, RevisionCommitRangeProjection, RevisionCommitRangeView,
-    SupersessionView, TrustSet, verify_event_signature,
+    StoreCapabilityStatus, SupersessionView, TrustSet, verify_event_signature,
 };
 
 mod identity;
@@ -65,7 +67,7 @@ pub use self::search::{
     current_assessment_includes_follow_up, stale_review_fact_count,
 };
 use self::snapshot::{
-    SnapshotContent, load_bound_object_artifact_from_backend, resolve_snapshot_content,
+    SnapshotContent, load_bound_object_artifact_from_backend, resolve_snapshot_content_from_backend,
 };
 pub use self::summary_cache::{SnapshotSummaryCache, SnapshotSummaryCounts};
 pub use self::validation_continuity::{
@@ -200,6 +202,63 @@ pub fn show_revision_for_inspector(options: RevisionShowOptions) -> Result<Revis
     Ok(result)
 }
 
+/// Build one exact Revision read for the activated Change-capable cohort.
+///
+/// This deliberately bypasses only the legacy event-only preflight. It first
+/// validates the complete Journal capability state, refuses L0/M1, decodes the
+/// completion-qualified event set, and then delegates to the same exact
+/// revision projection used by Inspector. No Change relation can forward the
+/// supplied Revision identity.
+#[doc(hidden)]
+pub fn show_revision_for_change_reader(options: RevisionShowOptions) -> Result<RevisionShowResult> {
+    let state = crate::session::change_reader_state_for_repo(&options.repo)?;
+    match state.capability.status {
+        StoreCapabilityStatus::MigrationRequired => {
+            return Err(crate::error::ShoreError::Message(
+                "migration_required".to_owned(),
+            ));
+        }
+        StoreCapabilityStatus::MigrationInProgress { .. } => {
+            return Err(crate::error::ShoreError::Message(
+                "migration_in_progress".to_owned(),
+            ));
+        }
+        StoreCapabilityStatus::Ready { .. } => {}
+    }
+    let ready = state.ready().ok_or_else(|| {
+        crate::error::ShoreError::Message(
+            "Change reader state has no complete semantic projection".to_owned(),
+        )
+    })?;
+    show_revision_for_change_reader_ready(options, ready)
+}
+
+/// Exact Revision read over an already-validated Change authority snapshot.
+/// Inspector uses this entry point so profile/list/detail requests share one
+/// decoded event set instead of re-folding the Journal for each resource.
+#[doc(hidden)]
+pub fn show_revision_for_change_reader_ready(
+    options: RevisionShowOptions,
+    ready: &crate::session::ChangeReaderReadyV1,
+) -> Result<RevisionShowResult> {
+    if !options.exact {
+        return Err(crate::error::ShoreError::Message(
+            "Change-capable revision reads require exact selection".to_owned(),
+        ));
+    }
+    let revision_id = options.revision_id.clone().ok_or_else(|| {
+        crate::error::ShoreError::Message(
+            "Change-capable revision reads require a revision id".to_owned(),
+        )
+    })?;
+    let read_store = resolve_change_read_backend(&options.repo)?;
+    let selected = select_inspector_revision_events(ready.events(), &revision_id)?;
+    let mut result = show_revision_from_selected_events(options, read_store.backend(), selected)?;
+    result.event_set_hash = ready.event_set_hash().to_owned();
+    result.event_count = ready.events().len();
+    Ok(result)
+}
+
 pub(crate) fn show_revision_from_selected_events(
     options: RevisionShowOptions,
     backend: &StoreBackend,
@@ -315,14 +374,15 @@ fn show_revision_from_events(
         options.removal_policy,
         &cosig_index,
     );
-    let snapshot_content = match resolve_snapshot_content(&options.repo, &revision, bound_status) {
-        Ok(content) => content,
-        Err(error) if options.read_for_display => SnapshotContent::Unavailable {
-            content_hash: revision.object_artifact_content_hash.clone(),
-            error: error.to_string(),
-        },
-        Err(error) => return Err(error),
-    };
+    let snapshot_content =
+        match resolve_snapshot_content_from_backend(backend, &revision, bound_status) {
+            Ok(content) => content,
+            Err(error) if options.read_for_display => SnapshotContent::Unavailable {
+                content_hash: revision.object_artifact_content_hash.clone(),
+                error: error.to_string(),
+            },
+            Err(error) => return Err(error),
+        };
     let snapshot_content_state = SnapshotContentState::from(&snapshot_content);
     let (snapshot, removed_snapshot_content_hash, unavailable_snapshot) = match snapshot_content {
         SnapshotContent::Present(snapshot) => (snapshot, None, None),

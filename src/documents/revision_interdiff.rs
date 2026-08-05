@@ -21,6 +21,9 @@ pub struct RevisionInterdiffRefV1 {
 #[serde(rename_all = "snake_case")]
 pub enum RevisionInterdiffAvailabilityV1 {
     Available,
+    /// Both exact endpoints are valid, but this reader cohort does not provide
+    /// comparison material for the requested algorithm and scope.
+    Unavailable,
     EndpointMissing,
     EndpointMismatch,
     NonTextual,
@@ -145,5 +148,26 @@ mod tests {
         .unwrap();
         assert_ne!(first.cache_key, second.cache_key);
         assert_ne!(first.cache_key, missing.cache_key);
+    }
+
+    #[test]
+    fn unavailable_comparison_is_typed_and_bodyless() {
+        let document = RevisionInterdiffDocumentV1::new(
+            RevisionInterdiffRefV1 {
+                from: reference("a", 'a'),
+                to: reference("b", 'b'),
+                algorithm_version: "unavailable-v1".to_owned(),
+                scope: Vec::new(),
+            },
+            RevisionInterdiffAvailabilityV1::Unavailable,
+            None,
+            vec!["revision_interdiff_not_available".to_owned()],
+        )
+        .unwrap();
+        assert_eq!(
+            document.availability,
+            RevisionInterdiffAvailabilityV1::Unavailable
+        );
+        assert!(document.comparison.is_none());
     }
 }

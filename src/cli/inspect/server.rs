@@ -12,13 +12,16 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use std::{fmt, thread};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use pointbreak::documents::{InspectStartupDocument, version_document};
+use pointbreak::documents::{
+    ChangeQueryUnavailableDocumentV1, InspectStartupDocument, ReaderUpgradeRequiredDocumentV1,
+    version_document,
+};
 use pointbreak::model::EventId;
 use pointbreak::session::{
     HistoryOrder, HistoryPage, HistoryQuery, QueryDiagnosticCode, QuerySurface,
@@ -108,6 +111,10 @@ pub(super) struct InspectState {
     /// `/api/revisions` pages: an artifact loaded on more than one page is
     /// decoded once per server process.
     pub snapshot_summaries: Arc<SnapshotSummaryCache>,
+    /// One complete Change reader snapshot keyed by the append-only Journal
+    /// marker. The mutex is also the rebuild permit: concurrent requests wait
+    /// for one fold rather than multiplying decoded histories.
+    pub change_reader_cache: ChangeReaderCache,
     /// The eager cache warm is delayed until the first authenticated API request,
     /// so serving the recovery shell never opens the store.
     initial_warm_started: AtomicBool,
@@ -137,9 +144,66 @@ impl InspectState {
             highlight_cache: RwLock::new(HighlightCache::new(HIGHLIGHT_CACHE_CAPACITY)),
             history_cache: super::cache::HistoryProjectionCache::new(),
             snapshot_summaries: Arc::new(SnapshotSummaryCache::new()),
+            change_reader_cache: ChangeReaderCache::new(),
             initial_warm_started: AtomicBool::new(false),
             authoritative_fallback: AuthoritativeFallbackGate::new(),
         })
+    }
+}
+
+struct CachedChangeReaderState {
+    marker: u64,
+    state: Arc<pointbreak::session::ChangeReaderStateV1>,
+}
+
+/// Single-generation cache for the warm Change reader.
+///
+/// The cheap marker is only an invalidation detector. A miss always performs a
+/// complete capability-validated fold, and the marker is re-read afterward so
+/// a moving Journal can never publish a mixed generation. Cold CLI commands do
+/// not use this process-local cache.
+pub(super) struct ChangeReaderCache {
+    slot: Mutex<Option<CachedChangeReaderState>>,
+}
+
+impl ChangeReaderCache {
+    fn new() -> Self {
+        Self {
+            slot: Mutex::new(None),
+        }
+    }
+
+    pub(super) fn load(
+        &self,
+        repo: &std::path::Path,
+    ) -> Result<Arc<pointbreak::session::ChangeReaderStateV1>, String> {
+        let mut slot = self
+            .slot
+            .lock()
+            .map_err(|_| "Change reader cache lock is poisoned".to_owned())?;
+        for _ in 0..2 {
+            let before = pointbreak::session::change_reader_head_marker_for_repo(repo)
+                .map_err(|error| error.to_string())?;
+            if let Some(cached) = slot.as_ref()
+                && cached.marker == before
+            {
+                return Ok(Arc::clone(&cached.state));
+            }
+            let state = Arc::new(
+                pointbreak::session::change_reader_state_for_repo(repo)
+                    .map_err(|error| error.to_string())?,
+            );
+            let after = pointbreak::session::change_reader_head_marker_for_repo(repo)
+                .map_err(|error| error.to_string())?;
+            if before == after {
+                *slot = Some(CachedChangeReaderState {
+                    marker: after,
+                    state: Arc::clone(&state),
+                });
+                return Ok(state);
+            }
+        }
+        Err("Journal changed while the Change reader generation was loading; retry".to_owned())
     }
 }
 
@@ -487,6 +551,9 @@ fn warm_caches_after_auth(state: &Arc<InspectState>) {
     }
     let state = Arc::clone(state);
     thread::spawn(move || {
+        if let Err(error) = state.change_reader_cache.load(state.repo.as_path()) {
+            tracing::debug!(error = %error, "inspect_change_reader_cache_warm_failed");
+        }
         if !state.derived_history.is_active()
             && let Err(error) = api::warm_history_cache(state.repo.as_path(), &state.history_cache)
         {
@@ -632,6 +699,37 @@ fn route(
     }
 
     let repo = state.repo.as_path();
+    if path == "/api/v2/profile" {
+        return api_response(api::change_v2_profile_json(
+            repo,
+            &state.change_reader_cache,
+        ));
+    }
+    if path == "/api/v2/changes" {
+        return change_v2_response(api::changes_v2_json(repo, &state.change_reader_cache));
+    }
+    if path == "/api/v2/attention" {
+        return change_v2_response(api::change_attention_v2_json(
+            repo,
+            &state.change_reader_cache,
+        ));
+    }
+    if path.starts_with("/api/v2/changes/") {
+        return route_change_v2(state, path, query);
+    }
+    if is_legacy_semantic_path(path) {
+        match pointbreak::session::activated_store_capability_for_repo(repo) {
+            Ok(Some(capability)) => {
+                if let Some(response) = legacy_semantic_gate(&capability) {
+                    return response;
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return Response::json_error("500 Internal Server Error", &error.to_string());
+            }
+        }
+    }
     match path {
         "/api/derived-access/status" => api_response(api::derived_access_status_json(
             &state.derived_history,
@@ -746,6 +844,129 @@ fn route(
         ),
         "/api/identity" => api_response(api::identity_json(repo)),
         _ => route_member(state, path, query),
+    }
+}
+
+fn is_legacy_semantic_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/history"
+            | "/api/history/new-count"
+            | "/api/revisions"
+            | "/api/threads"
+            | "/api/attention"
+            | "/api/freshness"
+    ) || path_member(path, "/api/revisions/").is_some_and(|member| !member.is_empty())
+        || path_member(path, "/api/snapshots/").is_some_and(|member| !member.is_empty())
+}
+
+fn legacy_semantic_gate(
+    capability: &pointbreak::session::StoreCapabilityInspection,
+) -> Option<Response> {
+    match &capability.status {
+        pointbreak::session::StoreCapabilityStatus::Ready { .. } => {
+            let document = ReaderUpgradeRequiredDocumentV1::new(
+                "review_change_revision_v1",
+                Some("legacy_revision_v2".to_owned()),
+            );
+            Some(match serde_json::to_string(&document) {
+                Ok(body) => Response::new(
+                    "426 Upgrade Required",
+                    "application/json; charset=utf-8",
+                    body.into_bytes(),
+                ),
+                Err(error) => Response::json_error("500 Internal Server Error", &error.to_string()),
+            })
+        }
+        pointbreak::session::StoreCapabilityStatus::MigrationRequired => None,
+        pointbreak::session::StoreCapabilityStatus::MigrationInProgress { .. } => {
+            let document = ChangeQueryUnavailableDocumentV1::for_inspection(capability)
+                .expect("non-ready capability has a typed unavailable document");
+            Some(match serde_json::to_string(&document) {
+                Ok(body) => Response::new(
+                    "409 Conflict",
+                    "application/json; charset=utf-8",
+                    body.into_bytes(),
+                ),
+                Err(error) => Response::json_error("500 Internal Server Error", &error.to_string()),
+            })
+        }
+    }
+}
+
+fn route_change_v2(state: &InspectState, path: &str, query: Option<&str>) -> Response {
+    let Some(member_path) = path.strip_prefix("/api/v2/changes/") else {
+        return Response::json_error("404 Not Found", "no such route");
+    };
+    let repo = state.repo.as_path();
+    let cache = &state.change_reader_cache;
+    let segments = member_path
+        .split('/')
+        .map(decode_member)
+        .collect::<Option<Vec<_>>>();
+    let Some(segments) = segments else {
+        return Response::json_error("400 Bad Request", "invalid Change route identity");
+    };
+    match segments.as_slice() {
+        [change_id] => change_v2_response(api::change_detail_v2_json(repo, cache, change_id)),
+        [change_id, revisions, revision_id] if revisions == "revisions" => {
+            let Some(artifact_hash) = query_param(query, "artifactHash") else {
+                return Response::json_error("400 Bad Request", "missing artifactHash");
+            };
+            change_v2_response(api::change_revision_v2_json(
+                repo,
+                cache,
+                change_id,
+                revision_id,
+                &artifact_hash,
+                false,
+            ))
+        }
+        [change_id, revisions, revision_id, resource]
+            if revisions == "revisions" && resource == "resource" =>
+        {
+            let Some(artifact_hash) = query_param(query, "artifactHash") else {
+                return Response::json_error("400 Bad Request", "missing artifactHash");
+            };
+            change_v2_response(api::change_revision_v2_json(
+                repo,
+                cache,
+                change_id,
+                revision_id,
+                &artifact_hash,
+                true,
+            ))
+        }
+        [change_id, interdiff, from_revision_id, to_revision_id] if interdiff == "interdiff" => {
+            let Some(from_hash) = query_param(query, "fromArtifactHash") else {
+                return Response::json_error("400 Bad Request", "missing fromArtifactHash");
+            };
+            let Some(to_hash) = query_param(query, "toArtifactHash") else {
+                return Response::json_error("400 Bad Request", "missing toArtifactHash");
+            };
+            change_v2_response(api::change_interdiff_v2_json(
+                repo,
+                cache,
+                change_id,
+                from_revision_id,
+                &from_hash,
+                to_revision_id,
+                &to_hash,
+            ))
+        }
+        _ => Response::json_error("404 Not Found", "no such route"),
+    }
+}
+
+fn change_v2_response(result: Result<api::ChangeV2Json, String>) -> Response {
+    match result {
+        Ok(api::ChangeV2Json::Ok(body)) => Response::json_ok(body),
+        Ok(api::ChangeV2Json::Unavailable(body)) => Response::new(
+            "409 Conflict",
+            "application/json; charset=utf-8",
+            body.into_bytes(),
+        ),
+        Err(message) => Response::json_error("500 Internal Server Error", &message),
     }
 }
 
@@ -1137,6 +1358,23 @@ mod tests {
         route(&state, true, method, path, None)
     }
 
+    fn capability(
+        status: pointbreak::session::StoreCapabilityStatus,
+    ) -> pointbreak::session::StoreCapabilityInspection {
+        pointbreak::session::StoreCapabilityInspection {
+            status,
+            cursor: pointbreak::session::AuthorityCursorV2 {
+                schema: "pointbreak.authority-cursor.v2".to_owned(),
+                journal_record_count: 1,
+                event_count: 1,
+                journal_record_set_hash: format!("sha256:{}", "2".repeat(64)),
+                event_set_hash: format!("sha256:{}", "3".repeat(64)),
+                capability_set_hash: format!("sha256:{}", "4".repeat(64)),
+            },
+            minimum_reader_profile: None,
+        }
+    }
+
     fn parse(raw: impl AsRef<[u8]>) -> Result<Option<RequestHead>, RequestParseError> {
         parse_request_head(&mut Cursor::new(raw.as_ref()))
     }
@@ -1374,6 +1612,112 @@ mod tests {
         let response = route_for("GET", "/does-not-exist");
         assert_eq!(response.status, "404 Not Found");
         assert!(response.content_type.starts_with("application/json"));
+    }
+
+    #[test]
+    fn v2_profile_is_the_only_semantic_bootstrap_on_an_l0_root() {
+        let response = route_for("GET", "/api/v2/profile");
+        assert_eq!(response.status, "200 OK");
+        let value: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(value["schema"], "pointbreak.inspect-reader-profile");
+        assert_eq!(value["availability"], "migration_required");
+    }
+
+    #[test]
+    fn doubled_change_route_prefix_is_not_reinterpreted_as_an_identity() {
+        let response = route_for("GET", "/api/v2/changes//api/v2/changes/example");
+        assert_eq!(response.status, "400 Bad Request");
+    }
+
+    #[test]
+    fn change_reader_cache_reuses_and_invalidates_one_complete_generation() {
+        let repo = tempfile::tempdir().expect("cache test repository");
+        for args in [
+            vec!["init", "--quiet"],
+            vec!["config", "user.name", "Pointbreak Test"],
+            vec!["config", "user.email", "pointbreak@example.test"],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(repo.path())
+                    .status()
+                    .expect("run git")
+                    .success()
+            );
+        }
+        std::fs::write(repo.path().join("sample.txt"), "before\n").unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["add", "sample.txt"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["commit", "--quiet", "-m", "base"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let cache = ChangeReaderCache::new();
+        let first = cache.load(repo.path()).unwrap();
+        let hit = cache.load(repo.path()).unwrap();
+        assert!(Arc::ptr_eq(&first, &hit));
+
+        std::fs::write(repo.path().join("sample.txt"), "after\n").unwrap();
+        pointbreak::session::capture_worktree_review(pointbreak::session::CaptureOptions::new(
+            repo.path(),
+        ))
+        .unwrap();
+        let refreshed = cache.load(repo.path()).unwrap();
+        assert!(!Arc::ptr_eq(&first, &refreshed));
+        assert!(
+            refreshed.capability.cursor.journal_record_count
+                > first.capability.cursor.journal_record_count
+        );
+    }
+
+    #[test]
+    fn legacy_semantic_routes_remain_available_on_untouched_l0() {
+        let capability = capability(pointbreak::session::StoreCapabilityStatus::MigrationRequired);
+        assert!(legacy_semantic_gate(&capability).is_none());
+    }
+
+    #[test]
+    fn legacy_semantic_routes_refuse_m1_before_partial_payload() {
+        let mut capability = capability(
+            pointbreak::session::StoreCapabilityStatus::MigrationInProgress {
+                activation_id: "activation:sha256:test".to_owned(),
+                manifest_hash: format!("sha256:{}", "1".repeat(64)),
+            },
+        );
+        capability.minimum_reader_profile = Some("review_change_revision_v1".to_owned());
+        let response = legacy_semantic_gate(&capability).unwrap();
+        assert_eq!(response.status, "409 Conflict");
+        let value: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(value["schema"], "pointbreak.store-migration-in-progress");
+        assert_eq!(value["state"], "migration_in_progress");
+    }
+
+    #[test]
+    fn legacy_semantic_routes_return_typed_426_for_l2() {
+        let mut capability = capability(pointbreak::session::StoreCapabilityStatus::Ready {
+            activation_id: "activation:sha256:test".to_owned(),
+            manifest_hash: format!("sha256:{}", "1".repeat(64)),
+            completion_id: "completion:sha256:test".to_owned(),
+        });
+        capability.minimum_reader_profile = Some("review_change_revision_v1".to_owned());
+
+        let response = legacy_semantic_gate(&capability).unwrap();
+        assert_eq!(response.status, "426 Upgrade Required");
+        let value: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(value["schema"], "pointbreak.reader-upgrade-required");
+        assert_eq!(value["code"], "reader_upgrade_required");
     }
 
     #[test]

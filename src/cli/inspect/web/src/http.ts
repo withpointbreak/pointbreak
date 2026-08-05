@@ -38,6 +38,18 @@ interface ExpectedDocument {
 function expectedDocument(path: string): ExpectedDocument | null {
   const pathname = new URL(path, location.origin).pathname;
   const collections: Record<string, ExpectedDocument> = {
+    "/api/v2/profile": {
+      schema: "pointbreak.inspect-reader-profile",
+      version: 1,
+    },
+    "/api/v2/changes": {
+      schema: "pointbreak.inspect-changes-page",
+      version: 1,
+    },
+    "/api/v2/attention": {
+      schema: "pointbreak.inspect-attention",
+      version: 2,
+    },
     "/api/attention": { schema: "pointbreak.inspect-attention" },
     "/api/derived-access/status": {
       schema: "pointbreak.inspect-derived-access-status",
@@ -71,6 +83,20 @@ function expectedDocument(path: string): ExpectedDocument | null {
   }
   if (/^\/api\/snapshots\/[^/]+$/.test(pathname)) {
     return { schema: "pointbreak.review-snapshot", version: 1 };
+  }
+  if (/^\/api\/v2\/changes\/[^/]+$/.test(pathname)) {
+    return { schema: "pointbreak.review-change", version: 1 };
+  }
+  if (/^\/api\/v2\/changes\/[^/]+\/revisions\/[^/]+$/.test(pathname)) {
+    return { schema: "pointbreak.review-change-revision", version: 1 };
+  }
+  if (
+    /^\/api\/v2\/changes\/[^/]+\/revisions\/[^/]+\/resource$/.test(pathname)
+  ) {
+    return { schema: "pointbreak.review-revision-resource", version: 1 };
+  }
+  if (/^\/api\/v2\/changes\/[^/]+\/interdiff\/[^/]+\/[^/]+$/.test(pathname)) {
+    return { schema: "pointbreak.review-revision-interdiff", version: 1 };
   }
   return null;
 }

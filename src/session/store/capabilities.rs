@@ -23,6 +23,7 @@ use crate::model::ActorId;
 use crate::session::event::WriterProducer;
 use crate::session::event::{Writer, event_type_from_code, pre_authentication_encoding};
 use crate::session::store::backend::{Journal, JournalEntry};
+use crate::session::store::event_store::EventStore;
 
 pub(crate) const REVIEW_CHANGE_REVISION_COHORT_V1: &str = "review_change_revision_v1";
 const CAPABILITY_MANIFEST_SCHEMA_V1: &str = "pointbreak.logical-capability-manifest";
@@ -652,14 +653,120 @@ pub(crate) fn inspect_journal_records(journal: &dyn Journal) -> Result<JournalIn
     route_journal_entries(journal.list_record_entries()?)
 }
 
+/// Inspect one Journal for the Change-capable reader.
+///
+/// Activated M1/L2 roots always take the strict complete router. An untouched
+/// L0 root uses the legacy reader's existing, narrow schema-break allowance:
+/// recognized retired event encodings contribute to the raw Journal-record
+/// cursor but are excluded from the supported event-set cursor. Genuine
+/// corruption, unknown control records, and Change-cohort records without an
+/// activation still fail closed.
+pub(crate) fn inspect_change_reader_journal_records(
+    journal: &dyn Journal,
+) -> Result<JournalInspection> {
+    if journal.record_exists(ROOT_ACTIVATION_LOGICAL_KEY_V1)? {
+        return inspect_journal_records(journal);
+    }
+    route_unactivated_journal_entries(journal.list_record_entries()?)
+}
+
+fn route_unactivated_journal_entries(entries: Vec<JournalEntry>) -> Result<JournalInspection> {
+    #[cfg(any(test, feature = "bench"))]
+    let record_entries = entries.clone();
+    let mut event_entries = Vec::new();
+    let mut event_probes = Vec::new();
+    let mut record_set = Vec::with_capacity(entries.len());
+
+    for entry in entries {
+        record_set.push(JournalRecordSetEntry {
+            key_digest: entry.key_digest.clone(),
+            record_hash: format!("sha256:{}", sha256_bytes_hex(&entry.bytes)),
+        });
+
+        if let Some(code) = serde_json::from_slice::<serde_json::Value>(&entry.bytes)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("eventType")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+            })
+            && code.starts_with("t:")
+            && event_type_from_code(&code).is_none()
+        {
+            if is_reserved_event_code(&code) {
+                return capability_error(
+                    "Change-cohort records exist without a capability activation",
+                );
+            }
+            return capability_error(format!("unknown Journal event type code {code:?}"));
+        }
+
+        match EventStore::decode_qualification_entry(entry.key_digest.clone(), entry.bytes.clone())
+        {
+            Ok(_) => {
+                let probe: EventProbe = serde_json::from_slice(&entry.bytes)?;
+                validate_event_probe(&probe, &entry.key_digest)?;
+                event_probes.push(probe);
+                event_entries.push(entry);
+            }
+            Err(ShoreError::UnsupportedEventType(_) | ShoreError::UnsupportedEventEnvelope(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+
+    record_set.sort_by(|left, right| left.key_digest.cmp(&right.key_digest));
+    event_probes.sort_by(|left, right| {
+        (left.event_id.as_str(), left.payload_hash.as_str())
+            .cmp(&(right.event_id.as_str(), right.payload_hash.as_str()))
+    });
+    let journal_record_count = record_set.len();
+    let journal_record_set_hash =
+        sha256_json_prefixed(&serde_json::to_value(JournalRecordSetMaterial {
+            schema: JOURNAL_RECORD_SET_SCHEMA_V1,
+            records: record_set,
+        })?)?;
+    let cursor = authority_cursor(
+        journal_record_count,
+        event_entries.len(),
+        journal_record_set_hash,
+        event_set_hash(&event_probes)?,
+        &[],
+    )?;
+    Ok(JournalInspection {
+        status: StoreCapabilityStatus::MigrationRequired,
+        cursor,
+        minimum_reader_profile: None,
+        #[cfg(any(test, feature = "bench"))]
+        record_entries,
+        event_entries,
+    })
+}
+
+/// Inspect capability authority only when the fixed activation record exists.
+///
+/// This is the compatibility choke point for legacy semantic readers. An
+/// untouched L0 journal may contain event encodings that the old lenient
+/// display path can diagnose and skip, so probing every record before that
+/// display path would accidentally make the compatibility check stricter than
+/// the reader it protects. Once the activation key exists, the complete router
+/// remains mandatory and validates every record before returning authority.
+pub(crate) fn inspect_activated_journal_records(
+    journal: &dyn Journal,
+) -> Result<Option<JournalInspection>> {
+    if !journal.record_exists(ROOT_ACTIVATION_LOGICAL_KEY_V1)? {
+        return Ok(None);
+    }
+    inspect_journal_records(journal).map(Some)
+}
+
 /// The temporary writer-dark gate for the already-shipped event-only product.
 /// A fixed root key makes the normal L0 check O(1); once it exists, the complete
 /// router validates the activated store and then refuses the old semantic path.
 pub(crate) fn preflight_event_only_product(journal: &dyn Journal) -> Result<()> {
-    if !journal.record_exists(ROOT_ACTIVATION_LOGICAL_KEY_V1)? {
+    let Some(inspection) = inspect_activated_journal_records(journal)? else {
         return Ok(());
-    }
-    let inspection = inspect_journal_records(journal)?;
+    };
     capability_error(match inspection.status {
         StoreCapabilityStatus::MigrationRequired => {
             "activation root disappeared during capability preflight".to_owned()

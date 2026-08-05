@@ -193,6 +193,18 @@ export function installAuthCoordinator(coordinator: AuthCoordinator): void {
   installedCoordinator = coordinator;
 }
 
+/** Install the Inspector's standard loopback capability recovery policy. */
+export function installDefaultAuthCoordinator(): AuthCoordinator {
+  const coordinator = new AuthCoordinator({
+    prompt: promptForCredential,
+    navigate: (url) => location.replace(url),
+    currentOrigin: () => location.origin,
+    currentRoute: () => location.hash,
+  });
+  installAuthCoordinator(coordinator);
+  return coordinator;
+}
+
 export function recoverUnauthorized(): Promise<boolean> {
   return installedCoordinator?.recoverUnauthorized() ?? Promise.resolve(false);
 }

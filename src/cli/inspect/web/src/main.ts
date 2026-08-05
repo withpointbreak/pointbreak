@@ -1,21 +1,18 @@
-// The composition root: wire the whole inspector port into a runnable (but still
-// unserved) app. Ported from the served app.js `wireControls` + the bottom-of-file
-// bootstrap tail (`wireControls()` / `popstate` / `hashchange` / `load().then(…)`).
+// Retained legacy composition root for the signed v0.9 reader behavior and its
+// focused unit tests. The capable bundle does not serve or auto-fallback to this
+// aggregate event UI; `entry.ts` owns the profile-first Change composition root.
 //
 // This is the ONLY place `subscribe(render)` is called — the single store
 // subscriber is registered here, once — and the only place the two `document`
 // delegates (`keydown→onKey`, `click→resolveRef`) and the bootstrap tail live. Every
 // other module exposes an `initControls()` for its own fixed-id / delegated wiring;
 // `main` calls them in order, wires the toolbar, then runs the load tail. `main`
-// returns the load chain so a test can await first paint; the served entry (a later
-// emit flip) invokes `main()` and ignores the return — the port stays parallel and
-// unserved here, so nothing calls `main()` automatically yet.
+// returns the load chain so a test can await first paint. Nothing calls `main()`
+// automatically in the capable bundle.
 
 import {
-  AuthCoordinator,
   bootstrapCapability,
-  installAuthCoordinator,
-  promptForCredential,
+  installDefaultAuthCoordinator,
   requestReconnect,
 } from "./auth";
 import { initControls as initAutocomplete } from "./autocomplete";
@@ -230,13 +227,7 @@ export function main(
   document.addEventListener("click", onDocumentClick);
   window.addEventListener("popstate", applyHash);
   window.addEventListener("hashchange", applyHash);
-  const coordinator = new AuthCoordinator({
-    prompt: promptForCredential,
-    navigate: (url) => location.replace(url),
-    currentOrigin: () => location.origin,
-    currentRoute: () => location.hash,
-  });
-  installAuthCoordinator(coordinator);
+  installDefaultAuthCoordinator();
   const retry = async () => {
     const [loaded] = await Promise.all([load(), loadIdentity()]);
     if (loaded) {
