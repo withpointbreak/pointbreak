@@ -109,10 +109,10 @@ for (const dir of [extensionRoot, outDir]) {
   }
 }
 
-run("npm", ["run", "build"], extensionRoot);
+run(nodePackageCommand("npm"), ["run", "build"], extensionRoot);
 assertListedFiles(bundledRelative);
 run(
-  "npx",
+  nodePackageCommand("npx"),
   [
     "--no-install",
     "vsce",
@@ -169,7 +169,7 @@ console.log(
 
 function assertListedFiles(binary) {
   const result = run(
-    "npx",
+    nodePackageCommand("npx"),
     ["--no-install", "vsce", "ls"],
     extensionRoot,
     true,
@@ -179,6 +179,10 @@ function assertListedFiles(binary) {
     binary,
     "vsce ls",
   );
+}
+
+function nodePackageCommand(command) {
+  return process.platform === "win32" ? `${command}.cmd` : command;
 }
 
 function assertArchiveFiles(artifact, binary) {
@@ -335,7 +339,18 @@ function archiveEntries(artifact) {
 }
 
 function run(command, args, cwd, capture = false, encoding = "utf8") {
-  const result = spawnSync(command, args, {
+  // Windows cannot execute npm.cmd/npx.cmd directly through CreateProcess.
+  // Invoke these trusted toolchain shims through cmd.exe without enabling a
+  // shell for any other packaging subprocess.
+  const isWindowsCommandShim =
+    process.platform === "win32" && command.endsWith(".cmd");
+  const executable = isWindowsCommandShim
+    ? (process.env.ComSpec ?? "cmd.exe")
+    : command;
+  const executableArgs = isWindowsCommandShim
+    ? ["/d", "/s", "/c", command, ...args]
+    : args;
+  const result = spawnSync(executable, executableArgs, {
     cwd,
     encoding,
     // Captured stdout has to hold a whole binary when archiveBinarySha256 pipes
