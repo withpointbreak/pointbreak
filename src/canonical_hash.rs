@@ -23,6 +23,20 @@ pub(crate) fn sha256_bytes_hex(bytes: &[u8]) -> String {
     hex_lower(hasher.finalize().as_slice())
 }
 
+/// Returns a portable filename stem for a prefixed SHA-256 identity.
+///
+/// Valid `sha256:<64 hex digits>` identities retain their digest component so
+/// filenames remain recognizable. Any other input is hashed as an opaque
+/// identity, keeping separators and platform-reserved punctuation out of the
+/// resulting path.
+pub(crate) fn portable_sha256_file_stem(identity: &str) -> String {
+    identity
+        .strip_prefix("sha256:")
+        .filter(|stem| stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map(str::to_owned)
+        .unwrap_or_else(|| sha256_bytes_hex(identity.as_bytes()))
+}
+
 pub(crate) fn canonical_json_bytes(value: &serde_json::Value) -> Result<Vec<u8>> {
     let canonical = canonical_json_value(value);
     Ok(serde_json::to_vec(&canonical)?)
@@ -84,6 +98,24 @@ mod tests {
         assert_eq!(
             sha256_json_prefixed(&value).expect("canonical hash"),
             "sha256:b0d4c7b49807651a24243b0ebe264541166d8aa9fd31719c6e461a0118e4dd2f"
+        );
+    }
+
+    #[test]
+    fn portable_sha256_file_stem_retains_only_a_valid_digest_component() {
+        let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+        assert_eq!(
+            portable_sha256_file_stem(&format!("sha256:{digest}")),
+            digest
+        );
+        assert_eq!(
+            portable_sha256_file_stem("sha256:not-a-digest"),
+            sha256_bytes_hex(b"sha256:not-a-digest")
+        );
+        assert_eq!(
+            portable_sha256_file_stem("other:0123456789abcdef"),
+            sha256_bytes_hex(b"other:0123456789abcdef")
         );
     }
 }

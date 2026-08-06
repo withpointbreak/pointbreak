@@ -14,7 +14,7 @@ use std::path::{Component, Path};
 use serde::{Deserialize, Serialize};
 
 use super::import_receipt::ImportReceiptV1;
-use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
+use crate::canonical_hash::{portable_sha256_file_stem, sha256_bytes_hex, sha256_json_prefixed};
 use crate::error::ShoreError;
 #[cfg(any(test, feature = "bench"))]
 use crate::model::RevisionId;
@@ -372,10 +372,7 @@ pub fn import_exact_bundle_v2(
             "exact import did not preserve complete destination authority".to_owned(),
         ));
     }
-    let receipt_hex = receipt
-        .receipt_sha256
-        .strip_prefix("sha256:")
-        .ok_or_else(|| ExactTransferError::Contract("invalid import receipt digest".to_owned()))?;
+    let receipt_hex = portable_sha256_file_stem(&receipt.receipt_sha256);
     let receipt_path = Path::new("operations")
         .join("imports")
         .join(format!("{receipt_hex}.json"));

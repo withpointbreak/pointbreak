@@ -2641,7 +2641,7 @@ mod tests {
     }
 
     #[test]
-    fn production_migration_refuses_a_damaged_backup_and_publishes_derived_only_after_l2() {
+    fn production_migration_refuses_a_damaged_backup() {
         use crate::crypto::TestEd25519Signer;
         use crate::session::store::capabilities::REVIEW_CHANGE_REVISION_COHORT_V1;
 
@@ -2690,6 +2690,12 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("failed verification"));
+    }
+
+    #[test]
+    fn production_migration_default_publishes_derived_only_after_l2() {
+        use crate::crypto::TestEd25519Signer;
+        use crate::session::store::capabilities::REVIEW_CHANGE_REVISION_COHORT_V1;
 
         let repo = real_l0_repo();
         let dry_run = dry_run_bulk_adoption(BulkAdoptionDryRunOptions::new(repo.path())).unwrap();
@@ -2706,6 +2712,8 @@ mod tests {
             .with_minimum_reader_ack(REVIEW_CHANGE_REVISION_COHORT_V1)
             .with_legacy_reader_unsupported_ack()
             .sign_with(TestEd25519Signer::from_seed([0x64; 32]))
+            // Intentionally do not override `derived_enabled`: this proves the
+            // production default while the authority lock spans activation.
             .with_fixed_occurred_at("2026-08-06T18:23:00Z"),
         )
         .unwrap();

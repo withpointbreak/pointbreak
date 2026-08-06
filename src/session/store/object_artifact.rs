@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
+use crate::canonical_hash::{portable_sha256_file_stem, sha256_bytes_hex, sha256_json_prefixed};
 use crate::error::{Result, ShoreError};
 use crate::model::{DiffSnapshot, ObjectId};
 use crate::session::store::backend::StoreBackend;
@@ -319,11 +319,7 @@ fn artifact_file_stem(id: &str) -> String {
 }
 
 fn content_hash_file_stem(content_hash: &str) -> String {
-    content_hash
-        .strip_prefix("sha256:")
-        .filter(|stem| stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .map(str::to_owned)
-        .unwrap_or_else(|| sha256_bytes_hex(content_hash.as_bytes()))
+    portable_sha256_file_stem(content_hash)
 }
 
 fn validate_bound_object_artifact(

@@ -3,7 +3,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
+use crate::canonical_hash::{portable_sha256_file_stem, sha256_bytes_hex, sha256_json_prefixed};
 use crate::error::{Result, ShoreError};
 use crate::model::id_prefix;
 use crate::session::event::{EventType, IngestVia, ShoreEvent, stamp_ingest_provenance};
@@ -985,11 +985,7 @@ fn find_object_artifact(
 }
 
 fn content_hash_file_stem(content_hash: &str) -> String {
-    content_hash
-        .strip_prefix("sha256:")
-        .filter(|stem| stem.len() == 64 && stem.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .map(str::to_owned)
-        .unwrap_or_else(|| sha256_bytes_hex(content_hash.as_bytes()))
+    portable_sha256_file_stem(content_hash)
 }
 
 fn read_note_body_export_artifact(
