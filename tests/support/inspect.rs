@@ -972,6 +972,24 @@ pub fn representative_store() -> RepresentativeStore {
         .expect("capture returns a snapshot id")
         .to_owned();
 
+    // Capture no longer infers ref continuity. Keep this representative legacy
+    // reader fixture explicit about the structural ref association it exercises.
+    let head = repo.git(["rev-parse", "HEAD"]).stdout.trim().to_owned();
+    run_shore(&[
+        "association",
+        "record",
+        "--repo",
+        &repo_arg,
+        "--exact-revision",
+        &revision_id,
+        "--track",
+        "agent:codex",
+        "--ref",
+        "main",
+        "--head",
+        &head,
+    ]);
+
     // Range-targeted observation on the agent track.
     run_shore(&[
         "observation",

@@ -44,20 +44,26 @@ type Detail = typeof import("../src/detail");
 let store: Store;
 let detail: Detail;
 
-const OBS_EVENT =
-  "evt:sha256:8ac34bc85b48ed6623660a174b024bd9099edd09877180bfa87101cc76ac6058";
-const REF_EVENT =
-  "evt:sha256:fdcfefd1251ddb5fcf0740317c46a2f3197ae8908e6760a625800fd5167db8aa";
-const OBS_ID =
-  "obs:sha256:752a5b0ab30cfa3aa062bcf6f11b4c6ee3dcfd055207b6a995b91bf81ffec8d9";
-const REV =
-  "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd";
+const OBS_ENTRY = historyJson.entries.find(
+  (entry) => entry.eventType === "review_observation_recorded",
+);
+const REF_ENTRY = historyJson.entries.find(
+  (entry) => entry.eventType === "revision_ref_associated",
+);
+if (!OBS_ENTRY || !REF_ENTRY) throw new Error("incomplete Inspector fixture");
+const OBS_EVENT = OBS_ENTRY.eventId;
+const REF_EVENT = REF_ENTRY.eventId;
+const OBS_ID = (OBS_ENTRY.summary as { observationId: string }).observationId;
+const REF_SUMMARY = REF_ENTRY.summary as {
+  refAssociationId: string;
+  refName: string;
+  headOid: string;
+};
+const REV = revisionsJson.entries[0].revisionId;
 const SUCCESSOR =
   "rev:sha256:1111111111111111111111111111111111111111111111111111111111111111";
-const OBJ =
-  "obj:sha256:38a493d2f09d6fde9d1dcac61a12c4ccc4de42a0b9c6829752d34cc648a9f9d7";
-const ARTIFACT =
-  "sha256:32161336d3627d277a7a5917abe2e2694edec4f3621dbf939bf22091b40e0871";
+const OBJ = revisionsJson.entries[0].snapshotId;
+const ARTIFACT = revisionsJson.entries[0].snapshotContentHash;
 
 function detailEl(): HTMLElement {
   const el = document.querySelector<HTMLElement>("#detail");
@@ -176,15 +182,19 @@ describe("renderDetail (event detail / empty prompt)", () => {
   it("renders type-specific summary rows for revision ref association events", () => {
     store.commit({ selected: { kind: "event", id: REF_EVENT } });
     detail.renderDetail();
-    expect(kvValue("refAssociationId")).toContain("assoc-ref:8cf5b7c2");
-    expect(kvValue("refName")).toBe("refs/heads/main");
-    expect(kvValue("headOid")).toBe("ffc93defe1");
+    expect(kvValue("refAssociationId")).toContain(
+      `assoc-ref:${REF_SUMMARY.refAssociationId.split(":").at(-1)?.slice(0, 8)}`,
+    );
+    expect(kvValue("refName")).toBe(REF_SUMMARY.refName);
+    expect(kvValue("headOid")).toBe(REF_SUMMARY.headOid.slice(0, 10));
   });
 
   it("renders observation metadata as HTML instead of relying on raw JSON", () => {
     store.commit({ selected: { kind: "event", id: OBS_EVENT } });
     detail.renderDetail();
-    expect(kvValue("observationId")).toContain("obs:752a5b0a");
+    expect(kvValue("observationId")).toContain(
+      `obs:${OBS_ID.split(":").at(-1)?.slice(0, 8)}`,
+    );
     expect(kvValue("target")).toContain("src/lib.rs:2-2");
     expect(kvValue("bodyHash")).toContain("sha256:24c2131b");
     expect(kvValue("bodyBytes")).toBe("24");

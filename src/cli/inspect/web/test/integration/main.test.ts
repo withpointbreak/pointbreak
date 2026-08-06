@@ -19,8 +19,7 @@ type Main = typeof import("../../src/main");
 let store: Store;
 let main: Main;
 
-const REV =
-  "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd";
+const REV = revisionsJson.entries[0].revisionId;
 
 function flush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));

@@ -1,37 +1,32 @@
 {
   "diagnostics": [],
   "distinctValues": {
-    "actor": [
-      "actor:git-email:shore-tests@example.com"
-    ],
+    "actor": ["actor:git-email:shore-tests@example.com"],
     "tag": [],
-    "track": [
-      "agent:codex",
-      "human:kevin"
-    ]
+    "track": ["agent:codex", "human:kevin"]
   },
   "entries": [
     {
-      "eventId": "evt:sha256:f835facf52cc4cac2616e7081dd5b98517a08b73f56c8da54be4d555c366592d",
+      "eventId": "evt:sha256:47c2d329e7e71e06cd36fe50f8918648055660a0ecdd2216f60c72c49234293f",
       "eventType": "work_object_proposed",
       "journalId": "journal:default",
-      "occurredAt": "2026-08-06T07:34:57.590Z",
-      "payloadHash": "sha256:ac6b39a4d32ce3ed27d9297dbd906f84dfdcef3cdad69b7695b2f07fd25a09b8",
+      "occurredAt": "2026-08-06T09:11:30.817Z",
+      "payloadHash": "sha256:05bc5820aa46118e5fdc4e5c65269a996c36f7e0a355eb9ef605ea4cde280a80",
       "subject": {
         "kind": "revision",
-        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
+        "revisionId": "rev:sha256:e41279536891837733a14150888fe2f9f04838717b7c44757acc2dd543e5bbdc"
       },
       "summary": {
         "base": {
-          "commitOid": "04f041b7dfbf5ae56e1ec79eaf6df94ef8517c9b",
+          "commitOid": "26e9dc6e807a4ff26b9cc9029885627ed20a9cb0",
           "kind": "git_commit",
           "treeOid": "8a6622c20e639e20b00100e48d58c3834a2db323"
         },
-        "engagementId": "engagement:sha256:f321ff5218eee166766a40c3514d6d5a638b8f247f1023e5e140b140e9edd82d",
+        "engagementId": "engagement:sha256:e2dbdd826d0e28a42aae71aabc5c4e3c6f492e5012c5b5a2e06e53e53f44c397",
         "kind": "revision_captured",
         "objectArtifactContentHash": "sha256:a79c47e18b9a08f5bdd53ea5fcb867d856d1f38f96b297fa529afa610e2c361f",
         "objectId": "obj:sha256:38a493d2f09d6fde9d1dcac61a12c4ccc4de42a0b9c6829752d34cc648a9f9d7",
-        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4",
+        "revisionId": "rev:sha256:e41279536891837733a14150888fe2f9f04838717b7c44757acc2dd543e5bbdc",
         "source": {
           "includeUntracked": false,
           "kind": "git_worktree",
@@ -39,7 +34,7 @@
         },
         "target": {
           "kind": "git_working_tree",
-          "worktreeRoot": "/private/var/folders/pn/96xv56rd1mj4g7mxpx1z9jx80000gn/T/.tmp7yTBri"
+          "worktreeRoot": "/private/var/folders/pn/96xv56rd1mj4g7mxpx1z9jx80000gn/T/.tmpZXJRt0"
         }
       },
       "verificationStatus": "unsigned",
@@ -52,16 +47,42 @@
       }
     },
     {
-      "eventId": "evt:sha256:e7e9b05f284749df82e29571889122b854b2662d97f0fcaa5fcba1a3dff914aa",
+      "eventId": "evt:sha256:546b1d7e07730f5249949933411b65e31f1bac9238432debb2a945db2a1804f6",
+      "eventType": "revision_ref_associated",
+      "journalId": "journal:default",
+      "occurredAt": "2026-08-06T09:11:30.998Z",
+      "payloadHash": "sha256:016f5e0355086acc0a56358b7cd93a4d382ad2dd966aca0b97195d9a92a2658f",
+      "subject": {
+        "kind": "revision",
+        "revisionId": "rev:sha256:e41279536891837733a14150888fe2f9f04838717b7c44757acc2dd543e5bbdc"
+      },
+      "summary": {
+        "headOid": "26e9dc6e807a4ff26b9cc9029885627ed20a9cb0",
+        "kind": "revision_ref_associated",
+        "refAssociationId": "assoc-ref:sha256:51448719134a7728fdbd1ed9214bdfd3c1f8bfbacc12bd2fdc3716e71c087e37",
+        "refName": "refs/heads/main"
+      },
+      "trackId": "agent:codex",
+      "verificationStatus": "unsigned",
+      "writer": {
+        "actorId": "actor:git-email:shore-tests@example.com",
+        "producer": {
+          "name": "pointbreak",
+          "version": "0.9.0"
+        }
+      }
+    },
+    {
+      "eventId": "evt:sha256:202d874b86dc09df355bab56969b14c544fbfedfdcb6bcbe84d84c0029645e2d",
       "eventType": "review_observation_recorded",
       "journalId": "journal:default",
-      "occurredAt": "2026-08-06T07:34:57.833Z",
-      "payloadHash": "sha256:dced5ddc9edc8275b6f9c138a2662bdef02f4227de39afbc7cdb96ec7cd088ff",
+      "occurredAt": "2026-08-06T09:11:31.050Z",
+      "payloadHash": "sha256:37f6337a88e2f879e386b3261c172bab37812cd77e119dc00a0b9990b26f0088",
       "subject": {
         "endLine": 2,
         "filePath": "src/lib.rs",
         "kind": "range",
-        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4",
+        "revisionId": "rev:sha256:e41279536891837733a14150888fe2f9f04838717b7c44757acc2dd543e5bbdc",
         "side": "new",
         "startLine": 2
       },
@@ -70,12 +91,12 @@
         "bodyByteSize": 24,
         "bodyContentHash": "sha256:24c2131bbd193a1ae68ea4596caa49ae76e887925a7f14b3591963177cca2689",
         "kind": "review_observation_recorded",
-        "observationId": "obs:sha256:1286226dea143a77ea90ed15fee929f4c1b4ae0cbdadf472db672886ab90e279",
+        "observationId": "obs:sha256:837bcf87f38ce3fbd20f4627ac1c709bfbbd50354534b8d81c30e60618c57cf8",
         "target": {
           "endLine": 2,
           "filePath": "src/lib.rs",
           "kind": "range",
-          "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4",
+          "revisionId": "rev:sha256:e41279536891837733a14150888fe2f9f04838717b7c44757acc2dd543e5bbdc",
           "side": "new",
           "startLine": 2
         },
@@ -92,26 +113,26 @@
       }
     },
     {
-      "eventId": "evt:sha256:219e371fd232c1e8ad6b51c8fbc70608711d1af857edf2ffb47fbdcbd26e904e",
+      "eventId": "evt:sha256:ebcbbe48403891d02d9e27428763f6874f830246ca332e7fe9d5d457368618d6",
       "eventType": "input_request_opened",
       "journalId": "journal:default",
-      "occurredAt": "2026-08-06T07:34:57.881Z",
-      "payloadHash": "sha256:08c29b67edeb8b354e02bfc3547d10c1f81a1b7c0de76c758bd7d41981aa55d9",
+      "occurredAt": "2026-08-06T09:11:31.099Z",
+      "payloadHash": "sha256:6eb94f6a9099947da78359ce667e3d20428173e3c232e145be541c136e19b09a",
       "subject": {
         "kind": "revision",
-        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
+        "revisionId": "rev:sha256:e41279536891837733a14150888fe2f9f04838717b7c44757acc2dd543e5bbdc"
       },
       "summary": {
         "body": "should we ship this?",
         "bodyByteSize": 20,
         "bodyContentHash": "sha256:2155bb9c776e6b03017ab64a3f0645cf07a8ea05ba8f25570a58e429f0538cc5",
-        "inputRequestId": "input-request:sha256:755023af99e5c4414e19f346f74467a92223480d9b887dd35c48bdc3ee76dab1",
+        "inputRequestId": "input-request:sha256:b6f39cb30a8e3e86b3af82eb53e3e5f77daa68301dedd37fb0a92af9115049ba",
         "kind": "input_request_opened",
         "mode": "operative",
         "reasonCode": "manual_decision_required",
         "target": {
           "kind": "revision",
-          "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
+          "revisionId": "rev:sha256:e41279536891837733a14150888fe2f9f04838717b7c44757acc2dd543e5bbdc"
         },
         "title": "Need a decision"
       },
@@ -126,25 +147,25 @@
       }
     },
     {
-      "eventId": "evt:sha256:745e5a32c04d749af18d06784eff0c118b9e6b957cd74f75007476611143dbbb",
+      "eventId": "evt:sha256:31b665c09a45e81ad2ae300d0fe5df1ed03eb5af667c0e5459a3de564433c2aa",
       "eventType": "review_assessment_recorded",
       "journalId": "journal:default",
-      "occurredAt": "2026-08-06T07:34:57.930Z",
-      "payloadHash": "sha256:e265c87edd5c5c1677c40b404992dc14a50872c0dedb04979edbac7071930a95",
+      "occurredAt": "2026-08-06T09:11:31.148Z",
+      "payloadHash": "sha256:8a5c0213e391b92a986ccbaf8fda39550a55eef2ea2ed3fcd544ed3e6cff8e51",
       "subject": {
         "kind": "revision",
-        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
+        "revisionId": "rev:sha256:e41279536891837733a14150888fe2f9f04838717b7c44757acc2dd543e5bbdc"
       },
       "summary": {
         "assessment": "needs_changes",
-        "assessmentId": "assess:sha256:66d1bb616102c528a7beb3ceb357cc7e0e24693c1cc8c873ecb129295d82a055",
+        "assessmentId": "assess:sha256:f93e2362d1b3b6ac0a76c7ba2832f6e49fc353c9db1c6927eb8aba7a23b18509",
         "kind": "review_assessment_recorded",
         "summary": "not yet",
         "summaryByteSize": 7,
         "summaryContentHash": "sha256:3b82aae1ed24f6077df25a3b4e1b7a78f100716d5a6f6949a0610b05bc1f8959",
         "target": {
           "kind": "revision",
-          "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
+          "revisionId": "rev:sha256:e41279536891837733a14150888fe2f9f04838717b7c44757acc2dd543e5bbdc"
         }
       },
       "trackId": "agent:codex",
@@ -158,28 +179,28 @@
       }
     },
     {
-      "eventId": "evt:sha256:3206215ff1e70f6d226da9fda82c92456d4283bc7d4959a342e5f760b0cdb473",
+      "eventId": "evt:sha256:271216b69dae32745a380660a1e2eef6addfe912d9a4e4ab3115a24eb1abec2a",
       "eventType": "review_assessment_recorded",
       "journalId": "journal:default",
-      "occurredAt": "2026-08-06T07:34:57.985Z",
-      "payloadHash": "sha256:0e4bf47d5e90dee0ac2e2d55f3b7514b0135ca45d6c4fbe71b0ba2bea59d5968",
+      "occurredAt": "2026-08-06T09:11:31.198Z",
+      "payloadHash": "sha256:2538ae6ccdd2e96f6360ee0c019a640eadc21ef35eeedfb45e9286d34e98d131",
       "subject": {
         "kind": "revision",
-        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
+        "revisionId": "rev:sha256:e41279536891837733a14150888fe2f9f04838717b7c44757acc2dd543e5bbdc"
       },
       "summary": {
         "assessment": "accepted",
-        "assessmentId": "assess:sha256:f1652985b839295f8b4e5b25682806526a266412e2aa01fea81e165cb73b81f2",
+        "assessmentId": "assess:sha256:c7168d682c39eabdd931226d296bf695d31ead67a4f4edb6522439a670814244",
         "kind": "review_assessment_recorded",
         "replaces": [
-          "assess:sha256:66d1bb616102c528a7beb3ceb357cc7e0e24693c1cc8c873ecb129295d82a055"
+          "assess:sha256:f93e2362d1b3b6ac0a76c7ba2832f6e49fc353c9db1c6927eb8aba7a23b18509"
         ],
         "summary": "ship it",
         "summaryByteSize": 7,
         "summaryContentHash": "sha256:bef4261f394bf71fd2b565cd76396ac9ed7953f9110c69ee49d7a82871238fbf",
         "target": {
           "kind": "revision",
-          "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
+          "revisionId": "rev:sha256:e41279536891837733a14150888fe2f9f04838717b7c44757acc2dd543e5bbdc"
         }
       },
       "trackId": "human:kevin",
@@ -193,14 +214,14 @@
       }
     },
     {
-      "eventId": "evt:sha256:aacc7137dfecbcdd86267294aeaefde4a10dba9289a1db61cd34cf96f4dec05f",
+      "eventId": "evt:sha256:d2f86ac5e95a55ce4d85255b245b0454a97126d1c24b4496e2f9bd5ac61cdb95",
       "eventType": "validation_check_recorded",
       "journalId": "journal:default",
-      "occurredAt": "2026-08-06T07:34:58.042Z",
-      "payloadHash": "sha256:3915c06ea7029d895d50b07be909a9f475bf0e8ee88cfccba74e62ec1949c76f",
+      "occurredAt": "2026-08-06T09:11:31.248Z",
+      "payloadHash": "sha256:e65b7fc4dadf83de833e8bf56ab022bebfdff877954e88539729978a36a7a68e",
       "subject": {
         "kind": "revision",
-        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
+        "revisionId": "rev:sha256:e41279536891837733a14150888fe2f9f04838717b7c44757acc2dd543e5bbdc"
       },
       "summary": {
         "checkName": "cargo test",
@@ -208,10 +229,10 @@
         "status": "passed",
         "target": {
           "kind": "revision",
-          "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
+          "revisionId": "rev:sha256:e41279536891837733a14150888fe2f9f04838717b7c44757acc2dd543e5bbdc"
         },
         "trigger": "manual",
-        "validationCheckId": "validation:sha256:13bade5c02021022d2feacb68487e8e6f72eb01c13b31cb15007017b6afd3f25"
+        "validationCheckId": "validation:sha256:d50c96c0a026669094e2ba1238e4491d95f248fb6b7bcd96616b2ffc8fa5bfbf"
       },
       "trackId": "agent:codex",
       "verificationStatus": "unsigned",
@@ -224,14 +245,14 @@
       }
     },
     {
-      "eventId": "evt:sha256:bd4c69859953db78e5d9832fcba2e5e171ca71fddbaf38c206fe88d31be686a2",
+      "eventId": "evt:sha256:6e3e4df308852154a2002cb40f2bac49206115cd54d718ef18f3b0a0627eabaf",
       "eventType": "validation_check_recorded",
       "journalId": "journal:default",
-      "occurredAt": "2026-08-06T07:34:58.100Z",
-      "payloadHash": "sha256:5a7f3b0660eb299ed8a65e88546d2a2474a1899be13c9106da1b3a1f4fa11477",
+      "occurredAt": "2026-08-06T09:11:31.300Z",
+      "payloadHash": "sha256:8d945690f98fbb42b73ba7aab5bdae550c01d37cc0beb1650647838e253fa45d",
       "subject": {
         "kind": "revision",
-        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
+        "revisionId": "rev:sha256:e41279536891837733a14150888fe2f9f04838717b7c44757acc2dd543e5bbdc"
       },
       "summary": {
         "checkName": "cargo clippy",
@@ -241,10 +262,10 @@
         "status": "failed",
         "target": {
           "kind": "revision",
-          "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
+          "revisionId": "rev:sha256:e41279536891837733a14150888fe2f9f04838717b7c44757acc2dd543e5bbdc"
         },
         "trigger": "manual",
-        "validationCheckId": "validation:sha256:3027fe3cfb7ac2650d0ba08341153988240ddef9e05ab2f87f233bafd022ef4c"
+        "validationCheckId": "validation:sha256:3a57f7c5cbc22c185e5122eb50a7949b7db97003d16120e0b639194beb9850a0"
       },
       "trackId": "human:kevin",
       "verificationStatus": "unsigned",
@@ -257,18 +278,19 @@
       }
     }
   ],
-  "eventCount": 7,
+  "eventCount": 8,
   "facets": {
     "input_request_opened": 1,
     "review_assessment_recorded": 2,
     "review_observation_recorded": 1,
+    "revision_ref_associated": 1,
     "validation_check_recorded": 2,
     "work_object_proposed": 1
   },
-  "historyCount": 7,
-  "matchCount": 7,
+  "historyCount": 8,
+  "matchCount": 8,
   "offset": 0,
-  "projectionStamp": "sha256:aae66335961f81296ac20b1c2251fb4de480307ff49e752e2c9544496b9f6b51",
+  "projectionStamp": "sha256:86fb5b33b5c02f4c774b3bf348e956a76c544a04cd92fefe29850fe1d61bc8af",
   "queryNotices": [],
   "schema": "pointbreak.inspect-history"
 }

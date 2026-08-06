@@ -1,32 +1,36 @@
 {
-  "asOf": "sha256:aae66335961f81296ac20b1c2251fb4de480307ff49e752e2c9544496b9f6b51",
+  "asOf": "sha256:86fb5b33b5c02f4c774b3bf348e956a76c544a04cd92fefe29850fe1d61bc8af",
   "diagnostics": [],
   "entries": [
     {
       "base": {
-        "commitOid": "04f041b7dfbf5ae56e1ec79eaf6df94ef8517c9b",
+        "commitOid": "26e9dc6e807a4ff26b9cc9029885627ed20a9cb0",
         "kind": "git_commit",
         "treeOid": "8a6622c20e639e20b00100e48d58c3834a2db323"
       },
-      "capturedAt": "2026-08-06T07:34:57.590Z",
+      "capturedAt": "2026-08-06T09:11:30.817Z",
       "commitRange": {
         "anchored": false,
         "currentCommits": [],
-        "currentRefs": [],
+        "currentRefs": [
+          {
+            "headOid": "26e9dc6e807a4ff26b9cc9029885627ed20a9cb0",
+            "refAssociationId": "assoc-ref:sha256:51448719134a7728fdbd1ed9214bdfd3c1f8bfbacc12bd2fdc3716e71c087e37",
+            "refName": "refs/heads/main"
+          }
+        ],
         "diagnostics": [],
-        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4",
+        "revisionId": "rev:sha256:e41279536891837733a14150888fe2f9f04838717b7c44757acc2dd543e5bbdc",
         "withdrawnCommits": [],
         "withdrawnRefs": []
       },
       "diagnostics": [],
       "groupedRevisionIds": [
-        "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
+        "rev:sha256:e41279536891837733a14150888fe2f9f04838717b7c44757acc2dd543e5bbdc"
       ],
       "mergeStatus": "unknown",
       "overview": {
-        "actors": [
-          "actor:git-email:shore-tests@example.com"
-        ],
+        "actors": ["actor:git-email:shore-tests@example.com"],
         "attention": {
           "acceptedWithFollowUp": false,
           "erroredValidationCount": 0,
@@ -49,15 +53,12 @@
           "status": "resolved"
         },
         "latestActivity": {
-          "at": "2026-08-06T07:34:58.100Z",
+          "at": "2026-08-06T09:11:31.300Z",
           "kind": "validation",
           "title": "cargo clippy"
         },
         "tags": [],
-        "tracks": [
-          "agent:codex",
-          "human:kevin"
-        ],
+        "tracks": ["agent:codex", "human:kevin"],
         "validationContinuity": {
           "outstandingErroredCount": 0,
           "outstandingFailedCount": 1,
@@ -66,7 +67,7 @@
           "skippedOnlyCount": 0
         }
       },
-      "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4",
+      "revisionId": "rev:sha256:e41279536891837733a14150888fe2f9f04838717b7c44757acc2dd543e5bbdc",
       "snapshotContentHash": "sha256:a79c47e18b9a08f5bdd53ea5fcb867d856d1f38f96b297fa529afa610e2c361f",
       "snapshotId": "obj:sha256:38a493d2f09d6fde9d1dcac61a12c4ccc4de42a0b9c6829752d34cc648a9f9d7",
       "source": {
@@ -76,27 +77,27 @@
       },
       "target": {
         "kind": "git_working_tree",
-        "worktreeRoot": "/private/var/folders/pn/96xv56rd1mj4g7mxpx1z9jx80000gn/T/.tmp7yTBri"
+        "worktreeRoot": "/private/var/folders/pn/96xv56rd1mj4g7mxpx1z9jx80000gn/T/.tmpZXJRt0"
       },
       "targetDisplay": {
         "head": {
-          "commitOidShort": "04f041b",
-          "label": "04f041b"
+          "commitOidShort": "26e9dc6",
+          "label": "26e9dc6"
         },
         "kind": "working_tree",
-        "label": ".tmp7yTBri",
+        "label": ".tmpZXJRt0",
         "pathPrivate": true,
         "workLabel": {
-          "source": "source_fallback",
-          "text": "working-tree changes"
+          "source": "current_ref",
+          "text": "working-tree changes on main"
         }
       }
     }
   ],
-  "eventCount": 7,
+  "eventCount": 8,
   "eventSetHash": null,
   "next": null,
-  "projectionStamp": "sha256:aae66335961f81296ac20b1c2251fb4de480307ff49e752e2c9544496b9f6b51",
+  "projectionStamp": "sha256:86fb5b33b5c02f4c774b3bf348e956a76c544a04cd92fefe29850fe1d61bc8af",
   "revisionCount": 1,
   "schema": "pointbreak.inspect-revisions-page.v1"
 }

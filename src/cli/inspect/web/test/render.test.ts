@@ -31,12 +31,12 @@ type Render = typeof import("../src/render");
 let store: Store;
 let render: Render;
 
-const OBS_EVENT =
-  "evt:sha256:8ac34bc85b48ed6623660a174b024bd9099edd09877180bfa87101cc76ac6058";
-const REV =
-  "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd";
-const OBJ =
-  "obj:sha256:38a493d2f09d6fde9d1dcac61a12c4ccc4de42a0b9c6829752d34cc648a9f9d7";
+const OBS_EVENT = historyJson.entries.find(
+  (entry) => entry.eventType === "review_observation_recorded",
+)?.eventId;
+if (!OBS_EVENT) throw new Error("observation missing from Inspector fixture");
+const REV = revisionsJson.entries[0].revisionId;
+const OBJ = revisionsJson.entries[0].snapshotId;
 
 function $<T extends Element = Element>(sel: string): T | null {
   return document.querySelector<T>(sel);
@@ -75,7 +75,9 @@ describe("render is a no-arg projection of getState()", () => {
     expect($("#stat-units")?.textContent).toBe("1 units");
     expect($("#stat-threads")?.textContent).toBe("1 threads");
     // The freshness hash is the short form of the event-set hash.
-    expect($("#stat-hash")?.textContent).toBe("e81f297a301a");
+    expect($("#stat-hash")?.textContent).toBe(
+      historyJson.projectionStamp.split(":").at(-1)?.slice(0, 12),
+    );
   });
 
   it("prefers the active projection stamp over the deprecated event-set hash", () => {

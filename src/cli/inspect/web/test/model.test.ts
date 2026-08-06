@@ -24,12 +24,9 @@ beforeEach(async () => {
 });
 
 // The single revision/object the committed fixtures describe.
-const REV =
-  "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd";
-const OBJ =
-  "obj:sha256:38a493d2f09d6fde9d1dcac61a12c4ccc4de42a0b9c6829752d34cc648a9f9d7";
-const ARTIFACT =
-  "sha256:32161336d3627d277a7a5917abe2e2694edec4f3621dbf939bf22091b40e0871";
+const REV = revisionsJson.entries[0].revisionId;
+const OBJ = revisionsJson.entries[0].snapshotId;
+const ARTIFACT = revisionsJson.entries[0].snapshotContentHash;
 
 /** Seed the three committed `/api/*` documents the model reads. */
 function seedFixtures(): void {

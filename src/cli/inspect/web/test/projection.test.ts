@@ -48,6 +48,8 @@ function entryOfType(type: string): HistoryEntry {
 }
 
 const revision = revisions.entries[0];
+const fixtureBaseCommit = revisionsJson.entries[0].base.commitOid;
+const fixtureCapturedAt = revisionsJson.entries[0].capturedAt;
 
 describe("entryTrack", () => {
   it("reads the explicit trackId when present", () => {
@@ -262,7 +264,7 @@ describe("assessmentDisplayLabel", () => {
 describe("entryTitle", () => {
   it("renders a capture with its short base commit, or bare capture", () => {
     expect(entryTitle(entryOfType("work_object_proposed"))).toBe(
-      "capture · base ffc93defe117",
+      `capture · base ${fixtureBaseCommit.slice(0, 12)}`,
     );
     expect(entryTitle({ eventType: "work_object_proposed" })).toBe("capture");
   });
@@ -599,7 +601,12 @@ describe("revisionSearchIndex", () => {
     expect(idx.attention).toBe(" open-request validation-context ");
     // The range anchor: capturedAt normalized to the fixed-width form under the
     // shared occurred_at key.
-    expect(idx.occurred_at).toBe("2026-06-29T02:13:05.391Z");
+    const capturedAt = fixtureCapturedAt.startsWith("unix-ms:")
+      ? new Date(
+          Number(fixtureCapturedAt.slice("unix-ms:".length)),
+        ).toISOString()
+      : new Date(fixtureCapturedAt).toISOString();
+    expect(idx.occurred_at).toBe(capturedAt);
   });
 
   it("builds a lowercased haystack of the human-relevant fields", () => {
@@ -609,7 +616,7 @@ describe("revisionSearchIndex", () => {
       "resolved",
       "validation",
       "cargo clippy",
-      "ffc93de",
+      fixtureBaseCommit.slice(0, 7),
       "1 open request",
       "1 outstanding validation check",
       "review cues",
