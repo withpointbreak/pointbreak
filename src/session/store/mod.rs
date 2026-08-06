@@ -1,3 +1,4 @@
+pub(in crate::session) mod authority_lock;
 pub(in crate::session) mod backend;
 pub(in crate::session) mod body_artifact;
 pub(in crate::session) mod bundle;

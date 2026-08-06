@@ -240,6 +240,12 @@ pointbreak change capture --operation-id <id>
   [--sign-key <name|path>] [capture options]
 pointbreak change migrate-dry-run [--root <path>]... [--owner-decisions <file>]
   [--repo <path>] [--format <fmt>]
+pointbreak change migrate --dry-run <file> --ack-manifest <sha256>
+  --ack-cohort-manifest <sha256> --ack-minimum-reader review_change_revision_v1
+  --ack-v0-9-unsupported --backup <external-dir> --operation-id <id>
+  [--owner-decisions <file>] [--repo <path>] [--sign-key <name|path>] [--format <fmt>]
+pointbreak change migrate-restore --backup <external-dir> --target-repo <path>
+  [--format <fmt>]
 ```
 
 The Change reader begins with a complete capability profile. An untouched legacy root reports
@@ -268,8 +274,15 @@ in the same optional signing-key resolution as the review-writing commands.
 
 `migrate-dry-run` is read-only. It inventories one or more legacy roots, reports anomalies and retained
 manifest overlaps, and accepts an explicit owner-decision manifest for deterministic replanning. It does
-not expose a public migration executor or activate a root; execution remains a private qualification
-boundary until activation is shipped.
+not activate a store. `migrate` is the only activation route. It accepts the exact approved dry-run and
+both of its acknowledged hashes, requires the new minimum-reader and v0.9 incompatibility acknowledgements,
+and creates a byte-verified L0 backup plus a fully signed resume plan in the supplied external directory
+before publishing activation. The same command and operation id resume an interrupted M1 transition without
+re-signing or recomputing the legacy graph. Completion is appended last; ordinary Change reads and writes
+remain unavailable until that L2 record verifies. A repeated completed invocation returns `existing`.
+`migrate-restore` verifies that retained backup again and copies it only into an empty store with a
+different placement identity. The result is a separate L0 recovery fork that requires its own fresh dry
+run; it never rolls an M1/L2 store backward in place.
 
 The signed v0.9 reader remains compatible only with untouched legacy roots. It is not a reader for a root
 once the Change/Revision capability transition begins or completes.
@@ -543,9 +556,10 @@ pointbreak store compact [--repo <path>] [--format <fmt>]
 > **Transition availability:** `store migrate` and `store link` retain their command syntax and
 > historical placement contracts, but their transfer writers are inactive in this build. Untouched
 > and partially migrated roots fail at the capability fence; a Change-ready root reports
-> `change_store_transfer_unavailable`. There is no public activation executor yet. `change
-> migrate-dry-run` is the only migration surface and never writes. Do not copy a test capability
-> fixture into an owner store.
+> `change_store_transfer_unavailable`. This is distinct from the explicit `change migrate` command,
+> which activates one exact owner-approved legacy root in place after retaining a verified external
+> backup. It does not move a store between placements. Do not copy a test capability fixture into an
+> owner store.
 
 `pointbreak store` commands inspect, configure, and maintain the review store the current Git worktree
 resolves. By default every worktree of a clone — the main worktree and every linked worktree alike —

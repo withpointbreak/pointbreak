@@ -7,6 +7,7 @@ use crate::error::{Result, SchemaBreakRecord, ShoreError};
 use crate::model::id_prefix;
 use crate::session::derived_access::writer::{DerivedWriteCoordinator, DerivedWriteDiagnostic};
 use crate::session::event::{AssertionMode, EventType, ShoreEvent, event_type_from_code};
+use crate::session::store::authority_lock::StoreAuthorityLock;
 use crate::session::store::backend::{Journal, JournalEntry, LocalJournal, StoreBackend};
 use crate::session::store::capabilities::{
     event_entries_for_current_product, inspect_journal_records, preflight_change_writer,
@@ -118,6 +119,12 @@ impl EventStore {
         );
         let _entered = span.enter();
 
+        let _authority = self
+            .files
+            .as_ref()
+            .map(|files| StoreAuthorityLock::acquire(&files.store_dir))
+            .transpose()?;
+
         // The event-only writer is intentionally dark once the non-event
         // activation root exists. This keyed probe is O(1) for ordinary L0
         // stores and the full router runs before any activated-store mutation.
@@ -141,6 +148,11 @@ impl EventStore {
     /// workflows must refuse both an unactivated store and a partially migrated
     /// one before validating or publishing event bytes.
     pub(crate) fn record_change_event_once(&self, event: &ShoreEvent) -> Result<EventWriteOutcome> {
+        let _authority = self
+            .files
+            .as_ref()
+            .map(|files| StoreAuthorityLock::acquire(&files.store_dir))
+            .transpose()?;
         preflight_change_writer(self.journal.as_ref())?;
         validate_event(event, None)?;
         let bytes = serde_json::to_vec(event)?;

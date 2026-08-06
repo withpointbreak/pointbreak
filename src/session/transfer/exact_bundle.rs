@@ -2,13 +2,14 @@
     not(test),
     allow(
         dead_code,
-        reason = "writer-dark exact-transfer publication is qualification-only until activation"
+        reason = "exact-transfer source assembly and interruption hooks remain evidence-only"
     )
 )]
 
 #[cfg(any(test, feature = "bench"))]
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::path::{Component, Path};
 
 use serde::{Deserialize, Serialize};
 
@@ -18,13 +19,16 @@ use crate::error::ShoreError;
 #[cfg(any(test, feature = "bench"))]
 use crate::model::RevisionId;
 use crate::model::{ChangeId, RevisionRefV1};
-use crate::session::AuthorityCursorV2;
 #[cfg(any(test, feature = "bench"))]
 use crate::session::event::{
     ChangeMembershipAssertedPayload, ChangeMembershipWithdrawnPayload,
     ChangeRevisionRelationAssertedPayload, ChangeRevisionRelationWithdrawnPayload, EventType,
     ShoreEvent,
 };
+use crate::session::store::authority_lock::StoreAuthorityLock;
+use crate::session::store::resolution::resolve_change_read_store;
+use crate::session::{AuthorityCursorV2, StoreCapabilityStatus};
+use crate::storage::{CreateOutcome, Durability, LocalStorage};
 
 pub const EXACT_BUNDLE_SCHEMA_V2: &str = "pointbreak.exact-bundle.v2";
 
@@ -280,8 +284,6 @@ pub enum ExactTransferError {
         event_logical_key: String,
         content_logical_key: String,
     },
-    #[error("activated exact import is not available in this writer-dark build")]
-    NotActivated,
     #[error("qualification publication interrupted after {phase}")]
     Interrupted { phase: &'static str },
 }
@@ -298,15 +300,110 @@ impl From<ShoreError> for ExactTransferError {
     }
 }
 
-/// Production import remains deliberately unreachable while the cohort is
-/// writer-dark. In particular, this function owns no Journal or content-store
-/// handle and therefore cannot append a carrier before activation is exposed.
-pub(crate) fn import_exact_bundle_v2(
+/// Reconcile one exact logical bundle into an already-complete Change store.
+/// L0 and M1 destinations fail before any content or event is published. Source
+/// capability records remain transfer proof and are never installed as a second
+/// destination authority root.
+pub fn import_exact_bundle_v2(
+    repo: &Path,
     manifest: &ExactBundleManifestV2,
-    _local_import_context: &str,
+    local_import_context: &str,
 ) -> Result<ImportReceiptV1, ExactTransferError> {
     manifest.validate()?;
-    Err(ExactTransferError::NotActivated)
+    let (resolved, _) = resolve_change_read_store(repo)?;
+    let store_root = resolved.store_dir().to_path_buf();
+    let _authority = StoreAuthorityLock::acquire(&store_root)?;
+    let (resolved, inspection) = resolve_change_read_store(repo)?;
+    if !matches!(inspection.status, StoreCapabilityStatus::Ready { .. })
+        || inspection.minimum_reader_profile.as_deref()
+            != Some(
+                manifest
+                    .required_capabilities
+                    .minimum_reader_profile
+                    .as_str(),
+            )
+    {
+        return Err(ExactTransferError::MissingDestinationCapability {
+            capability: manifest
+                .required_capabilities
+                .minimum_reader_profile
+                .clone(),
+        });
+    }
+    let journal = resolved.backend().journal();
+    let content_store = resolved.backend().content_store();
+    for record in &manifest.content {
+        validate_content_locator(record)?;
+        if let Some(existing) = content_store.get_if_exists(&record.logical_key)?
+            && existing != record.decoded_bytes
+        {
+            return Err(ExactTransferError::HardConflict {
+                logical_key: record.logical_key.clone(),
+            });
+        }
+    }
+    for record in manifest
+        .events
+        .iter()
+        .filter(|record| record.record_kind == ExactBundleRecordKindV2::Event)
+    {
+        if let Some(existing) = journal.read_event_bytes(&record.logical_key)?
+            && existing != record.decoded_bytes
+        {
+            return Err(ExactTransferError::HardConflict {
+                logical_key: record.logical_key.clone(),
+            });
+        }
+    }
+    let receipt = ImportReceiptV1::new(manifest, local_import_context)?;
+    for record in &manifest.content {
+        content_store.put_once(&record.logical_key, &record.decoded_bytes)?;
+    }
+    for record in manifest
+        .events
+        .iter()
+        .filter(|record| record.record_kind == ExactBundleRecordKindV2::Event)
+    {
+        journal.create_event_once(&record.logical_key, &record.decoded_bytes)?;
+    }
+    let after = crate::session::store::capabilities::inspect_journal_records(journal.as_ref())?;
+    if !matches!(after.status, StoreCapabilityStatus::Ready { .. }) {
+        return Err(ExactTransferError::Contract(
+            "exact import did not preserve complete destination authority".to_owned(),
+        ));
+    }
+    let receipt_path = Path::new("operations")
+        .join("imports")
+        .join(format!("{}.json", receipt.receipt_sha256));
+    let bytes = crate::canonical_hash::canonical_json_bytes(&serde_json::to_value(&receipt)?)?;
+    let storage = LocalStorage::new(&store_root);
+    match storage.create_file_exclusive(&receipt_path, &bytes, Durability::Durable)? {
+        CreateOutcome::Created => {}
+        CreateOutcome::AlreadyExists => {
+            if storage.read_bytes(&receipt_path)? != bytes {
+                return Err(ExactTransferError::HardConflict {
+                    logical_key: receipt.receipt_sha256.clone(),
+                });
+            }
+        }
+    }
+    Ok(receipt)
+}
+
+fn validate_content_locator(record: &ExactBundleRecordV2) -> Result<(), ExactTransferError> {
+    let path = Path::new(&record.logical_key);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        || !path.starts_with("artifacts")
+    {
+        return Err(ExactTransferError::Contract(format!(
+            "exact content record has an unsafe destination locator: {}",
+            record.logical_key
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(any(test, feature = "bench"))]
@@ -1165,13 +1262,15 @@ mod tests {
             .unwrap();
         write_capability_fixture_for_test(journal.as_ref(), CapabilityFixtureState::L2).unwrap();
         let inspection = inspect_journal_records(journal.as_ref()).unwrap();
+        let content_a_key = format!("artifacts/objects/{}.json", sha256_bytes_hex(b"object-a"));
+        let content_b_key = format!("artifacts/objects/{}.json", sha256_bytes_hex(b"object-b"));
         let content_a = ExactBundleRecordV2::new(
-            "content:object:a",
+            &content_a_key,
             ExactBundleRecordKindV2::ObjectArtifact,
             b"object-a".to_vec(),
         )?;
         let content_b = ExactBundleRecordV2::new(
-            "content:object:b",
+            &content_b_key,
             ExactBundleRecordKindV2::ObjectArtifact,
             b"object-b".to_vec(),
         )?;
@@ -1182,11 +1281,11 @@ mod tests {
             vec![
                 ExactBundleClosureV2 {
                     event_logical_key: event_a.idempotency_key,
-                    required_content_keys: vec!["content:object:a".to_owned()],
+                    required_content_keys: vec![content_a_key],
                 },
                 ExactBundleClosureV2 {
                     event_logical_key: event_b.idempotency_key,
-                    required_content_keys: vec!["content:object:b".to_owned()],
+                    required_content_keys: vec![content_b_key],
                 },
             ],
         )?;
@@ -1461,14 +1560,50 @@ mod tests {
     }
 
     #[test]
-    fn production_import_refuses_before_any_writer_is_reachable() {
+    fn production_import_is_gated_by_l2_and_reconciles_exact_bytes_idempotently() {
         let (manifest, _) = source(ExactBundleSelectionV2::CompleteChange {
             change_id: change_id(),
         })
         .unwrap();
-        assert_eq!(
-            import_exact_bundle_v2(&manifest, "local:product").unwrap_err(),
-            ExactTransferError::NotActivated
-        );
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+        };
+        git(&["init", "--quiet"]);
+        git(&["config", "user.name", "Pointbreak Test"]);
+        git(&["config", "user.email", "pointbreak@example.test"]);
+        let (store, _) = resolve_change_read_store(repo.path()).unwrap();
+        assert!(matches!(
+            import_exact_bundle_v2(repo.path(), &manifest, "local:product").unwrap_err(),
+            ExactTransferError::MissingDestinationCapability { .. }
+        ));
+        crate::session::store::capabilities::write_capability_fixture_for_test(
+            store.backend().journal().as_ref(),
+            crate::session::store::capabilities::CapabilityFixtureState::EmptyL2,
+        )
+        .unwrap();
+        let receipt = import_exact_bundle_v2(repo.path(), &manifest, "local:product").unwrap();
+        let repeated = import_exact_bundle_v2(repo.path(), &manifest, "local:product").unwrap();
+        assert_eq!(receipt, repeated);
+        for record in &manifest.content {
+            assert_eq!(
+                store
+                    .backend()
+                    .content_store()
+                    .get(&record.logical_key)
+                    .unwrap(),
+                record.decoded_bytes
+            );
+        }
+        let (_, inspection) = resolve_change_read_store(repo.path()).unwrap();
+        assert!(matches!(
+            inspection.status,
+            StoreCapabilityStatus::Ready { .. }
+        ));
     }
 }

@@ -2,7 +2,6 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::BTreeMap;
-#[cfg(any(test, feature = "bench"))]
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -10,11 +9,9 @@ use serde::{Deserialize, Serialize};
 use crate::canonical_hash::sha256_json_prefixed;
 use crate::error::{Result, ShoreError};
 use crate::session::derived_access::cursor::TruthCursor;
-#[cfg(any(test, feature = "bench"))]
 use crate::session::derived_access::generation::{
     GenerationDescriptor, GenerationLayout, GenerationPublication,
 };
-#[cfg(any(test, feature = "bench"))]
 use crate::session::derived_access::product_contract::DerivedAccessProfile;
 use crate::session::derived_access::semantic::{SemanticFact, SemanticSnapshot};
 use crate::session::event::ShoreEvent;
@@ -22,7 +19,6 @@ use crate::session::projection::change::{
     ChangeProjectionFact, extract_change_projection_fact, project_changes_from_facts,
 };
 use crate::session::store::EventStore;
-#[cfg(any(test, feature = "bench"))]
 use crate::session::store::backend::JournalChangeStamp;
 use crate::session::store::capabilities::{
     JournalInspection, REVIEW_CHANGE_REVISION_COHORT_V1, StoreCapabilityStatus,
@@ -34,7 +30,6 @@ pub(crate) const CHANGE_SEMANTIC_GENERATION_SCHEMA_V2: &str =
     "pointbreak.derived-change-semantic-generation.v2";
 pub(crate) const CHANGE_READER_PROFILE_RECEIPT_SCHEMA_V2: &str =
     "pointbreak.derived-change-reader-profile-receipt.v2";
-#[cfg(any(test, feature = "bench"))]
 const CHANGE_SEMANTIC_RESOURCE: &str = "change-semantic.json";
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -267,7 +262,6 @@ impl ChangeSemanticGenerationV2 {
     }
 }
 
-#[cfg(any(test, feature = "bench"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ChangeGenerationFailurePointV1 {
     None,
@@ -291,8 +285,7 @@ pub(crate) struct ChangeSemanticReadV1 {
     pub(crate) document_projection: ChangeDocumentProjectionV1,
 }
 
-#[cfg(any(test, feature = "bench"))]
-pub(crate) fn publish_change_semantic_generation_for_qualification(
+fn publish_change_semantic_generation_with_failure(
     store_root: &Path,
     inspection: &JournalInspection,
     authority_now: &AuthorityCursorV2,
@@ -364,6 +357,24 @@ pub(crate) fn publish_change_semantic_generation_for_qualification(
         .map_err(generation_error)?;
     let _ = layout.reclaim_inactive_generations(&generation_id);
     Ok(generation_id)
+}
+
+/// Publish the complete Change semantic projection only after the L2 authority
+/// cursor has been validated. The generation is disposable; the loose Journal
+/// remains the sole source of truth and an interrupted publication can be
+/// retried from the completed authority.
+pub(crate) fn publish_change_semantic_generation(
+    store_root: &Path,
+    inspection: &JournalInspection,
+    authority_now: &AuthorityCursorV2,
+) -> Result<String> {
+    publish_change_semantic_generation_with_failure(
+        store_root,
+        inspection,
+        authority_now,
+        true,
+        ChangeGenerationFailurePointV1::None,
+    )
 }
 
 #[cfg(any(test, feature = "bench"))]
@@ -450,7 +461,6 @@ fn strict_projections(
     ))
 }
 
-#[cfg(any(test, feature = "bench"))]
 fn generation_error(error: impl std::fmt::Display) -> ShoreError {
     ShoreError::Message(format!(
         "Change semantic generation lifecycle failed: {error}"
@@ -592,7 +602,7 @@ mod tests {
     fn immutable_change_generation_publishes_only_at_one_l2_authority() {
         let root = tempfile::tempdir().unwrap();
         let (_backend, l2) = l2_inspection();
-        let generation_id = publish_change_semantic_generation_for_qualification(
+        let generation_id = publish_change_semantic_generation_with_failure(
             root.path(),
             &l2,
             &l2.cursor,
@@ -617,7 +627,7 @@ mod tests {
         moved.journal_record_count += 1;
         moved.journal_record_set_hash = format!("sha256:{}", "f".repeat(64));
         assert!(
-            publish_change_semantic_generation_for_qualification(
+            publish_change_semantic_generation_with_failure(
                 tempfile::tempdir().unwrap().path(),
                 &l2,
                 &moved,
@@ -639,7 +649,7 @@ mod tests {
         ] {
             let root = tempfile::tempdir().unwrap();
             assert!(
-                publish_change_semantic_generation_for_qualification(
+                publish_change_semantic_generation_with_failure(
                     root.path(),
                     &l2,
                     &l2.cursor,
@@ -655,7 +665,7 @@ mod tests {
                     .unwrap()
                     .is_none()
             );
-            publish_change_semantic_generation_for_qualification(
+            publish_change_semantic_generation_with_failure(
                 root.path(),
                 &l2,
                 &l2.cursor,
@@ -685,7 +695,7 @@ mod tests {
 
         let missing = read_change_semantics_for_qualification(root.path(), &l2, true).unwrap();
         assert_eq!(missing.route, ChangeSemanticRouteV1::LooseFallback);
-        publish_change_semantic_generation_for_qualification(
+        publish_change_semantic_generation_with_failure(
             root.path(),
             &l2,
             &l2.cursor,

@@ -1,18 +1,10 @@
-#![cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "bulk-adoption execution is qualification-only until public activation"
-    )
-)]
-
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
-#[cfg(any(test, feature = "bench"))]
+use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex, sha256_json_prefixed};
 use crate::crypto::EventSigner;
 use crate::error::{Result, ShoreError};
 use crate::model::{
@@ -25,16 +17,29 @@ use crate::session::event::{
     WriterProducer, build_change_declared, build_membership_asserted,
     build_revision_relation_asserted,
 };
-#[cfg(any(test, feature = "bench"))]
+use crate::session::store::authority_lock::{STORE_AUTHORITY_LOCK_FILE, StoreAuthorityLock};
 use crate::session::store::capabilities::{
-    BulkAdoptionCompletionV1, StoreCapabilityActivationV1, build_signed_activation,
-    build_signed_completion, inspect_journal_records, publish_control_record,
+    BulkAdoptionCompletionV1, REVIEW_CHANGE_REVISION_COHORT_V1, StoreCapabilityActivationV1,
+    build_signed_activation, build_signed_completion, inspect_journal_records,
+    publish_control_record,
 };
 use crate::session::store::resolution::resolve_change_read_store;
 use crate::session::store::{BulkAdoptionManifestV1, ReservedCohortRecordV1};
 use crate::session::{AuthorityCursorV2, StoreCapabilityStatus, StoreIdentityOptions};
+use crate::storage::{CreateOutcome, Durability, LocalStorage};
 
 pub const BULK_ADOPTION_DRY_RUN_SCHEMA_V1: &str = "pointbreak.bulk-adoption-dry-run.v1";
+pub const BULK_ADOPTION_MIGRATION_RECEIPT_SCHEMA_V1: &str =
+    "pointbreak.bulk-adoption-migration-receipt.v1";
+pub const BULK_ADOPTION_MINIMUM_READER_PROFILE_V1: &str = REVIEW_CHANGE_REVISION_COHORT_V1;
+pub const BULK_ADOPTION_BACKUP_MANIFEST_FILE_V1: &str = "backup-manifest.json";
+pub const BULK_ADOPTION_BACKUP_RECEIPT_FILE_V1: &str = "backup-receipt.json";
+pub const BULK_ADOPTION_EXECUTION_PLAN_FILE_V1: &str = "migration-plan.json";
+const BULK_ADOPTION_MIGRATION_RECEIPT_FILE_V1: &str = "migration-receipt.json";
+
+const BULK_ADOPTION_BACKUP_MANIFEST_SCHEMA_V1: &str = "pointbreak.bulk-adoption-backup-manifest.v1";
+const BULK_ADOPTION_BACKUP_RECEIPT_SCHEMA_V1: &str = "pointbreak.bulk-adoption-backup-receipt.v1";
+const BULK_ADOPTION_EXECUTION_PLAN_SCHEMA_V1: &str = "pointbreak.bulk-adoption-execution-plan.v1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BulkAdoptionDryRunOptions {
@@ -499,13 +504,1031 @@ fn invalid_migration(reason: impl Into<String>) -> ShoreError {
     }
 }
 
-/// Fully signed, exact execution input retained by qualification support while
-/// it exercises interruption and retry. Public product routes cannot construct
-/// or execute this type.
+fn minimum_reader_profile_v1() -> String {
+    REVIEW_CHANGE_REVISION_COHORT_V1.to_owned()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkAdoptionMigrationDispositionV1 {
+    Created,
+    Existing,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[cfg(any(test, feature = "bench"))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BulkAdoptionMigrationReceiptV1 {
+    pub schema: String,
+    pub approved_dry_run_hash: String,
+    pub cohort_manifest_hash: String,
+    pub minimum_reader_profile: String,
+    pub activation_id: String,
+    pub completion_id: String,
+    pub backup_manifest_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derived_generation_id: Option<String>,
+    pub disposition: BulkAdoptionMigrationDispositionV1,
+}
+
+pub const BULK_ADOPTION_BACKUP_RESTORE_RECEIPT_SCHEMA_V1: &str =
+    "pointbreak.bulk-adoption-backup-restore-receipt.v1";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BulkAdoptionBackupRestoreDispositionV1 {
+    Created,
+    Existing,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BulkAdoptionBackupRestoreReceiptV1 {
+    pub schema: String,
+    pub backup_manifest_hash: String,
+    pub restored_store_identity: String,
+    pub restored_authority_cursor: AuthorityCursorV2,
+    pub file_count: u64,
+    pub total_bytes: u64,
+    pub disposition: BulkAdoptionBackupRestoreDispositionV1,
+}
+
+pub struct BulkAdoptionMigrationOptions {
+    repo: PathBuf,
+    dry_run: BulkAdoptionDryRunDocumentV1,
+    acknowledged_dry_run_hash: String,
+    acknowledged_cohort_manifest_hash: String,
+    backup_root: PathBuf,
+    operation_id: String,
+    minimum_reader_ack: Option<String>,
+    legacy_reader_unsupported_ack: bool,
+    owner_decisions: Option<BulkAdoptionOwnerDecisionManifestV1>,
+    signer: Option<Box<dyn EventSigner + Send + Sync>>,
+    fixed_occurred_at: Option<String>,
+    derived_enabled: bool,
+    interruption_after_append: Option<usize>,
+}
+
+impl BulkAdoptionMigrationOptions {
+    pub fn new(
+        repo: impl AsRef<Path>,
+        dry_run: BulkAdoptionDryRunDocumentV1,
+        acknowledged_dry_run_hash: impl Into<String>,
+        acknowledged_cohort_manifest_hash: impl Into<String>,
+        backup_root: impl AsRef<Path>,
+        operation_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            repo: repo.as_ref().to_path_buf(),
+            dry_run,
+            acknowledged_dry_run_hash: acknowledged_dry_run_hash.into(),
+            acknowledged_cohort_manifest_hash: acknowledged_cohort_manifest_hash.into(),
+            backup_root: backup_root.as_ref().to_path_buf(),
+            operation_id: operation_id.into(),
+            minimum_reader_ack: None,
+            legacy_reader_unsupported_ack: false,
+            owner_decisions: None,
+            signer: None,
+            fixed_occurred_at: None,
+            derived_enabled: true,
+            interruption_after_append: None,
+        }
+    }
+
+    pub fn with_minimum_reader_ack(mut self, profile: impl Into<String>) -> Self {
+        self.minimum_reader_ack = Some(profile.into());
+        self
+    }
+
+    pub fn with_legacy_reader_unsupported_ack(mut self) -> Self {
+        self.legacy_reader_unsupported_ack = true;
+        self
+    }
+
+    pub fn with_owner_decisions(mut self, decisions: BulkAdoptionOwnerDecisionManifestV1) -> Self {
+        self.owner_decisions = Some(decisions);
+        self
+    }
+
+    pub fn sign_with<S>(mut self, signer: S) -> Self
+    where
+        S: EventSigner + Send + Sync + 'static,
+    {
+        self.signer = Some(Box::new(signer));
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_fixed_occurred_at(mut self, occurred_at: impl Into<String>) -> Self {
+        self.fixed_occurred_at = Some(occurred_at.into());
+        self
+    }
+
+    pub fn with_derived_enabled(mut self, enabled: bool) -> Self {
+        self.derived_enabled = enabled;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_interruption_after_append(mut self, append: usize) -> Self {
+        self.interruption_after_append = Some(append);
+        self
+    }
+}
+
+/// Restore a verified pre-activation backup into one empty, separately
+/// identified repository store. This never rolls an activated store backward;
+/// the restored L0 root has its own placement identity and must receive a fresh
+/// dry run before any later activation.
+pub fn restore_bulk_adoption_backup(
+    backup_root: impl AsRef<Path>,
+    target_repo: impl AsRef<Path>,
+) -> Result<BulkAdoptionBackupRestoreReceiptV1> {
+    let backup_root = backup_root.as_ref();
+    let target_repo = target_repo.as_ref();
+    let manifest = verify_backup(backup_root)?;
+    let (target, _) = resolve_change_read_store(target_repo)?;
+    let target_root = target.store_dir().to_path_buf();
+    ensure_external_backup_path(&target_root, backup_root)?;
+    let _authority = StoreAuthorityLock::acquire(&target_root)?;
+    let (_, initial) = resolve_change_read_store(target_repo)?;
+    let target_identity = crate::session::store_identity(StoreIdentityOptions::new(target_repo))?;
+    if target_identity.store_identity == manifest.source_store_identity {
+        return Err(invalid_migration(
+            "backup restore requires a separately identified destination store",
+        ));
+    }
+    if !matches!(initial.status, StoreCapabilityStatus::MigrationRequired) {
+        return Err(invalid_migration(
+            "backup restore requires an empty untouched L0 destination",
+        ));
+    }
+    let existing = inventory_store_files(&target_root)?;
+    let disposition = if existing == manifest.entries {
+        BulkAdoptionBackupRestoreDispositionV1::Existing
+    } else {
+        if !existing.is_empty() {
+            return Err(invalid_migration(
+                "backup restore destination contains different durable store files",
+            ));
+        }
+        let storage = LocalStorage::new(&target_root);
+        for entry in &manifest.entries {
+            let source = backup_root.join("store").join(&entry.path);
+            let bytes = fs::read(&source).map_err(|error| {
+                invalid_migration(format!(
+                    "could not read verified backup file {}: {error}",
+                    entry.path
+                ))
+            })?;
+            storage.create_file_exclusive(Path::new(&entry.path), &bytes, Durability::Durable)?;
+        }
+        BulkAdoptionBackupRestoreDispositionV1::Created
+    };
+    let (_, restored) = resolve_change_read_store(target_repo)?;
+    if !matches!(restored.status, StoreCapabilityStatus::MigrationRequired)
+        || restored.cursor != manifest.source_authority_cursor
+    {
+        return Err(invalid_migration(
+            "restored backup did not reproduce the verified L0 authority cursor",
+        ));
+    }
+    Ok(BulkAdoptionBackupRestoreReceiptV1 {
+        schema: BULK_ADOPTION_BACKUP_RESTORE_RECEIPT_SCHEMA_V1.to_owned(),
+        backup_manifest_hash: manifest.manifest_hash,
+        restored_store_identity: target_identity.store_identity,
+        restored_authority_cursor: restored.cursor,
+        file_count: manifest.entries.len() as u64,
+        total_bytes: manifest.entries.iter().map(|entry| entry.bytes).sum(),
+        disposition,
+    })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BulkAdoptionBackupEntryV1 {
+    path: String,
+    bytes: u64,
+    sha256: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BulkAdoptionBackupManifestV1 {
+    schema: String,
+    source_store_identity: String,
+    source_authority_cursor: AuthorityCursorV2,
+    entries: Vec<BulkAdoptionBackupEntryV1>,
+    manifest_hash: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BulkAdoptionBackupReceiptV1 {
+    schema: String,
+    source_store_identity: String,
+    source_authority_cursor: AuthorityCursorV2,
+    manifest_hash: String,
+    file_count: u64,
+    total_bytes: u64,
+}
+
+pub fn migrate_bulk_adoption(
+    options: BulkAdoptionMigrationOptions,
+) -> Result<BulkAdoptionMigrationReceiptV1> {
+    validate_migration_options(&options)?;
+    let (resolved, _) = resolve_change_read_store(&options.repo)?;
+    let store_root = resolved.store_dir().to_path_buf();
+    ensure_external_backup_path(&store_root, &options.backup_root)?;
+    let _authority = StoreAuthorityLock::acquire(&store_root)?;
+
+    let (_, initial) = resolve_change_read_store(&options.repo)?;
+    let current_identity =
+        crate::session::store_identity(StoreIdentityOptions::new(&options.repo))?;
+    let approved_root = approved_root_for_identity(&options, &current_identity.store_identity)?;
+    if matches!(&initial.status, StoreCapabilityStatus::MigrationRequired) {
+        if initial.cursor != approved_root.source_authority_cursor {
+            return Err(invalid_migration(
+                "current L0 authority does not match the approved dry-run cursor",
+            ));
+        }
+        if !options
+            .backup_root
+            .join(BULK_ADOPTION_EXECUTION_PLAN_FILE_V1)
+            .is_file()
+            && options.signer.is_none()
+        {
+            return Err(invalid_migration(
+                "initial activation requires an available strict signing key",
+            ));
+        }
+    }
+    let backup = match &initial.status {
+        StoreCapabilityStatus::MigrationRequired => ensure_backup(
+            &store_root,
+            &options.backup_root,
+            &approved_root.root_identity_hash,
+            &initial.cursor,
+        )?,
+        StoreCapabilityStatus::MigrationInProgress { .. } | StoreCapabilityStatus::Ready { .. } => {
+            verify_backup(&options.backup_root)?
+        }
+    };
+    if backup.source_store_identity != approved_root.root_identity_hash
+        || backup.source_authority_cursor != approved_root.source_authority_cursor
+    {
+        return Err(invalid_migration(
+            "verified backup does not match the approved pre-activation authority",
+        ));
+    }
+
+    let plan_path = options
+        .backup_root
+        .join(BULK_ADOPTION_EXECUTION_PLAN_FILE_V1);
+    let plan = if plan_path.is_file() {
+        let plan: BulkAdoptionExecutionPlanV1 =
+            serde_json::from_slice(&fs::read(&plan_path).map_err(|error| {
+                invalid_migration(format!("could not read retained migration plan: {error}"))
+            })?)?;
+        validate_retained_plan(&plan, &options, approved_root)?;
+        plan
+    } else {
+        if !matches!(&initial.status, StoreCapabilityStatus::MigrationRequired) {
+            return Err(invalid_migration(
+                "M1/L2 recovery requires the retained pre-activation execution plan",
+            ));
+        }
+        let signer = options.signer.as_ref().ok_or_else(|| {
+            invalid_migration("initial activation requires an available strict signing key")
+        })?;
+        let plan = prepare_approved_bulk_adoption(&options, approved_root, signer.as_ref())?;
+        let bytes = canonical_json_bytes(&serde_json::to_value(&plan)?)?;
+        match LocalStorage::new(&options.backup_root).create_file_exclusive(
+            Path::new(BULK_ADOPTION_EXECUTION_PLAN_FILE_V1),
+            &bytes,
+            Durability::Durable,
+        )? {
+            CreateOutcome::Created => {}
+            CreateOutcome::AlreadyExists => {
+                let retained = fs::read(&plan_path).map_err(|error| {
+                    invalid_migration(format!("could not verify retained migration plan: {error}"))
+                })?;
+                if retained != bytes {
+                    return Err(invalid_migration(
+                        "retained migration plan conflicts with the approved execution plan",
+                    ));
+                }
+            }
+        }
+        plan
+    };
+
+    let final_receipt_path = options
+        .backup_root
+        .join(BULK_ADOPTION_MIGRATION_RECEIPT_FILE_V1);
+    if final_receipt_path.is_file() {
+        if !matches!(&initial.status, StoreCapabilityStatus::Ready { .. }) {
+            return Err(invalid_migration(
+                "a retained completion receipt exists but the store is not L2",
+            ));
+        }
+        execute_bulk_adoption_plan(&options.repo, &plan, None)?;
+        let mut receipt: BulkAdoptionMigrationReceiptV1 =
+            serde_json::from_slice(&fs::read(&final_receipt_path).map_err(|error| {
+                invalid_migration(format!(
+                    "could not read retained migration receipt: {error}"
+                ))
+            })?)?;
+        validate_migration_receipt(&receipt, &plan, &backup)?;
+        receipt.disposition = BulkAdoptionMigrationDispositionV1::Existing;
+        return Ok(receipt);
+    }
+
+    execute_bulk_adoption_plan(&options.repo, &plan, options.interruption_after_append)?;
+    let (_, complete) = resolve_change_read_store(&options.repo)?;
+    let derived_generation_id = if options.derived_enabled {
+        Some(
+            crate::session::derived_access::semantic::change::publish_change_semantic_generation(
+                &store_root,
+                &complete,
+                &complete.cursor,
+            )?,
+        )
+    } else {
+        None
+    };
+    let receipt = BulkAdoptionMigrationReceiptV1 {
+        schema: BULK_ADOPTION_MIGRATION_RECEIPT_SCHEMA_V1.to_owned(),
+        approved_dry_run_hash: plan.approved_dry_run_hash.clone(),
+        cohort_manifest_hash: plan.manifest_hash.clone(),
+        minimum_reader_profile: plan.minimum_reader_profile.clone(),
+        activation_id: plan.activation.activation_id().to_owned(),
+        completion_id: plan.completion.completion_id().to_owned(),
+        backup_manifest_hash: backup.manifest_hash,
+        derived_generation_id,
+        disposition: BulkAdoptionMigrationDispositionV1::Created,
+    };
+    let receipt_bytes = canonical_json_bytes(&serde_json::to_value(&receipt)?)?;
+    let storage = LocalStorage::new(&options.backup_root);
+    match storage.create_file_exclusive(
+        Path::new(BULK_ADOPTION_MIGRATION_RECEIPT_FILE_V1),
+        &receipt_bytes,
+        Durability::Durable,
+    )? {
+        CreateOutcome::Created => {}
+        CreateOutcome::AlreadyExists => {
+            if storage.read_bytes(Path::new(BULK_ADOPTION_MIGRATION_RECEIPT_FILE_V1))?
+                != receipt_bytes
+            {
+                return Err(invalid_migration(
+                    "retained migration completion receipt conflicts with this execution",
+                ));
+            }
+        }
+    }
+    Ok(receipt)
+}
+
+fn validate_migration_receipt(
+    receipt: &BulkAdoptionMigrationReceiptV1,
+    plan: &BulkAdoptionExecutionPlanV1,
+    backup: &BulkAdoptionBackupManifestV1,
+) -> Result<()> {
+    if receipt.schema != BULK_ADOPTION_MIGRATION_RECEIPT_SCHEMA_V1
+        || receipt.approved_dry_run_hash != plan.approved_dry_run_hash
+        || receipt.cohort_manifest_hash != plan.manifest_hash
+        || receipt.minimum_reader_profile != plan.minimum_reader_profile
+        || receipt.activation_id != plan.activation.activation_id()
+        || receipt.completion_id != plan.completion.completion_id()
+        || receipt.backup_manifest_hash != backup.manifest_hash
+        || receipt.disposition != BulkAdoptionMigrationDispositionV1::Created
+    {
+        return Err(invalid_migration(
+            "retained migration receipt does not match the completed execution plan",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_migration_options(options: &BulkAdoptionMigrationOptions) -> Result<()> {
+    validate_dry_run_document(&options.dry_run)?;
+    if options.acknowledged_dry_run_hash != options.dry_run.manifest_hash {
+        return Err(invalid_migration(
+            "acknowledged dry-run hash does not match the exact dry-run document",
+        ));
+    }
+    if options.dry_run.requires_owner_decision {
+        return Err(invalid_migration(
+            "approved dry run still requires an explicit owner decision",
+        ));
+    }
+    if options.operation_id.trim().is_empty() {
+        return Err(invalid_migration("migration operation id cannot be empty"));
+    }
+    if options.minimum_reader_ack.as_deref() != Some(REVIEW_CHANGE_REVISION_COHORT_V1) {
+        return Err(invalid_migration(format!(
+            "minimum reader acknowledgement must be {REVIEW_CHANGE_REVISION_COHORT_V1}",
+        )));
+    }
+    if !options.legacy_reader_unsupported_ack {
+        return Err(invalid_migration(
+            "activation requires explicit acknowledgement that v0.9 readers become unsupported",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_dry_run_document(document: &BulkAdoptionDryRunDocumentV1) -> Result<()> {
+    if document.schema != BULK_ADOPTION_DRY_RUN_SCHEMA_V1 {
+        return Err(invalid_migration(
+            "unsupported bulk-adoption dry-run schema",
+        ));
+    }
+    if document.roots.is_empty()
+        || document
+            .roots
+            .windows(2)
+            .any(|pair| pair[0].root_identity_hash >= pair[1].root_identity_hash)
+    {
+        return Err(invalid_migration(
+            "bulk-adoption dry run has a non-canonical root set",
+        ));
+    }
+    let material = serde_json::json!({
+        "schema": document.schema,
+        "roots": document.roots,
+        "anomalies": document.anomalies,
+        "requiresOwnerDecision": document.requires_owner_decision,
+        "ownerDecisionManifestHash": document.owner_decision_manifest_hash,
+        "writer": document.writer,
+        "claimOccurredAt": document.claim_occurred_at,
+        "signaturePolicy": document.signature_policy,
+    });
+    if sha256_json_prefixed(&material)? != document.manifest_hash {
+        return Err(invalid_migration(
+            "bulk-adoption dry-run self-hash mismatch",
+        ));
+    }
+    Ok(())
+}
+
+fn prepare_approved_bulk_adoption(
+    options: &BulkAdoptionMigrationOptions,
+    approved_root: &BulkAdoptionDryRunRootV1,
+    signer: &(dyn EventSigner + Send + Sync),
+) -> Result<BulkAdoptionExecutionPlanV1> {
+    let inventory = legacy_inventory_for_repo(&options.repo)?;
+    if inventory.root_identity_hash != approved_root.root_identity_hash
+        || inventory.source_authority_cursor != approved_root.source_authority_cursor
+    {
+        return Err(invalid_migration(
+            "current L0 authority does not match the approved dry-run cursor",
+        ));
+    }
+    let decisions = decisions_for_execution(options)?;
+    let retained = options
+        .owner_decisions
+        .as_ref()
+        .map(|manifest| {
+            manifest
+                .retained_manifests
+                .iter()
+                .map(|retained| RetainedAdoptionManifestV1 {
+                    manifest_hash: retained.manifest_hash.clone(),
+                    allocations: retained
+                        .allocations
+                        .iter()
+                        .map(|allocation| RetainedChangeAllocationV1 {
+                            change_id: allocation.change_id.clone(),
+                            identity_descriptor: allocation.identity_descriptor.clone(),
+                            members: allocation.members.clone(),
+                        })
+                        .collect(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let proposal = plan_bulk_adoption(std::slice::from_ref(&inventory), &retained, &decisions)?;
+    if proposal.requires_owner_decision {
+        return Err(invalid_migration(
+            "exact activation re-plan still requires an owner decision",
+        ));
+    }
+    let root = proposal
+        .roots
+        .into_iter()
+        .next()
+        .ok_or_else(|| invalid_migration("approved activation has no root"))?;
+    let manifest = root
+        .manifest
+        .ok_or_else(|| invalid_migration("approved activation has no executable manifest"))?;
+    let manifest_hash = manifest.canonical_hash()?;
+    if manifest_hash != options.acknowledged_cohort_manifest_hash {
+        return Err(invalid_migration(
+            "exact activation re-plan changed the acknowledged cohort manifest",
+        ));
+    }
+    let occurred_at = options
+        .fixed_occurred_at
+        .clone()
+        .unwrap_or_else(crate::session::current_timestamp);
+    let nonce = sha256_json_prefixed(&serde_json::json!({
+        "operationId": options.operation_id,
+        "rootIdentityHash": inventory.root_identity_hash,
+        "approvedDryRunHash": options.acknowledged_dry_run_hash,
+    }))?;
+    let activation = build_signed_activation(
+        signer,
+        manifest,
+        nonce,
+        options.dry_run.writer.clone(),
+        occurred_at.clone(),
+    )?;
+    let completion = build_signed_completion(
+        signer,
+        &activation,
+        options.dry_run.writer.clone(),
+        occurred_at,
+    )?;
+    Ok(BulkAdoptionExecutionPlanV1 {
+        schema: BULK_ADOPTION_EXECUTION_PLAN_SCHEMA_V1.to_owned(),
+        operation_id: options.operation_id.clone(),
+        approved_dry_run_hash: options.acknowledged_dry_run_hash.clone(),
+        minimum_reader_profile: REVIEW_CHANGE_REVISION_COHORT_V1.to_owned(),
+        root_identity_hash: inventory.root_identity_hash,
+        manifest_hash,
+        source_authority_cursor: inventory.source_authority_cursor,
+        events: root.planned_events,
+        activation,
+        completion,
+    })
+}
+
+fn decisions_for_execution(
+    options: &BulkAdoptionMigrationOptions,
+) -> Result<OwnerManifestDecisionsV1> {
+    let Some(manifest) = options.owner_decisions.as_ref() else {
+        return Ok(OwnerManifestDecisionsV1 {
+            writer: options.dry_run.writer.clone(),
+            occurred_at: options.dry_run.claim_occurred_at.clone(),
+            ..OwnerManifestDecisionsV1::default()
+        });
+    };
+    let hash = validate_owner_decisions(manifest)?;
+    if options.dry_run.owner_decision_manifest_hash.as_deref() != Some(hash.as_str()) {
+        return Err(invalid_migration(
+            "owner decisions do not match the approved dry-run document",
+        ));
+    }
+    Ok(OwnerManifestDecisionsV1 {
+        approved_anomaly_ids: manifest.approved_anomaly_ids.clone(),
+        overlap_identity: manifest
+            .overlap_identity
+            .iter()
+            .map(|(revision, decision)| {
+                let decision = match decision {
+                    BulkAdoptionOverlapIdentityDecisionV1::Shared {
+                        identity_descriptor,
+                    } => OverlapIdentityDecisionV1::Shared {
+                        identity_descriptor: identity_descriptor.clone(),
+                    },
+                    BulkAdoptionOverlapIdentityDecisionV1::Distinct => {
+                        OverlapIdentityDecisionV1::Distinct
+                    }
+                };
+                (revision.clone(), decision)
+            })
+            .collect(),
+        writer: options.dry_run.writer.clone(),
+        occurred_at: manifest.claim_occurred_at.clone(),
+    })
+}
+
+fn validate_retained_plan(
+    plan: &BulkAdoptionExecutionPlanV1,
+    options: &BulkAdoptionMigrationOptions,
+    root: &BulkAdoptionDryRunRootV1,
+) -> Result<()> {
+    validate_execution_plan(plan)?;
+    if plan.operation_id != options.operation_id
+        || plan.approved_dry_run_hash != options.acknowledged_dry_run_hash
+        || plan.root_identity_hash != root.root_identity_hash
+        || plan.manifest_hash != options.acknowledged_cohort_manifest_hash
+        || plan.source_authority_cursor != root.source_authority_cursor
+    {
+        return Err(invalid_migration(
+            "retained execution plan does not match the approved migration inputs",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_execution_plan(plan: &BulkAdoptionExecutionPlanV1) -> Result<()> {
+    if plan.schema != BULK_ADOPTION_EXECUTION_PLAN_SCHEMA_V1
+        || plan.minimum_reader_profile != REVIEW_CHANGE_REVISION_COHORT_V1
+    {
+        return Err(invalid_migration(
+            "unsupported bulk-adoption execution plan",
+        ));
+    }
+    plan.activation.validate_for_execution()?;
+    plan.completion.validate_for_execution()?;
+    let manifest = plan.activation.manifest();
+    if manifest.canonical_hash()? != plan.manifest_hash
+        || manifest.source_authority_cursor != plan.source_authority_cursor
+    {
+        return Err(invalid_migration(
+            "execution plan control authority does not match its frozen manifest",
+        ));
+    }
+    let mut reservations = plan
+        .events
+        .iter()
+        .map(reserved_record)
+        .collect::<Result<Vec<_>>>()?;
+    reservations.sort_by(|left, right| left.logical_key.cmp(&right.logical_key));
+    if reservations != manifest.reserved_records {
+        return Err(invalid_migration(
+            "execution plan event bytes do not match the signed reservation manifest",
+        ));
+    }
+    Ok(())
+}
+
+fn approved_root_for_identity<'a>(
+    options: &'a BulkAdoptionMigrationOptions,
+    store_identity: &str,
+) -> Result<&'a BulkAdoptionDryRunRootV1> {
+    let root = options
+        .dry_run
+        .roots
+        .iter()
+        .find(|root| root.root_identity_hash == store_identity)
+        .ok_or_else(|| {
+            invalid_migration("resolved store is absent from the approved dry-run document")
+        })?;
+    if root.cohort_manifest_hash.as_deref()
+        != Some(options.acknowledged_cohort_manifest_hash.as_str())
+    {
+        return Err(invalid_migration(
+            "acknowledged cohort manifest does not match the approved root",
+        ));
+    }
+    Ok(root)
+}
+
+fn ensure_external_backup_path(store_root: &Path, backup_root: &Path) -> Result<()> {
+    let store = absolute_path(store_root)?;
+    let backup = absolute_path(backup_root)?;
+    if backup.starts_with(&store) || store.starts_with(&backup) {
+        return Err(invalid_migration(
+            "migration backup must be outside the authoritative store root",
+        ));
+    }
+    Ok(())
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| {
+                invalid_migration(format!("could not resolve current directory: {error}"))
+            })?
+            .join(path)
+    };
+    let mut existing = absolute.as_path();
+    let mut suffix = Vec::new();
+    while !existing.try_exists().map_err(|error| {
+        invalid_migration(format!(
+            "could not inspect migration path boundary: {error}"
+        ))
+    })? {
+        suffix.push(
+            existing
+                .file_name()
+                .ok_or_else(|| invalid_migration("migration path has no existing ancestor"))?
+                .to_os_string(),
+        );
+        existing = existing
+            .parent()
+            .ok_or_else(|| invalid_migration("migration path has no existing ancestor"))?;
+    }
+    let mut resolved = fs::canonicalize(existing).map_err(|error| {
+        invalid_migration(format!(
+            "could not canonicalize migration path boundary: {error}"
+        ))
+    })?;
+    for component in suffix.into_iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
+}
+
+fn ensure_backup(
+    store_root: &Path,
+    backup_root: &Path,
+    store_identity: &str,
+    source_cursor: &AuthorityCursorV2,
+) -> Result<BulkAdoptionBackupManifestV1> {
+    if backup_root
+        .join(BULK_ADOPTION_BACKUP_RECEIPT_FILE_V1)
+        .is_file()
+    {
+        let manifest = verify_backup(backup_root)?;
+        if manifest.source_store_identity != store_identity
+            || manifest.source_authority_cursor != *source_cursor
+        {
+            return Err(invalid_migration(
+                "existing backup belongs to a different source authority",
+            ));
+        }
+        return Ok(manifest);
+    }
+    fs::create_dir_all(backup_root.join("store")).map_err(|error| {
+        invalid_migration(format!(
+            "could not create external backup directory: {error}"
+        ))
+    })?;
+    let before = inventory_store_files(store_root)?;
+    validate_partial_backup(backup_root, &before)?;
+    let storage = LocalStorage::new(backup_root);
+    for entry in &before {
+        let bytes = fs::read(store_root.join(&entry.path)).map_err(|error| {
+            invalid_migration(format!(
+                "could not read source backup file {}: {error}",
+                entry.path
+            ))
+        })?;
+        let target = Path::new("store").join(&entry.path);
+        match storage.create_file_exclusive(&target, &bytes, Durability::Durable)? {
+            CreateOutcome::Created => {}
+            CreateOutcome::AlreadyExists => {
+                if storage.read_bytes(&target)? != bytes {
+                    return Err(invalid_migration(format!(
+                        "backup file conflicts with source authority: {}",
+                        entry.path
+                    )));
+                }
+            }
+        }
+    }
+    let after = inventory_store_files(store_root)?;
+    if before != after {
+        return Err(invalid_migration(
+            "source authority changed while the external backup was being written",
+        ));
+    }
+    let material = serde_json::json!({
+        "schema": BULK_ADOPTION_BACKUP_MANIFEST_SCHEMA_V1,
+        "sourceStoreIdentity": store_identity,
+        "sourceAuthorityCursor": source_cursor,
+        "entries": before,
+    });
+    let manifest = BulkAdoptionBackupManifestV1 {
+        schema: BULK_ADOPTION_BACKUP_MANIFEST_SCHEMA_V1.to_owned(),
+        source_store_identity: store_identity.to_owned(),
+        source_authority_cursor: source_cursor.clone(),
+        entries: before,
+        manifest_hash: sha256_json_prefixed(&material)?,
+    };
+    let manifest_bytes = canonical_json_bytes(&serde_json::to_value(&manifest)?)?;
+    match storage.create_file_exclusive(
+        Path::new(BULK_ADOPTION_BACKUP_MANIFEST_FILE_V1),
+        &manifest_bytes,
+        Durability::Durable,
+    )? {
+        CreateOutcome::Created => {}
+        CreateOutcome::AlreadyExists => {
+            if storage.read_bytes(Path::new(BULK_ADOPTION_BACKUP_MANIFEST_FILE_V1))?
+                != manifest_bytes
+            {
+                return Err(invalid_migration(
+                    "partial backup carries a conflicting manifest",
+                ));
+            }
+        }
+    }
+    let receipt = BulkAdoptionBackupReceiptV1 {
+        schema: BULK_ADOPTION_BACKUP_RECEIPT_SCHEMA_V1.to_owned(),
+        source_store_identity: store_identity.to_owned(),
+        source_authority_cursor: source_cursor.clone(),
+        manifest_hash: manifest.manifest_hash.clone(),
+        file_count: manifest.entries.len() as u64,
+        total_bytes: manifest.entries.iter().map(|entry| entry.bytes).sum(),
+    };
+    let receipt_bytes = canonical_json_bytes(&serde_json::to_value(receipt)?)?;
+    storage.create_file_exclusive(
+        Path::new(BULK_ADOPTION_BACKUP_RECEIPT_FILE_V1),
+        &receipt_bytes,
+        Durability::Durable,
+    )?;
+    Ok(manifest)
+}
+
+fn validate_partial_backup(
+    backup_root: &Path,
+    source_entries: &[BulkAdoptionBackupEntryV1],
+) -> Result<()> {
+    let entries = fs::read_dir(backup_root)
+        .map_err(|error| invalid_migration(format!("could not inspect partial backup: {error}")))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| invalid_migration(format!("could not inspect partial backup: {error}")))?;
+    for entry in entries {
+        let name = entry.file_name();
+        let kind = entry.file_type().map_err(|error| {
+            invalid_migration(format!("could not inspect partial backup entry: {error}"))
+        })?;
+        let allowed = (name == "store" && kind.is_dir())
+            || (name == BULK_ADOPTION_BACKUP_MANIFEST_FILE_V1 && kind.is_file())
+            || backup_path_is_disposable(Path::new(&name));
+        if !allowed {
+            return Err(invalid_migration(format!(
+                "incomplete backup contains an unexpected entry: {}",
+                entry.path().display()
+            )));
+        }
+    }
+    for existing in inventory_store_files(&backup_root.join("store"))? {
+        if !source_entries.iter().any(|source| source == &existing) {
+            return Err(invalid_migration(format!(
+                "partial backup conflicts with current source authority: {}",
+                existing.path
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn verify_backup(backup_root: &Path) -> Result<BulkAdoptionBackupManifestV1> {
+    let manifest: BulkAdoptionBackupManifestV1 = serde_json::from_slice(
+        &fs::read(backup_root.join(BULK_ADOPTION_BACKUP_MANIFEST_FILE_V1)).map_err(|error| {
+            invalid_migration(format!("could not read backup manifest: {error}"))
+        })?,
+    )?;
+    let receipt: BulkAdoptionBackupReceiptV1 = serde_json::from_slice(
+        &fs::read(backup_root.join(BULK_ADOPTION_BACKUP_RECEIPT_FILE_V1)).map_err(|error| {
+            invalid_migration(format!("could not read complete backup receipt: {error}"))
+        })?,
+    )?;
+    if manifest.schema != BULK_ADOPTION_BACKUP_MANIFEST_SCHEMA_V1
+        || receipt.schema != BULK_ADOPTION_BACKUP_RECEIPT_SCHEMA_V1
+        || receipt.source_store_identity != manifest.source_store_identity
+        || receipt.source_authority_cursor != manifest.source_authority_cursor
+        || receipt.manifest_hash != manifest.manifest_hash
+        || receipt.file_count != manifest.entries.len() as u64
+        || receipt.total_bytes
+            != manifest
+                .entries
+                .iter()
+                .map(|entry| entry.bytes)
+                .sum::<u64>()
+    {
+        return Err(invalid_migration("backup manifest/receipt mismatch"));
+    }
+    if manifest
+        .entries
+        .windows(2)
+        .any(|pair| pair[0].path >= pair[1].path)
+        || manifest
+            .entries
+            .iter()
+            .any(|entry| !backup_entry_path_is_safe(&entry.path))
+    {
+        return Err(invalid_migration(
+            "backup manifest contains a non-canonical or unsafe relative path",
+        ));
+    }
+    let material = serde_json::json!({
+        "schema": manifest.schema,
+        "sourceStoreIdentity": manifest.source_store_identity,
+        "sourceAuthorityCursor": manifest.source_authority_cursor,
+        "entries": manifest.entries,
+    });
+    if sha256_json_prefixed(&material)? != manifest.manifest_hash {
+        return Err(invalid_migration("backup manifest self-hash mismatch"));
+    }
+    for entry in &manifest.entries {
+        let bytes = fs::read(backup_root.join("store").join(&entry.path)).map_err(|error| {
+            invalid_migration(format!(
+                "could not read retained backup file {}: {error}",
+                entry.path
+            ))
+        })?;
+        if bytes.len() as u64 != entry.bytes || sha256_bytes_hex(&bytes) != entry.sha256 {
+            return Err(invalid_migration(format!(
+                "retained backup file failed verification: {}",
+                entry.path
+            )));
+        }
+    }
+    Ok(manifest)
+}
+
+fn backup_entry_path_is_safe(value: &str) -> bool {
+    let path = Path::new(value);
+    !path.is_absolute()
+        && !value.is_empty()
+        && path
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+        && !backup_path_is_disposable(path)
+}
+
+fn inventory_store_files(store_root: &Path) -> Result<Vec<BulkAdoptionBackupEntryV1>> {
+    let mut paths = Vec::new();
+    collect_store_files(store_root, store_root, &mut paths)?;
+    paths.sort();
+    let mut entries = Vec::with_capacity(paths.len());
+    for path in paths {
+        let relative = path
+            .strip_prefix(store_root)
+            .map_err(|_| invalid_migration("backup inventory escaped the source store"))?;
+        let relative = relative.to_str().ok_or_else(|| {
+            invalid_migration("backup inventory requires Unicode store-relative paths")
+        })?;
+        let relative = relative.replace('\\', "/");
+        let bytes = fs::read(&path).map_err(|error| {
+            invalid_migration(format!(
+                "could not inventory source file {relative}: {error}"
+            ))
+        })?;
+        entries.push(BulkAdoptionBackupEntryV1 {
+            path: relative,
+            bytes: bytes.len() as u64,
+            sha256: sha256_bytes_hex(&bytes),
+        });
+    }
+    Ok(entries)
+}
+
+fn collect_store_files(root: &Path, directory: &Path, paths: &mut Vec<PathBuf>) -> Result<()> {
+    let mut entries = fs::read_dir(directory)
+        .map_err(|error| {
+            invalid_migration(format!("could not inventory store directory: {error}"))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| invalid_migration(format!("could not inventory store entry: {error}")))?;
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| invalid_migration("backup inventory escaped the source store"))?;
+        if backup_path_is_disposable(relative) {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            invalid_migration(format!("could not inspect backup source entry: {error}"))
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(invalid_migration(format!(
+                "refusing symlink in authoritative backup inventory: {}",
+                relative.display()
+            )));
+        }
+        if metadata.is_dir() {
+            collect_store_files(root, &path, paths)?;
+        } else if metadata.is_file() {
+            paths.push(path);
+        } else {
+            return Err(invalid_migration(format!(
+                "refusing non-file store entry in backup inventory: {}",
+                relative.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn backup_path_is_disposable(path: &Path) -> bool {
+    let first = path
+        .components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str());
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    first == Some("derived")
+        || name == STORE_AUTHORITY_LOCK_FILE
+        || name == "derived.writer.lock"
+        || name == "derived.rebuild.lock"
+        || (name.starts_with(".shore-write.") && name.ends_with(".tmp"))
+}
+
+/// Fully signed, exact execution input retained outside the authoritative
+/// store before activation. M1 recovery reads this document and never attempts
+/// to reconstruct an L0 graph from partially migrated authority.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct BulkAdoptionExecutionPlanV1 {
     schema: String,
+    #[serde(default)]
+    operation_id: String,
+    #[serde(default)]
+    approved_dry_run_hash: String,
+    #[serde(default = "minimum_reader_profile_v1")]
+    minimum_reader_profile: String,
     root_identity_hash: String,
     manifest_hash: String,
     source_authority_cursor: AuthorityCursorV2,
@@ -514,11 +1537,12 @@ pub(crate) struct BulkAdoptionExecutionPlanV1 {
     completion: BulkAdoptionCompletionV1,
 }
 
-#[cfg(any(test, feature = "bench"))]
 #[allow(
     clippy::too_many_arguments,
-    reason = "the frozen qualification plan names each signed time and identity input explicitly"
+    dead_code,
+    reason = "the frozen qualification plan remains available to the feature-built evidence harness"
 )]
+#[cfg(any(test, feature = "bench"))]
 pub(crate) fn prepare_bulk_adoption_for_qualification(
     repo: &Path,
     acknowledged_manifest_hash: &str,
@@ -564,7 +1588,10 @@ pub(crate) fn prepare_bulk_adoption_for_qualification(
     )?;
     let completion = build_signed_completion(signer, &activation, writer, completion_occurred_at)?;
     Ok(BulkAdoptionExecutionPlanV1 {
-        schema: "pointbreak.bulk-adoption-execution-plan.v1".to_owned(),
+        schema: BULK_ADOPTION_EXECUTION_PLAN_SCHEMA_V1.to_owned(),
+        operation_id: String::new(),
+        approved_dry_run_hash: String::new(),
+        minimum_reader_profile: REVIEW_CHANGE_REVISION_COHORT_V1.to_owned(),
         root_identity_hash: inventory.root_identity_hash,
         manifest_hash,
         source_authority_cursor: inventory.source_authority_cursor,
@@ -574,21 +1601,16 @@ pub(crate) fn prepare_bulk_adoption_for_qualification(
     })
 }
 
-/// Execute a previously frozen plan against one disposable qualification root.
+/// Execute a previously frozen migration plan against one resolved store.
 /// `interrupt_after_append` counts activation, each Change event, then
 /// completion. Retrying the same plan converges through exclusive-create
 /// records and validates the exact M1/L2 authority after every phase.
-#[cfg(any(test, feature = "bench"))]
-pub(crate) fn execute_bulk_adoption_for_qualification(
+fn execute_bulk_adoption_plan(
     repo: &Path,
     plan: &BulkAdoptionExecutionPlanV1,
     interrupt_after_append: Option<usize>,
 ) -> Result<()> {
-    if plan.schema != "pointbreak.bulk-adoption-execution-plan.v1" {
-        return Err(invalid_migration(
-            "unsupported bulk-adoption execution plan",
-        ));
-    }
+    validate_execution_plan(plan)?;
     let identity = crate::session::store_identity(StoreIdentityOptions::new(repo))?;
     if identity.store_identity != plan.root_identity_hash {
         return Err(invalid_migration(
@@ -1371,19 +2393,488 @@ mod tests {
             let expected_boundaries = plan.events.len() + 2;
             assert_eq!(expected_boundaries, 6);
 
-            let error = execute_bulk_adoption_for_qualification(repo.path(), &plan, Some(boundary))
-                .unwrap_err();
+            let error = execute_bulk_adoption_plan(repo.path(), &plan, Some(boundary)).unwrap_err();
             assert!(
                 error
                     .to_string()
                     .contains("injected migration interruption")
             );
-            execute_bulk_adoption_for_qualification(repo.path(), &plan, None).unwrap();
+            execute_bulk_adoption_plan(repo.path(), &plan, None).unwrap();
             assert!(matches!(
                 resolve_change_read_store(repo.path()).unwrap().1.status,
                 StoreCapabilityStatus::Ready { .. }
             ));
         }
+    }
+
+    #[test]
+    fn execution_plan_tampering_fails_before_activation() {
+        use crate::crypto::TestEd25519Signer;
+
+        let repo = real_l0_repo();
+        let dry_run = dry_run_bulk_adoption(BulkAdoptionDryRunOptions::new(repo.path())).unwrap();
+        let mut plan = prepare_bulk_adoption_for_qualification(
+            repo.path(),
+            dry_run.roots[0].cohort_manifest_hash.as_deref().unwrap(),
+            dry_run.writer.clone(),
+            dry_run.claim_occurred_at.clone(),
+            "tamper-proof".to_owned(),
+            "2026-08-06T18:19:00Z".to_owned(),
+            "2026-08-06T18:19:01Z".to_owned(),
+            &TestEd25519Signer::from_seed([0x50; 32]),
+        )
+        .unwrap();
+        plan.events[0].payload["changeId"] =
+            serde_json::Value::String("change:tampered".to_owned());
+        let error = execute_bulk_adoption_plan(repo.path(), &plan, None).unwrap_err();
+        assert!(error.to_string().contains("reservation manifest"));
+        assert!(matches!(
+            resolve_change_read_store(repo.path()).unwrap().1.status,
+            StoreCapabilityStatus::MigrationRequired
+        ));
+    }
+
+    #[test]
+    fn production_migration_requires_exact_acks_and_publishes_a_verified_external_backup() {
+        use crate::crypto::TestEd25519Signer;
+        use crate::session::store::capabilities::REVIEW_CHANGE_REVISION_COHORT_V1;
+
+        let repo = real_l0_repo();
+        let dry_run = dry_run_bulk_adoption(BulkAdoptionDryRunOptions::new(repo.path())).unwrap();
+        let cohort_hash = dry_run.roots[0].cohort_manifest_hash.clone().unwrap();
+        let backup_parent = tempfile::tempdir().unwrap();
+        let backup = backup_parent.path().join("pre-activation");
+
+        let missing_reader_ack = migrate_bulk_adoption(
+            BulkAdoptionMigrationOptions::new(
+                repo.path(),
+                dry_run.clone(),
+                dry_run.manifest_hash.clone(),
+                cohort_hash.clone(),
+                &backup,
+                "migration-one",
+            )
+            .with_legacy_reader_unsupported_ack()
+            .sign_with(TestEd25519Signer::from_seed([0x51; 32]))
+            .with_fixed_occurred_at("2026-08-06T18:20:00Z")
+            .with_derived_enabled(false),
+        )
+        .unwrap_err();
+        assert!(missing_reader_ack.to_string().contains("minimum reader"));
+        assert!(!backup.exists());
+
+        let receipt = migrate_bulk_adoption(
+            BulkAdoptionMigrationOptions::new(
+                repo.path(),
+                dry_run.clone(),
+                dry_run.manifest_hash.clone(),
+                cohort_hash,
+                &backup,
+                "migration-one",
+            )
+            .with_minimum_reader_ack(REVIEW_CHANGE_REVISION_COHORT_V1)
+            .with_legacy_reader_unsupported_ack()
+            .sign_with(TestEd25519Signer::from_seed([0x51; 32]))
+            .with_fixed_occurred_at("2026-08-06T18:20:00Z")
+            .with_derived_enabled(false),
+        )
+        .unwrap();
+
+        assert_eq!(receipt.schema, BULK_ADOPTION_MIGRATION_RECEIPT_SCHEMA_V1);
+        assert_eq!(receipt.approved_dry_run_hash, dry_run.manifest_hash);
+        assert_eq!(
+            receipt.minimum_reader_profile,
+            REVIEW_CHANGE_REVISION_COHORT_V1
+        );
+        assert!(backup.join("store/events").is_dir());
+        assert!(backup.join(BULK_ADOPTION_BACKUP_MANIFEST_FILE_V1).is_file());
+        assert!(backup.join(BULK_ADOPTION_BACKUP_RECEIPT_FILE_V1).is_file());
+        assert!(backup.join(BULK_ADOPTION_EXECUTION_PLAN_FILE_V1).is_file());
+        assert!(matches!(
+            resolve_change_read_store(repo.path()).unwrap().1.status,
+            StoreCapabilityStatus::Ready { .. }
+        ));
+
+        let repeated = migrate_bulk_adoption(
+            BulkAdoptionMigrationOptions::new(
+                repo.path(),
+                dry_run.clone(),
+                dry_run.manifest_hash,
+                dry_run.roots[0].cohort_manifest_hash.clone().unwrap(),
+                &backup,
+                "migration-one",
+            )
+            .with_minimum_reader_ack(REVIEW_CHANGE_REVISION_COHORT_V1)
+            .with_legacy_reader_unsupported_ack()
+            .with_derived_enabled(false),
+        )
+        .unwrap();
+        assert_eq!(
+            repeated.disposition,
+            BulkAdoptionMigrationDispositionV1::Existing
+        );
+        assert_eq!(repeated.completion_id, receipt.completion_id);
+    }
+
+    #[test]
+    fn production_migration_resumes_each_append_boundary_from_the_retained_plan() {
+        use crate::crypto::TestEd25519Signer;
+        use crate::session::store::capabilities::REVIEW_CHANGE_REVISION_COHORT_V1;
+
+        for boundary in 1..=6 {
+            let repo = real_l0_repo();
+            let dry_run =
+                dry_run_bulk_adoption(BulkAdoptionDryRunOptions::new(repo.path())).unwrap();
+            let cohort_hash = dry_run.roots[0].cohort_manifest_hash.clone().unwrap();
+            let backup_parent = tempfile::tempdir().unwrap();
+            let backup = backup_parent
+                .path()
+                .join(format!("pre-activation-{boundary}"));
+            let base = BulkAdoptionMigrationOptions::new(
+                repo.path(),
+                dry_run.clone(),
+                dry_run.manifest_hash.clone(),
+                cohort_hash.clone(),
+                &backup,
+                format!("migration-{boundary}"),
+            )
+            .with_minimum_reader_ack(REVIEW_CHANGE_REVISION_COHORT_V1)
+            .with_legacy_reader_unsupported_ack()
+            .with_fixed_occurred_at("2026-08-06T18:21:00Z")
+            .with_derived_enabled(false);
+
+            let interrupted = migrate_bulk_adoption(
+                base.sign_with(TestEd25519Signer::from_seed([0x52; 32]))
+                    .with_interruption_after_append(boundary),
+            )
+            .unwrap_err();
+            assert!(interrupted.to_string().contains("interruption"));
+            assert!(backup.join(BULK_ADOPTION_EXECUTION_PLAN_FILE_V1).is_file());
+
+            let resumed = migrate_bulk_adoption(
+                BulkAdoptionMigrationOptions::new(
+                    repo.path(),
+                    dry_run.clone(),
+                    dry_run.manifest_hash.clone(),
+                    cohort_hash,
+                    &backup,
+                    format!("migration-{boundary}"),
+                )
+                .with_minimum_reader_ack(REVIEW_CHANGE_REVISION_COHORT_V1)
+                .with_legacy_reader_unsupported_ack()
+                .with_fixed_occurred_at("2026-08-06T18:21:00Z")
+                .with_derived_enabled(false),
+            )
+            .unwrap();
+            assert!(matches!(
+                resolve_change_read_store(repo.path()).unwrap().1.status,
+                StoreCapabilityStatus::Ready { .. }
+            ));
+            assert_eq!(
+                resumed.disposition,
+                BulkAdoptionMigrationDispositionV1::Created
+            );
+        }
+    }
+
+    #[test]
+    fn production_migration_refuses_wrong_acknowledgements_and_authority_drift_before_backup() {
+        use crate::crypto::TestEd25519Signer;
+        use crate::session::store::capabilities::REVIEW_CHANGE_REVISION_COHORT_V1;
+
+        let repo = real_l0_repo();
+        let dry_run = dry_run_bulk_adoption(BulkAdoptionDryRunOptions::new(repo.path())).unwrap();
+        let cohort_hash = dry_run.roots[0].cohort_manifest_hash.clone().unwrap();
+        let backups = tempfile::tempdir().unwrap();
+
+        for (name, dry_ack, cohort_ack) in [
+            ("wrong-dry", "sha256:wrong".to_owned(), cohort_hash.clone()),
+            (
+                "wrong-cohort",
+                dry_run.manifest_hash.clone(),
+                "sha256:wrong".to_owned(),
+            ),
+        ] {
+            let backup = backups.path().join(name);
+            let error = migrate_bulk_adoption(
+                BulkAdoptionMigrationOptions::new(
+                    repo.path(),
+                    dry_run.clone(),
+                    dry_ack,
+                    cohort_ack,
+                    &backup,
+                    name,
+                )
+                .with_minimum_reader_ack(REVIEW_CHANGE_REVISION_COHORT_V1)
+                .with_legacy_reader_unsupported_ack()
+                .sign_with(TestEd25519Signer::from_seed([0x61; 32]))
+                .with_derived_enabled(false),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("acknowledged"));
+            assert!(!backup.exists());
+        }
+
+        std::fs::write(repo.path().join("sample.txt"), "authority moved\n").unwrap();
+        crate::session::capture_review(
+            crate::session::CaptureOptions::new(repo.path()).with_summary("authority moved"),
+        )
+        .unwrap();
+        let drift_backup = backups.path().join("authority-drift");
+        let error = migrate_bulk_adoption(
+            BulkAdoptionMigrationOptions::new(
+                repo.path(),
+                dry_run.clone(),
+                dry_run.manifest_hash,
+                cohort_hash,
+                &drift_backup,
+                "authority-drift",
+            )
+            .with_minimum_reader_ack(REVIEW_CHANGE_REVISION_COHORT_V1)
+            .with_legacy_reader_unsupported_ack()
+            .sign_with(TestEd25519Signer::from_seed([0x62; 32]))
+            .with_derived_enabled(false),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("approved dry-run cursor"));
+        assert!(!drift_backup.exists());
+    }
+
+    #[test]
+    fn production_migration_refuses_a_damaged_backup_and_publishes_derived_only_after_l2() {
+        use crate::crypto::TestEd25519Signer;
+        use crate::session::store::capabilities::REVIEW_CHANGE_REVISION_COHORT_V1;
+
+        let damaged_repo = real_l0_repo();
+        let damaged_dry =
+            dry_run_bulk_adoption(BulkAdoptionDryRunOptions::new(damaged_repo.path())).unwrap();
+        let damaged_backup_parent = tempfile::tempdir().unwrap();
+        let damaged_backup = damaged_backup_parent.path().join("damaged");
+        let interrupted = migrate_bulk_adoption(
+            BulkAdoptionMigrationOptions::new(
+                damaged_repo.path(),
+                damaged_dry.clone(),
+                damaged_dry.manifest_hash.clone(),
+                damaged_dry.roots[0].cohort_manifest_hash.clone().unwrap(),
+                &damaged_backup,
+                "damaged-backup",
+            )
+            .with_minimum_reader_ack(REVIEW_CHANGE_REVISION_COHORT_V1)
+            .with_legacy_reader_unsupported_ack()
+            .sign_with(TestEd25519Signer::from_seed([0x63; 32]))
+            .with_fixed_occurred_at("2026-08-06T18:22:00Z")
+            .with_derived_enabled(false)
+            .with_interruption_after_append(1),
+        )
+        .unwrap_err();
+        assert!(interrupted.to_string().contains("interruption"));
+        let event = std::fs::read_dir(damaged_backup.join("store/events"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::write(event, b"damaged").unwrap();
+        let error = migrate_bulk_adoption(
+            BulkAdoptionMigrationOptions::new(
+                damaged_repo.path(),
+                damaged_dry.clone(),
+                damaged_dry.manifest_hash,
+                damaged_dry.roots[0].cohort_manifest_hash.clone().unwrap(),
+                &damaged_backup,
+                "damaged-backup",
+            )
+            .with_minimum_reader_ack(REVIEW_CHANGE_REVISION_COHORT_V1)
+            .with_legacy_reader_unsupported_ack()
+            .with_derived_enabled(false),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("failed verification"));
+
+        let repo = real_l0_repo();
+        let dry_run = dry_run_bulk_adoption(BulkAdoptionDryRunOptions::new(repo.path())).unwrap();
+        let backup_parent = tempfile::tempdir().unwrap();
+        let receipt = migrate_bulk_adoption(
+            BulkAdoptionMigrationOptions::new(
+                repo.path(),
+                dry_run.clone(),
+                dry_run.manifest_hash,
+                dry_run.roots[0].cohort_manifest_hash.clone().unwrap(),
+                backup_parent.path().join("derived"),
+                "derived-after-l2",
+            )
+            .with_minimum_reader_ack(REVIEW_CHANGE_REVISION_COHORT_V1)
+            .with_legacy_reader_unsupported_ack()
+            .sign_with(TestEd25519Signer::from_seed([0x64; 32]))
+            .with_fixed_occurred_at("2026-08-06T18:23:00Z"),
+        )
+        .unwrap();
+        assert!(receipt.derived_generation_id.is_some());
+        let (store, inspection) = resolve_change_read_store(repo.path()).unwrap();
+        assert!(matches!(
+            inspection.status,
+            StoreCapabilityStatus::Ready { .. }
+        ));
+        assert!(
+            std::fs::read_dir(store.store_dir().join("derived/publications"))
+                .unwrap()
+                .next()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn verified_backup_restores_only_as_a_separately_identified_l0_fork() {
+        use crate::crypto::TestEd25519Signer;
+        use crate::session::store::capabilities::REVIEW_CHANGE_REVISION_COHORT_V1;
+
+        let source = real_l0_repo();
+        let dry_run = dry_run_bulk_adoption(BulkAdoptionDryRunOptions::new(source.path())).unwrap();
+        let backup_parent = tempfile::tempdir().unwrap();
+        let backup = backup_parent.path().join("restore-source");
+        migrate_bulk_adoption(
+            BulkAdoptionMigrationOptions::new(
+                source.path(),
+                dry_run.clone(),
+                dry_run.manifest_hash,
+                dry_run.roots[0].cohort_manifest_hash.clone().unwrap(),
+                &backup,
+                "restore-source",
+            )
+            .with_minimum_reader_ack(REVIEW_CHANGE_REVISION_COHORT_V1)
+            .with_legacy_reader_unsupported_ack()
+            .sign_with(TestEd25519Signer::from_seed([0x65; 32]))
+            .with_fixed_occurred_at("2026-08-06T18:24:00Z")
+            .with_derived_enabled(false),
+        )
+        .unwrap();
+
+        let target = tempfile::tempdir().unwrap();
+        git(target.path(), &["init", "--quiet"]);
+        git(target.path(), &["config", "user.name", "Pointbreak Test"]);
+        git(
+            target.path(),
+            &["config", "user.email", "pointbreak@example.test"],
+        );
+        let restored = restore_bulk_adoption_backup(&backup, target.path()).unwrap();
+        assert_eq!(
+            restored.disposition,
+            BulkAdoptionBackupRestoreDispositionV1::Created
+        );
+        assert_ne!(
+            restored.restored_store_identity,
+            dry_run.roots[0].root_identity_hash
+        );
+        let restored_dry =
+            dry_run_bulk_adoption(BulkAdoptionDryRunOptions::new(target.path())).unwrap();
+        assert_eq!(restored_dry.roots[0].revision_count, 2);
+        assert!(matches!(
+            resolve_change_read_store(target.path()).unwrap().1.status,
+            StoreCapabilityStatus::MigrationRequired
+        ));
+        assert_eq!(
+            restore_bulk_adoption_backup(&backup, target.path())
+                .unwrap()
+                .disposition,
+            BulkAdoptionBackupRestoreDispositionV1::Existing
+        );
+    }
+
+    #[test]
+    fn production_migration_repairs_an_exact_interrupted_backup_copy() {
+        use crate::crypto::TestEd25519Signer;
+        use crate::session::store::capabilities::REVIEW_CHANGE_REVISION_COHORT_V1;
+
+        let repo = real_l0_repo();
+        let dry_run = dry_run_bulk_adoption(BulkAdoptionDryRunOptions::new(repo.path())).unwrap();
+        let (store, _) = resolve_change_read_store(repo.path()).unwrap();
+        let source_entries = inventory_store_files(store.store_dir()).unwrap();
+        let first = source_entries.first().unwrap();
+        let backup_parent = tempfile::tempdir().unwrap();
+        let backup = backup_parent.path().join("partial");
+        let partial_target = backup.join("store").join(&first.path);
+        std::fs::create_dir_all(partial_target.parent().unwrap()).unwrap();
+        std::fs::copy(store.store_dir().join(&first.path), &partial_target).unwrap();
+
+        let receipt = migrate_bulk_adoption(
+            BulkAdoptionMigrationOptions::new(
+                repo.path(),
+                dry_run.clone(),
+                dry_run.manifest_hash,
+                dry_run.roots[0].cohort_manifest_hash.clone().unwrap(),
+                &backup,
+                "partial-backup",
+            )
+            .with_minimum_reader_ack(REVIEW_CHANGE_REVISION_COHORT_V1)
+            .with_legacy_reader_unsupported_ack()
+            .sign_with(TestEd25519Signer::from_seed([0x66; 32]))
+            .with_fixed_occurred_at("2026-08-06T18:25:00Z")
+            .with_derived_enabled(false),
+        )
+        .unwrap();
+        assert_eq!(
+            receipt.disposition,
+            BulkAdoptionMigrationDispositionV1::Created
+        );
+        assert!(backup.join(BULK_ADOPTION_BACKUP_RECEIPT_FILE_V1).is_file());
+    }
+
+    #[test]
+    fn production_migration_selects_its_exact_root_from_a_multi_root_approval() {
+        use crate::crypto::TestEd25519Signer;
+        use crate::session::store::capabilities::REVIEW_CHANGE_REVISION_COHORT_V1;
+
+        let first = real_l0_repo();
+        let second = real_l0_repo();
+        let mut approved =
+            dry_run_bulk_adoption(BulkAdoptionDryRunOptions::new(first.path())).unwrap();
+        let other = dry_run_bulk_adoption(BulkAdoptionDryRunOptions::new(second.path())).unwrap();
+        approved.roots.push(other.roots[0].clone());
+        approved
+            .roots
+            .sort_by(|left, right| left.root_identity_hash.cmp(&right.root_identity_hash));
+        let material = serde_json::json!({
+            "schema": approved.schema,
+            "roots": approved.roots,
+            "anomalies": approved.anomalies,
+            "requiresOwnerDecision": approved.requires_owner_decision,
+            "ownerDecisionManifestHash": approved.owner_decision_manifest_hash,
+            "writer": approved.writer,
+            "claimOccurredAt": approved.claim_occurred_at,
+            "signaturePolicy": approved.signature_policy,
+        });
+        approved.manifest_hash = sha256_json_prefixed(&material).unwrap();
+        let first_identity =
+            crate::session::store_identity(StoreIdentityOptions::new(first.path()))
+                .unwrap()
+                .store_identity;
+        let cohort = approved
+            .roots
+            .iter()
+            .find(|root| root.root_identity_hash == first_identity)
+            .unwrap()
+            .cohort_manifest_hash
+            .clone()
+            .unwrap();
+        let backup_parent = tempfile::tempdir().unwrap();
+        let backup = backup_parent.path().join("multi-root");
+        let receipt = migrate_bulk_adoption(
+            BulkAdoptionMigrationOptions::new(
+                first.path(),
+                approved.clone(),
+                approved.manifest_hash.clone(),
+                cohort,
+                &backup,
+                "multi-root",
+            )
+            .with_minimum_reader_ack(REVIEW_CHANGE_REVISION_COHORT_V1)
+            .with_legacy_reader_unsupported_ack()
+            .sign_with(TestEd25519Signer::from_seed([0x67; 32]))
+            .with_fixed_occurred_at("2026-08-06T18:26:00Z")
+            .with_derived_enabled(false),
+        )
+        .unwrap();
+        assert_eq!(receipt.approved_dry_run_hash, approved.manifest_hash);
     }
 
     fn real_l0_repo() -> tempfile::TempDir {

@@ -159,8 +159,12 @@ fn prepare_change_cli_fixture(args: Vec<OsString>) -> Vec<OsString> {
     };
     let command = args.first().and_then(|arg| arg.to_str());
     let subcommand = args.get(1).and_then(|arg| arg.to_str());
-    let migration_dry_run = command == Some("change") && subcommand == Some("migrate-dry-run");
-    if !migration_dry_run {
+    let migration_command = command == Some("change")
+        && matches!(
+            subcommand,
+            Some("migrate-dry-run" | "migrate" | "migrate-restore")
+        );
+    if !migration_command {
         maybe_install_empty_ready_change_store(&repo);
     }
     args

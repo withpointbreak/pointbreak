@@ -94,11 +94,17 @@ pub use change::{
     withdraw_revision_from_change,
 };
 pub use change_migration::{
-    BULK_ADOPTION_DRY_RUN_SCHEMA_V1, BULK_ADOPTION_OWNER_DECISIONS_SCHEMA_V1,
+    BULK_ADOPTION_BACKUP_MANIFEST_FILE_V1, BULK_ADOPTION_BACKUP_RECEIPT_FILE_V1,
+    BULK_ADOPTION_BACKUP_RESTORE_RECEIPT_SCHEMA_V1, BULK_ADOPTION_DRY_RUN_SCHEMA_V1,
+    BULK_ADOPTION_EXECUTION_PLAN_FILE_V1, BULK_ADOPTION_MIGRATION_RECEIPT_SCHEMA_V1,
+    BULK_ADOPTION_MINIMUM_READER_PROFILE_V1, BULK_ADOPTION_OWNER_DECISIONS_SCHEMA_V1,
+    BulkAdoptionBackupRestoreDispositionV1, BulkAdoptionBackupRestoreReceiptV1,
     BulkAdoptionDryRunAnomalyV1, BulkAdoptionDryRunChangeV1, BulkAdoptionDryRunDocumentV1,
-    BulkAdoptionDryRunOptions, BulkAdoptionDryRunRootV1, BulkAdoptionOverlapIdentityDecisionV1,
-    BulkAdoptionOwnerDecisionManifestV1, BulkAdoptionRetainedAllocationV1,
-    BulkAdoptionRetainedManifestV1, dry_run_bulk_adoption,
+    BulkAdoptionDryRunOptions, BulkAdoptionDryRunRootV1, BulkAdoptionMigrationDispositionV1,
+    BulkAdoptionMigrationOptions, BulkAdoptionMigrationReceiptV1,
+    BulkAdoptionOverlapIdentityDecisionV1, BulkAdoptionOwnerDecisionManifestV1,
+    BulkAdoptionRetainedAllocationV1, BulkAdoptionRetainedManifestV1, dry_run_bulk_adoption,
+    migrate_bulk_adoption, restore_bulk_adoption_backup,
 };
 pub use change_read::{ChangeReaderReadyV1, ChangeReaderStateV1, change_reader_state_for_repo};
 pub use commit_range_liveness::{

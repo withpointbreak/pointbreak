@@ -16,15 +16,16 @@ use pointbreak::model::{
 };
 use pointbreak::session::event::ChangeLinkRelationV1;
 use pointbreak::session::{
-    AssessmentRecordStatus, BulkAdoptionDryRunOptions, BulkAdoptionOwnerDecisionManifestV1,
-    CaptureOptions, ChangeAdvanceV1, ChangeCaptureOptions, ChangeCreateOptions, ChangeLinkOptions,
+    AssessmentRecordStatus, BulkAdoptionDryRunDocumentV1, BulkAdoptionDryRunOptions,
+    BulkAdoptionMigrationOptions, BulkAdoptionOwnerDecisionManifestV1, CaptureOptions,
+    ChangeAdvanceV1, ChangeCaptureOptions, ChangeCreateOptions, ChangeLinkOptions,
     ChangeMembershipOptions, ChangeMembershipWithdrawalOptions, ChangeReaderReadyV1,
     ChangeReaderStateV1, ChangeRelationOptions, ChangeRelationWithdrawalOptions, ObservationStatus,
     ReviewCursorV1, ReviewSourceBindingV1, ReviewSourceRequestV1, RevisionShowOptions,
     SnapshotContentState, WorktreeSpec, assert_change_revision_relation, capture_change_revision,
     change_reader_state_for_repo, create_change, dry_run_bulk_adoption, join_revision_to_change,
-    link_changes, review_source_binding, select_review_cursor,
-    show_revision_for_change_reader_ready, validate_review_cursor_for_write,
+    link_changes, migrate_bulk_adoption, restore_bulk_adoption_backup, review_source_binding,
+    select_review_cursor, show_revision_for_change_reader_ready, validate_review_cursor_for_write,
     withdraw_change_revision_relation, withdraw_revision_from_change,
 };
 
@@ -70,6 +71,10 @@ enum ChangeCommand {
     Capture(ChangeCaptureArgs),
     /// Plan deterministic adoption for untouched stores without writing
     MigrateDryRun(MigrationDryRunArgs),
+    /// Activate one exact owner-approved migration plan after a verified backup
+    Migrate(MigrationArgs),
+    /// Restore a verified L0 backup as a separate recovery fork
+    MigrateRestore(MigrationRestoreArgs),
 }
 
 #[derive(Debug, Args)]
@@ -242,6 +247,54 @@ struct MigrationDryRunArgs {
 }
 
 #[derive(Debug, Args)]
+struct MigrationArgs {
+    /// Repository whose exact resolved store will be activated.
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    /// Exact JSON document emitted by `change migrate-dry-run`.
+    #[arg(long)]
+    dry_run: PathBuf,
+    /// Exact top-level self-hash printed in the approved dry-run document.
+    #[arg(long)]
+    ack_manifest: String,
+    /// Exact cohort manifest hash for this root in the approved dry run.
+    #[arg(long)]
+    ack_cohort_manifest: String,
+    /// Minimum reader profile accepted after the irreversible activation append.
+    #[arg(long)]
+    ack_minimum_reader: String,
+    /// Acknowledge that v0.9 readers are unsupported after activation.
+    #[arg(long)]
+    ack_v0_9_unsupported: bool,
+    /// Fresh external directory that retains the verified L0 backup and resume plan.
+    #[arg(long)]
+    backup: PathBuf,
+    /// Stable retry identifier. Reuse it to resume the same retained plan.
+    #[arg(long)]
+    operation_id: String,
+    /// Exact owner decision manifest used to produce the approved dry run.
+    #[arg(long)]
+    owner_decisions: Option<PathBuf>,
+    /// Select the strict signing key for a new L0 activation.
+    #[arg(long)]
+    sign_key: Option<String>,
+    #[command(flatten)]
+    format_args: output::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+struct MigrationRestoreArgs {
+    /// External directory containing the verified pre-activation backup.
+    #[arg(long)]
+    backup: PathBuf,
+    /// Repository whose empty, separately identified store receives the L0 fork.
+    #[arg(long)]
+    target_repo: PathBuf,
+    #[command(flatten)]
+    format_args: output::FormatArgs,
+}
+
+#[derive(Debug, Args)]
 struct ReadArgs {
     /// Repository root or a path inside the repository.
     #[arg(long, default_value = ".")]
@@ -359,6 +412,8 @@ pub(super) fn run(
         ChangeCommand::Link(args) => run_link(args, stdout, stderr),
         ChangeCommand::Capture(args) => run_change_capture(args, stdout, stderr),
         ChangeCommand::MigrateDryRun(args) => run_migration_dry_run(args, stdout),
+        ChangeCommand::Migrate(args) => run_migration(args, stdout, stderr),
+        ChangeCommand::MigrateRestore(args) => run_migration_restore(args, stdout),
     }
 }
 
@@ -603,6 +658,53 @@ fn run_migration_dry_run(
         options = options.with_owner_decisions(decisions);
     }
     write(&args.format_args, stdout, &dry_run_bulk_adoption(options)?)
+}
+
+fn run_migration(
+    args: MigrationArgs,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dry_run: BulkAdoptionDryRunDocumentV1 =
+        serde_json::from_slice(&std::fs::read(&args.dry_run)?)?;
+    let mut options = BulkAdoptionMigrationOptions::new(
+        &args.repo,
+        dry_run,
+        args.ack_manifest,
+        args.ack_cohort_manifest,
+        &args.backup,
+        args.operation_id,
+    )
+    .with_minimum_reader_ack(args.ack_minimum_reader)
+    .with_derived_enabled(
+        std::env::var_os("POINTBREAK_DERIVED_ACCESS").as_deref()
+            != Some(std::ffi::OsStr::new("off")),
+    );
+    if args.ack_v0_9_unsupported {
+        options = options.with_legacy_reader_unsupported_ack();
+    }
+    if let Some(path) = args.owner_decisions {
+        let decisions: BulkAdoptionOwnerDecisionManifestV1 =
+            serde_json::from_slice(&std::fs::read(path)?)?;
+        options = options.with_owner_decisions(decisions);
+    }
+    if let Some(resolved) =
+        common::resolve_and_surface_signer(&args.repo, args.sign_key.as_deref(), stderr)
+    {
+        options = options.sign_with(resolved.signer);
+    }
+    write(&args.format_args, stdout, &migrate_bulk_adoption(options)?)
+}
+
+fn run_migration_restore(
+    args: MigrationRestoreArgs,
+    stdout: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    write(
+        &args.format_args,
+        stdout,
+        &restore_bulk_adoption_backup(&args.backup, &args.target_repo)?,
+    )
 }
 
 fn with_facade(

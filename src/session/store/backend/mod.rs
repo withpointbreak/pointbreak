@@ -299,14 +299,6 @@ pub(crate) trait Journal: Debug {
     /// Store one opaque Journal record under its logical key. Event-only callers
     /// keep using `create_event_once`; capability records use this deliberately
     /// generic spelling so they never masquerade as an event in typed code.
-    #[cfg(any(test, feature = "bench"))]
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "generic control-record publication is qualification-only"
-        )
-    )]
     fn create_record_once(&self, logical_key: &str, bytes: &[u8]) -> Result<CreateOutcome> {
         self.create_event_once(logical_key, bytes)
     }

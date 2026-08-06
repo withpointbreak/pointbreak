@@ -1,20 +1,10 @@
-#![cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "capability construction is exposed only to qualification support"
-    )
-)]
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex, sha256_json_prefixed};
-#[cfg(any(test, feature = "bench"))]
-use crate::crypto::EventSigner;
 use crate::crypto::{
-    EventSignatureBytes, EventVerificationStatus, SignerId, verify_ed25519_strict,
+    EventSignatureBytes, EventSigner, EventVerificationStatus, SignerId, verify_ed25519_strict,
 };
 use crate::error::{Result, ShoreError};
 #[cfg(test)]
@@ -26,6 +16,10 @@ use crate::session::store::backend::{Journal, JournalEntry};
 use crate::session::store::event_store::EventStore;
 
 pub(crate) const REVIEW_CHANGE_REVISION_COHORT_V1: &str = "review_change_revision_v1";
+#[allow(
+    dead_code,
+    reason = "the frozen manifest is exercised by qualification tests"
+)]
 const CAPABILITY_MANIFEST_SCHEMA_V1: &str = "pointbreak.logical-capability-manifest";
 const ACTIVATION_SCHEMA_V1: &str = "pointbreak.store-capability-activation";
 const COMPLETION_SCHEMA_V1: &str = "pointbreak.bulk-adoption-completion";
@@ -176,6 +170,10 @@ pub(crate) fn reader_profile_versions_v1() -> &'static [DocumentVersionReservati
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(
+    dead_code,
+    reason = "the frozen manifest is exercised by qualification tests"
+)]
 pub(crate) struct ReviewChangeRevisionManifestV1 {
     schema: &'static str,
     version: u32,
@@ -185,6 +183,10 @@ pub(crate) struct ReviewChangeRevisionManifestV1 {
     pub(crate) record_families: &'static [RecordFamilyReservationV1],
 }
 
+#[allow(
+    dead_code,
+    reason = "the frozen manifest is exercised by qualification tests"
+)]
 impl ReviewChangeRevisionManifestV1 {
     pub(crate) const fn canonical() -> Self {
         Self {
@@ -355,14 +357,20 @@ impl StoreCapabilityActivationV1 {
         )
     }
 
-    #[cfg(any(test, feature = "bench"))]
     pub(crate) fn activation_id(&self) -> &str {
         &self.activation_id
     }
 
-    #[cfg(any(test, feature = "bench"))]
     pub(crate) fn manifest_hash(&self) -> &str {
         &self.bulk_adoption_manifest_hash
+    }
+
+    pub(crate) fn manifest(&self) -> &BulkAdoptionManifestV1 {
+        &self.bulk_adoption_manifest
+    }
+
+    pub(crate) fn validate_for_execution(&self) -> Result<()> {
+        self.validate()
     }
 
     fn identity_view(&self) -> ActivationIdentityView<'_> {
@@ -477,9 +485,12 @@ impl BulkAdoptionCompletionV1 {
         format!("bulk_adoption_completion:{}", self.completion_id)
     }
 
-    #[cfg(any(test, feature = "bench"))]
     pub(crate) fn completion_id(&self) -> &str {
         &self.completion_id
+    }
+
+    pub(crate) fn validate_for_execution(&self) -> Result<()> {
+        self.validate()
     }
 
     fn identity_view(&self) -> CompletionIdentityView<'_> {
@@ -994,6 +1005,10 @@ pub(crate) fn route_journal_entries(entries: Vec<JournalEntry>) -> Result<Journa
     })
 }
 
+#[allow(
+    dead_code,
+    reason = "successor activation remains a post-root transition seam"
+)]
 pub(crate) fn validate_monotonic_successor(previous: &[String], next: &[String]) -> Result<()> {
     ensure_sorted_unique(previous, "previous required capabilities")?;
     ensure_sorted_unique(next, "successor required capabilities")?;
@@ -1296,9 +1311,8 @@ enum CapabilityFixtureCorruption {
     CompletionWithoutCoverage,
 }
 
-#[cfg(any(test, feature = "bench"))]
 pub(crate) fn build_signed_activation(
-    signer: &impl EventSigner,
+    signer: &(impl EventSigner + ?Sized),
     manifest: BulkAdoptionManifestV1,
     nonce: String,
     writer: Writer,
@@ -1340,9 +1354,8 @@ pub(crate) fn build_signed_activation(
     Ok(activation)
 }
 
-#[cfg(any(test, feature = "bench"))]
 pub(crate) fn build_signed_completion(
-    signer: &impl EventSigner,
+    signer: &(impl EventSigner + ?Sized),
     activation: &StoreCapabilityActivationV1,
     writer: Writer,
     occurred_at: String,
@@ -1380,7 +1393,6 @@ pub(crate) fn build_signed_completion(
     Ok(completion)
 }
 
-#[cfg(any(test, feature = "bench"))]
 pub(crate) fn publish_control_record<T: Serialize>(
     journal: &dyn Journal,
     logical_key: &str,
