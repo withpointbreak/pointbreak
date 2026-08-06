@@ -53,25 +53,6 @@ fn assessment_exact_revision_targets_a_superseded_revision_for_add_and_show() {
     let (repo, first_id, second_id) = support::superseded_dump_repo();
     let repo_arg = repo.path().to_str().unwrap();
 
-    let legacy = pointbreak([
-        "assessment",
-        "add",
-        "--repo",
-        repo_arg,
-        "--revision",
-        &first_id,
-        "--track",
-        "human:legacy",
-        "--assessment",
-        "accepted",
-    ]);
-    assert!(
-        legacy.status.success(),
-        "stderr:\n{}",
-        String::from_utf8_lossy(&legacy.stderr)
-    );
-    assert_eq!(parse_json(&legacy.stdout)["revisionId"], second_id);
-
     let exact = pointbreak([
         "assessment",
         "add",
@@ -91,19 +72,6 @@ fn assessment_exact_revision_targets_a_superseded_revision_for_add_and_show() {
     );
     assert_eq!(parse_json(&exact.stdout)["revisionId"], first_id);
 
-    let legacy_show = pointbreak([
-        "assessment",
-        "show",
-        "--repo",
-        repo_arg,
-        "--revision",
-        &first_id,
-        "--track",
-        "human:legacy",
-    ]);
-    assert!(legacy_show.status.success());
-    assert_eq!(parse_json(&legacy_show.stdout)["revisionId"], second_id);
-
     let exact_show = pointbreak([
         "assessment",
         "show",
@@ -116,6 +84,7 @@ fn assessment_exact_revision_targets_a_superseded_revision_for_add_and_show() {
     ]);
     assert!(exact_show.status.success());
     assert_eq!(parse_json(&exact_show.stdout)["revisionId"], first_id);
+    assert_ne!(first_id, second_id);
 }
 
 #[test]
@@ -160,7 +129,7 @@ fn assessment_exact_revision_rejects_conflicting_or_unknown_selectors_before_wri
 
 #[test]
 fn assessment_exact_revision_validates_relationships_against_the_named_revision() {
-    let (repo, first_id, _) = support::superseded_dump_repo();
+    let (repo, first_id, second_id) = support::superseded_dump_repo();
     let repo_arg = repo.path().to_str().unwrap();
     let observation = parse_json(
         &pointbreak([
@@ -168,8 +137,8 @@ fn assessment_exact_revision_validates_relationships_against_the_named_revision(
             "add",
             "--repo",
             repo_arg,
-            "--revision",
-            &first_id,
+            "--exact-revision",
+            &second_id,
             "--track",
             "human:kevin",
             "--title",

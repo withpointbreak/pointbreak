@@ -309,7 +309,7 @@ impl RelationProofManifestV1 {
         })?)
     }
 
-    fn result_digest(&self) -> Result<String> {
+    pub(crate) fn result_digest(&self) -> Result<String> {
         sha256_json_prefixed(&serde_json::to_value(&self.result)?)
     }
 
@@ -334,6 +334,46 @@ impl RelationProofManifestV1 {
     }
 }
 
+/// Evaluate one canonical landing proof without publishing any authority.
+///
+/// The caller owns endpoint qualification (including deciding whether the
+/// candidate is the captured endpoint itself). This pure fold deliberately
+/// treats unavailable Git inputs as indeterminate and every failed comparison
+/// as refuted; path overlap and ancestry are never proof substitutes.
+pub(crate) fn evaluate_relation_proof_v1(
+    revision: RevisionRefV1,
+    association_id: CommitAssociationId,
+    algorithm: RelationProofAlgorithmV1,
+    source: CanonicalProofInputV1,
+    candidate: CanonicalProofInputV1,
+) -> Result<RelationProofManifestV1> {
+    let result = if algorithm == RelationProofAlgorithmV1::AttributionOnly {
+        RelationProofResultV1 {
+            semantic_relation: SemanticRevisionRelationV1::LandingProvenance,
+            proof_status: RelationProofStatusV1::Asserted,
+            additions: Vec::new(),
+        }
+    } else if source.git_availability == ProofGitAvailabilityV1::Missing
+        || candidate.git_availability == ProofGitAvailabilityV1::Missing
+    {
+        RelationProofResultV1 {
+            semantic_relation: algorithm.semantic_relation(),
+            proof_status: RelationProofStatusV1::Indeterminate,
+            additions: Vec::new(),
+        }
+    } else {
+        evaluate_available_inputs(algorithm, &source, &candidate)
+    };
+    RelationProofManifestV1::new(
+        revision,
+        association_id,
+        algorithm,
+        source,
+        candidate,
+        result,
+    )
+}
+
 impl RelationProofAlgorithmV1 {
     fn version(self) -> &'static str {
         match self {
@@ -343,6 +383,76 @@ impl RelationProofAlgorithmV1 {
             Self::AttributionOnly => "attribution-only-v1",
         }
     }
+
+    fn semantic_relation(self) -> SemanticRevisionRelationV1 {
+        match self {
+            Self::ExactMaterialization => SemanticRevisionRelationV1::ExactMaterialization,
+            Self::CanonicalEquivalentRewrite => SemanticRevisionRelationV1::EquivalentRewrite,
+            Self::ContentPreservingExtension => {
+                SemanticRevisionRelationV1::ContentPreservingExtension
+            }
+            Self::AttributionOnly => SemanticRevisionRelationV1::LandingProvenance,
+        }
+    }
+}
+
+fn evaluate_available_inputs(
+    algorithm: RelationProofAlgorithmV1,
+    source: &CanonicalProofInputV1,
+    candidate: &CanonicalProofInputV1,
+) -> RelationProofResultV1 {
+    let inputs_are_valid = canonical_input_is_valid(source) && canonical_input_is_valid(candidate);
+    let (verified, additions) = match algorithm {
+        RelationProofAlgorithmV1::ExactMaterialization => {
+            (inputs_are_valid && source == candidate, Vec::new())
+        }
+        RelationProofAlgorithmV1::CanonicalEquivalentRewrite => (
+            inputs_are_valid
+                && source.capture_mode == candidate.capture_mode
+                && source.path_scope == candidate.path_scope
+                && source.entries == candidate.entries,
+            Vec::new(),
+        ),
+        RelationProofAlgorithmV1::ContentPreservingExtension => {
+            let additions = candidate
+                .entries
+                .iter()
+                .filter(|entry| !source.entries.contains(entry))
+                .cloned()
+                .collect::<Vec<_>>();
+            let preserves_source = source
+                .entries
+                .iter()
+                .all(|entry| candidate.entries.contains(entry));
+            (
+                inputs_are_valid
+                    && source.capture_mode == candidate.capture_mode
+                    && source.path_scope == candidate.path_scope
+                    && preserves_source
+                    && !additions.is_empty(),
+                additions,
+            )
+        }
+        RelationProofAlgorithmV1::AttributionOnly => (false, Vec::new()),
+    };
+    RelationProofResultV1 {
+        semantic_relation: algorithm.semantic_relation(),
+        proof_status: if verified {
+            RelationProofStatusV1::Verified
+        } else {
+            RelationProofStatusV1::Refuted
+        },
+        additions,
+    }
+}
+
+fn canonical_input_is_valid(input: &CanonicalProofInputV1) -> bool {
+    !input.path_scope.is_empty()
+        && input.path_scope.iter().all(|scope| !scope.is_empty())
+        && input
+            .entries
+            .iter()
+            .all(|entry| !entry.path_identity.is_empty())
 }
 
 fn canonicalize_input(input: &mut CanonicalProofInputV1) {
@@ -421,6 +531,100 @@ mod tests {
             git_availability: ProofGitAvailabilityV1::Available,
             entries: Vec::new(),
         }
+    }
+
+    fn entry(path: &str) -> CanonicalRawEntryV1 {
+        CanonicalRawEntryV1 {
+            path_identity: path.to_owned(),
+            previous_path_identity: None,
+            change: CanonicalChangeV1::Modified,
+            old_oid: Some("old".to_owned()),
+            new_oid: Some("new".to_owned()),
+            old_mode: Some("100644".to_owned()),
+            new_mode: Some("100644".to_owned()),
+            old_decoded_sha256: None,
+            new_decoded_sha256: None,
+            content_kind: CanonicalContentKindV1::Text,
+            untracked: false,
+        }
+    }
+
+    #[test]
+    fn evaluator_distinguishes_verified_refuted_indeterminate_and_attribution_only() {
+        let association = CommitAssociationId::new("assoc-commit:sha256:evaluator");
+        let exact = evaluate_relation_proof_v1(
+            revision(),
+            association.clone(),
+            RelationProofAlgorithmV1::ExactMaterialization,
+            canonical_input(),
+            canonical_input(),
+        )
+        .unwrap();
+        assert_eq!(exact.result.proof_status, RelationProofStatusV1::Verified);
+        assert_eq!(
+            exact.result.semantic_relation,
+            SemanticRevisionRelationV1::ExactMaterialization
+        );
+
+        let mut extension = canonical_input();
+        extension.entries.push(entry("sha256:addition"));
+        let extended = evaluate_relation_proof_v1(
+            revision(),
+            association.clone(),
+            RelationProofAlgorithmV1::ContentPreservingExtension,
+            canonical_input(),
+            extension,
+        )
+        .unwrap();
+        assert_eq!(
+            extended.result.proof_status,
+            RelationProofStatusV1::Verified
+        );
+        assert_eq!(extended.result.additions.len(), 1);
+
+        let mut refuted_candidate = canonical_input();
+        refuted_candidate.path_scope = vec!["other".to_owned()];
+        let refuted = evaluate_relation_proof_v1(
+            revision(),
+            association.clone(),
+            RelationProofAlgorithmV1::CanonicalEquivalentRewrite,
+            canonical_input(),
+            refuted_candidate,
+        )
+        .unwrap();
+        assert_eq!(refuted.result.proof_status, RelationProofStatusV1::Refuted);
+
+        let mut missing = canonical_input();
+        missing.git_availability = ProofGitAvailabilityV1::Missing;
+        let indeterminate = evaluate_relation_proof_v1(
+            revision(),
+            association.clone(),
+            RelationProofAlgorithmV1::CanonicalEquivalentRewrite,
+            missing.clone(),
+            canonical_input(),
+        )
+        .unwrap();
+        assert_eq!(
+            indeterminate.result.proof_status,
+            RelationProofStatusV1::Indeterminate
+        );
+
+        let attribution = evaluate_relation_proof_v1(
+            revision(),
+            association,
+            RelationProofAlgorithmV1::AttributionOnly,
+            missing.clone(),
+            missing,
+        )
+        .unwrap();
+        assert_eq!(
+            attribution.result.proof_status,
+            RelationProofStatusV1::Asserted
+        );
+        assert_eq!(
+            attribution.result.semantic_relation,
+            SemanticRevisionRelationV1::LandingProvenance
+        );
     }
 
     #[test]

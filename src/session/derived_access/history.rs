@@ -69,7 +69,15 @@ review_event AS (
         'task_checkpoint_captured',
         'task_observation_recorded',
         'event_signature_recorded',
-        'artifact_removed'
+        'artifact_removed',
+        'change_declared',
+        'change_membership_asserted',
+        'change_membership_withdrawn',
+        'change_link_asserted',
+        'change_revision_relation_asserted',
+        'change_revision_relation_withdrawn',
+        'revision_relation_attested',
+        'review_fact_ported'
     )
       AND (
           event.revision_id IS NOT NULL

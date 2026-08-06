@@ -103,6 +103,9 @@ impl IdResolver {
     pub fn input_request(&self, input: &str) -> CliResult<String> {
         self.resolve(&[IdKind::InputRequest], input)
     }
+    pub fn fact(&self, input: &str) -> CliResult<String> {
+        self.resolve(&[IdKind::Observation, IdKind::InputRequest], input)
+    }
     /// Union resolution for `association withdraw <ID>`: prefixed-required
     /// (`assoc-commit:` | `assoc-ref:`); the resolved prefix selects the axis.
     pub fn association(&self, input: &str) -> CliResult<String> {

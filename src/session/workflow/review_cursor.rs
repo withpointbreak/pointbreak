@@ -8,7 +8,7 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 
 use crate::canonical_hash::{canonical_json_bytes, sha256_json_prefixed};
-use crate::model::{ChangeId, RevisionId, RevisionRefV1};
+use crate::model::{ChangeId, DiffFile, ReviewEndpoint, RevisionId, RevisionRefV1, RevisionSource};
 use crate::session::{ChangeDocumentProjectionV1, ChangeTopologyV1, ChangeView};
 
 pub const REVIEW_CURSOR_SCHEMA_V1: &str = "pointbreak.review-cursor.v1";
@@ -102,6 +102,13 @@ pub enum CommitProofStateV1 {
     Equivalent,
     Extension,
     Unavailable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ReviewSourceRequestV1 {
+    Captured,
+    Worktree,
+    Commit(String),
 }
 
 /// Canonical Git state used by a commit-bound cursor.
@@ -352,6 +359,314 @@ pub fn validate_review_cursor_for_write(
         ));
     }
     Ok(cursor)
+}
+
+/// Recheck graph and exact-Revision authority for a transition whose purpose
+/// is to leave the cursor's old mutable source state. Capture advancement and
+/// proof-first landing use this path: the former expects the worktree to have
+/// changed, while the latter compares the captured bytes with a commit.
+pub(crate) fn validate_review_cursor_for_transition(
+    token: &str,
+    current_change: &ChangeView,
+    current_projection: &ChangeDocumentProjectionV1,
+) -> std::result::Result<ReviewCursorV1, ReviewCursorRefusalV1> {
+    let cursor = ReviewCursorV1::decode_token(token).map_err(|error| {
+        refusal(
+            "invalid_review_cursor",
+            &error.to_string(),
+            Vec::new(),
+            Vec::new(),
+        )
+    })?;
+    if cursor.change_id != current_change.change_id
+        || cursor.change_graph_token
+            != change_graph_token(current_change).map_err(internal_refusal)?
+    {
+        return Err(refusal(
+            "change_graph_stale",
+            "Change membership, replacement state, current set, or blocking diagnostics changed",
+            cursor.selected_current_revisions,
+            current_change.diagnostics.clone(),
+        ));
+    }
+    let selected = select_review_cursor(
+        current_change,
+        current_projection,
+        Some(&cursor.revision.revision_id),
+        false,
+        cursor.source_binding.clone(),
+    )?;
+    if cursor.revision != selected.cursor.revision
+        || cursor.selected_current_revisions != selected.cursor.selected_current_revisions
+        || cursor.blocking_diagnostics != selected.cursor.blocking_diagnostics
+    {
+        return Err(refusal(
+            "review_cursor_selection_stale",
+            "the exact Revision, current candidate set, or blocking state changed",
+            selected.cursor.selected_current_revisions,
+            current_change.diagnostics.clone(),
+        ));
+    }
+    Ok(cursor)
+}
+
+/// Resolve one safe writer cursor against the complete capable reader just
+/// before a Revision-targeting append. The returned id is exact and never
+/// follows a replacement edge. Mutable-source cursors require a caller that can
+/// recompute their source binding; the current CLI selects captured-resource
+/// cursors and therefore cannot accidentally claim a live checkout match.
+pub(crate) fn exact_revision_from_review_cursor(
+    repo: &std::path::Path,
+    token: &str,
+) -> crate::error::Result<RevisionId> {
+    let cursor = ReviewCursorV1::decode_token(token)?;
+    let state = crate::session::change_reader_state_for_repo(repo)?;
+    let ready = state
+        .ready()
+        .ok_or_else(|| crate::error::ShoreError::WorkflowInputInvalid {
+            reason: "complete Change authority is unavailable for the Review cursor".to_owned(),
+        })?;
+    let change = ready
+        .projection
+        .changes
+        .get(&cursor.change_id)
+        .ok_or_else(|| crate::error::ShoreError::WorkflowInputInvalid {
+            reason: "the Review cursor Change is unavailable".to_owned(),
+        })?;
+    validate_review_cursor_for_transition(token, change, &ready.document_projection).map_err(
+        |refusal| crate::error::ShoreError::WorkflowInputInvalid {
+            reason: refusal.to_string(),
+        },
+    )?;
+    let current_source_binding = current_review_source_binding(repo, &cursor)?;
+    let validated = validate_review_cursor_for_write(
+        token,
+        change,
+        &ready.document_projection,
+        &current_source_binding,
+    )
+    .map_err(|refusal| crate::error::ShoreError::WorkflowInputInvalid {
+        reason: refusal.to_string(),
+    })?;
+    Ok(validated.revision.revision_id)
+}
+
+/// Resolve a cursor for capture advancement or proof-first landing. These
+/// operations deliberately cross away from the old worktree binding, so they
+/// validate exact graph/artifact authority without pretending the old source
+/// is still current.
+pub(crate) fn exact_revision_from_transition_cursor(
+    repo: &std::path::Path,
+    token: &str,
+) -> crate::error::Result<RevisionId> {
+    let cursor = ReviewCursorV1::decode_token(token)?;
+    let state = crate::session::change_reader_state_for_repo(repo)?;
+    let ready = state
+        .ready()
+        .ok_or_else(|| crate::error::ShoreError::WorkflowInputInvalid {
+            reason: "complete Change authority is unavailable for the Review cursor".to_owned(),
+        })?;
+    let change = ready
+        .projection
+        .changes
+        .get(&cursor.change_id)
+        .ok_or_else(|| crate::error::ShoreError::WorkflowInputInvalid {
+            reason: "the Review cursor Change is unavailable".to_owned(),
+        })?;
+    let validated =
+        validate_review_cursor_for_transition(token, change, &ready.document_projection).map_err(
+            |refusal| crate::error::ShoreError::WorkflowInputInvalid {
+                reason: refusal.to_string(),
+            },
+        )?;
+    Ok(validated.revision.revision_id)
+}
+
+pub fn review_source_binding(
+    repo: &std::path::Path,
+    revision: &RevisionRefV1,
+    request: ReviewSourceRequestV1,
+) -> crate::error::Result<ReviewSourceBindingV1> {
+    match request {
+        ReviewSourceRequestV1::Captured => Ok(ReviewSourceBindingV1::Captured),
+        ReviewSourceRequestV1::Worktree => worktree_source_binding(repo, revision),
+        ReviewSourceRequestV1::Commit(revision_spec) => {
+            commit_source_binding(repo, revision, &revision_spec)
+        }
+    }
+}
+
+fn current_review_source_binding(
+    repo: &std::path::Path,
+    cursor: &ReviewCursorV1,
+) -> crate::error::Result<ReviewSourceBindingV1> {
+    match &cursor.source_binding {
+        ReviewSourceBindingV1::Captured => Ok(ReviewSourceBindingV1::Captured),
+        ReviewSourceBindingV1::WorktreeMatchV1 { .. } => {
+            worktree_source_binding(repo, &cursor.revision)
+        }
+        ReviewSourceBindingV1::CommitMatchV1 { commit_oid, .. } => {
+            commit_source_binding(repo, &cursor.revision, commit_oid)
+        }
+    }
+}
+
+fn worktree_source_binding(
+    repo: &std::path::Path,
+    revision: &RevisionRefV1,
+) -> crate::error::Result<ReviewSourceBindingV1> {
+    let shown = exact_revision_source(repo, revision)?;
+    let provenance = shown.revision.git_provenance.as_ref().ok_or_else(|| {
+        crate::error::ShoreError::WorkflowInputInvalid {
+            reason: "the exact Revision has no Git source to compare with the worktree".to_owned(),
+        }
+    })?;
+    let (files, fingerprint) =
+        super::capture::prepare_mutable_source_for_provenance(repo, provenance)?;
+    if fingerprint.revision_id != revision.revision_id || files != shown.snapshot.files {
+        return Err(crate::error::ShoreError::WorkflowInputInvalid {
+            reason: "review_cursor_source_changed: the live worktree no longer matches the exact Revision capture mode and scope".to_owned(),
+        });
+    }
+    ReviewSourceBindingV1::worktree(WorktreeSourceStateV1 {
+        capture_mode: capture_mode_label(&fingerprint.source)?,
+        base: endpoint_identity(&fingerprint.base),
+        path_scope: source_path_scope(&fingerprint.source).to_vec(),
+        paths: source_path_states(&files)?,
+    })
+}
+
+fn commit_source_binding(
+    repo: &std::path::Path,
+    revision: &RevisionRefV1,
+    commit_spec: &str,
+) -> crate::error::Result<ReviewSourceBindingV1> {
+    let shown = exact_revision_source(repo, revision)?;
+    let provenance = shown.revision.git_provenance.as_ref().ok_or_else(|| {
+        crate::error::ShoreError::WorkflowInputInvalid {
+            reason: "the exact Revision has no Git source to compare with a commit".to_owned(),
+        }
+    })?;
+    let commit_oid = crate::git::git_rev_parse_commit_oid(repo, commit_spec)?;
+    let tree_oid = crate::git::git_commit_tree_oid(repo, &commit_oid)?;
+    let comparison_base = endpoint_identity(&provenance.base).ok_or_else(|| {
+        crate::error::ShoreError::WorkflowInputInvalid {
+            reason: "the exact Revision has no stable Git base for commit comparison".to_owned(),
+        }
+    })?;
+    let path_scope = source_path_scope(&provenance.source).to_vec();
+    let candidate = crate::git::capture_commit_range_diff_files(
+        repo,
+        &comparison_base,
+        &commit_oid,
+        &path_scope,
+    )?;
+    if candidate != shown.snapshot.files {
+        return Err(crate::error::ShoreError::WorkflowInputInvalid {
+            reason: "review_cursor_source_changed: the selected commit does not materialize the exact Revision capture mode and scope".to_owned(),
+        });
+    }
+    let exact = matches!(
+        &provenance.target,
+        ReviewEndpoint::GitCommit {
+            commit_oid: captured,
+            ..
+        } if captured == &commit_oid
+    );
+    ReviewSourceBindingV1::commit(CommitSourceStateV1 {
+        commit_oid,
+        tree_oid,
+        comparison_base,
+        path_scope,
+        proof_state: if exact {
+            CommitProofStateV1::Exact
+        } else {
+            CommitProofStateV1::Equivalent
+        },
+        proof_ref: None,
+    })
+}
+
+fn exact_revision_source(
+    repo: &std::path::Path,
+    revision: &RevisionRefV1,
+) -> crate::error::Result<crate::session::RevisionShowResult> {
+    let shown = crate::session::show_revision_for_change_reader(
+        crate::session::RevisionShowOptions::new(repo)
+            .with_revision_id(revision.revision_id.clone())
+            .with_exact(true),
+    )?;
+    if shown.revision.object_artifact_content_hash != revision.object_artifact_content_hash {
+        return Err(crate::error::ShoreError::WorkflowInputInvalid {
+            reason: "review_cursor_artifact_mismatch: the exact Revision artifact binding changed"
+                .to_owned(),
+        });
+    }
+    Ok(shown)
+}
+
+fn capture_mode_label(source: &RevisionSource) -> crate::error::Result<String> {
+    let value = serde_json::to_value(source)?;
+    let kind = value
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let mode = value
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let include_untracked = value
+        .get("includeUntracked")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    Ok(format!(
+        "{kind}:{mode}:include_untracked={include_untracked}"
+    ))
+}
+
+fn source_path_scope(source: &RevisionSource) -> &[String] {
+    match source {
+        RevisionSource::GitWorktree { pathspecs, .. }
+        | RevisionSource::GitCommitRange { pathspecs, .. }
+        | RevisionSource::GitRootCommit { pathspecs, .. }
+        | RevisionSource::GitStaged { pathspecs, .. }
+        | RevisionSource::GitUnstaged { pathspecs, .. } => pathspecs,
+    }
+}
+
+fn endpoint_identity(endpoint: &ReviewEndpoint) -> Option<String> {
+    match endpoint {
+        ReviewEndpoint::GitCommit { commit_oid, .. } => Some(commit_oid.clone()),
+        ReviewEndpoint::GitTree { tree_oid } | ReviewEndpoint::GitIndex { tree_oid } => {
+            Some(tree_oid.clone())
+        }
+        ReviewEndpoint::GitWorkingTree { .. } => None,
+    }
+}
+
+fn source_path_states(files: &[DiffFile]) -> crate::error::Result<Vec<ReviewSourcePathStateV1>> {
+    files
+        .iter()
+        .map(|file| {
+            let path = file
+                .new_path
+                .as_ref()
+                .or(file.old_path.as_ref())
+                .ok_or_else(|| crate::error::ShoreError::WorkflowInputInvalid {
+                    reason: "captured source entry has no path".to_owned(),
+                })?;
+            Ok(ReviewSourcePathStateV1 {
+                path: path.clone(),
+                content_hash: Some(sha256_json_prefixed(&serde_json::to_value(file)?)?),
+                mode: format!(
+                    "{}->{}",
+                    file.old_mode.as_deref().unwrap_or("none"),
+                    file.new_mode.as_deref().unwrap_or("none")
+                ),
+                tracked: !file.synthetic,
+            })
+        })
+        .collect()
 }
 
 /// Digest only authoritative Change graph state. Review facts, timestamps,

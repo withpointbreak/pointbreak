@@ -2,7 +2,7 @@ mod support;
 
 use serde_json::Value;
 use support::git_repo::GitRepo;
-use support::{pointbreak, pointbreak_env};
+use support::{pointbreak, pointbreak_env, pointbreak_unprepared};
 
 #[test]
 fn revision_help_lists_show() {
@@ -178,7 +178,7 @@ fn revision_show_positional_resolves_a_prefixed_short_id() {
 }
 
 #[test]
-fn revision_show_emits_v2_json() {
+fn revision_show_emits_v2_json_over_the_complete_change_cohort() {
     let repo = modified_repo();
     pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]);
 
@@ -201,7 +201,7 @@ fn revision_show_emits_v2_json() {
             .unwrap()
             .starts_with("sha256:")
     );
-    assert_eq!(json["eventCount"], 2);
+    assert_eq!(json["eventCount"], 3);
     assert_eq!(json["revision"]["id"], json["filters"]["revisionId"]);
     assert_eq!(json["currentAssessment"]["status"], "unassessed");
     assert!(json["currentAssessment"].get("assessment").is_none());
@@ -950,6 +950,23 @@ fn amendable_capture_repo() -> (GitRepo, String, String) {
         .as_str()
         .unwrap()
         .to_owned();
+    let associated = pointbreak([
+        "association",
+        "record",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--track",
+        "test:ref-continuity",
+        "--ref",
+        "refs/heads/feat/amend",
+        "--head",
+        &recorded_head,
+    ]);
+    assert!(
+        associated.status.success(),
+        "explicit ref association failed: {}",
+        String::from_utf8_lossy(&associated.stderr)
+    );
     (repo, revision_id, recorded_head)
 }
 
@@ -1368,8 +1385,10 @@ fn ambiguous_current_revision_error_names_valid_recovery_forms() {
         "candidate listing named: {show_err}"
     );
 
-    // Fact commands take --revision; the same error must name that form too.
-    let add = pointbreak([
+    // The ordinary fixture helper supplies the latest exact cursor to older
+    // tests. Bypass that adapter here to prove a genuinely unseeded legacy fact
+    // write still refuses ambiguity and names its explicit seed form.
+    let add = pointbreak_unprepared([
         "observation",
         "add",
         "--repo",

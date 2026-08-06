@@ -40,8 +40,16 @@ struct InputRequestOpenArgs {
     #[arg(long, default_value = ".")]
     repo: PathBuf,
 
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["exact_revision", "review_cursor"])]
     revision: Option<String>,
+
+    /// Exact captured revision without following replacement edges.
+    #[arg(long, conflicts_with = "review_cursor")]
+    exact_revision: Option<String>,
+
+    /// Exact safe writer cursor emitted by `pointbreak change select` or capture.
+    #[arg(long)]
+    review_cursor: Option<String>,
 
     /// Review lane that owns this input request.
     #[arg(long)]
@@ -103,8 +111,12 @@ struct InputRequestListArgs {
     #[arg(long, default_value = ".")]
     repo: PathBuf,
 
-    #[arg(long)]
+    #[arg(long, conflicts_with = "exact_revision")]
     revision: Option<String>,
+
+    /// Exact captured revision without following Change replacement edges.
+    #[arg(long)]
+    exact_revision: Option<String>,
 
     /// Only list input requests from this review lane.
     #[arg(long)]
@@ -448,6 +460,11 @@ fn input_request_open_options(
         None => None,
     };
     args.revision = revision;
+    let exact_revision = match &args.exact_revision {
+        Some(raw) => Some(ids.rev(raw)?),
+        None => None,
+    };
+    args.exact_revision = exact_revision;
     let target = input_request_target(&args)?;
     let body = read_body_input(
         args.body.as_deref(),
@@ -463,6 +480,12 @@ fn input_request_open_options(
 
     if let Some(revision) = args.revision {
         options = options.with_revision_id(RevisionId::new(revision));
+    }
+    if let Some(exact_revision) = args.exact_revision {
+        options = options.with_exact_revision_id(RevisionId::new(exact_revision));
+    }
+    if let Some(review_cursor) = args.review_cursor {
+        options = options.with_review_cursor(review_cursor);
     }
     if let Some(body) = body {
         options = options.with_body(body);
@@ -486,6 +509,9 @@ fn input_request_open_options(
 fn input_request_list_options(
     args: InputRequestListArgs,
 ) -> Result<InputRequestListOptions, Box<dyn std::error::Error>> {
+    if args.exact_revision.is_some() {
+        crate::cli::common::require_ready_change_reader(&args.repo)?;
+    }
     let mut options = InputRequestListOptions::new(&args.repo)
         .with_status(args.status.into())
         .with_include_body(args.include_body)
@@ -493,6 +519,10 @@ fn input_request_list_options(
     if let Some(revision) = &args.revision {
         let ids = crate::cli::id_resolver::IdResolver::new(&args.repo);
         options = options.with_revision_id(RevisionId::new(ids.rev(revision)?));
+    }
+    if let Some(revision) = &args.exact_revision {
+        let ids = crate::cli::id_resolver::IdResolver::new(&args.repo);
+        options = options.with_exact_revision_id(RevisionId::new(ids.rev(revision)?));
     }
     if let Some(track) = args.track {
         options = options.with_track(track);

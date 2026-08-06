@@ -879,8 +879,8 @@ fn legacy_semantic_gate(
                 Err(error) => Response::json_error("500 Internal Server Error", &error.to_string()),
             })
         }
-        pointbreak::session::StoreCapabilityStatus::MigrationRequired => None,
-        pointbreak::session::StoreCapabilityStatus::MigrationInProgress { .. } => {
+        pointbreak::session::StoreCapabilityStatus::MigrationRequired
+        | pointbreak::session::StoreCapabilityStatus::MigrationInProgress { .. } => {
             let document = ChangeQueryUnavailableDocumentV1::for_inspection(capability)
                 .expect("non-ready capability has a typed unavailable document");
             Some(match serde_json::to_string(&document) {
@@ -1686,9 +1686,13 @@ mod tests {
     }
 
     #[test]
-    fn legacy_semantic_routes_remain_available_on_untouched_l0() {
+    fn legacy_semantic_routes_refuse_l0_before_partial_payload() {
         let capability = capability(pointbreak::session::StoreCapabilityStatus::MigrationRequired);
-        assert!(legacy_semantic_gate(&capability).is_none());
+        let response = legacy_semantic_gate(&capability).unwrap();
+        assert_eq!(response.status, "409 Conflict");
+        let value: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(value["schema"], "pointbreak.store-migration-required");
+        assert_eq!(value["state"], "migration_required");
     }
 
     #[test]

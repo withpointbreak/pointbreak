@@ -206,6 +206,79 @@ fn sign_key_flag_signs_the_write() {
 }
 
 #[test]
+fn change_create_sign_key_signs_the_change_event() {
+    let home = tempfile::tempdir().unwrap();
+    let env_home = home.path().to_str().unwrap();
+    assert!(
+        pointbreak_env(
+            ["key", "init", "--name", "change-key"],
+            &[("POINTBREAK_HOME", env_home)],
+        )
+        .status
+        .success()
+    );
+
+    let repo = modified_repo();
+    let output = pointbreak_env(
+        [
+            "change",
+            "create",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "--operation-id",
+            "change-operation:signing-contract",
+            "--nonce",
+            &"7a".repeat(32),
+            "--sign-key",
+            "change-key",
+        ],
+        &[("POINTBREAK_HOME", env_home)],
+    );
+    assert!(
+        output.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let events_dir = pointbreak::session::store_dir_for_repo(repo.path())
+        .unwrap()
+        .join("events");
+    let event = std::fs::read_dir(events_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read(entry.path()).ok())
+        .filter_map(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .find(|event| event["eventType"] == "t:17")
+        .expect("Change declaration is present");
+    assert!(event.get("signature").is_some(), "Change event is signed");
+    assert!(
+        event.get("signer").is_some(),
+        "Change event names its signer"
+    );
+}
+
+#[test]
+fn every_direct_change_mutation_documents_sign_key() {
+    for subcommand in [
+        "create",
+        "join",
+        "withdraw-membership",
+        "assert-relation",
+        "withdraw-relation",
+        "link",
+        "capture",
+    ] {
+        let output = support::pointbreak(["change", subcommand, "--help"]);
+        assert!(output.status.success(), "{subcommand} help failed");
+        let help = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            help.contains("--sign-key"),
+            "{subcommand} does not expose --sign-key:\n{help}"
+        );
+    }
+}
+
+#[test]
 fn all_six_write_paths_stay_exit_zero_without_a_key() {
     let home = tempfile::tempdir().unwrap();
     let env = [("POINTBREAK_HOME", home.path().to_str().unwrap())];

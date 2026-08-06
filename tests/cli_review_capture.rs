@@ -1,12 +1,8 @@
-use std::process::Command;
-
 use serde_json::Value;
 
-#[allow(dead_code)]
-#[path = "support/git_repo.rs"]
-mod git_repo;
+mod support;
 
-use git_repo::GitRepo;
+use support::git_repo::GitRepo;
 
 #[test]
 fn review_capture_creates_revision_from_subdir() {
@@ -21,7 +17,7 @@ fn review_capture_creates_revision_from_subdir() {
         String::from_utf8_lossy(&output.stderr)
     );
     let json = parse_json(&output.stdout);
-    assert_eq!(json["schema"], "pointbreak.review-capture");
+    assert_eq!(json["schema"], "pointbreak.change-capture-receipt.v1");
     assert_eq!(json["version"], 1);
     assert!(
         json["revision"]["id"]
@@ -52,6 +48,56 @@ fn review_capture_creates_revision_from_subdir() {
     assert!(json.get("statePath").is_none());
     assert!(json.get("snapshotArtifactPath").is_none());
     assert_eq!(json["eventsCreatedByType"]["work_object_proposed"], 1);
+    assert_eq!(
+        json["reviewCursor"]["cursor"]["sourceBinding"]["kind"],
+        "worktree_match_v1"
+    );
+}
+
+#[test]
+fn change_select_rechecks_worktree_and_commit_source_bindings() {
+    let repo = modified_repo();
+    let capture =
+        parse_json(&pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]).stdout);
+    let change_id = capture["changeId"].as_str().unwrap();
+    let revision_id = capture["revision"]["id"].as_str().unwrap();
+
+    let worktree = pointbreak([
+        "change",
+        "select",
+        change_id,
+        "--revision",
+        revision_id,
+        "--source",
+        "worktree",
+        "--repo",
+        repo.path().to_str().unwrap(),
+    ]);
+    assert!(
+        worktree.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&worktree.stderr)
+    );
+
+    repo.commit_all("materialize captured revision");
+    let commit = pointbreak([
+        "change",
+        "select",
+        change_id,
+        "--revision",
+        revision_id,
+        "--source",
+        "commit:HEAD",
+        "--repo",
+        repo.path().to_str().unwrap(),
+    ]);
+    assert!(
+        commit.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+    let commit = parse_json(&commit.stdout);
+    assert_eq!(commit["cursor"]["sourceBinding"]["kind"], "commit_match_v1");
 }
 
 #[test]
@@ -191,7 +237,7 @@ fn review_capture_writes_through_to_the_shared_store_without_a_link_step() {
     );
     let status_json = parse_json(&status.stdout);
     assert_eq!(status_json["mode"], "local");
-    assert_eq!(status_json["inventory"]["eventCount"], 2);
+    assert_eq!(status_json["inventory"]["eventCount"], 3);
     assert!(status_json.get("cloneRef").is_none() || status_json["cloneRef"].is_null());
 }
 
@@ -304,7 +350,7 @@ fn cli_capture_root_outputs_added_files_for_one_commit_repo() {
         String::from_utf8_lossy(&output.stderr)
     );
     let json = parse_json(&output.stdout);
-    assert_eq!(json["schema"], "pointbreak.review-capture");
+    assert_eq!(json["schema"], "pointbreak.change-capture-receipt.v1");
     assert_eq!(json["revision"]["base"]["kind"], "git_tree");
     assert_eq!(json["revision"]["target"]["kind"], "git_commit");
     assert_eq!(json["diffstat"]["addedFiles"], 1);
@@ -385,7 +431,15 @@ fn cli_capture_root_with_path_scopes_added_files() {
 
 #[test]
 fn cli_capture_root_rejects_base() {
-    let output = pointbreak(["capture", "--root", "--base", "HEAD"]);
+    let repo = modified_repo();
+    let output = pointbreak([
+        "capture",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--root",
+        "--base",
+        "HEAD",
+    ]);
 
     assert!(!output.status.success());
     assert!(
@@ -797,45 +851,24 @@ fn capture_without_base_keeps_worktree_behavior() {
 }
 
 #[test]
-fn capture_accepts_supersedes_and_records_no_lineage_attach() {
+fn capture_rejects_proposal_borne_supersedes() {
     let repo = modified_repo();
-
-    // The first revision (no predecessors).
     let first =
         parse_json(&pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]).stdout);
     let first_id = first["revision"]["id"].as_str().unwrap().to_owned();
-    // A capture never attaches lineage now.
-    assert!(first.get("lineageAttach").is_none());
-
-    // A changed file yields a distinct revision that supersedes the first.
     repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
-    let second = parse_json(
-        &pointbreak([
-            "capture",
-            "--repo",
-            repo.path().to_str().unwrap(),
-            "--supersedes",
-            &first_id,
-        ])
-        .stdout,
+    let rejected = pointbreak([
+        "capture",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--supersedes",
+        &first_id,
+    ]);
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr)
+            .contains("proposal-borne --supersedes is no longer supported")
     );
-    let second_id = second["revision"]["id"].as_str().unwrap().to_owned();
-    assert_ne!(first_id, second_id);
-    assert!(second.get("lineageAttach").is_none());
-
-    // The supersession is readable: --revision on the superseded id resolves to
-    // the single current head (the second revision).
-    let resolved = parse_json(
-        &pointbreak([
-            "revision",
-            "show",
-            &first_id,
-            "--repo",
-            repo.path().to_str().unwrap(),
-        ])
-        .stdout,
-    );
-    assert_eq!(resolved["revision"]["id"], second_id.as_str());
 }
 
 #[test]
@@ -843,16 +876,21 @@ fn capture_exact_payload_rerun_with_supersedes_is_idempotent() {
     let repo = modified_repo();
     let first =
         parse_json(&pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]).stdout);
-    let first_id = first["revision"]["id"].as_str().unwrap().to_owned();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
 
+    let cursor = first["reviewCursor"]["token"].as_str().unwrap();
     let capture = || {
         pointbreak([
+            "change",
             "capture",
             "--repo",
             repo.path().to_str().unwrap(),
-            "--supersedes",
-            &first_id,
+            "--operation-id",
+            "change-operation:capture-retry",
+            "--cursor",
+            cursor,
+            "--advance",
+            "replace",
         ])
     };
     let successor = parse_json(&capture().stdout);
@@ -865,8 +903,15 @@ fn capture_exact_payload_rerun_with_supersedes_is_idempotent() {
     );
     let rerun = parse_json(&rerun.stdout);
     assert_eq!(rerun["revision"]["id"], successor["revision"]["id"]);
-    assert_eq!(rerun["eventsCreated"], 0);
-    assert!(rerun["eventsExisting"].as_u64().unwrap() >= 1);
+    assert_eq!(rerun["revisionEventsCreated"], 0);
+    assert!(rerun["revisionEventsExisting"].as_u64().unwrap() >= 1);
+    assert!(
+        rerun["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| { entry["code"] == "operation_retry_retained_revision" })
+    );
 }
 
 #[test]
@@ -874,19 +919,24 @@ fn capture_rejects_a_different_proposal_for_an_existing_head_before_append() {
     let repo = modified_repo();
     let first =
         parse_json(&pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]).stdout);
-    let first_id = first["revision"]["id"].as_str().unwrap().to_owned();
+    let first_cursor = first["reviewCursor"]["token"].as_str().unwrap().to_owned();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
     let successor = parse_json(
         &pointbreak([
             "capture",
             "--repo",
             repo.path().to_str().unwrap(),
-            "--supersedes",
-            &first_id,
+            "--review-cursor",
+            &first_cursor,
+            "--advance",
+            "replace",
         ])
         .stdout,
     );
-    let successor_id = successor["revision"]["id"].as_str().unwrap().to_owned();
+    let successor_cursor = successor["reviewCursor"]["token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let before = parse_json(
         &pointbreak(["revision", "list", "--repo", repo.path().to_str().unwrap()]).stdout,
     );
@@ -895,18 +945,20 @@ fn capture_rejects_a_different_proposal_for_an_existing_head_before_append() {
         "capture",
         "--repo",
         repo.path().to_str().unwrap(),
-        "--supersedes",
-        &successor_id,
+        "--review-cursor",
+        &successor_cursor,
+        "--advance",
+        "replace",
     ]);
 
     assert!(!conflict.status.success());
     let stderr = String::from_utf8_lossy(&conflict.stderr);
     assert!(
-        stderr.contains("capture proposal for revision"),
+        stderr.contains("capture did not create a new Revision"),
         "stderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("genuinely new content state"),
+        stderr.contains("existing exact cursor"),
         "stderr:\n{stderr}"
     );
     let after = parse_json(
@@ -921,31 +973,35 @@ fn capture_rejects_a_different_proposal_for_an_existing_non_head_before_append()
     let repo = modified_repo();
     let first =
         parse_json(&pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]).stdout);
-    let first_id = first["revision"]["id"].as_str().unwrap().to_owned();
+    let first_cursor = first["reviewCursor"]["token"].as_str().unwrap().to_owned();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
     let second = parse_json(
         &pointbreak([
             "capture",
             "--repo",
             repo.path().to_str().unwrap(),
-            "--supersedes",
-            &first_id,
+            "--review-cursor",
+            &first_cursor,
+            "--advance",
+            "replace",
         ])
         .stdout,
     );
-    let second_id = second["revision"]["id"].as_str().unwrap().to_owned();
+    let second_cursor = second["reviewCursor"]["token"].as_str().unwrap().to_owned();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 4 }\n");
     let third = parse_json(
         &pointbreak([
             "capture",
             "--repo",
             repo.path().to_str().unwrap(),
-            "--supersedes",
-            &second_id,
+            "--review-cursor",
+            &second_cursor,
+            "--advance",
+            "replace",
         ])
         .stdout,
     );
-    let third_id = third["revision"]["id"].as_str().unwrap().to_owned();
+    let third_cursor = third["reviewCursor"]["token"].as_str().unwrap().to_owned();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
     let before = parse_json(
         &pointbreak(["revision", "list", "--repo", repo.path().to_str().unwrap()]).stdout,
@@ -955,18 +1011,20 @@ fn capture_rejects_a_different_proposal_for_an_existing_non_head_before_append()
         "capture",
         "--repo",
         repo.path().to_str().unwrap(),
-        "--supersedes",
-        &third_id,
+        "--review-cursor",
+        &third_cursor,
+        "--advance",
+        "replace",
     ]);
 
     assert!(!conflict.status.success());
     let stderr = String::from_utf8_lossy(&conflict.stderr);
     assert!(
-        stderr.contains("capture proposal for revision"),
+        stderr.contains("capture did not create a new Revision"),
         "stderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("genuinely new content state"),
+        stderr.contains("existing exact cursor"),
         "stderr:\n{stderr}"
     );
     let after = parse_json(
@@ -991,7 +1049,7 @@ fn rebased_recapture_with_stable_object_id_writes_distinct_artifact() {
     repo.write("src/lib.rs", reviewed);
     let first =
         parse_json(&pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]).stdout);
-    let first_id = first["revision"]["id"].as_str().unwrap().to_owned();
+    let first_cursor = first["reviewCursor"]["token"].as_str().unwrap().to_owned();
     let first_object = first["revision"]["objectId"].as_str().unwrap().to_owned();
     let first_artifact_hash = first["revision"]["objectArtifactContentHash"]
         .as_str()
@@ -1010,8 +1068,10 @@ fn rebased_recapture_with_stable_object_id_writes_distinct_artifact() {
         "capture",
         "--repo",
         repo.path().to_str().unwrap(),
-        "--supersedes",
-        &first_id,
+        "--review-cursor",
+        &first_cursor,
+        "--advance",
+        "replace",
     ]);
 
     assert!(
@@ -1057,8 +1117,9 @@ fn capture_with_base_twice_reports_existing_event() {
 
     assert_eq!(first["revision"]["id"], second["revision"]["id"]);
     assert_eq!(second["eventsCreated"], 0);
-    // The capture event plus the auto-recorded HEAD-tipping ref association.
-    assert_eq!(second["eventsExisting"], 2);
+    // The immutable Revision proposal is the only legacy-domain capture event;
+    // landing associations are explicit proof-first operations.
+    assert_eq!(second["eventsExisting"], 1);
 }
 
 fn committed_repo() -> GitRepo {
@@ -1130,12 +1191,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    Command::new(env!("CARGO_BIN_EXE_pointbreak"))
-        .args(args)
-        .env_remove("POINTBREAK_LOG")
-        .env_remove("RUST_LOG")
-        .output()
-        .expect("run pointbreak binary")
+    support::pointbreak(args)
 }
 
 fn parse_json(stdout: &[u8]) -> Value {
@@ -1185,17 +1241,16 @@ fn capture_is_available_at_the_top_level() {
         String::from_utf8_lossy(&output.stderr)
     );
     let document = parse_json(&output.stdout);
-    assert_eq!(document["schema"], "pointbreak.review-capture"); // INV-1: schema tag is frozen
+    assert_eq!(document["schema"], "pointbreak.change-capture-receipt.v1"); // INV-1: schema tag is frozen
 }
 
 #[test]
-fn abbreviated_supersedes_resolves_to_the_full_id_before_it_is_stored() {
+fn replacement_cursor_records_the_full_exact_predecessor() {
     let repo = modified_repo();
     let first =
         parse_json(&pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]).stdout);
     let first_id = first["revision"]["id"].as_str().unwrap().to_owned();
-    // first_id = "rev:sha256:<64hex>" (capture.rs's revision ids always take this shape).
-    let fragment = &first_id["rev:sha256:".len()..][..8];
+    let first_cursor = first["reviewCursor"]["token"].as_str().unwrap();
 
     repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
     let second = parse_json(
@@ -1203,8 +1258,10 @@ fn abbreviated_supersedes_resolves_to_the_full_id_before_it_is_stored() {
             "capture",
             "--repo",
             repo.path().to_str().unwrap(),
-            "--supersedes",
-            fragment,
+            "--review-cursor",
+            first_cursor,
+            "--advance",
+            "replace",
         ])
         .stdout,
     );
@@ -1212,18 +1269,22 @@ fn abbreviated_supersedes_resolves_to_the_full_id_before_it_is_stored() {
 
     let resolved = parse_json(
         &pointbreak([
-            "revision",
+            "change",
             "show",
-            &first_id,
+            first["changeId"].as_str().unwrap(),
             "--repo",
             repo.path().to_str().unwrap(),
         ])
         .stdout,
     );
     assert_eq!(
-        resolved["revision"]["id"], second_id,
+        resolved["currentRevisionRefs"][0]["revisionId"], second_id,
         "if the raw fragment had been stored instead of the resolved full id, \
-         `--revision {first_id}` would not resolve to the second revision"
+         the exact Change relation would not resolve to the second revision"
+    );
+    assert_eq!(
+        resolved["effectiveSupersedes"][0][1]["revisionId"],
+        first_id
     );
 }
 

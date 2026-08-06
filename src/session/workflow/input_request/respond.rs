@@ -18,7 +18,8 @@ use crate::session::observation::staged_body;
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{
-    prepare_write_landing, resolve_write_store, resolve_write_validation_store,
+    prepare_write_landing, resolve_change_write_store, resolve_write_store,
+    resolve_write_validation_store,
 };
 use crate::session::{
     BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, current_timestamp,
@@ -115,7 +116,13 @@ pub struct InputRequestRespondResult {
 pub fn respond_input_request(
     options: InputRequestRespondOptions,
 ) -> Result<InputRequestRespondResult> {
-    let write_store = resolve_write_store(&options.repo)?;
+    let change_write =
+        crate::session::activated_store_capability_for_repo(&options.repo)?.is_some();
+    let write_store = if change_write {
+        resolve_change_write_store(&options.repo)?
+    } else {
+        resolve_write_store(&options.repo)?
+    };
     let worktree_root = write_store.worktree_root();
     let store_dir = write_store.store_dir();
     let storage = LocalStorage::new(store_dir);
@@ -128,8 +135,18 @@ pub fn respond_input_request(
     // The request being responded to may live only in the linked store: its
     // EventTarget fields are copied verbatim into the response, so the lookup
     // resolves the writer-visible union.
-    let validation_store = resolve_write_validation_store(&options.repo)?;
-    let validation_events = validation_store.validation_events()?;
+    let validation_events = if change_write {
+        crate::session::change_reader_state_for_repo(&options.repo)?
+            .ready()
+            .ok_or_else(|| ShoreError::WorkflowInputInvalid {
+                reason: "migration_in_progress; input-request response requires complete Change authority"
+                    .to_owned(),
+            })?
+            .events()
+            .to_vec()
+    } else {
+        resolve_write_validation_store(&options.repo)?.validation_events()?
+    };
 
     // A task-attempt input request belongs to the agent-resumption domain
     // (authored by the agent session / relay): it carries no review unit and no
@@ -237,7 +254,11 @@ pub fn respond_input_request(
     let event_id = event.event_id.clone();
 
     let mut events_created_by_type = BTreeMap::new();
-    let write_outcome = event_store.record_event_once(&event)?;
+    let write_outcome = if change_write {
+        event_store.record_change_event_once(&event)?
+    } else {
+        event_store.record_event_once(&event)?
+    };
     let (events_created, events_existing) = match write_outcome {
         EventWriteOutcome::Created => {
             events_created_by_type.insert("input_request_responded".to_owned(), 1);
@@ -246,7 +267,11 @@ pub fn respond_input_request(
         EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => (0, 1),
     };
 
-    let state = SessionState::from_events(&event_store.list_events()?)?;
+    let state = SessionState::from_events(&if change_write {
+        event_store.list_change_events()?
+    } else {
+        event_store.list_events()?
+    })?;
     storage.write_json_atomic(
         &store_dir.join("state.json"),
         &state,

@@ -33,12 +33,16 @@ pub(super) struct AssessmentAddArgs {
     repo: PathBuf,
 
     /// Captured revision head seed; defaults to the single captured revision.
-    #[arg(long, conflicts_with = "exact_revision")]
+    #[arg(long, conflicts_with_all = ["exact_revision", "review_cursor"])]
     revision: Option<String>,
 
     /// Exact captured revision to assess without following supersession.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "review_cursor")]
     exact_revision: Option<String>,
+
+    /// Exact safe writer cursor emitted by `pointbreak change select` or capture.
+    #[arg(long)]
+    review_cursor: Option<String>,
 
     /// Review lane that owns this assessment.
     #[arg(long)]
@@ -314,6 +318,9 @@ pub(super) fn assessment_add_options(
     if let Some(exact_revision) = &args.exact_revision {
         options = options.with_exact_revision_id(RevisionId::new(ids.rev(exact_revision)?));
     }
+    if let Some(review_cursor) = args.review_cursor {
+        options = options.with_review_cursor(review_cursor);
+    }
     if let Some(summary) = summary {
         options = options.with_summary(summary);
     }
@@ -346,6 +353,9 @@ pub(super) fn assessment_add_options(
 pub(super) fn assessment_show_options(
     args: AssessmentShowArgs,
 ) -> Result<AssessmentShowOptions, Box<dyn std::error::Error>> {
+    if args.exact_revision.is_some() {
+        crate::cli::common::require_ready_change_reader(&args.repo)?;
+    }
     let mut options = AssessmentShowOptions::new(&args.repo)
         .with_all(args.all)
         .with_include_summary(args.include_summary)

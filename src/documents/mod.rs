@@ -130,6 +130,7 @@ const CLI_DOCUMENT_REGISTRY: &[(&str, u32)] = &[
     ("pointbreak.review-association-list", 1),
     ("pointbreak.review-association-ref", 1),
     ("pointbreak.review-association-ref-withdrawn", 1),
+    ("pointbreak.change-capture-receipt.v1", 1),
     ("pointbreak.review-capture", 1),
     ("pointbreak.review-endorse", 1),
     ("pointbreak.review-history", 1),

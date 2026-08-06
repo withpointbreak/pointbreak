@@ -96,6 +96,12 @@ git -C "$destination" symbolic-ref HEAD refs/heads/main
 git -C "$destination" config user.name "Pointbreak Matrix"
 git -C "$destination" config user.email "pointbreak-matrix@example.com"
 git -C "$destination" config commit.gpgsign false
+if [ -n "${POINTBREAK_CHANGE_READY_FIXTURE_DIR:-}" ]; then
+  [ -d "$POINTBREAK_CHANGE_READY_FIXTURE_DIR" ] || die "POINTBREAK_CHANGE_READY_FIXTURE_DIR is not a directory"
+  common_dir="$(git -C "$destination" rev-parse --path-format=absolute --git-common-dir)"
+  mkdir -p "$common_dir/pointbreak/events"
+  cp "$POINTBREAK_CHANGE_READY_FIXTURE_DIR"/*.json "$common_dir/pointbreak/events/"
+fi
 
 mkdir -p "$destination/src"
 printf 'pub fn matrix_value() -> u32 { 1 }\n' > "$destination/src/lib.rs"
@@ -219,6 +225,10 @@ live_landing="$(git -C "$destination" rev-parse HEAD)"
 pointbreak_actor_json "actor:agent:pointbreak-matrix-association-writer" \
   association record --repo "$destination" --revision "$live_revision" \
   --track "agent:matrix-associations" --commit "$live_landing" >/dev/null
+pointbreak_actor_json "actor:agent:pointbreak-matrix-association-writer" \
+  association record --repo "$destination" --revision "$live_revision" \
+  --track "agent:matrix-associations" --ref feat/live-matrix \
+  --head "$live_landing" >/dev/null
 
 git -C "$destination" switch --quiet --detach main
 printf 'pub fn matrix_value() -> u32 { 5 }\n' > "$destination/src/lib.rs"
@@ -229,18 +239,25 @@ git -C "$destination" reset --quiet --hard main
 
 git -C "$destination" switch --quiet -c feat/competing-heads
 printf 'pub fn matrix_value() -> u32 { 6 }\n' > "$destination/src/lib.rs"
-superseded_revision="$(capture_revision \
+superseded_capture="$(pointbreak_actor_json \
   "actor:agent:pointbreak-matrix-capture-writer" \
-  --summary "Supersession root")"
+  capture --repo "$destination" --summary "Supersession root")"
+superseded_revision="$(printf '%s\n' "$superseded_capture" | jq -er '.revision.revisionId')"
+superseded_change="$(printf '%s\n' "$superseded_capture" | jq -er '.changeId')"
+superseded_cursor="$(printf '%s\n' "$superseded_capture" | jq -er '.reviewCursor.token')"
+superseded_artifact="$(printf '%s\n' "$superseded_capture" | jq -er '.revision.objectArtifactContentHash')"
 pointbreak_actor_json "actor:agent:pointbreak-matrix-fact-writer" \
   observation add --repo "$destination" --exact-revision "$superseded_revision" \
   --track "agent:matrix-facts" --title "Stale predecessor fact" \
   --body "This fact remains on the addressed predecessor." >/dev/null
 
 printf 'pub fn matrix_value() -> u32 { 7 }\n' > "$destination/src/lib.rs"
-ambiguous_assessment_revision="$(capture_revision \
+ambiguous_assessment_capture="$(pointbreak_actor_json \
   "actor:agent:pointbreak-matrix-capture-writer" \
-  --summary "Competing head A" --supersedes "$superseded_revision")"
+  capture --repo "$destination" --summary "Competing head A" \
+  --review-cursor "$superseded_cursor" --advance replace)"
+ambiguous_assessment_revision="$(printf '%s\n' "$ambiguous_assessment_capture" | jq -er '.revision.revisionId')"
+ambiguous_assessment_cursor="$(printf '%s\n' "$ambiguous_assessment_capture" | jq -er '.reviewCursor.token')"
 pointbreak_actor_json "actor:agent:pointbreak-matrix-assessment-writer-one" \
   assessment add --repo "$destination" \
   --exact-revision "$ambiguous_assessment_revision" \
@@ -253,9 +270,18 @@ pointbreak_actor_json "actor:agent:pointbreak-matrix-assessment-writer-two" \
   --summary "Candidate B requests changes." >/dev/null
 
 printf 'pub fn matrix_value() -> u32 { 8 }\n' > "$destination/src/lib.rs"
-competing_revision="$(capture_revision \
+competing_capture="$(pointbreak_actor_json \
   "actor:agent:pointbreak-matrix-capture-writer" \
-  --summary "Competing head B" --supersedes "$superseded_revision")"
+  capture --repo "$destination" --summary "Competing head B" \
+  --review-cursor "$ambiguous_assessment_cursor" --advance parallel)"
+competing_revision="$(printf '%s\n' "$competing_capture" | jq -er '.revision.revisionId')"
+competing_artifact="$(printf '%s\n' "$competing_capture" | jq -er '.revision.objectArtifactContentHash')"
+pointbreak_actor_json "actor:agent:pointbreak-matrix-capture-writer" \
+  change assert-relation "$superseded_change" "$competing_revision" "$superseded_revision" \
+  --successor-artifact-hash "$competing_artifact" \
+  --predecessor-artifact-hash "$superseded_artifact" \
+  --operation-id "change-operation:decision-matrix-competing-relation" \
+  --repo "$destination" >/dev/null
 git -C "$destination" reset --quiet --hard main
 
 git -C "$destination" switch --quiet -c feat/source-matrix

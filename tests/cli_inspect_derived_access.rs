@@ -2,9 +2,8 @@ mod support;
 
 use std::time::{Duration, Instant};
 
-use support::common_dir_store;
 use support::git_repo::GitRepo;
-use support::inspect::{Inspector, capture, urlencode};
+use support::inspect::{Inspector, capture, legacy_reader_clone, urlencode};
 
 fn assert_revision_page_parity(active: &serde_json::Value, authoritative: &serde_json::Value) {
     for field in [
@@ -33,13 +32,14 @@ fn unset_inspector_first_start_builds_the_default_projection() {
     repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
     capture(repo.path());
 
-    let derived_root = common_dir_store(repo.path()).join("derived");
+    let (_legacy_root, legacy_repo) = legacy_reader_clone(repo.path());
+    let derived_root = legacy_repo.join(".pointbreak/data/derived");
     assert!(
         !derived_root.exists(),
         "writes do not synchronously bootstrap"
     );
 
-    let inspector = Inspector::spawn_authenticated(repo.path());
+    let inspector = Inspector::spawn_authenticated(&legacy_repo);
     let status = inspector.get_json("/api/derived-access/status");
     let history = inspector.get_json("/api/history");
 
@@ -61,9 +61,10 @@ fn active_inspector_first_start_bootstraps_and_serves_history() {
     repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
     let revision_id = capture(repo.path());
 
-    let derived_root = common_dir_store(repo.path()).join("derived");
+    let (_legacy_root, legacy_repo) = legacy_reader_clone(repo.path());
+    let derived_root = legacy_repo.join(".pointbreak/data/derived");
     assert!(!derived_root.exists(), "fixture starts without a sidecar");
-    let rebuild_lock_path = common_dir_store(repo.path()).join("derived.rebuild.lock");
+    let rebuild_lock_path = legacy_repo.join(".pointbreak/data/derived.rebuild.lock");
     let rebuild_lock = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -74,7 +75,7 @@ fn active_inspector_first_start_bootstraps_and_serves_history() {
     rebuild_lock.lock().unwrap();
 
     let inspector = Inspector::spawn_authenticated_with_env(
-        repo.path(),
+        &legacy_repo,
         &[("POINTBREAK_DERIVED_ACCESS", "sqlite-wal-bodyless-v1")],
     );
     let (status_head, status_body) = inspector.raw_get("/api/derived-access/status");

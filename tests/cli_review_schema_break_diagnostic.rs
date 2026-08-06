@@ -1,13 +1,9 @@
-//! A stored event whose type/envelope was retired at a breaking change must not
-//! hard-fail the CLI read surfaces. `pointbreak history` / `show` skip it and
-//! surface a `ProjectionDiagnostic` instead, exiting 0 so the rest of the
-//! review still renders.
+//! L0 stores fail at the migration fence before retired payloads are decoded.
 
 mod support;
 
-use serde_json::Value;
 use support::git_repo::GitRepo;
-use support::{common_dir_store, pointbreak};
+use support::{common_dir_store, pointbreak, pointbreak_unprepared};
 
 /// A repo with one captured Revision plus a raw retired-type event file dropped
 /// into the resolved store. The probe rejects the raw file before full decode,
@@ -26,74 +22,77 @@ fn store_with_retired_event() -> GitRepo {
     );
 
     let events_dir = common_dir_store(repo.path()).join("events");
+    for entry in std::fs::read_dir(&events_dir)
+        .unwrap()
+        .filter_map(Result::ok)
+    {
+        let Ok(value) = std::fs::read(entry.path())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .ok_or(())
+        else {
+            continue;
+        };
+        if matches!(
+            value["schema"].as_str(),
+            Some("pointbreak.store-capability-activation" | "pointbreak.bulk-adoption-completion")
+        ) {
+            std::fs::remove_file(entry.path()).unwrap();
+        }
+    }
     std::fs::create_dir_all(&events_dir).unwrap();
     std::fs::write(
         events_dir.join(format!("{}.json", "a".repeat(64))),
-        br#"{"eventType":"review_disposition_recorded"}"#,
+        br#"{"schema":"shore.event","version":1,"eventType":"review_disposition_recorded"}"#,
     )
     .unwrap();
 
     repo
 }
 
-fn has_schema_break_diagnostic(json: &Value) -> bool {
-    json["diagnostics"]
-        .as_array()
-        .expect("diagnostics is an array")
-        .iter()
-        .any(|d| d["code"] == "unsupported_event_type")
-}
-
 #[test]
-fn review_history_surfaces_schema_break_diagnostic_and_exits_zero() {
+fn review_history_refuses_l0_before_decoding_a_retired_event() {
     let repo = store_with_retired_event();
 
-    let output = pointbreak(["history", "--repo", repo.path().to_str().unwrap()]);
+    let output = pointbreak_unprepared(["history", "--repo", repo.path().to_str().unwrap()]);
 
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
     assert!(
-        output.status.success(),
-        "history must exit 0 over a retired event:\n{}",
+        String::from_utf8_lossy(&output.stderr).contains("migration_required"),
+        "unexpected stderr: {}",
         String::from_utf8_lossy(&output.stderr)
-    );
-    let json: Value = serde_json::from_slice(&output.stdout).expect("history JSON");
-    assert!(
-        has_schema_break_diagnostic(&json),
-        "history diagnostics missing the schema break: {json}"
     );
 }
 
 #[test]
-fn review_revisions_surfaces_schema_break_diagnostic_and_exits_zero() {
+fn review_revisions_refuses_l0_before_decoding_a_retired_event() {
     let repo = store_with_retired_event();
 
-    let output = pointbreak(["revision", "list", "--repo", repo.path().to_str().unwrap()]);
+    let output =
+        pointbreak_unprepared(["revision", "list", "--repo", repo.path().to_str().unwrap()]);
 
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
     assert!(
-        output.status.success(),
-        "revisions must exit 0 over a retired event:\n{}",
+        String::from_utf8_lossy(&output.stderr).contains("migration_required"),
+        "unexpected stderr: {}",
         String::from_utf8_lossy(&output.stderr)
-    );
-    let json: Value = serde_json::from_slice(&output.stdout).expect("revisions JSON");
-    assert!(
-        has_schema_break_diagnostic(&json),
-        "revisions diagnostics missing the schema break: {json}"
     );
 }
 
 #[test]
-fn review_show_surfaces_schema_break_diagnostic_and_exits_zero() {
+fn review_show_refuses_l0_before_decoding_a_retired_event() {
     let repo = store_with_retired_event();
 
-    let output = pointbreak(["revision", "show", "--repo", repo.path().to_str().unwrap()]);
+    let output =
+        pointbreak_unprepared(["revision", "show", "--repo", repo.path().to_str().unwrap()]);
 
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
     assert!(
-        output.status.success(),
-        "show must exit 0 over a retired event:\n{}",
+        String::from_utf8_lossy(&output.stderr).contains("migration_required"),
+        "unexpected stderr: {}",
         String::from_utf8_lossy(&output.stderr)
-    );
-    let json: Value = serde_json::from_slice(&output.stdout).expect("show JSON");
-    assert!(
-        has_schema_break_diagnostic(&json),
-        "show diagnostics missing the schema break: {json}"
     );
 }

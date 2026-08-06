@@ -1,6 +1,8 @@
-use std::ffi::OsStr;
+use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
 use std::process::{Command, Output};
+use std::sync::{Mutex, OnceLock};
 
 #[allow(dead_code)]
 pub mod event_signature_fixtures;
@@ -17,8 +19,13 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    Command::new(env!("CARGO_BIN_EXE_pointbreak"))
-        .args(args)
+    let args = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_owned())
+        .collect::<Vec<_>>();
+    let args = prepare_change_cli_fixture(args);
+    let output = Command::new(env!("CARGO_BIN_EXE_pointbreak"))
+        .args(&args)
         .env_remove("POINTBREAK_LOG")
         .env_remove("RUST_LOG")
         // Isolate byte-asserting tests from a developer's ambient output-lane
@@ -33,7 +40,53 @@ where
         .env_remove("POINTBREAK_THEME")
         .env_remove("BAT_THEME")
         .output()
-        .expect("run pointbreak binary")
+        .expect("run pointbreak binary");
+    remember_change_capture(&args, &output);
+    if output.status.success()
+        && let Some(repo) = repo_argument(&args)
+    {
+        inspect::sync_legacy_mirrors(&repo);
+    }
+    output
+}
+
+/// Run the binary without installing the ordinary ready-Change integration fixture.
+/// Reserved for capability-fence tests that deliberately exercise L0 or M1.
+#[allow(dead_code)]
+pub fn pointbreak_unprepared<I, S>(args: I) -> Output
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    Command::new(env!("CARGO_BIN_EXE_pointbreak"))
+        .args(args)
+        .env_remove("POINTBREAK_LOG")
+        .env_remove("RUST_LOG")
+        .env_remove("POINTBREAK_FORMAT")
+        .env_remove("POINTBREAK_THEME")
+        .env_remove("BAT_THEME")
+        .output()
+        .expect("run unprepared pointbreak binary")
+}
+
+#[allow(dead_code)]
+pub fn pointbreak_unprepared_env<I, S>(args: I, env: &[(&str, &str)]) -> Output
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pointbreak"));
+    command
+        .args(args)
+        .env_remove("POINTBREAK_LOG")
+        .env_remove("RUST_LOG")
+        .env_remove("POINTBREAK_FORMAT")
+        .env_remove("POINTBREAK_THEME")
+        .env_remove("BAT_THEME");
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    command.output().expect("run unprepared pointbreak binary")
 }
 
 /// Run `pointbreak` with extra environment variables — e.g. `POINTBREAK_ACTOR_ID` to
@@ -44,9 +97,14 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    let args = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_owned())
+        .collect::<Vec<_>>();
+    let args = prepare_change_cli_fixture(args);
     let mut command = Command::new(env!("CARGO_BIN_EXE_pointbreak"));
     command
-        .args(args)
+        .args(&args)
         .env_remove("POINTBREAK_LOG")
         .env_remove("RUST_LOG")
         // Clear ambient selectors first; a caller that passes POINTBREAK_FORMAT or
@@ -57,7 +115,226 @@ where
     for (key, value) in env {
         command.env(key, value);
     }
-    command.output().expect("run pointbreak binary")
+    let output = command.output().expect("run pointbreak binary");
+    remember_change_capture(&args, &output);
+    if output.status.success()
+        && let Some(repo) = repo_argument(&args)
+    {
+        inspect::sync_legacy_mirrors(&repo);
+    }
+    output
+}
+
+/// Ordinary integration fixtures start from an empty, already-qualified L2
+/// authority. Tests that exercise L0/M1 construct those states explicitly and
+/// bypass this capture helper. The two frozen records were emitted by the
+/// test-only capability fixture producer and contain no repository data.
+#[derive(Clone)]
+struct FixtureCapture {
+    revision_id: String,
+    change_id: String,
+    artifact_hash: String,
+}
+
+#[derive(Default)]
+struct FixtureChangeState {
+    latest_cursor: Option<String>,
+    captures: HashMap<String, FixtureCapture>,
+}
+
+fn fixture_change_state() -> &'static Mutex<HashMap<std::path::PathBuf, FixtureChangeState>> {
+    static STATE: OnceLock<Mutex<HashMap<std::path::PathBuf, FixtureChangeState>>> =
+        OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn repo_argument(args: &[OsString]) -> Option<std::path::PathBuf> {
+    let index = args.iter().position(|arg| arg == "--repo")?;
+    Some(std::path::PathBuf::from(args.get(index + 1)?))
+}
+
+fn prepare_change_cli_fixture(args: Vec<OsString>) -> Vec<OsString> {
+    let Some(repo) = repo_argument(&args) else {
+        return args;
+    };
+    let command = args.first().and_then(|arg| arg.to_str());
+    let subcommand = args.get(1).and_then(|arg| arg.to_str());
+    let migration_dry_run = command == Some("change") && subcommand == Some("migrate-dry-run");
+    if !migration_dry_run {
+        maybe_install_empty_ready_change_store(&repo);
+    }
+    args
+}
+
+fn maybe_install_empty_ready_change_store(repo_root: &Path) {
+    let git = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(repo_root)
+        .output();
+    if !git.is_ok_and(|output| output.status.success()) {
+        return;
+    }
+    let events = fixture_store_dir(repo_root).join("events");
+    let has_authority = events.exists()
+        && std::fs::read_dir(&events)
+            .expect("read fixture event directory")
+            .next()
+            .is_some();
+    if !has_authority {
+        install_empty_ready_change_store(repo_root);
+    }
+}
+
+fn remember_change_capture(args: &[OsString], output: &Output) {
+    if args.first().and_then(|arg| arg.to_str()) != Some("capture") || !output.status.success() {
+        return;
+    }
+    let Some(repo) = repo_argument(args) else {
+        return;
+    };
+    let Ok(document) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return;
+    };
+    let revision = document["revision"]["revisionId"]
+        .as_str()
+        .expect("capture fixture Revision id")
+        .to_owned();
+    let change_id = document["changeId"]
+        .as_str()
+        .expect("capture fixture Change id")
+        .to_owned();
+    let cursor = document["reviewCursor"]["token"]
+        .as_str()
+        .expect("capture fixture review cursor")
+        .to_owned();
+    let artifact_hash = document["revision"]["objectArtifactContentHash"]
+        .as_str()
+        .expect("capture fixture artifact hash")
+        .to_owned();
+    let mut state = fixture_change_state().lock().expect("fixture state lock");
+    let repo_state = state.entry(repo).or_default();
+    repo_state.latest_cursor = Some(cursor.clone());
+    repo_state.captures.insert(
+        revision,
+        FixtureCapture {
+            revision_id: document["revision"]["revisionId"]
+                .as_str()
+                .expect("capture fixture Revision id")
+                .to_owned(),
+            change_id,
+            artifact_hash,
+        },
+    );
+}
+
+fn fixture_capture<'a>(state: &'a FixtureChangeState, selector: &str) -> &'a FixtureCapture {
+    if let Some(capture) = state.captures.get(selector) {
+        return capture;
+    }
+    let mut matches = state
+        .captures
+        .iter()
+        .filter(|(revision, _)| {
+            revision.starts_with(selector)
+                || revision
+                    .strip_prefix("rev:sha256:")
+                    .is_some_and(|digest| digest.starts_with(selector))
+        })
+        .map(|(_, capture)| capture);
+    let capture = matches
+        .next()
+        .expect("superseded fixture Revision was captured through this helper");
+    assert!(
+        matches.next().is_none(),
+        "fixture Revision selector must be unambiguous"
+    );
+    capture
+}
+
+fn fresh_fixture_cursor(repo: &Path, revision: &str, change_id: &str) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_pointbreak"))
+        .args([
+            "change",
+            "select",
+            change_id,
+            "--revision",
+            revision,
+            "--allow-historical",
+            "--repo",
+            repo.to_str().expect("fixture repo path is utf-8"),
+        ])
+        .env_remove("POINTBREAK_LOG")
+        .env_remove("RUST_LOG")
+        .env_remove("POINTBREAK_FORMAT")
+        .output()
+        .expect("select fresh fixture review cursor");
+    assert!(
+        output.status.success(),
+        "fresh fixture cursor selection failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("review cursor selection is JSON");
+    document["token"]
+        .as_str()
+        .expect("review cursor selection token")
+        .to_owned()
+}
+
+#[allow(dead_code)]
+pub fn install_empty_ready_change_store(repo_root: &Path) {
+    let events = fixture_store_dir(repo_root).join("events");
+    let activation =
+        events.join("5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json");
+    if activation.exists() {
+        return;
+    }
+    if events.exists()
+        && std::fs::read_dir(&events)
+            .expect("read fixture event directory")
+            .next()
+            .is_some()
+    {
+        panic!("cannot install the empty L2 fixture over existing L0 authority");
+    }
+    std::fs::create_dir_all(&events).expect("create fixture event directory");
+    for (name, bytes) in [
+        (
+            "5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json",
+            include_bytes!(
+                "assets/change-ready-store/5a1f8bbdea0db6199064bb2b75dfa89382b23398c71c640f7ca3268e48e3afaf.json"
+            )
+            .as_slice(),
+        ),
+        (
+            "f31956c2b820926adc74d4d03cb03820d13c9ed2739b5f7ada81611a6f8bcff1.json",
+            include_bytes!(
+                "assets/change-ready-store/f31956c2b820926adc74d4d03cb03820d13c9ed2739b5f7ada81611a6f8bcff1.json"
+            )
+            .as_slice(),
+        ),
+    ] {
+        std::fs::write(events.join(name), bytes).expect("write frozen empty L2 fixture record");
+    }
+}
+
+fn fixture_store_dir(repo_root: &Path) -> std::path::PathBuf {
+    for config in [
+        repo_root.join(".pointbreak/store.local.json"),
+        repo_root.join(".pointbreak/store.json"),
+    ] {
+        let Ok(bytes) = std::fs::read(config) else {
+            continue;
+        };
+        let Ok(document) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        if document["mode"] == "ephemeral" {
+            return repo_root.join(".pointbreak/data");
+        }
+        break;
+    }
+    common_dir_store(repo_root)
 }
 
 #[allow(dead_code)]
@@ -66,6 +343,7 @@ pub fn dump_repo() -> git_repo::GitRepo {
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
     repo.commit_all("base");
     repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    install_empty_ready_change_store(repo.path());
     repo
 }
 
@@ -82,9 +360,22 @@ pub fn superseded_dump_repo() -> (git_repo::GitRepo, String, String) {
         .as_str()
         .expect("first revision id")
         .to_owned();
+    let first_cursor = first["reviewCursor"]["token"]
+        .as_str()
+        .expect("first review cursor")
+        .to_owned();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
     let second: serde_json::Value = serde_json::from_slice(
-        &pointbreak(["capture", "--repo", repo_arg, "--supersedes", &first_id]).stdout,
+        &pointbreak([
+            "capture",
+            "--repo",
+            repo_arg,
+            "--review-cursor",
+            &first_cursor,
+            "--advance",
+            "replace",
+        ])
+        .stdout,
     )
     .expect("second capture emits JSON");
     let second_id = second["revision"]["id"]

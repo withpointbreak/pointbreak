@@ -30,6 +30,19 @@ pub(super) struct StoreArgs {
     command: StoreCommand,
 }
 
+impl StoreArgs {
+    pub(super) fn is_capability_exempt(&self) -> bool {
+        matches!(
+            self.command,
+            StoreCommand::Paths(_)
+                | StoreCommand::Mode(_)
+                | StoreCommand::List(_)
+                | StoreCommand::Forget(_)
+                | StoreCommand::Unlink(_)
+        )
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum StoreCommand {
     Status(StoreStatusArgs),
@@ -113,7 +126,7 @@ struct StoreModeArgs {
     format_args: output::FormatArgs,
 }
 
-/// Fold a legacy per-worktree store into the shared common-dir store.
+/// Reserved store-transfer syntax. Change-ready transfer is not active yet.
 #[derive(Debug, Args)]
 struct StoreMigrateArgs {
     #[arg(long, default_value = ".")]
@@ -135,7 +148,7 @@ struct StoreMigrateArgs {
     format_args: output::FormatArgs,
 }
 
-/// Promote this clone to the opt-in user-level family store tier.
+/// Reserved family-transfer syntax. Change-ready transfer is not active yet.
 #[derive(Debug, Args)]
 struct StoreLinkArgs {
     /// Family slug placing this clone's store at `<pointbreak-home-root>/stores/<slug>/`.
@@ -819,6 +832,15 @@ fn migrate(
     args: StoreMigrateArgs,
     stdout: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if matches!(
+        pointbreak::session::store_capability_for_repo(&args.repo)?.status,
+        pointbreak::session::StoreCapabilityStatus::Ready { .. }
+    ) {
+        return Err(
+            "change_store_transfer_unavailable; exact Change store transfer is not activated"
+                .into(),
+        );
+    }
     let span = tracing::info_span!("shore.store.migrate");
     let _entered = span.enter();
     let result = migrate_store_to_common_dir(
@@ -887,6 +909,18 @@ fn render_store_migrate_text(body: &StoreMigrateBody) -> String {
 }
 
 fn link(args: StoreLinkArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn std::error::Error>> {
+    if args.slug.is_none() {
+        return Err("a family slug is required; pass `pointbreak store link <slug>`".into());
+    }
+    if matches!(
+        pointbreak::session::store_capability_for_repo(&args.repo)?.status,
+        pointbreak::session::StoreCapabilityStatus::Ready { .. }
+    ) {
+        return Err(
+            "change_store_transfer_unavailable; exact Change store transfer is not activated"
+                .into(),
+        );
+    }
     let span = tracing::info_span!("shore.store.link");
     let _entered = span.enter();
     let trust = discover_trust_set(&args.repo);

@@ -52,27 +52,6 @@ fn validation_exact_revision_targets_a_superseded_revision() {
     let (repo, first_id, second_id) = support::superseded_dump_repo();
     let repo_arg = repo.path().to_str().unwrap();
 
-    let legacy = pointbreak([
-        "validation",
-        "add",
-        "--repo",
-        repo_arg,
-        "--revision",
-        &first_id,
-        "--track",
-        "human:legacy",
-        "--check-name",
-        "legacy",
-        "--status",
-        "passed",
-    ]);
-    assert!(
-        legacy.status.success(),
-        "stderr:\n{}",
-        String::from_utf8_lossy(&legacy.stderr)
-    );
-    assert_eq!(parse_json(&legacy.stdout)["revisionId"], second_id);
-
     let exact = pointbreak([
         "validation",
         "add",
@@ -93,6 +72,7 @@ fn validation_exact_revision_targets_a_superseded_revision() {
         String::from_utf8_lossy(&exact.stderr)
     );
     assert_eq!(parse_json(&exact.stdout)["revisionId"], first_id);
+    assert_ne!(first_id, second_id);
 }
 
 #[test]

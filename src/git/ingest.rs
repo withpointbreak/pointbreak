@@ -1,13 +1,16 @@
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::error::{Result, ShoreError};
 use crate::git::command::{git_worktree_root, run_git, run_git_allowing_statuses};
 use crate::git::patch::{PatchFile, parse_patch};
 use crate::git::raw::{RawFile, parse_raw};
-use crate::model::{DiffFile, DiffSnapshot, FileId, FileMetadataKind, FileMetadataRow, ReviewId};
+use crate::model::{
+    DiffFile, DiffSnapshot, FileId, FileMetadataKind, FileMetadataRow, FileStatus, ReviewId,
+};
 use crate::session::worktree_fingerprint_for_files;
 
 // Counts the `git` subprocess spawns on the capture-time diff funnel
@@ -193,7 +196,14 @@ fn diff_files_for_args(
 ) -> Result<Vec<DiffFile>> {
     #[cfg(test)]
     record_diff_funnel_spawn();
-    let raw_output = run_git(repo, diff_args(&["--raw", "-z"], endpoint_args, pathspecs))?;
+    // Freeze full object identities in every snapshot. Git reports an all-zero
+    // new-side oid for mutable worktree entries; those are hydrated below from
+    // the exact path bytes. Full-width committed and mutable oids then compare
+    // directly when a reviewed worktree is committed unchanged.
+    let raw_output = run_git(
+        repo,
+        diff_args(&["--raw", "-z", "--abbrev=64"], endpoint_args, pathspecs),
+    )?;
     #[cfg(test)]
     record_diff_funnel_spawn();
     let patch_output = run_git(repo, diff_args(&["--patch"], endpoint_args, pathspecs))?;
@@ -243,7 +253,9 @@ pub(crate) fn capture_worktree_diff_files_from_base(
     if options.include_untracked {
         files.extend(synthesize_untracked_files(repo, &options.pathspecs)?);
     }
-    filter_helper_paths(files, repo, &options.helper_paths)
+    let mut files = filter_helper_paths(files, repo, &options.helper_paths)?;
+    hydrate_worktree_new_oids(repo, &mut files)?;
+    Ok(files)
 }
 
 fn capture_worktree_diff_files_scoped_with_untracked(
@@ -255,6 +267,7 @@ fn capture_worktree_diff_files_scoped_with_untracked(
     if include_untracked {
         files.extend(synthesize_untracked_files(repo, pathspecs)?);
     }
+    hydrate_worktree_new_oids(repo, &mut files)?;
     Ok(files)
 }
 
@@ -309,7 +322,76 @@ pub(crate) fn capture_unstaged_diff_files(
     if include_untracked {
         files.extend(synthesize_untracked_files(repo, &options.pathspecs)?);
     }
-    filter_helper_paths(files, repo, &options.helper_paths)
+    let mut files = filter_helper_paths(files, repo, &options.helper_paths)?;
+    hydrate_worktree_new_oids(repo, &mut files)?;
+    Ok(files)
+}
+
+/// Replace Git's mutable-worktree all-zero new-side oid with the blob oid Git
+/// would write for the exact path bytes. `hash-object` does not write the
+/// object without `-w`; `--path` applies the repository's clean filters so the
+/// result matches a later `git add`/commit. Deletions have no new side and
+/// submodules already carry their commit identity from the raw diff.
+fn hydrate_worktree_new_oids(repo: &Path, files: &mut [DiffFile]) -> Result<()> {
+    for file in files {
+        if file.status == FileStatus::Deleted || file.is_submodule {
+            continue;
+        }
+        let missing = file
+            .new_oid
+            .as_deref()
+            .is_none_or(|oid| oid.chars().all(|character| character == '0'));
+        if !missing {
+            continue;
+        }
+        let path = file.new_path.as_deref().ok_or_else(|| {
+            ShoreError::Message("mutable diff entry has no new-side path".to_owned())
+        })?;
+        let absolute = repo.join(path);
+        let metadata = fs::symlink_metadata(&absolute).map_err(|error| {
+            ShoreError::Message(format!("inspect mutable path {path}: {error}"))
+        })?;
+        let output = if metadata.file_type().is_symlink() {
+            let target = fs::read_link(&absolute).map_err(|error| {
+                ShoreError::Message(format!("read mutable symlink {path}: {error}"))
+            })?;
+            #[cfg(unix)]
+            let target_bytes = {
+                use std::os::unix::ffi::OsStrExt as _;
+                target.as_os_str().as_bytes().to_vec()
+            };
+            #[cfg(not(unix))]
+            let target_bytes = target.to_string_lossy().as_bytes().to_vec();
+            crate::git::backend::subprocess::run_git_with_stdin(
+                repo,
+                ["hash-object", "--stdin"],
+                &target_bytes,
+                &[0],
+            )?
+        } else {
+            run_git(
+                repo,
+                [
+                    OsString::from("hash-object"),
+                    OsString::from(format!("--path={path}")),
+                    OsString::from("--"),
+                    OsString::from(path),
+                ],
+            )?
+        };
+        let oid = std::str::from_utf8(&output.stdout)
+            .map_err(|error| {
+                ShoreError::Message(format!("hash-object output is not utf-8: {error}"))
+            })?
+            .trim();
+        if oid.is_empty() {
+            return Err(ShoreError::Message(format!(
+                "hash-object returned no oid for mutable path {path}"
+            )));
+        }
+        file.new_oid = Some(oid.to_owned());
+    }
+    Ok(())
 }
 
 fn synthesize_untracked_files(repo: &Path, pathspecs: &[String]) -> Result<Vec<DiffFile>> {
@@ -677,6 +759,51 @@ mod tests {
         assert!(file.old_oid.as_deref().is_some_and(|oid| !oid.is_empty()));
         assert!(file.new_oid.as_deref().is_some_and(|oid| !oid.is_empty()));
         assert!(files.iter().all(|file| !file.synthetic));
+    }
+
+    #[test]
+    fn mutable_worktree_new_oid_matches_the_later_commit_blob() {
+        let repo = TestRepo::new();
+        repo.write("file.txt", "one\n");
+        repo.commit_all("base");
+        let base_oid = repo.rev_parse("HEAD");
+        repo.write("file.txt", b"two\0binary\n");
+
+        let mutable = capture_worktree_diff_files(repo.path()).unwrap();
+        let mutable_oid = mutable[0].new_oid.clone().unwrap();
+        assert!(!mutable_oid.chars().all(|character| character == '0'));
+
+        repo.commit_all("materialize");
+        let commit_oid = repo.rev_parse("HEAD");
+        let committed =
+            capture_commit_range_diff_files(repo.path(), &base_oid, &commit_oid, &[]).unwrap();
+
+        assert_eq!(mutable_oid, committed[0].new_oid.clone().unwrap());
+        assert_eq!(mutable, committed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mutable_symlink_new_oid_matches_the_later_commit_blob() {
+        use std::os::unix::fs::symlink;
+
+        let repo = TestRepo::new();
+        repo.write("target-a.txt", "a\n");
+        symlink("target-a.txt", repo.path().join("link.txt")).unwrap();
+        repo.commit_all("base");
+        let base_oid = repo.rev_parse("HEAD");
+        fs::remove_file(repo.path().join("link.txt")).unwrap();
+        symlink("target-b.txt", repo.path().join("link.txt")).unwrap();
+
+        let mutable = capture_worktree_diff_files(repo.path()).unwrap();
+        let mutable_oid = mutable[0].new_oid.clone().unwrap();
+        repo.commit_all("retarget link");
+        let commit_oid = repo.rev_parse("HEAD");
+        let committed =
+            capture_commit_range_diff_files(repo.path(), &base_oid, &commit_oid, &[]).unwrap();
+
+        assert_eq!(mutable_oid, committed[0].new_oid.clone().unwrap());
+        assert_eq!(mutable, committed);
     }
 
     #[test]

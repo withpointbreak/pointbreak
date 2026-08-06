@@ -1,344 +1,50 @@
 mod support;
 
-use serde_json::Value;
 use support::git_repo::GitRepo;
-use support::pointbreak;
+use support::{install_empty_ready_change_store, pointbreak, pointbreak_unprepared};
 
-fn parse_json(bytes: &[u8]) -> Value {
-    serde_json::from_slice(bytes).expect("valid json on stdout")
-}
-
-/// Commit a base version of a file, then leave a modified working-tree copy so a
-/// capture has a diff to record.
-fn repo_with_pending_change() -> GitRepo {
+fn repo() -> GitRepo {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
     repo.commit_all("base");
-    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
     repo
 }
 
 #[test]
-fn store_migrate_folds_worktree_local_into_common_dir() {
-    let repo = repo_with_pending_change();
+fn store_migrate_refuses_l0_with_typed_change_migration_guidance() {
+    let repo = repo();
+    let output =
+        pointbreak_unprepared(["store", "migrate", "--repo", repo.path().to_str().unwrap()]);
 
-    // Seed a pre-flip worktree-local store: capture while the worktree is
-    // ephemeral (so the write lands in `.pointbreak/data`), then restore the shared
-    // default so the migration runs against a non-ephemeral worktree carrying a
-    // legacy worktree-local store.
-    let ephemeral = pointbreak([
-        "store",
-        "mode",
-        "ephemeral",
-        "--repo",
-        repo.path().to_str().unwrap(),
-    ]);
+    assert!(!output.status.success());
     assert!(
-        ephemeral.status.success(),
-        "ephemeral mode: {}",
-        String::from_utf8_lossy(&ephemeral.stderr)
-    );
-    let capture = pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]);
-    assert!(
-        capture.status.success(),
-        "capture: {}",
-        String::from_utf8_lossy(&capture.stderr)
-    );
-    let shared = pointbreak([
-        "store",
-        "mode",
-        "shared",
-        "--repo",
-        repo.path().to_str().unwrap(),
-    ]);
-    assert!(
-        shared.status.success(),
-        "shared mode: {}",
-        String::from_utf8_lossy(&shared.stderr)
-    );
-
-    // The seed landed worktree-local; the shared common-dir store is still empty.
-    assert!(repo.path().join(".pointbreak/data/events").is_dir());
-
-    let migrate = pointbreak(["store", "migrate", "--repo", repo.path().to_str().unwrap()]);
-    assert!(
-        migrate.status.success(),
-        "migrate: {}",
-        String::from_utf8_lossy(&migrate.stderr)
-    );
-
-    let stdout = String::from_utf8(migrate.stdout).unwrap();
-    let json = parse_json(stdout.as_bytes());
-    assert_eq!(json["schema"], "pointbreak.store-migrate");
-    // DiagnosticDocument flattens the body to the TOP LEVEL (the `store status`
-    // tests assert this shape) — assert top-level fields, NOT json["body"][…].
-    assert!(json["eventsCreated"].as_u64().unwrap() >= 1);
-    // The default run reports the source honestly un-retired (additive field).
-    assert_eq!(json["sourceRetired"], Value::Bool(false));
-    // No raw private paths leak into the JSON (the export-manifest discipline).
-    assert!(!stdout.contains(".pointbreak/data"));
-    assert!(!stdout.contains(".git"));
-    // Non-destructive: the worktree-local store still exists after migration.
-    assert!(repo.path().join(".pointbreak/data/events").is_dir());
-    // The folded events now resolve from the shared common-dir store.
-    assert!(
-        support::common_dir_store(repo.path())
-            .join("events")
-            .is_dir()
-    );
-}
-
-#[test]
-fn store_migrate_retire_source_completes_in_one_command() {
-    let repo = repo_with_pending_change();
-    let repo_arg = repo.path().to_str().unwrap().to_owned();
-
-    // Seed a pre-flip worktree-local store, same shape as the fold test.
-    assert!(
-        pointbreak(["store", "mode", "ephemeral", "--repo", &repo_arg])
-            .status
-            .success()
-    );
-    assert!(
-        pointbreak(["capture", "--repo", &repo_arg, "--allow-empty"])
-            .status
-            .success()
-    );
-    assert!(
-        pointbreak(["store", "mode", "shared", "--repo", &repo_arg])
-            .status
-            .success()
-    );
-    assert!(repo.path().join(".pointbreak/data/events").is_dir());
-
-    let migrate = pointbreak(["store", "migrate", "--retire-source", "--repo", &repo_arg]);
-    assert!(
-        migrate.status.success(),
-        "migrate --retire-source: {}",
-        String::from_utf8_lossy(&migrate.stderr)
-    );
-
-    let stdout = String::from_utf8(migrate.stdout).unwrap();
-    let json = parse_json(stdout.as_bytes());
-    assert_eq!(json["sourceRetired"], Value::Bool(true));
-    assert!(json["verifiedEvents"].as_u64().unwrap() >= 1);
-    assert!(json["verifiedArtifacts"].as_u64().unwrap() >= 1);
-    // No raw private paths leak into the JSON.
-    assert!(!stdout.contains(".pointbreak/data"));
-    assert!(!stdout.contains(".git"));
-    // The verified fold retired the source in the same command.
-    assert!(!repo.path().join(".pointbreak/data").exists());
-    assert!(
-        support::common_dir_store(repo.path())
-            .join("events")
-            .is_dir()
-    );
-}
-
-#[test]
-fn store_migrate_excluded_fixture_paths_unblock_the_gate() {
-    let repo = repo_with_pending_change();
-    let repo_arg = repo.path().to_str().unwrap().to_owned();
-    // A committed private-key fixture would flag the worktree `block`; the
-    // committed exclude config is the targeted alternative to the blanket
-    // --include-ephemeral override.
-    repo.write(
-        "fixtures/dev.pem",
-        "-----BEGIN PRIVATE KEY-----\nredacted\n",
-    );
-    repo.write(
-        ".pointbreak/sensitivity.json",
-        r#"{"schema":"shore.sensitivity-config","version":1,"excludeGlobs":["fixtures/**"]}"#,
-    );
-    repo.commit_all("fixture and exclude config");
-
-    // Seed a worktree-local store to migrate.
-    assert!(
-        pointbreak(["store", "mode", "ephemeral", "--repo", &repo_arg])
-            .status
-            .success()
-    );
-    assert!(
-        pointbreak(["capture", "--repo", &repo_arg, "--allow-empty"])
-            .status
-            .success()
-    );
-    assert!(
-        pointbreak(["store", "mode", "shared", "--repo", &repo_arg])
-            .status
-            .success()
-    );
-
-    // Without the exclude config this would refuse; with it, the gate passes
-    // and the migrate output carries the audit count.
-    let migrate = pointbreak(["store", "migrate", "--repo", &repo_arg]);
-    assert!(
-        migrate.status.success(),
-        "excluded fixture must unblock the gate: {}",
-        String::from_utf8_lossy(&migrate.stderr)
-    );
-    let json = parse_json(&migrate.stdout);
-    assert_eq!(json["sensitivityExcludedPathCount"], 1);
-}
-
-#[test]
-fn store_migrate_block_refusal_names_the_targeted_exclude_alternative() {
-    let repo = repo_with_pending_change();
-    let repo_arg = repo.path().to_str().unwrap().to_owned();
-    repo.write("keys/dev.pem", "-----BEGIN PRIVATE KEY-----\nredacted\n");
-    repo.commit_all("sensitive fixture");
-    assert!(
-        pointbreak(["store", "mode", "ephemeral", "--repo", &repo_arg])
-            .status
-            .success()
-    );
-    assert!(
-        pointbreak(["capture", "--repo", &repo_arg, "--allow-empty"])
-            .status
-            .success()
-    );
-    assert!(
-        pointbreak(["store", "mode", "shared", "--repo", &repo_arg])
-            .status
-            .success()
-    );
-
-    let migrate = pointbreak(["store", "migrate", "--repo", &repo_arg]);
-    assert!(!migrate.status.success(), "a block finding still refuses");
-    let stderr = String::from_utf8_lossy(&migrate.stderr);
-    assert!(
-        stderr.contains("sensitivity.json"),
-        "the refusal names the targeted alternative: {stderr}"
-    );
-    assert!(
-        stderr.contains("store status --show-paths"),
-        "the refusal points at the command that lists the matched files: {stderr}"
-    );
-    assert!(
-        stderr.contains("include-ephemeral"),
-        "the blanket override stays documented: {stderr}"
-    );
-}
-
-#[test]
-fn store_migrate_include_ephemeral_omits_the_excluded_count() {
-    let repo = repo_with_pending_change();
-    let repo_arg = repo.path().to_str().unwrap().to_owned();
-    assert!(
-        pointbreak(["store", "mode", "ephemeral", "--repo", &repo_arg])
-            .status
-            .success()
-    );
-    assert!(
-        pointbreak(["capture", "--repo", &repo_arg])
-            .status
-            .success()
-    );
-
-    // --include-ephemeral skips the gate scan entirely, so no count is
-    // reported (absent, not zero — zero would claim a scan ran).
-    let migrate = pointbreak([
-        "store",
-        "migrate",
-        "--include-ephemeral",
-        "--repo",
-        &repo_arg,
-    ]);
-    assert!(
-        migrate.status.success(),
-        "override migrate: {}",
-        String::from_utf8_lossy(&migrate.stderr)
-    );
-    let json = parse_json(&migrate.stdout);
-    assert!(
-        json.get("sensitivityExcludedPathCount").is_none(),
-        "the count is omitted when the scan did not run: {json}"
-    );
-}
-
-#[test]
-fn store_migrate_refuses_ephemeral_without_include_ephemeral() {
-    let repo = repo_with_pending_change();
-    let capture = pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]);
-    assert!(
-        capture.status.success(),
-        "capture: {}",
-        String::from_utf8_lossy(&capture.stderr)
-    );
-    // Mark the worktree ephemeral (the `store mode` CLI is the user path).
-    let mode = pointbreak([
-        "store",
-        "mode",
-        "ephemeral",
-        "--repo",
-        repo.path().to_str().unwrap(),
-    ]);
-    assert!(
-        mode.status.success(),
-        "mode: {}",
-        String::from_utf8_lossy(&mode.stderr)
-    );
-
-    let migrate = pointbreak(["store", "migrate", "--repo", repo.path().to_str().unwrap()]);
-    assert!(
-        !migrate.status.success(),
-        "ephemeral migrate must fail without the override"
-    );
-    let stderr = String::from_utf8(migrate.stderr).unwrap();
-    assert!(
-        stderr.contains("ephemeral"),
-        "refusal names the opt-out: {stderr}"
-    );
-
-    // The override succeeds.
-    let forced = pointbreak([
-        "store",
-        "migrate",
-        "--include-ephemeral",
-        "--repo",
-        repo.path().to_str().unwrap(),
-    ]);
-    assert!(
-        forced.status.success(),
-        "override migrate: {}",
-        String::from_utf8_lossy(&forced.stderr)
-    );
-}
-
-#[test]
-fn text_store_migrate_digest_reports_fold_receipt() {
-    let repo = repo_with_pending_change();
-    let path = repo.path().to_str().unwrap();
-
-    // Same seeding as the fold test: capture into an ephemeral worktree-local
-    // store, then flip back to shared so migrate has a source to fold.
-    assert!(
-        pointbreak(["store", "mode", "ephemeral", "--repo", path])
-            .status
-            .success()
-    );
-    assert!(pointbreak(["capture", "--repo", path]).status.success());
-    assert!(
-        pointbreak(["store", "mode", "shared", "--repo", path])
-            .status
-            .success()
-    );
-
-    let output = pointbreak(["store", "migrate", "--repo", path, "--format", "text"]);
-
-    assert!(
-        output.status.success(),
+        String::from_utf8_lossy(&output.stderr).contains("migration_required"),
         "stderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8(output.stdout).unwrap();
+}
+
+#[test]
+fn store_migrate_refuses_l2_until_exact_transfer_is_activated_without_mutation() {
+    let repo = repo();
+    install_empty_ready_change_store(repo.path());
+    let marker = repo.path().join(".pointbreak/data/keep.txt");
+    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::write(&marker, b"keep").unwrap();
+
+    let output = pointbreak([
+        "store",
+        "migrate",
+        "--retire-source",
+        "--repo",
+        repo.path().to_str().unwrap(),
+    ]);
+
+    assert!(!output.status.success());
     assert!(
-        !stdout.contains("\"schema\""),
-        "text lane is not JSON: {stdout}"
+        String::from_utf8_lossy(&output.stderr).contains("change_store_transfer_unavailable"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(stdout.contains("folded"), "fold receipt verb: {stdout}");
-    assert!(stdout.contains("events"), "event counts: {stdout}");
-    assert!(stdout.contains("artifact"), "artifact counts: {stdout}");
-    assert!(stdout.contains("verified"), "verification line: {stdout}");
-    assert!(stdout.lines().count() <= 6, "digest is bounded: {stdout}");
+    assert_eq!(std::fs::read(marker).unwrap(), b"keep");
 }

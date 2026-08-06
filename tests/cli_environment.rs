@@ -24,6 +24,11 @@ const PRODUCT_SELECTORS: [&str; 16] = [
 ];
 
 fn command(args: &[&str]) -> Command {
+    if args.first() == Some(&"capture")
+        && let Some(index) = args.iter().position(|arg| *arg == "--repo")
+    {
+        support::install_empty_ready_change_store(std::path::Path::new(args[index + 1]));
+    }
     let mut command = Command::new(env!("CARGO_BIN_EXE_pointbreak"));
     command.args(args);
     for selector in PRODUCT_SELECTORS {

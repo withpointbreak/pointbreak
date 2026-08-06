@@ -276,7 +276,7 @@ fn active_first_write_falls_back_to_truth_with_one_actionable_hint() {
         String::from_utf8_lossy(&capture.stderr)
     );
     let document = parse_single_json(&capture.stdout);
-    assert_eq!(document["schema"], "pointbreak.review-capture");
+    assert_eq!(document["schema"], "pointbreak.change-capture-receipt.v1");
     let stderr = String::from_utf8_lossy(&capture.stderr);
     assert_eq!(
         stderr
@@ -320,7 +320,7 @@ fn namespace_conflict_preserves_authoritative_capture_and_both_roots() {
     );
     assert_eq!(
         parse_single_json(&capture.stdout)["schema"],
-        "pointbreak.review-capture"
+        "pointbreak.change-capture-receipt.v1"
     );
     assert!(
         String::from_utf8_lossy(&capture.stderr).contains("derived acceleration is unavailable")
@@ -355,7 +355,7 @@ fn busy_governed_writer_degrades_without_blocking_or_bootstrapping() {
     );
     assert_eq!(
         parse_single_json(&capture.stdout)["schema"],
-        "pointbreak.review-capture"
+        "pointbreak.change-capture-receipt.v1"
     );
     let stderr = String::from_utf8_lossy(&capture.stderr);
     assert_eq!(
@@ -392,7 +392,7 @@ fn explicit_off_write_creates_no_derived_artifact_or_hint() {
     assert!(capture.status.success());
     assert_eq!(
         parse_single_json(&capture.stdout)["schema"],
-        "pointbreak.review-capture"
+        "pointbreak.change-capture-receipt.v1"
     );
     assert!(!String::from_utf8_lossy(&capture.stderr).contains("derived acceleration"));
     for path in [

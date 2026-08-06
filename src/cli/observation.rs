@@ -33,12 +33,16 @@ struct ObservationAddArgs {
     repo: PathBuf,
 
     /// Captured revision head seed.
-    #[arg(long, conflicts_with = "exact_revision")]
+    #[arg(long, conflicts_with_all = ["exact_revision", "review_cursor"])]
     revision: Option<String>,
 
     /// Exact captured revision without following supersession.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "review_cursor")]
     exact_revision: Option<String>,
+
+    /// Exact safe writer cursor emitted by `pointbreak change select` or capture.
+    #[arg(long)]
+    review_cursor: Option<String>,
 
     /// Review lane that owns this observation.
     #[arg(long)]
@@ -103,8 +107,12 @@ struct ObservationListArgs {
     #[arg(long, default_value = ".")]
     repo: PathBuf,
 
-    #[arg(long)]
+    #[arg(long, conflicts_with = "exact_revision")]
     revision: Option<String>,
+
+    /// Exact captured revision without following Change replacement edges.
+    #[arg(long)]
+    exact_revision: Option<String>,
 
     /// Only list observations from this review lane.
     #[arg(long)]
@@ -266,6 +274,9 @@ fn observation_add_options(
     if let Some(exact_revision) = &args.exact_revision {
         options = options.with_exact_revision_id(RevisionId::new(ids.rev(exact_revision)?));
     }
+    if let Some(review_cursor) = args.review_cursor {
+        options = options.with_review_cursor(review_cursor);
+    }
     if let Some(body) = body {
         options = options.with_body(body);
     }
@@ -300,12 +311,19 @@ fn observation_add_options(
 fn observation_list_options(
     args: ObservationListArgs,
 ) -> Result<ObservationListOptions, Box<dyn std::error::Error>> {
+    if args.exact_revision.is_some() {
+        crate::cli::common::require_ready_change_reader(&args.repo)?;
+    }
     let mut options = ObservationListOptions::new(&args.repo)
         .with_include_body(args.include_body)
         .with_trust_set(crate::cli::common::discover_trust_set(&args.repo));
     if let Some(revision) = &args.revision {
         let ids = crate::cli::id_resolver::IdResolver::new(&args.repo);
         options = options.with_revision_id(RevisionId::new(ids.rev(revision)?));
+    }
+    if let Some(revision) = &args.exact_revision {
+        let ids = crate::cli::id_resolver::IdResolver::new(&args.repo);
+        options = options.with_exact_revision_id(RevisionId::new(ids.rev(revision)?));
     }
     if let Some(track) = args.track {
         options = options.with_track(track);

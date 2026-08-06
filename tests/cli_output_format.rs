@@ -95,7 +95,10 @@ fn json_stays_the_machine_document_default() {
     let capture_stdout = String::from_utf8_lossy(&capture.stdout);
     let capture_doc: serde_json::Value =
         serde_json::from_slice(&capture.stdout).expect("flag-less capture emits JSON");
-    assert_eq!(capture_doc["schema"], "pointbreak.review-capture");
+    assert_eq!(
+        capture_doc["schema"],
+        "pointbreak.change-capture-receipt.v1"
+    );
     assert!(
         capture_stdout.starts_with("{\""),
         "flag-less capture stays compact JSON: {capture_stdout}"

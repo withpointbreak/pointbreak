@@ -4,12 +4,15 @@ pub(in crate::session) mod assessment;
 mod association;
 pub(in crate::session) mod attention;
 mod capture;
+mod change;
 mod change_migration;
 mod change_read;
 mod commit_range_liveness;
 mod event_signature;
+mod fact_port;
 mod history;
 mod ingest;
+mod landing;
 mod review_cursor;
 mod revision_list;
 mod revision_projection;
@@ -23,6 +26,34 @@ pub(in crate::session) mod validation;
 
 pub(in crate::session) mod input_request;
 pub(in crate::session) mod observation;
+
+fn capable_read_store_and_events(
+    repo: &std::path::Path,
+) -> crate::error::Result<(
+    crate::session::store::resolution::ReadStore,
+    Vec<crate::session::event::ShoreEvent>,
+)> {
+    if crate::session::activated_store_capability_for_repo(repo)?.is_some() {
+        let state = change_reader_state_for_repo(repo)?;
+        let ready =
+            state
+                .ready()
+                .ok_or_else(|| {
+                    crate::error::ShoreError::WorkflowInputInvalid {
+                reason:
+                    "migration_in_progress; normal product reads require complete Change authority"
+                        .to_owned(),
+            }
+                })?;
+        let events = ready.events().to_vec();
+        let (store, _) = crate::session::store::resolution::resolve_change_read_store(repo)?;
+        Ok((store, events))
+    } else {
+        let store = crate::session::store::resolution::resolve_read_store(repo)?;
+        let events = crate::session::EventStore::from_backend(store.backend()).list_events()?;
+        Ok((store, events))
+    }
+}
 
 pub use artifact_removal::{
     CompactOptions, CompactResult, RemoveOptions, RemoveResult, RemoveSelector, RemovedContent,
@@ -53,6 +84,22 @@ pub use capture::{
     CaptureDiffstat, CaptureOptions, CaptureResult, CommitRangeSpec, RootCommitSpec, StagedSpec,
     UnstagedSpec, WorktreeSpec, capture_review, capture_worktree_review, diffstat_from_files,
 };
+pub use change::{
+    CHANGE_OPERATION_SCHEMA_V1, ChangeAdvanceV1, ChangeCaptureOptions, ChangeCaptureReceiptV1,
+    ChangeCaptureRevisionV1, ChangeCreateOptions, ChangeLinkOptions, ChangeMembershipOptions,
+    ChangeMembershipWithdrawalOptions, ChangeOperationEventOutcomeV1,
+    ChangeOperationEventReceiptV1, ChangeOperationReceiptV1, ChangeRelationOptions,
+    ChangeRelationWithdrawalOptions, assert_change_revision_relation, capture_change_revision,
+    create_change, join_revision_to_change, link_changes, withdraw_change_revision_relation,
+    withdraw_revision_from_change,
+};
+pub use change_migration::{
+    BULK_ADOPTION_DRY_RUN_SCHEMA_V1, BULK_ADOPTION_OWNER_DECISIONS_SCHEMA_V1,
+    BulkAdoptionDryRunAnomalyV1, BulkAdoptionDryRunChangeV1, BulkAdoptionDryRunDocumentV1,
+    BulkAdoptionDryRunOptions, BulkAdoptionDryRunRootV1, BulkAdoptionOverlapIdentityDecisionV1,
+    BulkAdoptionOwnerDecisionManifestV1, BulkAdoptionRetainedAllocationV1,
+    BulkAdoptionRetainedManifestV1, dry_run_bulk_adoption,
+};
 pub use change_read::{ChangeReaderReadyV1, ChangeReaderStateV1, change_reader_state_for_repo};
 pub use commit_range_liveness::{
     CommitGraphCondition, CommitLiveness, LivenessEnrichment, REF_REWRITTEN_CODE, RefContinuity,
@@ -62,6 +109,7 @@ pub use commit_range_liveness::{
 pub use event_signature::{
     EventSignatureRecordOptions, EventSignatureRecordResult, record_event_signature,
 };
+pub use fact_port::{FactPortOptions, FactPortResultV1, port_review_fact};
 #[cfg(test)]
 pub(crate) use history::history_base_from_events;
 pub use history::{
@@ -89,6 +137,7 @@ pub use input_request::{
     InputRequestStatus, InputRequestStatusFilter, InputRequestTargetSelector, InputRequestView,
     fetch_input_request, list_input_requests, open_input_request, respond_input_request,
 };
+pub use landing::{LandCommitOptions, LandCommitResultV1, land_commit};
 pub use observation::{
     ObservationAddOptions, ObservationAddResult, ObservationListOptions, ObservationListResult,
     ObservationStatus, ObservationTargetSelector, ObservationView, list_observations,
@@ -97,8 +146,12 @@ pub use observation::{
 pub use review_cursor::{
     CommitProofStateV1, CommitSourceStateV1, REVIEW_CURSOR_SCHEMA_V1, ReviewCursorRefusalV1,
     ReviewCursorSelectionV1, ReviewCursorV1, ReviewSourceBindingV1, ReviewSourceFingerprintV1,
-    ReviewSourcePathStateV1, WorktreeSourceStateV1, change_graph_token, select_review_cursor,
-    validate_review_cursor_for_write,
+    ReviewSourcePathStateV1, ReviewSourceRequestV1, WorktreeSourceStateV1, change_graph_token,
+    review_source_binding, select_review_cursor, validate_review_cursor_for_write,
+};
+pub(crate) use review_cursor::{
+    exact_revision_from_review_cursor, exact_revision_from_transition_cursor,
+    validate_review_cursor_for_transition,
 };
 pub(crate) use revision_list::list_revisions_from_selected_events;
 pub use revision_list::{

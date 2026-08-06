@@ -173,8 +173,9 @@ Release `0.7.0` is a one-release hard cutover. Before its first use:
 
 Rollback is the inverse filesystem move performed while writers remain stopped. Pointbreak provides
 no runtime fallback, compatibility alias, automatic migration, migration CLI, or dual read/write
-window. The existing `pointbreak store migrate` command serves an older Pointbreak store-topology
-change; it does not perform this `0.7.0` namespace cutover.
+window. The reserved `pointbreak store migrate` syntax describes an older Pointbreak store-topology
+change; it does not perform this `0.7.0` namespace cutover and is fail-closed while exact Change
+store transfer is unavailable.
 
 ## Supported platforms
 

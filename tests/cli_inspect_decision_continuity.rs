@@ -199,8 +199,20 @@ fn detail_retains_successive_and_withdrawn_commit_and_ref_edges() {
     repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
     repo.commit_all("landing two");
     record_commit(&repo, "HEAD");
-    repo.git(["branch", "release/reviewed"]);
     let second_oid = repo.git(["rev-parse", "HEAD"]).stdout.trim().to_owned();
+    run_json(&[
+        "association",
+        "record",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--track",
+        "agent:test",
+        "--ref",
+        "main",
+        "--head",
+        &second_oid,
+    ]);
+    repo.git(["branch", "release/reviewed"]);
     run_json(&[
         "association",
         "record",
@@ -441,14 +453,14 @@ fn generated_matrix_preserves_decision_continuity_without_selecting_uncertain_wi
     );
     assert_eq!(
         target_display(&matrix.ids.staged_revision)["workLabel"],
-        serde_json::json!({"text": "staged changes", "source": "source_fallback"})
+        serde_json::json!({
+            "text": "staged changes on second-current-ref",
+            "source": "current_ref"
+        })
     );
     assert_eq!(
         target_display(&matrix.ids.unstaged_revision)["workLabel"],
-        serde_json::json!({
-            "text": "unstaged changes on feat/source-matrix",
-            "source": "current_ref"
-        })
+        serde_json::json!({"text": "unstaged changes", "source": "source_fallback"})
     );
     assert_eq!(
         target_display(&matrix.ids.detached_revision)["workLabel"],

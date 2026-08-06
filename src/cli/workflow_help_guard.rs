@@ -81,7 +81,7 @@ fn long_help_gives_direct_recovery_pointers() {
         "revision list",
         "--revision",
         "--replaces",
-        "association record",
+        "association land",
     ] {
         assert!(
             help.contains(pointer),
@@ -89,8 +89,8 @@ fn long_help_gives_direct_recovery_pointers() {
         );
     }
     assert!(
-        help.contains("never a recapture"),
-        "root long help states the same-revision landing rule:\n{help}"
+        help.contains("commit landed after review"),
+        "root long help states the proof-first landing route:\n{help}"
     );
 }
 
@@ -124,6 +124,7 @@ fn command_inventory_is_exactly_the_shipped_flat_grammar() {
         "change",
         "diff",
         "endorse",
+        "fact",
         "history",
         "identity",
         "input-request",

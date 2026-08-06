@@ -12,10 +12,12 @@ use pointbreak::keys::{
 use pointbreak::model::{ActorId, ReviewEndpoint, Side};
 use pointbreak::session::{
     ActorAttributesMap, AssessmentAddOptions, AssociateCommitOptions, AssociateRefOptions,
-    BestEffortSkipSink, BodyContentType, CaptureOptions, CurrentAssessmentStatus, DelegationMap,
-    InputRequestOpenOptions, InputRequestRespondOptions, ObservationAddOptions, RemoveOptions,
-    TrustSet, ValidationAddOptions, WithdrawCommitOptions, WithdrawRefOptions, is_agent_actor_id,
-    resolve_writer_actor_id,
+    BestEffortSkipSink, BodyContentType, CaptureOptions, ChangeCreateOptions, ChangeLinkOptions,
+    ChangeMembershipOptions, ChangeMembershipWithdrawalOptions, ChangeRelationOptions,
+    ChangeRelationWithdrawalOptions, CurrentAssessmentStatus, DelegationMap, FactPortOptions,
+    InputRequestOpenOptions, InputRequestRespondOptions, LandCommitOptions, ObservationAddOptions,
+    RemoveOptions, TrustSet, ValidationAddOptions, WithdrawCommitOptions, WithdrawRefOptions,
+    is_agent_actor_id, resolve_writer_actor_id,
 };
 
 /// Clamp a review title for a single-line text digest, shared by the
@@ -384,6 +386,27 @@ pub(crate) fn surface_best_effort_skip(skip: &SigningSkip, stderr: &mut dyn Writ
     }
 }
 
+pub(crate) fn require_ready_change_reader(
+    repo: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let state = pointbreak::session::change_reader_state_for_repo(repo)?;
+    if state.ready().is_some() {
+        return Ok(());
+    }
+    let guidance = match state.capability.status {
+        pointbreak::session::StoreCapabilityStatus::MigrationRequired => {
+            "migration_required; exact Change reads require an explicit completed store migration"
+        }
+        pointbreak::session::StoreCapabilityStatus::MigrationInProgress { .. } => {
+            "migration_in_progress; exact Change reads refuse partial capability authority"
+        }
+        pointbreak::session::StoreCapabilityStatus::Ready { .. } => {
+            "complete Change authority is unavailable"
+        }
+    };
+    Err(guidance.into())
+}
+
 /// A write builder that can adopt a resolved signer either strict or best-effort.
 /// Implemented for the six review-write option builders so `apply_resolved_signer`
 /// is generic over them.
@@ -421,10 +444,18 @@ impl_signable_options!(
     InputRequestRespondOptions,
     AssessmentAddOptions,
     AssociateCommitOptions,
+    FactPortOptions,
+    LandCommitOptions,
     WithdrawCommitOptions,
     AssociateRefOptions,
     WithdrawRefOptions,
     RemoveOptions,
+    ChangeCreateOptions,
+    ChangeMembershipOptions,
+    ChangeMembershipWithdrawalOptions,
+    ChangeRelationOptions,
+    ChangeRelationWithdrawalOptions,
+    ChangeLinkOptions,
 );
 
 /// Pure resolution seam (env values AND the keystore root threaded in for

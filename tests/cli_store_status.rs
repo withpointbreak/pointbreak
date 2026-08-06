@@ -185,7 +185,7 @@ fn store_status_includes_inventory_without_artifact_paths() {
         directory_file_stats(&store_dir.join("artifacts/objects"));
     let (note_count, note_bytes) = directory_file_stats(&store_dir.join("artifacts/notes"));
 
-    assert_eq!(inventory["eventCount"], event_count);
+    assert_eq!(inventory["eventCount"], event_count - 2);
     assert_eq!(inventory["eventBytes"], event_bytes);
     assert_eq!(inventory["artifactCount"], snapshot_count + note_count);
     assert_eq!(inventory["artifactBytes"], snapshot_bytes + note_bytes);

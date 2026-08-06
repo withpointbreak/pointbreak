@@ -425,6 +425,10 @@ and the same `observationId` and `eventId` as the first call.
 
 ## Family store — link, capture, status, unlink
 
+> **Not executable in the current transition build.** This walkthrough is retained as the acceptance
+> contract for reactivation. `store link` currently fails closed because exact Change store transfer
+> is unavailable; do not bypass that fence or install a test capability fixture in a real store.
+
 **Goal.** Confirm the opt-in user-level family store: `pointbreak store link` promotes a clone to a
 machine-wide store at `<pointbreak-home>/stores/<slug>/`, `pointbreak store status` reports the family
 placement, captures write there while linked, and `pointbreak store unlink` detaches without moving data.

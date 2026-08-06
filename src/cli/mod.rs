@@ -20,6 +20,7 @@ pub(crate) mod common;
 mod derived_read;
 mod diff;
 mod endorse;
+mod fact;
 mod history;
 mod id_resolver;
 mod identity;
@@ -76,10 +77,12 @@ https://github.com/withpointbreak/pointbreak/blob/main/docs/getting-started.md
 
 Recovery:
   wrong repository or store    pointbreak store paths --repo <repo> --format text
-  more than one revision       pointbreak revision list, then pass --revision <id>
+  migration required           inspect state with pointbreak change profile --repo <repo>
+  find legacy captured work    pointbreak revision list, then pass --revision <id>
+  select exact current work    pointbreak change select <change-id>
   replace an earlier call      pointbreak assessment add --replaces <assessment-id>
-  commit landed after capture  pointbreak association record --commit <oid>
-                               (same revision — a landing is never a recapture)";
+  commit landed after review   pointbreak association land --review-cursor <cursor>
+                               --track <track> --commit <oid>";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -123,6 +126,8 @@ enum Command {
     Change(change::ChangeArgs),
     Diff(diff::DiffArgs),
     Endorse(endorse::EndorseArgs),
+    /// Record explicit context continuity between exact Revisions.
+    Fact(fact::FactArgs),
     History(history::HistoryArgs),
     /// Inspect actor identity, delegation, and attestations
     Identity(identity::IdentityArgs),
@@ -155,7 +160,7 @@ where
 {
     let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
     let invalid_subcommand_hint = invalid_subcommand_hint(&args);
-    let cli = match Cli::try_parse_from(args) {
+    let cli = match Cli::try_parse_from(args.clone()) {
         Ok(cli) => cli,
         Err(error) => {
             let exit = if matches!(
@@ -181,17 +186,71 @@ where
     {
         let mut cli = cli;
         if let Some(encoded) = cli.longitudinal_counting.take() {
-            return run_counted_cli(cli, stdout, stderr, &encoded);
+            return run_counted_cli(cli, stdout, stderr, &encoded, &args);
         }
-        result_exit_code(run_cli(cli, stdout, stderr), stderr)
+        result_exit_code(run_cli(cli, stdout, stderr, &args), stderr)
     }
 
     #[cfg(not(feature = "longitudinal-counting"))]
-    match run_cli(cli, stdout, stderr) {
+    match run_cli(cli, stdout, stderr, &args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             let _ = writeln!(stderr, "{error}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// Fence ordinary public product commands at the L2 capability boundary.
+///
+/// The `change` family owns the typed profile/migration-plan responses and its
+/// writers already require L2. Store placement/key/version operations do not
+/// consume Journal semantics. Inspector exposes the typed v2 profile while its
+/// semantic routes apply their own capability gates. Every other public command
+/// must refuse L0/M1 before its adapter can read or mutate domain state.
+fn preflight_public_store_capability(
+    cli: &Cli,
+    args: &[OsString],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let exempt = match &cli.command {
+        Command::Change(_)
+        | Command::Identity(_)
+        | Command::Inspect(_)
+        | Command::Key(_)
+        | Command::Version(_) => true,
+        Command::Store(args) => args.is_capability_exempt(),
+        _ => false,
+    };
+    if exempt {
+        return Ok(());
+    }
+
+    let repo = args
+        .windows(2)
+        .find(|window| window[0] == "--repo")
+        .map(|window| std::path::PathBuf::from(&window[1]))
+        .or_else(|| {
+            args.iter().find_map(|arg| {
+                arg.to_str()
+                    .and_then(|arg| arg.strip_prefix("--repo="))
+                    .map(std::path::PathBuf::from)
+            })
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let Some(capability) = pointbreak::session::activated_store_capability_for_repo(repo)? else {
+        return Err(
+            "migration_required; this command requires an explicit completed store migration"
+                .into(),
+        );
+    };
+    match capability.status {
+        pointbreak::session::StoreCapabilityStatus::Ready { .. } => Ok(()),
+        pointbreak::session::StoreCapabilityStatus::MigrationRequired => Err(
+            "migration_required; this command requires an explicit completed store migration"
+                .into(),
+        ),
+        pointbreak::session::StoreCapabilityStatus::MigrationInProgress { .. } => {
+            Err("migration_in_progress; this command refuses partial Change authority".into())
         }
     }
 }
@@ -216,6 +275,7 @@ fn run_counted_cli(
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
     encoded: &str,
+    raw_args: &[OsString],
 ) -> ExitCode {
     let request = URL_SAFE_NO_PAD
         .decode(encoded)
@@ -249,7 +309,7 @@ fn run_counted_cli(
     };
     let _guard = scope.enter();
     let mut counting_stdout = LongitudinalCountingWriter { inner: stdout };
-    let result = run_cli(cli, &mut counting_stdout, stderr);
+    let result = run_cli(cli, &mut counting_stdout, stderr, raw_args);
     let mut context = request.context;
     context.success = result.is_ok();
     let receipt = scope
@@ -469,21 +529,24 @@ fn run_cli(
     cli: Cli,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
+    raw_args: &[OsString],
 ) -> Result<(), Box<dyn std::error::Error>> {
     // The single validation boundary for the git-backend selector: every
     // subcommand flows through here, so an invalid `POINTBREAK_GIT_BACKEND`
     // surfaces one actionable error before any git operation runs.
     pointbreak::git::validate_backend_selector()?;
     crate::cli_tracing::init_tracing(&cli.tracing)?;
+    preflight_public_store_capability(&cli, raw_args)?;
 
     let result = match cli.command {
         Command::Assessment(args) => assessment::run(*args, stdout, stderr),
         Command::Association(args) => association::run(*args, stdout, stderr),
         Command::Attention(args) => attention::run(args, stdout),
         Command::Capture(args) => capture::run(args, &cli.tracing, stdout, stderr),
-        Command::Change(args) => change::run(args, stdout),
+        Command::Change(args) => change::run(args, stdout, stderr),
         Command::Diff(args) => diff::run(args, stdout),
         Command::Endorse(args) => endorse::run(args, stdout, stderr),
+        Command::Fact(args) => fact::run(args, stdout, stderr),
         Command::History(args) => history::run(args, stdout),
         Command::Identity(args) => identity::run(args, stdout, stderr),
         Command::InputRequest(args) => input_request::run(*args, stdout, stderr),
@@ -562,6 +625,90 @@ mod change_reader_cli_tests {
         assert_eq!(value["schema"], "pointbreak.store-migration-required");
         assert_eq!(value["state"], "migration_required");
         assert_eq!(stdout.iter().filter(|byte| **byte == b'\n').count(), 1);
+    }
+
+    #[test]
+    fn exact_review_command_refuses_l0_without_mutation() {
+        let repo = tempfile::tempdir().unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["config", "user.name", "Pointbreak Test"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["config", "user.email", "pointbreak@example.test"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["config", "commit.gpgsign", "false"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(repo.path().join("sample.txt"), "base\n").unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["add", "sample.txt"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            std::process::Command::new("git")
+                .args(["commit", "--quiet", "-m", "base"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(repo.path().join("sample.txt"), "changed\n").unwrap();
+        let before = pointbreak::session::store_capability_for_repo(repo.path())
+            .unwrap()
+            .cursor;
+        let revision = format!("rev:sha256:{}", "1".repeat(64));
+        let args = vec![
+            "pointbreak".to_owned(),
+            "observation".to_owned(),
+            "list".to_owned(),
+            "--repo".to_owned(),
+            repo.path().display().to_string(),
+            "--exact-revision".to_owned(),
+            revision,
+        ];
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            run_with_io(args, &mut stdout, &mut stderr),
+            ExitCode::FAILURE
+        );
+        assert!(stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&stderr).contains("migration_required"),
+            "{}",
+            String::from_utf8_lossy(&stderr)
+        );
+        let after = pointbreak::session::store_capability_for_repo(repo.path())
+            .unwrap()
+            .cursor;
+        assert_eq!(before, after);
     }
 }
 

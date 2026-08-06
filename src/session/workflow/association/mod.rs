@@ -28,7 +28,8 @@ use crate::session::observation::{
 };
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::resolution::{
-    prepare_write_landing, resolve_read_store, resolve_write_store, resolve_write_validation_store,
+    prepare_write_landing, resolve_change_write_store, resolve_read_store, resolve_write_store,
+    resolve_write_validation_store,
 };
 use crate::session::{
     BestEffortSkipSink, CurrentCommitAssociation, CurrentRefAssociation, EventSigningOptions,
@@ -50,6 +51,14 @@ macro_rules! association_write_builders {
         impl $name {
             pub fn with_revision_id(mut self, id: RevisionId) -> Self {
                 self.revision_id = Some(id);
+                self
+            }
+            pub fn with_exact_revision_id(mut self, id: RevisionId) -> Self {
+                self.exact_revision_id = Some(id);
+                self
+            }
+            pub fn with_review_cursor(mut self, cursor: impl Into<String>) -> Self {
+                self.review_cursor = Some(cursor.into());
                 self
             }
             pub fn with_track(mut self, track: impl Into<String>) -> Self {
@@ -89,6 +98,8 @@ macro_rules! association_write_builders {
 pub struct AssociateCommitOptions {
     repo: PathBuf,
     revision_id: Option<RevisionId>,
+    exact_revision_id: Option<RevisionId>,
+    review_cursor: Option<String>,
     track: Option<String>,
     actor_id: Option<ActorId>,
     signing: EventSigningOptions,
@@ -99,6 +110,8 @@ pub struct AssociateCommitOptions {
 pub struct WithdrawCommitOptions {
     repo: PathBuf,
     revision_id: Option<RevisionId>,
+    exact_revision_id: Option<RevisionId>,
+    review_cursor: Option<String>,
     track: Option<String>,
     actor_id: Option<ActorId>,
     signing: EventSigningOptions,
@@ -109,6 +122,8 @@ pub struct WithdrawCommitOptions {
 pub struct AssociateRefOptions {
     repo: PathBuf,
     revision_id: Option<RevisionId>,
+    exact_revision_id: Option<RevisionId>,
+    review_cursor: Option<String>,
     track: Option<String>,
     actor_id: Option<ActorId>,
     signing: EventSigningOptions,
@@ -120,6 +135,8 @@ pub struct AssociateRefOptions {
 pub struct WithdrawRefOptions {
     repo: PathBuf,
     revision_id: Option<RevisionId>,
+    exact_revision_id: Option<RevisionId>,
+    review_cursor: Option<String>,
     track: Option<String>,
     actor_id: Option<ActorId>,
     signing: EventSigningOptions,
@@ -131,11 +148,18 @@ impl AssociateCommitOptions {
         Self {
             repo: repo.as_ref().to_path_buf(),
             revision_id: None,
+            exact_revision_id: None,
+            review_cursor: None,
             track: None,
             actor_id: None,
             signing: EventSigningOptions::default(),
             commit: commit.into(),
         }
+    }
+
+    pub(crate) fn with_signing_options(mut self, signing: EventSigningOptions) -> Self {
+        self.signing = signing;
+        self
     }
 }
 
@@ -243,6 +267,8 @@ impl WithdrawCommitOptions {
         Self {
             repo: repo.as_ref().to_path_buf(),
             revision_id: None,
+            exact_revision_id: None,
+            review_cursor: None,
             track: None,
             actor_id: None,
             signing: EventSigningOptions::default(),
@@ -260,6 +286,8 @@ impl AssociateRefOptions {
         Self {
             repo: repo.as_ref().to_path_buf(),
             revision_id: None,
+            exact_revision_id: None,
+            review_cursor: None,
             track: None,
             actor_id: None,
             signing: EventSigningOptions::default(),
@@ -274,6 +302,8 @@ impl WithdrawRefOptions {
         Self {
             repo: repo.as_ref().to_path_buf(),
             revision_id: None,
+            exact_revision_id: None,
+            review_cursor: None,
             track: None,
             actor_id: None,
             signing: EventSigningOptions::default(),
@@ -340,6 +370,8 @@ pub fn associate_commit(options: AssociateCommitOptions) -> Result<AssociateComm
     let outcome = record_association(
         &options.repo,
         options.revision_id.as_ref(),
+        options.exact_revision_id.as_ref(),
+        options.review_cursor.as_deref(),
         options.track.as_deref(),
         options.actor_id.as_ref(),
         &options.signing,
@@ -568,6 +600,8 @@ pub fn withdraw_commit(options: WithdrawCommitOptions) -> Result<WithdrawCommitR
     let outcome = record_association(
         &options.repo,
         options.revision_id.as_ref(),
+        options.exact_revision_id.as_ref(),
+        options.review_cursor.as_deref(),
         options.track.as_deref(),
         options.actor_id.as_ref(),
         &options.signing,
@@ -605,6 +639,8 @@ pub fn associate_ref(options: AssociateRefOptions) -> Result<AssociateRefResult>
     let outcome = record_association(
         &options.repo,
         options.revision_id.as_ref(),
+        options.exact_revision_id.as_ref(),
+        options.review_cursor.as_deref(),
         options.track.as_deref(),
         options.actor_id.as_ref(),
         &options.signing,
@@ -646,6 +682,8 @@ pub fn withdraw_ref(options: WithdrawRefOptions) -> Result<WithdrawRefResult> {
     let outcome = record_association(
         &options.repo,
         options.revision_id.as_ref(),
+        options.exact_revision_id.as_ref(),
+        options.review_cursor.as_deref(),
         options.track.as_deref(),
         options.actor_id.as_ref(),
         &options.signing,
@@ -749,9 +787,15 @@ struct AssociationWriteOutcome {
 /// payload (track-free), then build the envelope (track on it only), sign,
 /// record unconditionally, and re-project state. Records always — withdrawals
 /// never check their referent.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the shared association seam keeps its three mutually exclusive selectors explicit"
+)]
 fn record_association<P, F>(
     repo: &Path,
     revision_id: Option<&RevisionId>,
+    exact_revision_id: Option<&RevisionId>,
+    review_cursor: Option<&str>,
     track: Option<&str>,
     actor_id: Option<&ActorId>,
     signing: &EventSigningOptions,
@@ -761,7 +805,17 @@ where
     P: EventPayload,
     F: FnOnce(&RevisionId, &Path) -> Result<(EventType, String, P)>,
 {
-    let write_store = resolve_write_store(repo)?;
+    if review_cursor.is_some() && (revision_id.is_some() || exact_revision_id.is_some()) {
+        return Err(ShoreError::WorkflowInputInvalid {
+            reason: "--review-cursor cannot be combined with another Revision selector".to_owned(),
+        });
+    }
+    let change_write = review_cursor.is_some();
+    let write_store = if change_write {
+        resolve_change_write_store(repo)?
+    } else {
+        resolve_write_store(repo)?
+    };
     let worktree_root = write_store.worktree_root();
     let store_dir = write_store.store_dir();
     let storage = LocalStorage::new(store_dir);
@@ -769,11 +823,26 @@ where
 
     let event_store = write_store.event_store()?;
 
-    let validation_store = resolve_write_validation_store(repo)?;
-    let validation_events = validation_store.validation_events()?;
+    let validation_events = if change_write {
+        crate::session::change_reader_state_for_repo(repo)?
+            .ready()
+            .ok_or_else(|| ShoreError::WorkflowInputInvalid {
+                reason: "complete Change authority is unavailable".to_owned(),
+            })?
+            .events()
+            .to_vec()
+    } else {
+        resolve_write_validation_store(repo)?.validation_events()?
+    };
+    let cursor_revision = review_cursor
+        .map(|cursor| super::exact_revision_from_review_cursor(repo, cursor))
+        .transpose()?;
     let resolved = resolve_revision(
         &validation_events,
-        RevisionSelection::from_revision_seed(revision_id),
+        RevisionSelection::from_revision_options(
+            revision_id,
+            cursor_revision.as_ref().or(exact_revision_id),
+        )?,
         &CurrentRevisionContext::for_repo(repo)?,
         RevisionScope::default(),
     )?;
@@ -802,7 +871,11 @@ where
     sign_event_if_requested(&mut event, signing)?;
     let event_id = event.event_id.clone();
 
-    let outcome = event_store.record_event_once(&event)?;
+    let outcome = if change_write {
+        event_store.record_change_event_once(&event)?
+    } else {
+        event_store.record_event_once(&event)?
+    };
     let mut events_created_by_type = BTreeMap::new();
     let (events_created, events_existing) = match outcome {
         EventWriteOutcome::Created => {
@@ -812,7 +885,11 @@ where
         EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => (0, 1),
     };
 
-    let events = event_store.list_events()?;
+    let events = if change_write {
+        event_store.list_change_events()?
+    } else {
+        event_store.list_events()?
+    };
     let state = SessionState::from_events(&events)?;
     storage.write_json_atomic(
         &store_dir.join("state.json"),

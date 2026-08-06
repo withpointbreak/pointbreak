@@ -368,26 +368,32 @@ mod tests {
     }
 
     #[test]
-    fn activated_store_status_fails_with_the_typed_capability_diagnostic() {
-        for state in [CapabilityFixtureState::M1, CapabilityFixtureState::L2] {
-            let repo = TestRepo::new();
-            repo.write("README.md", "base\n");
-            repo.commit_all("base");
-            let resolution = resolve_store(repo.path()).unwrap();
-            write_capability_fixture_for_test(resolution.backend().journal().as_ref(), state)
-                .unwrap();
+    fn partial_store_status_fails_while_complete_store_status_succeeds() {
+        let repo = TestRepo::new();
+        repo.write("README.md", "base\n");
+        repo.commit_all("base");
+        let resolution = resolve_store(repo.path()).unwrap();
+        write_capability_fixture_for_test(
+            resolution.backend().journal().as_ref(),
+            CapabilityFixtureState::M1,
+        )
+        .unwrap();
+        let error = store_status(StoreStatusOptions::new(repo.path()))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("migration_in_progress"));
+        assert!(!error.contains("json parse failed"));
 
-            let error = store_status(StoreStatusOptions::new(repo.path()))
-                .unwrap_err()
-                .to_string();
-
-            assert!(
-                error.contains("migration_in_progress")
-                    || error.contains("reader_upgrade_required"),
-                "unexpected capability diagnostic: {error}"
-            );
-            assert!(!error.contains("json parse failed"));
-        }
+        let ready = TestRepo::new();
+        ready.write("README.md", "base\n");
+        ready.commit_all("base");
+        let resolution = resolve_store(ready.path()).unwrap();
+        write_capability_fixture_for_test(
+            resolution.backend().journal().as_ref(),
+            CapabilityFixtureState::L2,
+        )
+        .unwrap();
+        store_status(StoreStatusOptions::new(ready.path())).unwrap();
     }
 
     #[test]

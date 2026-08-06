@@ -82,7 +82,7 @@ fn revision_list_emits_v1_json_with_freshness_metadata() {
             .unwrap()
             .starts_with("sha256:")
     );
-    assert_eq!(json["eventCount"], 2);
+    assert_eq!(json["eventCount"], 3);
     assert_eq!(json["revisionCount"], 1);
 
     let entry = &json["entries"][0];
@@ -248,7 +248,7 @@ fn revision_list_reads_capture_from_the_shared_store_after_seed_worktree_removed
     let stdout = String::from_utf8(output.stdout).unwrap();
     let json = parse_json(stdout.as_bytes());
 
-    assert_eq!(json["eventCount"], 2);
+    assert_eq!(json["eventCount"], 3);
     assert_eq!(json["revisionCount"], 1);
     assert_eq!(json["entries"][0]["revisionId"], capture["revision"]["id"]);
     assert!(json["diagnostics"].as_array().unwrap().is_empty());
@@ -285,7 +285,7 @@ fn revision_list_omits_ambient_ambiguous_current_diagnostic_from_shared_store() 
         .collect::<Vec<_>>();
 
     assert_ne!(first["revision"]["id"], second["revision"]["id"]);
-    assert_eq!(json["eventCount"], 4);
+    assert_eq!(json["eventCount"], 6);
     assert_eq!(json["revisionCount"], 2);
     assert!(ids.contains(&first["revision"]["id"].as_str().unwrap()));
     assert!(ids.contains(&second["revision"]["id"].as_str().unwrap()));
@@ -718,10 +718,18 @@ fn revision_list_filter_by_is_superseded() {
     let repo = modified_repo();
     let path = repo.path().to_str().unwrap();
     let first = parse_json(&pointbreak(["capture", "--repo", path]).stdout);
-    let predecessor = first["revision"]["id"].as_str().unwrap().to_owned();
+    let cursor = first["reviewCursor"]["token"].as_str().unwrap();
     // A successor must carry different content or it collapses to the same snapshot id.
     repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
-    pointbreak(["capture", "--repo", path, "--supersedes", &predecessor]);
+    pointbreak([
+        "capture",
+        "--repo",
+        path,
+        "--review-cursor",
+        cursor,
+        "--advance",
+        "replace",
+    ]);
 
     let json = parse_json(
         &pointbreak([
@@ -740,12 +748,11 @@ fn revision_list_filter_by_is_superseded() {
         .iter()
         .map(|e| e["revisionId"].as_str().unwrap())
         .collect();
-    assert_eq!(
-        ids,
-        vec![predecessor.as_str()],
-        "only the superseded revision matches"
+    assert!(
+        ids.is_empty(),
+        "legacy proposal supersession must not infer Change-scoped replacement: {ids:?}"
     );
-    assert_eq!(json["revisionCount"], 1);
+    assert_eq!(json["revisionCount"], 0);
 }
 
 #[test]

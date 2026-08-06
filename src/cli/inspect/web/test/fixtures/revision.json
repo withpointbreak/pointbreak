@@ -2,9 +2,9 @@
   "assessments": [
     {
       "assessment": "needs_changes",
-      "createdAt": "unix-ms:1782699185604",
-      "eventId": "evt:sha256:63d8e6174cc943ee8f049e5f6718ff385e763fd55731bb196de5fb2d3e90d4e0",
-      "id": "assess:sha256:96faccf9a8ca8174f227dd4d667fbe47a439ad8afa0259e01fb278685eff35da",
+      "createdAt": "2026-08-06T07:34:57.930Z",
+      "eventId": "evt:sha256:745e5a32c04d749af18d06784eff0c118b9e6b957cd74f75007476611143dbbb",
+      "id": "assess:sha256:66d1bb616102c528a7beb3ceb357cc7e0e24693c1cc8c873ecb129295d82a055",
       "relatedInputRequests": [],
       "relatedObservations": [],
       "replaces": [],
@@ -13,42 +13,42 @@
       "summaryContentHash": "sha256:3b82aae1ed24f6077df25a3b4e1b7a78f100716d5a6f6949a0610b05bc1f8959",
       "target": {
         "kind": "revision",
-        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
       },
       "trackId": "agent:codex",
       "verificationStatus": "unsigned",
       "writer": {
         "actorId": "actor:git-email:shore-tests@example.com",
         "producer": {
-          "name": "shore",
-          "version": "0.6.0"
+          "name": "pointbreak",
+          "version": "0.9.0"
         }
       }
     },
     {
       "assessment": "accepted",
-      "createdAt": "unix-ms:1782699185663",
-      "eventId": "evt:sha256:c347fc5a1aa67bb44823826b40fbec2c4b90a51a70d2a19b707b4027dcb6e992",
-      "id": "assess:sha256:e4d41bfb3b0794d99572242aa51e54f043ec18d2c6e81796b756c78e7f24d088",
+      "createdAt": "2026-08-06T07:34:57.985Z",
+      "eventId": "evt:sha256:3206215ff1e70f6d226da9fda82c92456d4283bc7d4959a342e5f760b0cdb473",
+      "id": "assess:sha256:f1652985b839295f8b4e5b25682806526a266412e2aa01fea81e165cb73b81f2",
       "relatedInputRequests": [],
       "relatedObservations": [],
       "replaces": [
-        "assess:sha256:96faccf9a8ca8174f227dd4d667fbe47a439ad8afa0259e01fb278685eff35da"
+        "assess:sha256:66d1bb616102c528a7beb3ceb357cc7e0e24693c1cc8c873ecb129295d82a055"
       ],
       "status": "current",
       "summary": "ship it",
       "summaryContentHash": "sha256:bef4261f394bf71fd2b565cd76396ac9ed7953f9110c69ee49d7a82871238fbf",
       "target": {
         "kind": "revision",
-        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
       },
       "trackId": "human:kevin",
       "verificationStatus": "unsigned",
       "writer": {
         "actorId": "actor:git-email:shore-tests@example.com",
         "producer": {
-          "name": "shore",
-          "version": "0.6.0"
+          "name": "pointbreak",
+          "version": "0.9.0"
         }
       }
     }
@@ -56,53 +56,38 @@
   "commitRange": {
     "anchored": false,
     "currentCommits": [],
-    "currentRefs": [
-      {
-        "headOid": "ffc93defe11730aca098a481cc1409e76a2d249f",
-        "refAssociationId": "assoc-ref:sha256:8cf5b7c262bda47de419467ebdb9efd271330961df637b1f61bec5586f21d14c",
-        "refName": "refs/heads/main"
-      }
-    ],
+    "currentRefs": [],
     "liveness": {
-      "perCommit": [],
-      "refContinuity": [
-        {
-          "continuity": "current",
-          "currentTipOid": "ffc93defe11730aca098a481cc1409e76a2d249f",
-          "recordedHeadOid": "ffc93defe11730aca098a481cc1409e76a2d249f",
-          "refName": "refs/heads/main"
-        }
-      ]
+      "perCommit": []
     },
     "withdrawnCommits": [],
     "withdrawnRefs": []
   },
   "currentAssessment": {
     "assessment": "accepted",
-    "assessmentId": "assess:sha256:e4d41bfb3b0794d99572242aa51e54f043ec18d2c6e81796b756c78e7f24d088",
+    "assessmentId": "assess:sha256:f1652985b839295f8b4e5b25682806526a266412e2aa01fea81e165cb73b81f2",
     "status": "resolved"
   },
   "diagnostics": [],
-  "eventCount": 8,
-  "projectionStamp": "sha256:e81f297a301ad7d9df6bd90ceeb257511f661b4fc108460e7f2bdc3f76de0164",
+  "eventCount": 7,
   "filters": {
     "includeBody": true,
-    "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+    "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
   },
   "inputRequests": [
     {
       "body": "should we ship this?",
       "bodyContentHash": "sha256:2155bb9c776e6b03017ab64a3f0645cf07a8ea05ba8f25570a58e429f0538cc5",
-      "createdAt": "unix-ms:1782699185547",
-      "eventId": "evt:sha256:f47630e3267794e65fdfb05aec8c6ced794b0c4931169b5ac8628608c42b069c",
-      "id": "input-request:sha256:04da631687810e9a5b9816ccc8140fb521dd2fadc5d9d235f7251e0c6046e25c",
+      "createdAt": "2026-08-06T07:34:57.881Z",
+      "eventId": "evt:sha256:219e371fd232c1e8ad6b51c8fbc70608711d1af857edf2ffb47fbdcbd26e904e",
+      "id": "input-request:sha256:755023af99e5c4414e19f346f74467a92223480d9b887dd35c48bdc3ee76dab1",
       "mode": "operative",
       "reasonCode": "manual_decision_required",
       "responses": [],
       "status": "open",
       "target": {
         "kind": "revision",
-        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
       },
       "title": "Need a decision",
       "trackId": "agent:codex",
@@ -110,8 +95,8 @@
       "writer": {
         "actorId": "actor:git-email:shore-tests@example.com",
         "producer": {
-          "name": "shore",
-          "version": "0.6.0"
+          "name": "pointbreak",
+          "version": "0.9.0"
         }
       }
     }
@@ -120,9 +105,9 @@
     {
       "body": "the return value changed",
       "bodyContentHash": "sha256:24c2131bbd193a1ae68ea4596caa49ae76e887925a7f14b3591963177cca2689",
-      "createdAt": "unix-ms:1782699185488",
-      "eventId": "evt:sha256:8ac34bc85b48ed6623660a174b024bd9099edd09877180bfa87101cc76ac6058",
-      "id": "obs:sha256:752a5b0ab30cfa3aa062bcf6f11b4c6ee3dcfd055207b6a995b91bf81ffec8d9",
+      "createdAt": "2026-08-06T07:34:57.833Z",
+      "eventId": "evt:sha256:e7e9b05f284749df82e29571889122b854b2662d97f0fcaa5fcba1a3dff914aa",
+      "id": "obs:sha256:1286226dea143a77ea90ed15fee929f4c1b4ae0cbdadf472db672886ab90e279",
       "status": "active",
       "supersedes": [],
       "tags": [],
@@ -130,7 +115,7 @@
         "endLine": 2,
         "filePath": "src/lib.rs",
         "kind": "range",
-        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd",
+        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4",
         "side": "new",
         "startLine": 2
       },
@@ -140,23 +125,24 @@
       "writer": {
         "actorId": "actor:git-email:shore-tests@example.com",
         "producer": {
-          "name": "shore",
-          "version": "0.6.0"
+          "name": "pointbreak",
+          "version": "0.9.0"
         }
       }
     }
   ],
+  "projectionStamp": "sha256:aae66335961f81296ac20b1c2251fb4de480307ff49e752e2c9544496b9f6b51",
   "revision": {
     "base": {
-      "commitOid": "ffc93defe11730aca098a481cc1409e76a2d249f",
+      "commitOid": "04f041b7dfbf5ae56e1ec79eaf6df94ef8517c9b",
       "kind": "git_commit",
       "treeOid": "8a6622c20e639e20b00100e48d58c3834a2db323"
     },
-    "id": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd",
+    "id": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4",
     "journalId": "journal:default",
-    "objectArtifactContentHash": "sha256:32161336d3627d277a7a5917abe2e2694edec4f3621dbf939bf22091b40e0871",
+    "objectArtifactContentHash": "sha256:a79c47e18b9a08f5bdd53ea5fcb867d856d1f38f96b297fa529afa610e2c361f",
     "objectId": "obj:sha256:38a493d2f09d6fde9d1dcac61a12c4ccc4de42a0b9c6829752d34cc648a9f9d7",
-    "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd",
+    "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4",
     "source": {
       "includeUntracked": false,
       "kind": "git_worktree",
@@ -164,19 +150,19 @@
     },
     "target": {
       "kind": "git_working_tree",
-      "worktreeRoot": "/private/var/folders/pn/96xv56rd1mj4g7mxpx1z9jx80000gn/T/.tmplPi8eZ"
+      "worktreeRoot": "/private/var/folders/pn/96xv56rd1mj4g7mxpx1z9jx80000gn/T/.tmp7yTBri"
     },
     "targetDisplay": {
       "head": {
-        "commitOidShort": "ffc93de",
-        "label": "ffc93de"
+        "commitOidShort": "04f041b",
+        "label": "04f041b"
       },
       "kind": "working_tree",
-      "label": ".tmplPi8eZ",
+      "label": ".tmp7yTBri",
       "pathPrivate": true,
       "workLabel": {
-        "source": "current_ref",
-        "text": "working-tree changes on main"
+        "source": "source_fallback",
+        "text": "working-tree changes"
       }
     },
     "verificationStatus": "unsigned"
@@ -192,14 +178,14 @@
       "relatedAssessmentIds": [],
       "relatedInputRequestIds": [],
       "relatedObservationIds": [
-        "obs:sha256:752a5b0ab30cfa3aa062bcf6f11b4c6ee3dcfd055207b6a995b91bf81ffec8d9"
+        "obs:sha256:1286226dea143a77ea90ed15fee929f4c1b4ae0cbdadf472db672886ab90e279"
       ],
       "relatedValidationCheckIds": [],
       "target": {
         "endLine": 2,
         "filePath": "src/lib.rs",
         "kind": "range",
-        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd",
+        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4",
         "side": "new",
         "startLine": 2
       }
@@ -212,13 +198,13 @@
       "projectionPhase": "narrative",
       "relatedAssessmentIds": [],
       "relatedInputRequestIds": [
-        "input-request:sha256:04da631687810e9a5b9816ccc8140fb521dd2fadc5d9d235f7251e0c6046e25c"
+        "input-request:sha256:755023af99e5c4414e19f346f74467a92223480d9b887dd35c48bdc3ee76dab1"
       ],
       "relatedObservationIds": [],
       "relatedValidationCheckIds": [],
       "target": {
         "kind": "revision",
-        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
       }
     },
     {
@@ -228,14 +214,14 @@
       "projectionOrder": 2,
       "projectionPhase": "narrative",
       "relatedAssessmentIds": [
-        "assess:sha256:96faccf9a8ca8174f227dd4d667fbe47a439ad8afa0259e01fb278685eff35da"
+        "assess:sha256:66d1bb616102c528a7beb3ceb357cc7e0e24693c1cc8c873ecb129295d82a055"
       ],
       "relatedInputRequestIds": [],
       "relatedObservationIds": [],
       "relatedValidationCheckIds": [],
       "target": {
         "kind": "revision",
-        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
       }
     },
     {
@@ -245,14 +231,14 @@
       "projectionOrder": 3,
       "projectionPhase": "narrative",
       "relatedAssessmentIds": [
-        "assess:sha256:e4d41bfb3b0794d99572242aa51e54f043ec18d2c6e81796b756c78e7f24d088"
+        "assess:sha256:f1652985b839295f8b4e5b25682806526a266412e2aa01fea81e165cb73b81f2"
       ],
       "relatedInputRequestIds": [],
       "relatedObservationIds": [],
       "relatedValidationCheckIds": [],
       "target": {
         "kind": "revision",
-        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
       }
     },
     {
@@ -265,11 +251,11 @@
       "relatedInputRequestIds": [],
       "relatedObservationIds": [],
       "relatedValidationCheckIds": [
-        "validation:sha256:6eacfb816ebdc508f4ffa46e13c4df7576702ad93e36521e276f4382b5553469"
+        "validation:sha256:13bade5c02021022d2feacb68487e8e6f72eb01c13b31cb15007017b6afd3f25"
       ],
       "target": {
         "kind": "revision",
-        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
       }
     },
     {
@@ -282,11 +268,11 @@
       "relatedInputRequestIds": [],
       "relatedObservationIds": [],
       "relatedValidationCheckIds": [
-        "validation:sha256:ad56705a57d1c3904835705d2e0aa49a1dc127ae0970ce34d88507497692b743"
+        "validation:sha256:3027fe3cfb7ac2650d0ba08341153988240ddef9e05ab2f87f233bafd022ef4c"
       ],
       "target": {
         "kind": "revision",
-        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
       }
     },
     {
@@ -307,7 +293,7 @@
       "target": {
         "filePath": "src/lib.rs",
         "kind": "file",
-        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
       }
     },
     {
@@ -505,14 +491,14 @@
   "validationChecks": [
     {
       "checkName": "cargo test",
-      "createdAt": "unix-ms:1782699185721",
-      "eventId": "evt:sha256:9f8c8a056ba071ec66e4a5586d0b1d49b8539101ed9cf04c274b659815a0cf3a",
-      "id": "validation:sha256:6eacfb816ebdc508f4ffa46e13c4df7576702ad93e36521e276f4382b5553469",
+      "createdAt": "2026-08-06T07:34:58.042Z",
+      "eventId": "evt:sha256:aacc7137dfecbcdd86267294aeaefde4a10dba9289a1db61cd34cf96f4dec05f",
+      "id": "validation:sha256:13bade5c02021022d2feacb68487e8e6f72eb01c13b31cb15007017b6afd3f25",
       "logArtifactContentHashes": [],
       "status": "passed",
       "target": {
         "kind": "revision",
-        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
       },
       "trackId": "agent:codex",
       "trigger": "manual",
@@ -520,23 +506,23 @@
       "writer": {
         "actorId": "actor:git-email:shore-tests@example.com",
         "producer": {
-          "name": "shore",
-          "version": "0.6.0"
+          "name": "pointbreak",
+          "version": "0.9.0"
         }
       }
     },
     {
       "checkName": "cargo clippy",
       "command": "cargo clippy -- -D warnings",
-      "createdAt": "unix-ms:1782699185782",
-      "eventId": "evt:sha256:cdf083ff5cb1d4bb44a3e9088a57c13c5d26c03e00ccc995dbdf54db2720f24b",
+      "createdAt": "2026-08-06T07:34:58.100Z",
+      "eventId": "evt:sha256:bd4c69859953db78e5d9832fcba2e5e171ca71fddbaf38c206fe88d31be686a2",
       "exitCode": 1,
-      "id": "validation:sha256:ad56705a57d1c3904835705d2e0aa49a1dc127ae0970ce34d88507497692b743",
+      "id": "validation:sha256:3027fe3cfb7ac2650d0ba08341153988240ddef9e05ab2f87f233bafd022ef4c",
       "logArtifactContentHashes": [],
       "status": "failed",
       "target": {
         "kind": "revision",
-        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
       },
       "trackId": "human:kevin",
       "trigger": "manual",
@@ -544,16 +530,16 @@
       "writer": {
         "actorId": "actor:git-email:shore-tests@example.com",
         "producer": {
-          "name": "shore",
-          "version": "0.6.0"
+          "name": "pointbreak",
+          "version": "0.9.0"
         }
       }
     }
   ],
   "validationContinuity": {
     "checks": {
-      "validation:sha256:6eacfb816ebdc508f4ffa46e13c4df7576702ad93e36521e276f4382b5553469": "current",
-      "validation:sha256:ad56705a57d1c3904835705d2e0aa49a1dc127ae0970ce34d88507497692b743": "outstanding"
+      "validation:sha256:13bade5c02021022d2feacb68487e8e6f72eb01c13b31cb15007017b6afd3f25": "current",
+      "validation:sha256:3027fe3cfb7ac2650d0ba08341153988240ddef9e05ab2f87f233bafd022ef4c": "outstanding"
     },
     "summary": {
       "outstandingErroredCount": 0,

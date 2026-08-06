@@ -8,6 +8,12 @@ introduces the five Review stages in plain language:
 
 ## Before You Start
 
+> **Change-store transition:** this source revision is an intentionally fail-closed intermediate
+> build. Normal Review reads and writes require an already activated Change-ready store. An untouched
+> or legacy store returns `migration_required`, and this build does not expose a public activation
+> command. The fresh-repository walkthrough below is therefore descriptive until activation ships;
+> do not copy test capability fixtures into a real store.
+
 Install Pointbreak by the supported route in [installation.md](installation.md), then verify the
 binary:
 

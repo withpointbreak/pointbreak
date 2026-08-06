@@ -203,6 +203,16 @@ fn normalize_cli_version(text: &str) -> String {
     )
 }
 
+fn normalize_generated_string(text: &str, key: &str, replacement: &str) -> String {
+    let prefix = format!("\"{key}\":\"");
+    replace_prefixed(
+        text,
+        &prefix,
+        &format!("\"{key}\":\"{replacement}"),
+        |rest| rest.find('"'),
+    )
+}
+
 fn normalize_build_identity(text: &str) -> String {
     let text = replace_prefixed(
         text,
@@ -248,9 +258,12 @@ fn normalize(raw: &str, repo_path: &str) -> String {
     let text = normalize_worktree_root(&text);
     let text = normalize_hashes(&text);
     let text = normalize_timestamps(&text);
+    let text = normalize_generated_string(&text, "operationId", "<operationId>");
+    let text = normalize_generated_string(&text, "token", "<reviewCursor>");
     let text = normalize_producer_for_historical_snapshot(&text);
     let text = normalize_cli_version(&text);
     let text = normalize_build_identity(&text);
+    let text = normalize_git_oid(&text, "base");
     let text = normalize_git_oid(&text, "commitOid");
     let text = normalize_git_oid(&text, "treeOid");
     // `headOid` rides on auto-recorded ref associations (the capture-time branch
@@ -283,6 +296,17 @@ fn normalizer_masks_store_and_context_identity_hashes() {
     assert!(normalized.contains(r#""storeIdentity":"store:sha256:<h>""#));
     assert!(normalized.contains(r#""contextIdentity":"context:sha256:<h>""#));
     assert!(!normalized.contains(&hash));
+}
+
+#[test]
+fn normalizer_masks_generated_operation_and_cursor_identity() {
+    let document = r#"{"operationId":"change-operation:abc","reviewCursor":{"token":"opaque"}}"#;
+    let normalized = normalize(document, "<absent>");
+
+    assert_eq!(
+        normalized,
+        r#"{"operationId":"<operationId>","reviewCursor":{"token":"<reviewCursor>"}}"#
+    );
 }
 
 #[test]

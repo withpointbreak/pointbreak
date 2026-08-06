@@ -1,8 +1,3 @@
-#![allow(
-    dead_code,
-    reason = "writer-dark relation constructors are not routed yet"
-)]
-
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]

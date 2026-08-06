@@ -14,7 +14,7 @@ use crate::session::event::ShoreEvent;
 use crate::session::store::backend::StoreBackend;
 use crate::session::store::capabilities::{
     JournalInspection, StoreCapabilityInspection, inspect_activated_journal_records,
-    inspect_change_reader_journal_records, inspect_journal_records, preflight_event_only_product,
+    inspect_change_reader_journal_records, inspect_journal_records, preflight_current_product,
 };
 use crate::session::store::event_store::EventStore;
 use crate::session::store::store_config::{StoreMode, resolve_family_binding, resolve_store_mode};
@@ -262,7 +262,7 @@ pub(crate) fn resolve_read_store_with_derived_access_profile(
 }
 
 fn read_store_from_resolution(resolution: StoreResolution) -> Result<ReadStore> {
-    preflight_event_only_product(resolution.backend().journal().as_ref())?;
+    preflight_current_product(resolution.backend().journal().as_ref())?;
     Ok(ReadStore { resolution })
 }
 
@@ -439,7 +439,24 @@ fn coordinate_event_store(
 pub(crate) fn resolve_write_store(repo: impl AsRef<Path>) -> Result<WriteStore> {
     let paths = RepositoryPaths::resolve(repo.as_ref())?;
     let resolution = resolve_store(repo.as_ref())?;
-    preflight_event_only_product(resolution.backend().journal().as_ref())?;
+    preflight_current_product(resolution.backend().journal().as_ref())?;
+    Ok(WriteStore {
+        store_dir: resolution.store_dir().to_path_buf(),
+        worktree_root: paths.worktree_root().to_path_buf(),
+        backend: resolution.backend().clone(),
+        derived_access_profile: resolution.derived_access_profile(),
+    })
+}
+
+/// Resolve the write landing for a workflow that requires a completed Change
+/// capability. Unlike [`resolve_write_store`], this bypasses the legacy writer
+/// gate and admits only a fully verified L2 root.
+pub(crate) fn resolve_change_write_store(repo: impl AsRef<Path>) -> Result<WriteStore> {
+    let paths = RepositoryPaths::resolve(repo.as_ref())?;
+    let resolution = resolve_store(repo.as_ref())?;
+    crate::session::store::capabilities::preflight_change_writer(
+        resolution.backend().journal().as_ref(),
+    )?;
     Ok(WriteStore {
         store_dir: resolution.store_dir().to_path_buf(),
         worktree_root: paths.worktree_root().to_path_buf(),
@@ -494,25 +511,18 @@ fn resolve_store_with_derived_access_profile(
     }
 
     // A non-ephemeral worktree that still carries a populated worktree-local
-    // `.pointbreak/data/` store predates the shared-store default. Direct the user to
-    // `pointbreak store migrate` rather than silently reading an empty common-dir store
-    // and orphaning the history. This guard lives HERE (resolve_store), not in
-    // RepositoryPaths::resolve, so the `pointbreak store migrate` command — which reads
-    // its source via the raw RepositoryPaths::resolve — is never blocked by it.
+    // `.pointbreak/data/` store predates the shared-store default. Never silently
+    // read an empty common-dir store and orphan that history. Exact transfer is
+    // deliberately unavailable during the minimum-reader transition, so both
+    // roots stay untouched until the capable transfer command is activated.
     if worktree_local_store_is_populated(paths.worktree_store()) {
         return Err(ShoreError::Message(
-            "a worktree-local .pointbreak/data/ review store from before the shared-store default \
-             was detected. Reads and writes now use the shared store under .git/pointbreak, so this \
-             worktree-local store is no longer read automatically. Complete the switch in one \
-             command with `pointbreak store migrate --retire-source`, which copies its events and \
-             artifacts into the shared store, independently verifies the fold, and then deletes \
-             .pointbreak/data/. Or take it in two steps: (1) run `pointbreak store migrate` to copy \
-             non-destructively, leaving .pointbreak/data/ in place so you can verify the result \
-             first; then (2) delete the .pointbreak/data/ directory. This message keeps appearing \
-             until .pointbreak/data/ is removed, by design, so the original store is never discarded \
-             before the migration is confirmed. (If this worktree is meant to stay isolated and \
-             discardable instead, run `pointbreak store mode ephemeral` and its .pointbreak/data/ store is \
-             used as-is.)"
+            "change_store_transfer_unavailable; a worktree-local .pointbreak/data/ review store \
+             from before the shared-store default was detected alongside the shared store under \
+             .git/pointbreak. Exact Change store transfer is not activated in this reader; keep both \
+             roots unchanged until a capable transfer command is available. If this worktree is \
+             intentionally isolated and discardable, `pointbreak store mode ephemeral` selects its \
+             .pointbreak/data/ store as-is."
                 .to_owned(),
         ));
     }
@@ -738,7 +748,7 @@ mod tests {
                     capability.status,
                     StoreCapabilityStatus::MigrationInProgress { .. }
                 )),
-                CapabilityFixtureState::L2 => {
+                CapabilityFixtureState::L2 | CapabilityFixtureState::EmptyL2 => {
                     assert!(matches!(
                         capability.status,
                         StoreCapabilityStatus::Ready { .. }
@@ -751,20 +761,29 @@ mod tests {
                 Some("review_change_revision_v1")
             );
 
-            let read_error = resolve_read_store(repo.path()).unwrap_err().to_string();
-            let off_error = resolve_read_store_with_derived_access_profile(
-                repo.path(),
-                DerivedAccessProfile::Off,
-            )
-            .unwrap_err()
-            .to_string();
-            let write_error = resolve_write_store(repo.path()).unwrap_err().to_string();
-            assert!(
-                read_error.contains("migration_in_progress")
-                    || read_error.contains("reader_upgrade_required")
-            );
-            assert_eq!(read_error, off_error);
-            assert_eq!(read_error, write_error);
+            if matches!(state, CapabilityFixtureState::M1) {
+                let read_error = resolve_read_store(repo.path()).unwrap_err().to_string();
+                let off_error = resolve_read_store_with_derived_access_profile(
+                    repo.path(),
+                    DerivedAccessProfile::Off,
+                )
+                .unwrap_err()
+                .to_string();
+                let write_error = resolve_write_store(repo.path()).unwrap_err().to_string();
+                assert!(read_error.contains("migration_in_progress"));
+                assert_eq!(read_error, off_error);
+                assert_eq!(read_error, write_error);
+            } else {
+                assert!(resolve_read_store(repo.path()).is_ok());
+                assert!(
+                    resolve_read_store_with_derived_access_profile(
+                        repo.path(),
+                        DerivedAccessProfile::Off,
+                    )
+                    .is_ok()
+                );
+                assert!(resolve_write_store(repo.path()).is_ok());
+            }
 
             // Placement diagnosis is repo-only: it reports where the store is
             // without opening the activated Journal and is classified separately.
@@ -857,7 +876,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_worktree_local_store_after_flip_returns_migrate_hint() {
+    fn legacy_worktree_local_store_after_flip_refuses_until_exact_transfer_activation() {
         // After the flip the default store is .git/pointbreak, so a populated
         // worktree-local .pointbreak/data/ is a pre-flip store that must be migrated —
         // never silently ignored in favor of an empty common-dir store. The guard is
@@ -870,14 +889,8 @@ mod tests {
         let err = resolve_store(repo.path())
             .expect_err("a populated worktree-local store after the flip must be a loud error");
         let message = err.to_string();
-        assert!(
-            message.contains("store migrate"),
-            "names the fix (`pointbreak store migrate`); got: {message}"
-        );
-        assert!(
-            message.contains("--retire-source"),
-            "names the one-command completion; got: {message}"
-        );
+        assert!(message.contains("change_store_transfer_unavailable"));
+        assert!(message.contains("keep both roots unchanged"));
         assert!(
             message.contains(".pointbreak/data"),
             "names the legacy worktree-local store; got: {message}"
@@ -1233,7 +1246,7 @@ mod tests {
     #[test]
     fn legacy_populated_store_outranks_a_family_binding() {
         use crate::session::store::store_config::write_common_dir_binding;
-        // A populated worktree-local .pointbreak/data AND a binding: the legacy migrate
+        // A populated worktree-local .pointbreak/data AND a binding: the exact-transfer
         // guard fires before the user-level arm.
         let repo = GitRepo::new();
         fs::create_dir_all(repo.path().join(".pointbreak/data/events")).unwrap();
@@ -1245,8 +1258,13 @@ mod tests {
         )
         .unwrap();
         let err = resolve_store(repo.path())
-            .expect_err("the legacy guard fires before the user-level arm");
-        assert!(err.to_string().contains("store migrate"), "got: {err}");
+            .expect_err("the exact-transfer guard fires before the user-level arm");
+        let message = err.to_string();
+        assert!(
+            message.contains("change_store_transfer_unavailable"),
+            "got: {err}"
+        );
+        assert!(message.contains("keep both roots unchanged"), "got: {err}");
     }
 
     #[test]

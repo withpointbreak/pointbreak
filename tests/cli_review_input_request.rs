@@ -833,7 +833,7 @@ fn input_request_respond_reason_inputs_are_mutually_exclusive() {
 }
 
 #[test]
-fn input_request_open_requires_revision_when_current_is_ambiguous() {
+fn input_request_open_uses_an_explicit_current_change_cursor_after_independent_captures() {
     let repo = modified_repo();
     let first =
         parse_json(&pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]).stdout);
@@ -842,11 +842,13 @@ fn input_request_open_requires_revision_when_current_is_ambiguous() {
         parse_json(&pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]).stdout);
     assert_ne!(first["revision"]["id"], second["revision"]["id"]);
 
-    let ambiguous = pointbreak([
+    let current = pointbreak([
         "input-request",
         "open",
         "--repo",
         repo.path().to_str().unwrap(),
+        "--review-cursor",
+        second["reviewCursor"]["token"].as_str().unwrap(),
         "--track",
         "human:kevin",
         "--title",
@@ -854,8 +856,15 @@ fn input_request_open_requires_revision_when_current_is_ambiguous() {
         "--reason",
         "manual-decision-required",
     ]);
-    assert!(!ambiguous.status.success());
-    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("multiple captured revisions"));
+    assert!(
+        current.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&current.stderr)
+    );
+    assert_eq!(
+        parse_json(&current.stdout)["revisionId"],
+        second["revision"]["id"]
+    );
 
     let explicit = pointbreak([
         "input-request",

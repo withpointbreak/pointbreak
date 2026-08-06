@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use clap::{Args, Subcommand};
+use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use pointbreak::documents::{
     AssociationComparisonDocumentV1, AssociationComparisonRefV1, AssociationComparisonStateV1,
     AssociationProofAvailabilityV1, ChangeDocumentFacadeV1, ChangeQueryUnavailableDocumentV1,
@@ -10,15 +10,25 @@ use pointbreak::documents::{
     RevisionResourceDocumentV1, RevisionResourceProjectionV1, RevisionResourceRefV1,
     revision_show_document_v3,
 };
-use pointbreak::model::{ChangeId, RevisionId, RevisionRefV1};
+use pointbreak::model::{
+    ActorId, ChangeId, ChangeIdentityDescriptorV1, ChangeMembershipClaimId,
+    ChangeRevisionRelationClaimId, RevisionId, RevisionRefV1,
+};
+use pointbreak::session::event::ChangeLinkRelationV1;
 use pointbreak::session::{
-    AssessmentRecordStatus, ChangeReaderReadyV1, ChangeReaderStateV1, ObservationStatus,
-    ReviewCursorV1, ReviewSourceBindingV1, RevisionShowOptions, SnapshotContentState,
-    change_reader_state_for_repo, select_review_cursor, show_revision_for_change_reader_ready,
-    validate_review_cursor_for_write,
+    AssessmentRecordStatus, BulkAdoptionDryRunOptions, BulkAdoptionOwnerDecisionManifestV1,
+    CaptureOptions, ChangeAdvanceV1, ChangeCaptureOptions, ChangeCreateOptions, ChangeLinkOptions,
+    ChangeMembershipOptions, ChangeMembershipWithdrawalOptions, ChangeReaderReadyV1,
+    ChangeReaderStateV1, ChangeRelationOptions, ChangeRelationWithdrawalOptions, ObservationStatus,
+    ReviewCursorV1, ReviewSourceBindingV1, ReviewSourceRequestV1, RevisionShowOptions,
+    SnapshotContentState, WorktreeSpec, assert_change_revision_relation, capture_change_revision,
+    change_reader_state_for_repo, create_change, dry_run_bulk_adoption, join_revision_to_change,
+    link_changes, review_source_binding, select_review_cursor,
+    show_revision_for_change_reader_ready, validate_review_cursor_for_write,
+    withdraw_change_revision_relation, withdraw_revision_from_change,
 };
 
-use crate::cli::output;
+use crate::cli::{common, output};
 
 #[derive(Debug, Args)]
 pub(super) struct ChangeArgs {
@@ -44,6 +54,191 @@ enum ChangeCommand {
     Resource(ExactReadArgs),
     /// Describe a separately identified comparison between two exact Revisions
     Interdiff(InterdiffArgs),
+    /// Create a stable Change identity in an activated store
+    Create(CreateArgs),
+    /// Adopt one existing exact Revision into a Change
+    Join(JoinArgs),
+    /// Withdraw one exact membership claim
+    WithdrawMembership(WithdrawMembershipArgs),
+    /// Assert one exact replacement edge inside a Change
+    AssertRelation(RelationArgs),
+    /// Withdraw one exact replacement claim
+    WithdrawRelation(WithdrawRelationArgs),
+    /// Record an explicit relationship between two Changes
+    Link(LinkArgs),
+    /// Capture an initial, replacement, parallel, or consolidation Revision
+    Capture(ChangeCaptureArgs),
+    /// Plan deterministic adoption for untouched stores without writing
+    MigrateDryRun(MigrationDryRunArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("identity").required(true).multiple(false)))]
+struct CreateArgs {
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    /// Stable retry identifier. Reusing it with different inputs is refused.
+    #[arg(long)]
+    operation_id: String,
+    /// Explicit 32-byte lowercase hexadecimal Change nonce.
+    #[arg(long, group = "identity")]
+    nonce: Option<String>,
+    /// Explicit rendezvous Revision for a root-derived Change identity.
+    #[arg(long, group = "identity")]
+    root_revision: Option<String>,
+    /// Select a signing key for this write.
+    #[arg(long)]
+    sign_key: Option<String>,
+    #[command(flatten)]
+    format_args: output::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+struct JoinArgs {
+    change: String,
+    revision: String,
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    #[arg(long)]
+    operation_id: String,
+    /// Select a signing key for this write.
+    #[arg(long)]
+    sign_key: Option<String>,
+    #[command(flatten)]
+    format_args: output::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+struct WithdrawMembershipArgs {
+    claim: String,
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    #[arg(long)]
+    operation_id: String,
+    /// Select a signing key for this write.
+    #[arg(long)]
+    sign_key: Option<String>,
+    #[command(flatten)]
+    format_args: output::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+struct RelationArgs {
+    change: String,
+    successor: String,
+    predecessor: String,
+    #[arg(long)]
+    successor_artifact_hash: String,
+    #[arg(long)]
+    predecessor_artifact_hash: String,
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    #[arg(long)]
+    operation_id: String,
+    /// Select a signing key for this write.
+    #[arg(long)]
+    sign_key: Option<String>,
+    #[command(flatten)]
+    format_args: output::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+struct WithdrawRelationArgs {
+    claim: String,
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    #[arg(long)]
+    operation_id: String,
+    /// Select a signing key for this write.
+    #[arg(long)]
+    sign_key: Option<String>,
+    #[command(flatten)]
+    format_args: output::FormatArgs,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum LinkRelationArg {
+    SameWork,
+    RelatedWork,
+}
+
+#[derive(Debug, Args)]
+struct LinkArgs {
+    first_change: String,
+    second_change: String,
+    #[arg(long, value_enum)]
+    relation: LinkRelationArg,
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    #[arg(long)]
+    operation_id: String,
+    /// Select a signing key for this write.
+    #[arg(long)]
+    sign_key: Option<String>,
+    #[command(flatten)]
+    format_args: output::FormatArgs,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum CaptureAdvanceArg {
+    Replace,
+    Parallel,
+}
+
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("transition").required(true).multiple(false)))]
+struct ChangeCaptureArgs {
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    #[arg(long)]
+    operation_id: String,
+    /// Start a new Change with this explicit 32-byte lowercase hexadecimal nonce.
+    #[arg(long, group = "transition")]
+    initial_nonce: Option<String>,
+    /// Advance this exact cursor by replacement or parallel capture.
+    #[arg(long, group = "transition", requires = "advance")]
+    cursor: Option<String>,
+    #[arg(long, value_enum, requires = "cursor")]
+    advance: Option<CaptureAdvanceArg>,
+    /// Additional exact current predecessor for consolidation. May be repeated.
+    #[arg(long, requires = "cursor")]
+    predecessor: Vec<String>,
+    /// Artifact hash paired by position with each --predecessor.
+    #[arg(long, requires = "predecessor")]
+    predecessor_artifact_hash: Vec<String>,
+    #[arg(long)]
+    include_untracked: bool,
+    #[arg(long)]
+    allow_empty: bool,
+    #[arg(long)]
+    summary: Option<String>,
+    #[arg(long = "path")]
+    paths: Vec<String>,
+    /// Select a signing key for this write.
+    #[arg(long)]
+    sign_key: Option<String>,
+    #[command(flatten)]
+    format_args: output::FormatArgs,
+}
+
+#[derive(Debug, Args)]
+struct MigrationDryRunArgs {
+    /// Repository root used when no --root values are supplied.
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+    /// Repository roots to inventory together. May be repeated.
+    #[arg(long = "root")]
+    roots: Vec<PathBuf>,
+    /// Actor identity frozen into the proposed Change claim envelopes.
+    #[arg(long, default_value = "actor:bulk-adoption-dry-run")]
+    actor: String,
+    /// Owner-authored anomaly and overlap decisions to apply to the exact re-plan.
+    #[arg(long)]
+    owner_decisions: Option<PathBuf>,
+    #[command(flatten)]
+    format_args: output::FormatArgs,
 }
 
 #[derive(Debug, Args)]
@@ -77,6 +272,10 @@ struct SelectArgs {
     /// Revalidate a previously emitted cursor against the current Change graph before selecting.
     #[arg(long)]
     cursor: Option<String>,
+    /// Bind the cursor to immutable captured bytes, the matching live worktree,
+    /// or a commit that materializes the exact captured change.
+    #[arg(long, value_name = "captured|worktree|commit:<rev>")]
+    source: Option<String>,
     /// Repository root or a path inside the repository.
     #[arg(long, default_value = ".")]
     repo: PathBuf,
@@ -120,6 +319,7 @@ struct InterdiffArgs {
 pub(super) fn run(
     args: ChangeArgs,
     stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match args.command {
         ChangeCommand::Profile(args) => {
@@ -151,7 +351,258 @@ pub(super) fn run(
         ChangeCommand::Revision(args) => run_exact(args, stdout, true),
         ChangeCommand::Resource(args) => run_exact(args, stdout, false),
         ChangeCommand::Interdiff(args) => run_interdiff(args, stdout),
+        ChangeCommand::Create(args) => run_create(args, stdout, stderr),
+        ChangeCommand::Join(args) => run_join(args, stdout, stderr),
+        ChangeCommand::WithdrawMembership(args) => run_withdraw_membership(args, stdout, stderr),
+        ChangeCommand::AssertRelation(args) => run_assert_relation(args, stdout, stderr),
+        ChangeCommand::WithdrawRelation(args) => run_withdraw_relation(args, stdout, stderr),
+        ChangeCommand::Link(args) => run_link(args, stdout, stderr),
+        ChangeCommand::Capture(args) => run_change_capture(args, stdout, stderr),
+        ChangeCommand::MigrateDryRun(args) => run_migration_dry_run(args, stdout),
     }
+}
+
+fn run_create(
+    args: CreateArgs,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let descriptor = match (args.nonce.as_deref(), args.root_revision) {
+        (Some(nonce), None) => ChangeIdentityDescriptorV1::opaque_nonce(parse_nonce(nonce)?),
+        (None, Some(revision)) => {
+            ChangeIdentityDescriptorV1::root_revision(RevisionId::new(revision))
+        }
+        _ => return Err("exactly one Change identity is required".into()),
+    };
+    let (options, skip) = signed_options(
+        &args.repo,
+        args.sign_key.as_deref(),
+        stderr,
+        ChangeCreateOptions::new(&args.repo, args.operation_id, descriptor),
+    );
+    let receipt = create_change(options)?;
+    common::surface_best_effort_skip(&skip, stderr);
+    write(&args.format_args, stdout, &receipt)
+}
+
+fn run_join(
+    args: JoinArgs,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (options, skip) = signed_options(
+        &args.repo,
+        args.sign_key.as_deref(),
+        stderr,
+        ChangeMembershipOptions::new(
+            &args.repo,
+            args.operation_id,
+            ChangeId::new(args.change),
+            RevisionId::new(args.revision),
+        ),
+    );
+    let receipt = join_revision_to_change(options)?;
+    common::surface_best_effort_skip(&skip, stderr);
+    write(&args.format_args, stdout, &receipt)
+}
+
+fn run_withdraw_membership(
+    args: WithdrawMembershipArgs,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (options, skip) = signed_options(
+        &args.repo,
+        args.sign_key.as_deref(),
+        stderr,
+        ChangeMembershipWithdrawalOptions::new(
+            &args.repo,
+            args.operation_id,
+            ChangeMembershipClaimId::new(args.claim),
+        ),
+    );
+    let receipt = withdraw_revision_from_change(options)?;
+    common::surface_best_effort_skip(&skip, stderr);
+    write(&args.format_args, stdout, &receipt)
+}
+
+fn run_assert_relation(
+    args: RelationArgs,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let successor = RevisionRefV1::new(
+        RevisionId::new(args.successor),
+        args.successor_artifact_hash,
+    )?;
+    let predecessor = RevisionRefV1::new(
+        RevisionId::new(args.predecessor),
+        args.predecessor_artifact_hash,
+    )?;
+    let (options, skip) = signed_options(
+        &args.repo,
+        args.sign_key.as_deref(),
+        stderr,
+        ChangeRelationOptions::new(
+            &args.repo,
+            args.operation_id,
+            ChangeId::new(args.change),
+            successor,
+            predecessor,
+        ),
+    );
+    let receipt = assert_change_revision_relation(options)?;
+    common::surface_best_effort_skip(&skip, stderr);
+    write(&args.format_args, stdout, &receipt)
+}
+
+fn run_withdraw_relation(
+    args: WithdrawRelationArgs,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (options, skip) = signed_options(
+        &args.repo,
+        args.sign_key.as_deref(),
+        stderr,
+        ChangeRelationWithdrawalOptions::new(
+            &args.repo,
+            args.operation_id,
+            ChangeRevisionRelationClaimId::new(args.claim),
+        ),
+    );
+    let receipt = withdraw_change_revision_relation(options)?;
+    common::surface_best_effort_skip(&skip, stderr);
+    write(&args.format_args, stdout, &receipt)
+}
+
+fn run_link(
+    args: LinkArgs,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let relation = match args.relation {
+        LinkRelationArg::SameWork => ChangeLinkRelationV1::SameWork,
+        LinkRelationArg::RelatedWork => ChangeLinkRelationV1::RelatedWork,
+    };
+    let (options, skip) = signed_options(
+        &args.repo,
+        args.sign_key.as_deref(),
+        stderr,
+        ChangeLinkOptions::new(
+            &args.repo,
+            args.operation_id,
+            ChangeId::new(args.first_change),
+            ChangeId::new(args.second_change),
+            relation,
+        ),
+    );
+    let receipt = link_changes(options)?;
+    common::surface_best_effort_skip(&skip, stderr);
+    write(&args.format_args, stdout, &receipt)
+}
+
+fn run_change_capture(
+    args: ChangeCaptureArgs,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if args.predecessor.len() != args.predecessor_artifact_hash.len() {
+        return Err("each --predecessor requires one --predecessor-artifact-hash".into());
+    }
+    let mut capture = CaptureOptions::new(&args.repo);
+    if args.include_untracked {
+        capture = capture.with_worktree(WorktreeSpec::new().with_include_untracked());
+    }
+    if args.allow_empty {
+        capture = capture.with_allow_empty();
+    }
+    if let Some(summary) = args.summary {
+        capture = capture.with_summary(summary);
+    }
+    if !args.paths.is_empty() {
+        capture = capture.with_pathspecs(args.paths);
+    }
+    let (capture, skip) = signed_options(&args.repo, args.sign_key.as_deref(), stderr, capture);
+    let mut operation = if let Some(nonce) = args.initial_nonce {
+        ChangeCaptureOptions::initial(
+            args.operation_id,
+            capture,
+            ChangeIdentityDescriptorV1::opaque_nonce(parse_nonce(&nonce)?),
+        )
+    } else {
+        let cursor = args
+            .cursor
+            .ok_or("--cursor is required for an advancing capture")?;
+        let advance = match args.advance.ok_or("--advance is required with --cursor")? {
+            CaptureAdvanceArg::Replace => ChangeAdvanceV1::Replace,
+            CaptureAdvanceArg::Parallel => ChangeAdvanceV1::Parallel,
+        };
+        ChangeCaptureOptions::advance(args.operation_id, capture, cursor, advance)
+    };
+    for (revision, artifact_hash) in args
+        .predecessor
+        .into_iter()
+        .zip(args.predecessor_artifact_hash)
+    {
+        operation = operation.with_additional_predecessor(RevisionRefV1::new(
+            RevisionId::new(revision),
+            artifact_hash,
+        )?);
+    }
+    let receipt = capture_change_revision(operation)?;
+    common::surface_best_effort_skip(&skip, stderr);
+    write(&args.format_args, stdout, &receipt)
+}
+
+fn signed_options<O: common::SignableOptions>(
+    repo: &std::path::Path,
+    sign_key: Option<&str>,
+    stderr: &mut dyn Write,
+    options: O,
+) -> (O, common::SigningSkip) {
+    if let Some(resolved) = common::resolve_and_surface_signer(repo, sign_key, stderr) {
+        common::apply_resolved_signer(options, resolved)
+    } else {
+        (options, None)
+    }
+}
+
+fn parse_nonce(value: &str) -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err("Change nonce must be 32 lowercase-hex bytes".into());
+    }
+    let mut nonce = [0_u8; 32];
+    for (index, byte) in nonce.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)?;
+    }
+    Ok(nonce)
+}
+
+fn run_migration_dry_run(
+    args: MigrationDryRunArgs,
+    stdout: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let roots = if args.roots.is_empty() {
+        vec![args.repo]
+    } else {
+        args.roots
+    };
+    let mut options =
+        BulkAdoptionDryRunOptions::new(&roots[0]).with_actor_id(ActorId::new(args.actor));
+    for root in &roots[1..] {
+        options = options.with_root(root);
+    }
+    if let Some(path) = args.owner_decisions {
+        let decisions: BulkAdoptionOwnerDecisionManifestV1 =
+            serde_json::from_slice(&std::fs::read(path)?)?;
+        options = options.with_owner_decisions(decisions);
+    }
+    write(&args.format_args, stdout, &dry_run_bulk_adoption(options)?)
 }
 
 fn with_facade(
@@ -193,20 +644,26 @@ fn run_select(args: SelectArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn st
             .as_deref()
             .map(ReviewCursorV1::decode_token)
             .transpose()?;
-        if let Some(token) = args.cursor.as_deref() {
+        if let (Some(token), Some(previous)) = (args.cursor.as_deref(), previous.as_ref()) {
+            let current_binding = review_source_binding(
+                &args.repo,
+                &previous.revision,
+                source_request_from_binding(&previous.source_binding),
+            )?;
             validate_review_cursor_for_write(
                 token,
                 change,
                 &ready.document_projection,
-                &ReviewSourceBindingV1::Captured,
+                &current_binding,
             )
             .map_err(|error| serde_json::to_string(&error).unwrap_or_else(|_| error.to_string()))?;
         }
-        let revision_id = args
-            .revision
-            .map(RevisionId::new)
-            .or_else(|| previous.map(|cursor| cursor.revision.revision_id));
-        let selected = select_review_cursor(
+        let revision_id = args.revision.map(RevisionId::new).or_else(|| {
+            previous
+                .as_ref()
+                .map(|cursor| cursor.revision.revision_id.clone())
+        });
+        let provisional = select_review_cursor(
             change,
             &ready.document_projection,
             revision_id.as_ref(),
@@ -214,8 +671,51 @@ fn run_select(args: SelectArgs, stdout: &mut dyn Write) -> Result<(), Box<dyn st
             ReviewSourceBindingV1::Captured,
         )
         .map_err(|error| serde_json::to_string(&error).unwrap_or_else(|_| error.to_string()))?;
+        let source_request = match args.source.as_deref() {
+            Some(source) => parse_source_request(source)?,
+            None => previous
+                .as_ref()
+                .map(|cursor| source_request_from_binding(&cursor.source_binding))
+                .unwrap_or(ReviewSourceRequestV1::Captured),
+        };
+        let source_binding =
+            review_source_binding(&args.repo, &provisional.cursor.revision, source_request)?;
+        let selected = select_review_cursor(
+            change,
+            &ready.document_projection,
+            revision_id.as_ref(),
+            args.allow_historical,
+            source_binding,
+        )
+        .map_err(|error| serde_json::to_string(&error).unwrap_or_else(|_| error.to_string()))?;
         Ok(serde_json::to_value(selected)?)
     })
+}
+
+fn parse_source_request(source: &str) -> Result<ReviewSourceRequestV1, Box<dyn std::error::Error>> {
+    match source {
+        "captured" => Ok(ReviewSourceRequestV1::Captured),
+        "worktree" => Ok(ReviewSourceRequestV1::Worktree),
+        _ => source
+            .strip_prefix("commit:")
+            .filter(|revision| !revision.is_empty())
+            .map(|revision| ReviewSourceRequestV1::Commit(revision.to_owned()))
+            .ok_or_else(|| {
+                "--source must be captured, worktree, or commit:<rev>"
+                    .to_owned()
+                    .into()
+            }),
+    }
+}
+
+fn source_request_from_binding(binding: &ReviewSourceBindingV1) -> ReviewSourceRequestV1 {
+    match binding {
+        ReviewSourceBindingV1::Captured => ReviewSourceRequestV1::Captured,
+        ReviewSourceBindingV1::WorktreeMatchV1 { .. } => ReviewSourceRequestV1::Worktree,
+        ReviewSourceBindingV1::CommitMatchV1 { commit_oid, .. } => {
+            ReviewSourceRequestV1::Commit(commit_oid.clone())
+        }
+    }
 }
 
 fn run_exact(

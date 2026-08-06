@@ -60,6 +60,13 @@ pub struct Inspector {
     bearer: Option<String>,
     stderr: Arc<Mutex<String>>,
     _stdout_drain: thread::JoinHandle<()>,
+    _legacy_clone: Option<tempfile::TempDir>,
+}
+
+fn legacy_mirrors() -> &'static Mutex<std::collections::HashMap<PathBuf, Vec<PathBuf>>> {
+    static MIRRORS: std::sync::OnceLock<Mutex<std::collections::HashMap<PathBuf, Vec<PathBuf>>>> =
+        std::sync::OnceLock::new();
+    MIRRORS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,6 +84,15 @@ pub enum InspectOutput {
 impl Inspector {
     pub fn spawn(repo: &Path) -> Self {
         Self::spawn_web_text(repo)
+    }
+
+    /// Start against the supplied authority without constructing the explicit
+    /// L0 compatibility fixture. Use this for capability-neutral and v2 routes.
+    pub fn spawn_current(repo: &Path) -> Self {
+        let inspector =
+            Self::spawn_with_env_mode(repo, InspectSurface::Web, InspectOutput::Text, &[], false);
+        inspector.wait_for_default_derived_generation();
+        inspector
     }
 
     pub fn spawn_human(repo: &Path) -> Self {
@@ -131,11 +147,27 @@ impl Inspector {
         output: InspectOutput,
         env: &[(&str, &str)],
     ) -> Self {
+        Self::spawn_with_env_mode(repo, surface, output, env, true)
+    }
+
+    fn spawn_with_env_mode(
+        repo: &Path,
+        surface: InspectSurface,
+        output: InspectOutput,
+        env: &[(&str, &str)],
+        legacy_compatibility: bool,
+    ) -> Self {
+        let legacy_clone = legacy_compatibility
+            .then(|| prepare_legacy_inspector_clone(repo))
+            .flatten();
+        let effective_repo = legacy_clone
+            .as_ref()
+            .map_or(repo, |(_, clone)| clone.as_path());
         let mut command = Command::new(env!("CARGO_BIN_EXE_pointbreak"));
         command.args([
             "inspect",
             "--repo",
-            repo.to_str().unwrap(),
+            effective_repo.to_str().unwrap(),
             "--host",
             "127.0.0.1",
             "--port",
@@ -281,6 +313,7 @@ impl Inspector {
             bearer,
             stderr,
             _stdout_drain: stdout_drain,
+            _legacy_clone: legacy_clone.map(|(temp, _)| temp),
         }
     }
 
@@ -300,9 +333,30 @@ impl Inspector {
         drained(&self.stderr)
     }
 
+    /// Rebuild the disposable legacy mirror's derived projection after a test
+    /// appends through the current Change-aware source store. Production writes
+    /// update their own sidecar; the compatibility mirror copies only authority
+    /// bytes, so its running Inspector must exercise the explicit retry action.
+    pub fn rebuild_legacy_derived_projection(&self) {
+        let (status, body) =
+            self.request_with_retry("POST", "/api/derived-access/retry", &self.default_headers());
+        assert!(status.contains("200 OK"), "{status}: {body}");
+        self.wait_for_default_derived_generation();
+    }
+
     fn wait_for_default_derived_generation(&self) {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
+            // Activated Change stores intentionally do not build the legacy
+            // Revision-history sidecar. Their `/api/v2` reader is already the
+            // ready surface, so waiting for a generation that must remain
+            // absent would turn a contract failure into a misleading timeout.
+            if let Ok((_, body)) = self.try_get("/api/v2/profile")
+                && let Ok(profile) = serde_json::from_str::<Value>(&body)
+                && profile["availability"] == "ready"
+            {
+                return;
+            }
             if let Ok((_, body)) = self.try_get("/api/derived-access/status")
                 && let Ok(status) = serde_json::from_str::<Value>(&body)
             {
@@ -455,9 +509,291 @@ impl Inspector {
     fn try_get(&self, path: &str) -> Result<(String, String), String> {
         let (head, body) = self.try_request("GET", path, &self.default_headers())?;
         if !head.starts_with("HTTP/1.1 200") {
-            return Err(format!("unexpected status for {path}"));
+            return Err(format!(
+                "unexpected status for {path}: {}; body: {}",
+                head.lines().next().unwrap_or_default(),
+                body
+            ));
         }
         Ok((head, body))
+    }
+}
+
+/// Keep legacy Inspector tests honest after the Change hard cutover.
+///
+/// Their setup runs the current CLI against a complete L2 store. The signed
+/// v0.9-shaped `/api/*` routes, however, are only valid on L0. For those tests
+/// we open an independent clone whose ephemeral store contains the append-only
+/// legacy event/content subset. Later CLI appends are mirrored into every live
+/// clone, so freshness tests still exercise a running reader rather than a
+/// frozen response fixture.
+fn prepare_legacy_inspector_clone(repo: &Path) -> Option<(tempfile::TempDir, PathBuf)> {
+    let source_store = pointbreak::session::store_dir_for_repo(repo).ok()?;
+    let events = source_store.join("events");
+    let activated = std::fs::read_dir(&events)
+        .ok()?
+        .filter_map(Result::ok)
+        .any(|entry| {
+            std::fs::read(entry.path())
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .and_then(|value| value["schema"].as_str().map(str::to_owned))
+                .is_some_and(|schema| schema == "pointbreak.store-capability-activation")
+        });
+    if !activated {
+        return None;
+    }
+
+    let temp = tempfile::tempdir().expect("legacy Inspector clone parent");
+    let clone = temp.path().join(
+        repo.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("repository"),
+    );
+    copy_legacy_repository(repo, &clone, Path::new(""));
+    let config_dir = clone.join(".pointbreak");
+    std::fs::create_dir_all(&config_dir).expect("create legacy Inspector config directory");
+    copy_worktree_config(&repo.join(".pointbreak"), &config_dir);
+    std::fs::write(
+        config_dir.join("store.local.json"),
+        b"{\"schema\":\"shore.store-config\",\"version\":1,\"mode\":\"ephemeral\"}\n",
+    )
+    .expect("write legacy Inspector ephemeral store config");
+    sync_legacy_store(&source_store, &clone);
+    let source_key = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    legacy_mirrors()
+        .lock()
+        .expect("legacy mirror registry lock")
+        .entry(source_key)
+        .or_default()
+        .push(clone.clone());
+    Some((temp, clone))
+}
+
+/// Materialize and retain the explicit L0 reader fixture used by tests that
+/// need to inspect its disposable derived sidecar before server startup.
+pub fn legacy_reader_clone(repo: &Path) -> (tempfile::TempDir, PathBuf) {
+    prepare_legacy_inspector_clone(repo).expect("source store has complete Change authority")
+}
+
+fn copy_legacy_repository(source_root: &Path, destination_root: &Path, relative: &Path) {
+    let source = source_root.join(relative);
+    let destination = destination_root.join(relative);
+    std::fs::create_dir_all(&destination).expect("create legacy Inspector repository directory");
+    let entries = std::fs::read_dir(&source).expect("read legacy Inspector repository directory");
+    for entry in entries.filter_map(Result::ok) {
+        let child_relative = relative.join(entry.file_name());
+        if child_relative == Path::new(".git/pointbreak")
+            || child_relative == Path::new(".pointbreak/data")
+        {
+            continue;
+        }
+        let source_path = entry.path();
+        let destination_path = destination_root.join(&child_relative);
+        if source_path.is_dir() {
+            copy_legacy_repository(source_root, destination_root, &child_relative);
+        } else {
+            std::fs::copy(&source_path, &destination_path)
+                .expect("copy legacy Inspector repository file");
+        }
+    }
+}
+
+pub(super) fn sync_legacy_mirrors(repo: &Path) {
+    let source_key = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    let output = Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(repo)
+        .output();
+    let Ok(output) = output else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let Ok(common_dir) = String::from_utf8(output.stdout) else {
+        return;
+    };
+    let source_store = Path::new(common_dir.trim()).join("pointbreak");
+    let mut registry = legacy_mirrors()
+        .lock()
+        .expect("legacy mirror registry lock");
+    let Some(mirrors) = registry.get_mut(&source_key) else {
+        return;
+    };
+    mirrors.retain(|mirror_repo| {
+        if !mirror_repo.exists() {
+            return false;
+        }
+        sync_legacy_store(&source_store, mirror_repo);
+        true
+    });
+}
+
+fn sync_legacy_store(source: &Path, destination_repo: &Path) {
+    let destination = destination_repo.join(".pointbreak/data");
+    std::fs::create_dir_all(&destination).expect("create legacy mirror store");
+    for directory in ["artifacts", "objects"] {
+        copy_tree_if_present(&source.join(directory), &destination.join(directory));
+    }
+    let destination_events = destination.join("events");
+    std::fs::create_dir_all(&destination_events).expect("create legacy mirror events");
+    let Ok(entries) = std::fs::read_dir(source.join("events")) else {
+        return;
+    };
+    let events = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let bytes = std::fs::read(entry.path()).ok()?;
+            let event =
+                serde_json::from_slice::<pointbreak::session::event::ShoreEvent>(&bytes).ok();
+            Some((entry.file_name(), bytes, event))
+        })
+        .collect::<Vec<_>>();
+
+    // Legacy-route regression tests need a historically valid v0.9 proposal
+    // shape. New L2 proposals deliberately carry no proposal-borne supersedes,
+    // so translate active Change relation claims at this fixture boundary only.
+    // Production projections never infer or rewrite this representation.
+    let mut relation_claims = std::collections::BTreeMap::new();
+    let mut withdrawn_claims = std::collections::BTreeSet::new();
+    for (_, _, event) in &events {
+        let Some(event) = event else {
+            continue;
+        };
+        match event.event_type {
+            pointbreak::session::event::EventType::ChangeRevisionRelationAsserted => {
+                let payload: pointbreak::session::event::ChangeRevisionRelationAssertedPayload =
+                    serde_json::from_value(event.payload.clone())
+                        .expect("decode fixture Change relation assertion");
+                relation_claims.insert(
+                    payload.relation_claim_id.as_str().to_owned(),
+                    (
+                        payload.successor.revision_id,
+                        payload.predecessor.revision_id,
+                    ),
+                );
+            }
+            pointbreak::session::event::EventType::ChangeRevisionRelationWithdrawn => {
+                let payload: pointbreak::session::event::ChangeRevisionRelationWithdrawnPayload =
+                    serde_json::from_value(event.payload.clone())
+                        .expect("decode fixture Change relation withdrawal");
+                withdrawn_claims.insert(payload.relation_claim_id.as_str().to_owned());
+            }
+            _ => {}
+        }
+    }
+    let mut supersedes = std::collections::BTreeMap::<
+        pointbreak::model::RevisionId,
+        Vec<pointbreak::model::RevisionId>,
+    >::new();
+    for (claim_id, (successor, predecessor)) in relation_claims {
+        if !withdrawn_claims.contains(&claim_id) {
+            supersedes.entry(successor).or_default().push(predecessor);
+        }
+    }
+    for predecessors in supersedes.values_mut() {
+        predecessors.sort();
+        predecessors.dedup();
+    }
+
+    for (file_name, bytes, event) in events {
+        let target = destination_events.join(file_name);
+        let Some(event) = event else {
+            let schema = serde_json::from_slice::<Value>(&bytes)
+                .ok()
+                .and_then(|value| value["schema"].as_str().map(str::to_owned));
+            if matches!(
+                schema.as_deref(),
+                Some(
+                    "pointbreak.store-capability-activation"
+                        | "pointbreak.bulk-adoption-completion"
+                )
+            ) {
+                continue;
+            }
+            if !target.exists() {
+                std::fs::write(target, bytes).expect("copy legacy fixture raw record");
+            }
+            continue;
+        };
+        if matches!(
+            event.event_type,
+            pointbreak::session::event::EventType::ChangeDeclared
+                | pointbreak::session::event::EventType::ChangeMembershipAsserted
+                | pointbreak::session::event::EventType::ChangeMembershipWithdrawn
+                | pointbreak::session::event::EventType::ChangeLinkAsserted
+                | pointbreak::session::event::EventType::ChangeRevisionRelationAsserted
+                | pointbreak::session::event::EventType::ChangeRevisionRelationWithdrawn
+                | pointbreak::session::event::EventType::RevisionRelationAttested
+                | pointbreak::session::event::EventType::ReviewFactPorted
+        ) {
+            continue;
+        }
+        if event.event_type == pointbreak::session::event::EventType::WorkObjectProposed {
+            let mut payload: pointbreak::session::event::WorkObjectProposedPayload =
+                serde_json::from_value(event.payload.clone())
+                    .expect("decode fixture Revision proposal");
+            if let pointbreak::session::event::WorkObjectProposal::Revision {
+                revision,
+                supersedes: proposal_supersedes,
+                ..
+            } = &mut payload.work_object
+                && let Some(predecessors) = supersedes.get(&revision.id)
+            {
+                proposal_supersedes.extend(predecessors.iter().cloned());
+                proposal_supersedes.sort();
+                proposal_supersedes.dedup();
+                let translated = pointbreak::session::event::ShoreEvent::new(
+                    event.event_type,
+                    event.idempotency_key,
+                    event.target,
+                    event.writer,
+                    payload,
+                    event.occurred_at,
+                )
+                .expect("build historical fixture proposal");
+                std::fs::write(
+                    target,
+                    serde_json::to_vec(&translated).expect("encode historical fixture proposal"),
+                )
+                .expect("write historical fixture proposal");
+                continue;
+            }
+        }
+        if !target.exists() {
+            std::fs::write(target, bytes).expect("copy legacy fixture event");
+        }
+    }
+}
+
+fn copy_worktree_config(source: &Path, destination: &Path) {
+    let Ok(entries) = std::fs::read_dir(source) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let source_path = entry.path();
+        if !source_path.is_file() || entry.file_name() == "store.local.json" {
+            continue;
+        }
+        std::fs::copy(&source_path, destination.join(entry.file_name()))
+            .expect("copy legacy Inspector reader configuration");
+    }
+}
+
+fn copy_tree_if_present(source: &Path, destination: &Path) {
+    let Ok(entries) = std::fs::read_dir(source) else {
+        return;
+    };
+    std::fs::create_dir_all(destination).expect("create legacy mirror directory");
+    for entry in entries.filter_map(Result::ok) {
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if source_path.is_dir() {
+            copy_tree_if_present(&source_path, &destination_path);
+        } else if !destination_path.exists() {
+            std::fs::copy(&source_path, &destination_path).expect("copy legacy mirror content");
+        }
     }
 }
 
@@ -585,6 +921,11 @@ pub fn decision_continuity_matrix() -> DecisionContinuityMatrix {
         .arg(&script)
         .arg(&repo)
         .env("POINTBREAK_BINARY", env!("CARGO_BIN_EXE_pointbreak"))
+        .env(
+            "POINTBREAK_CHANGE_READY_FIXTURE_DIR",
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/support/assets/change-ready-store"),
+        )
         .env_remove("POINTBREAK_HOME")
         .env_remove("POINTBREAK_FORMAT")
         .env_remove("POINTBREAK_SIGNING_KEY")
@@ -765,6 +1106,88 @@ fn run_shore_json(args: &[&str]) -> Value {
 /// tracked file first (so the snapshot id differs) and records the new revision
 /// as superseding the predecessor. Returns the captured revision id.
 pub fn capture_supersession_round(repo: &Path, predecessor: Option<&str>) -> String {
+    if let Some(predecessor) = predecessor {
+        let (predecessor_capture, latest_cursor, latest_revision) = {
+            let state = super::fixture_change_state()
+                .lock()
+                .expect("fixture Change state lock");
+            let repo_state = state.get(repo).expect("fixture repo capture state");
+            let predecessor_capture = super::fixture_capture(repo_state, predecessor).clone();
+            let latest_cursor = repo_state
+                .latest_cursor
+                .clone()
+                .expect("fixture has a latest review cursor");
+            let latest_revision = pointbreak::session::ReviewCursorV1::decode_token(&latest_cursor)
+                .expect("fixture review cursor is valid")
+                .revision
+                .revision_id;
+            (predecessor_capture, latest_cursor, latest_revision)
+        };
+        if latest_revision.as_str() != predecessor_capture.revision_id {
+            let target = repo.join("src/lib.rs");
+            let mut contents = std::fs::read_to_string(&target).unwrap_or_default();
+            contents.push_str(&format!(
+                "\n// supersedes {}\n",
+                predecessor.replace(':', "_")
+            ));
+            std::fs::write(&target, contents).expect("write fork successor content");
+
+            let repo_arg = repo.to_str().expect("fixture repo path is utf-8");
+            let captured = pointbreak([
+                "capture",
+                "--repo",
+                repo_arg,
+                "--review-cursor",
+                &latest_cursor,
+                "--advance",
+                "parallel",
+            ]);
+            assert!(
+                captured.status.success(),
+                "capture fork round stderr:\n{}",
+                String::from_utf8_lossy(&captured.stderr)
+            );
+            let document: Value =
+                serde_json::from_slice(&captured.stdout).expect("parse fork capture JSON");
+            let revision = document["revision"]["revisionId"]
+                .as_str()
+                .expect("fork capture Revision id")
+                .to_owned();
+            let artifact_hash = document["revision"]["objectArtifactContentHash"]
+                .as_str()
+                .expect("fork capture artifact hash")
+                .to_owned();
+            let operation_id = format!(
+                "change-operation:fixture-fork-{}-{}",
+                revision.trim_start_matches("rev:sha256:"),
+                predecessor_capture
+                    .revision_id
+                    .trim_start_matches("rev:sha256:")
+            );
+            let asserted = pointbreak([
+                "change",
+                "assert-relation",
+                &predecessor_capture.change_id,
+                &revision,
+                &predecessor_capture.revision_id,
+                "--successor-artifact-hash",
+                &artifact_hash,
+                "--predecessor-artifact-hash",
+                &predecessor_capture.artifact_hash,
+                "--operation-id",
+                &operation_id,
+                "--repo",
+                repo_arg,
+            ]);
+            assert!(
+                asserted.status.success(),
+                "assert fork relation stderr:\n{}",
+                String::from_utf8_lossy(&asserted.stderr)
+            );
+            return revision;
+        }
+    }
+
     let mut args = vec![
         "capture".to_owned(),
         "--repo".to_owned(),
@@ -780,8 +1203,24 @@ pub fn capture_supersession_round(repo: &Path, predecessor: Option<&str>) -> Str
             predecessor.replace(':', "_")
         ));
         std::fs::write(&target, contents).expect("write successor content");
-        args.push("--supersedes".to_owned());
-        args.push(predecessor.to_owned());
+        let cursor = {
+            let state = super::fixture_change_state()
+                .lock()
+                .expect("fixture Change state lock");
+            let repo_state = state.get(repo).expect("fixture repo capture state");
+            let predecessor_capture = super::fixture_capture(repo_state, predecessor);
+            super::fresh_fixture_cursor(
+                repo,
+                &predecessor_capture.revision_id,
+                &predecessor_capture.change_id,
+            )
+        };
+        args.extend([
+            "--review-cursor".to_owned(),
+            cursor,
+            "--advance".to_owned(),
+            "replace".to_owned(),
+        ]);
     } else {
         args.push("--allow-empty".to_owned());
     }

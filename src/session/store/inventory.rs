@@ -97,9 +97,13 @@ fn scan_events(events_dir: &Path) -> Result<(usize, u64)> {
         }
         let contents =
             fs::read(&path).map_err(|error| io_error("read event file", &path, error))?;
-        let event: ShoreEvent = serde_json::from_slice(&contents)?;
-        event.validate_schema_version()?;
-        count += 1;
+        if let Some(event) = decode_journal_event(&contents)? {
+            event.validate_schema_version()?;
+            count += 1;
+        }
+        // The events directory is now the physical Journal directory. Control
+        // records are not domain events, but their durable bytes still belong
+        // in the on-disk inventory.
         bytes += contents.len() as u64;
     }
     Ok((count, bytes))
@@ -162,7 +166,9 @@ fn capture_owners_by_snapshot(
         }
         let contents =
             fs::read(&path).map_err(|error| io_error("read event file", &path, error))?;
-        let event: ShoreEvent = serde_json::from_slice(&contents)?;
+        let Some(event) = decode_journal_event(&contents)? else {
+            continue;
+        };
         if event.event_type != EventType::WorkObjectProposed {
             continue;
         }
@@ -182,6 +188,16 @@ fn capture_owners_by_snapshot(
             .insert(revision_id.to_owned());
     }
     Ok(owners)
+}
+
+fn decode_journal_event(contents: &[u8]) -> Result<Option<ShoreEvent>> {
+    let value: serde_json::Value = serde_json::from_slice(contents)?;
+    match value.get("schema").and_then(serde_json::Value::as_str) {
+        Some("pointbreak.store-capability-activation" | "pointbreak.bulk-adoption-completion") => {
+            Ok(None)
+        }
+        _ => Ok(Some(serde_json::from_value(value)?)),
+    }
 }
 
 fn scan_note_artifacts(

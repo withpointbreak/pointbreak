@@ -25,7 +25,8 @@ use crate::session::observation::{
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{
-    prepare_write_landing, resolve_write_store, resolve_write_validation_store,
+    prepare_write_landing, resolve_change_write_store, resolve_write_store,
+    resolve_write_validation_store,
 };
 use crate::session::workflow::util::sorted_unique;
 use crate::session::{
@@ -39,6 +40,7 @@ pub struct AssessmentAddOptions {
     repo: PathBuf,
     revision_id: Option<RevisionId>,
     exact_revision_id: Option<RevisionId>,
+    review_cursor: Option<String>,
     track: Option<String>,
     assessment: Option<ReviewAssessment>,
     summary: Option<String>,
@@ -58,6 +60,7 @@ impl AssessmentAddOptions {
             repo: repo.as_ref().to_path_buf(),
             revision_id: None,
             exact_revision_id: None,
+            review_cursor: None,
             track: None,
             assessment: None,
             summary: None,
@@ -89,6 +92,10 @@ impl AssessmentAddOptions {
 
     pub fn with_exact_revision_id(mut self, id: RevisionId) -> Self {
         self.exact_revision_id = Some(id);
+        self
+    }
+    pub fn with_review_cursor(mut self, cursor: impl Into<String>) -> Self {
+        self.review_cursor = Some(cursor.into());
         self
     }
     pub fn with_track(mut self, track: impl Into<String>) -> Self {
@@ -174,7 +181,12 @@ pub struct AssessmentAddResult {
 }
 
 pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddResult> {
-    let write_store = resolve_write_store(&options.repo)?;
+    let change_write = options.review_cursor.is_some();
+    let write_store = if change_write {
+        resolve_change_write_store(&options.repo)?
+    } else {
+        resolve_write_store(&options.repo)?
+    };
     let worktree_root = write_store.worktree_root();
     let store_dir = write_store.store_dir();
     let storage = LocalStorage::new(store_dir);
@@ -188,13 +200,36 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
     // the target, and every relationship reference (`--replaces`,
     // `--related-observation`, `--related-input-request`) validate against
     // everything the writer can see, including linked-only facts.
-    let validation_store = resolve_write_validation_store(&options.repo)?;
-    let validation_events = validation_store.validation_events()?;
+    let validation_events = if change_write {
+        crate::session::change_reader_state_for_repo(&options.repo)?
+            .ready()
+            .ok_or_else(|| ShoreError::WorkflowInputInvalid {
+                reason: "complete Change authority is unavailable".to_owned(),
+            })?
+            .events()
+            .to_vec()
+    } else {
+        resolve_write_validation_store(&options.repo)?.validation_events()?
+    };
+    let cursor_revision = options
+        .review_cursor
+        .as_deref()
+        .map(|cursor| super::super::exact_revision_from_review_cursor(&options.repo, cursor))
+        .transpose()?;
+    if cursor_revision.is_some()
+        && (options.revision_id.is_some() || options.exact_revision_id.is_some())
+    {
+        return Err(ShoreError::WorkflowInputInvalid {
+            reason: "--review-cursor cannot be combined with another Revision selector".to_owned(),
+        });
+    }
     let resolved = resolve_revision(
         &validation_events,
         RevisionSelection::from_revision_options(
             options.revision_id.as_ref(),
-            options.exact_revision_id.as_ref(),
+            cursor_revision
+                .as_ref()
+                .or(options.exact_revision_id.as_ref()),
         )?,
         &CurrentRevisionContext::for_repo(&options.repo)?,
         RevisionScope::default(),
@@ -315,7 +350,11 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
     let event_id = event.event_id.clone();
 
     let mut events_created_by_type = BTreeMap::new();
-    let outcome = event_store.record_event_once(&event)?;
+    let outcome = if change_write {
+        event_store.record_change_event_once(&event)?
+    } else {
+        event_store.record_event_once(&event)?
+    };
     let (events_created, events_existing) = match outcome {
         EventWriteOutcome::Created => {
             events_created_by_type.insert("review_assessment_recorded".to_owned(), 1);
@@ -324,7 +363,12 @@ pub fn record_assessment(options: AssessmentAddOptions) -> Result<AssessmentAddR
         EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => (0, 1),
     };
 
-    let state = SessionState::from_events(&event_store.list_events()?)?;
+    let events = if change_write {
+        event_store.list_change_events()?
+    } else {
+        event_store.list_events()?
+    };
+    let state = SessionState::from_events(&events)?;
     storage.write_json_atomic(
         &store_dir.join("state.json"),
         &state,

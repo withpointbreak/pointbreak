@@ -126,10 +126,10 @@ fn inspector_harness_serves_history_for_minimal_store() {
     let history = inspector.get_json("/api/history");
 
     assert_eq!(history["schema"], "pointbreak.inspect-history");
-    // A minimal worktree capture records the capture event plus the auto-recorded
-    // capture-time ref association (no separate `review_initialized` event exists).
+    // The Change-era capture records one immutable Revision proposal. Landing
+    // associations are proof-first explicit operations, not capture side effects.
     let entries = history["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.len(), 1);
     let event_types: Vec<&str> = entries
         .iter()
         .filter_map(|entry| entry["eventType"].as_str())
@@ -138,10 +138,7 @@ fn inspector_harness_serves_history_for_minimal_store() {
         event_types.contains(&"work_object_proposed"),
         "{event_types:?}"
     );
-    assert!(
-        event_types.contains(&"revision_ref_associated"),
-        "{event_types:?}"
-    );
+    assert!(!event_types.contains(&"revision_ref_associated"));
 }
 
 #[test]
@@ -237,11 +234,11 @@ fn api_history_returns_chronological_typed_summaries() {
     );
     assert!(history.get("eventSetHash").is_none());
     let entries = history["entries"].as_array().unwrap();
-    // capture + auto-recorded ref association + observation + input-request
-    // + 2 assessments + 2 validation checks.
-    assert_eq!(history["eventCount"], 8);
-    assert_eq!(history["historyCount"], 8);
-    assert_eq!(entries.len(), 8, "one entry per recorded event");
+    // capture + observation + input-request + 2 assessments + 2 validation
+    // checks. Landing associations are no longer implicit capture output.
+    assert_eq!(history["eventCount"], 7);
+    assert_eq!(history["historyCount"], 7);
+    assert_eq!(entries.len(), 7, "one entry per recorded event");
 
     // Entries are chronological (occurredAt ascending).
     let stamps: Vec<i64> = entries.iter().map(occurred_instant).collect();
@@ -492,6 +489,7 @@ fn api_revisions_page_serves_fresh_payload_after_store_writes() {
     // A store write moves the snapshot and the new revision appears.
     repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
     let second_revision = capture(repo.path());
+    inspector.rebuild_legacy_derived_projection();
     let refreshed = inspector.get_json("/api/revisions");
     assert_eq!(refreshed["revisionCount"], 2);
     let ids: Vec<&str> = refreshed["entries"]
@@ -535,6 +533,7 @@ fn api_revisions_pages_are_bounded_and_stale_tokens_require_restart() {
 
     repo.write("src/lib.rs", "pub fn value() -> u32 { 4 }\n");
     capture(repo.path());
+    inspector.rebuild_legacy_derived_projection();
     let (status, body) = inspector.get_error(&format!("/api/revisions?limit=1&after={next}"));
     assert!(status.contains("409 Conflict"));
     assert_eq!(body["error"], "restart_required");
@@ -1969,6 +1968,7 @@ fn api_history_reflects_a_new_event_after_an_append() {
         "pub fn value() -> u32 {\n    99\n}\n\npub fn other() -> u32 {\n    7\n}\n",
     );
     capture(store.repo.path());
+    inspector.rebuild_legacy_derived_projection();
 
     let after = inspector.get_json("/api/history")["matchCount"]
         .as_u64()
@@ -1986,6 +1986,7 @@ fn new_count_endpoint_counts_events_newer_than_the_since_anchor() {
     let (occurred_at, event_id) = newest_history_anchor(&inspector);
 
     append_count_probe_events(store.repo.path(), &store.revision_id);
+    inspector.rebuild_legacy_derived_projection();
 
     let count = inspector.get_json(&format!(
         "/api/history/new-count?sinceOccurredAt={}&sinceEventId={}",
@@ -2003,6 +2004,7 @@ fn new_count_respects_the_active_query() {
     let (occurred_at, event_id) = newest_history_anchor(&inspector);
 
     append_count_probe_events(store.repo.path(), &store.revision_id);
+    inspector.rebuild_legacy_derived_projection();
 
     let anchor = format!(
         "sinceOccurredAt={}&sinceEventId={}",

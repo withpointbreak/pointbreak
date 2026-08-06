@@ -67,7 +67,7 @@ fn cli_reference_exists_and_covers_current_commands() {
         );
     }
 
-    assert!(cli.contains("pointbreak.review-capture"));
+    assert!(cli.contains("pointbreak.change-capture-receipt.v1"));
     assert!(cli.contains("pointbreak.review-revision"));
     assert!(cli.contains("eventSetHash"));
 

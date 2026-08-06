@@ -199,6 +199,27 @@ fn inspector_projects_current_ref_for_worktree_staged_and_unstaged_sources() {
         }
         let output = pointbreak(args);
         assert!(output.status.success());
+        let capture: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let head = repo.git(["rev-parse", "HEAD"]).stdout.trim().to_owned();
+        let associated = pointbreak([
+            "association",
+            "record",
+            "--repo",
+            repo.path().to_str().unwrap(),
+            "--track",
+            "agent:test",
+            "--exact-revision",
+            capture["revision"]["id"].as_str().unwrap(),
+            "--ref",
+            "main",
+            "--head",
+            &head,
+        ]);
+        assert!(
+            associated.status.success(),
+            "explicit current-ref association failed: {}",
+            String::from_utf8_lossy(&associated.stderr)
+        );
 
         let inspector = Inspector::spawn(repo.path());
         let units = inspector.get_json("/api/revisions");

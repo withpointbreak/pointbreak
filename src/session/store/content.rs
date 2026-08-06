@@ -17,6 +17,7 @@ use super::object_artifact::{
 };
 use crate::error::{Result, ShoreError};
 use crate::model::ObjectId;
+use crate::session::evidence::RelationProofManifestV1;
 use crate::storage::{CreateOutcome, RemoveOutcome};
 
 /// Validated put/get for content-addressed artifacts over a byte
@@ -69,6 +70,41 @@ impl ContentArtifacts {
                     Err(ShoreError::Message(format!(
                         "object artifact conflict for {}",
                         artifact.snapshot.object_id.as_str()
+                    )))
+                }
+            }
+        }
+    }
+
+    /// Publish a validated relation-proof resource by its canonical evidence
+    /// hash. The proof bytes precede any structural association or semantic
+    /// attestation, so an interrupted safe landing can never leave strong
+    /// wording without its supporting resource.
+    pub(crate) fn put_relation_proof(
+        &self,
+        proof: &RelationProofManifestV1,
+    ) -> Result<CreateOutcome> {
+        proof.validate()?;
+        let hash = proof
+            .evidence_sha256
+            .strip_prefix("sha256:")
+            .ok_or_else(|| {
+                ShoreError::Message("relation proof hash is not canonical".to_owned())
+            })?;
+        let content_ref = format!("artifacts/proofs/{hash}.json");
+        let bytes = serde_json::to_vec(proof)?;
+        match self.store.put_once(&content_ref, &bytes)? {
+            CreateOutcome::Created => Ok(CreateOutcome::Created),
+            CreateOutcome::AlreadyExists => {
+                let existing: RelationProofManifestV1 =
+                    serde_json::from_slice(&self.store.get(&content_ref)?)?;
+                existing.validate()?;
+                if existing == *proof {
+                    Ok(CreateOutcome::AlreadyExists)
+                } else {
+                    Err(ShoreError::Message(format!(
+                        "relation proof conflict for {}",
+                        proof.evidence_sha256
                     )))
                 }
             }

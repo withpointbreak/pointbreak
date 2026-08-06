@@ -9,7 +9,8 @@ use crate::session::derived_access::writer::{DerivedWriteCoordinator, DerivedWri
 use crate::session::event::{AssertionMode, EventType, ShoreEvent, event_type_from_code};
 use crate::session::store::backend::{Journal, JournalEntry, LocalJournal, StoreBackend};
 use crate::session::store::capabilities::{
-    event_entries_for_event_only_product, preflight_event_only_product,
+    event_entries_for_current_product, inspect_journal_records, preflight_change_writer,
+    preflight_current_product,
 };
 use crate::storage::{CreateOutcome, LocalStorage};
 
@@ -120,7 +121,7 @@ impl EventStore {
         // The event-only writer is intentionally dark once the non-event
         // activation root exists. This keyed probe is O(1) for ordinary L0
         // stores and the full router runs before any activated-store mutation.
-        preflight_event_only_product(self.journal.as_ref())?;
+        preflight_current_product(self.journal.as_ref())?;
 
         // The journal owns key→address mapping, so the write needs no on-disk path;
         // the prior path-stem check was a tautology over the key-derived filename.
@@ -131,6 +132,33 @@ impl EventStore {
                 .record_event_once(event, || self.publish_validated_event(event, &bytes));
         }
         self.publish_validated_event(event, &bytes)
+    }
+
+    /// Record one event only after the complete Change capability is ready.
+    ///
+    /// This is deliberately separate from [`Self::record_event_once`]. The
+    /// legacy writer stays valid only for an untouched store, while Change-aware
+    /// workflows must refuse both an unactivated store and a partially migrated
+    /// one before validating or publishing event bytes.
+    pub(crate) fn record_change_event_once(&self, event: &ShoreEvent) -> Result<EventWriteOutcome> {
+        preflight_change_writer(self.journal.as_ref())?;
+        validate_event(event, None)?;
+        let bytes = serde_json::to_vec(event)?;
+        if let Some(coordinator) = &self.coordinator {
+            return coordinator
+                .record_event_once(event, || self.publish_validated_event(event, &bytes));
+        }
+        self.publish_validated_event(event, &bytes)
+    }
+
+    /// List validated events only from a complete Change-capable Journal.
+    pub(crate) fn list_change_events(&self) -> Result<Vec<ShoreEvent>> {
+        preflight_change_writer(self.journal.as_ref())?;
+        inspect_journal_records(self.journal.as_ref())?
+            .event_entries
+            .into_iter()
+            .map(|entry| Self::decode_qualification_entry(entry.key_digest, entry.bytes))
+            .collect()
     }
 
     fn publish_validated_event(
@@ -332,7 +360,7 @@ impl EventStore {
     /// guard, so two simultaneously live histories are counted as two rather
     /// than one setter silently replacing the other.
     pub(crate) fn list_events_untracked(&self) -> Result<Vec<ShoreEvent>> {
-        event_entries_for_event_only_product(self.journal.as_ref())?
+        event_entries_for_current_product(self.journal.as_ref())?
             .iter()
             .map(Self::decode_validated_entry)
             .collect::<Result<Vec<_>>>()
@@ -346,7 +374,7 @@ impl EventStore {
     /// one physical read. The raw entry bytes are consumed while building the
     /// decoded population, so no second decoded history is created here.
     pub(crate) fn list_events_with_witnesses(&self) -> Result<Vec<ValidatedJournalEntry>> {
-        let events = event_entries_for_event_only_product(self.journal.as_ref())?
+        let events = event_entries_for_current_product(self.journal.as_ref())?
             .into_iter()
             .map(|entry| {
                 let carrier_bytes = u64::try_from(entry.bytes.len()).unwrap_or(u64::MAX);
@@ -369,7 +397,7 @@ impl EventStore {
     pub fn list_events_lenient(&self) -> Result<(Vec<ShoreEvent>, Vec<SkippedEvent>)> {
         let mut events = Vec::new();
         let mut skipped = Vec::new();
-        for entry in event_entries_for_event_only_product(self.journal.as_ref())? {
+        for entry in event_entries_for_current_product(self.journal.as_ref())? {
             match Self::decode_validated_entry(&entry) {
                 Ok(event) => events.push(event),
                 Err(ShoreError::UnsupportedEventType(record)) => skipped.push(SkippedEvent {
@@ -692,25 +720,66 @@ mod tests {
     }
 
     #[test]
-    fn activated_store_refuses_event_write_before_mutation() {
-        for state in [CapabilityFixtureState::M1, CapabilityFixtureState::L2] {
+    fn partial_store_refuses_event_write_while_complete_store_accepts_it() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = StoreBackend::Local(root.path().to_path_buf());
+        let journal = backend.journal();
+        write_capability_fixture_for_test(journal.as_ref(), CapabilityFixtureState::M1).unwrap();
+        let before = journal.list_record_entries().unwrap();
+        let error = EventStore::from_backend(&backend)
+            .record_event_once(&review_initialized_event())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("migration_in_progress"));
+        let after = journal.list_record_entries().unwrap();
+        assert_eq!(before.len(), after.len());
+        assert!(
+            before
+                .iter()
+                .zip(after.iter())
+                .all(|(left, right)| left.key_digest == right.key_digest
+                    && left.bytes == right.bytes)
+        );
+
+        let ready_root = tempfile::tempdir().unwrap();
+        let ready_backend = StoreBackend::Local(ready_root.path().to_path_buf());
+        write_capability_fixture_for_test(
+            ready_backend.journal().as_ref(),
+            CapabilityFixtureState::L2,
+        )
+        .unwrap();
+        assert_eq!(
+            EventStore::from_backend(&ready_backend)
+                .record_event_once(&review_initialized_event())
+                .unwrap(),
+            EventWriteOutcome::Created
+        );
+    }
+
+    #[test]
+    fn change_writer_requires_ready_capability_and_is_retryable() {
+        for state in [None, Some(CapabilityFixtureState::M1)] {
             let root = tempfile::tempdir().unwrap();
             let backend = StoreBackend::Local(root.path().to_path_buf());
             let journal = backend.journal();
-            write_capability_fixture_for_test(journal.as_ref(), state).unwrap();
+            if let Some(state) = state {
+                write_capability_fixture_for_test(journal.as_ref(), state).unwrap();
+            }
             let before = journal.list_record_entries().unwrap();
 
             let error = EventStore::from_backend(&backend)
-                .record_event_once(&review_initialized_event())
+                .record_change_event_once(&review_initialized_event_for(
+                    "journal:change-writer-refusal",
+                ))
                 .unwrap_err()
                 .to_string();
 
             assert!(
-                error.contains("migration_in_progress")
-                    || error.contains("reader_upgrade_required")
+                error.contains("migration_required") || error.contains("migration_in_progress"),
+                "{error}"
             );
             let after = journal.list_record_entries().unwrap();
-            assert_eq!(before.len(), after.len());
+            assert_eq!(after.len(), before.len());
             assert!(
                 before
                     .iter()
@@ -719,6 +788,22 @@ mod tests {
                         && left.bytes == right.bytes)
             );
         }
+
+        let root = tempfile::tempdir().unwrap();
+        let backend = StoreBackend::Local(root.path().to_path_buf());
+        write_capability_fixture_for_test(backend.journal().as_ref(), CapabilityFixtureState::L2)
+            .unwrap();
+        let store = EventStore::from_backend(&backend);
+        let event = review_initialized_event_for("journal:change-writer-ready");
+
+        assert_eq!(
+            store.record_change_event_once(&event).unwrap(),
+            EventWriteOutcome::Created
+        );
+        assert_eq!(
+            store.record_change_event_once(&event).unwrap(),
+            EventWriteOutcome::Existing
+        );
     }
 
     #[test]

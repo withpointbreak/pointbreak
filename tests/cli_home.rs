@@ -4,6 +4,11 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 
 fn command(args: &[&str]) -> Command {
+    if args.first() == Some(&"capture")
+        && let Some(index) = args.iter().position(|arg| *arg == "--repo")
+    {
+        support::install_empty_ready_change_store(std::path::Path::new(args[index + 1]));
+    }
     let mut command = Command::new(env!("CARGO_BIN_EXE_pointbreak"));
     command.args(args);
     for selector in pointbreak::environment::RUNTIME_VARIABLES {
@@ -86,7 +91,7 @@ fn empty_and_relative_explicit_homes_fail_without_creating_directories() {
 }
 
 #[test]
-fn one_explicit_home_owns_family_registry_and_user_store_paths() {
+fn one_explicit_home_owns_the_reported_user_store_and_key_paths() {
     let repo = support::dump_repo();
     let repo_path = repo.path().to_str().unwrap();
     let home = tempfile::tempdir().unwrap();
@@ -103,20 +108,18 @@ fn one_explicit_home_owns_family_registry_and_user_store_paths() {
         String::from_utf8_lossy(&capture.stderr)
     );
 
-    let link = output(
-        command(&["store", "link", "acme", "--repo", repo_path])
+    let paths = output(
+        command(&["store", "paths", "--repo", repo_path])
             .env("POINTBREAK_HOME", home.path())
             .env("HOME", fallback.path()),
     );
     assert!(
-        link.status.success(),
-        "link stderr:\n{}",
-        String::from_utf8_lossy(&link.stderr)
+        paths.status.success(),
+        "paths stderr:\n{}",
+        String::from_utf8_lossy(&paths.stderr)
     );
-
-    let family = home.path().join("stores/acme");
-    assert!(family.join("family.json").is_file());
-    assert!(family.join("registry.json").is_file());
-    assert!(family.join("events").is_dir());
+    let document: serde_json::Value = serde_json::from_slice(&paths.stdout).unwrap();
+    assert_eq!(document["home"], home.path().to_str().unwrap());
+    assert_eq!(document["keys"], home.path().join("keys").to_str().unwrap());
     assert!(!fallback.path().join(".pointbreak").exists());
 }

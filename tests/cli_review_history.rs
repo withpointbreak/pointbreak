@@ -73,8 +73,8 @@ fn review_history_emits_v1_json_with_freshness_metadata() {
             .unwrap()
             .starts_with("sha256:")
     );
-    assert_eq!(json["eventCount"], 2);
-    assert_eq!(json["historyCount"], 2);
+    assert_eq!(json["eventCount"], 3);
+    assert_eq!(json["historyCount"], 1);
     assert_eq!(json["entries"][0]["eventType"], "work_object_proposed");
     assert_eq!(
         json["entries"][0]["subject"]["revisionId"],
@@ -371,7 +371,7 @@ fn review_history_filters_by_revision() {
     let json = parse_json(&output.stdout);
 
     assert_ne!(first["revision"]["id"], second["revision"]["id"]);
-    assert_eq!(json["eventCount"], 4);
+    assert_eq!(json["eventCount"], 6);
     assert_eq!(json["historyCount"], 1);
     assert_eq!(
         json["entries"][0]["subject"]["revisionId"],
@@ -736,7 +736,7 @@ fn history_filter_narrows_by_type() {
         "type:assessment keeps only assessment entries, got {kinds:?}"
     );
     // Identity still describes the full replayed set, never the filtered set.
-    assert_eq!(json["eventCount"], 4);
+    assert_eq!(json["eventCount"], 5);
 }
 
 #[test]
@@ -859,7 +859,7 @@ fn history_filter_applies_before_windowing() {
         page["nextCursor"].is_string(),
         "a second observation remains after the window"
     );
-    assert_eq!(page["eventCount"], 5, "identity stays the full set");
+    assert_eq!(page["eventCount"], 6, "identity stays the full set");
 }
 
 #[test]

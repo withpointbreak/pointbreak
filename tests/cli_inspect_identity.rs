@@ -21,7 +21,7 @@ fn identity_reports_clone_placement_and_repo_basename() {
     repo.write("src/lib.rs", "pub fn v() -> u32 { 2 }\n");
     capture(repo.path());
 
-    let inspector = Inspector::spawn(repo.path());
+    let inspector = Inspector::spawn_current(repo.path());
     let id = inspector.get_json("/api/identity");
 
     assert_eq!(id["schema"], "pointbreak.inspect-identity");
@@ -44,7 +44,7 @@ fn identity_body_never_leaks_an_absolute_path() {
     repo.commit_all("base");
     capture(repo.path());
 
-    let inspector = Inspector::spawn(repo.path());
+    let inspector = Inspector::spawn_current(repo.path());
     let raw = inspector.get_text("/api/identity");
     let abs = repo.path().to_str().unwrap();
     assert!(
@@ -56,7 +56,7 @@ fn identity_body_never_leaks_an_absolute_path() {
 #[test]
 fn identity_distinguishes_repository_from_a_linked_worktree() {
     let capture = WorktreeCapture::on_branch("feat-foo", "feat/foo");
-    let inspector = Inspector::spawn(&capture.worktree);
+    let inspector = Inspector::spawn_current(&capture.worktree);
     let id = inspector.get_json("/api/identity");
 
     let main_basename = capture._main.path().file_name().unwrap().to_str().unwrap();

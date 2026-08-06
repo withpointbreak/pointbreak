@@ -49,11 +49,9 @@ pub use change::{
     ChangeRevisionRelationWithdrawnPayload,
 };
 pub(crate) use change::{
-    build_change_declared, build_membership_asserted, build_revision_relation_asserted,
-};
-#[cfg(test)]
-pub(crate) use change::{
-    build_change_link_asserted, build_membership_withdrawn, build_revision_relation_withdrawn,
+    build_change_declared, build_change_link_asserted, build_membership_asserted,
+    build_membership_withdrawn, build_revision_relation_asserted,
+    build_revision_relation_withdrawn,
 };
 pub use event_signature::{EventSignatureRecordedPayload, InclusionProof};
 pub(crate) use input_request::decode_input_request_opened_payload;
@@ -71,7 +69,6 @@ pub use relation::{
     FactPortRelationV1, FactRefV1, RelationProofStatusV1, ReviewFactPortedPayload,
     RevisionRelationAttestedPayload, SemanticRevisionRelationV1,
 };
-#[cfg(test)]
 pub(crate) use relation::{
     ReviewFactPortDraftV1, RevisionRelationAttestationDraftV1, build_review_fact_ported,
     build_revision_relation_attested,

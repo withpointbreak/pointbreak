@@ -1,5 +1,5 @@
 {
-  "contentHash": "sha256:32161336d3627d277a7a5917abe2e2694edec4f3621dbf939bf22091b40e0871",
+  "contentHash": "sha256:a79c47e18b9a08f5bdd53ea5fcb867d856d1f38f96b297fa529afa610e2c361f",
   "schema": "pointbreak.review-snapshot",
   "snapshot": {
     "files": [
@@ -192,10 +192,10 @@
         "is_submodule": false,
         "metadata_rows": [],
         "new_mode": "100644",
-        "new_oid": null,
+        "new_oid": "ba6d0b64ce277f9d46a233af30d20da0af2d1d54",
         "new_path": "src/lib.rs",
         "old_mode": "100644",
-        "old_oid": "4fc1e96",
+        "old_oid": "4fc1e96c5079e5a89fa9ff2f84bd6abe2da358c9",
         "old_path": "src/lib.rs",
         "similarity": null,
         "status": "modified",

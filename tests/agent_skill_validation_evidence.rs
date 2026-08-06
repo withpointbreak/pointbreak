@@ -270,7 +270,7 @@ fn reviewer_skill_reads_author_facts_before_writing_and_owns_the_call() {
 }
 
 #[test]
-fn author_response_skill_reuses_author_identity_and_never_assesses_or_recaptures() {
+fn author_response_skill_reuses_author_identity_and_advances_after_content_changes() {
     assert_order(
         "skills/pointbreak-author-response/SKILL.md",
         &[
@@ -298,11 +298,19 @@ fn author_response_skill_reuses_author_identity_and_never_assesses_or_recaptures
     );
     assert_contains(
         "skills/pointbreak-author-response/SKILL.md",
-        "`pointbreak capture`; this response attaches to the existing revision",
+        "pointbreak capture",
     );
     assert_contains(
         "skills/pointbreak-author-response/SKILL.md",
         "the Call stays the reviewer's",
+    );
+    assert_contains(
+        "skills/pointbreak-author-response/SKILL.md",
+        "--review-cursor \"$review_cursor\" --advance replace",
+    );
+    assert_contains(
+        "skills/pointbreak-author-response/SKILL.md",
+        "The prior assessment remains attached to the prior Revision",
     );
 }
 
@@ -319,18 +327,22 @@ fn enrollment_is_optional_staged_and_follows_the_untrusted_explanation() {
 }
 
 #[test]
-fn landing_guidance_associates_the_commit_on_the_same_revision() {
+fn landing_guidance_is_proof_first_and_content_changes_create_a_revision() {
     for path in [
         "skills/pointbreak-author/SKILL.md",
         "skills/pointbreak-author-response/SKILL.md",
-        "docs/agent-authoring.md",
     ] {
-        assert_contains(path, "pointbreak association record");
-        assert_contains(path, "same revision");
+        assert_contains(path, "pointbreak association land");
+        assert_contains(path, "--review-cursor");
+        assert_contains(path, "provenance-only");
     }
     assert_contains(
+        "skills/pointbreak-author/SKILL.md",
+        "pointbreak association record",
+    );
+    assert_contains(
         "skills/pointbreak-author-response/SKILL.md",
-        "`pointbreak capture` is not re-run for the landing",
+        "Capture the new state in the same",
     );
 }
 

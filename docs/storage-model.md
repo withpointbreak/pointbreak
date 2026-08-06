@@ -401,8 +401,8 @@ worktree (`pointbreak store mode ephemeral`) instead pins its writes to a discar
 disappear when the worktree is removed.
 
 A pre-flip worktree-local `.pointbreak/data/` store on a non-ephemeral worktree (data written before the
-shared common-dir default) is detected on any read or write and errors with a hint to run
-`pointbreak store migrate`. `pointbreak store migrate` folds that legacy store into the shared common-dir store
+shared common-dir default) is detected on any read or write. The retained `pointbreak store migrate`
+contract folds that legacy store into the shared common-dir store
 **non-destructively** by default: it copies events and artifacts forward with strict content-hash
 validation and leaves `.pointbreak/data/` in place, so the operator can verify the result and then remove
 `.pointbreak/data/` to finish the switch — or completes the switch in one command with
@@ -412,7 +412,8 @@ manifest-driven check, which cannot see orphan/unreferenced files) and only then
 `.pointbreak/data/`; on any divergence it errors and deletes nothing. It is idempotent — re-running
 reports already-present facts as existing — and refuses an ephemeral or sensitivity-flagged worktree
 unless `--include-ephemeral` is passed. It scans for sensitivity findings before moving data and
-reports them in the command document. (`pointbreak store migrate` folds the ephemeral `.pointbreak/data/`
+reports them in the command document. During the Change-store transition this transfer writer is
+fail-closed; only the mutation-free Change migration dry run is public. (`pointbreak store migrate` folds the ephemeral `.pointbreak/data/`
 store into the shared common-dir store; it is unrelated to the legacy flat `.pointbreak/` layout, a
 retired pre-1.0 format that is detected and refused rather than migrated; see
 [Migrations And Doctor](#migrations-and-doctor).)
@@ -454,6 +455,10 @@ A future delivery queue is a separate subsystem. Queue concepts such as `pending
 retry counts, backoff, and circuit breakers do not belong in the store's `events/`.
 
 ## User-Level Family Store Tier
+
+> **Transition fence:** the placement model below remains the intended durable contract, but
+> `pointbreak store link` and its transfer writer are inactive until exact Change store transfer is
+> available. Current commands fail closed rather than moving a partial Change authority set.
 
 A clone may opt into a **user-level family store**: one store per repository family per machine, at
 `<pointbreak-home-root>/stores/<slug>/`. It exists so review facts survive removing any single clone

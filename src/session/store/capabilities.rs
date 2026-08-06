@@ -2,7 +2,7 @@
     not(test),
     allow(
         dead_code,
-        reason = "writer-dark capability constructors are not routed yet"
+        reason = "capability construction is exposed only to qualification support"
     )
 )]
 
@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::canonical_hash::{canonical_json_bytes, sha256_bytes_hex, sha256_json_prefixed};
-#[cfg(test)]
+#[cfg(any(test, feature = "bench"))]
 use crate::crypto::EventSigner;
 use crate::crypto::{
     EventSignatureBytes, EventVerificationStatus, SignerId, verify_ed25519_strict,
@@ -297,7 +297,7 @@ struct JournalRecordSignatureV1 {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct StoreCapabilityActivationV1 {
+pub(crate) struct StoreCapabilityActivationV1 {
     schema: String,
     version: u32,
     activation_id: String,
@@ -346,13 +346,23 @@ struct ActivationSigningView<'a> {
 }
 
 impl StoreCapabilityActivationV1 {
-    fn logical_key(&self) -> String {
+    pub(crate) fn logical_key(&self) -> String {
         self.predecessor_activation_id.as_ref().map_or_else(
             || ROOT_ACTIVATION_LOGICAL_KEY_V1.to_owned(),
             |predecessor| {
                 format!("store_capability_activation:review_change_revision_v1:after:{predecessor}")
             },
         )
+    }
+
+    #[cfg(any(test, feature = "bench"))]
+    pub(crate) fn activation_id(&self) -> &str {
+        &self.activation_id
+    }
+
+    #[cfg(any(test, feature = "bench"))]
+    pub(crate) fn manifest_hash(&self) -> &str {
+        &self.bulk_adoption_manifest_hash
     }
 
     fn identity_view(&self) -> ActivationIdentityView<'_> {
@@ -423,7 +433,7 @@ impl StoreCapabilityActivationV1 {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct BulkAdoptionCompletionV1 {
+pub(crate) struct BulkAdoptionCompletionV1 {
     schema: String,
     version: u32,
     completion_id: String,
@@ -463,8 +473,13 @@ struct CompletionSigningView<'a> {
 }
 
 impl BulkAdoptionCompletionV1 {
-    fn logical_key(&self) -> String {
+    pub(crate) fn logical_key(&self) -> String {
         format!("bulk_adoption_completion:{}", self.completion_id)
+    }
+
+    #[cfg(any(test, feature = "bench"))]
+    pub(crate) fn completion_id(&self) -> &str {
+        &self.completion_id
     }
 
     fn identity_view(&self) -> CompletionIdentityView<'_> {
@@ -763,6 +778,10 @@ pub(crate) fn inspect_activated_journal_records(
 /// The temporary writer-dark gate for the already-shipped event-only product.
 /// A fixed root key makes the normal L0 check O(1); once it exists, the complete
 /// router validates the activated store and then refuses the old semantic path.
+#[allow(
+    dead_code,
+    reason = "retained as the frozen signed-v0.9 compatibility reference"
+)]
 pub(crate) fn preflight_event_only_product(journal: &dyn Journal) -> Result<()> {
     let Some(inspection) = inspect_activated_journal_records(journal)? else {
         return Ok(());
@@ -782,6 +801,29 @@ pub(crate) fn preflight_event_only_product(journal: &dyn Journal) -> Result<()> 
     })
 }
 
+/// Require the complete Change cohort before any Change-aware workflow writes.
+///
+/// This check is the inverse of [`preflight_event_only_product`]: untouched L0
+/// and partial M1 roots are classified without mutation, and only a verified L2
+/// root may proceed. Keeping the checks separate prevents either writer family
+/// from silently crossing the minimum-reader boundary.
+pub(crate) fn preflight_change_writer(journal: &dyn Journal) -> Result<()> {
+    let inspection = inspect_change_reader_journal_records(journal)?;
+    match inspection.status {
+        StoreCapabilityStatus::Ready { .. } => Ok(()),
+        StoreCapabilityStatus::MigrationRequired => capability_error(
+            "migration_required; Change writes require an explicit completed store migration",
+        ),
+        StoreCapabilityStatus::MigrationInProgress { .. } => capability_error(
+            "migration_in_progress; Change writes refuse partial capability authority",
+        ),
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "retained as the frozen signed-v0.9 compatibility reference"
+)]
 pub(crate) fn event_entries_for_event_only_product(
     journal: &dyn Journal,
 ) -> Result<Vec<JournalEntry>> {
@@ -800,6 +842,42 @@ pub(crate) fn event_entries_for_event_only_product(
         StoreCapabilityStatus::Ready { .. } => capability_error(
             "reader_upgrade_required; refusing legacy semantic output from an activated store",
         ),
+    }
+}
+
+/// Route the current binary's domain-named compatibility commands across the
+/// pre-activation and complete Change cohorts. The transition state remains a
+/// hard stop: no command may observe or append against partial authority.
+pub(crate) fn preflight_current_product(journal: &dyn Journal) -> Result<()> {
+    let Some(inspection) = inspect_activated_journal_records(journal)? else {
+        return Ok(());
+    };
+    match inspection.status {
+        StoreCapabilityStatus::Ready { .. } => Ok(()),
+        StoreCapabilityStatus::MigrationInProgress { .. } => capability_error(
+            "migration_in_progress; normal product routes refuse partial Change authority",
+        ),
+        StoreCapabilityStatus::MigrationRequired => {
+            capability_error("activation root disappeared during current-product preflight")
+        }
+    }
+}
+
+pub(crate) fn event_entries_for_current_product(
+    journal: &dyn Journal,
+) -> Result<Vec<JournalEntry>> {
+    if !journal.record_exists(ROOT_ACTIVATION_LOGICAL_KEY_V1)? {
+        return journal.list_event_entries();
+    }
+    let inspection = inspect_journal_records(journal)?;
+    match inspection.status {
+        StoreCapabilityStatus::Ready { .. } => Ok(inspection.event_entries),
+        StoreCapabilityStatus::MigrationInProgress { .. } => capability_error(
+            "migration_in_progress; refusing partial semantic output from an activated store",
+        ),
+        StoreCapabilityStatus::MigrationRequired => {
+            capability_error("activation root disappeared during current-product event routing")
+        }
     }
 }
 
@@ -1205,6 +1283,7 @@ fn capability_error<T>(message: impl Into<String>) -> Result<T> {
 pub(in crate::session) enum CapabilityFixtureState {
     M1,
     L2,
+    EmptyL2,
 }
 
 #[cfg(test)]
@@ -1215,6 +1294,100 @@ enum CapabilityFixtureCorruption {
     UnsupportedMinimumReaderProfile,
     DivergentLogicalKey,
     CompletionWithoutCoverage,
+}
+
+#[cfg(any(test, feature = "bench"))]
+pub(crate) fn build_signed_activation(
+    signer: &impl EventSigner,
+    manifest: BulkAdoptionManifestV1,
+    nonce: String,
+    writer: Writer,
+    occurred_at: String,
+) -> Result<StoreCapabilityActivationV1> {
+    let manifest_hash = manifest.canonical_hash()?;
+    let mut activation = StoreCapabilityActivationV1 {
+        schema: ACTIVATION_SCHEMA_V1.to_owned(),
+        version: 1,
+        activation_id: String::new(),
+        nonce,
+        predecessor_activation_id: None,
+        cohort_manifest_hash: REVIEW_CHANGE_REVISION_MANIFEST_HASH_V1.to_owned(),
+        minimum_reader_profile: REVIEW_CHANGE_REVISION_COHORT_V1.to_owned(),
+        required_capabilities: supported_capabilities(),
+        bulk_adoption_manifest_hash: manifest_hash,
+        bulk_adoption_manifest: manifest,
+        writer,
+        occurred_at,
+        signer: signer.signer_id().clone(),
+        signature: JournalRecordSignatureV1 {
+            alg: "ed25519".to_owned(),
+            sig_version: 1,
+            sig: EventSignatureBytes::parse("")?,
+        },
+    };
+    activation.activation_id = format!(
+        "capability-activation:sha256:{}",
+        sha256_bytes_hex(&canonical_json_bytes(&serde_json::to_value(
+            activation.identity_view()
+        )?)?)
+    );
+    let body = canonical_json_bytes(&serde_json::to_value(activation.signing_view())?)?;
+    activation.signature.sig = signer.sign_event_message(&pre_authentication_encoding(
+        ACTIVATION_TBS_PAYLOAD_TYPE_V1,
+        &body,
+    ))?;
+    activation.validate()?;
+    Ok(activation)
+}
+
+#[cfg(any(test, feature = "bench"))]
+pub(crate) fn build_signed_completion(
+    signer: &impl EventSigner,
+    activation: &StoreCapabilityActivationV1,
+    writer: Writer,
+    occurred_at: String,
+) -> Result<BulkAdoptionCompletionV1> {
+    let mut completion = BulkAdoptionCompletionV1 {
+        schema: COMPLETION_SCHEMA_V1.to_owned(),
+        version: 1,
+        completion_id: String::new(),
+        activation_id: activation.activation_id.clone(),
+        bulk_adoption_manifest_hash: activation.bulk_adoption_manifest_hash.clone(),
+        covered_record_set_hash: reserved_record_set_hash(
+            &activation.bulk_adoption_manifest.reserved_records,
+        )?,
+        writer,
+        occurred_at,
+        signer: signer.signer_id().clone(),
+        signature: JournalRecordSignatureV1 {
+            alg: "ed25519".to_owned(),
+            sig_version: 1,
+            sig: EventSignatureBytes::parse("")?,
+        },
+    };
+    completion.completion_id = format!(
+        "bulk-adoption-completion:sha256:{}",
+        sha256_bytes_hex(&canonical_json_bytes(&serde_json::to_value(
+            completion.identity_view()
+        )?)?)
+    );
+    let body = canonical_json_bytes(&serde_json::to_value(completion.signing_view())?)?;
+    completion.signature.sig = signer.sign_event_message(&pre_authentication_encoding(
+        COMPLETION_TBS_PAYLOAD_TYPE_V1,
+        &body,
+    ))?;
+    completion.validate()?;
+    Ok(completion)
+}
+
+#[cfg(any(test, feature = "bench"))]
+pub(crate) fn publish_control_record<T: Serialize>(
+    journal: &dyn Journal,
+    logical_key: &str,
+    record: &T,
+) -> Result<crate::storage::CreateOutcome> {
+    let bytes = canonical_json_bytes(&serde_json::to_value(record)?)?;
+    journal.create_record_once(logical_key, &bytes)
 }
 
 #[cfg(test)]
@@ -1233,7 +1406,11 @@ pub(in crate::session) fn write_capability_fixture_for_test(
         return capability_error("qualification activation requires an L0 source root");
     }
     let source = source_inspection.cursor;
-    let events = qualification_events();
+    let events = if matches!(state, CapabilityFixtureState::EmptyL2) {
+        Vec::new()
+    } else {
+        qualification_events()
+    };
     let mut reservations = events
         .iter()
         .map(|(logical_key, _, bytes)| ReservedCohortRecordV1 {
@@ -1262,7 +1439,10 @@ pub(in crate::session) fn write_capability_fixture_for_test(
     };
     let activation = signed_activation(&signer, manifest)?;
     publish_test_record(journal, &activation.logical_key(), &activation)?;
-    if matches!(state, CapabilityFixtureState::L2) {
+    if matches!(
+        state,
+        CapabilityFixtureState::L2 | CapabilityFixtureState::EmptyL2
+    ) {
         for (logical_key, _, bytes) in &events {
             match journal.create_record_once(logical_key, bytes)? {
                 crate::storage::CreateOutcome::Created
@@ -1833,7 +2013,10 @@ mod tests {
         let state = match std::env::var("POINTBREAK_CAPABILITY_FIXTURE_STATE").as_deref() {
             Ok("m1") => CapabilityFixtureState::M1,
             Ok("l2") => CapabilityFixtureState::L2,
-            other => panic!("POINTBREAK_CAPABILITY_FIXTURE_STATE must be m1 or l2, got {other:?}"),
+            Ok("empty-l2") => CapabilityFixtureState::EmptyL2,
+            other => panic!(
+                "POINTBREAK_CAPABILITY_FIXTURE_STATE must be m1, l2, or empty-l2, got {other:?}"
+            ),
         };
         std::fs::create_dir_all(&store_dir).expect("create explicit fixture store");
         let journal = crate::session::store::backend::LocalJournal::new(&store_dir);

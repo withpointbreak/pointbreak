@@ -5,6 +5,7 @@ use super::{
 };
 use crate::error::Result;
 use crate::model::{RevisionId, TrackId};
+use crate::session::ArtifactRemovalProjection;
 use crate::session::observation::{
     CurrentRevisionContext, RevisionScope, RevisionSelection, resolve_revision, validated_track_id,
 };
@@ -12,8 +13,6 @@ use crate::session::projection::body_content::{BodyRemovalLens, body_content_dia
 use crate::session::projection::cosignature::CosignatureIndex;
 use crate::session::signing::{RemovalPolicy, TrustSet};
 use crate::session::state::{ProjectionDiagnostic, SessionState};
-use crate::session::store::resolution::resolve_read_store;
-use crate::session::{ArtifactRemovalProjection, EventStore};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssessmentShowOptions {
@@ -98,8 +97,7 @@ pub struct AssessmentShowFilters {
 }
 
 pub fn show_assessments(options: AssessmentShowOptions) -> Result<AssessmentShowResult> {
-    let read_store = resolve_read_store(&options.repo)?;
-    let events = EventStore::from_backend(read_store.backend()).list_events()?;
+    let (read_store, events) = super::super::capable_read_store_and_events(&options.repo)?;
     let resolved = resolve_revision(
         &events,
         RevisionSelection::from_revision_options(

@@ -11,8 +11,8 @@ use crate::git::{
 };
 use crate::model::{
     ActorId, DiffFile, DiffRowKind, DiffSnapshot, EngagementId, EngagementType, FileStatus,
-    JournalId, ObjectId, ReviewEndpoint, ReviewId, ReviewTargetRef, RevisionId, RevisionSource,
-    TargetRef, id_prefix,
+    JournalId, ObjectId, ReviewEndpoint, ReviewId, ReviewTargetRef, RevisionId, RevisionRefV1,
+    RevisionSource, TargetRef, id_prefix,
 };
 use crate::session::event::{
     EventTarget, EventType, Revision, ShoreEvent, WorkObjectProposal, WorkObjectProposedPayload,
@@ -22,7 +22,8 @@ use crate::session::fingerprint::{
     ResolvedTreeEndpoint, RevisionFingerprint, engagement_id_from_root, engagement_id_provisional,
 };
 use crate::session::store::resolution::{
-    prepare_write_landing, resolve_write_store, resolve_write_validation_store,
+    prepare_write_landing, resolve_change_write_store, resolve_write_store,
+    resolve_write_validation_store,
 };
 use crate::session::workflow::util::sorted_unique;
 use crate::session::{
@@ -175,6 +176,48 @@ impl CaptureOptions {
         }
     }
 
+    pub(crate) fn repo(&self) -> &Path {
+        &self.repo
+    }
+
+    pub(crate) fn actor_id(&self) -> Option<&ActorId> {
+        self.actor_id.as_ref()
+    }
+
+    pub(crate) fn signing(&self) -> &EventSigningOptions {
+        &self.signing
+    }
+
+    pub(crate) fn operation_material(&self) -> serde_json::Value {
+        let source = match &self.source {
+            CaptureSourceSpec::Worktree(spec) => serde_json::json!({
+                "kind": "worktree",
+                "includeUntracked": spec.include_untracked,
+            }),
+            CaptureSourceSpec::CommitRange(spec) => serde_json::json!({
+                "kind": "commit_range",
+                "baseRev": spec.base_rev,
+                "targetRev": spec.target_rev,
+            }),
+            CaptureSourceSpec::RootCommit(spec) => serde_json::json!({
+                "kind": "root_commit",
+                "targetRev": spec.target_rev,
+            }),
+            CaptureSourceSpec::Staged(_) => serde_json::json!({"kind": "staged"}),
+            CaptureSourceSpec::Unstaged(spec) => serde_json::json!({
+                "kind": "unstaged",
+                "includeUntracked": spec.include_untracked,
+            }),
+        };
+        serde_json::json!({
+            "source": source,
+            "excludedHelperPaths": self.excluded_helper_paths,
+            "summary": self.summary,
+            "pathspecs": self.pathspecs,
+            "allowEmpty": self.allow_empty,
+        })
+    }
+
     /// Capture the tree diff of a commit range instead of the `HEAD` ->
     /// working-tree diff. The working tree and untracked files are not read, and
     /// helper-path exclusion does not apply (a range capture is a faithful tree
@@ -310,7 +353,8 @@ pub struct CaptureResult {
 /// so a human capture readback needs no object-artifact re-read. Line churn counts
 /// textual diff rows only; binary and mode-only files count as files but contribute
 /// no lines.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CaptureDiffstat {
     pub file_count: usize,
     pub added_files: usize,
@@ -364,6 +408,50 @@ pub fn diffstat_from_files(files: &[DiffFile]) -> CaptureDiffstat {
 /// `revision_captured` event, rebuild projection state, and surface the
 /// clone-local diagnostic.
 pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
+    capture_review_with_policy(options, CaptureWritePolicy::EventOnly, None)
+}
+
+/// Capture a new immutable Revision through the completed Change writer.
+///
+/// Replacement intent is deliberately absent from the proposal. A higher-level
+/// Change operation appends separately withdrawable relation claims only after
+/// this exact Revision exists.
+/// Capture through the Change writer after giving the caller custody of the
+/// exact Revision reference that will be proposed. The hook runs after source
+/// preparation and proposal validation but before either the object artifact
+/// or proposal event is written, allowing a retryable higher-level operation
+/// to durably bind its operation id to the exact source result first.
+pub(crate) fn capture_change_review_with_preappend(
+    options: CaptureOptions,
+    mut before_append: impl FnMut(&RevisionRefV1) -> Result<()>,
+) -> Result<CaptureResult> {
+    if !options.supersedes.is_empty() {
+        return Err(ShoreError::WorkflowInputInvalid {
+            reason: "Change capture cannot store proposal-borne supersedes authority".to_owned(),
+        });
+    }
+    capture_review_with_policy(
+        options,
+        CaptureWritePolicy::Change,
+        Some(&mut before_append),
+    )
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CaptureWritePolicy {
+    EventOnly,
+    Change,
+}
+
+#[allow(
+    clippy::type_complexity,
+    reason = "the optional callback is a private interruption seam for Change capture"
+)]
+fn capture_review_with_policy(
+    options: CaptureOptions,
+    write_policy: CaptureWritePolicy,
+    mut before_change_append: Option<&mut dyn FnMut(&RevisionRefV1) -> Result<()>>,
+) -> Result<CaptureResult> {
     let span = tracing::info_span!(
         "session.capture_review",
         repo = %options.repo.display(),
@@ -374,30 +462,18 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
     // The write landing is mode-aware (INV-1): in a linked worktree the
     // artifact, event, and state.json all land in the clone-local store, so the
     // same worktree's reads (which already resolve it) see the capture in place.
-    let write_store = resolve_write_store(&options.repo)?;
+    let write_store = match write_policy {
+        CaptureWritePolicy::EventOnly => resolve_write_store(&options.repo)?,
+        CaptureWritePolicy::Change => resolve_change_write_store(&options.repo)?,
+    };
     let worktree_root = write_store.worktree_root().to_path_buf();
     let store_dir = write_store.store_dir().to_path_buf();
     let storage = LocalStorage::new(&store_dir);
     prepare_write_landing(&write_store, &storage)?;
 
     let pathspecs = normalize_pathspecs(&options.pathspecs)?;
-    let PreparedCapture { files, fingerprint } = match &options.source {
-        CaptureSourceSpec::Worktree(worktree) => {
-            prepare_worktree_capture(&worktree_root, &options, worktree, &pathspecs)?
-        }
-        CaptureSourceSpec::CommitRange(range) => {
-            prepare_commit_range_capture(&worktree_root, range, &pathspecs)?
-        }
-        CaptureSourceSpec::RootCommit(root) => {
-            prepare_root_commit_capture(&worktree_root, root, &pathspecs)?
-        }
-        CaptureSourceSpec::Staged(staged) => {
-            prepare_staged_capture(&worktree_root, staged, &pathspecs)?
-        }
-        CaptureSourceSpec::Unstaged(unstaged) => {
-            prepare_unstaged_capture(&worktree_root, &options, unstaged, &pathspecs)?
-        }
-    };
+    let PreparedCapture { files, fingerprint } =
+        prepare_capture_source(&worktree_root, &options, &pathspecs)?;
     if files.is_empty() && !options.allow_empty {
         return Err(ShoreError::Message(empty_capture_message(
             &options.source,
@@ -422,7 +498,18 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
     // lends its engagement; an all-dangling set takes a deterministic provisional
     // id. The hint never gates the write — the read projections own grouping.
     let supersedes = sorted_unique(options.supersedes.clone());
-    let validation_events = resolve_write_validation_store(&worktree_root)?.validation_events()?;
+    let validation_events = match write_policy {
+        CaptureWritePolicy::EventOnly => {
+            resolve_write_validation_store(&worktree_root)?.validation_events()?
+        }
+        CaptureWritePolicy::Change => crate::session::change_reader_state_for_repo(&worktree_root)?
+            .ready()
+            .ok_or_else(|| ShoreError::WorkflowInputInvalid {
+                reason: "complete Change authority is unavailable".to_owned(),
+            })?
+            .events()
+            .to_vec(),
+    };
     let engagement_id =
         derive_engagement_id(&validation_events, &fingerprint.revision_id, &supersedes)?;
     // The generative move is an advisory proposal of a revision over a
@@ -453,6 +540,26 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
     };
     let object_artifact_content_hash = artifact.content_hash.clone();
     let proposal_exists = preflight_capture_proposal(&validation_events, &payload)?;
+    if let Some(before_append) = before_change_append.as_mut() {
+        before_append(&RevisionRefV1::new(
+            fingerprint.revision_id.clone(),
+            object_artifact_content_hash.clone(),
+        )?)?;
+    }
+    if matches!(
+        &options.source,
+        CaptureSourceSpec::Worktree(_)
+            | CaptureSourceSpec::Staged(_)
+            | CaptureSourceSpec::Unstaged(_)
+    ) {
+        let current = prepare_capture_source(&worktree_root, &options, &pathspecs)?;
+        if current.fingerprint != fingerprint {
+            return Err(ShoreError::WorkflowInputInvalid {
+                reason: "capture source changed before append; finish one coherent source state and retry with a new operation id"
+                    .to_owned(),
+            });
+        }
+    }
     crate::session::object_artifact::write_prepared_object_artifact_to(
         write_store.backend(),
         &fingerprint,
@@ -475,7 +582,7 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
     if proposal_exists {
         recorder.record_existing();
     } else {
-        recorder.record(&event_store, event)?;
+        recorder.record(&event_store, event, write_policy)?;
     }
 
     // Record the capture-time branch ref as a best-effort `RevisionRefAssociated`
@@ -485,16 +592,17 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
     // HEAD. An arbitrary historical range (target != HEAD) records nothing — the
     // checked-out branch is not its provenance. Detached HEAD names no ref, so the
     // helper skips it. Any failure degrades to a diagnostic and never blocks capture.
-    let auto_record_ref = match &options.source {
-        CaptureSourceSpec::Worktree(_)
-        | CaptureSourceSpec::Staged(_)
-        | CaptureSourceSpec::Unstaged(_) => git_head_oid(&worktree_root).is_ok(),
-        CaptureSourceSpec::CommitRange(_) | CaptureSourceSpec::RootCommit(_) => matches!(
-            &fingerprint.target,
-            ReviewEndpoint::GitCommit { commit_oid, .. }
-                if *commit_oid == git_head_oid(&worktree_root)?
-        ),
-    };
+    let auto_record_ref = write_policy == CaptureWritePolicy::EventOnly
+        && match &options.source {
+            CaptureSourceSpec::Worktree(_)
+            | CaptureSourceSpec::Staged(_)
+            | CaptureSourceSpec::Unstaged(_) => git_head_oid(&worktree_root).is_ok(),
+            CaptureSourceSpec::CommitRange(_) | CaptureSourceSpec::RootCommit(_) => matches!(
+                &fingerprint.target,
+                ReviewEndpoint::GitCommit { commit_oid, .. }
+                    if *commit_oid == git_head_oid(&worktree_root)?
+            ),
+        };
     let mut auto_record_diagnostics = Vec::new();
     if auto_record_ref
         && let Err(error) = auto_record_capture_ref_association(
@@ -504,6 +612,7 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
             &fingerprint,
             &journal_id,
             &options,
+            write_policy,
         )
     {
         auto_record_diagnostics.push(ProjectionDiagnostic {
@@ -512,7 +621,11 @@ pub fn capture_review(options: CaptureOptions) -> Result<CaptureResult> {
         });
     }
 
-    let state = SessionState::from_events(&event_store.list_events()?)?;
+    let events = match write_policy {
+        CaptureWritePolicy::EventOnly => event_store.list_events()?,
+        CaptureWritePolicy::Change => event_store.list_change_events()?,
+    };
+    let state = SessionState::from_events(&events)?;
     storage.write_json_atomic(
         &store_dir.join("state.json"),
         &state,
@@ -561,6 +674,7 @@ fn auto_record_capture_ref_association(
     fingerprint: &RevisionFingerprint,
     journal_id: &JournalId,
     options: &CaptureOptions,
+    write_policy: CaptureWritePolicy,
 ) -> Result<()> {
     let Some(ref_name) = git_head_ref(worktree_root)? else {
         return Ok(());
@@ -579,13 +693,93 @@ fn auto_record_capture_ref_association(
     sign_event_if_requested(&mut event, &options.signing)?;
     // Route through the recorder so the capture's write-count envelope counts the
     // auto-recorded ref event (created or existing) and its event type.
-    recorder.record(event_store, event)
+    recorder.record(event_store, event, write_policy)
 }
 
 /// The row inventory plus resolved identity an adapter hands to the shared tail.
 struct PreparedCapture {
     files: Vec<DiffFile>,
     fingerprint: RevisionFingerprint,
+}
+
+fn prepare_capture_source(
+    worktree_root: &Path,
+    options: &CaptureOptions,
+    pathspecs: &[String],
+) -> Result<PreparedCapture> {
+    match &options.source {
+        CaptureSourceSpec::Worktree(worktree) => {
+            prepare_worktree_capture(worktree_root, options, worktree, pathspecs)
+        }
+        CaptureSourceSpec::CommitRange(range) => {
+            prepare_commit_range_capture(worktree_root, range, pathspecs)
+        }
+        CaptureSourceSpec::RootCommit(root) => {
+            prepare_root_commit_capture(worktree_root, root, pathspecs)
+        }
+        CaptureSourceSpec::Staged(staged) => {
+            prepare_staged_capture(worktree_root, staged, pathspecs)
+        }
+        CaptureSourceSpec::Unstaged(unstaged) => {
+            prepare_unstaged_capture(worktree_root, options, unstaged, pathspecs)
+        }
+    }
+}
+
+/// Re-materialize the mutable Git source described by one captured Revision.
+///
+/// Review cursors use this read-only adapter to compare the live checkout with
+/// the exact capture mode and scope that minted the Revision. It deliberately
+/// reuses the production capture adapters so source-race checks cannot drift
+/// into a second interpretation of worktree, index, untracked, mode, or
+/// pathspec state.
+pub(crate) fn prepare_mutable_source_for_provenance(
+    repo: &Path,
+    provenance: &crate::session::event::GitProvenance,
+) -> Result<(Vec<DiffFile>, RevisionFingerprint)> {
+    let worktree_root = crate::git::git_worktree_root(repo)?;
+    let prepared = match &provenance.source {
+        RevisionSource::GitWorktree {
+            include_untracked,
+            pathspecs,
+            ..
+        } => {
+            let worktree = if *include_untracked {
+                WorktreeSpec::new().with_include_untracked()
+            } else {
+                WorktreeSpec::new()
+            };
+            let options = CaptureOptions::new(&worktree_root)
+                .with_worktree(worktree.clone())
+                .with_pathspecs(pathspecs.clone());
+            prepare_worktree_capture(&worktree_root, &options, &worktree, pathspecs)?
+        }
+        RevisionSource::GitStaged { pathspecs, .. } => {
+            let staged = StagedSpec::new();
+            prepare_staged_capture(&worktree_root, &staged, pathspecs)?
+        }
+        RevisionSource::GitUnstaged {
+            include_untracked,
+            pathspecs,
+            ..
+        } => {
+            let unstaged = if *include_untracked {
+                UnstagedSpec::new().with_include_untracked()
+            } else {
+                UnstagedSpec::new()
+            };
+            let options = CaptureOptions::new(&worktree_root)
+                .with_unstaged(unstaged.clone())
+                .with_pathspecs(pathspecs.clone());
+            prepare_unstaged_capture(&worktree_root, &options, &unstaged, pathspecs)?
+        }
+        RevisionSource::GitCommitRange { .. } | RevisionSource::GitRootCommit { .. } => {
+            return Err(ShoreError::WorkflowInputInvalid {
+                reason: "the selected Revision has no mutable worktree-backed source".to_owned(),
+            });
+        }
+    };
+    Ok((prepared.files, prepared.fingerprint))
 }
 
 /// Worktree adapter: ingest the `HEAD` -> working-tree diff (helper-path
@@ -967,9 +1161,18 @@ impl CaptureRecorder {
         self.events_existing += 1;
     }
 
-    fn record(&mut self, event_store: &EventStore, event: ShoreEvent) -> Result<()> {
+    fn record(
+        &mut self,
+        event_store: &EventStore,
+        event: ShoreEvent,
+        write_policy: CaptureWritePolicy,
+    ) -> Result<()> {
         let event_type = event.event_type;
-        match event_store.record_event_once(&event)? {
+        let outcome = match write_policy {
+            CaptureWritePolicy::EventOnly => event_store.record_event_once(&event)?,
+            CaptureWritePolicy::Change => event_store.record_change_event_once(&event)?,
+        };
+        match outcome {
             EventWriteOutcome::Created => {
                 self.events_created += 1;
                 *self

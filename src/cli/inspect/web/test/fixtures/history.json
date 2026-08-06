@@ -1,32 +1,37 @@
 {
   "diagnostics": [],
   "distinctValues": {
-    "track": ["agent:codex", "human:kevin"],
-    "actor": ["actor:git-email:shore-tests@example.com"],
-    "tag": []
+    "actor": [
+      "actor:git-email:shore-tests@example.com"
+    ],
+    "tag": [],
+    "track": [
+      "agent:codex",
+      "human:kevin"
+    ]
   },
   "entries": [
     {
-      "eventId": "evt:sha256:5c73d1aed5e1f2e68520faf19a6468f6ee2eb691038eb620d54d48f403a03b95",
+      "eventId": "evt:sha256:f835facf52cc4cac2616e7081dd5b98517a08b73f56c8da54be4d555c366592d",
       "eventType": "work_object_proposed",
       "journalId": "journal:default",
-      "occurredAt": "unix-ms:1782699185391",
-      "payloadHash": "sha256:13870ee0a48a0ffafd3de2537c9b42363a2b6e53d2fe5924f381953a96f2474e",
+      "occurredAt": "2026-08-06T07:34:57.590Z",
+      "payloadHash": "sha256:ac6b39a4d32ce3ed27d9297dbd906f84dfdcef3cdad69b7695b2f07fd25a09b8",
       "subject": {
         "kind": "revision",
-        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
       },
       "summary": {
         "base": {
-          "commitOid": "ffc93defe11730aca098a481cc1409e76a2d249f",
+          "commitOid": "04f041b7dfbf5ae56e1ec79eaf6df94ef8517c9b",
           "kind": "git_commit",
           "treeOid": "8a6622c20e639e20b00100e48d58c3834a2db323"
         },
-        "engagementId": "engagement:sha256:7b8a07a15a63ca09e26080ec985cbabf6ebe03106c00c95d33125284b5b47764",
+        "engagementId": "engagement:sha256:f321ff5218eee166766a40c3514d6d5a638b8f247f1023e5e140b140e9edd82d",
         "kind": "revision_captured",
-        "objectArtifactContentHash": "sha256:32161336d3627d277a7a5917abe2e2694edec4f3621dbf939bf22091b40e0871",
+        "objectArtifactContentHash": "sha256:a79c47e18b9a08f5bdd53ea5fcb867d856d1f38f96b297fa529afa610e2c361f",
         "objectId": "obj:sha256:38a493d2f09d6fde9d1dcac61a12c4ccc4de42a0b9c6829752d34cc648a9f9d7",
-        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd",
+        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4",
         "source": {
           "includeUntracked": false,
           "kind": "git_worktree",
@@ -34,54 +39,29 @@
         },
         "target": {
           "kind": "git_working_tree",
-          "worktreeRoot": "/private/var/folders/pn/96xv56rd1mj4g7mxpx1z9jx80000gn/T/.tmplPi8eZ"
+          "worktreeRoot": "/private/var/folders/pn/96xv56rd1mj4g7mxpx1z9jx80000gn/T/.tmp7yTBri"
         }
       },
       "verificationStatus": "unsigned",
       "writer": {
         "actorId": "actor:git-email:shore-tests@example.com",
         "producer": {
-          "name": "shore",
-          "version": "0.6.0"
+          "name": "pointbreak",
+          "version": "0.9.0"
         }
       }
     },
     {
-      "eventId": "evt:sha256:fdcfefd1251ddb5fcf0740317c46a2f3197ae8908e6760a625800fd5167db8aa",
-      "eventType": "revision_ref_associated",
-      "journalId": "journal:default",
-      "occurredAt": "unix-ms:1782699185426",
-      "payloadHash": "sha256:99a8759240a1b286bff4d047e4bf8c812d05e2a9cbb80d39a8ffe45edf20ba3a",
-      "subject": {
-        "kind": "revision",
-        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
-      },
-      "summary": {
-        "headOid": "ffc93defe11730aca098a481cc1409e76a2d249f",
-        "kind": "revision_ref_associated",
-        "refAssociationId": "assoc-ref:sha256:8cf5b7c262bda47de419467ebdb9efd271330961df637b1f61bec5586f21d14c",
-        "refName": "refs/heads/main"
-      },
-      "verificationStatus": "unsigned",
-      "writer": {
-        "actorId": "actor:git-email:shore-tests@example.com",
-        "producer": {
-          "name": "shore",
-          "version": "0.6.0"
-        }
-      }
-    },
-    {
-      "eventId": "evt:sha256:8ac34bc85b48ed6623660a174b024bd9099edd09877180bfa87101cc76ac6058",
+      "eventId": "evt:sha256:e7e9b05f284749df82e29571889122b854b2662d97f0fcaa5fcba1a3dff914aa",
       "eventType": "review_observation_recorded",
       "journalId": "journal:default",
-      "occurredAt": "unix-ms:1782699185488",
-      "payloadHash": "sha256:3be3939b00d0f1f4bb6a89846df5238293440b83fdf3a27cbef5a89c696950f3",
+      "occurredAt": "2026-08-06T07:34:57.833Z",
+      "payloadHash": "sha256:dced5ddc9edc8275b6f9c138a2662bdef02f4227de39afbc7cdb96ec7cd088ff",
       "subject": {
         "endLine": 2,
         "filePath": "src/lib.rs",
         "kind": "range",
-        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd",
+        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4",
         "side": "new",
         "startLine": 2
       },
@@ -90,12 +70,12 @@
         "bodyByteSize": 24,
         "bodyContentHash": "sha256:24c2131bbd193a1ae68ea4596caa49ae76e887925a7f14b3591963177cca2689",
         "kind": "review_observation_recorded",
-        "observationId": "obs:sha256:752a5b0ab30cfa3aa062bcf6f11b4c6ee3dcfd055207b6a995b91bf81ffec8d9",
+        "observationId": "obs:sha256:1286226dea143a77ea90ed15fee929f4c1b4ae0cbdadf472db672886ab90e279",
         "target": {
           "endLine": 2,
           "filePath": "src/lib.rs",
           "kind": "range",
-          "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd",
+          "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4",
           "side": "new",
           "startLine": 2
         },
@@ -106,32 +86,32 @@
       "writer": {
         "actorId": "actor:git-email:shore-tests@example.com",
         "producer": {
-          "name": "shore",
-          "version": "0.6.0"
+          "name": "pointbreak",
+          "version": "0.9.0"
         }
       }
     },
     {
-      "eventId": "evt:sha256:f47630e3267794e65fdfb05aec8c6ced794b0c4931169b5ac8628608c42b069c",
+      "eventId": "evt:sha256:219e371fd232c1e8ad6b51c8fbc70608711d1af857edf2ffb47fbdcbd26e904e",
       "eventType": "input_request_opened",
       "journalId": "journal:default",
-      "occurredAt": "unix-ms:1782699185547",
-      "payloadHash": "sha256:dd3bef903f8ba4f06fa4be461246a42f30b354b079d6ff76a3973197e0943691",
+      "occurredAt": "2026-08-06T07:34:57.881Z",
+      "payloadHash": "sha256:08c29b67edeb8b354e02bfc3547d10c1f81a1b7c0de76c758bd7d41981aa55d9",
       "subject": {
         "kind": "revision",
-        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
       },
       "summary": {
         "body": "should we ship this?",
         "bodyByteSize": 20,
         "bodyContentHash": "sha256:2155bb9c776e6b03017ab64a3f0645cf07a8ea05ba8f25570a58e429f0538cc5",
-        "inputRequestId": "input-request:sha256:04da631687810e9a5b9816ccc8140fb521dd2fadc5d9d235f7251e0c6046e25c",
+        "inputRequestId": "input-request:sha256:755023af99e5c4414e19f346f74467a92223480d9b887dd35c48bdc3ee76dab1",
         "kind": "input_request_opened",
         "mode": "operative",
         "reasonCode": "manual_decision_required",
         "target": {
           "kind": "revision",
-          "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+          "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
         },
         "title": "Need a decision"
       },
@@ -140,31 +120,31 @@
       "writer": {
         "actorId": "actor:git-email:shore-tests@example.com",
         "producer": {
-          "name": "shore",
-          "version": "0.6.0"
+          "name": "pointbreak",
+          "version": "0.9.0"
         }
       }
     },
     {
-      "eventId": "evt:sha256:63d8e6174cc943ee8f049e5f6718ff385e763fd55731bb196de5fb2d3e90d4e0",
+      "eventId": "evt:sha256:745e5a32c04d749af18d06784eff0c118b9e6b957cd74f75007476611143dbbb",
       "eventType": "review_assessment_recorded",
       "journalId": "journal:default",
-      "occurredAt": "unix-ms:1782699185604",
-      "payloadHash": "sha256:4e2a7fe8f686190865d24ee90383b37931b626da16424a7f9f67016a64d89972",
+      "occurredAt": "2026-08-06T07:34:57.930Z",
+      "payloadHash": "sha256:e265c87edd5c5c1677c40b404992dc14a50872c0dedb04979edbac7071930a95",
       "subject": {
         "kind": "revision",
-        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
       },
       "summary": {
         "assessment": "needs_changes",
-        "assessmentId": "assess:sha256:96faccf9a8ca8174f227dd4d667fbe47a439ad8afa0259e01fb278685eff35da",
+        "assessmentId": "assess:sha256:66d1bb616102c528a7beb3ceb357cc7e0e24693c1cc8c873ecb129295d82a055",
         "kind": "review_assessment_recorded",
         "summary": "not yet",
         "summaryByteSize": 7,
         "summaryContentHash": "sha256:3b82aae1ed24f6077df25a3b4e1b7a78f100716d5a6f6949a0610b05bc1f8959",
         "target": {
           "kind": "revision",
-          "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+          "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
         }
       },
       "trackId": "agent:codex",
@@ -172,34 +152,34 @@
       "writer": {
         "actorId": "actor:git-email:shore-tests@example.com",
         "producer": {
-          "name": "shore",
-          "version": "0.6.0"
+          "name": "pointbreak",
+          "version": "0.9.0"
         }
       }
     },
     {
-      "eventId": "evt:sha256:c347fc5a1aa67bb44823826b40fbec2c4b90a51a70d2a19b707b4027dcb6e992",
+      "eventId": "evt:sha256:3206215ff1e70f6d226da9fda82c92456d4283bc7d4959a342e5f760b0cdb473",
       "eventType": "review_assessment_recorded",
       "journalId": "journal:default",
-      "occurredAt": "unix-ms:1782699185663",
-      "payloadHash": "sha256:ebd8fd47e36a2b22356743b9a9e929eddbafc9b02aeb206c526ed323d9dd456a",
+      "occurredAt": "2026-08-06T07:34:57.985Z",
+      "payloadHash": "sha256:0e4bf47d5e90dee0ac2e2d55f3b7514b0135ca45d6c4fbe71b0ba2bea59d5968",
       "subject": {
         "kind": "revision",
-        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
       },
       "summary": {
         "assessment": "accepted",
-        "assessmentId": "assess:sha256:e4d41bfb3b0794d99572242aa51e54f043ec18d2c6e81796b756c78e7f24d088",
+        "assessmentId": "assess:sha256:f1652985b839295f8b4e5b25682806526a266412e2aa01fea81e165cb73b81f2",
         "kind": "review_assessment_recorded",
         "replaces": [
-          "assess:sha256:96faccf9a8ca8174f227dd4d667fbe47a439ad8afa0259e01fb278685eff35da"
+          "assess:sha256:66d1bb616102c528a7beb3ceb357cc7e0e24693c1cc8c873ecb129295d82a055"
         ],
         "summary": "ship it",
         "summaryByteSize": 7,
         "summaryContentHash": "sha256:bef4261f394bf71fd2b565cd76396ac9ed7953f9110c69ee49d7a82871238fbf",
         "target": {
           "kind": "revision",
-          "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+          "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
         }
       },
       "trackId": "human:kevin",
@@ -207,20 +187,20 @@
       "writer": {
         "actorId": "actor:git-email:shore-tests@example.com",
         "producer": {
-          "name": "shore",
-          "version": "0.6.0"
+          "name": "pointbreak",
+          "version": "0.9.0"
         }
       }
     },
     {
-      "eventId": "evt:sha256:9f8c8a056ba071ec66e4a5586d0b1d49b8539101ed9cf04c274b659815a0cf3a",
+      "eventId": "evt:sha256:aacc7137dfecbcdd86267294aeaefde4a10dba9289a1db61cd34cf96f4dec05f",
       "eventType": "validation_check_recorded",
       "journalId": "journal:default",
-      "occurredAt": "unix-ms:1782699185721",
-      "payloadHash": "sha256:97051c157858e88b222c2fc3a35162b1923f36c9d87ccfd58ec91e9b910f8982",
+      "occurredAt": "2026-08-06T07:34:58.042Z",
+      "payloadHash": "sha256:3915c06ea7029d895d50b07be909a9f475bf0e8ee88cfccba74e62ec1949c76f",
       "subject": {
         "kind": "revision",
-        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
       },
       "summary": {
         "checkName": "cargo test",
@@ -228,30 +208,30 @@
         "status": "passed",
         "target": {
           "kind": "revision",
-          "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+          "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
         },
         "trigger": "manual",
-        "validationCheckId": "validation:sha256:6eacfb816ebdc508f4ffa46e13c4df7576702ad93e36521e276f4382b5553469"
+        "validationCheckId": "validation:sha256:13bade5c02021022d2feacb68487e8e6f72eb01c13b31cb15007017b6afd3f25"
       },
       "trackId": "agent:codex",
       "verificationStatus": "unsigned",
       "writer": {
         "actorId": "actor:git-email:shore-tests@example.com",
         "producer": {
-          "name": "shore",
-          "version": "0.6.0"
+          "name": "pointbreak",
+          "version": "0.9.0"
         }
       }
     },
     {
-      "eventId": "evt:sha256:cdf083ff5cb1d4bb44a3e9088a57c13c5d26c03e00ccc995dbdf54db2720f24b",
+      "eventId": "evt:sha256:bd4c69859953db78e5d9832fcba2e5e171ca71fddbaf38c206fe88d31be686a2",
       "eventType": "validation_check_recorded",
       "journalId": "journal:default",
-      "occurredAt": "unix-ms:1782699185782",
-      "payloadHash": "sha256:f52fac559cc31bc52cdffb28ebb00662723786063714de786767e412124956dc",
+      "occurredAt": "2026-08-06T07:34:58.100Z",
+      "payloadHash": "sha256:5a7f3b0660eb299ed8a65e88546d2a2474a1899be13c9106da1b3a1f4fa11477",
       "subject": {
         "kind": "revision",
-        "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+        "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
       },
       "summary": {
         "checkName": "cargo clippy",
@@ -261,35 +241,34 @@
         "status": "failed",
         "target": {
           "kind": "revision",
-          "revisionId": "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd"
+          "revisionId": "rev:sha256:67c0c86d86ddf4a756a560036034cb094d2d8153d02c72a6e32bf3b6606493f4"
         },
         "trigger": "manual",
-        "validationCheckId": "validation:sha256:ad56705a57d1c3904835705d2e0aa49a1dc127ae0970ce34d88507497692b743"
+        "validationCheckId": "validation:sha256:3027fe3cfb7ac2650d0ba08341153988240ddef9e05ab2f87f233bafd022ef4c"
       },
       "trackId": "human:kevin",
       "verificationStatus": "unsigned",
       "writer": {
         "actorId": "actor:git-email:shore-tests@example.com",
         "producer": {
-          "name": "shore",
-          "version": "0.6.0"
+          "name": "pointbreak",
+          "version": "0.9.0"
         }
       }
     }
   ],
-  "eventCount": 8,
-  "projectionStamp": "sha256:e81f297a301ad7d9df6bd90ceeb257511f661b4fc108460e7f2bdc3f76de0164",
+  "eventCount": 7,
   "facets": {
     "input_request_opened": 1,
     "review_assessment_recorded": 2,
     "review_observation_recorded": 1,
-    "revision_ref_associated": 1,
     "validation_check_recorded": 2,
     "work_object_proposed": 1
   },
-  "historyCount": 8,
-  "matchCount": 8,
+  "historyCount": 7,
+  "matchCount": 7,
   "offset": 0,
+  "projectionStamp": "sha256:aae66335961f81296ac20b1c2251fb4de480307ff49e752e2c9544496b9f6b51",
   "queryNotices": [],
   "schema": "pointbreak.inspect-history"
 }

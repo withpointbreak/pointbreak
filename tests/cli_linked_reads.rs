@@ -841,9 +841,11 @@ fn read_store_events(store_dir: &Path) -> Vec<pointbreak::session::event::ShoreE
     entries.sort();
     entries
         .iter()
-        .map(|path| {
+        .filter_map(|path| {
             let bytes = fs::read(path).expect("read event file");
-            serde_json::from_slice(&bytes).expect("event file is a ShoreEvent")
+            let document: Value = serde_json::from_slice(&bytes).expect("journal record is JSON");
+            document.get("eventId")?;
+            Some(serde_json::from_value(document).expect("event carrier is a ShoreEvent"))
         })
         .collect()
 }
@@ -1001,7 +1003,7 @@ fn linked_unit_list_without_local_events_has_no_divergence_diagnostic() {
     let json = fixture.unit_list_json(&fixture.reader);
 
     assert_eq!(json["revisionCount"], 1);
-    assert_eq!(json["eventCount"], 2);
+    assert_eq!(json["eventCount"], 3);
     assert_eq!(
         json["entries"][0]["revisionId"],
         Value::String(fixture.seed_revision_id.clone())
@@ -1022,7 +1024,7 @@ fn linked_history_reads_full_timeline_from_linked_store() {
 
     let json = fixture.history_json(&fixture.reader, true);
 
-    assert_eq!(json["eventCount"], 3);
+    assert_eq!(json["eventCount"], 4);
     let event_types: Vec<&str> = json["entries"]
         .as_array()
         .unwrap()
@@ -1276,7 +1278,7 @@ fn worktree_local_unit_list_is_unchanged() {
 
     assert_eq!(json["schema"], "pointbreak.review-revision-list");
     assert_eq!(json["version"], 1);
-    assert_eq!(json["eventCount"], 2);
+    assert_eq!(json["eventCount"], 3);
     assert_eq!(json["revisionCount"], 1);
 }
 
@@ -1321,7 +1323,7 @@ fn main_worktree_of_a_clone_round_trips_a_capture_in_place() {
     // The capture landed in the shared common-dir store, not stranded worktree-local.
     let status = run_shore_json(&["store", "status", "--repo", main.path().to_str().unwrap()]);
     assert_eq!(status["mode"], "local");
-    assert_eq!(status["inventory"]["eventCount"], 2);
+    assert_eq!(status["inventory"]["eventCount"], 3);
 }
 
 #[test]

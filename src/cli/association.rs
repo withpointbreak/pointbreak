@@ -9,9 +9,10 @@ use pointbreak::documents::{
 use pointbreak::model::{CommitAssociationId, RefAssociationId, RevisionId};
 use pointbreak::session::{
     AssociateCommitOptions, AssociateRefOptions, AssociationAxis, CommitEdgeSource,
-    CommitGraphCondition, ListAssociationsOptions, ListAssociationsResult, RevisionCommitRangeView,
-    WithdrawCommitOptions, WithdrawRefOptions, associate_commit, associate_ref,
-    effective_integration_ref, enrich_liveness, list_associations, withdraw_commit, withdraw_ref,
+    CommitGraphCondition, LandCommitOptions, ListAssociationsOptions, ListAssociationsResult,
+    RevisionCommitRangeView, WithdrawCommitOptions, WithdrawRefOptions, associate_commit,
+    associate_ref, effective_integration_ref, enrich_liveness, land_commit, list_associations,
+    withdraw_commit, withdraw_ref,
 };
 
 use crate::cli::common::{SignableOptions, SigningSkip, count_label};
@@ -27,8 +28,43 @@ pub(super) struct AssociationArgs {
 #[derive(Debug, Subcommand)]
 enum AssociationCommand {
     Record(AssociationRecordArgs),
+    /// Prove an exact Revision-to-commit relation before recording strong landing state.
+    Land(AssociationLandArgs),
     Withdraw(AssociationWithdrawArgs),
     List(ListArgs),
+}
+
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("landing_policy").multiple(false)))]
+struct AssociationLandArgs {
+    #[arg(long, default_value = ".")]
+    repo: PathBuf,
+
+    /// Exact safe writer cursor emitted by `pointbreak change select` or capture.
+    #[arg(long)]
+    review_cursor: String,
+
+    /// Review lane that owns the landing record.
+    #[arg(long)]
+    track: String,
+
+    /// Candidate landing commit (resolved to an exact commit OID).
+    #[arg(long)]
+    commit: String,
+
+    /// Admit a proved extension and report its unreviewed additions.
+    #[arg(long, group = "landing_policy")]
+    allow_extension: bool,
+
+    /// Record honest provenance without claiming content equivalence.
+    #[arg(long, group = "landing_policy")]
+    provenance_only: bool,
+
+    #[arg(long)]
+    sign_key: Option<String>,
+
+    #[command(flatten)]
+    format_args: output::FormatArgs,
 }
 
 /// Record a commit or ref association for a revision.
@@ -38,8 +74,16 @@ struct AssociationRecordArgs {
     #[arg(long, default_value = ".")]
     repo: PathBuf,
 
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["exact_revision", "review_cursor"])]
     revision: Option<String>,
+
+    /// Exact captured Revision; records structural provenance only.
+    #[arg(long, conflicts_with = "review_cursor")]
+    exact_revision: Option<String>,
+
+    /// Exact safe writer cursor emitted by `pointbreak change select` or capture.
+    #[arg(long)]
+    review_cursor: Option<String>,
 
     /// Review lane that owns this association.
     #[arg(long)]
@@ -80,8 +124,14 @@ struct AssociationWithdrawArgs {
     #[arg(long, default_value = ".")]
     repo: PathBuf,
 
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["exact_revision", "review_cursor"])]
     revision: Option<String>,
+
+    #[arg(long, conflicts_with = "review_cursor")]
+    exact_revision: Option<String>,
+
+    #[arg(long)]
+    review_cursor: Option<String>,
 
     /// Review lane that owns this withdrawal.
     #[arg(long)]
@@ -146,6 +196,11 @@ pub(super) fn run(
             let _entered = span.enter();
             record_run(args, stdout, stderr)
         }
+        AssociationCommand::Land(args) => {
+            let span = tracing::info_span!("shore.association.land");
+            let _entered = span.enter();
+            land_run(args, stdout, stderr)
+        }
         AssociationCommand::Withdraw(args) => {
             let span = tracing::info_span!("shore.association.withdraw");
             let _entered = span.enter();
@@ -157,6 +212,22 @@ pub(super) fn run(
             list_run(args, stdout)
         }
     }
+}
+
+fn land_run(
+    args: AssociationLandArgs,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let options = LandCommitOptions::new(&args.repo, args.review_cursor, args.track, args.commit)
+        .with_allow_extension(args.allow_extension)
+        .with_provenance_only(args.provenance_only);
+    let (options, skip) = apply_signer(options, &args.repo, args.sign_key.as_deref(), stderr);
+    let result = land_commit(options)?;
+    crate::cli::common::surface_best_effort_skip(&skip, stderr);
+    let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
+    let message = result.message.clone();
+    output::write_document(stdout, format, &result, || message)
 }
 
 /// The exclusive `record` axis, decoded from the clap group.
@@ -198,12 +269,17 @@ fn record_run(
         Some(revision) => Some(ids.rev(revision)?),
         None => None,
     };
+    let exact_revision = match &args.exact_revision {
+        Some(revision) => Some(ids.rev(revision)?),
+        None => None,
+    };
+    let review_cursor = args.review_cursor.clone();
     let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
     match record_axis_from_args(&args)? {
         RecordAxis::Commit(commit) => {
             let mut options =
                 AssociateCommitOptions::new(&args.repo, commit).with_track(args.track);
-            options = with_selection(options, revision);
+            options = with_selection(options, revision, exact_revision, review_cursor);
             let (options, skip) =
                 apply_signer(options, &args.repo, args.sign_key.as_deref(), stderr);
             let result = associate_commit(options)?;
@@ -212,14 +288,14 @@ fn record_run(
             let text = matches!(format.format, output::OutputFormat::Text).then(|| {
                 let receipt = if result.events_created > 0 {
                     format!(
-                        "associated commit {} with {} · {} created",
+                        "recorded structural commit association {} with {} · {} created",
                         output::short_ref(&result.commit_oid),
                         output::short_ref(result.revision_id.as_str()),
                         count_label(result.events_created, "event", "events"),
                     )
                 } else {
                     format!(
-                        "commit {} already associated with {}",
+                        "structural commit association {} already recorded with {}",
                         output::short_ref(&result.commit_oid),
                         output::short_ref(result.revision_id.as_str()),
                     )
@@ -234,7 +310,7 @@ fn record_run(
         RecordAxis::Ref { ref_name, head } => {
             let mut options =
                 AssociateRefOptions::new(&args.repo, ref_name, head).with_track(args.track);
-            options = with_selection(options, revision);
+            options = with_selection(options, revision, exact_revision, review_cursor);
             let (options, skip) =
                 apply_signer(options, &args.repo, args.sign_key.as_deref(), stderr);
             let result = associate_ref(options)?;
@@ -277,13 +353,18 @@ fn withdraw_run(
         Some(revision) => Some(ids.rev(revision)?),
         None => None,
     };
+    let exact_revision = match &args.exact_revision {
+        Some(revision) => Some(ids.rev(revision)?),
+        None => None,
+    };
+    let review_cursor = args.review_cursor.clone();
     let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
     // The resolved prefix selects which axis is withdrawn.
     if association_id.starts_with(&format!("{}:", IdKind::CommitAssociation.prefix())) {
         let mut options =
             WithdrawCommitOptions::new(&args.repo, CommitAssociationId::new(association_id))
                 .with_track(args.track);
-        options = with_selection(options, revision);
+        options = with_selection(options, revision, exact_revision, review_cursor);
         let (options, skip) = apply_signer(options, &args.repo, args.sign_key.as_deref(), stderr);
         let result = withdraw_commit(options)?;
         crate::cli::common::surface_best_effort_skip(&skip, stderr);
@@ -311,7 +392,7 @@ fn withdraw_run(
         let mut options =
             WithdrawRefOptions::new(&args.repo, RefAssociationId::new(association_id))
                 .with_track(args.track);
-        options = with_selection(options, revision);
+        options = with_selection(options, revision, exact_revision, review_cursor);
         let (options, skip) = apply_signer(options, &args.repo, args.sign_key.as_deref(), stderr);
         let result = withdraw_ref(options)?;
         crate::cli::common::surface_best_effort_skip(&skip, stderr);
@@ -493,9 +574,20 @@ fn source_label(source: CommitEdgeSource) -> &'static str {
 /// Apply the `--revision` selection shared by the write verbs. The four
 /// write-options builders share the method name, so this is generic over a small
 /// local trait.
-fn with_selection<O: AssociationSelection>(mut options: O, revision: Option<String>) -> O {
+fn with_selection<O: AssociationSelection>(
+    mut options: O,
+    revision: Option<String>,
+    exact_revision: Option<String>,
+    review_cursor: Option<String>,
+) -> O {
     if let Some(revision) = revision {
         options = options.with_revision_id(RevisionId::new(revision));
+    }
+    if let Some(revision) = exact_revision {
+        options = options.with_exact_revision_id(RevisionId::new(revision));
+    }
+    if let Some(cursor) = review_cursor {
+        options = options.with_review_cursor(cursor);
     }
     options
 }
@@ -517,6 +609,8 @@ fn apply_signer<O: SignableOptions>(
 
 trait AssociationSelection {
     fn with_revision_id(self, id: RevisionId) -> Self;
+    fn with_exact_revision_id(self, id: RevisionId) -> Self;
+    fn with_review_cursor(self, cursor: String) -> Self;
 }
 
 macro_rules! impl_association_selection {
@@ -524,6 +618,12 @@ macro_rules! impl_association_selection {
         impl AssociationSelection for $ty {
             fn with_revision_id(self, id: RevisionId) -> Self {
                 <$ty>::with_revision_id(self, id)
+            }
+            fn with_exact_revision_id(self, id: RevisionId) -> Self {
+                <$ty>::with_exact_revision_id(self, id)
+            }
+            fn with_review_cursor(self, cursor: String) -> Self {
+                <$ty>::with_review_cursor(self, cursor)
             }
         }
     )+};

@@ -331,8 +331,26 @@ fn history_filters_to_the_commit_associated_event_type() {
 fn unit_list_ref_label_filter_matches_normalized_short_branch() {
     let repo = modified_repo();
     repo.git(["branch", "-M", "feat/x"]);
-    capture(&repo); // auto-records refs/heads/feat/x
+    capture(&repo);
     let repo_path = repo.path().to_str().unwrap();
+    let head = repo.git(["rev-parse", "HEAD"]).stdout.trim().to_owned();
+    let associated = pointbreak([
+        "association",
+        "record",
+        "--repo",
+        repo_path,
+        "--track",
+        "test:ref-label",
+        "--ref",
+        "refs/heads/feat/x",
+        "--head",
+        &head,
+    ]);
+    assert!(
+        associated.status.success(),
+        "explicit ref association failed: {}",
+        String::from_utf8_lossy(&associated.stderr)
+    );
 
     // A short branch name is normalized to the stored full ref.
     let matched = parse_json(
@@ -999,7 +1017,7 @@ fn text_association_record_commit_receipt_and_rerun() {
         "text lane is not JSON: {stdout}"
     );
     assert!(
-        stdout.contains("associated commit"),
+        stdout.contains("structural commit association"),
         "receipt verb: {stdout}"
     );
     assert!(stdout.contains("rev:"), "short revision id: {stdout}");

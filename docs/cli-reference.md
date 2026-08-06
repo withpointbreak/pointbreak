@@ -9,7 +9,8 @@ Command output JSON is the machine-integration surface, under a **tiered stabili
 narrow **hard core** is frozen within each document's `version`:
 
 - the envelope discriminators (`schema`, `version`) on every document;
-- the field-paths a non-human consumer actually reads — `pointbreak capture`'s `revision.id`,
+- the field-paths a non-human consumer actually reads — `pointbreak capture`'s `changeId`,
+  `revision.{revisionId,objectArtifactContentHash}`, and `reviewCursor.token`,
   `pointbreak input-request list`'s `inputRequests[].{id,title,mode,reasonCode,trackId}`, and
   `pointbreak input-request respond`'s `inputRequestResponseId` and `eventId`;
 - the wire-value vocabularies — the assessment values, the input-request response outcomes, and the
@@ -142,7 +143,8 @@ exists so a revision's facts can be filtered and grouped by who recorded them.
 
 - On every write command that records a fact (`pointbreak observation add`,
   `pointbreak assessment add`, `pointbreak validation add`,
-  `pointbreak association record` / `withdraw`, `pointbreak input-request open`),
+  `pointbreak association record` / `land` / `withdraw`, `pointbreak fact port`,
+  `pointbreak input-request open`),
   `--track <track-id>` is **required** and
   stamps the lane that owns the new fact.
 - On read/list commands (`pointbreak observation list`, `pointbreak input-request list`,
@@ -217,6 +219,26 @@ pointbreak change resource <change-id> <revision-id> --artifact-hash <sha256>
 pointbreak change interdiff <change-id> <from-revision-id> <to-revision-id>
   --from-artifact-hash <sha256> --to-artifact-hash <sha256>
   [--repo <path>] [--format <fmt>]
+pointbreak change create --operation-id <id>
+  (--nonce <64-hex> | --root-revision <revision-id>) [--repo <path>] [--sign-key <name|path>]
+pointbreak change join <change-id> <revision-id> --operation-id <id>
+  [--repo <path>] [--sign-key <name|path>]
+pointbreak change withdraw-membership <claim-id> --operation-id <id>
+  [--repo <path>] [--sign-key <name|path>]
+pointbreak change assert-relation <change-id> <successor-id> <predecessor-id>
+  --successor-artifact-hash <sha256> --predecessor-artifact-hash <sha256>
+  --operation-id <id> [--repo <path>] [--sign-key <name|path>]
+pointbreak change withdraw-relation <claim-id> --operation-id <id>
+  [--repo <path>] [--sign-key <name|path>]
+pointbreak change link <first-change-id> <second-change-id>
+  --relation same-work|related-work --operation-id <id>
+  [--repo <path>] [--sign-key <name|path>]
+pointbreak change capture --operation-id <id>
+  (--initial-nonce <64-hex> | --cursor <token> --advance replace|parallel)
+  [--predecessor <revision-id> --predecessor-artifact-hash <sha256>]...
+  [--sign-key <name|path>] [capture options]
+pointbreak change migrate-dry-run [--root <path>]... [--owner-decisions <file>]
+  [--repo <path>] [--format <fmt>]
 ```
 
 The Change reader begins with a complete capability profile. An untouched legacy root reports
@@ -233,6 +255,20 @@ Revision id plus its captured object-artifact hash; no current or successor Revi
 Association comparisons and Revision interdiffs have their own typed identities and availability. The
 first reader cohort reports native Revision interdiff material as unavailable instead of substituting a
 live Git diff.
+
+The write commands are available only when the store profile is `ready`; an untouched legacy root fails
+with `migration_required`, and an admitted but incomplete transition fails with
+`migration_in_progress`, before proposal or retry state is written. Every Change mutation takes a stable
+`--operation-id`. Retrying the same operation with the same inputs is idempotent; reusing the id with
+different inputs is refused. `create`, `join`, and the membership/relation/link commands expose the
+low-level append-only claim vocabulary. `change capture` is the higher-level workflow for initial,
+replacement, parallel, and multi-predecessor consolidation captures. Every Change mutation participates
+in the same optional signing-key resolution as the review-writing commands.
+
+`migrate-dry-run` is read-only. It inventories one or more legacy roots, reports anomalies and retained
+manifest overlaps, and accepts an explicit owner-decision manifest for deterministic replanning. It does
+not expose a public migration executor or activate a root; execution remains a private qualification
+boundary until activation is shipped.
 
 The signed v0.9 reader remains compatible only with untouched legacy roots. It is not a reader for a root
 once the Change/Revision capability transition begins or completes.
@@ -341,11 +377,25 @@ non-Git label.
 ```bash
 pointbreak capture [--repo <path>] [--base <rev> | --root | --staged | --unstaged] \
   [--target <rev>] [--include-untracked] [--allow-empty] \
-  [--summary <text>] [--path <pathspec>]... [--supersedes <revision-id>]...
+  [--summary <text>] [--path <pathspec>]... [--operation-id <id>] \
+  [--review-cursor <token> --advance replace|parallel] \
+  [--also-supersedes <revision-id>@<object-artifact-sha256>]...
 ```
 
-`pointbreak capture` records the current V1 revision: the base endpoint, target endpoint, and
-captured diff snapshot. By default V1 captures the local Git worktree from `HEAD` (or Git's empty
+`pointbreak capture` records a new exact Revision in a stable Change: the base endpoint, target
+endpoint, and captured diff snapshot. Without `--review-cursor`, it creates a new independent Change.
+With `--review-cursor --advance`, it revalidates that exact Change/Revision selection and records a
+replacement or parallel Revision. Repeated `--also-supersedes REVISION@ARTIFACT_HASH` arguments add
+exact current predecessors for a consolidation. The legacy proposal-borne `--supersedes` spelling is
+rejected with an actionable error.
+
+`--operation-id` supplies the durable retry identity; when omitted, Pointbreak generates one and returns
+it in the receipt. The JSON receipt is `pointbreak.change-capture-receipt.v1` and includes `changeId`,
+`revision.{revisionId,objectArtifactContentHash}`, `reviewCursor.token`, per-event outcomes, and whether
+the operation is complete. Retrying the retained operation never silently adopts a different source
+snapshot.
+
+By default capture reads the local Git worktree from `HEAD` (or Git's empty
 tree before the first commit) to the working tree (source `git_worktree`). That default is a
 combined "what differs from the baseline" capture: it includes staged and unstaged tracked changes
 because both differ from `HEAD`. Like `git diff HEAD`, default capture excludes untracked files; add
@@ -428,12 +478,8 @@ proposal rather than an edit; choose the label on the initial capture.
 - Full captured snapshots are Pointbreak-owned immutable object artifacts under `artifacts/objects/`.
 - The `work_object_proposed` event binds to the object artifact's canonical content hash; the
   content-only artifact body carries no revision identity or endpoints (those live on the event).
-- Output is compact `pointbreak.review-capture` JSON and includes the revision and object IDs
-  plus `objectArtifactContentHash`.
-- With `--supersedes <revision-id>` (repeatable, order-independent), the capture records that it
-  evolves past the named revisions, extending the supersession DAG. The new revision becomes a thread
-  head; when two captures supersede the same predecessor, the competing heads are surfaced rather than
-  auto-collapsed.
+- Output is compact `pointbreak.change-capture-receipt.v1` JSON and includes the Change, exact
+  Revision and object-artifact hash, a fresh review cursor, the retry operation, and write outcomes.
 - With `--path <pathspec>` (repeatable), the capture is scoped to the given git pathspec(s): both
   the tracked diff and any enabled untracked-file synthesis include only matching files. This
   composes with the default worktree capture, with `--base`/`--target`, with `--root`/`--target`,
@@ -493,13 +539,21 @@ pointbreak store gc [--repo <path>] [--format <fmt>]
 pointbreak store compact [--repo <path>] [--format <fmt>]
 ```
 
+> **Transition availability:** `store migrate` and `store link` retain their command syntax and
+> historical placement contracts, but their transfer writers are inactive in this build. Untouched
+> and partially migrated roots fail at the capability fence; a Change-ready root reports
+> `change_store_transfer_unavailable`. There is no public activation executor yet. `change
+> migrate-dry-run` is the only migration surface and never writes. Do not copy a test capability
+> fixture into an owner store.
+
 `pointbreak store` commands inspect, configure, and maintain the review store the current Git worktree
 resolves. By default every worktree of a clone — the main worktree and every linked worktree alike —
 resolves the same **shared common-dir store** at `<git-common-dir>/pointbreak` (the path under the repo's Git common
 directory), automatically and with no setup step. Because linked worktrees share one Git common
 directory, a capture in any worktree is immediately visible from its siblings. By default this is a
 per-clone store, not a user-level multi-repository store or remote sync service; a clone can opt into
-the machine-wide **user-level family store tier** with `pointbreak store link` (see below).
+the machine-wide **user-level family store tier** once exact Change store transfer is activated (see
+the retained placement contract below).
 
 `pointbreak store status` resolves the store and emits `pointbreak.store-status` JSON.
 
@@ -661,12 +715,13 @@ construction: the type that carries the real paths is not serializable, and the 
 but stdout.
 
 A pre-flip worktree-local `.pointbreak/data` store on a non-ephemeral worktree (data written before the
-shared common-dir default) is detected on any read or write and errors with a hint to run
-`pointbreak store migrate`. `pointbreak store migrate` folds that legacy store into the shared common-dir store
+shared common-dir default) is detected on any read or write. The retained transfer contract for
+`pointbreak store migrate` folds that legacy store into the shared common-dir store
 **non-destructively** by default: it copies events and artifacts forward and leaves `.pointbreak/data` in
 place, so you can verify the result and then remove `.pointbreak/data` yourself to finish the switch. It
 is idempotent (re-running reports the already-present facts as existing), and it refuses an ephemeral
-or sensitivity-flagged worktree unless you pass `--include-ephemeral`.
+or sensitivity-flagged worktree unless you pass `--include-ephemeral`. That transfer is not executable in
+this build; the command fails closed as described above.
 
 **`--retire-source`** completes the switch in one command: after the fold, an independent
 verification walks every durable file in the source store (`events/` and `artifacts/`, recursively;
@@ -687,7 +742,7 @@ It emits `pointbreak.store-migrate` JSON with `eventsCreated`, `eventsExisting`,
 and refused rather than migrated; see
 [storage-model.md](./storage-model.md#migrations-and-doctor).)
 
-`pointbreak store link [<slug>]` promotes this clone into the opt-in **user-level family store** at
+The retained `pointbreak store link [<slug>]` contract promotes a clone into the opt-in **user-level family store** at
 `<pointbreak-home-root>/stores/<slug>/`, a per-machine store shared across independent clones of the same
 repository family so review facts survive removing any one clone. The binding is recorded **per
 physical clone** in the git common dir (`pointbreak.link.json` under `.git/`), so it never travels in a
@@ -705,7 +760,8 @@ shares no git history with an existing family. It then folds the clone-local `<g
 forward with independent verification and flips the binding last, so an interrupted link leaves the
 clone still resolving its clone-local store. Omitting `<slug>` fails with a suggestion rather than
 picking one silently. `--retire-source` deletes the clone-local store only after the fold is
-verified. When the fold carries prior unsigned `pointbreak store remove` events, a diagnostic discloses
+verified. The link writer is not executable in this build. When the fold carries prior unsigned
+`pointbreak store remove` events, a diagnostic discloses
 that they lost possession-based suppression and should be re-issued in the family store. It emits
 `pointbreak.store-link` JSON (`familyRef`, `cloneRef`, `createdFamily`, the `folded*` counts,
 `sourceRetired`, and any warnings). `pointbreak store unlink` detaches this clone (clearing the binding
@@ -880,6 +936,7 @@ pointbreak observation add --track <track-id> --title <title> \
   [--tag <tag>]... [--confidence low|medium|high] [--supersedes <observation-id>]... \
   [--responds-to <observation-id>]...
 pointbreak observation list [--revision <revision-id>] [--track <track-id>] \
+  [--exact-revision <revision-id>] \
   [--file <path>] [--tag <tag>] [--include-body] [--format <fmt>]
 ```
 
@@ -917,9 +974,9 @@ default.
 
 ```bash
 pointbreak input-request open --track <track-id> --title <title> --reason <reason> \
-  [--revision <revision-id>] [--mode operative|advisory] \
+  [--revision <revision-id> | --exact-revision <revision-id>] [--mode operative|advisory] \
   [--body-content-type text/plain|text/markdown]
-pointbreak input-request list [--revision <revision-id>] [--track <track-id>] \
+pointbreak input-request list [--revision <revision-id> | --exact-revision <revision-id>] [--track <track-id>] \
   [--mode operative|advisory] [--file <path>] [--status open|responded|ambiguous|all] \
   [--include-body] [--format <fmt>]
 pointbreak input-request show <input-request-id> [--include-body]
@@ -1055,6 +1112,7 @@ pointbreak validation add --track <track-id> --check-name <name> --status <statu
   [--revision <revision-id> | --exact-revision <revision-id>] [validation options] \
   [--summary-content-type text/plain|text/markdown]
 pointbreak validation list [--revision <revision-id>] \
+  [--exact-revision <revision-id>] \
   [--track <track-id>] [--status <status>] [--include-body] [--format <fmt>]
 ```
 
@@ -1082,6 +1140,22 @@ replace a review assessment.
 
 Output documents are compact `pointbreak.review-validation-add` and
 `pointbreak.review-validation-list` JSON by default.
+
+## `pointbreak fact`
+
+```bash
+pointbreak fact port --origin-revision <revision-id>@<object-artifact-sha256>
+  --origin-fact <observation-id|input-request-id> --review-cursor <token>
+  --relation context-only|reanchored-as|carried-open-as|resolved-by
+  [--target-fact <observation-id|input-request-id>] [--rationale-content-hash <sha256>]
+  --track <track-id> [--repo <path>] [--format <fmt>]
+```
+
+`fact port` records explicit continuity from an observation or input request owned by one exact
+Revision to the exact Revision selected by a validated review cursor. `reanchored-as` and
+`carried-open-as` require a target fact; the other relations forbid one. The origin fact keeps its
+original ownership: the port is context, not reassignment. Validation and assessment facts cannot be
+ported, so accepting judgments and check results never leak across captured content states.
 
 ## `pointbreak endorse`
 
@@ -1112,23 +1186,31 @@ The endorsement record and its read-side classification are decided in
 
 ```bash
 pointbreak association record --track <track-id> (--commit <rev> | --ref <name> --head <oid>) \
-  [--revision <revision-id>] [--sign-key <name|path>] [--repo <path>]
+  [--revision <revision-id> | --exact-revision <revision-id> | --review-cursor <token>] \
+  [--sign-key <name|path>] [--repo <path>]
+pointbreak association land --review-cursor <token> --track <track-id> --commit <rev> \
+  [--allow-extension | --provenance-only] [--sign-key <name|path>] [--repo <path>]
 pointbreak association withdraw <association-id> --track <track-id> \
-  [--revision <revision-id>] [--sign-key <name|path>] [--repo <path>]
+  [--revision <revision-id> | --exact-revision <revision-id> | --review-cursor <token>] \
+  [--sign-key <name|path>] [--repo <path>]
 pointbreak association list [--revision <revision-id>] [--axis commit|ref] [--current] \
   [--repo <path>] [--format <fmt>]
 ```
 
-`pointbreak association` records and withdraws the commit-graph associations of a captured
-revision as append-only associate/withdraw events on two axes — commit and ref. This is how a
-revision is tied to the commits and branches that carry it; recording a landed commit
-(`record --commit`) is the association half of the ADR-0014 lifecycle
-([ADR-0014](./adr/adr-0014-reviewunit-commit-range-lifecycle.md)).
+`pointbreak association` records and withdraws structural commit-graph associations of an exact
+Revision as append-only associate/withdraw events on two axes — commit and ref. A structural record
+says only that the named Git object is associated with the Revision; it does not claim byte equality,
+containment, or review coverage. Use `association land` for proof-backed landing language.
 
 - **`record`** takes exactly one axis. `--commit <rev>` (resolved to an OID) binds the revision on
   the commit axis; `--ref <name>` (a short branch name is normalized to its full ref) at the
   explicit `--head <oid>` (never inferred) binds it on the ref axis. `--commit` and `--ref` are
   mutually exclusive, and `--ref` requires `--head`.
+- **`land`** validates the exact review cursor, computes and durably records the Revision-to-commit
+  proof first, then records the commit association and final attestation. Exact equality is accepted
+  by default. `--allow-extension` admits a proved extension while reporting unreviewed additions.
+  `--provenance-only` records honest attribution without claiming content equivalence. Refuted or
+  indeterminate proof never receives strong landing wording.
 - **`withdraw <association-id>`** retracts an earlier association by its id. The id is positional
   and must carry its prefix — `assoc-commit:…` or `assoc-ref:…` — because the prefix selects which
   axis is withdrawn; a prefixed short form like `assoc-commit:<hex-fragment>` resolves against the
@@ -1136,8 +1218,9 @@ revision is tied to the commits and branches that carry it; recording a landed c
   withdrawn edge.
 - Both writes are signable — `--sign-key <name|path>` selects the signing key exactly as
   `pointbreak capture` does, and signing never gates the write.
-- `--revision <revision-id>` pins the target revision; without it the command defaults to the single
-  captured revision and errors if multiple captured revisions exist.
+- `--exact-revision` pins the named captured Revision and `--review-cursor` additionally revalidates
+  its Change graph before writing. Legacy `--revision` retains head-seed behavior. Without a selector,
+  the command defaults to the single captured Revision and errors if multiple candidates exist.
 - **`list`** reports both axes unless `--axis commit|ref` narrows to one, and `--current` excludes
   withdrawn associations, showing only what currently holds. It emits `pointbreak.review-association-list`
   JSON.

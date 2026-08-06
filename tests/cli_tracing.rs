@@ -196,5 +196,6 @@ fn dump_repo() -> GitRepo {
     repo.commit_all("base");
     repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
     repo.write("src/untracked.rs", "pub fn untracked() -> u32 { 3 }\n");
+    support::install_empty_ready_change_store(repo.path());
     repo
 }

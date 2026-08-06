@@ -1,23 +1,42 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use clap::Args;
-use pointbreak::documents::capture_document;
-use pointbreak::model::RevisionId;
+use clap::{Args, ValueEnum};
+use pointbreak::model::{ChangeIdentityDescriptorV1, RevisionId, RevisionRefV1};
 use pointbreak::session::{
-    CaptureOptions, CaptureResult, CommitRangeSpec, RootCommitSpec, StagedSpec, UnstagedSpec,
-    WorktreeSpec, capture_review,
+    CaptureOptions, ChangeAdvanceV1, ChangeCaptureOptions, CommitRangeSpec, RootCommitSpec,
+    StagedSpec, UnstagedSpec, WorktreeSpec, capture_change_revision,
 };
+use sha2::{Digest, Sha256};
 
+#[cfg(test)]
 use crate::cli::common::endpoint_label;
 use crate::cli::output;
 use crate::cli_tracing::TracingArgs;
+
+const CHANGE_CAPTURE_RECEIPT_SCHEMA: &str = "pointbreak.change-capture-receipt.v1";
 
 /// Capture a revision from the working tree or a committed commit range.
 #[derive(Debug, Args)]
 pub(super) struct CaptureArgs {
     #[arg(long, default_value = ".")]
     repo: PathBuf,
+
+    /// Retry identity. Generated and retained locally when omitted.
+    #[arg(long)]
+    operation_id: Option<String>,
+
+    /// Advance the exact Revision selected by this cursor within its stable Change.
+    #[arg(long, requires = "advance")]
+    review_cursor: Option<String>,
+
+    /// Whether the new Revision replaces the selected Revision or remains parallel.
+    #[arg(long, value_enum, requires = "review_cursor")]
+    advance: Option<CaptureAdvanceArg>,
+
+    /// Additional exact `REVISION_ID@OBJECT_ARTIFACT_SHA256` predecessors for consolidation.
+    #[arg(long, requires = "review_cursor")]
+    also_supersedes: Vec<String>,
 
     /// Capture the committed range from this rev (resolved to a commit, peeling
     /// annotated tags) to --target instead of the HEAD -> working-tree diff.
@@ -49,8 +68,7 @@ pub(super) struct CaptureArgs {
     #[arg(long)]
     target: Option<String>,
 
-    /// Record this capture as superseding one or more earlier revisions (an
-    /// evolution forward-pointer). May be repeated; the set is order-independent.
+    /// Unsupported legacy flag. Use --review-cursor --advance replace.
     #[arg(long = "supersedes")]
     supersedes: Vec<String>,
 
@@ -78,6 +96,13 @@ pub(super) struct CaptureArgs {
     format_args: output::FormatArgs,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+#[value(rename_all = "kebab-case")]
+enum CaptureAdvanceArg {
+    Replace,
+    Parallel,
+}
+
 pub(super) fn run(
     args: CaptureArgs,
     tracing: &TracingArgs,
@@ -102,33 +127,103 @@ pub(super) fn run(
             "--include-untracked can only be used with worktree or unstaged capture".into(),
         );
     }
+    if !args.supersedes.is_empty() {
+        return Err("proposal-borne --supersedes is no longer supported; use --review-cursor --advance replace and exact --also-supersedes references".into());
+    }
     let (options, skip) = capture_options(&args, tracing, stderr)?;
-    let capture = capture_review(options)?;
+    let operation_id = match args.operation_id.clone() {
+        Some(operation_id) => operation_id,
+        None => random_operation_id()?,
+    };
+    let mut change_options = if let Some(cursor) = &args.review_cursor {
+        let advance = match args.advance.expect("clap requires advance with cursor") {
+            CaptureAdvanceArg::Replace => ChangeAdvanceV1::Replace,
+            CaptureAdvanceArg::Parallel => ChangeAdvanceV1::Parallel,
+        };
+        ChangeCaptureOptions::advance(operation_id, options, cursor, advance)
+    } else {
+        let identity_nonce = nonce_for_operation(&operation_id);
+        ChangeCaptureOptions::initial(
+            operation_id,
+            options,
+            ChangeIdentityDescriptorV1::opaque_nonce(identity_nonce),
+        )
+    };
+    for predecessor in &args.also_supersedes {
+        change_options =
+            change_options.with_additional_predecessor(parse_revision_ref(predecessor)?);
+    }
+    let capture = capture_change_revision(change_options)?;
+    debug_assert_eq!(capture.schema, CHANGE_CAPTURE_RECEIPT_SCHEMA);
     crate::cli::common::surface_best_effort_skip(&skip, stderr);
     // Best-effort: if this worktree is splitting off from a family store a sibling
     // worktree is linked to, say so on stderr. Never fails the capture.
     if let Ok(Some(advisory)) = pointbreak::session::family_link_advisory(&args.repo) {
         let _ = writeln!(stderr, "{advisory}");
     }
-    // `capture_document` consumes the result by value; keep a clone for the text lane.
-    let text_source = capture.clone();
-    let document = capture_document(capture);
     let format = output::resolve_format(args.format_args.explicit(), output::OutputFormat::Json)?;
-    output::write_document(stdout, format, &document, || {
-        capture_receipt_text(&text_source)
-    })
+    let text = render_change_capture_text(&capture);
+    output::write_document(stdout, format, &capture, || text)
+}
+
+fn render_change_capture_text(capture: &pointbreak::session::ChangeCaptureReceiptV1) -> String {
+    let file_word = if capture.diffstat.file_count == 1 {
+        "file"
+    } else {
+        "files"
+    };
+    let mut lines = vec![format!(
+        "captured {} in {} · operation {}",
+        output::short_ref(capture.revision.revision_id.as_str()),
+        output::short_ref(capture.change_id.as_str()),
+        capture.operation_id,
+    )];
+    if let Some(summary) = &capture.revision.summary {
+        lines.push(format!("summary: {summary}"));
+    }
+    lines.push(format!(
+        "{} {file_word} · +{}/−{}",
+        capture.diffstat.file_count, capture.diffstat.added_lines, capture.diffstat.removed_lines
+    ));
+    lines.join("\n")
+}
+
+fn random_operation_id() -> Result<String, Box<dyn std::error::Error>> {
+    let mut nonce = [0_u8; 32];
+    getrandom::fill(&mut nonce)?;
+    let encoded = nonce
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!("change-operation:{encoded}"))
+}
+
+fn nonce_for_operation(operation_id: &str) -> [u8; 32] {
+    Sha256::digest(operation_id.as_bytes()).into()
+}
+
+fn parse_revision_ref(value: &str) -> Result<RevisionRefV1, Box<dyn std::error::Error>> {
+    let (revision, artifact_hash) = value
+        .split_once('@')
+        .ok_or("--also-supersedes must be REVISION_ID@OBJECT_ARTIFACT_SHA256")?;
+    Ok(RevisionRefV1::new(
+        RevisionId::new(revision),
+        artifact_hash.to_owned(),
+    )?)
 }
 
 /// The full capture receipt for the text lane: the rendered ack plus one
 /// `advisory:` line per projection diagnostic the write document carries.
-fn capture_receipt_text(result: &CaptureResult) -> String {
+#[cfg(test)]
+fn capture_receipt_text(result: &pointbreak::session::CaptureResult) -> String {
     crate::cli::common::with_advisory_lines(render_capture_text(result), &result.diagnostics)
 }
 
 /// Text capture ack: a few-line confirmation shaped on the inspector's
 /// revision-page header — revision short ref, base -> target, diffstat, event
 /// counts. Renders from the public `CaptureResult`; wording is disposable.
-fn render_capture_text(result: &CaptureResult) -> String {
+#[cfg(test)]
+fn render_capture_text(result: &pointbreak::session::CaptureResult) -> String {
     let stat = &result.diffstat;
 
     let statuses: Vec<String> = [
@@ -198,14 +293,6 @@ fn capture_options(
         options = options.with_commit_range(range);
     } else if args.include_untracked {
         options = options.with_worktree(WorktreeSpec::new().with_include_untracked());
-    }
-    if !args.supersedes.is_empty() {
-        let ids = crate::cli::id_resolver::IdResolver::new(&args.repo);
-        let mut supersedes = Vec::with_capacity(args.supersedes.len());
-        for raw in &args.supersedes {
-            supersedes.push(RevisionId::new(ids.rev(raw)?));
-        }
-        options = options.with_supersedes(supersedes);
     }
     if let Some(summary) = &args.summary {
         options = options.with_summary(summary.clone());

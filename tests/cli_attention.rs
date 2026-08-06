@@ -300,7 +300,7 @@ fn accepted_after_failed_validation_clears_the_attention_item() {
 }
 
 #[test]
-fn assessed_successor_clears_the_stale_assessment_item() {
+fn change_scoped_successor_does_not_create_legacy_stale_assessment() {
     let repo = modified_repo();
     let repo_arg = repo.path().to_str().unwrap().to_owned();
     let first = pointbreak(["capture", "--repo", &repo_arg]);
@@ -310,6 +310,10 @@ fn assessed_successor_clears_the_stale_assessment_item() {
         String::from_utf8_lossy(&first.stderr)
     );
     let first_revision = parse_json(&first.stdout)["revision"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let first_cursor = parse_json(&first.stdout)["reviewCursor"]["token"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -337,8 +341,10 @@ fn assessed_successor_clears_the_stale_assessment_item() {
         "capture",
         "--repo",
         &repo_arg,
-        "--supersedes",
-        &first_revision,
+        "--review-cursor",
+        &first_cursor,
+        "--advance",
+        "replace",
     ]);
     assert!(
         second.status.success(),
@@ -350,8 +356,9 @@ fn assessed_successor_clears_the_stale_assessment_item() {
         .unwrap()
         .to_owned();
 
-    // The accepted decision now anchors to a superseded revision whose
-    // successor is unjudged: the stale_assessment item claims attention.
+    // Replacement now lives exclusively in the Change relation graph. The
+    // compatibility attention projection must not infer a legacy proposal-borne
+    // supersession edge from that relation.
     let before = parse_json(&pointbreak(["attention", "list", "--repo", &repo_arg]).stdout);
     let kinds: Vec<String> = before["items"]
         .as_array()
@@ -359,7 +366,10 @@ fn assessed_successor_clears_the_stale_assessment_item() {
         .iter()
         .map(|item| item["kind"].as_str().unwrap().to_owned())
         .collect();
-    assert_eq!(kinds, vec!["stale_assessment".to_owned()]);
+    assert!(
+        kinds.is_empty(),
+        "legacy attention leaked Change relations: {kinds:?}"
+    );
 
     let re_judged = pointbreak([
         "assessment",
@@ -379,7 +389,7 @@ fn assessed_successor_clears_the_stale_assessment_item() {
         String::from_utf8_lossy(&re_judged.stderr)
     );
 
-    // The successor has been re-judged: the stale decision is resolved.
+    // Judging the successor remains valid and does not create legacy attention.
     let after = parse_json(&pointbreak(["attention", "list", "--repo", &repo_arg]).stdout);
     assert_eq!(after["items"].as_array().unwrap().len(), 0);
 }

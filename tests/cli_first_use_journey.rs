@@ -71,7 +71,7 @@ fn first_use_journey_executes_the_flattened_paired_loop() {
         home,
         None,
     );
-    assert_eq!(captured["schema"], "pointbreak.review-capture");
+    assert_eq!(captured["schema"], "pointbreak.change-capture-receipt.v1");
     assert_eq!(captured["revision"]["summary"], CAPTURE_SUMMARY);
     let revision_id = captured["revision"]["id"]
         .as_str()

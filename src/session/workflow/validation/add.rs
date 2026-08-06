@@ -21,7 +21,8 @@ use crate::session::event::{
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::content::ContentArtifacts;
 use crate::session::store::resolution::{
-    prepare_write_landing, resolve_write_store, resolve_write_validation_store,
+    prepare_write_landing, resolve_change_write_store, resolve_write_store,
+    resolve_write_validation_store,
 };
 use crate::session::{
     BestEffortSkipSink, EventSigningOptions, EventWriteOutcome, current_timestamp,
@@ -34,6 +35,7 @@ pub struct ValidationAddOptions {
     repo: PathBuf,
     revision_id: Option<RevisionId>,
     exact_revision_id: Option<RevisionId>,
+    review_cursor: Option<String>,
     track: Option<String>,
     check_name: Option<String>,
     command: Option<String>,
@@ -57,6 +59,7 @@ impl ValidationAddOptions {
             repo: repo.as_ref().to_path_buf(),
             revision_id: None,
             exact_revision_id: None,
+            review_cursor: None,
             track: None,
             check_name: None,
             command: None,
@@ -87,6 +90,10 @@ impl ValidationAddOptions {
 
     pub fn with_exact_revision_id(mut self, id: RevisionId) -> Self {
         self.exact_revision_id = Some(id);
+        self
+    }
+    pub fn with_review_cursor(mut self, cursor: impl Into<String>) -> Self {
+        self.review_cursor = Some(cursor.into());
         self
     }
     pub fn with_track(mut self, track: impl Into<String>) -> Self {
@@ -190,13 +197,37 @@ pub fn record_validation_check(options: ValidationAddOptions) -> Result<Validati
     // Unit existence resolves the writer-visible union so validation evidence
     // attaches to a linked-only unit; the write half writes through to that same
     // store (the clone-local store in linked mode).
-    let validation_store = resolve_write_validation_store(&options.repo)?;
-    let events = validation_store.validation_events()?;
+    let change_write = options.review_cursor.is_some();
+    let events = if change_write {
+        crate::session::change_reader_state_for_repo(&options.repo)?
+            .ready()
+            .ok_or_else(|| ShoreError::WorkflowInputInvalid {
+                reason: "complete Change authority is unavailable".to_owned(),
+            })?
+            .events()
+            .to_vec()
+    } else {
+        resolve_write_validation_store(&options.repo)?.validation_events()?
+    };
+    let cursor_revision = options
+        .review_cursor
+        .as_deref()
+        .map(|cursor| super::super::exact_revision_from_review_cursor(&options.repo, cursor))
+        .transpose()?;
+    if cursor_revision.is_some()
+        && (options.revision_id.is_some() || options.exact_revision_id.is_some())
+    {
+        return Err(ShoreError::WorkflowInputInvalid {
+            reason: "--review-cursor cannot be combined with another Revision selector".to_owned(),
+        });
+    }
     let resolved = resolve_revision(
         &events,
         RevisionSelection::from_revision_options(
             options.revision_id.as_ref(),
-            options.exact_revision_id.as_ref(),
+            cursor_revision
+                .as_ref()
+                .or(options.exact_revision_id.as_ref()),
         )?,
         &CurrentRevisionContext::for_repo(&options.repo)?,
         RevisionScope::default(),
@@ -226,6 +257,7 @@ pub fn record_validation_check(options: ValidationAddOptions) -> Result<Validati
         idempotency_key: options.idempotency_key,
         actor_id: options.actor_id,
         signing: options.signing,
+        change_write,
     })?;
     Ok(result)
 }
@@ -248,10 +280,15 @@ struct ValidationWriteInput {
     idempotency_key: Option<String>,
     actor_id: Option<ActorId>,
     signing: EventSigningOptions,
+    change_write: bool,
 }
 
 fn write_validation_check_event(input: ValidationWriteInput) -> Result<ValidationAddResult> {
-    let write_store = resolve_write_store(&input.repo)?;
+    let write_store = if input.change_write {
+        resolve_change_write_store(&input.repo)?
+    } else {
+        resolve_write_store(&input.repo)?
+    };
     let worktree_root = write_store.worktree_root();
     let store_dir = write_store.store_dir();
     let storage = LocalStorage::new(store_dir);
@@ -354,7 +391,11 @@ fn write_validation_check_event(input: ValidationWriteInput) -> Result<Validatio
     let event_id = event.event_id.clone();
 
     let mut events_created_by_type = BTreeMap::new();
-    let outcome = event_store.record_event_once(&event)?;
+    let outcome = if input.change_write {
+        event_store.record_change_event_once(&event)?
+    } else {
+        event_store.record_event_once(&event)?
+    };
     let (events_created, events_existing) = match outcome {
         EventWriteOutcome::Created => {
             events_created_by_type.insert("validation_check_recorded".to_owned(), 1);
@@ -363,7 +404,12 @@ fn write_validation_check_event(input: ValidationWriteInput) -> Result<Validatio
         EventWriteOutcome::Existing | EventWriteOutcome::ExistingDivergentSignature => (0, 1),
     };
 
-    let state = SessionState::from_events(&event_store.list_events()?)?;
+    let events = if input.change_write {
+        event_store.list_change_events()?
+    } else {
+        event_store.list_events()?
+    };
+    let state = SessionState::from_events(&events)?;
     storage.write_json_atomic(
         &store_dir.join("state.json"),
         &state,

@@ -655,8 +655,14 @@ mod tests {
             stored.snapshot.files[0].new_path.as_deref(),
             Some("src/lib.rs")
         );
-        assert!(format!("{:?}", stored.snapshot).contains("2"));
-        assert!(!format!("{:?}", stored.snapshot).contains("99"));
+        let row_text = stored.snapshot.files[0]
+            .hunks
+            .iter()
+            .flat_map(|hunk| hunk.rows.iter())
+            .map(|row| row.text.as_str())
+            .collect::<Vec<_>>();
+        assert!(row_text.iter().any(|text| text.contains("2")));
+        assert!(row_text.iter().all(|text| !text.contains("99")));
     }
 
     #[test]

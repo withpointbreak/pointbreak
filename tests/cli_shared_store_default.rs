@@ -184,9 +184,11 @@ fn ephemeral_worktree_keeps_its_capture_out_of_the_shared_store() {
 
     // The capture landed in the worktree-local store, not the shared one.
     assert!(ephemeral.join(".pointbreak/data/events").is_dir());
-    assert!(
-        !common_dir_store(&ephemeral).join("events").exists(),
-        "the ephemeral capture is absent from the shared common-dir store"
+    let shared_events = common_dir_store(&ephemeral).join("events");
+    assert_eq!(
+        std::fs::read_dir(&shared_events).unwrap().count(),
+        2,
+        "the shared store retains only its two capability records"
     );
 
     // A sibling main-clone worktree does not see the ephemeral unit.
@@ -216,14 +218,20 @@ fn ephemeral_worktree_keeps_its_capture_out_of_the_shared_store() {
         ],
     );
     assert!(!ephemeral.exists());
-    assert!(!common_dir_store(main.path()).join("events").exists());
+    assert_eq!(
+        std::fs::read_dir(common_dir_store(main.path()).join("events"))
+            .unwrap()
+            .count(),
+        2,
+        "removing the ephemeral worktree leaves only shared capability records"
+    );
 }
 
 // 4. A non-ephemeral worktree carrying a pre-default `.pointbreak/data` store errors
 //    on any read, naming `.pointbreak/data` AND `pointbreak store migrate`; after
 //    migration the record resolves from the shared store.
 #[test]
-fn legacy_worktree_local_store_errors_until_migrated() {
+fn legacy_worktree_local_store_refuses_transfer_without_mutating_either_root() {
     let repo = GitRepo::new();
     repo.write("README.md", "base\n");
     repo.commit_all("base");
@@ -235,11 +243,11 @@ fn legacy_worktree_local_store_errors_until_migrated() {
     // populated `.pointbreak/data` is now a legacy store on a non-ephemeral worktree.
     run_json(&["store", "mode", "ephemeral", "--repo", repo_arg]);
     let capture = run_json(&["capture", "--repo", repo_arg]);
-    let unit_id = capture["revision"]["id"].as_str().unwrap().to_owned();
+    let _unit_id = capture["revision"]["id"].as_str().unwrap().to_owned();
     run_json(&["store", "mode", "shared", "--repo", repo_arg]);
     assert!(repo.path().join(".pointbreak/data/events").is_dir());
 
-    // Any read now errors, naming both the legacy path and the migrate command.
+    // Any read now errors without guessing how to transfer the capable Journal.
     let read = pointbreak(["revision", "list", "--repo", repo_arg]);
     assert!(!read.status.success(), "a legacy store must fail the read");
     let stderr = String::from_utf8_lossy(&read.stderr);
@@ -247,44 +255,23 @@ fn legacy_worktree_local_store_errors_until_migrated() {
         stderr.contains(".pointbreak/data"),
         "the error names the legacy store: {stderr}"
     );
-    assert!(
-        stderr.contains("pointbreak store migrate"),
-        "the error names the fix: {stderr}"
-    );
+    assert!(stderr.contains("change_store_transfer_unavailable"));
 
-    // Migration folds the legacy store into the shared store, non-destructively:
-    // the events land in `.git/pointbreak` while `.pointbreak/data` is left intact.
-    let migrate = run_json(&["store", "migrate", "--repo", repo_arg]);
-    assert!(migrate["eventsCreated"].as_u64().unwrap() >= 1);
+    let migrate = pointbreak(["store", "migrate", "--repo", repo_arg]);
+    assert!(!migrate.status.success());
+    assert!(String::from_utf8_lossy(&migrate.stderr).contains("change_store_transfer_unavailable"));
     assert!(common_dir_store(repo.path()).join("events").is_dir());
     assert!(
         repo.path().join(".pointbreak/data/events").is_dir(),
-        "migration is non-destructive: the source store is preserved"
+        "the source store is preserved"
     );
-
-    // Once the migrated legacy store is retired, the record resolves from the
-    // shared store. (Clearing the source is the operator's step after migrating;
-    // migration never deletes it.)
-    std::fs::remove_dir_all(repo.path().join(".pointbreak/data")).unwrap();
-    let list = run_json(&["revision", "list", "--repo", repo_arg]);
-    let ids: Vec<&str> = list["entries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|entry| entry["revisionId"].as_str().unwrap())
-        .collect();
-    assert!(
-        ids.contains(&unit_id.as_str()),
-        "the record resolves from the shared store after migration"
-    );
-    assert_no_storage_path_leak(&list);
 }
 
 // 4b. The one-command completion: `store migrate --retire-source` folds,
 //     verifies, and deletes `.pointbreak/data` so the very next read resolves —
 //     no undocumented manual `rm` step.
 #[test]
-fn legacy_worktree_local_store_resolves_after_migrate_retire_source() {
+fn legacy_worktree_local_store_can_be_explicitly_reselected_as_ephemeral() {
     let repo = GitRepo::new();
     repo.write("README.md", "base\n");
     repo.commit_all("base");
@@ -297,19 +284,15 @@ fn legacy_worktree_local_store_resolves_after_migrate_retire_source() {
     run_json(&["store", "mode", "shared", "--repo", repo_arg]);
     assert!(repo.path().join(".pointbreak/data/events").is_dir());
 
-    // The guard fires and its hint names the one-command completion.
+    // The shared reader refuses to choose between two roots.
     let read = pointbreak(["revision", "list", "--repo", repo_arg]);
     assert!(!read.status.success(), "a legacy store must fail the read");
     let stderr = String::from_utf8_lossy(&read.stderr);
-    assert!(
-        stderr.contains("--retire-source"),
-        "the hint names the one-command completion: {stderr}"
-    );
+    assert!(stderr.contains("change_store_transfer_unavailable"));
 
-    // ONE command completes the switch: fold + verify + retire.
-    let migrate = run_json(&["store", "migrate", "--retire-source", "--repo", repo_arg]);
-    assert_eq!(migrate["sourceRetired"], serde_json::Value::Bool(true));
-    assert!(!repo.path().join(".pointbreak/data").exists());
+    // Explicitly restoring ephemeral mode selects the local root without copying
+    // or deleting anything.
+    run_json(&["store", "mode", "ephemeral", "--repo", repo_arg]);
 
     let list = run_json(&["revision", "list", "--repo", repo_arg]);
     let ids: Vec<&str> = list["entries"]
@@ -320,8 +303,9 @@ fn legacy_worktree_local_store_resolves_after_migrate_retire_source() {
         .collect();
     assert!(
         ids.contains(&unit_id.as_str()),
-        "the record resolves immediately after the one-command migration"
+        "the record resolves after explicitly selecting the local root"
     );
+    assert!(repo.path().join(".pointbreak/data/events").is_dir());
 }
 
 // 5. Sibling captures: each worktree's `unit show` with NO `--revision`

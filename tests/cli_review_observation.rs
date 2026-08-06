@@ -9,6 +9,42 @@ use support::git_repo::GitRepo;
 use support::pointbreak;
 
 #[test]
+fn worktree_bound_review_cursor_refuses_a_fact_after_source_change() {
+    let repo = modified_repo();
+    let capture =
+        parse_json(&pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]).stdout);
+    let cursor = capture["reviewCursor"]["token"].as_str().unwrap();
+    let before = parse_json(
+        &pointbreak(["revision", "list", "--repo", repo.path().to_str().unwrap()]).stdout,
+    );
+
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
+    let rejected = pointbreak([
+        "observation",
+        "add",
+        "--repo",
+        repo.path().to_str().unwrap(),
+        "--review-cursor",
+        cursor,
+        "--track",
+        "human:source-race",
+        "--title",
+        "must not land on stale bytes",
+    ]);
+
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("review_cursor_source_changed"),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&rejected.stderr)
+    );
+    let after = parse_json(
+        &pointbreak(["revision", "list", "--repo", repo.path().to_str().unwrap()]).stdout,
+    );
+    assert_eq!(after["eventCount"], before["eventCount"]);
+}
+
+#[test]
 fn observation_add_and_list_run_at_the_top_level() {
     let repo = modified_repo();
     pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]);
@@ -67,6 +103,7 @@ fn observation_exact_revision_targets_and_validates_the_named_snapshot() {
         .stdout,
     );
     let first_id = first["revision"]["id"].as_str().unwrap().to_owned();
+    let first_cursor = first["reviewCursor"]["token"].as_str().unwrap().to_owned();
     repo.remove("only-a.rs");
     repo.write("only-b.rs", "fn b() {}\n");
     let second = parse_json(
@@ -75,31 +112,14 @@ fn observation_exact_revision_targets_and_validates_the_named_snapshot() {
             "--repo",
             repo.path().to_str().unwrap(),
             "--include-untracked",
-            "--supersedes",
-            &first_id,
+            "--review-cursor",
+            &first_cursor,
+            "--advance",
+            "replace",
         ])
         .stdout,
     );
     let second_id = second["revision"]["id"].as_str().unwrap().to_owned();
-
-    let legacy = pointbreak([
-        "observation",
-        "add",
-        "--repo",
-        repo.path().to_str().unwrap(),
-        "--revision",
-        &first_id,
-        "--track",
-        "human:legacy",
-        "--title",
-        "head seed",
-    ]);
-    assert!(
-        legacy.status.success(),
-        "stderr:\n{}",
-        String::from_utf8_lossy(&legacy.stderr)
-    );
-    assert_eq!(parse_json(&legacy.stdout)["revisionId"], second_id);
 
     let exact = pointbreak([
         "observation",
@@ -124,13 +144,26 @@ fn observation_exact_revision_targets_and_validates_the_named_snapshot() {
     assert_eq!(exact["revisionId"], first_id);
     assert_eq!(exact["target"]["filePath"], "only-a.rs");
 
+    let selected = parse_json(
+        &pointbreak([
+            "change",
+            "select",
+            second["changeId"].as_str().unwrap(),
+            "--revision",
+            &second_id,
+            "--repo",
+            repo.path().to_str().unwrap(),
+        ])
+        .stdout,
+    );
+    let successor_cursor = selected["token"].as_str().unwrap().to_owned();
     let wrong_snapshot = pointbreak([
         "observation",
         "add",
         "--repo",
         repo.path().to_str().unwrap(),
-        "--revision",
-        &first_id,
+        "--review-cursor",
+        &successor_cursor,
         "--track",
         "human:legacy",
         "--title",
@@ -956,7 +989,7 @@ fn observation_add_with_explicit_revision_succeeds_when_current_is_ambiguous() {
 }
 
 #[test]
-fn observation_add_errors_when_current_revision_is_ambiguous_without_explicit_id() {
+fn observation_add_refuses_implicit_selection_after_independent_captures() {
     let repo = modified_repo();
     pointbreak(["capture", "--repo", repo.path().to_str().unwrap()]);
     repo.write("src/lib.rs", "pub fn value() -> u32 { 3 }\n");
