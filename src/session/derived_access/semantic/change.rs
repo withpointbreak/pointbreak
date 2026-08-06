@@ -325,9 +325,10 @@ fn publish_change_semantic_generation_with_failure(
             "Change authority moved while the derived generation was staging".to_owned(),
         ));
     }
+    let store_id = crate::session::store::resolution::opaque_path_identity("store", store_root)?;
     let descriptor = GenerationDescriptor::new(
         &generation_id,
-        "writer-dark-change-qualification",
+        store_id,
         DerivedAccessProfile::SqliteWalBodylessV1,
         sequence,
         inspection.cursor.event_count,
@@ -357,24 +358,6 @@ fn publish_change_semantic_generation_with_failure(
         .map_err(generation_error)?;
     let _ = layout.reclaim_inactive_generations(&generation_id);
     Ok(generation_id)
-}
-
-/// Publish the complete Change semantic projection only after the L2 authority
-/// cursor has been validated. The generation is disposable; the loose Journal
-/// remains the sole source of truth and an interrupted publication can be
-/// retried from the completed authority.
-pub(crate) fn publish_change_semantic_generation(
-    store_root: &Path,
-    inspection: &JournalInspection,
-    authority_now: &AuthorityCursorV2,
-) -> Result<String> {
-    publish_change_semantic_generation_with_failure(
-        store_root,
-        inspection,
-        authority_now,
-        true,
-        ChangeGenerationFailurePointV1::None,
-    )
 }
 
 #[cfg(any(test, feature = "bench"))]

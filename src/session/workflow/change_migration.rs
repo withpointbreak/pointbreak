@@ -844,15 +844,18 @@ pub fn migrate_bulk_adoption(
     }
 
     execute_bulk_adoption_plan(&options.repo, &plan, options.interruption_after_append)?;
-    let (_, complete) = resolve_change_read_store(&options.repo)?;
     let derived_generation_id = if options.derived_enabled {
-        Some(
-            crate::session::derived_access::semantic::change::publish_change_semantic_generation(
-                &store_root,
-                &complete,
-                &complete.cursor,
-            )?,
-        )
+        // Publish through the product lifecycle so the descriptor, SQLite
+        // database, locator, and store identity form one validated generation.
+        // The bodyless Change generator is qualification-only and cannot stand
+        // in for this complete post-L2 product generation.
+        let access =
+            crate::session::derived_access::history::DerivedHistoryAccess::resolve(&options.repo)
+                .map_err(ShoreError::Message)?;
+        access
+            .build(|_| crate::session::derived_access::history::DerivedHistoryControl::Continue)
+            .map_err(ShoreError::Message)?
+            .generation_id
     } else {
         None
     };
@@ -2729,6 +2732,16 @@ mod tests {
                 .next()
                 .is_some()
         );
+        let status =
+            crate::session::derived_access::history::DerivedHistoryAccess::resolve(repo.path())
+                .unwrap()
+                .lifecycle_status();
+        assert_eq!(
+            status.availability,
+            crate::session::derived_access::history::DerivedHistoryAvailability::Current,
+            "{status:?}"
+        );
+        assert_eq!(receipt.derived_generation_id, status.generation_id);
     }
 
     #[test]
