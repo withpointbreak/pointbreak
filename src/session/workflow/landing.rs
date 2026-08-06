@@ -5,6 +5,7 @@
 //! structural low-level association remains available separately, but only
 //! this workflow may return content-qualified landing language.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -388,7 +389,7 @@ fn proof_inputs(
         base_or_parent: Some(base),
         path_scope: canonical_scope(&path_scope),
         git_availability: ProofGitAvailabilityV1::Available,
-        entries: canonical_entries(&candidate_files),
+        entries: canonical_candidate_entries(&candidate_files, source_files),
     };
     let exact_endpoint = match &provenance.target {
         ReviewEndpoint::GitCommit {
@@ -453,19 +454,44 @@ fn path_scope_for_git(pathspecs: &[String]) -> Vec<String> {
 }
 
 fn canonical_entries(files: &[DiffFile]) -> Vec<CanonicalRawEntryV1> {
+    canonical_entries_with_untracked_paths(files, &BTreeSet::new())
+}
+
+/// Canonicalize a committed candidate against the capture-time origin of added paths.
+///
+/// Git necessarily stops calling a path "untracked" after it is committed, while the
+/// captured worktree correctly retains that provenance. Carry the source-side bit into
+/// the candidate proof input so it still binds the origin without making an exact
+/// materialization impossible. The absent old side of an addition is likewise one
+/// semantic state whether Git spells it as missing fields or all-zero sentinels.
+fn canonical_candidate_entries(
+    candidate_files: &[DiffFile],
+    source_files: &[DiffFile],
+) -> Vec<CanonicalRawEntryV1> {
+    let source_untracked_paths = source_files
+        .iter()
+        .filter(|file| file.synthetic)
+        .filter_map(diff_file_path)
+        .map(path_identity)
+        .collect::<BTreeSet<_>>();
+    canonical_entries_with_untracked_paths(candidate_files, &source_untracked_paths)
+}
+
+fn canonical_entries_with_untracked_paths(
+    files: &[DiffFile],
+    source_untracked_paths: &BTreeSet<String>,
+) -> Vec<CanonicalRawEntryV1> {
     let mut entries = files
         .iter()
         .map(|file| {
-            let path = file
-                .new_path
-                .as_deref()
-                .or(file.old_path.as_deref())
-                .unwrap_or_default();
+            let path = diff_file_path(file).unwrap_or_default();
+            let path_identity_value = path_identity(path);
             let previous_path = matches!(file.status, FileStatus::Renamed | FileStatus::Copied)
                 .then(|| file.old_path.as_deref())
                 .flatten();
+            let added = file.status == FileStatus::Added;
             CanonicalRawEntryV1 {
-                path_identity: path_identity(path),
+                path_identity: path_identity_value.clone(),
                 previous_path_identity: previous_path.map(path_identity),
                 change: if file.is_mode_only {
                     CanonicalChangeV1::ModeOnly
@@ -478,9 +504,9 @@ fn canonical_entries(files: &[DiffFile]) -> Vec<CanonicalRawEntryV1> {
                         FileStatus::Copied => CanonicalChangeV1::Copied,
                     }
                 },
-                old_oid: file.old_oid.clone(),
+                old_oid: (!added).then(|| file.old_oid.clone()).flatten(),
                 new_oid: file.new_oid.clone(),
-                old_mode: file.old_mode.clone(),
+                old_mode: (!added).then(|| file.old_mode.clone()).flatten(),
                 new_mode: file.new_mode.clone(),
                 old_decoded_sha256: None,
                 new_decoded_sha256: None,
@@ -495,13 +521,17 @@ fn canonical_entries(files: &[DiffFile]) -> Vec<CanonicalRawEntryV1> {
                 } else {
                     CanonicalContentKindV1::Text
                 },
-                untracked: file.synthetic,
+                untracked: file.synthetic || source_untracked_paths.contains(&path_identity_value),
             }
         })
         .collect::<Vec<_>>();
     entries.sort();
     entries.dedup();
     entries
+}
+
+fn diff_file_path(file: &DiffFile) -> Option<&str> {
+    file.new_path.as_deref().or(file.old_path.as_deref())
 }
 
 fn path_identity(path: &str) -> String {
@@ -667,6 +697,84 @@ mod tests {
         assert_eq!(
             landed.proof.result.semantic_relation,
             SemanticRevisionRelationV1::ExactMaterialization
+        );
+    }
+
+    #[test]
+    fn worktree_capture_with_untracked_files_lands_as_an_exact_materialization() {
+        let root = tempfile::tempdir().unwrap();
+        git(root.path(), &["init", "--quiet"]);
+        git(root.path(), &["config", "user.name", "Pointbreak Test"]);
+        git(
+            root.path(),
+            &["config", "user.email", "pointbreak@example.test"],
+        );
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.path().join("tracked.txt"), "base\n").unwrap();
+        git(root.path(), &["add", "tracked.txt"]);
+        git(root.path(), &["commit", "--quiet", "-m", "base"]);
+
+        std::fs::write(root.path().join("tracked.txt"), "landed\n").unwrap();
+        std::fs::write(root.path().join("untracked.txt"), "new text\n").unwrap();
+        std::fs::write(root.path().join("untracked.bin"), [0_u8, 159, 146, 150]).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("untracked.txt", root.path().join("untracked-link")).unwrap();
+
+        let capture = capture_review(
+            crate::session::CaptureOptions::new(root.path())
+                .with_worktree(crate::session::WorktreeSpec::new().with_include_untracked()),
+        )
+        .unwrap();
+        let (store, _) =
+            crate::session::store::resolution::resolve_change_read_store(root.path()).unwrap();
+        write_capability_fixture_for_test(
+            store.backend().journal().as_ref(),
+            CapabilityFixtureState::L2,
+        )
+        .unwrap();
+        let change = create_change(ChangeCreateOptions::new(
+            root.path(),
+            "change-operation:untracked-worktree-landing-test-create",
+            ChangeIdentityDescriptorV1::opaque_nonce([0x73; 32]),
+        ))
+        .unwrap();
+        join_revision_to_change(ChangeMembershipOptions::new(
+            root.path(),
+            "change-operation:untracked-worktree-landing-test-join",
+            change.change_id.clone(),
+            capture.revision_id.clone(),
+        ))
+        .unwrap();
+        git(root.path(), &["add", "--all"]);
+        git(root.path(), &["commit", "--quiet", "-m", "candidate"]);
+
+        let ready = crate::session::change_reader_state_for_repo(root.path())
+            .unwrap()
+            .ready()
+            .unwrap()
+            .clone();
+        let selected = select_review_cursor(
+            &ready.projection.changes[&change.change_id],
+            &ready.document_projection,
+            Some(&capture.revision_id),
+            false,
+            ReviewSourceBindingV1::Captured,
+        )
+        .unwrap();
+        let landed = land_commit(LandCommitOptions::new(
+            root.path(),
+            selected.token,
+            "track:author",
+            "HEAD",
+        ))
+        .unwrap();
+
+        assert_eq!(
+            landed.proof.result.semantic_relation,
+            SemanticRevisionRelationV1::ExactMaterialization,
+            "source: {:#?}\ncandidate: {:#?}",
+            landed.proof.source,
+            landed.proof.candidate,
         );
     }
 

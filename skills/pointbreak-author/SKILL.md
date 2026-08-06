@@ -136,9 +136,17 @@ A commit that materializes already-reviewed content does not create a new Revisi
 proof-first wrapper after the reviewer accepts the exact Revision:
 
 ```bash
+landed_commit=<commit>
+landing_cursor=$(pointbreak change select "$change_id" \
+  --revision "$revision_id" --source "commit:$landed_commit" \
+  --format json | jq -r '.token')
 pointbreak association land \
-  --review-cursor "$review_cursor" --track "$track" --commit <commit>
+  --review-cursor "$landing_cursor" --track "$track" --commit "$landed_commit"
 ```
+
+Re-select after committing: the authoring cursor is worktree-bound and must fail once the commit
+changes that source state. The commit-bound cursor proves that the named commit materializes the
+accepted exact Revision before `association land` records anything.
 
 Strong language such as exact, equivalent, contained, or landed unchanged is permitted only when
 this command returns a verified relation. `pointbreak association record` is the low-level structural

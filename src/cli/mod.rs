@@ -81,8 +81,8 @@ Recovery:
   find legacy captured work    pointbreak revision list, then pass --revision <id>
   select exact current work    pointbreak change select <change-id>
   replace an earlier call      pointbreak assessment add --replaces <assessment-id>
-  commit landed after review   pointbreak association land --review-cursor <cursor>
-                               --track <track> --commit <oid>";
+  commit landed after review   pointbreak change select <change-id> --revision <revision-id>
+                               --source commit:<oid>, then association land with that cursor";
 
 #[derive(Debug, Parser)]
 #[command(

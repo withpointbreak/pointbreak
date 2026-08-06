@@ -280,10 +280,6 @@ fn validation_add_options(
         let ids = crate::cli::id_resolver::IdResolver::new(&args.repo);
         options = options.with_revision_id(RevisionId::new(ids.rev(revision)?));
     }
-    if let Some(revision) = &args.exact_revision {
-        let ids = crate::cli::id_resolver::IdResolver::new(&args.repo);
-        options = options.with_exact_revision_id(RevisionId::new(ids.rev(revision)?));
-    }
     if let Some(exact_revision) = &args.exact_revision {
         let ids = crate::cli::id_resolver::IdResolver::new(&args.repo);
         options = options.with_exact_revision_id(RevisionId::new(ids.rev(exact_revision)?));
@@ -340,6 +336,10 @@ fn validation_list_options(
     if let Some(revision) = &args.revision {
         let ids = crate::cli::id_resolver::IdResolver::new(&args.repo);
         options = options.with_revision_id(RevisionId::new(ids.rev(revision)?));
+    }
+    if let Some(exact_revision) = &args.exact_revision {
+        let ids = crate::cli::id_resolver::IdResolver::new(&args.repo);
+        options = options.with_exact_revision_id(RevisionId::new(ids.rev(exact_revision)?));
     }
     if let Some(track) = args.track {
         options = options.with_track(track);

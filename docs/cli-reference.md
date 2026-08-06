@@ -1202,6 +1202,18 @@ Revision as append-only associate/withdraw events on two axes — commit and ref
 says only that the named Git object is associated with the Revision; it does not claim byte equality,
 containment, or review coverage. Use `association land` for proof-backed landing language.
 
+After committing an accepted worktree capture, select a commit-bound cursor before landing. The
+original authoring cursor is worktree-bound and intentionally becomes stale when the commit changes
+that source state:
+
+```bash
+landing_cursor=$(pointbreak change select <change-id> \
+  --revision <revision-id> --source commit:<oid> \
+  --format json | jq -r '.token')
+pointbreak association land --review-cursor "$landing_cursor" \
+  --track <track-id> --commit <oid>
+```
+
 - **`record`** takes exactly one axis. `--commit <rev>` (resolved to an OID) binds the revision on
   the commit axis; `--ref <name>` (a short branch name is normalized to its full ref) at the
   explicit `--head <oid>` (never inferred) binds it on the ref axis. `--commit` and `--ref` are

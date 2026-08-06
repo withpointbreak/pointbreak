@@ -73,6 +73,23 @@ fn validation_exact_revision_targets_a_superseded_revision() {
     );
     assert_eq!(parse_json(&exact.stdout)["revisionId"], first_id);
     assert_ne!(first_id, second_id);
+
+    let listed = pointbreak([
+        "validation",
+        "list",
+        "--repo",
+        repo_arg,
+        "--exact-revision",
+        &first_id,
+    ]);
+    assert!(
+        listed.status.success(),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let listed = parse_json(&listed.stdout);
+    assert_eq!(listed["revisionId"], first_id);
+    assert_eq!(listed["validationChecks"][0]["checkName"], "exact");
 }
 
 #[test]

@@ -132,9 +132,18 @@ assessment port.
 After the reviewer accepts the exact current Revision, use proof-first landing:
 
 ```bash
+landed_commit=<commit>
+accepted_revision_id=<accepted-revision-id>
+landing_cursor=$(pointbreak change select "$change_id" \
+  --revision "$accepted_revision_id" --source "commit:$landed_commit" \
+  --format json | jq -r '.token')
 pointbreak association land \
-  --review-cursor "$review_cursor" --track "$author_track" --commit <commit>
+  --review-cursor "$landing_cursor" --track "$author_track" --commit "$landed_commit"
 ```
+
+Re-select after committing. A capture or fact-writing cursor may be worktree-bound, and its refusal
+after the commit is the intended source-race protection. Landing uses a fresh commit-bound cursor
+for the accepted exact Revision.
 
 If the proof is refuted, capture and review a new Revision. If it is indeterminate and only provenance
 is needed, use `--provenance-only` or the low-level structural `association record` command and avoid

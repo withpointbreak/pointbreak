@@ -976,7 +976,20 @@ fn capture_receipt(
             }
         })
         .unwrap_or(crate::session::ReviewSourceRequestV1::Captured);
-    let source_binding = crate::session::review_source_binding(repo, &revision, source_request)?;
+    let source_binding = match crate::session::review_source_binding(
+        repo,
+        &revision,
+        source_request,
+    ) {
+        Err(ShoreError::WorkflowInputInvalid { reason })
+            if capture.is_none() && reason.starts_with("review_cursor_source_changed:") =>
+        {
+            return Err(invalid_input(
+                "operation_source_changed: the repeated capture operation no longer matches its previously captured exact Revision; restore the original source or use a new --operation-id",
+            ));
+        }
+        result => result?,
+    };
     let review_cursor = crate::session::select_review_cursor(
         change,
         &ready.document_projection,
@@ -1774,6 +1787,29 @@ mod tests {
             .events()
             .len();
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn initial_capture_retry_names_a_changed_operation_source() {
+        let root = ready_repo();
+        std::fs::write(root.path().join("sample.txt"), "captured\n").unwrap();
+        let options = || {
+            ChangeCaptureOptions::initial(
+                "change-operation:test-initial-retry-source",
+                crate::session::CaptureOptions::new(root.path()).with_summary("captured state"),
+                ChangeIdentityDescriptorV1::opaque_nonce([0x62; 32]),
+            )
+        };
+        capture_change_revision(options()).unwrap();
+
+        std::fs::write(root.path().join("sample.txt"), "changed\n").unwrap();
+        let error = capture_change_revision(options()).unwrap_err();
+        assert!(
+            error.to_string().contains("operation_source_changed"),
+            "{error}"
+        );
+        assert!(!error.to_string().contains("review_cursor_source_changed"));
+        assert!(error.to_string().contains("new --operation-id"));
     }
 
     #[test]

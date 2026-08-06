@@ -333,6 +333,8 @@ fn landing_guidance_is_proof_first_and_content_changes_create_a_revision() {
         "skills/pointbreak-author-response/SKILL.md",
     ] {
         assert_contains(path, "pointbreak association land");
+        assert_contains(path, "--source \"commit:$landed_commit\"");
+        assert_contains(path, "landing_cursor");
         assert_contains(path, "--review-cursor");
         assert_contains(path, "provenance-only");
     }
