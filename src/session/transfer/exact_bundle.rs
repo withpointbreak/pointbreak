@@ -372,9 +372,13 @@ pub fn import_exact_bundle_v2(
             "exact import did not preserve complete destination authority".to_owned(),
         ));
     }
+    let receipt_hex = receipt
+        .receipt_sha256
+        .strip_prefix("sha256:")
+        .ok_or_else(|| ExactTransferError::Contract("invalid import receipt digest".to_owned()))?;
     let receipt_path = Path::new("operations")
         .join("imports")
-        .join(format!("{}.json", receipt.receipt_sha256));
+        .join(format!("{receipt_hex}.json"));
     let bytes = crate::canonical_hash::canonical_json_bytes(&serde_json::to_value(&receipt)?)?;
     let storage = LocalStorage::new(&store_root);
     match storage.create_file_exclusive(&receipt_path, &bytes, Durability::Durable)? {
@@ -1590,6 +1594,15 @@ mod tests {
         let receipt = import_exact_bundle_v2(repo.path(), &manifest, "local:product").unwrap();
         let repeated = import_exact_bundle_v2(repo.path(), &manifest, "local:product").unwrap();
         assert_eq!(receipt, repeated);
+        let receipt_hex = receipt.receipt_sha256.strip_prefix("sha256:").unwrap();
+        assert!(
+            store
+                .store_dir()
+                .join("operations")
+                .join("imports")
+                .join(format!("{receipt_hex}.json"))
+                .is_file()
+        );
         for record in &manifest.content {
             assert_eq!(
                 store
