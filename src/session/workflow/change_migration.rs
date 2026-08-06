@@ -1394,6 +1394,7 @@ mod tests {
             repo.path(),
             &["config", "user.email", "pointbreak@example.test"],
         );
+        git(repo.path(), &["config", "commit.gpgsign", "false"]);
         std::fs::write(repo.path().join("sample.txt"), "base\n").unwrap();
         git(repo.path(), &["add", "sample.txt"]);
         git(repo.path(), &["commit", "--quiet", "-m", "base"]);
