@@ -19,6 +19,10 @@ let store: Store;
 let overlay: Overlay;
 let palette: Palette;
 
+// Deliberately arbitrary: the split-resize command only requires an open selection.
+const SYNTHETIC_REV =
+  "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd";
+
 beforeEach(async () => {
   vi.resetModules();
   store = await import("../src/store");
@@ -102,7 +106,7 @@ describe("buildCommands (actions + contextual jumps over the loaded state)", () 
     store.commit({
       selected: {
         kind: "revision",
-        id: "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd",
+        id: SYNTHETIC_REV,
       },
       open: true,
     });

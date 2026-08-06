@@ -19,7 +19,8 @@ let keyboard: Keyboard;
 let split: Split;
 
 const SPLIT_KEY = "shore-inspect-split";
-const REV =
+// Deliberately arbitrary: split geometry only needs a stable open selection.
+const SYNTHETIC_REV =
   "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd";
 
 function divider(): HTMLElement {
@@ -123,7 +124,10 @@ describe("the divider controller (drag / reset / keys)", () => {
   });
 
   it("ArrowLeft past the floor snaps into reading mode instead of clamping", () => {
-    store.commit({ selected: { kind: "revision", id: REV }, open: true });
+    store.commit({
+      selected: { kind: "revision", id: SYNTHETIC_REV },
+      open: true,
+    });
     split.initControls();
     const el = divider();
     el.setAttribute("aria-valuenow", "25"); // at the floor
@@ -134,7 +138,10 @@ describe("the divider controller (drag / reset / keys)", () => {
   });
 
   it("dragging past the floor snaps into reading mode and ends the drag", () => {
-    store.commit({ selected: { kind: "revision", id: REV }, open: true });
+    store.commit({
+      selected: { kind: "revision", id: SYNTHETIC_REV },
+      open: true,
+    });
     split.initControls();
     const el = divider();
     const splitEl = document.querySelector(".split") as HTMLElement;
@@ -174,7 +181,10 @@ describe("the divider controller (drag / reset / keys)", () => {
 
   it("divider keys never leak to the global keyboard handler", () => {
     document.addEventListener("keydown", keyboard.onKey);
-    store.commit({ selected: { kind: "revision", id: REV }, open: false });
+    store.commit({
+      selected: { kind: "revision", id: SYNTHETIC_REV },
+      open: false,
+    });
     split.initControls();
     const el = divider();
     el.dispatchEvent(
@@ -189,7 +199,10 @@ describe("the divider controller (drag / reset / keys)", () => {
 
 describe("stepSplit — the from-anywhere resize entry point (h / l)", () => {
   it("grows the timeline pane one step and syncs the pref, grid, and aria-valuenow", () => {
-    store.commit({ selected: { kind: "revision", id: REV }, open: true });
+    store.commit({
+      selected: { kind: "revision", id: SYNTHETIC_REV },
+      open: true,
+    });
     // happy-dom yields a zero-width rect, so stepPct uses its 3% fallback.
     expect(split.stepSplit(1)).toBe(true);
     expect(
@@ -200,7 +213,10 @@ describe("stepSplit — the from-anywhere resize entry point (h / l)", () => {
   });
 
   it("shrinks the timeline pane one step", () => {
-    store.commit({ selected: { kind: "revision", id: REV }, open: true });
+    store.commit({
+      selected: { kind: "revision", id: SYNTHETIC_REV },
+      open: true,
+    });
     expect(split.stepSplit(-1)).toBe(true);
     expect(
       document.documentElement.style.getPropertyValue("--split-master"),
@@ -209,7 +225,10 @@ describe("stepSplit — the from-anywhere resize entry point (h / l)", () => {
   });
 
   it("shrinking past the floor snaps into reading mode, leaving the stored ratio intact", () => {
-    store.commit({ selected: { kind: "revision", id: REV }, open: true });
+    store.commit({
+      selected: { kind: "revision", id: SYNTHETIC_REV },
+      open: true,
+    });
     const el = divider();
     el.setAttribute("aria-valuenow", "25"); // at the floor
     localStorage.setItem(SPLIT_KEY, "25");
@@ -223,7 +242,7 @@ describe("stepSplit — the from-anywhere resize entry point (h / l)", () => {
 
   it("growing from reading mode restores the split without stepping the width", () => {
     store.commit({
-      selected: { kind: "revision", id: REV },
+      selected: { kind: "revision", id: SYNTHETIC_REV },
       open: true,
       reading: true,
     });
@@ -239,7 +258,7 @@ describe("stepSplit — the from-anywhere resize entry point (h / l)", () => {
 
   it("does nothing further when shrinking while already at the reading rail", () => {
     store.commit({
-      selected: { kind: "revision", id: REV },
+      selected: { kind: "revision", id: SYNTHETIC_REV },
       open: true,
       reading: true,
     });

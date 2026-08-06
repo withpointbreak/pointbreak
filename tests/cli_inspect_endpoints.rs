@@ -234,11 +234,12 @@ fn api_history_returns_chronological_typed_summaries() {
     );
     assert!(history.get("eventSetHash").is_none());
     let entries = history["entries"].as_array().unwrap();
-    // capture + observation + input-request + 2 assessments + 2 validation
-    // checks. Landing associations are no longer implicit capture output.
-    assert_eq!(history["eventCount"], 7);
-    assert_eq!(history["historyCount"], 7);
-    assert_eq!(entries.len(), 7, "one entry per recorded event");
+    // capture + explicit ref association + observation + input-request +
+    // 2 assessments + 2 validation checks. Capture itself no longer infers
+    // continuity; the representative fixture records that association.
+    assert_eq!(history["eventCount"], 8);
+    assert_eq!(history["historyCount"], 8);
+    assert_eq!(entries.len(), 8, "one entry per recorded event");
 
     // Entries are chronological (occurredAt ascending).
     let stamps: Vec<i64> = entries.iter().map(occurred_instant).collect();

@@ -24,17 +24,18 @@ type Navigation = typeof import("../src/navigation");
 let store: Store;
 let navigation: Navigation;
 
-const OBS_EVENT =
+// Deliberately arbitrary identities for mocked navigation responses.
+const SYNTHETIC_OBS_EVENT =
   "evt:sha256:8ac34bc85b48ed6623660a174b024bd9099edd09877180bfa87101cc76ac6058";
-const OBS_ID =
+const SYNTHETIC_OBS_ID =
   "obs:sha256:752a5b0ab30cfa3aa062bcf6f11b4c6ee3dcfd055207b6a995b91bf81ffec8d9";
-const ASSESS_EVENT =
+const SYNTHETIC_ASSESS_EVENT =
   "evt:sha256:63d8e6174cc943ee8f049e5f6718ff385e763fd55731bb196de5fb2d3e90d4e0";
-const ASSESS_ID =
+const SYNTHETIC_ASSESS_ID =
   "assess:sha256:96faccf9a8ca8174f227dd4d667fbe47a439ad8afa0259e01fb278685eff35da";
-const REV =
+const SYNTHETIC_REV =
   "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd";
-const OBJ =
+const SYNTHETIC_OBJ =
   "obj:sha256:38a493d2f09d6fde9d1dcac61a12c4ccc4de42a0b9c6829752d34cc648a9f9d7";
 
 beforeEach(async () => {
@@ -71,15 +72,21 @@ function revealPageFor(event: HistoryDoc["entries"][number]): void {
 
 describe("resolveRef routes a chip by kind", () => {
   it("a rev chip selects the revision and dismisses the diff", () => {
-    store.commit({ diff: OBJ });
-    navigation.resolveRef("rev", REV);
-    expect(store.getState().selected).toEqual({ kind: "revision", id: REV });
+    store.commit({ diff: SYNTHETIC_OBJ });
+    navigation.resolveRef("rev", SYNTHETIC_REV);
+    expect(store.getState().selected).toEqual({
+      kind: "revision",
+      id: SYNTHETIC_REV,
+    });
     expect(store.getState().diff).toBeNull();
   });
 
   it("a review-unit chip resolves onto the same revision identity", () => {
-    navigation.resolveRef("review-unit", REV);
-    expect(store.getState().selected).toEqual({ kind: "revision", id: REV });
+    navigation.resolveRef("review-unit", SYNTHETIC_REV);
+    expect(store.getState().selected).toEqual({
+      kind: "revision",
+      id: SYNTHETIC_REV,
+    });
   });
 
   it("a track chip scopes the timeline to that track", () => {
@@ -141,65 +148,77 @@ describe("resolveRef routes a chip by kind", () => {
   });
 
   it("a snap chip opens the diff overlay route", () => {
-    navigation.resolveRef("snap", OBJ);
-    expect(store.getState().diff).toBe(OBJ);
+    navigation.resolveRef("snap", SYNTHETIC_OBJ);
+    expect(store.getState().diff).toBe(SYNTHETIC_OBJ);
   });
 
   it("an obs chip resolves the id to its event server-side, then reveals it", async () => {
     const obsEntry = {
-      eventId: OBS_EVENT,
+      eventId: SYNTHETIC_OBS_EVENT,
       eventType: "review_observation_recorded",
-      summary: { observationId: OBS_ID },
+      summary: { observationId: SYNTHETIC_OBS_ID },
     };
     revealPageFor(obsEntry as HistoryDoc["entries"][number]);
-    await navigation.resolveRefAsync("obs", OBS_ID);
-    expect(store.getState().selected).toEqual({ kind: "event", id: OBS_EVENT });
+    await navigation.resolveRefAsync("obs", SYNTHETIC_OBS_ID);
+    expect(store.getState().selected).toEqual({
+      kind: "event",
+      id: SYNTHETIC_OBS_EVENT,
+    });
     expect(store.getState().lens).toBe("timeline");
   });
 
   it("an obs chip reveal exits the diff page", async () => {
-    store.commit({ diffPage: true, diffRevision: REV });
+    store.commit({ diffPage: true, diffRevision: SYNTHETIC_REV });
     const obsEntry = {
-      eventId: OBS_EVENT,
+      eventId: SYNTHETIC_OBS_EVENT,
       eventType: "review_observation_recorded",
-      summary: { observationId: OBS_ID },
+      summary: { observationId: SYNTHETIC_OBS_ID },
     };
     revealPageFor(obsEntry as HistoryDoc["entries"][number]);
-    await navigation.resolveRefAsync("obs", OBS_ID);
+    await navigation.resolveRefAsync("obs", SYNTHETIC_OBS_ID);
     expect(store.getState().diffPage).toBe(false);
     expect(store.getState().diffRevision).toBeNull();
-    expect(store.getState().selected).toEqual({ kind: "event", id: OBS_EVENT });
+    expect(store.getState().selected).toEqual({
+      kind: "event",
+      id: SYNTHETIC_OBS_EVENT,
+    });
   });
 
   it("an assess chip resolves the id to its event server-side, then reveals it", async () => {
     const assessEntry = {
-      eventId: ASSESS_EVENT,
+      eventId: SYNTHETIC_ASSESS_EVENT,
       eventType: "review_assessment_recorded",
-      summary: { assessmentId: ASSESS_ID },
+      summary: { assessmentId: SYNTHETIC_ASSESS_ID },
     };
     revealPageFor(assessEntry as HistoryDoc["entries"][number]);
-    await navigation.resolveRefAsync("assess", ASSESS_ID);
+    await navigation.resolveRefAsync("assess", SYNTHETIC_ASSESS_ID);
     expect(store.getState().selected).toEqual({
       kind: "event",
-      id: ASSESS_EVENT,
+      id: SYNTHETIC_ASSESS_EVENT,
     });
   });
 
   it("an evt chip reveals and selects the event directly", async () => {
     const evtEntry = {
-      eventId: OBS_EVENT,
+      eventId: SYNTHETIC_OBS_EVENT,
       eventType: "review_observation_recorded",
     };
     revealPageFor(evtEntry as HistoryDoc["entries"][number]);
-    await navigation.resolveRefAsync("evt", OBS_EVENT);
-    expect(store.getState().selected).toEqual({ kind: "event", id: OBS_EVENT });
+    await navigation.resolveRefAsync("evt", SYNTHETIC_OBS_EVENT);
+    expect(store.getState().selected).toEqual({
+      kind: "event",
+      id: SYNTHETIC_OBS_EVENT,
+    });
   });
 
   it("a non-clickable kind (validation) is inert", () => {
-    store.commit({ selected: { kind: "revision", id: REV } });
+    store.commit({ selected: { kind: "revision", id: SYNTHETIC_REV } });
     navigation.resolveRef("validation", "validation:sha256:abc");
     // The default branch routes nowhere — the selection is untouched.
-    expect(store.getState().selected).toEqual({ kind: "revision", id: REV });
+    expect(store.getState().selected).toEqual({
+      kind: "revision",
+      id: SYNTHETIC_REV,
+    });
   });
 });
 
@@ -208,17 +227,17 @@ describe("reveal helpers fetch the target page and select through the router", (
     store.commit({
       filterText: "something",
       filterTrack: "human:kevin",
-      filterSnapshot: OBJ,
+      filterSnapshot: SYNTHETIC_OBJ,
       lens: "list",
     });
     const obsEntry = {
-      eventId: OBS_EVENT,
+      eventId: SYNTHETIC_OBS_EVENT,
       eventType: "review_observation_recorded",
     };
     revealPageFor(obsEntry as HistoryDoc["entries"][number]);
-    await navigation.revealEvent(OBS_EVENT);
+    await navigation.revealEvent(SYNTHETIC_OBS_EVENT);
     const s = store.getState();
-    expect(s.selected).toEqual({ kind: "event", id: OBS_EVENT });
+    expect(s.selected).toEqual({ kind: "event", id: SYNTHETIC_OBS_EVENT });
     expect(s.lens).toBe("timeline");
     expect(s.filterText).toBe("");
     expect(s.filterTrack).toBe("");
@@ -271,7 +290,7 @@ describe("reveal helpers fetch the target page and select through the router", (
   });
 
   it("revealEvent leaves the view unchanged for a genuinely absent event", async () => {
-    store.commit({ selected: { kind: "revision", id: REV } });
+    store.commit({ selected: { kind: "revision", id: SYNTHETIC_REV } });
     setHistoryResponse({
       entries: [],
       diagnostics: [],
@@ -282,14 +301,17 @@ describe("reveal helpers fetch the target page and select through the router", (
     });
     await navigation.revealEvent("evt:sha256:absent");
     // No matching page → the selection is not switched to the absent event.
-    expect(store.getState().selected).toEqual({ kind: "revision", id: REV });
+    expect(store.getState().selected).toEqual({
+      kind: "revision",
+      id: SYNTHETIC_REV,
+    });
     expect(store.getState().followByLens.timeline).toBe(true);
   });
 
   it("navigateToRevision filters the timeline to that revision", () => {
-    navigation.navigateToRevision(REV);
+    navigation.navigateToRevision(SYNTHETIC_REV);
     expect(store.getState().lens).toBe("timeline");
-    expect(store.getState().filterText).toBe(`revision:${REV}`);
+    expect(store.getState().filterText).toBe(`revision:${SYNTHETIC_REV}`);
     expect(store.getState().filterTrack).toBe("");
   });
 });
@@ -299,11 +321,14 @@ describe("the single document click delegate", () => {
     document.addEventListener("click", navigation.onDocumentClick);
     const detail = document.querySelector("#detail");
     if (detail)
-      detail.innerHTML = `<span class="ref" role="link" data-ref-kind="rev" data-ref-id="${REV}">chip</span>`;
+      detail.innerHTML = `<span class="ref" role="link" data-ref-kind="rev" data-ref-id="${SYNTHETIC_REV}">chip</span>`;
     document
       .querySelector("[data-ref-kind]")
       ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    expect(store.getState().selected).toEqual({ kind: "revision", id: REV });
+    expect(store.getState().selected).toEqual({
+      kind: "revision",
+      id: SYNTHETIC_REV,
+    });
     document.removeEventListener("click", navigation.onDocumentClick);
   });
 
@@ -311,12 +336,12 @@ describe("the single document click delegate", () => {
     document.addEventListener("click", navigation.onDocumentClick);
     const detail = document.querySelector("#detail");
     if (detail)
-      detail.innerHTML = `<button data-reveal-revision="${REV}">show in timeline</button>`;
+      detail.innerHTML = `<button data-reveal-revision="${SYNTHETIC_REV}">show in timeline</button>`;
     document
       .querySelector("[data-reveal-revision]")
       ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     expect(store.getState().lens).toBe("timeline");
-    expect(store.getState().filterText).toBe(`revision:${REV}`);
+    expect(store.getState().filterText).toBe(`revision:${SYNTHETIC_REV}`);
     document.removeEventListener("click", navigation.onDocumentClick);
   });
 });

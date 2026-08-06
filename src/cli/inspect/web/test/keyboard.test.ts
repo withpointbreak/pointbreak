@@ -31,7 +31,8 @@ let controller: Controller;
 let keyboard: Keyboard;
 let model: Model;
 
-const REV =
+// Deliberately arbitrary: these keyboard scenarios do not address the fixture Revision.
+const SYNTHETIC_REV =
   "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd";
 
 function key(init: KeyboardEventInit, target: EventTarget = document): void {
@@ -115,20 +116,26 @@ describe("selection stepping / activation / search", () => {
   });
 
   it("Enter activates the selected revision's diff once the detail is open", () => {
-    store.commit({ selected: { kind: "revision", id: REV }, open: true });
+    store.commit({
+      selected: { kind: "revision", id: SYNTHETIC_REV },
+      open: true,
+    });
     key({ key: "Enter" });
     expect(store.getState().diffPage).toBe(true);
-    expect(store.getState().diffRevision).toBe(REV);
+    expect(store.getState().diffRevision).toBe(SYNTHETIC_REV);
   });
 
   it("Enter on a parked cursor opens the detail; a second Enter opens the diff", () => {
-    store.commit({ selected: { kind: "revision", id: REV }, open: false });
+    store.commit({
+      selected: { kind: "revision", id: SYNTHETIC_REV },
+      open: false,
+    });
     key({ key: "Enter" });
     expect(store.getState().open).toBe(true);
     expect(store.getState().diffPage).toBe(false);
     key({ key: "Enter" });
     expect(store.getState().diffPage).toBe(true);
-    expect(store.getState().diffRevision).toBe(REV);
+    expect(store.getState().diffRevision).toBe(SYNTHETIC_REV);
   });
 
   it("Enter twice from a parked EVENT cursor descends into the diff", async () => {
@@ -144,7 +151,10 @@ describe("selection stepping / activation / search", () => {
   });
 
   it("Enter on a focused native control stays native (no ladder)", () => {
-    store.commit({ selected: { kind: "revision", id: REV }, open: false });
+    store.commit({
+      selected: { kind: "revision", id: SYNTHETIC_REV },
+      open: false,
+    });
     const btn = document.querySelector<HTMLElement>("#view-toggle");
     btn?.focus();
     key({ key: "Enter" }, btn ?? document);
@@ -164,7 +174,7 @@ describe("selection stepping / activation / search", () => {
     store.subscribe(render.render);
     render.render();
     store.commit({
-      selected: { kind: "revision", id: REV },
+      selected: { kind: "revision", id: SYNTHETIC_REV },
       open: false,
       reading: true,
     });
@@ -243,7 +253,7 @@ describe("overlays via the keyboard", () => {
 
   it("Escape restores the split before closing the pane (reading rung)", () => {
     store.commit({
-      selected: { kind: "revision", id: REV },
+      selected: { kind: "revision", id: SYNTHETIC_REV },
       open: true,
       reading: true,
     });
@@ -252,18 +262,18 @@ describe("overlays via the keyboard", () => {
     expect(store.getState().open).toBe(true);
     key({ key: "Escape" });
     expect(store.getState().open).toBe(false);
-    expect(store.getState().selected.id).toBe(REV);
+    expect(store.getState().selected.id).toBe(SYNTHETIC_REV);
   });
 
   it("Escape closes an open detail keeping the cursor, then clears the cursor, then the query", () => {
     store.commit({
-      selected: { kind: "revision", id: REV },
+      selected: { kind: "revision", id: SYNTHETIC_REV },
       open: true,
       filterText: "sig",
     });
     key({ key: "Escape" });
     expect(store.getState().open).toBe(false);
-    expect(store.getState().selected.id).toBe(REV);
+    expect(store.getState().selected.id).toBe(SYNTHETIC_REV);
     expect(store.getState().filterText).toBe("sig");
     key({ key: "Escape" });
     expect(store.getState().selected.id).toBeNull();
@@ -275,7 +285,10 @@ describe("overlays via the keyboard", () => {
 
 describe("Space scrolls the open detail pane", () => {
   it("Space pages down, Shift+Space pages up; closed pane leaves Space native", () => {
-    store.commit({ selected: { kind: "revision", id: REV }, open: true });
+    store.commit({
+      selected: { kind: "revision", id: SYNTHETIC_REV },
+      open: true,
+    });
     const pane = document.querySelector<HTMLElement>("#detail");
     if (!pane) throw new Error("#detail not mounted");
     pane.scrollTop = 0;
@@ -307,20 +320,29 @@ describe("h / l resize the split from anywhere", () => {
   }
 
   it("l grows the timeline pane without focusing the divider", () => {
-    store.commit({ selected: { kind: "revision", id: REV }, open: true });
+    store.commit({
+      selected: { kind: "revision", id: SYNTHETIC_REV },
+      open: true,
+    });
     key({ key: "l" });
     expect(splitMaster()).toBe("53%");
     expect(divider().getAttribute("aria-valuenow")).toBe("53");
   });
 
   it("h shrinks the timeline pane without focusing the divider", () => {
-    store.commit({ selected: { kind: "revision", id: REV }, open: true });
+    store.commit({
+      selected: { kind: "revision", id: SYNTHETIC_REV },
+      open: true,
+    });
     key({ key: "h" });
     expect(splitMaster()).toBe("47%");
   });
 
   it("h past the floor snaps into reading mode (the divider ArrowLeft twin)", () => {
-    store.commit({ selected: { kind: "revision", id: REV }, open: true });
+    store.commit({
+      selected: { kind: "revision", id: SYNTHETIC_REV },
+      open: true,
+    });
     divider().setAttribute("aria-valuenow", "25"); // at the floor
     key({ key: "h" });
     expect(store.getState().reading).toBe(true);
@@ -328,7 +350,7 @@ describe("h / l resize the split from anywhere", () => {
 
   it("l from reading mode restores the split", () => {
     store.commit({
-      selected: { kind: "revision", id: REV },
+      selected: { kind: "revision", id: SYNTHETIC_REV },
       open: true,
       reading: true,
     });
@@ -338,7 +360,7 @@ describe("h / l resize the split from anywhere", () => {
 
   it("bare l resizes and does not switch lenses", () => {
     store.commit({
-      selected: { kind: "revision", id: REV },
+      selected: { kind: "revision", id: SYNTHETIC_REV },
       open: true,
       lens: "timeline",
     });
@@ -348,7 +370,10 @@ describe("h / l resize the split from anywhere", () => {
   });
 
   it("Cmd-L is left to the browser location-bar shortcut", () => {
-    store.commit({ selected: { kind: "revision", id: REV }, open: true });
+    store.commit({
+      selected: { kind: "revision", id: SYNTHETIC_REV },
+      open: true,
+    });
     const ev = new KeyboardEvent("keydown", {
       key: "l",
       metaKey: true,
@@ -361,7 +386,10 @@ describe("h / l resize the split from anywhere", () => {
   });
 
   it("h / l are inert while a text field is focused", () => {
-    store.commit({ selected: { kind: "revision", id: REV }, open: true });
+    store.commit({
+      selected: { kind: "revision", id: SYNTHETIC_REV },
+      open: true,
+    });
     const box = document.querySelector<HTMLInputElement>("#filter-text");
     box?.focus();
     key({ key: "l" }, box ?? document);
@@ -370,7 +398,10 @@ describe("h / l resize the split from anywhere", () => {
   });
 
   it("h / l are inert while the detail pane is closed", () => {
-    store.commit({ selected: { kind: "revision", id: REV }, open: false });
+    store.commit({
+      selected: { kind: "revision", id: SYNTHETIC_REV },
+      open: false,
+    });
     key({ key: "l" });
     key({ key: "h" });
     expect(splitMaster()).toBe("");
@@ -437,9 +468,15 @@ describe("split-view invariants (plan 0122, I4)", () => {
 
   it("closing the detail never moves the cursor", async () => {
     const router = await import("../src/router");
-    store.commit({ selected: { kind: "revision", id: REV }, open: true });
+    store.commit({
+      selected: { kind: "revision", id: SYNTHETIC_REV },
+      open: true,
+    });
     router.navigate({ open: false });
-    expect(store.getState().selected).toEqual({ kind: "revision", id: REV });
+    expect(store.getState().selected).toEqual({
+      kind: "revision",
+      id: SYNTHETIC_REV,
+    });
   });
 
   it("keyboard stepping preserves the URL form", async () => {
@@ -460,11 +497,14 @@ describe("a focused ref chip activates on Enter", () => {
   it("resolves the chip reference", () => {
     const detail = document.querySelector("#detail");
     if (detail)
-      detail.innerHTML = `<span class="ref" role="link" tabindex="0" data-ref-kind="rev" data-ref-id="${REV}">chip</span>`;
+      detail.innerHTML = `<span class="ref" role="link" tabindex="0" data-ref-kind="rev" data-ref-id="${SYNTHETIC_REV}">chip</span>`;
     const chip = document.querySelector<HTMLElement>("[data-ref-kind]");
     chip?.focus();
     key({ key: "Enter" }, chip ?? document);
-    expect(store.getState().selected).toEqual({ kind: "revision", id: REV });
+    expect(store.getState().selected).toEqual({
+      kind: "revision",
+      id: SYNTHETIC_REV,
+    });
   });
 });
 
@@ -522,15 +562,21 @@ describe("overlay keyboard scope (#455)", () => {
   }
 
   it("runs no store commit and no navigate for non-owned keys while help is active", async () => {
-    store.commit({ selected: { kind: "revision", id: REV }, open: false });
+    store.commit({
+      selected: { kind: "revision", id: SYNTHETIC_REV },
+      open: false,
+    });
     await openHelp();
     await assertKeysInert(LEAKY_KEYS);
   });
 
   it("runs no store commit and no navigate for lens keys while the diff page is active", async () => {
     controller.initControls();
-    store.commit({ selected: { kind: "revision", id: REV }, open: true });
-    store.commit({ diffPage: true, diffRevision: REV });
+    store.commit({
+      selected: { kind: "revision", id: SYNTHETIC_REV },
+      open: true,
+    });
+    store.commit({ diffPage: true, diffRevision: SYNTHETIC_REV });
     await controller.renderDiffPage();
     // A route surface, not an overlay: the diff-page block owns the keyboard.
     expect(overlay.activeName()).toBe(null);
@@ -541,7 +587,7 @@ describe("overlay keyboard scope (#455)", () => {
 
   it("runs the page's own jump keys through the diff-page block", async () => {
     controller.initControls();
-    store.commit({ diffPage: true, diffRevision: REV });
+    store.commit({ diffPage: true, diffRevision: SYNTHETIC_REV });
     await controller.renderDiffPage();
     key({ key: "n" });
     const firstAnno = document.querySelector<HTMLElement>(

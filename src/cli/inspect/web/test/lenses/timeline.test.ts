@@ -123,16 +123,18 @@ describe("renderTimeline", () => {
   });
 
   it("linkifies embedded reference ids into navigable chips, not plain text", () => {
-    const ref =
+    const syntheticRef =
       "rev:sha256:9a7626ca7cb2801721ed992402184460210477aadfd4f7228628b65ff11a6efd";
-    seedHistory([entry("e1", { summary: { title: `supersedes ${ref}` } })]);
+    seedHistory([
+      entry("e1", { summary: { title: `supersedes ${syntheticRef}` } }),
+    ]);
     timeline.renderTimeline();
     const chip = document.querySelector<HTMLElement>(
       "#timeline li.event [data-ref-kind]",
     );
     expect(chip).not.toBeNull();
     expect(chip?.dataset.refKind).toBe("rev");
-    expect(chip?.dataset.refId).toBe(ref);
+    expect(chip?.dataset.refId).toBe(syntheticRef);
     expect(chip?.getAttribute("tabindex")).toBe("-1");
   });
 
