@@ -946,7 +946,7 @@ unresolved signer is a hard error rather than an unsigned write. Only shipped su
 
 ```bash
 pointbreak observation add --track <track-id> --title <title> \
-  [--revision <revision-id> | --exact-revision <revision-id>] [target options] \
+  [--review-cursor <token> | --revision <revision-id> | --exact-revision <revision-id>] [target options] \
   [--body-content-type text/plain|text/markdown] \
   [--tag <tag>]... [--confidence low|medium|high] [--supersedes <observation-id>]... \
   [--responds-to <observation-id>]...
@@ -958,10 +958,9 @@ pointbreak observation list [--revision <revision-id>] [--track <track-id>] \
 Observations are append-only review notes for a captured revision.
 
 - `observation add` requires `--track` and `--title`.
-- `--revision` is a head seed: a superseded revision resolves forward to the unique current head of
-  its thread. `--exact-revision` targets the named revision without following supersession. The two
-  options are mutually exclusive. Without either, the command defaults to the single captured
-  revision in the current worktree scope and errors when none or multiple are in scope.
+- Change-capable writers use `--review-cursor` so the exact Change/Revision/artifact, graph, and source
+  state are revalidated immediately before append. `--exact-revision` is the low-level exact target;
+  `--revision` retains legacy proposal-supersession selection. The three options are mutually exclusive.
 - Tracks are review lanes, not actor or producer provenance.
 - Without `--file`, the observation targets the whole revision.
 - With `--file <path>`, it targets a captured file.
@@ -989,7 +988,8 @@ default.
 
 ```bash
 pointbreak input-request open --track <track-id> --title <title> --reason <reason> \
-  [--revision <revision-id> | --exact-revision <revision-id>] [--mode operative|advisory] \
+  [--review-cursor <token> | --revision <revision-id> | --exact-revision <revision-id>] \
+  [--mode operative|advisory] \
   [--body-content-type text/plain|text/markdown]
 pointbreak input-request list [--revision <revision-id> | --exact-revision <revision-id>] [--track <track-id>] \
   [--mode operative|advisory] [--file <path>] [--status open|responded|ambiguous|all] \
@@ -1007,8 +1007,9 @@ Input requests are durable pause or decision requests for a captured revision.
   `manual-decision-required`, `insufficient-evidence`. `insufficient-evidence` types an ask for more
   evidence — a debugger or CI run can satisfy it with validation evidence. The set grows additively
   within `version:1` (a new value is appended, not a `version` bump); see the hard-core note above.
-- `--revision` pins the request to one captured revision. Without either, the command defaults to the single captured revision and errors if
-  multiple captured revisions exist.
+- Change-capable writers use `--review-cursor`; `--exact-revision` is the low-level exact target and
+  `--revision` retains legacy proposal-supersession selection. Without a selector, the command defaults to
+  the single captured Revision and errors if several are in scope.
 - `--mode` defaults to `operative`; `advisory` requests are durable and visible but do not imply a
   cooperative client must pause. The `mode` (`operative`/`advisory`) and `reasonCode` values surface
   on the consumed `input-request list` field-paths, so — like the response outcomes below — they are
@@ -1042,7 +1043,7 @@ notification transport, or cancellation/escalation event.
 
 ```bash
 pointbreak assessment add --track <track-id> --assessment <assessment> \
-  [--revision <revision-id> | --exact-revision <revision-id>] [target options] \
+  [--review-cursor <token> | --revision <revision-id> | --exact-revision <revision-id>] [target options] \
   [--summary-content-type text/plain|text/markdown]
 pointbreak assessment show [--revision <revision-id> | --exact-revision <revision-id>] \
   [--all] [--track <track-id>] \
@@ -1052,10 +1053,9 @@ pointbreak assessment show [--revision <revision-id> | --exact-revision <revisio
 Assessments record review calls for a captured revision.
 
 - `assessment add` requires `--track` and `--assessment`.
-- `--revision` is a head seed: a superseded revision resolves forward to the unique current head of
-  its thread. `--exact-revision` targets the named revision without following supersession. The two
-  options are mutually exclusive. Without either, the command defaults to the single captured
-  revision in the current worktree scope and errors when none or multiple are in scope.
+- Change-capable writers use `--review-cursor` so the selected exact state is revalidated before append.
+  `--exact-revision` is the low-level exact target; `--revision` retains legacy proposal-supersession
+  selection. The three options are mutually exclusive.
 - CLI input uses `kebab-case` assessment values: `accepted`, `accepted-with-follow-up`,
   `needs-changes`, and `needs-clarification`. Command JSON output uses the matching `snake_case`
   values: `accepted`, `accepted_with_follow_up`, `needs_changes`, and `needs_clarification`. The
@@ -1083,6 +1083,10 @@ State-change outcomes such as deferred, split-out, overridden, and superseded ar
 observations when needed.
 
 ## `pointbreak attention`
+
+This is the legacy Revision/proposal-supersession attention document. For an activated Change store, use
+`pointbreak change attention <change-id>` so current-set topology and exact fact origins are interpreted in
+their Change context.
 
 ```bash
 pointbreak attention list [--repo <path>] [--revision <revision-id>] [--format <fmt>]
@@ -1124,7 +1128,8 @@ The item and filter fields are identical in both cases.
 
 ```bash
 pointbreak validation add --track <track-id> --check-name <name> --status <status> \
-  [--revision <revision-id> | --exact-revision <revision-id>] [validation options] \
+  [--review-cursor <token> | --revision <revision-id> | --exact-revision <revision-id>] \
+  [validation options] \
   [--summary-content-type text/plain|text/markdown]
 pointbreak validation list [--revision <revision-id>] \
   [--exact-revision <revision-id>] \
@@ -1136,10 +1141,9 @@ revision. They are advisory review context only: they do not accept, reject, mer
 replace a review assessment.
 
 - `validation add` requires `--track`, `--check-name`, and `--status`.
-- `--revision` is a head seed: a superseded revision resolves forward to the unique current head of
-  its thread. `--exact-revision` targets the named revision without following supersession. The two
-  options are mutually exclusive. Without either, the command defaults to the single captured
-  revision in the current worktree scope and errors when none or multiple are in scope.
+- Change-capable writers use `--review-cursor` so the selected exact state is revalidated before append.
+  `--exact-revision` is the low-level exact target; `--revision` retains legacy proposal-supersession
+  selection. The three options are mutually exclusive.
 - Validation targets are revision-only. There are no file or path target flags.
 - Status values are `passed`, `failed`, `errored`, and `skipped`.
 - `--command`, `--exit-code`, `--source-fingerprint`, `--started-at`, `--completed-at`, and
@@ -1357,6 +1361,10 @@ narrative-first plus snapshot-complete view of one captured revision.
 
 ## `pointbreak revision list`
 
+This is the legacy flat Revision directory. It remains useful for exact historical discovery, but its
+proposal-supersession classification is not Change current-set authority. Use `pointbreak change list` and
+`pointbreak change show` for stable work and contextual topology.
+
 ```bash
 pointbreak revision list [--repo <path>] [--object <object-id>] [--ref <name> [--by label|liveness]] \
   [--filter <query>] [--integration-ref <name>] [--worktree <path>] [--all | --unreachable] \
@@ -1420,6 +1428,10 @@ use the summary as the primary selection label.
   repository). The former `orphaned` status is retired.
 
 ## `pointbreak revision show`
+
+This is the legacy composite Revision view. Use
+`pointbreak change revision <change-id> <revision-id> --artifact-hash <sha256>` for an exact Change-capable
+resource and `pointbreak change show <change-id>` for current-set selection.
 
 ```bash
 pointbreak revision show [REVISION] [--repo <path>] [--track <track-id>] \

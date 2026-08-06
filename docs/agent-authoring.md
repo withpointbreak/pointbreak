@@ -324,18 +324,22 @@ separate, later step where the reviewed change is actually committed. It happens
 reaches an accepting verdict and after any author response, and it belongs to the author, not the
 reviewer: the reviewer records its one assessment and stands down.
 
-Record the landed commit as a structural association on the author track — the first-class "the work
-landed as commit X" record (a `RevisionCommitAssociated` edge, ADR-0014):
+Record the landed commit through the proof-first author workflow:
 
 ```bash
-pointbreak association record \
-  --revision <revision-id> \
+landing_cursor=$(pointbreak change select <change-id> \
+  --revision <revision-id> --source commit:<landed-sha> \
+  --format json | jq -r '.token')
+pointbreak association land \
+  --review-cursor "$landing_cursor" \
   --track <author-track> \
   --commit <landed-sha>
 ```
 
-The association accretes on the same revision that was reviewed; landing never recaptures or
-supersedes unchanged content.
+The workflow proves the commit relationship before recording evidence and the structural association on
+the same exact Revision. Landing never recaptures or replaces unchanged content. Use the low-level
+`association record` command only for explicitly unverified structural provenance; it cannot support
+content-qualified landing language.
 
 This is git-resolved and machine-readable: the revision then reports `anchored` with merged/live
 reachability in `pointbreak revision show`, and `pointbreak revision list --ref <branch>` /
@@ -348,12 +352,7 @@ keep or `pointbreak association withdraw` the edge you do not want. Optionally a
 `pointbreak capture` again for the landing, and do not add or change the assessment — the resulting
 commit is an author fact, not a review call.
 
-When several captures are still current — re-captures stack, and a stale or superseded one is retired
-with `pointbreak capture --supersedes <revision>` — pin the landing to the
-revision that was actually reviewed and accepted by passing `--revision` explicitly, seeding it on the
-accepted revision when it is the current head of a supersession thread. Sibling captures
-remain, but routine list/history/exact/thread-scoped reads no longer emit an ambient
-`ambiguous_current_revision` diagnostic just because multiple captures exist. Note that one commit
-can correspond to more than one accepted revision (for example a sub-task capture nested inside a phase
-capture); the landing observation annotates only the revision or thread head you pin, not the
-relationship.
+When a Change has several current Revisions, select the exact one that was reviewed and accepted. If the
+source changed, capture a replacement or intentional parallel Revision through the current
+`ReviewCursorV1`; do not attach new-state evidence to the old bytes. One commit can truthfully correspond
+to more than one accepted Change, but each landing proof remains scoped to one exact Revision/artifact.

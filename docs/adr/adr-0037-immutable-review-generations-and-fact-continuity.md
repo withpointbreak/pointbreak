@@ -175,3 +175,31 @@ only when reproducible evidence exists.
   strict-default acceptance rule.
 - Generation or thread projections become hot enough to justify a derived cache; the cache remains
   rebuildable and non-authoritative.
+
+## Amendment: Superseded in Full by Stable Change and Exact Revision (2026-08-06)
+
+This ADR is superseded in full by
+[ADR-0042](./adr-0042-stable-changes-exact-revisions-and-explicit-activation.md). Its durable invariants
+remain, under the as-built vocabulary:
+
+- `RevisionRefV1` replaces `GenerationRefV1` as the exact Revision plus artifact address;
+- changed reviewable content creates a new Revision inside a stable Change;
+- exact facts never move implicitly, while `ReviewFactPorted` carries attributed context only;
+- validation and assessments never port;
+- commit association stays structural until independent evidence qualifies its meaning;
+- exact Revision, Change, association comparison, interdiff, proof, and auxiliary documents remain separate
+  typed resources; and
+- one fail-closed minimum-reader capability cohort gates Change semantics.
+
+ADR-0042 rejects the former proposal-borne `supersedes`/`continues` relation model, derived thread identity,
+and generation terminology. D4's relation-attestation and D5's fact-port canonical contracts remain the
+wire authority with `RevisionRefV1` substituted for `GenerationRefV1`; the discarded generation/thread
+topology is not current authority. Historical events and this ADR remain readable as provenance.
+
+The exact as-built `RevisionRelationAttestedPayload` members are `schema`, `version`,
+`relationAttestationId`, `revision: RevisionRefV1`, `commitAssociationId`, `semanticRelation`, `proofStatus`,
+`proofMethod`, `proofAlgorithmVersion`, `captureScope`, `comparisonBaseOrParent`, `endpointOids`,
+`evidenceContentHash`, and `resultDigest`. The exact as-built `ReviewFactPortedPayload` members are `schema`,
+`version`, `portId`, `originRevision: RevisionRefV1`, `originFact`, `targetRevision: RevisionRefV1`,
+`relation`, `targetFact`, `rationaleContentHash`, and `contextChangeId`. `contextChangeId` is optional
+presentation context and never changes exact fact ownership.

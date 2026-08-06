@@ -125,3 +125,23 @@ recursive closure. No derived read index becomes the evidence or erasure authori
 - A new capture mode needs canonical status/blob/mode semantics not expressible by `CanonicalRawEntryV1`.
 - A new content kind requires a privacy, encoding, closure, and native-projection contract.
 - Proof retention cost warrants a smaller manifest that remains independently auditable.
+
+## Amendment: Exact Revision and Change-Aware Resource Closure (2026-08-06)
+
+[ADR-0042](./adr-0042-stable-changes-exact-revisions-and-explicit-activation.md) replaces generation
+addresses with `RevisionRefV1`. Relation proof, auxiliary documents, and fact origins bind that exact
+Revision/artifact pair and never a floating Change head.
+
+The capable resource registry now includes Change, contextual Revision, exact Revision resource,
+association comparison, interdiff, attention, and availability documents. Optional proof/auxiliary content
+may remain unavailable without fabricating bytes, but its typed availability and required closure are part
+of the document. Complete-Change transfer includes applicable membership, withdrawal, relation, fact-port,
+proof, and auxiliary dependencies; exact-Revision transfer includes the selected exact state and only the
+closure required to interpret it. Missing required closure or unsupported capability fails before semantic
+publication.
+
+The unchanged `.v1` manifests use their as-built canonical members. `RelationProofManifestV1` carries
+`schema`, `version`, `algorithm`, `algorithmVersion`, `revision: RevisionRefV1`, `associationId`, `source`,
+`candidate`, `result`, and `evidenceSha256`. `AuxiliaryDocumentManifestV1` carries `schema`, `version`,
+`revision: RevisionRefV1`, `retentionPolicy`, `entries`, `childContentHashes`, `retainedDecodedBytes`, and
+`manifestSha256`. These lists supersede the earlier split generation-id/artifact fields.

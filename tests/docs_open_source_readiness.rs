@@ -329,7 +329,7 @@ fn review_workflow_explains_stages_roles_and_recovery() {
     }
 
     // Validation is evidence, never the call; replacement and follow-up carry
-    // the recovery path; landing associates the same revision.
+    // the recovery path; proof-first landing associates the same exact Revision.
     assert!(
         workflow.contains("evidence, not a verdict"),
         "review workflow separates validation evidence from the assessment"
@@ -339,12 +339,12 @@ fn review_workflow_explains_stages_roles_and_recovery() {
         "review workflow teaches assessment replacement"
     );
     assert!(
-        workflow.contains("pointbreak association record"),
-        "review workflow covers commit association"
+        workflow.contains("pointbreak association land"),
+        "review workflow covers proof-first commit association"
     );
     assert!(
-        workflow.contains("same revision") && workflow.contains("never a recapture"),
-        "review workflow states the same-revision landing rule"
+        workflow.contains("same exact Revision") && workflow.contains("never a recapture"),
+        "review workflow states the same-exact-Revision landing rule"
     );
     assert!(
         workflow.contains("read-only"),

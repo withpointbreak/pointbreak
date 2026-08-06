@@ -223,3 +223,22 @@ containment, transfers a fact or assessment, or creates a scalar current generat
 The former definition "same thread iff a supersedes path connects them" is therefore superseded by
 connectivity over `supersedes ∪ continues`. The rejection of a stored thread/lineage container, timestamp
 winner, or content-keyed supersession continues to stand.
+
+## Amendment: Change-Scoped Relation Claims Replace Proposal-Borne Relations (2026-08-06)
+
+The Revision-to-Revision meaning of `supersedes` remains directional and fork-tolerant, but
+[ADR-0042](./adr-0042-stable-changes-exact-revisions-and-explicit-activation.md) supersedes C1's
+proposal-field authority and the 2026-07-19 `continues` decision. New writers leave proposal-borne
+`supersedes` empty. Replacement authority is an independently keyed, attributed
+`ChangeRevisionRelationAsserted` claim between two exact `RevisionRefV1` values within one Change; a
+claim-specific withdrawal removes only that assertion. `continues` is not part of the as-built model.
+
+The active Change-scoped claim set derives current Revisions. Multiple current Revisions without shared
+replaced ancestry are valid parallel work. Current successors whose predecessor-ancestor sets intersect are
+`replacement_divergent` and conflict rather than being timestamp-selected. One successor may supersede
+several predecessors for consolidation. Legacy proposal fields remain preserved migration input and
+historical origin after L2, never steady-state authority.
+
+The old connected-component "thread" is replaced at the review-work layer by explicit Change declaration
+and membership. Revision relation edges remain positional and may differ by Change when one exact Revision
+is intentionally reused across Changes.

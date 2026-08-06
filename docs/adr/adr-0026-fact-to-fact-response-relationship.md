@@ -282,3 +282,10 @@ ports do not mutate anchors or make the origin current.
 Validation and assessment never port or cross-generation-replace. After reviewed content changes, relied-on
 checks and the accepting assessment target the new generation. Missing or conflicting ports remain visible
 and self-heal on backfill; no timestamp or thread-level winner is inferred.
+
+## Amendment: Fact Ports Address Exact Revisions (2026-08-06)
+
+[ADR-0042](./adr-0042-stable-changes-exact-revisions-and-explicit-activation.md) replaces the generation
+and derived-thread vocabulary above. `ReviewFactPortedV1` retains the same four attributed context-only
+relations, but its origin and target are exact `RevisionRefV1` addresses inside explicit Change context.
+Validation and assessments still never port, and no port chooses a current Revision.

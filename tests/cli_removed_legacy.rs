@@ -36,8 +36,8 @@ const REMOVED_PATHS: &[RemovedPath] = &[
     RemovedPath {
         argv: &["review", "lineage", "--help"],
         hint_contains: &[
-            "pointbreak capture --supersedes",
-            "pointbreak revision list",
+            "pointbreak capture --review-cursor <token>",
+            "--advance replace|parallel",
         ],
     },
     RemovedPath {

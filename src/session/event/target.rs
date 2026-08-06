@@ -17,9 +17,9 @@ use crate::model::{
 /// by the projection ([`ShoreEvent::reconstruct_subject`](super::ShoreEvent::reconstruct_subject)).
 ///
 /// `subjectId` is `None` only for the fieldless `TargetRef::Journal` carrier:
-/// genuinely subject-less events (the detached co-signature carrier and content
-/// removal) address their real target by payload content and ride the journal
-/// carrier.
+/// genuinely subject-less events (including Change claims, the detached
+/// co-signature carrier, and content removal) address their real target by
+/// payload content and ride the journal carrier.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventTarget {

@@ -517,3 +517,21 @@ revision still stands. The broader "never recapture after assessment" reading is
 content changes, capture a new generation before recording new-state facts, validation, or assessment, then
 choose `supersedes`, `continues`, or independence by intent. An association is never the mechanism for
 retargeting a frozen generation.
+
+## Amendment: Stable Change, Exact Revision, and Proof-First Landing (2026-08-06)
+
+[ADR-0042](./adr-0042-stable-changes-exact-revisions-and-explicit-activation.md) is now the positive
+as-built source for multi-round review. The association event family remains structural and exact-Revision
+scoped. Its generation-era address is realized as `RevisionRefV1 { revision_id,
+object_artifact_content_hash }`.
+
+`pointbreak association land` is the normal landing workflow: it selects a commit-bound `ReviewCursorV1`,
+proves exact/equivalent/extension relation before any write, and then records evidence plus association. The
+low-level `association record` path remains explicitly unverified provenance.
+
+An unchanged reviewed state that becomes a commit stays on the same Revision. If reviewable content or
+capture scope changes, the author first captures a new replacement or parallel Revision inside the stable
+Change; the old association cannot retarget it. These rules supersede any earlier broad reading that a PR or
+post-assessment commit alone may accrete arbitrary changed content onto one Revision. They also retire the
+2026-07-19 instruction to choose proposal-borne `supersedes`, `continues`, or independence: current writers
+advance an exact Change cursor as replacement or parallel work.

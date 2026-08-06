@@ -46,8 +46,9 @@ pub enum TaskTargetRef {
 /// The single shared subject identity carried by every event envelope. The
 /// outer variant is the *domain* (= the engagement type); the inner is the
 /// *work object*. `Journal` is the fieldless carrier for genuinely subject-less
-/// events (the detached co-signature carrier, content removal, and pre-revision
-/// journal events), which address their real target by payload content.
+/// events (Change claims, the detached co-signature carrier, content removal,
+/// and pre-revision journal events), which address their real target by payload
+/// content.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TargetRef {

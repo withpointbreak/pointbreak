@@ -12,8 +12,9 @@ freshness, and advisory/operative patterns.
 
 ## Thesis
 
-Pointbreak is a durable shared medium for software work objects. The same substrate pattern can support
-more than one software-work domain without growing a central workflow controller:
+Pointbreak is a durable shared medium for software work objects. In review, a stable Change coordinates one
+or more immutable Revision states while facts remain exact-Revision scoped. The same substrate pattern can
+support more than one software-work domain without growing a central workflow controller:
 
 - append-only event log;
 - stable work-object identity addressed through one non-optional subject;
@@ -52,7 +53,7 @@ each additional domain as an experiment that can fail.
 
 The task-supervision prototype added a second domain without replacing the review-domain model:
 
-- `Revision` (the review-domain work object) and `TaskAttempt` both address through one non-optional
+- `Revision` (the review-domain captured-state subject) and `TaskAttempt` both address through one non-optional
   `TargetRef` subject. The pre-reshape `WorkObjectId` claim — that the two domains shared an identity
   field — was aspirational: review kept its bespoke identity until the reshape, and identity is now
   realized by the **subject** (`EventTarget.subject`), not by a separate `WorkObjectId` sibling field.
@@ -70,13 +71,18 @@ The important result is not that task supervision is now a product surface. The 
 event-log and projection substrate carried a second domain cleanly enough to promote the vocabulary
 to source-facing internal docs — one more data point under the open generality claim, no more.
 
+The stable Change layer does not change that envelope result. Change declaration, membership, and contextual
+Revision-relation claims are review-domain events filed journal-scoped, not against a Revision subject. They
+provide stable multi-round work identity without moving observations, validation, requests, assessments, or
+content away from their exact Revision.
+
 ## What The Prototype Supports — And Doesn't
 
 Within its scope, the prototype is consistent with the substrate pattern:
 
 | Statement | Standing |
 |---|---|
-| The same event-log / projection pattern serves both revisions and task attempts. | Supported within the two tested domains. |
+| The same event-log / projection pattern serves Change-coordinated Revisions and task attempts. | Supported within the two tested domains. |
 | Humans and agents coordinate asynchronously through recorded facts, not direct calls. | Supported. |
 | Stale resolutions can be detected with work-object identity and fingerprints. | Supported at the substrate-mechanism level. |
 | Task state can be understood from projections without raw transcripts. | Supported within the tested fixture set. |

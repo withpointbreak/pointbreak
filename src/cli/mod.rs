@@ -475,8 +475,8 @@ const INVALID_SUBCOMMAND_HINTS: &[(HintPredicate, &str)] = &[
     ),
     (
         HintPredicate::AdjacentWindow(&["review", "lineage"]),
-        "`pointbreak review lineage` is removed; record supersession on \
-         `pointbreak capture --supersedes <revision>` and read it with `pointbreak revision list`.",
+        "`pointbreak review lineage` is removed; use stable Change cursors with \
+         `pointbreak capture --review-cursor <token> --advance replace|parallel`.",
     ),
     (
         HintPredicate::AdjacentWindow(&["review", "unit"]),

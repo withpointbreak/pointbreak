@@ -15,7 +15,7 @@ command family:
 
 | Stage | The question it answers | Command family |
 | --- | --- | --- |
-| Work | What changed? | `capture`, `revision`, `inspect` |
+| Work | What changed? | `capture`, `change`, `revision`, `inspect` |
 | Claims | What does an author or reviewer assert? | `observation` |
 | Evidence | What was checked? | `validation` |
 | Questions | What still needs judgment? | `input-request` |
@@ -45,10 +45,13 @@ pair while a human reads the record and owns the decision.
 
 ## What Pointbreak reviews
 
-Pointbreak reviews a **revision**: the base endpoint, the target endpoint, and a
-captured diff snapshot taken at a single moment. Capturing a revision is the one **generative move**
-in the workflow — proposing a captured work object for others to assert facts about — while "review"
-stays the surface verb. V1 captures several Git-backed shapes: the local Git worktree from `HEAD` to
+Pointbreak coordinates multi-round review through a stable **Change**. Each state of that work is an exact
+**Revision**: the base endpoint, target endpoint, and captured diff snapshot taken at one moment. Facts,
+validation, requests, assessments, and associations stay attached to that immutable Revision; Change owns
+only attributed membership and contextual relations between exact Revisions.
+
+Capturing a Revision is the generative move in the workflow, while "review" stays the surface verb. V1
+captures several Git-backed shapes: the local Git worktree from `HEAD` to
 the working tree (the default, excluding untracked files unless `--include-untracked` is passed); the
 committed range between two resolved commits with `pointbreak capture --base <rev>`
 (`<rev>..--target`, target defaulting to `HEAD`), read as a tree diff with no working-tree
@@ -62,26 +65,26 @@ copy. The revision is the captured unit's identity; the object is a hash of its 
 Anything you record afterwards — observations, input requests, assessments — attaches to that
 revision and lives in the durable `events/` log.
 
-A later capture can record that it **supersedes** one or more earlier revisions, forming a
-fork-tolerant succession graph. A reviewer is free to counter-propose by capturing their own revision
-that supersedes yours. Successive rounds never mutate the captured snapshots; the thread's current
-**head** is derived from the supersession graph, and when two captures supersede the same predecessor
-the **competing heads** are surfaced rather than one silently winning.
+A later capture advances an exact Change cursor as either a replacement or intentional parallel Revision.
+Replacement is an attributed Change-scoped relation between exact Revision/artifact pairs, not a field on
+the new Revision proposal. Successive rounds never mutate captured snapshots. A Change may have several
+valid current Revisions; successors that replace intersecting predecessor ancestry are surfaced as
+`replacement_divergent` rather than silently reduced to one winner.
 
 ## The workflow at a glance
 
 1. Start from a Git worktree containing the change you want to review.
 2. Capture a revision with `pointbreak capture --summary`.
 3. Open Review with `pointbreak inspect --open`, or use the scriptable reads
-   (`pointbreak revision show`, `pointbreak history`).
+   (`pointbreak change show`, `pointbreak change revision`, `pointbreak history`).
 4. Record review facts as the review moves through the stages:
    - **Observations** are the claims an author or reviewer wants preserved.
    - **Validation checks** are evidence that a command actually ran.
    - **Input requests** are durable pause/decision requests for someone else.
    - **Assessments** are the current review call for the revision (or for a
      file, range, or specific fact within it).
-5. When the reviewed content lands as a commit, associate that commit with the
-   same revision.
+5. When unchanged reviewed content lands as a commit, select that commit against the exact Revision and use
+   proof-first `pointbreak association land`.
 
 The rest of this document walks through each step.
 
@@ -118,21 +121,20 @@ pointbreak capture --summary "Explain the fallback behavior"
 pointbreak capture --include-untracked --summary "Add the initial untracked files"
 ```
 
-`pointbreak capture` records a `work_object_proposed` event and writes the
-captured snapshot as an immutable Pointbreak-owned object artifact. The output document is
-`pointbreak.review-capture` JSON and includes:
+`pointbreak capture` records the exact Revision plus its initial Change claims and writes the captured
+snapshot as an immutable Pointbreak-owned object artifact. The
+`pointbreak.change-capture-receipt.v1` output includes:
 
+- the stable Change ID
 - the revision ID
 - the optional human-readable summary used by discovery surfaces
 - the object ID (the content-only identity)
 - the object artifact's canonical content hash
+- a self-hashed `ReviewCursorV1` token for subsequent exact writes or capture advancement
 
-You can pin later commands to the captured revision with `--revision
-<id>`. When only one revision exists in the store, commands that need a
-current revision pick it automatically. When multiple exist, list them with
-`pointbreak revision list`, use each entry's `summary` to identify the intended capture, and pass
-either the exact revision ID or seed a
-supersession thread with `--revision <id>`.
+Pass the receipt's cursor to high-level fact writers with `--review-cursor`. Re-select it with
+`pointbreak change select <change-id> --revision <revision-id>` when you need a fresh cursor; if several
+Revisions are current, the explicit Revision is required.
 
 The snapshot and capture summary are now frozen. Capturing changed content later creates a new
 revision; it does not mutate the previous one. Rerunning identical content with a different summary
@@ -209,105 +211,48 @@ files is an error unless `--allow-empty` is passed. See
 [`pointbreak capture`](./cli-reference.md#pointbreak-capture) for the full
 semantics.
 
-Record a succession round by naming the revisions a new capture supersedes:
+Advance the exact cursor returned by capture or `pointbreak change select`:
 
 ```bash
-pointbreak capture --supersedes <revision-id>
-pointbreak capture --supersedes <revision-id> --supersedes <other-revision-id>
+pointbreak capture --review-cursor <cursor-token> --advance replace
+pointbreak capture --review-cursor <cursor-token> --advance parallel
 ```
 
-The `supersedes` set is order-independent and may name more than one predecessor. There is no
-separate lineage command or declared lineage id — the thread is the connected component of the
-`supersedes` graph, and its current **head** is derived from that graph. When two captures supersede
-the same predecessor, the resulting **competing heads** are surfaced as competing, never collapsed to
-a single winner.
+`replace` relates the new exact Revision to the cursor's selected predecessor. `parallel` adds an
+intentional current Revision without replacement. Consolidation can name additional exact current
+predecessors with repeated `--also-supersedes <revision-id>@<artifact-sha256>` arguments. The legacy
+proposal-borne `--supersedes` option is rejected.
 
 Write commands such as `pointbreak observation add`,
 `pointbreak input-request open`, and `pointbreak assessment add` accept
-`--revision <id>`. When more than one captured revision is current, pass
-the ID from capture output or `pointbreak revision list`; otherwise writes fail
-with an ambiguity error.
-
-Supersession makes that ambiguity contextual. A revision-scoped read seeds on `--revision <id>` and
-resolves that revision's thread head; unscoped current selection remains ambiguous when multiple
-unrelated captures exist. Routine list, history, and exact-revision reads have no always-on
-ambiguous-current warning. A thread-level read may report `stale_by_superseding_revision` when a fact
-targets a revision that a newer revision supersedes, but exact-revision reads remain valid for
-superseded revisions.
+`--revision <id>`. High-level Change writers use a `ReviewCursorV1` so the Change graph, exact
+Revision/artifact, and source state are revalidated immediately before append. When several Revisions are
+current, select one explicitly; replacement divergence, cycles, incomplete authority, or stale source state
+fail closed. Exact-Revision reads remain valid for historical members.
 
 ## 3. Inspect what was captured
 
-Three read surfaces describe revisions, and they answer different questions:
+Four read surfaces answer different questions:
 
 ```bash
-pointbreak revision list     # what revisions exist in the store
-pointbreak revision show          # composite revision view (narrative + snapshot)
-pointbreak history       # chronological raw event listing
+pointbreak change list
+pointbreak change show <change-id>
+pointbreak change revision <change-id> <revision-id> --artifact-hash <sha256>
+pointbreak history
 ```
 
-For a visual, cross-linked view of the whole store — an event timeline, composite per-revision
-pages, supersession-thread pages, and captured diffs annotated with their review facts — run
+For a visual, cross-linked view of the whole store — an event timeline, stable Change pages, exact Revision
+resources, and captured diffs annotated with their review facts — run
 `pointbreak inspect` to open a local web UI (see the [CLI reference](cli-reference.md)). The commands
 below remain the scriptable surface.
 
-### `pointbreak revision list`
-
-`pointbreak revision list` projects every `work_object_proposed` event into a
-flat directory of revisions. It is the discovery surface — start here when
-`pointbreak revision show` errors with `multiple captured revisions; pass
---revision`, or whenever you need to pick an ID for `--revision <id>`.
-Git reachability enriches each entry's status but never removes a recorded
-revision from this unfiltered directory, even if its commit objects later disappear.
-
-It returns `pointbreak.review-revision-list` JSON with `eventCount`,
-`revisionCount`, and an `entries` array whose elements include
-`revisionId`, `capturedAt`, `objectId`, and `objectArtifactContentHash`. Git-backed entries also include
-the complete `source`, `base`, and `target` provenance triple. A provenance-free revision omits all three
-and remains independently listable and showable; later commit/ref associations may enrich liveness but do
-not manufacture capture provenance or collapse it into another revision. Entries are sorted by capture
-time so the newest revision appears last. Pass `--object <object-id>` to list only the revisions
-that share one content object — a listing lens that may span threads, never a head selector.
-
-Snapshot identity follows the access source. An eligible bounded page served by the current derived
-generation carries `projectionStamp`; an authoritative read — including explicit `off`, fallback, or
-the unbounded list — carries `eventSetHash`. Treat either field as opaque and do not continue a cursor
-after its bound snapshot identity changes.
-
-```bash
-pointbreak revision list --format json-pretty
-```
-
-When a revision supersedes another, the list/read projections build the supersession DAG and surface
-each thread's competing heads. That view is a thread over immutable captures, not an interdiff
-renderer; this release has no interdiff or stack DAG. Capture facts remain signable through the
-generic `EventToBeSigned` producer-fact view and ADR-0004's Dead Simple Signing Envelope (DSSE)
-pre-authentication encoding.
-
-### `pointbreak revision show`
-
-`pointbreak revision show` is the composite view of one revision. It returns
-`pointbreak.review-revision` JSON containing:
-
-- revision identity and event-set freshness metadata
-- summary counts and current assessment status
-- native observations, input requests, and assessments
-- projection rows (narrative-first, then snapshot-complete)
-- diagnostics
-
-Narrative rows (native facts) appear before the snapshot
-remainder, but the snapshot remainder still includes every captured file,
-metadata row, hunk header, and diff row. Track filters narrow narrative facts
-without changing snapshot completeness.
-
-```bash
-pointbreak revision show --format json-pretty
-pointbreak revision show <revision-id>
-pointbreak revision show --track agent:codex
-pointbreak revision show --include-body
-```
-
-Passing a revision id seeds head selection on that revision and resolves its thread's current
-head; an intra-thread fork is reported as competing revisions.
+`change list` discovers stable work. `change show` reports attributed membership, current-set topology,
+lifecycle, diagnostics, and the contextual relations that produced it. `change revision` is the exact
+Revision/artifact read and never follows a floating head. Use `change interdiff` for a pair of exact members.
+The legacy aggregate `revision list` and `revision show` documents are not Change-capable readers; an L2
+store may still serve those CLI views, but they report neither Change membership nor contextual current-set
+topology. The Inspector's legacy aggregate HTTP routes return typed `426 Upgrade Required` rather than
+partial Change semantics.
 
 ### `pointbreak history`
 
@@ -470,16 +415,13 @@ evidence.
 
 ### Attention
 
-`pointbreak attention list` is the read that surfaces what still needs an actor's
-judgment across the review record: open asks (including evidence requests),
-ambiguous assessments, competing supersession heads, stale decisions on
-superseded revisions, failed checks on current heads, and outstanding
-follow-ups. It is a projection over the same durable facts the commands above
-record — nothing new is written by reading it.
+`pointbreak change attention <change-id>` surfaces what still needs an actor's judgment across one stable
+Change: open asks, ambiguous assessments, unresolved current members, failed checks, and outstanding
+follow-ups. It is a projection over the same durable facts the commands above record — nothing new is
+written by reading it.
 
 ```bash
-pointbreak attention list
-pointbreak attention list --revision <revision-id>
+pointbreak change attention <change-id>
 ```
 
 Attention *guides, never gates* (ADR-0019): the list is derived attention
@@ -493,34 +435,37 @@ never a fact about the queue (ADR-0019's judgment-subsumption amendment):
 
 - `open_input_request` / `follow_up_outstanding` — respond with
   `pointbreak input-request respond` (the `dismissed` outcome closes a moot ask).
-- `ambiguous_assessment` — record an assessment that `--replaces` the
-  competing records; a superseded revision's ambiguity also resolves once
-  every successor head has been re-judged.
-- `stale_assessment` — replace the assessment, or re-judge every successor
-  head (any assessment value counts as re-judged).
+- `ambiguous_assessment` — record an assessment that `--replaces` the competing records on that exact
+  Revision.
+- stale or unresolved current state — capture a replacement or parallel Revision through the exact Change
+  cursor, then record new-state validation and assessment on the new exact Revision.
 - `failed_validation` — record a strictly-later passing run of the same
-  check (`skipped` never clears), supersede the revision, or record a later,
+  check (`skipped` never clears), replace the Revision, or record a later,
   unanimously accepting judgment on it: a reviewer who accepts a revision
   with the failure in evidence has rendered the judgment the item was
   waiting for.
-- `competing_heads` — consolidate the fork with a capture that supersedes
-  the competing heads.
+- replacement divergence — use explicit Change relation claims to reconcile or consolidate the conflicting
+  current set; Pointbreak never chooses a winner by time.
 
 ### Landing: commit association
 
-When the reviewed content lands as a commit, record the landing on the same revision:
+When unchanged reviewed content lands as a commit, select a commit-bound cursor and prove the landing before
+recording its structural association:
 
 ```bash
-pointbreak association record --track agent:codex --commit <oid>
+landing_cursor=$(pointbreak change select <change-id> \
+  --revision <revision-id> --source commit:<oid> \
+  --format json | jq -r '.token')
+pointbreak association land --review-cursor "$landing_cursor" \
+  --track agent:codex --commit <oid>
 pointbreak association list --axis commit --current
 ```
 
-A landed commit is an association on the existing revision — unchanged reviewed content is
-never a recapture and never a supersession, even when the commit lands after the assessment.
-Successive
-commits landing more of the same reviewed work accrete on one revision; that multi-pass shape is
-expected. Capture with `--supersedes` only when a genuinely new content state replaces the reviewed
-one. `pointbreak association withdraw <association-id>` retires a wrongly recorded edge.
+A proved landed commit is an association on the same exact Revision — unchanged reviewed content is
+never a recapture or replacement, even when the commit lands after assessment. If reviewable bytes or
+capture scope changed, capture a new Revision in the same Change before recording new-state facts or an
+assessment. The low-level `association record` command remains available for explicitly unverified
+structural provenance; it cannot authorize exact/equivalent/extension wording.
 
 ## 5. Concepts you need to know
 

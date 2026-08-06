@@ -55,7 +55,11 @@ Pointbreak does not introduce async traits or a runtime of its own.
 
 | Item | Purpose |
 | ---- | ------- |
-| `capture_review` + `CaptureOptions` | Canonical capture entry point; records a `WorkObjectProposed` event carrying a `WorkObjectProposedPayload` (the one generative move), and dispatches on the options' source spec. Worktree capture is the default; callers can select commit-range, root-commit, staged, or unstaged capture with the matching builder. |
+| `capture_change_revision` + `ChangeCaptureOptions` / `ChangeCaptureReceiptV1` | Canonical Change-aware capture entry point. Creates a stable Change or advances an exact `ReviewCursorV1` as replacement/parallel work, returning the new exact Revision and cursor. |
+| `select_review_cursor` + `ReviewCursorV1` / `ReviewCursorSelectionV1` | Select and self-hash one exact Change/Revision/artifact plus graph and source binding; conflicted, ambiguous, or stale state refuses. |
+| `create_change` / `join_revision_to_change` + `ChangeCreateOptions` / `ChangeMembershipOptions` / `ChangeOperationReceiptV1` | Explicit low-level declaration and Revision-id-keyed membership claims for import or administration workflows. |
+| `land_commit` + `LandCommitOptions` / `LandCommitResultV1` | Prove an exact Revision-to-commit relation before recording evidence, association, and attestation. |
+| `capture_review` + `CaptureOptions` | Legacy/low-level exact Revision capture. Records `WorkObjectProposed` and dispatches on the source spec, but does not provide stable Change membership or cursor discipline by itself. |
 | `WorktreeSpec`, `CommitRangeSpec`, `RootCommitSpec`, `StagedSpec`, `UnstagedSpec` | Capture source inputs. Worktree capture excludes untracked files unless `WorktreeSpec::with_include_untracked` is used; unstaged capture can also opt into untracked synthesis. |
 | `capture_worktree_review` + `CaptureOptions` | Worktree-source convenience entry point; delegates to `capture_review`. The function name is unchanged. |
 | `open_input_request` / `respond_input_request` (+ options/results) | Open and operatively respond to input requests. |
@@ -69,9 +73,9 @@ correct actor without mutating the process-global `POINTBREAK_ACTOR_ID` (which i
 edition 2024). The chosen actor is part of a fact's content-addressed identity, so distinct actors
 produce distinct facts.
 
-Validation checks target a captured revision only. `ValidationAddOptions` resolves either an
-explicit revision, a supersession-thread head, or the single current revision, then constructs the
-revision validation target internally. `ValidationListOptions` filters by revision, track, and
+Validation checks target one exact captured Revision only. Current Change-capable callers pass a validated
+`ReviewCursorV1`; legacy explicit-revision selection remains a bounded compatibility route rather than
+floating head authority. `ValidationListOptions` filters by revision, track, and
 status, and `with_include_body(true)` hydrates validation summaries. Validation evidence is
 advisory; it does not accept, reject, merge, block, or replace a review assessment.
 

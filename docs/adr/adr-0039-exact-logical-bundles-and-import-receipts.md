@@ -154,3 +154,21 @@ command, live-root cutover, or production new-event writer follows from this ADR
   contract.
 - A selected physical profile needs additional operational receipt fields without changing source-event or
   bundle identity.
+
+## Amendment: Capability and Change Cohort Closure (2026-08-06)
+
+Under [ADR-0042](./adr-0042-stable-changes-exact-revisions-and-explicit-activation.md), exact bundle v2
+has two explicit scopes: one exact `RevisionRefV1`, or one complete Change snapshot. Both carry the
+`review_change_revision_v1` capability activation and verified bulk-adoption completion required to
+interpret Change records. Complete-Change scope additionally carries declaration, applicable membership and
+withdrawal claims, Change-scoped Revision-relation claims and withdrawals, and required fact/proof/content
+closure. Exact-Revision scope never invents omitted Change history.
+
+`AuthorityCursorV2` accounts for Journal records, events, event/capability set hashes, and record counts
+separately. Import requires an L2 destination and completes preflight before mutation. It publishes content
+first, cohort events next, verifies ready authority, and writes the destination-local portable import receipt
+last. Source capability and completion records travel as transfer proof; production import never installs
+them as a second destination authority root. The qualification-only disposable publisher separately proves
+the four-phase capability -> cohort -> completion -> receipt ordering. Physical backup includes the
+authoritative Journal/content and operational receipts; derived SQLite pages, WAL, leases, and staging remain
+rebuildable rather than logical bundle identity.

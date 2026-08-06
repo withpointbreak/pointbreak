@@ -101,7 +101,9 @@ content-qualified landing language. Read
 `docs/substrate-language.md`, `docs/substrate-thesis-summary.md`,
 `docs/adr/adr-0003-agent-resource-claims-advisory-first.md`,
 `docs/adr/adr-0017-eventtarget-identity-layering-and-engagement-naming.md`, and
-`docs/adr/adr-0018-event-borne-supersession-replaces-lineage.md` before substrate-shaped refactors.
+`docs/adr/adr-0018-event-borne-supersession-replaces-lineage.md`, plus the as-built
+`docs/adr/adr-0042-stable-changes-exact-revisions-and-explicit-activation.md` before
+substrate-shaped refactors.
 Substrate vocabulary is internal; user-facing commands and JSON documents should stay domain-named.
 
 ## Testing

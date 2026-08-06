@@ -278,3 +278,17 @@ retained-scale run was required. The rollout contract is
 `69650f18f89329aac602ecbf34a552084decd9f48556ce0e3f5a4aa2cc711fb1`, and preserves the immutable historical
 integration/readiness hashes. No authoritative truth migration, production-store rewrite, body persistence,
 or broad substrate seam is authorized by activation.
+
+## Amendment: Change-Cohort Rebuild and Contextual Readers (2026-08-06)
+
+[ADR-0042](./adr-0042-stable-changes-exact-revisions-and-explicit-activation.md) adds capability
+Journal records and Change event kinds to the authority the sidecar follows. Activation changes
+`AuthorityCursorV2` even before an event append, invalidates every pre-Change generation, and forbids that
+generation as fallback in M1/L2.
+
+The fresh derived schema remains bodyless and rebuildable. It projects exact `RevisionRefV1` availability,
+Change declaration/membership/withdrawal, Change-scoped relation claims, current sets, topology, lifecycle,
+fact origins, and the capable reader document registry only after verified L2 completion. Derived
+publication during bulk adoption occurs after the completion record and never makes an incomplete M1 store
+servable. Loose Journal and ContentStore bytes remain sole authority; explicit derived-off remains an
+artifact-free operational rollback, not a capability/store rollback.

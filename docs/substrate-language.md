@@ -33,8 +33,9 @@ Pointbreak coordinates through these pieces:
 
 - **Append-only event log.** Recorded facts are immutable. Corrections, supersession, retraction,
   and resolution are new facts, not edits to old facts.
-- **Work objects.** Durable subjects that actors coordinate around. A revision is one work
-  object. A task attempt is another.
+- **Work objects.** Durable subjects that actors coordinate around. A Change is stable review work;
+  a Revision is one immutable captured state inside it. A task attempt is the prototype domain's
+  work object.
 - **Targets within work objects.** A file range, observation, or task checkpoint can be addressed
   without becoming a peer work object.
 - **Actor-attributed assertions.** Events are claims by actors, not unqualified global truth.
@@ -45,21 +46,27 @@ Pointbreak coordinates through these pieces:
 
 ## Layering Vocabulary
 
-The substrate names four nested layers. Two of them — **Journal** and **Engagement** — are internal
-architecture vocabulary and never surface in commands or JSON; the other two — **Revision** and
-**Object** — are permitted domain terms because the CLI already addresses them.
+The review domain names five related layers. Two of them — **Journal** and **Engagement** — are internal
+architecture vocabulary and never surface in commands or JSON; **Change**, **Revision**, and **Object**
+are domain terms because the CLI addresses them.
 
 | Layer | What it is | Surface? |
 |---|---|---|
 | **Journal** | The durable container that scopes one coordinated body of work within the append-only store. | Internal only. |
-| **Engagement** | The activity, typed by **one domain axis** (`Review` or `Task`). It groups an object's revisions. | Internal only. |
-| **Revision** | The captured **work object** — the addressed, fact-carrying unit that observations, input requests, assessments, and validation evidence attach to, and the thing supersession operates over. The pre-reshape `ReviewUnit` folds into this layer. | `revision` is a permitted domain term. |
+| **Engagement** | A retained activity/payload hint typed by **one domain axis** (`Review` or `Task`). Change replaces its derived connectivity as the review-work grouping; it remains relevant to non-Change substrate subjects. | Internal only. |
+| **Change** | Stable multi-round review work. It owns attributed membership and contextual Revision-relation claims, but never owns Revision facts or content. | `change` is a permitted review-domain term. |
+| **Revision** | One immutable captured state — the addressed, fact-carrying unit that observations, input requests, assessments, and validation evidence attach to. The pre-reshape `ReviewUnit` folds into this layer. | `revision` is a permitted domain term. |
 | **Object** | A **content-only identity** that is a sub-layer of `Revision`: a hash of the captured content alone, git-optional. Many revisions can share one object (two clones capturing identical content converge on the same object id), so it is a dedup/grouping key, **not** a peer work-object kind. | `object` is a permitted domain term (listing/grouping only). |
 
-On the surface, the review commands are flat top-level verbs (`pointbreak capture`, `pointbreak revision …`,
-`pointbreak observation …`); "review" is the engagement type, distinct from the captured unit, which is
-a **revision**. So "review" names exactly one thing — the activity — and `revision` / `object` name
-the unit and its content identity.
+On the surface, the review commands are flat top-level verbs (`pointbreak capture`, `pointbreak change …`,
+`pointbreak revision …`, `pointbreak observation …`). Change names stable review work; Revision names one
+captured state; Object names its content identity. Facts stay Revision-targeted even when several Revisions
+belong to one Change.
+
+These are related scopes, not a strict containment chain. Change claims use a journal-scoped target:
+interactive writers use `journal:default`, while bulk adoption preserves the legacy root's journal id.
+Exact Revision facts retain the review-domain EventTarget. Engagement is therefore not a parent from which
+Change membership or current selection is inferred.
 
 **Single-domain-axis guard.** The domain appears structurally in two places — the `Engagement` type
 (`Review` | `Task`) and the subject's `TargetRef` outer variant (`Review` | `Task`). These must never
@@ -84,8 +91,8 @@ exact failure the reshape exists to fix (see the thesis summary's note on the as
 | operative | Assertion mode meaning binding only under explicit projection policy. |
 | stale | An action against captured state that has moved since the actor read it. |
 | fingerprint | Opaque identity for a captured state. Equality is meaningful; internal structure is not. |
-| supersedes | A forward pointer recorded by a new capture naming the earlier revisions it evolves past. |
-| supersession DAG | The fork-tolerant succession graph built from `supersedes` pointers. A thread is a connected component; competing heads are **surfaced**, never nulled or tie-broken. |
+| supersedes | A directional Change-scoped claim that one exact Revision replaces another exact Revision. |
+| supersession DAG | The fork-tolerant graph built from active exact Change-scoped relation claims. Current sets and divergence are derived per Change; competing successors are **surfaced**, never tie-broken. |
 | provenance | Source information for a fact or imported assertion. |
 | evidence | Material that supports an assertion, such as test output, logs, traces, or artifacts. |
 | supersession | A new event that replaces an earlier event without mutating it. |
@@ -95,18 +102,19 @@ exact failure the reshape exists to fix (see the thesis summary's note on the as
 | ambiguity preservation | The discipline of carrying disagreement as explicit state instead of picking a winner. |
 | derived attention state | Projection output used to guide attention, not to authorize or block writes. |
 
-### Supersession Replaces Lineage
+### Change-Scoped Supersession Replaces Lineage and Derived Threads
 
-Earlier drafts named a `lineage` term — a predecessor relationship between related captures, declared
-as its own fact with a scalar current head. That model is **retired**. Succession is now the
-**supersession DAG**: a capture records `supersedes` forward pointers to the revisions it evolves past,
-and the thread is the connected component those pointers form. The DAG is **fork-tolerant** — two
-captures may both supersede the same predecessor, producing competing heads that the projection
-**surfaces as competing**, rather than nulling the head or picking a timestamp winner. This is a
-*strengthening* of the old ambiguity-preservation discipline, not a relaxation: where lineage resolved
-to a single `headReviewUnitId` (and went null when malformed), supersession keeps every live head
-visible. Content grouping is a separate lens: the **object** id groups revisions by identical content,
-which may span threads, so it is a listing aid and never a head selector.
+Earlier designs used a scalar lineage, then proposal-borne `supersedes`/`continues` pointers whose connected
+component formed a derived thread. Both are retired as current authority. Stable review work is an explicit
+**Change** with attributed membership. Replacement is a separately keyed, exact-claim-withdrawable
+Change-scoped relation between `RevisionRefV1` values.
+
+The graph remains fork-tolerant. Two current Revisions with no intersecting replaced ancestry are valid
+parallel work. Two current successors whose predecessor ancestry intersects are
+`replacement_divergent`; the projection surfaces the conflict and never chooses by timestamp. A
+consolidation may replace several predecessors. The same Revision may belong to several Changes, so relation
+meaning is contextual rather than one global thread. Object identity remains a separate dedup/grouping lens
+and never selects a current Revision.
 
 ## Policy Vocabulary
 
@@ -147,10 +155,10 @@ Event names follow one rule that unifies the abstract and domain halves of the v
 > the domain work object (`Review*` / `Task*`, including the `Revision*` association family) or its own
 > concept (`InputRequest*`, `ValidationCheckRecorded`, and so on).
 
-`WorkObjectProposed` is the **sole** event that satisfies the rule. It is the one generative move —
-proposing a captured work object — and it is genuinely polymorphic over both kinds: one event collapses
-what used to be a review-domain capture and a task-domain capture, carrying `supersedes`, a
-write-derived `engagement_id`, and the advisory-generative default. Crucially, the domain is **not** a
+`WorkObjectProposed` is the **sole** event that satisfies the rule. It is the generative move that proposes
+one immutable captured Revision or TaskAttempt. Historical Revision proposals may carry legacy
+`supersedes`, but current review writers express replacement through Change-scoped relation claims.
+Change declaration and membership are separate review-domain events. Crucially, the domain is **not** a
 separate field on the event: it rides `EventTarget.subject` (the `TargetRef` variant), the single
 source of truth for which kind the subject is. A reader recovers the domain from the subject, never
 from a parallel discriminator that could disagree with it.
@@ -171,7 +179,8 @@ advisory-first rule that governs resource claims; see
 
 | Domain term | Substrate concept | Notes |
 |---|---|---|
-| revision | work object | Captured working-tree (or committed-range) state for review; the `ReviewUnit` that folded into the `Revision` layer. |
+| change | stable review work object | Multi-round review identity with attributed Revision membership and contextual replacement claims. |
+| revision | exact captured state | Captured working-tree (or committed-range) state; the immutable fact/resource target. |
 | object | content identity of a revision | The content-only hash a revision carries; groups revisions with identical content. |
 | review observation | assertion | An attributed claim about a revision or target inside it. |
 | review assessment | assertion | A formal review-domain call. |
@@ -208,8 +217,8 @@ authorize a public task command surface.
 - Preserve ambiguity in projections. Multiple distinct facts should surface as ambiguous or
   diagnostic state, not disappear behind timestamp tie-breakers. Competing supersession heads are the
   canonical case: surface them, never null or auto-pick.
-- Treat event IDs and filenames as storage addresses, not causal order. Use explicit fields for
-  semantic ordering or succession (the `supersedes` pointers, not filename sort order).
+- Treat event IDs and filenames as storage addresses, not causal order. Use explicit Change-scoped
+  relation claims for succession, not filename or timestamp order.
 - Keep advisory and operative separate. Stored assertion mode is an actor's claim; treated-as-
   operative is a projection rule.
 - Keep resource claims advisory by default. See
@@ -225,13 +234,13 @@ This vocabulary keeps every original guardrail, with two deliberate refinements 
 
 - **"Named, not factored" now permits *internal* factoring.** Naming the substrate has always been the
   discipline; the relaxation is that internal modules may be organized around these layers
-  (`Revision`, `Object`, projections) without that counting as "factoring." What stays forbidden is a
+  (`Change`, `Revision`, `Object`, projections) without that counting as "factoring." What stays forbidden is a
   *separate* substrate crate, SDK, or product boundary — an external factoring with its own design and
   review.
 - **The current-state-scalar suspicion is *strengthened*, not loosened.** The old guardrail was wary of
-  a global current-state field; supersession replaces that wariness with a concrete fork-tolerant
-  succession DAG that surfaces competing heads. It serves the guardrail better than a scalar head ever
-  did — there is no single "current" to be wrong about.
+  a global current-state field. A Change now derives a fork-tolerant current set from active exact relation
+  claims and surfaces parallel work or replacement divergence explicitly. No timestamp-selected scalar can
+  silently hide another current Revision.
 
 ## What This Does Not Authorize
 
@@ -241,3 +250,8 @@ This vocabulary keeps every original guardrail, with two deliberate refinements 
 - Productizing task supervision or any additional domain.
 - Renaming existing review-domain commands simply to match the substrate vocabulary.
 - Surfacing `Journal` or `Engagement` in any command, flag, or JSON document.
+
+## Related Docs
+
+- [ADR-0042: Stable Changes, Exact Revisions, and Explicit Store Activation](adr/adr-0042-stable-changes-exact-revisions-and-explicit-activation.md)
+- [Substrate Thesis Summary](substrate-thesis-summary.md)

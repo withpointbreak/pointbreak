@@ -134,36 +134,27 @@ Revision capture follows the same authority split:
 - bounded `state.json` may summarize revision count and current unambiguous revision ID, but it
   is not the source of revision identity or snapshot content
 
-`pointbreak capture` returns `pointbreak.review-capture` JSON as the command-output contract. The
-command reports the revision and object IDs, optional capture summary, and object artifact content
-hash without making object artifact paths a user-facing API.
+`pointbreak capture` returns `pointbreak.change-capture-receipt.v1`. The receipt reports the stable Change,
+exact Revision/artifact, content-only Object, operation identity, per-event outcomes, and a self-hashed
+`ReviewCursorV1` without exposing object-artifact paths.
 
-Revision succession follows the same event/projection split. A capture records `supersedes` forward
-pointers naming the already-stored revisions it evolves past; it never edits captured revision payloads
-or object artifacts. There is no separate lineage event family — succession rides the
-`work_object_proposed` event's `supersedes` field. Derived read documents build the **supersession
-DAG**: a thread is the connected component of the `supersedes` graph, and the projection surfaces every
-live **head** rather than resolving to a single scalar head. When two captures supersede the same
-predecessor, the resulting **competing heads** are surfaced as competing, never nulled or tie-broken by
-timestamp.
+Review succession follows the same event/projection split, but replacement authority is not stored on the
+Revision proposal. Stable Change declaration, Revision-id-keyed membership, and exact
+Revision-to-Revision relation assertions are independently keyed attributed claims. Claim-specific
+withdrawals remove only the named claim. The projection folds unordered claim union minus exact withdrawal;
+there is no timestamp winner, mutable parent, or inferred Change identity.
 
-Succession identity must not depend on worktree paths, raw `.git` layout, raw `.pointbreak/data` paths, or
-raw shared-store paths. The `supersedes` pointers carry opaque revision ids only. Succession facts
-remain ordinary producer facts signable by the generic `EventToBeSigned` contract from
-[ADR-0004](./adr/adr-0004-event-signatures.md), including its Dead Simple Signing Envelope (DSSE)
-and pre-authentication encoding rules.
+Current selection is contextual to one Change. Several members without replacement relations are valid
+parallel work. One successor may replace several predecessors for consolidation. Successors whose replaced
+ancestry intersects are `replacement_divergent`; cycles, incomplete authority, and artifact conflicts also
+fail closed. The content-only Object lens may group Revisions across Changes but never chooses a current
+Revision.
 
-Succession has scoped current semantics with no global winner. A revision-scoped read seeds on
-`--revision <id>` and resolves that revision's thread head; an intra-thread fork surfaces as competing
-revisions. The content-only `--object` lens groups revisions by identical content — which may span
-threads — and is a listing aid only, never a head selector. Routine list, history, and exact-revision
-reads have no always-on ambiguous-current warning, but unscoped current selection still fails clearly
-when the caller asks for one current revision in a store with multiple unrelated captures. The
-`stale_by_superseding_revision` diagnostic is a thread-level freshness fact for a revision that a newer
-revision supersedes, not an exact-revision read error.
-
-This first release has no interdiff or stack DAG beyond the supersession graph itself. Public export,
-relay/network forwarding, visual stack rendering, and stacked-work graph semantics remain out of scope.
+`ReviewCursorV1` binds Change, exact Revision/artifact, current-set and graph token, source state, and
+diagnostics. High-level writers revalidate it immediately before append. A changed source creates a new
+replacement or parallel Revision; unchanged landing stays on the same Revision and requires independent
+proof before content-qualified association wording. These claims remain ordinary signable producer facts
+under [ADR-0004](./adr/adr-0004-event-signatures.md).
 
 When the inspector lists captured revisions, it shows a derived label for each working-tree
 target — the worktree's name together with the short base commit — instead of a generic

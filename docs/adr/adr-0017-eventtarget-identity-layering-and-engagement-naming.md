@@ -474,3 +474,28 @@ The clean-break posture is also constrained: migration preserves legacy decoded 
 attribution. It may not invent generation boundaries, continuation intent, relation evidence, fact ports, or
 document coverage. New semantic families require one fail-closed logical capability cohort before their
 first production write.
+
+## Amendment: Change Is the Stable Review Work Object (2026-08-06)
+
+[ADR-0042](./adr-0042-stable-changes-exact-revisions-and-explicit-activation.md) adds the stable
+review-domain layer above the exact captured state:
+
+```text
+ChangeId -> RevisionRefV1 -> ObjectId
+```
+
+Change is the user-visible multi-round review work object. Revision remains the immutable captured-state
+subject addressed by the existing `EventTarget`/`TargetRef` shape, and Object remains its content identity.
+Facts therefore stay exact-Revision targeted; they do not float to Change. The existing generic
+`WorkObjectProposed::Revision` wire is not renamed or duplicated. Change declaration and membership are
+separate append-only claims, so this amendment preserves A1-A6's non-optional EventTarget triple and signed
+Revision/Object layering rather than introducing another target discriminator. Change claims use
+journal-scoped `TargetRef::Journal` without a `track_id` or envelope `subjectId`: interactive writers use
+`journal:default`, while bulk adoption preserves the legacy root's journal id. Attribution comes from the
+event actor.
+
+Change replaces derived Engagement/thread connectivity as the review-work grouping for current writers.
+The retained proposal `engagement_id` is a legacy/internal payload hint and, because Change-era proposals
+leave proposal-borne relations empty, is not authority for Change membership or current selection.
+`RevisionRefV1` replaces `GenerationRefV1` as the exact read and fact-currency address, and the earlier
+`supersedes ∪ continues` membership projection is retired.
