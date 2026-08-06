@@ -58,7 +58,7 @@ pointbreak change profile --format json | jq .
 ```
 
 Activate it through a reviewed dry run and a fresh external backup directory. The backup path must
-not already exist. The signing key is required only for the irreversible activation record; Review
+be absent or empty. The signing key is required only for the irreversible activation record; Review
 facts continue to use their own actor identities below.
 
 ```sh

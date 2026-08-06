@@ -880,7 +880,7 @@ Every recovery is journaled. Setup-only recoveries stay outside the clocks when 
 | Port/browser open failure | Read the startup URL, choose another `--port`, open the printed URL manually; never expose a non-loopback host |
 | Signed but untrusted writer | Continue; explain the advisory state; offer `pointbreak key enroll` only after value is visible |
 | Ambiguous assessment | Use `assessment add --replaces <id>` and verify one current call |
-| Follow-up missing from attention | Open a related advisory request and link it with `--related-input-request` |
+| Follow-up missing from Change attention | Open a related operative request and link it with `--related-input-request`; advisory requests appear only in legacy `attention list` |
 | Commit created after capture | Select a commit-bound cursor, prove the landing on the same Revision, and do not recapture unchanged content |
 | Raw JSON temptation | Use Review detail/diff/attention first; JSON stays a captured evidence artifact, not the comprehension path |
 

@@ -687,6 +687,10 @@ fn getting_started_teaches_the_canonical_first_use_sequence() {
         guide.contains("review_change_revision_v1") && guide.contains("--ack-v0-9-unsupported"),
         "activation states the minimum-reader break explicitly"
     );
+    assert!(
+        guide.contains("be absent or empty"),
+        "activation describes the real absent-or-empty backup precondition"
+    );
 
     // Trust arrives after value: enrollment is taught after Review opens, as an
     // optional staging step.
@@ -793,6 +797,8 @@ fn manual_testing_fixes_the_first_use_walkthrough_protocol() {
             "--include-untracked",
             "store paths",
             "key enroll",
+            "operative request",
+            "legacy `attention list`",
             "intervention",
             "do not recapture",
             "five-minute",
