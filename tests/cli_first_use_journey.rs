@@ -77,7 +77,16 @@ fn first_use_journey_executes_the_flattened_paired_loop() {
         .as_str()
         .expect("captured revision id")
         .to_owned();
+    let change_id = captured["changeId"]
+        .as_str()
+        .expect("captured Change id")
+        .to_owned();
+    let review_cursor = captured["reviewCursor"]["token"]
+        .as_str()
+        .expect("capture writer cursor")
+        .to_owned();
     assert!(revision_id.starts_with("rev:sha256:"));
+    assert!(change_id.starts_with("change:sha256:"));
 
     // The summary is a discovery label on list and show, and identity stays the
     // captured id.
@@ -102,8 +111,8 @@ fn first_use_journey_executes_the_flattened_paired_loop() {
             "add",
             "--repo",
             repo_arg,
-            "--exact-revision",
-            &revision_id,
+            "--review-cursor",
+            &review_cursor,
             "--track",
             AUTHOR_TRACK,
             "--title",
@@ -147,8 +156,8 @@ fn first_use_journey_executes_the_flattened_paired_loop() {
             "add",
             "--repo",
             repo_arg,
-            "--exact-revision",
-            &revision_id,
+            "--review-cursor",
+            &review_cursor,
             "--track",
             AUTHOR_TRACK,
             "--check-name",
@@ -178,8 +187,8 @@ fn first_use_journey_executes_the_flattened_paired_loop() {
             "add",
             "--repo",
             repo_arg,
-            "--exact-revision",
-            &revision_id,
+            "--review-cursor",
+            &review_cursor,
             "--track",
             REVIEWER_TRACK,
             "--title",
@@ -203,8 +212,8 @@ fn first_use_journey_executes_the_flattened_paired_loop() {
             "add",
             "--repo",
             repo_arg,
-            "--exact-revision",
-            &revision_id,
+            "--review-cursor",
+            &review_cursor,
             "--track",
             REVIEWER_TRACK,
             "--check-name",
@@ -231,8 +240,8 @@ fn first_use_journey_executes_the_flattened_paired_loop() {
             "open",
             "--repo",
             repo_arg,
-            "--revision",
-            &revision_id,
+            "--review-cursor",
+            &review_cursor,
             "--track",
             REVIEWER_TRACK,
             "--title",
@@ -262,8 +271,8 @@ fn first_use_journey_executes_the_flattened_paired_loop() {
             "add",
             "--repo",
             repo_arg,
-            "--exact-revision",
-            &revision_id,
+            "--review-cursor",
+            &review_cursor,
             "--track",
             REVIEWER_TRACK,
             "--assessment",
@@ -312,8 +321,8 @@ fn first_use_journey_executes_the_flattened_paired_loop() {
             "add",
             "--repo",
             repo_arg,
-            "--exact-revision",
-            &revision_id,
+            "--review-cursor",
+            &review_cursor,
             "--track",
             AUTHOR_TRACK,
             "--title",
@@ -337,8 +346,8 @@ fn first_use_journey_executes_the_flattened_paired_loop() {
             "open",
             "--repo",
             repo_arg,
-            "--revision",
-            &revision_id,
+            "--review-cursor",
+            &review_cursor,
             "--track",
             REVIEWER_TRACK,
             "--title",
@@ -346,7 +355,7 @@ fn first_use_journey_executes_the_flattened_paired_loop() {
             "--reason",
             "insufficient-evidence",
             "--mode",
-            "advisory",
+            "operative",
             "--body",
             "The released artifact must repeat this path before a release claim.",
             "--format",
@@ -365,8 +374,8 @@ fn first_use_journey_executes_the_flattened_paired_loop() {
             "add",
             "--repo",
             repo_arg,
-            "--exact-revision",
-            &revision_id,
+            "--review-cursor",
+            &review_cursor,
             "--track",
             REVIEWER_TRACK,
             "--assessment",
@@ -447,6 +456,15 @@ fn first_use_journey_executes_the_flattened_paired_loop() {
 
     // Attention and the current-assessment projection agree: the answered
     // question is gone, the open follow-up and the follow-up obligation remain.
+    let change_attention = journey_json(&["change", "attention", "--repo", repo_arg], home, None);
+    assert!(
+        change_attention["changes"]
+            .as_array()
+            .expect("Changes requiring attention")
+            .iter()
+            .any(|change| change["changeId"] == change_id),
+        "the stable Change stays visible while its follow-up remains open"
+    );
     let attention = journey_json(&["attention", "list", "--repo", repo_arg], home, None);
     let items = attention["items"].as_array().expect("attention items");
     let kinds: Vec<&str> = items
@@ -534,33 +552,53 @@ fn first_use_journey_executes_the_flattened_paired_loop() {
         );
     }
 
-    // Landing: commit the already-reviewed content, then associate that commit
-    // with the same revision. No recapture, no successor.
+    // Landing: commit the already-reviewed content, bind a cursor to that exact
+    // commit, then prove the association with the same Revision. No recapture,
+    // no replacement.
     repo.git(["add", "onboarding.txt"]);
     repo.git(["commit", "-m", "docs: clarify first Review evidence"]);
     let head_oid = repo.git(["rev-parse", "HEAD"]).stdout.trim().to_owned();
-    let association = journey_json(
+    let commit_source = format!("commit:{head_oid}");
+    let landing_selection = journey_json(
         &[
-            "association",
-            "record",
+            "change",
+            "select",
+            &change_id,
             "--repo",
             repo_arg,
             "--revision",
             &revision_id,
-            "--track",
-            AUTHOR_TRACK,
-            "--commit",
-            "HEAD",
+            "--source",
+            &commit_source,
             "--format",
             "json",
         ],
         home,
         Some(AUTHOR_ACTOR),
     );
-    assert_eq!(
-        association["schema"],
-        "pointbreak.review-association-commit"
+    let landing_cursor = landing_selection["token"]
+        .as_str()
+        .expect("commit-bound landing cursor")
+        .to_owned();
+    let association = journey_json(
+        &[
+            "association",
+            "land",
+            "--repo",
+            repo_arg,
+            "--review-cursor",
+            &landing_cursor,
+            "--track",
+            AUTHOR_TRACK,
+            "--commit",
+            &head_oid,
+            "--format",
+            "json",
+        ],
+        home,
+        Some(AUTHOR_ACTOR),
     );
+    assert_eq!(association["schema"], "pointbreak.association-land.v1");
     assert_eq!(association["commitOid"], head_oid.as_str());
 
     let landed = journey_json(
@@ -620,12 +658,14 @@ fn getting_started_teaches_the_canonical_first_use_sequence() {
         "the guide names the five review stages in order"
     );
 
-    // One canonical sequence: supported continuation, value before setup, then
-    // the paired loop and the same-revision landing, in order.
+    // One canonical sequence: supported activation, capture, the paired loop,
+    // and the same-Revision proof-first landing, in order.
     assert_ordered_anchors(
         &guide,
         &[
             "installation.md",
+            "pointbreak change migrate-dry-run",
+            "pointbreak change migrate",
             "pointbreak capture --summary",
             "pointbreak inspect --open",
             "POINTBREAK_ACTOR_ID",
@@ -635,8 +675,17 @@ fn getting_started_teaches_the_canonical_first_use_sequence() {
             "pointbreak assessment add",
             "pointbreak input-request respond",
             "--replaces",
-            "pointbreak association record",
+            "pointbreak change select",
+            "pointbreak association land",
         ],
+    );
+    assert!(
+        guide.contains("--review-cursor \"$REVIEW_CURSOR\""),
+        "review writes use the exact capture cursor"
+    );
+    assert!(
+        guide.contains("review_change_revision_v1") && guide.contains("--ack-v0-9-unsupported"),
+        "activation states the minimum-reader break explicitly"
     );
 
     // Trust arrives after value: enrollment is taught after Review opens, as an
@@ -699,6 +748,10 @@ fn manual_testing_fixes_the_first_use_walkthrough_protocol() {
         &[
             "00-version.json",
             "00-binary-sha256.txt",
+            "00-profile-l0.json",
+            "00-migration-dry-run.json",
+            "00-migration.json",
+            "00-profile-l2.json",
             "01-empty-first-open.png",
             "02-capture.json",
             "03-first-useful-review.png",
@@ -712,10 +765,10 @@ fn manual_testing_fixes_the_first_use_walkthrough_protocol() {
             "11-author-follow-up.json",
             "12-release-follow-up.json",
             "13-current-assessment.json",
-            "14-commit-association.json",
-            "15-revision-list.json",
-            "16-attention.json",
-            "17-revision.json",
+            "14-landing.json",
+            "15-change-list.json",
+            "16-change-attention.json",
+            "17-change-revision.json",
         ],
     );
     assert_markdown_section_contains(
@@ -726,7 +779,9 @@ fn manual_testing_fixes_the_first_use_walkthrough_protocol() {
             "manual-decision-required",
             "insufficient-evidence",
             "--replaces",
-            "association record",
+            "change select",
+            "association land",
+            "--review-cursor",
         ],
     );
 

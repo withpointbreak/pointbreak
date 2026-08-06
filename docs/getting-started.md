@@ -2,17 +2,16 @@
 
 This guide takes one real tracked change from capture to a complete paired author/reviewer loop:
 capture the change, open it in Pointbreak Review, record the author's handoff, let a reviewer ask a
-question and make a call, answer it, and land the commit on the same revision. Along the way it
+question and make a call, answer it, and land the commit on the same exact Revision. Along the way it
 introduces the five Review stages in plain language:
 `Work -> Claims -> Evidence -> Questions -> Call`.
 
 ## Before You Start
 
-> **Change-store transition:** this source revision is an intentionally fail-closed intermediate
-> build. Normal Review reads and writes require an already activated Change-ready store. An untouched
-> or legacy store returns `migration_required`, and this build does not expose a public activation
-> command. The fresh-repository walkthrough below is therefore descriptive until activation ships;
-> do not copy test capability fixtures into a real store.
+> **Change-store transition:** normal Review reads and writes require an activated Change-ready
+> store. A new or legacy store reports `migration_required`; the explicit activation below creates a
+> verified external backup, acknowledges the exact migration plan, and sets the minimum reader to
+> `review_change_revision_v1`. Pointbreak v0.9 readers cannot open the store after that transition.
 
 Install Pointbreak by the supported route in [installation.md](installation.md), then verify the
 binary:
@@ -21,8 +20,8 @@ binary:
 pointbreak --version
 ```
 
-You also need Git. The commands below are written for a macOS or Linux shell; on Windows, run them
-in Git Bash or WSL.
+You also need Git and `jq`. The commands below are written for a macOS or Linux shell; on Windows,
+run them in Git Bash or WSL.
 
 ## 1. Start From A Real Tracked Change
 
@@ -50,10 +49,51 @@ printf '%s\n' 'First useful Review' 'Checks are evidence, not a verdict.' > onbo
 `git status --short` now shows ` M onboarding.txt`: a real modification to an already tracked file,
 which is exactly what a first review should look at.
 
-## 2. Capture The Change And Open Review
+## 2. Activate The Store, Capture The Change, And Open Review
+
+First inspect the store profile. A fresh repository reports `migration_required`:
 
 ```sh
-pointbreak capture --summary "Explain evidence in first-use guidance" --format json
+pointbreak change profile --format json | jq .
+```
+
+Activate it through a reviewed dry run and a fresh external backup directory. The backup path must
+not already exist. The signing key is required only for the irreversible activation record; Review
+facts continue to use their own actor identities below.
+
+```sh
+ACTIVATION_DIR=$(mktemp -d "${TMPDIR:-/tmp}/pointbreak-first-review.XXXXXX")
+DRY_RUN="$ACTIVATION_DIR/dry-run.json"
+BACKUP_DIR="$ACTIVATION_DIR/pre-activation-backup"
+
+pointbreak key init --name first-review-activation
+pointbreak change migrate-dry-run --repo . --format json > "$DRY_RUN"
+MANIFEST_HASH=$(jq -r '.manifestHash' "$DRY_RUN")
+COHORT_MANIFEST_HASH=$(jq -r '.roots[0].cohortManifestHash' "$DRY_RUN")
+
+pointbreak change migrate \
+  --repo . \
+  --dry-run "$DRY_RUN" \
+  --ack-manifest "$MANIFEST_HASH" \
+  --ack-cohort-manifest "$COHORT_MANIFEST_HASH" \
+  --ack-minimum-reader review_change_revision_v1 \
+  --ack-v0-9-unsupported \
+  --backup "$BACKUP_DIR" \
+  --operation-id first-review-activation \
+  --sign-key first-review-activation \
+  --format json | jq .
+
+pointbreak change profile --format json | jq .
+```
+
+The final profile reports `availability: ready`. Keep `ACTIVATION_DIR` until you no longer need its
+dry run, migration receipt, and pre-activation backup.
+
+Now capture the tracked change:
+
+```sh
+CAPTURE=$(pointbreak capture --summary "Explain evidence in first-use guidance" --format json)
+printf '%s\n' "$CAPTURE" | jq .
 ```
 
 The capture freezes the current diff as a revision and prints a JSON document describing it. The
@@ -61,11 +101,13 @@ summary is an immutable discovery label: lists and Review use it to identify the
 never changes revision identity. Later facts attach to the same revision; nothing edits the label
 in place.
 
-Keep the revision id — the `id` field under `revision` in the capture output — for the rest of the
-walkthrough:
+Keep the stable Change id, exact Revision id, and safe writer cursor from the capture output for the
+rest of the walkthrough:
 
 ```sh
-REVISION_ID="rev:sha256:<the id from your capture output>"
+CHANGE_ID=$(printf '%s\n' "$CAPTURE" | jq -r '.changeId')
+REVISION_ID=$(printf '%s\n' "$CAPTURE" | jq -r '.revision.id')
+REVIEW_CURSOR=$(printf '%s\n' "$CAPTURE" | jq -r '.reviewCursor.token')
 ```
 
 Now open Review:
@@ -76,9 +118,9 @@ pointbreak inspect --open
 
 Review is a local, read-only projection of the durable review record: it renders revisions, diffs,
 and recorded facts, and it never executes commands or writes to the store. Right now it shows one
-revision under your summary, with the changed file and rows. That is the first useful Review — and
-notice what it did not require: no actor id, no track, no signing setup, no trust configuration,
-and no reading of raw JSON.
+Change under your summary, with one exact Revision and its changed file and rows. That is the first
+useful Review — and notice what the review itself did not require: no author or reviewer actor id,
+no review track, no trust enrollment, and no reading of raw event files.
 
 `inspect` is a foreground server: leave it running, keep Review open in this browser tab, and run
 every later command in a second terminal. Each step below appears in Review after a refresh.
@@ -90,15 +132,15 @@ flattened command family:
 
 | Stage | Question it answers | Command family |
 | --- | --- | --- |
-| Work | What changed? | `capture`, `revision`, `inspect` |
+| Work | What changed? | `capture`, `change`, `inspect` |
 | Claims | What does an author or reviewer assert? | `observation` |
 | Evidence | What was checked? | `validation` |
-| Questions | What still needs judgment? | `input-request`, `attention` |
+| Questions | What still needs judgment? | `input-request`, `change attention` |
 | Call | What is the current assessment? | `assessment` |
 
-Two supporting nouns complete the picture: `attention` lists outstanding judgment across stages,
-and `association` records where the reviewed work landed. After the capture, Work is populated and
-the other stages are empty. The rest of this guide fills them in.
+Two supporting nouns complete the picture: `change attention` lists outstanding judgment across
+the store, and `association` records where the reviewed work landed. After the capture, Work is
+populated and the other stages are empty. The rest of this guide fills them in.
 
 ## 4. Author Handoff — Claims And Evidence
 
@@ -115,7 +157,7 @@ Record the author's claim about the change:
 
 ```sh
 pointbreak observation add \
-  --exact-revision "$REVISION_ID" \
+  --review-cursor "$REVIEW_CURSOR" \
   --track "$AUTHOR_TRACK" \
   --title "First-use guidance distinguishes evidence" \
   --body "The tracked change explains that checks are evidence rather than a verdict." \
@@ -133,7 +175,7 @@ Now run a real check and record its result:
 ```sh
 git diff --check
 pointbreak validation add \
-  --exact-revision "$REVISION_ID" \
+  --review-cursor "$REVIEW_CURSOR" \
   --track "$AUTHOR_TRACK" \
   --check-name "git diff --check" \
   --status passed \
@@ -166,7 +208,7 @@ record:
 
 ```sh
 pointbreak observation add \
-  --exact-revision "$REVISION_ID" \
+  --review-cursor "$REVIEW_CURSOR" \
   --track "$REVIEWER_TRACK" \
   --title "The added sentence is user-visible" \
   --body "The added line is wording a reader will quote; it should be deliberate." \
@@ -174,7 +216,7 @@ pointbreak observation add \
 
 git diff --check
 pointbreak validation add \
-  --exact-revision "$REVISION_ID" \
+  --review-cursor "$REVIEW_CURSOR" \
   --track "$REVIEWER_TRACK" \
   --check-name "reviewer git diff --check" \
   --status passed \
@@ -194,7 +236,7 @@ A question that needs the author's judgment becomes a durable input request, not
 
 ```sh
 pointbreak input-request open \
-  --revision "$REVISION_ID" \
+  --review-cursor "$REVIEW_CURSOR" \
   --track "$REVIEWER_TRACK" \
   --title "Confirm the wording boundary" \
   --reason manual-decision-required \
@@ -213,7 +255,7 @@ The reviewer closes the pass with a provisional call that links what it rests on
 
 ```sh
 pointbreak assessment add \
-  --exact-revision "$REVISION_ID" \
+  --review-cursor "$REVIEW_CURSOR" \
   --track "$REVIEWER_TRACK" \
   --assessment needs-clarification \
   --summary "The change is sound, but the quoted wording needs an explicit answer." \
@@ -248,7 +290,7 @@ Context worth keeping beyond the answer goes into a follow-up observation on the
 
 ```sh
 pointbreak observation add \
-  --exact-revision "$REVISION_ID" \
+  --review-cursor "$REVIEW_CURSOR" \
   --track "$AUTHOR_TRACK" \
   --title "Quoted wording is final" \
   --body "The sentence is the exact wording the guide quotes; no further edit is planned." \
@@ -267,11 +309,11 @@ explicit follow-up request before replacing the call:
 export POINTBREAK_ACTOR_ID="actor:agent:first-review-reviewer"
 
 pointbreak input-request open \
-  --revision "$REVISION_ID" \
+  --review-cursor "$REVIEW_CURSOR" \
   --track "$REVIEWER_TRACK" \
   --title "Re-check the wording after the next guide edit" \
   --reason insufficient-evidence \
-  --mode advisory \
+  --mode operative \
   --body "If the guide sentence changes, re-run this walkthrough against the new wording." \
   --format json
 ```
@@ -282,7 +324,7 @@ Keep the new request id as `FOLLOW_UP_REQUEST_ID`, then replace the provisional 
 FOLLOW_UP_REQUEST_ID="input-request:sha256:<the id from the open output>"
 
 pointbreak assessment add \
-  --exact-revision "$REVISION_ID" \
+  --review-cursor "$REVIEW_CURSOR" \
   --track "$REVIEWER_TRACK" \
   --assessment accepted-with-follow-up \
   --summary "Accepted; the follow-up re-check remains open." \
@@ -293,29 +335,37 @@ pointbreak assessment add \
 
 `--replaces` is the only thing that retires an earlier assessment. Refresh Review: Call shows
 `accepted-with-follow-up` as current with `needs-clarification` visibly replaced — the history is
-kept, not rewritten — and the follow-up stays visible under attention until someone resolves it.
+kept, not rewritten — and the operative follow-up keeps the Change visible under attention until
+someone resolves it.
 
 ## 8. Land The Commit On The Same Revision
 
-The reviewed content is ready to land. Commit it, then record the commit as an association on the
-existing revision:
+The reviewed content is ready to land. Commit it, select the exact Revision against that immutable
+commit, and let Pointbreak prove the content relation before recording the landing:
 
 ```sh
 git add onboarding.txt
 git commit -m "docs: clarify first Review evidence"
 
 export POINTBREAK_ACTOR_ID="actor:agent:first-review-author"
-pointbreak association record \
+LANDED_COMMIT=$(git rev-parse HEAD)
+LANDING_CURSOR=$(pointbreak change select "$CHANGE_ID" \
   --revision "$REVISION_ID" \
+  --source "commit:$LANDED_COMMIT" \
+  --format json | jq -r '.token')
+
+pointbreak association land \
+  --review-cursor "$LANDING_CURSOR" \
   --track "$AUTHOR_TRACK" \
-  --commit HEAD \
+  --commit "$LANDED_COMMIT" \
   --format json
 ```
 
 Refresh Review one last time. The revision id is unchanged, the landing shows the exact commit, and
-every fact recorded above still reads against the same revision. Committing already-reviewed
-content is a landing, never new work: recapture only when the content itself changes. A commit that
-lands what was reviewed is always an association on the same revision.
+every fact recorded above still reads against the same exact Revision. Committing already-reviewed
+content is a landing, never new work: capture a replacement Revision in the same Change only when
+the content itself changes. A commit that lands what was reviewed is always an association on the
+same Revision.
 
 ## Where To Go Next
 

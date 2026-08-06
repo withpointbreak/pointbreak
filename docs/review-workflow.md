@@ -415,13 +415,13 @@ evidence.
 
 ### Attention
 
-`pointbreak change attention <change-id>` surfaces what still needs an actor's judgment across one stable
-Change: open asks, ambiguous assessments, unresolved current members, failed checks, and outstanding
+`pointbreak change attention` surfaces what still needs an actor's judgment across the store's stable
+Changes: open asks, ambiguous assessments, unresolved current members, failed checks, and outstanding
 follow-ups. It is a projection over the same durable facts the commands above record — nothing new is
 written by reading it.
 
 ```bash
-pointbreak change attention <change-id>
+pointbreak change attention
 ```
 
 Attention *guides, never gates* (ADR-0019): the list is derived attention

@@ -569,6 +569,7 @@ WALK_ROOT=$(mktemp -d)
 WALK_REPO="$WALK_ROOT/repo"
 WALK_HOME="$WALK_ROOT/home"
 WALK_EVIDENCE="$WALK_ROOT/evidence"
+WALK_BACKUP="$WALK_ROOT/pre-activation-backup"
 mkdir -p "$WALK_REPO" "$WALK_HOME" "$WALK_EVIDENCE"
 export POINTBREAK_HOME="$WALK_HOME"
 
@@ -586,10 +587,36 @@ shasum -a 256 "$POINTBREAK_BINARY" > "$WALK_EVIDENCE/00-binary-sha256.txt"
 git -C "$WALK_REPO" status --short > "$WALK_EVIDENCE/00-repo-status.txt"
 "$POINTBREAK_BINARY" store paths --repo "$WALK_REPO" --format json \
   > "$WALK_EVIDENCE/00-store-paths.json"
+
+"$POINTBREAK_BINARY" change profile --repo "$WALK_REPO" --format json \
+  > "$WALK_EVIDENCE/00-profile-l0.json"
+"$POINTBREAK_BINARY" key init --name walkthrough-activation --format json \
+  > "$WALK_EVIDENCE/00-activation-key.json"
+"$POINTBREAK_BINARY" change migrate-dry-run --repo "$WALK_REPO" --format json \
+  > "$WALK_EVIDENCE/00-migration-dry-run.json"
+MIGRATION_MANIFEST=$(jq -r '.manifestHash' "$WALK_EVIDENCE/00-migration-dry-run.json")
+COHORT_MANIFEST=$(jq -r '.roots[0].cohortManifestHash' \
+  "$WALK_EVIDENCE/00-migration-dry-run.json")
+"$POINTBREAK_BINARY" change migrate \
+  --repo "$WALK_REPO" \
+  --dry-run "$WALK_EVIDENCE/00-migration-dry-run.json" \
+  --ack-manifest "$MIGRATION_MANIFEST" \
+  --ack-cohort-manifest "$COHORT_MANIFEST" \
+  --ack-minimum-reader review_change_revision_v1 \
+  --ack-v0-9-unsupported \
+  --backup "$WALK_BACKUP" \
+  --operation-id first-review-walkthrough-activation \
+  --sign-key walkthrough-activation \
+  --format json > "$WALK_EVIDENCE/00-migration.json"
+"$POINTBREAK_BINARY" change profile --repo "$WALK_REPO" --format json \
+  > "$WALK_EVIDENCE/00-profile-l2.json"
 ```
 
-Do not disable signing, enroll a key, or add `.pointbreak` configuration before the first useful
-Review: trust is introduced after value, exactly as the guide teaches.
+The L0 profile must report `migration_required`; the L2 profile must report `ready` with minimum
+reader `review_change_revision_v1`. Keep the dry run, migration receipt, and fresh external backup.
+The activation signer proves the irreversible store transition; do not enroll it or add
+`.pointbreak` trust configuration before the first useful Review. Author/reviewer identity and
+trust are introduced after value, exactly as the guide teaches.
 
 ### Empty first-open check (outside Clock B)
 
@@ -627,6 +654,10 @@ capture:
   > "$WALK_EVIDENCE/02-capture.json" \
   2> "$WALK_EVIDENCE/02-capture.stderr.txt"
 REVISION_ID=$(jq -r '.revision.id' "$WALK_EVIDENCE/02-capture.json")
+CHANGE_ID=$(jq -r '.changeId' "$WALK_EVIDENCE/02-capture.json")
+OBJECT_ARTIFACT_HASH=$(jq -r '.revision.objectArtifactContentHash' \
+  "$WALK_EVIDENCE/02-capture.json")
+REVIEW_CURSOR=$(jq -r '.reviewCursor.token' "$WALK_EVIDENCE/02-capture.json")
 "$POINTBREAK_BINARY" inspect --repo "$WALK_REPO" --open
 ```
 
@@ -653,7 +684,7 @@ AUTHOR_TRACK="agent:first-review-author"
 
 "$POINTBREAK_BINARY" observation add \
   --repo "$WALK_REPO" \
-  --exact-revision "$REVISION_ID" \
+  --review-cursor "$REVIEW_CURSOR" \
   --track "$AUTHOR_TRACK" \
   --title "First-use guidance distinguishes evidence" \
   --body "The tracked change explains that checks are evidence rather than a verdict." \
@@ -662,7 +693,7 @@ AUTHOR_TRACK="agent:first-review-author"
 git -C "$WALK_REPO" diff --check
 "$POINTBREAK_BINARY" validation add \
   --repo "$WALK_REPO" \
-  --exact-revision "$REVISION_ID" \
+  --review-cursor "$REVIEW_CURSOR" \
   --track "$AUTHOR_TRACK" \
   --check-name "git diff --check" \
   --status passed \
@@ -672,8 +703,9 @@ git -C "$WALK_REPO" diff --check
   --format json > "$WALK_EVIDENCE/05-author-validation.json"
 ```
 
-Journal the first automatic-signing diagnostic (from capture or the first authored write) and the
-trust state Review shows for each writer. Signing is automatic and was never a setup prerequisite.
+Journal the first automatic-signing diagnostic for Review facts (from capture or the first authored
+write) and the trust state Review shows for each writer. The separate activation signer does not
+replace author/reviewer identity; signing for Review facts remains automatic with no per-track setup.
 If signed-but-untrusted appears, continue: it is advisory. Show — but do not run — the optional
 `pointbreak key enroll <name>` recovery and note that it stages `.pointbreak/allowed-signers.json`
 for human review. Enrollment happens after value, never inside the captured change.
@@ -686,7 +718,7 @@ REVIEWER_TRACK="agent:first-review-reviewer"
 
 "$POINTBREAK_BINARY" observation add \
   --repo "$WALK_REPO" \
-  --exact-revision "$REVISION_ID" \
+  --review-cursor "$REVIEW_CURSOR" \
   --track "$REVIEWER_TRACK" \
   --title "Release proof remains separate" \
   --body "The walkthrough is reviewable locally, but the released artifact has not repeated it." \
@@ -696,7 +728,7 @@ REVIEWER_OBSERVATION_ID=$(jq -r '.observationId' "$WALK_EVIDENCE/06-reviewer-obs
 git -C "$WALK_REPO" diff --check
 "$POINTBREAK_BINARY" validation add \
   --repo "$WALK_REPO" \
-  --exact-revision "$REVISION_ID" \
+  --review-cursor "$REVIEW_CURSOR" \
   --track "$REVIEWER_TRACK" \
   --check-name "reviewer git diff --check" \
   --status passed \
@@ -707,7 +739,7 @@ git -C "$WALK_REPO" diff --check
 
 "$POINTBREAK_BINARY" input-request open \
   --repo "$WALK_REPO" \
-  --revision "$REVISION_ID" \
+  --review-cursor "$REVIEW_CURSOR" \
   --track "$REVIEWER_TRACK" \
   --title "Confirm the recovery boundary" \
   --reason manual-decision-required \
@@ -718,7 +750,7 @@ INPUT_REQUEST_ID=$(jq -r '.inputRequestId' "$WALK_EVIDENCE/08-reviewer-question.
 
 "$POINTBREAK_BINARY" assessment add \
   --repo "$WALK_REPO" \
-  --exact-revision "$REVISION_ID" \
+  --review-cursor "$REVIEW_CURSOR" \
   --track "$REVIEWER_TRACK" \
   --assessment needs-clarification \
   --summary "The Review is useful, but the clock boundary needs an explicit answer." \
@@ -745,7 +777,7 @@ export POINTBREAK_ACTOR_ID="actor:agent:first-review-author"
 
 "$POINTBREAK_BINARY" observation add \
   --repo "$WALK_REPO" \
-  --exact-revision "$REVISION_ID" \
+  --review-cursor "$REVIEW_CURSOR" \
   --track "$AUTHOR_TRACK" \
   --title "Clock boundary is explicit" \
   --body "The journal separates acquisition and PATH recovery from the walkthrough clocks." \
@@ -762,18 +794,18 @@ export POINTBREAK_ACTOR_ID="actor:agent:first-review-reviewer"
 
 "$POINTBREAK_BINARY" input-request open \
   --repo "$WALK_REPO" \
-  --revision "$REVISION_ID" \
+  --review-cursor "$REVIEW_CURSOR" \
   --track "$REVIEWER_TRACK" \
   --title "Verify the release-candidate rerun" \
   --reason insufficient-evidence \
-  --mode advisory \
+  --mode operative \
   --body "The released artifact must repeat this path before a release claim." \
   --format json > "$WALK_EVIDENCE/12-release-follow-up.json"
 FOLLOW_UP_REQUEST_ID=$(jq -r '.inputRequestId' "$WALK_EVIDENCE/12-release-follow-up.json")
 
 "$POINTBREAK_BINARY" assessment add \
   --repo "$WALK_REPO" \
-  --exact-revision "$REVISION_ID" \
+  --review-cursor "$REVIEW_CURSOR" \
   --track "$REVIEWER_TRACK" \
   --assessment accepted-with-follow-up \
   --summary "The walkthrough is accepted; released-artifact proof remains open." \
@@ -790,19 +822,25 @@ git -C "$WALK_REPO" commit -m "docs: clarify first Review evidence"
 LANDED_COMMIT=$(git -C "$WALK_REPO" rev-parse HEAD)
 
 export POINTBREAK_ACTOR_ID="actor:agent:first-review-author"
-"$POINTBREAK_BINARY" association record \
+LANDING_CURSOR=$("$POINTBREAK_BINARY" change select "$CHANGE_ID" \
   --repo "$WALK_REPO" \
   --revision "$REVISION_ID" \
+  --source "commit:$LANDED_COMMIT" \
+  --format json | jq -r '.token')
+"$POINTBREAK_BINARY" association land \
+  --repo "$WALK_REPO" \
+  --review-cursor "$LANDING_CURSOR" \
   --track "$AUTHOR_TRACK" \
   --commit "$LANDED_COMMIT" \
-  --format json > "$WALK_EVIDENCE/14-commit-association.json"
+  --format json > "$WALK_EVIDENCE/14-landing.json"
 
-"$POINTBREAK_BINARY" revision list --repo "$WALK_REPO" --format json \
-  > "$WALK_EVIDENCE/15-revision-list.json"
-"$POINTBREAK_BINARY" attention list --repo "$WALK_REPO" --format json \
-  > "$WALK_EVIDENCE/16-attention.json"
-"$POINTBREAK_BINARY" revision show "$REVISION_ID" --repo "$WALK_REPO" --format json \
-  > "$WALK_EVIDENCE/17-revision.json"
+"$POINTBREAK_BINARY" change list --repo "$WALK_REPO" --format json \
+  > "$WALK_EVIDENCE/15-change-list.json"
+"$POINTBREAK_BINARY" change attention --repo "$WALK_REPO" --format json \
+  > "$WALK_EVIDENCE/16-change-attention.json"
+"$POINTBREAK_BINARY" change revision "$CHANGE_ID" "$REVISION_ID" \
+  --artifact-hash "$OBJECT_ARTIFACT_HASH" \
+  --repo "$WALK_REPO" --format json > "$WALK_EVIDENCE/17-change-revision.json"
 ```
 
 Stop Clock B-paired only when Review visibly shows the final state below.
@@ -822,8 +860,8 @@ answer from Review:
 | Follow-up | The release rerun visible in attention and detail |
 | Roles | Author and reviewer facts distinguishable by actor and track |
 | Trust | Each writer's verification state visible; untrusted distinguished from invalid |
-| Landing | The exact commit associated with the original `REVISION_ID` |
-| Identity | Exactly one revision in the list; no successor was created for the commit |
+| Landing | The exact commit proved against and associated with the original `REVISION_ID` |
+| Identity | Exactly one Change and one current Revision; no replacement was created for the commit |
 
 Record wide and narrow screenshots, copied contextual commands, keyboard navigation, the help
 overlay, browser console/network state, and the final URL and repository identity.
@@ -843,7 +881,7 @@ Every recovery is journaled. Setup-only recoveries stay outside the clocks when 
 | Signed but untrusted writer | Continue; explain the advisory state; offer `pointbreak key enroll` only after value is visible |
 | Ambiguous assessment | Use `assessment add --replaces <id>` and verify one current call |
 | Follow-up missing from attention | Open a related advisory request and link it with `--related-input-request` |
-| Commit created after capture | Record the association on the same revision; do not recapture unchanged content |
+| Commit created after capture | Select a commit-bound cursor, prove the landing on the same Revision, and do not recapture unchanged content |
 | Raw JSON temptation | Use Review detail/diff/attention first; JSON stays a captured evidence artifact, not the comprehension path |
 
 ### Evidence, interventions, and nonclaims

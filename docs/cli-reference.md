@@ -1085,8 +1085,8 @@ observations when needed.
 ## `pointbreak attention`
 
 This is the legacy Revision/proposal-supersession attention document. For an activated Change store, use
-`pointbreak change attention <change-id>` so current-set topology and exact fact origins are interpreted in
-their Change context.
+`pointbreak change attention` so current-set topology and exact fact origins are interpreted across the
+store's stable Changes.
 
 ```bash
 pointbreak attention list [--repo <path>] [--revision <revision-id>] [--format <fmt>]
