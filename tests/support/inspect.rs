@@ -550,7 +550,7 @@ fn prepare_legacy_inspector_clone(repo: &Path) -> Option<(tempfile::TempDir, Pat
             .and_then(|name| name.to_str())
             .unwrap_or("repository"),
     );
-    copy_legacy_repository(repo, &clone, Path::new(""));
+    copy_legacy_repository(repo, &clone);
     let config_dir = clone.join(".pointbreak");
     std::fs::create_dir_all(&config_dir).expect("create legacy Inspector config directory");
     copy_worktree_config(&repo.join(".pointbreak"), &config_dir);
@@ -576,27 +576,69 @@ pub fn legacy_reader_clone(repo: &Path) -> (tempfile::TempDir, PathBuf) {
     prepare_legacy_inspector_clone(repo).expect("source store has complete Change authority")
 }
 
-fn copy_legacy_repository(source_root: &Path, destination_root: &Path, relative: &Path) {
+const LEGACY_REPOSITORY_COPY_ATTEMPTS: usize = 3;
+
+fn copy_legacy_repository(source_root: &Path, destination_root: &Path) {
+    for attempt in 1..=LEGACY_REPOSITORY_COPY_ATTEMPTS {
+        match copy_legacy_repository_once(source_root, destination_root, Path::new("")) {
+            Ok(()) => return,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && attempt < LEGACY_REPOSITORY_COPY_ATTEMPTS =>
+            {
+                match std::fs::remove_dir_all(destination_root) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => panic!(
+                        "reset legacy Inspector repository snapshot {}: {error}",
+                        destination_root.display()
+                    ),
+                }
+                std::thread::yield_now();
+            }
+            Err(error) => panic!(
+                "copy legacy Inspector repository {} to {} after {attempt} attempt(s): {error}",
+                source_root.display(),
+                destination_root.display()
+            ),
+        }
+    }
+}
+
+fn copy_legacy_repository_once(
+    source_root: &Path,
+    destination_root: &Path,
+    relative: &Path,
+) -> std::io::Result<()> {
     let source = source_root.join(relative);
     let destination = destination_root.join(relative);
-    std::fs::create_dir_all(&destination).expect("create legacy Inspector repository directory");
-    let entries = std::fs::read_dir(&source).expect("read legacy Inspector repository directory");
-    for entry in entries.filter_map(Result::ok) {
+    std::fs::create_dir_all(&destination)?;
+    let entries = std::fs::read_dir(&source)?;
+    for entry in entries {
+        let entry = entry?;
         let child_relative = relative.join(entry.file_name());
         if child_relative == Path::new(".git/pointbreak")
             || child_relative == Path::new(".pointbreak/data")
+            || is_transient_git_lock(&child_relative)
         {
             continue;
         }
         let source_path = entry.path();
         let destination_path = destination_root.join(&child_relative);
-        if source_path.is_dir() {
-            copy_legacy_repository(source_root, destination_root, &child_relative);
+        if entry.file_type()?.is_dir() {
+            copy_legacy_repository_once(source_root, destination_root, &child_relative)?;
         } else {
-            std::fs::copy(&source_path, &destination_path)
-                .expect("copy legacy Inspector repository file");
+            std::fs::copy(&source_path, &destination_path)?;
         }
     }
+    Ok(())
+}
+
+fn is_transient_git_lock(relative: &Path) -> bool {
+    relative.starts_with(".git")
+        && relative
+            .extension()
+            .is_some_and(|extension| extension == "lock")
 }
 
 pub(super) fn sync_legacy_mirrors(repo: &Path) {

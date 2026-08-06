@@ -25,6 +25,25 @@ fn assert_revision_page_parity(active: &serde_json::Value, authoritative: &serde
 }
 
 #[test]
+fn legacy_reader_snapshot_excludes_transient_git_lock_files() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 2 }\n");
+    capture(repo.path());
+
+    let source_lock = repo.path().join(".git/index.lock");
+    std::fs::write(&source_lock, b"transient fixture lock\n").unwrap();
+    let (_legacy_root, legacy_repo) = legacy_reader_clone(repo.path());
+
+    assert!(source_lock.exists(), "the source fixture remains untouched");
+    assert!(
+        !legacy_repo.join(".git/index.lock").exists(),
+        "transient Git lock files are not repository snapshot state"
+    );
+}
+
+#[test]
 fn unset_inspector_first_start_builds_the_default_projection() {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
