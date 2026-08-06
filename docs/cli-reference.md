@@ -211,7 +211,8 @@ pointbreak change list [--repo <path>] [--format <fmt>]
 pointbreak change attention [--repo <path>] [--format <fmt>]
 pointbreak change show <change-id> [--repo <path>] [--format <fmt>]
 pointbreak change select <change-id> [--revision <revision-id>] [--allow-historical]
-  [--cursor <token>] [--repo <path>] [--format <fmt>]
+  [--cursor <token>] [--source captured|worktree|commit:<rev>]
+  [--repo <path>] [--format <fmt>]
 pointbreak change revision <change-id> <revision-id> --artifact-hash <sha256>
   [--include-body] [--repo <path>] [--format <fmt>]
 pointbreak change resource <change-id> <revision-id> --artifact-hash <sha256>

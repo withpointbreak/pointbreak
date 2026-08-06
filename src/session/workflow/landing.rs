@@ -5,18 +5,15 @@
 //! structural low-level association remains available separately, but only
 //! this workflow may return content-qualified landing language.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::canonical_hash::sha256_bytes_hex;
 use crate::crypto::EventSigner;
 use crate::error::{Result, ShoreError};
 use crate::git::{capture_commit_range_diff_files, git_commit_tree_oid, git_rev_parse_commit_oid};
 use crate::model::{
-    ActorId, DiffFile, FileStatus, ReviewEndpoint, ReviewTargetRef, RevisionRefV1, RevisionSource,
-    TargetRef,
+    ActorId, DiffFile, ReviewEndpoint, ReviewTargetRef, RevisionRefV1, RevisionSource, TargetRef,
 };
 use crate::session::event::{
     EventTarget, EventType, RelationProofStatusV1, RevisionRelationAttestationDraftV1,
@@ -24,8 +21,8 @@ use crate::session::event::{
     build_revision_relation_attested,
 };
 use crate::session::evidence::{
-    CanonicalChangeV1, CanonicalContentKindV1, CanonicalProofInputV1, CanonicalRawEntryV1,
-    ProofCaptureModeV1, ProofGitAvailabilityV1, RelationProofAlgorithmV1, RelationProofManifestV1,
+    CanonicalProofInputV1, ProofCaptureModeV1, ProofGitAvailabilityV1, RelationProofAlgorithmV1,
+    RelationProofManifestV1, canonical_candidate_diff_entries, canonical_diff_entries,
     evaluate_relation_proof_v1,
 };
 use crate::session::store::content::ContentArtifacts;
@@ -342,7 +339,7 @@ fn attribution_inputs(
         base_or_parent: provenance.and_then(|value| endpoint_treeish(&value.base)),
         path_scope: canonical_scope(&path_scope),
         git_availability: source_availability,
-        entries: canonical_entries(source_files),
+        entries: canonical_diff_entries(source_files),
     };
     let candidate = CanonicalProofInputV1 {
         capture_mode,
@@ -382,14 +379,14 @@ fn proof_inputs(
         base_or_parent: Some(base.clone()),
         path_scope: canonical_scope(&path_scope),
         git_availability: ProofGitAvailabilityV1::Available,
-        entries: canonical_entries(source_files),
+        entries: canonical_diff_entries(source_files),
     };
     let candidate = CanonicalProofInputV1 {
         capture_mode,
         base_or_parent: Some(base),
         path_scope: canonical_scope(&path_scope),
         git_availability: ProofGitAvailabilityV1::Available,
-        entries: canonical_candidate_entries(&candidate_files, source_files),
+        entries: canonical_candidate_diff_entries(&candidate_files, source_files),
     };
     let exact_endpoint = match &provenance.target {
         ReviewEndpoint::GitCommit {
@@ -453,91 +450,6 @@ fn path_scope_for_git(pathspecs: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn canonical_entries(files: &[DiffFile]) -> Vec<CanonicalRawEntryV1> {
-    canonical_entries_with_untracked_paths(files, &BTreeSet::new())
-}
-
-/// Canonicalize a committed candidate against the capture-time origin of added paths.
-///
-/// Git necessarily stops calling a path "untracked" after it is committed, while the
-/// captured worktree correctly retains that provenance. Carry the source-side bit into
-/// the candidate proof input so it still binds the origin without making an exact
-/// materialization impossible. The absent old side of an addition is likewise one
-/// semantic state whether Git spells it as missing fields or all-zero sentinels.
-fn canonical_candidate_entries(
-    candidate_files: &[DiffFile],
-    source_files: &[DiffFile],
-) -> Vec<CanonicalRawEntryV1> {
-    let source_untracked_paths = source_files
-        .iter()
-        .filter(|file| file.synthetic)
-        .filter_map(diff_file_path)
-        .map(path_identity)
-        .collect::<BTreeSet<_>>();
-    canonical_entries_with_untracked_paths(candidate_files, &source_untracked_paths)
-}
-
-fn canonical_entries_with_untracked_paths(
-    files: &[DiffFile],
-    source_untracked_paths: &BTreeSet<String>,
-) -> Vec<CanonicalRawEntryV1> {
-    let mut entries = files
-        .iter()
-        .map(|file| {
-            let path = diff_file_path(file).unwrap_or_default();
-            let path_identity_value = path_identity(path);
-            let previous_path = matches!(file.status, FileStatus::Renamed | FileStatus::Copied)
-                .then(|| file.old_path.as_deref())
-                .flatten();
-            let added = file.status == FileStatus::Added;
-            CanonicalRawEntryV1 {
-                path_identity: path_identity_value.clone(),
-                previous_path_identity: previous_path.map(path_identity),
-                change: if file.is_mode_only {
-                    CanonicalChangeV1::ModeOnly
-                } else {
-                    match file.status {
-                        FileStatus::Modified => CanonicalChangeV1::Modified,
-                        FileStatus::Added => CanonicalChangeV1::Added,
-                        FileStatus::Deleted => CanonicalChangeV1::Deleted,
-                        FileStatus::Renamed => CanonicalChangeV1::Renamed,
-                        FileStatus::Copied => CanonicalChangeV1::Copied,
-                    }
-                },
-                old_oid: (!added).then(|| file.old_oid.clone()).flatten(),
-                new_oid: file.new_oid.clone(),
-                old_mode: (!added).then(|| file.old_mode.clone()).flatten(),
-                new_mode: file.new_mode.clone(),
-                old_decoded_sha256: None,
-                new_decoded_sha256: None,
-                content_kind: if file.is_submodule {
-                    CanonicalContentKindV1::Submodule
-                } else if file.old_mode.as_deref() == Some("120000")
-                    || file.new_mode.as_deref() == Some("120000")
-                {
-                    CanonicalContentKindV1::Symlink
-                } else if file.is_binary {
-                    CanonicalContentKindV1::Binary
-                } else {
-                    CanonicalContentKindV1::Text
-                },
-                untracked: file.synthetic || source_untracked_paths.contains(&path_identity_value),
-            }
-        })
-        .collect::<Vec<_>>();
-    entries.sort();
-    entries.dedup();
-    entries
-}
-
-fn diff_file_path(file: &DiffFile) -> Option<&str> {
-    file.new_path.as_deref().or(file.old_path.as_deref())
-}
-
-fn path_identity(path: &str) -> String {
-    format!("sha256:{}", sha256_bytes_hex(path.as_bytes()))
-}
-
 #[cfg(test)]
 mod tests {
     use std::process::Command;
@@ -548,8 +460,8 @@ mod tests {
         CapabilityFixtureState, write_capability_fixture_for_test,
     };
     use crate::session::{
-        ChangeCreateOptions, ChangeMembershipOptions, CommitRangeSpec, ReviewSourceBindingV1,
-        capture_review, create_change, join_revision_to_change, select_review_cursor,
+        ChangeCreateOptions, ChangeMembershipOptions, CommitRangeSpec, capture_review,
+        create_change, join_revision_to_change, select_review_cursor,
     };
 
     #[test]
@@ -599,12 +511,21 @@ mod tests {
             .ready()
             .unwrap()
             .clone();
+        let revision = ready.document_projection.revision_refs[&capture.revision_id]
+            .first()
+            .unwrap();
+        let commit_binding = crate::session::review_source_binding(
+            root.path(),
+            revision,
+            crate::session::ReviewSourceRequestV1::Commit("HEAD".to_owned()),
+        )
+        .unwrap();
         let selected = select_review_cursor(
             &ready.projection.changes[&change.change_id],
             &ready.document_projection,
             Some(&capture.revision_id),
             false,
-            ReviewSourceBindingV1::Captured,
+            commit_binding,
         )
         .unwrap();
         let first = land_commit(LandCommitOptions::new(
@@ -678,12 +599,21 @@ mod tests {
             .ready()
             .unwrap()
             .clone();
+        let revision = ready.document_projection.revision_refs[&capture.revision_id]
+            .first()
+            .unwrap();
+        let commit_binding = crate::session::review_source_binding(
+            root.path(),
+            revision,
+            crate::session::ReviewSourceRequestV1::Commit("HEAD".to_owned()),
+        )
+        .unwrap();
         let selected = select_review_cursor(
             &ready.projection.changes[&change.change_id],
             &ready.document_projection,
             Some(&capture.revision_id),
             false,
-            ReviewSourceBindingV1::Captured,
+            commit_binding,
         )
         .unwrap();
         let landed = land_commit(LandCommitOptions::new(
@@ -753,12 +683,21 @@ mod tests {
             .ready()
             .unwrap()
             .clone();
+        let revision = ready.document_projection.revision_refs[&capture.revision_id]
+            .first()
+            .unwrap();
+        let commit_binding = crate::session::review_source_binding(
+            root.path(),
+            revision,
+            crate::session::ReviewSourceRequestV1::Commit("HEAD".to_owned()),
+        )
+        .unwrap();
         let selected = select_review_cursor(
             &ready.projection.changes[&change.change_id],
             &ready.document_projection,
             Some(&capture.revision_id),
             false,
-            ReviewSourceBindingV1::Captured,
+            commit_binding,
         )
         .unwrap();
         let landed = land_commit(LandCommitOptions::new(

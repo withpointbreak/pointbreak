@@ -561,7 +561,9 @@ fn commit_source_binding(
         &commit_oid,
         &path_scope,
     )?;
-    if candidate != shown.snapshot.files {
+    if crate::session::evidence::canonical_candidate_diff_entries(&candidate, &shown.snapshot.files)
+        != crate::session::evidence::canonical_diff_entries(&shown.snapshot.files)
+    {
         return Err(crate::error::ShoreError::WorkflowInputInvalid {
             reason: "review_cursor_source_changed: the selected commit does not materialize the exact Revision capture mode and scope".to_owned(),
         });

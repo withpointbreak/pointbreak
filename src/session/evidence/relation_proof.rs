@@ -3,9 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use super::EvidenceAvailabilityV1;
-use crate::canonical_hash::sha256_json_prefixed;
+use crate::canonical_hash::{sha256_bytes_hex, sha256_json_prefixed};
 use crate::error::{Result, ShoreError};
-use crate::model::{CommitAssociationId, RevisionRefV1};
+use crate::model::{CommitAssociationId, DiffFile, FileStatus, RevisionRefV1};
 use crate::session::event::{
     RelationProofStatusV1, RevisionRelationAttestedPayload, SemanticRevisionRelationV1,
 };
@@ -74,6 +74,95 @@ pub struct CanonicalProofInputV1 {
     pub path_scope: Vec<String>,
     pub git_availability: ProofGitAvailabilityV1,
     pub entries: Vec<CanonicalRawEntryV1>,
+}
+
+/// Canonicalize captured diff entries for semantic Revision-to-commit comparison.
+///
+/// The result deliberately excludes patch presentation while retaining path, change,
+/// mode, object identity, content kind, and capture-time untracked provenance.
+pub(crate) fn canonical_diff_entries(files: &[DiffFile]) -> Vec<CanonicalRawEntryV1> {
+    canonical_diff_entries_with_untracked_paths(files, &BTreeSet::new())
+}
+
+/// Canonicalize a committed candidate against the capture-time origin of added paths.
+///
+/// Git necessarily stops calling a path "untracked" after it is committed, while the
+/// captured worktree correctly retains that provenance. Carry the source-side bit into
+/// the candidate input so commit selection and landing proof apply one equivalence rule.
+/// The absent old side of an addition is likewise one semantic state whether Git spells
+/// it as missing fields or all-zero sentinels.
+pub(crate) fn canonical_candidate_diff_entries(
+    candidate_files: &[DiffFile],
+    source_files: &[DiffFile],
+) -> Vec<CanonicalRawEntryV1> {
+    let source_untracked_paths = source_files
+        .iter()
+        .filter(|file| file.synthetic)
+        .filter_map(diff_file_path)
+        .map(path_identity)
+        .collect::<BTreeSet<_>>();
+    canonical_diff_entries_with_untracked_paths(candidate_files, &source_untracked_paths)
+}
+
+fn canonical_diff_entries_with_untracked_paths(
+    files: &[DiffFile],
+    source_untracked_paths: &BTreeSet<String>,
+) -> Vec<CanonicalRawEntryV1> {
+    let mut entries = files
+        .iter()
+        .map(|file| {
+            let path = diff_file_path(file).unwrap_or_default();
+            let path_identity_value = path_identity(path);
+            let previous_path = matches!(file.status, FileStatus::Renamed | FileStatus::Copied)
+                .then(|| file.old_path.as_deref())
+                .flatten();
+            let added = file.status == FileStatus::Added;
+            CanonicalRawEntryV1 {
+                path_identity: path_identity_value.clone(),
+                previous_path_identity: previous_path.map(path_identity),
+                change: if file.is_mode_only {
+                    CanonicalChangeV1::ModeOnly
+                } else {
+                    match file.status {
+                        FileStatus::Modified => CanonicalChangeV1::Modified,
+                        FileStatus::Added => CanonicalChangeV1::Added,
+                        FileStatus::Deleted => CanonicalChangeV1::Deleted,
+                        FileStatus::Renamed => CanonicalChangeV1::Renamed,
+                        FileStatus::Copied => CanonicalChangeV1::Copied,
+                    }
+                },
+                old_oid: (!added).then(|| file.old_oid.clone()).flatten(),
+                new_oid: file.new_oid.clone(),
+                old_mode: (!added).then(|| file.old_mode.clone()).flatten(),
+                new_mode: file.new_mode.clone(),
+                old_decoded_sha256: None,
+                new_decoded_sha256: None,
+                content_kind: if file.is_submodule {
+                    CanonicalContentKindV1::Submodule
+                } else if file.old_mode.as_deref() == Some("120000")
+                    || file.new_mode.as_deref() == Some("120000")
+                {
+                    CanonicalContentKindV1::Symlink
+                } else if file.is_binary {
+                    CanonicalContentKindV1::Binary
+                } else {
+                    CanonicalContentKindV1::Text
+                },
+                untracked: file.synthetic || source_untracked_paths.contains(&path_identity_value),
+            }
+        })
+        .collect::<Vec<_>>();
+    entries.sort();
+    entries.dedup();
+    entries
+}
+
+fn diff_file_path(file: &DiffFile) -> Option<&str> {
+    file.new_path.as_deref().or(file.old_path.as_deref())
+}
+
+fn path_identity(path: &str) -> String {
+    format!("sha256:{}", sha256_bytes_hex(path.as_bytes()))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
