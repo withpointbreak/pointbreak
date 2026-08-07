@@ -1866,6 +1866,23 @@ mod tests {
     }
 
     #[test]
+    fn public_reader_profile_adds_only_store_state_stop_documents() {
+        let mut expected = READER_PROFILE_DOCUMENT_VERSIONS_V1
+            .iter()
+            .map(|reservation| (reservation.schema, reservation.version))
+            .collect::<Vec<_>>();
+        expected.extend([
+            ("pointbreak.store-migration-required", 1),
+            ("pointbreak.store-migration-in-progress", 1),
+        ]);
+
+        assert_eq!(
+            crate::documents::change_revision_document_registry(),
+            expected
+        );
+    }
+
+    #[test]
     fn authority_cursor_distinguishes_journal_records_from_events() {
         let root = tempfile::tempdir().unwrap();
         let backend = StoreBackend::Local(root.path().to_path_buf());

@@ -229,23 +229,32 @@
   }
   __name(promptForCredential, "promptForCredential");
 
+  // ../../../documents/change_reader_profile_v1.json
+  var change_reader_profile_v1_default = {
+    minimumReaderProfile: "review_change_revision_v1",
+    documents: {
+      "pointbreak.attention-list": 2,
+      "pointbreak.inspect-attention": 2,
+      "pointbreak.inspect-changes-page": 1,
+      "pointbreak.inspect-reader-profile": 1,
+      "pointbreak.reader-upgrade-required": 1,
+      "pointbreak.review-association-comparison": 1,
+      "pointbreak.review-change": 1,
+      "pointbreak.review-change-list": 1,
+      "pointbreak.review-change-revision": 1,
+      "pointbreak.review-revision": 3,
+      "pointbreak.review-revision-interdiff": 1,
+      "pointbreak.review-revision-resource": 1,
+      "pointbreak.store-migration-in-progress": 1,
+      "pointbreak.store-migration-required": 1
+    }
+  };
+
   // src/change-protocol.ts
   var CHANGE_PAGE_LIMIT = 50;
   var MAX_LIVE_CHANGE_ROWS = 150;
-  var REQUIRED_DOCUMENTS = {
-    "pointbreak.inspect-reader-profile": 1,
-    "pointbreak.inspect-changes-page": 1,
-    "pointbreak.review-change": 1,
-    "pointbreak.review-change-revision": 1,
-    "pointbreak.review-revision": 3,
-    "pointbreak.review-revision-resource": 1,
-    "pointbreak.review-association-comparison": 1,
-    "pointbreak.review-revision-interdiff": 1,
-    "pointbreak.inspect-attention": 2,
-    "pointbreak.reader-upgrade-required": 1,
-    "pointbreak.store-migration-required": 1,
-    "pointbreak.store-migration-in-progress": 1
-  };
+  var CHANGE_READER_PROFILE = change_reader_profile_v1_default.minimumReaderProfile;
+  var CHANGE_READER_DOCUMENTS = change_reader_profile_v1_default.documents;
   var TOPOLOGY_VALUES = /* @__PURE__ */ new Set([
     "initial",
     "replacement",
@@ -410,13 +419,12 @@
       params.set("after", query.after);
     }
     if (query.q !== void 0) {
-      const trimmed = trimUnicodeWhitespace(query.q);
-      if (!trimmed || new TextEncoder().encode(trimmed).length > 256) {
+      const normalized = trimUnicodeWhitespace(query.q).toLowerCase();
+      if (!normalized || new TextEncoder().encode(normalized).length > 256) {
         throw new Error(
           "Change page query must be non-empty and at most 256 bytes"
         );
       }
-      const normalized = trimmed.toLowerCase();
       params.set("q", normalized);
     }
     appendEnum(params, "topology", query.topology, TOPOLOGY_VALUES);
@@ -434,10 +442,10 @@
     const documents = profile.documents;
     const minimumReaderProfile = profile.minimumReaderProfile;
     const commitGraphStamp = profile.commitGraphStamp;
-    if (profile.schema !== "pointbreak.inspect-reader-profile" || profile.version !== 1 || !isAvailability(availability) || !isRecord(authorityCursor) || !isDocumentMap(documents) || !sameDocumentMap(documents, REQUIRED_DOCUMENTS)) {
+    if (profile.schema !== "pointbreak.inspect-reader-profile" || profile.version !== 1 || !isAvailability(availability) || !isRecord(authorityCursor) || !isDocumentMap(documents) || !sameDocumentMap(documents, CHANGE_READER_DOCUMENTS)) {
       throw new Error("incompatible Inspector reader profile");
     }
-    if (availability === "ready" && (minimumReaderProfile !== "review_change_revision_v1" || typeof commitGraphStamp !== "string" || commitGraphStamp.length === 0)) {
+    if (availability === "ready" && (minimumReaderProfile !== CHANGE_READER_PROFILE || typeof commitGraphStamp !== "string" || commitGraphStamp.length === 0)) {
       throw new Error(
         "ready Inspector reader profile is missing capability or commit graph stamp"
       );

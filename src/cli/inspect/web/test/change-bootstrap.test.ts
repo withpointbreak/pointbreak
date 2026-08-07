@@ -1,20 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CHANGE_READER_DOCUMENTS } from "../src/change-protocol";
 import { mountInspectorDom, resetDom } from "./support/dom";
-
-const requiredDocuments = {
-  "pointbreak.inspect-reader-profile": 1,
-  "pointbreak.inspect-changes-page": 1,
-  "pointbreak.review-change": 1,
-  "pointbreak.review-change-revision": 1,
-  "pointbreak.review-revision": 3,
-  "pointbreak.review-revision-resource": 1,
-  "pointbreak.review-association-comparison": 1,
-  "pointbreak.review-revision-interdiff": 1,
-  "pointbreak.inspect-attention": 2,
-  "pointbreak.reader-upgrade-required": 1,
-  "pointbreak.store-migration-required": 1,
-  "pointbreak.store-migration-in-progress": 1,
-};
 
 function profile(availability: "ready" | "migration_required") {
   return {
@@ -26,7 +12,7 @@ function profile(availability: "ready" | "migration_required") {
       availability === "ready" ? "sha256:commit-graph" : undefined,
     minimumReaderProfile:
       availability === "ready" ? "review_change_revision_v1" : undefined,
-    documents: { ...requiredDocuments },
+    documents: { ...CHANGE_READER_DOCUMENTS },
   };
 }
 

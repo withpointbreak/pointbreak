@@ -23,7 +23,10 @@ const scriptRoot = path.dirname(fileURLToPath(import.meta.url));
 const extensionRoot = path.resolve(scriptRoot, "..");
 const repoRoot = path.resolve(extensionRoot, "../..");
 const readerProfileContract = JSON.parse(
-  readFileSync(path.join(extensionRoot, "src/changeReaderProfile.json"), "utf8"),
+  readFileSync(
+    path.join(repoRoot, "src/documents/change_reader_profile_v1.json"),
+    "utf8",
+  ),
 );
 const targetManifest = JSON.parse(
   readFileSync(path.join(repoRoot, ".github/binary-targets.json"), "utf8"),

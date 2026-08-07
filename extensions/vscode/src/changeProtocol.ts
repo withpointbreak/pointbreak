@@ -1,4 +1,4 @@
-import changeReaderProfile from "./changeReaderProfile.json";
+import changeReaderProfile from "../../../src/documents/change_reader_profile_v1.json";
 
 export const CHANGE_READER_PROFILE = changeReaderProfile.minimumReaderProfile;
 

@@ -420,6 +420,12 @@ longitudinal-verify-package root:
     cargo +stable bench --locked --features bench --bench store_foundation -- \
         --longitudinal-verify-package --longitudinal-package-root="{{ root }}"
 
+# Regenerate the checked-in cross-runtime Change reader-profile contract from
+# the Rust document registry. The normal Rust suite verifies freshness without writing.
+[group('maintenance')]
+reader-profile-generate:
+    POINTBREAK_UPDATE_CHANGE_READER_PROFILE=1 cargo +stable test --lib documents::tests::generated_change_reader_profile_is_current -- --exact
+
 # Install the Visual Studio Code extension toolchain from its committed lockfile.
 [group('extension')]
 extension-install:

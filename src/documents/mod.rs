@@ -169,7 +169,10 @@ const CLI_DOCUMENT_REGISTRY: &[(&str, u32)] = &[
 
 /// Headless documents reserved by the Change-capable reader cohort. These are
 /// public library contracts but are not advertised as active CLI/Inspector
-/// routes until the later client cutover wires those routes atomically.
+/// routes until the later client cutover wires those routes atomically. The
+/// bundled TypeScript readers consume the generated
+/// `change_reader_profile_v1.json`; refresh it with
+/// `just reader-profile-generate` whenever this registry changes.
 const CHANGE_REVISION_DOCUMENT_REGISTRY: &[(&str, u32)] = &[
     (INSPECT_READER_PROFILE_SCHEMA, 1),
     (REVIEW_CHANGE_LIST_SCHEMA, 1),
@@ -324,6 +327,37 @@ mod tests {
                 ("pointbreak.store-migration-in-progress", 1),
             ]
         );
+    }
+
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ChangeReaderProfileArtifact<'a> {
+        minimum_reader_profile: &'a str,
+        documents: BTreeMap<&'a str, u32>,
+    }
+
+    fn generated_change_reader_profile() -> Vec<u8> {
+        let artifact = ChangeReaderProfileArtifact {
+            minimum_reader_profile: "review_change_revision_v1",
+            documents: super::change_revision_document_registry()
+                .iter()
+                .copied()
+                .collect(),
+        };
+        let mut bytes = serde_json::to_vec_pretty(&artifact).unwrap();
+        bytes.push(b'\n');
+        bytes
+    }
+
+    #[test]
+    fn generated_change_reader_profile_is_current() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/documents/change_reader_profile_v1.json");
+        let expected = generated_change_reader_profile();
+        if std::env::var("POINTBREAK_UPDATE_CHANGE_READER_PROFILE").as_deref() == Ok("1") {
+            fs::write(&path, &expected).unwrap();
+        }
+        assert_eq!(fs::read(path).unwrap(), expected);
     }
 
     #[test]

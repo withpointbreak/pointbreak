@@ -71,6 +71,7 @@ Some commands are intentionally mutating:
 | Command | Writes | Rule |
 | --- | --- | --- |
 | `just fix` | Rust source formatting and Clippy fixes | Inspect every edit; it allows dirty/staged input |
+| `just reader-profile-generate` | `src/documents/change_reader_profile_v1.json` | Run after intentionally changing the Rust Change reader registry; both bundled clients consume this checked-in derivative |
 | `just web-build` | Committed Inspector `assets/app.js` | Run only after editing web source; finish with `just web-verify` |
 | `just extension-package` | Local VSIX/package output | Treat as disposable dogfood output unless a task explicitly preserves it |
 | `just longitudinal-smoke` | Disposable public roots under the host temporary directory | Non-timing only; output is never terminal or native qualification evidence |

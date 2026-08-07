@@ -3,6 +3,8 @@
  * and validates server-owned projections; it never derives Change semantics.
  */
 
+import changeReaderProfile from "../../../../documents/change_reader_profile_v1.json";
+
 export type Availability =
   | "migration_required"
   | "migration_in_progress"
@@ -13,20 +15,9 @@ export type ChangeLens = "changes" | "attention";
 export const CHANGE_PAGE_LIMIT = 50;
 export const MAX_LIVE_CHANGE_ROWS = 150;
 
-const REQUIRED_DOCUMENTS: Readonly<Record<string, number>> = {
-  "pointbreak.inspect-reader-profile": 1,
-  "pointbreak.inspect-changes-page": 1,
-  "pointbreak.review-change": 1,
-  "pointbreak.review-change-revision": 1,
-  "pointbreak.review-revision": 3,
-  "pointbreak.review-revision-resource": 1,
-  "pointbreak.review-association-comparison": 1,
-  "pointbreak.review-revision-interdiff": 1,
-  "pointbreak.inspect-attention": 2,
-  "pointbreak.reader-upgrade-required": 1,
-  "pointbreak.store-migration-required": 1,
-  "pointbreak.store-migration-in-progress": 1,
-};
+export const CHANGE_READER_PROFILE = changeReaderProfile.minimumReaderProfile;
+export const CHANGE_READER_DOCUMENTS: Readonly<Record<string, number>> =
+  changeReaderProfile.documents;
 
 const TOPOLOGY_VALUES = new Set([
   "initial",
@@ -380,13 +371,12 @@ export function buildChangePageUrl(
     params.set("after", query.after);
   }
   if (query.q !== undefined) {
-    const trimmed = trimUnicodeWhitespace(query.q);
-    if (!trimmed || new TextEncoder().encode(trimmed).length > 256) {
+    const normalized = trimUnicodeWhitespace(query.q).toLowerCase();
+    if (!normalized || new TextEncoder().encode(normalized).length > 256) {
       throw new Error(
         "Change page query must be non-empty and at most 256 bytes",
       );
     }
-    const normalized = trimmed.toLowerCase();
     params.set("q", normalized);
   }
   appendEnum(params, "topology", query.topology, TOPOLOGY_VALUES);
@@ -410,13 +400,13 @@ export function decodeReaderProfile(value: unknown): ReaderProfile {
     !isAvailability(availability) ||
     !isRecord(authorityCursor) ||
     !isDocumentMap(documents) ||
-    !sameDocumentMap(documents, REQUIRED_DOCUMENTS)
+    !sameDocumentMap(documents, CHANGE_READER_DOCUMENTS)
   ) {
     throw new Error("incompatible Inspector reader profile");
   }
   if (
     availability === "ready" &&
-    (minimumReaderProfile !== "review_change_revision_v1" ||
+    (minimumReaderProfile !== CHANGE_READER_PROFILE ||
       typeof commitGraphStamp !== "string" ||
       commitGraphStamp.length === 0)
   ) {

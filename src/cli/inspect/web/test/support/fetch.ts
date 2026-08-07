@@ -4,6 +4,7 @@
 // at the `fetch` boundary (not `fetchJSON`) keeps the ported `http.ts`/`fetchJSON`
 // in the path under test. Append-only shared surface: extend with new routes here.
 
+import { CHANGE_READER_DOCUMENTS } from "../../src/change-protocol";
 import attentionJson from "../fixtures/attention.json";
 import historyJson from "../fixtures/history.json";
 import identityJson from "../fixtures/identity.json";
@@ -23,20 +24,7 @@ const FIXTURES: Record<string, unknown> = {
     availability: "ready",
     minimumReaderProfile: "review_change_revision_v1",
     authorityCursor: { eventCount: 0 },
-    documents: {
-      "pointbreak.inspect-reader-profile": 1,
-      "pointbreak.inspect-changes-page": 1,
-      "pointbreak.review-change": 1,
-      "pointbreak.review-change-revision": 1,
-      "pointbreak.review-revision": 3,
-      "pointbreak.review-revision-resource": 1,
-      "pointbreak.review-association-comparison": 1,
-      "pointbreak.review-revision-interdiff": 1,
-      "pointbreak.inspect-attention": 2,
-      "pointbreak.reader-upgrade-required": 1,
-      "pointbreak.store-migration-required": 1,
-      "pointbreak.store-migration-in-progress": 1,
-    },
+    documents: { ...CHANGE_READER_DOCUMENTS },
   },
   "/api/v2/changes": {
     schema: "pointbreak.inspect-changes-page",

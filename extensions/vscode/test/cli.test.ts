@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { ResolvedBinary } from "../src/binary";
+import { CHANGE_READER_DOCUMENTS } from "../src/changeProtocol";
 import {
   type CaptureOptions,
   captureArgs,
@@ -18,22 +19,7 @@ const READY_PROFILE = JSON.stringify({
   availability: "ready",
   minimumReaderProfile: "review_change_revision_v1",
   authorityCursor: { eventCount: 7 },
-  documents: {
-    "pointbreak.inspect-reader-profile": 1,
-    "pointbreak.review-change-list": 1,
-    "pointbreak.inspect-changes-page": 1,
-    "pointbreak.review-change": 1,
-    "pointbreak.review-change-revision": 1,
-    "pointbreak.review-revision": 3,
-    "pointbreak.review-revision-resource": 1,
-    "pointbreak.review-association-comparison": 1,
-    "pointbreak.review-revision-interdiff": 1,
-    "pointbreak.attention-list": 2,
-    "pointbreak.inspect-attention": 2,
-    "pointbreak.reader-upgrade-required": 1,
-    "pointbreak.store-migration-required": 1,
-    "pointbreak.store-migration-in-progress": 1,
-  },
+  documents: CHANGE_READER_DOCUMENTS,
 });
 
 it("validates the capable profile before a cold Change semantic read", async () => {

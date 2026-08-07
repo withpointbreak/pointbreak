@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ChangePresentation, ChangeSummary } from "../src/change-protocol";
 import {
   buildChangePageUrl,
+  CHANGE_READER_DOCUMENTS,
   decodeChangeDetail,
   decodeChangePage,
   decodeChangeRevisionDetail,
@@ -13,20 +14,7 @@ import {
   trimUnicodeWhitespace,
 } from "../src/change-protocol";
 
-const documents = {
-  "pointbreak.inspect-reader-profile": 1,
-  "pointbreak.inspect-changes-page": 1,
-  "pointbreak.review-change": 1,
-  "pointbreak.review-change-revision": 1,
-  "pointbreak.review-revision": 3,
-  "pointbreak.review-revision-resource": 1,
-  "pointbreak.review-association-comparison": 1,
-  "pointbreak.review-revision-interdiff": 1,
-  "pointbreak.inspect-attention": 2,
-  "pointbreak.reader-upgrade-required": 1,
-  "pointbreak.store-migration-required": 1,
-  "pointbreak.store-migration-in-progress": 1,
-};
+const documents = CHANGE_READER_DOCUMENTS;
 
 function profile(eventCount = 3) {
   return {
@@ -111,6 +99,12 @@ describe("bounded Change protocol", () => {
       buildChangePageUrl("changes", { q: "\u00a0RÉSUMÉ\u00a0" }),
     ).toContain("q=r%C3%A9sum%C3%A9");
     expect(trimUnicodeWhitespace("\u0085\u3000RÉSUMÉ\u00a0")).toBe("RÉSUMÉ");
+  });
+
+  it("enforces the query byte limit after Unicode lowercase normalization", () => {
+    expect(() => buildChangePageUrl("changes", { q: "İ".repeat(100) })).toThrow(
+      "at most 256 bytes",
+    );
   });
 
   it("rejects malformed page DTOs and mixed projection stamps before paint", () => {

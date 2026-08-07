@@ -1,0 +1,19 @@
+{
+  "minimumReaderProfile": "review_change_revision_v1",
+  "documents": {
+    "pointbreak.attention-list": 2,
+    "pointbreak.inspect-attention": 2,
+    "pointbreak.inspect-changes-page": 1,
+    "pointbreak.inspect-reader-profile": 1,
+    "pointbreak.reader-upgrade-required": 1,
+    "pointbreak.review-association-comparison": 1,
+    "pointbreak.review-change": 1,
+    "pointbreak.review-change-list": 1,
+    "pointbreak.review-change-revision": 1,
+    "pointbreak.review-revision": 3,
+    "pointbreak.review-revision-interdiff": 1,
+    "pointbreak.review-revision-resource": 1,
+    "pointbreak.store-migration-in-progress": 1,
+    "pointbreak.store-migration-required": 1
+  }
+}
