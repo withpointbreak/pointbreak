@@ -19,6 +19,10 @@ tests/fixtures/naming-cutover/** text eol=lf
 # diff.
 src/cli/inspect/assets/app.js text eol=lf
 
+# The generated Change reader profile is also byte-compared against Rust-owned
+# output. Preserve its canonical LF bytes in Windows checkouts.
+src/documents/change_reader_profile_v1.json text eol=lf
+
 # The canonical Review example and its capture lock carry SHA-256 digests of
 # JSON bytes. Pin those digest-bearing files to LF so Windows autocrlf checkouts
 # verify the same public pack bytes as Unix checkouts.
