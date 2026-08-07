@@ -636,10 +636,11 @@
   function renderGeneration(profile, page, attention) {
     const master = document.querySelector("#master");
     if (!master) return;
-    const fragment = document.createDocumentFragment();
+    const list = document.createElement("section");
+    list.className = "units";
     const heading2 = document.createElement("h1");
     heading2.textContent = `Changes · ${page.changes.length}`;
-    fragment.append(heading2);
+    list.append(heading2);
     for (const change of page.changes) {
       const card = document.createElement("article");
       card.dataset.changeId = change.changeId;
@@ -686,10 +687,10 @@
         });
         card.append(compare);
       }
-      fragment.append(card);
+      list.append(card);
     }
-    if (page.changes.length === 0) fragment.append(message("No Changes."));
-    master.replaceChildren(fragment);
+    if (page.changes.length === 0) list.append(message("No Changes."));
+    master.replaceChildren(list);
     setText(
       "#stat-events",
       `${profile.authorityCursor.eventCount ?? "—"} events`

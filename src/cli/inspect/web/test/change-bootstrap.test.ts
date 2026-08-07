@@ -214,6 +214,16 @@ describe("profile-first Change bootstrap", () => {
     );
     expect(document.querySelectorAll("[data-revision-id]")).toHaveLength(2);
 
+    // `#master` is a flex shell that gives one lens body the available height.
+    // The Change reader must keep its heading and cards inside that one scrollable
+    // body; direct cards would each become flex children and collapse into one
+    // another on a populated store.
+    const changeList = document.querySelector<HTMLElement>("#master > .units");
+    expect(changeList).not.toBeNull();
+    expect(document.querySelector("#master")?.children).toHaveLength(1);
+    expect(changeList?.querySelector("h1")?.textContent).toBe("Changes · 2");
+    expect(changeList?.querySelectorAll("[data-change-id]")).toHaveLength(2);
+
     const revisions =
       document.querySelectorAll<HTMLButtonElement>("[data-revision-id]");
     revisions[1]?.click();

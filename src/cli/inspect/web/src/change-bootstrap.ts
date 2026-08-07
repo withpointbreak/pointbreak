@@ -295,10 +295,15 @@ function renderGeneration(
 ): void {
   const master = document.querySelector<HTMLElement>("#master");
   if (!master) return;
-  const fragment = document.createDocumentFragment();
+  // `#master` is the flex shell for one active lens body. Keep the complete
+  // Change list inside its scrollable body: appending every card directly to
+  // the shell would turn a populated list into hundreds of competing flex
+  // children whose content can overlap when they shrink.
+  const list = document.createElement("section");
+  list.className = "units";
   const heading = document.createElement("h1");
   heading.textContent = `Changes · ${page.changes.length}`;
-  fragment.append(heading);
+  list.append(heading);
   for (const change of page.changes) {
     const card = document.createElement("article");
     card.dataset.changeId = change.changeId;
@@ -345,10 +350,10 @@ function renderGeneration(
       });
       card.append(compare);
     }
-    fragment.append(card);
+    list.append(card);
   }
-  if (page.changes.length === 0) fragment.append(message("No Changes."));
-  master.replaceChildren(fragment);
+  if (page.changes.length === 0) list.append(message("No Changes."));
+  master.replaceChildren(list);
   setText(
     "#stat-events",
     `${profile.authorityCursor.eventCount ?? "—"} events`,
