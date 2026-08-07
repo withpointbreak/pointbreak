@@ -71,6 +71,37 @@ describe("loadChangeDocuments", () => {
 });
 
 describe("deriveChangeTree", () => {
+  it("preserves the two-Change server change_id_asc order without re-sorting it", () => {
+    const serverOrder = [
+      changeSummary("sha256:one", "change:sha256:alpha", "in_progress"),
+      changeSummary("sha256:one", "change:sha256:omega", "conflicted"),
+    ];
+    const loaded = new Map([
+      [
+        "target",
+        {
+          profile: profile("ready"),
+          changes: changes("sha256:one", serverOrder),
+          attention: attention("sha256:one", serverOrder),
+        },
+      ],
+    ]);
+    const sort = vi.spyOn(Array.prototype, "sort");
+
+    try {
+      const [section] = deriveChangeTree([resolved()], loaded, new Map());
+      if (section.kind !== "changes-section")
+        throw new Error("missing Changes");
+
+      expect(section.children.map((change) => change.changeId)).toEqual(
+        serverOrder.map((change) => change.changeId),
+      );
+      expect(sort).not.toHaveBeenCalled();
+    } finally {
+      sort.mockRestore();
+    }
+  });
+
   it("renders Change identity, topology, and every exact current Revision", () => {
     const loaded = new Map([
       [
@@ -180,9 +211,13 @@ function profile(
   };
 }
 
-function changes(projectionStamp: string) {
-  const summary = {
-    changeId: "change:sha256:one",
+function changeSummary(
+  projectionStamp: string,
+  changeId = "change:sha256:one",
+  lifecycle = "conflicted",
+) {
+  return {
+    changeId,
     declarationState: "authoritative",
     memberCount: 2,
     currentRevisionRefs: [
@@ -196,26 +231,35 @@ function changes(projectionStamp: string) {
       },
     ],
     topology: "replacement_divergent",
-    lifecycle: "conflicted",
+    lifecycle,
     attentionSummary: "conflicted",
     availabilitySummary: "available",
     diagnostics: [],
     projectionStamp,
   };
+}
+
+function changes(
+  projectionStamp: string,
+  summaries = [changeSummary(projectionStamp)],
+) {
   return {
     schema: "pointbreak.review-change-list" as const,
     version: 1 as const,
-    changes: [summary],
+    changes: summaries,
     diagnostics: [],
     projectionStamp,
   };
 }
 
-function attention(projectionStamp: string) {
+function attention(
+  projectionStamp: string,
+  summaries = changes(projectionStamp).changes,
+) {
   return {
     schema: "pointbreak.attention-list" as const,
     version: 2 as const,
-    changes: changes(projectionStamp).changes,
+    changes: summaries,
     projectionStamp,
   };
 }

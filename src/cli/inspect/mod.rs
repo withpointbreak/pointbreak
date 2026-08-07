@@ -6,6 +6,7 @@ use clap::{Args, ValueEnum};
 
 mod api;
 mod cache;
+mod change_page;
 mod server;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]

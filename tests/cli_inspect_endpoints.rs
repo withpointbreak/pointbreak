@@ -142,6 +142,37 @@ fn inspector_harness_serves_history_for_minimal_store() {
 }
 
 #[test]
+fn change_pages_preserve_bare_shape_and_reject_append_stale_continuations() {
+    let repo = GitRepo::new();
+    repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
+    repo.commit_all("base");
+    capture(repo.path());
+    capture(repo.path());
+
+    let inspector = Inspector::spawn_current(repo.path());
+    let bare = inspector.get_json("/api/v2/changes");
+    assert_eq!(bare["schema"], "pointbreak.inspect-changes-page");
+    assert_eq!(bare["version"], 1);
+    assert!(bare.get("next").is_none());
+
+    let first = inspector.get_json("/api/v2/changes?limit=1&order=change_id_asc");
+    assert_eq!(first["schema"], bare["schema"]);
+    assert_eq!(first["version"], bare["version"]);
+    let next = first["next"]
+        .as_str()
+        .expect("two Changes yield a continuation");
+
+    capture(repo.path());
+    let (status, body) = inspector.get_error(&format!(
+        "/api/v2/changes?limit=1&order=change_id_asc&after={}",
+        urlencode(next)
+    ));
+    assert!(status.contains("409 Conflict"), "status: {status}");
+    assert_eq!(body["schema"], "pointbreak.inspect-change-page-error");
+    assert_eq!(body["code"], "stale_projection");
+}
+
+#[test]
 fn api_attention_serves_projection() {
     let store = representative_store();
     // The fixture's human assessment REPLACES the agent one, leaving a single

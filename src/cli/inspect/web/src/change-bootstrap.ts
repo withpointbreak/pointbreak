@@ -4,149 +4,48 @@ import {
   requestReconnect,
 } from "./auth";
 import {
+  type AttentionPage,
+  type Availability,
+  buildChangePageUrl,
+  type ChangePresentation,
+  type ChangeSummary,
+  type ChangesPage,
+  decodeChangeDetail,
+  decodeChangePage,
+  decodeChangeRevisionDetail,
+  decodeReaderProfile,
+  decodeRevisionInterdiff,
+  decodeRevisionResource,
+  MAX_LIVE_CHANGE_ROWS,
+  type ReaderProfile,
+  type RevisionRef,
+  requireCoherentGeneration,
+  sameProfileGeneration,
+} from "./change-protocol";
+import {
   configureConnectionActions,
   initConnectionControls,
 } from "./connection";
-import { fetchJSON } from "./http";
-
-type Availability = "migration_required" | "migration_in_progress" | "ready";
-
-interface ReaderProfile {
-  schema: "pointbreak.inspect-reader-profile";
-  version: 1;
-  availability: Availability;
-  minimumReaderProfile?: string;
-  authorityCursor: { eventCount?: number };
-  documents: Record<string, number>;
-}
-
-interface RevisionRef {
-  revisionId: string;
-  objectArtifactContentHash: string;
-}
-
-interface ChangePresentation {
-  currentRevisions: Array<{
-    revision: RevisionRef;
-    revisionProposalSummary?: string;
-    summarySource: "revision_proposal_summary" | "absent";
-  }>;
-}
-
-interface ChangeSummary {
-  changeId: string;
-  topology: string;
-  lifecycle: string;
-  attentionSummary: string;
-  availabilitySummary: string;
-  currentRevisionRefs: RevisionRef[];
-  diagnostics?: string[];
-  projectionStamp: string;
-}
-
-interface ChangesPage {
-  schema: "pointbreak.inspect-changes-page";
-  version: 1;
-  changes: ChangeSummary[];
-  diagnostics: string[];
-  presentations?: Record<string, ChangePresentation>;
-  projectionStamp: string;
-}
-
-interface AttentionPage {
-  schema: "pointbreak.inspect-attention";
-  version: 2;
-  changes: ChangeSummary[];
-  presentations?: Record<string, ChangePresentation>;
-  projectionStamp: string;
-}
-
-interface ChangeDetail {
-  schema: "pointbreak.review-change";
-  version: 1;
-  summary: ChangeSummary;
-  relationClaims: Array<{
-    claimId: string;
-    active: boolean;
-    successor: RevisionRef;
-    predecessor: RevisionRef;
-    supports: Array<{ actorId: string; eventId: string }>;
-    withdrawals: Array<{ actorId: string; eventId: string }>;
-  }>;
-  diagnostics: string[];
-  projectionStamp: string;
-}
-
-interface ChangeRevisionDetail {
-  schema: "pointbreak.review-change-revision";
-  version: 1;
-  changeId: string;
-  revision: RevisionRef;
-  revisionCurrency: string;
-  relationClassification: string;
-  availability: string;
-  factPresentations: Array<{
-    factId: string;
-    family: string;
-    originRevision: RevisionRef;
-    revisionCurrency: string;
-    familyState: string;
-    availability: string;
-  }>;
-  factContentPresentations?: Record<
-    string,
-    {
-      contentType: "text/plain" | "text/markdown";
-      bodyContentState: "present" | "suppressed_present" | "physically_removed";
-      content: Record<string, unknown>;
-    }
-  >;
-  associations: Array<{
-    state: string;
-    proofAvailability: string;
-    comparison: { revision: RevisionRef; commitOid: string };
-  }>;
-  diagnostics: string[];
-  projectionStamp: string;
-}
-
-interface RevisionResource {
-  schema: "pointbreak.review-revision-resource";
-  version: 1;
-  resource: { revision: RevisionRef; objectId: string };
-  availability: string;
-  capturedDocumentHash?: string;
-  capturedDocument?: unknown;
-  diagnostics: string[];
-}
-
-interface RevisionInterdiff {
-  schema: "pointbreak.review-revision-interdiff";
-  version: 1;
-  interdiff: { from: RevisionRef; to: RevisionRef };
-  availability: string;
-  comparison?: unknown;
-  diagnostics: string[];
-}
-
-const REQUIRED_DOCUMENTS: Readonly<Record<string, number>> = {
-  "pointbreak.inspect-reader-profile": 1,
-  "pointbreak.inspect-changes-page": 1,
-  "pointbreak.review-change": 1,
-  "pointbreak.review-change-revision": 1,
-  "pointbreak.review-revision": 3,
-  "pointbreak.review-revision-resource": 1,
-  "pointbreak.review-association-comparison": 1,
-  "pointbreak.review-revision-interdiff": 1,
-  "pointbreak.inspect-attention": 2,
-  "pointbreak.reader-upgrade-required": 1,
-  "pointbreak.store-migration-required": 1,
-  "pointbreak.store-migration-in-progress": 1,
-};
+import { ChangePageFailure, fetchJSON } from "./http";
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
-let generation = 0;
+let readerEpoch = 0;
+let detailSelectionEpoch = 0;
 let connectionControlsInitialized = false;
+interface VisibleGeneration {
+  profile: ReaderProfile;
+  changes: ChangesPage;
+  attention: AttentionPage;
+}
+
+interface DetailRequest {
+  readerEpoch: number;
+  selectionEpoch: number;
+  projectionStamp: string;
+  visible: VisibleGeneration;
+}
+
+let visibleGeneration: VisibleGeneration | null = null;
 
 export interface ChangeBootstrapOptions {
   poll?: boolean;
@@ -163,6 +62,8 @@ export async function bootstrapChangeReader(
   options: ChangeBootstrapOptions = {},
 ): Promise<void> {
   stopChangeReader();
+  const bootstrapEpoch = readerEpoch;
+  let loadingGeneration = false;
   const capability = bootstrapCapability();
   if (capability.token !== null) {
     (options.reload ?? (() => location.reload()))();
@@ -181,97 +82,122 @@ export async function bootstrapChangeReader(
     connectionControlsInitialized = true;
   }
   try {
-    const profile = validateProfile(
-      (await fetchJSON("/api/v2/profile")) as ReaderProfile,
-    );
+    const profile = decodeReaderProfile(await fetchJSON("/api/v2/profile"));
+    if (bootstrapEpoch !== readerEpoch) return;
     prepareChangeShell();
     if (profile.availability !== "ready") {
       renderUnavailable(profile.availability);
       return;
     }
-    await loadGeneration(profile);
-    if (options.poll !== false) {
+    loadingGeneration = true;
+    const publishedEpoch = await loadGeneration(profile);
+    if (
+      options.poll !== false &&
+      publishedEpoch !== null &&
+      publishedEpoch === readerEpoch
+    ) {
       pollTimer = setInterval(() => {
         void refresh();
       }, 3000);
     }
   } catch (error) {
+    if (!loadingGeneration && bootstrapEpoch !== readerEpoch) return;
     renderRefusal(error);
   }
 }
 
 export function stopChangeReader(): void {
-  generation += 1;
+  readerEpoch += 1;
+  detailSelectionEpoch += 1;
+  visibleGeneration = null;
   if (pollTimer !== null) {
     clearInterval(pollTimer);
     pollTimer = null;
   }
 }
 
-async function refresh(): Promise<void> {
+async function refresh(force = false): Promise<void> {
+  const requestedEpoch = readerEpoch;
+  const current = visibleGeneration;
+  let loadingGeneration = false;
   try {
-    const profile = validateProfile(
-      (await fetchJSON("/api/v2/profile")) as ReaderProfile,
-    );
+    const profile = decodeReaderProfile(await fetchJSON("/api/v2/profile"));
+    if (requestedEpoch !== readerEpoch || current !== visibleGeneration) {
+      return;
+    }
     if (profile.availability !== "ready") {
       renderUnavailable(profile.availability);
       stopChangeReader();
       return;
     }
+    if (
+      !force &&
+      current !== null &&
+      sameProfileGeneration(current.profile, profile)
+    ) {
+      return;
+    }
+    loadingGeneration = true;
     await loadGeneration(profile);
   } catch (error) {
+    if (
+      !loadingGeneration &&
+      (requestedEpoch !== readerEpoch || current !== visibleGeneration)
+    ) {
+      return;
+    }
     renderRefusal(error);
   }
 }
 
-function validateProfile(profile: ReaderProfile): ReaderProfile {
-  if (
-    profile.schema !== "pointbreak.inspect-reader-profile" ||
-    profile.version !== 1 ||
-    !["migration_required", "migration_in_progress", "ready"].includes(
-      profile.availability,
-    )
-  ) {
-    throw new Error("incompatible Inspector reader profile");
-  }
-  for (const [schema, version] of Object.entries(REQUIRED_DOCUMENTS)) {
-    if (profile.documents?.[schema] !== version) {
-      throw new Error(`reader profile is missing ${schema} v${version}`);
+async function loadGeneration(
+  profile: ReaderProfile,
+  restarted = false,
+): Promise<number | null> {
+  const requestedEpoch = ++readerEpoch;
+  detailSelectionEpoch += 1;
+  try {
+    const [changes, attention] = await Promise.all([
+      fetchJSON(buildChangePageUrl("changes")).then((page) =>
+        decodeChangePage(page, { lens: "changes", bounded: true }),
+      ),
+      fetchJSON(buildChangePageUrl("attention")).then((page) =>
+        decodeChangePage(page, { lens: "attention", bounded: true }),
+      ),
+    ]);
+    const postflight = decodeReaderProfile(await fetchJSON("/api/v2/profile"));
+    if (requestedEpoch !== readerEpoch) return null;
+    requireCoherentGeneration(changes, attention);
+    if (!sameProfileGeneration(profile, postflight)) {
+      throw new Error("Change generation changed during staging");
     }
+    renderGeneration(profile, changes, attention);
+    return requestedEpoch;
+  } catch (error) {
+    if (requestedEpoch !== readerEpoch) return null;
+    const stalePage =
+      error instanceof ChangePageFailure && error.code === "stale_projection";
+    const changedDuringStaging =
+      error instanceof Error &&
+      error.message === "Change generation changed during staging";
+    if (!restarted && (stalePage || changedDuringStaging)) {
+      renderRestart(error);
+      let retryProfile: ReaderProfile;
+      try {
+        retryProfile = decodeReaderProfile(await fetchJSON("/api/v2/profile"));
+      } catch (retryError) {
+        if (requestedEpoch !== readerEpoch) return null;
+        throw retryError;
+      }
+      if (requestedEpoch !== readerEpoch) return null;
+      if (retryProfile.availability !== "ready") {
+        renderUnavailable(retryProfile.availability);
+        return null;
+      }
+      return loadGeneration(retryProfile, true);
+    }
+    throw error;
   }
-  if (
-    profile.availability === "ready" &&
-    profile.minimumReaderProfile !== "review_change_revision_v1"
-  ) {
-    throw new Error("incompatible minimum reader profile");
-  }
-  return profile;
-}
-
-async function loadGeneration(profile: ReaderProfile): Promise<void> {
-  const requestedGeneration = ++generation;
-  const [changes, attention] = (await Promise.all([
-    fetchJSON("/api/v2/changes"),
-    fetchJSON("/api/v2/attention"),
-  ])) as [ChangesPage, AttentionPage];
-  if (requestedGeneration !== generation) return;
-  if (
-    changes.schema !== "pointbreak.inspect-changes-page" ||
-    changes.version !== 1 ||
-    attention.schema !== "pointbreak.inspect-attention" ||
-    attention.version !== 2 ||
-    !changes.projectionStamp ||
-    changes.projectionStamp !== attention.projectionStamp ||
-    changes.changes.some(
-      (change) => change.projectionStamp !== changes.projectionStamp,
-    ) ||
-    attention.changes.some(
-      (change) => change.projectionStamp !== changes.projectionStamp,
-    )
-  ) {
-    throw new Error("Change documents do not form one coherent generation");
-  }
-  renderGeneration(profile, changes, attention);
 }
 
 function prepareChangeShell(): void {
@@ -342,12 +268,13 @@ function renderGeneration(
     );
     const revisions = document.createElement("div");
     revisions.className = "change-current-revisions";
+    const presentation = page.presentations?.[change.changeId];
     for (const revision of change.currentRevisionRefs) {
       const select = document.createElement("button");
       select.type = "button";
       select.className = "ghost mono";
       select.dataset.revisionId = revision.revisionId;
-      select.textContent = revision.revisionId;
+      select.textContent = currentRevisionLabel(revision, presentation);
       select.addEventListener("click", () => {
         void loadRevisionDetail(change, revision);
       });
@@ -371,6 +298,16 @@ function renderGeneration(
     list.append(card);
   }
   if (page.changes.length === 0) list.append(message("No Changes."));
+  if (page.next !== null) {
+    const loadMore = document.createElement("button");
+    loadMore.type = "button";
+    loadMore.className = "ghost";
+    loadMore.textContent = "Load more Changes";
+    loadMore.addEventListener("click", () => {
+      void loadMoreChanges();
+    });
+    list.append(loadMore);
+  }
   master.replaceChildren(list);
   setText(
     "#stat-events",
@@ -379,25 +316,164 @@ function renderGeneration(
   setText("#stat-units", `${page.changes.length} Changes`);
   setText("#stat-threads", `${attention.changes.length} need attention`);
   setText("#stat-hash", page.projectionStamp);
+  detailSelectionEpoch += 1;
+  visibleGeneration = { profile, changes: page, attention };
+}
+
+/**
+ * A continuation remains opaque to the browser. It replaces the oldest rows
+ * once the bounded live window is full, then validates the same postflight
+ * capability/freshness state before a single repaint.
+ */
+async function loadMoreChanges(): Promise<void> {
+  const current = visibleGeneration;
+  if (!current?.changes.next) return;
+  const requestedEpoch = readerEpoch;
+  try {
+    const next = decodeChangePage(
+      await fetchJSON(
+        buildChangePageUrl("changes", { after: current.changes.next }),
+      ),
+      { lens: "changes", bounded: true },
+    );
+    if (!isLiveGeneration(requestedEpoch, current)) return;
+    const postflight = decodeReaderProfile(await fetchJSON("/api/v2/profile"));
+    if (!isLiveGeneration(requestedEpoch, current)) return;
+    if (
+      next.projectionStamp !== current.changes.projectionStamp ||
+      !sameProfileGeneration(current.profile, postflight)
+    ) {
+      throw new Error(
+        "Change page changed during paging; restarting from first page",
+      );
+    }
+    const merged = mergeChangePages(current.changes, next);
+    if (!isLiveGeneration(requestedEpoch, current)) return;
+    renderGeneration(current.profile, merged, current.attention);
+  } catch (error) {
+    if (!isLiveGeneration(requestedEpoch, current)) return;
+    if (
+      (error instanceof ChangePageFailure &&
+        error.code === "stale_projection") ||
+      (error instanceof Error &&
+        error.message ===
+          "Change page changed during paging; restarting from first page")
+    ) {
+      renderRestart(error);
+      await refresh(true);
+      return;
+    }
+    renderRefusal(error);
+  }
+}
+
+function isLiveGeneration(
+  requestedEpoch: number,
+  expected: VisibleGeneration,
+): boolean {
+  return requestedEpoch === readerEpoch && visibleGeneration === expected;
+}
+
+function beginDetailRequest(change: ChangeSummary): DetailRequest | null {
+  const visible = visibleGeneration;
+  if (visible === null || !visible.changes.changes.includes(change))
+    return null;
+  return {
+    readerEpoch,
+    selectionEpoch: ++detailSelectionEpoch,
+    projectionStamp: change.projectionStamp,
+    visible,
+  };
+}
+
+function isLiveDetailRequest(request: DetailRequest): boolean {
+  return (
+    request.readerEpoch === readerEpoch &&
+    request.selectionEpoch === detailSelectionEpoch &&
+    request.visible === visibleGeneration &&
+    request.visible.changes.projectionStamp === request.projectionStamp
+  );
+}
+
+async function detailPostflight(request: DetailRequest): Promise<boolean> {
+  const profile = decodeReaderProfile(await fetchJSON("/api/v2/profile"));
+  if (!isLiveDetailRequest(request)) return false;
+  if (!sameProfileGeneration(request.visible.profile, profile)) {
+    throw new Error("Change detail generation changed during staging");
+  }
+  return true;
+}
+
+function mergeChangePages(
+  current: ChangesPage,
+  next: ChangesPage,
+): ChangesPage {
+  const lastCurrent = current.changes.at(-1)?.changeId;
+  const firstNext = next.changes[0]?.changeId;
+  if (
+    lastCurrent !== undefined &&
+    firstNext !== undefined &&
+    firstNext <= lastCurrent
+  ) {
+    throw new Error("Change continuation did not advance in server order");
+  }
+  const seen = new Set(current.changes.map((change) => change.changeId));
+  if (next.changes.some((change) => seen.has(change.changeId))) {
+    throw new Error("Change continuation repeated an emitted Change ID");
+  }
+  const changes = [...current.changes, ...next.changes].slice(
+    -MAX_LIVE_CHANGE_ROWS,
+  );
+  const visibleIds = new Set(changes.map((change) => change.changeId));
+  const presentations =
+    current.presentations !== undefined && next.presentations !== undefined
+      ? Object.fromEntries(
+          Object.entries({
+            ...current.presentations,
+            ...next.presentations,
+          }).filter(([changeId]) => visibleIds.has(changeId)),
+        )
+      : undefined;
+  return {
+    ...next,
+    changes,
+    presentations,
+  };
+}
+
+function currentRevisionLabel(
+  revision: RevisionRef,
+  presentation: ChangePresentation | undefined,
+): string {
+  const entry = presentation?.currentRevisions.find((candidate) =>
+    sameRevision(candidate.revision, revision),
+  );
+  if (entry?.summarySource === "revision_proposal_summary") {
+    return `Current Revision — proposal summary: ${entry.revisionProposalSummary ?? "absent"} · ${revision.revisionId}`;
+  }
+  return `Current Revision — summary absent · ${revision.revisionId}`;
 }
 
 async function loadChangeDetail(change: ChangeSummary): Promise<void> {
+  const request = beginDetailRequest(change);
+  if (request === null) return;
   try {
-    const detail = (await fetchJSON(
-      `/api/v2/changes/${encodeURIComponent(change.changeId)}`,
-    )) as ChangeDetail;
+    const detail = decodeChangeDetail(
+      await fetchJSON(`/api/v2/changes/${encodeURIComponent(change.changeId)}`),
+    );
+    if (!isLiveDetailRequest(request)) return;
     if (
       detail.summary.changeId !== change.changeId ||
       detail.projectionStamp !== change.projectionStamp
     ) {
       throw new Error("Change detail generation is stale; refresh and retry");
     }
-    const body = detailBody();
-    body.append(
+    if (!(await detailPostflight(request))) return;
+    const content: Node[] = [
       heading(change.changeId),
       line(`topology: ${words(detail.summary.topology)}`),
       line(`lifecycle: ${words(detail.summary.lifecycle)}`),
-    );
+    ];
     const relations = document.createElement("section");
     relations.append(heading("Relation claims", 3));
     for (const claim of detail.relationClaims) {
@@ -416,8 +492,10 @@ async function loadChangeDetail(change: ChangeSummary): Promise<void> {
     if (detail.relationClaims.length === 0) {
       relations.append(message("No relation claims."));
     }
-    body.append(relations);
+    content.push(relations);
+    publishDetail(request, content);
   } catch (error) {
+    if (!isLiveDetailRequest(request)) return;
     renderRefusal(error);
   }
 }
@@ -426,13 +504,18 @@ async function loadRevisionDetail(
   change: ChangeSummary,
   revision: RevisionRef,
 ): Promise<void> {
+  const request = beginDetailRequest(change);
+  if (request === null) return;
   try {
     const params = new URLSearchParams({
       artifactHash: revision.objectArtifactContentHash,
     });
-    const detail = (await fetchJSON(
-      `/api/v2/changes/${encodeURIComponent(change.changeId)}/revisions/${encodeURIComponent(revision.revisionId)}?${params}`,
-    )) as ChangeRevisionDetail;
+    const detail = decodeChangeRevisionDetail(
+      await fetchJSON(
+        `/api/v2/changes/${encodeURIComponent(change.changeId)}/revisions/${encodeURIComponent(revision.revisionId)}?${params}`,
+      ),
+    );
+    if (!isLiveDetailRequest(request)) return;
     if (
       detail.changeId !== change.changeId ||
       !sameRevision(detail.revision, revision) ||
@@ -444,13 +527,13 @@ async function loadRevisionDetail(
     ) {
       throw new Error("Revision detail generation is stale; refresh and retry");
     }
-    const body = detailBody();
-    body.append(
+    if (!(await detailPostflight(request))) return;
+    const content: Node[] = [
       heading(revision.revisionId),
       line(`currency: ${words(detail.revisionCurrency)}`),
       line(`relation: ${words(detail.relationClassification)}`),
       line(`captured resource: ${words(detail.availability)}`),
-    );
+    ];
     const facts = document.createElement("section");
     facts.append(heading("Facts", 3));
     for (const fact of detail.factPresentations) {
@@ -460,9 +543,10 @@ async function loadRevisionDetail(
         ),
       );
     }
-    if (detail.factPresentations.length === 0)
+    if (detail.factPresentations.length === 0) {
       facts.append(message("No facts."));
-    body.append(facts);
+    }
+    content.push(facts);
     const associations = document.createElement("section");
     associations.append(heading("Association comparisons", 3));
     for (const association of detail.associations) {
@@ -475,7 +559,7 @@ async function loadRevisionDetail(
     if (detail.associations.length === 0) {
       associations.append(message("No association comparisons."));
     }
-    body.append(associations);
+    content.push(associations);
     const resource = document.createElement("button");
     resource.type = "button";
     resource.className = "ghost";
@@ -483,8 +567,10 @@ async function loadRevisionDetail(
     resource.addEventListener("click", () => {
       void loadRevisionResource(change, revision);
     });
-    body.append(resource);
+    content.push(resource);
+    publishDetail(request, content);
   } catch (error) {
+    if (!isLiveDetailRequest(request)) return;
     renderRefusal(error);
   }
 }
@@ -493,34 +579,42 @@ async function loadRevisionResource(
   change: ChangeSummary,
   revision: RevisionRef,
 ): Promise<void> {
+  const request = beginDetailRequest(change);
+  if (request === null) return;
   try {
     const params = new URLSearchParams({
       artifactHash: revision.objectArtifactContentHash,
     });
-    const resource = (await fetchJSON(
-      `/api/v2/changes/${encodeURIComponent(change.changeId)}/revisions/${encodeURIComponent(revision.revisionId)}/resource?${params}`,
-    )) as RevisionResource;
+    const resource = decodeRevisionResource(
+      await fetchJSON(
+        `/api/v2/changes/${encodeURIComponent(change.changeId)}/revisions/${encodeURIComponent(revision.revisionId)}/resource?${params}`,
+      ),
+    );
+    if (!isLiveDetailRequest(request)) return;
     if (!sameRevision(resource.resource.revision, revision)) {
       throw new Error(
         "captured resource identity does not match its exact route",
       );
     }
-    const body = detailBody();
-    body.append(
+    if (!(await detailPostflight(request))) return;
+    const content: Node[] = [
       heading(`Captured resource · ${revision.revisionId}`),
       line(`availability: ${words(resource.availability)}`),
-    );
+    ];
     if (resource.capturedDocumentHash) {
-      body.append(line(`document hash: ${resource.capturedDocumentHash}`));
+      content.push(line(`document hash: ${resource.capturedDocumentHash}`));
     }
     if (resource.capturedDocument !== undefined) {
       const captured = document.createElement("pre");
       captured.textContent = JSON.stringify(resource.capturedDocument, null, 2);
-      body.append(captured);
+      content.push(captured);
     }
-    for (const diagnostic of resource.diagnostics)
-      body.append(line(diagnostic));
+    for (const diagnostic of resource.diagnostics) {
+      content.push(line(diagnostic));
+    }
+    publishDetail(request, content);
   } catch (error) {
+    if (!isLiveDetailRequest(request)) return;
     renderRefusal(error);
   }
 }
@@ -530,14 +624,19 @@ async function loadInterdiff(
   from: RevisionRef,
   to: RevisionRef,
 ): Promise<void> {
+  const request = beginDetailRequest(change);
+  if (request === null) return;
   try {
     const params = new URLSearchParams({
       fromArtifactHash: from.objectArtifactContentHash,
       toArtifactHash: to.objectArtifactContentHash,
     });
-    const interdiff = (await fetchJSON(
-      `/api/v2/changes/${encodeURIComponent(change.changeId)}/interdiff/${encodeURIComponent(from.revisionId)}/${encodeURIComponent(to.revisionId)}?${params}`,
-    )) as RevisionInterdiff;
+    const interdiff = decodeRevisionInterdiff(
+      await fetchJSON(
+        `/api/v2/changes/${encodeURIComponent(change.changeId)}/interdiff/${encodeURIComponent(from.revisionId)}/${encodeURIComponent(to.revisionId)}?${params}`,
+      ),
+    );
+    if (!isLiveDetailRequest(request)) return;
     if (
       !sameRevision(interdiff.interdiff.from, from) ||
       !sameRevision(interdiff.interdiff.to, to)
@@ -546,28 +645,31 @@ async function loadInterdiff(
         "Revision interdiff identity does not match its exact route",
       );
     }
-    const body = detailBody();
-    body.append(
+    if (!(await detailPostflight(request))) return;
+    const content: Node[] = [
       heading(`Revision interdiff · ${from.revisionId} → ${to.revisionId}`),
       line(`availability: ${words(interdiff.availability)}`),
-    );
+    ];
     if (interdiff.comparison !== undefined) {
       const comparison = document.createElement("pre");
       comparison.textContent = JSON.stringify(interdiff.comparison, null, 2);
-      body.append(comparison);
+      content.push(comparison);
     }
-    for (const diagnostic of interdiff.diagnostics)
-      body.append(line(diagnostic));
+    for (const diagnostic of interdiff.diagnostics) {
+      content.push(line(diagnostic));
+    }
+    publishDetail(request, content);
   } catch (error) {
+    if (!isLiveDetailRequest(request)) return;
     renderRefusal(error);
   }
 }
 
-function detailBody(): HTMLElement {
+function publishDetail(request: DetailRequest, content: Node[]): void {
+  if (!isLiveDetailRequest(request)) return;
   const body = document.querySelector<HTMLElement>("#detail-body");
   if (!body) throw new Error("Inspector detail container is absent");
-  body.replaceChildren();
-  return body;
+  body.replaceChildren(...content);
 }
 
 function renderRefusal(error: unknown): void {
@@ -582,7 +684,22 @@ function renderRefusal(error: unknown): void {
   }
 }
 
+function renderRestart(error: unknown): void {
+  const text =
+    error instanceof ChangePageFailure && error.code === "stale_projection"
+      ? "Change page became stale; restarting from the first page."
+      : "Change generation changed while loading; restarting from the first page.";
+  const banner = document.querySelector<HTMLElement>("#error");
+  if (banner) {
+    banner.textContent = text;
+    banner.classList.remove("hidden");
+  }
+}
+
 function clearSemanticPresentation(): void {
+  readerEpoch += 1;
+  detailSelectionEpoch += 1;
+  visibleGeneration = null;
   document.querySelector<HTMLElement>("#master")?.replaceChildren();
   document.querySelector<HTMLElement>("#detail-body")?.replaceChildren();
   for (const selector of [

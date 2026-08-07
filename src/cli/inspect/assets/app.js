@@ -229,6 +229,404 @@
   }
   __name(promptForCredential, "promptForCredential");
 
+  // src/change-protocol.ts
+  var CHANGE_PAGE_LIMIT = 50;
+  var MAX_LIVE_CHANGE_ROWS = 150;
+  var REQUIRED_DOCUMENTS = {
+    "pointbreak.inspect-reader-profile": 1,
+    "pointbreak.inspect-changes-page": 1,
+    "pointbreak.review-change": 1,
+    "pointbreak.review-change-revision": 1,
+    "pointbreak.review-revision": 3,
+    "pointbreak.review-revision-resource": 1,
+    "pointbreak.review-association-comparison": 1,
+    "pointbreak.review-revision-interdiff": 1,
+    "pointbreak.inspect-attention": 2,
+    "pointbreak.reader-upgrade-required": 1,
+    "pointbreak.store-migration-required": 1,
+    "pointbreak.store-migration-in-progress": 1
+  };
+  var TOPOLOGY_VALUES = /* @__PURE__ */ new Set([
+    "initial",
+    "replacement",
+    "replacement_divergent",
+    "consolidation",
+    "parallel_current",
+    "mixed",
+    "incomplete",
+    "cycle_conflicted"
+  ]);
+  var LIFECYCLE_VALUES = /* @__PURE__ */ new Set([
+    "incomplete",
+    "conflicted",
+    "in_progress",
+    "accepted"
+  ]);
+  var ATTENTION_VALUES = /* @__PURE__ */ new Set([
+    "clear",
+    "in_progress",
+    "incomplete",
+    "conflicted"
+  ]);
+  var AVAILABILITY_VALUES = /* @__PURE__ */ new Set(["available", "incomplete"]);
+  var CONTENT_AVAILABILITY_VALUES = /* @__PURE__ */ new Set([
+    "available",
+    "removed",
+    "missing",
+    "mismatch",
+    "non_textual"
+  ]);
+  var REVISION_CURRENCY_VALUES = /* @__PURE__ */ new Set([
+    "current",
+    "stale_by_supersession",
+    "membership_incomplete",
+    "membership_conflicted"
+  ]);
+  var FACT_FAMILY_STATE_VALUES = /* @__PURE__ */ new Set([
+    "current",
+    "stale",
+    "withdrawn",
+    "conflicted",
+    "unavailable"
+  ]);
+  var ASSOCIATION_STATE_VALUES = /* @__PURE__ */ new Set([
+    "unknown",
+    "exact",
+    "equivalent",
+    "extension",
+    "unavailable"
+  ]);
+  var ASSOCIATION_PROOF_VALUES = /* @__PURE__ */ new Set([
+    "available",
+    "missing",
+    "mismatch",
+    "not_requested"
+  ]);
+  var INTERDIFF_AVAILABILITY_VALUES = /* @__PURE__ */ new Set([
+    "available",
+    "unavailable",
+    "endpoint_missing",
+    "endpoint_mismatch",
+    "non_textual"
+  ]);
+  function decodeChangeDetail(value) {
+    const detail = object(value, "Change detail");
+    const summary = detail.summary;
+    const stamp = detail.projectionStamp;
+    const relationClaims = detail.relationClaims;
+    const diagnostics = detail.diagnostics;
+    if (detail.schema !== "pointbreak.review-change" || detail.version !== 1 || !nonEmptyString(stamp) || !isChangeSummary(summary, stamp) || !Array.isArray(relationClaims) || !relationClaims.every(isRelationClaim) || !isStringArray(diagnostics)) {
+      throw new Error("invalid Change detail DTO");
+    }
+    return {
+      schema: "pointbreak.review-change",
+      version: 1,
+      summary,
+      relationClaims,
+      diagnostics,
+      projectionStamp: stamp
+    };
+  }
+  __name(decodeChangeDetail, "decodeChangeDetail");
+  function decodeChangeRevisionDetail(value) {
+    const detail = object(value, "Change Revision detail");
+    const revision = detail.revision;
+    const factPresentations = detail.factPresentations;
+    const factContentPresentations = detail.factContentPresentations;
+    const associations = detail.associations;
+    const diagnostics = detail.diagnostics;
+    const revisionCurrency = detail.revisionCurrency;
+    const relationClassification = detail.relationClassification;
+    const availability = detail.availability;
+    if (detail.schema !== "pointbreak.review-change-revision" || detail.version !== 1 || !nonEmptyString(detail.changeId) || !isRevisionRef(revision) || typeof revisionCurrency !== "string" || !REVISION_CURRENCY_VALUES.has(revisionCurrency) || relationClassification !== "current" && relationClassification !== "superseded" || typeof availability !== "string" || !CONTENT_AVAILABILITY_VALUES.has(availability) || !Array.isArray(factPresentations) || !factPresentations.every(isFactPresentation) || factContentPresentations !== void 0 && !isFactContentPresentations(factContentPresentations) || !Array.isArray(associations) || !associations.every(isAssociation) || !isStringArray(diagnostics) || !nonEmptyString(detail.projectionStamp)) {
+      throw new Error("invalid Change Revision detail DTO");
+    }
+    return {
+      schema: "pointbreak.review-change-revision",
+      version: 1,
+      changeId: detail.changeId,
+      revision,
+      revisionCurrency,
+      relationClassification,
+      availability,
+      factPresentations,
+      factContentPresentations,
+      associations,
+      diagnostics,
+      projectionStamp: detail.projectionStamp
+    };
+  }
+  __name(decodeChangeRevisionDetail, "decodeChangeRevisionDetail");
+  function decodeRevisionResource(value) {
+    const document2 = object(value, "Revision resource");
+    const resource = document2.resource;
+    const diagnostics = document2.diagnostics;
+    const availability = document2.availability;
+    const capturedDocumentHash = document2.capturedDocumentHash;
+    if (document2.schema !== "pointbreak.review-revision-resource" || document2.version !== 1 || !isRecord(resource) || !isRevisionRef(resource.revision) || !nonEmptyString(resource.objectId) || !isOneOf(availability, CONTENT_AVAILABILITY_VALUES) || capturedDocumentHash !== void 0 && !nonEmptyString(capturedDocumentHash) || availability === "available" !== (capturedDocumentHash !== void 0 && document2.capturedDocument !== void 0) || !isStringArray(diagnostics)) {
+      throw new Error("invalid Revision resource DTO");
+    }
+    return {
+      schema: "pointbreak.review-revision-resource",
+      version: 1,
+      resource: { revision: resource.revision, objectId: resource.objectId },
+      availability,
+      capturedDocumentHash,
+      capturedDocument: document2.capturedDocument,
+      diagnostics
+    };
+  }
+  __name(decodeRevisionResource, "decodeRevisionResource");
+  function decodeRevisionInterdiff(value) {
+    const document2 = object(value, "Revision interdiff");
+    const interdiff = document2.interdiff;
+    const diagnostics = document2.diagnostics;
+    const availability = document2.availability;
+    if (document2.schema !== "pointbreak.review-revision-interdiff" || document2.version !== 1 || !isRecord(interdiff) || !isRevisionRef(interdiff.from) || !isRevisionRef(interdiff.to) || !isOneOf(availability, INTERDIFF_AVAILABILITY_VALUES) || !isStringArray(diagnostics) || availability === "available" !== (document2.comparison !== void 0)) {
+      throw new Error("invalid Revision interdiff DTO");
+    }
+    return {
+      schema: "pointbreak.review-revision-interdiff",
+      version: 1,
+      interdiff: { from: interdiff.from, to: interdiff.to },
+      availability,
+      comparison: document2.comparison,
+      diagnostics
+    };
+  }
+  __name(decodeRevisionInterdiff, "decodeRevisionInterdiff");
+  function buildChangePageUrl(lens, query = {}) {
+    const limit = query.limit ?? CHANGE_PAGE_LIMIT;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new Error("Change page limit must be an integer from 1 through 100");
+    }
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (query.after !== void 0) {
+      if (!query.after || new TextEncoder().encode(query.after).length > 4096) {
+        throw new Error(
+          "Change page continuation must be a non-empty opaque token"
+        );
+      }
+      params.set("after", query.after);
+    }
+    if (query.q !== void 0) {
+      const trimmed = trimUnicodeWhitespace(query.q);
+      if (!trimmed || new TextEncoder().encode(trimmed).length > 256) {
+        throw new Error(
+          "Change page query must be non-empty and at most 256 bytes"
+        );
+      }
+      const normalized = trimmed.toLowerCase();
+      params.set("q", normalized);
+    }
+    appendEnum(params, "topology", query.topology, TOPOLOGY_VALUES);
+    appendEnum(params, "lifecycle", query.lifecycle, LIFECYCLE_VALUES);
+    appendEnum(params, "attention", query.attention, ATTENTION_VALUES);
+    appendEnum(params, "availability", query.availability, AVAILABILITY_VALUES);
+    params.set("order", "change_id_asc");
+    return `/api/v2/${lens}?${params}`;
+  }
+  __name(buildChangePageUrl, "buildChangePageUrl");
+  function decodeReaderProfile(value) {
+    const profile = object(value, "Inspector reader profile");
+    const availability = profile.availability;
+    const authorityCursor = profile.authorityCursor;
+    const documents = profile.documents;
+    const minimumReaderProfile = profile.minimumReaderProfile;
+    const commitGraphStamp = profile.commitGraphStamp;
+    if (profile.schema !== "pointbreak.inspect-reader-profile" || profile.version !== 1 || !isAvailability(availability) || !isRecord(authorityCursor) || !isDocumentMap(documents) || !sameDocumentMap(documents, REQUIRED_DOCUMENTS)) {
+      throw new Error("incompatible Inspector reader profile");
+    }
+    if (availability === "ready" && (minimumReaderProfile !== "review_change_revision_v1" || typeof commitGraphStamp !== "string" || commitGraphStamp.length === 0)) {
+      throw new Error(
+        "ready Inspector reader profile is missing capability or commit graph stamp"
+      );
+    }
+    return {
+      schema: "pointbreak.inspect-reader-profile",
+      version: 1,
+      availability,
+      minimumReaderProfile: typeof minimumReaderProfile === "string" ? minimumReaderProfile : void 0,
+      authorityCursor,
+      commitGraphStamp: typeof commitGraphStamp === "string" ? commitGraphStamp : void 0,
+      documents
+    };
+  }
+  __name(decodeReaderProfile, "decodeReaderProfile");
+  function decodeChangePage(value, expected) {
+    const page = object(value, `${expected.lens} Change page`);
+    const expectedSchema = expected.lens === "changes" ? "pointbreak.inspect-changes-page" : "pointbreak.inspect-attention";
+    const expectedVersion = expected.lens === "changes" ? 1 : 2;
+    const stamp = page.projectionStamp;
+    const changes = page.changes;
+    const diagnostics = page.diagnostics;
+    const presentations = page.presentations;
+    if (page.schema !== expectedSchema || page.version !== expectedVersion || !nonEmptyString(stamp) || !Array.isArray(changes) || expected.bounded && changes.length > 100 || !changes.every((change) => isChangeSummary(change, stamp)) || !isStrictlyAscending(changes.map((change) => change.changeId)) || new Set(changes.map((change) => change.changeId)).size !== changes.length || diagnostics !== void 0 && !isStringArray(diagnostics) || presentations !== void 0 && !isPresentations(presentations, changes)) {
+      throw new Error(`invalid ${expected.lens} Change page DTO`);
+    }
+    const next = page.next;
+    if (next !== void 0 && next !== null && !nonEmptyString(next)) {
+      throw new Error("invalid Change page next continuation");
+    }
+    if (expected.bounded && next === void 0)
+      throw new Error("bounded Change page is missing next continuation");
+    const common = {
+      changes,
+      diagnostics,
+      presentations,
+      projectionStamp: stamp,
+      next: next ?? null
+    };
+    return expected.lens === "changes" ? {
+      schema: "pointbreak.inspect-changes-page",
+      version: 1,
+      ...common
+    } : {
+      schema: "pointbreak.inspect-attention",
+      version: 2,
+      ...common
+    };
+  }
+  __name(decodeChangePage, "decodeChangePage");
+  function requireCoherentGeneration(changes, attention) {
+    if (changes.projectionStamp !== attention.projectionStamp) {
+      throw new Error("Change documents do not form one coherent generation");
+    }
+  }
+  __name(requireCoherentGeneration, "requireCoherentGeneration");
+  function sameProfileGeneration(initial, postflight) {
+    return initial.availability === postflight.availability && initial.minimumReaderProfile === postflight.minimumReaderProfile && initial.commitGraphStamp === postflight.commitGraphStamp && sameDocumentMap(initial.documents, postflight.documents) && canonicalJson(initial.authorityCursor) === canonicalJson(postflight.authorityCursor);
+  }
+  __name(sameProfileGeneration, "sameProfileGeneration");
+  function trimUnicodeWhitespace(value) {
+    return value.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
+  }
+  __name(trimUnicodeWhitespace, "trimUnicodeWhitespace");
+  function appendEnum(params, name, value, values) {
+    if (value === void 0) return;
+    if (!values.has(value)) throw new Error(`invalid Change page ${name}`);
+    params.set(name, value);
+  }
+  __name(appendEnum, "appendEnum");
+  function isAvailability(value) {
+    return value === "migration_required" || value === "migration_in_progress" || value === "ready";
+  }
+  __name(isAvailability, "isAvailability");
+  function isChangeSummary(value, stamp) {
+    if (!isRecord(value)) return false;
+    return nonEmptyString(value.changeId) && isOneOf(value.topology, TOPOLOGY_VALUES) && isOneOf(value.lifecycle, LIFECYCLE_VALUES) && isOneOf(value.attentionSummary, ATTENTION_VALUES) && isOneOf(value.availabilitySummary, AVAILABILITY_VALUES) && value.projectionStamp === stamp && Array.isArray(value.currentRevisionRefs) && value.currentRevisionRefs.every(isRevisionRef) && uniqueRevisionKeys(value.currentRevisionRefs).size === value.currentRevisionRefs.length && (value.diagnostics === void 0 || isStringArray(value.diagnostics));
+  }
+  __name(isChangeSummary, "isChangeSummary");
+  function isPresentations(value, changes) {
+    if (!isRecord(value)) return false;
+    const summaries = new Map(
+      changes.map((change) => [change.changeId, change])
+    );
+    if (Object.keys(value).length !== summaries.size) return false;
+    return Object.entries(value).every(([changeId, presentation]) => {
+      const change = summaries.get(changeId);
+      if (change === void 0 || !isRecord(presentation) || !Array.isArray(presentation.currentRevisions) || !presentation.currentRevisions.every(isPresentationRevision)) {
+        return false;
+      }
+      const expected = uniqueRevisionKeys(change.currentRevisionRefs);
+      const actual = uniqueRevisionKeys(
+        presentation.currentRevisions.map((candidate) => candidate.revision)
+      );
+      return expected.size === change.currentRevisionRefs.length && actual.size === presentation.currentRevisions.length && expected.size === actual.size && [...expected].every((key) => actual.has(key));
+    });
+  }
+  __name(isPresentations, "isPresentations");
+  function isPresentationRevision(value) {
+    return isRecord(value) && isRevisionRef(value.revision) && (value.summarySource === "revision_proposal_summary" && nonEmptyString(value.revisionProposalSummary) || value.summarySource === "absent" && value.revisionProposalSummary === void 0);
+  }
+  __name(isPresentationRevision, "isPresentationRevision");
+  function isRevisionRef(value) {
+    return isRecord(value) && nonEmptyString(value.revisionId) && nonEmptyString(value.objectArtifactContentHash);
+  }
+  __name(isRevisionRef, "isRevisionRef");
+  function uniqueRevisionKeys(revisions) {
+    return new Set(
+      revisions.map(
+        (revision) => `${revision.revisionId}\0${revision.objectArtifactContentHash}`
+      )
+    );
+  }
+  __name(uniqueRevisionKeys, "uniqueRevisionKeys");
+  function isClaimSupport(value) {
+    return isRecord(value) && nonEmptyString(value.actorId) && nonEmptyString(value.eventId);
+  }
+  __name(isClaimSupport, "isClaimSupport");
+  function isRelationClaim(value) {
+    return isRecord(value) && nonEmptyString(value.claimId) && typeof value.active === "boolean" && isRevisionRef(value.successor) && isRevisionRef(value.predecessor) && Array.isArray(value.supports) && value.supports.every(isClaimSupport) && Array.isArray(value.withdrawals) && value.withdrawals.every(isClaimSupport);
+  }
+  __name(isRelationClaim, "isRelationClaim");
+  function isFactPresentation(value) {
+    return isRecord(value) && nonEmptyString(value.factId) && nonEmptyString(value.family) && isRevisionRef(value.originRevision) && isOneOf(value.revisionCurrency, REVISION_CURRENCY_VALUES) && isOneOf(value.familyState, FACT_FAMILY_STATE_VALUES) && isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES);
+  }
+  __name(isFactPresentation, "isFactPresentation");
+  function isFactContentPresentations(value) {
+    return isRecord(value) && Object.values(value).every(
+      (presentation) => isRecord(presentation) && (presentation.contentType === "text/plain" || presentation.contentType === "text/markdown") && (presentation.bodyContentState === "present" || presentation.bodyContentState === "suppressed_present" || presentation.bodyContentState === "physically_removed") && isRecord(presentation.content)
+    );
+  }
+  __name(isFactContentPresentations, "isFactContentPresentations");
+  function isAssociation(value) {
+    return isRecord(value) && isOneOf(value.state, ASSOCIATION_STATE_VALUES) && isOneOf(value.proofAvailability, ASSOCIATION_PROOF_VALUES) && isRecord(value.comparison) && isRevisionRef(value.comparison.revision) && nonEmptyString(value.comparison.commitOid);
+  }
+  __name(isAssociation, "isAssociation");
+  function isStrictlyAscending(values) {
+    return values.every((value, index) => {
+      const previous = values[index - 1];
+      return index === 0 || previous !== void 0 && previous < value;
+    });
+  }
+  __name(isStrictlyAscending, "isStrictlyAscending");
+  function isOneOf(value, values) {
+    return typeof value === "string" && values.has(value);
+  }
+  __name(isOneOf, "isOneOf");
+  function isDocumentMap(value) {
+    return isRecord(value) && Object.values(value).every((version) => Number.isInteger(version));
+  }
+  __name(isDocumentMap, "isDocumentMap");
+  function sameDocumentMap(left, right) {
+    const leftEntries = Object.entries(left).sort(
+      ([a], [b]) => a.localeCompare(b)
+    );
+    const rightEntries = Object.entries(right).sort(
+      ([a], [b]) => a.localeCompare(b)
+    );
+    return leftEntries.length === rightEntries.length && leftEntries.every(
+      ([schema, version], index) => schema === rightEntries[index]?.[0] && version === rightEntries[index]?.[1]
+    );
+  }
+  __name(sameDocumentMap, "sameDocumentMap");
+  function canonicalJson(value) {
+    if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+    if (isRecord(value)) {
+      return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+    }
+    return JSON.stringify(value);
+  }
+  __name(canonicalJson, "canonicalJson");
+  function object(value, name) {
+    if (!isRecord(value)) throw new Error(`invalid ${name} DTO`);
+    return value;
+  }
+  __name(object, "object");
+  function isRecord(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  __name(isRecord, "isRecord");
+  function nonEmptyString(value) {
+    return typeof value === "string" && value.length > 0;
+  }
+  __name(nonEmptyString, "nonEmptyString");
+  function isStringArray(value) {
+    return Array.isArray(value) && value.every((item) => typeof item === "string");
+  }
+  __name(isStringArray, "isStringArray");
+
   // src/connection.ts
   var snapshot = {
     connection: "connecting",
@@ -350,6 +748,17 @@
       __name(this, "RequestFailure");
     }
   };
+  var ChangePageFailure = class extends RequestFailure {
+    constructor(code, status) {
+      super("protocol", status);
+      this.code = code;
+      this.name = "ChangePageFailure";
+    }
+    code;
+    static {
+      __name(this, "ChangePageFailure");
+    }
+  };
   function failure(kind, status) {
     markRequestFailure(kind);
     return new RequestFailure(kind, status);
@@ -426,6 +835,19 @@
     return typeof data === "object" && data !== null && "error" in data && Boolean(data.error);
   }
   __name(hasPayloadError, "hasPayloadError");
+  function changePageFailure(data, status) {
+    if (typeof data !== "object" || data === null || data.schema !== "pointbreak.inspect-change-page-error" || data.version !== 1) {
+      return null;
+    }
+    const code = data.code;
+    if (code !== "invalid_query" && code !== "stale_projection") return null;
+    if (code === "invalid_query" && status !== 400 || code === "stale_projection" && status !== 409) {
+      return null;
+    }
+    markRequestFailure("protocol");
+    return new ChangePageFailure(code, status);
+  }
+  __name(changePageFailure, "changePageFailure");
   async function fetchOnce(path, method) {
     const headers = {};
     const token = getSessionToken();
@@ -449,11 +871,15 @@
     } catch {
       throw failure("protocol", response.status);
     }
-    if (!response.ok) throw failure("protocol", response.status);
     let data;
     try {
       data = JSON.parse(text);
     } catch {
+      throw failure("protocol", response.status);
+    }
+    if (!response.ok) {
+      const typed = changePageFailure(data, response.status);
+      if (typed !== null) throw typed;
       throw failure("protocol", response.status);
     }
     const expected = expectedDocument(path);
@@ -489,25 +915,15 @@
   __name(fetchJSON, "fetchJSON");
 
   // src/change-bootstrap.ts
-  var REQUIRED_DOCUMENTS = {
-    "pointbreak.inspect-reader-profile": 1,
-    "pointbreak.inspect-changes-page": 1,
-    "pointbreak.review-change": 1,
-    "pointbreak.review-change-revision": 1,
-    "pointbreak.review-revision": 3,
-    "pointbreak.review-revision-resource": 1,
-    "pointbreak.review-association-comparison": 1,
-    "pointbreak.review-revision-interdiff": 1,
-    "pointbreak.inspect-attention": 2,
-    "pointbreak.reader-upgrade-required": 1,
-    "pointbreak.store-migration-required": 1,
-    "pointbreak.store-migration-in-progress": 1
-  };
   var pollTimer = null;
-  var generation = 0;
+  var readerEpoch = 0;
+  var detailSelectionEpoch = 0;
   var connectionControlsInitialized = false;
+  var visibleGeneration = null;
   async function bootstrapChangeReader(options = {}) {
     stopChangeReader();
+    const bootstrapEpoch = readerEpoch;
+    let loadingGeneration = false;
     const capability = bootstrapCapability();
     if (capability.token !== null) {
       (options.reload ?? (() => location.reload()))();
@@ -526,81 +942,105 @@
       connectionControlsInitialized = true;
     }
     try {
-      const profile = validateProfile(
-        await fetchJSON("/api/v2/profile")
-      );
+      const profile = decodeReaderProfile(await fetchJSON("/api/v2/profile"));
+      if (bootstrapEpoch !== readerEpoch) return;
       prepareChangeShell();
       if (profile.availability !== "ready") {
         renderUnavailable(profile.availability);
         return;
       }
-      await loadGeneration(profile);
-      if (options.poll !== false) {
+      loadingGeneration = true;
+      const publishedEpoch = await loadGeneration(profile);
+      if (options.poll !== false && publishedEpoch !== null && publishedEpoch === readerEpoch) {
         pollTimer = setInterval(() => {
           void refresh();
         }, 3e3);
       }
     } catch (error) {
+      if (!loadingGeneration && bootstrapEpoch !== readerEpoch) return;
       renderRefusal(error);
     }
   }
   __name(bootstrapChangeReader, "bootstrapChangeReader");
   function stopChangeReader() {
-    generation += 1;
+    readerEpoch += 1;
+    detailSelectionEpoch += 1;
+    visibleGeneration = null;
     if (pollTimer !== null) {
       clearInterval(pollTimer);
       pollTimer = null;
     }
   }
   __name(stopChangeReader, "stopChangeReader");
-  async function refresh() {
+  async function refresh(force = false) {
+    const requestedEpoch = readerEpoch;
+    const current = visibleGeneration;
+    let loadingGeneration = false;
     try {
-      const profile = validateProfile(
-        await fetchJSON("/api/v2/profile")
-      );
+      const profile = decodeReaderProfile(await fetchJSON("/api/v2/profile"));
+      if (requestedEpoch !== readerEpoch || current !== visibleGeneration) {
+        return;
+      }
       if (profile.availability !== "ready") {
         renderUnavailable(profile.availability);
         stopChangeReader();
         return;
       }
+      if (!force && current !== null && sameProfileGeneration(current.profile, profile)) {
+        return;
+      }
+      loadingGeneration = true;
       await loadGeneration(profile);
     } catch (error) {
+      if (!loadingGeneration && (requestedEpoch !== readerEpoch || current !== visibleGeneration)) {
+        return;
+      }
       renderRefusal(error);
     }
   }
   __name(refresh, "refresh");
-  function validateProfile(profile) {
-    if (profile.schema !== "pointbreak.inspect-reader-profile" || profile.version !== 1 || !["migration_required", "migration_in_progress", "ready"].includes(
-      profile.availability
-    )) {
-      throw new Error("incompatible Inspector reader profile");
-    }
-    for (const [schema, version] of Object.entries(REQUIRED_DOCUMENTS)) {
-      if (profile.documents?.[schema] !== version) {
-        throw new Error(`reader profile is missing ${schema} v${version}`);
+  async function loadGeneration(profile, restarted = false) {
+    const requestedEpoch = ++readerEpoch;
+    detailSelectionEpoch += 1;
+    try {
+      const [changes, attention] = await Promise.all([
+        fetchJSON(buildChangePageUrl("changes")).then(
+          (page) => decodeChangePage(page, { lens: "changes", bounded: true })
+        ),
+        fetchJSON(buildChangePageUrl("attention")).then(
+          (page) => decodeChangePage(page, { lens: "attention", bounded: true })
+        )
+      ]);
+      const postflight = decodeReaderProfile(await fetchJSON("/api/v2/profile"));
+      if (requestedEpoch !== readerEpoch) return null;
+      requireCoherentGeneration(changes, attention);
+      if (!sameProfileGeneration(profile, postflight)) {
+        throw new Error("Change generation changed during staging");
       }
+      renderGeneration(profile, changes, attention);
+      return requestedEpoch;
+    } catch (error) {
+      if (requestedEpoch !== readerEpoch) return null;
+      const stalePage = error instanceof ChangePageFailure && error.code === "stale_projection";
+      const changedDuringStaging = error instanceof Error && error.message === "Change generation changed during staging";
+      if (!restarted && (stalePage || changedDuringStaging)) {
+        renderRestart(error);
+        let retryProfile;
+        try {
+          retryProfile = decodeReaderProfile(await fetchJSON("/api/v2/profile"));
+        } catch (retryError) {
+          if (requestedEpoch !== readerEpoch) return null;
+          throw retryError;
+        }
+        if (requestedEpoch !== readerEpoch) return null;
+        if (retryProfile.availability !== "ready") {
+          renderUnavailable(retryProfile.availability);
+          return null;
+        }
+        return loadGeneration(retryProfile, true);
+      }
+      throw error;
     }
-    if (profile.availability === "ready" && profile.minimumReaderProfile !== "review_change_revision_v1") {
-      throw new Error("incompatible minimum reader profile");
-    }
-    return profile;
-  }
-  __name(validateProfile, "validateProfile");
-  async function loadGeneration(profile) {
-    const requestedGeneration = ++generation;
-    const [changes, attention] = await Promise.all([
-      fetchJSON("/api/v2/changes"),
-      fetchJSON("/api/v2/attention")
-    ]);
-    if (requestedGeneration !== generation) return;
-    if (changes.schema !== "pointbreak.inspect-changes-page" || changes.version !== 1 || attention.schema !== "pointbreak.inspect-attention" || attention.version !== 2 || !changes.projectionStamp || changes.projectionStamp !== attention.projectionStamp || changes.changes.some(
-      (change) => change.projectionStamp !== changes.projectionStamp
-    ) || attention.changes.some(
-      (change) => change.projectionStamp !== changes.projectionStamp
-    )) {
-      throw new Error("Change documents do not form one coherent generation");
-    }
-    renderGeneration(profile, changes, attention);
   }
   __name(loadGeneration, "loadGeneration");
   function prepareChangeShell() {
@@ -661,12 +1101,13 @@
       );
       const revisions = document.createElement("div");
       revisions.className = "change-current-revisions";
+      const presentation = page.presentations?.[change.changeId];
       for (const revision of change.currentRevisionRefs) {
         const select = document.createElement("button");
         select.type = "button";
         select.className = "ghost mono";
         select.dataset.revisionId = revision.revisionId;
-        select.textContent = revision.revisionId;
+        select.textContent = currentRevisionLabel(revision, presentation);
         select.addEventListener("click", () => {
           void loadRevisionDetail(change, revision);
         });
@@ -690,6 +1131,16 @@
       list.append(card);
     }
     if (page.changes.length === 0) list.append(message("No Changes."));
+    if (page.next !== null) {
+      const loadMore = document.createElement("button");
+      loadMore.type = "button";
+      loadMore.className = "ghost";
+      loadMore.textContent = "Load more Changes";
+      loadMore.addEventListener("click", () => {
+        void loadMoreChanges();
+      });
+      list.append(loadMore);
+    }
     master.replaceChildren(list);
     setText(
       "#stat-events",
@@ -698,22 +1149,126 @@
     setText("#stat-units", `${page.changes.length} Changes`);
     setText("#stat-threads", `${attention.changes.length} need attention`);
     setText("#stat-hash", page.projectionStamp);
+    detailSelectionEpoch += 1;
+    visibleGeneration = { profile, changes: page, attention };
   }
   __name(renderGeneration, "renderGeneration");
-  async function loadChangeDetail(change) {
+  async function loadMoreChanges() {
+    const current = visibleGeneration;
+    if (!current?.changes.next) return;
+    const requestedEpoch = readerEpoch;
     try {
-      const detail = await fetchJSON(
-        `/api/v2/changes/${encodeURIComponent(change.changeId)}`
+      const next = decodeChangePage(
+        await fetchJSON(
+          buildChangePageUrl("changes", { after: current.changes.next })
+        ),
+        { lens: "changes", bounded: true }
       );
+      if (!isLiveGeneration(requestedEpoch, current)) return;
+      const postflight = decodeReaderProfile(await fetchJSON("/api/v2/profile"));
+      if (!isLiveGeneration(requestedEpoch, current)) return;
+      if (next.projectionStamp !== current.changes.projectionStamp || !sameProfileGeneration(current.profile, postflight)) {
+        throw new Error(
+          "Change page changed during paging; restarting from first page"
+        );
+      }
+      const merged = mergeChangePages(current.changes, next);
+      if (!isLiveGeneration(requestedEpoch, current)) return;
+      renderGeneration(current.profile, merged, current.attention);
+    } catch (error) {
+      if (!isLiveGeneration(requestedEpoch, current)) return;
+      if (error instanceof ChangePageFailure && error.code === "stale_projection" || error instanceof Error && error.message === "Change page changed during paging; restarting from first page") {
+        renderRestart(error);
+        await refresh(true);
+        return;
+      }
+      renderRefusal(error);
+    }
+  }
+  __name(loadMoreChanges, "loadMoreChanges");
+  function isLiveGeneration(requestedEpoch, expected) {
+    return requestedEpoch === readerEpoch && visibleGeneration === expected;
+  }
+  __name(isLiveGeneration, "isLiveGeneration");
+  function beginDetailRequest(change) {
+    const visible = visibleGeneration;
+    if (visible === null || !visible.changes.changes.includes(change))
+      return null;
+    return {
+      readerEpoch,
+      selectionEpoch: ++detailSelectionEpoch,
+      projectionStamp: change.projectionStamp,
+      visible
+    };
+  }
+  __name(beginDetailRequest, "beginDetailRequest");
+  function isLiveDetailRequest(request) {
+    return request.readerEpoch === readerEpoch && request.selectionEpoch === detailSelectionEpoch && request.visible === visibleGeneration && request.visible.changes.projectionStamp === request.projectionStamp;
+  }
+  __name(isLiveDetailRequest, "isLiveDetailRequest");
+  async function detailPostflight(request) {
+    const profile = decodeReaderProfile(await fetchJSON("/api/v2/profile"));
+    if (!isLiveDetailRequest(request)) return false;
+    if (!sameProfileGeneration(request.visible.profile, profile)) {
+      throw new Error("Change detail generation changed during staging");
+    }
+    return true;
+  }
+  __name(detailPostflight, "detailPostflight");
+  function mergeChangePages(current, next) {
+    const lastCurrent = current.changes.at(-1)?.changeId;
+    const firstNext = next.changes[0]?.changeId;
+    if (lastCurrent !== void 0 && firstNext !== void 0 && firstNext <= lastCurrent) {
+      throw new Error("Change continuation did not advance in server order");
+    }
+    const seen = new Set(current.changes.map((change) => change.changeId));
+    if (next.changes.some((change) => seen.has(change.changeId))) {
+      throw new Error("Change continuation repeated an emitted Change ID");
+    }
+    const changes = [...current.changes, ...next.changes].slice(
+      -MAX_LIVE_CHANGE_ROWS
+    );
+    const visibleIds = new Set(changes.map((change) => change.changeId));
+    const presentations = current.presentations !== void 0 && next.presentations !== void 0 ? Object.fromEntries(
+      Object.entries({
+        ...current.presentations,
+        ...next.presentations
+      }).filter(([changeId]) => visibleIds.has(changeId))
+    ) : void 0;
+    return {
+      ...next,
+      changes,
+      presentations
+    };
+  }
+  __name(mergeChangePages, "mergeChangePages");
+  function currentRevisionLabel(revision, presentation) {
+    const entry = presentation?.currentRevisions.find(
+      (candidate) => sameRevision(candidate.revision, revision)
+    );
+    if (entry?.summarySource === "revision_proposal_summary") {
+      return `Current Revision — proposal summary: ${entry.revisionProposalSummary ?? "absent"} · ${revision.revisionId}`;
+    }
+    return `Current Revision — summary absent · ${revision.revisionId}`;
+  }
+  __name(currentRevisionLabel, "currentRevisionLabel");
+  async function loadChangeDetail(change) {
+    const request = beginDetailRequest(change);
+    if (request === null) return;
+    try {
+      const detail = decodeChangeDetail(
+        await fetchJSON(`/api/v2/changes/${encodeURIComponent(change.changeId)}`)
+      );
+      if (!isLiveDetailRequest(request)) return;
       if (detail.summary.changeId !== change.changeId || detail.projectionStamp !== change.projectionStamp) {
         throw new Error("Change detail generation is stale; refresh and retry");
       }
-      const body = detailBody();
-      body.append(
+      if (!await detailPostflight(request)) return;
+      const content = [
         heading(change.changeId),
         line(`topology: ${words(detail.summary.topology)}`),
         line(`lifecycle: ${words(detail.summary.lifecycle)}`)
-      );
+      ];
       const relations = document.createElement("section");
       relations.append(heading("Relation claims", 3));
       for (const claim of detail.relationClaims) {
@@ -728,32 +1283,39 @@
       if (detail.relationClaims.length === 0) {
         relations.append(message("No relation claims."));
       }
-      body.append(relations);
+      content.push(relations);
+      publishDetail(request, content);
     } catch (error) {
+      if (!isLiveDetailRequest(request)) return;
       renderRefusal(error);
     }
   }
   __name(loadChangeDetail, "loadChangeDetail");
   async function loadRevisionDetail(change, revision) {
+    const request = beginDetailRequest(change);
+    if (request === null) return;
     try {
       const params = new URLSearchParams({
         artifactHash: revision.objectArtifactContentHash
       });
-      const detail = await fetchJSON(
-        `/api/v2/changes/${encodeURIComponent(change.changeId)}/revisions/${encodeURIComponent(revision.revisionId)}?${params}`
+      const detail = decodeChangeRevisionDetail(
+        await fetchJSON(
+          `/api/v2/changes/${encodeURIComponent(change.changeId)}/revisions/${encodeURIComponent(revision.revisionId)}?${params}`
+        )
       );
+      if (!isLiveDetailRequest(request)) return;
       if (detail.changeId !== change.changeId || !sameRevision(detail.revision, revision) || detail.projectionStamp !== change.projectionStamp || detail.associations.some(
         (association) => !sameRevision(association.comparison.revision, revision)
       )) {
         throw new Error("Revision detail generation is stale; refresh and retry");
       }
-      const body = detailBody();
-      body.append(
+      if (!await detailPostflight(request)) return;
+      const content = [
         heading(revision.revisionId),
         line(`currency: ${words(detail.revisionCurrency)}`),
         line(`relation: ${words(detail.relationClassification)}`),
         line(`captured resource: ${words(detail.availability)}`)
-      );
+      ];
       const facts = document.createElement("section");
       facts.append(heading("Facts", 3));
       for (const fact of detail.factPresentations) {
@@ -763,9 +1325,10 @@
           )
         );
       }
-      if (detail.factPresentations.length === 0)
+      if (detail.factPresentations.length === 0) {
         facts.append(message("No facts."));
-      body.append(facts);
+      }
+      content.push(facts);
       const associations = document.createElement("section");
       associations.append(heading("Association comparisons", 3));
       for (const association of detail.associations) {
@@ -778,7 +1341,7 @@
       if (detail.associations.length === 0) {
         associations.append(message("No association comparisons."));
       }
-      body.append(associations);
+      content.push(associations);
       const resource = document.createElement("button");
       resource.type = "button";
       resource.className = "ghost";
@@ -786,83 +1349,101 @@
       resource.addEventListener("click", () => {
         void loadRevisionResource(change, revision);
       });
-      body.append(resource);
+      content.push(resource);
+      publishDetail(request, content);
     } catch (error) {
+      if (!isLiveDetailRequest(request)) return;
       renderRefusal(error);
     }
   }
   __name(loadRevisionDetail, "loadRevisionDetail");
   async function loadRevisionResource(change, revision) {
+    const request = beginDetailRequest(change);
+    if (request === null) return;
     try {
       const params = new URLSearchParams({
         artifactHash: revision.objectArtifactContentHash
       });
-      const resource = await fetchJSON(
-        `/api/v2/changes/${encodeURIComponent(change.changeId)}/revisions/${encodeURIComponent(revision.revisionId)}/resource?${params}`
+      const resource = decodeRevisionResource(
+        await fetchJSON(
+          `/api/v2/changes/${encodeURIComponent(change.changeId)}/revisions/${encodeURIComponent(revision.revisionId)}/resource?${params}`
+        )
       );
+      if (!isLiveDetailRequest(request)) return;
       if (!sameRevision(resource.resource.revision, revision)) {
         throw new Error(
           "captured resource identity does not match its exact route"
         );
       }
-      const body = detailBody();
-      body.append(
+      if (!await detailPostflight(request)) return;
+      const content = [
         heading(`Captured resource · ${revision.revisionId}`),
         line(`availability: ${words(resource.availability)}`)
-      );
+      ];
       if (resource.capturedDocumentHash) {
-        body.append(line(`document hash: ${resource.capturedDocumentHash}`));
+        content.push(line(`document hash: ${resource.capturedDocumentHash}`));
       }
       if (resource.capturedDocument !== void 0) {
         const captured = document.createElement("pre");
         captured.textContent = JSON.stringify(resource.capturedDocument, null, 2);
-        body.append(captured);
+        content.push(captured);
       }
-      for (const diagnostic of resource.diagnostics)
-        body.append(line(diagnostic));
+      for (const diagnostic of resource.diagnostics) {
+        content.push(line(diagnostic));
+      }
+      publishDetail(request, content);
     } catch (error) {
+      if (!isLiveDetailRequest(request)) return;
       renderRefusal(error);
     }
   }
   __name(loadRevisionResource, "loadRevisionResource");
   async function loadInterdiff(change, from, to) {
+    const request = beginDetailRequest(change);
+    if (request === null) return;
     try {
       const params = new URLSearchParams({
         fromArtifactHash: from.objectArtifactContentHash,
         toArtifactHash: to.objectArtifactContentHash
       });
-      const interdiff = await fetchJSON(
-        `/api/v2/changes/${encodeURIComponent(change.changeId)}/interdiff/${encodeURIComponent(from.revisionId)}/${encodeURIComponent(to.revisionId)}?${params}`
+      const interdiff = decodeRevisionInterdiff(
+        await fetchJSON(
+          `/api/v2/changes/${encodeURIComponent(change.changeId)}/interdiff/${encodeURIComponent(from.revisionId)}/${encodeURIComponent(to.revisionId)}?${params}`
+        )
       );
+      if (!isLiveDetailRequest(request)) return;
       if (!sameRevision(interdiff.interdiff.from, from) || !sameRevision(interdiff.interdiff.to, to)) {
         throw new Error(
           "Revision interdiff identity does not match its exact route"
         );
       }
-      const body = detailBody();
-      body.append(
+      if (!await detailPostflight(request)) return;
+      const content = [
         heading(`Revision interdiff · ${from.revisionId} → ${to.revisionId}`),
         line(`availability: ${words(interdiff.availability)}`)
-      );
+      ];
       if (interdiff.comparison !== void 0) {
         const comparison = document.createElement("pre");
         comparison.textContent = JSON.stringify(interdiff.comparison, null, 2);
-        body.append(comparison);
+        content.push(comparison);
       }
-      for (const diagnostic of interdiff.diagnostics)
-        body.append(line(diagnostic));
+      for (const diagnostic of interdiff.diagnostics) {
+        content.push(line(diagnostic));
+      }
+      publishDetail(request, content);
     } catch (error) {
+      if (!isLiveDetailRequest(request)) return;
       renderRefusal(error);
     }
   }
   __name(loadInterdiff, "loadInterdiff");
-  function detailBody() {
+  function publishDetail(request, content) {
+    if (!isLiveDetailRequest(request)) return;
     const body = document.querySelector("#detail-body");
     if (!body) throw new Error("Inspector detail container is absent");
-    body.replaceChildren();
-    return body;
+    body.replaceChildren(...content);
   }
-  __name(detailBody, "detailBody");
+  __name(publishDetail, "publishDetail");
   function renderRefusal(error) {
     const text = error instanceof Error ? error.message : String(error);
     clearSemanticPresentation();
@@ -875,7 +1456,19 @@
     }
   }
   __name(renderRefusal, "renderRefusal");
+  function renderRestart(error) {
+    const text = error instanceof ChangePageFailure && error.code === "stale_projection" ? "Change page became stale; restarting from the first page." : "Change generation changed while loading; restarting from the first page.";
+    const banner = document.querySelector("#error");
+    if (banner) {
+      banner.textContent = text;
+      banner.classList.remove("hidden");
+    }
+  }
+  __name(renderRestart, "renderRestart");
   function clearSemanticPresentation() {
+    readerEpoch += 1;
+    detailSelectionEpoch += 1;
+    visibleGeneration = null;
     document.querySelector("#master")?.replaceChildren();
     document.querySelector("#detail-body")?.replaceChildren();
     for (const selector of [

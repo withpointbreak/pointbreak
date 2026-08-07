@@ -25,6 +25,17 @@ export class RequestFailure extends Error {
   }
 }
 
+/** A typed refusal from the bounded Change-page grammar. */
+export class ChangePageFailure extends RequestFailure {
+  constructor(
+    readonly code: "invalid_query" | "stale_projection",
+    status: number,
+  ) {
+    super("protocol", status);
+    this.name = "ChangePageFailure";
+  }
+}
+
 function failure(kind: RequestFailureKind, status?: number): RequestFailure {
   markRequestFailure(kind);
   return new RequestFailure(kind, status);
@@ -122,6 +133,31 @@ function hasPayloadError(data: unknown): boolean {
   );
 }
 
+function changePageFailure(
+  data: unknown,
+  status: number,
+): ChangePageFailure | null {
+  if (
+    typeof data !== "object" ||
+    data === null ||
+    (data as Record<string, unknown>).schema !==
+      "pointbreak.inspect-change-page-error" ||
+    (data as Record<string, unknown>).version !== 1
+  ) {
+    return null;
+  }
+  const code = (data as Record<string, unknown>).code;
+  if (code !== "invalid_query" && code !== "stale_projection") return null;
+  if (
+    (code === "invalid_query" && status !== 400) ||
+    (code === "stale_projection" && status !== 409)
+  ) {
+    return null;
+  }
+  markRequestFailure("protocol");
+  return new ChangePageFailure(code, status);
+}
+
 async function fetchOnce(
   path: string,
   method: "GET" | "POST",
@@ -150,12 +186,15 @@ async function fetchOnce(
   } catch {
     throw failure("protocol", response.status);
   }
-  if (!response.ok) throw failure("protocol", response.status);
-
   let data: unknown;
   try {
     data = JSON.parse(text);
   } catch {
+    throw failure("protocol", response.status);
+  }
+  if (!response.ok) {
+    const typed = changePageFailure(data, response.status);
+    if (typed !== null) throw typed;
     throw failure("protocol", response.status);
   }
   const expected = expectedDocument(path);

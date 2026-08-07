@@ -6,7 +6,7 @@ import {
   setSessionToken,
 } from "../src/auth";
 import { getConnectionSnapshot, resetConnectionState } from "../src/connection";
-import { fetchJSON, RequestFailure } from "../src/http";
+import { ChangePageFailure, fetchJSON, RequestFailure } from "../src/http";
 
 // `fetchJSON` is the fetch leaf. These tests drive it against a hand-stubbed
 // global `fetch` so the status / body / error-field combinations of its error
@@ -117,6 +117,45 @@ describe("fetchJSON", () => {
     stub(JSON.stringify({ data: 1 }), 500);
     const failure = await fetchJSON("/api/threads").catch((error) => error);
     expect(failure).toMatchObject({ kind: "protocol", status: 500 });
+  });
+
+  it("preserves a bounded Change-page stale refusal without exposing its message", async () => {
+    stub(
+      JSON.stringify({
+        schema: "pointbreak.inspect-change-page-error",
+        version: 1,
+        code: "stale_projection",
+        message: "opaque server detail",
+      }),
+      409,
+    );
+
+    const failure = await fetchJSON("/api/v2/changes?limit=50").catch(
+      (error) => error,
+    );
+
+    expect(failure).toBeInstanceOf(ChangePageFailure);
+    expect(failure).toMatchObject({ code: "stale_projection", status: 409 });
+    expect(String(failure)).not.toContain("opaque server detail");
+  });
+
+  it("does not treat a mismatched typed refusal status as restartable", async () => {
+    stub(
+      JSON.stringify({
+        schema: "pointbreak.inspect-change-page-error",
+        version: 1,
+        code: "stale_projection",
+        message: "not restartable at this status",
+      }),
+      400,
+    );
+
+    const failure = await fetchJSON("/api/v2/changes?limit=50").catch(
+      (error) => error,
+    );
+
+    expect(failure).toBeInstanceOf(RequestFailure);
+    expect(failure).not.toBeInstanceOf(ChangePageFailure);
   });
 
   it("classifies a wrong promoted schema as connected plus degraded", async () => {

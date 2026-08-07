@@ -51,6 +51,8 @@ use super::server::HighlightCache;
 pub(super) enum ChangeV2Json {
     Ok(String),
     Unavailable(String),
+    Invalid(String),
+    Stale(String),
 }
 
 pub(super) fn change_v2_profile_json(
@@ -66,29 +68,79 @@ pub(super) fn change_v2_profile_json(
 pub(super) fn changes_v2_json(
     repo: &Path,
     cache: &super::server::ChangeReaderCache,
+    query: Option<&str>,
+    signer: &super::change_page::PageTokenSigner,
 ) -> Result<ChangeV2Json, String> {
-    with_change_v2(repo, cache, |facade, _| {
-        serde_json::to_string(
-            &facade
-                .list_document_for_inspector_with_presentations()
-                .map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())
+    let request =
+        match super::change_page::parse_signed(super::change_page::Lens::Changes, query, signer) {
+            Ok(request) => request,
+            Err(error) => return Ok(ChangeV2Json::Invalid(page_error_json(error))),
+        };
+    with_change_v2_outcome(repo, cache, |facade, _| {
+        let document = facade
+            .list_document_for_inspector_with_presentations()
+            .map_err(|error| error.to_string())?;
+        paged_change_json(document, request, signer)
     })
 }
 
 pub(super) fn change_attention_v2_json(
     repo: &Path,
     cache: &super::server::ChangeReaderCache,
+    query: Option<&str>,
+    signer: &super::change_page::PageTokenSigner,
 ) -> Result<ChangeV2Json, String> {
-    with_change_v2(repo, cache, |facade, _| {
-        serde_json::to_string(
-            &facade
-                .attention_document_with_presentations(true)
-                .map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())
+    let request = match super::change_page::parse_signed(
+        super::change_page::Lens::Attention,
+        query,
+        signer,
+    ) {
+        Ok(request) => request,
+        Err(error) => return Ok(ChangeV2Json::Invalid(page_error_json(error))),
+    };
+    with_change_v2_outcome(repo, cache, |facade, _| {
+        let document = facade
+            .attention_document_with_presentations(true)
+            .map_err(|error| error.to_string())?;
+        paged_change_json(document, request, signer)
     })
+}
+
+fn paged_change_json(
+    document: impl Serialize,
+    request: super::change_page::Request,
+    signer: &super::change_page::PageTokenSigner,
+) -> Result<ChangeV2Json, String> {
+    match request {
+        super::change_page::Request::Bare => serde_json::to_string(&document)
+            .map(ChangeV2Json::Ok)
+            .map_err(|error| error.to_string()),
+        super::change_page::Request::Bounded(query) => {
+            let value = serde_json::to_value(document).map_err(|error| error.to_string())?;
+            match super::change_page::apply_signed(value, *query, signer) {
+                Ok(value) => serde_json::to_string(&value)
+                    .map(ChangeV2Json::Ok)
+                    .map_err(|error| error.to_string()),
+                Err(super::change_page::PageError::Invalid(message)) => Ok(ChangeV2Json::Invalid(
+                    page_error_json(super::change_page::PageError::Invalid(message)),
+                )),
+                Err(super::change_page::PageError::Stale) => Ok(ChangeV2Json::Stale(
+                    page_error_json(super::change_page::PageError::Stale),
+                )),
+            }
+        }
+    }
+}
+
+fn page_error_json(error: super::change_page::PageError) -> String {
+    let (code, message) = match error {
+        super::change_page::PageError::Invalid(message) => ("invalid_query", message),
+        super::change_page::PageError::Stale => (
+            "stale_projection",
+            "continuation belongs to a stale projection".to_owned(),
+        ),
+    };
+    serde_json::json!({"schema":"pointbreak.inspect-change-page-error","version":1,"code":code,"message":message}).to_string()
 }
 
 pub(super) fn change_detail_v2_json(
@@ -173,6 +225,19 @@ fn with_change_v2(
         &pointbreak::session::ChangeReaderReadyV1,
     ) -> Result<String, String>,
 ) -> Result<ChangeV2Json, String> {
+    with_change_v2_outcome(repo, cache, |facade, ready| {
+        build(facade, ready).map(ChangeV2Json::Ok)
+    })
+}
+
+fn with_change_v2_outcome(
+    repo: &Path,
+    cache: &super::server::ChangeReaderCache,
+    build: impl FnOnce(
+        &ChangeDocumentFacadeV1,
+        &pointbreak::session::ChangeReaderReadyV1,
+    ) -> Result<ChangeV2Json, String>,
+) -> Result<ChangeV2Json, String> {
     let state = cache.load(repo)?;
     if let Some(unavailable) = ChangeQueryUnavailableDocumentV1::for_inspection(&state.capability) {
         return serde_json::to_string(&unavailable)
@@ -183,7 +248,7 @@ fn with_change_v2(
         .ready()
         .ok_or_else(|| "Change reader state has no complete semantic projection".to_owned())?;
     let facade = ready.document_facade().map_err(|error| error.to_string())?;
-    build(&facade, ready).map(ChangeV2Json::Ok)
+    build(&facade, ready)
 }
 
 #[derive(Serialize)]
@@ -2570,6 +2635,27 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
+
+    #[test]
+    fn bare_change_page_serialization_is_byte_identical_and_omits_next() {
+        let document = serde_json::json!({
+            "schema": "pointbreak.inspect-changes-page",
+            "version": 1,
+            "changes": [],
+            "projectionStamp": "stamp"
+        });
+        let expected = serde_json::to_string(&document).unwrap();
+        let ChangeV2Json::Ok(actual) = paged_change_json(
+            &document,
+            super::super::change_page::Request::Bare,
+            &super::super::change_page::PageTokenSigner::from_seed([3_u8; 32]),
+        )
+        .unwrap() else {
+            panic!("bare document must remain an ordinary successful response")
+        };
+        assert_eq!(actual.as_bytes(), expected.as_bytes());
+        assert!(!actual.contains("\"next\""));
+    }
 
     #[test]
     fn default_off_new_count_wire_remains_byte_identical() {

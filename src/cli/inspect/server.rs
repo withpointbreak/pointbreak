@@ -115,6 +115,9 @@ pub(super) struct InspectState {
     /// marker. The mutex is also the rebuild permit: concurrent requests wait
     /// for one fold rather than multiplying decoded histories.
     pub change_reader_cache: ChangeReaderCache,
+    /// Ephemeral continuation-token authority, deliberately independent of the
+    /// browser bearer secret and never persisted beyond this Inspector process.
+    pub page_token_signer: super::change_page::PageTokenSigner,
     /// The eager cache warm is delayed until the first authenticated API request,
     /// so serving the recovery shell never opens the store.
     initial_warm_started: AtomicBool,
@@ -146,6 +149,8 @@ impl InspectState {
             history_cache: super::cache::HistoryProjectionCache::new(),
             snapshot_summaries: Arc::new(SnapshotSummaryCache::new()),
             change_reader_cache: ChangeReaderCache::new(),
+            page_token_signer: super::change_page::PageTokenSigner::generate()
+                .map_err(|error| error.to_string())?,
             initial_warm_started: AtomicBool::new(false),
             authoritative_fallback: AuthoritativeFallbackGate::new(),
         })
@@ -707,12 +712,19 @@ fn route(
         ));
     }
     if path == "/api/v2/changes" {
-        return change_v2_response(api::changes_v2_json(repo, &state.change_reader_cache));
+        return change_v2_response(api::changes_v2_json(
+            repo,
+            &state.change_reader_cache,
+            query,
+            &state.page_token_signer,
+        ));
     }
     if path == "/api/v2/attention" {
         return change_v2_response(api::change_attention_v2_json(
             repo,
             &state.change_reader_cache,
+            query,
+            &state.page_token_signer,
         ));
     }
     if path.starts_with("/api/v2/changes/") {
@@ -963,6 +975,16 @@ fn change_v2_response(result: Result<api::ChangeV2Json, String>) -> Response {
     match result {
         Ok(api::ChangeV2Json::Ok(body)) => Response::json_ok(body),
         Ok(api::ChangeV2Json::Unavailable(body)) => Response::new(
+            "409 Conflict",
+            "application/json; charset=utf-8",
+            body.into_bytes(),
+        ),
+        Ok(api::ChangeV2Json::Invalid(body)) => Response::new(
+            "400 Bad Request",
+            "application/json; charset=utf-8",
+            body.into_bytes(),
+        ),
+        Ok(api::ChangeV2Json::Stale(body)) => Response::new(
             "409 Conflict",
             "application/json; charset=utf-8",
             body.into_bytes(),
@@ -1357,6 +1379,45 @@ mod tests {
             InspectState::new_with_background_rebuild(repo.path().to_path_buf(), false).unwrap(),
         );
         route(&state, true, method, path, None)
+    }
+
+    fn route_for_query(path: &str, query: &str) -> Response {
+        let repo = tempfile::tempdir().expect("routing test repository");
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let state = Arc::new(
+            InspectState::new_with_background_rebuild(repo.path().to_path_buf(), false).unwrap(),
+        );
+        route(&state, true, "GET", path, Some(query))
+    }
+
+    #[test]
+    fn bounded_change_routes_share_typed_query_errors() {
+        for path in ["/api/v2/changes", "/api/v2/attention"] {
+            let response = route_for_query(path, "order=activity_desc");
+            assert_eq!(response.status, "400 Bad Request");
+            let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+            assert_eq!(body["schema"], "pointbreak.inspect-change-page-error");
+            assert_eq!(body["code"], "invalid_query");
+        }
+    }
+
+    #[test]
+    fn typed_page_outcomes_map_to_distinct_http_statuses() {
+        let invalid = change_v2_response(Ok(api::ChangeV2Json::Invalid(
+            "{\"code\":\"invalid_query\"}".to_owned(),
+        )));
+        let stale = change_v2_response(Ok(api::ChangeV2Json::Stale(
+            "{\"code\":\"stale_projection\"}".to_owned(),
+        )));
+        assert_eq!(invalid.status, "400 Bad Request");
+        assert_eq!(stale.status, "409 Conflict");
     }
 
     fn capability(
