@@ -338,7 +338,7 @@ mod tests {
 
     fn generated_change_reader_profile() -> Vec<u8> {
         let artifact = ChangeReaderProfileArtifact {
-            minimum_reader_profile: "review_change_revision_v1",
+            minimum_reader_profile: crate::session::BULK_ADOPTION_MINIMUM_READER_PROFILE_V1,
             documents: super::change_revision_document_registry()
                 .iter()
                 .copied()
