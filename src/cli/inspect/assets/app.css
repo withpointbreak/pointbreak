@@ -685,6 +685,11 @@ main { flex: 1 1 auto; min-height: 0; min-width: 0; display: flex; flex-directio
 .unit-card h3 { margin: 0 0 6px; font-size: var(--fs-md); font-family: var(--mono); }
 .unit-card .kv { display: grid; grid-template-columns: 110px 1fr; gap: 2px 10px; font-size: var(--fs-sm); font-family: var(--mono); color: var(--fg-dim); }
 .unit-card .kv b { color: var(--fg); font-weight: 500; }
+.change-card-badges { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 0 10px; }
+.change-card-peer { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.change-card-peer-open { color: var(--fg); font-size: var(--fs-md); font-weight: 500; text-align: left; }
+.change-card-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; color: var(--fg-dim); font-size: var(--fs-xs); }
+.change-card-actions code { color: var(--fg-dim); font-size: var(--fs-xs); font-weight: 400; overflow-wrap: anywhere; }
 .compact .tier-medium { display: none; }
 
 /* The attention lens: tiered cards over the outstanding review state. */

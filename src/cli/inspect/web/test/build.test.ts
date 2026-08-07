@@ -31,7 +31,7 @@ describe("the inspector bundle is the served-artifact shape", () => {
     expect(first).not.toMatch(/^export[ {]/m);
     // The entry invokes the profile-first bootstrap (keep-names preserves the
     // symbol; non-minified keeps newlines).
-    expect(first).toMatch(/\bbootstrapChangeReader\(\)/);
+    expect(first).toMatch(/\bbootstrapChangeInspector\(\)/);
     expect(first).toContain("\n");
   });
 });

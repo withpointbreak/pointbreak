@@ -82,7 +82,7 @@
     return `${cleaned}${separator}token=${encodeURIComponent(token)}`;
   }
   __name(routeWithToken, "routeWithToken");
-  function resolveReconnectInput(input, currentOrigin, currentRoute) {
+  function resolveReconnectInput(input, currentOrigin, currentRoute2) {
     const value = input.trim();
     if (!value) throw new Error("invalid capability URL");
     if (!/^[a-z][a-z0-9+.-]*:/i.test(value)) {
@@ -109,7 +109,7 @@
     }
     return {
       kind: "navigate",
-      url: `${url.origin}/${routeWithToken(currentRoute, extraction.token)}`
+      url: `${url.origin}/${routeWithToken(currentRoute2, extraction.token)}`
     };
   }
   __name(resolveReconnectInput, "resolveReconnectInput");
@@ -229,6 +229,787 @@
   }
   __name(promptForCredential, "promptForCredential");
 
+  // src/connection.ts
+  var snapshot = {
+    connection: "connecting",
+    refresh: "idle"
+  };
+  function connectionPresentation(state) {
+    const refreshLabel = state.refresh === "degraded" ? "response error" : state.refresh;
+    switch (state.connection) {
+      case "unauthorized":
+        return {
+          serverLabel: "local server",
+          connectionLabel: "authentication required",
+          refreshLabel,
+          action: "Reconnect",
+          canConnectAnother: false
+        };
+      case "unreachable":
+        return {
+          serverLabel: "local server",
+          connectionLabel: "server unavailable",
+          refreshLabel,
+          action: "Retry",
+          canConnectAnother: true
+        };
+      case "connected":
+        return {
+          serverLabel: "local server",
+          connectionLabel: "connected",
+          refreshLabel,
+          action: state.refresh === "degraded" ? "Retry" : null,
+          canConnectAnother: false
+        };
+      case "connecting":
+        return {
+          serverLabel: "local server",
+          connectionLabel: "connecting",
+          refreshLabel,
+          action: null,
+          canConnectAnother: false
+        };
+    }
+  }
+  __name(connectionPresentation, "connectionPresentation");
+  function markRequestSuccess() {
+    snapshot = {
+      connection: "connected",
+      refresh: snapshot.refresh
+    };
+    renderConnectionChrome();
+  }
+  __name(markRequestSuccess, "markRequestSuccess");
+  function markRequestFailure(kind) {
+    snapshot = kind === "protocol" ? { connection: "connected", refresh: "degraded" } : { ...snapshot, connection: kind };
+    renderConnectionChrome();
+  }
+  __name(markRequestFailure, "markRequestFailure");
+  var actions = null;
+  function configureConnectionActions(next) {
+    actions = next;
+  }
+  __name(configureConnectionActions, "configureConnectionActions");
+  function initConnectionControls() {
+    document.querySelector("#connection-action")?.addEventListener("click", () => {
+      if (!actions) return;
+      if (snapshot.connection === "unauthorized") void actions.reconnect();
+      else void actions.retry();
+    });
+    document.querySelector("#connect-another")?.addEventListener("click", () => {
+      if (actions) void actions.reconnect();
+    });
+    renderConnectionChrome();
+  }
+  __name(initConnectionControls, "initConnectionControls");
+  function renderConnectionChrome() {
+    const presentation = connectionPresentation(snapshot);
+    const root = document.querySelector("#store-identity");
+    root?.classList.remove("hidden");
+    const connection = document.querySelector("#connection-status");
+    if (connection) connection.textContent = presentation.connectionLabel;
+    const refresh = document.querySelector("#refresh-status");
+    if (refresh) refresh.textContent = presentation.refreshLabel;
+    const legacyRefresh = document.querySelector("#stat-live");
+    if (legacyRefresh) {
+      legacyRefresh.textContent = presentation.refreshLabel;
+      legacyRefresh.dataset.state = snapshot.refresh;
+    }
+    const dot = document.querySelector("#refresh");
+    if (dot) {
+      dot.dataset.connection = snapshot.connection;
+      dot.dataset.state = snapshot.refresh;
+      dot.title = `${presentation.connectionLabel}; refresh ${presentation.refreshLabel}`;
+    }
+    const action = document.querySelector("#connection-action");
+    if (action) {
+      action.textContent = presentation.action ?? "";
+      action.classList.toggle("hidden", presentation.action === null);
+    }
+    document.querySelector("#connect-another")?.classList.toggle("hidden", !presentation.canConnectAnother);
+    const word = document.querySelector("#refresh-word");
+    if (word) {
+      word.textContent = snapshot.connection === "unauthorized" ? "authentication required" : snapshot.connection === "unreachable" ? "server unavailable" : snapshot.refresh === "degraded" ? "response error" : "";
+    }
+  }
+  __name(renderConnectionChrome, "renderConnectionChrome");
+
+  // src/change-inspector-http.ts
+  var ChangeInspectorRequestFailure = class extends Error {
+    constructor(kind, status) {
+      super(
+        kind === "unauthorized" ? "authentication required" : kind === "unreachable" ? "server unavailable" : "server response error"
+      );
+      this.kind = kind;
+      this.status = status;
+    }
+    kind;
+    status;
+    static {
+      __name(this, "ChangeInspectorRequestFailure");
+    }
+  };
+  var ChangeInspectorPageFailure = class extends ChangeInspectorRequestFailure {
+    constructor(code, status) {
+      super("protocol", status);
+      this.code = code;
+    }
+    code;
+    static {
+      __name(this, "ChangeInspectorPageFailure");
+    }
+  };
+  function failure(kind, status) {
+    markRequestFailure(kind);
+    return new ChangeInspectorRequestFailure(kind, status);
+  }
+  __name(failure, "failure");
+  function typedPageFailure(value, status) {
+    if (typeof value !== "object" || value === null) return null;
+    const document2 = value;
+    if (document2.schema !== "pointbreak.inspect-change-page-error" || document2.version !== 1)
+      return null;
+    if (document2.code === "invalid_query" && status === 400)
+      return new ChangeInspectorPageFailure("invalid_query", status);
+    if (document2.code === "stale_projection" && status === 409)
+      return new ChangeInspectorPageFailure("stale_projection", status);
+    return null;
+  }
+  __name(typedPageFailure, "typedPageFailure");
+  async function fetchOnce(path) {
+    const headers = {};
+    const token = getSessionToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    let response;
+    try {
+      response = await fetch(path, {
+        method: "GET",
+        cache: "no-store",
+        credentials: "omit",
+        referrerPolicy: "no-referrer",
+        headers
+      });
+    } catch {
+      throw failure("unreachable");
+    }
+    if (response.status === 401)
+      throw new ChangeInspectorRequestFailure("unauthorized", 401);
+    let data;
+    try {
+      data = JSON.parse(await response.text());
+    } catch {
+      throw failure("protocol", response.status);
+    }
+    if (!response.ok)
+      throw typedPageFailure(data, response.status) ?? failure("protocol", response.status);
+    if (typeof data !== "object" || data === null || "error" in data && Boolean(data.error)) {
+      throw failure("protocol", response.status);
+    }
+    markRequestSuccess();
+    return data;
+  }
+  __name(fetchOnce, "fetchOnce");
+  async function fetchChangeInspectorJSON(path) {
+    const credentialVersion2 = sessionCredentialVersion();
+    try {
+      return await fetchOnce(path);
+    } catch (error) {
+      if (!(error instanceof ChangeInspectorRequestFailure) || error.kind !== "unauthorized")
+        throw error;
+    }
+    if (sessionCredentialVersion() !== credentialVersion2 || await recoverUnauthorized())
+      return fetchOnce(path);
+    throw failure("unauthorized", 401);
+  }
+  __name(fetchChangeInspectorJSON, "fetchChangeInspectorJSON");
+
+  // src/change-inspector-cards.ts
+  function words(value) {
+    return value.replaceAll("_", " ");
+  }
+  __name(words, "words");
+  function shortExact(revision) {
+    const revisionId = revision.revisionId.length > 24 ? `${revision.revisionId.slice(0, 24)}…` : revision.revisionId;
+    const artifact = revision.objectArtifactContentHash.length > 18 ? `${revision.objectArtifactContentHash.slice(0, 18)}…` : revision.objectArtifactContentHash;
+    return `${revisionId} · ${artifact}`;
+  }
+  __name(shortExact, "shortExact");
+  function changeCardPresentation(summary, presentation) {
+    const byExactIdentity = new Map(
+      (presentation?.currentRevisions ?? []).map((entry) => [
+        `${entry.revision.revisionId}\0${entry.revision.objectArtifactContentHash}`,
+        entry
+      ])
+    );
+    return {
+      changeId: summary.changeId,
+      badges: [
+        summary.topology,
+        summary.lifecycle,
+        summary.attentionSummary,
+        summary.availabilitySummary
+      ].map(words),
+      peers: summary.currentRevisionRefs.map((revision) => {
+        const entry = byExactIdentity.get(
+          `${revision.revisionId}\0${revision.objectArtifactContentHash}`
+        );
+        const summaryLabel = entry?.summarySource === "revision_proposal_summary" ? entry.revisionProposalSummary : void 0;
+        return {
+          revision,
+          label: summaryLabel ? `Current Revision — ${summaryLabel}` : `Current Revision — ${shortExact(revision)}`,
+          copyText: `${revision.revisionId} ${revision.objectArtifactContentHash}`
+        };
+      })
+    };
+  }
+  __name(changeCardPresentation, "changeCardPresentation");
+
+  // src/change-inspector-router.ts
+  var QUERY_KEYS = [
+    "q",
+    "topology",
+    "lifecycle",
+    "attention",
+    "availability",
+    "after",
+    "limit",
+    "order"
+  ];
+  var ROUTE_QUERY_KEYS = /* @__PURE__ */ new Set([...QUERY_KEYS, "artifactHash"]);
+  function decodeSegment(value) {
+    try {
+      const decoded2 = decodeURIComponent(value);
+      return decoded2.length > 0 ? decoded2 : null;
+    } catch {
+      return null;
+    }
+  }
+  __name(decodeSegment, "decodeSegment");
+  function validQueryEncoding(search) {
+    if (!search) return true;
+    return search.split("&").every((component) => {
+      if (!component) return false;
+      const separator = component.indexOf("=");
+      const key = separator === -1 ? component : component.slice(0, separator);
+      const value = separator === -1 ? "" : component.slice(separator + 1);
+      try {
+        decodeURIComponent(key.replaceAll("+", " "));
+        decodeURIComponent(value.replaceAll("+", " "));
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  }
+  __name(validQueryEncoding, "validQueryEncoding");
+  function parseQuery(search) {
+    if (!validQueryEncoding(search)) {
+      return { message: "Malformed route query encoding." };
+    }
+    const params = new URLSearchParams(search);
+    const query = {};
+    for (const key of params.keys()) {
+      if (!ROUTE_QUERY_KEYS.has(key)) {
+        return { message: `Unknown ${key} route query.` };
+      }
+    }
+    for (const key of QUERY_KEYS) {
+      const values = params.getAll(key);
+      if (values.length > 1) return { message: `Duplicate ${key} route query.` };
+      const value = values[0];
+      if (value === void 0) continue;
+      if (key === "limit") {
+        const limit = Number(value);
+        if (!Number.isInteger(limit))
+          return { message: "Invalid limit route query." };
+        query.limit = limit;
+      } else if (key === "order") {
+        if (value !== "change_id_asc") {
+          return { message: "Invalid order route query." };
+        }
+        query.order = value;
+      } else {
+        query[key] = value;
+      }
+    }
+    return { query, artifactHashes: params.getAll("artifactHash") };
+  }
+  __name(parseQuery, "parseQuery");
+  function isParseError(value) {
+    return "message" in value;
+  }
+  __name(isParseError, "isParseError");
+  function parseChangeInspectorRoute(hash) {
+    const raw = hash.startsWith("#") ? hash.slice(1) : hash;
+    const separator = raw.indexOf("?");
+    const path = separator === -1 ? raw : raw.slice(0, separator);
+    const search = separator === -1 ? "" : raw.slice(separator + 1);
+    const parsed = parseQuery(search);
+    if (isParseError(parsed)) return { kind: "invalid", message: parsed.message };
+    const { query, artifactHashes } = parsed;
+    const segments = path.split("/").filter(Boolean);
+    if (segments.length === 1 && (segments[0] === "changes" || segments[0] === "attention")) {
+      if (artifactHashes.length > 0) {
+        return {
+          kind: "invalid",
+          message: "artifactHash is only valid on an exact Revision route."
+        };
+      }
+      return { kind: "lens", lens: segments[0], query };
+    }
+    if (segments[0] !== "changes")
+      return { kind: "invalid", message: "Unknown Change Inspector route." };
+    const changeId = decodeSegment(segments[1] ?? "");
+    if (changeId === null)
+      return { kind: "invalid", message: "Change routes require a Change ID." };
+    if (segments.length === 2) {
+      if (artifactHashes.length > 0) {
+        return {
+          kind: "invalid",
+          message: "artifactHash is only valid on an exact Revision route."
+        };
+      }
+      return { kind: "change", changeId, query };
+    }
+    if (segments.length !== 4 || segments[2] !== "revisions") {
+      return { kind: "invalid", message: "Unknown Change Inspector route." };
+    }
+    const revisionId = decodeSegment(segments[3]);
+    if (revisionId === null)
+      return {
+        kind: "invalid",
+        message: "Revision routes require a Revision ID."
+      };
+    if (artifactHashes.length !== 1 || !artifactHashes[0])
+      return {
+        kind: "invalid",
+        message: artifactHashes.length > 1 ? "Exact Revision routes require exactly one artifactHash." : "Exact Revision routes require artifactHash."
+      };
+    return {
+      kind: "revision",
+      changeId,
+      revision: {
+        revisionId,
+        objectArtifactContentHash: artifactHashes[0]
+      },
+      query
+    };
+  }
+  __name(parseChangeInspectorRoute, "parseChangeInspectorRoute");
+  function appendQuery(query, params) {
+    for (const key of QUERY_KEYS) {
+      const value = query[key];
+      if (value !== void 0) params.set(key, String(value));
+    }
+  }
+  __name(appendQuery, "appendQuery");
+  function formatChangeInspectorRoute(route) {
+    const params = new URLSearchParams();
+    appendQuery(route.query, params);
+    if (route.kind === "revision")
+      params.set("artifactHash", route.revision.objectArtifactContentHash);
+    const suffix = params.size ? `?${params}` : "";
+    if (route.kind === "lens") return `#/${route.lens}${suffix}`;
+    const change = encodeURIComponent(route.changeId);
+    if (route.kind === "change") return `#/changes/${change}${suffix}`;
+    return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}${suffix}`;
+  }
+  __name(formatChangeInspectorRoute, "formatChangeInspectorRoute");
+  function lensForRoute(route) {
+    return route.kind === "lens" ? route.lens : "changes";
+  }
+  __name(lensForRoute, "lensForRoute");
+
+  // src/change-inspector-render.ts
+  var FILTER_OPTIONS = [
+    [
+      "topology",
+      [
+        "initial",
+        "replacement",
+        "replacement_divergent",
+        "consolidation",
+        "parallel_current",
+        "mixed",
+        "incomplete",
+        "cycle_conflicted"
+      ]
+    ],
+    ["lifecycle", ["incomplete", "conflicted", "in_progress", "accepted"]],
+    ["attention", ["clear", "in_progress", "incomplete", "conflicted"]],
+    ["availability", ["available", "incomplete"]]
+  ];
+  function message(text) {
+    const element = document.createElement("p");
+    element.className = "empty";
+    element.textContent = text;
+    return element;
+  }
+  __name(message, "message");
+  function setText(selector, value) {
+    const element = document.querySelector(selector);
+    if (element) element.textContent = value;
+  }
+  __name(setText, "setText");
+  function prepareChangeInspectorShell(actions2) {
+    document.querySelector("#view-controls")?.classList.add("hidden");
+    document.querySelector("#derived-access-status")?.classList.add("hidden");
+    document.querySelector("#follow-toggle")?.classList.add("hidden");
+    const switcher = document.querySelector("#lens-switcher");
+    if (switcher) {
+      switcher.replaceChildren();
+      for (const lens of ["changes", "attention"]) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "lens-tab";
+        button.dataset.lens = lens;
+        button.textContent = lens === "changes" ? "Changes" : "Attention";
+        button.addEventListener(
+          "click",
+          () => actions2.navigate({ kind: "lens", lens, query: {} })
+        );
+        switcher.append(button);
+      }
+    }
+    const back = document.querySelector("#detail-back");
+    if (back) {
+      back.textContent = "‹ Changes";
+      back.onclick = () => actions2.navigate({ kind: "lens", lens: "changes", query: {} });
+    }
+    const search = document.querySelector("#filter-text");
+    if (search) search.placeholder = "Search Changes and current Revisions";
+    const filterTypes = document.querySelector("#filter-types");
+    if (filterTypes) {
+      filterTypes.replaceChildren();
+      const heading = document.createElement("h2");
+      heading.id = "filter-types-label";
+      heading.className = "control-heading";
+      heading.textContent = "Change status";
+      filterTypes.append(heading);
+      for (const [name, values] of FILTER_OPTIONS) {
+        const label = document.createElement("label");
+        label.textContent = name.replaceAll("_", " ");
+        const select = document.createElement("select");
+        select.id = `change-filter-${name}`;
+        for (const [labelText, value] of [
+          ["Any", ""],
+          ...values.map((value2) => [value2.replaceAll("_", " "), value2])
+        ]) {
+          const option = document.createElement("option");
+          option.textContent = labelText;
+          option.value = value;
+          select.append(option);
+        }
+        select.addEventListener("change", () => {
+          const current = parseChangeInspectorRoute(location.hash || "#/changes");
+          const base = current.kind === "invalid" ? { kind: "lens", lens: "changes", query: {} } : current;
+          actions2.navigate({
+            ...base,
+            query: {
+              ...base.query,
+              after: void 0,
+              [name]: select.value || void 0
+            }
+          });
+        });
+        label.append(select);
+        filterTypes.append(label);
+      }
+    }
+    const clear = document.querySelector("#filter-clear");
+    if (clear) {
+      clear.onclick = () => {
+        const current = parseChangeInspectorRoute(location.hash || "#/changes");
+        const base = current.kind === "invalid" ? { kind: "lens", lens: "changes", query: {} } : current;
+        actions2.navigate({
+          ...base,
+          query: {}
+        });
+      };
+    }
+  }
+  __name(prepareChangeInspectorShell, "prepareChangeInspectorShell");
+  function copyExact(value) {
+    if (navigator.clipboard) void navigator.clipboard.writeText(value);
+  }
+  __name(copyExact, "copyExact");
+  function clearError() {
+    const banner = document.querySelector("#error");
+    if (!banner) return;
+    banner.textContent = "";
+    banner.classList.add("hidden");
+  }
+  __name(clearError, "clearError");
+  function filterValues(query) {
+    const values = [];
+    if (query.q) values.push(["search", query.q]);
+    for (const [name] of FILTER_OPTIONS) {
+      const value = query[name];
+      if (value) values.push([name, value]);
+    }
+    return values;
+  }
+  __name(filterValues, "filterValues");
+  function syncFilterChrome(route) {
+    if (route.kind === "invalid") return;
+    const input = document.querySelector("#filter-text");
+    if (input) input.value = route.query.q ?? "";
+    for (const [name] of FILTER_OPTIONS) {
+      const select = document.querySelector(
+        `#change-filter-${name}`
+      );
+      if (select) select.value = route.query[name] ?? "";
+    }
+    const values = filterValues(route.query);
+    const chips = document.querySelector("#filter-chips");
+    if (chips) {
+      chips.replaceChildren(
+        ...values.map(([name, value]) => {
+          const chip = document.createElement("span");
+          chip.className = "badge";
+          chip.textContent = `${name}: ${value.replaceAll("_", " ")}`;
+          return chip;
+        })
+      );
+    }
+    document.querySelector("#filter-chips-empty")?.classList.toggle("hidden", values.length > 0);
+    const toggle = document.querySelector("#filters-toggle");
+    if (toggle)
+      toggle.textContent = values.length ? `Filters · ${values.length}` : "Filters";
+  }
+  __name(syncFilterChrome, "syncFilterChrome");
+  function renderDetail(snapshot2, actions2) {
+    const detail = document.querySelector("#detail-body");
+    if (!detail) return;
+    if (snapshot2.route.kind === "invalid") {
+      detail.replaceChildren(message(snapshot2.route.message));
+      return;
+    }
+    if (snapshot2.diagnostic) {
+      detail.replaceChildren(message(snapshot2.diagnostic));
+      return;
+    }
+    if (snapshot2.route.kind === "lens" || snapshot2.generation === null) {
+      detail.replaceChildren(message("Select a Change or exact Revision."));
+      return;
+    }
+    const heading = document.createElement("h2");
+    heading.textContent = snapshot2.route.kind === "change" ? "Change" : "Exact Revision";
+    const identity = document.createElement("p");
+    identity.className = "mono";
+    identity.textContent = snapshot2.route.kind === "change" ? `Change ID: ${snapshot2.route.changeId}` : `Revision ID: ${snapshot2.route.revision.revisionId} · artifact hash: ${snapshot2.route.revision.objectArtifactContentHash}`;
+    const placeholder = message(
+      snapshot2.route.kind === "change" ? "Select an explicit current Revision to inspect its exact context." : "Exact Revision selected. Rich facts and captured resources load in the next Inspector slice."
+    );
+    const copyLink = document.createElement("button");
+    copyLink.type = "button";
+    copyLink.className = "ghost";
+    copyLink.textContent = "Copy link";
+    copyLink.addEventListener("click", () => copyExact(location.href));
+    const peers = document.createElement("section");
+    if (snapshot2.route.kind === "change" && snapshot2.selected !== null) {
+      const changeRoute = snapshot2.route;
+      const peerHeading = document.createElement("h3");
+      peerHeading.textContent = "Current Revisions";
+      peers.append(peerHeading);
+      for (const revision of snapshot2.selected.currentRevisionRefs) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "ghost mono";
+        button.textContent = revision.revisionId;
+        button.addEventListener(
+          "click",
+          () => actions2.navigate({
+            kind: "revision",
+            changeId: changeRoute.changeId,
+            revision,
+            query: changeRoute.query
+          })
+        );
+        peers.append(button);
+      }
+    }
+    detail.replaceChildren(heading, identity, copyLink, placeholder, peers);
+  }
+  __name(renderDetail, "renderDetail");
+  function renderChangeInspector(snapshot2, actions2) {
+    const master = document.querySelector("#master");
+    if (!master) return;
+    const routeDiagnostic = document.querySelector("#route-diagnostic");
+    if (routeDiagnostic) {
+      routeDiagnostic.textContent = snapshot2.diagnostic ?? "";
+      routeDiagnostic.classList.toggle("hidden", snapshot2.diagnostic === null);
+    }
+    syncFilterChrome(snapshot2.route);
+    clearError();
+    if (snapshot2.route.kind === "invalid") {
+      master.replaceChildren(message("Cannot open this Inspector link."));
+      renderDetail(snapshot2, actions2);
+      return;
+    }
+    const route = snapshot2.route;
+    if (snapshot2.generation === null) {
+      master.replaceChildren(message("Loading Change generation…"));
+      renderDetail(snapshot2, actions2);
+      return;
+    }
+    const lens = lensForRoute(route);
+    const page = lens === "changes" ? snapshot2.generation.changes : snapshot2.generation.attention;
+    const list = document.createElement("section");
+    list.className = "units";
+    const heading = document.createElement("h1");
+    heading.textContent = `${lens === "changes" ? "Changes" : "Attention"} · ${page.changes.length}`;
+    list.append(heading);
+    for (const summary of page.changes) {
+      const card = changeCardPresentation(
+        summary,
+        page.presentations?.[summary.changeId]
+      );
+      const element = document.createElement("article");
+      element.className = "unit-card";
+      element.dataset.changeId = summary.changeId;
+      const badges = document.createElement("p");
+      badges.className = "change-card-badges";
+      for (const value of card.badges) {
+        const badge = document.createElement("span");
+        badge.className = "badge";
+        badge.textContent = value;
+        badges.append(badge, " ");
+      }
+      element.append(badges);
+      if (card.peers.length === 0) {
+        const unavailable = document.createElement("h3");
+        unavailable.textContent = "Current Revision unavailable";
+        element.append(unavailable);
+      } else if (card.peers.length > 1) {
+        const peerHeading = document.createElement("h3");
+        peerHeading.textContent = "Current Revisions";
+        element.append(peerHeading);
+      }
+      for (const peer of card.peers) {
+        const peerRow = document.createElement("div");
+        peerRow.className = "change-card-peer";
+        const choose = document.createElement("button");
+        choose.type = "button";
+        choose.className = "ghost change-card-peer-open";
+        choose.textContent = peer.label;
+        choose.title = peer.copyText;
+        choose.addEventListener(
+          "click",
+          () => actions2.navigate({
+            kind: "revision",
+            changeId: summary.changeId,
+            revision: peer.revision,
+            query: route.query
+          })
+        );
+        const copyPeer = document.createElement("button");
+        copyPeer.type = "button";
+        copyPeer.className = "ghost";
+        copyPeer.textContent = "Copy exact Revision";
+        copyPeer.addEventListener("click", () => copyExact(peer.copyText));
+        peerRow.append(choose, copyPeer);
+        element.append(peerRow);
+      }
+      const actionsElement = document.createElement("div");
+      actionsElement.className = "actions change-card-actions";
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "ghost";
+      open.textContent = "Open Change";
+      open.addEventListener(
+        "click",
+        () => actions2.navigate({
+          kind: "change",
+          changeId: summary.changeId,
+          query: route.query
+        })
+      );
+      const changeIdentity = document.createElement("code");
+      changeIdentity.className = "mono";
+      changeIdentity.textContent = summary.changeId;
+      const copyChange = document.createElement("button");
+      copyChange.type = "button";
+      copyChange.className = "ghost";
+      copyChange.textContent = "Copy Change ID";
+      copyChange.addEventListener("click", () => copyExact(summary.changeId));
+      actionsElement.append(open, changeIdentity, copyChange);
+      element.append(actionsElement);
+      list.append(element);
+    }
+    if (page.changes.length === 0)
+      list.append(
+        message(
+          lens === "changes" ? "No Changes." : "No Changes need attention."
+        )
+      );
+    const nextPage = page.next;
+    if (nextPage !== null) {
+      const next = document.createElement("button");
+      next.type = "button";
+      next.className = "ghost";
+      next.textContent = "Next page";
+      next.addEventListener(
+        "click",
+        () => actions2.navigate({
+          kind: "lens",
+          lens,
+          query: {
+            ...route.query,
+            after: nextPage
+          }
+        })
+      );
+      list.append(next);
+    }
+    master.replaceChildren(list);
+    document.querySelectorAll("#lens-switcher [data-lens]").forEach((button) => {
+      button.setAttribute("aria-pressed", String(button.dataset.lens === lens));
+    });
+    setText(
+      "#stat-events",
+      `${snapshot2.generation.profile.authorityCursor.eventCount ?? "—"} events`
+    );
+    setText(
+      "#stat-units",
+      `${snapshot2.generation.changes.changes.length} Changes`
+    );
+    setText(
+      "#stat-threads",
+      `${snapshot2.generation.attention.changes.length} need attention`
+    );
+    setText("#stat-hash", snapshot2.generation.changes.projectionStamp);
+    renderDetail(snapshot2, actions2);
+  }
+  __name(renderChangeInspector, "renderChangeInspector");
+  function renderChangeInspectorUnavailable(availability) {
+    clearError();
+    const master = document.querySelector("#master");
+    master?.replaceChildren(
+      message(
+        availability === "migration_required" ? "Store migration required. No Change state was loaded." : "Store migration in progress. Partial Change state is unavailable."
+      )
+    );
+    document.querySelector("#detail-body")?.replaceChildren(message("Change state is unavailable."));
+  }
+  __name(renderChangeInspectorUnavailable, "renderChangeInspectorUnavailable");
+  function renderChangeInspectorRefusal(error) {
+    const text = error instanceof Error ? error.message : String(error);
+    document.querySelector("#master")?.replaceChildren(message(`Reader refused: ${text}`));
+    document.querySelector("#detail-body")?.replaceChildren(message("Change state was not published."));
+    const diagnostic = document.querySelector("#route-diagnostic");
+    if (diagnostic) {
+      diagnostic.textContent = "";
+      diagnostic.classList.add("hidden");
+    }
+    const banner = document.querySelector("#error");
+    if (banner) {
+      banner.textContent = `error: ${text}`;
+      banner.classList.remove("hidden");
+    }
+  }
+  __name(renderChangeInspectorRefusal, "renderChangeInspectorRefusal");
+
   // ../../../documents/change_reader_profile_v1.json
   var change_reader_profile_v1_default = {
     minimumReaderProfile: "review_change_revision_v1",
@@ -252,7 +1033,6 @@
 
   // src/change-protocol.ts
   var CHANGE_PAGE_LIMIT = 50;
-  var MAX_LIVE_CHANGE_ROWS = 150;
   var CHANGE_READER_PROFILE = change_reader_profile_v1_default.minimumReaderProfile;
   var CHANGE_READER_DOCUMENTS = change_reader_profile_v1_default.documents;
   var TOPOLOGY_VALUES = /* @__PURE__ */ new Set([
@@ -278,132 +1058,6 @@
     "conflicted"
   ]);
   var AVAILABILITY_VALUES = /* @__PURE__ */ new Set(["available", "incomplete"]);
-  var CONTENT_AVAILABILITY_VALUES = /* @__PURE__ */ new Set([
-    "available",
-    "removed",
-    "missing",
-    "mismatch",
-    "non_textual"
-  ]);
-  var REVISION_CURRENCY_VALUES = /* @__PURE__ */ new Set([
-    "current",
-    "stale_by_supersession",
-    "membership_incomplete",
-    "membership_conflicted"
-  ]);
-  var FACT_FAMILY_STATE_VALUES = /* @__PURE__ */ new Set([
-    "current",
-    "stale",
-    "withdrawn",
-    "conflicted",
-    "unavailable"
-  ]);
-  var ASSOCIATION_STATE_VALUES = /* @__PURE__ */ new Set([
-    "unknown",
-    "exact",
-    "equivalent",
-    "extension",
-    "unavailable"
-  ]);
-  var ASSOCIATION_PROOF_VALUES = /* @__PURE__ */ new Set([
-    "available",
-    "missing",
-    "mismatch",
-    "not_requested"
-  ]);
-  var INTERDIFF_AVAILABILITY_VALUES = /* @__PURE__ */ new Set([
-    "available",
-    "unavailable",
-    "endpoint_missing",
-    "endpoint_mismatch",
-    "non_textual"
-  ]);
-  function decodeChangeDetail(value) {
-    const detail = object(value, "Change detail");
-    const summary = detail.summary;
-    const stamp = detail.projectionStamp;
-    const relationClaims = detail.relationClaims;
-    const diagnostics = detail.diagnostics;
-    if (detail.schema !== "pointbreak.review-change" || detail.version !== 1 || !nonEmptyString(stamp) || !isChangeSummary(summary, stamp) || !Array.isArray(relationClaims) || !relationClaims.every(isRelationClaim) || !isStringArray(diagnostics)) {
-      throw new Error("invalid Change detail DTO");
-    }
-    return {
-      schema: "pointbreak.review-change",
-      version: 1,
-      summary,
-      relationClaims,
-      diagnostics,
-      projectionStamp: stamp
-    };
-  }
-  __name(decodeChangeDetail, "decodeChangeDetail");
-  function decodeChangeRevisionDetail(value) {
-    const detail = object(value, "Change Revision detail");
-    const revision = detail.revision;
-    const factPresentations = detail.factPresentations;
-    const factContentPresentations = detail.factContentPresentations;
-    const associations = detail.associations;
-    const diagnostics = detail.diagnostics;
-    const revisionCurrency = detail.revisionCurrency;
-    const relationClassification = detail.relationClassification;
-    const availability = detail.availability;
-    if (detail.schema !== "pointbreak.review-change-revision" || detail.version !== 1 || !nonEmptyString(detail.changeId) || !isRevisionRef(revision) || typeof revisionCurrency !== "string" || !REVISION_CURRENCY_VALUES.has(revisionCurrency) || relationClassification !== "current" && relationClassification !== "superseded" || typeof availability !== "string" || !CONTENT_AVAILABILITY_VALUES.has(availability) || !Array.isArray(factPresentations) || !factPresentations.every(isFactPresentation) || factContentPresentations !== void 0 && !isFactContentPresentations(factContentPresentations) || !Array.isArray(associations) || !associations.every(isAssociation) || !isStringArray(diagnostics) || !nonEmptyString(detail.projectionStamp)) {
-      throw new Error("invalid Change Revision detail DTO");
-    }
-    return {
-      schema: "pointbreak.review-change-revision",
-      version: 1,
-      changeId: detail.changeId,
-      revision,
-      revisionCurrency,
-      relationClassification,
-      availability,
-      factPresentations,
-      factContentPresentations,
-      associations,
-      diagnostics,
-      projectionStamp: detail.projectionStamp
-    };
-  }
-  __name(decodeChangeRevisionDetail, "decodeChangeRevisionDetail");
-  function decodeRevisionResource(value) {
-    const document2 = object(value, "Revision resource");
-    const resource = document2.resource;
-    const diagnostics = document2.diagnostics;
-    const availability = document2.availability;
-    const capturedDocumentHash = document2.capturedDocumentHash;
-    if (document2.schema !== "pointbreak.review-revision-resource" || document2.version !== 1 || !isRecord(resource) || !isRevisionRef(resource.revision) || !nonEmptyString(resource.objectId) || !isOneOf(availability, CONTENT_AVAILABILITY_VALUES) || capturedDocumentHash !== void 0 && !nonEmptyString(capturedDocumentHash) || availability === "available" !== (capturedDocumentHash !== void 0 && document2.capturedDocument !== void 0) || !isStringArray(diagnostics)) {
-      throw new Error("invalid Revision resource DTO");
-    }
-    return {
-      schema: "pointbreak.review-revision-resource",
-      version: 1,
-      resource: { revision: resource.revision, objectId: resource.objectId },
-      availability,
-      capturedDocumentHash,
-      capturedDocument: document2.capturedDocument,
-      diagnostics
-    };
-  }
-  __name(decodeRevisionResource, "decodeRevisionResource");
-  function decodeRevisionInterdiff(value) {
-    const document2 = object(value, "Revision interdiff");
-    const interdiff = document2.interdiff;
-    const diagnostics = document2.diagnostics;
-    const availability = document2.availability;
-    if (document2.schema !== "pointbreak.review-revision-interdiff" || document2.version !== 1 || !isRecord(interdiff) || !isRevisionRef(interdiff.from) || !isRevisionRef(interdiff.to) || !isOneOf(availability, INTERDIFF_AVAILABILITY_VALUES) || !isStringArray(diagnostics) || availability === "available" !== (document2.comparison !== void 0)) {
-      throw new Error("invalid Revision interdiff DTO");
-    }
-    return {
-      schema: "pointbreak.review-revision-interdiff",
-      version: 1,
-      interdiff: { from: interdiff.from, to: interdiff.to },
-      availability,
-      comparison: document2.comparison,
-      diagnostics
-    };
-  }
-  __name(decodeRevisionInterdiff, "decodeRevisionInterdiff");
   function buildChangePageUrl(lens, query = {}) {
     const limit = query.limit ?? CHANGE_PAGE_LIMIT;
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
@@ -431,6 +1085,9 @@
     appendEnum(params, "lifecycle", query.lifecycle, LIFECYCLE_VALUES);
     appendEnum(params, "attention", query.attention, ATTENTION_VALUES);
     appendEnum(params, "availability", query.availability, AVAILABILITY_VALUES);
+    if (query.order !== void 0 && query.order !== "change_id_asc") {
+      throw new Error("Change page order must be change_id_asc");
+    }
     params.set("order", "change_id_asc");
     return `/api/v2/${lens}?${params}`;
   }
@@ -560,28 +1217,6 @@
     );
   }
   __name(uniqueRevisionKeys, "uniqueRevisionKeys");
-  function isClaimSupport(value) {
-    return isRecord(value) && nonEmptyString(value.actorId) && nonEmptyString(value.eventId);
-  }
-  __name(isClaimSupport, "isClaimSupport");
-  function isRelationClaim(value) {
-    return isRecord(value) && nonEmptyString(value.claimId) && typeof value.active === "boolean" && isRevisionRef(value.successor) && isRevisionRef(value.predecessor) && Array.isArray(value.supports) && value.supports.every(isClaimSupport) && Array.isArray(value.withdrawals) && value.withdrawals.every(isClaimSupport);
-  }
-  __name(isRelationClaim, "isRelationClaim");
-  function isFactPresentation(value) {
-    return isRecord(value) && nonEmptyString(value.factId) && nonEmptyString(value.family) && isRevisionRef(value.originRevision) && isOneOf(value.revisionCurrency, REVISION_CURRENCY_VALUES) && isOneOf(value.familyState, FACT_FAMILY_STATE_VALUES) && isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES);
-  }
-  __name(isFactPresentation, "isFactPresentation");
-  function isFactContentPresentations(value) {
-    return isRecord(value) && Object.values(value).every(
-      (presentation) => isRecord(presentation) && (presentation.contentType === "text/plain" || presentation.contentType === "text/markdown") && (presentation.bodyContentState === "present" || presentation.bodyContentState === "suppressed_present" || presentation.bodyContentState === "physically_removed") && isRecord(presentation.content)
-    );
-  }
-  __name(isFactContentPresentations, "isFactContentPresentations");
-  function isAssociation(value) {
-    return isRecord(value) && isOneOf(value.state, ASSOCIATION_STATE_VALUES) && isOneOf(value.proofAvailability, ASSOCIATION_PROOF_VALUES) && isRecord(value.comparison) && isRevisionRef(value.comparison.revision) && nonEmptyString(value.comparison.commitOid);
-  }
-  __name(isAssociation, "isAssociation");
   function isStrictlyAscending(values) {
     return values.every((value, index) => {
       const previous = values[index - 1];
@@ -635,893 +1270,296 @@
   }
   __name(isStringArray, "isStringArray");
 
-  // src/connection.ts
-  var snapshot = {
-    connection: "connecting",
-    refresh: "idle"
-  };
-  function connectionPresentation(state) {
-    const refreshLabel = state.refresh === "degraded" ? "response error" : state.refresh;
-    switch (state.connection) {
-      case "unauthorized":
-        return {
-          serverLabel: "local server",
-          connectionLabel: "authentication required",
-          refreshLabel,
-          action: "Reconnect",
-          canConnectAnother: false
-        };
-      case "unreachable":
-        return {
-          serverLabel: "local server",
-          connectionLabel: "server unavailable",
-          refreshLabel,
-          action: "Retry",
-          canConnectAnother: true
-        };
-      case "connected":
-        return {
-          serverLabel: "local server",
-          connectionLabel: "connected",
-          refreshLabel,
-          action: state.refresh === "degraded" ? "Retry" : null,
-          canConnectAnother: false
-        };
-      case "connecting":
-        return {
-          serverLabel: "local server",
-          connectionLabel: "connecting",
-          refreshLabel,
-          action: null,
-          canConnectAnother: false
-        };
-    }
-  }
-  __name(connectionPresentation, "connectionPresentation");
-  function markRequestSuccess() {
-    snapshot = {
-      connection: "connected",
-      refresh: snapshot.refresh
-    };
-    renderConnectionChrome();
-  }
-  __name(markRequestSuccess, "markRequestSuccess");
-  function markRequestFailure(kind) {
-    snapshot = kind === "protocol" ? { connection: "connected", refresh: "degraded" } : { ...snapshot, connection: kind };
-    renderConnectionChrome();
-  }
-  __name(markRequestFailure, "markRequestFailure");
-  var actions = null;
-  function configureConnectionActions(next) {
-    actions = next;
-  }
-  __name(configureConnectionActions, "configureConnectionActions");
-  function initConnectionControls() {
-    document.querySelector("#connection-action")?.addEventListener("click", () => {
-      if (!actions) return;
-      if (snapshot.connection === "unauthorized") void actions.reconnect();
-      else void actions.retry();
-    });
-    document.querySelector("#connect-another")?.addEventListener("click", () => {
-      if (actions) void actions.reconnect();
-    });
-    renderConnectionChrome();
-  }
-  __name(initConnectionControls, "initConnectionControls");
-  function renderConnectionChrome() {
-    const presentation = connectionPresentation(snapshot);
-    const root = document.querySelector("#store-identity");
-    root?.classList.remove("hidden");
-    const connection = document.querySelector("#connection-status");
-    if (connection) connection.textContent = presentation.connectionLabel;
-    const refresh2 = document.querySelector("#refresh-status");
-    if (refresh2) refresh2.textContent = presentation.refreshLabel;
-    const legacyRefresh = document.querySelector("#stat-live");
-    if (legacyRefresh) {
-      legacyRefresh.textContent = presentation.refreshLabel;
-      legacyRefresh.dataset.state = snapshot.refresh;
-    }
-    const dot = document.querySelector("#refresh");
-    if (dot) {
-      dot.dataset.connection = snapshot.connection;
-      dot.dataset.state = snapshot.refresh;
-      dot.title = `${presentation.connectionLabel}; refresh ${presentation.refreshLabel}`;
-    }
-    const action = document.querySelector("#connection-action");
-    if (action) {
-      action.textContent = presentation.action ?? "";
-      action.classList.toggle("hidden", presentation.action === null);
-    }
-    document.querySelector("#connect-another")?.classList.toggle("hidden", !presentation.canConnectAnother);
-    const word = document.querySelector("#refresh-word");
-    if (word) {
-      word.textContent = snapshot.connection === "unauthorized" ? "authentication required" : snapshot.connection === "unreachable" ? "server unavailable" : snapshot.refresh === "degraded" ? "response error" : "";
-    }
-  }
-  __name(renderConnectionChrome, "renderConnectionChrome");
-
-  // src/http.ts
-  var RequestFailure = class extends Error {
-    constructor(kind, status) {
-      super(
-        kind === "unauthorized" ? "authentication required" : kind === "unreachable" ? "server unavailable" : "server response error"
-      );
-      this.kind = kind;
-      this.status = status;
-      this.name = "RequestFailure";
-    }
-    kind;
-    status;
+  // src/change-inspector-state.ts
+  var ChangeInspectorGenerationChanged = class extends Error {
     static {
-      __name(this, "RequestFailure");
+      __name(this, "ChangeInspectorGenerationChanged");
+    }
+    constructor() {
+      super("Change generation changed during staging");
     }
   };
-  var ChangePageFailure = class extends RequestFailure {
-    constructor(code, status) {
-      super("protocol", status);
-      this.code = code;
-      this.name = "ChangePageFailure";
-    }
-    code;
-    static {
-      __name(this, "ChangePageFailure");
-    }
-  };
-  function failure(kind, status) {
-    markRequestFailure(kind);
-    return new RequestFailure(kind, status);
+  function sameRevision(left, right) {
+    return left.revisionId === right.revisionId && left.objectArtifactContentHash === right.objectArtifactContentHash;
   }
-  __name(failure, "failure");
-  function expectedDocument(path) {
-    const pathname = new URL(path, location.origin).pathname;
-    const collections = {
-      "/api/v2/profile": {
-        schema: "pointbreak.inspect-reader-profile",
-        version: 1
-      },
-      "/api/v2/changes": {
-        schema: "pointbreak.inspect-changes-page",
-        version: 1
-      },
-      "/api/v2/attention": {
-        schema: "pointbreak.inspect-attention",
-        version: 2
-      },
-      "/api/attention": { schema: "pointbreak.inspect-attention" },
-      "/api/derived-access/status": {
-        schema: "pointbreak.inspect-derived-access-status",
-        version: 1
-      },
-      "/api/freshness": {
-        schema: "pointbreak.inspect-freshness",
-        version: 1
-      },
-      "/api/history": { schema: "pointbreak.inspect-history" },
-      "/api/history/new-count": {
-        schema: "pointbreak.inspect-history-new-count"
-      },
-      "/api/identity": { schema: "pointbreak.inspect-identity" },
-      "/api/revisions": { schema: "pointbreak.inspect-revisions-page.v1" },
-      "/api/threads": { schema: "pointbreak.inspect-threads" },
-      "/api/version": { schema: "pointbreak.version", version: 1 }
-    };
-    if (collections[pathname]) return collections[pathname];
-    if (pathname === "/api/derived-access/cancel" || pathname === "/api/derived-access/retry") {
-      return {
-        schema: "pointbreak.inspect-derived-access-status",
-        version: 1
-      };
-    }
-    if (/^\/api\/revisions\/[^/]+$/.test(pathname)) {
-      return { schema: "pointbreak.review-revision", version: 2 };
-    }
-    if (/^\/api\/snapshots\/[^/]+$/.test(pathname)) {
-      return { schema: "pointbreak.review-snapshot", version: 1 };
-    }
-    if (/^\/api\/v2\/changes\/[^/]+$/.test(pathname)) {
-      return { schema: "pointbreak.review-change", version: 1 };
-    }
-    if (/^\/api\/v2\/changes\/[^/]+\/revisions\/[^/]+$/.test(pathname)) {
-      return { schema: "pointbreak.review-change-revision", version: 1 };
-    }
-    if (/^\/api\/v2\/changes\/[^/]+\/revisions\/[^/]+\/resource$/.test(pathname)) {
-      return { schema: "pointbreak.review-revision-resource", version: 1 };
-    }
-    if (/^\/api\/v2\/changes\/[^/]+\/interdiff\/[^/]+\/[^/]+$/.test(pathname)) {
-      return { schema: "pointbreak.review-revision-interdiff", version: 1 };
-    }
+  __name(sameRevision, "sameRevision");
+  function selectedChange(generation, route) {
+    if (route.kind !== "change" && route.kind !== "revision") return null;
+    const all = [...generation.changes.changes, ...generation.attention.changes];
+    const change = all.find((candidate) => candidate.changeId === route.changeId) ?? null;
+    if (change === null || route.kind !== "revision") return change;
+    return change.currentRevisionRefs.some(
+      (candidate) => sameRevision(candidate, route.revision)
+    ) ? change : null;
+  }
+  __name(selectedChange, "selectedChange");
+  function selectionDiagnostic(route) {
+    if (route.kind === "invalid") return route.message;
     return null;
   }
-  __name(expectedDocument, "expectedDocument");
-  function isExpectedDocument(data, expected) {
-    if (typeof data !== "object" || data === null) return false;
-    const document2 = data;
-    return document2.schema === expected.schema && (expected.version === void 0 || document2.version === expected.version);
+  __name(selectionDiagnostic, "selectionDiagnostic");
+  function stageGeneration(profile, changes, attention, postflight) {
+    requireCoherentGeneration(changes, attention);
+    if (!sameProfileGeneration(profile, postflight)) {
+      throw new ChangeInspectorGenerationChanged();
+    }
+    return { profile, changes, attention };
   }
-  __name(isExpectedDocument, "isExpectedDocument");
-  function hasPayloadError(data) {
-    return typeof data === "object" && data !== null && "error" in data && Boolean(data.error);
-  }
-  __name(hasPayloadError, "hasPayloadError");
-  function changePageFailure(data, status) {
-    if (typeof data !== "object" || data === null || data.schema !== "pointbreak.inspect-change-page-error" || data.version !== 1) {
-      return null;
-    }
-    const code = data.code;
-    if (code !== "invalid_query" && code !== "stale_projection") return null;
-    if (code === "invalid_query" && status !== 400 || code === "stale_projection" && status !== 409) {
-      return null;
-    }
-    markRequestFailure("protocol");
-    return new ChangePageFailure(code, status);
-  }
-  __name(changePageFailure, "changePageFailure");
-  async function fetchOnce(path, method) {
-    const headers = {};
-    const token = getSessionToken();
-    if (token) headers.Authorization = `Bearer ${token}`;
-    let response;
-    try {
-      response = await fetch(path, {
-        method,
-        cache: "no-store",
-        credentials: "omit",
-        referrerPolicy: "no-referrer",
-        headers
-      });
-    } catch {
-      throw failure("unreachable");
-    }
-    if (response.status === 401) throw new RequestFailure("unauthorized", 401);
-    let text;
-    try {
-      text = await response.text();
-    } catch {
-      throw failure("protocol", response.status);
-    }
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      throw failure("protocol", response.status);
-    }
-    if (!response.ok) {
-      const typed = changePageFailure(data, response.status);
-      if (typed !== null) throw typed;
-      throw failure("protocol", response.status);
-    }
-    const expected = expectedDocument(path);
-    if (hasPayloadError(data) || expected !== null && !isExpectedDocument(data, expected)) {
-      throw failure("protocol", response.status);
-    }
-    markRequestSuccess();
-    return data;
-  }
-  __name(fetchOnce, "fetchOnce");
-  async function fetchJSON(path, method = "GET") {
-    const requestCredentialVersion = sessionCredentialVersion();
-    try {
-      return await fetchOnce(path, method);
-    } catch (error) {
-      if (!(error instanceof RequestFailure) || error.kind !== "unauthorized") {
-        throw error;
+  __name(stageGeneration, "stageGeneration");
+  function createChangeInspectorState(initialRoute) {
+    let generation = null;
+    let route = initialRoute;
+    const snapshot2 = /* @__PURE__ */ __name(() => {
+      const selected = generation === null ? null : selectedChange(generation, route);
+      return {
+        generation,
+        route,
+        selected,
+        diagnostic: selectionDiagnostic(route)
+      };
+    }, "snapshot");
+    return {
+      snapshot: snapshot2,
+      publish(next) {
+        generation = next;
+        return snapshot2();
+      },
+      setRoute(next) {
+        route = next;
+        return snapshot2();
+      },
+      clearGeneration() {
+        generation = null;
+        return snapshot2();
       }
-    }
-    const credentialAlreadyRenewed = sessionCredentialVersion() !== requestCredentialVersion;
-    if (credentialAlreadyRenewed || await recoverUnauthorized()) {
-      try {
-        return await fetchOnce(path, method);
-      } catch (error) {
-        if (error instanceof RequestFailure && error.kind === "unauthorized") {
-          throw failure("unauthorized", 401);
-        }
-        throw error;
-      }
-    }
-    throw failure("unauthorized", 401);
+    };
   }
-  __name(fetchJSON, "fetchJSON");
+  __name(createChangeInspectorState, "createChangeInspectorState");
 
-  // src/change-bootstrap.ts
+  // src/dom.ts
+  function $(sel) {
+    return document.querySelector(sel);
+  }
+  __name($, "$");
+
+  // src/disclosure.ts
+  var active = null;
+  function createDisclosure({
+    container,
+    trigger,
+    panel
+  }) {
+    let open = false;
+    const controller = {
+      isOpen: /* @__PURE__ */ __name(() => open, "isOpen"),
+      open: /* @__PURE__ */ __name(() => {
+        if (active && active !== controller) active.close();
+        open = true;
+        active = controller;
+        controller.sync();
+      }, "open"),
+      close: /* @__PURE__ */ __name((returnFocus = false) => {
+        open = false;
+        if (active === controller) active = null;
+        controller.sync();
+        if (returnFocus) $(trigger)?.focus();
+      }, "close"),
+      toggle: /* @__PURE__ */ __name(() => {
+        if (open) controller.close();
+        else controller.open();
+      }, "toggle"),
+      sync: /* @__PURE__ */ __name(() => {
+        $(panel)?.classList.toggle("hidden", !open);
+        $(trigger)?.setAttribute("aria-expanded", String(open));
+      }, "sync")
+    };
+    $(trigger)?.addEventListener("click", (event) => {
+      event.stopPropagation();
+      controller.toggle();
+    });
+    $(container)?.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || !open) return;
+      event.preventDefault();
+      event.stopPropagation();
+      controller.close(true);
+    });
+    document.addEventListener(
+      "click",
+      (event) => {
+        if (!open) return;
+        const root = $(container);
+        if (event.target instanceof Node && root?.contains(event.target)) return;
+        controller.close();
+      },
+      true
+    );
+    controller.sync();
+    return controller;
+  }
+  __name(createDisclosure, "createDisclosure");
+
+  // src/change-inspector.ts
   var pollTimer = null;
-  var readerEpoch = 0;
-  var detailSelectionEpoch = 0;
+  var routeListener = null;
+  var filterInput = null;
+  var filterInputListener = null;
   var connectionControlsInitialized = false;
-  var visibleGeneration = null;
-  async function bootstrapChangeReader(options = {}) {
-    stopChangeReader();
-    const bootstrapEpoch = readerEpoch;
-    let loadingGeneration = false;
+  var filterDisclosureInitialized = false;
+  var requestEpoch = 0;
+  function currentRoute() {
+    return parseChangeInspectorRoute(location.hash || "#/changes");
+  }
+  __name(currentRoute, "currentRoute");
+  function stopChangeInspector() {
+    requestEpoch += 1;
+    if (pollTimer !== null) clearInterval(pollTimer);
+    pollTimer = null;
+    if (routeListener !== null)
+      window.removeEventListener("hashchange", routeListener);
+    routeListener = null;
+    if (filterInput !== null && filterInputListener !== null) {
+      filterInput.removeEventListener("change", filterInputListener);
+    }
+    filterInput = null;
+    filterInputListener = null;
+  }
+  __name(stopChangeInspector, "stopChangeInspector");
+  async function bootstrapChangeInspector(options = {}) {
+    stopChangeInspector();
     const capability = bootstrapCapability();
     if (capability.token !== null) {
       (options.reload ?? (() => location.reload()))();
       return;
     }
     installDefaultAuthCoordinator();
-    const retry = /* @__PURE__ */ __name(() => bootstrapChangeReader(options), "retry");
+    const state = createChangeInspectorState(currentRoute());
+    const navigate = /* @__PURE__ */ __name((route) => {
+      const hash = formatChangeInspectorRoute(route);
+      if (location.hash !== hash) location.hash = hash;
+      else void onRoute();
+    }, "navigate");
+    const paint = /* @__PURE__ */ __name(() => renderChangeInspector(state.snapshot(), { navigate }), "paint");
+    const requestKey = /* @__PURE__ */ __name((query) => buildChangePageUrl("changes", query), "requestKey");
+    let visibleRequest = "";
+    const loadGeneration = /* @__PURE__ */ __name(async (route, restarted = false) => {
+      const epoch = ++requestEpoch;
+      try {
+        const profile = decodeReaderProfile(
+          await fetchChangeInspectorJSON("/api/v2/profile")
+        );
+        if (epoch !== requestEpoch) return;
+        if (profile.availability !== "ready") {
+          visibleRequest = "";
+          state.clearGeneration();
+          renderChangeInspectorUnavailable(profile.availability);
+          return;
+        }
+        const query = route.query;
+        const [changes, attention] = await Promise.all([
+          fetchChangeInspectorJSON(buildChangePageUrl("changes", query)).then(
+            (value) => decodeChangePage(value, { lens: "changes", bounded: true })
+          ),
+          fetchChangeInspectorJSON(buildChangePageUrl("attention", query)).then(
+            (value) => decodeChangePage(value, { lens: "attention", bounded: true })
+          )
+        ]);
+        const postflight = decodeReaderProfile(
+          await fetchChangeInspectorJSON("/api/v2/profile")
+        );
+        if (epoch !== requestEpoch) return;
+        state.publish(stageGeneration(profile, changes, attention, postflight));
+        visibleRequest = requestKey(query);
+        paint();
+      } catch (error) {
+        if (epoch !== requestEpoch) return;
+        if (!restarted && (error instanceof ChangeInspectorPageFailure && error.code === "stale_projection" || error instanceof ChangeInspectorGenerationChanged)) {
+          await loadGeneration(route, true);
+          return;
+        }
+        visibleRequest = "";
+        state.clearGeneration();
+        renderChangeInspectorRefusal(error);
+      }
+    }, "loadGeneration");
+    const onRoute = /* @__PURE__ */ __name(async () => {
+      const route = currentRoute();
+      state.setRoute(route);
+      if (route.kind === "invalid") {
+        visibleRequest = "";
+        state.clearGeneration();
+        paint();
+        return;
+      }
+      let request;
+      try {
+        request = requestKey(route.query);
+      } catch (error) {
+        state.clearGeneration();
+        renderChangeInspectorRefusal(error);
+        return;
+      }
+      if (request === visibleRequest) paint();
+      else {
+        visibleRequest = "";
+        state.clearGeneration();
+        paint();
+        await loadGeneration(route);
+      }
+    }, "onRoute");
+    routeListener = /* @__PURE__ */ __name(() => {
+      void onRoute();
+    }, "routeListener");
+    window.addEventListener("hashchange", routeListener);
+    const reloadCurrent = /* @__PURE__ */ __name(async () => {
+      const route = currentRoute();
+      if (route.kind === "invalid") {
+        await onRoute();
+        return;
+      }
+      await loadGeneration(route);
+    }, "reloadCurrent");
     configureConnectionActions({
-      retry,
+      retry: reloadCurrent,
       reconnect: /* @__PURE__ */ __name(async () => {
-        if (await requestReconnect()) await retry();
+        if (await requestReconnect()) await reloadCurrent();
       }, "reconnect")
     });
     if (!connectionControlsInitialized) {
       initConnectionControls();
       connectionControlsInitialized = true;
     }
-    try {
-      const profile = decodeReaderProfile(await fetchJSON("/api/v2/profile"));
-      if (bootstrapEpoch !== readerEpoch) return;
-      prepareChangeShell();
-      if (profile.availability !== "ready") {
-        renderUnavailable(profile.availability);
-        return;
-      }
-      loadingGeneration = true;
-      const publishedEpoch = await loadGeneration(profile);
-      if (options.poll !== false && publishedEpoch !== null && publishedEpoch === readerEpoch) {
-        pollTimer = setInterval(() => {
-          void refresh();
-        }, 3e3);
-      }
-    } catch (error) {
-      if (!loadingGeneration && bootstrapEpoch !== readerEpoch) return;
-      renderRefusal(error);
+    prepareChangeInspectorShell({ navigate });
+    if (!filterDisclosureInitialized) {
+      createDisclosure({
+        container: "#filter-controls",
+        trigger: "#filters-toggle",
+        panel: "#filters-panel"
+      });
+      filterDisclosureInitialized = true;
     }
-  }
-  __name(bootstrapChangeReader, "bootstrapChangeReader");
-  function stopChangeReader() {
-    readerEpoch += 1;
-    detailSelectionEpoch += 1;
-    visibleGeneration = null;
-    if (pollTimer !== null) {
-      clearInterval(pollTimer);
-      pollTimer = null;
-    }
-  }
-  __name(stopChangeReader, "stopChangeReader");
-  async function refresh(force = false) {
-    const requestedEpoch = readerEpoch;
-    const current = visibleGeneration;
-    let loadingGeneration = false;
-    try {
-      const profile = decodeReaderProfile(await fetchJSON("/api/v2/profile"));
-      if (requestedEpoch !== readerEpoch || current !== visibleGeneration) {
-        return;
-      }
-      if (profile.availability !== "ready") {
-        renderUnavailable(profile.availability);
-        stopChangeReader();
-        return;
-      }
-      if (!force && current !== null && sameProfileGeneration(current.profile, profile)) {
-        return;
-      }
-      loadingGeneration = true;
-      await loadGeneration(profile);
-    } catch (error) {
-      if (!loadingGeneration && (requestedEpoch !== readerEpoch || current !== visibleGeneration)) {
-        return;
-      }
-      renderRefusal(error);
-    }
-  }
-  __name(refresh, "refresh");
-  async function loadGeneration(profile, restarted = false) {
-    const requestedEpoch = ++readerEpoch;
-    detailSelectionEpoch += 1;
-    try {
-      const [changes, attention] = await Promise.all([
-        fetchJSON(buildChangePageUrl("changes")).then(
-          (page) => decodeChangePage(page, { lens: "changes", bounded: true })
-        ),
-        fetchJSON(buildChangePageUrl("attention")).then(
-          (page) => decodeChangePage(page, { lens: "attention", bounded: true })
-        )
-      ]);
-      const postflight = decodeReaderProfile(await fetchJSON("/api/v2/profile"));
-      if (requestedEpoch !== readerEpoch) return null;
-      requireCoherentGeneration(changes, attention);
-      if (!sameProfileGeneration(profile, postflight)) {
-        throw new Error("Change generation changed during staging");
-      }
-      renderGeneration(profile, changes, attention);
-      return requestedEpoch;
-    } catch (error) {
-      if (requestedEpoch !== readerEpoch) return null;
-      const stalePage = error instanceof ChangePageFailure && error.code === "stale_projection";
-      const changedDuringStaging = error instanceof Error && error.message === "Change generation changed during staging";
-      if (!restarted && (stalePage || changedDuringStaging)) {
-        renderRestart(error);
-        let retryProfile;
-        try {
-          retryProfile = decodeReaderProfile(await fetchJSON("/api/v2/profile"));
-        } catch (retryError) {
-          if (requestedEpoch !== readerEpoch) return null;
-          throw retryError;
+    filterInput = document.querySelector("#filter-text");
+    filterInputListener = /* @__PURE__ */ __name(() => {
+      const route = currentRoute();
+      const base = route.kind === "invalid" ? { kind: "lens", lens: "changes", query: {} } : route;
+      navigate({
+        ...base,
+        query: {
+          ...base.query,
+          after: void 0,
+          q: filterInput?.value || void 0
         }
-        if (requestedEpoch !== readerEpoch) return null;
-        if (retryProfile.availability !== "ready") {
-          renderUnavailable(retryProfile.availability);
-          return null;
-        }
-        return loadGeneration(retryProfile, true);
-      }
-      throw error;
-    }
-  }
-  __name(loadGeneration, "loadGeneration");
-  function prepareChangeShell() {
-    document.querySelector("#toolbar")?.classList.add("hidden");
-    document.querySelector("#view-controls")?.classList.add("hidden");
-    document.querySelector("#derived-access-status")?.classList.add("hidden");
-    const switcher = document.querySelector("#lens-switcher");
-    if (switcher) {
-      switcher.replaceChildren();
-      const label = document.createElement("strong");
-      label.textContent = "Changes";
-      switcher.append(label);
-    }
-    const master = document.querySelector("#master");
-    master?.setAttribute("aria-label", "Changes");
-    const detail = document.querySelector("#detail-body");
-    if (detail) {
-      detail.replaceChildren(message("Select a Change or exact Revision."));
-    }
-  }
-  __name(prepareChangeShell, "prepareChangeShell");
-  function renderUnavailable(availability) {
-    clearSemanticPresentation();
-    const master = document.querySelector("#master");
-    if (!master) return;
-    master.replaceChildren(
-      message(
-        availability === "migration_required" ? "Store migration required. No Change state was loaded." : "Store migration in progress. Partial Change state is unavailable."
-      )
-    );
-  }
-  __name(renderUnavailable, "renderUnavailable");
-  function renderGeneration(profile, page, attention) {
-    const master = document.querySelector("#master");
-    if (!master) return;
-    const list = document.createElement("section");
-    list.className = "units";
-    const heading2 = document.createElement("h1");
-    heading2.textContent = `Changes · ${page.changes.length}`;
-    list.append(heading2);
-    for (const change of page.changes) {
-      const card = document.createElement("article");
-      card.dataset.changeId = change.changeId;
-      card.className = "unit-card";
-      const open = document.createElement("button");
-      open.type = "button";
-      open.className = "ghost mono";
-      open.textContent = change.changeId;
-      open.addEventListener("click", () => {
-        void loadChangeDetail(change);
       });
-      card.append(open);
-      card.append(
-        line(`topology: ${words(change.topology)}`),
-        line(`lifecycle: ${words(change.lifecycle)}`),
-        line(`attention: ${words(change.attentionSummary)}`),
-        line(`availability: ${words(change.availabilitySummary)}`)
-      );
-      const revisions = document.createElement("div");
-      revisions.className = "change-current-revisions";
-      const presentation = page.presentations?.[change.changeId];
-      for (const revision of change.currentRevisionRefs) {
-        const select = document.createElement("button");
-        select.type = "button";
-        select.className = "ghost mono";
-        select.dataset.revisionId = revision.revisionId;
-        select.textContent = currentRevisionLabel(revision, presentation);
-        select.addEventListener("click", () => {
-          void loadRevisionDetail(change, revision);
-        });
-        revisions.append(select);
-      }
-      card.append(revisions);
-      if (change.currentRevisionRefs.length > 1) {
-        const compare = document.createElement("button");
-        compare.type = "button";
-        compare.className = "ghost";
-        compare.textContent = "Compare exact Revisions";
-        compare.addEventListener("click", () => {
-          void loadInterdiff(
-            change,
-            change.currentRevisionRefs[0],
-            change.currentRevisionRefs[1]
-          );
-        });
-        card.append(compare);
-      }
-      list.append(card);
-    }
-    if (page.changes.length === 0) list.append(message("No Changes."));
-    if (page.next !== null) {
-      const loadMore = document.createElement("button");
-      loadMore.type = "button";
-      loadMore.className = "ghost";
-      loadMore.textContent = "Load more Changes";
-      loadMore.addEventListener("click", () => {
-        void loadMoreChanges();
-      });
-      list.append(loadMore);
-    }
-    master.replaceChildren(list);
-    setText(
-      "#stat-events",
-      `${profile.authorityCursor.eventCount ?? "—"} events`
-    );
-    setText("#stat-units", `${page.changes.length} Changes`);
-    setText("#stat-threads", `${attention.changes.length} need attention`);
-    setText("#stat-hash", page.projectionStamp);
-    detailSelectionEpoch += 1;
-    visibleGeneration = { profile, changes: page, attention };
+    }, "filterInputListener");
+    filterInput?.addEventListener("change", filterInputListener);
+    await onRoute();
+    if (options.poll !== false)
+      pollTimer = setInterval(() => {
+        const route = currentRoute();
+        if (route.kind !== "invalid") void loadGeneration(route);
+      }, 3e3);
   }
-  __name(renderGeneration, "renderGeneration");
-  async function loadMoreChanges() {
-    const current = visibleGeneration;
-    if (!current?.changes.next) return;
-    const requestedEpoch = readerEpoch;
-    try {
-      const next = decodeChangePage(
-        await fetchJSON(
-          buildChangePageUrl("changes", { after: current.changes.next })
-        ),
-        { lens: "changes", bounded: true }
-      );
-      if (!isLiveGeneration(requestedEpoch, current)) return;
-      const postflight = decodeReaderProfile(await fetchJSON("/api/v2/profile"));
-      if (!isLiveGeneration(requestedEpoch, current)) return;
-      if (next.projectionStamp !== current.changes.projectionStamp || !sameProfileGeneration(current.profile, postflight)) {
-        throw new Error(
-          "Change page changed during paging; restarting from first page"
-        );
-      }
-      const merged = mergeChangePages(current.changes, next);
-      if (!isLiveGeneration(requestedEpoch, current)) return;
-      renderGeneration(current.profile, merged, current.attention);
-    } catch (error) {
-      if (!isLiveGeneration(requestedEpoch, current)) return;
-      if (error instanceof ChangePageFailure && error.code === "stale_projection" || error instanceof Error && error.message === "Change page changed during paging; restarting from first page") {
-        renderRestart(error);
-        await refresh(true);
-        return;
-      }
-      renderRefusal(error);
-    }
-  }
-  __name(loadMoreChanges, "loadMoreChanges");
-  function isLiveGeneration(requestedEpoch, expected) {
-    return requestedEpoch === readerEpoch && visibleGeneration === expected;
-  }
-  __name(isLiveGeneration, "isLiveGeneration");
-  function beginDetailRequest(change) {
-    const visible = visibleGeneration;
-    if (visible === null || !visible.changes.changes.includes(change))
-      return null;
-    return {
-      readerEpoch,
-      selectionEpoch: ++detailSelectionEpoch,
-      projectionStamp: change.projectionStamp,
-      visible
-    };
-  }
-  __name(beginDetailRequest, "beginDetailRequest");
-  function isLiveDetailRequest(request) {
-    return request.readerEpoch === readerEpoch && request.selectionEpoch === detailSelectionEpoch && request.visible === visibleGeneration && request.visible.changes.projectionStamp === request.projectionStamp;
-  }
-  __name(isLiveDetailRequest, "isLiveDetailRequest");
-  async function detailPostflight(request) {
-    const profile = decodeReaderProfile(await fetchJSON("/api/v2/profile"));
-    if (!isLiveDetailRequest(request)) return false;
-    if (!sameProfileGeneration(request.visible.profile, profile)) {
-      throw new Error("Change detail generation changed during staging");
-    }
-    return true;
-  }
-  __name(detailPostflight, "detailPostflight");
-  function mergeChangePages(current, next) {
-    const lastCurrent = current.changes.at(-1)?.changeId;
-    const firstNext = next.changes[0]?.changeId;
-    if (lastCurrent !== void 0 && firstNext !== void 0 && firstNext <= lastCurrent) {
-      throw new Error("Change continuation did not advance in server order");
-    }
-    const seen = new Set(current.changes.map((change) => change.changeId));
-    if (next.changes.some((change) => seen.has(change.changeId))) {
-      throw new Error("Change continuation repeated an emitted Change ID");
-    }
-    const changes = [...current.changes, ...next.changes].slice(
-      -MAX_LIVE_CHANGE_ROWS
-    );
-    const visibleIds = new Set(changes.map((change) => change.changeId));
-    const presentations = current.presentations !== void 0 && next.presentations !== void 0 ? Object.fromEntries(
-      Object.entries({
-        ...current.presentations,
-        ...next.presentations
-      }).filter(([changeId]) => visibleIds.has(changeId))
-    ) : void 0;
-    return {
-      ...next,
-      changes,
-      presentations
-    };
-  }
-  __name(mergeChangePages, "mergeChangePages");
-  function currentRevisionLabel(revision, presentation) {
-    const entry = presentation?.currentRevisions.find(
-      (candidate) => sameRevision(candidate.revision, revision)
-    );
-    if (entry?.summarySource === "revision_proposal_summary") {
-      return `Current Revision — proposal summary: ${entry.revisionProposalSummary ?? "absent"} · ${revision.revisionId}`;
-    }
-    return `Current Revision — summary absent · ${revision.revisionId}`;
-  }
-  __name(currentRevisionLabel, "currentRevisionLabel");
-  async function loadChangeDetail(change) {
-    const request = beginDetailRequest(change);
-    if (request === null) return;
-    try {
-      const detail = decodeChangeDetail(
-        await fetchJSON(`/api/v2/changes/${encodeURIComponent(change.changeId)}`)
-      );
-      if (!isLiveDetailRequest(request)) return;
-      if (detail.summary.changeId !== change.changeId || detail.projectionStamp !== change.projectionStamp) {
-        throw new Error("Change detail generation is stale; refresh and retry");
-      }
-      if (!await detailPostflight(request)) return;
-      const content = [
-        heading(change.changeId),
-        line(`topology: ${words(detail.summary.topology)}`),
-        line(`lifecycle: ${words(detail.summary.lifecycle)}`)
-      ];
-      const relations = document.createElement("section");
-      relations.append(heading("Relation claims", 3));
-      for (const claim of detail.relationClaims) {
-        const supports = claim.supports.map((support) => `${support.actorId}/${support.eventId}`).join(", ");
-        const withdrawals = claim.withdrawals.map((withdrawal) => `${withdrawal.actorId}/${withdrawal.eventId}`).join(", ");
-        relations.append(
-          line(
-            `${claim.active ? "active" : "withdrawn"} ${claim.claimId}: ${claim.successor.revisionId} replaces ${claim.predecessor.revisionId} · support ${supports || "none"} · withdrawal ${withdrawals || "none"}`
-          )
-        );
-      }
-      if (detail.relationClaims.length === 0) {
-        relations.append(message("No relation claims."));
-      }
-      content.push(relations);
-      publishDetail(request, content);
-    } catch (error) {
-      if (!isLiveDetailRequest(request)) return;
-      renderRefusal(error);
-    }
-  }
-  __name(loadChangeDetail, "loadChangeDetail");
-  async function loadRevisionDetail(change, revision) {
-    const request = beginDetailRequest(change);
-    if (request === null) return;
-    try {
-      const params = new URLSearchParams({
-        artifactHash: revision.objectArtifactContentHash
-      });
-      const detail = decodeChangeRevisionDetail(
-        await fetchJSON(
-          `/api/v2/changes/${encodeURIComponent(change.changeId)}/revisions/${encodeURIComponent(revision.revisionId)}?${params}`
-        )
-      );
-      if (!isLiveDetailRequest(request)) return;
-      if (detail.changeId !== change.changeId || !sameRevision(detail.revision, revision) || detail.projectionStamp !== change.projectionStamp || detail.associations.some(
-        (association) => !sameRevision(association.comparison.revision, revision)
-      )) {
-        throw new Error("Revision detail generation is stale; refresh and retry");
-      }
-      if (!await detailPostflight(request)) return;
-      const content = [
-        heading(revision.revisionId),
-        line(`currency: ${words(detail.revisionCurrency)}`),
-        line(`relation: ${words(detail.relationClassification)}`),
-        line(`captured resource: ${words(detail.availability)}`)
-      ];
-      const facts = document.createElement("section");
-      facts.append(heading("Facts", 3));
-      for (const fact of detail.factPresentations) {
-        facts.append(
-          line(
-            `${fact.family}: ${fact.factId} · origin ${fact.originRevision.revisionId} · ${words(fact.revisionCurrency)} · ${words(fact.familyState)} · ${words(fact.availability)}`
-          )
-        );
-      }
-      if (detail.factPresentations.length === 0) {
-        facts.append(message("No facts."));
-      }
-      content.push(facts);
-      const associations = document.createElement("section");
-      associations.append(heading("Association comparisons", 3));
-      for (const association of detail.associations) {
-        associations.append(
-          line(
-            `${association.comparison.commitOid} · ${words(association.state)} · proof ${words(association.proofAvailability)}`
-          )
-        );
-      }
-      if (detail.associations.length === 0) {
-        associations.append(message("No association comparisons."));
-      }
-      content.push(associations);
-      const resource = document.createElement("button");
-      resource.type = "button";
-      resource.className = "ghost";
-      resource.textContent = "Open exact captured resource";
-      resource.addEventListener("click", () => {
-        void loadRevisionResource(change, revision);
-      });
-      content.push(resource);
-      publishDetail(request, content);
-    } catch (error) {
-      if (!isLiveDetailRequest(request)) return;
-      renderRefusal(error);
-    }
-  }
-  __name(loadRevisionDetail, "loadRevisionDetail");
-  async function loadRevisionResource(change, revision) {
-    const request = beginDetailRequest(change);
-    if (request === null) return;
-    try {
-      const params = new URLSearchParams({
-        artifactHash: revision.objectArtifactContentHash
-      });
-      const resource = decodeRevisionResource(
-        await fetchJSON(
-          `/api/v2/changes/${encodeURIComponent(change.changeId)}/revisions/${encodeURIComponent(revision.revisionId)}/resource?${params}`
-        )
-      );
-      if (!isLiveDetailRequest(request)) return;
-      if (!sameRevision(resource.resource.revision, revision)) {
-        throw new Error(
-          "captured resource identity does not match its exact route"
-        );
-      }
-      if (!await detailPostflight(request)) return;
-      const content = [
-        heading(`Captured resource · ${revision.revisionId}`),
-        line(`availability: ${words(resource.availability)}`)
-      ];
-      if (resource.capturedDocumentHash) {
-        content.push(line(`document hash: ${resource.capturedDocumentHash}`));
-      }
-      if (resource.capturedDocument !== void 0) {
-        const captured = document.createElement("pre");
-        captured.textContent = JSON.stringify(resource.capturedDocument, null, 2);
-        content.push(captured);
-      }
-      for (const diagnostic of resource.diagnostics) {
-        content.push(line(diagnostic));
-      }
-      publishDetail(request, content);
-    } catch (error) {
-      if (!isLiveDetailRequest(request)) return;
-      renderRefusal(error);
-    }
-  }
-  __name(loadRevisionResource, "loadRevisionResource");
-  async function loadInterdiff(change, from, to) {
-    const request = beginDetailRequest(change);
-    if (request === null) return;
-    try {
-      const params = new URLSearchParams({
-        fromArtifactHash: from.objectArtifactContentHash,
-        toArtifactHash: to.objectArtifactContentHash
-      });
-      const interdiff = decodeRevisionInterdiff(
-        await fetchJSON(
-          `/api/v2/changes/${encodeURIComponent(change.changeId)}/interdiff/${encodeURIComponent(from.revisionId)}/${encodeURIComponent(to.revisionId)}?${params}`
-        )
-      );
-      if (!isLiveDetailRequest(request)) return;
-      if (!sameRevision(interdiff.interdiff.from, from) || !sameRevision(interdiff.interdiff.to, to)) {
-        throw new Error(
-          "Revision interdiff identity does not match its exact route"
-        );
-      }
-      if (!await detailPostflight(request)) return;
-      const content = [
-        heading(`Revision interdiff · ${from.revisionId} → ${to.revisionId}`),
-        line(`availability: ${words(interdiff.availability)}`)
-      ];
-      if (interdiff.comparison !== void 0) {
-        const comparison = document.createElement("pre");
-        comparison.textContent = JSON.stringify(interdiff.comparison, null, 2);
-        content.push(comparison);
-      }
-      for (const diagnostic of interdiff.diagnostics) {
-        content.push(line(diagnostic));
-      }
-      publishDetail(request, content);
-    } catch (error) {
-      if (!isLiveDetailRequest(request)) return;
-      renderRefusal(error);
-    }
-  }
-  __name(loadInterdiff, "loadInterdiff");
-  function publishDetail(request, content) {
-    if (!isLiveDetailRequest(request)) return;
-    const body = document.querySelector("#detail-body");
-    if (!body) throw new Error("Inspector detail container is absent");
-    body.replaceChildren(...content);
-  }
-  __name(publishDetail, "publishDetail");
-  function renderRefusal(error) {
-    const text = error instanceof Error ? error.message : String(error);
-    clearSemanticPresentation();
-    const master = document.querySelector("#master");
-    master?.replaceChildren(message(`Reader refused: ${text}`));
-    const banner = document.querySelector("#error");
-    if (banner) {
-      banner.textContent = `error: ${text}`;
-      banner.classList.remove("hidden");
-    }
-  }
-  __name(renderRefusal, "renderRefusal");
-  function renderRestart(error) {
-    const text = error instanceof ChangePageFailure && error.code === "stale_projection" ? "Change page became stale; restarting from the first page." : "Change generation changed while loading; restarting from the first page.";
-    const banner = document.querySelector("#error");
-    if (banner) {
-      banner.textContent = text;
-      banner.classList.remove("hidden");
-    }
-  }
-  __name(renderRestart, "renderRestart");
-  function clearSemanticPresentation() {
-    readerEpoch += 1;
-    detailSelectionEpoch += 1;
-    visibleGeneration = null;
-    document.querySelector("#master")?.replaceChildren();
-    document.querySelector("#detail-body")?.replaceChildren();
-    for (const selector of [
-      "#stat-events",
-      "#stat-units",
-      "#stat-threads",
-      "#stat-hash"
-    ]) {
-      setText(selector, "—");
-    }
-  }
-  __name(clearSemanticPresentation, "clearSemanticPresentation");
-  function sameRevision(left, right) {
-    return left.revisionId === right.revisionId && left.objectArtifactContentHash === right.objectArtifactContentHash;
-  }
-  __name(sameRevision, "sameRevision");
-  function words(value) {
-    return value.replaceAll("_", " ");
-  }
-  __name(words, "words");
-  function setText(selector, value) {
-    const element = document.querySelector(selector);
-    if (element) element.textContent = value;
-  }
-  __name(setText, "setText");
-  function message(text) {
-    const paragraph = document.createElement("p");
-    paragraph.className = "empty";
-    paragraph.textContent = text;
-    return paragraph;
-  }
-  __name(message, "message");
-  function line(text) {
-    const paragraph = document.createElement("p");
-    paragraph.textContent = text;
-    return paragraph;
-  }
-  __name(line, "line");
-  function heading(text, level = 2) {
-    const element = document.createElement(`h${level}`);
-    element.textContent = text;
-    return element;
-  }
-  __name(heading, "heading");
+  __name(bootstrapChangeInspector, "bootstrapChangeInspector");
 
   // src/entry.ts
-  void bootstrapChangeReader();
+  void bootstrapChangeInspector();
 })();

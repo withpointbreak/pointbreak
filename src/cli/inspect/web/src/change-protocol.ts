@@ -351,6 +351,7 @@ export interface ChangePageQuery {
   lifecycle?: string;
   attention?: string;
   availability?: string;
+  order?: "change_id_asc";
 }
 
 export function buildChangePageUrl(
@@ -383,6 +384,9 @@ export function buildChangePageUrl(
   appendEnum(params, "lifecycle", query.lifecycle, LIFECYCLE_VALUES);
   appendEnum(params, "attention", query.attention, ATTENTION_VALUES);
   appendEnum(params, "availability", query.availability, AVAILABILITY_VALUES);
+  if (query.order !== undefined && query.order !== "change_id_asc") {
+    throw new Error("Change page order must be change_id_asc");
+  }
   params.set("order", "change_id_asc");
   return `/api/v2/${lens}?${params}`;
 }

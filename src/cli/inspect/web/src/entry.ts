@@ -6,6 +6,6 @@
 // The composition root does not auto-run so it stays testable; this entry is the
 // single invoker, exactly as the served `<script src="/app.js">` does.
 
-import { bootstrapChangeReader } from "./change-bootstrap";
+import { bootstrapChangeInspector } from "./change-inspector";
 
-void bootstrapChangeReader();
+void bootstrapChangeInspector();

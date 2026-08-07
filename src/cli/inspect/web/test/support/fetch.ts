@@ -24,6 +24,7 @@ const FIXTURES: Record<string, unknown> = {
     availability: "ready",
     minimumReaderProfile: "review_change_revision_v1",
     authorityCursor: { eventCount: 0 },
+    commitGraphStamp: "sha256:empty-change-generation",
     documents: { ...CHANGE_READER_DOCUMENTS },
   },
   "/api/v2/changes": {
@@ -32,12 +33,14 @@ const FIXTURES: Record<string, unknown> = {
     changes: [],
     diagnostics: [],
     projectionStamp: "sha256:empty-change-generation",
+    next: null,
   },
   "/api/v2/attention": {
     schema: "pointbreak.inspect-attention",
     version: 2,
     changes: [],
     projectionStamp: "sha256:empty-change-generation",
+    next: null,
   },
   "/api/revisions": revisionsJson,
   "/api/threads": threadsJson,
