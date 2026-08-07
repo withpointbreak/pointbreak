@@ -3,6 +3,36 @@
 Release entries are managed with Cocogitto.
 
 - - -
+## [v0.10.0](https://github.com/withpointbreak/pointbreak/compare/e0d7660b5264957a4a8a9dd2e2e581fa6ee5530c..v0.10.0) - 2026-08-07
+#### Features
+- activate Change store migration - ([96652ab](https://github.com/withpointbreak/pointbreak/commit/96652abce6250fdc9e84a80a17a25ce8ba491a00)) - [@kevinswiber](https://github.com/kevinswiber)
+- add exact Change writer workflows - ([8865fd2](https://github.com/withpointbreak/pointbreak/commit/8865fd2120a4ca3e2e22e83cc612c4cfee45687c)) - [@kevinswiber](https://github.com/kevinswiber)
+- add Change-capable VS Code reader - ([55104d8](https://github.com/withpointbreak/pointbreak/commit/55104d865be93db75587197ede9375d57bc08bf4)) - [@kevinswiber](https://github.com/kevinswiber)
+- add Change-capable CLI and Inspector readers - ([4acc1d9](https://github.com/withpointbreak/pointbreak/commit/4acc1d93824d9b50a2ebf265ead2c7601cd121ad)) - [@kevinswiber](https://github.com/kevinswiber)
+- add Change headless documents and review cursors - ([f780457](https://github.com/withpointbreak/pointbreak/commit/f780457b6a4b5b76313ee64468cea01e3656b7d6)) - [@kevinswiber](https://github.com/kevinswiber)
+- add Change-derived semantics and exact transfer - ([cab526a](https://github.com/withpointbreak/pointbreak/commit/cab526a78a381ffde630ad250a4ce0148e9fa70a)) - [@kevinswiber](https://github.com/kevinswiber)
+- add writer-dark Change and Revision semantic core - ([97f033f](https://github.com/withpointbreak/pointbreak/commit/97f033f7beb5e32b47b48426c15c6da231de6c9f)) - [@kevinswiber](https://github.com/kevinswiber)
+- add change capability carrier - ([e0d7660](https://github.com/withpointbreak/pointbreak/commit/e0d7660b5264957a4a8a9dd2e2e581fa6ee5530c)) - [@kevinswiber](https://github.com/kevinswiber)
+#### Bug Fixes
+- publish valid derived generation after migration - ([34ef777](https://github.com/withpointbreak/pointbreak/commit/34ef777c1036f40ff18c087ae0e146208dc31c9c)) - [@kevinswiber](https://github.com/kevinswiber)
+- use portable exact-import receipt paths - ([76e2249](https://github.com/withpointbreak/pointbreak/commit/76e2249af56d08eb8ae583f8167f4b0c7bc179ee)) - [@kevinswiber](https://github.com/kevinswiber)
+- stabilize legacy Inspector snapshots - ([dc1f4ef](https://github.com/withpointbreak/pointbreak/commit/dc1f4ef5ee7de827108f2592b0ef9b0afef4425b)) - [@kevinswiber](https://github.com/kevinswiber)
+- complete Inspector fixture refresh - ([c60127c](https://github.com/withpointbreak/pointbreak/commit/c60127ce12042db5e99e685faa80ebebe14a2685)) - [@kevinswiber](https://github.com/kevinswiber)
+- keep Inspector wire fixtures coherent - ([9160511](https://github.com/withpointbreak/pointbreak/commit/9160511c27beca7a511097538aa93b7fdec21663)) - [@kevinswiber](https://github.com/kevinswiber)
+- align commit selection with landing proof - ([4474b0c](https://github.com/withpointbreak/pointbreak/commit/4474b0ca7ddfa0aae9f4d683eca783707149c174)) - [@kevinswiber](https://github.com/kevinswiber)
+- make Change landing proofs exact - ([2fad38e](https://github.com/withpointbreak/pointbreak/commit/2fad38ecba4d5aaeff9319b6d79b05544d27373c)) - [@kevinswiber](https://github.com/kevinswiber)
+- honor target platform in extension paths - ([c645e08](https://github.com/withpointbreak/pointbreak/commit/c645e08993155f275cd2026770c5708514a2a793)) - [@kevinswiber](https://github.com/kevinswiber)
+- avoid shell in Windows extension package - ([798a04e](https://github.com/withpointbreak/pointbreak/commit/798a04e2ef2b77722d609422a0195b342f211c61)) - [@kevinswiber](https://github.com/kevinswiber)
+- support Windows package command shims - ([16db425](https://github.com/withpointbreak/pointbreak/commit/16db425bc13b7f876d48211db52c7b8a5ecb0cae)) - [@kevinswiber](https://github.com/kevinswiber)
+- keep activated Inspector reader available - ([ba0b90b](https://github.com/withpointbreak/pointbreak/commit/ba0b90b6b8d4fe4aad86085d306689a8069b52df)) - [@kevinswiber](https://github.com/kevinswiber)
+- keep derived history state inline on Windows - ([d286655](https://github.com/withpointbreak/pointbreak/commit/d286655a57fcbec23c333b6f4c757e56804614d4)) - [@kevinswiber](https://github.com/kevinswiber)
+#### Documentation
+- correct Change attention recovery - ([356416c](https://github.com/withpointbreak/pointbreak/commit/356416c886ae57762cad05e75040d77936d156d4)) - [@kevinswiber](https://github.com/kevinswiber)
+- align first-use Change workflow - ([ff5fdbb](https://github.com/withpointbreak/pointbreak/commit/ff5fdbb324ff8b41db5d4be546d270b3e762a3d8)) - [@kevinswiber](https://github.com/kevinswiber)
+- record Change and Revision architecture - ([a2190c0](https://github.com/withpointbreak/pointbreak/commit/a2190c09d2f40195c3dce6715d980b2b0c7a55fc)) - [@kevinswiber](https://github.com/kevinswiber)
+
+- - -
+
 ## [v0.9.0](https://github.com/withpointbreak/pointbreak/compare/bf43333f3f22981367551f37b309e6c9be78b2ac..v0.9.0) - 2026-08-04
 #### Features
 - enable derived access by default - ([024671d](https://github.com/withpointbreak/pointbreak/commit/024671dc8536885693d4dea698a8e4e75f03e2c2)) - [@kevinswiber](https://github.com/kevinswiber)
