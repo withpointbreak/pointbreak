@@ -1,6 +1,6 @@
 //! Change-oriented headless documents built from authoritative domain projections.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -10,11 +10,14 @@ use super::{
 };
 use crate::error::{Result, ShoreError};
 use crate::model::{ActorId, ChangeId, InputRequestId, RevisionId, RevisionRefV1, TrackId};
-use crate::session::event::FactPortRelationV1;
+use crate::session::event::{
+    BodyContentType, EventType, FactPortRelationV1, ShoreEvent, WorkObjectProposal,
+    WorkObjectProposedPayload,
+};
 use crate::session::{
-    ChangeClaimSupportV1, ChangeDocumentProjectionV1, ChangeLifecycleV1, ChangeLinkView,
-    ChangeMembershipClaimViewV1, ChangeProjection, ChangeRelationClaimViewV1, ChangeTopologyV1,
-    RevisionRefUnavailableReasonV1,
+    BodyContentState, ChangeClaimSupportV1, ChangeDocumentProjectionV1, ChangeLifecycleV1,
+    ChangeLinkView, ChangeMembershipClaimViewV1, ChangeProjection, ChangeRelationClaimViewV1,
+    ChangeTopologyV1, RevisionRefUnavailableReasonV1,
 };
 
 pub const REVIEW_CHANGE_LIST_SCHEMA: &str = "pointbreak.review-change-list";
@@ -51,6 +54,61 @@ pub enum FactFamilyStateV1 {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    tag = "kind"
+)]
+pub enum FactContentV1 {
+    Observation {
+        title: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+    },
+    InputRequest {
+        title: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        status: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        responses: Vec<FactInputResponseContentV1>,
+    },
+    Assessment {
+        assessment: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+    },
+    Validation {
+        check_name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FactInputResponseContentV1 {
+    pub response_id: String,
+    pub outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub content_type: BodyContentType,
+    pub body_content_state: BodyContentState,
+    pub availability: ContentAvailabilityV1,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FactContentPresentationV1 {
+    pub content_type: BodyContentType,
+    pub body_content_state: BodyContentState,
+    pub content: FactContentV1,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FactPresentationV1 {
     pub fact_id: String,
@@ -68,6 +126,42 @@ pub struct FactPresentationV1 {
     pub family_state: FactFamilyStateV1,
     pub revision_currency: ChangeRevisionCurrencyV1,
     pub availability: ContentAvailabilityV1,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevisionSummarySourceV1 {
+    RevisionProposalSummary,
+    Absent,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CurrentRevisionPresentationV1 {
+    pub revision: RevisionRefV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revision_proposal_summary: Option<String>,
+    pub summary_source: RevisionSummarySourceV1,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangePresentationV1 {
+    pub current_revisions: Vec<CurrentRevisionPresentationV1>,
+}
+
+/// Body-free document input built from validated events in the same reader
+/// generation. Proposal summaries remain here rather than entering
+/// `ChangeDocumentProjectionV1`, whose persisted semantic contract is prose-free.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ChangePresentationProjectionV1 {
+    pub presentations: BTreeMap<ChangeId, ChangePresentationV1>,
+    pub source_projection_stamp: String,
+    /// The validated event generation this presentation was built from. The
+    /// semantic projection can intentionally omit prose-only event changes, so
+    /// the shared presentation stamp must carry this identity separately.
+    pub source_event_set_hash: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -176,6 +270,24 @@ pub struct ChangeAttentionDocumentV2 {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ChangeListPresentationDocumentV1 {
+    #[serde(flatten)]
+    pub document: ChangeListDocumentV1,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub presentations: BTreeMap<ChangeId, ChangePresentationV1>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeAttentionPresentationDocumentV2 {
+    #[serde(flatten)]
+    pub document: ChangeAttentionDocumentV2,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub presentations: BTreeMap<ChangeId, ChangePresentationV1>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ChangeDetailDocumentV1 {
     pub schema: String,
     pub version: u32,
@@ -192,12 +304,23 @@ pub struct ChangeRevisionDocumentV1 {
     pub detail: ChangeRevisionDetailV1,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeRevisionPresentationDocumentV1 {
+    #[serde(flatten)]
+    pub document: ChangeRevisionDocumentV1,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub fact_content_presentations: BTreeMap<String, FactContentPresentationV1>,
+}
+
 /// One facade over the semantic and provenance projections. It has no store or
 /// SQLite handle, so loose and derived callers cannot diverge in presentation.
 #[derive(Clone, Debug)]
 pub struct ChangeDocumentFacadeV1 {
     semantic: ChangeProjection,
     provenance: ChangeDocumentProjectionV1,
+    presentations: Option<BTreeMap<ChangeId, ChangePresentationV1>>,
+    projection_stamp: String,
 }
 
 impl ChangeDocumentFacadeV1 {
@@ -245,8 +368,69 @@ impl ChangeDocumentFacadeV1 {
         }
         Ok(Self {
             semantic,
+            projection_stamp: provenance.projection_stamp.clone(),
             provenance,
+            presentations: None,
         })
+    }
+
+    /// Bind optional presentation data produced from the exact same validated
+    /// event generation. The combined stamp changes when inline proposal copy
+    /// changes while the bodyless semantic projection remains unchanged.
+    pub(crate) fn with_presentations(
+        mut self,
+        projection: ChangePresentationProjectionV1,
+    ) -> Result<Self> {
+        if projection.source_projection_stamp != self.provenance.projection_stamp {
+            return Err(ShoreError::Message(
+                "Change presentation projection belongs to a different semantic generation"
+                    .to_owned(),
+            ));
+        }
+        let expected_change_ids = self
+            .semantic
+            .changes
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if projection
+            .presentations
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            != expected_change_ids
+        {
+            return Err(ShoreError::Message(
+                "Change presentation projection does not cover the semantic Change set".to_owned(),
+            ));
+        }
+        for (change_id, presentation) in &projection.presentations {
+            let view = &self.semantic.changes[change_id];
+            let expected = self.current_refs(view);
+            let actual = presentation
+                .current_revisions
+                .iter()
+                .map(|current| current.revision.clone())
+                .collect::<Vec<_>>();
+            if actual != expected
+                || presentation.current_revisions.iter().any(|current| {
+                    matches!(current.summary_source, RevisionSummarySourceV1::Absent)
+                        != current.revision_proposal_summary.is_none()
+                })
+            {
+                return Err(ShoreError::Message(
+                    "Change presentation projection diverges from exact current Revision state"
+                        .to_owned(),
+                ));
+            }
+        }
+        self.projection_stamp = crate::canonical_hash::sha256_json_prefixed(&serde_json::json!({
+            "semanticProjectionStamp": self.provenance.projection_stamp,
+            "eventSetHash": projection.source_event_set_hash,
+            "presentations": projection.presentations,
+        }))?;
+        self.presentations = Some(projection.presentations);
+        Ok(self)
     }
 
     pub fn list_document(&self) -> ChangeListDocumentV1 {
@@ -261,6 +445,17 @@ impl ChangeDocumentFacadeV1 {
         self.list_document_with_schema(INSPECT_CHANGES_PAGE_SCHEMA)
     }
 
+    pub fn list_document_for_inspector_with_presentations(
+        &self,
+    ) -> Result<ChangeListPresentationDocumentV1> {
+        Ok(ChangeListPresentationDocumentV1 {
+            document: self.list_document_for_inspector(),
+            presentations: self.presentations.clone().ok_or_else(|| {
+                ShoreError::Message("Change presentation projection is unavailable".to_owned())
+            })?,
+        })
+    }
+
     fn list_document_with_schema(&self, schema: &str) -> ChangeListDocumentV1 {
         ChangeListDocumentV1 {
             schema: schema.to_owned(),
@@ -272,7 +467,7 @@ impl ChangeDocumentFacadeV1 {
                 .map(|view| self.summary(view))
                 .collect(),
             diagnostics: self.provenance.diagnostics.clone(),
-            projection_stamp: self.provenance.projection_stamp.clone(),
+            projection_stamp: self.projection_stamp.clone(),
         }
     }
 
@@ -294,8 +489,35 @@ impl ChangeDocumentFacadeV1 {
                 .filter(|view| view.lifecycle != ChangeLifecycleV1::Accepted)
                 .map(|view| self.summary(view))
                 .collect(),
-            projection_stamp: self.provenance.projection_stamp.clone(),
+            projection_stamp: self.projection_stamp.clone(),
         }
+    }
+
+    pub fn attention_document_with_presentations(
+        &self,
+        inspect: bool,
+    ) -> Result<ChangeAttentionPresentationDocumentV2> {
+        let visible_change_ids = self
+            .semantic
+            .changes
+            .values()
+            .filter(|view| view.lifecycle != ChangeLifecycleV1::Accepted)
+            .map(|view| view.change_id.clone())
+            .collect::<BTreeSet<_>>();
+        let presentations = self
+            .presentations
+            .as_ref()
+            .ok_or_else(|| {
+                ShoreError::Message("Change presentation projection is unavailable".to_owned())
+            })?
+            .iter()
+            .filter(|(change_id, _)| visible_change_ids.contains(*change_id))
+            .map(|(change_id, presentation)| (change_id.clone(), presentation.clone()))
+            .collect();
+        Ok(ChangeAttentionPresentationDocumentV2 {
+            document: self.attention_document(inspect),
+            presentations,
+        })
     }
 
     pub fn detail_document(&self, change_id: &ChangeId) -> Result<ChangeDetailDocumentV1> {
@@ -418,7 +640,7 @@ impl ChangeDocumentFacadeV1 {
             current_revision_refs,
             operative_obligations: view.operative_obligations.iter().cloned().collect(),
             diagnostics: view.diagnostics.clone(),
-            projection_stamp: self.provenance.projection_stamp.clone(),
+            projection_stamp: self.projection_stamp.clone(),
         };
         Ok(ChangeDetailDocumentV1 {
             schema: REVIEW_CHANGE_SCHEMA.to_owned(),
@@ -521,8 +743,65 @@ impl ChangeDocumentFacadeV1 {
                 fact_presentations,
                 associations,
                 diagnostics: view.diagnostics.clone(),
-                projection_stamp: self.provenance.projection_stamp.clone(),
+                projection_stamp: self.projection_stamp.clone(),
             },
+        })
+    }
+
+    pub fn contextual_revision_document_with_fact_content(
+        &self,
+        change_id: &ChangeId,
+        revision: &RevisionRefV1,
+        exact_revision_document: RevisionResourceDocumentV1,
+        fact_presentations: Vec<FactPresentationV1>,
+        associations: Vec<AssociationComparisonDocumentV1>,
+        fact_content_presentations: BTreeMap<String, FactContentPresentationV1>,
+    ) -> Result<ChangeRevisionPresentationDocumentV1> {
+        let facts_by_id = fact_presentations
+            .iter()
+            .map(|fact| (fact.fact_id.as_str(), fact))
+            .collect::<BTreeMap<_, _>>();
+        if facts_by_id.len() != fact_presentations.len()
+            || facts_by_id.len() != fact_content_presentations.len()
+            || fact_content_presentations
+                .keys()
+                .any(|fact_id| !facts_by_id.contains_key(fact_id.as_str()))
+        {
+            return Err(ShoreError::Message(
+                "rich fact content must cover every exact contextual fact exactly once".to_owned(),
+            ));
+        }
+        for (fact_id, content) in &fact_content_presentations {
+            let fact = facts_by_id[fact_id.as_str()];
+            let family_matches = matches!(
+                (fact.family.as_str(), &content.content),
+                ("observation", FactContentV1::Observation { .. })
+                    | ("input_request", FactContentV1::InputRequest { .. })
+                    | ("assessment", FactContentV1::Assessment { .. })
+                    | ("validation", FactContentV1::Validation { .. })
+            );
+            if !family_matches
+                || !fact_content_availability_is_consistent(
+                    fact.availability,
+                    content.body_content_state,
+                    fact_content_body(&content.content),
+                )
+                || !fact_input_responses_are_consistent(&content.content)
+            {
+                return Err(ShoreError::Message(format!(
+                    "rich fact content is inconsistent with fact {fact_id}"
+                )));
+            }
+        }
+        Ok(ChangeRevisionPresentationDocumentV1 {
+            document: self.contextual_revision_document(
+                change_id,
+                revision,
+                exact_revision_document,
+                fact_presentations,
+                associations,
+            )?,
+            fact_content_presentations,
         })
     }
 
@@ -555,7 +834,7 @@ impl ChangeDocumentFacadeV1 {
             }
             .to_owned(),
             diagnostics: view.diagnostics.clone(),
-            projection_stamp: self.provenance.projection_stamp.clone(),
+            projection_stamp: self.projection_stamp.clone(),
         }
     }
 
@@ -572,6 +851,33 @@ impl ChangeDocumentFacadeV1 {
     }
 }
 
+fn fact_content_availability_is_consistent(
+    availability: ContentAvailabilityV1,
+    state: BodyContentState,
+    body: Option<&str>,
+) -> bool {
+    match availability {
+        ContentAvailabilityV1::Available => state == BodyContentState::Present,
+        ContentAvailabilityV1::Removed => state.is_removed() && body.is_none(),
+        ContentAvailabilityV1::Missing
+        | ContentAvailabilityV1::Mismatch
+        | ContentAvailabilityV1::NonTextual => state == BodyContentState::Present && body.is_none(),
+    }
+}
+
+fn fact_input_responses_are_consistent(content: &FactContentV1) -> bool {
+    let FactContentV1::InputRequest { responses, .. } = content else {
+        return true;
+    };
+    responses.iter().all(|response| {
+        fact_content_availability_is_consistent(
+            response.availability,
+            response.body_content_state,
+            response.reason.as_deref(),
+        )
+    })
+}
+
 fn declaration_state(view: &crate::session::ChangeView) -> ChangeDeclarationStateV1 {
     let diagnostics: BTreeSet<_> = view.diagnostics.iter().map(String::as_str).collect();
     if diagnostics.contains("change_declaration_missing") {
@@ -585,6 +891,322 @@ fn declaration_state(view: &crate::session::ChangeView) -> ChangeDeclarationStat
     }
 }
 
+/// Build card/list presentation solely from validated inline journal events.
+///
+/// This function deliberately has no store, content-backend, or resource
+/// loader parameter. A list caller therefore cannot hydrate captured resources
+/// or externalized fact bodies by accident. Rich fact hydration remains on the
+/// explicitly selected exact-Revision path.
+pub(crate) fn change_presentation_projection(
+    semantic: &ChangeProjection,
+    provenance: &ChangeDocumentProjectionV1,
+    events: &[ShoreEvent],
+    event_set_hash: &str,
+) -> Result<ChangePresentationProjectionV1> {
+    let mut proposal_summaries = BTreeMap::<RevisionRefV1, BTreeSet<Option<String>>>::new();
+    for event in events {
+        if event.event_type != EventType::WorkObjectProposed {
+            continue;
+        }
+        let payload: WorkObjectProposedPayload = serde_json::from_value(event.payload.clone())?;
+        if let WorkObjectProposal::Revision {
+            revision,
+            summary,
+            object_artifact_content_hash,
+            ..
+        } = payload.work_object
+        {
+            let Ok(reference) = RevisionRefV1::new(revision.id, object_artifact_content_hash)
+            else {
+                continue;
+            };
+            proposal_summaries
+                .entry(reference)
+                .or_default()
+                .insert(summary);
+        }
+    }
+
+    let mut presentations = BTreeMap::new();
+    for (change_id, view) in &semantic.changes {
+        let current_revisions = view
+            .current_revisions
+            .iter()
+            .filter_map(|revision_id| exact_ref_from_projection(provenance, revision_id))
+            .map(|revision| {
+                let summaries = proposal_summaries
+                    .get(&revision)
+                    .into_iter()
+                    .flat_map(|summaries| summaries.iter().cloned())
+                    .collect::<BTreeSet<_>>();
+                if summaries.len() > 1 {
+                    return Err(ShoreError::Message(format!(
+                        "conflicting proposal summaries for exact Revision {}",
+                        revision.revision_id.as_str()
+                    )));
+                }
+                let revision_proposal_summary = (summaries.len() == 1)
+                    .then(|| summaries.iter().next().cloned().flatten())
+                    .flatten();
+                Ok(CurrentRevisionPresentationV1 {
+                    summary_source: if revision_proposal_summary.is_some() {
+                        RevisionSummarySourceV1::RevisionProposalSummary
+                    } else {
+                        RevisionSummarySourceV1::Absent
+                    },
+                    revision,
+                    revision_proposal_summary,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        presentations.insert(
+            change_id.clone(),
+            ChangePresentationV1 { current_revisions },
+        );
+    }
+    Ok(ChangePresentationProjectionV1 {
+        presentations,
+        source_projection_stamp: provenance.projection_stamp.clone(),
+        source_event_set_hash: event_set_hash.to_owned(),
+    })
+}
+
+/// Normalize every human-readable fact family from one exact Revision read.
+///
+/// This is document policy rather than CLI policy: cold CLI and warm Inspector
+/// adapters must expose the same family names, enum spellings, availability,
+/// and typed content for the same `RevisionShowResult`.
+#[doc(hidden)]
+pub fn normalize_fact_presentations(
+    result: &crate::session::RevisionShowResult,
+    exact: &RevisionRefV1,
+) -> (
+    Vec<FactPresentationV1>,
+    BTreeMap<String, FactContentPresentationV1>,
+) {
+    let mut facts = Vec::new();
+    let mut content = BTreeMap::new();
+    for view in &result.observations {
+        let fact_id = view.id.as_str().to_owned();
+        content.insert(
+            fact_id.clone(),
+            FactContentPresentationV1 {
+                content_type: view.body_content_type,
+                body_content_state: view.body_content_state,
+                content: FactContentV1::Observation {
+                    title: view.title.clone(),
+                    body: view.body.clone(),
+                },
+            },
+        );
+        facts.push(normalized_fact(
+            &fact_id,
+            "observation",
+            exact,
+            &view.writer.actor_id,
+            Some(view.track_id.clone()),
+            if view.status == crate::session::ObservationStatus::Active {
+                FactFamilyStateV1::Current
+            } else {
+                FactFamilyStateV1::Stale
+            },
+            (
+                view.body_content_state,
+                result.body_content_availability(view.body_content_hash.as_deref()),
+            ),
+        ));
+    }
+    for view in &result.input_requests {
+        let fact_id = view.id.as_str().to_owned();
+        content.insert(
+            fact_id.clone(),
+            FactContentPresentationV1 {
+                content_type: view.body_content_type,
+                body_content_state: view.body_content_state,
+                content: FactContentV1::InputRequest {
+                    title: view.title.clone(),
+                    body: view.body.clone(),
+                    status: view.status.as_str().to_owned(),
+                    responses: view
+                        .responses
+                        .iter()
+                        .map(|response| FactInputResponseContentV1 {
+                            response_id: response.id.as_str().to_owned(),
+                            outcome: input_request_response_outcome_wire(response.outcome)
+                                .to_owned(),
+                            reason: response.reason.clone(),
+                            content_type: response.reason_content_type,
+                            body_content_state: response.reason_content_state,
+                            availability: if response.reason_content_state.is_removed() {
+                                ContentAvailabilityV1::Removed
+                            } else {
+                                result.body_content_availability(
+                                    response.reason_content_hash.as_deref(),
+                                )
+                            },
+                        })
+                        .collect(),
+                },
+            },
+        );
+        facts.push(normalized_fact(
+            &fact_id,
+            "input_request",
+            exact,
+            &view.writer.actor_id,
+            Some(view.track_id.clone()),
+            FactFamilyStateV1::Current,
+            (
+                view.body_content_state,
+                result.body_content_availability(view.body_content_hash.as_deref()),
+            ),
+        ));
+    }
+    for view in &result.assessments {
+        let fact_id = view.id.as_str().to_owned();
+        content.insert(
+            fact_id.clone(),
+            FactContentPresentationV1 {
+                content_type: view.summary_content_type,
+                body_content_state: view.summary_content_state,
+                content: FactContentV1::Assessment {
+                    assessment: review_assessment_wire(view.assessment).to_owned(),
+                    summary: view.summary.clone(),
+                },
+            },
+        );
+        facts.push(normalized_fact(
+            &fact_id,
+            "assessment",
+            exact,
+            &view.writer.actor_id,
+            Some(view.track_id.clone()),
+            if view.status == crate::session::AssessmentRecordStatus::Current {
+                FactFamilyStateV1::Current
+            } else {
+                FactFamilyStateV1::Stale
+            },
+            (
+                view.summary_content_state,
+                result.body_content_availability(view.summary_content_hash.as_deref()),
+            ),
+        ));
+    }
+    for view in &result.validation_checks {
+        let fact_id = view.id.as_str().to_owned();
+        content.insert(
+            fact_id.clone(),
+            FactContentPresentationV1 {
+                content_type: view.summary_content_type,
+                body_content_state: view.summary_content_state,
+                content: FactContentV1::Validation {
+                    check_name: view.check_name.clone(),
+                    command: view.command.clone(),
+                    status: validation_status_wire(view.status).to_owned(),
+                    summary: view.summary.clone(),
+                },
+            },
+        );
+        facts.push(normalized_fact(
+            &fact_id,
+            "validation",
+            exact,
+            &view.writer.actor_id,
+            Some(view.track_id.clone()),
+            if view.superseded_by_revisions.is_empty() {
+                FactFamilyStateV1::Current
+            } else {
+                FactFamilyStateV1::Stale
+            },
+            (
+                view.summary_content_state,
+                result.body_content_availability(view.summary_content_hash.as_deref()),
+            ),
+        ));
+    }
+    facts.sort_by(|left, right| left.fact_id.cmp(&right.fact_id));
+    (facts, content)
+}
+
+fn input_request_response_outcome_wire(
+    outcome: crate::session::event::InputRequestResponseOutcome,
+) -> &'static str {
+    match outcome {
+        crate::session::event::InputRequestResponseOutcome::Approved => "approved",
+        crate::session::event::InputRequestResponseOutcome::Rejected => "rejected",
+        crate::session::event::InputRequestResponseOutcome::Dismissed => "dismissed",
+        crate::session::event::InputRequestResponseOutcome::Superseded => "superseded",
+        crate::session::event::InputRequestResponseOutcome::Abandoned => "abandoned",
+    }
+}
+
+fn review_assessment_wire(assessment: crate::session::event::ReviewAssessment) -> &'static str {
+    match assessment {
+        crate::session::event::ReviewAssessment::Accepted => "accepted",
+        crate::session::event::ReviewAssessment::AcceptedWithFollowUp => "accepted_with_follow_up",
+        crate::session::event::ReviewAssessment::NeedsChanges => "needs_changes",
+        crate::session::event::ReviewAssessment::NeedsClarification => "needs_clarification",
+    }
+}
+
+fn validation_status_wire(status: crate::model::ValidationStatus) -> &'static str {
+    match status {
+        crate::model::ValidationStatus::Passed => "passed",
+        crate::model::ValidationStatus::Failed => "failed",
+        crate::model::ValidationStatus::Errored => "errored",
+        crate::model::ValidationStatus::Skipped => "skipped",
+    }
+}
+
+fn normalized_fact(
+    fact_id: &str,
+    family: &str,
+    exact: &RevisionRefV1,
+    actor_id: &ActorId,
+    track_id: Option<TrackId>,
+    family_state: FactFamilyStateV1,
+    content: (BodyContentState, ContentAvailabilityV1),
+) -> FactPresentationV1 {
+    let (body_content_state, content_availability) = content;
+    FactPresentationV1 {
+        fact_id: fact_id.to_owned(),
+        family: family.to_owned(),
+        origin_revision: exact.clone(),
+        context_change_id: None,
+        presented_in_revision: None,
+        port_relation: None,
+        actor_id: actor_id.clone(),
+        track_id,
+        family_state,
+        revision_currency: ChangeRevisionCurrencyV1::Current,
+        availability: if body_content_state.is_removed() {
+            ContentAvailabilityV1::Removed
+        } else {
+            content_availability
+        },
+    }
+}
+
+fn fact_content_body(content: &FactContentV1) -> Option<&str> {
+    match content {
+        FactContentV1::Observation { body, .. } | FactContentV1::InputRequest { body, .. } => {
+            body.as_deref()
+        }
+        FactContentV1::Assessment { summary, .. } | FactContentV1::Validation { summary, .. } => {
+            summary.as_deref()
+        }
+    }
+}
+
+fn exact_ref_from_projection(
+    projection: &ChangeDocumentProjectionV1,
+    revision_id: &RevisionId,
+) -> Option<RevisionRefV1> {
+    let references = projection.revision_refs.get(revision_id)?;
+    (references.len() == 1).then(|| references[0].clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -592,7 +1214,10 @@ mod tests {
         AssociationComparisonRefV1, AssociationComparisonStateV1, AssociationProofAvailabilityV1,
         RevisionResourceProjectionV1, RevisionResourceRefV1,
     };
-    use crate::model::{ChangeMembershipClaimId, CommitAssociationId, EventId, ObjectId};
+    use crate::model::{
+        ChangeMembershipClaimId, CommitAssociationId, EngagementId, EventId, JournalId, ObjectId,
+    };
+    use crate::session::event::{EventPayload, EventTarget, Revision, Writer};
     use crate::session::{ChangeClaimSupportV1, ChangeMembershipClaimViewV1, ChangeView};
 
     fn reference(name: &str, byte: char) -> RevisionRefV1 {
@@ -601,6 +1226,43 @@ mod tests {
             format!("sha256:{}", byte.to_string().repeat(64)),
         )
         .unwrap()
+    }
+
+    fn event<P: EventPayload>(payload: P, key: &str, target: EventTarget) -> ShoreEvent {
+        ShoreEvent::new(
+            payload.event_type(),
+            key,
+            target,
+            Writer::shore_local("presentation-test"),
+            payload,
+            "2026-08-06T00:00:00Z",
+        )
+        .unwrap()
+    }
+
+    fn proposal_event(revision: &RevisionRefV1, summary: Option<&str>, key: &str) -> ShoreEvent {
+        event(
+            WorkObjectProposedPayload {
+                engagement_id: EngagementId::new("engagement:sha256:presentation"),
+                work_object: WorkObjectProposal::Revision {
+                    revision: Revision {
+                        id: revision.revision_id.clone(),
+                        object_id: ObjectId::new("obj:sha256:presentation"),
+                        git_provenance: None,
+                    },
+                    summary: summary.map(str::to_owned),
+                    object_artifact_content_hash: revision.object_artifact_content_hash.clone(),
+                    supersedes: Vec::new(),
+                },
+            },
+            key,
+            EventTarget::for_revision(
+                JournalId::new("journal:presentation"),
+                revision.revision_id.clone(),
+                None,
+            )
+            .unwrap(),
+        )
     }
 
     fn facade() -> (ChangeId, RevisionRefV1, ChangeDocumentFacadeV1) {
@@ -1005,6 +1667,506 @@ mod tests {
         assert_eq!(
             document.detail.fact_presentations[0].revision_currency,
             ChangeRevisionCurrencyV1::Current
+        );
+    }
+
+    #[test]
+    fn additive_presentations_keep_change_titles_empty_and_every_current_revision_exact() {
+        let (change_id, revision, facade) = facade();
+        let other = reference("two", 'b');
+        let facade = with_second_member(&facade, &change_id, other.clone());
+        let source_projection_stamp = facade.provenance.projection_stamp.clone();
+        let facade = facade
+            .with_presentations(ChangePresentationProjectionV1 {
+                presentations: [(
+                    change_id.clone(),
+                    ChangePresentationV1 {
+                        current_revisions: vec![
+                            CurrentRevisionPresentationV1 {
+                                revision: revision.clone(),
+                                revision_proposal_summary: Some("first proposal".to_owned()),
+                                summary_source: RevisionSummarySourceV1::RevisionProposalSummary,
+                            },
+                            CurrentRevisionPresentationV1 {
+                                revision: other.clone(),
+                                revision_proposal_summary: None,
+                                summary_source: RevisionSummarySourceV1::Absent,
+                            },
+                        ],
+                    },
+                )]
+                .into(),
+                source_projection_stamp,
+                source_event_set_hash: "sha256:event-set".to_owned(),
+            })
+            .unwrap();
+
+        let list = facade
+            .list_document_for_inspector_with_presentations()
+            .unwrap();
+        let attention = facade.attention_document_with_presentations(true).unwrap();
+        assert!(list.document.changes[0].title_assertions.is_empty());
+        assert_eq!(list.presentations, attention.presentations);
+        assert_eq!(
+            list.presentations
+                .get(&change_id)
+                .unwrap()
+                .current_revisions
+                .iter()
+                .map(|current| current.revision.clone())
+                .collect::<Vec<_>>(),
+            vec![revision, other]
+        );
+        assert_eq!(
+            list.document.projection_stamp,
+            attention.document.projection_stamp
+        );
+        assert_ne!(
+            list.document.projection_stamp,
+            facade.provenance.projection_stamp
+        );
+    }
+
+    #[test]
+    fn presentation_documents_are_flat_additions_on_one_shared_generation() {
+        fn keys(value: &serde_json::Value) -> BTreeSet<&str> {
+            value
+                .as_object()
+                .expect("document object")
+                .keys()
+                .map(String::as_str)
+                .collect()
+        }
+
+        let (change_id, revision, facade) = facade();
+        let proposal = proposal_event(&revision, Some("Readable exact state"), "proposal:wire");
+        let presentations = change_presentation_projection(
+            &facade.semantic,
+            &facade.provenance,
+            &[proposal],
+            "sha256:shared-event-set",
+        )
+        .unwrap();
+        let facade = facade.with_presentations(presentations).unwrap();
+
+        let list = serde_json::to_value(
+            facade
+                .list_document_for_inspector_with_presentations()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            keys(&list),
+            BTreeSet::from([
+                "changes",
+                "diagnostics",
+                "presentations",
+                "projectionStamp",
+                "schema",
+                "version",
+            ])
+        );
+        assert!(list.get("document").is_none());
+
+        for (inspect, schema) in [
+            (false, ATTENTION_LIST_SCHEMA_V2),
+            (true, INSPECT_ATTENTION_SCHEMA_V2),
+        ] {
+            let attention = serde_json::to_value(
+                facade
+                    .attention_document_with_presentations(inspect)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(attention["schema"], schema);
+            assert_eq!(
+                keys(&attention),
+                BTreeSet::from([
+                    "changes",
+                    "presentations",
+                    "projectionStamp",
+                    "schema",
+                    "version",
+                ])
+            );
+            assert!(attention.get("document").is_none());
+            assert_eq!(attention["projectionStamp"], list["projectionStamp"]);
+            assert_eq!(
+                attention["changes"][0]["projectionStamp"],
+                list["projectionStamp"]
+            );
+        }
+
+        let detail = facade.detail_document(&change_id).unwrap();
+        assert_eq!(detail.detail.projection_stamp, list["projectionStamp"]);
+        assert_eq!(
+            detail.detail.summary.projection_stamp,
+            list["projectionStamp"]
+        );
+
+        let observation = fact(revision.clone());
+        let contextual = serde_json::to_value(
+            facade
+                .contextual_revision_document_with_fact_content(
+                    &change_id,
+                    &revision,
+                    resource(&revision),
+                    vec![observation.clone()],
+                    Vec::new(),
+                    [(
+                        observation.fact_id,
+                        FactContentPresentationV1 {
+                            content_type: BodyContentType::TextMarkdown,
+                            body_content_state: BodyContentState::Present,
+                            content: FactContentV1::Observation {
+                                title: "Readable fact".to_owned(),
+                                body: Some("Exact contextual body".to_owned()),
+                            },
+                        },
+                    )]
+                    .into(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            keys(&contextual),
+            BTreeSet::from([
+                "associations",
+                "availability",
+                "changeId",
+                "diagnostics",
+                "exactRevisionDocument",
+                "factContentPresentations",
+                "factPresentations",
+                "membershipSupport",
+                "projectionStamp",
+                "relationClassification",
+                "revision",
+                "revisionCurrency",
+                "schema",
+                "version",
+            ])
+        );
+        assert!(contextual.get("document").is_none());
+        assert_eq!(contextual["projectionStamp"], list["projectionStamp"]);
+        assert_eq!(
+            list["changes"][0]["projectionStamp"],
+            list["projectionStamp"]
+        );
+    }
+
+    #[test]
+    fn inline_proposal_presentations_are_typed_and_permutation_duplicate_stable() {
+        let (change_id, revision, facade) = facade();
+        let summarized = proposal_event(&revision, Some("Readable exact state"), "proposal:one");
+        let duplicate = proposal_event(
+            &revision,
+            Some("Readable exact state"),
+            "proposal:duplicate",
+        );
+        let inputs = vec![summarized.clone(), duplicate];
+        let projected = change_presentation_projection(
+            &facade.semantic,
+            &facade.provenance,
+            &inputs,
+            "sha256:event-set",
+        )
+        .unwrap();
+        let mut permuted = inputs.clone();
+        permuted.reverse();
+        assert_eq!(
+            projected,
+            change_presentation_projection(
+                &facade.semantic,
+                &facade.provenance,
+                &permuted,
+                "sha256:event-set",
+            )
+            .unwrap()
+        );
+        let presentation = &projected.presentations[&change_id];
+        assert_eq!(
+            presentation.current_revisions[0]
+                .revision_proposal_summary
+                .as_deref(),
+            Some("Readable exact state")
+        );
+        assert_eq!(
+            presentation.current_revisions[0].summary_source,
+            RevisionSummarySourceV1::RevisionProposalSummary
+        );
+
+        let absent = change_presentation_projection(
+            &facade.semantic,
+            &facade.provenance,
+            &[proposal_event(&revision, None, "proposal:absent")],
+            "sha256:event-set",
+        )
+        .unwrap();
+        assert_eq!(
+            absent.presentations[&change_id].current_revisions[0].summary_source,
+            RevisionSummarySourceV1::Absent
+        );
+        assert!(
+            absent.presentations[&change_id].current_revisions[0]
+                .revision_proposal_summary
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn list_presentation_builder_has_no_body_or_resource_reader_input() {
+        let (_, revision, facade) = facade();
+        let inputs = [proposal_event(
+            &revision,
+            Some("inline only"),
+            "proposal:inline",
+        )];
+        let projection = change_presentation_projection(
+            &facade.semantic,
+            &facade.provenance,
+            &inputs,
+            "sha256:event-set",
+        )
+        .unwrap();
+        assert_eq!(projection.presentations.len(), 1);
+    }
+
+    #[test]
+    fn distinct_proposal_summaries_for_one_exact_revision_fail_closed() {
+        let (_, revision, facade) = facade();
+        let error = change_presentation_projection(
+            &facade.semantic,
+            &facade.provenance,
+            &[
+                proposal_event(&revision, Some("first"), "proposal:first"),
+                proposal_event(&revision, Some("second"), "proposal:second"),
+            ],
+            "sha256:event-set",
+        )
+        .expect_err("conflicting exact-revision proposal summaries must not be selected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("conflicting proposal summaries for exact Revision")
+        );
+    }
+
+    #[test]
+    fn presentation_stamp_includes_event_generation_identity() {
+        let (change_id, revision, facade) = facade();
+        let presentation = ChangePresentationV1 {
+            current_revisions: vec![CurrentRevisionPresentationV1 {
+                revision,
+                revision_proposal_summary: Some("stable".to_owned()),
+                summary_source: RevisionSummarySourceV1::RevisionProposalSummary,
+            }],
+        };
+        let bind = |event_set_hash: &str| {
+            facade
+                .clone()
+                .with_presentations(ChangePresentationProjectionV1 {
+                    presentations: [(change_id.clone(), presentation.clone())].into(),
+                    source_projection_stamp: facade.provenance.projection_stamp.clone(),
+                    source_event_set_hash: event_set_hash.to_owned(),
+                })
+                .unwrap()
+                .list_document_for_inspector()
+                .projection_stamp
+        };
+
+        assert_ne!(bind("sha256:event-set-a"), bind("sha256:event-set-b"));
+    }
+
+    #[test]
+    fn rich_fact_content_is_typed_without_weakening_exact_context() {
+        let (change_id, revision, facade) = facade();
+        let observation = fact(revision.clone());
+        let content = FactContentPresentationV1 {
+            content_type: crate::session::event::BodyContentType::TextMarkdown,
+            body_content_state: crate::session::BodyContentState::Present,
+            content: FactContentV1::Observation {
+                title: "Actionable finding".to_owned(),
+                body: Some("Use the exact Revision.".to_owned()),
+            },
+        };
+
+        let document = facade
+            .contextual_revision_document_with_fact_content(
+                &change_id,
+                &revision,
+                resource(&revision),
+                vec![observation],
+                Vec::new(),
+                [("observation:sha256:one".to_owned(), content)].into(),
+            )
+            .unwrap();
+        let fact = &document.document.detail.fact_presentations[0];
+        assert_eq!(fact.origin_revision, revision);
+        assert_eq!(fact.context_change_id.as_ref(), Some(&change_id));
+        assert_eq!(fact.availability, ContentAvailabilityV1::Available);
+        assert!(matches!(
+            document
+                .fact_content_presentations
+                .get(&fact.fact_id)
+                .map(|presentation| &presentation.content),
+            Some(FactContentV1::Observation { title, .. }) if title == "Actionable finding"
+        ));
+    }
+
+    #[test]
+    fn rich_fact_content_requires_exact_typed_and_available_fact_coverage() {
+        let (change_id, revision, facade) = facade();
+        let observation = fact(revision.clone());
+        let observation_content = FactContentPresentationV1 {
+            content_type: BodyContentType::TextPlain,
+            body_content_state: BodyContentState::Present,
+            content: FactContentV1::Observation {
+                title: "finding".to_owned(),
+                body: Some("body".to_owned()),
+            },
+        };
+
+        assert!(
+            facade
+                .contextual_revision_document_with_fact_content(
+                    &change_id,
+                    &revision,
+                    resource(&revision),
+                    vec![observation.clone()],
+                    Vec::new(),
+                    BTreeMap::new(),
+                )
+                .is_err(),
+            "a missing companion entry must fail closed"
+        );
+        assert!(
+            facade
+                .contextual_revision_document_with_fact_content(
+                    &change_id,
+                    &revision,
+                    resource(&revision),
+                    vec![observation.clone()],
+                    Vec::new(),
+                    [
+                        (observation.fact_id.clone(), observation_content.clone()),
+                        (
+                            "observation:sha256:extra".to_owned(),
+                            observation_content.clone(),
+                        ),
+                    ]
+                    .into(),
+                )
+                .is_err(),
+            "a surplus companion entry must fail closed"
+        );
+        assert!(
+            facade
+                .contextual_revision_document_with_fact_content(
+                    &change_id,
+                    &revision,
+                    resource(&revision),
+                    vec![observation.clone()],
+                    Vec::new(),
+                    [(
+                        observation.fact_id.clone(),
+                        FactContentPresentationV1 {
+                            content_type: BodyContentType::TextPlain,
+                            body_content_state: BodyContentState::Present,
+                            content: FactContentV1::Assessment {
+                                assessment: "accepted".to_owned(),
+                                summary: None,
+                            },
+                        },
+                    )]
+                    .into(),
+                )
+                .is_err(),
+            "a content variant from another fact family must fail closed"
+        );
+        assert!(
+            facade
+                .contextual_revision_document_with_fact_content(
+                    &change_id,
+                    &revision,
+                    resource(&revision),
+                    vec![observation.clone()],
+                    Vec::new(),
+                    [(
+                        observation.fact_id,
+                        FactContentPresentationV1 {
+                            content_type: BodyContentType::TextPlain,
+                            body_content_state: BodyContentState::SuppressedPresent,
+                            content: FactContentV1::Observation {
+                                title: "finding".to_owned(),
+                                body: None,
+                            },
+                        },
+                    )]
+                    .into(),
+                )
+                .is_err(),
+            "available metadata cannot pair with removed body state"
+        );
+    }
+
+    #[test]
+    fn rich_fact_content_accepts_typed_unavailability_and_checks_response_reasons() {
+        let (change_id, revision, facade) = facade();
+        let mut request = fact(revision.clone());
+        request.family = "input_request".to_owned();
+        request.availability = ContentAvailabilityV1::NonTextual;
+        let request_content = FactContentPresentationV1 {
+            content_type: BodyContentType::TextPlain,
+            body_content_state: BodyContentState::Present,
+            content: FactContentV1::InputRequest {
+                title: "decision".to_owned(),
+                body: None,
+                status: "responded".to_owned(),
+                responses: vec![FactInputResponseContentV1 {
+                    response_id: "input-response:sha256:one".to_owned(),
+                    outcome: "approved".to_owned(),
+                    reason: None,
+                    content_type: BodyContentType::TextPlain,
+                    body_content_state: BodyContentState::Present,
+                    availability: ContentAvailabilityV1::Missing,
+                }],
+            },
+        };
+
+        assert!(
+            facade
+                .contextual_revision_document_with_fact_content(
+                    &change_id,
+                    &revision,
+                    resource(&revision),
+                    vec![request.clone()],
+                    Vec::new(),
+                    [(request.fact_id.clone(), request_content.clone())].into(),
+                )
+                .is_ok(),
+            "typed unavailability with no text is valid"
+        );
+
+        let mut inconsistent = request_content;
+        let FactContentV1::InputRequest { responses, .. } = &mut inconsistent.content else {
+            unreachable!()
+        };
+        responses[0].reason = Some("must not survive a missing state".to_owned());
+        assert!(
+            facade
+                .contextual_revision_document_with_fact_content(
+                    &change_id,
+                    &revision,
+                    resource(&revision),
+                    vec![request.clone()],
+                    Vec::new(),
+                    [(request.fact_id, inconsistent)].into(),
+                )
+                .is_err(),
+            "an unavailable response reason cannot carry text"
         );
     }
 }

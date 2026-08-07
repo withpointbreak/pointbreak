@@ -35,6 +35,16 @@ export interface RevisionRefV1 {
   readonly objectArtifactContentHash: string;
 }
 
+export interface CurrentRevisionPresentationV1 {
+  readonly revision: RevisionRefV1;
+  readonly revisionProposalSummary?: string;
+  readonly summarySource: "revision_proposal_summary" | "absent";
+}
+
+export interface ChangePresentationV1 {
+  readonly currentRevisions: CurrentRevisionPresentationV1[];
+}
+
 export interface ChangeSummaryV1 {
   readonly changeId: string;
   readonly declarationState: string;
@@ -55,6 +65,7 @@ export interface ChangeListDoc {
   readonly version: 1;
   readonly changes: ChangeSummaryV1[];
   readonly diagnostics: string[];
+  readonly presentations?: Readonly<Record<string, ChangePresentationV1>>;
   readonly projectionStamp: string;
 }
 
@@ -62,6 +73,7 @@ export interface ChangeAttentionDoc {
   readonly schema: "pointbreak.attention-list" | "pointbreak.inspect-attention";
   readonly version: 2;
   readonly changes: ChangeSummaryV1[];
+  readonly presentations?: Readonly<Record<string, ChangePresentationV1>>;
   readonly projectionStamp: string;
 }
 
@@ -107,6 +119,19 @@ export interface ChangeRevisionDoc {
     readonly familyState: string;
     readonly availability: string;
   }>;
+  readonly factContentPresentations?: Readonly<
+    Record<
+      string,
+      {
+        readonly contentType: "text/plain" | "text/markdown";
+        readonly bodyContentState:
+          | "present"
+          | "suppressed_present"
+          | "physically_removed";
+        readonly content: Readonly<Record<string, unknown>>;
+      }
+    >
+  >;
   readonly associations: Array<{
     readonly comparison: { readonly revision: RevisionRefV1 };
     readonly [field: string]: unknown;

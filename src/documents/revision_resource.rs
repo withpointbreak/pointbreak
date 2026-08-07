@@ -9,18 +9,9 @@ use serde::{Deserialize, Serialize};
 use crate::canonical_hash::sha256_json_prefixed;
 use crate::error::Result;
 use crate::model::{ObjectId, RevisionRefV1, TrackId};
+pub use crate::session::ContentAvailabilityV1;
 
 pub const REVISION_RESOURCE_SCHEMA: &str = "pointbreak.review-revision-resource";
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ContentAvailabilityV1 {
-    Available,
-    Removed,
-    Missing,
-    Mismatch,
-    NonTextual,
-}
 
 pub type RevisionResourceAvailabilityV1 = ContentAvailabilityV1;
 

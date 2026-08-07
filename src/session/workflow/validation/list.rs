@@ -125,6 +125,7 @@ pub fn list_validation_checks(options: ValidationListOptions) -> Result<Validati
         track_filter: track_filter.clone(),
         status_filter: options.status,
         include_body: options.include_body,
+        read_for_display: false,
         removal_lens: &removal_lens,
     })?;
     let mut diagnostics = SessionState::from_events(&events)?.diagnostics;

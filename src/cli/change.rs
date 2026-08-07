@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -5,7 +6,7 @@ use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use pointbreak::documents::{
     AssociationComparisonDocumentV1, AssociationComparisonRefV1, AssociationComparisonStateV1,
     AssociationProofAvailabilityV1, ChangeDocumentFacadeV1, ChangeQueryUnavailableDocumentV1,
-    ContentAvailabilityV1, FactFamilyStateV1, FactPresentationV1, ReaderProfileDocumentV1,
+    ContentAvailabilityV1, FactPresentationV1, ReaderProfileDocumentV1,
     RevisionInterdiffAvailabilityV1, RevisionInterdiffDocumentV1, RevisionInterdiffRefV1,
     RevisionResourceDocumentV1, RevisionResourceProjectionV1, RevisionResourceRefV1,
     revision_show_document_v3,
@@ -16,15 +17,15 @@ use pointbreak::model::{
 };
 use pointbreak::session::event::ChangeLinkRelationV1;
 use pointbreak::session::{
-    AssessmentRecordStatus, BulkAdoptionDryRunDocumentV1, BulkAdoptionDryRunOptions,
-    BulkAdoptionMigrationOptions, BulkAdoptionOwnerDecisionManifestV1, CaptureOptions,
-    ChangeAdvanceV1, ChangeCaptureOptions, ChangeCreateOptions, ChangeLinkOptions,
-    ChangeMembershipOptions, ChangeMembershipWithdrawalOptions, ChangeReaderReadyV1,
-    ChangeReaderStateV1, ChangeRelationOptions, ChangeRelationWithdrawalOptions, ObservationStatus,
-    ReviewCursorV1, ReviewSourceBindingV1, ReviewSourceRequestV1, RevisionShowOptions,
-    SnapshotContentState, WorktreeSpec, assert_change_revision_relation, capture_change_revision,
-    change_reader_state_for_repo, create_change, dry_run_bulk_adoption, join_revision_to_change,
-    link_changes, migrate_bulk_adoption, restore_bulk_adoption_backup, review_source_binding,
+    BulkAdoptionDryRunDocumentV1, BulkAdoptionDryRunOptions, BulkAdoptionMigrationOptions,
+    BulkAdoptionOwnerDecisionManifestV1, CaptureOptions, ChangeAdvanceV1, ChangeCaptureOptions,
+    ChangeCreateOptions, ChangeLinkOptions, ChangeMembershipOptions,
+    ChangeMembershipWithdrawalOptions, ChangeReaderReadyV1, ChangeReaderStateV1,
+    ChangeRelationOptions, ChangeRelationWithdrawalOptions, ReviewCursorV1, ReviewSourceBindingV1,
+    ReviewSourceRequestV1, RevisionShowOptions, SnapshotContentState, WorktreeSpec,
+    assert_change_revision_relation, capture_change_revision, change_reader_state_for_repo,
+    create_change, dry_run_bulk_adoption, join_revision_to_change, link_changes,
+    migrate_bulk_adoption, restore_bulk_adoption_backup, review_source_binding,
     select_review_cursor, show_revision_for_change_reader_ready, validate_review_cursor_for_write,
     withdraw_change_revision_relation, withdraw_revision_from_change,
 };
@@ -390,7 +391,9 @@ pub(super) fn run(
         }
         ChangeCommand::Attention(args) => {
             with_facade(&args.repo, &args.format_args, stdout, |facade, _| {
-                Ok(serde_json::to_value(facade.attention_document(false))?)
+                Ok(serde_json::to_value(
+                    facade.attention_document_with_presentations(false)?,
+                )?)
             })
         }
         ChangeCommand::Show(args) => {
@@ -721,8 +724,7 @@ fn with_facade(
         return write(format_args, stdout, &unavailable);
     }
     let ready = ready(&state)?;
-    let facade =
-        ChangeDocumentFacadeV1::new(ready.projection.clone(), ready.document_projection.clone())?;
+    let facade = ready.document_facade()?;
     let document = build(&facade, ready)?;
     write(format_args, stdout, &document)
 }
@@ -835,13 +837,16 @@ fn run_exact(
         )?;
         let exact_read = build_exact_read(&args.repo, ready, &exact, args.include_body)?;
         if contextual {
-            Ok(serde_json::to_value(facade.contextual_revision_document(
-                &change_id,
-                &exact,
-                exact_read.resource,
-                exact_read.facts,
-                exact_read.associations,
-            )?)?)
+            Ok(serde_json::to_value(
+                facade.contextual_revision_document_with_fact_content(
+                    &change_id,
+                    &exact,
+                    exact_read.resource,
+                    exact_read.facts,
+                    exact_read.associations,
+                    exact_read.fact_content,
+                )?,
+            )?)
         } else {
             Ok(serde_json::to_value(exact_read.resource)?)
         }
@@ -917,6 +922,7 @@ pub(crate) fn exact_ref(
 pub(crate) struct ExactRead {
     pub(crate) resource: RevisionResourceDocumentV1,
     pub(crate) facts: Vec<FactPresentationV1>,
+    pub(crate) fact_content: BTreeMap<String, pointbreak::documents::FactContentPresentationV1>,
     pub(crate) associations: Vec<AssociationComparisonDocumentV1>,
 }
 
@@ -937,7 +943,7 @@ pub(crate) fn build_exact_read(
     if result.revision.object_artifact_content_hash != exact.object_artifact_content_hash {
         return Err("exact Revision projection returned a different artifact hash".into());
     }
-    let facts = fact_presentations(&result, exact);
+    let (facts, fact_content) = pointbreak::documents::normalize_fact_presentations(&result, exact);
     let associations = association_documents(&result, exact)?;
     let resource_ref = RevisionResourceRefV1 {
         revision: exact.clone(),
@@ -978,6 +984,7 @@ pub(crate) fn build_exact_read(
     Ok(ExactRead {
         resource,
         facts,
+        fact_content,
         associations,
     })
 }
@@ -992,90 +999,6 @@ fn unavailable_content_availability(
         ContentAvailabilityV1::Mismatch
     } else {
         ContentAvailabilityV1::Missing
-    }
-}
-
-fn fact_presentations(
-    result: &pointbreak::session::RevisionShowResult,
-    exact: &RevisionRefV1,
-) -> Vec<FactPresentationV1> {
-    let mut facts = Vec::new();
-    for view in &result.observations {
-        facts.push(fact(
-            view.id.as_str(),
-            "observation",
-            exact,
-            &view.writer.actor_id,
-            Some(view.track_id.clone()),
-            if view.status == ObservationStatus::Active {
-                FactFamilyStateV1::Current
-            } else {
-                FactFamilyStateV1::Stale
-            },
-        ));
-    }
-    for view in &result.input_requests {
-        facts.push(fact(
-            view.id.as_str(),
-            "input_request",
-            exact,
-            &view.writer.actor_id,
-            Some(view.track_id.clone()),
-            FactFamilyStateV1::Current,
-        ));
-    }
-    for view in &result.assessments {
-        facts.push(fact(
-            view.id.as_str(),
-            "assessment",
-            exact,
-            &view.writer.actor_id,
-            Some(view.track_id.clone()),
-            if view.status == AssessmentRecordStatus::Current {
-                FactFamilyStateV1::Current
-            } else {
-                FactFamilyStateV1::Stale
-            },
-        ));
-    }
-    for view in &result.validation_checks {
-        facts.push(fact(
-            view.id.as_str(),
-            "validation",
-            exact,
-            &view.writer.actor_id,
-            Some(view.track_id.clone()),
-            if view.superseded_by_revisions.is_empty() {
-                FactFamilyStateV1::Current
-            } else {
-                FactFamilyStateV1::Stale
-            },
-        ));
-    }
-    facts.sort_by(|left, right| left.fact_id.cmp(&right.fact_id));
-    facts
-}
-
-fn fact(
-    fact_id: &str,
-    family: &str,
-    exact: &RevisionRefV1,
-    actor_id: &pointbreak::model::ActorId,
-    track_id: Option<pointbreak::model::TrackId>,
-    family_state: FactFamilyStateV1,
-) -> FactPresentationV1 {
-    FactPresentationV1 {
-        fact_id: fact_id.to_owned(),
-        family: family.to_owned(),
-        origin_revision: exact.clone(),
-        context_change_id: None,
-        presented_in_revision: None,
-        port_relation: None,
-        actor_id: actor_id.clone(),
-        track_id,
-        family_state,
-        revision_currency: pointbreak::documents::ChangeRevisionCurrencyV1::Current,
-        availability: ContentAvailabilityV1::Available,
     }
 }
 

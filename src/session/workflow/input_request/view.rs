@@ -9,7 +9,7 @@ use crate::session::event::{
 };
 use crate::session::observation::{ResolvedRevision, target_matches_file};
 use crate::session::projection::body_content::{
-    BodyContentState, BodyRemovalLens, resolve_body_content,
+    BodyContentState, BodyReadMode, BodyRemovalLens, resolve_body_content_for_read,
 };
 use crate::session::store::backend::StoreBackend;
 
@@ -22,6 +22,7 @@ pub(crate) struct InputRequestProjectionOptions<'a> {
     pub file_filter: Option<&'a str>,
     pub status_filter: InputRequestStatusFilter,
     pub include_body: bool,
+    pub read_for_display: bool,
     /// The reader's removal lens: an operative removal over an externalized
     /// body or response reason renders an explained removed state.
     pub removal_lens: &'a BodyRemovalLens<'a>,
@@ -154,6 +155,7 @@ pub(crate) fn project_input_requests(
                 options.backend,
                 options.removal_lens,
                 options.include_body,
+                options.read_for_display,
                 records,
             )?,
             None => Vec::new(),
@@ -165,7 +167,10 @@ pub(crate) fn project_input_requests(
             record.payload,
             record.track_id,
             responses,
-            options.include_body,
+            BodyReadMode {
+                include_body: options.include_body,
+                read_for_display: options.read_for_display,
+            },
         )?;
         input_requests.push(view);
     }
@@ -287,17 +292,20 @@ pub(super) fn response_views_from_records(
     backend: &StoreBackend,
     removal_lens: &BodyRemovalLens<'_>,
     include_body: bool,
+    read_for_display: bool,
     records: &[InputRequestResponseRecord<'_>],
 ) -> Result<Vec<InputRequestResponseView>> {
     records
         .iter()
         .map(|record| {
-            let content = resolve_body_content(
+            let content = resolve_body_content_for_read(
                 backend,
                 removal_lens,
                 include_body,
                 record.payload.reason.clone(),
                 record.payload.reason_artifact_path.as_deref(),
+                record.payload.reason_content_hash.as_deref(),
+                read_for_display,
             )?;
             let reason_content_state = content.state();
             Ok(InputRequestResponseView {
@@ -328,14 +336,16 @@ pub(super) fn input_request_view_from_event(
     payload: InputRequestOpenedPayload,
     track_id: TrackId,
     responses: Vec<InputRequestResponseView>,
-    include_body: bool,
+    read_mode: BodyReadMode,
 ) -> Result<InputRequestView> {
-    let content = resolve_body_content(
+    let content = resolve_body_content_for_read(
         backend,
         removal_lens,
-        include_body,
+        read_mode.include_body,
         payload.body.clone(),
         payload.body_artifact_path.as_deref(),
+        payload.body_content_hash.as_deref(),
+        read_mode.read_for_display,
     )?;
     let body_content_state = content.state();
     let body = content.into_text();

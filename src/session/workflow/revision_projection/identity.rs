@@ -10,9 +10,9 @@ use crate::session::observation::ObservationView;
 use crate::session::state::ProjectionDiagnostic;
 use crate::session::workflow::ValidationCheckView;
 use crate::session::{
-    ActorAttributesMap, DelegationMap, EndorsementReadback, EventVerificationPolicy,
-    EventVerificationStatus, PrincipalResolution, RemovalPolicy, RevisionCommitRangeView, TrustSet,
-    principal_resolution_for_writer,
+    ActorAttributesMap, ContentAvailabilityV1, DelegationMap, EndorsementReadback,
+    EventVerificationPolicy, EventVerificationStatus, PrincipalResolution, RemovalPolicy,
+    RevisionCommitRangeView, TrustSet, principal_resolution_for_writer,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -226,6 +226,30 @@ impl RevisionShowResult {
     /// is empty and `removed_snapshot_content_hash` names the removed blob.
     pub fn snapshot_is_removed(&self) -> bool {
         self.removed_snapshot_content_hash.is_some()
+    }
+
+    /// Display-only availability for one external fact artifact in this exact
+    /// revision read.  Fact-view structs deliberately keep their established
+    /// source-compatible shape; unavailable selected-detail content is instead
+    /// recorded as a stable diagnostic and exposed by this lookup.
+    pub fn body_content_availability(&self, content_hash: Option<&str>) -> ContentAvailabilityV1 {
+        let Some(content_hash) = content_hash else {
+            return ContentAvailabilityV1::Available;
+        };
+        for (availability, suffix) in [
+            (ContentAvailabilityV1::Missing, "missing"),
+            (ContentAvailabilityV1::Mismatch, "mismatch"),
+            (ContentAvailabilityV1::NonTextual, "non_textual"),
+        ] {
+            if self.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == format!("body_content_{suffix}")
+                    && diagnostic.message
+                        == format!("body content {content_hash} is unavailable: {suffix}")
+            }) {
+                return availability;
+            }
+        }
+        ContentAvailabilityV1::Available
     }
 }
 

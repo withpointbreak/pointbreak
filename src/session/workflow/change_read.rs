@@ -36,6 +36,23 @@ impl ChangeReaderReadyV1 {
     pub(crate) fn event_set_hash(&self) -> &str {
         &self.event_set_hash
     }
+
+    /// Build the complete headless Change document facade from this one
+    /// capability-validated generation. Inline proposal presentation is folded
+    /// here so no adapter can pair semantic state with a different event set.
+    pub fn document_facade(&self) -> Result<crate::documents::ChangeDocumentFacadeV1> {
+        let presentations = crate::documents::change_presentation_projection(
+            &self.projection,
+            &self.document_projection,
+            &self.events,
+            &self.event_set_hash,
+        )?;
+        crate::documents::ChangeDocumentFacadeV1::new(
+            self.projection.clone(),
+            self.document_projection.clone(),
+        )?
+        .with_presentations(presentations)
+    }
 }
 
 /// One complete-or-refuse capability snapshot for a cold or warm reader.
@@ -101,6 +118,9 @@ fn change_reader_state_from_backend_for_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bench_support::longitudinal::LongitudinalCountingScopeV1;
+    use crate::model::{JournalId, ObservationId, ReviewTargetRef, RevisionId, TrackId};
+    use crate::session::event::{EventTarget, EventType, ReviewObservationRecordedPayload, Writer};
     use crate::session::store::capabilities::{
         CapabilityFixtureState, write_capability_fixture_for_test,
     };
@@ -208,6 +228,145 @@ mod tests {
             capture.object_artifact_content_hash
         );
         assert_eq!(result.snapshot.files.len(), 1);
+    }
+
+    #[test]
+    fn fact_only_event_advances_the_shared_change_document_stamp() {
+        let backend = StoreBackend::memory();
+        write_capability_fixture_for_test(backend.journal().as_ref(), CapabilityFixtureState::L2)
+            .unwrap();
+
+        let before = change_reader_state_from_backend_for_test(&backend).unwrap();
+        let before_ready = before.ready().expect("L2 reader is ready");
+        let revision_id = RevisionId::new("rev:sha256:presentation-test");
+        let before_stamp = before_ready
+            .document_facade()
+            .unwrap()
+            .list_document_for_inspector_with_presentations()
+            .unwrap()
+            .document
+            .projection_stamp;
+
+        EventStore::from_backend(&backend)
+            .record_change_event_once(&external_observation_event(revision_id))
+            .unwrap();
+
+        let after = change_reader_state_from_backend_for_test(&backend).unwrap();
+        let after_ready = after.ready().expect("L2 reader stays ready");
+        assert_eq!(after_ready.projection, before_ready.projection);
+        assert_eq!(
+            after_ready.document_projection,
+            before_ready.document_projection
+        );
+        assert_ne!(after_ready.event_set_hash(), before_ready.event_set_hash());
+
+        let facade = after_ready.document_facade().unwrap();
+        let list_stamp = facade
+            .list_document_for_inspector_with_presentations()
+            .unwrap()
+            .document
+            .projection_stamp;
+        let review_attention_stamp = facade
+            .attention_document_with_presentations(false)
+            .unwrap()
+            .document
+            .projection_stamp;
+        let inspect_attention_stamp = facade
+            .attention_document_with_presentations(true)
+            .unwrap()
+            .document
+            .projection_stamp;
+        let change_id = facade
+            .list_document_for_inspector_with_presentations()
+            .unwrap()
+            .document
+            .changes
+            .first()
+            .expect("qualification fixture has a Change")
+            .change_id
+            .clone();
+        let detail_stamp = facade
+            .detail_document(&change_id)
+            .unwrap()
+            .detail
+            .projection_stamp;
+
+        assert_ne!(list_stamp, before_stamp);
+        assert_eq!(review_attention_stamp, list_stamp);
+        assert_eq!(inspect_attention_stamp, list_stamp);
+        assert_eq!(detail_stamp, list_stamp);
+    }
+
+    #[test]
+    fn change_list_and_attention_presentations_read_zero_content_artifacts() {
+        let backend = StoreBackend::memory();
+        write_capability_fixture_for_test(backend.journal().as_ref(), CapabilityFixtureState::L2)
+            .unwrap();
+        let revision_id = RevisionId::new("rev:sha256:presentation-test");
+        EventStore::from_backend(&backend)
+            .record_change_event_once(&external_observation_event(revision_id))
+            .unwrap();
+
+        let counting = LongitudinalCountingScopeV1::new("a".repeat(64)).unwrap();
+        let guard = counting.enter();
+        let state = change_reader_state_from_backend_for_test(&backend).unwrap();
+        let facade = state
+            .ready()
+            .expect("L2 reader stays ready")
+            .document_facade()
+            .unwrap();
+        serde_json::to_vec(
+            &facade
+                .list_document_for_inspector_with_presentations()
+                .unwrap(),
+        )
+        .unwrap();
+        serde_json::to_vec(&facade.attention_document_with_presentations(false).unwrap()).unwrap();
+        serde_json::to_vec(&facade.attention_document_with_presentations(true).unwrap()).unwrap();
+        drop(guard);
+
+        let counters = counting.snapshot().counters;
+        assert_eq!(counters.body_artifact_reads, 0);
+        assert_eq!(counters.object_artifact_reads, 0);
+    }
+
+    fn external_observation_event(revision_id: RevisionId) -> ShoreEvent {
+        let track_id = TrackId::new("track:presentation-test");
+        let body_stem = "e".repeat(64);
+        let payload = ReviewObservationRecordedPayload {
+            observation_id: ObservationId::new("observation:sha256:presentation-test"),
+            target: ReviewTargetRef::Revision {
+                revision_id: revision_id.clone(),
+            },
+            title: "fact-only presentation stamp".to_owned(),
+            body: None,
+            body_content_type: Default::default(),
+            body_artifact_path: Some(format!("artifacts/notes/{body_stem}.json")),
+            body_byte_size: Some(5_000),
+            body_content_hash: Some(format!("sha256:{body_stem}")),
+            tags: Vec::new(),
+            confidence: None,
+            supersedes_observation_ids: Vec::new(),
+            responds_to_observation_ids: Vec::new(),
+        };
+        ShoreEvent::new(
+            EventType::ReviewObservationRecorded,
+            ReviewObservationRecordedPayload::idempotency_key(
+                &revision_id,
+                &track_id,
+                "presentation-test",
+            ),
+            EventTarget::for_revision(
+                JournalId::new("journal:qualification"),
+                revision_id,
+                Some(track_id),
+            )
+            .unwrap(),
+            Writer::shore_local("presentation-test"),
+            payload,
+            "2026-08-04T00:01:00Z",
+        )
+        .unwrap()
     }
 
     fn git(repo: &Path, args: &[&str]) {

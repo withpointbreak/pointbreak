@@ -68,8 +68,12 @@ pub(super) fn changes_v2_json(
     cache: &super::server::ChangeReaderCache,
 ) -> Result<ChangeV2Json, String> {
     with_change_v2(repo, cache, |facade, _| {
-        serde_json::to_string(&facade.list_document_for_inspector())
-            .map_err(|error| error.to_string())
+        serde_json::to_string(
+            &facade
+                .list_document_for_inspector_with_presentations()
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())
     })
 }
 
@@ -78,7 +82,12 @@ pub(super) fn change_attention_v2_json(
     cache: &super::server::ChangeReaderCache,
 ) -> Result<ChangeV2Json, String> {
     with_change_v2(repo, cache, |facade, _| {
-        serde_json::to_string(&facade.attention_document(true)).map_err(|error| error.to_string())
+        serde_json::to_string(
+            &facade
+                .attention_document_with_presentations(true)
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())
     })
 }
 
@@ -118,12 +127,13 @@ pub(super) fn change_revision_v2_json(
             serde_json::to_string(&exact_read.resource).map_err(|error| error.to_string())
         } else {
             let document = facade
-                .contextual_revision_document(
+                .contextual_revision_document_with_fact_content(
                     &change_id,
                     &exact,
                     exact_read.resource,
                     exact_read.facts,
                     exact_read.associations,
+                    exact_read.fact_content,
                 )
                 .map_err(|error| error.to_string())?;
             serde_json::to_string(&document).map_err(|error| error.to_string())
@@ -172,9 +182,7 @@ fn with_change_v2(
     let ready = state
         .ready()
         .ok_or_else(|| "Change reader state has no complete semantic projection".to_owned())?;
-    let facade =
-        ChangeDocumentFacadeV1::new(ready.projection.clone(), ready.document_projection.clone())
-            .map_err(|error| error.to_string())?;
+    let facade = ready.document_facade().map_err(|error| error.to_string())?;
     build(&facade, ready).map(ChangeV2Json::Ok)
 }
 

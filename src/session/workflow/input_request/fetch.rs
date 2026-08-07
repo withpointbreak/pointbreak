@@ -6,7 +6,9 @@ use super::view::{
 };
 use crate::error::{Result, ShoreError};
 use crate::model::InputRequestId;
-use crate::session::projection::body_content::{BodyRemovalLens, body_content_diagnostics};
+use crate::session::projection::body_content::{
+    BodyReadMode, BodyRemovalLens, body_content_diagnostics,
+};
 use crate::session::projection::cosignature::CosignatureIndex;
 use crate::session::signing::{RemovalPolicy, TrustSet};
 use crate::session::state::{ProjectionDiagnostic, SessionState};
@@ -84,6 +86,7 @@ pub fn fetch_input_request(options: InputRequestFetchOptions) -> Result<InputReq
                 read_store.backend(),
                 &removal_lens,
                 options.include_body,
+                false,
                 records,
             )?,
             None => Vec::new(),
@@ -95,7 +98,10 @@ pub fn fetch_input_request(options: InputRequestFetchOptions) -> Result<InputReq
             record.payload,
             record.track_id,
             responses,
-            options.include_body,
+            BodyReadMode {
+                include_body: options.include_body,
+                read_for_display: false,
+            },
         )?;
         let mut diagnostics = SessionState::from_events(&events)?.diagnostics;
         diagnostics.extend(body_content_diagnostics(

@@ -71,6 +71,27 @@ describe("profile-first Change bootstrap", () => {
             version: 1,
             projectionStamp: "sha256:generation",
             diagnostics: [],
+            presentations: {
+              "change:sha256:one": {
+                currentRevisions: [
+                  {
+                    revision: {
+                      revisionId: "rev:sha256:a",
+                      objectArtifactContentHash: `sha256:${"a".repeat(64)}`,
+                    },
+                    revisionProposalSummary: "First exact state",
+                    summarySource: "revision_proposal_summary",
+                  },
+                  {
+                    revision: {
+                      revisionId: "rev:sha256:b",
+                      objectArtifactContentHash: `sha256:${"b".repeat(64)}`,
+                    },
+                    summarySource: "absent",
+                  },
+                ],
+              },
+            },
             changes: [
               {
                 changeId: "change:sha256:one",
@@ -110,6 +131,7 @@ describe("profile-first Change bootstrap", () => {
             version: 2,
             projectionStamp: "sha256:generation",
             changes: [],
+            presentations: {},
           }),
         );
       }
@@ -178,6 +200,17 @@ describe("profile-first Change bootstrap", () => {
                 availability: "available",
               },
             ],
+            factContentPresentations: {
+              "observation:one": {
+                contentType: "text/markdown",
+                bodyContentState: "present",
+                content: {
+                  kind: "observation",
+                  title: "Readable finding",
+                  body: "Exact context",
+                },
+              },
+            },
             associations: [
               {
                 state: "unknown",
@@ -260,6 +293,85 @@ describe("profile-first Change bootstrap", () => {
       );
     });
     expect(requests.at(-1)).toContain("/interdiff/");
+  });
+
+  it("bootstraps one coherent generation without optional presentations", async () => {
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/v2/profile") {
+        return new Response(JSON.stringify(profile("ready")));
+      }
+      if (path === "/api/v2/changes") {
+        return new Response(
+          JSON.stringify({
+            schema: "pointbreak.inspect-changes-page",
+            version: 1,
+            projectionStamp: "sha256:generation",
+            diagnostics: [],
+            changes: [
+              {
+                changeId: "change:sha256:one",
+                topology: "initial",
+                lifecycle: "in_progress",
+                attentionSummary: "in_progress",
+                availabilitySummary: "available",
+                projectionStamp: "sha256:generation",
+                currentRevisionRefs: [
+                  {
+                    revisionId: "rev:sha256:one",
+                    objectArtifactContentHash: `sha256:${"a".repeat(64)}`,
+                  },
+                ],
+              },
+            ],
+          }),
+        );
+      }
+      if (path === "/api/v2/attention") {
+        return new Response(
+          JSON.stringify({
+            schema: "pointbreak.inspect-attention",
+            version: 2,
+            projectionStamp: "sha256:generation",
+            changes: [],
+          }),
+        );
+      }
+      if (path.includes("/api/v2/changes/change%3Asha256%3Aone/revisions/")) {
+        return new Response(
+          JSON.stringify({
+            schema: "pointbreak.review-change-revision",
+            version: 1,
+            changeId: "change:sha256:one",
+            revision: {
+              revisionId: "rev:sha256:one",
+              objectArtifactContentHash: `sha256:${"a".repeat(64)}`,
+            },
+            revisionCurrency: "current",
+            relationClassification: "current",
+            availability: "available",
+            factPresentations: [],
+            associations: [],
+            diagnostics: [],
+            projectionStamp: "sha256:generation",
+          }),
+        );
+      }
+      throw new Error(`unexpected request ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeReader } = await import("../src/change-bootstrap");
+
+    await bootstrapChangeReader({ poll: false });
+
+    expect(document.querySelector("[data-change-id]")?.textContent).toContain(
+      "change:sha256:one",
+    );
+    document.querySelector<HTMLButtonElement>("[data-revision-id]")?.click();
+    await vi.waitFor(() => {
+      expect(document.querySelector("#detail-body")?.textContent).toContain(
+        "No facts.",
+      );
+    });
   });
 
   it("refuses an incomplete registry before any semantic request", async () => {

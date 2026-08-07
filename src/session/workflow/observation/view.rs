@@ -9,7 +9,7 @@ use crate::session::event::{
     BodyContentType, EventType, ReviewObservationRecordedPayload, ShoreEvent, Writer,
 };
 use crate::session::projection::body_content::{
-    BodyContentState, BodyRemovalLens, resolve_body_content,
+    BodyContentState, BodyRemovalLens, resolve_body_content_for_read,
 };
 use crate::session::store::backend::StoreBackend;
 
@@ -27,6 +27,7 @@ pub(crate) struct ObservationProjectionOptions<'a> {
     pub file_filter: Option<&'a str>,
     pub tag_filters: &'a [String],
     pub include_body: bool,
+    pub read_for_display: bool,
     /// The reader's removal lens: an operative removal over an externalized
     /// body renders an explained removed state instead of the bytes.
     pub removal_lens: &'a BodyRemovalLens<'a>,
@@ -142,12 +143,14 @@ pub(crate) fn project_observations(
 
     let mut observations = Vec::new();
     for (_, record) in observation_records {
-        let content = resolve_body_content(
+        let content = resolve_body_content_for_read(
             options.backend,
             options.removal_lens,
             options.include_body,
             record.payload.body.clone(),
             record.payload.body_artifact_path.as_deref(),
+            record.payload.body_content_hash.as_deref(),
+            options.read_for_display,
         )?;
         let body_content_state = content.state();
         let body = content.into_text();

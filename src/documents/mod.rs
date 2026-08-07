@@ -54,13 +54,19 @@ pub use attention::{
     derived_attention_list_document,
 };
 pub use capture::{CaptureBody, capture_document};
+pub(crate) use change::change_presentation_projection;
+#[doc(hidden)]
+pub use change::normalize_fact_presentations;
 pub use change::{
-    ATTENTION_LIST_SCHEMA_V2, ChangeAttentionDocumentV2, ChangeClaimWithdrawalV1,
-    ChangeDeclarationStateV1, ChangeDetailDocumentV1, ChangeDetailV1, ChangeDocumentFacadeV1,
-    ChangeListDocumentV1, ChangeMemberRevisionV1, ChangeRevisionCurrencyV1, ChangeRevisionDetailV1,
-    ChangeRevisionDocumentV1, ChangeSummaryV1, FactFamilyStateV1, FactPresentationV1,
-    INSPECT_ATTENTION_SCHEMA_V2, INSPECT_CHANGES_PAGE_SCHEMA, REVIEW_CHANGE_LIST_SCHEMA,
-    REVIEW_CHANGE_REVISION_SCHEMA, REVIEW_CHANGE_SCHEMA, RevisionQualificationV1,
+    ATTENTION_LIST_SCHEMA_V2, ChangeAttentionDocumentV2, ChangeAttentionPresentationDocumentV2,
+    ChangeClaimWithdrawalV1, ChangeDeclarationStateV1, ChangeDetailDocumentV1, ChangeDetailV1,
+    ChangeDocumentFacadeV1, ChangeListDocumentV1, ChangeListPresentationDocumentV1,
+    ChangeMemberRevisionV1, ChangePresentationV1, ChangeRevisionCurrencyV1, ChangeRevisionDetailV1,
+    ChangeRevisionDocumentV1, ChangeRevisionPresentationDocumentV1, ChangeSummaryV1,
+    CurrentRevisionPresentationV1, FactContentPresentationV1, FactContentV1, FactFamilyStateV1,
+    FactInputResponseContentV1, FactPresentationV1, INSPECT_ATTENTION_SCHEMA_V2,
+    INSPECT_CHANGES_PAGE_SCHEMA, REVIEW_CHANGE_LIST_SCHEMA, REVIEW_CHANGE_REVISION_SCHEMA,
+    REVIEW_CHANGE_SCHEMA, RevisionQualificationV1, RevisionSummarySourceV1,
     UnavailableChangeMemberRevisionV1,
 };
 pub use history::{HistoryBody, derived_history_document, history_document};
@@ -299,28 +305,25 @@ mod tests {
 
     #[test]
     fn change_revision_cohort_documents_are_registered_at_frozen_versions() {
-        let registry = super::change_revision_document_registry();
-        for expected in [
-            ("pointbreak.inspect-reader-profile", 1),
-            ("pointbreak.review-change-list", 1),
-            ("pointbreak.inspect-changes-page", 1),
-            ("pointbreak.review-change", 1),
-            ("pointbreak.review-change-revision", 1),
-            ("pointbreak.review-revision", 3),
-            ("pointbreak.review-revision-resource", 1),
-            ("pointbreak.review-association-comparison", 1),
-            ("pointbreak.review-revision-interdiff", 1),
-            ("pointbreak.attention-list", 2),
-            ("pointbreak.inspect-attention", 2),
-            ("pointbreak.reader-upgrade-required", 1),
-            ("pointbreak.store-migration-required", 1),
-            ("pointbreak.store-migration-in-progress", 1),
-        ] {
-            assert!(
-                registry.contains(&expected),
-                "missing frozen document reservation {expected:?}"
-            );
-        }
+        assert_eq!(
+            super::change_revision_document_registry(),
+            &[
+                ("pointbreak.inspect-reader-profile", 1),
+                ("pointbreak.review-change-list", 1),
+                ("pointbreak.inspect-changes-page", 1),
+                ("pointbreak.review-change", 1),
+                ("pointbreak.review-change-revision", 1),
+                ("pointbreak.review-revision", 3),
+                ("pointbreak.review-revision-resource", 1),
+                ("pointbreak.review-association-comparison", 1),
+                ("pointbreak.review-revision-interdiff", 1),
+                ("pointbreak.attention-list", 2),
+                ("pointbreak.inspect-attention", 2),
+                ("pointbreak.reader-upgrade-required", 1),
+                ("pointbreak.store-migration-required", 1),
+                ("pointbreak.store-migration-in-progress", 1),
+            ]
+        );
     }
 
     #[test]

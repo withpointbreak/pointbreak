@@ -190,6 +190,7 @@ fn engagement_lifecycle(
         track_filter: None,
         include_summary: false,
         include_all: false,
+        read_for_display: false,
         removal_lens: None,
     })?;
 

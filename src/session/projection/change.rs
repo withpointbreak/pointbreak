@@ -1147,6 +1147,26 @@ mod tests {
         event(payload, format!("relation:{nonce}"))
     }
 
+    fn presented_revision_ids(
+        events: &[ShoreEvent],
+        change_id: &crate::model::ChangeId,
+    ) -> BTreeSet<RevisionId> {
+        let semantic = project_changes(events).unwrap();
+        let documents = project_change_documents(events).unwrap();
+        crate::documents::change_presentation_projection(
+            &semantic,
+            &documents,
+            events,
+            "sha256:test-event-set",
+        )
+        .unwrap()
+        .presentations[change_id]
+            .current_revisions
+            .iter()
+            .map(|current| current.revision.revision_id.clone())
+            .collect()
+    }
+
     fn assessment(revision_id: RevisionId, nonce: u8) -> ShoreEvent {
         assessment_for_target(
             ReviewTargetRef::Revision { revision_id },
@@ -1346,6 +1366,10 @@ mod tests {
             divergent.changes[&change_id].lifecycle,
             ChangeLifecycleV1::Conflicted
         );
+        assert_eq!(
+            presented_revision_ids(&events, &change_id),
+            divergent.changes[&change_id].current_revisions
+        );
         events.push(relation(&change_id, d_ref.clone(), b_ref, 22));
         assert_eq!(
             project_changes(&events).unwrap().changes[&change_id].topology,
@@ -1360,6 +1384,10 @@ mod tests {
         assert_eq!(
             consolidated.changes[&change_id].current_revisions,
             [d].into()
+        );
+        assert_eq!(
+            presented_revision_ids(&events, &change_id),
+            consolidated.changes[&change_id].current_revisions
         );
     }
 
@@ -1489,19 +1517,27 @@ mod tests {
             view.diagnostics
                 .contains(&"change_membership_revision_missing".to_owned())
         );
+        assert!(
+            presented_revision_ids(&[declared.clone(), membership.clone()], &change_id).is_empty(),
+            "presentation must not fabricate an exact identity for a missing Revision"
+        );
 
-        let complete = project_changes(&[
+        let complete_events = [
             declared,
             membership,
             revision_event,
             assessment(revision_id.clone(), 36),
-        ])
-        .unwrap();
+        ];
+        let complete = project_changes(&complete_events).unwrap();
         let view = &complete.changes[&change_id];
-        assert_eq!(view.members, [revision_id].into());
+        assert_eq!(view.members, [revision_id.clone()].into());
         assert_eq!(view.topology, ChangeTopologyV1::Initial);
         assert_eq!(view.lifecycle, ChangeLifecycleV1::Accepted);
         assert!(view.diagnostics.is_empty());
+        assert_eq!(
+            presented_revision_ids(&complete_events, &change_id),
+            [revision_id].into()
+        );
     }
 
     #[test]
@@ -1601,7 +1637,7 @@ mod tests {
         let (_, first_b) = membership(&first_change, &b, 42);
         let (_, second_a) = membership(&second_change, &a, 51);
         let (_, second_b) = membership(&second_change, &b, 52);
-        let projection = project_changes(&[
+        let events = vec![
             first_declared,
             second_declared,
             a_event,
@@ -1610,9 +1646,9 @@ mod tests {
             first_b,
             second_a,
             second_b,
-            relation(&first_change, b_ref, a_ref, 43),
-        ])
-        .unwrap();
+            relation(&first_change, b_ref.clone(), a_ref.clone(), 43),
+        ];
+        let projection = project_changes(&events).unwrap();
         assert_eq!(
             projection.changes[&first_change].topology,
             ChangeTopologyV1::Replacement
@@ -1623,7 +1659,72 @@ mod tests {
         );
         assert_eq!(
             projection.changes[&second_change].current_revisions,
-            [a, b].into()
+            [a.clone(), b.clone()].into()
+        );
+        assert_eq!(
+            presented_revision_ids(&events, &first_change),
+            [b.clone()].into()
+        );
+        assert_eq!(
+            presented_revision_ids(&events, &second_change),
+            [a.clone(), b].into()
+        );
+
+        let documents = project_change_documents(&events).unwrap();
+        let facade = crate::documents::ChangeDocumentFacadeV1::new(projection, documents).unwrap();
+        let resource = crate::documents::RevisionResourceDocumentV1::available(
+            crate::documents::RevisionResourceRefV1 {
+                revision: a_ref.clone(),
+                object_id: ObjectId::new("obj:sha256:a"),
+            },
+            crate::documents::RevisionResourceProjectionV1 {
+                track_id: None,
+                include_body: false,
+            },
+            &a_ref.object_artifact_content_hash,
+            serde_json::json!({"revision": "a"}),
+        )
+        .unwrap();
+        let fact = crate::documents::FactPresentationV1 {
+            fact_id: "observation:sha256:shared".to_owned(),
+            family: "observation".to_owned(),
+            origin_revision: a_ref.clone(),
+            context_change_id: None,
+            presented_in_revision: None,
+            port_relation: None,
+            actor_id: crate::model::ActorId::new("actor:test"),
+            track_id: None,
+            family_state: crate::documents::FactFamilyStateV1::Current,
+            revision_currency: crate::documents::ChangeRevisionCurrencyV1::Current,
+            availability: crate::session::ContentAvailabilityV1::Available,
+        };
+        let replacement = facade
+            .contextual_revision_document(
+                &first_change,
+                &a_ref,
+                resource.clone(),
+                vec![fact.clone()],
+                Vec::new(),
+            )
+            .unwrap();
+        let parallel = facade
+            .contextual_revision_document(&second_change, &a_ref, resource, vec![fact], Vec::new())
+            .unwrap();
+        assert_eq!(
+            replacement.detail.revision_currency,
+            crate::documents::ChangeRevisionCurrencyV1::StaleBySupersession
+        );
+        assert_eq!(
+            replacement.detail.fact_presentations[0].revision_currency,
+            crate::documents::ChangeRevisionCurrencyV1::StaleBySupersession
+        );
+        assert_eq!(
+            parallel.detail.revision_currency,
+            crate::documents::ChangeRevisionCurrencyV1::Current
+        );
+        assert_eq!(
+            parallel.detail.fact_presentations[0].revision_currency,
+            crate::documents::ChangeRevisionCurrencyV1::Current
         );
     }
 

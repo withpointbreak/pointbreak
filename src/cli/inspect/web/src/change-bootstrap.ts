@@ -25,6 +25,14 @@ interface RevisionRef {
   objectArtifactContentHash: string;
 }
 
+interface ChangePresentation {
+  currentRevisions: Array<{
+    revision: RevisionRef;
+    revisionProposalSummary?: string;
+    summarySource: "revision_proposal_summary" | "absent";
+  }>;
+}
+
 interface ChangeSummary {
   changeId: string;
   topology: string;
@@ -41,6 +49,7 @@ interface ChangesPage {
   version: 1;
   changes: ChangeSummary[];
   diagnostics: string[];
+  presentations?: Record<string, ChangePresentation>;
   projectionStamp: string;
 }
 
@@ -48,6 +57,7 @@ interface AttentionPage {
   schema: "pointbreak.inspect-attention";
   version: 2;
   changes: ChangeSummary[];
+  presentations?: Record<string, ChangePresentation>;
   projectionStamp: string;
 }
 
@@ -83,6 +93,14 @@ interface ChangeRevisionDetail {
     familyState: string;
     availability: string;
   }>;
+  factContentPresentations?: Record<
+    string,
+    {
+      contentType: "text/plain" | "text/markdown";
+      bodyContentState: "present" | "suppressed_present" | "physically_removed";
+      content: Record<string, unknown>;
+    }
+  >;
   associations: Array<{
     state: string;
     proofAvailability: string;

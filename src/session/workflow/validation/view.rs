@@ -12,7 +12,7 @@ use crate::session::event::{
     BodyContentType, EventType, ShoreEvent, ValidationCheckRecordedPayload, Writer,
 };
 use crate::session::projection::body_content::{
-    BodyContentState, BodyRemovalLens, resolve_body_content,
+    BodyContentState, BodyRemovalLens, resolve_body_content_for_read,
 };
 use crate::session::store::backend::StoreBackend;
 
@@ -29,6 +29,7 @@ pub(crate) struct ValidationCheckProjectionOptions<'a> {
     pub track_filter: Option<TrackId>,
     pub status_filter: Option<ValidationStatus>,
     pub include_body: bool,
+    pub read_for_display: bool,
     /// The reader's removal lens: an operative removal over an externalized
     /// summary renders an explained removed state instead of the bytes.
     pub removal_lens: &'a BodyRemovalLens<'a>,
@@ -138,12 +139,14 @@ pub fn project_validation_checks(
 
     let mut validations = Vec::new();
     for (_, record) in validation_records {
-        let content = resolve_body_content(
+        let content = resolve_body_content_for_read(
             options.backend,
             options.removal_lens,
             options.include_body,
             record.payload.summary.clone(),
             record.payload.summary_artifact_path.as_deref(),
+            record.payload.summary_content_hash.as_deref(),
+            options.read_for_display,
         )?;
         let summary_content_state = content.state();
         let summary = content.into_text();
@@ -253,6 +256,7 @@ mod tests {
             track_filter: None,
             status_filter: None,
             include_body: false,
+            read_for_display: false,
             removal_lens: &lens,
         })
         .unwrap();
@@ -293,6 +297,7 @@ mod tests {
             track_filter: None,
             status_filter: None,
             include_body: false,
+            read_for_display: false,
             removal_lens: &lens,
         })
         .unwrap();
@@ -340,6 +345,7 @@ mod tests {
             track_filter: None,
             status_filter: None,
             include_body: false,
+            read_for_display: false,
             removal_lens: &lens,
         })
         .unwrap();
@@ -424,6 +430,7 @@ mod tests {
             track_filter: None,
             status_filter: None,
             include_body: true,
+            read_for_display: false,
             removal_lens: &lens,
         })
         .expect("swept validation summary must not hard-error");
@@ -469,6 +476,7 @@ mod tests {
             track_filter: None,
             status_filter: None,
             include_body: true,
+            read_for_display: false,
             removal_lens: &lens,
         })
         .expect("suppressed validation summary renders");
@@ -505,6 +513,7 @@ mod tests {
             track_filter: None,
             status_filter: None,
             include_body: true,
+            read_for_display: false,
             removal_lens: &lens,
         })
         .expect_err("absent summary bytes without an operative removal keep the hard error");
@@ -516,18 +525,20 @@ mod tests {
     fn project_validation_checks_hydrates_summary_only_when_requested() {
         let dir = tempfile::tempdir().unwrap();
         let backend = StoreBackend::Local(dir.path().to_path_buf());
-        let artifact_path = "artifacts/notes/abc.json";
+        let body = "artifact summary";
+        let body_hash = crate::canonical_hash::sha256_bytes_hex(body.as_bytes());
+        let artifact_path = format!("artifacts/notes/{body_hash}.json");
         fs::create_dir_all(dir.path().join("artifacts/notes")).unwrap();
         fs::write(
-            dir.path().join(artifact_path),
-            r#"{"schema":"shore.note-body","version":1,"body":"artifact summary"}"#,
+            dir.path().join(&artifact_path),
+            format!(r#"{{"schema":"shore.note-body","version":1,"body":"{body}"}}"#),
         )
         .unwrap();
         let events = vec![validation_event_with_summary_artifact(
             "evt:sha256:0001",
             "review-unit:sha256:one",
             "validation:sha256:one",
-            artifact_path,
+            &artifact_path,
         )];
         let removal = crate::session::ArtifactRemovalProjection::from_events(&[]).unwrap();
         let cosig = crate::session::projection::cosignature::CosignatureIndex::build(&[]).unwrap();
@@ -541,6 +552,7 @@ mod tests {
             track_filter: None,
             status_filter: None,
             include_body,
+            read_for_display: false,
             removal_lens: &lens,
         };
 
@@ -674,7 +686,10 @@ mod tests {
                 summary_content_type: Default::default(),
                 summary_artifact_path: Some(artifact_path.to_owned()),
                 summary_byte_size: Some(16),
-                summary_content_hash: Some("sha256:artifact-summary".to_owned()),
+                summary_content_hash: Some(
+                    crate::session::body_artifact::note_body_content_hash_from_path(artifact_path)
+                        .expect("content-addressed summary artifact path"),
+                ),
                 started_at: None,
                 completed_at: None,
                 log_artifact_content_hashes: Vec::new(),

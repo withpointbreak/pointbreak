@@ -147,6 +147,7 @@ pub fn list_input_requests(options: InputRequestListOptions) -> Result<InputRequ
         file_filter: options.file.as_deref(),
         status_filter: options.status,
         include_body: options.include_body,
+        read_for_display: false,
         removal_lens: &removal_lens,
     })?;
     let mut diagnostics = SessionState::from_events(&events)?.diagnostics;

@@ -374,6 +374,12 @@ fn show_revision_from_events(
         options.removal_policy,
         &cosig_index,
     );
+    // `read_for_display` predates typed fact-body availability: legacy CLI
+    // readers use it for lenient event decoding but still promise a hard error
+    // for missing selected fact bytes. Only an exact-addressed display read
+    // (Inspector and Change-contextual detail) may degrade those bytes into the
+    // typed availability companion.
+    let body_read_for_display = options.read_for_display && options.exact;
     let snapshot_content =
         match resolve_snapshot_content_from_backend(backend, &revision, bound_status) {
             Ok(content) => content,
@@ -417,6 +423,7 @@ fn show_revision_from_events(
         file_filter: None,
         tag_filters: &[],
         include_body: options.include_body,
+        read_for_display: body_read_for_display,
         removal_lens: &body_removal_lens,
     })?;
     let input_requests = project_input_requests(InputRequestProjectionOptions {
@@ -428,6 +435,7 @@ fn show_revision_from_events(
         file_filter: None,
         status_filter: InputRequestStatusFilter::All,
         include_body: options.include_body,
+        read_for_display: body_read_for_display,
         removal_lens: &body_removal_lens,
     })?;
     let (current_assessment, assessments) = project_assessments(AssessmentProjectionOptions {
@@ -437,6 +445,7 @@ fn show_revision_from_events(
         track_filter: track_id.clone(),
         include_summary: options.include_body,
         include_all: true,
+        read_for_display: body_read_for_display,
         removal_lens: Some(&body_removal_lens),
     })?;
     let mut validation_checks = project_validation_checks(ValidationCheckProjectionOptions {
@@ -446,6 +455,7 @@ fn show_revision_from_events(
         track_filter: track_id.clone(),
         status_filter: None,
         include_body: options.include_body,
+        read_for_display: body_read_for_display,
         removal_lens: &body_removal_lens,
     })?;
     // Annotate each check with the successors of the revision it targets. An exact address can
@@ -541,6 +551,7 @@ fn show_revision_from_events(
                 .map(|v| (v.summary_content_state, v.summary_content_hash.as_deref())),
         );
     diagnostics.extend(body_content_diagnostics(body_states));
+    diagnostics.extend(body_removal_lens.availability_diagnostics());
 
     // The bound hash's claim diagnostic, mapped from the operative status decided
     // once above (reused, not recomputed). A non-operative claim renders the bytes
@@ -1247,6 +1258,7 @@ fn build_revision_overview(
             file_filter: None,
             tag_filters: &[],
             include_body: false,
+            read_for_display: false,
             removal_lens: &body_removal_lens,
         })?
     };
@@ -1262,6 +1274,7 @@ fn build_revision_overview(
             file_filter: None,
             status_filter: InputRequestStatusFilter::All,
             include_body: false,
+            read_for_display: false,
             removal_lens: &body_removal_lens,
         })?
     };
@@ -1275,6 +1288,7 @@ fn build_revision_overview(
             track_filter: None,
             include_summary: false,
             include_all: true,
+            read_for_display: false,
             removal_lens: Some(&body_removal_lens),
         })?
     };
@@ -1288,6 +1302,7 @@ fn build_revision_overview(
             track_filter: None,
             status_filter: None,
             include_body: false,
+            read_for_display: false,
             removal_lens: &body_removal_lens,
         })?
     };
@@ -1362,8 +1377,8 @@ mod tests {
     use crate::crypto::{EventSignatureBytes, EventSigner};
     use crate::model::{
         DiffSnapshot, EngagementId, JournalId, ObjectId, ReviewEndpoint, ReviewId, RevisionId,
-        RevisionSource, ValidationCheckId, ValidationStatus, ValidationTarget, ValidationTrigger,
-        WorktreeCaptureMode,
+        RevisionRefV1, RevisionSource, ValidationCheckId, ValidationStatus, ValidationTarget,
+        ValidationTrigger, WorktreeCaptureMode,
     };
     use crate::session::event::{
         ArtifactRemovedPayload, EventSignature, EventTarget, EventToBeSigned, EventType,
@@ -1376,13 +1391,14 @@ mod tests {
     use crate::session::store::backend::{InMemoryStore, StoreBackend};
     use crate::session::{
         AssessmentAddOptions, AssessmentShowOptions, BodyContentState, CaptureOptions,
-        CaptureResult, CurrentAssessmentStatus, EventStore, InputRequestFetchOptions,
-        InputRequestListOptions, InputRequestOpenOptions, InputRequestRespondOptions,
-        InputRequestStatus, InputRequestStatusFilter, ObservationAddOptions,
-        ObservationListOptions, ObservationTargetSelector, RemovalPolicy, RevisionListOptions,
-        RootCommitSpec, capture_review, capture_worktree_review, fetch_input_request,
-        list_input_requests, list_observations, list_revisions, open_input_request,
-        record_assessment, record_observation, respond_input_request, show_assessments,
+        CaptureResult, ContentAvailabilityV1, CurrentAssessmentStatus, EventStore,
+        InputRequestFetchOptions, InputRequestListOptions, InputRequestOpenOptions,
+        InputRequestRespondOptions, InputRequestStatus, InputRequestStatusFilter,
+        ObservationAddOptions, ObservationListOptions, ObservationTargetSelector, RemovalPolicy,
+        RevisionListOptions, RootCommitSpec, capture_review, capture_worktree_review,
+        fetch_input_request, list_input_requests, list_observations, list_revisions,
+        open_input_request, record_assessment, record_observation, respond_input_request,
+        show_assessments,
     };
 
     // ---- Overview batch: golden-equality + single-read invariants ----
@@ -2379,6 +2395,94 @@ mod tests {
     }
 
     #[test]
+    fn exact_revision_fact_normalizer_covers_every_readable_family() {
+        let repo = modified_repo();
+        let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        record_observation(
+            ObservationAddOptions::new(repo.path())
+                .with_revision_id(capture.revision_id.clone())
+                .with_track("agent:codex")
+                .with_title("Actionable observation")
+                .with_body("Use the exact Revision."),
+        )
+        .unwrap();
+        let request = open_input_request(
+            InputRequestOpenOptions::new(repo.path())
+                .with_revision_id(capture.revision_id.clone())
+                .with_track("agent:codex")
+                .with_title("Need a decision")
+                .with_reason_code(InputRequestReasonCode::ManualDecisionRequired),
+        )
+        .unwrap();
+        respond_input_request(
+            InputRequestRespondOptions::new(repo.path(), request.input_request_id)
+                .with_outcome(InputRequestResponseOutcome::Approved)
+                .with_reason("Approved for this exact state"),
+        )
+        .unwrap();
+        record_assessment(
+            AssessmentAddOptions::new(repo.path())
+                .with_revision_id(capture.revision_id.clone())
+                .with_track("human:kevin")
+                .with_assessment(ReviewAssessment::AcceptedWithFollowUp)
+                .with_summary("Ship with follow-up."),
+        )
+        .unwrap();
+        record_validation_with_status(
+            repo.path(),
+            &capture,
+            "validation:sha256:normalizer",
+            ValidationStatus::Passed,
+        );
+
+        let result = show_revision(
+            RevisionShowOptions::new(repo.path())
+                .with_revision_id(capture.revision_id.clone())
+                .with_exact(true)
+                .with_include_body(true)
+                .with_read_for_display(true),
+        )
+        .unwrap();
+        let exact =
+            RevisionRefV1::new(capture.revision_id, capture.object_artifact_content_hash).unwrap();
+        let (facts, content) = crate::documents::normalize_fact_presentations(&result, &exact);
+
+        assert_eq!(
+            facts
+                .iter()
+                .map(|fact| fact.family.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["assessment", "input_request", "observation", "validation"])
+        );
+        assert_eq!(content.len(), 4);
+        assert!(facts.iter().all(|fact| {
+            fact.origin_revision == exact
+                && fact.context_change_id.is_none()
+                && fact.revision_currency == crate::documents::ChangeRevisionCurrencyV1::Current
+                && fact.availability == ContentAvailabilityV1::Available
+        }));
+        let request = facts
+            .iter()
+            .find(|fact| fact.family == "input_request")
+            .expect("normalized input request");
+        match &content[&request.fact_id].content {
+            crate::documents::FactContentV1::InputRequest {
+                status, responses, ..
+            } => {
+                assert_eq!(status, "responded");
+                assert_eq!(responses.len(), 1);
+                assert_eq!(responses[0].outcome, "approved");
+                assert_eq!(
+                    responses[0].reason.as_deref(),
+                    Some("Approved for this exact state")
+                );
+                assert_eq!(responses[0].availability, ContentAvailabilityV1::Available);
+            }
+            other => panic!("expected input-request content, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn show_revision_includes_current_assessment() {
         let repo = modified_repo();
         capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
@@ -3027,6 +3131,24 @@ mod tests {
         fs::remove_file(path).expect("delete note body blob");
     }
 
+    fn replace_note_body_blob(repo: &Path, body_content_hash: &str, body: &str) {
+        let hex = body_content_hash
+            .strip_prefix("sha256:")
+            .expect("normalized body content hash");
+        let path = resolved_store_dir(repo)
+            .join("artifacts")
+            .join("notes")
+            .join(format!("{hex}.json"));
+        fs::write(
+            path,
+            serde_json::to_vec(&crate::session::body_artifact::NoteBodyEnvelope::new(
+                body.to_owned(),
+            ))
+            .expect("note envelope"),
+        )
+        .expect("replace note body blob");
+    }
+
     /// Capture plus one externalized (> 4096-byte) observation body; returns
     /// the repo and the body's normalized content hash (the removal key).
     fn revision_with_externalized_observation_body() -> (TestRepo, String) {
@@ -3123,6 +3245,101 @@ mod tests {
             .expect_err("absent bytes without an operative removal keep the hard error");
 
         assert!(err.to_string().contains("import referenced artifacts"));
+    }
+
+    #[test]
+    fn display_read_keeps_exact_observation_with_missing_body() {
+        let (repo, body_hash) = revision_with_externalized_observation_body();
+        delete_note_body_blob(repo.path(), &body_hash);
+
+        let result = show_revision(
+            RevisionShowOptions::new(repo.path())
+                .with_include_body(true)
+                .with_exact(true)
+                .with_read_for_display(true),
+        )
+        .expect("display read degrades missing observation content");
+
+        assert_eq!(result.observations[0].body, None);
+        assert_eq!(
+            result.body_content_availability(result.observations[0].body_content_hash.as_deref()),
+            ContentAvailabilityV1::Missing
+        );
+        assert!(result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "body_content_missing" && diagnostic.message.contains(&body_hash)
+        }));
+        assert_normalized_observation_unavailable(&result, ContentAvailabilityV1::Missing);
+    }
+
+    #[test]
+    fn exact_display_read_without_bodies_validates_external_artifacts() {
+        let (repo, body_hash) = revision_with_externalized_observation_body();
+        delete_note_body_blob(repo.path(), &body_hash);
+
+        let result = show_revision(
+            RevisionShowOptions::new(repo.path())
+                .with_exact(true)
+                .with_read_for_display(true)
+                .with_include_body(false),
+        )
+        .expect("exact display read reports unavailable hidden content");
+
+        assert_eq!(result.observations[0].body, None);
+        assert_eq!(
+            result.body_content_availability(result.observations[0].body_content_hash.as_deref()),
+            ContentAvailabilityV1::Missing
+        );
+        assert!(result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "body_content_missing" && diagnostic.message.contains(&body_hash)
+        }));
+    }
+
+    #[test]
+    fn display_read_validates_exact_observation_body_hash() {
+        let (repo, body_hash) = revision_with_externalized_observation_body();
+        replace_note_body_blob(repo.path(), &body_hash, &"wrong".repeat(1000));
+
+        let error = show_revision(RevisionShowOptions::new(repo.path()).with_include_body(true))
+            .expect_err("strict exact read rejects mismatched observation content");
+        assert!(error.to_string().contains("content hash mismatch"));
+
+        let result = show_revision(
+            RevisionShowOptions::new(repo.path())
+                .with_include_body(true)
+                .with_exact(true)
+                .with_read_for_display(true),
+        )
+        .expect("display read degrades mismatched observation content");
+
+        assert_eq!(result.observations[0].body, None);
+        assert_eq!(
+            result.body_content_availability(result.observations[0].body_content_hash.as_deref()),
+            ContentAvailabilityV1::Mismatch
+        );
+        assert_normalized_observation_unavailable(&result, ContentAvailabilityV1::Mismatch);
+    }
+
+    fn assert_normalized_observation_unavailable(
+        result: &RevisionShowResult,
+        expected: ContentAvailabilityV1,
+    ) {
+        let exact = RevisionRefV1::new(
+            result.revision.revision_id.clone(),
+            result.revision.object_artifact_content_hash.clone(),
+        )
+        .expect("exact Revision reference");
+        let (facts, content) = crate::documents::normalize_fact_presentations(result, &exact);
+        let fact = facts
+            .iter()
+            .find(|fact| fact.family == "observation")
+            .expect("normalized observation fact");
+        assert_eq!(fact.availability, expected);
+        match &content[&fact.fact_id].content {
+            crate::documents::FactContentV1::Observation { body, .. } => {
+                assert_eq!(body, &None);
+            }
+            other => panic!("expected observation content, got {other:?}"),
+        }
     }
 
     #[test]
@@ -3228,6 +3445,26 @@ mod tests {
         assert!(err.to_string().contains("import referenced artifacts"));
     }
 
+    #[test]
+    fn display_read_keeps_exact_assessment_with_missing_summary() {
+        let (repo, summary_hash) = revision_with_externalized_assessment_summary();
+        delete_note_body_blob(repo.path(), &summary_hash);
+
+        let result = show_revision(
+            RevisionShowOptions::new(repo.path())
+                .with_include_body(true)
+                .with_exact(true)
+                .with_read_for_display(true),
+        )
+        .expect("display read degrades missing assessment content");
+
+        assert_eq!(result.assessments[0].summary, None);
+        assert_eq!(
+            result.body_content_availability(result.assessments[0].summary_content_hash.as_deref()),
+            ContentAvailabilityV1::Missing
+        );
+    }
+
     /// INV: without a lens (status-only projections, e.g. the engagement
     /// lifecycle) no state resolution happens — an operative removal over the
     /// summary hash still reads `Present` because nothing consults it.
@@ -3264,6 +3501,7 @@ mod tests {
             track_filter: None,
             include_summary: false,
             include_all: true,
+            read_for_display: false,
             removal_lens: None,
         })
         .unwrap();
@@ -3370,6 +3608,49 @@ mod tests {
         assert!(result.diagnostics.iter().any(
             |d| d.code == "body_content_physically_removed" && d.message.contains(&reason_hash)
         ));
+
+        let exact = RevisionRefV1::new(
+            result.revision.revision_id.clone(),
+            result.revision.object_artifact_content_hash.clone(),
+        )
+        .unwrap();
+        let (facts, content) = crate::documents::normalize_fact_presentations(&result, &exact);
+        let request = facts
+            .iter()
+            .find(|fact| fact.family == "input_request")
+            .expect("normalized input request");
+        let crate::documents::FactContentV1::InputRequest { responses, .. } =
+            &content[&request.fact_id].content
+        else {
+            panic!("expected input-request content")
+        };
+        assert_eq!(responses[0].availability, ContentAvailabilityV1::Removed);
+    }
+
+    #[test]
+    fn display_read_keeps_request_and_sibling_body_when_response_reason_is_missing() {
+        let (repo, _body_hash, reason_hash) = revision_with_externalized_input_request();
+        delete_note_body_blob(repo.path(), &reason_hash);
+
+        let result = show_revision(
+            RevisionShowOptions::new(repo.path())
+                .with_include_body(true)
+                .with_exact(true)
+                .with_read_for_display(true),
+        )
+        .expect("display read degrades one missing response reason");
+
+        let request = &result.input_requests[0];
+        assert!(request.body.is_some(), "available sibling body survives");
+        assert_eq!(
+            result.body_content_availability(request.body_content_hash.as_deref()),
+            ContentAvailabilityV1::Available
+        );
+        assert_eq!(request.responses[0].reason, None);
+        assert_eq!(
+            result.body_content_availability(request.responses[0].reason_content_hash.as_deref(),),
+            ContentAvailabilityV1::Missing
+        );
     }
 
     #[test]
@@ -3548,6 +3829,42 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|d| d.code == "body_content_physically_removed")
+        );
+    }
+
+    #[test]
+    fn display_read_keeps_exact_validation_with_missing_summary() {
+        use crate::session::{ValidationAddOptions, record_validation_check};
+
+        let repo = modified_repo();
+        let capture = capture_worktree_review(CaptureOptions::new(repo.path())).unwrap();
+        let check = record_validation_check(
+            ValidationAddOptions::new(repo.path())
+                .with_revision_id(capture.revision_id.clone())
+                .with_track("agent:codex")
+                .with_check_name("cargo test")
+                .with_status(ValidationStatus::Passed)
+                .with_summary("v".repeat(5000)),
+        )
+        .unwrap();
+        let summary_hash = check.summary_content_hash.expect("externalized summary");
+        delete_note_body_blob(repo.path(), &summary_hash);
+
+        let result = show_revision(
+            RevisionShowOptions::new(repo.path())
+                .with_revision_id(capture.revision_id)
+                .with_exact(true)
+                .with_include_body(true)
+                .with_read_for_display(true),
+        )
+        .expect("display read degrades missing validation content");
+
+        assert_eq!(result.validation_checks[0].summary, None);
+        assert_eq!(
+            result.body_content_availability(
+                result.validation_checks[0].summary_content_hash.as_deref(),
+            ),
+            ContentAvailabilityV1::Missing
         );
     }
 

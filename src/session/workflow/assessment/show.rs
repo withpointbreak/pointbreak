@@ -127,6 +127,7 @@ pub fn show_assessments(options: AssessmentShowOptions) -> Result<AssessmentShow
         track_filter: track_filter.clone(),
         include_summary: options.include_summary,
         include_all: options.include_all,
+        read_for_display: false,
         removal_lens: Some(&removal_lens),
     })?;
     let mut diagnostics = SessionState::from_events(&events)?.diagnostics;

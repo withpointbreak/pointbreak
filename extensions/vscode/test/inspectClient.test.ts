@@ -93,6 +93,37 @@ describe("InspectClient", () => {
     ]);
   });
 
+  it("decodes contextual Revision facts without optional content presentations", async () => {
+    const reference = {
+      revisionId: "rev:sha256:one",
+      objectArtifactContentHash: `sha256:${"a".repeat(64)}`,
+    };
+    const { factContentPresentations: _, ...document } = changeRevisionDocument(
+      reference,
+      "sha256:projection",
+    );
+    const fetch = vi
+      .fn<FetchFn>()
+      .mockResolvedValueOnce(response(readerProfile()))
+      .mockResolvedValueOnce(response(document));
+    const client = new InspectClient(
+      "http://127.0.0.1:63831",
+      "secret-bearer",
+      fetch,
+    );
+
+    const detail = await client.changeRevision("change:sha256:one", reference);
+    expect(detail).toMatchObject({
+      factPresentations: [
+        {
+          contextChangeId: "change:sha256:one",
+          factId: "observation:sha256:one",
+        },
+      ],
+    });
+    expect(detail.factContentPresentations).toBeUndefined();
+  });
+
   it("refuses a warm Revision from another projection generation", async () => {
     const reference = {
       revisionId: "rev:sha256:one",
@@ -529,7 +560,28 @@ function changeRevisionDocument(
       diagnostics: [],
       cacheKey: `sha256:${"c".repeat(64)}`,
     },
-    factPresentations: [],
+    factPresentations: [
+      {
+        factId: "observation:sha256:one",
+        family: "observation",
+        originRevision: reference,
+        contextChangeId: "change:sha256:one",
+        revisionCurrency: "current",
+        familyState: "current",
+        availability: "available",
+      },
+    ],
+    factContentPresentations: {
+      "observation:sha256:one": {
+        contentType: "text/markdown",
+        bodyContentState: "present",
+        content: {
+          kind: "observation",
+          title: "Readable finding",
+          body: "Exact context",
+        },
+      },
+    },
     associations: [],
     availability: "available",
     diagnostics: [],

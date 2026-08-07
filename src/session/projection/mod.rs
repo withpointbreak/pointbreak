@@ -17,7 +17,7 @@ pub(crate) mod task;
 pub(crate) mod test_support;
 
 pub use artifact_removal::{ArtifactRemovalProjection, RemovalClaim, RemovalOperativeStatus};
-pub use body_content::BodyContentState;
+pub use body_content::{BodyContentState, ContentAvailabilityV1};
 pub use change::{
     ChangeClaimSupportV1, ChangeDocumentProjectionV1, ChangeLifecycleV1, ChangeLinkView,
     ChangeMembershipClaimViewV1, ChangeProjection, ChangeRelationClaimViewV1, ChangeTopologyV1,

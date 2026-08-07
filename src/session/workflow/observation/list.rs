@@ -131,6 +131,7 @@ pub fn list_observations(options: ObservationListOptions) -> Result<ObservationL
         file_filter: options.file.as_deref(),
         tag_filters: &options.tags,
         include_body: options.include_body,
+        read_for_display: false,
         removal_lens: &removal_lens,
     })?;
     let mut diagnostics = SessionState::from_events(&events)?.diagnostics;

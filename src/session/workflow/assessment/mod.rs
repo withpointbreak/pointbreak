@@ -440,6 +440,7 @@ mod tests {
             track_filter: None,
             include_summary: false,
             include_all: true,
+            read_for_display: false,
             removal_lens: None,
         })
         .unwrap();

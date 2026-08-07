@@ -2,6 +2,9 @@ import { expect, it } from "vitest";
 import type { ResolvedBinary } from "../src/binary";
 import {
   CHANGE_READER_DOCUMENTS,
+  CHANGE_READER_PROFILE,
+  validateChangeAttention,
+  validateChangeList,
   validateReaderProfile,
 } from "../src/changeProtocol";
 import {
@@ -39,6 +42,7 @@ it("pins the exact extension document handshake", () => {
 });
 
 it("pins the separate Change-capable reader profile registry", () => {
+  expect(CHANGE_READER_PROFILE).toBe("review_change_revision_v1");
   expect(CHANGE_READER_DOCUMENTS).toEqual({
     "pointbreak.inspect-reader-profile": 1,
     "pointbreak.review-change-list": 1,
@@ -55,6 +59,106 @@ it("pins the separate Change-capable reader profile registry", () => {
     "pointbreak.store-migration-required": 1,
     "pointbreak.store-migration-in-progress": 1,
   });
+});
+
+it("decodes Change list and attention schemas without optional presentations", () => {
+  const summary = {
+    changeId: "change:sha256:one",
+    declarationState: "authoritative",
+    titleAssertions: [],
+    memberCount: 0,
+    currentRevisionRefs: [],
+    topology: "initial",
+    lifecycle: "in_progress",
+    attentionSummary: "in_progress",
+    availabilitySummary: "available",
+    diagnostics: [],
+    projectionStamp: "sha256:generation",
+  };
+
+  const list = validateChangeList(
+    {
+      schema: "pointbreak.inspect-changes-page",
+      version: 1,
+      changes: [summary],
+      diagnostics: [],
+      projectionStamp: "sha256:generation",
+    },
+    "pointbreak.inspect-changes-page",
+  );
+  expect(list.presentations).toBeUndefined();
+
+  for (const schema of [
+    "pointbreak.attention-list",
+    "pointbreak.inspect-attention",
+  ] as const) {
+    const attention = validateChangeAttention(
+      {
+        schema,
+        version: 2,
+        changes: [summary],
+        projectionStamp: "sha256:generation",
+      },
+      schema,
+    );
+    expect(attention.presentations).toBeUndefined();
+  }
+});
+
+it("tolerates additive Change presentation collections without profile drift", () => {
+  const reference = {
+    revisionId: "rev:sha256:one",
+    objectArtifactContentHash: `sha256:${"a".repeat(64)}`,
+  };
+  const summary = {
+    changeId: "change:sha256:one",
+    declarationState: "authoritative",
+    titleAssertions: [],
+    memberCount: 1,
+    currentRevisionRefs: [reference],
+    topology: "initial",
+    lifecycle: "in_progress",
+    attentionSummary: "in_progress",
+    availabilitySummary: "available",
+    diagnostics: [],
+    projectionStamp: "sha256:generation",
+  };
+  const presentations = {
+    "change:sha256:one": {
+      currentRevisions: [
+        {
+          revision: reference,
+          revisionProposalSummary: "Readable exact state",
+          summarySource: "revision_proposal_summary",
+        },
+      ],
+    },
+  };
+  expect(
+    validateChangeList(
+      {
+        schema: "pointbreak.inspect-changes-page",
+        version: 1,
+        changes: [summary],
+        diagnostics: [],
+        presentations,
+        projectionStamp: "sha256:generation",
+      },
+      "pointbreak.inspect-changes-page",
+    ).presentations,
+  ).toEqual(presentations);
+  expect(
+    validateChangeAttention(
+      {
+        schema: "pointbreak.inspect-attention",
+        version: 2,
+        changes: [summary],
+        presentations,
+        projectionStamp: "sha256:generation",
+      },
+      "pointbreak.inspect-attention",
+    ).presentations,
+  ).toEqual(presentations);
 });
 
 it("rejects additive Change documents until the client registry is updated", () => {

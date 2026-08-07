@@ -1,10 +1,13 @@
 //! Read-time resolution of note-shaped body content against recorded
 //! removals, the body twin of the snapshot content seam.
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 
-use crate::error::Result;
-use crate::session::body_artifact::{load_body_artifact, note_body_content_hash_from_path};
+use crate::error::{Result, ShoreError};
+use crate::session::body_artifact::{
+    load_body_artifact, note_body_content_hash_from_path, parse_note_body_artifact,
+};
 use crate::session::projection::artifact_removal::{
     ArtifactRemovalProjection, RemovalOperativeStatus,
 };
@@ -14,12 +17,53 @@ use crate::session::state::ProjectionDiagnostic;
 use crate::session::store::backend::StoreBackend;
 use crate::session::store::content::ContentArtifacts;
 
+/// Shared availability vocabulary for exact captured resources and
+/// note-shaped fact bodies.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentAvailabilityV1 {
+    #[default]
+    Available,
+    Removed,
+    Missing,
+    Mismatch,
+    NonTextual,
+}
+
+impl ContentAvailabilityV1 {
+    pub fn is_available(&self) -> bool {
+        matches!(self, Self::Available)
+    }
+}
+
 /// Wire+library state of a note-shaped body (observation body, input-request
 /// body, response reason, assessment summary, validation summary, imported
 /// note body). Body twin of `SnapshotContentState`: `SuppressedPresent` means
 /// a removal is recorded but the bytes are still stored; `PhysicallyRemoved`
 /// means the bytes have been swept from the store.
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd, serde::Serialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum BodyContentState {
     #[default]
@@ -40,12 +84,28 @@ impl BodyContentState {
     }
 }
 
+/// Controls whether an exact fact-body projection returns text and whether it
+/// must still validate external bytes for a display-facing selected read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct BodyReadMode {
+    pub include_body: bool,
+    pub read_for_display: bool,
+}
+
 /// Resolved body content: the (state, text) pair the views consume.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum BodyContent {
     Present(Option<String>),
-    SuppressedPresent { content_hash: String },
-    PhysicallyRemoved { content_hash: String },
+    SuppressedPresent {
+        content_hash: String,
+    },
+    PhysicallyRemoved {
+        content_hash: String,
+    },
+    Unavailable {
+        content_hash: String,
+        availability: ContentAvailabilityV1,
+    },
 }
 
 impl BodyContent {
@@ -54,6 +114,18 @@ impl BodyContent {
             Self::Present(_) => BodyContentState::Present,
             Self::SuppressedPresent { .. } => BodyContentState::SuppressedPresent,
             Self::PhysicallyRemoved { .. } => BodyContentState::PhysicallyRemoved,
+            Self::Unavailable { .. } => BodyContentState::Present,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn availability(&self) -> ContentAvailabilityV1 {
+        match self {
+            Self::Present(_) => ContentAvailabilityV1::Available,
+            Self::SuppressedPresent { .. } | Self::PhysicallyRemoved { .. } => {
+                ContentAvailabilityV1::Removed
+            }
+            Self::Unavailable { availability, .. } => *availability,
         }
     }
 
@@ -62,7 +134,7 @@ impl BodyContent {
     /// as their `removed_body_content_hash` twin of the snapshot result field.
     pub(crate) fn removed_content_hash(&self) -> Option<&str> {
         match self {
-            Self::Present(_) => None,
+            Self::Present(_) | Self::Unavailable { .. } => None,
             Self::SuppressedPresent { content_hash } | Self::PhysicallyRemoved { content_hash } => {
                 Some(content_hash)
             }
@@ -73,7 +145,9 @@ impl BodyContent {
     pub(crate) fn into_text(self) -> Option<String> {
         match self {
             Self::Present(text) => text,
-            Self::SuppressedPresent { .. } | Self::PhysicallyRemoved { .. } => None,
+            Self::SuppressedPresent { .. }
+            | Self::PhysicallyRemoved { .. }
+            | Self::Unavailable { .. } => None,
         }
     }
 }
@@ -86,6 +160,10 @@ pub(crate) struct BodyRemovalLens<'a> {
     trust_set: &'a TrustSet,
     policy: RemovalPolicy,
     cosig: &'a CosignatureIndex<'a>,
+    /// Display-only availability failures discovered while resolving the exact
+    /// selected revision.  This stays on the reader lens rather than expanding
+    /// the long-standing public fact-view structs.
+    unavailable: RefCell<BTreeSet<(String, ContentAvailabilityV1)>>,
 }
 
 impl<'a> BodyRemovalLens<'a> {
@@ -100,7 +178,30 @@ impl<'a> BodyRemovalLens<'a> {
             trust_set,
             policy,
             cosig,
+            unavailable: RefCell::new(BTreeSet::new()),
         }
+    }
+
+    fn record_unavailable(&self, content_hash: &str, availability: ContentAvailabilityV1) {
+        if matches!(
+            availability,
+            ContentAvailabilityV1::Missing
+                | ContentAvailabilityV1::Mismatch
+                | ContentAvailabilityV1::NonTextual
+        ) {
+            self.unavailable
+                .borrow_mut()
+                .insert((content_hash.to_owned(), availability));
+        }
+    }
+
+    pub(crate) fn availability_diagnostics(&self) -> Vec<ProjectionDiagnostic> {
+        body_content_availability_diagnostics(
+            self.unavailable
+                .borrow()
+                .iter()
+                .map(|(hash, availability)| (*availability, Some(hash.as_str()))),
+        )
     }
 }
 
@@ -126,6 +227,30 @@ pub(crate) fn resolve_body_content(
     inline: Option<String>,
     artifact_path: Option<&str>,
 ) -> Result<BodyContent> {
+    resolve_body_content_for_read(
+        backend,
+        lens,
+        include_body,
+        inline,
+        artifact_path,
+        None,
+        false,
+    )
+}
+
+/// Resolve body content for a strict or display read. Display reads degrade
+/// only recognized content-availability failures; backend and policy failures
+/// remain errors. `expected_content_hash` is the event's declared hash and is
+/// checked independently of the locator before any text is returned.
+pub(crate) fn resolve_body_content_for_read(
+    backend: &StoreBackend,
+    lens: &BodyRemovalLens<'_>,
+    include_body: bool,
+    inline: Option<String>,
+    artifact_path: Option<&str>,
+    expected_content_hash: Option<&str>,
+    read_for_display: bool,
+) -> Result<BodyContent> {
     if inline.is_some() {
         return Ok(BodyContent::Present(if include_body {
             inline
@@ -138,14 +263,31 @@ pub(crate) fn resolve_body_content(
     };
     // A path whose stem is not a well-formed content hash has no derivable
     // removal key (no claim can target it), so the lens is skipped and the
-    // legacy load below keeps its exact behavior for such paths.
-    let Ok(content_hash) = note_body_content_hash_from_path(path) else {
-        return Ok(BodyContent::Present(if include_body {
-            load_body_artifact(backend, path)?
-        } else {
-            None
-        }));
-    };
+    // legacy load below keeps its exact behavior for such paths. A display
+    // read still parses that external artifact when text is omitted.
+    let locator_hash = note_body_content_hash_from_path(path);
+    if locator_hash.is_err() && expected_content_hash.is_none() {
+        let load = || load_body_artifact(backend, path);
+        return match (include_body || read_for_display).then(load) {
+            Some(Ok(text)) => Ok(BodyContent::Present(include_body.then_some(text).flatten())),
+            Some(Err(error)) if read_for_display => {
+                if let Some(availability) = body_artifact_error_availability(&error) {
+                    lens.record_unavailable(path, availability);
+                    Ok(BodyContent::Unavailable {
+                        content_hash: path.to_owned(),
+                        availability,
+                    })
+                } else {
+                    Err(error)
+                }
+            }
+            Some(Err(error)) => Err(error),
+            None => Ok(BodyContent::Present(None)),
+        };
+    }
+    let content_hash = expected_content_hash
+        .map(str::to_owned)
+        .unwrap_or_else(|| locator_hash.expect("validated above"));
     let status =
         lens.removal
             .operative_status(&content_hash, lens.trust_set, lens.policy, lens.cosig)?;
@@ -162,10 +304,54 @@ pub(crate) fn resolve_body_content(
             BodyContent::PhysicallyRemoved { content_hash }
         });
     }
-    if include_body {
-        return Ok(BodyContent::Present(load_body_artifact(backend, path)?));
+    // Exact display reads always validate an external artifact, even when the
+    // caller deliberately requested no text.  This prevents an omitted body
+    // from hiding a missing or mismatched selected-revision fact, while list and
+    // overview paths keep `read_for_display` off and perform no body reads.
+    if include_body || read_for_display {
+        let expected = content_hash.as_str();
+        let load = || {
+            let bytes =
+                ContentArtifacts::from_backend(backend).read_note_body_bytes(path, expected)?;
+            Ok(parse_note_body_artifact(&bytes)?.body)
+        };
+        return match load() {
+            Ok(text) => Ok(BodyContent::Present(include_body.then_some(text))),
+            Err(error) if read_for_display => {
+                if let Some(availability) = body_artifact_error_availability(&error) {
+                    lens.record_unavailable(expected, availability);
+                    Ok(BodyContent::Unavailable {
+                        content_hash: expected.to_owned(),
+                        availability,
+                    })
+                } else {
+                    Err(error)
+                }
+            }
+            Err(error) => Err(error),
+        };
     }
     Ok(BodyContent::Present(None))
+}
+
+fn body_artifact_error_availability(error: &ShoreError) -> Option<ContentAvailabilityV1> {
+    match error {
+        ShoreError::Json(_) => Some(ContentAvailabilityV1::Mismatch),
+        ShoreError::Message(message) if message.starts_with("missing artifact ") => {
+            Some(ContentAvailabilityV1::Missing)
+        }
+        ShoreError::Message(message)
+            if message.contains("hash mismatch") || message.contains("locator hash mismatch") =>
+        {
+            Some(ContentAvailabilityV1::Mismatch)
+        }
+        ShoreError::Message(message)
+            if message.starts_with("Unsupported note body artifact schema/version:") =>
+        {
+            Some(ContentAvailabilityV1::Mismatch)
+        }
+        _ => None,
+    }
 }
 
 /// A removal is recorded for the body content, but its bytes are still stored:
@@ -208,6 +394,42 @@ pub(crate) fn body_content_diagnostics<'a>(
                 ),
             },
             BodyContentState::Present => unreachable!("present entries are filtered above"),
+        })
+        .collect()
+}
+
+/// Fold display-only body unavailability into stable diagnostics. Removed
+/// content remains owned by `body_content_diagnostics` above.
+pub(crate) fn body_content_availability_diagnostics<'a>(
+    entries: impl IntoIterator<Item = (ContentAvailabilityV1, Option<&'a str>)>,
+) -> Vec<ProjectionDiagnostic> {
+    let unavailable = entries
+        .into_iter()
+        .filter(|(availability, _)| {
+            matches!(
+                availability,
+                ContentAvailabilityV1::Missing
+                    | ContentAvailabilityV1::Mismatch
+                    | ContentAvailabilityV1::NonTextual
+            )
+        })
+        .filter_map(|(availability, hash)| hash.map(|hash| (hash.to_owned(), availability)))
+        .collect::<BTreeSet<_>>();
+    unavailable
+        .into_iter()
+        .map(|(hash, availability)| {
+            let suffix = match availability {
+                ContentAvailabilityV1::Missing => "missing",
+                ContentAvailabilityV1::Mismatch => "mismatch",
+                ContentAvailabilityV1::NonTextual => "non_textual",
+                ContentAvailabilityV1::Available | ContentAvailabilityV1::Removed => {
+                    unreachable!("available and removed entries are filtered above")
+                }
+            };
+            ProjectionDiagnostic {
+                code: format!("body_content_{suffix}"),
+                message: format!("body content {hash} is unavailable: {suffix}"),
+            }
         })
         .collect()
 }
@@ -297,6 +519,29 @@ mod tests {
         resolve_body_content(backend, &lens, include_body, inline, artifact_path)
     }
 
+    fn resolve_for_display(
+        backend: &StoreBackend,
+        events: &[ShoreEvent],
+        include_body: bool,
+        inline: Option<String>,
+        artifact_path: Option<&str>,
+    ) -> crate::error::Result<BodyContent> {
+        let removal = ArtifactRemovalProjection::from_events(events).expect("removal projection");
+        let cosig = CosignatureIndex::build(events).expect("cosignature index");
+        let trust = TrustSet::default();
+        let lens = BodyRemovalLens::new(&removal, &trust, RemovalPolicy::default(), &cosig);
+        let expected = artifact_path.and_then(|path| note_body_content_hash_from_path(path).ok());
+        resolve_body_content_for_read(
+            backend,
+            &lens,
+            include_body,
+            inline,
+            artifact_path,
+            expected.as_deref(),
+            true,
+        )
+    }
+
     #[test]
     fn operative_removal_with_blob_on_disk_is_suppressed_present() {
         let backend = StoreBackend::memory();
@@ -360,6 +605,55 @@ mod tests {
         let err = resolve(&backend, &[], true, None, Some(&path)).unwrap_err();
 
         assert!(err.to_string().contains("import referenced artifacts"));
+    }
+
+    #[test]
+    fn display_read_maps_missing_body_to_typed_unavailability() {
+        let backend = StoreBackend::memory();
+        let body = external_body();
+        let (path, _hash) = staged_note_body(&backend, &body, false);
+
+        let content = resolve_for_display(&backend, &[], true, None, Some(&path))
+            .expect("display read degrades a missing body");
+
+        assert_eq!(content.state(), BodyContentState::Present);
+        assert_eq!(content.availability(), ContentAvailabilityV1::Missing);
+        assert_eq!(content.into_text(), None);
+    }
+
+    #[test]
+    fn display_read_validates_and_maps_mismatched_body() {
+        let backend = StoreBackend::memory();
+        let expected = external_body();
+        let (path, _hash) = staged_note_body(&backend, &expected, false);
+        let wrong = format!("{}wrong", external_body());
+        let envelope = crate::session::body_artifact::NoteBodyEnvelope::new(wrong);
+        ContentArtifacts::from_backend(&backend)
+            .put_note_body(&path, &envelope.to_json_bytes().expect("envelope bytes"))
+            .expect("write corrupt blob");
+
+        let content = resolve_for_display(&backend, &[], true, None, Some(&path))
+            .expect("display read degrades a mismatched body");
+
+        assert_eq!(content.state(), BodyContentState::Present);
+        assert_eq!(content.availability(), ContentAvailabilityV1::Mismatch);
+        assert_eq!(content.into_text(), None);
+    }
+
+    #[test]
+    fn strict_read_rejects_mismatched_body() {
+        let backend = StoreBackend::memory();
+        let expected = external_body();
+        let (path, _hash) = staged_note_body(&backend, &expected, false);
+        let envelope = crate::session::body_artifact::NoteBodyEnvelope::new("wrong".repeat(2000));
+        ContentArtifacts::from_backend(&backend)
+            .put_note_body(&path, &envelope.to_json_bytes().expect("envelope bytes"))
+            .expect("write corrupt blob");
+
+        let error = resolve(&backend, &[], true, None, Some(&path))
+            .expect_err("strict read must reject mismatched bytes");
+
+        assert!(error.to_string().contains("content hash mismatch"));
     }
 
     #[test]

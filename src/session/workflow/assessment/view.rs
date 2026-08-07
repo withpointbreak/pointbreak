@@ -11,7 +11,7 @@ use crate::session::event::{
 };
 use crate::session::observation::ResolvedRevision;
 use crate::session::projection::body_content::{
-    BodyContentState, BodyRemovalLens, resolve_body_content,
+    BodyContentState, BodyReadMode, BodyRemovalLens, resolve_body_content_for_read,
 };
 use crate::session::store::backend::StoreBackend;
 use crate::session::workflow::util::sorted_unique;
@@ -25,6 +25,7 @@ pub(crate) struct AssessmentProjectionOptions<'a> {
     pub track_filter: Option<TrackId>,
     pub include_summary: bool,
     pub include_all: bool,
+    pub read_for_display: bool,
     /// The reader's removal lens; `None` only on status-only projections that
     /// never hydrate (no state resolution happens without it, and a `Some`
     /// lens must always be paired with a live `backend`).
@@ -118,7 +119,10 @@ pub(crate) fn project_assessments(
             record.payload,
             record.track_id,
             &replaced_ids,
-            options.include_summary,
+            BodyReadMode {
+                include_body: options.include_summary,
+                read_for_display: options.read_for_display,
+            },
         )?;
         all_views.push(view);
     }
@@ -222,25 +226,27 @@ fn assessment_view_from_event(
     payload: ReviewAssessmentRecordedPayload,
     track_id: TrackId,
     replaced_ids: &BTreeSet<AssessmentId>,
-    include_summary: bool,
+    read_mode: BodyReadMode,
 ) -> Result<AssessmentView> {
     // With a lens (paired with a live backend), the seam decides removed vs
     // present vs missing; without one (status-only projections) the legacy
     // path runs and the state stays `Present` unresolved.
     let (summary, summary_content_state) = match (backend, removal_lens) {
         (Some(backend), Some(lens)) => {
-            let content = resolve_body_content(
+            let content = resolve_body_content_for_read(
                 backend,
                 lens,
-                include_summary,
+                read_mode.include_body,
                 payload.summary.clone(),
                 payload.summary_artifact_path.as_deref(),
+                payload.summary_content_hash.as_deref(),
+                read_mode.read_for_display,
             )?;
             let state = content.state();
             (content.into_text(), state)
         }
         _ => {
-            let summary = if include_summary {
+            let summary = if read_mode.include_body {
                 assessment_summary(backend, &payload)?
             } else {
                 None
