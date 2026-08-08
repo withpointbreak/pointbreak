@@ -1,16 +1,35 @@
 /** DOM projection for the Change-first shell. It fetches nothing and owns no history. */
 
 import { changeCardPresentation } from "./change-inspector-cards";
+import type { ChangeInspectorReading } from "./change-inspector-reading";
 import type { ChangeInspectorRoute } from "./change-inspector-router";
 import {
   lensForRoute,
   parseChangeInspectorRoute,
 } from "./change-inspector-router";
 import type { ChangeInspectorSnapshot } from "./change-inspector-state";
-import type { ChangePageQuery } from "./change-protocol";
+import type {
+  ChangeDetail,
+  ChangePageQuery,
+  FactContent,
+  FactTarget,
+  RevisionResource,
+} from "./change-protocol";
+import {
+  type Annotation,
+  type DiffArtifact,
+  renderDiff,
+  renderDiffFileBody,
+} from "./diff/render";
+import { renderBodyContent } from "./markdown";
 
 export interface ChangeInspectorRenderActions {
   navigate(route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>): void;
+}
+
+export interface ChangeInspectorDetailPresentation {
+  reading: ChangeInspectorReading | null;
+  refusal: string | null;
 }
 
 const FILTER_OPTIONS = [
@@ -184,9 +203,728 @@ function syncFilterChrome(route: ChangeInspectorRoute): void {
       : "Filters";
 }
 
+function detailHeading(text: string, level = 2): HTMLHeadingElement {
+  const heading = document.createElement(`h${level}`) as HTMLHeadingElement;
+  heading.textContent = text;
+  return heading;
+}
+
+function detailLine(text: string, className?: string): HTMLParagraphElement {
+  const line = document.createElement("p");
+  if (className) line.className = className;
+  line.textContent = text;
+  return line;
+}
+
+function shortExact(revision: {
+  revisionId: string;
+  objectArtifactContentHash: string;
+}): string {
+  return `${revision.revisionId} · ${revision.objectArtifactContentHash}`;
+}
+
+function renderedFactBody(
+  content: FactContent,
+  contentType: "text/plain" | "text/markdown",
+): HTMLElement {
+  const body = document.createElement("div");
+  body.className = "anno-body";
+  const text =
+    content.kind === "observation" || content.kind === "input_request"
+      ? content.body
+      : content.kind === "assessment" || content.kind === "validation"
+        ? content.summary
+        : undefined;
+  // Fact prose is supplied by the server after exact contextual validation.
+  // This uses the retained pure Markdown renderer, not the retired Inspector
+  // composition, so exact contextual selection remains the only reader state.
+  if (text) body.innerHTML = renderBodyContent(text, contentType);
+  return body;
+}
+
+function renderFacts(
+  reading:
+    | Extract<ChangeInspectorReading, { kind: "revision" }>
+    | Extract<ChangeInspectorReading, { kind: "association" }>,
+  route: Extract<ChangeInspectorRoute, { kind: "revision" | "association" }>,
+  actions: ChangeInspectorRenderActions,
+): HTMLElement {
+  const facts = document.createElement("section");
+  facts.className = "detail-facts";
+  facts.append(detailHeading("Facts", 3));
+  const groups = new Map<string, typeof reading.document.factPresentations>();
+  for (const fact of reading.document.factPresentations) {
+    const family = groups.get(fact.family) ?? [];
+    family.push(fact);
+    groups.set(fact.family, family);
+  }
+  for (const [family, items] of groups) {
+    const group = document.createElement("section");
+    group.append(detailHeading(family.replaceAll("_", " "), 4));
+    for (const fact of items) {
+      const card = document.createElement("article");
+      card.className = "unit-card";
+      card.dataset.factId = fact.factId;
+      card.tabIndex = -1;
+      card.append(
+        detailLine(fact.factId, "mono"),
+        detailLine(
+          `origin: ${shortExact(fact.originRevision)} · context: ${fact.contextChangeId ?? "unavailable"} · currency: ${fact.revisionCurrency.replaceAll("_", " ")}`,
+        ),
+        detailLine(
+          `family: ${fact.familyState.replaceAll("_", " ")} · availability: ${fact.availability.replaceAll("_", " ")} · actor: ${fact.actorId}${fact.trackId ? ` · track: ${fact.trackId}` : ""}`,
+        ),
+      );
+      const presentedInRevision = fact.presentedInRevision;
+      if (presentedInRevision) {
+        const applicablePort = reading.document.factPorts.find(
+          (port) =>
+            port.applicability === "applicable" &&
+            port.originRevision.revisionId === fact.originRevision.revisionId &&
+            port.originRevision.objectArtifactContentHash ===
+              fact.originRevision.objectArtifactContentHash &&
+            port.targetRevision.revisionId === presentedInRevision.revisionId &&
+            port.targetRevision.objectArtifactContentHash ===
+              presentedInRevision.objectArtifactContentHash &&
+            factRefLabel(port.originFact) === factRefLabelFromFactId(fact),
+        );
+        card.append(
+          detailLine(
+            `presented in: ${shortExact(presentedInRevision)} · port: ${fact.portRelation?.replaceAll("_", " ") ?? (applicablePort ? `${applicablePort.relation.replaceAll("_", " ")} (${applicablePort.portId})` : "see Fact ports")}`,
+          ),
+        );
+      }
+      const content = reading.document.factContentPresentations?.[fact.factId];
+      if (content) {
+        card.append(
+          detailLine(
+            `body: ${content.bodyContentState.replaceAll("_", " ")} · ${content.contentType}`,
+          ),
+          renderedFactBody(content.content, content.contentType),
+        );
+      }
+      const focus = document.createElement("button");
+      focus.type = "button";
+      focus.className = "ghost";
+      focus.textContent = "Focus fact";
+      focus.addEventListener("click", () =>
+        actions.navigate({
+          kind: route.kind,
+          changeId: route.changeId,
+          revision: route.revision,
+          query: route.query,
+          focus: { factId: fact.factId },
+        }),
+      );
+      card.append(focus);
+      group.append(card);
+    }
+    facts.append(group);
+  }
+  if (groups.size === 0) facts.append(message("No facts."));
+  return facts;
+}
+
+function factRefLabel(fact: {
+  kind: string;
+  observationId?: string;
+  inputRequestId?: string;
+}): string {
+  return fact.kind === "observation"
+    ? `observation: ${fact.observationId}`
+    : `input request: ${fact.inputRequestId}`;
+}
+
+function factRefLabelFromFactId(fact: {
+  family: string;
+  factId: string;
+}): string {
+  return fact.family === "observation"
+    ? `observation: ${fact.factId}`
+    : fact.family === "input_request"
+      ? `input request: ${fact.factId}`
+      : "";
+}
+
+function renderFactPorts(
+  reading:
+    | Extract<ChangeInspectorReading, { kind: "revision" }>
+    | Extract<ChangeInspectorReading, { kind: "association" }>,
+): HTMLElement {
+  const ports = document.createElement("section");
+  ports.append(detailHeading("Fact ports", 3));
+  for (const port of reading.document.factPorts) {
+    const item = document.createElement("article");
+    item.className = "unit-card";
+    item.append(
+      detailLine(port.portId, "mono"),
+      detailLine(
+        `origin: ${factRefLabel(port.originFact)} · ${shortExact(port.originRevision)}`,
+      ),
+      detailLine(
+        `target: ${shortExact(port.targetRevision)} · ${port.relation.replaceAll("_", " ")}`,
+      ),
+      detailLine(
+        `target fact: ${port.targetFact ? factRefLabel(port.targetFact) : "none"} · applicability: ${port.applicability.replaceAll("_", " ")}`,
+      ),
+      detailLine(
+        `actor: ${port.actorId}${port.trackId ? ` · track: ${port.trackId}` : ""}${port.contextChangeId ? ` · context: ${port.contextChangeId}` : ""}`,
+      ),
+    );
+    if (port.rationaleContentHash)
+      item.append(
+        detailLine(`rationale: ${port.rationaleContentHash}`, "mono"),
+      );
+    for (const diagnostic of port.diagnostics)
+      item.append(detailLine(diagnostic));
+    ports.append(item);
+  }
+  if (reading.document.factPorts.length === 0)
+    ports.append(message("No fact ports."));
+  return ports;
+}
+
+function openCapturedResource(
+  route: Extract<ChangeInspectorRoute, { kind: "revision" | "association" }>,
+  actions: ChangeInspectorRenderActions,
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ghost";
+  button.textContent = "Open authoritative captured diff";
+  button.addEventListener("click", () =>
+    actions.navigate({
+      kind: "resource",
+      changeId: route.changeId,
+      revision: route.revision,
+      query: route.query,
+      ...(route.focus ? { focus: route.focus } : {}),
+    }),
+  );
+  return button;
+}
+
+function renderAssociations(
+  reading: Extract<
+    ChangeInspectorReading,
+    { kind: "revision" | "association" }
+  >,
+  route: Extract<ChangeInspectorRoute, { kind: "revision" | "association" }>,
+  actions: ChangeInspectorRenderActions,
+): HTMLElement {
+  const section = document.createElement("section");
+  section.append(detailHeading("Association comparisons", 3));
+  for (const association of reading.document.associations) {
+    const item = document.createElement("article");
+    item.className = "unit-card";
+    item.append(
+      detailLine(association.comparison.associationId, "mono"),
+      detailLine(
+        `commit: ${association.comparison.commitOid} · base: ${association.comparison.comparisonBase}`,
+      ),
+      detailLine(
+        `view: ${association.comparison.viewKind} · state: ${association.state} · proof: ${association.proofAvailability}`,
+      ),
+    );
+    if (association.comparison.proofRef)
+      item.append(
+        detailLine(`proof: ${association.comparison.proofRef}`, "mono"),
+      );
+    for (const diagnostic of association.diagnostics)
+      item.append(detailLine(diagnostic));
+    item.append(openCapturedResource(route, actions));
+    section.append(item);
+  }
+  if (reading.document.associations.length === 0)
+    section.append(message("No association comparisons."));
+  return section;
+}
+
+function capturedDiffArtifact(documentValue: unknown): DiffArtifact | null {
+  if (typeof documentValue !== "object" || documentValue === null) return null;
+  const documentRecord = documentValue as Record<string, unknown>;
+  const snapshot = documentRecord.snapshot;
+  if (typeof snapshot !== "object" || snapshot === null) return null;
+  const files = (snapshot as Record<string, unknown>).files;
+  return Array.isArray(files) ? (documentValue as DiffArtifact) : null;
+}
+
+function annotationTarget(target: FactTarget): Annotation["target"] {
+  return {
+    kind: target.kind,
+    filePath: target.filePath,
+    startLine: target.startLine,
+    endLine: target.endLine,
+    side: target.side,
+    observationId: target.observationId,
+    inputRequestId: target.inputRequestId,
+    assessmentId: target.assessmentId,
+    eventId: target.eventId,
+  };
+}
+
+function annotationBody(content: FactContent): string | undefined {
+  return content.kind === "observation" || content.kind === "input_request"
+    ? content.body
+    : content.kind === "assessment" || content.kind === "validation"
+      ? content.summary
+      : undefined;
+}
+
+/**
+ * Preserve each typed fact family's readable fields when adapting the
+ * authoritative Change document to the retained, pure fact renderer.  This
+ * is a presentation adapter only: it never chooses a target or joins facts
+ * across Revisions.
+ */
+function annotationForFact(
+  fact: Extract<
+    ChangeInspectorReading,
+    { kind: "revision" }
+  >["document"]["factPresentations"][number],
+  presentation: NonNullable<
+    Extract<
+      ChangeInspectorReading,
+      { kind: "revision" }
+    >["document"]["factContentPresentations"]
+  >[string],
+): Annotation {
+  const content = presentation.content;
+  const base: Annotation = {
+    id: fact.factId,
+    kind: content.kind === "input_request" ? "input-request" : content.kind,
+    title:
+      content.kind === "assessment"
+        ? `assessment: ${content.assessment}`
+        : content.kind === "validation"
+          ? content.checkName
+          : content.title,
+    track: fact.trackId ?? "untracked",
+    body: annotationBody(content),
+    bodyContentType: presentation.contentType,
+    bodyContentState: presentation.bodyContentState,
+    ...(fact.target ? { target: annotationTarget(fact.target) } : {}),
+  };
+  if (content.kind === "input_request") {
+    base.status = content.status;
+    base.responses = content.responses?.map((response) => ({
+      id: response.responseId,
+      outcome: response.outcome,
+      reason: response.reason,
+      reasonContentType: response.contentType,
+      reasonContentState: response.bodyContentState,
+      verificationStatus: response.availability,
+    }));
+  } else if (content.kind === "assessment") {
+    // `assessment` is the recorded verdict; family state remains the only
+    // lifecycle status this contextual document promises.
+    base.assessment = content.assessment;
+    base.status = fact.familyState;
+  } else if (content.kind === "validation") {
+    base.status = content.status;
+    base.command = content.command;
+  }
+  return base;
+}
+
+function annotationsForExactRevision(
+  detail: Extract<ChangeInspectorReading, { kind: "revision" }>["document"],
+): Annotation[] {
+  const annotations: Annotation[] = [];
+  for (const fact of detail.factPresentations) {
+    const content = detail.factContentPresentations?.[fact.factId];
+    if (
+      fact.family !== content?.content.kind ||
+      fact.originRevision.revisionId !== detail.revision.revisionId ||
+      fact.originRevision.objectArtifactContentHash !==
+        detail.revision.objectArtifactContentHash ||
+      !content
+    ) {
+      continue;
+    }
+    if (fact.target && fact.target.revisionId !== detail.revision.revisionId)
+      continue;
+    annotations.push(annotationForFact(fact, content));
+  }
+  return annotations;
+}
+
+function bindCapturedDiffInteractions(
+  diff: HTMLElement,
+  rendered: ReturnType<typeof renderDiff>,
+): void {
+  rendered.ctx.files.forEach((file, index) => {
+    const section = diff.querySelector<HTMLElement>(`[data-dfile="${index}"]`);
+    const header = section?.querySelector<HTMLElement>(".dfile-head");
+    const body = section?.querySelector<HTMLElement>(
+      `[data-dfile-body="${index}"]`,
+    );
+    const renderBody = () => {
+      if (!section || !body) return;
+      body.innerHTML = renderDiffFileBody(file, rendered.ctx.anchored);
+      body.dataset.rendered = "1";
+      section.dataset.expanded = "true";
+    };
+    const toggle = () => {
+      if (!section || !body) return;
+      if (section.dataset.expanded === "true") {
+        section.dataset.expanded = "false";
+        return;
+      }
+      renderBody();
+    };
+    header?.addEventListener("click", toggle);
+    header?.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      toggle();
+    });
+    body?.addEventListener("click", (event) => {
+      const trigger = (event.target as Element | null)?.closest<HTMLElement>(
+        "[data-render-diff-file]",
+      );
+      if (!trigger) return;
+      event.preventDefault();
+      renderBody();
+    });
+  });
+}
+
+function renderCapturedDiff(
+  resource: RevisionResource,
+  annotations: Annotation[] = [],
+): HTMLElement {
+  const artifact = capturedDiffArtifact(resource.capturedDocument);
+  if (artifact === null) {
+    const refusal = document.createElement("section");
+    refusal.className = "detail-facts";
+    refusal.append(
+      message(
+        "This exact resource does not contain a captured snapshot. The Inspector will not reconstruct a diff from Git or an associated commit.",
+      ),
+    );
+    return refusal;
+  }
+  const diff = document.createElement("section");
+  diff.className = "captured-diff";
+  const rendered = renderDiff(
+    resource.resource.objectId,
+    artifact,
+    annotations,
+  );
+  diff.innerHTML = rendered.html;
+  rendered.ctx.files.forEach((file, index) => {
+    const section = diff.querySelector<HTMLElement>(`[data-dfile="${index}"]`);
+    const path = file.new_path ?? file.old_path;
+    if (section && path) {
+      section.dataset.filePath = path;
+      if (file.old_path) section.dataset.oldFilePath = file.old_path;
+      if (file.new_path) section.dataset.newFilePath = file.new_path;
+      section.tabIndex = -1;
+    }
+  });
+  bindCapturedDiffInteractions(diff, rendered);
+  return diff;
+}
+
+function renderCapturedResource(
+  resource: RevisionResource,
+  route: Extract<ChangeInspectorRoute, { kind: "resource" }>,
+  actions: ChangeInspectorRenderActions,
+): Node[] {
+  const nodes: Node[] = [
+    detailHeading("Authoritative captured diff"),
+    detailLine(shortExact(resource.resource.revision), "mono"),
+    detailLine(`availability: ${resource.availability.replaceAll("_", " ")}`),
+  ];
+  if (resource.availability !== "available") {
+    nodes.push(
+      message(
+        "Captured bytes are unavailable. No live or associated-commit bytes were substituted.",
+      ),
+    );
+  } else {
+    nodes.push(
+      detailLine(`captured document: ${resource.capturedDocumentHash}`, "mono"),
+    );
+    nodes.push(renderCapturedDiff(resource));
+  }
+  for (const diagnostic of resource.diagnostics)
+    nodes.push(detailLine(diagnostic));
+  const back = document.createElement("button");
+  back.type = "button";
+  back.className = "ghost";
+  back.textContent = "Back to exact Revision";
+  back.addEventListener("click", () =>
+    actions.navigate({
+      kind: "revision",
+      changeId: route.changeId,
+      revision: route.revision,
+      query: route.query,
+      ...(route.focus ? { focus: route.focus } : {}),
+    }),
+  );
+  nodes.push(back);
+  return nodes;
+}
+
+function renderChangeDetail(detail: ChangeDetail): Node[] {
+  const nodes: Node[] = [
+    detailHeading("Change"),
+    detailLine(detail.summary.changeId, "mono"),
+    detailLine(
+      `declaration: ${detail.summary.declarationState.replaceAll("_", " ")} · topology: ${detail.summary.topology.replaceAll("_", " ")} · lifecycle: ${detail.summary.lifecycle.replaceAll("_", " ")}`,
+    ),
+    detailLine(
+      `members: ${detail.summary.memberCount} · current peers: ${detail.currentRevisionRefs.map(shortExact).join("; ") || "none"}`,
+    ),
+  ];
+  const sections: Array<[string, string[]]> = [
+    [
+      "Member Revisions",
+      detail.memberRevisions.map(
+        (member) =>
+          `${shortExact(member.revision)} · support: ${member.supportingClaimIds.join(", ") || "none"}`,
+      ),
+    ],
+    [
+      "Unavailable Members",
+      detail.unavailableMemberRevisions.map(
+        (member) =>
+          `${member.revisionId} · ${member.reason.replaceAll("_", " ")} · support: ${member.supportingClaimIds.join(", ") || "none"}`,
+      ),
+    ],
+    [
+      "Membership Claims",
+      detail.membershipClaims.map(
+        (claim) =>
+          `${claim.claimId} · revision: ${claim.revisionId} · ${claim.active ? "active" : "inactive"} · supports: ${claim.supports.length} · withdrawals: ${claim.withdrawals.length}`,
+      ),
+    ],
+    [
+      "Membership Withdrawals",
+      detail.membershipWithdrawals.map(
+        (withdrawal) =>
+          `${withdrawal.claimId} · support carriers: ${withdrawal.supports.length}`,
+      ),
+    ],
+    [
+      "Revision Relation Claims",
+      detail.relationClaims.map(
+        (claim) =>
+          `${claim.claimId} · ${shortExact(claim.predecessor)} → ${shortExact(claim.successor)} · ${claim.active ? "active" : "inactive"}`,
+      ),
+    ],
+    [
+      "Relation Withdrawals",
+      detail.relationWithdrawals.map(
+        (withdrawal) =>
+          `${withdrawal.claimId} · support carriers: ${withdrawal.supports.length}`,
+      ),
+    ],
+    [
+      "Effective Supersedes",
+      detail.effectiveSupersedes.map(
+        ([successor, predecessor]) =>
+          `${shortExact(predecessor)} → ${shortExact(successor)}`,
+      ),
+    ],
+    [
+      "Pending or Conflicting Edges",
+      detail.pendingOrConflictingEdges.map(
+        (claim) =>
+          `${claim.claimId} · ${shortExact(claim.predecessor)} → ${shortExact(claim.successor)} · ${claim.active ? "active" : "inactive"}`,
+      ),
+    ],
+    [
+      "Change Links",
+      detail.links.map(
+        (link) =>
+          `${link.leftChangeId} · ${link.relation.replaceAll("_", " ")} · ${link.rightChangeId}`,
+      ),
+    ],
+    [
+      "Current Revision Qualification",
+      detail.perCurrentRevisionQualification.map(
+        (qualification) =>
+          `${shortExact(qualification.revision)} · ${qualification.qualified ? "qualified" : "not qualified"}`,
+      ),
+    ],
+    ["Operative Obligations", detail.operativeObligations],
+    ["Diagnostics", detail.diagnostics],
+  ];
+  for (const [title, entries] of sections) {
+    const section = document.createElement("section");
+    section.append(detailHeading(title, 3));
+    if (entries.length === 0) section.append(message("None."));
+    for (const entry of entries) section.append(detailLine(entry));
+    nodes.push(section);
+  }
+  return nodes;
+}
+
+function renderReading(
+  reading: ChangeInspectorReading,
+  snapshot: ChangeInspectorSnapshot,
+  actions: ChangeInspectorRenderActions,
+): Node[] {
+  const route = snapshot.route;
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "ghost";
+  copy.textContent = "Copy link";
+  copy.addEventListener("click", () => copyExact(location.href));
+  if (reading.kind === "change") {
+    return [...renderChangeDetail(reading.document), copy];
+  }
+  if (reading.kind === "resource" && route.kind === "resource")
+    return [...renderCapturedResource(reading.document, route, actions), copy];
+  if (reading.kind === "interdiff" && route.kind === "interdiff") {
+    const nodes: Node[] = [
+      detailHeading("Ordered Revision interdiff"),
+      detailLine(
+        `${shortExact(reading.document.interdiff.from)} → ${shortExact(reading.document.interdiff.to)}`,
+        "mono",
+      ),
+      detailLine(
+        `availability: ${reading.document.availability.replaceAll("_", " ")} · algorithm: ${reading.document.interdiff.algorithmVersion}`,
+      ),
+      detailLine("This is a comparison, not the authoritative captured diff."),
+    ];
+    if (reading.document.comparison !== undefined) {
+      const comparison = document.createElement("pre");
+      comparison.textContent = JSON.stringify(
+        reading.document.comparison,
+        null,
+        2,
+      );
+      nodes.push(comparison);
+    }
+    for (const diagnostic of reading.document.diagnostics)
+      nodes.push(detailLine(diagnostic));
+    for (const revision of [route.from, route.to]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "ghost";
+      button.textContent = `Open authoritative captured diff: ${revision.revisionId}`;
+      button.addEventListener("click", () =>
+        actions.navigate({
+          kind: "resource",
+          changeId: route.changeId,
+          revision,
+          query: route.query,
+        }),
+      );
+      nodes.push(button);
+    }
+    nodes.push(copy);
+    return nodes;
+  }
+  if (
+    (reading.kind === "revision" || reading.kind === "association") &&
+    (route.kind === "revision" || route.kind === "association")
+  ) {
+    const document = reading.document;
+    const nodes: Node[] = [
+      detailHeading(
+        reading.kind === "association"
+          ? "Association comparisons"
+          : "Exact Revision",
+      ),
+      detailLine(shortExact(document.revision), "mono"),
+      detailLine(
+        `currency: ${document.revisionCurrency.replaceAll("_", " ")} · relation: ${document.relationClassification}`,
+      ),
+      detailLine(
+        `captured resource: ${document.availability.replaceAll("_", " ")}`,
+      ),
+    ];
+    if (reading.kind === "revision") {
+      nodes.push(
+        detailHeading("Authoritative captured diff", 3),
+        renderCapturedDiff(
+          document.exactRevisionDocument,
+          annotationsForExactRevision(document),
+        ),
+        renderFacts(reading, route, actions),
+        renderFactPorts(reading),
+      );
+    }
+    nodes.push(
+      renderAssociations(reading, route, actions),
+      openCapturedResource(route, actions),
+      copy,
+    );
+    return nodes;
+  }
+  return [
+    message("Reading surface no longer matches the selected exact route."),
+  ];
+}
+
+function exactFocusTarget(
+  detail: HTMLElement,
+  route: ChangeInspectorRoute,
+): HTMLElement | null {
+  if (
+    route.kind !== "revision" &&
+    route.kind !== "resource" &&
+    route.kind !== "association" &&
+    route.kind !== "interdiff"
+  ) {
+    return null;
+  }
+  const focus = route.focus;
+  if (!focus) return null;
+  const targets: HTMLElement[] = [];
+  if (focus.factId) {
+    const fact = Array.from(
+      detail.querySelectorAll<HTMLElement>("[data-fact-id], [data-anno]"),
+    ).find(
+      (element) =>
+        element.dataset.factId === focus.factId ||
+        element.dataset.anno === focus.factId,
+    );
+    if (fact) targets.push(fact);
+  }
+  if (focus.filePath) {
+    const file = Array.from(
+      detail.querySelectorAll<HTMLElement>("[data-file-path]"),
+    ).find(
+      (element) =>
+        element.dataset.filePath === focus.filePath ||
+        element.dataset.oldFilePath === focus.filePath ||
+        element.dataset.newFilePath === focus.filePath,
+    );
+    if (file) targets.push(file);
+  }
+  for (const target of targets) {
+    target.dataset.exactFocus = "true";
+    target.setAttribute("aria-current", "true");
+  }
+  return targets[0] ?? null;
+}
+
+function applyExactFocus(
+  detail: HTMLElement,
+  route: ChangeInspectorRoute,
+): void {
+  const target = exactFocusTarget(detail, route);
+  if (!target) return;
+  if (
+    target.dataset.dfile !== undefined &&
+    target.dataset.expanded !== "true"
+  ) {
+    target.querySelector<HTMLElement>(".dfile-head")?.click();
+  }
+  target.scrollIntoView?.({ block: "center", behavior: "auto" });
+  target.focus({ preventScroll: true });
+}
+
 function renderDetail(
   snapshot: ChangeInspectorSnapshot,
   actions: ChangeInspectorRenderActions,
+  presentation: ChangeInspectorDetailPresentation,
 ): void {
   const detail = document.querySelector<HTMLElement>("#detail-body");
   if (!detail) return;
@@ -202,19 +940,42 @@ function renderDetail(
     detail.replaceChildren(message("Select a Change or exact Revision."));
     return;
   }
+  if (presentation.refusal !== null) {
+    detail.replaceChildren(
+      message(`Reader refused this exact surface: ${presentation.refusal}`),
+    );
+    return;
+  }
+  if (presentation.reading !== null) {
+    detail.replaceChildren(
+      ...renderReading(presentation.reading, snapshot, actions),
+    );
+    applyExactFocus(detail, snapshot.route);
+    return;
+  }
   const heading = document.createElement("h2");
   heading.textContent =
-    snapshot.route.kind === "change" ? "Change" : "Exact Revision";
+    snapshot.route.kind === "change"
+      ? "Change"
+      : snapshot.route.kind === "resource"
+        ? "Captured resource"
+        : snapshot.route.kind === "association"
+          ? "Association comparison"
+          : snapshot.route.kind === "interdiff"
+            ? "Revision interdiff"
+            : "Exact Revision";
   const identity = document.createElement("p");
   identity.className = "mono";
   identity.textContent =
     snapshot.route.kind === "change"
       ? `Change ID: ${snapshot.route.changeId}`
-      : `Revision ID: ${snapshot.route.revision.revisionId} · artifact hash: ${snapshot.route.revision.objectArtifactContentHash}`;
+      : snapshot.route.kind === "interdiff"
+        ? `From: ${snapshot.route.from.revisionId} · ${snapshot.route.from.objectArtifactContentHash}\nTo: ${snapshot.route.to.revisionId} · ${snapshot.route.to.objectArtifactContentHash}`
+        : `Revision ID: ${snapshot.route.revision.revisionId} · artifact hash: ${snapshot.route.revision.objectArtifactContentHash}`;
   const placeholder = message(
     snapshot.route.kind === "change"
       ? "Select an explicit current Revision to inspect its exact context."
-      : "Exact Revision selected. Rich facts and captured resources load in the next Inspector slice.",
+      : "Exact reading surface is loading.",
   );
   const copyLink = document.createElement("button");
   copyLink.type = "button";
@@ -250,6 +1011,10 @@ function renderDetail(
 export function renderChangeInspector(
   snapshot: ChangeInspectorSnapshot,
   actions: ChangeInspectorRenderActions,
+  presentation: ChangeInspectorDetailPresentation = {
+    reading: null,
+    refusal: null,
+  },
 ): void {
   const master = document.querySelector<HTMLElement>("#master");
   if (!master) return;
@@ -263,13 +1028,13 @@ export function renderChangeInspector(
   clearError();
   if (snapshot.route.kind === "invalid") {
     master.replaceChildren(message("Cannot open this Inspector link."));
-    renderDetail(snapshot, actions);
+    renderDetail(snapshot, actions, presentation);
     return;
   }
   const route = snapshot.route;
   if (snapshot.generation === null) {
     master.replaceChildren(message("Loading Change generation…"));
-    renderDetail(snapshot, actions);
+    renderDetail(snapshot, actions, presentation);
     return;
   }
   const lens = lensForRoute(route);
@@ -400,7 +1165,7 @@ export function renderChangeInspector(
     `${snapshot.generation.attention.changes.length} need attention`,
   );
   setText("#stat-hash", snapshot.generation.changes.projectionStamp);
-  renderDetail(snapshot, actions);
+  renderDetail(snapshot, actions, presentation);
 }
 
 export function renderChangeInspectorUnavailable(

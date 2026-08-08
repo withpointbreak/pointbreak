@@ -64,10 +64,10 @@ pub use change::{
     ChangeMemberRevisionV1, ChangePresentationV1, ChangeRevisionCurrencyV1, ChangeRevisionDetailV1,
     ChangeRevisionDocumentV1, ChangeRevisionPresentationDocumentV1, ChangeSummaryV1,
     CurrentRevisionPresentationV1, FactContentPresentationV1, FactContentV1, FactFamilyStateV1,
-    FactInputResponseContentV1, FactPresentationV1, INSPECT_ATTENTION_SCHEMA_V2,
-    INSPECT_CHANGES_PAGE_SCHEMA, REVIEW_CHANGE_LIST_SCHEMA, REVIEW_CHANGE_REVISION_SCHEMA,
-    REVIEW_CHANGE_SCHEMA, RevisionQualificationV1, RevisionSummarySourceV1,
-    UnavailableChangeMemberRevisionV1,
+    FactInputResponseContentV1, FactPortApplicabilityV1, FactPortPresentationV1,
+    FactPresentationV1, INSPECT_ATTENTION_SCHEMA_V2, INSPECT_CHANGES_PAGE_SCHEMA,
+    REVIEW_CHANGE_LIST_SCHEMA, REVIEW_CHANGE_REVISION_SCHEMA, REVIEW_CHANGE_SCHEMA,
+    RevisionQualificationV1, RevisionSummarySourceV1, UnavailableChangeMemberRevisionV1,
 };
 pub use history::{HistoryBody, derived_history_document, history_document};
 pub use identity::{

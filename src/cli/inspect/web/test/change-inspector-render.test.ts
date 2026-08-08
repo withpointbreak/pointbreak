@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ChangeInspectorReading } from "../src/change-inspector-reading";
 import {
   prepareChangeInspectorShell,
   renderChangeInspector,
@@ -9,8 +10,10 @@ import {
 } from "../src/change-inspector-state";
 import type {
   AttentionPage,
+  ChangeDetail,
   ChangesPage,
   ReaderProfile,
+  RevisionResource,
 } from "../src/change-protocol";
 import { mountInspectorDom, resetDom } from "./support/dom";
 
@@ -35,6 +38,9 @@ const changes: ChangesPage = {
   changes: [
     {
       changeId: "change:sha256:one",
+      declarationState: "authoritative",
+      titleAssertions: [],
+      memberCount: 1,
       topology: "parallel_current",
       lifecycle: "in_progress",
       attentionSummary: "conflicted",
@@ -61,6 +67,135 @@ const attention: AttentionPage = {
   version: 2,
 };
 
+function exactResource(): RevisionResource {
+  return {
+    schema: "pointbreak.review-revision-resource" as const,
+    version: 1 as const,
+    resource: { revision, objectId: "obj:sha256:one" },
+    projection: { includeBody: true },
+    availability: "available",
+    capturedDocumentHash: "sha256:captured-document",
+    capturedDocument: {
+      schema: "pointbreak.review-snapshot" as const,
+      version: 1 as const,
+      contentHash: revision.objectArtifactContentHash,
+      snapshot: {
+        review_id: "review:sha256:one",
+        object_id: "obj:sha256:one",
+        files: [
+          {
+            status: "modified",
+            new_path: "src/lib.rs",
+            hunks: [
+              {
+                header: "@@ -1 +1 @@",
+                rows: [
+                  {
+                    kind: "added",
+                    old_line: null,
+                    new_line: 1,
+                    text: "pub fn restored() {}",
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    },
+    diagnostics: [],
+    projectionStamp: "sha256:generation",
+    cacheKey: "sha256:resource",
+  };
+}
+
+function revisionReading(): Extract<
+  ChangeInspectorReading,
+  { kind: "revision" }
+> {
+  return {
+    kind: "revision",
+    document: {
+      schema: "pointbreak.review-change-revision",
+      version: 1,
+      changeId: "change:sha256:one",
+      revision,
+      membershipSupport: [],
+      revisionCurrency: "current",
+      relationClassification: "current",
+      availability: "available",
+      exactRevisionDocument: exactResource(),
+      factPresentations: [
+        {
+          factId: "obs:sha256:focused",
+          family: "observation",
+          originRevision: revision,
+          target: {
+            kind: "range",
+            revisionId: revision.revisionId,
+            filePath: "src/lib.rs",
+            side: "new",
+            startLine: 1,
+            endLine: 1,
+          },
+          actorId: "author",
+          revisionCurrency: "current",
+          familyState: "current",
+          availability: "available",
+        },
+      ],
+      factContentPresentations: {
+        "obs:sha256:focused": {
+          contentType: "text/markdown",
+          bodyContentState: "present",
+          content: {
+            kind: "observation",
+            title: "Readable fact",
+            body: "**Rendered** fact body",
+          },
+        },
+      },
+      factPorts: [],
+      associations: [],
+      diagnostics: [],
+      projectionStamp: "sha256:generation",
+    },
+  };
+}
+
+function changeReading(): ChangeInspectorReading {
+  const predecessor = {
+    revisionId: "revision:sha256:predecessor",
+    objectArtifactContentHash: "sha256:predecessor",
+  };
+  const successor = {
+    revisionId: "revision:sha256:successor",
+    objectArtifactContentHash: "sha256:successor",
+  };
+  const summary = changes.changes[0];
+  if (!summary) throw new Error("fixture needs Change summary");
+  const document: ChangeDetail = {
+    schema: "pointbreak.review-change",
+    version: 1,
+    summary,
+    memberRevisions: [],
+    unavailableMemberRevisions: [],
+    membershipClaims: [],
+    membershipWithdrawals: [],
+    relationClaims: [],
+    relationWithdrawals: [],
+    links: [],
+    effectiveSupersedes: [[successor, predecessor]],
+    pendingOrConflictingEdges: [],
+    currentRevisionRefs: [],
+    perCurrentRevisionQualification: [],
+    operativeObligations: [],
+    diagnostics: [],
+    projectionStamp: "sha256:generation",
+  };
+  return { kind: "change", document };
+}
+
 beforeEach(() => mountInspectorDom());
 
 describe("Change inspector render", () => {
@@ -82,7 +217,7 @@ describe("Change inspector render", () => {
       "parallel current",
     );
     expect(document.querySelector("#detail-body")?.textContent).toContain(
-      "Exact Revision selected",
+      "Exact reading surface is loading",
     );
     expect(document.querySelector("#detail-body")?.textContent).toContain(
       "sha256:artifact",
@@ -113,7 +248,314 @@ describe("Change inspector render", () => {
       "revision:sha256:stale-but-readable",
     );
     expect(document.querySelector("#detail-body")?.textContent).toContain(
-      "Exact Revision selected",
+      "Exact reading surface is loading",
+    );
+  });
+
+  it("renders the bound captured snapshot through the retained diff renderer and focuses an exact file", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "resource",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+      focus: { filePath: "src/lib.rs" },
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading: { kind: "resource", document: exactResource() },
+        refusal: null,
+      },
+    );
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      "pub fn restored() {}",
+    );
+    const file = document.querySelector<HTMLElement>(
+      '[data-file-path="src/lib.rs"]',
+    );
+    expect(file?.dataset.exactFocus).toBe("true");
+  });
+
+  it("renders exact fact Markdown and focuses the requested fact without selecting a peer", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+      focus: { factId: "obs:sha256:focused" },
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      { reading: revisionReading(), refusal: null },
+    );
+    const fact = document.querySelector<HTMLElement>(
+      '[data-anno="obs:sha256:focused"]',
+    );
+    expect(fact?.dataset.exactFocus).toBe("true");
+    expect(
+      document.querySelector<HTMLElement>(
+        '.anno[data-anno="obs:sha256:focused"]',
+      )?.textContent,
+    ).toContain("Rendered fact body");
+    expect(
+      document
+        .querySelector<HTMLElement>('[data-fact-id="obs:sha256:focused"]')
+        ?.querySelector("strong")?.textContent,
+    ).toBe("Rendered");
+  });
+
+  it("opens a collapsed captured file through the retained model-neutral handler", () => {
+    const navigate = vi.fn();
+    const resource = exactResource();
+    if (!resource.capturedDocument)
+      throw new Error("fixture needs captured bytes");
+    resource.capturedDocument.snapshot.files = [
+      {
+        status: "modified",
+        new_path: "Cargo.toml",
+        is_mode_only: true,
+        metadata_rows: [{ text: "mode 100644 → 100755" }],
+      },
+    ];
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "resource",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading: { kind: "resource", document: resource },
+        refusal: null,
+      },
+    );
+    const file = document.querySelector<HTMLElement>(
+      '[data-file-path="Cargo.toml"]',
+    );
+    expect(file?.dataset.expanded).toBe("false");
+    file?.querySelector<HTMLElement>(".dfile-head")?.click();
+    expect(file?.dataset.expanded).toBe("true");
+    expect(file?.textContent).toContain("mode 100644 → 100755");
+  });
+
+  it("focuses an old rename path without substituting a live diff", () => {
+    const navigate = vi.fn();
+    const resource = exactResource();
+    if (!resource.capturedDocument)
+      throw new Error("fixture needs captured bytes");
+    resource.capturedDocument.snapshot.files = [
+      {
+        status: "renamed",
+        old_path: "src/old-name.rs",
+        new_path: "src/new-name.rs",
+        hunks: [],
+      },
+    ];
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "resource",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+      focus: { filePath: "src/old-name.rs" },
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading: { kind: "resource", document: resource },
+        refusal: null,
+      },
+    );
+    expect(
+      document.querySelector<HTMLElement>(
+        '[data-old-file-path="src/old-name.rs"]',
+      )?.dataset.exactFocus,
+    ).toBe("true");
+  });
+
+  it("labels a ported fact from its applicable sibling carrier", () => {
+    const navigate = vi.fn();
+    const reading = revisionReading();
+    const origin = {
+      revisionId: "revision:sha256:origin",
+      objectArtifactContentHash: "sha256:origin-artifact",
+    };
+    const fact = reading.document.factPresentations[0];
+    if (!fact) throw new Error("fixture needs a fact");
+    fact.originRevision = origin;
+    fact.presentedInRevision = revision;
+    delete fact.target;
+    reading.document.factPorts.push({
+      portId: "fact-port:sha256:one",
+      originRevision: origin,
+      originFact: { kind: "observation", observationId: fact.factId },
+      targetRevision: revision,
+      relation: "carried_open_as",
+      actorId: "author",
+      trackId: "track:review",
+      sourceEventIds: ["event:sha256:one"],
+      applicability: "applicable",
+      diagnostics: [],
+    });
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      { reading, refusal: null },
+    );
+    expect(
+      document.querySelector<HTMLElement>('[data-fact-id="obs:sha256:focused"]')
+        ?.textContent,
+    ).toContain("port: carried open as (fact-port:sha256:one)");
+  });
+
+  it("retains all exact-local fact families in the captured diff presentation", () => {
+    const navigate = vi.fn();
+    const reading = revisionReading();
+    reading.document.factPresentations.push(
+      {
+        factId: "request:sha256:one",
+        family: "input_request",
+        originRevision: revision,
+        target: {
+          kind: "file",
+          revisionId: revision.revisionId,
+          filePath: "src/lib.rs",
+        },
+        actorId: "author",
+        revisionCurrency: "current",
+        familyState: "current",
+        availability: "available",
+      },
+      {
+        factId: "assessment:sha256:one",
+        family: "assessment",
+        originRevision: revision,
+        target: { kind: "revision", revisionId: revision.revisionId },
+        actorId: "reviewer",
+        revisionCurrency: "current",
+        familyState: "current",
+        availability: "available",
+      },
+      {
+        factId: "validation:sha256:one",
+        family: "validation",
+        originRevision: revision,
+        actorId: "author",
+        revisionCurrency: "current",
+        familyState: "current",
+        availability: "available",
+      },
+    );
+    const contents = reading.document.factContentPresentations;
+    if (!contents) throw new Error("fixture needs fact content");
+    Object.assign(contents, {
+      "request:sha256:one": {
+        contentType: "text/plain",
+        bodyContentState: "present",
+        content: {
+          kind: "input_request",
+          title: "Need confirmation",
+          status: "answered",
+          body: "Question body",
+          responses: [
+            {
+              responseId: "response:sha256:one",
+              outcome: "approved",
+              reason: "Proceed with the change.",
+              contentType: "text/plain",
+              bodyContentState: "present",
+              availability: "available",
+            },
+          ],
+        },
+      },
+      "assessment:sha256:one": {
+        contentType: "text/plain",
+        bodyContentState: "present",
+        content: {
+          kind: "assessment",
+          assessment: "accepted",
+          summary: "Decision context assessment",
+        },
+      },
+      "validation:sha256:one": {
+        contentType: "text/plain",
+        bodyContentState: "present",
+        content: {
+          kind: "validation",
+          checkName: "just test",
+          status: "passed",
+          command: "just test",
+          summary: "All tests passed",
+        },
+      },
+    });
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "revision",
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      { reading, refusal: null },
+    );
+    expect(
+      document.querySelector(".anno-input-request")?.textContent,
+    ).toContain("approved");
+    expect(
+      document.querySelector(".anno-input-request")?.textContent,
+    ).toContain("Proceed with the change.");
+    const decisionContext = document.querySelector(".diff-decision-context");
+    expect(decisionContext?.textContent).toContain("accepted");
+    expect(decisionContext?.textContent).toContain("just test");
+    expect(decisionContext?.textContent).toContain("passed");
+  });
+
+  it("renders effective supersession in predecessor-to-successor reading order", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "change",
+      changeId: "change:sha256:one",
+      query: {},
+    });
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading: changeReading(),
+        refusal: null,
+      },
+    );
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      "revision:sha256:predecessor · sha256:predecessor → revision:sha256:successor · sha256:successor",
     );
   });
 });

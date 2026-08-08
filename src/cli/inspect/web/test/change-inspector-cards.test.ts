@@ -4,6 +4,9 @@ import type { ChangeSummary } from "../src/change-protocol";
 
 const summary: ChangeSummary = {
   changeId: "change:sha256:one",
+  declarationState: "authoritative",
+  titleAssertions: [],
+  memberCount: 2,
   topology: "parallel_current",
   lifecycle: "in_progress",
   attentionSummary: "conflicted",

@@ -9,10 +9,13 @@ use super::{
     RevisionResourceDocumentV1,
 };
 use crate::error::{Result, ShoreError};
-use crate::model::{ActorId, ChangeId, InputRequestId, RevisionId, RevisionRefV1, TrackId};
+use crate::model::{
+    ActorId, ChangeId, EventId, InputRequestId, ReviewFactPortId, ReviewTargetRef, RevisionId,
+    RevisionRefV1, TrackId,
+};
 use crate::session::event::{
-    BodyContentType, EventType, FactPortRelationV1, ShoreEvent, WorkObjectProposal,
-    WorkObjectProposedPayload,
+    BodyContentType, EventType, FactPortRelationV1, FactRefV1, ReviewFactPortedPayload, ShoreEvent,
+    WorkObjectProposal, WorkObjectProposedPayload,
 };
 use crate::session::{
     BodyContentState, ChangeClaimSupportV1, ChangeDocumentProjectionV1, ChangeLifecycleV1,
@@ -114,6 +117,11 @@ pub struct FactPresentationV1 {
     pub fact_id: String,
     pub family: String,
     pub origin_revision: RevisionRefV1,
+    /// The immutable Review target recorded with this fact. Contextual readers
+    /// may use it to place the fact only against this Revision's bound
+    /// captured snapshot; it is never inferred from a live worktree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<ReviewTargetRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_change_id: Option<ChangeId>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -126,6 +134,46 @@ pub struct FactPresentationV1 {
     pub family_state: FactFamilyStateV1,
     pub revision_currency: ChangeRevisionCurrencyV1,
     pub availability: ContentAvailabilityV1,
+}
+
+/// Whether one recorded fact-port carrier can contribute continuity in the
+/// selected Change and exact target Revision.
+///
+/// A port is presentation context only. Even an applicable port never moves
+/// fact ownership, changes family state, or transfers validation/assessment.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FactPortApplicabilityV1 {
+    Applicable,
+    Conflicted,
+    Unavailable,
+}
+
+/// One explicit cross-Revision fact-port carrier.
+///
+/// This is deliberately separate from [`FactPresentationV1`]. Port writer and
+/// track attribution, target-fact identity, rationale, and competing carriers
+/// cannot be folded into a fact row without misrepresenting the origin fact.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FactPortPresentationV1 {
+    pub port_id: ReviewFactPortId,
+    pub origin_revision: RevisionRefV1,
+    pub origin_fact: FactRefV1,
+    pub target_revision: RevisionRefV1,
+    pub relation: FactPortRelationV1,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_fact: Option<FactRefV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rationale_content_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_change_id: Option<ChangeId>,
+    pub actor_id: ActorId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub track_id: Option<TrackId>,
+    pub source_event_ids: Vec<EventId>,
+    pub applicability: FactPortApplicabilityV1,
+    pub diagnostics: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -150,6 +198,22 @@ pub struct ChangePresentationV1 {
     pub current_revisions: Vec<CurrentRevisionPresentationV1>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FactPortCarrierV1 {
+    port_id: ReviewFactPortId,
+    origin_revision: RevisionRefV1,
+    origin_fact: FactRefV1,
+    target_revision: RevisionRefV1,
+    relation: FactPortRelationV1,
+    target_fact: Option<FactRefV1>,
+    rationale_content_hash: Option<String>,
+    context_change_id: Option<ChangeId>,
+    actor_id: ActorId,
+    track_id: TrackId,
+    source_event_ids: Vec<EventId>,
+}
+
 /// Body-free document input built from validated events in the same reader
 /// generation. Proposal summaries remain here rather than entering
 /// `ChangeDocumentProjectionV1`, whose persisted semantic contract is prose-free.
@@ -157,6 +221,7 @@ pub struct ChangePresentationV1 {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ChangePresentationProjectionV1 {
     pub presentations: BTreeMap<ChangeId, ChangePresentationV1>,
+    fact_port_carriers: Vec<FactPortCarrierV1>,
     pub source_projection_stamp: String,
     /// The validated event generation this presentation was built from. The
     /// semantic projection can intentionally omit prose-only event changes, so
@@ -243,6 +308,8 @@ pub struct ChangeRevisionDetailV1 {
     pub relation_classification: String,
     pub exact_revision_document: RevisionResourceDocumentV1,
     pub fact_presentations: Vec<FactPresentationV1>,
+    #[serde(default)]
+    pub fact_ports: Vec<FactPortPresentationV1>,
     pub associations: Vec<AssociationComparisonDocumentV1>,
     pub availability: RevisionResourceAvailabilityV1,
     pub diagnostics: Vec<String>,
@@ -320,6 +387,7 @@ pub struct ChangeDocumentFacadeV1 {
     semantic: ChangeProjection,
     provenance: ChangeDocumentProjectionV1,
     presentations: Option<BTreeMap<ChangeId, ChangePresentationV1>>,
+    fact_port_carriers: Vec<FactPortCarrierV1>,
     projection_stamp: String,
 }
 
@@ -371,7 +439,104 @@ impl ChangeDocumentFacadeV1 {
             projection_stamp: provenance.projection_stamp.clone(),
             provenance,
             presentations: None,
+            fact_port_carriers: Vec::new(),
         })
+    }
+
+    /// The combined semantic-and-presentation generation used by every
+    /// Change-capable Inspector response staged together.
+    pub fn projection_stamp(&self) -> &str {
+        &self.projection_stamp
+    }
+
+    /// Select fact-port authority for one exact contextual Revision from the
+    /// same validated event generation as the facade.
+    ///
+    /// An explicit Change context applies only to that Change. Older unscoped
+    /// ports apply wherever both exact endpoint Revisions are active members;
+    /// they are never assigned to a Change by event order or lexical identity.
+    pub fn fact_port_presentations(
+        &self,
+        change_id: &ChangeId,
+        target_revision: &RevisionRefV1,
+    ) -> Result<Vec<FactPortPresentationV1>> {
+        let view = self.semantic.changes.get(change_id).ok_or_else(|| {
+            ShoreError::Message(format!("Change {} is unavailable", change_id.as_str()))
+        })?;
+        if self.exact_ref(&target_revision.revision_id).as_ref() != Some(target_revision)
+            || !view.members.contains(&target_revision.revision_id)
+        {
+            return Err(ShoreError::Message(
+                "fact-port target is not an exact member of the Change".to_owned(),
+            ));
+        }
+        let mut ports = Vec::new();
+        for carrier in self
+            .fact_port_carriers
+            .iter()
+            .filter(|carrier| carrier.target_revision == *target_revision)
+        {
+            if carrier
+                .context_change_id
+                .as_ref()
+                .is_some_and(|context| context != change_id)
+            {
+                continue;
+            }
+            let origin_is_member = self
+                .exact_ref(&carrier.origin_revision.revision_id)
+                .as_ref()
+                == Some(&carrier.origin_revision)
+                && view.members.contains(&carrier.origin_revision.revision_id);
+            if carrier.context_change_id.is_none() && !origin_is_member {
+                continue;
+            }
+            ports.push(FactPortPresentationV1 {
+                port_id: carrier.port_id.clone(),
+                origin_revision: carrier.origin_revision.clone(),
+                origin_fact: carrier.origin_fact.clone(),
+                target_revision: carrier.target_revision.clone(),
+                relation: carrier.relation,
+                target_fact: carrier.target_fact.clone(),
+                rationale_content_hash: carrier.rationale_content_hash.clone(),
+                context_change_id: carrier.context_change_id.clone(),
+                actor_id: carrier.actor_id.clone(),
+                track_id: Some(carrier.track_id.clone()),
+                source_event_ids: carrier.source_event_ids.clone(),
+                applicability: if origin_is_member {
+                    FactPortApplicabilityV1::Applicable
+                } else {
+                    FactPortApplicabilityV1::Unavailable
+                },
+                diagnostics: if origin_is_member {
+                    Vec::new()
+                } else {
+                    vec!["fact_port_origin_revision_unavailable".to_owned()]
+                },
+            });
+        }
+        let mut semantic_edges = BTreeMap::<String, BTreeSet<String>>::new();
+        for port in ports
+            .iter()
+            .filter(|port| port.applicability == FactPortApplicabilityV1::Applicable)
+        {
+            semantic_edges
+                .entry(fact_port_continuity_key(port)?)
+                .or_default()
+                .insert(fact_port_semantic_edge(port)?);
+        }
+        for port in &mut ports {
+            if port.applicability == FactPortApplicabilityV1::Applicable
+                && semantic_edges
+                    .get(&fact_port_continuity_key(port)?)
+                    .is_some_and(|edges| edges.len() > 1)
+            {
+                port.applicability = FactPortApplicabilityV1::Conflicted;
+                port.diagnostics
+                    .push("fact_port_continuity_conflicted".to_owned());
+            }
+        }
+        Ok(ports)
     }
 
     /// Bind optional presentation data produced from the exact same validated
@@ -428,8 +593,10 @@ impl ChangeDocumentFacadeV1 {
             "semanticProjectionStamp": self.provenance.projection_stamp,
             "eventSetHash": projection.source_event_set_hash,
             "presentations": projection.presentations,
+            "factPortCarriers": projection.fact_port_carriers,
         }))?;
         self.presentations = Some(projection.presentations);
+        self.fact_port_carriers = projection.fact_port_carriers;
         Ok(self)
     }
 
@@ -654,9 +821,39 @@ impl ChangeDocumentFacadeV1 {
         change_id: &ChangeId,
         revision: &RevisionRefV1,
         exact_revision_document: RevisionResourceDocumentV1,
-        mut fact_presentations: Vec<FactPresentationV1>,
+        fact_presentations: Vec<FactPresentationV1>,
         associations: Vec<AssociationComparisonDocumentV1>,
     ) -> Result<ChangeRevisionDocumentV1> {
+        let fact_ports = self.fact_port_presentations(change_id, revision)?;
+        self.contextual_revision_document_with_fact_ports(
+            change_id,
+            revision,
+            exact_revision_document,
+            fact_presentations,
+            fact_ports,
+            associations,
+        )
+    }
+
+    fn contextual_revision_document_with_fact_ports(
+        &self,
+        change_id: &ChangeId,
+        revision: &RevisionRefV1,
+        exact_revision_document: RevisionResourceDocumentV1,
+        mut fact_presentations: Vec<FactPresentationV1>,
+        canonical_fact_ports: Vec<FactPortPresentationV1>,
+        associations: Vec<AssociationComparisonDocumentV1>,
+    ) -> Result<ChangeRevisionDocumentV1> {
+        exact_revision_document.validate_integrity()?;
+        if exact_revision_document
+            .projection_stamp
+            .as_deref()
+            .is_some_and(|stamp| stamp != self.projection_stamp.as_str())
+        {
+            return Err(ShoreError::Message(
+                "exact Revision resource belongs to a different facade generation".to_owned(),
+            ));
+        }
         let view = self.semantic.changes.get(change_id).ok_or_else(|| {
             ShoreError::Message(format!("Change {} is unavailable", change_id.as_str()))
         })?;
@@ -668,6 +865,9 @@ impl ChangeDocumentFacadeV1 {
                 "exact Revision is not an integrity-qualified member of the Change".to_owned(),
             ));
         }
+        for association in &associations {
+            association.validate_integrity()?;
+        }
         if associations
             .iter()
             .any(|association| association.comparison.revision != *revision)
@@ -676,6 +876,32 @@ impl ChangeDocumentFacadeV1 {
                 "association comparison does not target the contextual exact Revision".to_owned(),
             ));
         }
+        let mut presented_fact_keys = BTreeSet::new();
+        for fact in &fact_presentations {
+            let key = serde_json::to_string(&serde_json::json!({
+                "originRevision": fact.origin_revision,
+                "factId": fact.fact_id,
+                "family": fact.family,
+                "presentedInRevision": fact.presented_in_revision,
+            }))?;
+            if !presented_fact_keys.insert(key) {
+                return Err(ShoreError::Message(
+                    "an exact contextual fact presentation is duplicated".to_owned(),
+                ));
+            }
+        }
+        let fact_ports =
+            bind_fact_port_hydration(canonical_fact_ports, &fact_presentations, revision);
+        let applicable_port_origins = fact_ports
+            .iter()
+            .filter(|port| port.applicability == FactPortApplicabilityV1::Applicable)
+            .map(|port| {
+                (
+                    port.origin_revision.clone(),
+                    fact_ref_id(&port.origin_fact).to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
         let currency = if view.current_revisions.contains(&revision.revision_id) {
             ChangeRevisionCurrencyV1::Current
         } else {
@@ -706,10 +932,41 @@ impl ChangeDocumentFacadeV1 {
                     ));
                 }
             } else if fact.presented_in_revision.as_ref() != Some(revision)
-                || fact.port_relation.is_none()
+                || fact.port_relation.is_some()
             {
                 return Err(ShoreError::Message(
-                    "a cross-Revision fact presentation requires the exact target and typed port"
+                    "a cross-Revision fact presentation requires the exact target and sibling port authority"
+                        .to_owned(),
+                ));
+            } else if !applicable_port_origins.iter().any(|(origin, fact_id)| {
+                origin == &fact.origin_revision && fact_id == &fact.fact_id
+            }) {
+                return Err(ShoreError::Message(
+                    "a cross-Revision fact presentation requires an applicable recorded port"
+                        .to_owned(),
+                ));
+            }
+        }
+        for port in fact_ports
+            .iter()
+            .filter(|port| port.applicability == FactPortApplicabilityV1::Applicable)
+        {
+            let origin_present = fact_presentations.iter().any(|fact| {
+                fact.origin_revision == port.origin_revision
+                    && fact.fact_id == fact_ref_id(&port.origin_fact)
+                    && fact.family == fact_ref_family(&port.origin_fact)
+                    && fact.presented_in_revision.as_ref() == Some(revision)
+            });
+            let target_present = port.target_fact.as_ref().is_none_or(|target_fact| {
+                fact_presentations.iter().any(|fact| {
+                    fact.origin_revision == *revision
+                        && fact.fact_id == fact_ref_id(target_fact)
+                        && fact.family == fact_ref_family(target_fact)
+                })
+            });
+            if !origin_present || !target_present {
+                return Err(ShoreError::Message(
+                    "applicable fact port is missing an exact endpoint fact presentation"
                         .to_owned(),
                 ));
             }
@@ -741,6 +998,7 @@ impl ChangeDocumentFacadeV1 {
                 availability: exact_revision_document.availability,
                 exact_revision_document,
                 fact_presentations,
+                fact_ports,
                 associations,
                 diagnostics: view.diagnostics.clone(),
                 projection_stamp: self.projection_stamp.clone(),
@@ -754,6 +1012,29 @@ impl ChangeDocumentFacadeV1 {
         revision: &RevisionRefV1,
         exact_revision_document: RevisionResourceDocumentV1,
         fact_presentations: Vec<FactPresentationV1>,
+        associations: Vec<AssociationComparisonDocumentV1>,
+        fact_content_presentations: BTreeMap<String, FactContentPresentationV1>,
+    ) -> Result<ChangeRevisionPresentationDocumentV1> {
+        let fact_ports = self.fact_port_presentations(change_id, revision)?;
+        self.contextual_revision_document_with_fact_content_and_ports(
+            change_id,
+            revision,
+            exact_revision_document,
+            fact_presentations,
+            fact_ports,
+            associations,
+            fact_content_presentations,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn contextual_revision_document_with_fact_content_and_ports(
+        &self,
+        change_id: &ChangeId,
+        revision: &RevisionRefV1,
+        exact_revision_document: RevisionResourceDocumentV1,
+        fact_presentations: Vec<FactPresentationV1>,
+        canonical_fact_ports: Vec<FactPortPresentationV1>,
         associations: Vec<AssociationComparisonDocumentV1>,
         fact_content_presentations: BTreeMap<String, FactContentPresentationV1>,
     ) -> Result<ChangeRevisionPresentationDocumentV1> {
@@ -794,11 +1075,12 @@ impl ChangeDocumentFacadeV1 {
             }
         }
         Ok(ChangeRevisionPresentationDocumentV1 {
-            document: self.contextual_revision_document(
+            document: self.contextual_revision_document_with_fact_ports(
                 change_id,
                 revision,
                 exact_revision_document,
                 fact_presentations,
+                canonical_fact_ports,
                 associations,
             )?,
             fact_content_presentations,
@@ -967,6 +1249,7 @@ pub(crate) fn change_presentation_projection(
     }
     Ok(ChangePresentationProjectionV1 {
         presentations,
+        fact_port_carriers: normalize_fact_port_carriers(events)?,
         source_projection_stamp: provenance.projection_stamp.clone(),
         source_event_set_hash: event_set_hash.to_owned(),
     })
@@ -1004,6 +1287,7 @@ pub fn normalize_fact_presentations(
             &fact_id,
             "observation",
             exact,
+            Some(view.target.clone()),
             &view.writer.actor_id,
             Some(view.track_id.clone()),
             if view.status == crate::session::ObservationStatus::Active {
@@ -1054,6 +1338,7 @@ pub fn normalize_fact_presentations(
             &fact_id,
             "input_request",
             exact,
+            Some(view.target.clone()),
             &view.writer.actor_id,
             Some(view.track_id.clone()),
             FactFamilyStateV1::Current,
@@ -1080,6 +1365,7 @@ pub fn normalize_fact_presentations(
             &fact_id,
             "assessment",
             exact,
+            Some(view.target.clone()),
             &view.writer.actor_id,
             Some(view.track_id.clone()),
             if view.status == crate::session::AssessmentRecordStatus::Current {
@@ -1112,6 +1398,7 @@ pub fn normalize_fact_presentations(
             &fact_id,
             "validation",
             exact,
+            None,
             &view.writer.actor_id,
             Some(view.track_id.clone()),
             if view.superseded_by_revisions.is_empty() {
@@ -1127,6 +1414,140 @@ pub fn normalize_fact_presentations(
     }
     facts.sort_by(|left, right| left.fact_id.cmp(&right.fact_id));
     (facts, content)
+}
+
+/// Bind every explicit fact-port carrier to the same validated event generation
+/// as the Change presentation facade. Contextual applicability is deliberately
+/// deferred until a caller names one Change and one exact target Revision.
+fn normalize_fact_port_carriers(events: &[ShoreEvent]) -> Result<Vec<FactPortCarrierV1>> {
+    let mut by_port_id = BTreeMap::<String, FactPortCarrierV1>::new();
+    for event in events
+        .iter()
+        .filter(|event| event.event_type == EventType::ReviewFactPorted)
+    {
+        let payload: ReviewFactPortedPayload = serde_json::from_value(event.payload.clone())?;
+        let track_id = event
+            .target
+            .track_id
+            .as_ref()
+            .ok_or_else(|| ShoreError::InvalidEvent {
+                message: "review_fact_ported requires an attributed review track".to_owned(),
+            })?;
+        payload.validate_attribution(&event.writer.actor_id, track_id)?;
+        let carrier = FactPortCarrierV1 {
+            port_id: payload.port_id,
+            origin_revision: payload.origin_revision,
+            origin_fact: payload.origin_fact,
+            target_revision: payload.target_revision,
+            relation: payload.relation,
+            target_fact: payload.target_fact,
+            rationale_content_hash: payload.rationale_content_hash,
+            context_change_id: payload.context_change_id,
+            actor_id: event.writer.actor_id.clone(),
+            track_id: track_id.clone(),
+            source_event_ids: vec![event.event_id.clone()],
+        };
+        let key = carrier.port_id.as_str().to_owned();
+        match by_port_id.entry(key) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(carrier);
+            }
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
+                if !same_fact_port_carrier(entry.get(), &carrier) {
+                    return Err(ShoreError::Message(
+                        "one fact-port identity has conflicting carrier material".to_owned(),
+                    ));
+                }
+                entry
+                    .get_mut()
+                    .source_event_ids
+                    .extend(carrier.source_event_ids);
+            }
+        }
+    }
+    for carrier in by_port_id.values_mut() {
+        carrier.source_event_ids.sort();
+        carrier.source_event_ids.dedup();
+    }
+    Ok(by_port_id.into_values().collect())
+}
+
+fn same_fact_port_carrier(left: &FactPortCarrierV1, right: &FactPortCarrierV1) -> bool {
+    left.port_id == right.port_id
+        && left.origin_revision == right.origin_revision
+        && left.origin_fact == right.origin_fact
+        && left.target_revision == right.target_revision
+        && left.relation == right.relation
+        && left.target_fact == right.target_fact
+        && left.rationale_content_hash == right.rationale_content_hash
+        && left.context_change_id == right.context_change_id
+        && left.actor_id == right.actor_id
+        && left.track_id == right.track_id
+}
+
+fn fact_port_continuity_key(port: &FactPortPresentationV1) -> Result<String> {
+    Ok(serde_json::to_string(&serde_json::json!({
+        "originRevision": port.origin_revision,
+        "originFact": port.origin_fact,
+        "targetRevision": port.target_revision,
+    }))?)
+}
+
+fn fact_port_semantic_edge(port: &FactPortPresentationV1) -> Result<String> {
+    Ok(serde_json::to_string(&serde_json::json!({
+        "relation": port.relation,
+        "targetFact": port.target_fact,
+    }))?)
+}
+
+fn bind_fact_port_hydration(
+    mut ports: Vec<FactPortPresentationV1>,
+    fact_presentations: &[FactPresentationV1],
+    target_revision: &RevisionRefV1,
+) -> Vec<FactPortPresentationV1> {
+    for port in ports
+        .iter_mut()
+        .filter(|port| port.applicability == FactPortApplicabilityV1::Applicable)
+    {
+        let origin_present = fact_presentations.iter().any(|fact| {
+            fact.origin_revision == port.origin_revision
+                && fact.fact_id == fact_ref_id(&port.origin_fact)
+                && fact.family == fact_ref_family(&port.origin_fact)
+                && fact.presented_in_revision.as_ref() == Some(target_revision)
+        });
+        let target_present = port.target_fact.as_ref().is_none_or(|target_fact| {
+            fact_presentations.iter().any(|fact| {
+                fact.origin_revision == *target_revision
+                    && fact.fact_id == fact_ref_id(target_fact)
+                    && fact.family == fact_ref_family(target_fact)
+            })
+        });
+        if !origin_present {
+            port.applicability = FactPortApplicabilityV1::Unavailable;
+            port.diagnostics
+                .push("fact_port_origin_fact_unavailable".to_owned());
+        }
+        if !target_present {
+            port.applicability = FactPortApplicabilityV1::Unavailable;
+            port.diagnostics
+                .push("fact_port_target_fact_unavailable".to_owned());
+        }
+    }
+    ports
+}
+
+pub(crate) fn fact_ref_id(fact: &FactRefV1) -> &str {
+    match fact {
+        FactRefV1::Observation { observation_id } => observation_id.as_str(),
+        FactRefV1::InputRequest { input_request_id } => input_request_id.as_str(),
+    }
+}
+
+pub(crate) fn fact_ref_family(fact: &FactRefV1) -> &'static str {
+    match fact {
+        FactRefV1::Observation { .. } => "observation",
+        FactRefV1::InputRequest { .. } => "input_request",
+    }
 }
 
 fn input_request_response_outcome_wire(
@@ -1163,6 +1584,7 @@ fn normalized_fact(
     fact_id: &str,
     family: &str,
     exact: &RevisionRefV1,
+    target: Option<ReviewTargetRef>,
     actor_id: &ActorId,
     track_id: Option<TrackId>,
     family_state: FactFamilyStateV1,
@@ -1173,6 +1595,7 @@ fn normalized_fact(
         fact_id: fact_id.to_owned(),
         family: family.to_owned(),
         origin_revision: exact.clone(),
+        target,
         context_change_id: None,
         presented_in_revision: None,
         port_relation: None,
@@ -1216,8 +1639,12 @@ mod tests {
     };
     use crate::model::{
         ChangeMembershipClaimId, CommitAssociationId, EngagementId, EventId, JournalId, ObjectId,
+        ObservationId,
     };
-    use crate::session::event::{EventPayload, EventTarget, Revision, Writer};
+    use crate::session::event::{
+        EventPayload, EventTarget, ReviewFactPortDraftV1, Revision, Writer,
+        build_review_fact_ported,
+    };
     use crate::session::{ChangeClaimSupportV1, ChangeMembershipClaimViewV1, ChangeView};
 
     fn reference(name: &str, byte: char) -> RevisionRefV1 {
@@ -1312,7 +1739,7 @@ mod tests {
     }
 
     fn resource(revision: &RevisionRefV1) -> RevisionResourceDocumentV1 {
-        RevisionResourceDocumentV1::available(
+        RevisionResourceDocumentV1::unavailable(
             RevisionResourceRefV1 {
                 revision: revision.clone(),
                 object_id: ObjectId::new(format!("obj:sha256:{}", revision.revision_id.as_str())),
@@ -1321,8 +1748,7 @@ mod tests {
                 track_id: None,
                 include_body: true,
             },
-            &revision.object_artifact_content_hash,
-            serde_json::json!({"exact": true}),
+            ContentAvailabilityV1::Missing,
         )
         .unwrap()
     }
@@ -1332,6 +1758,7 @@ mod tests {
             fact_id: "observation:sha256:one".to_owned(),
             family: "observation".to_owned(),
             origin_revision,
+            target: None,
             context_change_id: None,
             presented_in_revision: None,
             port_relation: None,
@@ -1341,6 +1768,125 @@ mod tests {
             revision_currency: ChangeRevisionCurrencyV1::Current,
             availability: ContentAvailabilityV1::Available,
         }
+    }
+
+    fn observation(id: &str) -> FactRefV1 {
+        FactRefV1::Observation {
+            observation_id: ObservationId::new(id),
+        }
+    }
+
+    fn fact_port_event(
+        origin: &RevisionRefV1,
+        target: &RevisionRefV1,
+        origin_fact: FactRefV1,
+        relation: FactPortRelationV1,
+        target_fact: Option<FactRefV1>,
+        context_change_id: Option<ChangeId>,
+        key: &str,
+    ) -> ShoreEvent {
+        let writer = Writer::shore_local("presentation-test");
+        let track_id = TrackId::new("track:fact-port");
+        let payload = build_review_fact_ported(
+            ReviewFactPortDraftV1 {
+                origin_revision: origin.clone(),
+                origin_fact,
+                target_revision: target.clone(),
+                relation,
+                target_fact,
+                rationale_content_hash: None,
+                context_change_id,
+            },
+            &writer.actor_id,
+            &track_id,
+        )
+        .unwrap();
+        ShoreEvent::new(
+            EventType::ReviewFactPorted,
+            key,
+            EventTarget::for_revision(
+                JournalId::new("journal:fact-port"),
+                origin.revision_id.clone(),
+                Some(track_id),
+            )
+            .unwrap(),
+            writer,
+            payload,
+            "2026-08-06T00:00:00Z",
+        )
+        .unwrap()
+    }
+
+    fn facade_with_port_events(
+        facade: &ChangeDocumentFacadeV1,
+        events: &[ShoreEvent],
+    ) -> ChangeDocumentFacadeV1 {
+        facade
+            .clone()
+            .with_presentations(
+                change_presentation_projection(
+                    &facade.semantic,
+                    &facade.provenance,
+                    events,
+                    "sha256:fact-port-event-set",
+                )
+                .unwrap(),
+            )
+            .unwrap()
+    }
+
+    fn with_additional_change(
+        facade: &ChangeDocumentFacadeV1,
+        change_id: ChangeId,
+        members: Vec<RevisionRefV1>,
+    ) -> ChangeDocumentFacadeV1 {
+        let mut semantic = facade.semantic.clone();
+        let member_ids = members
+            .iter()
+            .map(|member| member.revision_id.clone())
+            .collect::<BTreeSet<_>>();
+        semantic.changes.insert(
+            change_id.clone(),
+            ChangeView {
+                change_id: change_id.clone(),
+                members: member_ids.clone(),
+                current_revisions: member_ids,
+                supersedes: BTreeSet::new(),
+                topology: ChangeTopologyV1::ParallelCurrent,
+                lifecycle: ChangeLifecycleV1::InProgress,
+                qualified_current_revisions: BTreeSet::new(),
+                operative_obligations: BTreeSet::new(),
+                diagnostics: Vec::new(),
+            },
+        );
+        let mut provenance = facade.provenance.clone();
+        for (index, member) in members.into_iter().enumerate() {
+            provenance
+                .revision_refs
+                .entry(member.revision_id.clone())
+                .or_insert_with(|| vec![member.clone()]);
+            provenance
+                .membership_claims
+                .push(ChangeMembershipClaimViewV1 {
+                    claim_id: ChangeMembershipClaimId::new(format!(
+                        "membership:sha256:{}-{index}",
+                        change_id.as_str()
+                    )),
+                    change_id: change_id.clone(),
+                    revision_id: member.revision_id,
+                    supports: vec![ChangeClaimSupportV1 {
+                        event_id: EventId::new(format!("event:sha256:additional-{index}")),
+                        actor_id: ActorId::new("actor:author"),
+                        track_id: None,
+                    }],
+                    withdrawals: Vec::new(),
+                    active: true,
+                    diagnostics: Vec::new(),
+                });
+        }
+        provenance.projection_stamp =
+            crate::session::change_document_projection_stamp(&semantic, &provenance).unwrap();
+        ChangeDocumentFacadeV1::new(semantic, provenance).unwrap()
     }
 
     fn with_second_member(
@@ -1583,6 +2129,312 @@ mod tests {
     }
 
     #[test]
+    fn facade_owns_fact_port_hydration_state() {
+        let origin = reference("origin", 'b');
+        let target = reference("target", 'c');
+        let canonical = FactPortPresentationV1 {
+            port_id: ReviewFactPortId::new("fact-port:sha256:authority"),
+            origin_revision: origin.clone(),
+            origin_fact: FactRefV1::Observation {
+                observation_id: crate::model::ObservationId::new("observation:sha256:one"),
+            },
+            target_revision: target.clone(),
+            relation: FactPortRelationV1::ContextOnly,
+            target_fact: None,
+            rationale_content_hash: None,
+            context_change_id: Some(ChangeId::new("change:sha256:context")),
+            actor_id: ActorId::new("actor:author"),
+            track_id: Some(TrackId::new("track:reviewer")),
+            source_event_ids: vec![EventId::new("event:sha256:port")],
+            applicability: FactPortApplicabilityV1::Applicable,
+            diagnostics: Vec::new(),
+        };
+
+        let mut expected_unavailable = canonical.clone();
+        expected_unavailable.applicability = FactPortApplicabilityV1::Unavailable;
+        expected_unavailable
+            .diagnostics
+            .push("fact_port_origin_fact_unavailable".to_owned());
+        assert_eq!(
+            bind_fact_port_hydration(vec![canonical.clone()], &[], &target),
+            vec![expected_unavailable],
+            "the facade derives unavailability when the exact origin fact was not hydrated"
+        );
+
+        let mut cross_revision_fact = fact(origin);
+        cross_revision_fact.presented_in_revision = Some(target.clone());
+        assert_eq!(
+            bind_fact_port_hydration(vec![canonical.clone()], &[cross_revision_fact], &target),
+            vec![canonical],
+            "exact endpoint facts preserve the canonical carrier without caller-authored state"
+        );
+    }
+
+    #[test]
+    fn explicit_fact_port_context_never_leaks_to_another_change() {
+        let (first_change, target, facade) = facade();
+        let origin = reference("origin", 'b');
+        let facade = with_second_member(&facade, &first_change, origin.clone());
+        let second_change = ChangeId::new("change:sha256:second");
+        let facade = with_additional_change(
+            &facade,
+            second_change.clone(),
+            vec![origin.clone(), target.clone()],
+        );
+        let facade = facade_with_port_events(
+            &facade,
+            &[fact_port_event(
+                &origin,
+                &target,
+                observation("observation:sha256:origin"),
+                FactPortRelationV1::ContextOnly,
+                None,
+                Some(first_change.clone()),
+                "fact-port:explicit-context",
+            )],
+        );
+
+        assert_eq!(
+            facade
+                .fact_port_presentations(&first_change, &target)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            facade
+                .fact_port_presentations(&second_change, &target)
+                .unwrap()
+                .is_empty(),
+            "an explicit Change context may not be inferred into a sibling Change"
+        );
+    }
+
+    #[test]
+    fn unscoped_fact_ports_require_both_exact_endpoints_as_active_members() {
+        let (change_id, target, facade) = facade();
+        let origin = reference("origin", 'b');
+        let facade = with_second_member(&facade, &change_id, origin.clone());
+        let target_only_change = ChangeId::new("change:sha256:target-only");
+        let facade =
+            with_additional_change(&facade, target_only_change.clone(), vec![target.clone()]);
+        let facade = facade_with_port_events(
+            &facade,
+            &[fact_port_event(
+                &origin,
+                &target,
+                observation("observation:sha256:origin"),
+                FactPortRelationV1::ContextOnly,
+                None,
+                None,
+                "fact-port:unscoped",
+            )],
+        );
+
+        assert_eq!(
+            facade
+                .fact_port_presentations(&change_id, &target)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            facade
+                .fact_port_presentations(&target_only_change, &target)
+                .unwrap()
+                .is_empty(),
+            "unscoped continuity is not an implicit Change membership claim"
+        );
+    }
+
+    #[test]
+    fn competing_fact_port_semantics_are_conflicted_without_a_selected_winner() {
+        let (change_id, target, facade) = facade();
+        let origin = reference("origin", 'b');
+        let facade = with_second_member(&facade, &change_id, origin.clone());
+        let origin_fact = observation("observation:sha256:origin");
+        let target_fact = observation("observation:sha256:target");
+        let facade = facade_with_port_events(
+            &facade,
+            &[
+                fact_port_event(
+                    &origin,
+                    &target,
+                    origin_fact.clone(),
+                    FactPortRelationV1::ContextOnly,
+                    None,
+                    Some(change_id.clone()),
+                    "fact-port:context-only",
+                ),
+                fact_port_event(
+                    &origin,
+                    &target,
+                    origin_fact,
+                    FactPortRelationV1::ReanchoredAs,
+                    Some(target_fact),
+                    Some(change_id.clone()),
+                    "fact-port:reanchored",
+                ),
+            ],
+        );
+
+        let ports = facade.fact_port_presentations(&change_id, &target).unwrap();
+        assert_eq!(ports.len(), 2);
+        assert!(ports.iter().all(|port| {
+            port.applicability == FactPortApplicabilityV1::Conflicted
+                && port
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic == "fact_port_continuity_conflicted")
+        }));
+    }
+
+    #[test]
+    fn duplicate_fact_port_carriers_coalesce_their_distinct_event_ids() {
+        let (change_id, target, facade) = facade();
+        let origin = reference("origin", 'b');
+        let facade = with_second_member(&facade, &change_id, origin.clone());
+        let first = fact_port_event(
+            &origin,
+            &target,
+            observation("observation:sha256:origin"),
+            FactPortRelationV1::ContextOnly,
+            None,
+            Some(change_id.clone()),
+            "fact-port:duplicate-one",
+        );
+        let second = fact_port_event(
+            &origin,
+            &target,
+            observation("observation:sha256:origin"),
+            FactPortRelationV1::ContextOnly,
+            None,
+            Some(change_id.clone()),
+            "fact-port:duplicate-two",
+        );
+        let facade = facade_with_port_events(&facade, &[first.clone(), second.clone()]);
+
+        let ports = facade.fact_port_presentations(&change_id, &target).unwrap();
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].source_event_ids.len(), 2);
+        assert_eq!(
+            ports[0].source_event_ids,
+            vec![first.event_id.clone(), second.event_id.clone()]
+        );
+    }
+
+    #[test]
+    fn divergent_material_claiming_one_fact_port_identity_fails_closed() {
+        let (change_id, target, facade) = facade();
+        let origin = reference("origin", 'b');
+        let facade = with_second_member(&facade, &change_id, origin.clone());
+        let first = fact_port_event(
+            &origin,
+            &target,
+            observation("observation:sha256:origin"),
+            FactPortRelationV1::ContextOnly,
+            None,
+            Some(change_id),
+            "fact-port:valid",
+        );
+        let mut divergent = first.clone();
+        divergent.event_id = EventId::new("event:sha256:divergent-port");
+        divergent.payload["relation"] = serde_json::json!("resolved_by");
+        divergent.payload_hash = crate::canonical_hash::sha256_json_prefixed(&divergent.payload)
+            .expect("mutated test payload hashes");
+
+        let error = change_presentation_projection(
+            &facade.semantic,
+            &facade.provenance,
+            &[first, divergent],
+            "sha256:divergent-port-set",
+        )
+        .expect_err("divergent carrier material must not select one port identity");
+        assert!(
+            error
+                .to_string()
+                .contains("fact-port identity or attribution mismatch")
+        );
+    }
+
+    #[test]
+    fn fact_port_endpoint_hydration_requires_one_cross_origin_fact_per_exact_endpoint() {
+        let (change_id, target, facade) = facade();
+        let origin = reference("origin", 'b');
+        let facade = with_second_member(&facade, &change_id, origin.clone());
+        let facade = facade_with_port_events(
+            &facade,
+            &[fact_port_event(
+                &origin,
+                &target,
+                observation("observation:sha256:one"),
+                FactPortRelationV1::ContextOnly,
+                None,
+                Some(change_id.clone()),
+                "fact-port:hydration",
+            )],
+        );
+        let mut cross_origin = fact(origin.clone());
+        cross_origin.presented_in_revision = Some(target.clone());
+        let local = fact(target.clone());
+
+        let document = facade
+            .contextual_revision_document(
+                &change_id,
+                &target,
+                resource(&target),
+                vec![local.clone(), cross_origin.clone()],
+                Vec::new(),
+            )
+            .unwrap();
+        assert_eq!(document.detail.fact_ports.len(), 1);
+        assert_eq!(
+            document.detail.fact_ports[0].applicability,
+            FactPortApplicabilityV1::Applicable
+        );
+        assert_eq!(
+            document
+                .detail
+                .fact_presentations
+                .iter()
+                .filter(|fact| fact.origin_revision == origin)
+                .count(),
+            1,
+            "one origin-owned fact is presented once at the exact target"
+        );
+
+        let duplicate_error = facade
+            .contextual_revision_document(
+                &change_id,
+                &target,
+                resource(&target),
+                vec![local.clone(), cross_origin.clone(), cross_origin],
+                Vec::new(),
+            )
+            .expect_err("duplicate cross-origin facts cannot fabricate endpoint hydration");
+        assert!(
+            duplicate_error
+                .to_string()
+                .contains("exact contextual fact presentation is duplicated")
+        );
+
+        let local_duplicate_error = facade
+            .contextual_revision_document(
+                &change_id,
+                &target,
+                resource(&target),
+                vec![local.clone(), local],
+                Vec::new(),
+            )
+            .expect_err("origin-local facts must also remain exact and unique");
+        assert!(
+            local_duplicate_error
+                .to_string()
+                .contains("exact contextual fact presentation is duplicated")
+        );
+    }
+
+    #[test]
     fn change_summary_and_attention_documents_have_deterministic_golden_shapes() {
         let (_, revision, facade) = facade();
         let projection_stamp = facade.provenance.projection_stamp.clone();
@@ -1629,6 +2481,7 @@ mod tests {
             fact_id: "observation:sha256:one".to_owned(),
             family: "observation".to_owned(),
             origin_revision: revision.clone(),
+            target: None,
             context_change_id: Some(change_id.clone()),
             presented_in_revision: None,
             port_relation: None,
@@ -1642,19 +2495,7 @@ mod tests {
             .contextual_revision_document(
                 &change_id,
                 &revision,
-                crate::documents::RevisionResourceDocumentV1::available(
-                    crate::documents::RevisionResourceRefV1 {
-                        revision: revision.clone(),
-                        object_id: crate::model::ObjectId::new("obj:sha256:one"),
-                    },
-                    crate::documents::RevisionResourceProjectionV1 {
-                        track_id: None,
-                        include_body: true,
-                    },
-                    &revision.object_artifact_content_hash,
-                    serde_json::json!({"exact": true}),
-                )
-                .unwrap(),
+                resource(&revision),
                 vec![fact],
                 Vec::new(),
             )
@@ -1678,6 +2519,7 @@ mod tests {
         let source_projection_stamp = facade.provenance.projection_stamp.clone();
         let facade = facade
             .with_presentations(ChangePresentationProjectionV1 {
+                fact_port_carriers: Vec::new(),
                 presentations: [(
                     change_id.clone(),
                     ChangePresentationV1 {
@@ -1838,6 +2680,7 @@ mod tests {
                 "diagnostics",
                 "exactRevisionDocument",
                 "factContentPresentations",
+                "factPorts",
                 "factPresentations",
                 "membershipSupport",
                 "projectionStamp",
@@ -1968,6 +2811,7 @@ mod tests {
             facade
                 .clone()
                 .with_presentations(ChangePresentationProjectionV1 {
+                    fact_port_carriers: Vec::new(),
                     presentations: [(change_id.clone(), presentation.clone())].into(),
                     source_projection_stamp: facade.provenance.projection_stamp.clone(),
                     source_event_set_hash: event_set_hash.to_owned(),

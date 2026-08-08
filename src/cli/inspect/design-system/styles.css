@@ -450,6 +450,11 @@ body {
   cursor: pointer;
 }
 .unit-card:hover { border-color: var(--accent); }
+.unit-card[data-exact-focus],
+.dfile[data-exact-focus] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 55%, transparent);
+}
 .unit-card h3 { margin: 0 0 6px; font-size: 13px; font-family: var(--mono); }
 .unit-card .kv { display: grid; grid-template-columns: 110px 1fr; gap: 2px 10px; font-size: 12px; font-family: var(--mono); color: var(--fg-dim); }
 .unit-card .kv b { color: var(--fg); font-weight: 500; }

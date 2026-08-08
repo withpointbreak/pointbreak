@@ -32,6 +32,47 @@ describe("Change inspector routes", () => {
     ).toEqual(exact);
   });
 
+  it("round trips exact captured resources, associations, and ordered interdiffs", () => {
+    const revision = {
+      revisionId: "revision:sha256:two",
+      objectArtifactContentHash: "sha256:artifact-two",
+    };
+    const resource = {
+      kind: "resource" as const,
+      changeId: "change:sha256:one",
+      revision,
+      query: {},
+      focus: { factId: "obs:sha256:one", filePath: "src/lib.rs" },
+    };
+    const association = { ...resource, kind: "association" as const };
+    const interdiff = {
+      kind: "interdiff" as const,
+      changeId: "change:sha256:one",
+      from: revision,
+      to: {
+        revisionId: "revision:sha256:three",
+        objectArtifactContentHash: "sha256:artifact-three",
+      },
+      query: { q: "exact" },
+    };
+    expect(
+      parseChangeInspectorRoute(formatChangeInspectorRoute(resource)),
+    ).toEqual(resource);
+    expect(
+      parseChangeInspectorRoute(formatChangeInspectorRoute(association)),
+    ).toEqual(association);
+    expect(
+      parseChangeInspectorRoute(formatChangeInspectorRoute(interdiff)),
+    ).toEqual(interdiff);
+    expect(formatChangeInspectorRoute(interdiff)).not.toEqual(
+      formatChangeInspectorRoute({
+        ...interdiff,
+        from: interdiff.to,
+        to: interdiff.from,
+      }),
+    );
+  });
+
   it("rejects a Revision route with no artifact hash instead of retargeting it", () => {
     expect(
       parseChangeInspectorRoute(
@@ -77,6 +118,15 @@ describe("Change inspector routes", () => {
     ).toEqual({
       kind: "invalid",
       message: "Exact Revision routes require exactly one artifactHash.",
+    });
+    expect(
+      parseChangeInspectorRoute(
+        "#/changes/change%3Asha256%3Aone/interdiff/revision%3Asha256%3Aone/revision%3Asha256%3Atwo?fromArtifactHash=sha256:one",
+      ),
+    ).toEqual({
+      kind: "invalid",
+      message:
+        "Interdiff routes require exactly one artifact hash for each endpoint.",
     });
     for (const hash of ["#/changes?q=%ZZ", "#/changes?q=%E0%A4%A"]) {
       expect(parseChangeInspectorRoute(hash)).toEqual({

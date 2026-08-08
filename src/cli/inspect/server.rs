@@ -915,16 +915,21 @@ fn route_change_v2(state: &InspectState, path: &str, query: Option<&str>) -> Res
     let cache = &state.change_reader_cache;
     let segments = member_path
         .split('/')
-        .map(decode_member)
+        .map(|raw| {
+            (!raw.is_empty())
+                .then(|| strict_percent_decode(raw).ok())
+                .flatten()
+        })
         .collect::<Option<Vec<_>>>();
     let Some(segments) = segments else {
-        return Response::json_error("400 Bad Request", "invalid Change route identity");
+        return exact_selection_error_response("invalid Change route identity");
     };
     match segments.as_slice() {
         [change_id] => change_v2_response(api::change_detail_v2_json(repo, cache, change_id)),
         [change_id, revisions, revision_id] if revisions == "revisions" => {
-            let Some(artifact_hash) = query_param(query, "artifactHash") else {
-                return Response::json_error("400 Bad Request", "missing artifactHash");
+            let artifact_hash = match exact_selector_values(query, &["artifactHash"]) {
+                Ok(mut values) => values.remove(0),
+                Err(message) => return exact_selection_error_response(&message),
             };
             change_v2_response(api::change_revision_v2_json(
                 repo,
@@ -938,8 +943,9 @@ fn route_change_v2(state: &InspectState, path: &str, query: Option<&str>) -> Res
         [change_id, revisions, revision_id, resource]
             if revisions == "revisions" && resource == "resource" =>
         {
-            let Some(artifact_hash) = query_param(query, "artifactHash") else {
-                return Response::json_error("400 Bad Request", "missing artifactHash");
+            let artifact_hash = match exact_selector_values(query, &["artifactHash"]) {
+                Ok(mut values) => values.remove(0),
+                Err(message) => return exact_selection_error_response(&message),
             };
             change_v2_response(api::change_revision_v2_json(
                 repo,
@@ -951,24 +957,71 @@ fn route_change_v2(state: &InspectState, path: &str, query: Option<&str>) -> Res
             ))
         }
         [change_id, interdiff, from_revision_id, to_revision_id] if interdiff == "interdiff" => {
-            let Some(from_hash) = query_param(query, "fromArtifactHash") else {
-                return Response::json_error("400 Bad Request", "missing fromArtifactHash");
-            };
-            let Some(to_hash) = query_param(query, "toArtifactHash") else {
-                return Response::json_error("400 Bad Request", "missing toArtifactHash");
+            let values = match exact_selector_values(query, &["fromArtifactHash", "toArtifactHash"])
+            {
+                Ok(values) => values,
+                Err(message) => return exact_selection_error_response(&message),
             };
             change_v2_response(api::change_interdiff_v2_json(
                 repo,
                 cache,
                 change_id,
                 from_revision_id,
-                &from_hash,
+                &values[0],
                 to_revision_id,
-                &to_hash,
+                &values[1],
             ))
         }
         _ => Response::json_error("404 Not Found", "no such route"),
     }
+}
+
+/// Parse the complete query grammar for an exact Change-reader surface.
+///
+/// These selectors authorize immutable captured bytes or ordered comparison
+/// endpoints, so accepting a first duplicate, ignoring an unknown member, or
+/// repairing malformed encoding would make the URL's identity ambiguous. Keep
+/// this stricter than the legacy convenience parser used by unrelated routes.
+fn exact_selector_values(query: Option<&str>, expected: &[&str]) -> Result<Vec<String>, String> {
+    let query = query.ok_or_else(|| format!("missing {}", expected[0]))?;
+    if query.is_empty() {
+        return Err(format!("missing {}", expected[0]));
+    }
+
+    let mut values = vec![None; expected.len()];
+    for pair in query.split('&') {
+        let (key, raw_value) = pair
+            .split_once('=')
+            .ok_or_else(|| "exact selector query members require values".to_owned())?;
+        let Some(index) = expected
+            .iter()
+            .position(|expected_key| *expected_key == key)
+        else {
+            return Err(format!("unknown exact selector query member: {key}"));
+        };
+        if values[index].is_some() {
+            return Err(format!("duplicate exact selector query member: {key}"));
+        }
+        let value = strict_percent_decode(raw_value)?;
+        if value.is_empty() {
+            return Err(format!("empty exact selector query member: {key}"));
+        }
+        values[index] = Some(value);
+    }
+
+    expected
+        .iter()
+        .enumerate()
+        .map(|(index, key)| values[index].take().ok_or_else(|| format!("missing {key}")))
+        .collect()
+}
+
+fn exact_selection_error_response(message: &str) -> Response {
+    Response::new(
+        "400 Bad Request",
+        "application/json; charset=utf-8",
+        api::exact_selection_error_json(message).into_bytes(),
+    )
 }
 
 fn change_v2_response(result: Result<api::ChangeV2Json, String>) -> Response {
@@ -1272,6 +1325,38 @@ fn percent_decode(input: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+fn strict_percent_decode(input: &str) -> Result<String, String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' => {
+                if index + 2 >= bytes.len() {
+                    return Err("truncated percent encoding in exact selector".to_owned());
+                }
+                let Some(high) = (bytes[index + 1] as char).to_digit(16) else {
+                    return Err("malformed percent encoding in exact selector".to_owned());
+                };
+                let Some(low) = (bytes[index + 2] as char).to_digit(16) else {
+                    return Err("malformed percent encoding in exact selector".to_owned());
+                };
+                out.push((high * 16 + low) as u8);
+                index += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                index += 1;
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(out).map_err(|_| "invalid UTF-8 in exact selector".to_owned())
+}
+
 fn api_response(result: Result<String, String>) -> Response {
     match result {
         Ok(body) => Response::json_ok(body),
@@ -1405,6 +1490,69 @@ mod tests {
             let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
             assert_eq!(body["schema"], "pointbreak.inspect-change-page-error");
             assert_eq!(body["code"], "invalid_query");
+        }
+    }
+
+    #[test]
+    fn exact_selector_query_is_closed_strict_and_order_independent() {
+        assert_eq!(
+            exact_selector_values(
+                Some("toArtifactHash=sha256%3Atwo&fromArtifactHash=sha256%3Aone"),
+                &["fromArtifactHash", "toArtifactHash"],
+            )
+            .unwrap(),
+            vec!["sha256:one", "sha256:two"]
+        );
+
+        for (query, expected) in [
+            (
+                Some("artifactHash=one&artifactHash=two"),
+                &["artifactHash"][..],
+            ),
+            (Some("artifactHash="), &["artifactHash"][..]),
+            (Some("artifactHash=%"), &["artifactHash"][..]),
+            (Some("artifactHash=%GG"), &["artifactHash"][..]),
+            (Some("artifactHash=%FF"), &["artifactHash"][..]),
+            (Some("artifactHash=one&extra=two"), &["artifactHash"][..]),
+            (Some("artifactHash"), &["artifactHash"][..]),
+            (None, &["artifactHash"][..]),
+        ] {
+            assert!(
+                exact_selector_values(query, expected).is_err(),
+                "query unexpectedly accepted: {query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_routes_return_typed_bad_request_before_store_access() {
+        let cases = [
+            (
+                "/api/v2/changes/change/revisions/revision",
+                "artifactHash=one&artifactHash=two",
+            ),
+            (
+                "/api/v2/changes/change/revisions/revision/resource",
+                "artifactHash=one&unknown=two",
+            ),
+            (
+                "/api/v2/changes/change/interdiff/from/to",
+                "fromArtifactHash=one&toArtifactHash=%GG",
+            ),
+            (
+                "/api/v2/changes/change%GG/revisions/revision",
+                "artifactHash=one",
+            ),
+        ];
+        for (path, query) in cases {
+            let response = route_for_query(path, query);
+            assert_eq!(response.status, "400 Bad Request", "{path}?{query}");
+            let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+            assert_eq!(
+                body["schema"], "pointbreak.inspect-change-selection-error",
+                "{path}?{query}: {body:#}"
+            );
+            assert_eq!(body["code"], "invalid_exact_selection");
         }
     }
 

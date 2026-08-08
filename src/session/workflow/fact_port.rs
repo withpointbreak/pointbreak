@@ -17,9 +17,10 @@ use crate::session::event::{
 };
 use crate::session::store::resolution::{prepare_write_landing, resolve_change_write_store};
 use crate::session::{
-    BestEffortSkipSink, EventSigningOptions, EventStore, EventWriteOutcome, ReviewCursorV1,
-    RevisionShowOptions, SessionState, current_timestamp, show_revision_for_change_reader,
-    sign_event_if_requested, validated_track_id, writer_from_options,
+    BestEffortSkipSink, EventSigningOptions, EventStore, EventWriteOutcome, InputRequestStatus,
+    ReviewCursorV1, RevisionShowOptions, SessionState, current_timestamp,
+    show_revision_for_change_reader, sign_event_if_requested, validated_track_id,
+    writer_from_options,
 };
 use crate::storage::{Durability, LocalStorage};
 
@@ -141,6 +142,7 @@ pub fn port_review_fact(options: FactPortOptions) -> Result<FactPortResultV1> {
     if let Some(target_fact) = &options.target_fact {
         require_fact(&target, target_fact, "target")?;
     }
+    require_carried_open_target(&target, options.relation, options.target_fact.as_ref())?;
 
     let write_store = resolve_change_write_store(&options.repo)?;
     let storage = LocalStorage::new(write_store.store_dir());
@@ -199,6 +201,34 @@ pub fn port_review_fact(options: FactPortOptions) -> Result<FactPortResultV1> {
         event_id: event.event_id,
         created: outcome == EventWriteOutcome::Created,
     })
+}
+
+/// `carried_open_as` means the target request is open at the moment this
+/// continuity claim is appended. Later responses are independent history: they
+/// must not make an already-recorded port invalid during replay.
+fn require_carried_open_target(
+    target: &crate::session::RevisionShowResult,
+    relation: FactPortRelationV1,
+    target_fact: Option<&FactRefV1>,
+) -> Result<()> {
+    if !matches!(relation, FactPortRelationV1::CarriedOpenAs) {
+        return Ok(());
+    }
+
+    let Some(FactRefV1::InputRequest { input_request_id }) = target_fact else {
+        return Ok(());
+    };
+    let is_open = target.input_requests.iter().any(|request| {
+        &request.id == input_request_id && request.status == InputRequestStatus::Open
+    });
+    if is_open {
+        Ok(())
+    } else {
+        Err(ShoreError::WorkflowInputInvalid {
+            reason: "carried_open_as requires an open target input request at append time"
+                .to_owned(),
+        })
+    }
 }
 
 fn require_fact(
@@ -347,6 +377,224 @@ mod tests {
         .unwrap();
         assert_eq!(retry.port_id, first_port.port_id);
         assert!(!retry.created);
+    }
+
+    #[test]
+    fn carried_open_port_refuses_an_already_responded_target_request() {
+        let fixture = carried_open_fixture();
+        crate::session::respond_input_request(
+            crate::session::InputRequestRespondOptions::new(
+                fixture.root.path(),
+                fixture.target_request_id.clone(),
+            )
+            .with_outcome(crate::session::event::InputRequestResponseOutcome::Approved),
+        )
+        .unwrap();
+        let before = crate::session::change_reader_state_for_repo(fixture.root.path())
+            .unwrap()
+            .ready()
+            .unwrap()
+            .events()
+            .len();
+
+        let error = port_review_fact(
+            FactPortOptions::new(
+                fixture.root.path(),
+                fixture.origin,
+                FactRefV1::InputRequest {
+                    input_request_id: fixture.origin_request_id,
+                },
+                fixture.target_cursor,
+                FactPortRelationV1::CarriedOpenAs,
+                "track:author",
+            )
+            .with_target_fact(FactRefV1::InputRequest {
+                input_request_id: fixture.target_request_id,
+            }),
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("carried_open_as requires an open target input request")
+        );
+        let after = crate::session::change_reader_state_for_repo(fixture.root.path())
+            .unwrap()
+            .ready()
+            .unwrap()
+            .events()
+            .len();
+        assert_eq!(after, before, "refusal must occur before append");
+    }
+
+    #[test]
+    fn carried_open_port_remains_valid_after_a_later_target_response() {
+        let fixture = carried_open_fixture();
+        let port = port_review_fact(
+            FactPortOptions::new(
+                fixture.root.path(),
+                fixture.origin,
+                FactRefV1::InputRequest {
+                    input_request_id: fixture.origin_request_id,
+                },
+                fixture.target_cursor,
+                FactPortRelationV1::CarriedOpenAs,
+                "track:author",
+            )
+            .with_target_fact(FactRefV1::InputRequest {
+                input_request_id: fixture.target_request_id.clone(),
+            }),
+        )
+        .unwrap();
+        assert!(port.created);
+
+        crate::session::respond_input_request(
+            crate::session::InputRequestRespondOptions::new(
+                fixture.root.path(),
+                fixture.target_request_id.clone(),
+            )
+            .with_outcome(crate::session::event::InputRequestResponseOutcome::Approved),
+        )
+        .unwrap();
+
+        let target = show_revision_for_change_reader(
+            RevisionShowOptions::new(fixture.root.path())
+                .with_revision_id(port.target_revision.revision_id)
+                .with_exact(true),
+        )
+        .unwrap();
+        assert!(target.input_requests.iter().any(|request| {
+            request.id == fixture.target_request_id
+                && request.status == InputRequestStatus::Responded
+        }));
+        let ready = crate::session::change_reader_state_for_repo(fixture.root.path())
+            .unwrap()
+            .ready()
+            .unwrap()
+            .clone();
+        assert!(ready.events().iter().any(|event| {
+            event.event_type == EventType::ReviewFactPorted && event.event_id == port.event_id
+        }));
+    }
+
+    struct CarriedOpenFixture {
+        root: tempfile::TempDir,
+        origin: RevisionRefV1,
+        origin_request_id: crate::model::InputRequestId,
+        target_request_id: crate::model::InputRequestId,
+        target_cursor: String,
+    }
+
+    fn carried_open_fixture() -> CarriedOpenFixture {
+        let root = tempfile::tempdir().unwrap();
+        git(root.path(), &["init", "--quiet"]);
+        git(root.path(), &["config", "user.name", "Pointbreak Test"]);
+        git(
+            root.path(),
+            &["config", "user.email", "pointbreak@example.test"],
+        );
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(root.path().join("sample.txt"), "base\n").unwrap();
+        git(root.path(), &["add", "sample.txt"]);
+        git(root.path(), &["commit", "--quiet", "-m", "base"]);
+        let base = git_stdout(root.path(), &["rev-parse", "HEAD"]);
+
+        std::fs::write(root.path().join("sample.txt"), "first\n").unwrap();
+        git(root.path(), &["commit", "--quiet", "-am", "first"]);
+        let first = capture_review(
+            crate::session::CaptureOptions::new(root.path())
+                .with_commit_range(CommitRangeSpec::new(&base)),
+        )
+        .unwrap();
+        std::fs::write(root.path().join("sample.txt"), "second\n").unwrap();
+        git(root.path(), &["commit", "--quiet", "-am", "second"]);
+        let second = capture_review(
+            crate::session::CaptureOptions::new(root.path())
+                .with_commit_range(CommitRangeSpec::new(base)),
+        )
+        .unwrap();
+        let (store, _) =
+            crate::session::store::resolution::resolve_change_read_store(root.path()).unwrap();
+        write_capability_fixture_for_test(
+            store.backend().journal().as_ref(),
+            CapabilityFixtureState::L2,
+        )
+        .unwrap();
+        let change = create_change(ChangeCreateOptions::new(
+            root.path(),
+            "change-operation:fact-port-carried-open",
+            ChangeIdentityDescriptorV1::opaque_nonce([0x73; 32]),
+        ))
+        .unwrap();
+        for (operation_id, revision_id) in [
+            (
+                "change-operation:fact-port-carried-open-first",
+                &first.revision_id,
+            ),
+            (
+                "change-operation:fact-port-carried-open-second",
+                &second.revision_id,
+            ),
+        ] {
+            join_revision_to_change(ChangeMembershipOptions::new(
+                root.path(),
+                operation_id,
+                change.change_id.clone(),
+                revision_id.clone(),
+            ))
+            .unwrap();
+        }
+        let ready = crate::session::change_reader_state_for_repo(root.path())
+            .unwrap()
+            .ready()
+            .unwrap()
+            .clone();
+        let origin_cursor = select_review_cursor(
+            &ready.projection.changes[&change.change_id],
+            &ready.document_projection,
+            Some(&first.revision_id),
+            false,
+            ReviewSourceBindingV1::Captured,
+        )
+        .unwrap();
+        let target_cursor = select_review_cursor(
+            &ready.projection.changes[&change.change_id],
+            &ready.document_projection,
+            Some(&second.revision_id),
+            false,
+            ReviewSourceBindingV1::Captured,
+        )
+        .unwrap();
+        let origin_request = crate::session::open_input_request(
+            crate::session::InputRequestOpenOptions::new(root.path())
+                .with_review_cursor(origin_cursor.token)
+                .with_track("track:author")
+                .with_title("origin request")
+                .with_reason_code(
+                    crate::session::event::InputRequestReasonCode::ManualDecisionRequired,
+                ),
+        )
+        .unwrap();
+        let target_request = crate::session::open_input_request(
+            crate::session::InputRequestOpenOptions::new(root.path())
+                .with_review_cursor(target_cursor.token.clone())
+                .with_track("track:author")
+                .with_title("target request")
+                .with_reason_code(
+                    crate::session::event::InputRequestReasonCode::ManualDecisionRequired,
+                ),
+        )
+        .unwrap();
+
+        CarriedOpenFixture {
+            root,
+            origin: RevisionRefV1::new(first.revision_id, first.object_artifact_content_hash)
+                .unwrap(),
+            origin_request_id: origin_request.input_request_id,
+            target_request_id: target_request.input_request_id,
+            target_cursor: target_cursor.token,
+        }
     }
 
     fn git(repo: &Path, args: &[&str]) {

@@ -108,6 +108,9 @@ export interface ChangePresentation {
 
 export interface ChangeSummary {
   changeId: string;
+  declarationState: "authoritative" | "incomplete" | "conflicted";
+  titleAssertions: string[];
+  memberCount: number;
   topology: string;
   lifecycle: string;
   attentionSummary: string;
@@ -142,16 +145,96 @@ export interface ChangeDetail {
   schema: "pointbreak.review-change";
   version: 1;
   summary: ChangeSummary;
-  relationClaims: Array<{
-    claimId: string;
-    active: boolean;
-    successor: RevisionRef;
-    predecessor: RevisionRef;
-    supports: Array<{ actorId: string; eventId: string }>;
-    withdrawals: Array<{ actorId: string; eventId: string }>;
-  }>;
+  memberRevisions: ChangeMemberRevision[];
+  unavailableMemberRevisions: UnavailableChangeMemberRevision[];
+  membershipClaims: ChangeMembershipClaim[];
+  membershipWithdrawals: ChangeClaimWithdrawal[];
+  relationClaims: ChangeRelationClaim[];
+  relationWithdrawals: ChangeClaimWithdrawal[];
+  links: ChangeLink[];
+  effectiveSupersedes: Array<[RevisionRef, RevisionRef]>;
+  pendingOrConflictingEdges: ChangeRelationClaim[];
+  currentRevisionRefs: RevisionRef[];
+  perCurrentRevisionQualification: RevisionQualification[];
+  operativeObligations: string[];
   diagnostics: string[];
   projectionStamp: string;
+}
+
+export interface ChangeClaimSupport {
+  eventId: string;
+  actorId: string;
+  trackId?: string;
+}
+
+export interface ChangeMemberRevision {
+  revision: RevisionRef;
+  supportingClaimIds: string[];
+}
+
+export interface UnavailableChangeMemberRevision {
+  revisionId: string;
+  reason: "invalid_revision_id" | "invalid_object_artifact_content_hash";
+  supportingClaimIds: string[];
+}
+
+export interface ChangeMembershipClaim {
+  claimId: string;
+  changeId: string;
+  revisionId: string;
+  supports: ChangeClaimSupport[];
+  withdrawals: ChangeClaimSupport[];
+  active: boolean;
+  diagnostics: string[];
+}
+
+export interface ChangeRelationClaim {
+  claimId: string;
+  changeId: string;
+  successor: RevisionRef;
+  predecessor: RevisionRef;
+  supports: ChangeClaimSupport[];
+  withdrawals: ChangeClaimSupport[];
+  active: boolean;
+  diagnostics: string[];
+}
+
+export interface ChangeClaimWithdrawal {
+  claimId: string;
+  supports: ChangeClaimSupport[];
+  diagnostics: string[];
+}
+
+export interface ChangeLink {
+  leftChangeId: string;
+  rightChangeId: string;
+  relation: string;
+}
+
+export interface RevisionQualification {
+  revision: RevisionRef;
+  qualified: boolean;
+}
+
+/** Immutable review target recorded with a fact; never inferred by the reader. */
+export interface FactTarget {
+  kind:
+    | "revision"
+    | "file"
+    | "range"
+    | "observation"
+    | "input_request"
+    | "assessment"
+    | "event";
+  revisionId: string;
+  filePath?: string;
+  side?: "old" | "new";
+  startLine?: number;
+  endLine?: number;
+  observationId?: string;
+  inputRequestId?: string;
+  assessmentId?: string;
+  eventId?: string;
 }
 
 export interface ChangeRevisionDetail {
@@ -159,13 +242,25 @@ export interface ChangeRevisionDetail {
   version: 1;
   changeId: string;
   revision: RevisionRef;
+  membershipSupport: ChangeMembershipClaim[];
   revisionCurrency: string;
   relationClassification: string;
   availability: string;
+  exactRevisionDocument: RevisionResource;
   factPresentations: Array<{
     factId: string;
     family: string;
     originRevision: RevisionRef;
+    target?: FactTarget;
+    contextChangeId?: string;
+    presentedInRevision?: RevisionRef;
+    portRelation?:
+      | "context_only"
+      | "reanchored_as"
+      | "carried_open_as"
+      | "resolved_by";
+    actorId: string;
+    trackId?: string;
     revisionCurrency: string;
     familyState: string;
     availability: string;
@@ -175,14 +270,11 @@ export interface ChangeRevisionDetail {
     {
       contentType: "text/plain" | "text/markdown";
       bodyContentState: "present" | "suppressed_present" | "physically_removed";
-      content: Record<string, unknown>;
+      content: FactContent;
     }
   >;
-  associations: Array<{
-    state: string;
-    proofAvailability: string;
-    comparison: { revision: RevisionRef; commitOid: string };
-  }>;
+  factPorts: FactPortPresentation[];
+  associations: AssociationComparison[];
   diagnostics: string[];
   projectionStamp: string;
 }
@@ -191,34 +283,165 @@ export interface RevisionResource {
   schema: "pointbreak.review-revision-resource";
   version: 1;
   resource: { revision: RevisionRef; objectId: string };
+  projection: { includeBody: boolean; trackId?: string };
   availability: string;
   capturedDocumentHash?: string;
-  capturedDocument?: unknown;
+  /**
+   * The served, bound view of the stored object artifact.  Decode it before
+   * paint: a route-bound resource must not be able to carry another
+   * Revision's snapshot merely because both envelopes look plausible.
+   */
+  capturedDocument?: CapturedReviewSnapshot;
   diagnostics: string[];
+  projectionStamp: string;
+  cacheKey: string;
+}
+
+/** The minimum identity-bearing shape of an authoritative captured snapshot. */
+export interface CapturedReviewSnapshot {
+  schema: "pointbreak.review-snapshot";
+  version: 1;
+  contentHash: string;
+  snapshot: {
+    review_id: string;
+    object_id: string;
+    files?: unknown[];
+  };
+}
+
+export interface FactPortPresentation {
+  portId: string;
+  originRevision: RevisionRef;
+  originFact: FactRef;
+  targetRevision: RevisionRef;
+  relation:
+    | "context_only"
+    | "reanchored_as"
+    | "carried_open_as"
+    | "resolved_by";
+  targetFact?: FactRef;
+  rationaleContentHash?: string;
+  contextChangeId?: string;
+  actorId: string;
+  trackId?: string;
+  sourceEventIds: string[];
+  applicability: "applicable" | "conflicted" | "unavailable";
+  diagnostics: string[];
+}
+
+export interface FactRef {
+  kind: "observation" | "input_request";
+  observationId?: string;
+  inputRequestId?: string;
+}
+
+export interface AssociationComparison {
+  schema: "pointbreak.review-association-comparison";
+  version: 1;
+  state: string;
+  proofAvailability: string;
+  comparison: {
+    revision: RevisionRef;
+    associationId: string;
+    commitOid: string;
+    comparisonBase: string;
+    viewKind: string;
+    proofRef?: string;
+  };
+  diagnostics: string[];
+  cacheKey: string;
 }
 
 export interface RevisionInterdiff {
   schema: "pointbreak.review-revision-interdiff";
   version: 1;
-  interdiff: { from: RevisionRef; to: RevisionRef };
+  interdiff: {
+    from: RevisionRef;
+    to: RevisionRef;
+    algorithmVersion: string;
+    scope: string[];
+  };
   availability: string;
   comparison?: unknown;
   diagnostics: string[];
+  projectionStamp: string;
+  cacheKey: string;
 }
+
+export type FactContent =
+  | { kind: "observation"; title: string; body?: string }
+  | {
+      kind: "input_request";
+      title: string;
+      body?: string;
+      status: string;
+      responses?: Array<{
+        responseId: string;
+        outcome: string;
+        reason?: string;
+        contentType: "text/plain" | "text/markdown";
+        bodyContentState:
+          | "present"
+          | "suppressed_present"
+          | "physically_removed";
+        availability: string;
+      }>;
+    }
+  | { kind: "assessment"; assessment: string; summary?: string }
+  | {
+      kind: "validation";
+      checkName: string;
+      command?: string;
+      status: string;
+      summary?: string;
+    };
 
 export function decodeChangeDetail(value: unknown): ChangeDetail {
   const detail = object(value, "Change detail");
   const summary = detail.summary;
   const stamp = detail.projectionStamp;
+  const memberRevisions = detail.memberRevisions;
+  const unavailableMemberRevisions = detail.unavailableMemberRevisions;
+  const membershipClaims = detail.membershipClaims;
+  const membershipWithdrawals = detail.membershipWithdrawals;
   const relationClaims = detail.relationClaims;
+  const relationWithdrawals = detail.relationWithdrawals;
+  const links = detail.links;
+  const effectiveSupersedes = detail.effectiveSupersedes;
+  const pendingOrConflictingEdges = detail.pendingOrConflictingEdges;
+  const currentRevisionRefs = detail.currentRevisionRefs;
+  const perCurrentRevisionQualification =
+    detail.perCurrentRevisionQualification;
+  const operativeObligations = detail.operativeObligations;
   const diagnostics = detail.diagnostics;
   if (
     detail.schema !== "pointbreak.review-change" ||
     detail.version !== 1 ||
     !nonEmptyString(stamp) ||
     !isChangeSummary(summary, stamp) ||
+    !isChangeMemberRevisions(memberRevisions) ||
+    !isUnavailableChangeMemberRevisions(unavailableMemberRevisions) ||
+    !isMembershipClaims(membershipClaims, summary.changeId) ||
+    !isClaimWithdrawals(membershipWithdrawals) ||
     !Array.isArray(relationClaims) ||
-    !relationClaims.every(isRelationClaim) ||
+    !relationClaims.every((claim) =>
+      isRelationClaim(claim, summary.changeId),
+    ) ||
+    !isClaimWithdrawals(relationWithdrawals) ||
+    !isChangeLinks(links) ||
+    !isEffectiveSupersedes(effectiveSupersedes) ||
+    !Array.isArray(pendingOrConflictingEdges) ||
+    !pendingOrConflictingEdges.every((claim) =>
+      isRelationClaim(claim, summary.changeId),
+    ) ||
+    !Array.isArray(currentRevisionRefs) ||
+    !currentRevisionRefs.every(isRevisionRef) ||
+    !sameRevisionSet(currentRevisionRefs, summary.currentRevisionRefs) ||
+    !isRevisionQualifications(
+      perCurrentRevisionQualification,
+      currentRevisionRefs,
+    ) ||
+    !isStringArray(operativeObligations) ||
     !isStringArray(diagnostics)
   ) {
     throw new Error("invalid Change detail DTO");
@@ -227,7 +450,18 @@ export function decodeChangeDetail(value: unknown): ChangeDetail {
     schema: "pointbreak.review-change",
     version: 1,
     summary,
+    memberRevisions,
+    unavailableMemberRevisions,
+    membershipClaims,
+    membershipWithdrawals,
     relationClaims,
+    relationWithdrawals,
+    links,
+    effectiveSupersedes,
+    pendingOrConflictingEdges,
+    currentRevisionRefs,
+    perCurrentRevisionQualification,
+    operativeObligations,
     diagnostics,
     projectionStamp: stamp,
   };
@@ -240,6 +474,9 @@ export function decodeChangeRevisionDetail(
   const revision = detail.revision;
   const factPresentations = detail.factPresentations;
   const factContentPresentations = detail.factContentPresentations;
+  const exactRevisionDocument = detail.exactRevisionDocument;
+  const membershipSupport = detail.membershipSupport;
+  const factPorts = detail.factPorts;
   const associations = detail.associations;
   const diagnostics = detail.diagnostics;
   const revisionCurrency = detail.revisionCurrency;
@@ -256,10 +493,23 @@ export function decodeChangeRevisionDetail(
       relationClassification !== "superseded") ||
     typeof availability !== "string" ||
     !CONTENT_AVAILABILITY_VALUES.has(availability) ||
+    !isRevisionResource(exactRevisionDocument) ||
+    !sameRevision(exactRevisionDocument.resource.revision, revision) ||
+    availability !== exactRevisionDocument.availability ||
+    !isMembershipClaims(membershipSupport, detail.changeId) ||
     !Array.isArray(factPresentations) ||
     !factPresentations.every(isFactPresentation) ||
+    !uniqueFactPresentationIds(factPresentations) ||
     (factContentPresentations !== undefined &&
       !isFactContentPresentations(factContentPresentations)) ||
+    (factContentPresentations !== undefined &&
+      !sameFactIds(factPresentations, factContentPresentations)) ||
+    !isFactPortPresentations(
+      factPorts,
+      detail.changeId,
+      factPresentations,
+      revision,
+    ) ||
     !Array.isArray(associations) ||
     !associations.every(isAssociation) ||
     !isStringArray(diagnostics) ||
@@ -272,11 +522,14 @@ export function decodeChangeRevisionDetail(
     version: 1,
     changeId: detail.changeId,
     revision,
+    membershipSupport,
     revisionCurrency,
     relationClassification,
     availability,
+    exactRevisionDocument,
     factPresentations,
     factContentPresentations,
+    factPorts,
     associations,
     diagnostics,
     projectionStamp: detail.projectionStamp,
@@ -286,21 +539,34 @@ export function decodeChangeRevisionDetail(
 export function decodeRevisionResource(value: unknown): RevisionResource {
   const document = object(value, "Revision resource");
   const resource = document.resource;
+  const projection = document.projection;
   const diagnostics = document.diagnostics;
   const availability = document.availability;
   const capturedDocumentHash = document.capturedDocumentHash;
+  const projectionStamp = document.projectionStamp;
+  const cacheKey = document.cacheKey;
   if (
     document.schema !== "pointbreak.review-revision-resource" ||
     document.version !== 1 ||
     !isRecord(resource) ||
     !isRevisionRef(resource.revision) ||
     !nonEmptyString(resource.objectId) ||
+    !isResourceProjection(projection) ||
     !isOneOf(availability, CONTENT_AVAILABILITY_VALUES) ||
     (capturedDocumentHash !== undefined &&
       !nonEmptyString(capturedDocumentHash)) ||
-    (availability === "available") !==
-      (capturedDocumentHash !== undefined &&
-        document.capturedDocument !== undefined) ||
+    (availability === "available" &&
+      (capturedDocumentHash === undefined ||
+        !isCapturedReviewSnapshot(
+          document.capturedDocument,
+          resource.revision.objectArtifactContentHash,
+          resource.objectId,
+        ))) ||
+    (availability !== "available" &&
+      (capturedDocumentHash !== undefined ||
+        document.capturedDocument !== undefined)) ||
+    !nonEmptyString(projectionStamp) ||
+    !nonEmptyString(cacheKey) ||
     !isStringArray(diagnostics)
   ) {
     throw new Error("invalid Revision resource DTO");
@@ -309,10 +575,15 @@ export function decodeRevisionResource(value: unknown): RevisionResource {
     schema: "pointbreak.review-revision-resource",
     version: 1,
     resource: { revision: resource.revision, objectId: resource.objectId },
+    projection,
     availability,
     capturedDocumentHash,
-    capturedDocument: document.capturedDocument,
+    capturedDocument: document.capturedDocument as
+      | CapturedReviewSnapshot
+      | undefined,
     diagnostics,
+    projectionStamp,
+    cacheKey,
   };
 }
 
@@ -321,14 +592,20 @@ export function decodeRevisionInterdiff(value: unknown): RevisionInterdiff {
   const interdiff = document.interdiff;
   const diagnostics = document.diagnostics;
   const availability = document.availability;
+  const projectionStamp = document.projectionStamp;
+  const cacheKey = document.cacheKey;
   if (
     document.schema !== "pointbreak.review-revision-interdiff" ||
     document.version !== 1 ||
     !isRecord(interdiff) ||
     !isRevisionRef(interdiff.from) ||
     !isRevisionRef(interdiff.to) ||
+    !nonEmptyString(interdiff.algorithmVersion) ||
+    !isStringArray(interdiff.scope) ||
     !isOneOf(availability, INTERDIFF_AVAILABILITY_VALUES) ||
     !isStringArray(diagnostics) ||
+    !nonEmptyString(projectionStamp) ||
+    !nonEmptyString(cacheKey) ||
     (availability === "available") !== (document.comparison !== undefined)
   ) {
     throw new Error("invalid Revision interdiff DTO");
@@ -336,10 +613,17 @@ export function decodeRevisionInterdiff(value: unknown): RevisionInterdiff {
   return {
     schema: "pointbreak.review-revision-interdiff",
     version: 1,
-    interdiff: { from: interdiff.from, to: interdiff.to },
+    interdiff: {
+      from: interdiff.from,
+      to: interdiff.to,
+      algorithmVersion: interdiff.algorithmVersion,
+      scope: interdiff.scope,
+    },
     availability,
     comparison: document.comparison,
     diagnostics,
+    projectionStamp,
+    cacheKey,
   };
 }
 
@@ -550,6 +834,13 @@ function isChangeSummary(
   if (!isRecord(value)) return false;
   return (
     nonEmptyString(value.changeId) &&
+    (value.declarationState === "authoritative" ||
+      value.declarationState === "incomplete" ||
+      value.declarationState === "conflicted") &&
+    isStringArray(value.titleAssertions) &&
+    typeof value.memberCount === "number" &&
+    Number.isSafeInteger(value.memberCount) &&
+    value.memberCount >= 0 &&
     isOneOf(value.topology, TOPOLOGY_VALUES) &&
     isOneOf(value.lifecycle, LIFECYCLE_VALUES) &&
     isOneOf(value.attentionSummary, ATTENTION_VALUES) &&
@@ -560,6 +851,147 @@ function isChangeSummary(
     uniqueRevisionKeys(value.currentRevisionRefs).size ===
       value.currentRevisionRefs.length &&
     (value.diagnostics === undefined || isStringArray(value.diagnostics))
+  );
+}
+
+function isClaimSupport(value: unknown): value is ChangeClaimSupport {
+  return (
+    isRecord(value) &&
+    nonEmptyString(value.eventId) &&
+    nonEmptyString(value.actorId) &&
+    optionalString(value.trackId)
+  );
+}
+
+function isChangeMemberRevisions(
+  value: unknown,
+): value is ChangeMemberRevision[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (member) =>
+        isRecord(member) &&
+        isRevisionRef(member.revision) &&
+        isStringArray(member.supportingClaimIds),
+    )
+  );
+}
+
+function isUnavailableChangeMemberRevisions(
+  value: unknown,
+): value is UnavailableChangeMemberRevision[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (member) =>
+        isRecord(member) &&
+        nonEmptyString(member.revisionId) &&
+        (member.reason === "invalid_revision_id" ||
+          member.reason === "invalid_object_artifact_content_hash") &&
+        isStringArray(member.supportingClaimIds),
+    )
+  );
+}
+
+function isMembershipClaims(
+  value: unknown,
+  changeId: string,
+): value is ChangeMembershipClaim[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (claim) =>
+        isRecord(claim) &&
+        nonEmptyString(claim.claimId) &&
+        claim.changeId === changeId &&
+        nonEmptyString(claim.revisionId) &&
+        Array.isArray(claim.supports) &&
+        claim.supports.every(isClaimSupport) &&
+        Array.isArray(claim.withdrawals) &&
+        claim.withdrawals.every(isClaimSupport) &&
+        typeof claim.active === "boolean" &&
+        isStringArray(claim.diagnostics),
+    )
+  );
+}
+
+function isClaimWithdrawals(value: unknown): value is ChangeClaimWithdrawal[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (withdrawal) =>
+        isRecord(withdrawal) &&
+        nonEmptyString(withdrawal.claimId) &&
+        Array.isArray(withdrawal.supports) &&
+        withdrawal.supports.every(isClaimSupport) &&
+        isStringArray(withdrawal.diagnostics),
+    )
+  );
+}
+
+function isChangeLinks(value: unknown): value is ChangeLink[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (link) =>
+        isRecord(link) &&
+        nonEmptyString(link.leftChangeId) &&
+        nonEmptyString(link.rightChangeId) &&
+        nonEmptyString(link.relation),
+    )
+  );
+}
+
+function isEffectiveSupersedes(
+  value: unknown,
+): value is Array<[RevisionRef, RevisionRef]> {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (edge) =>
+        Array.isArray(edge) &&
+        edge.length === 2 &&
+        isRevisionRef(edge[0]) &&
+        isRevisionRef(edge[1]),
+    )
+  );
+}
+
+function isRevisionQualifications(
+  value: unknown,
+  currentRevisionRefs: RevisionRef[],
+): value is RevisionQualification[] {
+  if (!Array.isArray(value)) return false;
+  const qualifications: RevisionQualification[] = [];
+  for (const candidate of value) {
+    if (!isRecord(candidate) || !isRevisionRef(candidate.revision)) {
+      return false;
+    }
+    const revision = candidate.revision;
+    if (
+      typeof candidate.qualified !== "boolean" ||
+      !currentRevisionRefs.some((current) => sameRevision(current, revision))
+    )
+      return false;
+    qualifications.push({
+      revision,
+      qualified: candidate.qualified,
+    });
+  }
+  return sameRevisionSet(
+    qualifications.map((qualification) => qualification.revision),
+    currentRevisionRefs,
+  );
+}
+
+function sameRevisionSet(left: RevisionRef[], right: RevisionRef[]): boolean {
+  const leftKeys = uniqueRevisionKeys(left);
+  const rightKeys = uniqueRevisionKeys(right);
+  return (
+    leftKeys.size === left.length &&
+    rightKeys.size === right.length &&
+    leftKeys.size === rightKeys.size &&
+    [...leftKeys].every((key) => rightKeys.has(key))
   );
 }
 
@@ -623,29 +1055,22 @@ function uniqueRevisionKeys(revisions: RevisionRef[]): Set<string> {
   );
 }
 
-function isClaimSupport(
-  value: unknown,
-): value is { actorId: string; eventId: string } {
-  return (
-    isRecord(value) &&
-    nonEmptyString(value.actorId) &&
-    nonEmptyString(value.eventId)
-  );
-}
-
 function isRelationClaim(
   value: unknown,
-): value is ChangeDetail["relationClaims"][number] {
+  changeId: string,
+): value is ChangeRelationClaim {
   return (
     isRecord(value) &&
     nonEmptyString(value.claimId) &&
+    value.changeId === changeId &&
     typeof value.active === "boolean" &&
     isRevisionRef(value.successor) &&
     isRevisionRef(value.predecessor) &&
     Array.isArray(value.supports) &&
     value.supports.every(isClaimSupport) &&
     Array.isArray(value.withdrawals) &&
-    value.withdrawals.every(isClaimSupport)
+    value.withdrawals.every(isClaimSupport) &&
+    isStringArray(value.diagnostics)
   );
 }
 
@@ -657,9 +1082,84 @@ function isFactPresentation(
     nonEmptyString(value.factId) &&
     nonEmptyString(value.family) &&
     isRevisionRef(value.originRevision) &&
+    (value.target === undefined || isFactTarget(value.target)) &&
+    (value.contextChangeId === undefined ||
+      nonEmptyString(value.contextChangeId)) &&
+    (value.presentedInRevision === undefined ||
+      isRevisionRef(value.presentedInRevision)) &&
+    (value.portRelation === undefined ||
+      value.portRelation === "context_only" ||
+      value.portRelation === "reanchored_as" ||
+      value.portRelation === "carried_open_as" ||
+      value.portRelation === "resolved_by") &&
+    nonEmptyString(value.actorId) &&
+    (value.trackId === undefined || nonEmptyString(value.trackId)) &&
     isOneOf(value.revisionCurrency, REVISION_CURRENCY_VALUES) &&
     isOneOf(value.familyState, FACT_FAMILY_STATE_VALUES) &&
     isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES)
+  );
+}
+
+function isFactTarget(value: unknown): value is FactTarget {
+  if (!isRecord(value) || !nonEmptyString(value.revisionId)) return false;
+  if (value.kind === "revision") return true;
+  if (value.kind === "file") return nonEmptyString(value.filePath);
+  if (value.kind === "range") {
+    return (
+      nonEmptyString(value.filePath) &&
+      (value.side === "old" || value.side === "new") &&
+      Number.isSafeInteger(value.startLine) &&
+      (value.startLine as number) > 0 &&
+      Number.isSafeInteger(value.endLine) &&
+      (value.endLine as number) >= (value.startLine as number)
+    );
+  }
+  if (value.kind === "observation") return nonEmptyString(value.observationId);
+  if (value.kind === "input_request")
+    return nonEmptyString(value.inputRequestId);
+  if (value.kind === "assessment") return nonEmptyString(value.assessmentId);
+  return value.kind === "event" && nonEmptyString(value.eventId);
+}
+
+function uniqueFactPresentationIds(
+  facts: ChangeRevisionDetail["factPresentations"],
+): boolean {
+  return new Set(facts.map((fact) => fact.factId)).size === facts.length;
+}
+
+function isResourceProjection(
+  value: unknown,
+): value is RevisionResource["projection"] {
+  return (
+    isRecord(value) &&
+    typeof value.includeBody === "boolean" &&
+    (value.trackId === undefined || nonEmptyString(value.trackId))
+  );
+}
+
+/**
+ * Check the immutable bindings available in the served envelope.  Diff-row
+ * shape remains renderer-owned, but schema, artifact hash, and object id are
+ * protocol identity and must be established before the renderer sees bytes.
+ */
+function isCapturedReviewSnapshot(
+  value: unknown,
+  expectedContentHash: string,
+  expectedObjectId: string,
+): value is CapturedReviewSnapshot {
+  if (
+    !isRecord(value) ||
+    value.schema !== "pointbreak.review-snapshot" ||
+    value.version !== 1 ||
+    value.contentHash !== expectedContentHash ||
+    !isRecord(value.snapshot)
+  ) {
+    return false;
+  }
+  return (
+    nonEmptyString(value.snapshot.review_id) &&
+    value.snapshot.object_id === expectedObjectId &&
+    Array.isArray(value.snapshot.files)
   );
 }
 
@@ -676,21 +1176,193 @@ function isFactContentPresentations(
         (presentation.bodyContentState === "present" ||
           presentation.bodyContentState === "suppressed_present" ||
           presentation.bodyContentState === "physically_removed") &&
-        isRecord(presentation.content),
+        isFactContent(presentation.content),
     )
   );
 }
 
-function isAssociation(
+function sameFactIds(
+  facts: ChangeRevisionDetail["factPresentations"],
+  content: NonNullable<ChangeRevisionDetail["factContentPresentations"]>,
+): boolean {
+  const expected = new Set(facts.map((fact) => fact.factId));
+  const actual = Object.keys(content);
+  return (
+    expected.size === facts.length &&
+    expected.size === actual.length &&
+    actual.every((factId) => expected.has(factId))
+  );
+}
+
+function isRevisionResource(value: unknown): value is RevisionResource {
+  try {
+    decodeRevisionResource(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isFactPortPresentations(
   value: unknown,
-): value is ChangeRevisionDetail["associations"][number] {
+  changeId: string,
+  facts: ChangeRevisionDetail["factPresentations"],
+  selectedRevision: RevisionRef,
+): value is FactPortPresentation[] {
+  if (!Array.isArray(value) || !value.every(isFactPortPresentation))
+    return false;
+  if (new Set(value.map((port) => port.portId)).size !== value.length)
+    return false;
+  return value.every(
+    (port) =>
+      (port.contextChangeId === undefined ||
+        port.contextChangeId === changeId) &&
+      port.sourceEventIds.length > 0 &&
+      new Set(port.sourceEventIds).size === port.sourceEventIds.length &&
+      port.trackId !== undefined &&
+      (port.applicability !== "applicable" ||
+        applicableFactPortHasExactEndpoints(port, facts, selectedRevision)),
+  );
+}
+
+function factRefId(fact: FactRef): string {
+  return fact.kind === "observation"
+    ? (fact.observationId ?? "")
+    : (fact.inputRequestId ?? "");
+}
+
+function applicableFactPortHasExactEndpoints(
+  port: FactPortPresentation,
+  facts: ChangeRevisionDetail["factPresentations"],
+  selectedRevision: RevisionRef,
+): boolean {
+  if (!sameRevision(port.targetRevision, selectedRevision)) return false;
+  const matchingOrigin = facts.filter(
+    (fact) =>
+      fact.factId === factRefId(port.originFact) &&
+      fact.family === port.originFact.kind &&
+      sameRevision(fact.originRevision, port.originRevision) &&
+      fact.presentedInRevision !== undefined &&
+      sameRevision(fact.presentedInRevision, selectedRevision),
+  );
+  if (matchingOrigin.length !== 1) return false;
+  const targetFact = port.targetFact;
+  if (targetFact === undefined) return true;
+  return (
+    facts.filter(
+      (fact) =>
+        fact.factId === factRefId(targetFact) &&
+        fact.family === targetFact.kind &&
+        sameRevision(fact.originRevision, selectedRevision),
+    ).length === 1
+  );
+}
+
+function isFactPortPresentation(value: unknown): value is FactPortPresentation {
   return (
     isRecord(value) &&
+    nonEmptyString(value.portId) &&
+    isRevisionRef(value.originRevision) &&
+    isFactRef(value.originFact) &&
+    isRevisionRef(value.targetRevision) &&
+    (value.relation === "context_only" ||
+      value.relation === "reanchored_as" ||
+      value.relation === "carried_open_as" ||
+      value.relation === "resolved_by") &&
+    (value.targetFact === undefined || isFactRef(value.targetFact)) &&
+    optionalString(value.rationaleContentHash) &&
+    optionalString(value.contextChangeId) &&
+    nonEmptyString(value.actorId) &&
+    nonEmptyString(value.trackId) &&
+    isStringArray(value.sourceEventIds) &&
+    (value.applicability === "applicable" ||
+      value.applicability === "conflicted" ||
+      value.applicability === "unavailable") &&
+    isStringArray(value.diagnostics)
+  );
+}
+
+function isFactRef(value: unknown): value is FactRef {
+  if (!isRecord(value)) return false;
+  if (value.kind === "observation") {
+    return (
+      nonEmptyString(value.observationId) && value.inputRequestId === undefined
+    );
+  }
+  if (value.kind === "input_request") {
+    return (
+      nonEmptyString(value.inputRequestId) && value.observationId === undefined
+    );
+  }
+  return false;
+}
+
+function isFactContent(value: unknown): value is FactContent {
+  if (!isRecord(value)) return false;
+  switch (value.kind) {
+    case "observation":
+      return nonEmptyString(value.title) && optionalString(value.body);
+    case "input_request":
+      return (
+        nonEmptyString(value.title) &&
+        optionalString(value.body) &&
+        nonEmptyString(value.status) &&
+        (value.responses === undefined ||
+          (Array.isArray(value.responses) &&
+            value.responses.every(isFactResponse)))
+      );
+    case "assessment":
+      return nonEmptyString(value.assessment) && optionalString(value.summary);
+    case "validation":
+      return (
+        nonEmptyString(value.checkName) &&
+        optionalString(value.command) &&
+        nonEmptyString(value.status) &&
+        optionalString(value.summary)
+      );
+    default:
+      return false;
+  }
+}
+
+function isFactResponse(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    nonEmptyString(value.responseId) &&
+    nonEmptyString(value.outcome) &&
+    optionalString(value.reason) &&
+    (value.contentType === "text/plain" ||
+      value.contentType === "text/markdown") &&
+    (value.bodyContentState === "present" ||
+      value.bodyContentState === "suppressed_present" ||
+      value.bodyContentState === "physically_removed") &&
+    isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES)
+  );
+}
+
+function isAssociation(value: unknown): value is AssociationComparison {
+  return (
+    isRecord(value) &&
+    value.schema === "pointbreak.review-association-comparison" &&
+    value.version === 1 &&
     isOneOf(value.state, ASSOCIATION_STATE_VALUES) &&
     isOneOf(value.proofAvailability, ASSOCIATION_PROOF_VALUES) &&
     isRecord(value.comparison) &&
     isRevisionRef(value.comparison.revision) &&
-    nonEmptyString(value.comparison.commitOid)
+    nonEmptyString(value.comparison.associationId) &&
+    nonEmptyString(value.comparison.commitOid) &&
+    nonEmptyString(value.comparison.comparisonBase) &&
+    nonEmptyString(value.comparison.viewKind) &&
+    optionalString(value.comparison.proofRef) &&
+    isStringArray(value.diagnostics) &&
+    nonEmptyString(value.cacheKey)
+  );
+}
+
+function sameRevision(left: RevisionRef, right: RevisionRef): boolean {
+  return (
+    left.revisionId === right.revisionId &&
+    left.objectArtifactContentHash === right.objectArtifactContentHash
   );
 }
 
@@ -754,6 +1426,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function nonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
+}
+
+function optionalString(value: unknown): boolean {
+  return value === undefined || typeof value === "string";
 }
 
 function isStringArray(value: unknown): value is string[] {

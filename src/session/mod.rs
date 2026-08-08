@@ -106,8 +106,8 @@ pub use store::{
     store_dir_for_repo, store_paths_for_repo,
 };
 pub(crate) use store::{
-    EventStore, RepositoryPaths, RevisionFingerprint, SkippedEvent, sweep_stale_temp_files,
-    worktree_fingerprint_for_files,
+    EventStore, RepositoryPaths, RevisionFingerprint, SkippedEvent, build_object_artifact_v2,
+    sweep_stale_temp_files, worktree_fingerprint_for_files,
 };
 pub(in crate::session) use store::{body_artifact, fingerprint, object_artifact, store_init};
 pub use workflow::{

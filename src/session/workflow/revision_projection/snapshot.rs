@@ -7,9 +7,10 @@ use crate::model::{DiffSnapshot, ObjectId};
 #[cfg(test)]
 use crate::session::object_artifact::read_bound_object_artifact;
 use crate::session::object_artifact::{
+    ObjectArtifactReadFailureKind, classify_bound_object_artifact_read_failure_from_backend,
     object_artifact_path, object_artifact_path_for_hash, read_bound_object_artifact_from_backend,
 };
-use crate::session::projection::RemovalOperativeStatus;
+use crate::session::projection::{ContentAvailabilityV1, RemovalOperativeStatus};
 #[cfg(test)]
 use crate::session::store::resolution::resolve_read_store;
 
@@ -34,6 +35,7 @@ pub(crate) enum SnapshotContent {
     /// snapshot failure explicitly.
     Unavailable {
         content_hash: String,
+        availability: ContentAvailabilityV1,
         error: String,
     },
 }
@@ -183,6 +185,26 @@ pub(super) fn load_bound_object_artifact_from_backend(
         &revision.object_artifact_content_hash,
     )?;
     validate_loaded_artifact(artifact, revision)
+}
+
+/// Resolve the typed exact-resource state after the validated artifact loader
+/// fails. This is an error-path-only second lookup: normal reads still fetch and
+/// validate the artifact exactly once.
+pub(super) fn classify_unavailable_snapshot_from_backend(
+    backend: &crate::session::store::backend::StoreBackend,
+    revision: &RevisionProjectionIdentity,
+) -> Result<ContentAvailabilityV1> {
+    Ok(
+        match classify_bound_object_artifact_read_failure_from_backend(
+            backend,
+            &revision.object_id,
+            &revision.object_artifact_content_hash,
+        )? {
+            ObjectArtifactReadFailureKind::Missing => ContentAvailabilityV1::Missing,
+            ObjectArtifactReadFailureKind::NonTextual => ContentAvailabilityV1::NonTextual,
+            ObjectArtifactReadFailureKind::Mismatch => ContentAvailabilityV1::Mismatch,
+        },
+    )
 }
 
 fn validate_loaded_artifact(

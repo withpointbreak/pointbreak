@@ -132,6 +132,18 @@ capability set separately. The store has three states:
 Malformed, conflicting, partial, unknown, or non-monotonic capability state refuses before semantic output
 or mutation. A pre-Change derived generation is never a fallback after activation.
 
+The **reader capability profile** is durable architecture, not a one-off label for this bulk adoption.
+It names the minimum reader and the coherent document/capability registry that a root requires; a later
+breaking cohort must declare a successor profile and make its reader support explicit. The current
+`review_change_revision_v1` activation and its retained migration procedure are only the first use of that
+mechanism. The corresponding vocabulary is deliberately durable and relative to the required target cohort:
+`migration_required` means that target profile has not been admitted, `migration_in_progress` means it has
+been admitted but lacks verified completion, and `ready` means the declared target cohort has verified as
+complete. `reader_upgrade_required` is the complementary reader result: a
+root may be ready, while a particular client is still unable to consume its declared profile. These states
+describe observed authority rather than optimism; partial or ambiguous authority never manufactures
+readiness or a compatibility fallback.
+
 `pointbreak change migrate-dry-run` is read-only and freezes exact root identity, authority cursor, cohort
 manifest, allocations, overlap/anomaly decisions, and the owner-decision hash. `pointbreak change migrate`
 requires the exact dry-run, cohort and minimum-reader acknowledgements, explicit acknowledgement that v0.9
@@ -175,7 +187,9 @@ available for forward recovery.
 The run-once migrator stays isolated from normal product services. It may be removed only by a later,
 separately authorized cleanup after every known root has cut over or has a reconciled recovery decision. Git,
 the signed release artifact, and retained external plans/backups preserve the recovery implementation and
-evidence; this ADR does not claim that removal has occurred.
+evidence; this ADR does not claim that removal has occurred. Removing that procedure does not remove the
+reader-profile boundary or its truthful transition states: future capability-cohort migrations must use their
+own explicitly admitted procedure and may not infer a ready result from a partial predecessor.
 
 ## Consequences
 

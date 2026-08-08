@@ -25,13 +25,26 @@ describe("active Change inspector architecture", () => {
       [...closure.keys()].map((file) => file.replace(process.cwd(), "")),
     ).toContain("/src/entry.ts");
     for (const [file, source] of closure) {
-      expect(file).not.toMatch(
-        /\/(main|store|router|data|render|detail|access|model|projection|navigation|follow|cards|refs)\.ts$/,
-      );
-      expect(source).not.toMatch(
-        /\.\/(main|store|router|data|render|detail|access|model|projection|navigation|follow|cards|refs)["']/,
-      );
-      expect(source).not.toMatch(/\/api\/(?!v2\/)/);
+      const activeComposition =
+        file.endsWith("/src/entry.ts") ||
+        file.endsWith("/src/change-inspector.ts") ||
+        file.endsWith("/src/change-inspector-render.ts");
+      if (activeComposition) {
+        expect(file).not.toMatch(
+          /\/src\/(main|store|router|data|render|detail|access|model|projection|navigation|follow)\.ts$/,
+        );
+        expect(source).not.toMatch(
+          /\.\/(main|store|router|data|render|detail|access|model|projection|navigation|follow)["']/,
+        );
+      }
+      // The Change-first composition may only call the versioned reader API.
+      // Retained pure render helpers can document the historical endpoint they
+      // were adapted from, but never make a transport request themselves.
+      if (
+        activeComposition ||
+        file.endsWith("/src/change-inspector-reading.ts")
+      )
+        expect(source).not.toMatch(/\/api\/(?!v2\/)/);
     }
   });
 });

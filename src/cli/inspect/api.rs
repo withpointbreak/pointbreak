@@ -143,6 +143,16 @@ fn page_error_json(error: super::change_page::PageError) -> String {
     serde_json::json!({"schema":"pointbreak.inspect-change-page-error","version":1,"code":code,"message":message}).to_string()
 }
 
+pub(super) fn exact_selection_error_json(message: &str) -> String {
+    serde_json::json!({
+        "schema": "pointbreak.inspect-change-selection-error",
+        "version": 1,
+        "code": "invalid_exact_selection",
+        "message": message,
+    })
+    .to_string()
+}
+
 pub(super) fn change_detail_v2_json(
     repo: &Path,
     cache: &super::server::ChangeReaderCache,
@@ -164,19 +174,36 @@ pub(super) fn change_revision_v2_json(
     artifact_hash: &str,
     resource_only: bool,
 ) -> Result<ChangeV2Json, String> {
-    with_change_v2(repo, cache, |facade, ready| {
+    with_change_v2_outcome(repo, cache, |facade, ready| {
         let change_id = ChangeId::new(change_id);
-        let exact = crate::cli::change::exact_ref(
+        let exact = match crate::cli::change::exact_ref(
             ready,
             &change_id,
             &RevisionId::new(revision_id),
             artifact_hash,
-        )
+        ) {
+            Ok(exact) => exact,
+            Err(error) => {
+                return Ok(ChangeV2Json::Invalid(exact_selection_error_json(
+                    &error.to_string(),
+                )));
+            }
+        };
+        let mut exact_read = if resource_only {
+            crate::cli::change::build_exact_read(repo, ready, &exact, true)
+        } else {
+            crate::cli::change::build_contextual_exact_read(
+                repo, ready, facade, &change_id, &exact, true,
+            )
+        }
         .map_err(|error| error.to_string())?;
-        let exact_read = crate::cli::change::build_exact_read(repo, ready, &exact, true)
-            .map_err(|error| error.to_string())?;
+        exact_read.resource = exact_read
+            .resource
+            .with_projection_stamp(facade.projection_stamp().to_owned());
         if resource_only {
-            serde_json::to_string(&exact_read.resource).map_err(|error| error.to_string())
+            serde_json::to_string(&exact_read.resource)
+                .map(ChangeV2Json::Ok)
+                .map_err(|error| error.to_string())
         } else {
             let document = facade
                 .contextual_revision_document_with_fact_content(
@@ -188,7 +215,9 @@ pub(super) fn change_revision_v2_json(
                     exact_read.fact_content,
                 )
                 .map_err(|error| error.to_string())?;
-            serde_json::to_string(&document).map_err(|error| error.to_string())
+            serde_json::to_string(&document)
+                .map(ChangeV2Json::Ok)
+                .map_err(|error| error.to_string())
         }
     })
 }
@@ -202,8 +231,23 @@ pub(super) fn change_interdiff_v2_json(
     to_revision_id: &str,
     to_artifact_hash: &str,
 ) -> Result<ChangeV2Json, String> {
-    with_change_v2(repo, cache, |_facade, ready| {
+    with_change_v2_outcome(repo, cache, |facade, ready| {
         let change_id = ChangeId::new(change_id);
+        for (revision_id, artifact_hash) in [
+            (from_revision_id, from_artifact_hash),
+            (to_revision_id, to_artifact_hash),
+        ] {
+            if let Err(error) = crate::cli::change::exact_ref(
+                ready,
+                &change_id,
+                &RevisionId::new(revision_id),
+                artifact_hash,
+            ) {
+                return Ok(ChangeV2Json::Invalid(exact_selection_error_json(
+                    &error.to_string(),
+                )));
+            }
+        }
         let document = crate::cli::change::build_interdiff(
             ready,
             &change_id,
@@ -212,8 +256,11 @@ pub(super) fn change_interdiff_v2_json(
             &RevisionId::new(to_revision_id),
             to_artifact_hash,
         )
-        .map_err(|error| error.to_string())?;
-        serde_json::to_string(&document).map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?
+        .with_projection_stamp(facade.projection_stamp().to_owned());
+        serde_json::to_string(&document)
+            .map(ChangeV2Json::Ok)
+            .map_err(|error| error.to_string())
     })
 }
 

@@ -13,6 +13,17 @@ use crate::session::{RepositoryPaths, RevisionFingerprint};
 const OBJECT_ARTIFACT_SCHEMA: &str = "shore.object";
 const OBJECT_ARTIFACT_VERSION: u32 = 2;
 
+/// Read-side classification for bytes that failed the canonical bound-artifact
+/// loader. This is deliberately narrower than the loader's error: the exact
+/// resource surface needs to distinguish an absent blob from opaque bytes and
+/// from textual-but-invalid artifact material without exposing the failed body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ObjectArtifactReadFailureKind {
+    Missing,
+    NonTextual,
+    Mismatch,
+}
+
 /// The object-scoped v2 artifact body (#146). It carries only namespace-
 /// independent content, so two worktrees capturing the same `object_id`
 /// produce **byte-identical** artifacts that dedup. Revision identity and
@@ -143,6 +154,31 @@ pub(crate) fn read_bound_object_artifact_from_backend(
     let artifact = decode_and_validate_object_artifact(&bytes)?;
     validate_bound_object_artifact(&artifact, object_id, content_hash)?;
     Ok(artifact)
+}
+
+/// Classify a failed bound-artifact read from the same resolved backend and
+/// locator precedence as [`read_bound_object_artifact_from_backend`]. Callers
+/// invoke this only after the validated loader fails, so any present UTF-8 body
+/// is necessarily malformed, schema-invalid, hash-invalid, or bound to a
+/// different object and is therefore a mismatch. Raw bytes are never returned.
+pub(crate) fn classify_bound_object_artifact_read_failure_from_backend(
+    backend: &StoreBackend,
+    object_id: &ObjectId,
+    content_hash: &str,
+) -> Result<ObjectArtifactReadFailureKind> {
+    let content = ContentArtifacts::from_backend(backend);
+    let bytes =
+        match content.read_object_bytes_if_exists(&object_content_ref_for_hash(content_hash))? {
+            Some(bytes) => Some(bytes),
+            None => content.read_object_bytes_if_exists(&object_content_ref(object_id))?,
+        };
+    Ok(match bytes {
+        None => ObjectArtifactReadFailureKind::Missing,
+        Some(bytes) if std::str::from_utf8(&bytes).is_err() => {
+            ObjectArtifactReadFailureKind::NonTextual
+        }
+        Some(_) => ObjectArtifactReadFailureKind::Mismatch,
+    })
 }
 
 pub(crate) fn read_object_artifact_bytes(
@@ -425,6 +461,59 @@ mod tests {
         // these constants (see docs/adr/adr-0002-large-snapshot-artifact-policy.md).
         assert_eq!(super::OBJECT_ARTIFACT_SCHEMA, "shore.object");
         assert_eq!(super::OBJECT_ARTIFACT_VERSION, 2);
+    }
+
+    #[test]
+    fn failed_bound_reads_distinguish_missing_non_textual_and_mismatch() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = StoreBackend::Local(root.path().join("store"));
+        let object_id = ObjectId::new("obj:sha256:failure-classification");
+        let missing_hash = format!("sha256:{}", "1".repeat(64));
+        assert_eq!(
+            classify_bound_object_artifact_read_failure_from_backend(
+                &backend,
+                &object_id,
+                &missing_hash,
+            )
+            .unwrap(),
+            ObjectArtifactReadFailureKind::Missing
+        );
+
+        let non_textual_hash = format!("sha256:{}", "2".repeat(64));
+        backend
+            .content_store()
+            .put_once(
+                &object_content_ref_for_hash(&non_textual_hash),
+                &[0xff, 0xfe, 0xfd],
+            )
+            .unwrap();
+        assert_eq!(
+            classify_bound_object_artifact_read_failure_from_backend(
+                &backend,
+                &object_id,
+                &non_textual_hash,
+            )
+            .unwrap(),
+            ObjectArtifactReadFailureKind::NonTextual
+        );
+
+        let mismatch_hash = format!("sha256:{}", "3".repeat(64));
+        backend
+            .content_store()
+            .put_once(
+                &object_content_ref_for_hash(&mismatch_hash),
+                br#"{"schema":"wrong-but-textual"}"#,
+            )
+            .unwrap();
+        assert_eq!(
+            classify_bound_object_artifact_read_failure_from_backend(
+                &backend,
+                &object_id,
+                &mismatch_hash,
+            )
+            .unwrap(),
+            ObjectArtifactReadFailureKind::Mismatch
+        );
     }
 
     #[test]

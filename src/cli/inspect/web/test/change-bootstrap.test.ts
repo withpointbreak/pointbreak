@@ -136,6 +136,9 @@ describe("profile-first Change bootstrap", () => {
             changes: [
               {
                 changeId: "change:sha256:one",
+                declarationState: "authoritative",
+                titleAssertions: [],
+                memberCount: 0,
                 topology: "parallel_current",
                 lifecycle: "in_progress",
                 attentionSummary: "in_progress",
@@ -154,6 +157,9 @@ describe("profile-first Change bootstrap", () => {
               },
               {
                 changeId: "change:sha256:z-divergent",
+                declarationState: "authoritative",
+                titleAssertions: [],
+                memberCount: 0,
                 topology: "replacement_divergent",
                 lifecycle: "in_progress",
                 attentionSummary: "conflicted",
@@ -222,6 +228,9 @@ describe("profile-first Change bootstrap", () => {
             schema: "pointbreak.review-change-revision",
             version: 1,
             changeId: "change:sha256:one",
+            declarationState: "authoritative",
+            titleAssertions: [],
+            memberCount: 0,
             revision: {
               revisionId: "rev:sha256:b",
               objectArtifactContentHash: `sha256:${"b".repeat(64)}`,
@@ -368,6 +377,9 @@ describe("profile-first Change bootstrap", () => {
             changes: [
               {
                 changeId: "change:sha256:one",
+                declarationState: "authoritative",
+                titleAssertions: [],
+                memberCount: 0,
                 topology: "initial",
                 lifecycle: "in_progress",
                 attentionSummary: "in_progress",
@@ -401,6 +413,9 @@ describe("profile-first Change bootstrap", () => {
             schema: "pointbreak.review-change-revision",
             version: 1,
             changeId: "change:sha256:one",
+            declarationState: "authoritative",
+            titleAssertions: [],
+            memberCount: 0,
             revision: {
               revisionId: "rev:sha256:one",
               objectArtifactContentHash: `sha256:${"a".repeat(64)}`,
@@ -547,6 +562,9 @@ describe("profile-first Change bootstrap", () => {
         const id = String(page * 50 + index + 1).padStart(3, "0");
         return {
           changeId: `change:sha256:${id}`,
+          declarationState: "authoritative",
+          titleAssertions: [],
+          memberCount: 0,
           topology: "initial",
           lifecycle: "in_progress",
           attentionSummary: "in_progress",
@@ -662,6 +680,9 @@ describe("profile-first Change bootstrap", () => {
             changes: [
               {
                 changeId: "change:sha256:one",
+                declarationState: "authoritative",
+                titleAssertions: [],
+                memberCount: 0,
                 topology: "initial",
                 lifecycle: "in_progress",
                 attentionSummary: "in_progress",
@@ -735,6 +756,9 @@ describe("profile-first Change bootstrap", () => {
             changes: [
               {
                 changeId: `change:sha256:${id}`,
+                declarationState: "authoritative",
+                titleAssertions: [],
+                memberCount: 0,
                 topology: "initial",
                 lifecycle: "in_progress",
                 attentionSummary: "in_progress",
@@ -802,6 +826,9 @@ describe("profile-first Change bootstrap", () => {
             changes: [
               {
                 changeId: "change:sha256:001",
+                declarationState: "authoritative",
+                titleAssertions: [],
+                memberCount: 0,
                 topology: "initial",
                 lifecycle: "in_progress",
                 attentionSummary: "in_progress",
@@ -833,6 +860,9 @@ describe("profile-first Change bootstrap", () => {
           changes: [
             {
               changeId: "change:sha256:002",
+              declarationState: "authoritative",
+              titleAssertions: [],
+              memberCount: 0,
               topology: "initial",
               lifecycle: "in_progress",
               attentionSummary: "in_progress",
@@ -862,6 +892,9 @@ describe("profile-first Change bootstrap", () => {
     });
     const row = (id: string, stamp: string) => ({
       changeId: `change:sha256:${id}`,
+      declarationState: "authoritative",
+      titleAssertions: [],
+      memberCount: 0,
       topology: "initial",
       lifecycle: "in_progress",
       attentionSummary: "in_progress",
@@ -999,6 +1032,9 @@ describe("profile-first Change bootstrap", () => {
     });
     const row = (id: "a" | "b") => ({
       changeId: `change:sha256:${id}`,
+      declarationState: "authoritative",
+      titleAssertions: [],
+      memberCount: 0,
       topology: "initial",
       lifecycle: "in_progress",
       attentionSummary: "in_progress",
@@ -1090,6 +1126,9 @@ describe("profile-first Change bootstrap", () => {
     let profileReads = 0;
     const row = {
       changeId: "change:sha256:a",
+      declarationState: "authoritative",
+      titleAssertions: [],
+      memberCount: 0,
       topology: "initial",
       lifecycle: "in_progress",
       attentionSummary: "in_progress",

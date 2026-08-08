@@ -1672,7 +1672,7 @@ mod tests {
 
         let documents = project_change_documents(&events).unwrap();
         let facade = crate::documents::ChangeDocumentFacadeV1::new(projection, documents).unwrap();
-        let resource = crate::documents::RevisionResourceDocumentV1::available(
+        let resource = crate::documents::RevisionResourceDocumentV1::unavailable(
             crate::documents::RevisionResourceRefV1 {
                 revision: a_ref.clone(),
                 object_id: ObjectId::new("obj:sha256:a"),
@@ -1681,14 +1681,14 @@ mod tests {
                 track_id: None,
                 include_body: false,
             },
-            &a_ref.object_artifact_content_hash,
-            serde_json::json!({"revision": "a"}),
+            crate::session::ContentAvailabilityV1::Missing,
         )
         .unwrap();
         let fact = crate::documents::FactPresentationV1 {
             fact_id: "observation:sha256:shared".to_owned(),
             family: "observation".to_owned(),
             origin_revision: a_ref.clone(),
+            target: None,
             context_change_id: None,
             presented_in_revision: None,
             port_relation: None,

@@ -27,7 +27,8 @@ use crate::session::projection::cosignature::{
     CosignatureIndex, endorsement_readbacks, enrich_endorser_attributes,
 };
 use crate::session::projection::{
-    ArtifactRemovalProjection, RemovalOperativeStatus, skipped_to_diagnostics,
+    ArtifactRemovalProjection, ContentAvailabilityV1, RemovalOperativeStatus,
+    skipped_to_diagnostics,
 };
 use crate::session::state::{ProjectionDiagnostic, SessionState};
 use crate::session::store::backend::StoreBackend;
@@ -67,7 +68,8 @@ pub use self::search::{
     current_assessment_includes_follow_up, stale_review_fact_count,
 };
 use self::snapshot::{
-    SnapshotContent, load_bound_object_artifact_from_backend, resolve_snapshot_content_from_backend,
+    SnapshotContent, classify_unavailable_snapshot_from_backend,
+    load_bound_object_artifact_from_backend, resolve_snapshot_content_from_backend,
 };
 pub use self::summary_cache::{SnapshotSummaryCache, SnapshotSummaryCounts};
 pub use self::validation_continuity::{
@@ -383,10 +385,15 @@ fn show_revision_from_events(
     let snapshot_content =
         match resolve_snapshot_content_from_backend(backend, &revision, bound_status) {
             Ok(content) => content,
-            Err(error) if options.read_for_display => SnapshotContent::Unavailable {
-                content_hash: revision.object_artifact_content_hash.clone(),
-                error: error.to_string(),
-            },
+            Err(error) if options.read_for_display => {
+                let availability = classify_unavailable_snapshot_from_backend(backend, &revision)
+                    .unwrap_or(ContentAvailabilityV1::Mismatch);
+                SnapshotContent::Unavailable {
+                    content_hash: revision.object_artifact_content_hash.clone(),
+                    availability,
+                    error: error.to_string(),
+                }
+            }
             Err(error) => return Err(error),
         };
     let snapshot_content_state = SnapshotContentState::from(&snapshot_content);
@@ -404,6 +411,7 @@ fn show_revision_from_events(
         ),
         SnapshotContent::Unavailable {
             content_hash,
+            availability,
             error,
         } => (
             DiffSnapshot::new(
@@ -412,7 +420,7 @@ fn show_revision_from_events(
                 Vec::new(),
             ),
             None,
-            Some((content_hash, error)),
+            Some((content_hash, availability, error)),
         ),
     };
     let observations = project_observations(ObservationProjectionOptions {
@@ -515,10 +523,18 @@ fn show_revision_from_events(
             SnapshotContentState::Present | SnapshotContentState::Unavailable => {}
         }
     }
-    if let Some((content_hash, error)) = &unavailable_snapshot {
+    if let Some((content_hash, availability, error)) = &unavailable_snapshot {
+        let availability = match availability {
+            ContentAvailabilityV1::Missing => "missing",
+            ContentAvailabilityV1::Mismatch => "mismatch",
+            ContentAvailabilityV1::NonTextual => "non_textual",
+            ContentAvailabilityV1::Available | ContentAvailabilityV1::Removed => "mismatch",
+        };
         diagnostics.push(ProjectionDiagnostic {
             code: SNAPSHOT_CONTENT_UNAVAILABLE.to_owned(),
-            message: format!("snapshot content {content_hash} is unavailable: {error}"),
+            message: format!(
+                "snapshot content {content_hash} is unavailable ({availability}): {error}"
+            ),
         });
     }
     // The body twin of the snapshot block above: every body-bearing view's

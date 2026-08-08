@@ -6,16 +6,16 @@ use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use pointbreak::documents::{
     AssociationComparisonDocumentV1, AssociationComparisonRefV1, AssociationComparisonStateV1,
     AssociationProofAvailabilityV1, ChangeDocumentFacadeV1, ChangeQueryUnavailableDocumentV1,
-    ContentAvailabilityV1, FactPresentationV1, ReaderProfileDocumentV1,
-    RevisionInterdiffAvailabilityV1, RevisionInterdiffDocumentV1, RevisionInterdiffRefV1,
-    RevisionResourceDocumentV1, RevisionResourceProjectionV1, RevisionResourceRefV1,
-    revision_show_document_v3,
+    ContentAvailabilityV1, FactContentPresentationV1, FactPortApplicabilityV1, FactPresentationV1,
+    ReaderProfileDocumentV1, RevisionInterdiffAvailabilityV1, RevisionInterdiffDocumentV1,
+    RevisionInterdiffRefV1, RevisionResourceDocumentV1, RevisionResourceProjectionV1,
+    RevisionResourceRefV1,
 };
 use pointbreak::model::{
     ActorId, ChangeId, ChangeIdentityDescriptorV1, ChangeMembershipClaimId,
     ChangeRevisionRelationClaimId, RevisionId, RevisionRefV1,
 };
-use pointbreak::session::event::ChangeLinkRelationV1;
+use pointbreak::session::event::{ChangeLinkRelationV1, FactRefV1};
 use pointbreak::session::{
     BulkAdoptionDryRunDocumentV1, BulkAdoptionDryRunOptions, BulkAdoptionMigrationOptions,
     BulkAdoptionOwnerDecisionManifestV1, CaptureOptions, ChangeAdvanceV1, ChangeCaptureOptions,
@@ -835,8 +835,15 @@ fn run_exact(
             &RevisionId::new(args.revision),
             &args.artifact_hash,
         )?;
-        let exact_read = build_exact_read(&args.repo, ready, &exact, args.include_body)?;
         if contextual {
+            let exact_read = build_contextual_exact_read(
+                &args.repo,
+                ready,
+                facade,
+                &change_id,
+                &exact,
+                args.include_body,
+            )?;
             Ok(serde_json::to_value(
                 facade.contextual_revision_document_with_fact_content(
                     &change_id,
@@ -848,6 +855,7 @@ fn run_exact(
                 )?,
             )?)
         } else {
+            let exact_read = build_exact_read(&args.repo, ready, &exact, args.include_body)?;
             Ok(serde_json::to_value(exact_read.resource)?)
         }
     })
@@ -953,23 +961,12 @@ pub(crate) fn build_exact_read(
         track_id: result.filters.track_id.clone(),
         include_body,
     };
-    let memberships = ready
-        .document_projection
-        .membership_claims
-        .iter()
-        .filter(|claim| claim.active && claim.revision_id == exact.revision_id)
-        .cloned()
-        .collect();
     let state = result.snapshot_content_state;
     let unavailable = unavailable_content_availability(&result.diagnostics);
-    let exact_document = revision_show_document_v3(result, exact.clone(), memberships)?;
     let resource = match state {
-        SnapshotContentState::Present => RevisionResourceDocumentV1::available(
-            resource_ref,
-            projection,
-            &exact.object_artifact_content_hash,
-            serde_json::to_value(exact_document)?,
-        )?,
+        SnapshotContentState::Present => {
+            RevisionResourceDocumentV1::available(resource_ref, projection, &result.snapshot)?
+        }
         SnapshotContentState::SuppressedPresent | SnapshotContentState::PhysicallyRemoved => {
             RevisionResourceDocumentV1::unavailable(
                 resource_ref,
@@ -989,10 +986,138 @@ pub(crate) fn build_exact_read(
     })
 }
 
+/// Hydrate one contextual exact Revision from the same facade generation used
+/// by the cold CLI and Inspector. The base exact read stays Revision-local;
+/// explicit port authority determines which origin-owned facts may be added as
+/// context, and no port relation is collapsed into the fact row itself.
+pub(crate) fn build_contextual_exact_read(
+    repo: &std::path::Path,
+    ready: &ChangeReaderReadyV1,
+    facade: &ChangeDocumentFacadeV1,
+    change_id: &ChangeId,
+    exact: &RevisionRefV1,
+    include_body: bool,
+) -> Result<ExactRead, Box<dyn std::error::Error>> {
+    let mut exact_read = build_exact_read(repo, ready, exact, include_body)?;
+    let ports = facade.fact_port_presentations(change_id, exact)?;
+    let mut origin_cache = BTreeMap::<
+        String,
+        (
+            Vec<FactPresentationV1>,
+            BTreeMap<String, FactContentPresentationV1>,
+        ),
+    >::new();
+    let mut contextual_facts = BTreeMap::<String, FactPresentationV1>::new();
+    let mut contextual_content = BTreeMap::<String, FactContentPresentationV1>::new();
+
+    for port in &ports {
+        if port.applicability != FactPortApplicabilityV1::Applicable {
+            continue;
+        }
+        if let Some(target_fact) = &port.target_fact
+            && !exact_read.facts.iter().any(|fact| {
+                fact.origin_revision == *exact
+                    && fact.fact_id == fact_ref_id(target_fact)
+                    && fact.family == fact_ref_family(target_fact)
+            })
+        {
+            continue;
+        }
+
+        let cache_key = format!(
+            "{}@{}",
+            port.origin_revision.revision_id.as_str(),
+            port.origin_revision.object_artifact_content_hash
+        );
+        if !origin_cache.contains_key(&cache_key) {
+            let origin_result = show_revision_for_change_reader_ready(
+                RevisionShowOptions::new(repo)
+                    .with_revision_id(port.origin_revision.revision_id.clone())
+                    .with_exact(true)
+                    .with_include_body(include_body)
+                    .with_read_for_display(true),
+                ready,
+            );
+            let Ok(origin_result) = origin_result else {
+                continue;
+            };
+            if origin_result.revision.object_artifact_content_hash
+                != port.origin_revision.object_artifact_content_hash
+            {
+                continue;
+            }
+            origin_cache.insert(
+                cache_key.clone(),
+                pointbreak::documents::normalize_fact_presentations(
+                    &origin_result,
+                    &port.origin_revision,
+                ),
+            );
+        }
+        let Some((facts, content)) = origin_cache.get(&cache_key) else {
+            continue;
+        };
+        let origin_fact_id = fact_ref_id(&port.origin_fact);
+        let Some(origin_fact) = facts.iter().find(|fact| {
+            fact.fact_id == origin_fact_id && fact.family == fact_ref_family(&port.origin_fact)
+        }) else {
+            continue;
+        };
+        let Some(origin_content) = content.get(origin_fact_id) else {
+            continue;
+        };
+        let mut contextual = origin_fact.clone();
+        contextual.presented_in_revision = Some(exact.clone());
+        contextual.port_relation = None;
+        match contextual_facts.entry(origin_fact_id.to_owned()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(contextual);
+                contextual_content.insert(origin_fact_id.to_owned(), origin_content.clone());
+            }
+            std::collections::btree_map::Entry::Occupied(entry)
+                if entry.get() == &contextual
+                    && contextual_content.get(origin_fact_id) == Some(origin_content) => {}
+            std::collections::btree_map::Entry::Occupied(_) => {
+                contextual_facts.remove(origin_fact_id);
+                contextual_content.remove(origin_fact_id);
+            }
+        }
+    }
+
+    exact_read.facts.extend(contextual_facts.into_values());
+    exact_read
+        .facts
+        .sort_by(|left, right| left.fact_id.cmp(&right.fact_id));
+    exact_read.fact_content.extend(contextual_content);
+    Ok(exact_read)
+}
+
+fn fact_ref_id(fact: &FactRefV1) -> &str {
+    match fact {
+        FactRefV1::Observation { observation_id } => observation_id.as_str(),
+        FactRefV1::InputRequest { input_request_id } => input_request_id.as_str(),
+    }
+}
+
+fn fact_ref_family(fact: &FactRefV1) -> &'static str {
+    match fact {
+        FactRefV1::Observation { .. } => "observation",
+        FactRefV1::InputRequest { .. } => "input_request",
+    }
+}
+
 fn unavailable_content_availability(
     diagnostics: &[pointbreak::session::ProjectionDiagnostic],
 ) -> ContentAvailabilityV1 {
     if diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "snapshot_content_unavailable"
+            && diagnostic
+                .message
+                .to_ascii_lowercase()
+                .contains("non_textual")
+    }) {
+        ContentAvailabilityV1::NonTextual
+    } else if diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "snapshot_content_unavailable"
             && diagnostic.message.to_ascii_lowercase().contains("mismatch")
     }) {
@@ -1050,15 +1175,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unavailable_content_preserves_mismatch_as_a_distinct_typed_state() {
+    fn unavailable_content_preserves_distinct_typed_states() {
         let mismatch = pointbreak::session::ProjectionDiagnostic {
             code: "snapshot_content_unavailable".to_owned(),
             message: "snapshot content is unavailable: object artifact content hash mismatch"
                 .to_owned(),
         };
+        let non_textual = pointbreak::session::ProjectionDiagnostic {
+            code: "snapshot_content_unavailable".to_owned(),
+            message: "snapshot content is unavailable (non_textual): opaque bytes".to_owned(),
+        };
         assert_eq!(
             unavailable_content_availability(&[mismatch]),
             ContentAvailabilityV1::Mismatch
+        );
+        assert_eq!(
+            unavailable_content_availability(&[non_textual]),
+            ContentAvailabilityV1::NonTextual
         );
         assert_eq!(
             unavailable_content_availability(&[]),

@@ -22,6 +22,9 @@ const page = (lens: "changes" | "attention") => ({
   changes: [
     {
       changeId: "change:sha256:one",
+      declarationState: "authoritative",
+      titleAssertions: [],
+      memberCount: 1,
       topology: "initial",
       lifecycle: "in_progress",
       attentionSummary: "in_progress",
@@ -36,6 +39,62 @@ const page = (lens: "changes" | "attention") => ({
     },
   ],
 });
+
+const revision = {
+  revisionId: "revision:sha256:one",
+  objectArtifactContentHash: "sha256:artifact",
+};
+
+function revisionDetail() {
+  return {
+    schema: "pointbreak.review-change-revision",
+    version: 1,
+    changeId: "change:sha256:one",
+    revision,
+    membershipSupport: [],
+    revisionCurrency: "current",
+    relationClassification: "current",
+    availability: "available",
+    exactRevisionDocument: {
+      schema: "pointbreak.review-revision-resource",
+      version: 1,
+      projectionStamp: "sha256:generation",
+      resource: { revision, objectId: "obj:sha256:one" },
+      projection: { includeBody: true },
+      availability: "available",
+      capturedDocumentHash: "sha256:captured",
+      capturedDocument: {
+        schema: "pointbreak.review-snapshot",
+        version: 1,
+        contentHash: revision.objectArtifactContentHash,
+        snapshot: {
+          review_id: "review:sha256:one",
+          object_id: "obj:sha256:one",
+          files: [],
+        },
+      },
+      diagnostics: [],
+      cacheKey: "sha256:resource",
+    },
+    factPresentations: [],
+    factPorts: [],
+    associations: [],
+    diagnostics: [],
+    projectionStamp: "sha256:generation",
+  };
+}
+
+function isExactRevisionPath(path: string): boolean {
+  return path.startsWith(
+    "/api/v2/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?",
+  );
+}
+
+function isExactResourcePath(path: string): boolean {
+  return path.startsWith(
+    "/api/v2/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone/resource?",
+  );
+}
 
 beforeEach(() => {
   vi.resetModules();
@@ -61,6 +120,8 @@ describe("Change-first composition", () => {
         return new Response(JSON.stringify(page("changes")));
       if (path.startsWith("/api/v2/attention?"))
         return new Response(JSON.stringify(page("attention")));
+      if (isExactRevisionPath(path))
+        return new Response(JSON.stringify(revisionDetail()));
       throw new Error(`unexpected ${path}`);
     }) as typeof fetch;
     const { bootstrapChangeInspector } = await import(
@@ -78,8 +139,7 @@ describe("Change-first composition", () => {
         "[data-change-id] .change-card-peer-open",
       )
       ?.click();
-    await Promise.resolve();
-    expect(requests).toHaveLength(4);
+    await vi.waitFor(() => expect(requests).toHaveLength(6));
     expect(location.hash).toContain("artifactHash=sha256%3Aartifact");
   });
 
@@ -125,6 +185,8 @@ describe("Change-first composition", () => {
         return Promise.resolve(new Response(JSON.stringify(page("changes"))));
       if (path.startsWith("/api/v2/attention?"))
         return Promise.resolve(new Response(JSON.stringify(page("attention"))));
+      if (isExactRevisionPath(path))
+        return Promise.resolve(new Response(JSON.stringify(revisionDetail())));
       throw new Error(`unexpected ${path}`);
     }) as typeof fetch;
     const { bootstrapChangeInspector } = await import(
@@ -164,6 +226,8 @@ describe("Change-first composition", () => {
         return new Response(JSON.stringify(page("changes")));
       if (path.startsWith("/api/v2/attention?"))
         return new Response(JSON.stringify(page("attention")));
+      if (isExactRevisionPath(path))
+        return new Response(JSON.stringify(revisionDetail()));
       throw new Error(`unexpected ${path}`);
     }) as typeof fetch;
     const { bootstrapChangeInspector } = await import(
@@ -174,11 +238,64 @@ describe("Change-first composition", () => {
     location.hash =
       "#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact";
     window.dispatchEvent(new Event("hashchange"));
-    await Promise.resolve();
+    await vi.waitFor(() => expect(requests).toHaveLength(6));
 
-    expect(requests).toHaveLength(4);
+    expect(requests).toHaveLength(6);
     expect(document.querySelector("#detail-body")?.textContent).toContain(
       "Exact Revision",
+    );
+  });
+
+  it("does not let an older same-query detail failure restart a route the user left", async () => {
+    let rejectOldDetail!: (reason?: unknown) => void;
+    const requests: string[] = [];
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      requests.push(path);
+      if (path === "/api/v2/profile")
+        return Promise.resolve(new Response(JSON.stringify(profile)));
+      if (path.startsWith("/api/v2/changes?"))
+        return Promise.resolve(new Response(JSON.stringify(page("changes"))));
+      if (path.startsWith("/api/v2/attention?"))
+        return Promise.resolve(new Response(JSON.stringify(page("attention"))));
+      if (isExactRevisionPath(path)) {
+        return new Promise<Response>((_resolve, reject) => {
+          rejectOldDetail = reject;
+        });
+      }
+      if (isExactResourcePath(path))
+        return Promise.resolve(
+          new Response(JSON.stringify(revisionDetail().exactRevisionDocument)),
+        );
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+
+    location.hash =
+      "#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone?artifactHash=sha256%3Aartifact";
+    window.dispatchEvent(new Event("hashchange"));
+    await vi.waitFor(() => expect(requests).toHaveLength(5));
+
+    location.hash =
+      "#/changes/change%3Asha256%3Aone/revisions/revision%3Asha256%3Aone/resource?artifactHash=sha256%3Aartifact";
+    window.dispatchEvent(new Event("hashchange"));
+    await vi.waitFor(() => {
+      expect(document.querySelector("#detail-body")?.textContent).toContain(
+        "Authoritative captured diff",
+      );
+    });
+    rejectOldDetail(new Error("old detail request failed"));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(
+      requests.filter((path) => path.startsWith("/api/v2/changes?")).length,
+    ).toBe(1);
+    expect(document.querySelector("#detail-body")?.textContent).toContain(
+      "Authoritative captured diff",
     );
   });
 
@@ -193,6 +310,8 @@ describe("Change-first composition", () => {
         return new Response(JSON.stringify(page("changes")));
       if (path.startsWith("/api/v2/attention?"))
         return new Response(JSON.stringify(page("attention")));
+      if (isExactRevisionPath(path))
+        return new Response(JSON.stringify(revisionDetail()));
       throw new Error(`unexpected ${path}`);
     }) as typeof fetch;
     const reader = await import("../src/change-inspector");
@@ -233,7 +352,7 @@ describe("Change-first composition", () => {
     const requestCount = requests.length;
     reader.stopChangeInspector();
     await reader.bootstrapChangeInspector({ poll: false });
-    expect(requests).toHaveLength(requestCount + 4);
+    expect(requests).toHaveLength(requestCount + 6);
     expect(document.querySelector("#detail-body")?.textContent).toContain(
       "Exact Revision",
     );
@@ -259,6 +378,8 @@ describe("Change-first composition", () => {
         return new Response(JSON.stringify(page("changes")));
       if (path.startsWith("/api/v2/attention?"))
         return new Response(JSON.stringify(page("attention")));
+      if (isExactRevisionPath(path))
+        return new Response(JSON.stringify(revisionDetail()));
       throw new Error(`unexpected ${path}`);
     }) as typeof fetch;
     const { bootstrapChangeInspector } = await import(

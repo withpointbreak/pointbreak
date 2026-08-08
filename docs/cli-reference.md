@@ -254,6 +254,16 @@ In either state, semantic Change commands emit only the matching typed status do
 the durable minimum reader profile `review_change_revision_v1` and advertises the exact document registry
 that must be accepted as one cohort before any Change payload is decoded.
 
+The profile is a durable reader-capability contract, not a label unique to this migration. It records the
+minimum reader and coherent registry a root actually requires, so a later breaking cohort can require a
+successor profile without pretending an older client understands it. Relative to that required target cohort,
+`migration_required`, `migration_in_progress`, and `ready` describe root authority;
+`reader_upgrade_required` describes the separate case where a ready root requires a profile the requesting
+reader does not support. A partial,
+conflicting, or otherwise ambiguous authority record remains unavailable rather than being promoted to
+`ready`. The current bulk-adoption commands are one temporary procedure for the first cohort, not an
+implicit general-purpose migration path.
+
 `list`, `attention`, and `show` render the authoritative Change projection. A Change may have multiple
 legitimate current Revisions; `select` therefore requires `--revision` when there is no unique current
 candidate and returns a self-hashed cursor rather than writing state. Supplying a previous `--cursor`

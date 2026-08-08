@@ -34,6 +34,10 @@ pub enum RevisionInterdiffAvailabilityV1 {
 pub struct RevisionInterdiffDocumentV1 {
     pub schema: String,
     pub version: u32,
+    /// Inspector generation identity. It is additive transport coherence and
+    /// intentionally absent from cold CLI interdiff documents.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projection_stamp: Option<String>,
     pub interdiff: RevisionInterdiffRefV1,
     pub availability: RevisionInterdiffAvailabilityV1,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -68,12 +72,21 @@ impl RevisionInterdiffDocumentV1 {
         Ok(Self {
             schema: REVISION_INTERDIFF_SCHEMA.to_owned(),
             version: 1,
+            projection_stamp: None,
             interdiff,
             availability,
             comparison,
             diagnostics,
             cache_key,
         })
+    }
+
+    /// Bind the ordered comparison response to the Change-reader generation
+    /// that authorized both exact endpoints. This does not alter interdiff
+    /// identity or make unavailable comparison material authoritative.
+    pub fn with_projection_stamp(mut self, projection_stamp: String) -> Self {
+        self.projection_stamp = Some(projection_stamp);
+        self
     }
 }
 
@@ -169,5 +182,33 @@ mod tests {
             RevisionInterdiffAvailabilityV1::Unavailable
         );
         assert!(document.comparison.is_none());
+    }
+
+    #[test]
+    fn inspector_projection_stamp_is_additive_and_preserves_ordered_identity() {
+        let document = RevisionInterdiffDocumentV1::new(
+            RevisionInterdiffRefV1 {
+                from: reference("a", 'a'),
+                to: reference("b", 'b'),
+                algorithm_version: "unavailable-v1".to_owned(),
+                scope: Vec::new(),
+            },
+            RevisionInterdiffAvailabilityV1::Unavailable,
+            None,
+            vec!["revision_interdiff_not_available".to_owned()],
+        )
+        .unwrap();
+        let cache_key = document.cache_key.clone();
+        let stamped = document.with_projection_stamp("sha256:generation".to_owned());
+
+        assert_eq!(
+            stamped.projection_stamp.as_deref(),
+            Some("sha256:generation")
+        );
+        assert_eq!(stamped.cache_key, cache_key);
+        assert_eq!(
+            serde_json::to_value(stamped).unwrap()["projectionStamp"],
+            "sha256:generation"
+        );
     }
 }

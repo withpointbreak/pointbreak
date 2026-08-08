@@ -28,6 +28,43 @@ function profile(eventCount = 3) {
   };
 }
 
+function capturedSnapshot(
+  revision: { objectArtifactContentHash: string },
+  objectId: string,
+) {
+  return {
+    schema: "pointbreak.review-snapshot",
+    version: 1,
+    contentHash: revision.objectArtifactContentHash,
+    snapshot: {
+      review_id: "review:sha256:captured",
+      object_id: objectId,
+      files: [],
+    },
+  };
+}
+
+function availableResource(
+  revision: {
+    revisionId: string;
+    objectArtifactContentHash: string;
+  },
+  objectId = "obj:sha256:target",
+) {
+  return {
+    schema: "pointbreak.review-revision-resource",
+    version: 1,
+    projectionStamp: "sha256:generation",
+    resource: { revision, objectId },
+    projection: { includeBody: true },
+    availability: "available",
+    capturedDocumentHash: "sha256:captured",
+    capturedDocument: capturedSnapshot(revision, objectId),
+    diagnostics: [],
+    cacheKey: "sha256:resource",
+  };
+}
+
 function page(
   schema: "pointbreak.inspect-changes-page" | "pointbreak.inspect-attention",
   stamp = "sha256:generation",
@@ -46,6 +83,9 @@ function page(
     changes: [
       {
         changeId: "change:sha256:a",
+        declarationState: "authoritative",
+        titleAssertions: [],
+        memberCount: 0,
         topology: "initial",
         lifecycle: "in_progress",
         attentionSummary: "in_progress",
@@ -324,5 +364,230 @@ describe("bounded Change protocol", () => {
         diagnostics: [],
       }),
     ).toThrow("interdiff DTO");
+  });
+
+  it("rejects a captured snapshot that is not bound to its exact resource", () => {
+    const revision = {
+      revisionId: "rev:sha256:target",
+      objectArtifactContentHash: "sha256:target-artifact",
+    };
+    const resource = availableResource(revision);
+    expect(decodeRevisionResource(resource).capturedDocument?.contentHash).toBe(
+      revision.objectArtifactContentHash,
+    );
+
+    const wrongSchema = structuredClone(resource);
+    wrongSchema.capturedDocument.schema = "pointbreak.review-revision";
+    expect(() => decodeRevisionResource(wrongSchema)).toThrow("resource DTO");
+
+    const wrongHash = structuredClone(resource);
+    wrongHash.capturedDocument.contentHash = "sha256:other-artifact";
+    expect(() => decodeRevisionResource(wrongHash)).toThrow("resource DTO");
+
+    const wrongObject = structuredClone(resource);
+    wrongObject.capturedDocument.snapshot.object_id = "obj:sha256:other";
+    expect(() => decodeRevisionResource(wrongObject)).toThrow("resource DTO");
+  });
+
+  it("preserves every explicit fact-port carrier on contextual exact Revision detail", () => {
+    const revision = {
+      revisionId: "rev:sha256:target",
+      objectArtifactContentHash: "sha256:target-artifact",
+    };
+    const origin = {
+      revisionId: "rev:sha256:origin",
+      objectArtifactContentHash: "sha256:origin-artifact",
+    };
+    const detail = {
+      schema: "pointbreak.review-change-revision",
+      version: 1,
+      changeId: "change:sha256:one",
+      revision,
+      membershipSupport: [],
+      revisionCurrency: "current",
+      relationClassification: "current",
+      availability: "available",
+      exactRevisionDocument: availableResource(revision),
+      factPresentations: [
+        {
+          factId: "obs:sha256:origin",
+          family: "observation",
+          originRevision: origin,
+          contextChangeId: "change:sha256:one",
+          presentedInRevision: revision,
+          actorId: "actor:one",
+          revisionCurrency: "current",
+          familyState: "current",
+          availability: "available",
+        },
+      ],
+      factContentPresentations: {
+        "obs:sha256:origin": {
+          contentType: "text/markdown",
+          bodyContentState: "present",
+          content: {
+            kind: "observation",
+            title: "Ported observation",
+            body: "Exact contextual body",
+          },
+        },
+      },
+      factPorts: [
+        {
+          portId: "fact-port:sha256:one",
+          originRevision: origin,
+          originFact: {
+            kind: "observation",
+            observationId: "obs:sha256:origin",
+          },
+          targetRevision: revision,
+          relation: "carried_open_as",
+          rationaleContentHash: "sha256:rationale",
+          contextChangeId: "change:sha256:one",
+          actorId: "actor:one",
+          trackId: "track:review",
+          sourceEventIds: ["evt:sha256:one"],
+          applicability: "applicable",
+          diagnostics: [],
+        },
+      ],
+      associations: [],
+      diagnostics: [],
+      projectionStamp: "sha256:generation",
+    };
+    expect(decodeChangeRevisionDetail(detail).factPorts).toEqual(
+      detail.factPorts,
+    );
+    const missingPorts = { ...detail };
+    delete (missingPorts as { factPorts?: unknown }).factPorts;
+    expect(() => decodeChangeRevisionDetail(missingPorts)).toThrow(
+      "Revision detail DTO",
+    );
+  });
+
+  it("rejects duplicate contextual fact identifiers before content joins", () => {
+    const revision = {
+      revisionId: "rev:sha256:target",
+      objectArtifactContentHash: "sha256:target-artifact",
+    };
+    const fact = {
+      factId: "obs:sha256:one",
+      family: "observation",
+      originRevision: revision,
+      actorId: "actor:one",
+      revisionCurrency: "current",
+      familyState: "current",
+      availability: "available",
+    };
+    const detail = {
+      schema: "pointbreak.review-change-revision",
+      version: 1,
+      changeId: "change:sha256:one",
+      revision,
+      membershipSupport: [],
+      revisionCurrency: "current",
+      relationClassification: "current",
+      availability: "available",
+      exactRevisionDocument: availableResource(revision),
+      factPresentations: [fact, { ...fact }],
+      factContentPresentations: {
+        [fact.factId]: {
+          contentType: "text/plain",
+          bodyContentState: "present",
+          content: { kind: "observation", title: "One" },
+        },
+      },
+      factPorts: [],
+      associations: [],
+      diagnostics: [],
+      projectionStamp: "sha256:generation",
+    };
+    expect(() => decodeChangeRevisionDetail(detail)).toThrow(
+      "Revision detail DTO",
+    );
+  });
+
+  it("rejects fabricated or ambiguous applicable fact-port carriers", () => {
+    const revision = {
+      revisionId: "rev:sha256:target",
+      objectArtifactContentHash: "sha256:target-artifact",
+    };
+    const origin = {
+      revisionId: "rev:sha256:origin",
+      objectArtifactContentHash: "sha256:origin-artifact",
+    };
+    const port = {
+      portId: "fact-port:sha256:one",
+      originRevision: origin,
+      originFact: { kind: "observation", observationId: "obs:sha256:origin" },
+      targetRevision: revision,
+      relation: "carried_open_as",
+      actorId: "actor:one",
+      trackId: "track:review",
+      sourceEventIds: ["evt:sha256:one"],
+      applicability: "applicable",
+      diagnostics: [],
+    };
+    const originFact = {
+      factId: "obs:sha256:origin",
+      family: "observation",
+      originRevision: origin,
+      presentedInRevision: revision,
+      actorId: "actor:one",
+      revisionCurrency: "current",
+      familyState: "current",
+      availability: "available",
+    };
+    const detail = {
+      schema: "pointbreak.review-change-revision",
+      version: 1,
+      changeId: "change:sha256:one",
+      revision,
+      membershipSupport: [],
+      revisionCurrency: "current",
+      relationClassification: "current",
+      availability: "available",
+      exactRevisionDocument: availableResource(revision),
+      factPresentations: [originFact],
+      factContentPresentations: {
+        [originFact.factId]: {
+          contentType: "text/plain",
+          bodyContentState: "present",
+          content: { kind: "observation", title: "Ported" },
+        },
+      },
+      factPorts: [port],
+      associations: [],
+      diagnostics: [],
+      projectionStamp: "sha256:generation",
+    };
+    expect(decodeChangeRevisionDetail(detail).factPorts).toEqual([port]);
+
+    const duplicatePort = structuredClone(detail);
+    duplicatePort.factPorts.push({ ...port });
+    expect(() => decodeChangeRevisionDetail(duplicatePort)).toThrow(
+      "Revision detail DTO",
+    );
+
+    const emptyCarrier = structuredClone(detail);
+    emptyCarrier.factPorts[0].sourceEventIds = [];
+    expect(() => decodeChangeRevisionDetail(emptyCarrier)).toThrow(
+      "Revision detail DTO",
+    );
+
+    const missingTrack = structuredClone(detail);
+    const carrier = missingTrack.factPorts[0];
+    if (!carrier) throw new Error("fixture needs a fact-port carrier");
+    delete (carrier as { trackId?: string }).trackId;
+    expect(() => decodeChangeRevisionDetail(missingTrack)).toThrow(
+      "Revision detail DTO",
+    );
+
+    const missingOrigin = structuredClone(detail);
+    missingOrigin.factPresentations = [];
+    missingOrigin.factContentPresentations = {};
+    expect(() => decodeChangeRevisionDetail(missingOrigin)).toThrow(
+      "Revision detail DTO",
+    );
   });
 });

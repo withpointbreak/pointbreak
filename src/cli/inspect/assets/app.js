@@ -423,6 +423,788 @@
   }
   __name(fetchChangeInspectorJSON, "fetchChangeInspectorJSON");
 
+  // ../../../documents/change_reader_profile_v1.json
+  var change_reader_profile_v1_default = {
+    minimumReaderProfile: "review_change_revision_v1",
+    documents: {
+      "pointbreak.attention-list": 2,
+      "pointbreak.inspect-attention": 2,
+      "pointbreak.inspect-changes-page": 1,
+      "pointbreak.inspect-reader-profile": 1,
+      "pointbreak.reader-upgrade-required": 1,
+      "pointbreak.review-association-comparison": 1,
+      "pointbreak.review-change": 1,
+      "pointbreak.review-change-list": 1,
+      "pointbreak.review-change-revision": 1,
+      "pointbreak.review-revision": 3,
+      "pointbreak.review-revision-interdiff": 1,
+      "pointbreak.review-revision-resource": 1,
+      "pointbreak.store-migration-in-progress": 1,
+      "pointbreak.store-migration-required": 1
+    }
+  };
+
+  // src/change-protocol.ts
+  var CHANGE_PAGE_LIMIT = 50;
+  var CHANGE_READER_PROFILE = change_reader_profile_v1_default.minimumReaderProfile;
+  var CHANGE_READER_DOCUMENTS = change_reader_profile_v1_default.documents;
+  var TOPOLOGY_VALUES = /* @__PURE__ */ new Set([
+    "initial",
+    "replacement",
+    "replacement_divergent",
+    "consolidation",
+    "parallel_current",
+    "mixed",
+    "incomplete",
+    "cycle_conflicted"
+  ]);
+  var LIFECYCLE_VALUES = /* @__PURE__ */ new Set([
+    "incomplete",
+    "conflicted",
+    "in_progress",
+    "accepted"
+  ]);
+  var ATTENTION_VALUES = /* @__PURE__ */ new Set([
+    "clear",
+    "in_progress",
+    "incomplete",
+    "conflicted"
+  ]);
+  var AVAILABILITY_VALUES = /* @__PURE__ */ new Set(["available", "incomplete"]);
+  var CONTENT_AVAILABILITY_VALUES = /* @__PURE__ */ new Set([
+    "available",
+    "removed",
+    "missing",
+    "mismatch",
+    "non_textual"
+  ]);
+  var REVISION_CURRENCY_VALUES = /* @__PURE__ */ new Set([
+    "current",
+    "stale_by_supersession",
+    "membership_incomplete",
+    "membership_conflicted"
+  ]);
+  var FACT_FAMILY_STATE_VALUES = /* @__PURE__ */ new Set([
+    "current",
+    "stale",
+    "withdrawn",
+    "conflicted",
+    "unavailable"
+  ]);
+  var ASSOCIATION_STATE_VALUES = /* @__PURE__ */ new Set([
+    "unknown",
+    "exact",
+    "equivalent",
+    "extension",
+    "unavailable"
+  ]);
+  var ASSOCIATION_PROOF_VALUES = /* @__PURE__ */ new Set([
+    "available",
+    "missing",
+    "mismatch",
+    "not_requested"
+  ]);
+  var INTERDIFF_AVAILABILITY_VALUES = /* @__PURE__ */ new Set([
+    "available",
+    "unavailable",
+    "endpoint_missing",
+    "endpoint_mismatch",
+    "non_textual"
+  ]);
+  function decodeChangeDetail(value) {
+    const detail = object(value, "Change detail");
+    const summary = detail.summary;
+    const stamp = detail.projectionStamp;
+    const memberRevisions = detail.memberRevisions;
+    const unavailableMemberRevisions = detail.unavailableMemberRevisions;
+    const membershipClaims = detail.membershipClaims;
+    const membershipWithdrawals = detail.membershipWithdrawals;
+    const relationClaims = detail.relationClaims;
+    const relationWithdrawals = detail.relationWithdrawals;
+    const links = detail.links;
+    const effectiveSupersedes = detail.effectiveSupersedes;
+    const pendingOrConflictingEdges = detail.pendingOrConflictingEdges;
+    const currentRevisionRefs = detail.currentRevisionRefs;
+    const perCurrentRevisionQualification = detail.perCurrentRevisionQualification;
+    const operativeObligations = detail.operativeObligations;
+    const diagnostics = detail.diagnostics;
+    if (detail.schema !== "pointbreak.review-change" || detail.version !== 1 || !nonEmptyString(stamp) || !isChangeSummary(summary, stamp) || !isChangeMemberRevisions(memberRevisions) || !isUnavailableChangeMemberRevisions(unavailableMemberRevisions) || !isMembershipClaims(membershipClaims, summary.changeId) || !isClaimWithdrawals(membershipWithdrawals) || !Array.isArray(relationClaims) || !relationClaims.every(
+      (claim) => isRelationClaim(claim, summary.changeId)
+    ) || !isClaimWithdrawals(relationWithdrawals) || !isChangeLinks(links) || !isEffectiveSupersedes(effectiveSupersedes) || !Array.isArray(pendingOrConflictingEdges) || !pendingOrConflictingEdges.every(
+      (claim) => isRelationClaim(claim, summary.changeId)
+    ) || !Array.isArray(currentRevisionRefs) || !currentRevisionRefs.every(isRevisionRef) || !sameRevisionSet(currentRevisionRefs, summary.currentRevisionRefs) || !isRevisionQualifications(
+      perCurrentRevisionQualification,
+      currentRevisionRefs
+    ) || !isStringArray(operativeObligations) || !isStringArray(diagnostics)) {
+      throw new Error("invalid Change detail DTO");
+    }
+    return {
+      schema: "pointbreak.review-change",
+      version: 1,
+      summary,
+      memberRevisions,
+      unavailableMemberRevisions,
+      membershipClaims,
+      membershipWithdrawals,
+      relationClaims,
+      relationWithdrawals,
+      links,
+      effectiveSupersedes,
+      pendingOrConflictingEdges,
+      currentRevisionRefs,
+      perCurrentRevisionQualification,
+      operativeObligations,
+      diagnostics,
+      projectionStamp: stamp
+    };
+  }
+  __name(decodeChangeDetail, "decodeChangeDetail");
+  function decodeChangeRevisionDetail(value) {
+    const detail = object(value, "Change Revision detail");
+    const revision = detail.revision;
+    const factPresentations = detail.factPresentations;
+    const factContentPresentations = detail.factContentPresentations;
+    const exactRevisionDocument = detail.exactRevisionDocument;
+    const membershipSupport = detail.membershipSupport;
+    const factPorts = detail.factPorts;
+    const associations = detail.associations;
+    const diagnostics = detail.diagnostics;
+    const revisionCurrency = detail.revisionCurrency;
+    const relationClassification = detail.relationClassification;
+    const availability = detail.availability;
+    if (detail.schema !== "pointbreak.review-change-revision" || detail.version !== 1 || !nonEmptyString(detail.changeId) || !isRevisionRef(revision) || typeof revisionCurrency !== "string" || !REVISION_CURRENCY_VALUES.has(revisionCurrency) || relationClassification !== "current" && relationClassification !== "superseded" || typeof availability !== "string" || !CONTENT_AVAILABILITY_VALUES.has(availability) || !isRevisionResource(exactRevisionDocument) || !sameRevision(exactRevisionDocument.resource.revision, revision) || availability !== exactRevisionDocument.availability || !isMembershipClaims(membershipSupport, detail.changeId) || !Array.isArray(factPresentations) || !factPresentations.every(isFactPresentation) || !uniqueFactPresentationIds(factPresentations) || factContentPresentations !== void 0 && !isFactContentPresentations(factContentPresentations) || factContentPresentations !== void 0 && !sameFactIds(factPresentations, factContentPresentations) || !isFactPortPresentations(
+      factPorts,
+      detail.changeId,
+      factPresentations,
+      revision
+    ) || !Array.isArray(associations) || !associations.every(isAssociation) || !isStringArray(diagnostics) || !nonEmptyString(detail.projectionStamp)) {
+      throw new Error("invalid Change Revision detail DTO");
+    }
+    return {
+      schema: "pointbreak.review-change-revision",
+      version: 1,
+      changeId: detail.changeId,
+      revision,
+      membershipSupport,
+      revisionCurrency,
+      relationClassification,
+      availability,
+      exactRevisionDocument,
+      factPresentations,
+      factContentPresentations,
+      factPorts,
+      associations,
+      diagnostics,
+      projectionStamp: detail.projectionStamp
+    };
+  }
+  __name(decodeChangeRevisionDetail, "decodeChangeRevisionDetail");
+  function decodeRevisionResource(value) {
+    const document2 = object(value, "Revision resource");
+    const resource = document2.resource;
+    const projection = document2.projection;
+    const diagnostics = document2.diagnostics;
+    const availability = document2.availability;
+    const capturedDocumentHash = document2.capturedDocumentHash;
+    const projectionStamp = document2.projectionStamp;
+    const cacheKey = document2.cacheKey;
+    if (document2.schema !== "pointbreak.review-revision-resource" || document2.version !== 1 || !isRecord(resource) || !isRevisionRef(resource.revision) || !nonEmptyString(resource.objectId) || !isResourceProjection(projection) || !isOneOf(availability, CONTENT_AVAILABILITY_VALUES) || capturedDocumentHash !== void 0 && !nonEmptyString(capturedDocumentHash) || availability === "available" && (capturedDocumentHash === void 0 || !isCapturedReviewSnapshot(
+      document2.capturedDocument,
+      resource.revision.objectArtifactContentHash,
+      resource.objectId
+    )) || availability !== "available" && (capturedDocumentHash !== void 0 || document2.capturedDocument !== void 0) || !nonEmptyString(projectionStamp) || !nonEmptyString(cacheKey) || !isStringArray(diagnostics)) {
+      throw new Error("invalid Revision resource DTO");
+    }
+    return {
+      schema: "pointbreak.review-revision-resource",
+      version: 1,
+      resource: { revision: resource.revision, objectId: resource.objectId },
+      projection,
+      availability,
+      capturedDocumentHash,
+      capturedDocument: document2.capturedDocument,
+      diagnostics,
+      projectionStamp,
+      cacheKey
+    };
+  }
+  __name(decodeRevisionResource, "decodeRevisionResource");
+  function decodeRevisionInterdiff(value) {
+    const document2 = object(value, "Revision interdiff");
+    const interdiff = document2.interdiff;
+    const diagnostics = document2.diagnostics;
+    const availability = document2.availability;
+    const projectionStamp = document2.projectionStamp;
+    const cacheKey = document2.cacheKey;
+    if (document2.schema !== "pointbreak.review-revision-interdiff" || document2.version !== 1 || !isRecord(interdiff) || !isRevisionRef(interdiff.from) || !isRevisionRef(interdiff.to) || !nonEmptyString(interdiff.algorithmVersion) || !isStringArray(interdiff.scope) || !isOneOf(availability, INTERDIFF_AVAILABILITY_VALUES) || !isStringArray(diagnostics) || !nonEmptyString(projectionStamp) || !nonEmptyString(cacheKey) || availability === "available" !== (document2.comparison !== void 0)) {
+      throw new Error("invalid Revision interdiff DTO");
+    }
+    return {
+      schema: "pointbreak.review-revision-interdiff",
+      version: 1,
+      interdiff: {
+        from: interdiff.from,
+        to: interdiff.to,
+        algorithmVersion: interdiff.algorithmVersion,
+        scope: interdiff.scope
+      },
+      availability,
+      comparison: document2.comparison,
+      diagnostics,
+      projectionStamp,
+      cacheKey
+    };
+  }
+  __name(decodeRevisionInterdiff, "decodeRevisionInterdiff");
+  function buildChangePageUrl(lens, query = {}) {
+    const limit = query.limit ?? CHANGE_PAGE_LIMIT;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      throw new Error("Change page limit must be an integer from 1 through 100");
+    }
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (query.after !== void 0) {
+      if (!query.after || new TextEncoder().encode(query.after).length > 4096) {
+        throw new Error(
+          "Change page continuation must be a non-empty opaque token"
+        );
+      }
+      params.set("after", query.after);
+    }
+    if (query.q !== void 0) {
+      const normalized = trimUnicodeWhitespace(query.q).toLowerCase();
+      if (!normalized || new TextEncoder().encode(normalized).length > 256) {
+        throw new Error(
+          "Change page query must be non-empty and at most 256 bytes"
+        );
+      }
+      params.set("q", normalized);
+    }
+    appendEnum(params, "topology", query.topology, TOPOLOGY_VALUES);
+    appendEnum(params, "lifecycle", query.lifecycle, LIFECYCLE_VALUES);
+    appendEnum(params, "attention", query.attention, ATTENTION_VALUES);
+    appendEnum(params, "availability", query.availability, AVAILABILITY_VALUES);
+    if (query.order !== void 0 && query.order !== "change_id_asc") {
+      throw new Error("Change page order must be change_id_asc");
+    }
+    params.set("order", "change_id_asc");
+    return `/api/v2/${lens}?${params}`;
+  }
+  __name(buildChangePageUrl, "buildChangePageUrl");
+  function decodeReaderProfile(value) {
+    const profile = object(value, "Inspector reader profile");
+    const availability = profile.availability;
+    const authorityCursor = profile.authorityCursor;
+    const documents = profile.documents;
+    const minimumReaderProfile = profile.minimumReaderProfile;
+    const commitGraphStamp = profile.commitGraphStamp;
+    if (profile.schema !== "pointbreak.inspect-reader-profile" || profile.version !== 1 || !isAvailability(availability) || !isRecord(authorityCursor) || !isDocumentMap(documents) || !sameDocumentMap(documents, CHANGE_READER_DOCUMENTS)) {
+      throw new Error("incompatible Inspector reader profile");
+    }
+    if (availability === "ready" && (minimumReaderProfile !== CHANGE_READER_PROFILE || typeof commitGraphStamp !== "string" || commitGraphStamp.length === 0)) {
+      throw new Error(
+        "ready Inspector reader profile is missing capability or commit graph stamp"
+      );
+    }
+    return {
+      schema: "pointbreak.inspect-reader-profile",
+      version: 1,
+      availability,
+      minimumReaderProfile: typeof minimumReaderProfile === "string" ? minimumReaderProfile : void 0,
+      authorityCursor,
+      commitGraphStamp: typeof commitGraphStamp === "string" ? commitGraphStamp : void 0,
+      documents
+    };
+  }
+  __name(decodeReaderProfile, "decodeReaderProfile");
+  function decodeChangePage(value, expected) {
+    const page = object(value, `${expected.lens} Change page`);
+    const expectedSchema = expected.lens === "changes" ? "pointbreak.inspect-changes-page" : "pointbreak.inspect-attention";
+    const expectedVersion = expected.lens === "changes" ? 1 : 2;
+    const stamp = page.projectionStamp;
+    const changes = page.changes;
+    const diagnostics = page.diagnostics;
+    const presentations = page.presentations;
+    if (page.schema !== expectedSchema || page.version !== expectedVersion || !nonEmptyString(stamp) || !Array.isArray(changes) || expected.bounded && changes.length > 100 || !changes.every((change) => isChangeSummary(change, stamp)) || !isStrictlyAscending(changes.map((change) => change.changeId)) || new Set(changes.map((change) => change.changeId)).size !== changes.length || diagnostics !== void 0 && !isStringArray(diagnostics) || presentations !== void 0 && !isPresentations(presentations, changes)) {
+      throw new Error(`invalid ${expected.lens} Change page DTO`);
+    }
+    const next = page.next;
+    if (next !== void 0 && next !== null && !nonEmptyString(next)) {
+      throw new Error("invalid Change page next continuation");
+    }
+    if (expected.bounded && next === void 0)
+      throw new Error("bounded Change page is missing next continuation");
+    const common = {
+      changes,
+      diagnostics,
+      presentations,
+      projectionStamp: stamp,
+      next: next ?? null
+    };
+    return expected.lens === "changes" ? {
+      schema: "pointbreak.inspect-changes-page",
+      version: 1,
+      ...common
+    } : {
+      schema: "pointbreak.inspect-attention",
+      version: 2,
+      ...common
+    };
+  }
+  __name(decodeChangePage, "decodeChangePage");
+  function requireCoherentGeneration(changes, attention) {
+    if (changes.projectionStamp !== attention.projectionStamp) {
+      throw new Error("Change documents do not form one coherent generation");
+    }
+  }
+  __name(requireCoherentGeneration, "requireCoherentGeneration");
+  function sameProfileGeneration(initial, postflight) {
+    return initial.availability === postflight.availability && initial.minimumReaderProfile === postflight.minimumReaderProfile && initial.commitGraphStamp === postflight.commitGraphStamp && sameDocumentMap(initial.documents, postflight.documents) && canonicalJson(initial.authorityCursor) === canonicalJson(postflight.authorityCursor);
+  }
+  __name(sameProfileGeneration, "sameProfileGeneration");
+  function trimUnicodeWhitespace(value) {
+    return value.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
+  }
+  __name(trimUnicodeWhitespace, "trimUnicodeWhitespace");
+  function appendEnum(params, name, value, values) {
+    if (value === void 0) return;
+    if (!values.has(value)) throw new Error(`invalid Change page ${name}`);
+    params.set(name, value);
+  }
+  __name(appendEnum, "appendEnum");
+  function isAvailability(value) {
+    return value === "migration_required" || value === "migration_in_progress" || value === "ready";
+  }
+  __name(isAvailability, "isAvailability");
+  function isChangeSummary(value, stamp) {
+    if (!isRecord(value)) return false;
+    return nonEmptyString(value.changeId) && (value.declarationState === "authoritative" || value.declarationState === "incomplete" || value.declarationState === "conflicted") && isStringArray(value.titleAssertions) && typeof value.memberCount === "number" && Number.isSafeInteger(value.memberCount) && value.memberCount >= 0 && isOneOf(value.topology, TOPOLOGY_VALUES) && isOneOf(value.lifecycle, LIFECYCLE_VALUES) && isOneOf(value.attentionSummary, ATTENTION_VALUES) && isOneOf(value.availabilitySummary, AVAILABILITY_VALUES) && value.projectionStamp === stamp && Array.isArray(value.currentRevisionRefs) && value.currentRevisionRefs.every(isRevisionRef) && uniqueRevisionKeys(value.currentRevisionRefs).size === value.currentRevisionRefs.length && (value.diagnostics === void 0 || isStringArray(value.diagnostics));
+  }
+  __name(isChangeSummary, "isChangeSummary");
+  function isClaimSupport(value) {
+    return isRecord(value) && nonEmptyString(value.eventId) && nonEmptyString(value.actorId) && optionalString(value.trackId);
+  }
+  __name(isClaimSupport, "isClaimSupport");
+  function isChangeMemberRevisions(value) {
+    return Array.isArray(value) && value.every(
+      (member) => isRecord(member) && isRevisionRef(member.revision) && isStringArray(member.supportingClaimIds)
+    );
+  }
+  __name(isChangeMemberRevisions, "isChangeMemberRevisions");
+  function isUnavailableChangeMemberRevisions(value) {
+    return Array.isArray(value) && value.every(
+      (member) => isRecord(member) && nonEmptyString(member.revisionId) && (member.reason === "invalid_revision_id" || member.reason === "invalid_object_artifact_content_hash") && isStringArray(member.supportingClaimIds)
+    );
+  }
+  __name(isUnavailableChangeMemberRevisions, "isUnavailableChangeMemberRevisions");
+  function isMembershipClaims(value, changeId) {
+    return Array.isArray(value) && value.every(
+      (claim) => isRecord(claim) && nonEmptyString(claim.claimId) && claim.changeId === changeId && nonEmptyString(claim.revisionId) && Array.isArray(claim.supports) && claim.supports.every(isClaimSupport) && Array.isArray(claim.withdrawals) && claim.withdrawals.every(isClaimSupport) && typeof claim.active === "boolean" && isStringArray(claim.diagnostics)
+    );
+  }
+  __name(isMembershipClaims, "isMembershipClaims");
+  function isClaimWithdrawals(value) {
+    return Array.isArray(value) && value.every(
+      (withdrawal) => isRecord(withdrawal) && nonEmptyString(withdrawal.claimId) && Array.isArray(withdrawal.supports) && withdrawal.supports.every(isClaimSupport) && isStringArray(withdrawal.diagnostics)
+    );
+  }
+  __name(isClaimWithdrawals, "isClaimWithdrawals");
+  function isChangeLinks(value) {
+    return Array.isArray(value) && value.every(
+      (link) => isRecord(link) && nonEmptyString(link.leftChangeId) && nonEmptyString(link.rightChangeId) && nonEmptyString(link.relation)
+    );
+  }
+  __name(isChangeLinks, "isChangeLinks");
+  function isEffectiveSupersedes(value) {
+    return Array.isArray(value) && value.every(
+      (edge) => Array.isArray(edge) && edge.length === 2 && isRevisionRef(edge[0]) && isRevisionRef(edge[1])
+    );
+  }
+  __name(isEffectiveSupersedes, "isEffectiveSupersedes");
+  function isRevisionQualifications(value, currentRevisionRefs) {
+    if (!Array.isArray(value)) return false;
+    const qualifications = [];
+    for (const candidate of value) {
+      if (!isRecord(candidate) || !isRevisionRef(candidate.revision)) {
+        return false;
+      }
+      const revision = candidate.revision;
+      if (typeof candidate.qualified !== "boolean" || !currentRevisionRefs.some((current) => sameRevision(current, revision)))
+        return false;
+      qualifications.push({
+        revision,
+        qualified: candidate.qualified
+      });
+    }
+    return sameRevisionSet(
+      qualifications.map((qualification) => qualification.revision),
+      currentRevisionRefs
+    );
+  }
+  __name(isRevisionQualifications, "isRevisionQualifications");
+  function sameRevisionSet(left, right) {
+    const leftKeys = uniqueRevisionKeys(left);
+    const rightKeys = uniqueRevisionKeys(right);
+    return leftKeys.size === left.length && rightKeys.size === right.length && leftKeys.size === rightKeys.size && [...leftKeys].every((key) => rightKeys.has(key));
+  }
+  __name(sameRevisionSet, "sameRevisionSet");
+  function isPresentations(value, changes) {
+    if (!isRecord(value)) return false;
+    const summaries = new Map(
+      changes.map((change) => [change.changeId, change])
+    );
+    if (Object.keys(value).length !== summaries.size) return false;
+    return Object.entries(value).every(([changeId, presentation]) => {
+      const change = summaries.get(changeId);
+      if (change === void 0 || !isRecord(presentation) || !Array.isArray(presentation.currentRevisions) || !presentation.currentRevisions.every(isPresentationRevision)) {
+        return false;
+      }
+      const expected = uniqueRevisionKeys(change.currentRevisionRefs);
+      const actual = uniqueRevisionKeys(
+        presentation.currentRevisions.map((candidate) => candidate.revision)
+      );
+      return expected.size === change.currentRevisionRefs.length && actual.size === presentation.currentRevisions.length && expected.size === actual.size && [...expected].every((key) => actual.has(key));
+    });
+  }
+  __name(isPresentations, "isPresentations");
+  function isPresentationRevision(value) {
+    return isRecord(value) && isRevisionRef(value.revision) && (value.summarySource === "revision_proposal_summary" && nonEmptyString(value.revisionProposalSummary) || value.summarySource === "absent" && value.revisionProposalSummary === void 0);
+  }
+  __name(isPresentationRevision, "isPresentationRevision");
+  function isRevisionRef(value) {
+    return isRecord(value) && nonEmptyString(value.revisionId) && nonEmptyString(value.objectArtifactContentHash);
+  }
+  __name(isRevisionRef, "isRevisionRef");
+  function uniqueRevisionKeys(revisions) {
+    return new Set(
+      revisions.map(
+        (revision) => `${revision.revisionId}\0${revision.objectArtifactContentHash}`
+      )
+    );
+  }
+  __name(uniqueRevisionKeys, "uniqueRevisionKeys");
+  function isRelationClaim(value, changeId) {
+    return isRecord(value) && nonEmptyString(value.claimId) && value.changeId === changeId && typeof value.active === "boolean" && isRevisionRef(value.successor) && isRevisionRef(value.predecessor) && Array.isArray(value.supports) && value.supports.every(isClaimSupport) && Array.isArray(value.withdrawals) && value.withdrawals.every(isClaimSupport) && isStringArray(value.diagnostics);
+  }
+  __name(isRelationClaim, "isRelationClaim");
+  function isFactPresentation(value) {
+    return isRecord(value) && nonEmptyString(value.factId) && nonEmptyString(value.family) && isRevisionRef(value.originRevision) && (value.target === void 0 || isFactTarget(value.target)) && (value.contextChangeId === void 0 || nonEmptyString(value.contextChangeId)) && (value.presentedInRevision === void 0 || isRevisionRef(value.presentedInRevision)) && (value.portRelation === void 0 || value.portRelation === "context_only" || value.portRelation === "reanchored_as" || value.portRelation === "carried_open_as" || value.portRelation === "resolved_by") && nonEmptyString(value.actorId) && (value.trackId === void 0 || nonEmptyString(value.trackId)) && isOneOf(value.revisionCurrency, REVISION_CURRENCY_VALUES) && isOneOf(value.familyState, FACT_FAMILY_STATE_VALUES) && isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES);
+  }
+  __name(isFactPresentation, "isFactPresentation");
+  function isFactTarget(value) {
+    if (!isRecord(value) || !nonEmptyString(value.revisionId)) return false;
+    if (value.kind === "revision") return true;
+    if (value.kind === "file") return nonEmptyString(value.filePath);
+    if (value.kind === "range") {
+      return nonEmptyString(value.filePath) && (value.side === "old" || value.side === "new") && Number.isSafeInteger(value.startLine) && value.startLine > 0 && Number.isSafeInteger(value.endLine) && value.endLine >= value.startLine;
+    }
+    if (value.kind === "observation") return nonEmptyString(value.observationId);
+    if (value.kind === "input_request")
+      return nonEmptyString(value.inputRequestId);
+    if (value.kind === "assessment") return nonEmptyString(value.assessmentId);
+    return value.kind === "event" && nonEmptyString(value.eventId);
+  }
+  __name(isFactTarget, "isFactTarget");
+  function uniqueFactPresentationIds(facts) {
+    return new Set(facts.map((fact) => fact.factId)).size === facts.length;
+  }
+  __name(uniqueFactPresentationIds, "uniqueFactPresentationIds");
+  function isResourceProjection(value) {
+    return isRecord(value) && typeof value.includeBody === "boolean" && (value.trackId === void 0 || nonEmptyString(value.trackId));
+  }
+  __name(isResourceProjection, "isResourceProjection");
+  function isCapturedReviewSnapshot(value, expectedContentHash, expectedObjectId) {
+    if (!isRecord(value) || value.schema !== "pointbreak.review-snapshot" || value.version !== 1 || value.contentHash !== expectedContentHash || !isRecord(value.snapshot)) {
+      return false;
+    }
+    return nonEmptyString(value.snapshot.review_id) && value.snapshot.object_id === expectedObjectId && Array.isArray(value.snapshot.files);
+  }
+  __name(isCapturedReviewSnapshot, "isCapturedReviewSnapshot");
+  function isFactContentPresentations(value) {
+    return isRecord(value) && Object.values(value).every(
+      (presentation) => isRecord(presentation) && (presentation.contentType === "text/plain" || presentation.contentType === "text/markdown") && (presentation.bodyContentState === "present" || presentation.bodyContentState === "suppressed_present" || presentation.bodyContentState === "physically_removed") && isFactContent(presentation.content)
+    );
+  }
+  __name(isFactContentPresentations, "isFactContentPresentations");
+  function sameFactIds(facts, content) {
+    const expected = new Set(facts.map((fact) => fact.factId));
+    const actual = Object.keys(content);
+    return expected.size === facts.length && expected.size === actual.length && actual.every((factId) => expected.has(factId));
+  }
+  __name(sameFactIds, "sameFactIds");
+  function isRevisionResource(value) {
+    try {
+      decodeRevisionResource(value);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  __name(isRevisionResource, "isRevisionResource");
+  function isFactPortPresentations(value, changeId, facts, selectedRevision) {
+    if (!Array.isArray(value) || !value.every(isFactPortPresentation))
+      return false;
+    if (new Set(value.map((port) => port.portId)).size !== value.length)
+      return false;
+    return value.every(
+      (port) => (port.contextChangeId === void 0 || port.contextChangeId === changeId) && port.sourceEventIds.length > 0 && new Set(port.sourceEventIds).size === port.sourceEventIds.length && port.trackId !== void 0 && (port.applicability !== "applicable" || applicableFactPortHasExactEndpoints(port, facts, selectedRevision))
+    );
+  }
+  __name(isFactPortPresentations, "isFactPortPresentations");
+  function factRefId(fact) {
+    return fact.kind === "observation" ? fact.observationId ?? "" : fact.inputRequestId ?? "";
+  }
+  __name(factRefId, "factRefId");
+  function applicableFactPortHasExactEndpoints(port, facts, selectedRevision) {
+    if (!sameRevision(port.targetRevision, selectedRevision)) return false;
+    const matchingOrigin = facts.filter(
+      (fact) => fact.factId === factRefId(port.originFact) && fact.family === port.originFact.kind && sameRevision(fact.originRevision, port.originRevision) && fact.presentedInRevision !== void 0 && sameRevision(fact.presentedInRevision, selectedRevision)
+    );
+    if (matchingOrigin.length !== 1) return false;
+    const targetFact = port.targetFact;
+    if (targetFact === void 0) return true;
+    return facts.filter(
+      (fact) => fact.factId === factRefId(targetFact) && fact.family === targetFact.kind && sameRevision(fact.originRevision, selectedRevision)
+    ).length === 1;
+  }
+  __name(applicableFactPortHasExactEndpoints, "applicableFactPortHasExactEndpoints");
+  function isFactPortPresentation(value) {
+    return isRecord(value) && nonEmptyString(value.portId) && isRevisionRef(value.originRevision) && isFactRef(value.originFact) && isRevisionRef(value.targetRevision) && (value.relation === "context_only" || value.relation === "reanchored_as" || value.relation === "carried_open_as" || value.relation === "resolved_by") && (value.targetFact === void 0 || isFactRef(value.targetFact)) && optionalString(value.rationaleContentHash) && optionalString(value.contextChangeId) && nonEmptyString(value.actorId) && nonEmptyString(value.trackId) && isStringArray(value.sourceEventIds) && (value.applicability === "applicable" || value.applicability === "conflicted" || value.applicability === "unavailable") && isStringArray(value.diagnostics);
+  }
+  __name(isFactPortPresentation, "isFactPortPresentation");
+  function isFactRef(value) {
+    if (!isRecord(value)) return false;
+    if (value.kind === "observation") {
+      return nonEmptyString(value.observationId) && value.inputRequestId === void 0;
+    }
+    if (value.kind === "input_request") {
+      return nonEmptyString(value.inputRequestId) && value.observationId === void 0;
+    }
+    return false;
+  }
+  __name(isFactRef, "isFactRef");
+  function isFactContent(value) {
+    if (!isRecord(value)) return false;
+    switch (value.kind) {
+      case "observation":
+        return nonEmptyString(value.title) && optionalString(value.body);
+      case "input_request":
+        return nonEmptyString(value.title) && optionalString(value.body) && nonEmptyString(value.status) && (value.responses === void 0 || Array.isArray(value.responses) && value.responses.every(isFactResponse));
+      case "assessment":
+        return nonEmptyString(value.assessment) && optionalString(value.summary);
+      case "validation":
+        return nonEmptyString(value.checkName) && optionalString(value.command) && nonEmptyString(value.status) && optionalString(value.summary);
+      default:
+        return false;
+    }
+  }
+  __name(isFactContent, "isFactContent");
+  function isFactResponse(value) {
+    return isRecord(value) && nonEmptyString(value.responseId) && nonEmptyString(value.outcome) && optionalString(value.reason) && (value.contentType === "text/plain" || value.contentType === "text/markdown") && (value.bodyContentState === "present" || value.bodyContentState === "suppressed_present" || value.bodyContentState === "physically_removed") && isOneOf(value.availability, CONTENT_AVAILABILITY_VALUES);
+  }
+  __name(isFactResponse, "isFactResponse");
+  function isAssociation(value) {
+    return isRecord(value) && value.schema === "pointbreak.review-association-comparison" && value.version === 1 && isOneOf(value.state, ASSOCIATION_STATE_VALUES) && isOneOf(value.proofAvailability, ASSOCIATION_PROOF_VALUES) && isRecord(value.comparison) && isRevisionRef(value.comparison.revision) && nonEmptyString(value.comparison.associationId) && nonEmptyString(value.comparison.commitOid) && nonEmptyString(value.comparison.comparisonBase) && nonEmptyString(value.comparison.viewKind) && optionalString(value.comparison.proofRef) && isStringArray(value.diagnostics) && nonEmptyString(value.cacheKey);
+  }
+  __name(isAssociation, "isAssociation");
+  function sameRevision(left, right) {
+    return left.revisionId === right.revisionId && left.objectArtifactContentHash === right.objectArtifactContentHash;
+  }
+  __name(sameRevision, "sameRevision");
+  function isStrictlyAscending(values) {
+    return values.every((value, index) => {
+      const previous = values[index - 1];
+      return index === 0 || previous !== void 0 && previous < value;
+    });
+  }
+  __name(isStrictlyAscending, "isStrictlyAscending");
+  function isOneOf(value, values) {
+    return typeof value === "string" && values.has(value);
+  }
+  __name(isOneOf, "isOneOf");
+  function isDocumentMap(value) {
+    return isRecord(value) && Object.values(value).every((version) => Number.isInteger(version));
+  }
+  __name(isDocumentMap, "isDocumentMap");
+  function sameDocumentMap(left, right) {
+    const leftEntries = Object.entries(left).sort(
+      ([a], [b]) => a.localeCompare(b)
+    );
+    const rightEntries = Object.entries(right).sort(
+      ([a], [b]) => a.localeCompare(b)
+    );
+    return leftEntries.length === rightEntries.length && leftEntries.every(
+      ([schema, version], index) => schema === rightEntries[index]?.[0] && version === rightEntries[index]?.[1]
+    );
+  }
+  __name(sameDocumentMap, "sameDocumentMap");
+  function canonicalJson(value) {
+    if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+    if (isRecord(value)) {
+      return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+    }
+    return JSON.stringify(value);
+  }
+  __name(canonicalJson, "canonicalJson");
+  function object(value, name) {
+    if (!isRecord(value)) throw new Error(`invalid ${name} DTO`);
+    return value;
+  }
+  __name(object, "object");
+  function isRecord(value) {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+  __name(isRecord, "isRecord");
+  function nonEmptyString(value) {
+    return typeof value === "string" && value.length > 0;
+  }
+  __name(nonEmptyString, "nonEmptyString");
+  function optionalString(value) {
+    return value === void 0 || typeof value === "string";
+  }
+  __name(optionalString, "optionalString");
+  function isStringArray(value) {
+    return Array.isArray(value) && value.every((item) => typeof item === "string");
+  }
+  __name(isStringArray, "isStringArray");
+
+  // src/change-inspector-reading.ts
+  function sameExactRevision(left, right) {
+    return left.revisionId === right.revisionId && left.objectArtifactContentHash === right.objectArtifactContentHash;
+  }
+  __name(sameExactRevision, "sameExactRevision");
+  function encoded(value) {
+    return encodeURIComponent(value);
+  }
+  __name(encoded, "encoded");
+  function revisionPath(changeId, revision) {
+    return `/api/v2/changes/${encoded(changeId)}/revisions/${encoded(revision.revisionId)}?artifactHash=${encoded(revision.objectArtifactContentHash)}`;
+  }
+  __name(revisionPath, "revisionPath");
+  function resourcePath(changeId, revision) {
+    return `/api/v2/changes/${encoded(changeId)}/revisions/${encoded(revision.revisionId)}/resource?artifactHash=${encoded(revision.objectArtifactContentHash)}`;
+  }
+  __name(resourcePath, "resourcePath");
+  function assertStamp(stamp, expected, surface) {
+    if (stamp !== expected) {
+      throw new Error(
+        `${surface} projection stamp does not match the staged Change generation`
+      );
+    }
+  }
+  __name(assertStamp, "assertStamp");
+  function assertRevisionDetail(document2, route, stamp) {
+    if (document2.changeId !== route.changeId) {
+      throw new Error(
+        "contextual Revision detail Change ID does not match its exact route"
+      );
+    }
+    if (!sameExactRevision(document2.revision, route.revision)) {
+      throw new Error(
+        "contextual Revision detail does not match its exact route"
+      );
+    }
+    if (!sameExactRevision(
+      document2.exactRevisionDocument.resource.revision,
+      route.revision
+    )) {
+      throw new Error(
+        "embedded captured resource does not match its exact Revision route"
+      );
+    }
+    if (document2.factPresentations.some(
+      (fact) => fact.contextChangeId !== route.changeId || fact.presentedInRevision !== void 0 && !sameExactRevision(fact.presentedInRevision, route.revision)
+    )) {
+      throw new Error(
+        "fact presentation does not match its Change and exact Revision context"
+      );
+    }
+    if (document2.factPorts.some(
+      (port) => !sameExactRevision(port.targetRevision, route.revision)
+    )) {
+      throw new Error("fact port does not target the selected exact Revision");
+    }
+    if (document2.associations.some(
+      (association) => !sameExactRevision(association.comparison.revision, route.revision)
+    )) {
+      throw new Error(
+        "association comparison does not target the selected exact Revision"
+      );
+    }
+    if (document2.exactRevisionDocument.projectionStamp !== document2.projectionStamp) {
+      throw new Error(
+        "embedded captured resource is from another projection stamp"
+      );
+    }
+    assertStamp(document2.projectionStamp, stamp, "contextual Revision detail");
+  }
+  __name(assertRevisionDetail, "assertRevisionDetail");
+  async function loadChangeInspectorReading(route, expectedProjectionStamp) {
+    if (route.kind === "change") {
+      const document3 = decodeChangeDetail(
+        await fetchChangeInspectorJSON(
+          `/api/v2/changes/${encoded(route.changeId)}`
+        )
+      );
+      if (document3.summary.changeId !== route.changeId) {
+        throw new Error("Change detail does not match its route");
+      }
+      assertStamp(
+        document3.projectionStamp,
+        expectedProjectionStamp,
+        "Change detail"
+      );
+      return { kind: "change", document: document3 };
+    }
+    if (route.kind === "revision" || route.kind === "association") {
+      const document3 = decodeChangeRevisionDetail(
+        await fetchChangeInspectorJSON(
+          revisionPath(route.changeId, route.revision)
+        )
+      );
+      assertRevisionDetail(document3, route, expectedProjectionStamp);
+      return { kind: route.kind, document: document3 };
+    }
+    if (route.kind === "resource") {
+      const document3 = decodeRevisionResource(
+        await fetchChangeInspectorJSON(
+          resourcePath(route.changeId, route.revision)
+        )
+      );
+      if (!sameExactRevision(document3.resource.revision, route.revision)) {
+        throw new Error(
+          "captured resource does not match its exact Revision route"
+        );
+      }
+      assertStamp(
+        document3.projectionStamp,
+        expectedProjectionStamp,
+        "captured resource"
+      );
+      return { kind: "resource", document: document3 };
+    }
+    const params = new URLSearchParams({
+      fromArtifactHash: route.from.objectArtifactContentHash,
+      toArtifactHash: route.to.objectArtifactContentHash
+    });
+    const document2 = decodeRevisionInterdiff(
+      await fetchChangeInspectorJSON(
+        `/api/v2/changes/${encoded(route.changeId)}/interdiff/${encoded(route.from.revisionId)}/${encoded(route.to.revisionId)}?${params}`
+      )
+    );
+    if (!sameExactRevision(document2.interdiff.from, route.from) || !sameExactRevision(document2.interdiff.to, route.to)) {
+      throw new Error(
+        "ordered Revision interdiff does not match its exact route"
+      );
+    }
+    assertStamp(
+      document2.projectionStamp,
+      expectedProjectionStamp,
+      "Revision interdiff"
+    );
+    return { kind: "interdiff", document: document2 };
+  }
+  __name(loadChangeInspectorReading, "loadChangeInspectorReading");
+
   // src/change-inspector-cards.ts
   function words(value) {
     return value.replaceAll("_", " ");
@@ -475,7 +1257,14 @@
     "limit",
     "order"
   ];
-  var ROUTE_QUERY_KEYS = /* @__PURE__ */ new Set([...QUERY_KEYS, "artifactHash"]);
+  var ROUTE_QUERY_KEYS = /* @__PURE__ */ new Set([
+    ...QUERY_KEYS,
+    "artifactHash",
+    "fromArtifactHash",
+    "toArtifactHash",
+    "fact",
+    "file"
+  ]);
   function decodeSegment(value) {
     try {
       const decoded2 = decodeURIComponent(value);
@@ -532,7 +1321,14 @@
         query[key] = value;
       }
     }
-    return { query, artifactHashes: params.getAll("artifactHash") };
+    return {
+      query,
+      artifactHashes: params.getAll("artifactHash"),
+      fromArtifactHashes: params.getAll("fromArtifactHash"),
+      toArtifactHashes: params.getAll("toArtifactHash"),
+      facts: params.getAll("fact"),
+      files: params.getAll("file")
+    };
   }
   __name(parseQuery, "parseQuery");
   function isParseError(value) {
@@ -546,10 +1342,27 @@
     const search = separator === -1 ? "" : raw.slice(separator + 1);
     const parsed = parseQuery(search);
     if (isParseError(parsed)) return { kind: "invalid", message: parsed.message };
-    const { query, artifactHashes } = parsed;
+    const {
+      query,
+      artifactHashes,
+      fromArtifactHashes,
+      toArtifactHashes,
+      facts,
+      files
+    } = parsed;
+    const focus = /* @__PURE__ */ __name(() => {
+      if (facts.length > 1 || files.length > 1 || facts.some((value) => !value) || files.some((value) => !value)) {
+        return null;
+      }
+      const selected = {
+        ...facts[0] ? { factId: facts[0] } : {},
+        ...files[0] ? { filePath: files[0] } : {}
+      };
+      return Object.keys(selected).length ? selected : void 0;
+    }, "focus");
     const segments = path.split("/").filter(Boolean);
     if (segments.length === 1 && (segments[0] === "changes" || segments[0] === "attention")) {
-      if (artifactHashes.length > 0) {
+      if (artifactHashes.length > 0 || fromArtifactHashes.length > 0 || toArtifactHashes.length > 0 || facts.length > 0 || files.length > 0) {
         return {
           kind: "invalid",
           message: "artifactHash is only valid on an exact Revision route."
@@ -563,7 +1376,7 @@
     if (changeId === null)
       return { kind: "invalid", message: "Change routes require a Change ID." };
     if (segments.length === 2) {
-      if (artifactHashes.length > 0) {
+      if (artifactHashes.length > 0 || fromArtifactHashes.length > 0 || toArtifactHashes.length > 0 || facts.length > 0 || files.length > 0) {
         return {
           kind: "invalid",
           message: "artifactHash is only valid on an exact Revision route."
@@ -571,29 +1384,97 @@
       }
       return { kind: "change", changeId, query };
     }
-    if (segments.length !== 4 || segments[2] !== "revisions") {
-      return { kind: "invalid", message: "Unknown Change Inspector route." };
-    }
-    const revisionId = decodeSegment(segments[3]);
-    if (revisionId === null)
+    const exactRevision = /* @__PURE__ */ __name((revisionId) => {
+      if (revisionId === null || artifactHashes.length !== 1 || !artifactHashes[0])
+        return null;
       return {
-        kind: "invalid",
-        message: "Revision routes require a Revision ID."
-      };
-    if (artifactHashes.length !== 1 || !artifactHashes[0])
-      return {
-        kind: "invalid",
-        message: artifactHashes.length > 1 ? "Exact Revision routes require exactly one artifactHash." : "Exact Revision routes require artifactHash."
-      };
-    return {
-      kind: "revision",
-      changeId,
-      revision: {
         revisionId,
         objectArtifactContentHash: artifactHashes[0]
-      },
-      query
-    };
+      };
+    }, "exactRevision");
+    const exactFailure = /* @__PURE__ */ __name(() => ({
+      kind: "invalid",
+      message: artifactHashes.length > 1 ? "Exact Revision routes require exactly one artifactHash." : "Exact Revision routes require artifactHash."
+    }), "exactFailure");
+    if (segments[2] === "revisions" && segments.length >= 4) {
+      const revision = exactRevision(decodeSegment(segments[3]));
+      if (revision === null) return exactFailure();
+      const exactFocus = focus();
+      if (exactFocus === null)
+        return {
+          kind: "invalid",
+          message: "Exact route focus requires at most one non-empty fact and file."
+        };
+      if (fromArtifactHashes.length > 0 || toArtifactHashes.length > 0)
+        return {
+          kind: "invalid",
+          message: "Revision routes do not accept interdiff hashes."
+        };
+      if (segments.length === 4)
+        return {
+          kind: "revision",
+          changeId,
+          revision,
+          query,
+          ...exactFocus ? { focus: exactFocus } : {}
+        };
+      if (segments.length === 5 && segments[4] === "resource")
+        return {
+          kind: "resource",
+          changeId,
+          revision,
+          query,
+          ...exactFocus ? { focus: exactFocus } : {}
+        };
+      if (segments.length === 5 && segments[4] === "association")
+        return {
+          kind: "association",
+          changeId,
+          revision,
+          query,
+          ...exactFocus ? { focus: exactFocus } : {}
+        };
+    }
+    if (segments[2] === "interdiff" && segments.length === 5) {
+      if (artifactHashes.length > 0)
+        return {
+          kind: "invalid",
+          message: "Interdiff routes use endpoint artifact hashes."
+        };
+      const fromRevisionId = decodeSegment(segments[3]);
+      const toRevisionId = decodeSegment(segments[4]);
+      if (fromRevisionId === null || toRevisionId === null)
+        return {
+          kind: "invalid",
+          message: "Interdiff routes require both Revision IDs."
+        };
+      if (fromArtifactHashes.length !== 1 || !fromArtifactHashes[0] || toArtifactHashes.length !== 1 || !toArtifactHashes[0])
+        return {
+          kind: "invalid",
+          message: "Interdiff routes require exactly one artifact hash for each endpoint."
+        };
+      const exactFocus = focus();
+      if (exactFocus === null)
+        return {
+          kind: "invalid",
+          message: "Exact route focus requires at most one non-empty fact and file."
+        };
+      return {
+        kind: "interdiff",
+        changeId,
+        from: {
+          revisionId: fromRevisionId,
+          objectArtifactContentHash: fromArtifactHashes[0]
+        },
+        to: {
+          revisionId: toRevisionId,
+          objectArtifactContentHash: toArtifactHashes[0]
+        },
+        query,
+        ...exactFocus ? { focus: exactFocus } : {}
+      };
+    }
+    return { kind: "invalid", message: "Unknown Change Inspector route." };
   }
   __name(parseChangeInspectorRoute, "parseChangeInspectorRoute");
   function appendQuery(query, params) {
@@ -606,19 +1487,1333 @@
   function formatChangeInspectorRoute(route) {
     const params = new URLSearchParams();
     appendQuery(route.query, params);
-    if (route.kind === "revision")
+    if (route.kind === "revision" || route.kind === "resource" || route.kind === "association")
       params.set("artifactHash", route.revision.objectArtifactContentHash);
+    if (route.kind === "interdiff") {
+      params.set("fromArtifactHash", route.from.objectArtifactContentHash);
+      params.set("toArtifactHash", route.to.objectArtifactContentHash);
+    }
+    if ("focus" in route && route.focus?.factId)
+      params.set("fact", route.focus.factId);
+    if ("focus" in route && route.focus?.filePath)
+      params.set("file", route.focus.filePath);
     const suffix = params.size ? `?${params}` : "";
     if (route.kind === "lens") return `#/${route.lens}${suffix}`;
     const change = encodeURIComponent(route.changeId);
     if (route.kind === "change") return `#/changes/${change}${suffix}`;
-    return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}${suffix}`;
+    if (route.kind === "revision")
+      return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}${suffix}`;
+    if (route.kind === "resource")
+      return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}/resource${suffix}`;
+    if (route.kind === "association")
+      return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}/association${suffix}`;
+    return `#/changes/${change}/interdiff/${encodeURIComponent(route.from.revisionId)}/${encodeURIComponent(route.to.revisionId)}${suffix}`;
   }
   __name(formatChangeInspectorRoute, "formatChangeInspectorRoute");
   function lensForRoute(route) {
     return route.kind === "lens" ? route.lens : "changes";
   }
   __name(lensForRoute, "lensForRoute");
+
+  // src/classNames.ts
+  var CLASS = {
+    // App chrome, master-detail panes, lens containers, and shared chips.
+    units: "units",
+    timeline: "timeline",
+    empty: "empty",
+    badge: "badge",
+    tierMedium: "tier-medium",
+    body: "body",
+    title: "title",
+    time: "time",
+    eventDate: "event-date",
+    rail: "rail",
+    meta: "meta",
+    type: "type",
+    typeCount: "type-count",
+    code: "code",
+    dot: "dot",
+    kv: "kv",
+    ghost: "ghost",
+    actions: "actions",
+    timelineShell: "timeline-shell",
+    timelineNewPill: "timeline-new-pill",
+    // (The app-shell store-identity chip + detail popover is static markup in
+    // index.html — `store-identity*` classes live there and in app.css, not here —
+    // and its rows are `renderIdentity`-filled <dt>/<dd> styled via element selectors.
+    // Issue #391.)
+    // Fact cards (observation / input-request / assessment / validation / note).
+    annoGroup: "anno-group",
+    annoHead: "anno-head",
+    annoLoc: "anno-loc",
+    annoSummary: "anno-summary",
+    annoTime: "anno-time",
+    annoTitle: "anno-title",
+    annoTrack: "anno-track",
+    actorAttribution: "actor-attribution",
+    factBodyRemoved: "fact-body-removed",
+    factRel: "fact-rel",
+    factResponse: "fact-response",
+    factResponses: "fact-responses",
+    factStaleContext: "fact-stale-context",
+    factStatus: "fact-status",
+    outcome: "outcome",
+    advisoryNote: "advisory-note",
+    validationNote: "validation-note",
+    validationContinuity: "validation-continuity",
+    validationContinuityNeutral: "validation-continuity-neutral",
+    validationContinuityOutstanding: "validation-continuity-outstanding",
+    readback: "readback",
+    readbackRow: "readback-row",
+    readerScopeNote: "reader-scope-note",
+    rawEvent: "raw-event",
+    rawEventActions: "raw-event-actions",
+    // The current-assessment verdict block.
+    verdictStatus: "verdict-status",
+    verdictSummary: "verdict-summary",
+    verdictValue: "verdict-value",
+    // The advisory endorsement readback.
+    endorseAttrs: "endorse-attrs",
+    endorseLabel: "endorse-label",
+    endorseList: "endorse-list",
+    endorseWho: "endorse-who",
+    endorsements: "endorsements",
+    endorsementsLabel: "endorsements-label",
+    // The revision-overview summary line.
+    overviewAssessment: "overview-assessment",
+    overviewCue: "overview-cue",
+    overviewHistoryCue: "overview-history-cue",
+    overviewCues: "overview-cues",
+    overviewLabel: "overview-label",
+    overviewLatest: "overview-latest",
+    overviewMain: "overview-main",
+    overviewMuted: "overview-muted",
+    revisionDiagnostic: "revision-diagnostic",
+    overviewStat: "overview-stat",
+    overviewStats: "overview-stats",
+    overviewSummary: "overview-summary",
+    // The annotated snapshot diff: files, rows, and the navigator.
+    dfileBody: "dfile-body",
+    dfileHead: "dfile-head",
+    dfileNotes: "dfile-notes",
+    dfileSummary: "dfile-summary",
+    dhunk: "dhunk",
+    diffBtn: "diff-btn",
+    diffAnchorReason: "diff-anchor-reason",
+    diffDecisionContext: "diff-decision-context",
+    diffDecisionContextNav: "diff-decision-context-nav",
+    diffFactVicinity: "diff-fact-vicinity",
+    diffFileNotice: "diff-file-notice",
+    diffNavFact: "diff-nav-fact",
+    diffNavFile: "diff-nav-file",
+    diffNavFiles: "diff-nav-files",
+    diffNavReason: "diff-nav-reason",
+    diffNavSummary: "diff-nav-summary",
+    diffUnanchored: "diff-unanchored",
+    diffUnanchoredFacts: "diff-unanchored-facts",
+    dpath: "dpath",
+    drow: "drow",
+    drowMeta: "drow-meta",
+    dtext: "dtext",
+    emph: "emph",
+    ln: "ln",
+    sign: "sign",
+    // Revision list, supersession badges, and the laid-out DAG.
+    unitCard: "unit-card",
+    unitPage: "unit-page",
+    unitPageTitle: "unit-page-title",
+    supersessionBadges: "supersession-badges",
+    competing: "competing",
+    revisionSupersession: "revision-supersession",
+    revisionHeads: "revision-heads",
+    revisionSelf: "revision-self",
+    dagEdge: "dag-edge",
+    dagArrowHead: "dag-arrow-head",
+    dagArrowHeadTraced: "dag-arrow-head-traced",
+    revisionDag: "revision-dag",
+    factDag: "fact-dag",
+    head: "head",
+    stale: "stale",
+    superseded: "superseded",
+    supersedes: "supersedes",
+    upEmpty: "up-empty",
+    upIdentity: "up-identity",
+    upStat: "up-stat",
+    upStats: "up-stats",
+    // The applied-filter chip row (the toolbar's pure view of filterText).
+    filterChips: "filter-chips",
+    filterChipRemove: "filter-chip-remove",
+    // The type facet section (the Timeline-only ?type= page-set control): static
+    // container/list classes in index.html; rows are emitted via typeFacetRowClass.
+    typeFacet: "type-facet",
+    typeFacetMenu: "type-facet-menu",
+    // The search-bar suggestion popover: static list container in index.html;
+    // the rows are emitted via suggestionClass below.
+    filterSuggestions: "filter-suggestions",
+    suggestion: "suggestion",
+    suggestionActive: "suggestion-active",
+    // The command palette.
+    cmdEmpty: "cmd-empty",
+    cmdGroup: "cmd-group",
+    cmdHint: "cmd-hint",
+    cmdLabel: "cmd-label",
+    // The attention lens: tiered cards over the outstanding review state.
+    attentionCard: "attention-card",
+    attentionTier: "attention-tier",
+    attentionEmpty: "attention-empty",
+    attentionOrderLabel: "attention-order-label",
+    attentionKind: "attention-kind",
+    attentionMeta: "attention-meta",
+    attentionFreshness: "attention-freshness",
+    attentionFocus: "attention-focus",
+    attentionDelta: "attention-delta",
+    // The attention tab's judgment-queue count badge (absent when both tiers are
+    // empty) and the muted advisory count beside the needs-input number.
+    attentionBadge: "attention-badge",
+    attentionBadgeSecondary: "attention-badge-secondary",
+    // The detail page's per-revision outstanding set (the scoped attention read);
+    // absent when nothing is outstanding on the shown revision.
+    outstandingSet: "outstanding-set",
+    // Copyable CLI command handoffs (workflow-handoff.ts): the block, its label,
+    // the command code, the visible placeholder marker, the clipboard-only copy
+    // control, and the detail page's stage-template section host.
+    workflowHandoff: "workflow-handoff",
+    workflowHandoffLabel: "workflow-handoff-label",
+    workflowCommand: "workflow-command",
+    workflowPlaceholder: "workflow-placeholder",
+    workflowCopy: "workflow-copy",
+    workflowHandoffs: "workflow-handoffs"
+  };
+  var ANNO_KINDS = [
+    "observation",
+    "assessment",
+    "input-request",
+    "validation"
+  ];
+  var DIFF_ROW_KINDS = ["added", "removed", "context"];
+  var TOKEN_KINDS = [
+    "keyword",
+    "string",
+    "comment",
+    "number",
+    "type",
+    "function",
+    "constant",
+    "operator",
+    "punctuation",
+    "variable"
+  ];
+  var DIFF_FILE_STATUSES = [
+    "added",
+    "deleted",
+    "modified",
+    "renamed",
+    "copied"
+  ];
+  var VERIFY_STATUSES = [
+    "valid",
+    "invalid",
+    "unsigned",
+    "untrusted_key"
+  ];
+  var ENDORSE_CLASSES = [
+    "endorsement-trusted",
+    "ambiguous_endorser",
+    "unknown_endorser"
+  ];
+  var VERDICT_ASSESSMENTS = [
+    "accepted",
+    "accepted_with_follow_up",
+    "ambiguous",
+    "needs_changes",
+    "needs_clarification",
+    "unassessed"
+  ];
+  var FACT_STATUSES = [
+    "accepted",
+    "accepted_with_follow_up",
+    "ambiguous",
+    "current",
+    "errored",
+    "failed",
+    "needs_changes",
+    "needs_clarification",
+    "open",
+    "passed",
+    "replaced",
+    "resolved",
+    "responded",
+    "skipped",
+    "stale",
+    "superseded",
+    "unassessed"
+  ];
+  var REF_ID_PREFIXES = [
+    "input-request-response",
+    "input-request",
+    "obs",
+    "assess",
+    "rev",
+    "evt",
+    "validation",
+    "obj",
+    "engagement",
+    "checkpoint",
+    "task-attempt",
+    "assoc-commit",
+    "assoc-ref",
+    "withdraw-commit",
+    "withdraw-ref"
+  ];
+  var REF_KINDS = [
+    ...REF_ID_PREFIXES,
+    "hash",
+    "commit",
+    "track",
+    "actor"
+  ];
+  var annoContainerClass = /* @__PURE__ */ __name((kind) => `anno anno-${kind}`, "annoContainerClass");
+  var annoKindClass = /* @__PURE__ */ __name((kind) => `anno-kind anno-kind-${kind}`, "annoKindClass");
+  var drowClass = /* @__PURE__ */ __name((kind, noted) => `drow drow-${kind}${noted ? " drow-noted" : ""}`, "drowClass");
+  var tokClass = /* @__PURE__ */ __name((kind) => `tok tok-${kind}`, "tokClass");
+  var diffStatusClass = /* @__PURE__ */ __name((status) => `dstatus s-${status}`, "diffStatusClass");
+  var verifyClass = /* @__PURE__ */ __name((status) => `verify verify-${status}`, "verifyClass");
+  var endorseClass = /* @__PURE__ */ __name((cls) => `endorse endorse-${cls}`, "endorseClass");
+  var verdictClass = /* @__PURE__ */ __name((assessment) => `verdict verdict-${assessment}`, "verdictClass");
+  var factStatusClass = /* @__PURE__ */ __name((status) => `fact-status ${status}`, "factStatusClass");
+  var refClass = /* @__PURE__ */ __name((kind) => `ref ref-${kind}`, "refClass");
+  var dfileClass = /* @__PURE__ */ __name((lowSignal) => `dfile${lowSignal ? " dfile-lowsignal" : ""}`, "dfileClass");
+  var dagNodeClass = /* @__PURE__ */ __name((o) => `dag-node${o.isHead ? " head" : ""}${o.isSuperseded ? " superseded" : ""}`, "dagNodeClass");
+  var bodyClass = /* @__PURE__ */ __name((base, markdown) => `${base}${markdown ? " markdown-body" : ""}`, "bodyClass");
+  var cmdItemClass = /* @__PURE__ */ __name((active2) => `cmd-item${active2 ? " active" : ""}`, "cmdItemClass");
+  var filterChipClass = /* @__PURE__ */ __name((negated) => `filter-chip${negated ? " filter-chip-negated" : ""}`, "filterChipClass");
+  var typeFacetRowClass = /* @__PURE__ */ __name((enabled) => `type-facet-row${enabled ? "" : " type-facet-row-off"}`, "typeFacetRowClass");
+  var suggestionClass = /* @__PURE__ */ __name((active2) => `suggestion${active2 ? " suggestion-active" : ""}`, "suggestionClass");
+  var tokensOf = /* @__PURE__ */ __name((classStrings) => classStrings.flatMap((s) => s.split(" ")), "tokensOf");
+  var ALL_EMITTABLE_CLASSES = [
+    ...new Set(
+      tokensOf([
+        ...Object.values(CLASS),
+        ...ANNO_KINDS.map((k) => annoContainerClass(k)),
+        ...ANNO_KINDS.map((k) => annoKindClass(k)),
+        ...DIFF_ROW_KINDS.map((k) => drowClass(k, true)),
+        ...TOKEN_KINDS.map((k) => tokClass(k)),
+        ...DIFF_FILE_STATUSES.map((s) => diffStatusClass(s)),
+        ...VERIFY_STATUSES.map((s) => verifyClass(s)),
+        ...ENDORSE_CLASSES.map((c) => endorseClass(c)),
+        ...VERDICT_ASSESSMENTS.map((a) => verdictClass(a)),
+        ...FACT_STATUSES.map((s) => factStatusClass(s)),
+        ...REF_KINDS.map((k) => refClass(k)),
+        dfileClass(true),
+        filterChipClass(true),
+        typeFacetRowClass(true),
+        typeFacetRowClass(false),
+        suggestionClass(true),
+        dagNodeClass({ isHead: true, isSuperseded: true }),
+        bodyClass("anno-body", true),
+        bodyClass("verdict-summary", true),
+        cmdItemClass(true)
+      ])
+    )
+  ];
+
+  // src/escape.ts
+  var ENTITIES = {
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  };
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, (char) => ENTITIES[char]);
+  }
+  __name(escapeHtml, "escapeHtml");
+
+  // src/format.ts
+  var RFC3339_UTC = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/;
+  function parseRfc3339UtcMillis(value) {
+    const match = value.match(RFC3339_UTC);
+    if (!match) return null;
+    const [
+      ,
+      yearText,
+      monthText,
+      dayText,
+      hourText,
+      minuteText,
+      secondText,
+      fraction
+    ] = match;
+    const year = Number(yearText);
+    const month = Number(monthText);
+    const day = Number(dayText);
+    const hour = Number(hourText);
+    const minute = Number(minuteText);
+    const second = Number(secondText);
+    const leapYear = year % 4 === 0 && year % 100 !== 0 || year % 400 === 0;
+    const daysInMonth = [
+      31,
+      leapYear ? 29 : 28,
+      31,
+      30,
+      31,
+      30,
+      31,
+      31,
+      30,
+      31,
+      30,
+      31
+    ];
+    if (month < 1 || month > 12 || day < 1 || day > daysInMonth[month - 1] || hour > 23 || minute > 59 || second > 60) {
+      return null;
+    }
+    const millis = Number((fraction ?? "").padEnd(3, "0").slice(0, 3));
+    const date = /* @__PURE__ */ new Date(0);
+    date.setUTCFullYear(year, month - 1, day);
+    date.setUTCHours(hour, minute, Math.min(second, 59), millis);
+    return date.getTime() + (second === 60 ? 1e3 : 0);
+  }
+  __name(parseRfc3339UtcMillis, "parseRfc3339UtcMillis");
+  function parseMs(occurredAt) {
+    if (typeof occurredAt !== "string") return null;
+    if (occurredAt.startsWith("unix-ms:")) {
+      const unixMillis = occurredAt.match(/^unix-ms:([+-]?\d+)$/);
+      return unixMillis ? Number(unixMillis[1]) : null;
+    }
+    if (/^\d{4}-\d{2}-\d{2}T/.test(occurredAt))
+      return parseRfc3339UtcMillis(occurredAt);
+    const match = occurredAt.match(/(\d+)\s*$/);
+    return match ? Number(match[1]) : null;
+  }
+  __name(parseMs, "parseMs");
+  function fmtDateTime(occurredAt) {
+    const ms = parseMs(occurredAt);
+    if (ms == null) return occurredAt || "";
+    return new Date(ms).toLocaleString([], { hour12: false });
+  }
+  __name(fmtDateTime, "fmtDateTime");
+
+  // src/refs.ts
+  function shortRef(id) {
+    const value = String(id);
+    let match = value.match(
+      /^([a-z][a-z-]*):(?:git:|worktree:)?sha256:([0-9a-f]{6,})$/i
+    );
+    if (match) return `${match[1]}:${match[2].slice(0, 8)}`;
+    match = value.match(/^sha256:([0-9a-f]{8,})$/i);
+    if (match) return `sha256:${match[1].slice(0, 8)}`;
+    if (/^[0-9a-f]{40}$/i.test(value)) return value.slice(0, 10);
+    return value;
+  }
+  __name(shortRef, "shortRef");
+  var NON_CLICKABLE_KINDS = /* @__PURE__ */ new Set([
+    "validation",
+    "obj",
+    "engagement",
+    "checkpoint",
+    "task-attempt",
+    "assoc-commit",
+    "assoc-ref",
+    "withdraw-commit",
+    "withdraw-ref"
+  ]);
+  function refInfo(token) {
+    const match = token.match(
+      /^([a-z][a-z-]*):(?:git:|worktree:)?sha256:[0-9a-f]+$/i
+    );
+    if (match) {
+      const kind = match[1].toLowerCase();
+      return { kind, clickable: !NON_CLICKABLE_KINDS.has(kind) };
+    }
+    if (/^sha256:[0-9a-f]+$/i.test(token))
+      return { kind: "hash", clickable: false };
+    if (/^[0-9a-f]{40}$/i.test(token))
+      return { kind: "commit", clickable: false };
+    if (/^(agent|human):[a-z0-9][a-z0-9_-]*$/i.test(token)) {
+      return { kind: "track", clickable: true };
+    }
+    return null;
+  }
+  __name(refInfo, "refInfo");
+  var REF_RE = new RegExp(
+    `\\b(?:${REF_ID_PREFIXES.join("|")}):(?:git:|worktree:)?sha256:[0-9a-f]{6,}\\b|(?<!:)\\bsha256:[0-9a-f]{16,}\\b|\\b[0-9a-f]{40}\\b|\\b(?:agent|human):[a-z0-9][a-z0-9_-]*\\b`,
+    "gi"
+  );
+  function linkifyEscaped(escaped, opts = {}) {
+    const tabIndex = typeof opts === "object" ? opts.tabIndex ?? 0 : 0;
+    return escaped.replace(REF_RE, (token) => {
+      const info = refInfo(token);
+      if (!info) return token;
+      const display = escapeHtml(shortRef(token));
+      if (!info.clickable) {
+        return `<span class="${refClass(info.kind)}" title="${escapeHtml(token)}">${display}</span>`;
+      }
+      return `<span class="${refClass(info.kind)}" role="link" tabindex="${tabIndex}" data-ref-kind="${info.kind}" data-ref-id="${escapeHtml(token)}" title="${escapeHtml(token)}">${display}</span>`;
+    });
+  }
+  __name(linkifyEscaped, "linkifyEscaped");
+  function linkify(text, opts = {}) {
+    return linkifyEscaped(escapeHtml(String(text ?? "")), opts);
+  }
+  __name(linkify, "linkify");
+  function actorChip(actorId, opts = {}) {
+    if (!actorId) return "";
+    const tabIndex = typeof opts === "object" ? opts.tabIndex ?? 0 : opts;
+    const display = escapeHtml(actorId);
+    return `<span class="${refClass("actor")}" role="link" tabindex="${tabIndex}" data-ref-kind="actor" data-ref-id="${escapeHtml(actorId)}" title="filter to ${escapeHtml(actorId)}">${display}</span>`;
+  }
+  __name(actorChip, "actorChip");
+  function isMarkdownContentType(contentType) {
+    return contentType === "text/markdown";
+  }
+  __name(isMarkdownContentType, "isMarkdownContentType");
+  function safeMarkdownHref(href) {
+    const raw = String(href ?? "").trim();
+    if (/^(https?:|mailto:)/i.test(raw) || raw.startsWith("#"))
+      return escapeHtml(raw);
+    return "";
+  }
+  __name(safeMarkdownHref, "safeMarkdownHref");
+
+  // src/markdown.ts
+  function renderBodyContent(text, contentType) {
+    if (!text) return "";
+    const cls = bodyClass("anno-body", isMarkdownContentType(contentType));
+    return `<div class="${cls}">${renderContentHtml(text, contentType)}</div>`;
+  }
+  __name(renderBodyContent, "renderBodyContent");
+  function renderContentHtml(text, contentType) {
+    return isMarkdownContentType(contentType) ? renderMarkdown(text) : linkify(text);
+  }
+  __name(renderContentHtml, "renderContentHtml");
+  function renderMarkdown(text) {
+    const lines = String(text ?? "").replace(/\r\n?/g, "\n").split("\n");
+    const out = [];
+    let paragraph = [];
+    let listKind = null;
+    let listItems = [];
+    const flushParagraph = /* @__PURE__ */ __name(() => {
+      if (!paragraph.length) return;
+      out.push(`<p>${renderMarkdownInline(paragraph.join(" "))}</p>`);
+      paragraph = [];
+    }, "flushParagraph");
+    const flushList = /* @__PURE__ */ __name(() => {
+      if (!listKind) return;
+      out.push(
+        `<${listKind}>${listItems.map((item) => `<li>${renderMarkdownInline(item)}</li>`).join("")}</${listKind}>`
+      );
+      listKind = null;
+      listItems = [];
+    }, "flushList");
+    const flushBlocks = /* @__PURE__ */ __name(() => {
+      flushParagraph();
+      flushList();
+    }, "flushBlocks");
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const fence = line.match(/^\s*```/);
+      if (fence) {
+        flushBlocks();
+        const code = [];
+        i++;
+        while (i < lines.length && !/^\s*```/.test(lines[i])) {
+          code.push(lines[i]);
+          i++;
+        }
+        out.push(`<pre><code>${escapeHtml(code.join("\n"))}</code></pre>`);
+        continue;
+      }
+      if (!line.trim()) {
+        flushBlocks();
+        continue;
+      }
+      const heading = line.match(/^(#{1,6})\s+(.+)$/);
+      if (heading) {
+        flushBlocks();
+        const level = heading[1].length;
+        out.push(
+          `<h${level}>${renderMarkdownInline(heading[2].trim())}</h${level}>`
+        );
+        continue;
+      }
+      const unordered = line.match(/^\s*[-*]\s+(.+)$/);
+      if (unordered) {
+        flushParagraph();
+        if (listKind && listKind !== "ul") flushList();
+        listKind = "ul";
+        listItems.push(unordered[1]);
+        continue;
+      }
+      const ordered = line.match(/^\s*\d+[.)]\s+(.+)$/);
+      if (ordered) {
+        flushParagraph();
+        if (listKind && listKind !== "ol") flushList();
+        listKind = "ol";
+        listItems.push(ordered[1]);
+        continue;
+      }
+      if (listKind) flushList();
+      paragraph.push(line.trim());
+    }
+    flushBlocks();
+    return out.join("");
+  }
+  __name(renderMarkdown, "renderMarkdown");
+  function renderMarkdownInline(text) {
+    const placeholders = [];
+    const stash = /* @__PURE__ */ __name((html2) => {
+      const token = `\0MD${placeholders.length}\0`;
+      placeholders.push([token, html2]);
+      return token;
+    }, "stash");
+    let html = escapeHtml(String(text ?? ""));
+    html = protectBackslashEscapes(html, stash, (character) => character === "`");
+    html = html.replace(
+      /`([^`]+)`/g,
+      (_, code) => stash(`<code>${code}</code>`)
+    );
+    html = protectBackslashEscapes(html, stash);
+    html = html.replace(
+      /\[([^\]]+)\]\(([^)\s]+)\)/g,
+      (_, label, href) => {
+        const safe = safeMarkdownHref(href);
+        const labelHtml = renderMarkdownInline(label);
+        return safe ? stash(
+          `<a href="${safe}" target="_blank" rel="noreferrer">${labelHtml}</a>`
+        ) : labelHtml;
+      }
+    );
+    html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/\*([^*]+)\*/g, "<em>$1</em>");
+    html = linkifyEscaped(html);
+    for (const [token, replacement] of placeholders.reverse()) {
+      html = html.split(token).join(replacement);
+    }
+    return html;
+  }
+  __name(renderMarkdownInline, "renderMarkdownInline");
+  function protectBackslashEscapes(html, stash, shouldProtect = isAsciiPunctuation) {
+    let protectedHtml = "";
+    for (let index = 0; index < html.length; index++) {
+      const character = html[index];
+      const escaped = html[index + 1];
+      if (character === "\\" && escaped && shouldProtect(escaped)) {
+        protectedHtml += stash(escaped);
+        index++;
+      } else {
+        protectedHtml += character;
+      }
+    }
+    return protectedHtml;
+  }
+  __name(protectBackslashEscapes, "protectBackslashEscapes");
+  function isAsciiPunctuation(character) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint >= 33 && codePoint <= 47 || codePoint >= 58 && codePoint <= 64 || codePoint >= 91 && codePoint <= 96 || codePoint >= 123 && codePoint <= 126;
+  }
+  __name(isAsciiPunctuation, "isAsciiPunctuation");
+
+  // src/types.ts
+  var TYPES = [
+    { id: "review_initialized", label: "init", color: "var(--evt-init)" },
+    { id: "work_object_proposed", label: "capture", color: "var(--evt-capture)" },
+    {
+      id: "review_observation_recorded",
+      label: "observation",
+      color: "var(--evt-observation)"
+    },
+    {
+      id: "review_assessment_recorded",
+      label: "assessment",
+      color: "var(--evt-assessment)"
+    },
+    { id: "input_request_opened", label: "request", color: "var(--evt-request)" },
+    {
+      id: "input_request_responded",
+      label: "response",
+      color: "var(--evt-response)"
+    },
+    { id: "review_note_imported", label: "note", color: "var(--evt-note)" },
+    {
+      id: "validation_check_recorded",
+      label: "validation",
+      color: "var(--evt-validation)"
+    }
+  ];
+  var TYPE_MAP = Object.fromEntries(TYPES.map((type) => [type.id, type]));
+  var VERIFICATION_LABELS = {
+    valid: "signature valid",
+    invalid: "signature invalid",
+    untrusted_key: "untrusted key",
+    unsigned: "unsigned"
+  };
+  var ENDORSEMENT_LABELS = {
+    "endorsement-trusted": "trusted endorsement",
+    unknown_endorser: "unknown endorser",
+    ambiguous_endorser: "ambiguous endorser"
+  };
+  var ASSESSMENT_LABELS = {
+    accepted: "accepted",
+    accepted_with_follow_up: "accepted-with-follow-up",
+    needs_changes: "needs-changes",
+    needs_clarification: "needs-clarification"
+  };
+  var REVISION_ATTENTION_VALUES = [
+    "open-request",
+    "unassessed",
+    "validation-context",
+    "follow-up",
+    "stale-fact"
+  ];
+  var DEFAULT_OPEN_FILES = 10;
+  var LARGE_FILE_ROWS = 500;
+
+  // src/projection.ts
+  function verificationChip(status) {
+    if (!status) return "";
+    const label = VERIFICATION_LABELS[status] || status;
+    return `<span class="${verifyClass(escapeHtml(status))}" title="advisory signature readback — reader-relative, never gates a write">${escapeHtml(label)}</span>`;
+  }
+  __name(verificationChip, "verificationChip");
+  function endorserDisplay(actorId) {
+    return actorId.replace(/^actor:git-(email|name):/, "");
+  }
+  __name(endorserDisplay, "endorserDisplay");
+  function endorsementRow(en) {
+    const cls = en.classification || "";
+    const label = ENDORSEMENT_LABELS[cls] || cls;
+    const parts = [
+      `<span class="${CLASS.endorseLabel}">${escapeHtml(label)}</span>`
+    ];
+    if (en.endorser) {
+      parts.push(
+        `<span class="${CLASS.endorseWho}">${escapeHtml(endorserDisplay(en.endorser))}</span>`
+      );
+    }
+    const attrs = en.endorserAttributes || {};
+    const attrBits = [];
+    if (attrs.kind) attrBits.push(attrs.kind);
+    const roles = attrs.roles || [];
+    if (roles.length) attrBits.push(roles.join(", "));
+    if (attrBits.length) {
+      parts.push(
+        `<span class="${CLASS.endorseAttrs}">${escapeHtml(attrBits.join(" · "))}</span>`
+      );
+    }
+    return `<li class="${endorseClass(escapeHtml(cls))}">${parts.join(" ")}</li>`;
+  }
+  __name(endorsementRow, "endorsementRow");
+  function endorsementsBlock(endorsements) {
+    const list = endorsements || [];
+    if (!list.length) return "";
+    const rows = list.map(endorsementRow).join("");
+    return `<div class="${CLASS.endorsements}" title="advisory endorsement readback — reader-relative, never gates a write">
+    <span class="${CLASS.endorsementsLabel}">endorsements</span>
+    <ul class="${CLASS.endorseList}">${rows}</ul>
+  </div>`;
+  }
+  __name(endorsementsBlock, "endorsementsBlock");
+  function assessmentDisplayLabel(value) {
+    return ASSESSMENT_LABELS[value] || value || "";
+  }
+  __name(assessmentDisplayLabel, "assessmentDisplayLabel");
+  var [
+    ATTENTION_OPEN_REQUEST,
+    ATTENTION_UNASSESSED,
+    ATTENTION_VALIDATION_CONTEXT,
+    ATTENTION_FOLLOW_UP,
+    ATTENTION_STALE_FACT
+  ] = REVISION_ATTENTION_VALUES;
+
+  // src/cards.ts
+  var VALIDATION_DISPOSITION_LABELS = {
+    outstanding: "outstanding",
+    current: "current result",
+    resolved_by_later_pass: "resolved by strictly later pass",
+    historical: "historical",
+    skipped: "skipped"
+  };
+  function renderActorAttribution(label, writer) {
+    const actorId = writer?.actorId ?? "";
+    if (!actorId) return "";
+    return `<span class="${CLASS.actorAttribution}">${label} ${actorChip(actorId)}</span>`;
+  }
+  __name(renderActorAttribution, "renderActorAttribution");
+  function renderRecordedTime(createdAt) {
+    if (!createdAt) return "";
+    return `<span class="${CLASS.annoTime}" title="${escapeHtml(createdAt)}">${escapeHtml(fmtDateTime(createdAt))}</span>`;
+  }
+  __name(renderRecordedTime, "renderRecordedTime");
+  function targetLabel(t) {
+    const tt = t ?? {};
+    switch (tt.kind) {
+      case "range":
+        return `${escapeHtml(tt.filePath)}:${tt.startLine}-${tt.endLine ?? tt.startLine} (${escapeHtml(tt.side || "new")})`;
+      case "file":
+        return escapeHtml(tt.filePath || "");
+      case "revision":
+        return "whole revision";
+      case "observation":
+        return `→ ${linkify(tt.observationId)}`;
+      case "input_request":
+        return `→ ${linkify(tt.inputRequestId)}`;
+      case "assessment":
+        return `→ ${linkify(tt.assessmentId)}`;
+      case "event":
+        return `→ ${linkify(tt.eventId)}`;
+      default:
+        return escapeHtml(tt.kind || "");
+    }
+  }
+  __name(targetLabel, "targetLabel");
+  function removedBodyCue(state) {
+    if (state !== "suppressed_present" && state !== "physically_removed") {
+      return null;
+    }
+    const title = state === "suppressed_present" ? "removal recorded; bytes still stored until compact" : "removed; bytes swept from the store";
+    return `<div class="${CLASS.factBodyRemoved}" title="${title}">content removed</div>`;
+  }
+  __name(removedBodyCue, "removedBodyCue");
+  function factCard(kind, opts) {
+    const tags = (opts.tags || []).filter(Boolean).map((t) => `<span class="${CLASS.badge}">${escapeHtml(t)}</span>`).join(" ");
+    const body = removedBodyCue(opts.bodyContentState) ?? renderBodyContent(opts.body, opts.bodyContentType);
+    const annotationId = opts.annotationId ? ` data-anno="${escapeHtml(opts.annotationId)}"` : "";
+    return `<div class="${annoContainerClass(kind)}"${annotationId}>
+    <div class="${CLASS.annoHead}">
+      <span class="${annoKindClass(kind)}">${kind}</span>
+      <span class="${CLASS.annoTrack}">${escapeHtml(opts.track || "")}</span>
+      ${renderActorAttribution("writer", opts.writer)}
+      <span class="${CLASS.annoTitle}">${linkify(opts.title || "")}</span>
+      ${opts.status ? `<span class="${factStatusClass(escapeHtml(opts.status))}">${escapeHtml(opts.status)}</span>` : ""}
+      ${opts.target ? `<span class="${CLASS.annoLoc}">${opts.target}</span>` : ""}
+      ${tags}
+      ${opts.verify || ""}
+      ${renderRecordedTime(opts.createdAt)}
+    </div>
+    ${body}
+    ${opts.endorsements || ""}
+    ${opts.extra || ""}</div>`;
+  }
+  __name(factCard, "factCard");
+  function renderObservationCard(o) {
+    const supersedes = o.supersedes ?? [];
+    const extra = supersedes.length ? `<div class="${CLASS.factRel}">supersedes ${supersedes.map(linkify).join(", ")}</div>` : "";
+    return factCard("observation", {
+      annotationId: o.id,
+      track: o.trackId,
+      title: o.title,
+      status: o.status,
+      target: targetLabel(o.target),
+      tags: o.tags,
+      body: o.body,
+      bodyContentType: o.bodyContentType,
+      bodyContentState: o.bodyContentState,
+      createdAt: o.createdAt,
+      verify: verificationChip(o.verificationStatus ?? ""),
+      endorsements: endorsementsBlock(o.endorsements),
+      writer: o.writer,
+      extra
+    });
+  }
+  __name(renderObservationCard, "renderObservationCard");
+  function renderInputRequestResponse(r) {
+    const reason = removedBodyCue(r.reasonContentState) ?? (r.reason ? renderBodyContent(r.reason, r.reasonContentType) : "");
+    return `<div class="${CLASS.factResponse}">
+    <div class="${CLASS.annoHead}">
+      <span class="${CLASS.outcome}">${escapeHtml(r.outcome)}</span>
+      ${r.id ? `<span class="${CLASS.annoLoc}">${linkify(r.id)}</span>` : ""}
+      ${renderActorAttribution("answered by", r.writer)}
+      ${verificationChip(r.verificationStatus ?? "")}
+      ${renderRecordedTime(r.createdAt)}
+    </div>
+    ${reason}
+    ${endorsementsBlock(r.endorsements)}
+  </div>`;
+  }
+  __name(renderInputRequestResponse, "renderInputRequestResponse");
+  function renderInputRequestCard(ir) {
+    const responses = (ir.responses ?? []).map(renderInputRequestResponse).join("");
+    return factCard("input-request", {
+      annotationId: ir.id,
+      track: ir.trackId,
+      title: ir.title,
+      status: ir.status,
+      target: targetLabel(ir.target),
+      tags: [ir.mode, ir.reasonCode],
+      body: ir.body,
+      bodyContentType: ir.bodyContentType,
+      bodyContentState: ir.bodyContentState,
+      createdAt: ir.createdAt,
+      verify: verificationChip(ir.verificationStatus ?? ""),
+      endorsements: endorsementsBlock(ir.endorsements),
+      writer: ir.writer,
+      extra: responses ? `<div class="${CLASS.factResponses}">${responses}</div>` : ""
+    });
+  }
+  __name(renderInputRequestCard, "renderInputRequestCard");
+  function renderAssessmentCard(a) {
+    const rel = [];
+    const replaces = a.replaces ?? [];
+    const relatedObservations = a.relatedObservations ?? [];
+    const relatedInputRequests = a.relatedInputRequests ?? [];
+    if (replaces.length) rel.push(`replaces ${replaces.map(linkify).join(", ")}`);
+    if (relatedObservations.length) {
+      rel.push(`re ${relatedObservations.map(linkify).join(", ")}`);
+    }
+    if (relatedInputRequests.length) {
+      rel.push(`re ${relatedInputRequests.map(linkify).join(", ")}`);
+    }
+    return factCard("assessment", {
+      annotationId: a.id,
+      track: a.trackId,
+      title: assessmentDisplayLabel(a.assessment ?? ""),
+      status: a.status,
+      target: targetLabel(a.target),
+      body: a.summary,
+      bodyContentType: a.summaryContentType,
+      bodyContentState: a.summaryContentState,
+      createdAt: a.createdAt,
+      verify: verificationChip(a.verificationStatus ?? ""),
+      endorsements: endorsementsBlock(a.endorsements),
+      writer: a.writer,
+      extra: rel.length ? `<div class="${CLASS.factRel}">${rel.join(" · ")}</div>` : ""
+    });
+  }
+  __name(renderAssessmentCard, "renderAssessmentCard");
+  function renderValidationCheckCard(v, disposition) {
+    const rel = [];
+    const logs = v.logArtifactContentHashes ?? [];
+    if (v.command) rel.push(escapeHtml(v.command));
+    if (logs.length) rel.push(`logs ${logs.map(linkify).join(", ")}`);
+    const continuity = disposition ? `<div class="${CLASS.validationContinuity} ${disposition === "outstanding" ? CLASS.validationContinuityOutstanding : CLASS.validationContinuityNeutral}" title="server-projected validation continuity">${escapeHtml(VALIDATION_DISPOSITION_LABELS[disposition])}</div>` : "";
+    const related = rel.length ? `<div class="${CLASS.factRel}">${rel.join(" · ")}</div>` : "";
+    return factCard("validation", {
+      annotationId: v.id,
+      track: v.trackId,
+      title: v.checkName,
+      status: v.status,
+      // passed | failed | errored | skipped → .fact-status.<status>
+      target: targetLabel(v.target),
+      tags: [v.trigger, v.exitCode != null ? `exit ${v.exitCode}` : null],
+      body: v.summary || "",
+      bodyContentType: v.summaryContentType,
+      bodyContentState: v.summaryContentState,
+      createdAt: v.completedAt || v.createdAt,
+      verify: verificationChip(v.verificationStatus ?? ""),
+      endorsements: endorsementsBlock(v.endorsements),
+      writer: v.writer,
+      extra: continuity + related
+    });
+  }
+  __name(renderValidationCheckCard, "renderValidationCheckCard");
+
+  // src/diff/highlight.ts
+  function validChannel(spans, len) {
+    let cursor = 0;
+    for (const span of spans) {
+      if (!Number.isInteger(span.start) || !Number.isInteger(span.end) || span.start < cursor || span.end < span.start || span.end > len) {
+        return false;
+      }
+      cursor = span.end;
+    }
+    return true;
+  }
+  __name(validChannel, "validChannel");
+  function segClass(kind, isEmph) {
+    const parts = [
+      kind ? tokClass(kind) : null,
+      isEmph ? CLASS.emph : null
+    ].filter(Boolean);
+    return parts.length > 0 ? parts.join(" ") : null;
+  }
+  __name(segClass, "segClass");
+  function highlightRowText(text, tokens, emphasis) {
+    const toks = tokens && validChannel(tokens, text.length) ? tokens : [];
+    const emph = emphasis && validChannel(emphasis, text.length) ? emphasis : [];
+    if (toks.length === 0 && emph.length === 0) return escapeHtml(text);
+    const points = [
+      .../* @__PURE__ */ new Set([
+        0,
+        text.length,
+        ...toks.flatMap((t) => [t.start, t.end]),
+        ...emph.flatMap((e) => [e.start, e.end])
+      ])
+    ].sort((a, b) => a - b);
+    let out = "";
+    for (let i = 0; i + 1 < points.length; i++) {
+      const a = points[i];
+      const b = points[i + 1];
+      if (a >= b) continue;
+      const seg = escapeHtml(text.slice(a, b));
+      const kind = toks.find((t) => t.start <= a && a < t.end)?.kind;
+      const isEmph = emph.some((e) => e.start <= a && a < e.end);
+      const cls = segClass(kind, isEmph);
+      out += cls ? `<span class="${cls}">${seg}</span>` : seg;
+    }
+    return out;
+  }
+  __name(highlightRowText, "highlightRowText");
+
+  // src/diff/render.ts
+  function filePathLabel(f) {
+    const oldp = f.old_path;
+    const newp = f.new_path;
+    return oldp && newp && oldp !== newp ? `${oldp} → ${newp}` : newp || oldp || "(unknown path)";
+  }
+  __name(filePathLabel, "filePathLabel");
+  function fileRowCount(f) {
+    return (f.hunks ?? []).reduce((n, h) => n + (h.rows ? h.rows.length : 0), 0);
+  }
+  __name(fileRowCount, "fileRowCount");
+  function classifyLowSignal(f) {
+    if (f.is_binary) return "binary";
+    if (f.is_mode_only) return "mode change only";
+    const hunks = f.hunks ?? [];
+    const renamed = f.status === "renamed" || !!f.old_path && !!f.new_path && f.old_path !== f.new_path;
+    if (renamed && !hunks.length) {
+      return f.similarity != null ? `rename ${f.similarity}%` : "rename";
+    }
+    if (fileRowCount(f) > LARGE_FILE_ROWS) return "large file";
+    return null;
+  }
+  __name(classifyLowSignal, "classifyLowSignal");
+  function fileFactCount(f, anchored) {
+    const oldp = f.old_path;
+    const newp = f.new_path;
+    let n = 0;
+    for (const a of anchored) {
+      const p = a.target?.filePath;
+      if (p === newp || p === oldp) n += 1;
+    }
+    return n;
+  }
+  __name(fileFactCount, "fileFactCount");
+  function fileForFact(files, filePath) {
+    return files.find((f) => f.new_path === filePath || f.old_path === filePath) ?? null;
+  }
+  __name(fileForFact, "fileForFact");
+  function rangeTouchesCapturedRows(a, file) {
+    if (!file) return false;
+    const t = a.target ?? {};
+    if (t.kind !== "range" || t.startLine == null) return true;
+    const start = t.startLine;
+    const side = t.side === "old" ? "old" : "new";
+    const end = t.endLine ?? start;
+    for (const h of file.hunks ?? []) {
+      for (const r of h.rows ?? []) {
+        const line = side === "old" ? r.old_line : r.new_line;
+        if (line != null && line >= start && line <= end) return true;
+      }
+    }
+    return false;
+  }
+  __name(rangeTouchesCapturedRows, "rangeTouchesCapturedRows");
+  function renderAnnotation(a, showLocation) {
+    const target = showLocation && a.target?.filePath ? a.target : void 0;
+    switch (a.kind) {
+      case "observation":
+        return renderObservationCard({
+          id: a.id,
+          trackId: a.track,
+          title: a.title,
+          status: a.status,
+          target,
+          tags: a.tags,
+          body: a.body,
+          bodyContentType: a.bodyContentType,
+          bodyContentState: a.bodyContentState,
+          createdAt: a.createdAt,
+          verificationStatus: a.verificationStatus,
+          endorsements: a.endorsements,
+          supersedes: a.supersedes,
+          writer: a.writer
+        });
+      case "input-request":
+        return renderInputRequestCard({
+          id: a.id,
+          trackId: a.track,
+          title: a.title,
+          status: a.status,
+          target,
+          mode: a.mode,
+          reasonCode: a.reasonCode,
+          body: a.body,
+          bodyContentType: a.bodyContentType,
+          bodyContentState: a.bodyContentState,
+          createdAt: a.createdAt,
+          verificationStatus: a.verificationStatus,
+          endorsements: a.endorsements,
+          responses: a.responses,
+          writer: a.writer
+        });
+      case "assessment":
+        return renderAssessmentCard({
+          id: a.id,
+          trackId: a.track,
+          assessment: a.assessment ?? a.title.replace(/^assessment:\s*/, "").trim(),
+          status: a.status,
+          target,
+          summary: a.body,
+          summaryContentType: a.bodyContentType,
+          summaryContentState: a.bodyContentState,
+          createdAt: a.createdAt,
+          verificationStatus: a.verificationStatus,
+          endorsements: a.endorsements,
+          replaces: a.replaces,
+          relatedObservations: a.relatedObservations,
+          relatedInputRequests: a.relatedInputRequests,
+          writer: a.writer
+        });
+      case "validation":
+        return renderValidationCheckCard(
+          {
+            id: a.id,
+            trackId: a.track,
+            checkName: a.title,
+            status: a.status,
+            target,
+            trigger: a.trigger,
+            exitCode: a.exitCode,
+            summary: a.body,
+            summaryContentType: a.bodyContentType,
+            summaryContentState: a.bodyContentState,
+            completedAt: a.completedAt,
+            createdAt: a.createdAt,
+            verificationStatus: a.verificationStatus,
+            endorsements: a.endorsements,
+            command: a.command,
+            logArtifactContentHashes: a.logArtifactContentHashes,
+            writer: a.writer
+          },
+          a.continuity
+        );
+      default:
+        return factCard(a.kind, {
+          annotationId: a.id,
+          track: a.track,
+          title: a.title,
+          status: a.status,
+          body: a.body,
+          bodyContentType: a.bodyContentType,
+          bodyContentState: a.bodyContentState,
+          createdAt: a.createdAt,
+          writer: a.writer,
+          tags: a.tags
+        });
+    }
+  }
+  __name(renderAnnotation, "renderAnnotation");
+  function renderDiffFactVicinity(f, anchored) {
+    const facts = anchored.filter((a) => {
+      const p = a.target?.filePath;
+      return p === f.new_path || p === f.old_path;
+    });
+    return `<div class="${CLASS.diffFactVicinity}" data-fact-vicinity="true">
+    <p>Large annotated file: showing review facts first.</p>
+    <button type="button" data-render-diff-file="true">Render all rows</button>
+    ${facts.map((a) => renderAnnotation(a, true)).join("")}
+  </div>`;
+  }
+  __name(renderDiffFactVicinity, "renderDiffFactVicinity");
+  function renderDiffFileHeader(f, anchored, reason, open) {
+    const n = fileFactCount(f, anchored);
+    const summary = reason ? `<span class="${CLASS.dfileSummary}">${escapeHtml(reason)}</span>` : "";
+    return `<header class="${CLASS.dfileHead}" role="button" tabindex="0" aria-expanded="${open}">
+    <span class="${diffStatusClass(escapeHtml(f.status))}">${escapeHtml(f.status)}</span>
+    <span class="${CLASS.dpath}">${escapeHtml(filePathLabel(f))}</span>${summary}
+    ${n ? `<span class="${CLASS.dfileNotes}">${n} note${n === 1 ? "" : "s"}</span>` : ""}</header>`;
+  }
+  __name(renderDiffFileHeader, "renderDiffFileHeader");
+  function renderDiffFileBody(f, anchored) {
+    const oldp = f.old_path;
+    const newp = f.new_path;
+    const fileFacts = anchored.filter((a) => {
+      const p = a.target?.filePath;
+      return p === newp || p === oldp;
+    });
+    const rangeFacts = fileFacts.filter((a) => a.target?.kind === "range");
+    const fileLevelFacts = fileFacts.filter((a) => a.target?.kind === "file");
+    const emitted = /* @__PURE__ */ new Set();
+    let html = "";
+    for (const a of fileLevelFacts) {
+      html += renderAnnotation(a, false);
+      emitted.add(a.id);
+    }
+    for (const m of f.metadata_rows ?? []) {
+      html += `<div class="${CLASS.drow} ${CLASS.drowMeta}"><span class="${CLASS.dtext}">${escapeHtml(m.text)}</span></div>`;
+    }
+    const factsByLine = /* @__PURE__ */ new Map();
+    for (const a of rangeFacts) {
+      const t = a.target ?? {};
+      if (t.startLine == null) continue;
+      const start = t.startLine;
+      const side = t.side === "old" ? "old" : "new";
+      const end = t.endLine ?? start;
+      for (let line = start; line <= end; line++) {
+        const key = `${side}:${line}`;
+        const bucket = factsByLine.get(key);
+        if (bucket) bucket.push(a);
+        else factsByLine.set(key, [a]);
+      }
+    }
+    const hunks = f.hunks ?? [];
+    for (const h of hunks) {
+      html += `<div class="${CLASS.dhunk}">${escapeHtml(h.header)}</div>`;
+      for (const r of h.rows ?? []) {
+        const matching = [];
+        const seen = /* @__PURE__ */ new Set();
+        const collect = /* @__PURE__ */ __name((key) => {
+          const bucket = factsByLine.get(key);
+          if (!bucket) return;
+          for (const a of bucket) {
+            if (!seen.has(a.id)) {
+              seen.add(a.id);
+              matching.push(a);
+            }
+          }
+        }, "collect");
+        if (r.old_line != null) collect(`old:${r.old_line}`);
+        if (r.new_line != null) collect(`new:${r.new_line}`);
+        const sign = r.kind === "added" ? "+" : r.kind === "removed" ? "-" : " ";
+        const noted = matching.length > 0;
+        const notedAttrs = noted ? ` data-anno="${escapeHtml(matching[0].id)}" tabindex="0" role="button"` : "";
+        html += `<div class="${drowClass(escapeHtml(r.kind), noted)}"${notedAttrs}>
+        <span class="${CLASS.ln}">${r.old_line ?? ""}</span>
+        <span class="${CLASS.ln}">${r.new_line ?? ""}</span>
+        <span class="${CLASS.sign}">${sign}</span>
+        <span class="${CLASS.dtext}">${highlightRowText(r.text, r.tokens, r.emphasis)}</span></div>`;
+        for (const a of matching) {
+          if (!emitted.has(a.id)) {
+            html += renderAnnotation(a, false);
+            emitted.add(a.id);
+          }
+        }
+      }
+    }
+    for (const a of rangeFacts) {
+      if (!emitted.has(a.id)) {
+        html += renderAnnotation(a, true);
+        emitted.add(a.id);
+      }
+    }
+    if (!hunks.length && !(f.metadata_rows ?? []).length) {
+      if (!classifyLowSignal(f)) {
+        html += `<div class="${CLASS.drow} ${CLASS.drowMeta}"><span class="${CLASS.dtext}">(no captured content)</span></div>`;
+      }
+    }
+    return html;
+  }
+  __name(renderDiffFileBody, "renderDiffFileBody");
+  function partitionAnnotations(files, annotations) {
+    const anchored = [];
+    const decisionContext = [];
+    const unanchored = [];
+    for (const annotation of annotations) {
+      const target = annotation.target ?? {};
+      if (annotation.kind === "validation") {
+        decisionContext.push(annotation);
+        continue;
+      }
+      if (target.kind !== "range" && target.kind !== "file") {
+        decisionContext.push(annotation);
+        continue;
+      }
+      if (!target.filePath) {
+        unanchored.push(annotation);
+        continue;
+      }
+      const file = fileForFact(files, target.filePath);
+      if (!file || target.kind === "range" && !rangeTouchesCapturedRows(annotation, file)) {
+        unanchored.push(annotation);
+        continue;
+      }
+      anchored.push(annotation);
+    }
+    return { anchored, decisionContext, unanchored };
+  }
+  __name(partitionAnnotations, "partitionAnnotations");
+  function renderDecisionContext(annotations) {
+    if (!annotations.length) return "";
+    return `<section class="${CLASS.diffDecisionContext}" aria-label="Decision context">
+    <h2>Decision context (${annotations.length})</h2>
+    <p>Review evidence and recorded assessments for this revision. Validation remains context only.</p>
+    <div class="${CLASS.annoGroup}">${annotations.map((annotation) => renderAnnotation(annotation, true)).join("")}</div>
+  </section>`;
+  }
+  __name(renderDecisionContext, "renderDecisionContext");
+  function renderUnanchoredFacts(annotations, filePaths) {
+    if (!annotations.length) return "";
+    return `<section class="${CLASS.diffUnanchoredFacts}" aria-label="Unanchored facts">
+    <h2>Unanchored facts (${annotations.length})</h2>
+    <div class="${CLASS.annoGroup}">${annotations.map(
+      (annotation) => `<div><p class="${CLASS.diffAnchorReason}">${escapeHtml(unanchoredReason(annotation, filePaths))}</p>${renderAnnotation(annotation, true)}</div>`
+    ).join("")}</div>
+  </section>`;
+  }
+  __name(renderUnanchoredFacts, "renderUnanchoredFacts");
+  function renderDiff(snapshotId, artifact, annotations) {
+    const annos = annotations ?? [];
+    const files = artifact.snapshot?.files ?? [];
+    const filePaths = /* @__PURE__ */ new Set();
+    for (const f of files) {
+      if (f.new_path) filePaths.add(f.new_path);
+      if (f.old_path) filePaths.add(f.old_path);
+    }
+    const { anchored, decisionContext, unanchored } = partitionAnnotations(
+      files,
+      annos
+    );
+    const ctx = {
+      snapshotId,
+      files,
+      anchored,
+      decisionContext,
+      unanchored,
+      filePaths
+    };
+    const counts = {};
+    for (const a of annos) {
+      counts[a.kind] = (counts[a.kind] ?? 0) + 1;
+    }
+    const breakdown = Object.entries(counts).map(([k, n]) => `${n} ${k}${n === 1 ? "" : "s"}`).join(", ");
+    let html = `<div class="${CLASS.annoSummary}">${annos.length} review fact${annos.length === 1 ? "" : "s"} on this revision${breakdown ? ` · ${breakdown}` : ""}${unanchored.length ? ` · ${unanchored.length} not anchored to a diff line` : ""}</div>`;
+    html += renderDecisionContext(decisionContext);
+    html += renderUnanchoredFacts(unanchored, filePaths);
+    if (!files.length) {
+      return {
+        html: `${html}<p class="${CLASS.empty}">No files captured in this snapshot.</p>`,
+        ctx
+      };
+    }
+    let openBudget = DEFAULT_OPEN_FILES;
+    html += files.map((f, i) => {
+      const reason = classifyLowSignal(f);
+      const annotated = fileFactCount(f, anchored) > 0;
+      const annotatedLarge = annotated && fileRowCount(f) > LARGE_FILE_ROWS;
+      const open = annotated && !annotatedLarge || (reason ? false : openBudget-- > 0);
+      const expanded = annotatedLarge || open;
+      const body = annotatedLarge ? renderDiffFactVicinity(f, anchored) : open ? renderDiffFileBody(f, anchored) : "";
+      const lowAttr = reason ? ` data-lowsignal="${escapeHtml(reason)}"` : "";
+      const bodyAttr = annotatedLarge ? ` data-fact-vicinity="true"` : open ? ` data-rendered="1"` : "";
+      return `<section class="${dfileClass(!!reason)}" data-dfile="${i}" data-expanded="${expanded}"${lowAttr}>${renderDiffFileHeader(f, anchored, reason, expanded)}<div class="${CLASS.dfileBody}" data-dfile-body="${i}"${bodyAttr}>${body}</div></section>`;
+    }).join("");
+    return { html, ctx };
+  }
+  __name(renderDiff, "renderDiff");
+  function unanchoredReason(a, filePaths) {
+    const t = a.target ?? {};
+    if (t.kind !== "range" && t.kind !== "file") {
+      return "not a file or range target";
+    }
+    if (!t.filePath) return "target missing file path";
+    if (t.kind === "range" && filePaths.has(t.filePath)) {
+      return "line outside captured rows";
+    }
+    if (!filePaths.has(t.filePath)) return "file missing from snapshot";
+    return "not anchored to a diff line";
+  }
+  __name(unanchoredReason, "unanchoredReason");
 
   // src/change-inspector-render.ts
   var FILTER_OPTIONS = [
@@ -778,7 +2973,590 @@
       toggle.textContent = values.length ? `Filters · ${values.length}` : "Filters";
   }
   __name(syncFilterChrome, "syncFilterChrome");
-  function renderDetail(snapshot2, actions2) {
+  function detailHeading(text, level = 2) {
+    const heading = document.createElement(`h${level}`);
+    heading.textContent = text;
+    return heading;
+  }
+  __name(detailHeading, "detailHeading");
+  function detailLine(text, className) {
+    const line = document.createElement("p");
+    if (className) line.className = className;
+    line.textContent = text;
+    return line;
+  }
+  __name(detailLine, "detailLine");
+  function shortExact2(revision) {
+    return `${revision.revisionId} · ${revision.objectArtifactContentHash}`;
+  }
+  __name(shortExact2, "shortExact");
+  function renderedFactBody(content, contentType) {
+    const body = document.createElement("div");
+    body.className = "anno-body";
+    const text = content.kind === "observation" || content.kind === "input_request" ? content.body : content.kind === "assessment" || content.kind === "validation" ? content.summary : void 0;
+    if (text) body.innerHTML = renderBodyContent(text, contentType);
+    return body;
+  }
+  __name(renderedFactBody, "renderedFactBody");
+  function renderFacts(reading, route, actions2) {
+    const facts = document.createElement("section");
+    facts.className = "detail-facts";
+    facts.append(detailHeading("Facts", 3));
+    const groups = /* @__PURE__ */ new Map();
+    for (const fact of reading.document.factPresentations) {
+      const family = groups.get(fact.family) ?? [];
+      family.push(fact);
+      groups.set(fact.family, family);
+    }
+    for (const [family, items] of groups) {
+      const group = document.createElement("section");
+      group.append(detailHeading(family.replaceAll("_", " "), 4));
+      for (const fact of items) {
+        const card = document.createElement("article");
+        card.className = "unit-card";
+        card.dataset.factId = fact.factId;
+        card.tabIndex = -1;
+        card.append(
+          detailLine(fact.factId, "mono"),
+          detailLine(
+            `origin: ${shortExact2(fact.originRevision)} · context: ${fact.contextChangeId ?? "unavailable"} · currency: ${fact.revisionCurrency.replaceAll("_", " ")}`
+          ),
+          detailLine(
+            `family: ${fact.familyState.replaceAll("_", " ")} · availability: ${fact.availability.replaceAll("_", " ")} · actor: ${fact.actorId}${fact.trackId ? ` · track: ${fact.trackId}` : ""}`
+          )
+        );
+        const presentedInRevision = fact.presentedInRevision;
+        if (presentedInRevision) {
+          const applicablePort = reading.document.factPorts.find(
+            (port) => port.applicability === "applicable" && port.originRevision.revisionId === fact.originRevision.revisionId && port.originRevision.objectArtifactContentHash === fact.originRevision.objectArtifactContentHash && port.targetRevision.revisionId === presentedInRevision.revisionId && port.targetRevision.objectArtifactContentHash === presentedInRevision.objectArtifactContentHash && factRefLabel(port.originFact) === factRefLabelFromFactId(fact)
+          );
+          card.append(
+            detailLine(
+              `presented in: ${shortExact2(presentedInRevision)} · port: ${fact.portRelation?.replaceAll("_", " ") ?? (applicablePort ? `${applicablePort.relation.replaceAll("_", " ")} (${applicablePort.portId})` : "see Fact ports")}`
+            )
+          );
+        }
+        const content = reading.document.factContentPresentations?.[fact.factId];
+        if (content) {
+          card.append(
+            detailLine(
+              `body: ${content.bodyContentState.replaceAll("_", " ")} · ${content.contentType}`
+            ),
+            renderedFactBody(content.content, content.contentType)
+          );
+        }
+        const focus = document.createElement("button");
+        focus.type = "button";
+        focus.className = "ghost";
+        focus.textContent = "Focus fact";
+        focus.addEventListener(
+          "click",
+          () => actions2.navigate({
+            kind: route.kind,
+            changeId: route.changeId,
+            revision: route.revision,
+            query: route.query,
+            focus: { factId: fact.factId }
+          })
+        );
+        card.append(focus);
+        group.append(card);
+      }
+      facts.append(group);
+    }
+    if (groups.size === 0) facts.append(message("No facts."));
+    return facts;
+  }
+  __name(renderFacts, "renderFacts");
+  function factRefLabel(fact) {
+    return fact.kind === "observation" ? `observation: ${fact.observationId}` : `input request: ${fact.inputRequestId}`;
+  }
+  __name(factRefLabel, "factRefLabel");
+  function factRefLabelFromFactId(fact) {
+    return fact.family === "observation" ? `observation: ${fact.factId}` : fact.family === "input_request" ? `input request: ${fact.factId}` : "";
+  }
+  __name(factRefLabelFromFactId, "factRefLabelFromFactId");
+  function renderFactPorts(reading) {
+    const ports = document.createElement("section");
+    ports.append(detailHeading("Fact ports", 3));
+    for (const port of reading.document.factPorts) {
+      const item = document.createElement("article");
+      item.className = "unit-card";
+      item.append(
+        detailLine(port.portId, "mono"),
+        detailLine(
+          `origin: ${factRefLabel(port.originFact)} · ${shortExact2(port.originRevision)}`
+        ),
+        detailLine(
+          `target: ${shortExact2(port.targetRevision)} · ${port.relation.replaceAll("_", " ")}`
+        ),
+        detailLine(
+          `target fact: ${port.targetFact ? factRefLabel(port.targetFact) : "none"} · applicability: ${port.applicability.replaceAll("_", " ")}`
+        ),
+        detailLine(
+          `actor: ${port.actorId}${port.trackId ? ` · track: ${port.trackId}` : ""}${port.contextChangeId ? ` · context: ${port.contextChangeId}` : ""}`
+        )
+      );
+      if (port.rationaleContentHash)
+        item.append(
+          detailLine(`rationale: ${port.rationaleContentHash}`, "mono")
+        );
+      for (const diagnostic of port.diagnostics)
+        item.append(detailLine(diagnostic));
+      ports.append(item);
+    }
+    if (reading.document.factPorts.length === 0)
+      ports.append(message("No fact ports."));
+    return ports;
+  }
+  __name(renderFactPorts, "renderFactPorts");
+  function openCapturedResource(route, actions2) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ghost";
+    button.textContent = "Open authoritative captured diff";
+    button.addEventListener(
+      "click",
+      () => actions2.navigate({
+        kind: "resource",
+        changeId: route.changeId,
+        revision: route.revision,
+        query: route.query,
+        ...route.focus ? { focus: route.focus } : {}
+      })
+    );
+    return button;
+  }
+  __name(openCapturedResource, "openCapturedResource");
+  function renderAssociations(reading, route, actions2) {
+    const section = document.createElement("section");
+    section.append(detailHeading("Association comparisons", 3));
+    for (const association of reading.document.associations) {
+      const item = document.createElement("article");
+      item.className = "unit-card";
+      item.append(
+        detailLine(association.comparison.associationId, "mono"),
+        detailLine(
+          `commit: ${association.comparison.commitOid} · base: ${association.comparison.comparisonBase}`
+        ),
+        detailLine(
+          `view: ${association.comparison.viewKind} · state: ${association.state} · proof: ${association.proofAvailability}`
+        )
+      );
+      if (association.comparison.proofRef)
+        item.append(
+          detailLine(`proof: ${association.comparison.proofRef}`, "mono")
+        );
+      for (const diagnostic of association.diagnostics)
+        item.append(detailLine(diagnostic));
+      item.append(openCapturedResource(route, actions2));
+      section.append(item);
+    }
+    if (reading.document.associations.length === 0)
+      section.append(message("No association comparisons."));
+    return section;
+  }
+  __name(renderAssociations, "renderAssociations");
+  function capturedDiffArtifact(documentValue) {
+    if (typeof documentValue !== "object" || documentValue === null) return null;
+    const documentRecord = documentValue;
+    const snapshot2 = documentRecord.snapshot;
+    if (typeof snapshot2 !== "object" || snapshot2 === null) return null;
+    const files = snapshot2.files;
+    return Array.isArray(files) ? documentValue : null;
+  }
+  __name(capturedDiffArtifact, "capturedDiffArtifact");
+  function annotationTarget(target) {
+    return {
+      kind: target.kind,
+      filePath: target.filePath,
+      startLine: target.startLine,
+      endLine: target.endLine,
+      side: target.side,
+      observationId: target.observationId,
+      inputRequestId: target.inputRequestId,
+      assessmentId: target.assessmentId,
+      eventId: target.eventId
+    };
+  }
+  __name(annotationTarget, "annotationTarget");
+  function annotationBody(content) {
+    return content.kind === "observation" || content.kind === "input_request" ? content.body : content.kind === "assessment" || content.kind === "validation" ? content.summary : void 0;
+  }
+  __name(annotationBody, "annotationBody");
+  function annotationForFact(fact, presentation) {
+    const content = presentation.content;
+    const base = {
+      id: fact.factId,
+      kind: content.kind === "input_request" ? "input-request" : content.kind,
+      title: content.kind === "assessment" ? `assessment: ${content.assessment}` : content.kind === "validation" ? content.checkName : content.title,
+      track: fact.trackId ?? "untracked",
+      body: annotationBody(content),
+      bodyContentType: presentation.contentType,
+      bodyContentState: presentation.bodyContentState,
+      ...fact.target ? { target: annotationTarget(fact.target) } : {}
+    };
+    if (content.kind === "input_request") {
+      base.status = content.status;
+      base.responses = content.responses?.map((response) => ({
+        id: response.responseId,
+        outcome: response.outcome,
+        reason: response.reason,
+        reasonContentType: response.contentType,
+        reasonContentState: response.bodyContentState,
+        verificationStatus: response.availability
+      }));
+    } else if (content.kind === "assessment") {
+      base.assessment = content.assessment;
+      base.status = fact.familyState;
+    } else if (content.kind === "validation") {
+      base.status = content.status;
+      base.command = content.command;
+    }
+    return base;
+  }
+  __name(annotationForFact, "annotationForFact");
+  function annotationsForExactRevision(detail) {
+    const annotations = [];
+    for (const fact of detail.factPresentations) {
+      const content = detail.factContentPresentations?.[fact.factId];
+      if (fact.family !== content?.content.kind || fact.originRevision.revisionId !== detail.revision.revisionId || fact.originRevision.objectArtifactContentHash !== detail.revision.objectArtifactContentHash || !content) {
+        continue;
+      }
+      if (fact.target && fact.target.revisionId !== detail.revision.revisionId)
+        continue;
+      annotations.push(annotationForFact(fact, content));
+    }
+    return annotations;
+  }
+  __name(annotationsForExactRevision, "annotationsForExactRevision");
+  function bindCapturedDiffInteractions(diff, rendered) {
+    rendered.ctx.files.forEach((file, index) => {
+      const section = diff.querySelector(`[data-dfile="${index}"]`);
+      const header = section?.querySelector(".dfile-head");
+      const body = section?.querySelector(
+        `[data-dfile-body="${index}"]`
+      );
+      const renderBody = /* @__PURE__ */ __name(() => {
+        if (!section || !body) return;
+        body.innerHTML = renderDiffFileBody(file, rendered.ctx.anchored);
+        body.dataset.rendered = "1";
+        section.dataset.expanded = "true";
+      }, "renderBody");
+      const toggle = /* @__PURE__ */ __name(() => {
+        if (!section || !body) return;
+        if (section.dataset.expanded === "true") {
+          section.dataset.expanded = "false";
+          return;
+        }
+        renderBody();
+      }, "toggle");
+      header?.addEventListener("click", toggle);
+      header?.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        toggle();
+      });
+      body?.addEventListener("click", (event) => {
+        const trigger = event.target?.closest(
+          "[data-render-diff-file]"
+        );
+        if (!trigger) return;
+        event.preventDefault();
+        renderBody();
+      });
+    });
+  }
+  __name(bindCapturedDiffInteractions, "bindCapturedDiffInteractions");
+  function renderCapturedDiff(resource, annotations = []) {
+    const artifact = capturedDiffArtifact(resource.capturedDocument);
+    if (artifact === null) {
+      const refusal = document.createElement("section");
+      refusal.className = "detail-facts";
+      refusal.append(
+        message(
+          "This exact resource does not contain a captured snapshot. The Inspector will not reconstruct a diff from Git or an associated commit."
+        )
+      );
+      return refusal;
+    }
+    const diff = document.createElement("section");
+    diff.className = "captured-diff";
+    const rendered = renderDiff(
+      resource.resource.objectId,
+      artifact,
+      annotations
+    );
+    diff.innerHTML = rendered.html;
+    rendered.ctx.files.forEach((file, index) => {
+      const section = diff.querySelector(`[data-dfile="${index}"]`);
+      const path = file.new_path ?? file.old_path;
+      if (section && path) {
+        section.dataset.filePath = path;
+        if (file.old_path) section.dataset.oldFilePath = file.old_path;
+        if (file.new_path) section.dataset.newFilePath = file.new_path;
+        section.tabIndex = -1;
+      }
+    });
+    bindCapturedDiffInteractions(diff, rendered);
+    return diff;
+  }
+  __name(renderCapturedDiff, "renderCapturedDiff");
+  function renderCapturedResource(resource, route, actions2) {
+    const nodes = [
+      detailHeading("Authoritative captured diff"),
+      detailLine(shortExact2(resource.resource.revision), "mono"),
+      detailLine(`availability: ${resource.availability.replaceAll("_", " ")}`)
+    ];
+    if (resource.availability !== "available") {
+      nodes.push(
+        message(
+          "Captured bytes are unavailable. No live or associated-commit bytes were substituted."
+        )
+      );
+    } else {
+      nodes.push(
+        detailLine(`captured document: ${resource.capturedDocumentHash}`, "mono")
+      );
+      nodes.push(renderCapturedDiff(resource));
+    }
+    for (const diagnostic of resource.diagnostics)
+      nodes.push(detailLine(diagnostic));
+    const back = document.createElement("button");
+    back.type = "button";
+    back.className = "ghost";
+    back.textContent = "Back to exact Revision";
+    back.addEventListener(
+      "click",
+      () => actions2.navigate({
+        kind: "revision",
+        changeId: route.changeId,
+        revision: route.revision,
+        query: route.query,
+        ...route.focus ? { focus: route.focus } : {}
+      })
+    );
+    nodes.push(back);
+    return nodes;
+  }
+  __name(renderCapturedResource, "renderCapturedResource");
+  function renderChangeDetail(detail) {
+    const nodes = [
+      detailHeading("Change"),
+      detailLine(detail.summary.changeId, "mono"),
+      detailLine(
+        `declaration: ${detail.summary.declarationState.replaceAll("_", " ")} · topology: ${detail.summary.topology.replaceAll("_", " ")} · lifecycle: ${detail.summary.lifecycle.replaceAll("_", " ")}`
+      ),
+      detailLine(
+        `members: ${detail.summary.memberCount} · current peers: ${detail.currentRevisionRefs.map(shortExact2).join("; ") || "none"}`
+      )
+    ];
+    const sections = [
+      [
+        "Member Revisions",
+        detail.memberRevisions.map(
+          (member) => `${shortExact2(member.revision)} · support: ${member.supportingClaimIds.join(", ") || "none"}`
+        )
+      ],
+      [
+        "Unavailable Members",
+        detail.unavailableMemberRevisions.map(
+          (member) => `${member.revisionId} · ${member.reason.replaceAll("_", " ")} · support: ${member.supportingClaimIds.join(", ") || "none"}`
+        )
+      ],
+      [
+        "Membership Claims",
+        detail.membershipClaims.map(
+          (claim) => `${claim.claimId} · revision: ${claim.revisionId} · ${claim.active ? "active" : "inactive"} · supports: ${claim.supports.length} · withdrawals: ${claim.withdrawals.length}`
+        )
+      ],
+      [
+        "Membership Withdrawals",
+        detail.membershipWithdrawals.map(
+          (withdrawal) => `${withdrawal.claimId} · support carriers: ${withdrawal.supports.length}`
+        )
+      ],
+      [
+        "Revision Relation Claims",
+        detail.relationClaims.map(
+          (claim) => `${claim.claimId} · ${shortExact2(claim.predecessor)} → ${shortExact2(claim.successor)} · ${claim.active ? "active" : "inactive"}`
+        )
+      ],
+      [
+        "Relation Withdrawals",
+        detail.relationWithdrawals.map(
+          (withdrawal) => `${withdrawal.claimId} · support carriers: ${withdrawal.supports.length}`
+        )
+      ],
+      [
+        "Effective Supersedes",
+        detail.effectiveSupersedes.map(
+          ([successor, predecessor]) => `${shortExact2(predecessor)} → ${shortExact2(successor)}`
+        )
+      ],
+      [
+        "Pending or Conflicting Edges",
+        detail.pendingOrConflictingEdges.map(
+          (claim) => `${claim.claimId} · ${shortExact2(claim.predecessor)} → ${shortExact2(claim.successor)} · ${claim.active ? "active" : "inactive"}`
+        )
+      ],
+      [
+        "Change Links",
+        detail.links.map(
+          (link) => `${link.leftChangeId} · ${link.relation.replaceAll("_", " ")} · ${link.rightChangeId}`
+        )
+      ],
+      [
+        "Current Revision Qualification",
+        detail.perCurrentRevisionQualification.map(
+          (qualification) => `${shortExact2(qualification.revision)} · ${qualification.qualified ? "qualified" : "not qualified"}`
+        )
+      ],
+      ["Operative Obligations", detail.operativeObligations],
+      ["Diagnostics", detail.diagnostics]
+    ];
+    for (const [title, entries] of sections) {
+      const section = document.createElement("section");
+      section.append(detailHeading(title, 3));
+      if (entries.length === 0) section.append(message("None."));
+      for (const entry of entries) section.append(detailLine(entry));
+      nodes.push(section);
+    }
+    return nodes;
+  }
+  __name(renderChangeDetail, "renderChangeDetail");
+  function renderReading(reading, snapshot2, actions2) {
+    const route = snapshot2.route;
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "ghost";
+    copy.textContent = "Copy link";
+    copy.addEventListener("click", () => copyExact(location.href));
+    if (reading.kind === "change") {
+      return [...renderChangeDetail(reading.document), copy];
+    }
+    if (reading.kind === "resource" && route.kind === "resource")
+      return [...renderCapturedResource(reading.document, route, actions2), copy];
+    if (reading.kind === "interdiff" && route.kind === "interdiff") {
+      const nodes = [
+        detailHeading("Ordered Revision interdiff"),
+        detailLine(
+          `${shortExact2(reading.document.interdiff.from)} → ${shortExact2(reading.document.interdiff.to)}`,
+          "mono"
+        ),
+        detailLine(
+          `availability: ${reading.document.availability.replaceAll("_", " ")} · algorithm: ${reading.document.interdiff.algorithmVersion}`
+        ),
+        detailLine("This is a comparison, not the authoritative captured diff.")
+      ];
+      if (reading.document.comparison !== void 0) {
+        const comparison = document.createElement("pre");
+        comparison.textContent = JSON.stringify(
+          reading.document.comparison,
+          null,
+          2
+        );
+        nodes.push(comparison);
+      }
+      for (const diagnostic of reading.document.diagnostics)
+        nodes.push(detailLine(diagnostic));
+      for (const revision of [route.from, route.to]) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "ghost";
+        button.textContent = `Open authoritative captured diff: ${revision.revisionId}`;
+        button.addEventListener(
+          "click",
+          () => actions2.navigate({
+            kind: "resource",
+            changeId: route.changeId,
+            revision,
+            query: route.query
+          })
+        );
+        nodes.push(button);
+      }
+      nodes.push(copy);
+      return nodes;
+    }
+    if ((reading.kind === "revision" || reading.kind === "association") && (route.kind === "revision" || route.kind === "association")) {
+      const document2 = reading.document;
+      const nodes = [
+        detailHeading(
+          reading.kind === "association" ? "Association comparisons" : "Exact Revision"
+        ),
+        detailLine(shortExact2(document2.revision), "mono"),
+        detailLine(
+          `currency: ${document2.revisionCurrency.replaceAll("_", " ")} · relation: ${document2.relationClassification}`
+        ),
+        detailLine(
+          `captured resource: ${document2.availability.replaceAll("_", " ")}`
+        )
+      ];
+      if (reading.kind === "revision") {
+        nodes.push(
+          detailHeading("Authoritative captured diff", 3),
+          renderCapturedDiff(
+            document2.exactRevisionDocument,
+            annotationsForExactRevision(document2)
+          ),
+          renderFacts(reading, route, actions2),
+          renderFactPorts(reading)
+        );
+      }
+      nodes.push(
+        renderAssociations(reading, route, actions2),
+        openCapturedResource(route, actions2),
+        copy
+      );
+      return nodes;
+    }
+    return [
+      message("Reading surface no longer matches the selected exact route.")
+    ];
+  }
+  __name(renderReading, "renderReading");
+  function exactFocusTarget(detail, route) {
+    if (route.kind !== "revision" && route.kind !== "resource" && route.kind !== "association" && route.kind !== "interdiff") {
+      return null;
+    }
+    const focus = route.focus;
+    if (!focus) return null;
+    const targets = [];
+    if (focus.factId) {
+      const fact = Array.from(
+        detail.querySelectorAll("[data-fact-id], [data-anno]")
+      ).find(
+        (element) => element.dataset.factId === focus.factId || element.dataset.anno === focus.factId
+      );
+      if (fact) targets.push(fact);
+    }
+    if (focus.filePath) {
+      const file = Array.from(
+        detail.querySelectorAll("[data-file-path]")
+      ).find(
+        (element) => element.dataset.filePath === focus.filePath || element.dataset.oldFilePath === focus.filePath || element.dataset.newFilePath === focus.filePath
+      );
+      if (file) targets.push(file);
+    }
+    for (const target of targets) {
+      target.dataset.exactFocus = "true";
+      target.setAttribute("aria-current", "true");
+    }
+    return targets[0] ?? null;
+  }
+  __name(exactFocusTarget, "exactFocusTarget");
+  function applyExactFocus(detail, route) {
+    const target = exactFocusTarget(detail, route);
+    if (!target) return;
+    if (target.dataset.dfile !== void 0 && target.dataset.expanded !== "true") {
+      target.querySelector(".dfile-head")?.click();
+    }
+    target.scrollIntoView?.({ block: "center", behavior: "auto" });
+    target.focus({ preventScroll: true });
+  }
+  __name(applyExactFocus, "applyExactFocus");
+  function renderDetail(snapshot2, actions2, presentation) {
     const detail = document.querySelector("#detail-body");
     if (!detail) return;
     if (snapshot2.route.kind === "invalid") {
@@ -793,13 +3571,27 @@
       detail.replaceChildren(message("Select a Change or exact Revision."));
       return;
     }
+    if (presentation.refusal !== null) {
+      detail.replaceChildren(
+        message(`Reader refused this exact surface: ${presentation.refusal}`)
+      );
+      return;
+    }
+    if (presentation.reading !== null) {
+      detail.replaceChildren(
+        ...renderReading(presentation.reading, snapshot2, actions2)
+      );
+      applyExactFocus(detail, snapshot2.route);
+      return;
+    }
     const heading = document.createElement("h2");
-    heading.textContent = snapshot2.route.kind === "change" ? "Change" : "Exact Revision";
+    heading.textContent = snapshot2.route.kind === "change" ? "Change" : snapshot2.route.kind === "resource" ? "Captured resource" : snapshot2.route.kind === "association" ? "Association comparison" : snapshot2.route.kind === "interdiff" ? "Revision interdiff" : "Exact Revision";
     const identity = document.createElement("p");
     identity.className = "mono";
-    identity.textContent = snapshot2.route.kind === "change" ? `Change ID: ${snapshot2.route.changeId}` : `Revision ID: ${snapshot2.route.revision.revisionId} · artifact hash: ${snapshot2.route.revision.objectArtifactContentHash}`;
+    identity.textContent = snapshot2.route.kind === "change" ? `Change ID: ${snapshot2.route.changeId}` : snapshot2.route.kind === "interdiff" ? `From: ${snapshot2.route.from.revisionId} · ${snapshot2.route.from.objectArtifactContentHash}
+To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactContentHash}` : `Revision ID: ${snapshot2.route.revision.revisionId} · artifact hash: ${snapshot2.route.revision.objectArtifactContentHash}`;
     const placeholder = message(
-      snapshot2.route.kind === "change" ? "Select an explicit current Revision to inspect its exact context." : "Exact Revision selected. Rich facts and captured resources load in the next Inspector slice."
+      snapshot2.route.kind === "change" ? "Select an explicit current Revision to inspect its exact context." : "Exact reading surface is loading."
     );
     const copyLink = document.createElement("button");
     copyLink.type = "button";
@@ -832,7 +3624,10 @@
     detail.replaceChildren(heading, identity, copyLink, placeholder, peers);
   }
   __name(renderDetail, "renderDetail");
-  function renderChangeInspector(snapshot2, actions2) {
+  function renderChangeInspector(snapshot2, actions2, presentation = {
+    reading: null,
+    refusal: null
+  }) {
     const master = document.querySelector("#master");
     if (!master) return;
     const routeDiagnostic = document.querySelector("#route-diagnostic");
@@ -844,13 +3639,13 @@
     clearError();
     if (snapshot2.route.kind === "invalid") {
       master.replaceChildren(message("Cannot open this Inspector link."));
-      renderDetail(snapshot2, actions2);
+      renderDetail(snapshot2, actions2, presentation);
       return;
     }
     const route = snapshot2.route;
     if (snapshot2.generation === null) {
       master.replaceChildren(message("Loading Change generation…"));
-      renderDetail(snapshot2, actions2);
+      renderDetail(snapshot2, actions2, presentation);
       return;
     }
     const lens = lensForRoute(route);
@@ -979,7 +3774,7 @@
       `${snapshot2.generation.attention.changes.length} need attention`
     );
     setText("#stat-hash", snapshot2.generation.changes.projectionStamp);
-    renderDetail(snapshot2, actions2);
+    renderDetail(snapshot2, actions2, presentation);
   }
   __name(renderChangeInspector, "renderChangeInspector");
   function renderChangeInspectorUnavailable(availability) {
@@ -1010,266 +3805,6 @@
   }
   __name(renderChangeInspectorRefusal, "renderChangeInspectorRefusal");
 
-  // ../../../documents/change_reader_profile_v1.json
-  var change_reader_profile_v1_default = {
-    minimumReaderProfile: "review_change_revision_v1",
-    documents: {
-      "pointbreak.attention-list": 2,
-      "pointbreak.inspect-attention": 2,
-      "pointbreak.inspect-changes-page": 1,
-      "pointbreak.inspect-reader-profile": 1,
-      "pointbreak.reader-upgrade-required": 1,
-      "pointbreak.review-association-comparison": 1,
-      "pointbreak.review-change": 1,
-      "pointbreak.review-change-list": 1,
-      "pointbreak.review-change-revision": 1,
-      "pointbreak.review-revision": 3,
-      "pointbreak.review-revision-interdiff": 1,
-      "pointbreak.review-revision-resource": 1,
-      "pointbreak.store-migration-in-progress": 1,
-      "pointbreak.store-migration-required": 1
-    }
-  };
-
-  // src/change-protocol.ts
-  var CHANGE_PAGE_LIMIT = 50;
-  var CHANGE_READER_PROFILE = change_reader_profile_v1_default.minimumReaderProfile;
-  var CHANGE_READER_DOCUMENTS = change_reader_profile_v1_default.documents;
-  var TOPOLOGY_VALUES = /* @__PURE__ */ new Set([
-    "initial",
-    "replacement",
-    "replacement_divergent",
-    "consolidation",
-    "parallel_current",
-    "mixed",
-    "incomplete",
-    "cycle_conflicted"
-  ]);
-  var LIFECYCLE_VALUES = /* @__PURE__ */ new Set([
-    "incomplete",
-    "conflicted",
-    "in_progress",
-    "accepted"
-  ]);
-  var ATTENTION_VALUES = /* @__PURE__ */ new Set([
-    "clear",
-    "in_progress",
-    "incomplete",
-    "conflicted"
-  ]);
-  var AVAILABILITY_VALUES = /* @__PURE__ */ new Set(["available", "incomplete"]);
-  function buildChangePageUrl(lens, query = {}) {
-    const limit = query.limit ?? CHANGE_PAGE_LIMIT;
-    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
-      throw new Error("Change page limit must be an integer from 1 through 100");
-    }
-    const params = new URLSearchParams({ limit: String(limit) });
-    if (query.after !== void 0) {
-      if (!query.after || new TextEncoder().encode(query.after).length > 4096) {
-        throw new Error(
-          "Change page continuation must be a non-empty opaque token"
-        );
-      }
-      params.set("after", query.after);
-    }
-    if (query.q !== void 0) {
-      const normalized = trimUnicodeWhitespace(query.q).toLowerCase();
-      if (!normalized || new TextEncoder().encode(normalized).length > 256) {
-        throw new Error(
-          "Change page query must be non-empty and at most 256 bytes"
-        );
-      }
-      params.set("q", normalized);
-    }
-    appendEnum(params, "topology", query.topology, TOPOLOGY_VALUES);
-    appendEnum(params, "lifecycle", query.lifecycle, LIFECYCLE_VALUES);
-    appendEnum(params, "attention", query.attention, ATTENTION_VALUES);
-    appendEnum(params, "availability", query.availability, AVAILABILITY_VALUES);
-    if (query.order !== void 0 && query.order !== "change_id_asc") {
-      throw new Error("Change page order must be change_id_asc");
-    }
-    params.set("order", "change_id_asc");
-    return `/api/v2/${lens}?${params}`;
-  }
-  __name(buildChangePageUrl, "buildChangePageUrl");
-  function decodeReaderProfile(value) {
-    const profile = object(value, "Inspector reader profile");
-    const availability = profile.availability;
-    const authorityCursor = profile.authorityCursor;
-    const documents = profile.documents;
-    const minimumReaderProfile = profile.minimumReaderProfile;
-    const commitGraphStamp = profile.commitGraphStamp;
-    if (profile.schema !== "pointbreak.inspect-reader-profile" || profile.version !== 1 || !isAvailability(availability) || !isRecord(authorityCursor) || !isDocumentMap(documents) || !sameDocumentMap(documents, CHANGE_READER_DOCUMENTS)) {
-      throw new Error("incompatible Inspector reader profile");
-    }
-    if (availability === "ready" && (minimumReaderProfile !== CHANGE_READER_PROFILE || typeof commitGraphStamp !== "string" || commitGraphStamp.length === 0)) {
-      throw new Error(
-        "ready Inspector reader profile is missing capability or commit graph stamp"
-      );
-    }
-    return {
-      schema: "pointbreak.inspect-reader-profile",
-      version: 1,
-      availability,
-      minimumReaderProfile: typeof minimumReaderProfile === "string" ? minimumReaderProfile : void 0,
-      authorityCursor,
-      commitGraphStamp: typeof commitGraphStamp === "string" ? commitGraphStamp : void 0,
-      documents
-    };
-  }
-  __name(decodeReaderProfile, "decodeReaderProfile");
-  function decodeChangePage(value, expected) {
-    const page = object(value, `${expected.lens} Change page`);
-    const expectedSchema = expected.lens === "changes" ? "pointbreak.inspect-changes-page" : "pointbreak.inspect-attention";
-    const expectedVersion = expected.lens === "changes" ? 1 : 2;
-    const stamp = page.projectionStamp;
-    const changes = page.changes;
-    const diagnostics = page.diagnostics;
-    const presentations = page.presentations;
-    if (page.schema !== expectedSchema || page.version !== expectedVersion || !nonEmptyString(stamp) || !Array.isArray(changes) || expected.bounded && changes.length > 100 || !changes.every((change) => isChangeSummary(change, stamp)) || !isStrictlyAscending(changes.map((change) => change.changeId)) || new Set(changes.map((change) => change.changeId)).size !== changes.length || diagnostics !== void 0 && !isStringArray(diagnostics) || presentations !== void 0 && !isPresentations(presentations, changes)) {
-      throw new Error(`invalid ${expected.lens} Change page DTO`);
-    }
-    const next = page.next;
-    if (next !== void 0 && next !== null && !nonEmptyString(next)) {
-      throw new Error("invalid Change page next continuation");
-    }
-    if (expected.bounded && next === void 0)
-      throw new Error("bounded Change page is missing next continuation");
-    const common = {
-      changes,
-      diagnostics,
-      presentations,
-      projectionStamp: stamp,
-      next: next ?? null
-    };
-    return expected.lens === "changes" ? {
-      schema: "pointbreak.inspect-changes-page",
-      version: 1,
-      ...common
-    } : {
-      schema: "pointbreak.inspect-attention",
-      version: 2,
-      ...common
-    };
-  }
-  __name(decodeChangePage, "decodeChangePage");
-  function requireCoherentGeneration(changes, attention) {
-    if (changes.projectionStamp !== attention.projectionStamp) {
-      throw new Error("Change documents do not form one coherent generation");
-    }
-  }
-  __name(requireCoherentGeneration, "requireCoherentGeneration");
-  function sameProfileGeneration(initial, postflight) {
-    return initial.availability === postflight.availability && initial.minimumReaderProfile === postflight.minimumReaderProfile && initial.commitGraphStamp === postflight.commitGraphStamp && sameDocumentMap(initial.documents, postflight.documents) && canonicalJson(initial.authorityCursor) === canonicalJson(postflight.authorityCursor);
-  }
-  __name(sameProfileGeneration, "sameProfileGeneration");
-  function trimUnicodeWhitespace(value) {
-    return value.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, "");
-  }
-  __name(trimUnicodeWhitespace, "trimUnicodeWhitespace");
-  function appendEnum(params, name, value, values) {
-    if (value === void 0) return;
-    if (!values.has(value)) throw new Error(`invalid Change page ${name}`);
-    params.set(name, value);
-  }
-  __name(appendEnum, "appendEnum");
-  function isAvailability(value) {
-    return value === "migration_required" || value === "migration_in_progress" || value === "ready";
-  }
-  __name(isAvailability, "isAvailability");
-  function isChangeSummary(value, stamp) {
-    if (!isRecord(value)) return false;
-    return nonEmptyString(value.changeId) && isOneOf(value.topology, TOPOLOGY_VALUES) && isOneOf(value.lifecycle, LIFECYCLE_VALUES) && isOneOf(value.attentionSummary, ATTENTION_VALUES) && isOneOf(value.availabilitySummary, AVAILABILITY_VALUES) && value.projectionStamp === stamp && Array.isArray(value.currentRevisionRefs) && value.currentRevisionRefs.every(isRevisionRef) && uniqueRevisionKeys(value.currentRevisionRefs).size === value.currentRevisionRefs.length && (value.diagnostics === void 0 || isStringArray(value.diagnostics));
-  }
-  __name(isChangeSummary, "isChangeSummary");
-  function isPresentations(value, changes) {
-    if (!isRecord(value)) return false;
-    const summaries = new Map(
-      changes.map((change) => [change.changeId, change])
-    );
-    if (Object.keys(value).length !== summaries.size) return false;
-    return Object.entries(value).every(([changeId, presentation]) => {
-      const change = summaries.get(changeId);
-      if (change === void 0 || !isRecord(presentation) || !Array.isArray(presentation.currentRevisions) || !presentation.currentRevisions.every(isPresentationRevision)) {
-        return false;
-      }
-      const expected = uniqueRevisionKeys(change.currentRevisionRefs);
-      const actual = uniqueRevisionKeys(
-        presentation.currentRevisions.map((candidate) => candidate.revision)
-      );
-      return expected.size === change.currentRevisionRefs.length && actual.size === presentation.currentRevisions.length && expected.size === actual.size && [...expected].every((key) => actual.has(key));
-    });
-  }
-  __name(isPresentations, "isPresentations");
-  function isPresentationRevision(value) {
-    return isRecord(value) && isRevisionRef(value.revision) && (value.summarySource === "revision_proposal_summary" && nonEmptyString(value.revisionProposalSummary) || value.summarySource === "absent" && value.revisionProposalSummary === void 0);
-  }
-  __name(isPresentationRevision, "isPresentationRevision");
-  function isRevisionRef(value) {
-    return isRecord(value) && nonEmptyString(value.revisionId) && nonEmptyString(value.objectArtifactContentHash);
-  }
-  __name(isRevisionRef, "isRevisionRef");
-  function uniqueRevisionKeys(revisions) {
-    return new Set(
-      revisions.map(
-        (revision) => `${revision.revisionId}\0${revision.objectArtifactContentHash}`
-      )
-    );
-  }
-  __name(uniqueRevisionKeys, "uniqueRevisionKeys");
-  function isStrictlyAscending(values) {
-    return values.every((value, index) => {
-      const previous = values[index - 1];
-      return index === 0 || previous !== void 0 && previous < value;
-    });
-  }
-  __name(isStrictlyAscending, "isStrictlyAscending");
-  function isOneOf(value, values) {
-    return typeof value === "string" && values.has(value);
-  }
-  __name(isOneOf, "isOneOf");
-  function isDocumentMap(value) {
-    return isRecord(value) && Object.values(value).every((version) => Number.isInteger(version));
-  }
-  __name(isDocumentMap, "isDocumentMap");
-  function sameDocumentMap(left, right) {
-    const leftEntries = Object.entries(left).sort(
-      ([a], [b]) => a.localeCompare(b)
-    );
-    const rightEntries = Object.entries(right).sort(
-      ([a], [b]) => a.localeCompare(b)
-    );
-    return leftEntries.length === rightEntries.length && leftEntries.every(
-      ([schema, version], index) => schema === rightEntries[index]?.[0] && version === rightEntries[index]?.[1]
-    );
-  }
-  __name(sameDocumentMap, "sameDocumentMap");
-  function canonicalJson(value) {
-    if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-    if (isRecord(value)) {
-      return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
-    }
-    return JSON.stringify(value);
-  }
-  __name(canonicalJson, "canonicalJson");
-  function object(value, name) {
-    if (!isRecord(value)) throw new Error(`invalid ${name} DTO`);
-    return value;
-  }
-  __name(object, "object");
-  function isRecord(value) {
-    return typeof value === "object" && value !== null && !Array.isArray(value);
-  }
-  __name(isRecord, "isRecord");
-  function nonEmptyString(value) {
-    return typeof value === "string" && value.length > 0;
-  }
-  __name(nonEmptyString, "nonEmptyString");
-  function isStringArray(value) {
-    return Array.isArray(value) && value.every((item) => typeof item === "string");
-  }
-  __name(isStringArray, "isStringArray");
-
   // src/change-inspector-state.ts
   var ChangeInspectorGenerationChanged = class extends Error {
     static {
@@ -1279,17 +3814,17 @@
       super("Change generation changed during staging");
     }
   };
-  function sameRevision(left, right) {
+  function sameRevision2(left, right) {
     return left.revisionId === right.revisionId && left.objectArtifactContentHash === right.objectArtifactContentHash;
   }
-  __name(sameRevision, "sameRevision");
+  __name(sameRevision2, "sameRevision");
   function selectedChange(generation, route) {
     if (route.kind !== "change" && route.kind !== "revision") return null;
     const all = [...generation.changes.changes, ...generation.attention.changes];
     const change = all.find((candidate) => candidate.changeId === route.changeId) ?? null;
     if (change === null || route.kind !== "revision") return change;
     return change.currentRevisionRefs.some(
-      (candidate) => sameRevision(candidate, route.revision)
+      (candidate) => sameRevision2(candidate, route.revision)
     ) ? change : null;
   }
   __name(selectedChange, "selectedChange");
@@ -1438,9 +3973,64 @@
       if (location.hash !== hash) location.hash = hash;
       else void onRoute();
     }, "navigate");
-    const paint = /* @__PURE__ */ __name(() => renderChangeInspector(state.snapshot(), { navigate }), "paint");
+    let reading = null;
+    let readingRefusal = null;
+    let visibleReading = "";
+    const paint = /* @__PURE__ */ __name(() => renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading,
+        refusal: readingRefusal
+      }
+    ), "paint");
     const requestKey = /* @__PURE__ */ __name((query) => buildChangePageUrl("changes", query), "requestKey");
     let visibleRequest = "";
+    const clearReading = /* @__PURE__ */ __name(() => {
+      reading = null;
+      readingRefusal = null;
+      visibleReading = "";
+    }, "clearReading");
+    const loadReading = /* @__PURE__ */ __name(async (route, expectedProjectionStamp, epoch, restarted = false) => {
+      if (route.kind === "lens") {
+        clearReading();
+        return;
+      }
+      const requested = formatChangeInspectorRoute(route);
+      if (visibleReading === requested && reading !== null) return;
+      reading = null;
+      readingRefusal = null;
+      visibleReading = requested;
+      paint();
+      try {
+        const loaded = await loadChangeInspectorReading(
+          route,
+          expectedProjectionStamp
+        );
+        const postflight = decodeReaderProfile(
+          await fetchChangeInspectorJSON("/api/v2/profile")
+        );
+        if (epoch !== requestEpoch || currentRoute().kind === "invalid") return;
+        const staged = state.snapshot().generation;
+        if (staged === null || formatChangeInspectorRoute(
+          currentRoute()
+        ) !== requested || !sameProfileGeneration(staged.profile, postflight)) {
+          throw new ChangeInspectorGenerationChanged();
+        }
+        reading = loaded;
+        readingRefusal = null;
+        paint();
+      } catch (error) {
+        if (epoch !== requestEpoch) return;
+        if (!restarted && (error instanceof ChangeInspectorGenerationChanged || error instanceof ChangeInspectorPageFailure && error.code === "stale_projection")) {
+          await loadGeneration(route, true);
+          return;
+        }
+        reading = null;
+        readingRefusal = error instanceof Error ? error.message : String(error);
+        paint();
+      }
+    }, "loadReading");
     const loadGeneration = /* @__PURE__ */ __name(async (route, restarted = false) => {
       const epoch = ++requestEpoch;
       try {
@@ -1450,6 +4040,7 @@
         if (epoch !== requestEpoch) return;
         if (profile.availability !== "ready") {
           visibleRequest = "";
+          clearReading();
           state.clearGeneration();
           renderChangeInspectorUnavailable(profile.availability);
           return;
@@ -1470,6 +4061,7 @@
         state.publish(stageGeneration(profile, changes, attention, postflight));
         visibleRequest = requestKey(query);
         paint();
+        await loadReading(route, changes.projectionStamp, epoch);
       } catch (error) {
         if (epoch !== requestEpoch) return;
         if (!restarted && (error instanceof ChangeInspectorPageFailure && error.code === "stale_projection" || error instanceof ChangeInspectorGenerationChanged)) {
@@ -1477,15 +4069,18 @@
           return;
         }
         visibleRequest = "";
+        clearReading();
         state.clearGeneration();
         renderChangeInspectorRefusal(error);
       }
     }, "loadGeneration");
     const onRoute = /* @__PURE__ */ __name(async () => {
       const route = currentRoute();
+      requestEpoch += 1;
       state.setRoute(route);
       if (route.kind === "invalid") {
         visibleRequest = "";
+        clearReading();
         state.clearGeneration();
         paint();
         return;
@@ -1498,9 +4093,21 @@
         renderChangeInspectorRefusal(error);
         return;
       }
-      if (request === visibleRequest) paint();
-      else {
+      if (request === visibleRequest) {
+        const generation = state.snapshot().generation;
+        if (generation === null) {
+          await loadGeneration(route);
+        } else {
+          await loadReading(
+            route,
+            generation.changes.projectionStamp,
+            requestEpoch
+          );
+          paint();
+        }
+      } else {
         visibleRequest = "";
+        clearReading();
         state.clearGeneration();
         paint();
         await loadGeneration(route);

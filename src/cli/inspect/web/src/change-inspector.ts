@@ -15,6 +15,10 @@ import {
   fetchChangeInspectorJSON,
 } from "./change-inspector-http";
 import {
+  type ChangeInspectorReading,
+  loadChangeInspectorReading,
+} from "./change-inspector-reading";
+import {
   prepareChangeInspectorShell,
   renderChangeInspector,
   renderChangeInspectorRefusal,
@@ -35,6 +39,7 @@ import {
   type ChangePageQuery,
   decodeChangePage,
   decodeReaderProfile,
+  sameProfileGeneration,
 } from "./change-protocol";
 import {
   configureConnectionActions,
@@ -93,10 +98,82 @@ export async function bootstrapChangeInspector(
     if (location.hash !== hash) location.hash = hash;
     else void onRoute();
   };
-  const paint = () => renderChangeInspector(state.snapshot(), { navigate });
+  let reading: ChangeInspectorReading | null = null;
+  let readingRefusal: string | null = null;
+  let visibleReading = "";
+  const paint = () =>
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      {
+        reading,
+        refusal: readingRefusal,
+      },
+    );
   const requestKey = (query: ChangePageQuery): string =>
     buildChangePageUrl("changes", query);
   let visibleRequest = "";
+
+  const clearReading = (): void => {
+    reading = null;
+    readingRefusal = null;
+    visibleReading = "";
+  };
+
+  const loadReading = async (
+    route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>,
+    expectedProjectionStamp: string,
+    epoch: number,
+    restarted = false,
+  ): Promise<void> => {
+    if (route.kind === "lens") {
+      clearReading();
+      return;
+    }
+    const requested = formatChangeInspectorRoute(route);
+    if (visibleReading === requested && reading !== null) return;
+    reading = null;
+    readingRefusal = null;
+    visibleReading = requested;
+    paint();
+    try {
+      const loaded = await loadChangeInspectorReading(
+        route,
+        expectedProjectionStamp,
+      );
+      const postflight = decodeReaderProfile(
+        await fetchChangeInspectorJSON("/api/v2/profile"),
+      );
+      if (epoch !== requestEpoch || currentRoute().kind === "invalid") return;
+      const staged = state.snapshot().generation;
+      if (
+        staged === null ||
+        formatChangeInspectorRoute(
+          currentRoute() as Exclude<ChangeInspectorRoute, { kind: "invalid" }>,
+        ) !== requested ||
+        !sameProfileGeneration(staged.profile, postflight)
+      ) {
+        throw new ChangeInspectorGenerationChanged();
+      }
+      reading = loaded;
+      readingRefusal = null;
+      paint();
+    } catch (error) {
+      if (epoch !== requestEpoch) return;
+      if (
+        !restarted &&
+        (error instanceof ChangeInspectorGenerationChanged ||
+          (error instanceof ChangeInspectorPageFailure &&
+            error.code === "stale_projection"))
+      ) {
+        await loadGeneration(route, true);
+        return;
+      }
+      reading = null;
+      readingRefusal = error instanceof Error ? error.message : String(error);
+      paint();
+    }
+  };
 
   const loadGeneration = async (
     route: Exclude<ChangeInspectorRoute, { kind: "invalid" }>,
@@ -110,6 +187,7 @@ export async function bootstrapChangeInspector(
       if (epoch !== requestEpoch) return;
       if (profile.availability !== "ready") {
         visibleRequest = "";
+        clearReading();
         state.clearGeneration();
         renderChangeInspectorUnavailable(profile.availability);
         return;
@@ -132,6 +210,7 @@ export async function bootstrapChangeInspector(
       state.publish(stageGeneration(profile, changes, attention, postflight));
       visibleRequest = requestKey(query);
       paint();
+      await loadReading(route, changes.projectionStamp, epoch);
     } catch (error) {
       if (epoch !== requestEpoch) return;
       if (
@@ -144,6 +223,7 @@ export async function bootstrapChangeInspector(
         return;
       }
       visibleRequest = "";
+      clearReading();
       state.clearGeneration();
       renderChangeInspectorRefusal(error);
     }
@@ -151,9 +231,14 @@ export async function bootstrapChangeInspector(
 
   const onRoute = async (): Promise<void> => {
     const route = currentRoute();
+    // Every URL intent, including same-query detail/focus navigation, owns a
+    // new read epoch. An older detail request may still finish, but it may not
+    // restart a generation for the route the user has already left.
+    requestEpoch += 1;
     state.setRoute(route);
     if (route.kind === "invalid") {
       visibleRequest = "";
+      clearReading();
       state.clearGeneration();
       paint();
       return;
@@ -169,9 +254,21 @@ export async function bootstrapChangeInspector(
     // A query change cannot display the prior semantic generation beneath its
     // new URL. Lens/detail routes with the same query reuse the already-staged
     // pair because both pages were atomically published together.
-    if (request === visibleRequest) paint();
-    else {
+    if (request === visibleRequest) {
+      const generation = state.snapshot().generation;
+      if (generation === null) {
+        await loadGeneration(route);
+      } else {
+        await loadReading(
+          route,
+          generation.changes.projectionStamp,
+          requestEpoch,
+        );
+        paint();
+      }
+    } else {
       visibleRequest = "";
+      clearReading();
       state.clearGeneration();
       paint();
       await loadGeneration(route);

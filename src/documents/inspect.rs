@@ -7,14 +7,14 @@
 
 use std::collections::HashMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::highlight::{EmphSpan, RowKey, TokenSpan, emphasis_file, highlight_file};
 use crate::model::{
     DiffFile, DiffRow, DiffRowKind, DiffSnapshot, FileId, FileMetadataRow, FileStatus, HunkId,
     ObjectId, ReviewHunk, ReviewId,
 };
-use crate::session::ObjectArtifact;
+use crate::session::{ObjectArtifact, build_object_artifact_v2};
 
 pub const REVIEW_SNAPSHOT_SCHEMA: &str = "pointbreak.review-snapshot";
 pub const INSPECT_FRESHNESS_SCHEMA: &str = "pointbreak.inspect-freshness";
@@ -36,24 +36,74 @@ pub fn promoted_inspect_document_registry() -> &'static [(&'static str, u32)] {
 }
 
 /// A served, enriched view of one validated stored object artifact.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReviewSnapshotDocument {
-    schema: &'static str,
+    schema: String,
     version: u32,
     content_hash: String,
     snapshot: ReviewSnapshot,
 }
 
+impl ReviewSnapshotDocument {
+    fn from_snapshot(content_hash: String, snapshot: &DiffSnapshot) -> Self {
+        Self {
+            schema: REVIEW_SNAPSHOT_SCHEMA.to_owned(),
+            version: 1,
+            content_hash,
+            snapshot: ReviewSnapshot::from_snapshot(snapshot),
+        }
+    }
+
+    /// Re-establish the immutable captured-resource binding after transport or
+    /// deserialization. Presentation spans are deliberately excluded from the
+    /// canonical artifact hash; the reconstructed captured rows must still
+    /// reproduce the Revision-bound object artifact exactly.
+    pub(crate) fn validate_binding(
+        &self,
+        expected_content_hash: &str,
+        expected_object_id: &ObjectId,
+    ) -> crate::error::Result<()> {
+        if self.schema != REVIEW_SNAPSHOT_SCHEMA
+            || self.version != 1
+            || self.content_hash != expected_content_hash
+            || &self.snapshot.object_id != expected_object_id
+        {
+            return Err(crate::error::ShoreError::Message(
+                "captured review snapshot identity does not match the exact resource".to_owned(),
+            ));
+        }
+        let snapshot = self.snapshot.to_diff_snapshot();
+        if self.snapshot != ReviewSnapshot::from_snapshot(&snapshot) {
+            return Err(crate::error::ShoreError::Message(
+                "captured review snapshot presentation spans are not canonical".to_owned(),
+            ));
+        }
+        let artifact = build_object_artifact_v2(snapshot)?;
+        if artifact.content_hash != self.content_hash {
+            return Err(crate::error::ShoreError::Message(
+                "captured review snapshot rows do not reproduce the bound artifact hash".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Build the v1 served snapshot without changing the at-rest `shore.object`
 /// artifact or its content hash.
 pub fn review_snapshot_document(artifact: &ObjectArtifact) -> ReviewSnapshotDocument {
-    ReviewSnapshotDocument {
-        schema: REVIEW_SNAPSHOT_SCHEMA,
-        version: 1,
-        content_hash: artifact.content_hash.clone(),
-        snapshot: ReviewSnapshot::from_snapshot(&artifact.snapshot),
-    }
+    ReviewSnapshotDocument::from_snapshot(artifact.content_hash.clone(), &artifact.snapshot)
+}
+
+/// Build the served snapshot from an already validated bound snapshot. Exact
+/// Revision readers have performed the content-addressed load before their
+/// contextual document is assembled; this variant preserves that one read and
+/// emits the identical captured rows without manufacturing an `ObjectArtifact`.
+pub(crate) fn review_snapshot_document_from_snapshot(
+    content_hash: impl Into<String>,
+    snapshot: &DiffSnapshot,
+) -> ReviewSnapshotDocument {
+    ReviewSnapshotDocument::from_snapshot(content_hash.into(), snapshot)
 }
 
 /// Cheap change marker for a running inspect server.
@@ -116,14 +166,16 @@ impl InspectStartupDocument {
 /// optional presentation channels.
 const HIGHLIGHT_FILE_ROW_CAP: usize = 500;
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReviewSnapshot {
     review_id: ReviewId,
     object_id: ObjectId,
     files: Vec<ReviewSnapshotFile>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReviewSnapshotFile {
     id: FileId,
     status: FileStatus,
@@ -142,7 +194,8 @@ struct ReviewSnapshotFile {
     hunks: Vec<ReviewSnapshotHunk>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReviewSnapshotHunk {
     id: HunkId,
     header: String,
@@ -153,26 +206,29 @@ struct ReviewSnapshotHunk {
     rows: Vec<ReviewSnapshotRow>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReviewSnapshotRow {
     kind: DiffRowKind,
     old_line: Option<u32>,
     new_line: Option<u32>,
     text: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     tokens: Vec<ReviewTokenSpan>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     emphasis: Vec<ReviewEmphasisSpan>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReviewTokenSpan {
     start: usize,
     end: usize,
-    kind: &'static str,
+    kind: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ReviewEmphasisSpan {
     start: usize,
     end: usize,
@@ -187,6 +243,18 @@ impl ReviewSnapshot {
                 .files
                 .iter()
                 .map(ReviewSnapshotFile::from_file)
+                .collect(),
+        }
+    }
+
+    fn to_diff_snapshot(&self) -> DiffSnapshot {
+        DiffSnapshot {
+            review_id: self.review_id.clone(),
+            object_id: self.object_id.clone(),
+            files: self
+                .files
+                .iter()
+                .map(ReviewSnapshotFile::to_diff_file)
                 .collect(),
         }
     }
@@ -226,6 +294,30 @@ impl ReviewSnapshotFile {
                 .collect(),
         }
     }
+
+    fn to_diff_file(&self) -> DiffFile {
+        DiffFile {
+            id: self.id.clone(),
+            status: self.status.clone(),
+            old_path: self.old_path.clone(),
+            new_path: self.new_path.clone(),
+            old_mode: self.old_mode.clone(),
+            new_mode: self.new_mode.clone(),
+            old_oid: self.old_oid.clone(),
+            new_oid: self.new_oid.clone(),
+            similarity: self.similarity,
+            is_binary: self.is_binary,
+            is_submodule: self.is_submodule,
+            is_mode_only: self.is_mode_only,
+            synthetic: self.synthetic,
+            metadata_rows: self.metadata_rows.clone(),
+            hunks: self
+                .hunks
+                .iter()
+                .map(ReviewSnapshotHunk::to_review_hunk)
+                .collect(),
+        }
+    }
 }
 
 impl ReviewSnapshotHunk {
@@ -257,6 +349,22 @@ impl ReviewSnapshotHunk {
                 .collect(),
         }
     }
+
+    fn to_review_hunk(&self) -> ReviewHunk {
+        ReviewHunk {
+            id: self.id.clone(),
+            header: self.header.clone(),
+            old_start: self.old_start,
+            old_lines: self.old_lines,
+            new_start: self.new_start,
+            new_lines: self.new_lines,
+            rows: self
+                .rows
+                .iter()
+                .map(ReviewSnapshotRow::to_diff_row)
+                .collect(),
+        }
+    }
 }
 
 impl ReviewSnapshotRow {
@@ -268,6 +376,15 @@ impl ReviewSnapshotRow {
             text: row.text.clone(),
             tokens: translate_tokens(&row.text, tokens).unwrap_or_default(),
             emphasis: translate_emphasis(&row.text, emphasis).unwrap_or_default(),
+        }
+    }
+
+    fn to_diff_row(&self) -> DiffRow {
+        DiffRow {
+            kind: self.kind.clone(),
+            old_line: self.old_line,
+            new_line: self.new_line,
+            text: self.text.clone(),
         }
     }
 }
@@ -291,7 +408,7 @@ fn translate_tokens(text: &str, spans: &[TokenSpan]) -> Option<Vec<ReviewTokenSp
             Some(ReviewTokenSpan {
                 start,
                 end,
-                kind: span.kind.as_str(),
+                kind: span.kind.as_str().to_owned(),
             })
         })
         .collect()
@@ -374,5 +491,20 @@ mod tests {
                 .unwrap();
 
         assert!(value.get("tokens").is_none());
+    }
+
+    #[test]
+    fn validated_artifact_and_exact_resource_parts_emit_identical_documents() {
+        let artifact = build_object_artifact_v2(DiffSnapshot::new(
+            ReviewId::new("review:exact-resource"),
+            ObjectId::new("obj:sha256:exact-resource"),
+            Vec::new(),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            review_snapshot_document(&artifact),
+            review_snapshot_document_from_snapshot(&artifact.content_hash, &artifact.snapshot)
+        );
     }
 }

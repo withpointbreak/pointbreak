@@ -23,6 +23,7 @@ pub(crate) use event_store::{EventStore, SkippedEvent};
 pub use fingerprint::compute_revision_fingerprint;
 pub(crate) use fingerprint::worktree_fingerprint_for_files;
 pub use fingerprint::{RevisionFingerprint, capture_worktree_fingerprint};
+pub(crate) use object_artifact::build_object_artifact_v2;
 pub use object_artifact::{ObjectArtifact, read_bound_object_artifact, read_object_artifact};
 pub use resolution::{
     StorePaths, activated_store_capability_for_repo, change_reader_head_marker_for_repo,

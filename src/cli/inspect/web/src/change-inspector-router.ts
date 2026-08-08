@@ -19,6 +19,29 @@ export type ChangeInspectorRoute =
       changeId: string;
       revision: RevisionRef;
       query: ChangePageQuery;
+      focus?: ExactRouteFocus;
+    }
+  | {
+      kind: "resource";
+      changeId: string;
+      revision: RevisionRef;
+      query: ChangePageQuery;
+      focus?: ExactRouteFocus;
+    }
+  | {
+      kind: "association";
+      changeId: string;
+      revision: RevisionRef;
+      query: ChangePageQuery;
+      focus?: ExactRouteFocus;
+    }
+  | {
+      kind: "interdiff";
+      changeId: string;
+      from: RevisionRef;
+      to: RevisionRef;
+      query: ChangePageQuery;
+      focus?: ExactRouteFocus;
     }
   | { kind: "invalid"; message: string };
 
@@ -33,7 +56,19 @@ const QUERY_KEYS = [
   "order",
 ] as const;
 
-const ROUTE_QUERY_KEYS = new Set<string>([...QUERY_KEYS, "artifactHash"]);
+const ROUTE_QUERY_KEYS = new Set<string>([
+  ...QUERY_KEYS,
+  "artifactHash",
+  "fromArtifactHash",
+  "toArtifactHash",
+  "fact",
+  "file",
+]);
+
+export interface ExactRouteFocus {
+  factId?: string;
+  filePath?: string;
+}
 
 function decodeSegment(value: string): string | null {
   try {
@@ -47,6 +82,10 @@ function decodeSegment(value: string): string | null {
 interface ParsedQuery {
   query: ChangePageQuery;
   artifactHashes: string[];
+  fromArtifactHashes: string[];
+  toArtifactHashes: string[];
+  facts: string[];
+  files: string[];
 }
 
 function validQueryEncoding(search: string): boolean {
@@ -96,7 +135,14 @@ function parseQuery(search: string): ParsedQuery | { message: string } {
       query[key] = value;
     }
   }
-  return { query, artifactHashes: params.getAll("artifactHash") };
+  return {
+    query,
+    artifactHashes: params.getAll("artifactHash"),
+    fromArtifactHashes: params.getAll("fromArtifactHash"),
+    toArtifactHashes: params.getAll("toArtifactHash"),
+    facts: params.getAll("fact"),
+    files: params.getAll("file"),
+  };
 }
 
 function isParseError(
@@ -112,13 +158,41 @@ export function parseChangeInspectorRoute(hash: string): ChangeInspectorRoute {
   const search = separator === -1 ? "" : raw.slice(separator + 1);
   const parsed = parseQuery(search);
   if (isParseError(parsed)) return { kind: "invalid", message: parsed.message };
-  const { query, artifactHashes } = parsed;
+  const {
+    query,
+    artifactHashes,
+    fromArtifactHashes,
+    toArtifactHashes,
+    facts,
+    files,
+  } = parsed;
+  const focus = (): ExactRouteFocus | null | undefined => {
+    if (
+      facts.length > 1 ||
+      files.length > 1 ||
+      facts.some((value) => !value) ||
+      files.some((value) => !value)
+    ) {
+      return null;
+    }
+    const selected = {
+      ...(facts[0] ? { factId: facts[0] } : {}),
+      ...(files[0] ? { filePath: files[0] } : {}),
+    };
+    return Object.keys(selected).length ? selected : undefined;
+  };
   const segments = path.split("/").filter(Boolean);
   if (
     segments.length === 1 &&
     (segments[0] === "changes" || segments[0] === "attention")
   ) {
-    if (artifactHashes.length > 0) {
+    if (
+      artifactHashes.length > 0 ||
+      fromArtifactHashes.length > 0 ||
+      toArtifactHashes.length > 0 ||
+      facts.length > 0 ||
+      files.length > 0
+    ) {
       return {
         kind: "invalid",
         message: "artifactHash is only valid on an exact Revision route.",
@@ -132,7 +206,13 @@ export function parseChangeInspectorRoute(hash: string): ChangeInspectorRoute {
   if (changeId === null)
     return { kind: "invalid", message: "Change routes require a Change ID." };
   if (segments.length === 2) {
-    if (artifactHashes.length > 0) {
+    if (
+      artifactHashes.length > 0 ||
+      fromArtifactHashes.length > 0 ||
+      toArtifactHashes.length > 0 ||
+      facts.length > 0 ||
+      files.length > 0
+    ) {
       return {
         kind: "invalid",
         message: "artifactHash is only valid on an exact Revision route.",
@@ -140,32 +220,112 @@ export function parseChangeInspectorRoute(hash: string): ChangeInspectorRoute {
     }
     return { kind: "change", changeId, query };
   }
-  if (segments.length !== 4 || segments[2] !== "revisions") {
-    return { kind: "invalid", message: "Unknown Change Inspector route." };
-  }
-  const revisionId = decodeSegment(segments[3]);
-  if (revisionId === null)
+  const exactRevision = (revisionId: string | null): RevisionRef | null => {
+    if (
+      revisionId === null ||
+      artifactHashes.length !== 1 ||
+      !artifactHashes[0]
+    )
+      return null;
     return {
-      kind: "invalid",
-      message: "Revision routes require a Revision ID.",
-    };
-  if (artifactHashes.length !== 1 || !artifactHashes[0])
-    return {
-      kind: "invalid",
-      message:
-        artifactHashes.length > 1
-          ? "Exact Revision routes require exactly one artifactHash."
-          : "Exact Revision routes require artifactHash.",
-    };
-  return {
-    kind: "revision",
-    changeId,
-    revision: {
       revisionId,
       objectArtifactContentHash: artifactHashes[0],
-    },
-    query,
+    };
   };
+  const exactFailure = (): ChangeInspectorRoute => ({
+    kind: "invalid",
+    message:
+      artifactHashes.length > 1
+        ? "Exact Revision routes require exactly one artifactHash."
+        : "Exact Revision routes require artifactHash.",
+  });
+  if (segments[2] === "revisions" && segments.length >= 4) {
+    const revision = exactRevision(decodeSegment(segments[3]));
+    if (revision === null) return exactFailure();
+    const exactFocus = focus();
+    if (exactFocus === null)
+      return {
+        kind: "invalid",
+        message:
+          "Exact route focus requires at most one non-empty fact and file.",
+      };
+    if (fromArtifactHashes.length > 0 || toArtifactHashes.length > 0)
+      return {
+        kind: "invalid",
+        message: "Revision routes do not accept interdiff hashes.",
+      };
+    if (segments.length === 4)
+      return {
+        kind: "revision",
+        changeId,
+        revision,
+        query,
+        ...(exactFocus ? { focus: exactFocus } : {}),
+      };
+    if (segments.length === 5 && segments[4] === "resource")
+      return {
+        kind: "resource",
+        changeId,
+        revision,
+        query,
+        ...(exactFocus ? { focus: exactFocus } : {}),
+      };
+    if (segments.length === 5 && segments[4] === "association")
+      return {
+        kind: "association",
+        changeId,
+        revision,
+        query,
+        ...(exactFocus ? { focus: exactFocus } : {}),
+      };
+  }
+  if (segments[2] === "interdiff" && segments.length === 5) {
+    if (artifactHashes.length > 0)
+      return {
+        kind: "invalid",
+        message: "Interdiff routes use endpoint artifact hashes.",
+      };
+    const fromRevisionId = decodeSegment(segments[3]);
+    const toRevisionId = decodeSegment(segments[4]);
+    if (fromRevisionId === null || toRevisionId === null)
+      return {
+        kind: "invalid",
+        message: "Interdiff routes require both Revision IDs.",
+      };
+    if (
+      fromArtifactHashes.length !== 1 ||
+      !fromArtifactHashes[0] ||
+      toArtifactHashes.length !== 1 ||
+      !toArtifactHashes[0]
+    )
+      return {
+        kind: "invalid",
+        message:
+          "Interdiff routes require exactly one artifact hash for each endpoint.",
+      };
+    const exactFocus = focus();
+    if (exactFocus === null)
+      return {
+        kind: "invalid",
+        message:
+          "Exact route focus requires at most one non-empty fact and file.",
+      };
+    return {
+      kind: "interdiff",
+      changeId,
+      from: {
+        revisionId: fromRevisionId,
+        objectArtifactContentHash: fromArtifactHashes[0],
+      },
+      to: {
+        revisionId: toRevisionId,
+        objectArtifactContentHash: toArtifactHashes[0],
+      },
+      query,
+      ...(exactFocus ? { focus: exactFocus } : {}),
+    };
+  }
+  return { kind: "invalid", message: "Unknown Change Inspector route." };
 }
 
 function appendQuery(query: ChangePageQuery, params: URLSearchParams): void {
@@ -180,13 +340,31 @@ export function formatChangeInspectorRoute(
 ): string {
   const params = new URLSearchParams();
   appendQuery(route.query, params);
-  if (route.kind === "revision")
+  if (
+    route.kind === "revision" ||
+    route.kind === "resource" ||
+    route.kind === "association"
+  )
     params.set("artifactHash", route.revision.objectArtifactContentHash);
+  if (route.kind === "interdiff") {
+    params.set("fromArtifactHash", route.from.objectArtifactContentHash);
+    params.set("toArtifactHash", route.to.objectArtifactContentHash);
+  }
+  if ("focus" in route && route.focus?.factId)
+    params.set("fact", route.focus.factId);
+  if ("focus" in route && route.focus?.filePath)
+    params.set("file", route.focus.filePath);
   const suffix = params.size ? `?${params}` : "";
   if (route.kind === "lens") return `#/${route.lens}${suffix}`;
   const change = encodeURIComponent(route.changeId);
   if (route.kind === "change") return `#/changes/${change}${suffix}`;
-  return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}${suffix}`;
+  if (route.kind === "revision")
+    return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}${suffix}`;
+  if (route.kind === "resource")
+    return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}/resource${suffix}`;
+  if (route.kind === "association")
+    return `#/changes/${change}/revisions/${encodeURIComponent(route.revision.revisionId)}/association${suffix}`;
+  return `#/changes/${change}/interdiff/${encodeURIComponent(route.from.revisionId)}/${encodeURIComponent(route.to.revisionId)}${suffix}`;
 }
 
 export function lensForRoute(route: ChangeInspectorRoute): ChangeLens {
