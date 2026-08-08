@@ -114,10 +114,11 @@ function snapshotFilterDraft(
 
 function capturePollFilterDraft(): FocusedFilterDraft | null {
   if (filterInput === null) return null;
-  const route = currentRoute();
-  const committed = route.kind === "invalid" ? "" : (route.query.q ?? "");
   const focused = document.activeElement === filterInput;
-  if (!focused && filterInput.value === committed) return null;
+  // Always retain the input identity for a poll, even when it is clean and
+  // unfocused at request start. The reader may focus and edit it while that
+  // asynchronous generation read is in flight; paint snapshots the live value
+  // immediately before render so the late response cannot erase that draft.
   return snapshotFilterDraft(filterInput, focused);
 }
 
@@ -397,7 +398,20 @@ export async function bootstrapChangeInspector(
   };
 
   const onRoute = async (): Promise<void> => {
-    const route = currentRoute();
+    // Lightweight panels are transient chrome for the route being inspected.
+    // Dismiss them without restoring focus before route focus management runs;
+    // otherwise a hash-only navigation can leave a high-z-index panel covering
+    // the newly selected Change or exact Revision.
+    filterDisclosure?.close();
+    viewDisclosure?.close();
+    // Capability credentials are startup/transport state, never part of the
+    // strict Change route grammar. A pasted same-origin capability can be a
+    // hash-only navigation, so consume and scrub it on every route transition
+    // before parsing semantic URL state.
+    const capability = bootstrapCapability();
+    const route = parseChangeInspectorRoute(
+      capability.cleanedHash || "#/changes",
+    );
     // Every URL intent, including same-query detail/focus navigation, owns a
     // new read epoch. An older detail request may still finish, but it may not
     // restart a generation for the route the user has already left.

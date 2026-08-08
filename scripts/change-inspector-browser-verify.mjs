@@ -19,10 +19,10 @@
     assertions += 1;
     if (!condition) fail(label, detail);
   };
-  const url = (route) => {
-    const separator = route.includes("?") ? "&" : "?";
-    return `${config.server.baseUrl}/#/${route}${separator}token=${encodeURIComponent(config.server.token)}`;
-  };
+  // The launcher has already moved the one-time fragment capability into
+  // origin-scoped sessionStorage. Route changes are same-document navigation
+  // and therefore use only the strict, shareable Change route grammar.
+  const url = (route) => `${config.server.baseUrl}/#/${route}`;
   const screenshot = async (name) => {
     screenshots += 1;
     await page.screenshot({ path: `${config.artifactDir}/${name}.png`, type: "png", fullPage: false });
@@ -31,10 +31,25 @@
     await page.setViewportSize({ width: layout.width, height: layout.height });
     await page.goto(url(route), { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => document.querySelector("#connection-status")?.textContent === "connected");
-    await page.waitForFunction(() => {
+    await page.waitForFunction((expectedRoute) => {
       const stamp = document.querySelector("#stat-hash")?.textContent?.trim();
-      return Boolean(stamp && stamp !== "—" && document.querySelector("#master h1"));
-    });
+      const rawKey = document.querySelector("#master")?.dataset.changeListKey;
+      if (!stamp || stamp === "—" || !document.querySelector("#master h1") || !rawKey) return false;
+      try {
+        const key = JSON.parse(rawKey);
+        const [path, query = ""] = expectedRoute.split("?", 2);
+        const expectedLens = path.split("/", 1)[0];
+        const expectedAfter = new URLSearchParams(query).get("after");
+        return key.lens === expectedLens && (key.query?.after ?? null) === expectedAfter;
+      } catch {
+        return false;
+      }
+    }, route);
+    expect(
+      !(await page.evaluate(() => location.hash)).includes("token="),
+      label,
+      "capability leaked into the semantic route",
+    );
     const metrics = await page.evaluate(() => ({
       width: document.documentElement.clientWidth,
       scrollWidth: document.documentElement.scrollWidth,
@@ -45,6 +60,15 @@
     return metrics;
   };
   const hash = () => page.evaluate(() => location.hash);
+  const waitForLens = (lens) => page.waitForFunction((expectedLens) => {
+    const rawKey = document.querySelector("#master")?.dataset.changeListKey;
+    if (!rawKey) return false;
+    try {
+      return JSON.parse(rawKey).lens === expectedLens;
+    } catch {
+      return false;
+    }
+  }, lens);
   const selected = () => page.locator(".unit-card.change-card-selected[data-change-id]");
   const cardNamesAreUseful = () => page.evaluate(() =>
     Array.from(document.querySelectorAll(".unit-card[data-change-id]")).every((card) => {
@@ -96,6 +120,7 @@
     await page.getByRole("button", { name: /Next page/ }).click();
     await page.waitForFunction(() => location.hash.includes("after="));
     await page.waitForFunction((key) => document.querySelector("#master")?.dataset.changeListKey !== key, firstListKey);
+    await page.waitForFunction(() => document.querySelectorAll(".unit-card[data-change-id]").length > 0);
     const nextPageIds = await page.locator(".unit-card[data-change-id]").evaluateAll((cards) => cards.map((card) => card.dataset.changeId));
     expect(nextPageIds.length > 0 && nextPageIds.length <= 100, `${layout.name} next page`, `next page has ${nextPageIds.length} cards`);
     expect(JSON.stringify(nextPageIds) === JSON.stringify([...nextPageIds].sort()), `${layout.name} stable order`, "next page is not change_id_asc");
@@ -115,6 +140,7 @@
   await page.keyboard.press("Enter");
   await page.waitForFunction((id) => location.hash.includes(encodeURIComponent(id)), selectedId);
   expect((await hash()).includes(`/changes/${encodeURIComponent(selectedId)}`), "keyboard Enter", "Enter did not open the selected Change");
+  await page.waitForFunction(() => Boolean(document.querySelector("#detail-body")?.dataset.changeReadingKey));
   await screenshot("wide-keyboard-change");
   await page.keyboard.press("Escape");
   await page.waitForFunction(() => location.hash.startsWith("#/changes?"));
@@ -134,8 +160,10 @@
   expect(await selected().getAttribute("data-change-id") === await page.locator(".unit-card[data-change-id]").first().getAttribute("data-change-id"), "g boundary", "g did not select first loaded Change");
   await page.keyboard.press("2");
   await page.waitForFunction(() => location.hash.startsWith("#/attention?"));
+  await waitForLens("attention");
   await page.keyboard.press("1");
   await page.waitForFunction(() => location.hash.startsWith("#/changes?"));
+  await waitForLens("changes");
   const beforeThree = await hash();
   await page.keyboard.press("3");
   expect(await hash() === beforeThree, "inert 3", "3 unexpectedly changed route");
@@ -161,8 +189,24 @@
   await page.locator("#change-filter-topology").selectOption("initial");
   const filteredHash = await hash();
   expect(filteredHash.includes("limit=100") && filteredHash.includes("order=change_id_asc"), "filter URL state", "filtering lost explicit paging or ordering state");
+  expect(
+    await page.locator("#filters-toggle").getAttribute("aria-expanded") === "false",
+    "filter route dismissal",
+    "route-changing facet left the Filters panel over the new result",
+  );
+  await page.locator("#filters-toggle").click();
   await page.locator("#filter-clear").click();
   await page.waitForFunction(() => !location.hash.includes("q=") && !location.hash.includes("after="));
+  await page.waitForFunction(() => {
+    const rawKey = document.querySelector("#master")?.dataset.changeListKey;
+    if (!rawKey) return false;
+    try {
+      const key = JSON.parse(rawKey);
+      return key.lens === "changes" && !key.query?.q && !key.query?.after;
+    } catch {
+      return false;
+    }
+  });
   const clearedHash = await hash();
   expect(clearedHash.includes("limit=100") && clearedHash.includes("order=change_id_asc"), "clear reset", "clear reset did not preserve limit and order");
   await screenshot("wide-filter-clear");
@@ -174,7 +218,7 @@
     ["parallel", "parallel topology", "topology=parallel_current", topologyFixture.parallel_current.change],
     ["replacement-divergent", "replacement-divergent topology", "topology=replacement_divergent", topologyFixture.replacement_divergent.change],
     ["consolidation", "consolidation topology", "topology=consolidation", topologyFixture.consolidation.change],
-    ["incomplete-resource", "incomplete resource topology", "availability=incomplete", config.fixture.removed.changeId],
+    ["removed-resource-change", "removed resource Change availability", "availability=available", config.fixture.removed.changeId],
   ];
   for (const layout of layouts) {
     for (const [slug, name, filter, expectedChange] of representativeCases) {
@@ -182,6 +226,21 @@
       const topologyMetrics = await open(route, layout, `${layout.name} ${name}`);
       expect(topologyMetrics.liveCards === 1, `${layout.name} ${name}`, `expected one exact representative card, saw ${topologyMetrics.liveCards}`);
       expect(await page.locator(`.unit-card[data-change-id="${expectedChange}"]`).count() === 1, `${layout.name} ${name}`, `missing exact fixture Change ${expectedChange}`);
+      const sparseGeometry = await page.evaluate(() => {
+        const units = document.querySelector("#master > .units");
+        const card = units?.querySelector(".unit-card[data-change-id]");
+        return {
+          listHeight: units?.getBoundingClientRect().height ?? 0,
+          cardHeight: card?.getBoundingClientRect().height ?? 0,
+        };
+      });
+      expect(
+        sparseGeometry.listHeight > 0
+          && sparseGeometry.cardHeight > 0
+          && sparseGeometry.cardHeight < sparseGeometry.listHeight * 0.75,
+        `${layout.name} ${name}`,
+        `single card stretched to ${sparseGeometry.cardHeight}/${sparseGeometry.listHeight}`,
+      );
       await screenshot(`${layout.name}-${slug}`);
     }
   }
@@ -198,6 +257,9 @@
   const parallelCard = page.locator(`.unit-card[data-change-id="${parallelChange}"]`);
   const peerButtons = parallelCard.locator(".change-card-peer-open");
   await peerButtons.first().focus();
+  await page.keyboard.press("Tab");
+  const firstPeerCopy = parallelCard.getByRole("button", { name: /^Copy exact Revision / }).first();
+  expect(await firstPeerCopy.evaluate((node) => document.activeElement === node), "peer keyboard traversal", "Tab skipped the first exact Revision copy action");
   await page.keyboard.press("Tab");
   expect(await peerButtons.nth(1).evaluate((node) => document.activeElement === node), "peer keyboard traversal", "Tab did not move between exact current-Revision peers");
   const peerFocus = await peerButtons.nth(1).evaluate((node) => {
@@ -321,22 +383,57 @@
     expect(exactText.includes(expected), "narrow rich revision", `missing representative detail: ${expected}`);
   }
   await screenshot("narrow-exact-detail");
+  await page.locator("#detail-body").evaluate((node) => { node.scrollTop = node.scrollHeight; });
+  const narrowBackBounds = await page.evaluate(() => {
+    const detail = document.querySelector("#detail")?.getBoundingClientRect();
+    const back = document.querySelector("#detail-back")?.getBoundingClientRect();
+    return detail && back
+      ? { detailTop: detail.top, detailBottom: detail.bottom, backTop: back.top, backBottom: back.bottom }
+      : null;
+  });
+  expect(
+    narrowBackBounds !== null
+      && narrowBackBounds.backTop >= narrowBackBounds.detailTop
+      && narrowBackBounds.backBottom <= narrowBackBounds.detailBottom,
+    "narrow persistent return",
+    `Back control left the detail viewport: ${JSON.stringify(narrowBackBounds)}`,
+  );
   await page.locator("#detail-back").click();
   await page.waitForFunction(() => location.hash.startsWith("#/changes?"));
   expect(await page.locator(".split").evaluate((node) => node.classList.contains("split-closed")), "narrow detail return", "Back did not close the narrow detail sheet");
   expect(await page.locator("#detail").evaluate((node) => node.inert && node.getAttribute("aria-hidden") === "true"), "narrow detail return", "closed detail remained exposed to keyboard or assistive navigation");
-  expect(await page.evaluate(() => document.activeElement?.id === "master"), "narrow detail focus restoration", "closing a direct-linked detail did not restore a stable list focus target");
+  expect(await page.evaluate(() => {
+    const master = document.querySelector("#master");
+    return document.activeElement === master || Boolean(master?.contains(document.activeElement));
+  }), "narrow detail focus restoration", "closing the narrow detail did not restore focus to the retained list surface");
 
   await open(exact, layouts[0], "wide exact revision");
   await page.waitForFunction(() => Boolean(document.querySelector("#detail-body")?.dataset.changeReadingKey));
   const detail = page.locator("#detail");
-  expect(await detail.evaluate((node) => node.scrollHeight > node.clientHeight), "reading scroll", "rich exact detail did not produce a real scroll range");
-  await detail.evaluate((node) => { node.scrollTop = Math.min(80, node.scrollHeight - node.clientHeight); });
-  const beforeReadingScroll = await detail.evaluate((node) => node.scrollTop);
+  const detailViewport = page.locator("#detail-body");
+  expect(await detailViewport.evaluate((node) => node.scrollHeight > node.clientHeight), "reading scroll", "rich exact detail did not produce a real scroll range");
+  const readingToggle = page.locator("#detail-read");
+  await readingToggle.focus();
+  await detailViewport.evaluate((node) => { node.scrollTop = Math.min(80, node.scrollHeight - node.clientHeight); });
+  const beforeReadingScroll = await detailViewport.evaluate((node) => node.scrollTop);
   expect(beforeReadingScroll > 0, "reading scroll", "failed to establish a non-zero detail scroll position");
-  await page.locator("#detail-read").click();
+  await page.keyboard.press("Enter");
   expect(await page.locator(".split").evaluate((node) => node.classList.contains("reading")), "reading mode", "reading mode was not entered");
-  expect(await detail.evaluate((node) => node.scrollTop) === beforeReadingScroll, "reading scroll", "reading mode lost detail scroll position");
+  expect(await detailViewport.evaluate((node) => node.scrollTop) === beforeReadingScroll, "reading scroll", "reading mode lost detail scroll position");
+  const wideHeaderBounds = await page.evaluate(() => {
+    const detail = document.querySelector("#detail")?.getBoundingClientRect();
+    const close = document.querySelector("#detail-close")?.getBoundingClientRect();
+    return detail && close
+      ? { detailTop: detail.top, detailBottom: detail.bottom, closeTop: close.top, closeBottom: close.bottom }
+      : null;
+  });
+  expect(
+    wideHeaderBounds !== null
+      && wideHeaderBounds.closeTop >= wideHeaderBounds.detailTop
+      && wideHeaderBounds.closeBottom <= wideHeaderBounds.detailBottom,
+    "reading persistent controls",
+    `detail controls left the reading viewport: ${JSON.stringify(wideHeaderBounds)}`,
+  );
   await page.locator("#master-rail").click();
   expect(!(await page.locator(".split").evaluate((node) => node.classList.contains("reading"))), "reading return path", "master rail did not restore split mode");
   await screenshot("wide-exact-reading");
@@ -361,6 +458,15 @@
       expect(resourceText.includes("Captured bytes are unavailable. No live or associated-commit bytes were substituted."), `${layout.name} ${availability} resource`, "bodyless exact resource did not state its non-substitution guarantee");
       expect(!resourceText.includes("captured document:"), `${layout.name} ${availability} resource`, "bodyless exact resource exposed a captured-document hash");
       expect(await page.locator("#detail-body .captured-diff").count() === 0, `${layout.name} ${availability} resource`, "bodyless exact resource rendered a captured or substituted diff");
+      const detailOverflow = await page.locator("#detail-body").evaluate((node) => ({
+        clientWidth: node.clientWidth,
+        scrollWidth: node.scrollWidth,
+      }));
+      expect(
+        detailOverflow.scrollWidth <= detailOverflow.clientWidth,
+        `${layout.name} ${availability} resource`,
+        `exact identity overflowed detail width ${detailOverflow.scrollWidth}/${detailOverflow.clientWidth}`,
+      );
       await screenshot(`${layout.name}-${availability}-resource`);
     }
   }
@@ -383,5 +489,5 @@
 
   expect(consoleErrors.length === 0, "browser console", consoleErrors.join("\n"));
   expect(pageErrors.length === 0, "browser page", pageErrors.join("\n"));
-  console.log(JSON.stringify({ assertionCount: assertions, screenshotCount: screenshots }));
+  return { assertionCount: assertions, screenshotCount: screenshots };
 })(__POINTBREAK_CHANGE_BROWSER_CONFIG__)

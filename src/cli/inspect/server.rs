@@ -398,7 +398,7 @@ pub(super) fn serve(
             .map_err(|error| format!("could not generate inspect bearer: {error}"))?,
         serve_static: !api_only,
     });
-    let capability_url = format!("{url}#/timeline?token={}", policy.token.expose());
+    let capability_url = format!("{url}#/changes?token={}", policy.token.expose());
     let state = Arc::new(InspectState::new(repo.clone())?);
 
     match (api_only, output_format) {

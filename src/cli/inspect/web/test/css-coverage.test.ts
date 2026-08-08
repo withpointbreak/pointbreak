@@ -95,9 +95,34 @@ test("detail key/value rows reserve a content-sized label track", () => {
   expect(css).toMatch(/\.detail \.kv dd \{[^}]*overflow-wrap: anywhere;/s);
 });
 
+test("applied-filter badges wrap long exact identities inside the disclosure", () => {
+  const css = readFileSync(APP_CSS_PATH, "utf8");
+  expect(css).toMatch(/\.filter-chips \.badge \{[^}]*max-width: 100%;/s);
+  expect(css).toMatch(
+    /\.filter-chips \.badge \{[^}]*overflow-wrap: anywhere;/s,
+  );
+});
+
 test("unit cards read their padding from the density-aware card token", () => {
   const css = readFileSync(APP_CSS_PATH, "utf8");
   expect(css).toMatch(/\.unit-card \{[^}]*padding: var\(--card-pad\);/s);
+});
+
+test("bounded Change grids keep sparse result cards at their content height", () => {
+  const css = readFileSync(APP_CSS_PATH, "utf8");
+  expect(css).toMatch(/\.units \{[^}]*align-content: start;/s);
+});
+
+test("exact detail identities wrap below persistent non-scrolling controls", () => {
+  const css = readFileSync(APP_CSS_PATH, "utf8");
+  expect(css).toMatch(/\.detail \.mono \{[^}]*overflow-wrap: anywhere;/s);
+  expect(css).toMatch(/\.detail \.mono \{[^}]*word-break: break-word;/s);
+  expect(css).toMatch(/\.detail \{[^}]*display: flex;/s);
+  expect(css).toMatch(/\.detail \{[^}]*flex-direction: column;/s);
+  expect(css).toMatch(/\.detail \{[^}]*overflow: hidden;/s);
+  expect(css).toMatch(/#detail-body \{[^}]*min-height: 0;/s);
+  expect(css).toMatch(/#detail-body \{[^}]*overflow-y: auto;/s);
+  expect(css).toMatch(/\.detail-head \{[^}]*background: var\(--bg\);/s);
 });
 
 test("the compact preset overrides the card token", () => {

@@ -289,8 +289,8 @@ export function installChangeInspectorInteraction(
   const masterRail = document.querySelector<HTMLButtonElement>("#master-rail");
   const setReading = (enabled: boolean) => {
     const split = document.querySelector<HTMLElement>(".split");
-    const detail = document.querySelector<HTMLElement>("#detail");
-    const scrollTop = detail?.scrollTop ?? 0;
+    const detailViewport = document.querySelector<HTMLElement>("#detail-body");
+    const scrollTop = detailViewport?.scrollTop ?? 0;
     split?.classList.toggle("reading", enabled);
     if (readingButton) {
       readingButton.textContent = enabled ? "⤡" : "⤢";
@@ -301,7 +301,7 @@ export function installChangeInspectorInteraction(
       );
       readingButton.title = enabled ? "Exit reading mode" : "Reading mode";
     }
-    if (detail) detail.scrollTop = scrollTop;
+    if (detailViewport) detailViewport.scrollTop = scrollTop;
   };
   const toggleReading = () => {
     setReading(
@@ -610,9 +610,21 @@ export function installChangeInspectorInteraction(
       const detailOpen =
         snapshot.route.kind !== "lens" && snapshot.route.kind !== "invalid";
       const detail = document.querySelector<HTMLElement>("#detail");
+      const viewportIsNarrow = window.matchMedia("(max-width: 760px)").matches;
       const nextDetailDomIdentity =
         document.querySelector<HTMLElement>("#detail-body")?.firstChild ?? null;
       const detailDomChanged = detailDomIdentity !== nextDetailDomIdentity;
+      const active =
+        document.activeElement instanceof HTMLElement
+          ? document.activeElement
+          : null;
+      const detailRouteChanged =
+        currentRoute !== null &&
+        currentRoute.kind !== "lens" &&
+        nextRoute !== null &&
+        nextRoute.kind !== "lens" &&
+        formatChangeInspectorRoute(currentRoute) !==
+          formatChangeInspectorRoute(nextRoute);
       document
         .querySelector(".split")
         ?.classList.toggle("split-closed", !detailOpen);
@@ -622,16 +634,26 @@ export function installChangeInspectorInteraction(
         else detail.setAttribute("aria-hidden", "true");
       }
       if (detailOpen && !detailWasOpen) {
-        const active =
-          document.activeElement instanceof HTMLElement
-            ? document.activeElement
-            : null;
         detailReturnFocus = active && active !== document.body ? active : null;
-        if (window.matchMedia("(max-width: 760px)").matches) {
+        if (viewportIsNarrow) {
           document
             .querySelector<HTMLButtonElement>("#detail-back")
             ?.focus({ preventScroll: true });
         }
+      } else if (
+        detailOpen &&
+        detailWasOpen &&
+        detailRouteChanged &&
+        viewportIsNarrow &&
+        detail !== null &&
+        (active === null || !detail.contains(active)) &&
+        (active === null || active.closest(".modal:not(.hidden)") === null)
+      ) {
+        // A different exact route enters a new reading surface. At the narrow
+        // breakpoint that surface is a fixed sheet, so connected focus left
+        // on the covered master or toolbar must move into retained sheet
+        // chrome. Same-route poll paints and visible modals retain focus.
+        focusFallback(nextRoute);
       } else if (
         detailOpen &&
         detailWasOpen &&

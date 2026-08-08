@@ -1042,8 +1042,8 @@
     const masterRail = document.querySelector("#master-rail");
     const setReading = /* @__PURE__ */ __name((enabled) => {
       const split = document.querySelector(".split");
-      const detail = document.querySelector("#detail");
-      const scrollTop = detail?.scrollTop ?? 0;
+      const detailViewport = document.querySelector("#detail-body");
+      const scrollTop = detailViewport?.scrollTop ?? 0;
       split?.classList.toggle("reading", enabled);
       if (readingButton) {
         readingButton.textContent = enabled ? "⤡" : "⤢";
@@ -1054,7 +1054,7 @@
         );
         readingButton.title = enabled ? "Exit reading mode" : "Reading mode";
       }
-      if (detail) detail.scrollTop = scrollTop;
+      if (detailViewport) detailViewport.scrollTop = scrollTop;
     }, "setReading");
     const toggleReading = /* @__PURE__ */ __name(() => {
       setReading(
@@ -1308,8 +1308,11 @@
         setSelected(selectedChangeId);
         const detailOpen = snapshot2.route.kind !== "lens" && snapshot2.route.kind !== "invalid";
         const detail = document.querySelector("#detail");
+        const viewportIsNarrow = window.matchMedia("(max-width: 760px)").matches;
         const nextDetailDomIdentity = document.querySelector("#detail-body")?.firstChild ?? null;
         const detailDomChanged = detailDomIdentity !== nextDetailDomIdentity;
+        const active2 = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        const detailRouteChanged = currentRoute2 !== null && currentRoute2.kind !== "lens" && nextRoute !== null && nextRoute.kind !== "lens" && formatChangeInspectorRoute(currentRoute2) !== formatChangeInspectorRoute(nextRoute);
         document.querySelector(".split")?.classList.toggle("split-closed", !detailOpen);
         if (detail) {
           detail.inert = !detailOpen;
@@ -1317,11 +1320,12 @@
           else detail.setAttribute("aria-hidden", "true");
         }
         if (detailOpen && !detailWasOpen) {
-          const active2 = document.activeElement instanceof HTMLElement ? document.activeElement : null;
           detailReturnFocus = active2 && active2 !== document.body ? active2 : null;
-          if (window.matchMedia("(max-width: 760px)").matches) {
+          if (viewportIsNarrow) {
             document.querySelector("#detail-back")?.focus({ preventScroll: true });
           }
+        } else if (detailOpen && detailWasOpen && detailRouteChanged && viewportIsNarrow && detail !== null && (active2 === null || !detail.contains(active2)) && (active2 === null || active2.closest(".modal:not(.hidden)") === null)) {
+          focusFallback(nextRoute);
         } else if (detailOpen && detailWasOpen && detailDomChanged && (!(document.activeElement instanceof HTMLElement) || document.activeElement === document.body || !document.activeElement.isConnected)) {
           focusFallback(nextRoute);
         } else if (!detailOpen && detailWasOpen) {
@@ -4714,10 +4718,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
   __name(snapshotFilterDraft, "snapshotFilterDraft");
   function capturePollFilterDraft() {
     if (filterInput === null) return null;
-    const route = currentRoute();
-    const committed = route.kind === "invalid" ? "" : route.query.q ?? "";
     const focused = document.activeElement === filterInput;
-    if (!focused && filterInput.value === committed) return null;
     return snapshotFilterDraft(filterInput, focused);
   }
   __name(capturePollFilterDraft, "capturePollFilterDraft");
@@ -4933,7 +4934,12 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       }
     }, "loadGeneration");
     const onRoute = /* @__PURE__ */ __name(async () => {
-      const route = currentRoute();
+      filterDisclosure?.close();
+      viewDisclosure?.close();
+      const capability2 = bootstrapCapability();
+      const route = parseChangeInspectorRoute(
+        capability2.cleanedHash || "#/changes"
+      );
       requestEpoch += 1;
       state.setRoute(route);
       if (route.kind === "invalid") {

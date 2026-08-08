@@ -125,6 +125,46 @@ afterEach(async () => {
 });
 
 describe("Change-first composition", () => {
+  it("consumes a same-document capability before strict Change routing", async () => {
+    const token = "opaque_test_capability_0123456789abcdef";
+    const requests: string[] = [];
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      requests.push(path);
+      if (path === "/api/v2/profile")
+        return new Response(JSON.stringify(profile));
+      if (path.startsWith("/api/v2/changes?"))
+        return new Response(JSON.stringify(page("changes")));
+      if (path.startsWith("/api/v2/attention?"))
+        return new Response(JSON.stringify(page("attention")));
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    const { sessionTokenKey } = await import("../src/auth");
+    await bootstrapChangeInspector({ poll: false });
+    requests.length = 0;
+
+    history.replaceState(
+      null,
+      "",
+      `/#/changes?limit=100&order=change_id_asc&token=${token}`,
+    );
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+
+    await vi.waitFor(() =>
+      expect(location.hash).toBe("#/changes?limit=100&order=change_id_asc"),
+    );
+    expect(sessionStorage.getItem(sessionTokenKey())).toBe(token);
+    await vi.waitFor(() =>
+      expect(requests).toContain(
+        "/api/v2/changes?limit=100&order=change_id_asc",
+      ),
+    );
+    expect(document.querySelector("#route-diagnostic")?.textContent).toBe("");
+  });
+
   it("keeps keyboard selection local until Enter and leaves text entry alone", async () => {
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
       const path = String(input);
@@ -432,15 +472,15 @@ describe("Change-first composition", () => {
     );
     expect(divider?.getAttribute("aria-valuenow")).toBe("50");
 
-    const detail = document.querySelector<HTMLElement>("#detail");
-    if (detail) detail.scrollTop = 17;
+    const detailViewport = document.querySelector<HTMLElement>("#detail-body");
+    if (detailViewport) detailViewport.scrollTop = 17;
     const reading = document.querySelector<HTMLButtonElement>("#detail-read");
     reading?.click();
     expect(
       document.querySelector(".split")?.classList.contains("reading"),
     ).toBe(true);
     expect(reading?.getAttribute("aria-label")).toBe("Exit reading mode");
-    expect(detail?.scrollTop).toBe(17);
+    expect(detailViewport?.scrollTop).toBe(17);
     document.querySelector<HTMLButtonElement>("#master-rail")?.click();
     expect(
       document.querySelector(".split")?.classList.contains("reading"),
@@ -927,6 +967,74 @@ describe("Change-first composition", () => {
     expect(search.selectionDirection).toBe("forward");
   });
 
+  it("preserves a search draft started after a background poll begins", async () => {
+    let pollTick: () => void = () => {
+      throw new Error("poll interval was not installed");
+    };
+    vi.spyOn(globalThis, "setInterval").mockImplementation((handler, delay) => {
+      if (delay === 3000 && typeof handler === "function") pollTick = handler;
+      return 1 as unknown as ReturnType<typeof setInterval>;
+    });
+    let generation = 1;
+    let profileRequests = 0;
+    let markPollStarted!: () => void;
+    let releasePoll!: () => void;
+    const pollStarted = new Promise<void>((resolve) => {
+      markPollStarted = resolve;
+    });
+    const pollGate = new Promise<void>((resolve) => {
+      releasePoll = resolve;
+    });
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      const stamp = `sha256:generation-${generation}`;
+      if (path === "/api/v2/profile") {
+        profileRequests += 1;
+        if (profileRequests === 3) {
+          markPollStarted();
+          await pollGate;
+        }
+        return new Response(
+          JSON.stringify({
+            ...profile,
+            authorityCursor: { eventCount: generation },
+          }),
+        );
+      }
+      if (path.startsWith("/api/v2/changes?"))
+        return new Response(JSON.stringify(page("changes", stamp)));
+      if (path.startsWith("/api/v2/attention?"))
+        return new Response(JSON.stringify(page("attention", stamp)));
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector();
+
+    const search = document.querySelector<HTMLInputElement>("#filter-text");
+    if (search === null) throw new Error("missing Change search input");
+    pollTick();
+    await pollStarted;
+    search.focus();
+    search.value = "draft started during poll";
+    search.setSelectionRange(6, 13, "backward");
+    generation = 2;
+    releasePoll();
+
+    await vi.waitFor(() =>
+      expect(document.querySelector("#stat-hash")?.textContent).toBe(
+        "sha256:generation-2",
+      ),
+    );
+    expect(location.hash).toBe("#/changes");
+    expect(search.value).toBe("draft started during poll");
+    expect(document.activeElement).toBe(search);
+    expect(search.selectionStart).toBe(6);
+    expect(search.selectionEnd).toBe(13);
+    expect(search.selectionDirection).toBe("backward");
+  });
+
   it("does not let an older same-query detail failure restart a route the user left", async () => {
     let rejectOldDetail!: (reason?: unknown) => void;
     const requests: string[] = [];
@@ -1044,6 +1152,55 @@ describe("Change-first composition", () => {
     expect(viewPanel?.classList).not.toContain("hidden");
     viewToggle?.click();
     expect(viewPanel?.classList).toContain("hidden");
+  });
+
+  it("dismisses lightweight control disclosures when route intent changes", async () => {
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/v2/profile")
+        return new Response(JSON.stringify(profile));
+      if (path.startsWith("/api/v2/changes?"))
+        return new Response(JSON.stringify(page("changes")));
+      if (path.startsWith("/api/v2/attention?"))
+        return new Response(JSON.stringify(page("attention")));
+      throw new Error(`unexpected ${path}`);
+    }) as typeof fetch;
+    const { bootstrapChangeInspector } = await import(
+      "../src/change-inspector"
+    );
+    await bootstrapChangeInspector({ poll: false });
+
+    const viewToggle =
+      document.querySelector<HTMLButtonElement>("#view-toggle");
+    const viewPanel = document.querySelector("#view-panel");
+    viewToggle?.click();
+    expect(viewPanel?.classList).not.toContain("hidden");
+
+    location.hash = "#/attention";
+    window.dispatchEvent(new Event("hashchange"));
+    await vi.waitFor(() =>
+      expect(document.querySelector("#master h1")?.textContent).toContain(
+        "Attention",
+      ),
+    );
+    expect(viewPanel?.classList).toContain("hidden");
+    expect(viewToggle?.getAttribute("aria-expanded")).toBe("false");
+
+    const filtersToggle =
+      document.querySelector<HTMLButtonElement>("#filters-toggle");
+    const filtersPanel = document.querySelector("#filters-panel");
+    filtersToggle?.click();
+    expect(filtersPanel?.classList).not.toContain("hidden");
+
+    location.hash = "#/changes";
+    window.dispatchEvent(new Event("hashchange"));
+    await vi.waitFor(() =>
+      expect(document.querySelector("#master h1")?.textContent).toContain(
+        "Changes",
+      ),
+    );
+    expect(filtersPanel?.classList).toContain("hidden");
+    expect(filtersToggle?.getAttribute("aria-expanded")).toBe("false");
   });
 
   it("retries one profile-generation mismatch exactly once", async () => {

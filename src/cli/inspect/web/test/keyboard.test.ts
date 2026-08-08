@@ -289,8 +289,8 @@ describe("Space scrolls the open detail pane", () => {
       selected: { kind: "revision", id: SYNTHETIC_REV },
       open: true,
     });
-    const pane = document.querySelector<HTMLElement>("#detail");
-    if (!pane) throw new Error("#detail not mounted");
+    const pane = document.querySelector<HTMLElement>("#detail-body");
+    if (!pane) throw new Error("#detail-body not mounted");
     pane.scrollTop = 0;
     key({ key: " " });
     const paged = pane.scrollTop;

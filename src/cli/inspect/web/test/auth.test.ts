@@ -40,6 +40,10 @@ describe("capability fragment bootstrap", () => {
       "#/attention?types=observation%2Cassessment",
     ],
     [
+      "#/changes?limit=100&order=change_id_asc&token=TOKEN",
+      "#/changes?limit=100&order=change_id_asc",
+    ],
+    [
       "#/revision/rev%3Aone?lens=list&token=TOKEN",
       "#/revision/rev%3Aone?lens=list",
     ],

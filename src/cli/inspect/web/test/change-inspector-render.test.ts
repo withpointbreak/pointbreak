@@ -416,7 +416,7 @@ describe("Change inspector render", () => {
       { navigate },
       { reading, refusal: null },
     );
-    const detail = document.querySelector<HTMLElement>("#detail");
+    const detail = document.querySelector<HTMLElement>("#detail-body");
     const fact = document.querySelector("[data-fact-id]");
     if (detail) detail.scrollTop = 19;
     renderChangeInspector(

@@ -299,6 +299,55 @@ describe("Change Inspector interaction lifecycle", () => {
     );
   });
 
+  it("moves focus into a new exact route when detail is already a narrow sheet", () => {
+    let narrow = false;
+    vi.spyOn(window, "matchMedia").mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === "(max-width: 760px)" && narrow,
+          media: query,
+          onchange: null,
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(() => true),
+        }) as unknown as MediaQueryList,
+    );
+    const { controller } = install();
+    history.replaceState(null, "", "/#/changes");
+    controller.sync(lensSnapshot());
+
+    const opener = document.createElement("button");
+    opener.textContent = "open change";
+    document.querySelector("#master")?.append(opener);
+    opener.focus();
+    history.pushState(null, "", "/#/changes/change%3Asha256%3Awide");
+    const exact = exactSnapshot("change:sha256:wide");
+    controller.sync(exact);
+    expect(document.activeElement).toBe(opener);
+
+    const toolbarControl = document.querySelector<HTMLElement>("#view-toggle");
+    toolbarControl?.focus();
+    narrow = true;
+    const nextGeneration = document.createElement("p");
+    nextGeneration.textContent = "different exact detail";
+    document.querySelector("#detail-body")?.replaceChildren(nextGeneration);
+    history.pushState(null, "", "/#/changes/change%3Asha256%3Anarrow");
+    const narrowExact = exactSnapshot("change:sha256:narrow");
+    controller.sync(narrowExact);
+    expect(document.activeElement).toBe(document.querySelector("#detail-back"));
+
+    toolbarControl?.focus();
+    const refreshedGeneration = document.createElement("p");
+    refreshedGeneration.textContent = "same exact detail refresh";
+    document
+      .querySelector("#detail-body")
+      ?.replaceChildren(refreshedGeneration);
+    controller.sync(narrowExact);
+    expect(document.activeElement).toBe(toolbarControl);
+  });
+
   it("restores focus after a same-route detail refresh but not an unchanged paint", () => {
     const { controller } = install();
     history.replaceState(null, "", "/#/changes");

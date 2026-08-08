@@ -1266,8 +1266,8 @@ describe("pollFreshness", () => {
     expect(document.querySelector("#detail-body")?.textContent).toContain(
       "Before parked poll",
     );
-    const detailPane = document.querySelector<HTMLElement>("#detail");
-    if (!detailPane) throw new Error("expected detail pane");
+    const detailPane = document.querySelector<HTMLElement>("#detail-body");
+    if (!detailPane) throw new Error("expected detail viewport");
     detailPane.scrollTop = 120;
 
     const after = structuredClone(revisionJson);

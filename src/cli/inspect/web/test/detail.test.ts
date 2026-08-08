@@ -71,6 +71,12 @@ function detailEl(): HTMLElement {
   return el;
 }
 
+function detailViewport(): HTMLElement {
+  const el = document.querySelector<HTMLElement>("#detail-body");
+  if (!el) throw new Error("#detail-body not mounted");
+  return el;
+}
+
 function kvValue(label: string): string {
   const dt = Array.from(
     document.querySelectorAll<HTMLElement>("#detail dl.kv dt"),
@@ -270,9 +276,7 @@ describe("renderDetail (event detail / empty prompt)", () => {
 
 describe("detail-pane scroll memory (reset on change, restore on revisit)", () => {
   function pane(): HTMLElement {
-    const el = document.querySelector<HTMLElement>("#detail");
-    if (!el) throw new Error("#detail not mounted");
-    return el;
+    return detailViewport();
   }
   function secondEvent(): string {
     const entries = (historyJson as unknown as HistoryDoc).entries;
@@ -1117,7 +1121,7 @@ describe("showComposite (shownCompositeId guards re-fetch)", () => {
       open: true,
     });
     await detail.showComposite(REV);
-    detailEl().scrollTop = 120;
+    detailViewport().scrollTop = 120;
 
     const updated = structuredClone(revisionJson) as unknown as RevisionPageDoc;
     const updatedObservation = updated.observations?.[0];
@@ -1171,7 +1175,7 @@ describe("showComposite (shownCompositeId guards re-fetch)", () => {
       expect(detailEl().textContent).toContain(
         "Fresh composite replaces existing",
       );
-      expect(detailEl().scrollTop).toBe(120);
+      expect(detailViewport().scrollTop).toBe(120);
     } finally {
       globalThis.fetch = baseFetch;
     }

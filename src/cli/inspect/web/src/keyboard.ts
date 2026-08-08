@@ -638,7 +638,7 @@ export function onKey(ev: KeyboardEvent): void {
       const t = ev.target;
       if (t instanceof Element && t.closest("a[href], button")) return;
       if (!getState().open) return;
-      const pane = $("#detail");
+      const pane = $("#detail-body");
       if (!pane) return;
       ev.preventDefault();
       const page = pane.clientHeight > 0 ? pane.clientHeight * 0.85 : 400;

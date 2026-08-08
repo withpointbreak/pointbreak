@@ -502,7 +502,7 @@ let shownDetailKey: string | null = null;
 
 /** Save the outgoing entity's offset — call BEFORE the content swap (clamping). */
 function rememberScroll(): void {
-  const pane = $("#detail");
+  const pane = $("#detail-body");
   if (!pane || shownDetailKey === null) return;
   scrollMemory.set(shownDetailKey, pane.scrollTop);
   if (scrollMemory.size > SCROLL_MEMORY_CAP) {
@@ -513,7 +513,7 @@ function rememberScroll(): void {
 
 /** Apply the incoming entity's offset — call AFTER the content swap. */
 function projectScroll(newKey: string | null): void {
-  const pane = $("#detail");
+  const pane = $("#detail-body");
   if (!pane) {
     shownDetailKey = newKey;
     return;
@@ -1201,7 +1201,7 @@ export async function openRevision(
   const el = $("#detail-body");
   rememberScroll();
   // Keep a same-revision refresh mounted while its replacement loads. Shrinking
-  // the body to this placeholder makes real browsers clamp the pane's scrollTop.
+  // the body to this placeholder makes real browsers clamp its scrollTop.
   if (el && !preserveCurrentPaint)
     el.innerHTML = `<p class="${CLASS.upEmpty}">loading…</p>`;
   // The scoped attention set rides the same paint; neither read throws
