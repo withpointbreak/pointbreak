@@ -262,7 +262,6 @@ primary_revision="$(jq -er '.primary_revision' "$log_dir/base-matrix.json")"
 primary_artifact="$(jq -er '.topology.initial.current.artifact' "$log_dir/base-matrix.json")"
 historical_change="$(jq -er '.topology.parallel_current.change' "$log_dir/base-matrix.json")"
 shared_revision="$(jq -er '.shared_revision.revision' "$log_dir/base-matrix.json")"
-shared_artifact="$(jq -er '.shared_revision.artifact' "$log_dir/base-matrix.json")"
 graph_change="$(jq -s -e -r '.[0].changeId' "$log_dir/scale-captures.jsonl")"
 graph_successor_revision="$(jq -s -e -r '.[0].revision.revisionId' "$log_dir/scale-captures.jsonl")"
 graph_successor_artifact="$(jq -s -e -r '.[0].revision.objectArtifactContentHash' "$log_dir/scale-captures.jsonl")"
@@ -328,28 +327,6 @@ POINTBREAK_HOME="$pointbreak_home" \
     --supersedes "$correction_origin_id" \
     --idempotency-key "browser-history-correction-replacement-v1" --format json \
     >"$log_dir/correction-replacement.json" 2>"$log_dir/correction-replacement.log"
-
-POINTBREAK_HOME="$pointbreak_home" \
-  POINTBREAK_ACTOR_ID="actor:agent:pointbreak-browser-matrix" \
-  "$pointbreak_binary" observation add --repo "$fixture_repo" \
-    --exact-revision "$shared_revision" --track "agent:browser-history-cases" \
-    --title "Browser fact-port shared origin" \
-    --body "This observation is ported as relationship-only context to the rich primary exact Revision." \
-    --idempotency-key "browser-fact-port-shared-origin-v1" --format json \
-    >"$log_dir/fact-port-origin.json" 2>"$log_dir/fact-port-origin.log"
-fact_port_origin_id="$(jq -er '.observationId' "$log_dir/fact-port-origin.json")"
-
-POINTBREAK_HOME="$pointbreak_home" "$pointbreak_binary" change select \
-  "$primary_change" --revision "$primary_revision" --source captured \
-  --repo "$fixture_repo" --format json >"$log_dir/fact-port-target-cursor.json"
-fact_port_cursor="$(jq -er '.token' "$log_dir/fact-port-target-cursor.json")"
-POINTBREAK_HOME="$pointbreak_home" \
-  POINTBREAK_ACTOR_ID="actor:agent:pointbreak-browser-matrix" \
-  "$pointbreak_binary" fact port --repo "$fixture_repo" \
-    --origin-revision "$shared_revision@$shared_artifact" \
-    --origin-fact "$fact_port_origin_id" --review-cursor "$fact_port_cursor" \
-    --relation context-only --track "agent:browser-history-cases" --format json \
-    >"$log_dir/fact-port.json" 2>"$log_dir/fact-port.log"
 
 # The primary exact Revision is directly owned by its original Change. Add one
 # historical membership in a second Change, resolve the exact claim from the
@@ -489,8 +466,8 @@ rich_artifact="$(jq -er --arg revision "$rich_revision" '
 
 fixture_identity="public-l2-change-matrix-v1"
 correction_event="$(jq -er '.eventId' "$log_dir/correction-replacement.json")"
-fact_port_event="$(jq -er '.eventId' "$log_dir/fact-port.json")"
-fact_port_id="$(jq -er '.portId' "$log_dir/fact-port.json")"
+fact_port_event="$(jq -er '.fact_port.event_id' "$log_dir/base-matrix.json")"
+fact_port_id="$(jq -er '.fact_port.port_id' "$log_dir/base-matrix.json")"
 historical_membership_join_event="$(jq -er '
   [.events[] | select(.eventType == "change_membership_asserted")]
   | if length == 1 then .[0].eventId else error("expected one membership assertion event") end

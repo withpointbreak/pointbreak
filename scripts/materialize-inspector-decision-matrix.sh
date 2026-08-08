@@ -155,10 +155,6 @@ ambiguous_request="$(pointbreak_actor_json \
 pointbreak_actor_json "actor:agent:pointbreak-matrix-response-one" \
   input-request respond "$ambiguous_request" --repo "$destination" \
   --outcome approved --reason "first response approves" >/dev/null
-pointbreak_actor_json "actor:agent:pointbreak-matrix-response-two" \
-  input-request respond "$ambiguous_request" --repo "$destination" \
-  --outcome rejected --reason "second response rejects" >/dev/null
-
 replaced_assessment="$(pointbreak_actor_json \
   "actor:agent:pointbreak-matrix-assessment-writer-one" \
   assessment add --repo "$destination" --exact-revision "$primary_revision" \
@@ -269,6 +265,35 @@ topology_left_capture="$(pointbreak_actor_json \
   --review-cursor "$topology_root_cursor" --advance replace)"
 topology_left_revision="$(printf '%s\n' "$topology_left_capture" | jq -er '.revision.revisionId')"
 topology_left_artifact="$(printf '%s\n' "$topology_left_capture" | jq -er '.revision.objectArtifactContentHash')"
+
+# Port one exact fact while the primary Change still has a resolvable request
+# state. The second conflicting response below deliberately makes that Change
+# ambiguous only after the public selector and write path have revalidated the
+# exact target.
+fact_port_origin_revision="$topology_left_revision"
+fact_port_origin_artifact="$topology_left_artifact"
+fact_port_origin_id="$(pointbreak_actor_json \
+  "actor:agent:pointbreak-matrix-fact-writer" \
+  observation add --repo "$destination" --exact-revision "$fact_port_origin_revision" \
+  --track "agent:matrix-facts" --title "Decision context origin" \
+  --body "This exact observation is relationship-only context for the primary Revision." \
+  | jq -er '.observationId')"
+fact_port_target_selection="$(pointbreak_actor_json \
+  "actor:agent:pointbreak-matrix-fact-writer" \
+  change select "$primary_change" --revision "$primary_revision" --source captured \
+  --repo "$destination")"
+fact_port_cursor="$(printf '%s\n' "$fact_port_target_selection" | jq -er '.token')"
+fact_port_result="$(pointbreak_actor_json \
+  "actor:agent:pointbreak-matrix-fact-writer" \
+  fact port --repo "$destination" \
+  --origin-revision "$fact_port_origin_revision@$fact_port_origin_artifact" \
+  --origin-fact "$fact_port_origin_id" --review-cursor "$fact_port_cursor" \
+  --relation context-only --track "agent:matrix-facts")"
+fact_port_id="$(printf '%s\n' "$fact_port_result" | jq -er '.portId')"
+fact_port_event="$(printf '%s\n' "$fact_port_result" | jq -er '.eventId')"
+pointbreak_actor_json "actor:agent:pointbreak-matrix-response-two" \
+  input-request respond "$ambiguous_request" --repo "$destination" \
+  --outcome rejected --reason "second response rejects" >/dev/null
 
 # A second Change adopts A and B, then C advances in parallel before asserting
 # its own replacement of A. Reselection after B -> A is required because every
@@ -493,6 +518,11 @@ jq -n \
   --arg primary_change "$primary_change" \
   --arg primary_revision "$primary_revision" \
   --arg primary_artifact "$primary_artifact" \
+  --arg fact_port_origin_revision "$fact_port_origin_revision" \
+  --arg fact_port_origin_artifact "$fact_port_origin_artifact" \
+  --arg fact_port_origin_id "$fact_port_origin_id" \
+  --arg fact_port_id "$fact_port_id" \
+  --arg fact_port_event "$fact_port_event" \
   --arg live_revision "$live_revision" \
   --arg unassessed_revision "$unassessed_revision" \
   --arg superseded_revision "$superseded_revision" \
@@ -524,6 +554,15 @@ jq -n \
   --arg live_landing "$live_landing" \
   '{
     primary_revision: $primary_revision,
+    fact_port: {
+      port_id: $fact_port_id,
+      event_id: $fact_port_event,
+      origin: {
+        revision: $fact_port_origin_revision,
+        artifact: $fact_port_origin_artifact,
+        observation: $fact_port_origin_id
+      }
+    },
     live_revision: $live_revision,
     unassessed_revision: $unassessed_revision,
     superseded_revision: $superseded_revision,

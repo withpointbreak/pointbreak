@@ -139,6 +139,9 @@ fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let script = fs::read_to_string(root.join("scripts/change-inspector-browser-verify.sh"))
         .expect("read Change Inspector browser gate");
+    let materializer =
+        fs::read_to_string(root.join("scripts/materialize-inspector-decision-matrix.sh"))
+            .expect("read decision matrix materializer");
     let browser_program =
         fs::read_to_string(root.join("scripts/change-inspector-browser-verify.mjs"))
             .expect("read Change Inspector browser program");
@@ -163,6 +166,25 @@ fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
     assert!(
         !browser_program.contains("new URL("),
         "the Playwright run-code sandbox does not expose the Web URL constructor"
+    );
+    let first_response = materializer
+        .find("actor:agent:pointbreak-matrix-response-one")
+        .expect("matrix records the first response");
+    let fact_port = materializer
+        .find("fact port --repo")
+        .expect("matrix records the fact port through the public CLI");
+    let conflicting_response = materializer
+        .find("actor:agent:pointbreak-matrix-response-two")
+        .expect("matrix records the conflicting response");
+    assert!(
+        first_response < fact_port && fact_port < conflicting_response,
+        "the matrix must port the fact while the target Change is still resolvable"
+    );
+    assert!(
+        script.contains(".fact_port.event_id")
+            && script.contains(".fact_port.port_id")
+            && !script.contains("fact-port-target-cursor"),
+        "the browser gate must consume the pre-ambiguity fact port instead of bypassing selection"
     );
 
     let explicit_cleanup = script
