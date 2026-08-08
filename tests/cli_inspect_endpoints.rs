@@ -238,6 +238,32 @@ fn change_aware_timeline_is_bounded_exact_and_stale_safe_without_widening_profil
     assert_eq!(located["entries"][0]["eventId"], event_id);
 
     let all = inspector.get_json("/api/v2/history?limit=100&order=asc");
+    let proposal_summary = all["entries"]
+        .as_array()
+        .expect("Timeline entries")
+        .iter()
+        .find(|entry| entry["eventType"] == "work_object_proposed")
+        .map(|entry| &entry["summary"])
+        .expect("captured Timeline includes a work object proposal");
+    assert!(
+        proposal_summary["details"]["engagementId"]
+            .as_str()
+            .is_some(),
+        "work object summary must use presentation DTO field casing: {proposal_summary}"
+    );
+    assert!(
+        proposal_summary["details"]["objectArtifactContentHash"]
+            .as_str()
+            .is_some(),
+        "work object summary must expose the artifact hash in camelCase: {proposal_summary}"
+    );
+    assert!(
+        proposal_summary["details"].get("engagement_id").is_none()
+            && proposal_summary["details"]
+                .get("object_artifact_content_hash")
+                .is_none(),
+        "wire summaries must not leak Rust field casing: {proposal_summary}"
+    );
     let revision_ref = all["entries"]
         .as_array()
         .expect("Timeline entries")

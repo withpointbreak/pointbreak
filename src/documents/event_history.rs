@@ -66,7 +66,12 @@ pub enum EventHistorySubjectV1 {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "details", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    content = "details",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum EventHistorySummaryV1 {
     ReviewInitialized,
     WorkObjectProposed {

@@ -31,7 +31,11 @@
     await page.setViewportSize({ width: layout.width, height: layout.height });
     await page.goto(url(route), { waitUntil: "domcontentloaded" });
     await page.waitForFunction(() => document.querySelector("#connection-status")?.textContent === "connected");
-    await page.waitForFunction((expectedRoute) => {
+    const readiness = await page.waitForFunction((expectedRoute) => {
+      const refusal = document.querySelector("#master")?.textContent?.trim();
+      if (refusal?.startsWith("Reader refused:")) {
+        return { state: "refused", detail: refusal };
+      }
       const stamp = document.querySelector("#stat-hash")?.textContent?.trim();
       if (!stamp || stamp === "—" || !document.querySelector("#master h1")) return false;
       const [path, query = ""] = expectedRoute.split("?", 2);
@@ -40,18 +44,27 @@
         const expectedAfter = new URLSearchParams(query).get("after");
         const current = new URLSearchParams(location.hash.split("?", 2)[1] ?? "");
         return Boolean(document.querySelector("#timeline"))
-          && current.get("after") === expectedAfter;
+          && current.get("after") === expectedAfter
+          ? { state: "ready" }
+          : false;
       }
       const rawKey = document.querySelector("#master")?.dataset.changeListKey;
       if (!rawKey) return false;
       try {
         const key = JSON.parse(rawKey);
         const expectedAfter = new URLSearchParams(query).get("after");
-        return key.lens === expectedLens && (key.query?.after ?? null) === expectedAfter;
+        return key.lens === expectedLens && (key.query?.after ?? null) === expectedAfter
+          ? { state: "ready" }
+          : false;
       } catch {
         return false;
       }
     }, route);
+    const readinessState = await readiness.jsonValue();
+    await readiness.dispose();
+    if (readinessState.state === "refused") {
+      fail(label, readinessState.detail);
+    }
     expect(
       !(await page.evaluate(() => location.hash)).includes("token="),
       label,
