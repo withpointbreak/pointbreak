@@ -310,6 +310,11 @@ fn enrich_change_attention_presentations(
                 .ok_or_else(|| "Inspector Attention summary has no Change identity".to_owned())
         })
         .collect::<Result<Vec<_>, _>>()?;
+    // Empty presentation maps are intentionally omitted from the wire shape.
+    // With no visible Changes there is nothing to enrich or validate.
+    if change_ids.is_empty() {
+        return Ok(());
+    }
     let presentations = value
         .get_mut("presentations")
         .and_then(serde_json::Value::as_object_mut)

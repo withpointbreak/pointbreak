@@ -216,6 +216,28 @@ fn change_attention_explains_one_primary_model_reason_without_widening_shared_pr
 }
 
 #[test]
+fn change_attention_serves_a_bounded_empty_ready_page() {
+    let repo = GitRepo::new();
+    repo.write("README.md", "empty ready Change store\n");
+    repo.commit_all("base");
+    support::install_empty_ready_change_store(repo.path());
+
+    let inspector = Inspector::spawn_current(repo.path());
+    let attention = inspector.get_json("/api/v2/attention?limit=50&order=change_id_asc");
+
+    assert_eq!(attention["schema"], "pointbreak.inspect-attention");
+    assert_eq!(attention["version"], 2);
+    assert_eq!(attention["changes"], serde_json::json!([]));
+    assert_eq!(attention["next"], serde_json::Value::Null);
+    assert!(
+        attention
+            .get("presentations")
+            .is_none_or(|presentations| presentations == &serde_json::json!({})),
+        "empty Attention page carried nonempty presentations: {attention}"
+    );
+}
+
+#[test]
 fn change_detail_and_exact_revision_publish_inspector_private_graph_geometry() {
     let repo = GitRepo::new();
     repo.write("src/lib.rs", "pub fn value() -> u32 { 1 }\n");
