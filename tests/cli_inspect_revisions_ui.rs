@@ -154,7 +154,7 @@ fn revisions_list_speaks_snapshot_vocabulary_and_member_doc_keeps_shared_keys() 
 }
 
 #[test]
-fn served_index_html_offers_the_list_lens_not_a_lineages_tab() {
+fn served_index_html_offers_change_lenses_not_a_lineages_tab() {
     let html = served_index_html();
 
     // The retired Lineages tab never returns.
@@ -162,16 +162,19 @@ fn served_index_html_offers_the_list_lens_not_a_lineages_tab() {
         !html.contains("data-view=\"lineages\"") && !html.contains(">Lineages<"),
         "the Lineages tab is replaced"
     );
-    // The parallel-tab model is gone: the master pane swaps lenses instead. The
-    // revision affordance is the `list` lens; per-revision supersession renders
-    // on the detail page, not behind a lens of its own.
+    // The parallel-tab model is gone: the master pane swaps Change-aware lenses
+    // instead. Per-revision supersession renders on the exact detail page, not
+    // behind a lens of its own.
     assert!(
         !html.contains("data-view="),
         "the parallel-view tab model is replaced by the lens switcher"
     );
     assert!(
-        html.contains("data-lens=\"list\"") && !html.contains("data-lens=\"threads\""),
-        "the lens switcher offers the list lens and no threads lens"
+        html.contains("data-lens=\"changes\"")
+            && html.contains("data-lens=\"attention\"")
+            && !html.contains("data-lens=\"list\"")
+            && !html.contains("data-lens=\"threads\""),
+        "the lens switcher offers Change-aware lenses and no Revision-primary lens"
     );
     // The retired lineage filter never returns; snapshot filtering is now a token
     // in the structured query grammar (`snapshot:`), not a dropdown.
@@ -188,7 +191,7 @@ fn served_change_bundle_presents_authoritative_attention_summary() {
     let app_js = inspector.get_text("/app.js");
 
     assert!(
-        app_js.contains("attention:") && app_js.contains("need attention"),
+        app_js.contains("attentionSummary") && app_js.contains("need attention"),
         "Changes must render the facade-owned attention summary and store-wide count"
     );
 }

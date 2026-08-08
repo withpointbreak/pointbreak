@@ -10,17 +10,25 @@ fn served() -> String {
 #[test]
 fn index_html_carries_the_command_palette_overlay() {
     let html = served();
+    let palette = html
+        .split("id=\"cmd-palette\"")
+        .nth(1)
+        .and_then(|tail| tail.split("id=\"key-help\"").next())
+        .expect("command palette markup exists");
     assert!(
-        html.contains("id=\"cmd-palette\""),
-        "the palette overlay slot exists"
+        palette.contains("role=\"dialog\"") && palette.contains("aria-label=\"Command palette\""),
+        "the palette is a labelled dialog"
     );
-    // A combobox + listbox with a visible, user-facing placeholder.
+    // Results are ordinary focusable buttons, not a partial ARIA combobox.
+    // The Change interaction tests own filtering and focus-trap behavior.
     assert!(
-        html.contains("role=\"combobox\"") || html.contains("role=\"listbox\""),
-        "the palette is an aria combobox/listbox"
+        palette.contains("id=\"cmd-input\"") && palette.contains("aria-label=\"Filter commands\""),
+        "the palette has a labelled command filter"
     );
     assert!(
-        html.contains("Jump to") || html.contains("Type a command"),
+        palette.contains("placeholder=\"Filter commands…\"")
+            && palette.contains("id=\"cmd-results\"")
+            && palette.contains("aria-label=\"Commands\""),
         "the palette input carries a visible placeholder"
     );
 }

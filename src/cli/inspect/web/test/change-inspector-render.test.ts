@@ -239,6 +239,12 @@ describe("Change inspector render", () => {
     state.publish(stageGeneration(profile, changes, attention, profile));
     renderChangeInspector(state.snapshot(), { navigate });
     const firstCard = document.querySelector(".unit-card[data-change-id]");
+    expect(
+      firstCard?.querySelector(".change-card-badges")?.textContent,
+    ).toContain("conflicted");
+    expect(document.querySelector("#stat-threads")?.textContent).toBe(
+      "1 need attention",
+    );
     const createElement = vi.spyOn(document, "createElement");
     renderChangeInspector(state.snapshot(), { navigate });
     expect(document.querySelector(".unit-card[data-change-id]")).toBe(

@@ -8,7 +8,7 @@ fn served_app_css() -> String {
 }
 
 #[test]
-fn index_html_is_one_master_detail_shell_not_four_views() {
+fn index_html_is_one_change_master_detail_shell_not_four_views() {
     let store = representative_store();
     let html = Inspector::spawn(store.repo.path()).get_text("/");
     // One master pane + one detail pane (the list-detail skeleton), not four sections.
@@ -28,14 +28,20 @@ fn index_html_is_one_master_detail_shell_not_four_views() {
             "the parallel `{old}` section is collapsed into the shell"
         );
     }
-    // The master pane switches between the three lenses (durable data-attr values).
-    for lens in ["timeline", "list", "attention"] {
+    // Before the typed Timeline is restored, the Change-first reader exposes
+    // only the two lenses it can serve from one admitted Change generation.
+    for lens in ["changes", "attention"] {
         assert!(
             html.contains(&format!("data-lens=\"{lens}\"")),
             "the lens switcher offers the `{lens}` lens"
         );
     }
-    // The threads lens is dissolved into the revision list; its tab never returns.
+    assert!(
+        !html.contains("data-lens=\"timeline\"") && !html.contains("data-lens=\"list\""),
+        "the quarantined legacy Timeline and Revision-list lenses are not offered"
+    );
+    // Thread topology is presented through Change and exact-Revision detail;
+    // the retired threads lens never returns.
     assert!(
         !html.contains("data-lens=\"threads\""),
         "the retired threads lens is not offered"
