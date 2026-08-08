@@ -1853,7 +1853,7 @@ export function renderChangeInspector(
     // The protocol caps individual responses lower than this guard. Keep the
     // render-side bound as a second line of defence against an over-full server
     // page: a large store must never create an unbounded live DOM.
-    for (const [index, summary] of page.changes.slice(0, 150).entries()) {
+    for (const summary of page.changes.slice(0, 150)) {
       const card = changeCardPresentation(
         summary,
         page.presentations?.[summary.changeId],
@@ -1861,8 +1861,7 @@ export function renderChangeInspector(
       const element = document.createElement("article");
       element.className = "unit-card";
       element.dataset.changeId = summary.changeId;
-      const headingId = `change-card-heading-${index}`;
-      element.setAttribute("aria-labelledby", headingId);
+      element.setAttribute("aria-label", card.accessibleName);
 
       const primary = document.createElement("button");
       primary.type = "button";
@@ -1873,7 +1872,6 @@ export function renderChangeInspector(
       );
       primary.title = card.title;
       const headline = document.createElement("span");
-      headline.id = headingId;
       headline.className = "change-card-headline";
       headline.textContent = card.headline;
       const identity = document.createElement("code");

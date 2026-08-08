@@ -8012,7 +8012,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       const heading = document.createElement("h1");
       heading.textContent = `${lens === "changes" ? "Changes" : "Attention"} · ${page.changes.length}`;
       list.append(heading);
-      for (const [index, summary] of page.changes.slice(0, 150).entries()) {
+      for (const summary of page.changes.slice(0, 150)) {
         const card = changeCardPresentation(
           summary,
           page.presentations?.[summary.changeId]
@@ -8020,8 +8020,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         const element = document.createElement("article");
         element.className = "unit-card";
         element.dataset.changeId = summary.changeId;
-        const headingId = `change-card-heading-${index}`;
-        element.setAttribute("aria-labelledby", headingId);
+        element.setAttribute("aria-label", card.accessibleName);
         const primary = document.createElement("button");
         primary.type = "button";
         primary.className = "change-card-primary";
@@ -8031,7 +8030,6 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
         );
         primary.title = card.title;
         const headline = document.createElement("span");
-        headline.id = headingId;
         headline.className = "change-card-headline";
         headline.textContent = card.headline;
         const identity = document.createElement("code");

@@ -783,6 +783,18 @@ describe("Change inspector render", () => {
     );
     expect(
       document
+        .querySelector(".unit-card[data-change-id]")
+        ?.getAttribute("aria-label"),
+    ).toBe(
+      "Server proposal; Current Revision — Server proposal; exact Revision revision:sha256:one; artifact sha256:artifact; Change change:sha256:one",
+    );
+    expect(
+      document
+        .querySelector(".unit-card[data-change-id]")
+        ?.hasAttribute("aria-labelledby"),
+    ).toBe(false);
+    expect(
+      document
         .querySelector(".change-card-primary")
         ?.getAttribute("aria-label"),
     ).toContain(
