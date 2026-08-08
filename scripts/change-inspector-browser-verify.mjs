@@ -126,6 +126,12 @@
     return metrics;
   };
   const hash = () => page.evaluate(() => location.hash);
+  const routeParameter = (name) => page.evaluate(
+    (parameterName) => new URLSearchParams(
+      location.hash.split("?", 2)[1] ?? "",
+    ).get(parameterName),
+    name,
+  );
   const shortRef = (value) => {
     let match = String(value).match(
       /^([a-z][a-z-]*):(?:git:|worktree:)?sha256:([0-9a-f]{6,})$/i,
@@ -1561,7 +1567,7 @@
   );
   await page.keyboard.press("[");
   expect(
-    new URLSearchParams((await hash()).split("?", 2)[1] ?? "").get("file") === diffFilePaths[0],
+    await routeParameter("file") === diffFilePaths[0],
     "annotated diff [ file key",
     "the backward file key did not retain the first-file boundary",
   );
@@ -1576,7 +1582,7 @@
   );
   await page.keyboard.press("p");
   expect(
-    new URLSearchParams((await hash()).split("?", 2)[1] ?? "").get("fact") === firstDiffFact,
+    await routeParameter("fact") === firstDiffFact,
     "annotated diff p fact key",
     "the backward fact key did not retain the first-fact boundary",
   );

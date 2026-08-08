@@ -167,6 +167,10 @@ fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
         !browser_program.contains("new URL("),
         "the Playwright run-code sandbox does not expose the Web URL constructor"
     );
+    assert!(
+        !browser_program.contains("new URLSearchParams((await hash())"),
+        "route query parsing must stay in page context because the Playwright run-code sandbox does not expose URLSearchParams"
+    );
     let first_response = materializer
         .find("actor:agent:pointbreak-matrix-response-one")
         .expect("matrix records the first response");
