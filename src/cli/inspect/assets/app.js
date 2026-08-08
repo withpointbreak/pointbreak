@@ -841,6 +841,12 @@
     );
   }
   __name(isTextControl, "isTextControl");
+  function isNativeActionControl(target) {
+    return target instanceof Element && target.closest(
+      "button, a[href], [role='button'], [role='link'], [role='separator']"
+    ) !== null;
+  }
+  __name(isNativeActionControl, "isNativeActionControl");
   function setSelected(changeId) {
     document.querySelectorAll(".unit-card[data-change-id]").forEach((card) => {
       const selected = card.dataset.changeId === changeId;
@@ -1070,15 +1076,64 @@
     const onDividerKey = /* @__PURE__ */ __name((event) => {
       if (event.key === "Enter") {
         event.preventDefault();
+        event.stopPropagation();
         updateSplit(null);
         return;
       }
       if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
       event.preventDefault();
+      event.stopPropagation();
       const value = (preferredSplit() ?? 50) + (event.key === "ArrowLeft" ? -5 : 5);
       updateSplit(value);
     }, "onDividerKey");
     divider?.addEventListener("keydown", onDividerKey);
+    let activeDividerPointerId = null;
+    const finishDividerDrag = /* @__PURE__ */ __name((event) => {
+      if (!divider || activeDividerPointerId !== event.pointerId) return;
+      activeDividerPointerId = null;
+      divider.classList.remove("dragging");
+      if (divider.hasPointerCapture?.(event.pointerId)) {
+        divider.releasePointerCapture?.(event.pointerId);
+      }
+    }, "finishDividerDrag");
+    const onDividerLostPointerCapture = /* @__PURE__ */ __name((event) => {
+      if (!divider || activeDividerPointerId !== event.pointerId) return;
+      activeDividerPointerId = null;
+      divider.classList.remove("dragging");
+    }, "onDividerLostPointerCapture");
+    const onDividerPointerDown = /* @__PURE__ */ __name((event) => {
+      if (!divider || activeDividerPointerId !== null || event.pointerType === "mouse" && event.button !== 0)
+        return;
+      event.preventDefault();
+      divider.focus();
+      activeDividerPointerId = event.pointerId;
+      divider.setPointerCapture?.(event.pointerId);
+      divider.classList.add("dragging");
+    }, "onDividerPointerDown");
+    const onDividerPointerMove = /* @__PURE__ */ __name((event) => {
+      if (!divider?.classList.contains("dragging") || activeDividerPointerId !== event.pointerId)
+        return;
+      const split = document.querySelector(".split");
+      const bounds = split?.getBoundingClientRect();
+      if (!bounds || bounds.width <= 0) return;
+      const value = (event.clientX - bounds.left) / bounds.width * 100;
+      if (value < 15) {
+        finishDividerDrag(event);
+        setReading(true);
+        return;
+      }
+      updateSplit(value);
+    }, "onDividerPointerMove");
+    const onDividerDoubleClick = /* @__PURE__ */ __name((event) => {
+      event.preventDefault();
+      updateSplit(null);
+    }, "onDividerDoubleClick");
+    divider?.addEventListener("pointerdown", onDividerPointerDown);
+    divider?.addEventListener("pointermove", onDividerPointerMove);
+    divider?.addEventListener("pointerup", finishDividerDrag);
+    divider?.addEventListener("pointercancel", finishDividerDrag);
+    divider?.addEventListener("lostpointercapture", onDividerLostPointerCapture);
+    divider?.addEventListener("dblclick", onDividerDoubleClick);
     const onClick = /* @__PURE__ */ __name((event) => {
       const target = event.target instanceof Element ? event.target : null;
       const card = target?.closest(".unit-card[data-change-id]");
@@ -1159,7 +1214,7 @@
         });
         return;
       }
-      if (event.key === "Enter" && selectedChangeId) {
+      if (event.key === "Enter" && selectedChangeId && !isNativeActionControl(event.target)) {
         event.preventDefault();
         actions2.navigate({
           kind: "change",
@@ -1205,6 +1260,20 @@
       readingButton?.removeEventListener("click", toggleReading);
       masterRail?.removeEventListener("click", restoreMaster);
       divider?.removeEventListener("keydown", onDividerKey);
+      divider?.removeEventListener("pointerdown", onDividerPointerDown);
+      divider?.removeEventListener("pointermove", onDividerPointerMove);
+      divider?.removeEventListener("pointerup", finishDividerDrag);
+      divider?.removeEventListener("pointercancel", finishDividerDrag);
+      divider?.removeEventListener(
+        "lostpointercapture",
+        onDividerLostPointerCapture
+      );
+      divider?.removeEventListener("dblclick", onDividerDoubleClick);
+      if (divider && activeDividerPointerId !== null && divider.hasPointerCapture?.(activeDividerPointerId)) {
+        divider.releasePointerCapture?.(activeDividerPointerId);
+      }
+      activeDividerPointerId = null;
+      divider?.classList.remove("dragging");
       paletteInput?.removeEventListener("input", renderPaletteResults);
       if (closeButton?.onclick === onClose) closeButton.onclick = null;
       if (backButton?.onclick === onClose) backButton.onclick = null;
@@ -2063,6 +2132,10 @@
     return `${revisionId} · ${artifact}`;
   }
   __name(shortExact, "shortExact");
+  function exactRevisionAccessibleIdentity(revision) {
+    return `exact Revision ${revision.revisionId}; artifact ${revision.objectArtifactContentHash}`;
+  }
+  __name(exactRevisionAccessibleIdentity, "exactRevisionAccessibleIdentity");
   function changeCardPresentation(summary, presentation) {
     const byExactIdentity = new Map(
       (presentation?.currentRevisions ?? []).map((entry) => [
@@ -2078,10 +2151,13 @@
       return {
         revision,
         label: summaryLabel ? `Current Revision — ${summaryLabel}` : `Current Revision — ${shortExact(revision)}`,
+        accessibleName: summaryLabel ? `Current Revision — ${summaryLabel}; ${exactRevisionAccessibleIdentity(revision)}` : `Current Revision — ${exactRevisionAccessibleIdentity(revision)}`,
         copyText: `${revision.revisionId} ${revision.objectArtifactContentHash}`
       };
     });
-    const currentRevisionName = peers.length === 0 ? "Current Revision unavailable" : peers.length === 1 ? peers[0].label : `Current Revisions — ${peers.map((peer) => peer.label.replace(/^Current Revision — /, "")).join("; ")}`;
+    const currentRevisionName = peers.length === 0 ? "Current Revision unavailable" : peers.length === 1 ? peers[0].accessibleName : `Current Revisions — ${peers.map(
+      (peer) => peer.accessibleName.replace(/^Current Revision — /, "")
+    ).join("; ")}`;
     return {
       changeId: summary.changeId,
       accessibleName: `${currentRevisionName}; Change ${summary.changeId}`,
@@ -3963,7 +4039,7 @@
       button.textContent = revision.revisionId;
       button.setAttribute(
         "aria-label",
-        `Current Revision: open exact Revision ${revision.revisionId} for Change ${changeId}`
+        `Current Revision: open ${exactRevisionAccessibleIdentity(revision)}; for Change ${changeId}`
       );
       button.addEventListener(
         "click",
@@ -4337,7 +4413,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           choose.title = peer.copyText;
           choose.setAttribute(
             "aria-label",
-            `${peer.label}: open exact Revision ${peer.revision.revisionId} for Change ${summary.changeId}`
+            `${peer.accessibleName}; open for Change ${summary.changeId}`
           );
           choose.addEventListener(
             "click",
@@ -4352,6 +4428,10 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           copyPeer.type = "button";
           copyPeer.className = "ghost";
           copyPeer.textContent = "Copy exact Revision";
+          copyPeer.setAttribute(
+            "aria-label",
+            `Copy ${exactRevisionAccessibleIdentity(peer.revision)}; for Change ${summary.changeId}`
+          );
           copyPeer.addEventListener("click", () => copyExact(peer.copyText));
           peerRow.append(choose, copyPeer);
           element.append(peerRow);

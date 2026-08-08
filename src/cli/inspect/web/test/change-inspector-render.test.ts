@@ -276,7 +276,16 @@ describe("Change inspector render", () => {
       document
         .querySelector(".unit-card[data-change-id]")
         ?.getAttribute("aria-label"),
-    ).toBe("Current Revision — Server proposal; Change change:sha256:one");
+    ).toBe(
+      "Current Revision — Server proposal; exact Revision revision:sha256:one; artifact sha256:artifact; Change change:sha256:one",
+    );
+    expect(
+      document
+        .querySelector(".change-card-peer button:last-child")
+        ?.getAttribute("aria-label"),
+    ).toBe(
+      "Copy exact Revision revision:sha256:one; artifact sha256:artifact; for Change change:sha256:one",
+    );
     expect(document.querySelector("#detail-body")?.textContent).toContain(
       "Exact reading surface is loading",
     );
@@ -327,7 +336,7 @@ describe("Change inspector render", () => {
       document.querySelectorAll<HTMLButtonElement>("#detail-body button"),
     ).find((button) => button.textContent === revision.revisionId);
     expect(chooser?.getAttribute("aria-label")).toBe(
-      "Current Revision: open exact Revision revision:sha256:one for Change change:sha256:one",
+      "Current Revision: open exact Revision revision:sha256:one; artifact sha256:artifact; for Change change:sha256:one",
     );
   });
 
@@ -709,7 +718,7 @@ describe("Change inspector render", () => {
       "#detail-body .detail-current-revisions button",
     );
     expect(chooser?.getAttribute("aria-label")).toBe(
-      "Current Revision: open exact Revision revision:sha256:one for Change change:sha256:one",
+      "Current Revision: open exact Revision revision:sha256:one; artifact sha256:artifact; for Change change:sha256:one",
     );
     chooser?.click();
     expect(navigate).toHaveBeenCalledWith({

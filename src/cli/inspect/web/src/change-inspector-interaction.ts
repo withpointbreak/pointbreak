@@ -34,6 +34,16 @@ function isTextControl(target: EventTarget | null): boolean {
   );
 }
 
+/** Native controls own Enter; the local Change cursor must not override them. */
+function isNativeActionControl(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element &&
+    target.closest(
+      "button, a[href], [role='button'], [role='link'], [role='separator']",
+    ) !== null
+  );
+}
+
 type ValidRoute = Exclude<ChangeInspectorRoute, { kind: "invalid" }>;
 
 function setSelected(changeId: string | null): void {
@@ -318,16 +328,75 @@ export function installChangeInspectorInteraction(
   const onDividerKey = (event: KeyboardEvent) => {
     if (event.key === "Enter") {
       event.preventDefault();
+      event.stopPropagation();
       updateSplit(null);
       return;
     }
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
+    event.stopPropagation();
     const value =
       (preferredSplit() ?? 50) + (event.key === "ArrowLeft" ? -5 : 5);
     updateSplit(value);
   };
   divider?.addEventListener("keydown", onDividerKey);
+  let activeDividerPointerId: number | null = null;
+  const finishDividerDrag = (event: PointerEvent) => {
+    if (!divider || activeDividerPointerId !== event.pointerId) return;
+    activeDividerPointerId = null;
+    divider.classList.remove("dragging");
+    if (divider.hasPointerCapture?.(event.pointerId)) {
+      divider.releasePointerCapture?.(event.pointerId);
+    }
+  };
+  const onDividerLostPointerCapture = (event: PointerEvent) => {
+    if (!divider || activeDividerPointerId !== event.pointerId) return;
+    activeDividerPointerId = null;
+    divider.classList.remove("dragging");
+  };
+  const onDividerPointerDown = (event: PointerEvent) => {
+    if (
+      !divider ||
+      activeDividerPointerId !== null ||
+      (event.pointerType === "mouse" && event.button !== 0)
+    )
+      return;
+    event.preventDefault();
+    divider.focus();
+    activeDividerPointerId = event.pointerId;
+    divider.setPointerCapture?.(event.pointerId);
+    divider.classList.add("dragging");
+  };
+  const onDividerPointerMove = (event: PointerEvent) => {
+    if (
+      !divider?.classList.contains("dragging") ||
+      activeDividerPointerId !== event.pointerId
+    )
+      return;
+    const split = document.querySelector<HTMLElement>(".split");
+    const bounds = split?.getBoundingClientRect();
+    if (!bounds || bounds.width <= 0) return;
+    const value = ((event.clientX - bounds.left) / bounds.width) * 100;
+    // Preserve the retained split's intentional snap into reading mode when a
+    // pointer moves decisively past the minimum pane width. The last valid
+    // persisted split remains available when the reader restores the rail.
+    if (value < 15) {
+      finishDividerDrag(event);
+      setReading(true);
+      return;
+    }
+    updateSplit(value);
+  };
+  const onDividerDoubleClick = (event: MouseEvent) => {
+    event.preventDefault();
+    updateSplit(null);
+  };
+  divider?.addEventListener("pointerdown", onDividerPointerDown);
+  divider?.addEventListener("pointermove", onDividerPointerMove);
+  divider?.addEventListener("pointerup", finishDividerDrag);
+  divider?.addEventListener("pointercancel", finishDividerDrag);
+  divider?.addEventListener("lostpointercapture", onDividerLostPointerCapture);
+  divider?.addEventListener("dblclick", onDividerDoubleClick);
 
   const onClick = (event: MouseEvent) => {
     const target = event.target instanceof Element ? event.target : null;
@@ -418,7 +487,11 @@ export function installChangeInspectorInteraction(
       });
       return;
     }
-    if (event.key === "Enter" && selectedChangeId) {
+    if (
+      event.key === "Enter" &&
+      selectedChangeId &&
+      !isNativeActionControl(event.target)
+    ) {
       event.preventDefault();
       actions.navigate({
         kind: "change",
@@ -473,6 +546,24 @@ export function installChangeInspectorInteraction(
     readingButton?.removeEventListener("click", toggleReading);
     masterRail?.removeEventListener("click", restoreMaster);
     divider?.removeEventListener("keydown", onDividerKey);
+    divider?.removeEventListener("pointerdown", onDividerPointerDown);
+    divider?.removeEventListener("pointermove", onDividerPointerMove);
+    divider?.removeEventListener("pointerup", finishDividerDrag);
+    divider?.removeEventListener("pointercancel", finishDividerDrag);
+    divider?.removeEventListener(
+      "lostpointercapture",
+      onDividerLostPointerCapture,
+    );
+    divider?.removeEventListener("dblclick", onDividerDoubleClick);
+    if (
+      divider &&
+      activeDividerPointerId !== null &&
+      divider.hasPointerCapture?.(activeDividerPointerId)
+    ) {
+      divider.releasePointerCapture?.(activeDividerPointerId);
+    }
+    activeDividerPointerId = null;
+    divider?.classList.remove("dragging");
     paletteInput?.removeEventListener("input", renderPaletteResults);
     if (closeButton?.onclick === onClose) closeButton.onclick = null;
     if (backButton?.onclick === onClose) backButton.onclick = null;

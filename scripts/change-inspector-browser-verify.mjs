@@ -50,7 +50,22 @@
     Array.from(document.querySelectorAll(".unit-card[data-change-id]")).every((card) => {
       const name = card.getAttribute("aria-label") || "";
       const exact = card.dataset.changeId || "";
-      return name.includes(exact) && name.length > exact.length && !/^Change\s+[^\s]+$/.test(name);
+      const peers = Array.from(card.querySelectorAll(".change-card-peer-open"));
+      const exactPeersAreNamed = peers.every((peer) => {
+        const [revisionId, artifactHash] = (peer.getAttribute("title") || "").split(" ");
+        const peerName = peer.getAttribute("aria-label") || "";
+        const copyName = peer.parentElement?.querySelector("button:last-child")?.getAttribute("aria-label") || "";
+        return Boolean(
+          revisionId && artifactHash
+          && name.includes(revisionId) && name.includes(artifactHash)
+          && peerName.includes(revisionId) && peerName.includes(artifactHash)
+          && copyName.includes(revisionId) && copyName.includes(artifactHash)
+        );
+      });
+      return name.includes(exact)
+        && name.length > exact.length
+        && !/^Change\s+[^\s]+$/.test(name)
+        && exactPeersAreNamed;
     }),
   );
   const noHiddenTabStops = () => page.evaluate(() => {
@@ -103,6 +118,15 @@
   await screenshot("wide-keyboard-change");
   await page.keyboard.press("Escape");
   await page.waitForFunction(() => location.hash.startsWith("#/changes?"));
+  expect(await selected().count() === 1, "native control Enter", "returning from the selected Change lost the local cursor");
+  const beforeNativeEnter = await hash();
+  const viewToggle = page.locator("#view-toggle");
+  await viewToggle.focus();
+  await page.keyboard.press("Enter");
+  expect(await viewToggle.getAttribute("aria-expanded") === "true", "native control Enter", "Enter on the focused View control was intercepted");
+  expect(await hash() === beforeNativeEnter, "native control Enter", "Enter on the focused View control opened the selected Change");
+  await page.keyboard.press("Enter");
+  expect(await viewToggle.getAttribute("aria-expanded") === "false", "native control Enter", "second Enter did not close the focused View control");
   await page.keyboard.press("G");
   const lastId = await selected().getAttribute("data-change-id");
   expect(lastId === await page.locator(".unit-card[data-change-id]").last().getAttribute("data-change-id"), "G boundary", "G did not select last loaded Change");
@@ -187,6 +211,11 @@
   await page.waitForFunction(() => Boolean(document.querySelector("#detail-body")?.dataset.changeReadingKey));
   const exactChoices = page.locator("#detail-body button[aria-label^='Current Revision:']");
   expect(await exactChoices.count() > 1, "parallel explicit chooser", "Change detail did not require a human exact-Revision choice");
+  expect(await exactChoices.evaluateAll((choices) => choices.every((choice) => {
+    const revisionId = choice.textContent?.trim() || "";
+    const name = choice.getAttribute("aria-label") || "";
+    return revisionId.length > 0 && name.includes(revisionId) && name.includes("; artifact sha256:");
+  })), "parallel explicit chooser", "Change detail exact-Revision names omitted the artifact identity");
   await exactChoices.first().click();
   await page.waitForFunction(() => location.hash.includes("/revisions/"));
   await page.waitForFunction(() => Boolean(document.querySelector("#detail-body")?.dataset.changeReadingKey));
@@ -225,7 +254,21 @@
   }
 
   await open("changes?limit=100&order=change_id_asc", layouts[0], "split bounds");
+  await page.getByRole("button", { name: /^Open Change / }).first().click();
+  await page.waitForFunction(() => !document.querySelector("#detail")?.inert);
   const divider = page.locator(".divider");
+  const splitBox = await page.locator(".split").boundingBox();
+  const dividerBox = await divider.boundingBox();
+  expect(Boolean(splitBox && dividerBox), "split pointer drag", "visible split geometry was unavailable");
+  if (!splitBox || !dividerBox) throw new Error("visible split geometry was unavailable");
+  await page.mouse.move(dividerBox.x + dividerBox.width / 2, dividerBox.y + dividerBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(splitBox.x + splitBox.width * 0.62, dividerBox.y + dividerBox.height / 2);
+  await page.mouse.up();
+  const draggedSplit = Number(await divider.getAttribute("aria-valuenow"));
+  expect(draggedSplit >= 61 && draggedSplit <= 63, "split pointer drag", `pointer drag produced ${draggedSplit} instead of approximately 62`);
+  await divider.dblclick();
+  expect(await divider.getAttribute("aria-valuenow") === "50", "split pointer reset", "double-click did not restore the balanced split");
   await divider.focus();
   for (let step = 0; step < 40; step += 1) await page.keyboard.press("ArrowLeft");
   expect(await divider.getAttribute("aria-valuenow") === "25", "split lower bound", "divider moved below its declared lower bound");

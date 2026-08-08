@@ -43,8 +43,12 @@ describe("Change cards", () => {
     expect(card.peers[0]?.label).toContain("Review parser");
     expect(card.peers[1]?.label).toContain("revision:sha256");
     expect(card.accessibleName).toBe(
-      "Current Revisions — Review parser; revision:sha256:bbb · sha256:b; Change change:sha256:one",
+      "Current Revisions — Review parser; exact Revision revision:sha256:aaa; artifact sha256:a; exact Revision revision:sha256:bbb; artifact sha256:b; Change change:sha256:one",
     );
+    expect(card.peers[0]?.accessibleName).toBe(
+      "Current Revision — Review parser; exact Revision revision:sha256:aaa; artifact sha256:a",
+    );
+    expect(card.peers[0]?.copyText).toBe("revision:sha256:aaa sha256:a");
     expect(card.badges).toEqual([
       "parallel current",
       "in progress",

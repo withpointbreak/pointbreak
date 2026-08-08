@@ -10,7 +10,12 @@ export interface ChangeCardPresentation {
   changeId: string;
   accessibleName: string;
   badges: string[];
-  peers: Array<{ revision: RevisionRef; label: string; copyText: string }>;
+  peers: Array<{
+    revision: RevisionRef;
+    label: string;
+    accessibleName: string;
+    copyText: string;
+  }>;
 }
 
 function words(value: string): string {
@@ -27,6 +32,11 @@ function shortExact(revision: RevisionRef): string {
       ? `${revision.objectArtifactContentHash.slice(0, 18)}…`
       : revision.objectArtifactContentHash;
   return `${revisionId} · ${artifact}`;
+}
+
+/** One spoken form for the complete identity of an exact Revision resource. */
+export function exactRevisionAccessibleIdentity(revision: RevisionRef): string {
+  return `exact Revision ${revision.revisionId}; artifact ${revision.objectArtifactContentHash}`;
 }
 
 export function changeCardPresentation(
@@ -52,6 +62,9 @@ export function changeCardPresentation(
       label: summaryLabel
         ? `Current Revision — ${summaryLabel}`
         : `Current Revision — ${shortExact(revision)}`,
+      accessibleName: summaryLabel
+        ? `Current Revision — ${summaryLabel}; ${exactRevisionAccessibleIdentity(revision)}`
+        : `Current Revision — ${exactRevisionAccessibleIdentity(revision)}`,
       copyText: `${revision.revisionId} ${revision.objectArtifactContentHash}`,
     };
   });
@@ -59,9 +72,11 @@ export function changeCardPresentation(
     peers.length === 0
       ? "Current Revision unavailable"
       : peers.length === 1
-        ? peers[0].label
+        ? peers[0].accessibleName
         : `Current Revisions — ${peers
-            .map((peer) => peer.label.replace(/^Current Revision — /, ""))
+            .map((peer) =>
+              peer.accessibleName.replace(/^Current Revision — /, ""),
+            )
             .join("; ")}`;
   return {
     changeId: summary.changeId,

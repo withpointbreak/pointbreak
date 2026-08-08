@@ -68,6 +68,149 @@ afterEach(() => {
 });
 
 describe("Change Inspector interaction lifecycle", () => {
+  it("leaves Enter on a focused native control instead of opening the local Change cursor", () => {
+    const { controller, navigate } = install();
+    const card = document.createElement("article");
+    card.className = "unit-card";
+    card.dataset.changeId = "change:sha256:selected";
+    const exactPeer = document.createElement("button");
+    exactPeer.type = "button";
+    exactPeer.textContent = "open exact Revision";
+    card.append(exactPeer);
+    document.querySelector("#master")?.append(card);
+    controller.sync(lensSnapshot());
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "j", bubbles: true }),
+    );
+    exactPeer.focus();
+    exactPeer.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+
+    expect(document.activeElement).toBe(exactPeer);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("supports pointer resizing and double-click reset on the active split divider", () => {
+    const { controller } = install();
+    controller.sync(exactSnapshot());
+    const split = document.querySelector<HTMLElement>(".split");
+    const divider = document.querySelector<HTMLElement>(".divider");
+    if (!split || !divider) throw new Error("split controls missing");
+    vi.spyOn(split, "getBoundingClientRect").mockReturnValue({
+      left: 0,
+      width: 1000,
+      top: 0,
+      height: 300,
+      right: 1000,
+      bottom: 300,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    } as DOMRect);
+
+    divider.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        pointerId: 9,
+        pointerType: "mouse",
+        button: 2,
+        bubbles: true,
+      }),
+    );
+    expect(divider.classList).not.toContain("dragging");
+    divider.dispatchEvent(
+      new PointerEvent("pointerdown", { pointerId: 1, bubbles: true }),
+    );
+    expect(document.activeElement).toBe(divider);
+    divider.dispatchEvent(
+      new PointerEvent("pointermove", {
+        pointerId: 2,
+        clientX: 700,
+        bubbles: true,
+      }),
+    );
+    divider.dispatchEvent(
+      new PointerEvent("pointerup", { pointerId: 2, bubbles: true }),
+    );
+    expect(
+      document.documentElement.style.getPropertyValue("--split-master"),
+    ).toBe("");
+    expect(divider.classList).toContain("dragging");
+    divider.dispatchEvent(
+      new PointerEvent("pointermove", {
+        pointerId: 1,
+        clientX: 620,
+        bubbles: true,
+      }),
+    );
+    divider.dispatchEvent(
+      new PointerEvent("pointerup", { pointerId: 1, bubbles: true }),
+    );
+
+    expect(
+      document.documentElement.style.getPropertyValue("--split-master"),
+    ).toBe("62%");
+    expect(divider.getAttribute("aria-valuenow")).toBe("62");
+    expect(divider.classList).not.toContain("dragging");
+
+    divider.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    expect(
+      document.documentElement.style.getPropertyValue("--split-master"),
+    ).toBe("");
+    expect(divider.getAttribute("aria-valuenow")).toBe("50");
+  });
+
+  it("cleans divider pointer capture on cancellation, loss, and controller stop", () => {
+    const { controller } = install();
+    controller.sync(exactSnapshot());
+    const divider = document.querySelector<HTMLElement>(".divider");
+    if (!divider) throw new Error("divider missing");
+    const releasePointerCapture = vi.fn();
+    Object.defineProperties(divider, {
+      setPointerCapture: { configurable: true, value: vi.fn() },
+      hasPointerCapture: {
+        configurable: true,
+        value: vi.fn(() => true),
+      },
+      releasePointerCapture: {
+        configurable: true,
+        value: releasePointerCapture,
+      },
+    });
+
+    divider.dispatchEvent(
+      new PointerEvent("pointerdown", { pointerId: 3, bubbles: true }),
+    );
+    divider.dispatchEvent(
+      new PointerEvent("pointercancel", { pointerId: 3, bubbles: true }),
+    );
+    expect(divider.classList).not.toContain("dragging");
+    expect(releasePointerCapture).toHaveBeenLastCalledWith(3);
+
+    divider.dispatchEvent(
+      new PointerEvent("pointerdown", { pointerId: 4, bubbles: true }),
+    );
+    divider.dispatchEvent(
+      new PointerEvent("lostpointercapture", {
+        pointerId: 4,
+        bubbles: true,
+      }),
+    );
+    expect(divider.classList).not.toContain("dragging");
+
+    divider.dispatchEvent(
+      new PointerEvent("pointerdown", { pointerId: 5, bubbles: true }),
+    );
+    controller.stop();
+    expect(divider.classList).not.toContain("dragging");
+    expect(releasePointerCapture).toHaveBeenLastCalledWith(5);
+  });
+
   it("settles reconnect Escape through auth and restores the prior focus", async () => {
     const { controller, navigate } = install();
     controller.sync(lensSnapshot());

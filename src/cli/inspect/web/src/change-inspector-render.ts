@@ -1,6 +1,9 @@
 /** DOM projection for the Change-first shell. It fetches nothing and owns no history. */
 
-import { changeCardPresentation } from "./change-inspector-cards";
+import {
+  changeCardPresentation,
+  exactRevisionAccessibleIdentity,
+} from "./change-inspector-cards";
 import type { ChangeInspectorReading } from "./change-inspector-reading";
 import type { ChangeInspectorRoute } from "./change-inspector-router";
 import {
@@ -732,7 +735,7 @@ function renderCurrentRevisionChoices(
     button.textContent = revision.revisionId;
     button.setAttribute(
       "aria-label",
-      `Current Revision: open exact Revision ${revision.revisionId} for Change ${changeId}`,
+      `Current Revision: open ${exactRevisionAccessibleIdentity(revision)}; for Change ${changeId}`,
     );
     button.addEventListener("click", () =>
       actions.navigate({
@@ -1180,7 +1183,7 @@ export function renderChangeInspector(
         choose.title = peer.copyText;
         choose.setAttribute(
           "aria-label",
-          `${peer.label}: open exact Revision ${peer.revision.revisionId} for Change ${summary.changeId}`,
+          `${peer.accessibleName}; open for Change ${summary.changeId}`,
         );
         choose.addEventListener("click", () =>
           actions.navigate({
@@ -1194,6 +1197,10 @@ export function renderChangeInspector(
         copyPeer.type = "button";
         copyPeer.className = "ghost";
         copyPeer.textContent = "Copy exact Revision";
+        copyPeer.setAttribute(
+          "aria-label",
+          `Copy ${exactRevisionAccessibleIdentity(peer.revision)}; for Change ${summary.changeId}`,
+        );
         copyPeer.addEventListener("click", () => copyExact(peer.copyText));
         peerRow.append(choose, copyPeer);
         element.append(peerRow);
