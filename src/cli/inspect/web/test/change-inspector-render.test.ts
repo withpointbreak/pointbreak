@@ -197,6 +197,34 @@ function changeReading(): ChangeInspectorReading {
   return { kind: "change", document };
 }
 
+function interdiffReading(): Extract<
+  ChangeInspectorReading,
+  { kind: "interdiff" }
+> {
+  const otherRevision = {
+    revisionId: "revision:sha256:two",
+    objectArtifactContentHash: "sha256:other-artifact",
+  };
+  return {
+    kind: "interdiff",
+    document: {
+      schema: "pointbreak.review-revision-interdiff",
+      version: 1,
+      interdiff: {
+        from: revision,
+        to: otherRevision,
+        algorithmVersion: "rows-v1",
+        scope: ["src/lib.rs"],
+      },
+      availability: "available",
+      comparison: { files: [] },
+      diagnostics: [],
+      projectionStamp: "sha256:generation",
+      cacheKey: "sha256:interdiff",
+    },
+  };
+}
+
 beforeEach(() => mountInspectorDom());
 
 describe("Change inspector render", () => {
@@ -692,6 +720,50 @@ describe("Change inspector render", () => {
     expect(decisionContext?.textContent).toContain("accepted");
     expect(decisionContext?.textContent).toContain("just test");
     expect(decisionContext?.textContent).toContain("passed");
+  });
+
+  it("keeps an interdiff distinct from either authoritative captured Revision", () => {
+    const navigate = vi.fn();
+    const reading = interdiffReading();
+    const route = {
+      kind: "interdiff" as const,
+      changeId: "change:sha256:one",
+      from: reading.document.interdiff.from,
+      to: reading.document.interdiff.to,
+      query: {},
+    };
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState(route);
+    state.publish(stageGeneration(profile, changes, attention, profile));
+    renderChangeInspector(
+      state.snapshot(),
+      { navigate },
+      { reading, refusal: null },
+    );
+
+    const detail = document.querySelector("#detail-body");
+    expect(detail?.textContent).toContain("Ordered Revision interdiff");
+    expect(detail?.textContent).toContain(
+      "This is a comparison, not the authoritative captured diff.",
+    );
+    expect(detail?.textContent).toContain(route.from.revisionId);
+    expect(detail?.textContent).toContain(route.to.revisionId);
+    expect(detail?.textContent).not.toContain("Decision context");
+    expect(detail?.querySelector(".diff-decision-context")).toBeNull();
+
+    const capturedDiffButtons = Array.from(
+      detail?.querySelectorAll<HTMLButtonElement>("button") ?? [],
+    ).filter((button) =>
+      button.textContent?.startsWith("Open authoritative captured diff:"),
+    );
+    expect(capturedDiffButtons).toHaveLength(2);
+    capturedDiffButtons[0]?.click();
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "resource",
+      changeId: route.changeId,
+      revision: route.from,
+      query: {},
+    });
   });
 
   it("renders effective supersession in predecessor-to-successor reading order", () => {

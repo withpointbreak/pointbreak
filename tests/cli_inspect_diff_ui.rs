@@ -89,8 +89,13 @@ fn change_reader_keeps_revision_interdiff_separate_from_assessed_content() {
         "the Change bundle reads and labels a distinct typed interdiff resource"
     );
     assert!(
-        !app.contains("Decision context"),
-        "the interdiff is not presented as the complete assessed Revision"
+        app.contains("This is a comparison, not the authoritative captured diff.")
+            && app.contains("Open authoritative captured diff:"),
+        "the interdiff directs readers to either complete captured Revision"
+    );
+    assert!(
+        app.contains("Decision context"),
+        "the complete captured Revision retains its separate decision context"
     );
 }
 
