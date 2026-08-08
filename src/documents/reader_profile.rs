@@ -10,6 +10,12 @@ pub const READER_UPGRADE_REQUIRED_SCHEMA: &str = "pointbreak.reader-upgrade-requ
 pub const STORE_MIGRATION_REQUIRED_SCHEMA: &str = "pointbreak.store-migration-required";
 pub const STORE_MIGRATION_IN_PROGRESS_SCHEMA: &str = "pointbreak.store-migration-in-progress";
 
+/// Authority state for the reader's target store cohort.
+///
+/// This is a recurring migration boundary, not a one-time legacy-store flag:
+/// a root may be ready for one cohort and require migration for a later cohort.
+/// It gates semantic Change reads independently of projection freshness and of
+/// exact Revision or fact-body availability.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReaderProfileAvailabilityV1 {
@@ -23,9 +29,13 @@ pub enum ReaderProfileAvailabilityV1 {
 pub struct ReaderProfileDocumentV1 {
     pub schema: String,
     pub version: u32,
+    /// Whether the target cohort has durable, complete authority in this root.
+    /// This does not summarize captured-resource or externalized-body bytes.
     pub availability: ReaderProfileAvailabilityV1,
     pub authority_cursor: AuthorityCursorV2,
     #[serde(skip_serializing_if = "Option::is_none")]
+    /// Minimum compatible semantic reader for the activated target cohort.
+    /// Product versions and resource-body availability do not participate.
     pub minimum_reader_profile: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activation_id: Option<String>,

@@ -243,6 +243,12 @@ pub struct ChangeSummaryV1 {
     pub topology: ChangeTopologyV1,
     pub lifecycle: ChangeLifecycleV1,
     pub attention_summary: String,
+    /// Change-level membership/reference completeness.
+    ///
+    /// `available` means every member resolves to one exact `RevisionRefV1` in
+    /// this projection generation. It does not promise that an exact captured
+    /// resource or an externalized fact body still has readable bytes; those
+    /// states are reported by the exact Revision and fact documents.
     pub availability_summary: String,
     pub diagnostics: Vec<String>,
     pub projection_stamp: String,
@@ -2472,6 +2478,44 @@ mod tests {
             facade.attention_document(true).schema,
             INSPECT_ATTENTION_SCHEMA_V2
         );
+    }
+
+    #[test]
+    fn change_summary_availability_is_independent_of_exact_resource_bytes() {
+        let (change_id, revision, facade) = facade();
+        assert_eq!(
+            facade.list_document().changes[0].availability_summary,
+            "available",
+            "the Change summary reports exact member-reference completeness"
+        );
+
+        for exact_availability in [
+            ContentAvailabilityV1::Removed,
+            ContentAvailabilityV1::Missing,
+        ] {
+            let exact = RevisionResourceDocumentV1::unavailable(
+                RevisionResourceRefV1 {
+                    revision: revision.clone(),
+                    object_id: ObjectId::new("obj:sha256:unavailable"),
+                },
+                RevisionResourceProjectionV1 {
+                    track_id: None,
+                    include_body: true,
+                },
+                exact_availability,
+            )
+            .unwrap();
+            let contextual = facade
+                .contextual_revision_document(&change_id, &revision, exact, Vec::new(), Vec::new())
+                .unwrap();
+
+            assert_eq!(contextual.detail.availability, exact_availability);
+            assert_eq!(
+                facade.list_document().changes[0].availability_summary,
+                "available",
+                "removed or missing exact bytes must not rewrite Change membership completeness"
+            );
+        }
     }
 
     #[test]

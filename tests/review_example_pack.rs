@@ -62,6 +62,11 @@ fn synthetic_decision_matrix_materializer_uses_only_isolated_pointbreak_surfaces
     assert!(!script.contains("rev:sha256:"));
     assert!(!script.contains("evt:sha256:"));
     assert!(!script.contains("assoc-commit:sha256:"));
+    assert!(
+        script.contains("rm -f -- \"$missing_object_path\"")
+            && script.contains("cat-file -e \"$missing_commit^{commit}\""),
+        "the intentionally removed loose object must be retry-safe and proven unreadable"
+    );
 
     let justfile = fs::read_to_string(root.join("Justfile")).expect("read Justfile");
     assert!(justfile.contains("review-decision-matrix-materialize output:"));

@@ -40,6 +40,12 @@
       "reason": "Theme and density are reader-local display preferences; they neither fetch nor infer review semantics. Active composition may import only this model-neutral preference surface."
     },
     {
+      "path": "thread-layout.ts",
+      "classification": "model-neutral-retained",
+      "activeImport": true,
+      "reason": "Defines only server-provided supersession graph geometry. Both retained legacy readers and active Change-first fact cards may consume this neutral wire contract without reaching the aggregate store."
+    },
+    {
       "path": "palette.ts",
       "classification": "quarantined",
       "activeImport": false,

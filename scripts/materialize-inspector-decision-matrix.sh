@@ -462,9 +462,24 @@ git -C "$destination" switch --quiet main
 git -C "$destination" branch --delete --force feat/missing-object >/dev/null
 git -C "$destination" reflog expire --expire=now --all
 git_object_dir="$(git -C "$destination" rev-parse --path-format=absolute --git-path objects)"
+git_object_dir="$(cd "$git_object_dir" && pwd -P)"
 missing_object_path="$git_object_dir/${missing_commit:0:2}/${missing_commit:2}"
-[ -f "$missing_object_path" ] || die "expected a loose synthetic commit object"
-rm "$missing_object_path"
+case "$missing_object_path" in
+  "$git_object_dir"/*) ;;
+  *) die "synthetic commit object escaped the disposable Git object directory" ;;
+esac
+if [ -e "$missing_object_path" ] || [ -L "$missing_object_path" ]; then
+  [ -f "$missing_object_path" ] || die "synthetic commit object is not a regular file"
+  [ ! -L "$missing_object_path" ] || die "synthetic commit object must not be a symlink"
+  # `-f` makes this removal step retry-safe if another cleanup wins after the
+  # checks above. The final object-database probe remains the authority.
+  rm -f -- "$missing_object_path"
+elif git -C "$destination" cat-file -e "$missing_commit^{commit}" 2>/dev/null; then
+  die "synthetic commit is still readable but is not the expected loose object"
+fi
+if git -C "$destination" cat-file -e "$missing_commit^{commit}" 2>/dev/null; then
+  die "synthetic commit remained readable after missing-object materialization"
+fi
 
 store_paths="$(pointbreak_json store paths --repo "$destination")"
 common_store="$(printf '%s\n' "$store_paths" | jq -er '.commonStore')"

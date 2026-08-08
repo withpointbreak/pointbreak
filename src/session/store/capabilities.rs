@@ -541,6 +541,12 @@ impl BulkAdoptionCompletionV1 {
     }
 }
 
+/// Durable migration authority for one target capability cohort.
+///
+/// The states intentionally survive the first Change migration. A store can
+/// be `Ready` for cohort v1 and later be `MigrationRequired` for cohort v2;
+/// callers must interpret the status together with the target reader profile,
+/// never as global health or captured-resource availability.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum StoreCapabilityStatus {

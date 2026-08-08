@@ -5,7 +5,12 @@
 
 import changeReaderProfile from "../../../../documents/change_reader_profile_v1.json";
 
-export type Availability =
+/**
+ * Authority state for the reader's target store cohort. These states describe
+ * whether Change semantics may be read at all; they do not describe projection
+ * freshness or the bytes of an exact Revision resource.
+ */
+export type ReaderProfileAvailability =
   | "migration_required"
   | "migration_in_progress"
   | "ready";
@@ -86,7 +91,7 @@ const INTERDIFF_AVAILABILITY_VALUES = new Set([
 export interface ReaderProfile {
   schema: "pointbreak.inspect-reader-profile";
   version: 1;
-  availability: Availability;
+  availability: ReaderProfileAvailability;
   minimumReaderProfile?: string;
   authorityCursor: Record<string, unknown>;
   commitGraphStamp?: string;
@@ -114,6 +119,11 @@ export interface ChangeSummary {
   topology: string;
   lifecycle: string;
   attentionSummary: string;
+  /**
+   * Change-level membership/reference completeness. `available` means every
+   * member has one exact Revision reference; its captured body may separately
+   * be available, removed, missing, mismatched, or non-textual.
+   */
   availabilitySummary: string;
   currentRevisionRefs: RevisionRef[];
   diagnostics?: string[];
@@ -685,7 +695,7 @@ export function decodeReaderProfile(value: unknown): ReaderProfile {
   if (
     profile.schema !== "pointbreak.inspect-reader-profile" ||
     profile.version !== 1 ||
-    !isAvailability(availability) ||
+    !isReaderProfileAvailability(availability) ||
     !isRecord(authorityCursor) ||
     !isDocumentMap(documents) ||
     !sameDocumentMap(documents, CHANGE_READER_DOCUMENTS)
@@ -819,7 +829,9 @@ function appendEnum(
   params.set(name, value);
 }
 
-function isAvailability(value: unknown): value is Availability {
+function isReaderProfileAvailability(
+  value: unknown,
+): value is ReaderProfileAvailability {
   return (
     value === "migration_required" ||
     value === "migration_in_progress" ||

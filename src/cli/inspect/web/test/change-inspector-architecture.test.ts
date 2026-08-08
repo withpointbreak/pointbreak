@@ -94,6 +94,13 @@ describe("active Change inspector architecture", () => {
     expect(
       [...closure.keys()].map((file) => file.replace(process.cwd(), "")),
     ).toContain("/src/entry.ts");
+    // Type-only imports are still architectural dependencies: a neutral renderer
+    // must not regain the legacy aggregate store through a type declared beside
+    // the state-reading model. Keep the whole active import closure free of both
+    // legacy semantic roots, not merely the three composition entry modules.
+    for (const file of closure.keys()) {
+      expect(file).not.toMatch(/\/src\/(model|store)\.ts$/);
+    }
     for (const [file, source] of closure) {
       const activeComposition =
         file.endsWith("/src/entry.ts") ||

@@ -1617,7 +1617,7 @@
     const documents = profile.documents;
     const minimumReaderProfile = profile.minimumReaderProfile;
     const commitGraphStamp = profile.commitGraphStamp;
-    if (profile.schema !== "pointbreak.inspect-reader-profile" || profile.version !== 1 || !isAvailability(availability) || !isRecord(authorityCursor) || !isDocumentMap(documents) || !sameDocumentMap(documents, CHANGE_READER_DOCUMENTS)) {
+    if (profile.schema !== "pointbreak.inspect-reader-profile" || profile.version !== 1 || !isReaderProfileAvailability(availability) || !isRecord(authorityCursor) || !isDocumentMap(documents) || !sameDocumentMap(documents, CHANGE_READER_DOCUMENTS)) {
       throw new Error("incompatible Inspector reader profile");
     }
     if (availability === "ready" && (minimumReaderProfile !== CHANGE_READER_PROFILE || typeof commitGraphStamp !== "string" || commitGraphStamp.length === 0)) {
@@ -1691,10 +1691,10 @@
     params.set(name, value);
   }
   __name(appendEnum, "appendEnum");
-  function isAvailability(value) {
+  function isReaderProfileAvailability(value) {
     return value === "migration_required" || value === "migration_in_progress" || value === "ready";
   }
-  __name(isAvailability, "isAvailability");
+  __name(isReaderProfileAvailability, "isReaderProfileAvailability");
   function isChangeSummary(value, stamp) {
     if (!isRecord(value)) return false;
     return nonEmptyString(value.changeId) && (value.declarationState === "authoritative" || value.declarationState === "incomplete" || value.declarationState === "conflicted") && isStringArray(value.titleAssertions) && typeof value.memberCount === "number" && Number.isSafeInteger(value.memberCount) && value.memberCount >= 0 && isOneOf(value.topology, TOPOLOGY_VALUES) && isOneOf(value.lifecycle, LIFECYCLE_VALUES) && isOneOf(value.attentionSummary, ATTENTION_VALUES) && isOneOf(value.availabilitySummary, AVAILABILITY_VALUES) && value.projectionStamp === stamp && Array.isArray(value.currentRevisionRefs) && value.currentRevisionRefs.every(isRevisionRef) && uniqueRevisionKeys(value.currentRevisionRefs).size === value.currentRevisionRefs.length && (value.diagnostics === void 0 || isStringArray(value.diagnostics));

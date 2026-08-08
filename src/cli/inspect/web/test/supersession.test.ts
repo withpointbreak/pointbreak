@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { ThreadLayout } from "../src/model";
 import { renderSupersessionSvg } from "../src/supersession";
+import type { ThreadLayout } from "../src/thread-layout";
 
 const laid: ThreadLayout = {
   nodes: [

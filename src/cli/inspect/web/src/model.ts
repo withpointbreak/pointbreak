@@ -21,6 +21,7 @@ import {
 import { matchesQuery, parseSearchQueryFor } from "./query";
 import { type LinkifyOptions, linkify } from "./refs";
 import { getState, type State } from "./store";
+import type { ThreadLayout } from "./thread-layout";
 import {
   type HistoryEntry,
   type Overview,
@@ -30,41 +31,14 @@ import {
 } from "./types";
 
 // A supersession thread (a connected component of the supersession DAG) as laid
-// out server-side. Only the fields the model reads are typed; deeper renderers
-// extend this view as they consume more of the payload.
-/** One laid-out node of a thread's supersession DAG (geometry + supersession state). */
-export interface ThreadNode {
-  id?: string;
-  x?: number;
-  y?: number;
-  // Box dimensions and head/superseded state the DAG painter reads.
-  w?: number;
-  h?: number;
-  isHead?: boolean;
-  isSuperseded?: boolean;
-}
-
-/** The normalized (0,0)-origin bounds of a thread's laid-out graph. */
-export interface ThreadBounds {
-  w?: number;
-  h?: number;
-}
-
-/** A routed supersession edge: the superseding `from`, the `to` it supersedes, and its polyline. */
-export interface ThreadEdge {
-  from?: string;
-  to?: string;
-  path?: number[][];
-  /** The fact relation this edge encodes (`replaces`/`supersedes`); absent on revision edges. */
-  kind?: string;
-}
-
-/** A thread's server-computed layout (the placed supersession nodes, edges, and bounds). */
-export interface ThreadLayout {
-  nodes?: ThreadNode[];
-  edges?: ThreadEdge[];
-  bounds?: ThreadBounds;
-}
+// out server-side. Re-export the neutral geometry types for retained legacy
+// callers while active Change-first renderers import their own neutral boundary.
+export type {
+  ThreadBounds,
+  ThreadEdge,
+  ThreadLayout,
+  ThreadNode,
+} from "./thread-layout";
 
 /** A supersession thread: its member revisions, heads, and their laid-out positions. */
 export interface Thread {

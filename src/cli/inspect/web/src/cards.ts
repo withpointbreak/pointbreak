@@ -19,7 +19,6 @@ import {
 import { escapeHtml } from "./escape";
 import { fmtDateTime } from "./format";
 import { renderBodyContent, renderContentHtml } from "./markdown";
-import type { ThreadLayout } from "./model";
 import {
   assessmentDisplayLabel,
   endorsementsBlock,
@@ -27,6 +26,7 @@ import {
 } from "./projection";
 import { actorChip, isMarkdownContentType, linkify } from "./refs";
 import { renderSupersessionSvg } from "./supersession";
+import type { ThreadLayout } from "./thread-layout";
 import type { Endorsement, EntryWriter } from "./types";
 
 // ---------------------------------------------------------------------------

@@ -41,7 +41,7 @@ describe("ReviewUrlParser", () => {
     expect(
       parser.push(`Pointbreak Review inspector
   store: .
-  url:   http://127.0.0.1:63831/#/timeline?token=${TOKEN}
+  url:   http://127.0.0.1:63831/#/changes?token=${TOKEN}
   stop:  Ctrl-C
 `),
     ).toEqual({ origin: "http://127.0.0.1:63831", token: TOKEN });
@@ -53,7 +53,7 @@ describe("ReviewUrlParser", () => {
     expect(
       parser.push("Pointbreak Review inspector\n  url: http://127.0."),
     ).toBeUndefined();
-    expect(parser.push(`0.1:63831/#/timeline?token=${TOKEN}\n`)).toEqual({
+    expect(parser.push(`0.1:63831/#/changes?token=${TOKEN}\n`)).toEqual({
       origin: "http://127.0.0.1:63831",
       token: TOKEN,
     });

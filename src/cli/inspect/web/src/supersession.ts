@@ -6,8 +6,8 @@
 // the aria noun, and the selection predicate.
 import { CLASS, dagNodeClass } from "./classNames";
 import { escapeHtml } from "./escape";
-import type { ThreadLayout } from "./model";
 import { shortId } from "./refs";
+import type { ThreadLayout } from "./thread-layout";
 
 /** How a supersession graph's nodes are wired for a given lens. */
 export interface SupersessionSvgOptions {
