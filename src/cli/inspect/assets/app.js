@@ -2446,6 +2446,7 @@
     let timelineOriginRoute = null;
     let detailDomIdentity = null;
     let pendingDiffEntryFocus = null;
+    let pendingDiffExitFocus = null;
     const parkTimelineForReaderActivity = /* @__PURE__ */ __name(() => {
       actions2.parkTimelineMonitoring?.();
     }, "parkTimelineForReaderActivity");
@@ -3163,6 +3164,7 @@
       timelineOriginRoute = null;
       detailDomIdentity = null;
       pendingDiffEntryFocus = null;
+      pendingDiffExitFocus = null;
       setCoveredPageInert(false);
     }, "stop");
     return {
@@ -3215,6 +3217,14 @@
         }
         const entersVisibleDiff = nextRoute?.kind === "diff" && sameDiffIdentity(pendingDiffEntryFocus, nextDiffIdentity) && document.querySelector("#diff-page:not(.hidden)") !== null;
         const leavesDiffForExactSurface = currentRoute2?.kind === "diff" && nextRoute !== null && nextRoute.kind !== "diff" && nextRoute.kind !== "lens" && nextRoute.kind !== "timeline";
+        const leavesDiffForRevision = leavesDiffForExactSurface && nextRoute?.kind === "revision";
+        const nextRevisionRoute = nextRoute?.kind === "revision" ? formatChangeInspectorRoute(nextRoute) : null;
+        if (leavesDiffForRevision) {
+          pendingDiffExitFocus = nextRevisionRoute;
+        } else if (pendingDiffExitFocus !== nextRevisionRoute) {
+          pendingDiffExitFocus = null;
+        }
+        const completesDiffExitFocus = pendingDiffExitFocus !== null && pendingDiffExitFocus === nextRevisionRoute && document.querySelector("#detail-body")?.dataset.changeReadingKey?.startsWith(`${pendingDiffExitFocus}:`) === true;
         document.querySelector(".split")?.classList.toggle("split-closed", !detailOpen);
         if (detail) {
           detail.inert = !detailOpen;
@@ -3225,6 +3235,10 @@
           pendingDiffEntryFocus = null;
           focusFallback(nextRoute);
         } else if (leavesDiffForExactSurface) {
+          if (completesDiffExitFocus) pendingDiffExitFocus = null;
+          focusFallback(nextRoute);
+        } else if (completesDiffExitFocus) {
+          pendingDiffExitFocus = null;
           focusFallback(nextRoute);
         } else if (detailOpen && !detailWasOpen) {
           detailReturnFocus = active3 && active3 !== document.body ? active3 : null;

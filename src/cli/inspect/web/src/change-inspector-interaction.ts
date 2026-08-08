@@ -369,6 +369,7 @@ export function installChangeInspectorInteraction(
     null;
   let detailDomIdentity: ChildNode | null = null;
   let pendingDiffEntryFocus: DiffIdentity | null = null;
+  let pendingDiffExitFocus: string | null = null;
 
   const parkTimelineForReaderActivity = () => {
     (actions as TimelineParkActions).parkTimelineMonitoring?.();
@@ -1310,6 +1311,7 @@ export function installChangeInspectorInteraction(
     timelineOriginRoute = null;
     detailDomIdentity = null;
     pendingDiffEntryFocus = null;
+    pendingDiffExitFocus = null;
     setCoveredPageInert(false);
   };
   return {
@@ -1418,6 +1420,24 @@ export function installChangeInspectorInteraction(
         nextRoute.kind !== "diff" &&
         nextRoute.kind !== "lens" &&
         nextRoute.kind !== "timeline";
+      const leavesDiffForRevision =
+        leavesDiffForExactSurface && nextRoute?.kind === "revision";
+      const nextRevisionRoute =
+        nextRoute?.kind === "revision"
+          ? formatChangeInspectorRoute(nextRoute)
+          : null;
+      if (leavesDiffForRevision) {
+        pendingDiffExitFocus = nextRevisionRoute;
+      } else if (pendingDiffExitFocus !== nextRevisionRoute) {
+        pendingDiffExitFocus = null;
+      }
+      const completesDiffExitFocus =
+        pendingDiffExitFocus !== null &&
+        pendingDiffExitFocus === nextRevisionRoute &&
+        document
+          .querySelector<HTMLElement>("#detail-body")
+          ?.dataset.changeReadingKey?.startsWith(`${pendingDiffExitFocus}:`) ===
+          true;
       document
         .querySelector(".split")
         ?.classList.toggle("split-closed", !detailOpen);
@@ -1434,8 +1454,16 @@ export function installChangeInspectorInteraction(
         focusFallback(nextRoute);
       } else if (leavesDiffForExactSurface) {
         // The diff has just been hidden and its search/body nodes may still
-        // be connected. Always settle on retained exact-reader chrome, which
-        // remains visible at both breakpoints.
+        // be connected. Settle on retained exact-reader chrome immediately,
+        // then keep that handoff pending if the exact reading is still loading.
+        if (completesDiffExitFocus) pendingDiffExitFocus = null;
+        focusFallback(nextRoute);
+      } else if (completesDiffExitFocus) {
+        // Exact hydration can deliberately focus a retained routed fact or
+        // file after the loading paint. Complete the one-time diff-exit
+        // handoff on stable exact-reader chrome, then return focus ownership
+        // to ordinary same-route renderer refinements.
+        pendingDiffExitFocus = null;
         focusFallback(nextRoute);
       } else if (detailOpen && !detailWasOpen) {
         detailReturnFocus = active && active !== document.body ? active : null;

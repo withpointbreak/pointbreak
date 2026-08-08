@@ -291,19 +291,23 @@ describe("Change Inspector interaction lifecycle", () => {
       revision,
       query: {},
     };
-    const revisionRoute: Extract<ChangeInspectorRoute, { kind: "revision" }> = {
-      kind: "revision",
-      changeId: diffRoute.changeId,
-      revision,
-      query: {},
-    };
     const diffPage = document.querySelector<HTMLElement>("#diff-page");
     const split = document.querySelector<HTMLElement>(".split");
     const input = document.querySelector<HTMLInputElement>("#diff-file-query");
     const close = document.querySelector<HTMLButtonElement>("#diff-page-close");
     const exactClose =
       document.querySelector<HTMLButtonElement>("#detail-close");
-    if (!diffPage || !split || !input || !close || !exactClose) {
+    const exactBack = document.querySelector<HTMLButtonElement>("#detail-back");
+    const detailBody = document.querySelector<HTMLElement>("#detail-body");
+    if (
+      !diffPage ||
+      !split ||
+      !input ||
+      !close ||
+      !exactClose ||
+      !exactBack ||
+      !detailBody
+    ) {
       throw new Error("diff focus-handoff fixture is missing");
     }
 
@@ -394,19 +398,108 @@ describe("Change Inspector interaction lifecycle", () => {
     });
     expect(document.activeElement).toBe(close);
 
-    // Escape/Back renders this exact Revision before the controller syncs;
-    // its hidden diff input remains connected, so the lifecycle must override
-    // it with visible exact-reader chrome.
+    const replacementRevisionRoute: Extract<
+      ChangeInspectorRoute,
+      { kind: "revision" }
+    > = {
+      kind: "revision",
+      changeId: replacementDiffRoute.changeId,
+      revision: replacementDiffRoute.revision,
+      query: replacementDiffRoute.query,
+      focus: {
+        filePath: "src/refined.rs",
+        factId: "obs:refined",
+      },
+    };
+
+    // Escape/Back first paints a loading exact Revision. Its hidden diff input
+    // remains connected, so the lifecycle must move focus to visible exact
+    // chrome immediately and retain that return intent through hydration.
     diffPage.classList.add("hidden");
     split.classList.remove("hidden");
+    delete detailBody.dataset.changeReadingKey;
+    detailBody.replaceChildren();
     input.focus();
     controller.sync({
       generation: null,
-      route: revisionRoute,
+      route: replacementRevisionRoute,
       selected: null,
       diagnostic: null,
     });
     expect(document.activeElement).toBe(exactClose);
+
+    // Hydration deliberately focuses the retained routed fact before the
+    // interaction owner syncs. The pending diff-exit handoff must settle once
+    // on exact Revision chrome, then leave later same-route renderer focus
+    // alone after that intent has been consumed.
+    const hydratedFact = document.createElement("button");
+    hydratedFact.dataset.factId = "obs:refined";
+    hydratedFact.textContent = "hydrated exact fact";
+    detailBody.replaceChildren(hydratedFact);
+    detailBody.dataset.changeReadingKey = `${formatChangeInspectorRoute(replacementRevisionRoute)}:sha256:focused-reading`;
+    hydratedFact.focus();
+    controller.sync({
+      generation: null,
+      route: replacementRevisionRoute,
+      selected: null,
+      diagnostic: null,
+    });
+    expect(document.activeElement).toBe(exactClose);
+
+    hydratedFact.focus();
+    controller.sync({
+      generation: null,
+      route: replacementRevisionRoute,
+      selected: null,
+      diagnostic: null,
+    });
+    expect(document.activeElement).toBe(hydratedFact);
+
+    // The same two-paint handoff targets the retained Back control when the
+    // exact Revision is a narrow sheet, and remains one-shot there as well.
+    narrow = true;
+    diffPage.classList.remove("hidden");
+    split.classList.add("hidden");
+    controller.sync({
+      generation: null,
+      route: replacementDiffRoute,
+      selected: null,
+      diagnostic: null,
+    });
+    expect(document.activeElement).toBe(close);
+
+    diffPage.classList.add("hidden");
+    split.classList.remove("hidden");
+    delete detailBody.dataset.changeReadingKey;
+    detailBody.replaceChildren();
+    input.focus();
+    controller.sync({
+      generation: null,
+      route: replacementRevisionRoute,
+      selected: null,
+      diagnostic: null,
+    });
+    expect(document.activeElement).toBe(exactBack);
+
+    detailBody.replaceChildren(hydratedFact);
+    detailBody.dataset.changeReadingKey = `${formatChangeInspectorRoute(replacementRevisionRoute)}:sha256:narrow-focused-reading`;
+    hydratedFact.focus();
+    controller.sync({
+      generation: null,
+      route: replacementRevisionRoute,
+      selected: null,
+      diagnostic: null,
+    });
+    expect(document.activeElement).toBe(exactBack);
+
+    hydratedFact.focus();
+    controller.sync({
+      generation: null,
+      route: replacementRevisionRoute,
+      selected: null,
+      diagnostic: null,
+    });
+    expect(document.activeElement).toBe(hydratedFact);
   });
 
   it("keeps one Timeline tab stop and moves its event cursor with j/k/g/G", () => {
