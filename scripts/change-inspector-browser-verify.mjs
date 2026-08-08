@@ -175,11 +175,11 @@
   const recordMismatchRequest = (request) => {
     if (isHistoryRequest(request.url(), config.server)) mismatchHistoryRequests += 1;
   };
-  await page.route("**/api/v2/profile", (route) => route.fulfill({
-    status: 200,
-    contentType: "application/json",
-    body: JSON.stringify({ schema: "pointbreak.inspect-reader-profile", version: 999 }),
-  }));
+  await page.route("**/api/v2/profile", async (route) => {
+    const response = await route.fetch();
+    const profile = await response.json();
+    await route.fulfill({ response, json: { ...profile, version: 999 } });
+  });
   page.on("request", recordMismatchRequest);
   try {
     await page.goto(url(""), { waitUntil: "domcontentloaded" });
