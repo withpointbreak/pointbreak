@@ -797,7 +797,7 @@ describe("Change Inspector interaction lifecycle", () => {
     expect(navigate).not.toHaveBeenCalled();
   });
 
-  it("keeps a narrow exact-event sheet isolated and repairs focus when widened", () => {
+  it("keeps an exact-event sheet isolated and repairs focus across breakpoints", () => {
     let narrow = true;
     vi.spyOn(window, "matchMedia").mockImplementation(
       (query: string) =>
@@ -850,6 +850,11 @@ describe("Change Inspector interaction lifecycle", () => {
       document.querySelector("#detail-close"),
     );
     expect(document.querySelector<HTMLElement>("#master")?.inert).toBe(false);
+
+    narrow = true;
+    window.dispatchEvent(new Event("resize"));
+    expect(document.activeElement).toBe(back);
+    expect(document.querySelector<HTMLElement>("#master")?.inert).toBe(true);
   });
 
   it("moves consecutively through a full 100-entry page beyond the mounted virtual slice", () => {

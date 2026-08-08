@@ -644,6 +644,19 @@ export function installChangeInspectorInteraction(
       return;
     }
     if (
+      currentRoute !== null &&
+      currentRoute.kind !== "diff" &&
+      currentRoute.kind !== "lens" &&
+      currentRoute.kind !== "timeline" &&
+      active?.id === "detail-close"
+    ) {
+      // The wide Close affordance disappears when retained detail becomes a
+      // narrow sheet. Move focus to its visible Back counterpart instead of
+      // accepting a hidden control merely because it remains inside detail.
+      focusFallback();
+      return;
+    }
+    if (
       routeSurface !== null &&
       (active === null || !routeSurface.contains(active)) &&
       (active === null || active.closest(".modal:not(.hidden)") === null)

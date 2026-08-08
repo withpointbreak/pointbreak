@@ -2615,6 +2615,10 @@
         }
         return;
       }
+      if (currentRoute2 !== null && currentRoute2.kind !== "diff" && currentRoute2.kind !== "lens" && currentRoute2.kind !== "timeline" && active3?.id === "detail-close") {
+        focusFallback();
+        return;
+      }
       if (routeSurface !== null && (active3 === null || !routeSurface.contains(active3)) && (active3 === null || active3.closest(".modal:not(.hidden)") === null)) {
         focusFallback();
       }
