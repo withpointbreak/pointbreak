@@ -78,7 +78,7 @@ function eventHistory(): EventHistoryDocument {
     sourceChangeProjectionStamp: "sha256:generation",
     timelineProjectionStamp: "sha256:timeline",
     order: "desc",
-    eventCount: 1,
+    eventCount: 2,
     matchCount: 1,
     offset: 0,
     facets: { validation_check_recorded: 1, change_declared: 0 },

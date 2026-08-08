@@ -11,6 +11,12 @@ import type {
 } from "../src/change-protocol";
 import { authorityCursor } from "./support/authority";
 
+const AUTHORITY_HASH_FIELDS = [
+  "journalRecordSetHash",
+  "eventSetHash",
+  "capabilitySetHash",
+] as const;
+
 const profile: ReaderProfile = {
   schema: "pointbreak.inspect-reader-profile",
   version: 1,
@@ -125,6 +131,24 @@ describe("Change inspector state", () => {
         { ...profile, authorityCursor: authorityCursor(2) },
       ),
     ).toThrow("changed during staging");
+
+    const alternateHashes = authorityCursor(7);
+    for (const field of AUTHORITY_HASH_FIELDS) {
+      expect(() =>
+        stageGeneration(
+          profile,
+          page("changes") as ChangesPage,
+          page("attention") as AttentionPage,
+          {
+            ...profile,
+            authorityCursor: {
+              ...profile.authorityCursor,
+              [field]: alternateHashes[field],
+            },
+          },
+        ),
+      ).toThrow("changed during staging");
+    }
   });
 
   it("refuses history from a different authority generation", () => {
@@ -137,5 +161,21 @@ describe("Change inspector state", () => {
         history(authorityCursor(2)),
       ),
     ).toThrow("changed during staging");
+
+    const alternateHashes = authorityCursor(7);
+    for (const field of AUTHORITY_HASH_FIELDS) {
+      expect(() =>
+        stageGeneration(
+          profile,
+          page("changes") as ChangesPage,
+          page("attention") as AttentionPage,
+          profile,
+          history({
+            ...profile.authorityCursor,
+            [field]: alternateHashes[field],
+          }),
+        ),
+      ).toThrow("changed during staging");
+    }
   });
 });

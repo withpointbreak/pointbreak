@@ -1513,6 +1513,7 @@ export function decodeEventHistory(value: unknown): EventHistoryDocument {
     (document.order !== "asc" && document.order !== "desc") ||
     !Number.isSafeInteger(document.eventCount) ||
     (document.eventCount as number) < 0 ||
+    (document.eventCount as number) !== authorityCursor.eventCount ||
     !Number.isSafeInteger(document.matchCount) ||
     (document.matchCount as number) < 0 ||
     !Number.isSafeInteger(document.offset) ||

@@ -212,6 +212,12 @@ describe("bounded Change protocol", () => {
     expect(() =>
       buildEventHistoryUrl({ at: "evt:one", after: "opaque" }),
     ).toThrow("mutually exclusive");
+
+    const mismatchedCount = structuredClone(validEventHistoryValue());
+    mismatchedCount.eventCount = 2;
+    expect(() => decodeEventHistory(mismatchedCount)).toThrow(
+      "invalid event history DTO",
+    );
   });
 
   it("closes Timeline query and document event types", () => {
