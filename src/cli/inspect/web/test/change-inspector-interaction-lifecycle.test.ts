@@ -3,6 +3,10 @@ import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { promptForCredential } from "../src/auth";
 import { installChangeInspectorInteraction } from "../src/change-inspector-interaction";
+import {
+  type ChangeInspectorRoute,
+  formatChangeInspectorRoute,
+} from "../src/change-inspector-router";
 import type { ChangeInspectorSnapshot } from "../src/change-inspector-state";
 import {
   renderChangeInspectorTimeline,
@@ -125,10 +129,18 @@ function install() {
   return { controller, navigate, toggleTimelineMonitoring };
 }
 
-function mountTimelineRows(eventIds: string[]): HTMLOListElement {
+function mountTimelineRows(
+  eventIds: string[],
+  route?: Extract<ChangeInspectorRoute, { kind: "timeline" }>,
+): HTMLOListElement {
   const list = document.createElement("ol");
   list.id = "timeline";
   list.tabIndex = 0;
+  const mountedRoute = route ?? timelineSnapshot().route;
+  if (mountedRoute.kind !== "timeline") {
+    throw new Error("Timeline row fixture requires a Timeline route");
+  }
+  list.dataset.timelineRoute = formatChangeInspectorRoute(mountedRoute);
   for (const eventId of eventIds) {
     const row = document.createElement("li");
     row.className = "event";
@@ -283,6 +295,7 @@ describe("Change Inspector interaction lifecycle", () => {
       timelineSnapshot(),
       timelineDocument(["evt:one", "evt:two"]),
     );
+    list.focus();
 
     document.dispatchEvent(
       new KeyboardEvent("keydown", { key: "G", bubbles: true }),
@@ -294,13 +307,23 @@ describe("Change Inspector interaction lifecycle", () => {
     );
     expect(list.getAttribute("aria-activedescendant")).toBeNull();
 
-    list.replaceChildren();
-    for (const eventId of ["evt:tail-one", "evt:tail-two"]) {
-      const row = document.createElement("li");
-      row.className = "event";
-      row.dataset.eventId = eventId;
-      list.append(row);
-    }
+    // A route can become current before its destination DOM replaces the old
+    // page. Presence alone cannot authorize consuming the pending tail intent:
+    // the mounted list must identify the same exact Timeline route.
+    controller.sync(
+      {
+        ...timelineSnapshot(),
+        route: target,
+      },
+      timelineDocument(["evt:one", "evt:two"]),
+    );
+    expect(list.getAttribute("aria-activedescendant")).toBeNull();
+
+    list.remove();
+    const tailList = mountTimelineRows(
+      ["evt:tail-one", "evt:tail-two"],
+      target,
+    );
     controller.sync(
       {
         ...timelineSnapshot(),
@@ -308,9 +331,218 @@ describe("Change Inspector interaction lifecycle", () => {
       },
       timelineDocument(["evt:tail-one", "evt:tail-two"]),
     );
-    expect(list.getAttribute("aria-activedescendant")).toContain(
+    expect(tailList.getAttribute("aria-activedescendant")).toContain(
       "evt_3Atail-two",
     );
+    expect(document.activeElement).toBe(tailList);
+  });
+
+  it("keeps an exact-event Timeline keyboard-active without changing its detail until Enter", () => {
+    const { controller, navigate } = install();
+    const snapshot = eventSnapshot();
+    if (snapshot.route.kind !== "event") throw new Error("missing event route");
+    const companion = {
+      kind: "timeline" as const,
+      historyQuery: snapshot.route.historyQuery,
+    };
+    const list = mountTimelineRows(
+      [snapshot.route.eventId, "evt:sha256:next"],
+      companion,
+    );
+    const nextPage = vi.fn();
+    const next = document.createElement("button");
+    next.dataset.timelinePage = "next";
+    next.dataset.timelineTargetRoute = "#/timeline?after=next-page";
+    next.addEventListener("click", nextPage);
+    const previousPage = vi.fn();
+    const previous = document.createElement("button");
+    previous.dataset.timelinePage = "previous";
+    previous.dataset.timelineTargetRoute = "#/timeline?after=previous-page";
+    previous.addEventListener("click", previousPage);
+    document.querySelector("#master")?.append(previous, next);
+    list.focus();
+    controller.sync(
+      snapshot,
+      timelineDocument([snapshot.route.eventId, "evt:sha256:next"]),
+    );
+    expect(list.getAttribute("aria-activedescendant")).toContain(
+      "evt_3Asha256_3Adeep-link",
+    );
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "G", bubbles: true }),
+    );
+    expect(list.getAttribute("aria-activedescendant")).toContain(
+      "evt_3Asha256_3Adeep-link",
+    );
+    expect(navigate).not.toHaveBeenCalled();
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "g", bubbles: true }),
+    );
+    expect(list.getAttribute("aria-activedescendant")).toContain(
+      "evt_3Asha256_3Adeep-link",
+    );
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "j", bubbles: true }),
+    );
+    expect(list.getAttribute("aria-activedescendant")).toContain(
+      "evt_3Asha256_3Anext",
+    );
+    expect(navigate).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(list);
+    for (const key of ["j", "f", "d"]) {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key, bubbles: true }),
+      );
+    }
+    expect(nextPage).not.toHaveBeenCalled();
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "k", bubbles: true }),
+    );
+    for (const key of ["k", "b", "u"]) {
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key, bubbles: true }),
+      );
+    }
+    expect(previousPage).not.toHaveBeenCalled();
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "j", bubbles: true }),
+    );
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+    expect(navigate).toHaveBeenCalledWith({
+      kind: "event",
+      eventId: "evt:sha256:next",
+      historyQuery: snapshot.route.historyQuery,
+      query: {},
+    });
+  });
+
+  it("leaves native detail arrows alone on an exact-event route", () => {
+    const { controller } = install();
+    const snapshot = eventSnapshot();
+    if (snapshot.route.kind !== "event") throw new Error("missing event route");
+    const list = mountTimelineRows(
+      [snapshot.route.eventId, "evt:sha256:next"],
+      { kind: "timeline", historyQuery: snapshot.route.historyQuery },
+    );
+    controller.sync(
+      snapshot,
+      timelineDocument([snapshot.route.eventId, "evt:sha256:next"]),
+    );
+    const close = document.querySelector<HTMLButtonElement>("#detail-close");
+    close?.focus();
+    const detailArrow = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    close?.dispatchEvent(detailArrow);
+    expect(detailArrow.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(close);
+    expect(list.getAttribute("aria-activedescendant")).toContain(
+      "evt_3Asha256_3Adeep-link",
+    );
+
+    list.focus();
+    const timelineArrow = new KeyboardEvent("keydown", {
+      key: "ArrowDown",
+      bubbles: true,
+      cancelable: true,
+    });
+    list.dispatchEvent(timelineArrow);
+    expect(timelineArrow.defaultPrevented).toBe(true);
+    expect(list.getAttribute("aria-activedescendant")).toContain(
+      "evt_3Asha256_3Anext",
+    );
+  });
+
+  it("leaves Enter on an exact-event disclosure to the native summary", () => {
+    const { controller, navigate } = install();
+    const snapshot = eventSnapshot();
+    if (snapshot.route.kind !== "event") throw new Error("missing event route");
+    mountTimelineRows([snapshot.route.eventId, "evt:sha256:next"], {
+      kind: "timeline",
+      historyQuery: snapshot.route.historyQuery,
+    });
+    controller.sync(
+      snapshot,
+      timelineDocument([snapshot.route.eventId, "evt:sha256:next"]),
+    );
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = "Structured event data";
+    details.append(summary, document.createElement("pre"));
+    document.querySelector("#detail-body")?.append(details);
+    summary.focus();
+    const enter = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    summary.dispatchEvent(enter);
+
+    expect(enter.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(summary);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("keeps a narrow exact-event sheet isolated and repairs focus when widened", () => {
+    let narrow = true;
+    vi.spyOn(window, "matchMedia").mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === "(max-width: 760px)" && narrow,
+          media: query,
+          onchange: null,
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(() => true),
+        }) as unknown as MediaQueryList,
+    );
+    const { controller } = install();
+    const snapshot = eventSnapshot();
+    if (snapshot.route.kind !== "event") throw new Error("missing event route");
+    const list = mountTimelineRows(
+      [snapshot.route.eventId, "evt:sha256:next"],
+      { kind: "timeline", historyQuery: snapshot.route.historyQuery },
+    );
+    controller.sync(
+      snapshot,
+      timelineDocument([snapshot.route.eventId, "evt:sha256:next"]),
+    );
+    const back = document.querySelector<HTMLButtonElement>("#detail-back");
+    expect(document.activeElement).toBe(back);
+    expect(document.querySelector<HTMLElement>("#master")?.inert).toBe(true);
+
+    back?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "j", bubbles: true }),
+    );
+    expect(document.activeElement).toBe(back);
+    expect(list.getAttribute("aria-activedescendant")).toContain(
+      "evt_3Asha256_3Adeep-link",
+    );
+    const splitBefore =
+      document.documentElement.style.getPropertyValue("--split-master");
+    for (const key of ["/", "h", "l"]) {
+      back?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+      expect(document.activeElement).toBe(back);
+      expect(
+        document.documentElement.style.getPropertyValue("--split-master"),
+      ).toBe(splitBefore);
+    }
+
+    narrow = false;
+    window.dispatchEvent(new Event("resize"));
+    expect(document.activeElement).toBe(
+      document.querySelector("#detail-close"),
+    );
+    expect(document.querySelector<HTMLElement>("#master")?.inert).toBe(false);
   });
 
   it("moves consecutively through a full 100-entry page beyond the mounted virtual slice", () => {
@@ -362,6 +594,13 @@ describe("Change Inspector interaction lifecycle", () => {
 
   it("uses f/b/u/d for Timeline movement and adjacent page controls at a boundary", () => {
     const { controller } = install();
+    const sourceRoute = timelineSnapshot().route;
+    if (sourceRoute.kind !== "timeline")
+      throw new Error("missing source route");
+    const nextRoute = {
+      kind: "timeline" as const,
+      historyQuery: { after: "next-page" },
+    };
     const list = mountTimelineRows(["evt:one", "evt:two"]);
     Object.defineProperty(list, "clientHeight", {
       configurable: true,
@@ -373,12 +612,15 @@ describe("Change Inspector interaction lifecycle", () => {
     const next = document.createElement("button");
     next.type = "button";
     next.dataset.timelinePage = "next";
+    next.dataset.timelineTargetRoute = formatChangeInspectorRoute(nextRoute);
     next.textContent = "Next page";
     const nextPage = vi.fn();
     next.addEventListener("click", nextPage);
     const previous = document.createElement("button");
     previous.type = "button";
     previous.dataset.timelinePage = "previous";
+    previous.dataset.timelineTargetRoute =
+      formatChangeInspectorRoute(sourceRoute);
     previous.textContent = "Previous page";
     const previousPage = vi.fn();
     previous.addEventListener("click", previousPage);
@@ -387,6 +629,7 @@ describe("Change Inspector interaction lifecycle", () => {
       timelineSnapshot(),
       timelineDocument(["evt:one", "evt:two"]),
     );
+    list.focus();
 
     document.dispatchEvent(
       new KeyboardEvent("keydown", { key: "j", bubbles: true }),
@@ -401,35 +644,47 @@ describe("Change Inspector interaction lifecycle", () => {
 
     // Simulate the server-owned next page replacing the bounded DOM. The
     // pending anchor selects its first event and preserves focus on the list.
-    list.replaceChildren();
-    for (const eventId of ["evt:three", "evt:four"]) {
-      const row = document.createElement("li");
-      row.className = "event";
-      row.dataset.eventId = eventId;
+    list.remove();
+    const nextList = mountTimelineRows(["evt:three", "evt:four"], nextRoute);
+    Object.defineProperty(nextList, "clientHeight", {
+      configurable: true,
+      value: 1,
+    });
+    for (const row of nextList.querySelectorAll<HTMLElement>(
+      "[data-event-id]",
+    )) {
       row.getBoundingClientRect = () => ({ height: 1 }) as DOMRect;
-      list.append(row);
     }
     controller.sync(
       {
         ...timelineSnapshot(),
-        route: { kind: "timeline", historyQuery: { after: "next-page" } },
+        route: nextRoute,
       },
       timelineDocument(["evt:three", "evt:four"]),
     );
-    expect(list.getAttribute("aria-activedescendant")).toContain("evt_3Athree");
+    expect(nextList.getAttribute("aria-activedescendant")).toContain(
+      "evt_3Athree",
+    );
+    expect(document.activeElement).toBe(nextList);
 
     document.dispatchEvent(
       new KeyboardEvent("keydown", { key: "u", bubbles: true }),
     );
-    expect(list.getAttribute("aria-activedescendant")).toContain("evt_3Athree");
+    expect(nextList.getAttribute("aria-activedescendant")).toContain(
+      "evt_3Athree",
+    );
     document.dispatchEvent(
       new KeyboardEvent("keydown", { key: "d", bubbles: true }),
     );
-    expect(list.getAttribute("aria-activedescendant")).toContain("evt_3Afour");
+    expect(nextList.getAttribute("aria-activedescendant")).toContain(
+      "evt_3Afour",
+    );
     document.dispatchEvent(
       new KeyboardEvent("keydown", { key: "b", bubbles: true }),
     );
-    expect(list.getAttribute("aria-activedescendant")).toContain("evt_3Athree");
+    expect(nextList.getAttribute("aria-activedescendant")).toContain(
+      "evt_3Athree",
+    );
     document.dispatchEvent(
       new KeyboardEvent("keydown", { key: "b", bubbles: true }),
     );
@@ -437,6 +692,51 @@ describe("Change Inspector interaction lifecycle", () => {
     // deliberate adjacent-page action, so the adjacent signed page is asked
     // for twice rather than coalescing two independent reader keys.
     expect(previousPage).toHaveBeenCalledTimes(2);
+  });
+
+  it("discards an adjacent-page intent when a different Timeline route wins", () => {
+    const { controller } = install();
+    const source = timelineSnapshot().route;
+    if (source.kind !== "timeline") throw new Error("missing source route");
+    const target = {
+      kind: "timeline" as const,
+      historyQuery: { q: "assessment", after: "target-page" },
+    };
+    const unrelated = {
+      kind: "timeline" as const,
+      historyQuery: { q: "different-filter" },
+    };
+    const sourceList = mountTimelineRows(["evt:one"], source);
+    const next = document.createElement("button");
+    next.type = "button";
+    next.dataset.timelinePage = "next";
+    next.dataset.timelineTargetRoute = formatChangeInspectorRoute(target);
+    document.querySelector("#master")?.append(next);
+    controller.sync(timelineSnapshot(), timelineDocument(["evt:one"]));
+    sourceList.focus();
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "j", bubbles: true }),
+    );
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "j", bubbles: true }),
+    );
+
+    sourceList.remove();
+    const unrelatedList = mountTimelineRows(["evt:other"], unrelated);
+    controller.sync(
+      { ...timelineSnapshot(), route: unrelated },
+      timelineDocument(["evt:other"]),
+    );
+    expect(unrelatedList.getAttribute("aria-activedescendant")).toBeNull();
+
+    unrelatedList.remove();
+    const lateTarget = mountTimelineRows(["evt:late"], target);
+    controller.sync(
+      { ...timelineSnapshot(), route: target },
+      timelineDocument(["evt:late"]),
+    );
+    expect(lateTarget.getAttribute("aria-activedescendant")).toBeNull();
+    expect(document.activeElement).not.toBe(lateTarget);
   });
 
   it("returns an exact Revision opened from Timeline to its filtered Timeline route", () => {
@@ -753,7 +1053,8 @@ describe("Change Inspector interaction lifecycle", () => {
       .querySelector("#detail-body")
       ?.replaceChildren(refreshedGeneration);
     controller.sync(narrowExact);
-    expect(document.activeElement).toBe(toolbarControl);
+    expect(document.activeElement).toBe(document.querySelector("#detail-back"));
+    expect(document.querySelector<HTMLElement>("#topbar")?.inert).toBe(true);
   });
 
   it("restores focus after a same-route detail refresh but not an unchanged paint", () => {

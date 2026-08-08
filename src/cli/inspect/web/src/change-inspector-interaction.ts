@@ -33,6 +33,22 @@ import {
 let colorSchemeWatcherInstalled = false;
 
 const HISTORY_ORIGIN_KEY = "__pointbreakChangeInspectorOrigin";
+const MASTER_SURFACE_KEYS = new Set([
+  "/",
+  "j",
+  "k",
+  "ArrowDown",
+  "ArrowUp",
+  "g",
+  "G",
+  "f",
+  "b",
+  "d",
+  "u",
+  "F",
+  "h",
+  "l",
+]);
 
 function isTextControl(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
@@ -49,8 +65,23 @@ function isNativeActionControl(target: EventTarget | null): boolean {
   return (
     target instanceof Element &&
     target.closest(
-      "button, a[href], [role='button'], [role='link'], [role='separator']",
+      "button, summary, a[href], [role='button'], [role='link'], [role='separator']",
     ) !== null
+  );
+}
+
+function isTimelineListTarget(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element &&
+    (target.matches("#timeline") || target.closest("#timeline") !== null)
+  );
+}
+
+function narrowDetailOwnsFocus(target: EventTarget | null): boolean {
+  return (
+    target instanceof Element &&
+    target.closest("#detail") !== null &&
+    window.matchMedia("(max-width: 760px)").matches
   );
 }
 
@@ -64,6 +95,27 @@ type ValidRoute = Exclude<ChangeInspectorRoute, { kind: "invalid" }>;
 type TimelineParkActions = ChangeInspectorRenderActions & {
   parkTimelineMonitoring?: () => void;
 };
+
+type TimelineRoute = Extract<ValidRoute, { kind: "timeline" }>;
+type AdjacentTimelineIntent = Extract<
+  TimelineSelectionIntent,
+  { kind: "adjacent-page" }
+>;
+type PendingTimelineSelection = {
+  intent: AdjacentTimelineIntent;
+  route: string;
+  restoreFocus: boolean;
+};
+
+function companionTimelineRoute(
+  route: ValidRoute | null,
+): TimelineRoute | null {
+  if (route?.kind === "timeline") return route;
+  if (route?.kind === "event") {
+    return { kind: "timeline", historyQuery: route.historyQuery };
+  }
+  return null;
+}
 
 function setSelected(changeId: string | null): void {
   document
@@ -227,13 +279,11 @@ export function installChangeInspectorInteraction(
   let selectedChangeId: string | null = null;
   let selectedTimelineEventId: string | null = null;
   let currentTimelineEventIds: string[] = [];
-  let pendingTimelineSelection: Extract<
-    TimelineSelectionIntent,
-    { kind: "adjacent-page" }
-  > | null = null;
+  let pendingTimelineSelection: PendingTimelineSelection | null = null;
   let pendingGlobalTimelineSelection: {
     boundary: "first" | "last";
     route: string;
+    restoreFocus: boolean;
   } | null = null;
   let modalReturnFocus: HTMLElement | null = null;
   let detailReturnFocus: HTMLElement | null = null;
@@ -264,8 +314,13 @@ export function installChangeInspectorInteraction(
       return true;
     }
     const pager = timelinePager(intent.direction);
-    if (!pager) return false;
-    pendingTimelineSelection = intent;
+    const targetRoute = pager?.dataset.timelineTargetRoute;
+    if (!pager || !targetRoute) return false;
+    pendingTimelineSelection = {
+      intent,
+      route: targetRoute,
+      restoreFocus: document.activeElement?.id === "timeline",
+    };
     pager.click();
     return true;
   };
@@ -275,9 +330,38 @@ export function installChangeInspectorInteraction(
       currentTimelineEventIds,
       selectedTimelineEventId,
     );
+    // A route transition removes the old Timeline before the destination page
+    // is published. Logical monitor rows can outlive that DOM briefly, but
+    // consuming a pending boundary against them would strand the new page with
+    // no active descendant. Pending selections resolve only after a real list
+    // for the routed page has painted.
+    const routedTimeline = companionTimelineRoute(route);
+    const routedTimelineKey =
+      routedTimeline === null
+        ? null
+        : formatChangeInspectorRoute(routedTimeline);
+    const mountedTimeline =
+      document.querySelector<HTMLOListElement>("#timeline");
+    const mountedTimelineRoute = mountedTimeline?.dataset.timelineRoute ?? null;
+    if (
+      pendingTimelineSelection !== null &&
+      (route?.kind !== "timeline" ||
+        routedTimelineKey !== pendingTimelineSelection.route)
+    ) {
+      pendingTimelineSelection = null;
+    }
+    if (
+      pendingGlobalTimelineSelection !== null &&
+      (route?.kind !== "timeline" ||
+        routedTimelineKey !== pendingGlobalTimelineSelection.route)
+    ) {
+      pendingGlobalTimelineSelection = null;
+    }
+    let restoreTimelineFocus = false;
     if (
       pendingGlobalTimelineSelection !== null &&
       route?.kind === "timeline" &&
+      mountedTimelineRoute === formatChangeInspectorRoute(route) &&
       formatChangeInspectorRoute(route) ===
         pendingGlobalTimelineSelection.route &&
       window.eventIds.length > 0
@@ -286,17 +370,27 @@ export function installChangeInspectorInteraction(
         pendingGlobalTimelineSelection.boundary === "first"
           ? (window.eventIds[0] ?? null)
           : (window.eventIds.at(-1) ?? null);
+      restoreTimelineFocus = pendingGlobalTimelineSelection.restoreFocus;
       pendingGlobalTimelineSelection = null;
       if (selectedTimelineEventId !== null) {
         actions.revealTimelineEvent?.(selectedTimelineEventId);
       }
     }
-    if (pendingTimelineSelection !== null && window.eventIds.length > 0) {
+    if (
+      pendingTimelineSelection !== null &&
+      route?.kind === "timeline" &&
+      mountedTimelineRoute === pendingTimelineSelection.route &&
+      window.eventIds.length > 0
+    ) {
       selectedTimelineEventId = resolveTimelinePageSelection(
         window.eventIds,
-        pendingTimelineSelection,
+        pendingTimelineSelection.intent,
       );
+      restoreTimelineFocus = pendingTimelineSelection.restoreFocus;
       pendingTimelineSelection = null;
+      if (selectedTimelineEventId !== null) {
+        actions.revealTimelineEvent?.(selectedTimelineEventId);
+      }
     }
     if (
       selectedTimelineEventId !== null &&
@@ -309,6 +403,9 @@ export function installChangeInspectorInteraction(
       return;
     }
     setTimelineSelected(selectedTimelineEventId);
+    if (restoreTimelineFocus && selectedTimelineEventId !== null) {
+      focusTimelineSelection(selectedTimelineEventId);
+    }
   };
 
   const applyGlobalTimelineBoundary = (
@@ -326,17 +423,30 @@ export function installChangeInspectorInteraction(
     }
     parkTimelineForReaderActivity();
     pendingTimelineSelection = null;
+    const restoreFocus = document.activeElement?.id === "timeline";
     void navigateBoundary(boundary, route)
       .then((target) => {
         if (target === null) return;
+        const targetRoute = formatChangeInspectorRoute(target);
         pendingGlobalTimelineSelection = {
           boundary,
-          route: formatChangeInspectorRoute(target),
+          route: targetRoute,
+          restoreFocus,
         };
-        // Navigation usually paints after the promise settles. If a test host
-        // or cached same-route navigation painted synchronously, resolve the
-        // landing against that already-published page now.
-        syncTimelineDom();
+        // Navigation usually paints after the promise settles. Resolve eagerly
+        // only when the exact destination page is already both current and
+        // mounted; otherwise the next paint owns the pending selection. This
+        // also prevents the source page from clearing a just-created intent.
+        const mountedRoute =
+          document.querySelector<HTMLOListElement>("#timeline")?.dataset
+            .timelineRoute ?? null;
+        if (
+          currentRoute?.kind === "timeline" &&
+          formatChangeInspectorRoute(currentRoute) === targetRoute &&
+          mountedRoute === targetRoute
+        ) {
+          syncTimelineDom();
+        }
       })
       .catch(() => {
         pendingGlobalTimelineSelection = null;
@@ -416,6 +526,49 @@ export function installChangeInspectorInteraction(
         : document.querySelector<HTMLElement>("#master");
     target?.focus({ preventScroll: true });
   };
+
+  const setCoveredPageInert = (covered: boolean): void => {
+    for (const selector of [
+      "#topbar",
+      "#toolbar",
+      "#master-rail",
+      "#master",
+      ".divider",
+    ]) {
+      const element = document.querySelector<HTMLElement>(selector);
+      if (element) element.inert = covered;
+    }
+  };
+
+  const onViewportResize = (): void => {
+    const covered =
+      detailWasOpen && window.matchMedia("(max-width: 760px)").matches;
+    setCoveredPageInert(covered);
+    const detail = document.querySelector<HTMLElement>("#detail");
+    const active =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    if (!covered) {
+      // The Back affordance disappears at the wide breakpoint. Do not leave
+      // browser focus parked on a now-hidden control after the sheet becomes
+      // an ordinary split-pane detail.
+      if (detailWasOpen && active?.id === "detail-back") {
+        document
+          .querySelector<HTMLButtonElement>("#detail-close")
+          ?.focus({ preventScroll: true });
+      }
+      return;
+    }
+    if (
+      detail !== null &&
+      (active === null || !detail.contains(active)) &&
+      (active === null || active.closest(".modal:not(.hidden)") === null)
+    ) {
+      focusFallback();
+    }
+  };
+  window.addEventListener("resize", onViewportResize);
 
   const closeModal = (id: string): void => {
     const modal = document.querySelector<HTMLElement>(id);
@@ -686,7 +839,7 @@ export function installChangeInspectorInteraction(
   // virtual list even though the renderer owns the list's own paint listener.
   document.addEventListener("scroll", onTimelineScroll, true);
   const timelineDomObserver = new MutationObserver(() => {
-    if (currentRoute?.kind === "timeline") syncTimelineDom();
+    if (companionTimelineRoute(currentRoute) !== null) syncTimelineDom();
   });
   const master = document.querySelector("#master");
   if (master) {
@@ -732,43 +885,79 @@ export function installChangeInspectorInteraction(
       openModal("#key-help", document.querySelector("#key-help-close"));
       return;
     }
+    // A narrow exact detail is a modal sheet over an inert master surface.
+    // Master shortcuts must not operate or focus that covered surface until
+    // the reader closes the sheet or widens the viewport.
+    if (
+      MASTER_SURFACE_KEYS.has(event.key) &&
+      narrowDetailOwnsFocus(event.target)
+    ) {
+      return;
+    }
     if (event.key === "/") {
       event.preventDefault();
       document.querySelector<HTMLInputElement>("#filter-text")?.focus();
       return;
     }
-    if (route.kind === "timeline") {
+    const timelineRoute = companionTimelineRoute(route);
+    if (timelineRoute !== null) {
       const timeline = timelineWindow(
         currentTimelineEventIds,
         selectedTimelineEventId,
       );
+      if (
+        (event.key === "ArrowDown" || event.key === "ArrowUp") &&
+        !isTimelineListTarget(event.target)
+      ) {
+        return;
+      }
+      const applyScopedTimelineIntent = (
+        intent: TimelineSelectionIntent | null,
+      ): boolean => {
+        // An exact event is a stable detail route. Its local cursor can move
+        // across the loaded page, but only Enter deliberately replaces the
+        // detail. Page-edge navigation remains a Timeline-lens operation.
+        if (route.kind === "event" && intent?.kind === "adjacent-page") {
+          return false;
+        }
+        return applyTimelineIntent(intent);
+      };
       if (event.key === "j" || event.key === "ArrowDown") {
-        if (applyTimelineIntent(moveTimelineSelection(timeline, 1))) {
+        if (applyScopedTimelineIntent(moveTimelineSelection(timeline, 1))) {
           event.preventDefault();
         }
         return;
       }
       if (event.key === "k" || event.key === "ArrowUp") {
-        if (applyTimelineIntent(moveTimelineSelection(timeline, -1))) {
+        if (applyScopedTimelineIntent(moveTimelineSelection(timeline, -1))) {
           event.preventDefault();
         }
         return;
       }
       if (event.key === "g") {
-        if (applyGlobalTimelineBoundary("first", route)) {
+        // g/G retain their global Timeline meaning. An exact-event detail does
+        // not own the companion-page state needed to traverse globally without
+        // replacing that detail, so it deliberately leaves them unhandled.
+        if (
+          route.kind === "timeline" &&
+          applyGlobalTimelineBoundary("first", timelineRoute)
+        ) {
           event.preventDefault();
         }
         return;
       }
       if (event.key === "G") {
-        if (applyGlobalTimelineBoundary("last", route)) {
+        if (
+          route.kind === "timeline" &&
+          applyGlobalTimelineBoundary("last", timelineRoute)
+        ) {
           event.preventDefault();
         }
         return;
       }
       if (event.key === "f") {
         if (
-          applyTimelineIntent(
+          applyScopedTimelineIntent(
             pageTimelineSelection(
               timeline,
               "forward",
@@ -783,7 +972,7 @@ export function installChangeInspectorInteraction(
       }
       if (event.key === "b") {
         if (
-          applyTimelineIntent(
+          applyScopedTimelineIntent(
             pageTimelineSelection(
               timeline,
               "backward",
@@ -798,7 +987,7 @@ export function installChangeInspectorInteraction(
       }
       if (event.key === "d" || event.key === "u") {
         if (
-          applyTimelineIntent(
+          applyScopedTimelineIntent(
             pageTimelineSelection(
               timeline,
               event.key === "d" ? "forward" : "backward",
@@ -815,8 +1004,10 @@ export function installChangeInspectorInteraction(
       // non-conflicting, deliberate follow/park toggle; the visible Follow
       // button remains the discoverable primary control.
       if (event.key === "F") {
-        event.preventDefault();
-        actions.toggleTimelineMonitoring?.();
+        if (route.kind === "timeline") {
+          event.preventDefault();
+          actions.toggleTimelineMonitoring?.();
+        }
         return;
       }
       if (
@@ -828,7 +1019,7 @@ export function installChangeInspectorInteraction(
         actions.navigate({
           kind: "event",
           eventId: selectedTimelineEventId,
-          historyQuery: route.historyQuery,
+          historyQuery: timelineRoute.historyQuery,
           query: {},
         });
         return;
@@ -954,6 +1145,7 @@ export function installChangeInspectorInteraction(
       onDividerLostPointerCapture,
     );
     divider?.removeEventListener("dblclick", onDividerDoubleClick);
+    window.removeEventListener("resize", onViewportResize);
     if (
       divider &&
       activeDividerPointerId !== null &&
@@ -983,15 +1175,24 @@ export function installChangeInspectorInteraction(
     exactOriginLens = null;
     timelineOriginRoute = null;
     detailDomIdentity = null;
+    setCoveredPageInert(false);
   };
   return {
     sync(snapshot, timelinePage = snapshot.generation?.history ?? null) {
       const nextRoute =
         snapshot.route.kind === "invalid" ? null : snapshot.route;
       currentTimelineEventIds =
-        nextRoute?.kind === "timeline" && timelinePage !== null
+        companionTimelineRoute(nextRoute) !== null && timelinePage !== null
           ? timelinePage.entries.map((entry) => entry.eventId)
           : [];
+      if (
+        nextRoute?.kind === "event" &&
+        (currentRoute?.kind !== "event" ||
+          formatChangeInspectorRoute(currentRoute) !==
+            formatChangeInspectorRoute(nextRoute))
+      ) {
+        selectedTimelineEventId = nextRoute.eventId;
+      }
       if (
         nextRoute !== null &&
         nextRoute.kind !== "lens" &&
@@ -1022,7 +1223,7 @@ export function installChangeInspectorInteraction(
       if (!cards.some((card) => card.dataset.changeId === selectedChangeId))
         selectedChangeId = null;
       setSelected(selectedChangeId);
-      if (nextRoute?.kind === "timeline") {
+      if (companionTimelineRoute(nextRoute) !== null) {
         syncTimelineDom(nextRoute);
       } else {
         selectedTimelineEventId = null;
@@ -1041,6 +1242,8 @@ export function installChangeInspectorInteraction(
         snapshot.route.kind !== "invalid";
       const detail = document.querySelector<HTMLElement>("#detail");
       const viewportIsNarrow = window.matchMedia("(max-width: 760px)").matches;
+      const coveredPage = detailOpen && viewportIsNarrow;
+      if (!coveredPage) setCoveredPageInert(false);
       const nextDetailDomIdentity =
         document.querySelector<HTMLElement>("#detail-body")?.firstChild ?? null;
       const detailDomChanged = detailDomIdentity !== nextDetailDomIdentity;
@@ -1110,6 +1313,21 @@ export function installChangeInspectorInteraction(
             : document.querySelector<HTMLElement>("#master");
         detailReturnFocus = null;
         candidate?.focus({ preventScroll: true });
+      }
+      if (coveredPage) {
+        const coveredActive =
+          document.activeElement instanceof HTMLElement
+            ? document.activeElement
+            : null;
+        if (
+          detail !== null &&
+          (coveredActive === null || !detail.contains(coveredActive)) &&
+          (coveredActive === null ||
+            coveredActive.closest(".modal:not(.hidden)") === null)
+        ) {
+          focusFallback(nextRoute);
+        }
+        setCoveredPageInert(true);
       }
       detailWasOpen = detailOpen;
       currentRoute = nextRoute;

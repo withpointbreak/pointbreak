@@ -238,12 +238,18 @@ export async function bootstrapChangeInspector(
         );
       }
     }
-    interaction?.sync(
-      snapshot,
-      snapshot.route.kind === "timeline"
-        ? (monitor?.display ?? snapshot.generation?.history ?? null)
-        : null,
-    );
+    // The parked monitor can still retain the prior head while a routed page
+    // is loading. Do not publish those stale logical rows to the interaction
+    // owner when no Timeline generation is actually mounted; pending page and
+    // global-boundary selections must land against the destination page.
+    const interactiveTimeline =
+      (snapshot.route.kind === "timeline" || snapshot.route.kind === "event") &&
+      snapshot.generation !== null
+        ? snapshot.route.kind === "timeline"
+          ? (monitor?.display ?? snapshot.generation.history)
+          : snapshot.generation.history
+        : null;
+    interaction?.sync(snapshot, interactiveTimeline);
   };
   let interaction: ReturnType<typeof installChangeInspectorInteraction> | null =
     null;
@@ -564,7 +570,11 @@ export async function bootstrapChangeInspector(
     const requestedRoute = formatChangeInspectorRoute(route);
     for (;;) {
       const generation = state.snapshot().generation;
-      const anchor = timelineMonitor.snapshot()?.display ?? generation?.history;
+      // A parked monitor intentionally retains an older presentation window.
+      // Global traversal, however, is an authority read and must be anchored
+      // to the current staged generation or its first fetched page will appear
+      // to cross generations and refuse forever while the monitor is parked.
+      const anchor = generation?.history;
       if (generation === null || anchor === null || anchor === undefined) {
         return null;
       }

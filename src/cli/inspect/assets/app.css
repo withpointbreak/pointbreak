@@ -807,13 +807,6 @@ main {
   background: var(--accent);
 }
 
-/* The narrow-viewport sheet honors reduced motion: an instant swap, no slide. */
-@media (prefers-reduced-motion: reduce) {
-  #detail {
-    transition: none;
-  }
-}
-
 /* The master pane is the swappable lens body; it owns the scroll + the divider
    between it and the detail pane. */
 #master {
@@ -1173,6 +1166,14 @@ main {
     max-height: 30vh;
     border-right: 0;
     border-bottom: 1px solid var(--border);
+  }
+}
+
+/* This follows the narrow sheet rule at equal specificity so the cascade
+   cannot accidentally restore its slide after reduced motion disabled it. */
+@media (max-width: 760px) and (prefers-reduced-motion: reduce) {
+  .split #detail {
+    transition: none;
   }
 }
 

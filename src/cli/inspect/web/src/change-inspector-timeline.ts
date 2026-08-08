@@ -12,7 +12,10 @@ import {
   presentEvent,
 } from "./change-inspector-event-presentation";
 import type { ChangeInspectorRenderActions } from "./change-inspector-render";
-import type { ChangeInspectorRoute } from "./change-inspector-router";
+import {
+  type ChangeInspectorRoute,
+  formatChangeInspectorRoute,
+} from "./change-inspector-router";
 import type {
   EventHistoryDocument,
   EventHistoryEntry,
@@ -30,6 +33,7 @@ interface TimelineView {
   resizeObserver: ResizeObserver | null;
   rowHeight: number;
   route: Extract<ChangeInspectorRoute, { kind: "timeline" }>;
+  routeSelectedEventId: string | null;
   selectedEventId: string | null;
 }
 
@@ -298,10 +302,18 @@ export function renderChangeInspectorTimeline(
   // replaces the DOM rather than repainting stale rows under new controls.
   const key = `${timeline.timelineProjectionStamp}\u0000${JSON.stringify(route.historyQuery)}`;
   if (master.dataset.timelineKey === key && active !== null) {
+    const exactRouteChanged = selectedEventId !== active.routeSelectedEventId;
     active.document = timeline;
     active.route = route;
-    active.selectedEventId = selectedEventId;
+    active.list.dataset.timelineRoute = formatChangeInspectorRoute(route);
+    active.routeSelectedEventId = selectedEventId;
+    if (exactRouteChanged && selectedEventId !== null) {
+      active.selectedEventId = selectedEventId;
+    }
     paintVisible(active);
+    if (exactRouteChanged && selectedEventId !== null) {
+      revealChangeInspectorTimelineEvent(selectedEventId);
+    }
     return;
   }
   const section = document.createElement("section");
@@ -331,44 +343,46 @@ export function renderChangeInspectorTimeline(
   const page = document.createElement("div");
   page.className = "actions";
   if (timeline.previous) {
+    const previousRoute = {
+      kind: "timeline" as const,
+      historyQuery: {
+        ...route.historyQuery,
+        at: undefined,
+        after: timeline.previous,
+      },
+    };
     const previous = document.createElement("button");
     previous.type = "button";
     previous.className = "ghost";
     previous.dataset.timelinePage = "previous";
+    previous.dataset.timelineTargetRoute =
+      formatChangeInspectorRoute(previousRoute);
     previous.textContent = "Previous page";
-    previous.addEventListener("click", () =>
-      actions.navigate({
-        kind: "timeline",
-        historyQuery: {
-          ...route.historyQuery,
-          at: undefined,
-          after: timeline.previous,
-        },
-      }),
-    );
+    previous.addEventListener("click", () => actions.navigate(previousRoute));
     page.append(previous);
   }
   if (timeline.next) {
+    const nextRoute = {
+      kind: "timeline" as const,
+      historyQuery: {
+        ...route.historyQuery,
+        at: undefined,
+        after: timeline.next,
+      },
+    };
     const next = document.createElement("button");
     next.type = "button";
     next.className = "ghost";
     next.dataset.timelinePage = "next";
+    next.dataset.timelineTargetRoute = formatChangeInspectorRoute(nextRoute);
     next.textContent = "Next page";
-    next.addEventListener("click", () =>
-      actions.navigate({
-        kind: "timeline",
-        historyQuery: {
-          ...route.historyQuery,
-          at: undefined,
-          after: timeline.next,
-        },
-      }),
-    );
+    next.addEventListener("click", () => actions.navigate(nextRoute));
     page.append(next);
   }
   const list = document.createElement("ol");
   list.id = "timeline";
   list.className = "timeline";
+  list.dataset.timelineRoute = formatChangeInspectorRoute(route);
   list.tabIndex = timeline.entries.length ? 0 : -1;
   list.setAttribute("role", "listbox");
   list.setAttribute("aria-label", "event timeline");
@@ -393,6 +407,7 @@ export function renderChangeInspectorTimeline(
     resizeObserver: null,
     rowHeight: FALLBACK_ROW_HEIGHT,
     route,
+    routeSelectedEventId: selectedEventId,
     selectedEventId,
   };
   const view = active;
@@ -406,7 +421,15 @@ export function renderChangeInspectorTimeline(
     view.resizeObserver.observe(list);
   }
   paintVisible(view);
-  remeasureChangeInspectorTimelineRows();
+  if (selectedEventId !== null) {
+    // An exact event route can anchor a bounded page whose selected event is
+    // outside the first virtual window. Materialize that row immediately so
+    // the deep link has the same visible selection and active-descendant
+    // semantics as an event opened from the Timeline.
+    revealChangeInspectorTimelineEvent(selectedEventId);
+  } else {
+    remeasureChangeInspectorTimelineRows();
+  }
 }
 
 /**
@@ -435,10 +458,25 @@ export function revealChangeInspectorTimelineEvent(eventId: string): boolean {
   // let the browser make the final exact correction within the mounted window.
   remeasureChangeInspectorTimelineRows();
   paintVisible(active);
-  Array.from(
+  let selected = Array.from(
     active.list.querySelectorAll<HTMLElement>("li.event[data-event-id]"),
-  )
-    .find((row) => row.dataset.eventId === eventId)
-    ?.scrollIntoView({ block: "nearest", behavior: "auto" });
-  return true;
+  ).find((row) => row.dataset.eventId === eventId);
+  if (selected === undefined) {
+    // Row content has deliberately variable height. A page-local mean is a
+    // good first estimate, but cumulative error can leave a boundary event
+    // just outside the overscanned window. Snap exact page boundaries to the
+    // real scroll extent, then repaint once from that browser-owned geometry.
+    // This keeps `g`/`G` and exact deep links honest without materializing the
+    // whole server-bounded page.
+    if (localIndex === 0) active.list.scrollTop = 0;
+    else if (localIndex === active.document.entries.length - 1) {
+      active.list.scrollTop = active.list.scrollHeight;
+    }
+    paintVisible(active);
+    selected = Array.from(
+      active.list.querySelectorAll<HTMLElement>("li.event[data-event-id]"),
+    ).find((row) => row.dataset.eventId === eventId);
+  }
+  selected?.scrollIntoView({ block: "nearest", behavior: "auto" });
+  return selected !== undefined;
 }

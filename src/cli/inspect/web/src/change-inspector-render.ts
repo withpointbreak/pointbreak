@@ -111,10 +111,12 @@ function setText(selector: string, value: string): void {
 function replaceMasterWith(...children: Node[]): void {
   const master = document.querySelector<HTMLElement>("#master");
   if (!master) return;
-  // `changeListKey` is valid only while the keyed list DOM is still mounted.
-  // A loading or refusal plane replaces that DOM, so retaining the key would
-  // cause a same-generation recovery paint to skip restoring the cards.
+  // Render keys are valid only while their keyed DOM is still mounted. A
+  // loading or refusal plane replaces that DOM, so retaining either key would
+  // make a same-generation recovery repaint a detached list and leave this
+  // plane visible forever.
   delete master.dataset.changeListKey;
+  delete master.dataset.timelineKey;
   master.replaceChildren(...children);
 }
 

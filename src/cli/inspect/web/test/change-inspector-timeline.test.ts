@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   remeasureChangeInspectorTimelineRows,
   renderChangeInspectorTimeline,
+  revealChangeInspectorTimelineEvent,
 } from "../src/change-inspector-timeline";
 import type {
   EventHistoryDocument,
@@ -159,7 +160,10 @@ function rect(top: number, height: number): DOMRect {
   };
 }
 
-afterEach(resetDom);
+afterEach(() => {
+  vi.restoreAllMocks();
+  resetDom();
+});
 
 describe("Change-aware Timeline renderer", () => {
   it("keeps a page-local virtual window with pure exact-event options", () => {
@@ -225,6 +229,7 @@ describe("Change-aware Timeline renderer", () => {
       "option",
     );
     expect(list?.getAttribute("role")).toBe("listbox");
+    expect(list?.dataset.timelineRoute).toBe("#/timeline");
     expect(list?.tabIndex).toBe(0);
     expect(list?.querySelectorAll('[tabindex="0"]')).toHaveLength(0);
     expect(list?.querySelectorAll('[tabindex="-1"]')).toHaveLength(2);
@@ -244,6 +249,129 @@ describe("Change-aware Timeline renderer", () => {
 
     document.querySelector<HTMLElement>("li.event")?.click();
     expect(navigated).toEqual([]);
+  });
+
+  it("reveals an exact deep-linked event outside the first virtual window", () => {
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(240);
+    mountInspectorDom();
+    const master = document.querySelector<HTMLElement>("#master");
+    if (!master) throw new Error("missing master");
+    const selectedEventId = "evt:sha256:090";
+
+    renderChangeInspectorTimeline(
+      master,
+      longDocument(),
+      { navigate: () => undefined },
+      { kind: "timeline", historyQuery: {} },
+      selectedEventId,
+    );
+
+    const list = document.querySelector<HTMLOListElement>("#timeline");
+    if (!list) throw new Error("missing Timeline list");
+    const selected = list.querySelector<HTMLElement>(
+      `[data-event-id="${selectedEventId}"]`,
+    );
+    expect(selected).not.toBeNull();
+    expect(selected?.getAttribute("aria-selected")).toBe("true");
+    expect(list.getAttribute("aria-activedescendant")).toBe(selected?.id);
+    expect(list.scrollTop).toBeGreaterThan(0);
+    expect(list.querySelectorAll("li.event").length).toBeLessThan(100);
+  });
+
+  it("preserves a local exact-event cursor across a same-route repaint", () => {
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(240);
+    mountInspectorDom();
+    const master = document.querySelector<HTMLElement>("#master");
+    if (!master) throw new Error("missing master");
+    const timeline = longDocument();
+    const route = { kind: "timeline" as const, historyQuery: {} };
+    const routedEventId = "evt:sha256:090";
+    const localEventId = "evt:sha256:050";
+
+    renderChangeInspectorTimeline(
+      master,
+      timeline,
+      { navigate: () => undefined },
+      route,
+      routedEventId,
+    );
+    expect(revealChangeInspectorTimelineEvent(localEventId)).toBe(true);
+
+    // A poll or resize can repaint the same exact-event route. The routed
+    // detail remains event 90, but the page-local reading cursor remains on
+    // event 50 until the reader explicitly activates another event.
+    renderChangeInspectorTimeline(
+      master,
+      timeline,
+      { navigate: () => undefined },
+      route,
+      routedEventId,
+    );
+
+    const list = document.querySelector<HTMLOListElement>("#timeline");
+    if (!list) throw new Error("missing Timeline list");
+    let localCursor = list.querySelector<HTMLElement>(
+      `[data-event-id="${localEventId}"]`,
+    );
+    expect(localCursor?.getAttribute("aria-selected")).toBe("true");
+    expect(list.getAttribute("aria-activedescendant")).toBe(localCursor?.id);
+
+    list.scrollTop = 0;
+    list.dispatchEvent(new Event("scroll"));
+    expect(list.querySelector(`[data-event-id="${localEventId}"]`)).toBeNull();
+    expect(list.getAttribute("aria-activedescendant")).toBeNull();
+
+    list.scrollTop = 50 * 72;
+    list.dispatchEvent(new Event("scroll"));
+    localCursor = list.querySelector<HTMLElement>(
+      `[data-event-id="${localEventId}"]`,
+    );
+    expect(localCursor?.getAttribute("aria-selected")).toBe("true");
+    expect(list.getAttribute("aria-activedescendant")).toBe(localCursor?.id);
+  });
+
+  it("snaps a variable-height boundary event into the virtual window", () => {
+    mountInspectorDom();
+    const master = document.querySelector<HTMLElement>("#master");
+    if (!master) throw new Error("missing master");
+    renderChangeInspectorTimeline(
+      master,
+      longDocument(),
+      { navigate: () => undefined },
+      { kind: "timeline", historyQuery: {} },
+    );
+    const list = document.querySelector<HTMLOListElement>("#timeline");
+    if (!list) throw new Error("missing Timeline list");
+    Object.defineProperty(list, "clientHeight", {
+      configurable: true,
+      value: 240,
+    });
+    Object.defineProperty(list, "scrollHeight", {
+      configurable: true,
+      value: 7_200,
+    });
+    let scrollTop = 0;
+    const scrollWrites: number[] = [];
+    Object.defineProperty(list, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollWrites.push(value);
+        // Model cumulative variable-row error: the mean-height estimate lands
+        // short, while the browser's real bottom extent reaches the last row.
+        scrollTop = value >= 7_200 ? 6_960 : Math.min(value, 5_000);
+      },
+    });
+
+    const selectedEventId = "evt:sha256:099";
+    expect(revealChangeInspectorTimelineEvent(selectedEventId)).toBe(true);
+    const selected = list.querySelector<HTMLElement>(
+      `[data-event-id="${selectedEventId}"]`,
+    );
+    expect(scrollWrites).toEqual([6_960, 7_200]);
+    expect(selected?.getAttribute("aria-selected")).toBe("true");
+    expect(list.getAttribute("aria-activedescendant")).toBe(selected?.id);
+    expect(list.querySelectorAll("li.event").length).toBeLessThan(100);
   });
 
   it("announces an honest empty result without creating a focusable list", () => {

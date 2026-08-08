@@ -545,6 +545,53 @@ describe("Change inspector render", () => {
     ).toBe("change:sha256:one");
   });
 
+  it("restores an exact event Timeline after its loading plane is replaced", () => {
+    const navigate = vi.fn();
+    prepareChangeInspectorShell({ navigate });
+    const state = createChangeInspectorState({
+      kind: "event",
+      eventId: "evt:sha256:one",
+      historyQuery: { q: "web" },
+      query: {},
+    });
+    const generation = stageGeneration(
+      profile,
+      changes,
+      attention,
+      profile,
+      eventHistory(),
+    );
+    state.publish(generation);
+    renderChangeInspector(state.snapshot(), { navigate });
+    expect(
+      document.querySelector<HTMLElement>("#master")?.dataset.timelineKey,
+    ).toBeDefined();
+
+    state.clearGeneration();
+    renderChangeInspector(state.snapshot(), { navigate });
+    expect(document.querySelector("#master")?.textContent).toContain(
+      "Loading Change generation",
+    );
+    expect(
+      document.querySelector<HTMLElement>("#master")?.dataset.timelineKey,
+    ).toBe(undefined);
+
+    state.publish(generation);
+    renderChangeInspector(state.snapshot(), { navigate });
+    const selected = document.querySelector<HTMLElement>(
+      '#timeline [data-event-id="evt:sha256:one"]',
+    );
+    expect(selected?.getAttribute("aria-selected")).toBe("true");
+    expect(
+      document
+        .querySelector("#timeline")
+        ?.getAttribute("aria-activedescendant"),
+    ).toBe(selected?.id);
+    expect(document.querySelector("#master")?.textContent).not.toContain(
+      "Loading Change generation",
+    );
+  });
+
   it("projects server-owned cards and exact placeholder selection into the retained shell", () => {
     const navigate = vi.fn();
     prepareChangeInspectorShell({ navigate });

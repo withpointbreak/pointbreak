@@ -1554,10 +1554,18 @@
   function renderChangeInspectorTimeline(master, timeline, actions2, route, selectedEventId = null) {
     const key = `${timeline.timelineProjectionStamp}\0${JSON.stringify(route.historyQuery)}`;
     if (master.dataset.timelineKey === key && active !== null) {
+      const exactRouteChanged = selectedEventId !== active.routeSelectedEventId;
       active.document = timeline;
       active.route = route;
-      active.selectedEventId = selectedEventId;
+      active.list.dataset.timelineRoute = formatChangeInspectorRoute(route);
+      active.routeSelectedEventId = selectedEventId;
+      if (exactRouteChanged && selectedEventId !== null) {
+        active.selectedEventId = selectedEventId;
+      }
       paintVisible(active);
+      if (exactRouteChanged && selectedEventId !== null) {
+        revealChangeInspectorTimelineEvent(selectedEventId);
+      }
       return;
     }
     const section = document.createElement("section");
@@ -1587,46 +1595,45 @@
     const page = document.createElement("div");
     page.className = "actions";
     if (timeline.previous) {
+      const previousRoute = {
+        kind: "timeline",
+        historyQuery: {
+          ...route.historyQuery,
+          at: void 0,
+          after: timeline.previous
+        }
+      };
       const previous = document.createElement("button");
       previous.type = "button";
       previous.className = "ghost";
       previous.dataset.timelinePage = "previous";
+      previous.dataset.timelineTargetRoute = formatChangeInspectorRoute(previousRoute);
       previous.textContent = "Previous page";
-      previous.addEventListener(
-        "click",
-        () => actions2.navigate({
-          kind: "timeline",
-          historyQuery: {
-            ...route.historyQuery,
-            at: void 0,
-            after: timeline.previous
-          }
-        })
-      );
+      previous.addEventListener("click", () => actions2.navigate(previousRoute));
       page.append(previous);
     }
     if (timeline.next) {
+      const nextRoute = {
+        kind: "timeline",
+        historyQuery: {
+          ...route.historyQuery,
+          at: void 0,
+          after: timeline.next
+        }
+      };
       const next = document.createElement("button");
       next.type = "button";
       next.className = "ghost";
       next.dataset.timelinePage = "next";
+      next.dataset.timelineTargetRoute = formatChangeInspectorRoute(nextRoute);
       next.textContent = "Next page";
-      next.addEventListener(
-        "click",
-        () => actions2.navigate({
-          kind: "timeline",
-          historyQuery: {
-            ...route.historyQuery,
-            at: void 0,
-            after: timeline.next
-          }
-        })
-      );
+      next.addEventListener("click", () => actions2.navigate(nextRoute));
       page.append(next);
     }
     const list = document.createElement("ol");
     list.id = "timeline";
     list.className = "timeline";
+    list.dataset.timelineRoute = formatChangeInspectorRoute(route);
     list.tabIndex = timeline.entries.length ? 0 : -1;
     list.setAttribute("role", "listbox");
     list.setAttribute("aria-label", "event timeline");
@@ -1651,6 +1658,7 @@
       resizeObserver: null,
       rowHeight: FALLBACK_ROW_HEIGHT,
       route,
+      routeSelectedEventId: selectedEventId,
       selectedEventId
     };
     const view = active;
@@ -1664,7 +1672,11 @@
       view.resizeObserver.observe(list);
     }
     paintVisible(view);
-    remeasureChangeInspectorTimelineRows();
+    if (selectedEventId !== null) {
+      revealChangeInspectorTimelineEvent(selectedEventId);
+    } else {
+      remeasureChangeInspectorTimelineRows();
+    }
   }
   __name(renderChangeInspectorTimeline, "renderChangeInspectorTimeline");
   function revealChangeInspectorTimelineEvent(eventId) {
@@ -1684,10 +1696,21 @@
     paintVisible(active);
     remeasureChangeInspectorTimelineRows();
     paintVisible(active);
-    Array.from(
+    let selected = Array.from(
       active.list.querySelectorAll("li.event[data-event-id]")
-    ).find((row) => row.dataset.eventId === eventId)?.scrollIntoView({ block: "nearest", behavior: "auto" });
-    return true;
+    ).find((row) => row.dataset.eventId === eventId);
+    if (selected === void 0) {
+      if (localIndex === 0) active.list.scrollTop = 0;
+      else if (localIndex === active.document.entries.length - 1) {
+        active.list.scrollTop = active.list.scrollHeight;
+      }
+      paintVisible(active);
+      selected = Array.from(
+        active.list.querySelectorAll("li.event[data-event-id]")
+      ).find((row) => row.dataset.eventId === eventId);
+    }
+    selected?.scrollIntoView({ block: "nearest", behavior: "auto" });
+    return selected !== void 0;
   }
   __name(revealChangeInspectorTimelineEvent, "revealChangeInspectorTimelineEvent");
 
@@ -1750,6 +1773,22 @@
   // src/change-inspector-interaction.ts
   var colorSchemeWatcherInstalled = false;
   var HISTORY_ORIGIN_KEY = "__pointbreakChangeInspectorOrigin";
+  var MASTER_SURFACE_KEYS = /* @__PURE__ */ new Set([
+    "/",
+    "j",
+    "k",
+    "ArrowDown",
+    "ArrowUp",
+    "g",
+    "G",
+    "f",
+    "b",
+    "d",
+    "u",
+    "F",
+    "h",
+    "l"
+  ]);
   function isTextControl(target) {
     if (!(target instanceof HTMLElement)) return false;
     return target.isContentEditable || target.matches(
@@ -1759,10 +1798,26 @@
   __name(isTextControl, "isTextControl");
   function isNativeActionControl(target) {
     return target instanceof Element && target.closest(
-      "button, a[href], [role='button'], [role='link'], [role='separator']"
+      "button, summary, a[href], [role='button'], [role='link'], [role='separator']"
     ) !== null;
   }
   __name(isNativeActionControl, "isNativeActionControl");
+  function isTimelineListTarget(target) {
+    return target instanceof Element && (target.matches("#timeline") || target.closest("#timeline") !== null);
+  }
+  __name(isTimelineListTarget, "isTimelineListTarget");
+  function narrowDetailOwnsFocus(target) {
+    return target instanceof Element && target.closest("#detail") !== null && window.matchMedia("(max-width: 760px)").matches;
+  }
+  __name(narrowDetailOwnsFocus, "narrowDetailOwnsFocus");
+  function companionTimelineRoute(route) {
+    if (route?.kind === "timeline") return route;
+    if (route?.kind === "event") {
+      return { kind: "timeline", historyQuery: route.historyQuery };
+    }
+    return null;
+  }
+  __name(companionTimelineRoute, "companionTimelineRoute");
   function setSelected(changeId) {
     document.querySelectorAll(".unit-card[data-change-id]").forEach((card) => {
       const selected = card.dataset.changeId === changeId;
@@ -1919,8 +1974,13 @@
         return true;
       }
       const pager = timelinePager(intent.direction);
-      if (!pager) return false;
-      pendingTimelineSelection = intent;
+      const targetRoute = pager?.dataset.timelineTargetRoute;
+      if (!pager || !targetRoute) return false;
+      pendingTimelineSelection = {
+        intent,
+        route: targetRoute,
+        restoreFocus: document.activeElement?.id === "timeline"
+      };
       pager.click();
       return true;
     }, "applyTimelineIntent");
@@ -1929,25 +1989,44 @@
         currentTimelineEventIds,
         selectedTimelineEventId
       );
-      if (pendingGlobalTimelineSelection !== null && route?.kind === "timeline" && formatChangeInspectorRoute(route) === pendingGlobalTimelineSelection.route && window2.eventIds.length > 0) {
+      const routedTimeline = companionTimelineRoute(route);
+      const routedTimelineKey = routedTimeline === null ? null : formatChangeInspectorRoute(routedTimeline);
+      const mountedTimeline = document.querySelector("#timeline");
+      const mountedTimelineRoute = mountedTimeline?.dataset.timelineRoute ?? null;
+      if (pendingTimelineSelection !== null && (route?.kind !== "timeline" || routedTimelineKey !== pendingTimelineSelection.route)) {
+        pendingTimelineSelection = null;
+      }
+      if (pendingGlobalTimelineSelection !== null && (route?.kind !== "timeline" || routedTimelineKey !== pendingGlobalTimelineSelection.route)) {
+        pendingGlobalTimelineSelection = null;
+      }
+      let restoreTimelineFocus = false;
+      if (pendingGlobalTimelineSelection !== null && route?.kind === "timeline" && mountedTimelineRoute === formatChangeInspectorRoute(route) && formatChangeInspectorRoute(route) === pendingGlobalTimelineSelection.route && window2.eventIds.length > 0) {
         selectedTimelineEventId = pendingGlobalTimelineSelection.boundary === "first" ? window2.eventIds[0] ?? null : window2.eventIds.at(-1) ?? null;
+        restoreTimelineFocus = pendingGlobalTimelineSelection.restoreFocus;
         pendingGlobalTimelineSelection = null;
         if (selectedTimelineEventId !== null) {
           actions2.revealTimelineEvent?.(selectedTimelineEventId);
         }
       }
-      if (pendingTimelineSelection !== null && window2.eventIds.length > 0) {
+      if (pendingTimelineSelection !== null && route?.kind === "timeline" && mountedTimelineRoute === pendingTimelineSelection.route && window2.eventIds.length > 0) {
         selectedTimelineEventId = resolveTimelinePageSelection(
           window2.eventIds,
-          pendingTimelineSelection
+          pendingTimelineSelection.intent
         );
+        restoreTimelineFocus = pendingTimelineSelection.restoreFocus;
         pendingTimelineSelection = null;
+        if (selectedTimelineEventId !== null) {
+          actions2.revealTimelineEvent?.(selectedTimelineEventId);
+        }
       }
       if (selectedTimelineEventId !== null && !window2.eventIds.includes(selectedTimelineEventId)) {
         setTimelineSelected(null);
         return;
       }
       setTimelineSelected(selectedTimelineEventId);
+      if (restoreTimelineFocus && selectedTimelineEventId !== null) {
+        focusTimelineSelection(selectedTimelineEventId);
+      }
     }, "syncTimelineDom");
     const applyGlobalTimelineBoundary = /* @__PURE__ */ __name((boundary, route) => {
       const navigateBoundary = actions2.navigateTimelineBoundary;
@@ -1961,13 +2040,19 @@
       }
       parkTimelineForReaderActivity();
       pendingTimelineSelection = null;
+      const restoreFocus = document.activeElement?.id === "timeline";
       void navigateBoundary(boundary, route).then((target) => {
         if (target === null) return;
+        const targetRoute = formatChangeInspectorRoute(target);
         pendingGlobalTimelineSelection = {
           boundary,
-          route: formatChangeInspectorRoute(target)
+          route: targetRoute,
+          restoreFocus
         };
-        syncTimelineDom();
+        const mountedRoute = document.querySelector("#timeline")?.dataset.timelineRoute ?? null;
+        if (currentRoute2?.kind === "timeline" && formatChangeInspectorRoute(currentRoute2) === targetRoute && mountedRoute === targetRoute) {
+          syncTimelineDom();
+        }
       }).catch(() => {
         pendingGlobalTimelineSelection = null;
       });
@@ -2015,6 +2100,34 @@
       const target = route !== null && route.kind !== "lens" && route.kind !== "timeline" ? window.matchMedia("(max-width: 760px)").matches ? document.querySelector("#detail-back") : document.querySelector("#detail-close") : document.querySelector("#master");
       target?.focus({ preventScroll: true });
     }, "focusFallback");
+    const setCoveredPageInert = /* @__PURE__ */ __name((covered) => {
+      for (const selector of [
+        "#topbar",
+        "#toolbar",
+        "#master-rail",
+        "#master",
+        ".divider"
+      ]) {
+        const element = document.querySelector(selector);
+        if (element) element.inert = covered;
+      }
+    }, "setCoveredPageInert");
+    const onViewportResize = /* @__PURE__ */ __name(() => {
+      const covered = detailWasOpen && window.matchMedia("(max-width: 760px)").matches;
+      setCoveredPageInert(covered);
+      const detail = document.querySelector("#detail");
+      const active3 = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      if (!covered) {
+        if (detailWasOpen && active3?.id === "detail-back") {
+          document.querySelector("#detail-close")?.focus({ preventScroll: true });
+        }
+        return;
+      }
+      if (detail !== null && (active3 === null || !detail.contains(active3)) && (active3 === null || active3.closest(".modal:not(.hidden)") === null)) {
+        focusFallback();
+      }
+    }, "onViewportResize");
+    window.addEventListener("resize", onViewportResize);
     const closeModal = /* @__PURE__ */ __name((id) => {
       const modal = document.querySelector(id);
       if (!modal || modal.classList.contains("hidden")) return;
@@ -2242,7 +2355,7 @@
     }, "onTimelineScroll");
     document.addEventListener("scroll", onTimelineScroll, true);
     const timelineDomObserver = new MutationObserver(() => {
-      if (currentRoute2?.kind === "timeline") syncTimelineDom();
+      if (companionTimelineRoute(currentRoute2) !== null) syncTimelineDom();
     });
     const master = document.querySelector("#master");
     if (master) {
@@ -2279,42 +2392,55 @@
         openModal("#key-help", document.querySelector("#key-help-close"));
         return;
       }
+      if (MASTER_SURFACE_KEYS.has(event.key) && narrowDetailOwnsFocus(event.target)) {
+        return;
+      }
       if (event.key === "/") {
         event.preventDefault();
         document.querySelector("#filter-text")?.focus();
         return;
       }
-      if (route.kind === "timeline") {
+      const timelineRoute = companionTimelineRoute(route);
+      if (timelineRoute !== null) {
         const timeline = timelineWindow(
           currentTimelineEventIds,
           selectedTimelineEventId
         );
+        if ((event.key === "ArrowDown" || event.key === "ArrowUp") && !isTimelineListTarget(event.target)) {
+          return;
+        }
+        const applyScopedTimelineIntent = /* @__PURE__ */ __name((intent) => {
+          if (route.kind === "event" && intent?.kind === "adjacent-page") {
+            return false;
+          }
+          return applyTimelineIntent(intent);
+        }, "applyScopedTimelineIntent");
         if (event.key === "j" || event.key === "ArrowDown") {
-          if (applyTimelineIntent(moveTimelineSelection(timeline, 1))) {
+          if (applyScopedTimelineIntent(moveTimelineSelection(timeline, 1))) {
             event.preventDefault();
           }
           return;
         }
         if (event.key === "k" || event.key === "ArrowUp") {
-          if (applyTimelineIntent(moveTimelineSelection(timeline, -1))) {
+          if (applyScopedTimelineIntent(moveTimelineSelection(timeline, -1))) {
             event.preventDefault();
           }
           return;
         }
         if (event.key === "g") {
-          if (applyGlobalTimelineBoundary("first", route)) {
+          if (route.kind === "timeline" && applyGlobalTimelineBoundary("first", timelineRoute)) {
             event.preventDefault();
           }
           return;
         }
         if (event.key === "G") {
-          if (applyGlobalTimelineBoundary("last", route)) {
+          if (route.kind === "timeline" && applyGlobalTimelineBoundary("last", timelineRoute)) {
             event.preventDefault();
           }
           return;
         }
         if (event.key === "f") {
-          if (applyTimelineIntent(
+          if (applyScopedTimelineIntent(
             pageTimelineSelection(
               timeline,
               "forward",
@@ -2327,7 +2453,7 @@
           return;
         }
         if (event.key === "b") {
-          if (applyTimelineIntent(
+          if (applyScopedTimelineIntent(
             pageTimelineSelection(
               timeline,
               "backward",
@@ -2340,7 +2466,7 @@
           return;
         }
         if (event.key === "d" || event.key === "u") {
-          if (applyTimelineIntent(
+          if (applyScopedTimelineIntent(
             pageTimelineSelection(
               timeline,
               event.key === "d" ? "forward" : "backward",
@@ -2353,8 +2479,10 @@
           return;
         }
         if (event.key === "F") {
-          event.preventDefault();
-          actions2.toggleTimelineMonitoring?.();
+          if (route.kind === "timeline") {
+            event.preventDefault();
+            actions2.toggleTimelineMonitoring?.();
+          }
           return;
         }
         if (event.key === "Enter" && selectedTimelineEventId !== null && !isNativeActionControl(event.target)) {
@@ -2362,7 +2490,7 @@
           actions2.navigate({
             kind: "event",
             eventId: selectedTimelineEventId,
-            historyQuery: route.historyQuery,
+            historyQuery: timelineRoute.historyQuery,
             query: {}
           });
           return;
@@ -2469,6 +2597,7 @@
         onDividerLostPointerCapture
       );
       divider?.removeEventListener("dblclick", onDividerDoubleClick);
+      window.removeEventListener("resize", onViewportResize);
       if (divider && activeDividerPointerId !== null && divider.hasPointerCapture?.(activeDividerPointerId)) {
         divider.releasePointerCapture?.(activeDividerPointerId);
       }
@@ -2494,11 +2623,15 @@
       exactOriginLens = null;
       timelineOriginRoute = null;
       detailDomIdentity = null;
+      setCoveredPageInert(false);
     }, "stop");
     return {
       sync(snapshot2, timelinePage = snapshot2.generation?.history ?? null) {
         const nextRoute = snapshot2.route.kind === "invalid" ? null : snapshot2.route;
-        currentTimelineEventIds = nextRoute?.kind === "timeline" && timelinePage !== null ? timelinePage.entries.map((entry) => entry.eventId) : [];
+        currentTimelineEventIds = companionTimelineRoute(nextRoute) !== null && timelinePage !== null ? timelinePage.entries.map((entry) => entry.eventId) : [];
+        if (nextRoute?.kind === "event" && (currentRoute2?.kind !== "event" || formatChangeInspectorRoute(currentRoute2) !== formatChangeInspectorRoute(nextRoute))) {
+          selectedTimelineEventId = nextRoute.eventId;
+        }
         if (nextRoute !== null && nextRoute.kind !== "lens" && nextRoute.kind !== "timeline") {
           const persistedOrigin = historyOrigin(nextRoute);
           const origin = persistedOrigin ?? (currentRoute2?.kind === "lens" ? currentRoute2.lens : currentRoute2?.kind === "timeline" ? "timeline" : exactOriginLens ?? "timeline");
@@ -2516,7 +2649,7 @@
         if (!cards.some((card) => card.dataset.changeId === selectedChangeId))
           selectedChangeId = null;
         setSelected(selectedChangeId);
-        if (nextRoute?.kind === "timeline") {
+        if (companionTimelineRoute(nextRoute) !== null) {
           syncTimelineDom(nextRoute);
         } else {
           selectedTimelineEventId = null;
@@ -2526,6 +2659,8 @@
         const detailOpen = snapshot2.route.kind !== "lens" && snapshot2.route.kind !== "timeline" && snapshot2.route.kind !== "invalid";
         const detail = document.querySelector("#detail");
         const viewportIsNarrow = window.matchMedia("(max-width: 760px)").matches;
+        const coveredPage = detailOpen && viewportIsNarrow;
+        if (!coveredPage) setCoveredPageInert(false);
         const nextDetailDomIdentity = document.querySelector("#detail-body")?.firstChild ?? null;
         const detailDomChanged = detailDomIdentity !== nextDetailDomIdentity;
         const active3 = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -2550,6 +2685,13 @@
           const candidate = detailReturnFocus?.isConnected === true ? detailReturnFocus : document.querySelector("#master");
           detailReturnFocus = null;
           candidate?.focus({ preventScroll: true });
+        }
+        if (coveredPage) {
+          const coveredActive = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+          if (detail !== null && (coveredActive === null || !detail.contains(coveredActive)) && (coveredActive === null || coveredActive.closest(".modal:not(.hidden)") === null)) {
+            focusFallback(nextRoute);
+          }
+          setCoveredPageInert(true);
         }
         detailWasOpen = detailOpen;
         currentRoute2 = nextRoute;
@@ -4977,6 +5119,7 @@
     const master = document.querySelector("#master");
     if (!master) return;
     delete master.dataset.changeListKey;
+    delete master.dataset.timelineKey;
     master.replaceChildren(...children);
   }
   __name(replaceMasterWith, "replaceMasterWith");
@@ -6914,10 +7057,8 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
           );
         }
       }
-      interaction?.sync(
-        snapshot2,
-        snapshot2.route.kind === "timeline" ? monitor?.display ?? snapshot2.generation?.history ?? null : null
-      );
+      const interactiveTimeline = (snapshot2.route.kind === "timeline" || snapshot2.route.kind === "event") && snapshot2.generation !== null ? snapshot2.route.kind === "timeline" ? monitor?.display ?? snapshot2.generation.history : snapshot2.generation.history : null;
+      interaction?.sync(snapshot2, interactiveTimeline);
     }, "paint");
     let interaction = null;
     const requestKey = /* @__PURE__ */ __name((route) => route.kind === "timeline" || route.kind === "event" ? buildEventHistoryUrl(
@@ -7150,7 +7291,7 @@ To: ${snapshot2.route.to.revisionId} · ${snapshot2.route.to.objectArtifactConte
       const requestedRoute = formatChangeInspectorRoute(route);
       for (; ; ) {
         const generation = state.snapshot().generation;
-        const anchor = timelineMonitor.snapshot()?.display ?? generation?.history;
+        const anchor = generation?.history;
         if (generation === null || anchor === null || anchor === void 0) {
           return null;
         }

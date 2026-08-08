@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CHANGE_READER_DOCUMENTS } from "../src/change-protocol";
+import type { ChangeInspectorSnapshot } from "../src/change-inspector-state";
+import {
+  CHANGE_READER_DOCUMENTS,
+  type EventHistoryDocument,
+} from "../src/change-protocol";
 import { authorityCursor } from "./support/authority";
 import { mountInspectorDom, resetDom } from "./support/dom";
 
@@ -71,6 +75,44 @@ function historyPage(projectionStamp = "sha256:generation") {
     diagnostics: [],
     queryNotices: [],
     entries: [],
+  };
+}
+
+function boundaryHistoryPage(options: {
+  authoritySequence?: number;
+  eventIds: string[];
+  next?: string;
+  offset: number;
+  timelineProjectionStamp?: string;
+}): EventHistoryDocument {
+  const authoritySequence = options.authoritySequence ?? 2;
+  return {
+    ...(historyPage() as EventHistoryDocument),
+    authorityCursor: authorityCursor(authoritySequence),
+    timelineProjectionStamp:
+      options.timelineProjectionStamp ?? "sha256:timeline-current",
+    eventCount: 2,
+    matchCount: 2,
+    offset: options.offset,
+    next: options.next,
+    entries: options.eventIds.map((eventId) => ({
+      eventId,
+      eventType: "review_note_imported",
+      occurredAt: "2026-08-08T00:00:00Z",
+      payloadHash: `sha256:${eventId}`,
+      journalId: "journal:sha256:test",
+      writer: {
+        actorId: "actor:test",
+        producer: { name: "pointbreak", version: "0.10.0" },
+      },
+      verificationStatus: "valid",
+      assertionMode: "advisory",
+      subject: { kind: "journal", journalId: "journal:sha256:test" },
+      changeIds: [],
+      revisionRefs: [],
+      unresolvedRevisionIds: [],
+      summary: { kind: "review_note_imported" },
+    })),
   };
 }
 
@@ -371,6 +413,15 @@ describe("Change-first composition", () => {
     expect(detail?.inert).toBe(false);
     expect(detail?.hasAttribute("aria-hidden")).toBe(false);
     expect(document.activeElement).toBe(document.querySelector("#detail-back"));
+    for (const selector of [
+      "#topbar",
+      "#toolbar",
+      "#master-rail",
+      "#master",
+      ".divider",
+    ]) {
+      expect(document.querySelector<HTMLElement>(selector)?.inert).toBe(true);
+    }
 
     document.querySelector<HTMLButtonElement>("#detail-back")?.click();
     await vi.waitFor(() => {
@@ -380,6 +431,15 @@ describe("Change-first composition", () => {
     expect(detail?.inert).toBe(true);
     expect(detail?.getAttribute("aria-hidden")).toBe("true");
     expect(document.activeElement).toBe(opener);
+    for (const selector of [
+      "#topbar",
+      "#toolbar",
+      "#master-rail",
+      "#master",
+      ".divider",
+    ]) {
+      expect(document.querySelector<HTMLElement>(selector)?.inert).toBe(false);
+    }
   });
 
   it("preserves the bounded query across lens changes and exposes local display modes", async () => {
@@ -780,6 +840,166 @@ describe("Change-first composition", () => {
         "/api/v2/changes?limit=50&q=replacement&order=change_id_asc",
       );
     });
+  });
+
+  it("withholds a parked Timeline page from interaction while its replacement generation loads", async () => {
+    history.replaceState(null, "", "/#/timeline?limit=20");
+    let replacementProfileResolve!: (value: Response) => void;
+    let profileRequests = 0;
+    const syncCalls: Array<{
+      snapshot: ChangeInspectorSnapshot;
+      timelinePage: EventHistoryDocument | null | undefined;
+    }> = [];
+    vi.doMock("../src/change-inspector-interaction", () => ({
+      installChangeInspectorInteraction: () => ({
+        sync(
+          snapshot: ChangeInspectorSnapshot,
+          timelinePage?: EventHistoryDocument | null,
+        ) {
+          syncCalls.push({ snapshot, timelinePage });
+        },
+        stop() {},
+      }),
+    }));
+    try {
+      globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path === "/api/v2/profile") {
+          profileRequests += 1;
+          if (profileRequests === 3) {
+            return new Promise<Response>((resolve) => {
+              replacementProfileResolve = resolve;
+            });
+          }
+          return Promise.resolve(new Response(JSON.stringify(profile)));
+        }
+        if (path.startsWith("/api/v2/changes?"))
+          return Promise.resolve(new Response(JSON.stringify(page("changes"))));
+        if (path.startsWith("/api/v2/attention?"))
+          return Promise.resolve(
+            new Response(JSON.stringify(page("attention"))),
+          );
+        if (path.startsWith("/api/v2/history?"))
+          return Promise.resolve(new Response(JSON.stringify(historyPage())));
+        throw new Error(`unexpected ${path}`);
+      }) as typeof fetch;
+      const { bootstrapChangeInspector } = await import(
+        "../src/change-inspector"
+      );
+      await bootstrapChangeInspector({ poll: false });
+
+      history.replaceState(null, "", "/#/timeline?limit=20&q=replacement");
+      window.dispatchEvent(new Event("hashchange"));
+      let loadingCall:
+        | {
+            snapshot: ChangeInspectorSnapshot;
+            timelinePage: EventHistoryDocument | null | undefined;
+          }
+        | undefined;
+      await vi.waitFor(() => {
+        loadingCall = syncCalls.find(
+          ({ snapshot }) =>
+            snapshot.generation === null &&
+            snapshot.route.kind === "timeline" &&
+            snapshot.route.historyQuery.q === "replacement",
+        );
+        expect(loadingCall).toBeDefined();
+      });
+      expect(loadingCall?.timelinePage).toBeNull();
+
+      replacementProfileResolve(new Response(JSON.stringify(profile)));
+      await vi.waitFor(() =>
+        expect(
+          syncCalls.some(
+            ({ snapshot, timelinePage }) =>
+              snapshot.generation !== null &&
+              snapshot.route.kind === "timeline" &&
+              snapshot.route.historyQuery.q === "replacement" &&
+              timelinePage !== null,
+          ),
+        ).toBe(true),
+      );
+    } finally {
+      vi.doUnmock("../src/change-inspector-interaction");
+    }
+  });
+
+  it("traverses a fresh authoritative generation while presentation remains parked", async () => {
+    history.replaceState(null, "", "/#/timeline?limit=1&order=desc");
+    const currentProfile = {
+      ...profile,
+      authorityCursor: authorityCursor(2),
+    };
+    const currentHead = boundaryHistoryPage({
+      eventIds: ["evt:current-head"],
+      next: "tail-token",
+      offset: 0,
+    });
+    const currentTail = boundaryHistoryPage({
+      eventIds: ["evt:current-tail"],
+      offset: 1,
+    });
+    const parkedDisplay = boundaryHistoryPage({
+      authoritySequence: 1,
+      eventIds: ["evt:parked-head"],
+      offset: 0,
+      timelineProjectionStamp: "sha256:timeline-parked",
+    });
+    const parkedSnapshot = {
+      mode: "parked" as const,
+      newCount: 1,
+      display: parkedDisplay,
+    };
+    vi.doMock("../src/change-inspector-timeline-monitor", () => ({
+      createTimelineMonitor: () => ({
+        observe: () => parkedSnapshot,
+        toggle: () => parkedSnapshot,
+        park: () => parkedSnapshot,
+        follow: () => parkedSnapshot,
+        snapshot: () => parkedSnapshot,
+      }),
+    }));
+    try {
+      globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+        const path = String(input);
+        if (path === "/api/v2/profile") {
+          return new Response(JSON.stringify(currentProfile));
+        }
+        if (path.startsWith("/api/v2/changes?")) {
+          return new Response(JSON.stringify(page("changes")));
+        }
+        if (path.startsWith("/api/v2/attention?")) {
+          return new Response(JSON.stringify(page("attention")));
+        }
+        if (path.startsWith("/api/v2/history?")) {
+          const query = new URL(path, "https://pointbreak.invalid")
+            .searchParams;
+          return new Response(
+            JSON.stringify(
+              query.get("after") === "tail-token" ? currentTail : currentHead,
+            ),
+          );
+        }
+        throw new Error(`unexpected ${path}`);
+      }) as typeof fetch;
+      const { bootstrapChangeInspector } = await import(
+        "../src/change-inspector"
+      );
+      await bootstrapChangeInspector({ poll: false });
+
+      const list = document.querySelector<HTMLOListElement>("#timeline");
+      list?.focus();
+      list?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "G", bubbles: true }),
+      );
+
+      await vi.waitFor(() => expect(location.hash).toContain("tail-token"));
+      expect(document.querySelector("#error")?.textContent).not.toContain(
+        "Reader refused",
+      );
+    } finally {
+      vi.doUnmock("../src/change-inspector-timeline-monitor");
+    }
   });
 
   it("reuses a coherent generation for exact navigation with the same query", async () => {
