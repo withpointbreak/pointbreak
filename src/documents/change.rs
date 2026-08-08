@@ -1290,8 +1290,7 @@ pub fn normalize_fact_presentations(
             },
         );
         facts.push(normalized_fact(
-            &fact_id,
-            "observation",
+            NormalizedFactIdentity::new(&fact_id, "observation"),
             exact,
             Some(view.target.clone()),
             &view.writer.actor_id,
@@ -1341,8 +1340,7 @@ pub fn normalize_fact_presentations(
             },
         );
         facts.push(normalized_fact(
-            &fact_id,
-            "input_request",
+            NormalizedFactIdentity::new(&fact_id, "input_request"),
             exact,
             Some(view.target.clone()),
             &view.writer.actor_id,
@@ -1368,8 +1366,7 @@ pub fn normalize_fact_presentations(
             },
         );
         facts.push(normalized_fact(
-            &fact_id,
-            "assessment",
+            NormalizedFactIdentity::new(&fact_id, "assessment"),
             exact,
             Some(view.target.clone()),
             &view.writer.actor_id,
@@ -1401,8 +1398,7 @@ pub fn normalize_fact_presentations(
             },
         );
         facts.push(normalized_fact(
-            &fact_id,
-            "validation",
+            NormalizedFactIdentity::new(&fact_id, "validation"),
             exact,
             None,
             &view.writer.actor_id,
@@ -1586,9 +1582,19 @@ fn validation_status_wire(status: crate::model::ValidationStatus) -> &'static st
     }
 }
 
+struct NormalizedFactIdentity<'a> {
+    fact_id: &'a str,
+    family: &'static str,
+}
+
+impl<'a> NormalizedFactIdentity<'a> {
+    const fn new(fact_id: &'a str, family: &'static str) -> Self {
+        Self { fact_id, family }
+    }
+}
+
 fn normalized_fact(
-    fact_id: &str,
-    family: &str,
+    identity: NormalizedFactIdentity<'_>,
     exact: &RevisionRefV1,
     target: Option<ReviewTargetRef>,
     actor_id: &ActorId,
@@ -1598,8 +1604,8 @@ fn normalized_fact(
 ) -> FactPresentationV1 {
     let (body_content_state, content_availability) = content;
     FactPresentationV1 {
-        fact_id: fact_id.to_owned(),
-        family: family.to_owned(),
+        fact_id: identity.fact_id.to_owned(),
+        family: identity.family.to_owned(),
         origin_revision: exact.clone(),
         target,
         context_change_id: None,
