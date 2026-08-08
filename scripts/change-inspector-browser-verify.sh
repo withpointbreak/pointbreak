@@ -214,6 +214,9 @@ for topology in initial replacement parallel_current replacement_divergent conso
     .topology[$topology].current
     | if type == "array" then . else [.] end
     | map({revisionId: .revision, objectArtifactContentHash: .artifact})
+    # Matrix metadata records fixture construction order. Change documents
+    # expose the canonical RevisionId order owned by the ChangeView BTreeSet.
+    | sort_by(.revisionId, .objectArtifactContentHash)
   ' "$log_dir/base-matrix.json")"
   POINTBREAK_HOME="$pointbreak_home" "$pointbreak_binary" change show "$topology_change" \
     --repo "$fixture_repo" --format json >"$log_dir/topology-$topology.json"

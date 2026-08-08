@@ -135,6 +135,22 @@ fn inspector_decision_continuity_browser_gate_uses_isolated_pointbreak_surfaces(
 }
 
 #[test]
+fn change_inspector_browser_gate_compares_canonical_current_revision_refs() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let script = fs::read_to_string(root.join("scripts/change-inspector-browser-verify.sh"))
+        .expect("read Change Inspector browser gate");
+
+    assert!(
+        script.contains("sort_by(.revisionId, .objectArtifactContentHash)"),
+        "fixture construction order must be normalized to the Change document order"
+    );
+    assert!(
+        script.contains(".currentRevisionRefs == $current"),
+        "the product document must still match the complete canonical array exactly"
+    );
+}
+
+#[test]
 fn canonical_review_example_manifest_pins_the_record_and_all_authoritative_files() {
     let manifest_path = pack_root().join("manifest.json");
     let manifest: Value = serde_json::from_slice(
