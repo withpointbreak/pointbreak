@@ -1032,6 +1032,7 @@
         );
         expect(await controls.count() === 1, `${layout.name} ordinary card tab order`, "an ordinary Change card exposed more than one tab stop");
         expect(await controls.first().getAttribute("class").then((value) => value?.includes("change-card-primary")), `${layout.name} ordinary card tab order`, "the ordinary Change card's only tab stop was not its primary action");
+        expect(await controls.first().getAttribute("aria-label").then((value) => value?.startsWith("Review Change. ")), `${layout.name} ordinary card action name`, "the ordinary Change card's primary action did not lead with its human review action");
       }
       const sparseGeometry = await page.evaluate(() => {
         const units = document.querySelector("#master > .units");
@@ -1214,7 +1215,10 @@
     "a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex='-1'])",
   );
   expect(await parallelControls.count() === expectedParallelPeers.length + 1, "parallel card tab order", "parallel Change card exposed controls beyond its primary action and exact peers");
+  const parallelPrimary = parallelCard.locator(".change-card-primary");
+  expect(await parallelPrimary.count() === 1, "parallel card tab order", "parallel Change card did not expose exactly one primary action");
   expect(await parallelControls.first().getAttribute("class").then((value) => value?.includes("change-card-primary")), "parallel card tab order", "parallel Change card did not lead with its primary action");
+  expect(await parallelPrimary.getAttribute("aria-label").then((value) => value?.startsWith("Review current Revisions. ") && value.includes(parallelCardName)), "parallel card action name", "parallel Change card's primary action did not lead with its human review action and retain the full card name");
   await peerButtons.first().focus();
   await page.keyboard.press("Tab");
   expect(await peerButtons.nth(1).evaluate((node) => document.activeElement === node), "peer keyboard traversal", "Tab did not move directly between exact current-Revision peers");
@@ -1223,7 +1227,7 @@
     return { outlineStyle: style.outlineStyle, outlineWidth: style.outlineWidth };
   });
   expect(peerFocus.outlineStyle !== "none" && peerFocus.outlineWidth !== "0px", "visible peer focus", `peer focus indicator was ${peerFocus.outlineStyle}/${peerFocus.outlineWidth}`);
-  await parallelCard.getByRole("button", { name: /^Open Change / }).click();
+  await parallelPrimary.click();
   await page.waitForFunction((changeId) => location.hash.includes(encodeURIComponent(changeId)) && !location.hash.includes("/revisions/"), parallelChange);
   expect(await page.locator("#detail-body .change-card-peer-open").count() === 0, "parallel explicit chooser", "card-only peer controls leaked into detail");
   await page.waitForFunction(() => Boolean(document.querySelector("#detail-body")?.dataset.changeReadingKey));
@@ -1302,7 +1306,7 @@
   }
 
   await open("changes?limit=100&order=change_id_asc", layouts[0], "split bounds");
-  await page.getByRole("button", { name: /^Open Change / }).first().click();
+  await page.locator(".change-card-primary").first().click();
   await page.waitForFunction(() => !document.querySelector("#detail")?.inert);
   const divider = page.locator(".divider");
   const splitBox = await page.locator(".split").boundingBox();
