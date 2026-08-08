@@ -155,14 +155,15 @@
       const exact = card.dataset.changeId || "";
       const peers = Array.from(card.querySelectorAll(".change-card-peer-open"));
       const exactPeersAreNamed = peers.every((peer) => {
-        const [revisionId, artifactHash] = (peer.getAttribute("title") || "").split(" ");
+        const title = peer.getAttribute("title") || "";
+        const identity = /^exact Revision (.+); artifact (.+)$/.exec(title);
+        if (!identity) return false;
+        const [, revisionId, artifactHash] = identity;
         const peerName = peer.getAttribute("aria-label") || "";
-        const copyName = peer.parentElement?.querySelector("button:last-child")?.getAttribute("aria-label") || "";
         return Boolean(
           revisionId && artifactHash
           && name.includes(revisionId) && name.includes(artifactHash)
           && peerName.includes(revisionId) && peerName.includes(artifactHash)
-          && copyName.includes(revisionId) && copyName.includes(artifactHash)
         );
       });
       return name.includes(exact)
@@ -1023,7 +1024,15 @@
       const route = `changes?limit=100&order=change_id_asc&${filter}&q=${encodeURIComponent(expectedChange)}`;
       const topologyMetrics = await open(route, layout, `${layout.name} ${name}`);
       expect(topologyMetrics.liveCards === 1, `${layout.name} ${name}`, `expected one exact representative card, saw ${topologyMetrics.liveCards}`);
-      expect(await page.locator(`.unit-card[data-change-id="${expectedChange}"]`).count() === 1, `${layout.name} ${name}`, `missing exact fixture Change ${expectedChange}`);
+      const representativeCard = page.locator(`.unit-card[data-change-id="${expectedChange}"]`);
+      expect(await representativeCard.count() === 1, `${layout.name} ${name}`, `missing exact fixture Change ${expectedChange}`);
+      if (slug === "initial") {
+        const controls = representativeCard.locator(
+          "a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex='-1'])",
+        );
+        expect(await controls.count() === 1, `${layout.name} ordinary card tab order`, "an ordinary Change card exposed more than one tab stop");
+        expect(await controls.first().getAttribute("class").then((value) => value?.includes("change-card-primary")), `${layout.name} ordinary card tab order`, "the ordinary Change card's only tab stop was not its primary action");
+      }
       const sparseGeometry = await page.evaluate(() => {
         const units = document.querySelector("#master > .units");
         const card = units?.querySelector(".unit-card[data-change-id]");
@@ -1172,12 +1181,43 @@
   expect(parallelChange === expectedParallelChange, "parallel explicit chooser", `opened ${parallelChange} instead of exact fixture ${expectedParallelChange}`);
   const parallelCard = page.locator(`.unit-card[data-change-id="${parallelChange}"]`);
   const peerButtons = parallelCard.locator(".change-card-peer-open");
+  const expectedParallelPeers = topologyFixture.parallel_current.current
+    .map((peer) => ({
+      revisionId: peer.revision,
+      artifactHash: peer.artifact,
+      title: `exact Revision ${peer.revision}; artifact ${peer.artifact}`,
+    }))
+    .sort((left, right) => left.title.localeCompare(right.title));
+  const renderedParallelPeers = await peerButtons.evaluateAll((peers) => peers
+    .map((peer) => ({
+      title: peer.getAttribute("title") || "",
+      name: peer.getAttribute("aria-label") || "",
+    }))
+    .sort((left, right) => left.title.localeCompare(right.title)));
+  expect(
+    JSON.stringify(renderedParallelPeers.map((peer) => peer.title))
+      === JSON.stringify(expectedParallelPeers.map((peer) => peer.title)),
+    "parallel explicit chooser",
+    "card peer controls did not represent the fixture's exact current Revisions",
+  );
+  const parallelCardName = await parallelCard.getAttribute("aria-label") || "";
+  expect(
+    expectedParallelPeers.every((expected, index) =>
+      parallelCardName.includes(expected.revisionId)
+        && parallelCardName.includes(expected.artifactHash)
+        && renderedParallelPeers[index].name.includes(expected.revisionId)
+        && renderedParallelPeers[index].name.includes(expected.artifactHash)),
+    "parallel explicit chooser",
+    "parallel card or peer names omitted an exact fixture identity",
+  );
+  const parallelControls = parallelCard.locator(
+    "a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex='-1'])",
+  );
+  expect(await parallelControls.count() === expectedParallelPeers.length + 1, "parallel card tab order", "parallel Change card exposed controls beyond its primary action and exact peers");
+  expect(await parallelControls.first().getAttribute("class").then((value) => value?.includes("change-card-primary")), "parallel card tab order", "parallel Change card did not lead with its primary action");
   await peerButtons.first().focus();
   await page.keyboard.press("Tab");
-  const firstPeerCopy = parallelCard.getByRole("button", { name: /^Copy exact Revision / }).first();
-  expect(await firstPeerCopy.evaluate((node) => document.activeElement === node), "peer keyboard traversal", "Tab skipped the first exact Revision copy action");
-  await page.keyboard.press("Tab");
-  expect(await peerButtons.nth(1).evaluate((node) => document.activeElement === node), "peer keyboard traversal", "Tab did not move between exact current-Revision peers");
+  expect(await peerButtons.nth(1).evaluate((node) => document.activeElement === node), "peer keyboard traversal", "Tab did not move directly between exact current-Revision peers");
   const peerFocus = await peerButtons.nth(1).evaluate((node) => {
     const style = getComputedStyle(node);
     return { outlineStyle: style.outlineStyle, outlineWidth: style.outlineWidth };
@@ -1194,9 +1234,39 @@
     const name = choice.getAttribute("aria-label") || "";
     return revisionId.length > 0 && name.includes(revisionId) && name.includes("; artifact sha256:");
   })), "parallel explicit chooser", "Change detail exact-Revision names omitted the artifact identity");
+  const chosenExactTitle = await exactChoices.first().getAttribute("title");
+  const chosenExactPeer = expectedParallelPeers.find((peer) => peer.title === chosenExactTitle);
+  expect(Boolean(chosenExactPeer), "parallel explicit chooser", "Change detail offered an exact Revision outside the fixture's current peers");
   await exactChoices.first().click();
   await page.waitForFunction(() => location.hash.includes("/revisions/"));
   await page.waitForFunction(() => Boolean(document.querySelector("#detail-body")?.dataset.changeReadingKey));
+  expect(await page.evaluate(({ changeId, revisionId, artifactHash }) => {
+    const [path, rawQuery = ""] = location.hash.slice(2).split("?", 2);
+    const query = new URLSearchParams(rawQuery);
+    return path === `changes/${encodeURIComponent(changeId)}/revisions/${encodeURIComponent(revisionId)}`
+      && query.get("artifactHash") === artifactHash;
+  }, {
+    changeId: parallelChange,
+    revisionId: chosenExactPeer.revisionId,
+    artifactHash: chosenExactPeer.artifactHash,
+  }), "parallel exact Revision route", "peer choice did not open its exact Change, Revision, and artifact identity");
+  const copyLink = page.locator("#detail-body").getByRole("button", { name: "Copy link" });
+  expect(await copyLink.count() === 1, "parallel exact Revision copy", "exact Revision detail omitted its relocated copy action");
+  await page.evaluate(() => {
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        writeText(value) {
+          document.documentElement.dataset.pointbreakCopiedLink = value;
+          return Promise.resolve();
+        },
+      },
+    });
+  });
+  const exactRevisionUrl = page.url();
+  await copyLink.click();
+  await page.waitForFunction((expected) => document.documentElement.dataset.pointbreakCopiedLink === expected, exactRevisionUrl);
+  expect(await page.evaluate(() => document.documentElement.dataset.pointbreakCopiedLink) === exactRevisionUrl, "parallel exact Revision copy", "Copy link did not copy the current exact Revision URL");
   await screenshot("wide-parallel-explicit-revision");
   const revisionReadingKey = await page.locator("#detail-body").getAttribute("data-change-reading-key");
   await page.getByRole("button", { name: "Open authoritative captured diff" }).click();
