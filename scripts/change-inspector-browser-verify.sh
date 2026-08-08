@@ -263,45 +263,51 @@ primary_artifact="$(jq -er '.topology.initial.current.artifact' "$log_dir/base-m
 historical_change="$(jq -er '.topology.parallel_current.change' "$log_dir/base-matrix.json")"
 shared_revision="$(jq -er '.shared_revision.revision' "$log_dir/base-matrix.json")"
 shared_artifact="$(jq -er '.shared_revision.artifact' "$log_dir/base-matrix.json")"
-replacement_change="$(jq -er '.topology.replacement.change' "$log_dir/base-matrix.json")"
-replacement_current_revision="$(jq -er '.topology.replacement.current.revision' "$log_dir/base-matrix.json")"
-replacement_current_artifact="$(jq -er '.topology.replacement.current.artifact' "$log_dir/base-matrix.json")"
+graph_change="$(jq -s -e -r '.[0].changeId' "$log_dir/scale-captures.jsonl")"
+graph_successor_revision="$(jq -s -e -r '.[0].revision.revisionId' "$log_dir/scale-captures.jsonl")"
+graph_successor_artifact="$(jq -s -e -r '.[0].revision.objectArtifactContentHash' "$log_dir/scale-captures.jsonl")"
+graph_context_revision="$(jq -s -e -r '.[1].revision.revisionId' "$log_dir/scale-captures.jsonl")"
+graph_context_artifact="$(jq -s -e -r '.[1].revision.objectArtifactContentHash' "$log_dir/scale-captures.jsonl")"
 
-# Join the contextual predecessor only long enough to assert a supported
-# relation, then withdraw that membership. The active relation must remain as
-# pending nonmember context without changing the final effective replacement.
+# Build claim-only relationship context from two otherwise clean scale
+# Changes. Assert the relation while both exact Revisions are members, then
+# withdraw the contextual membership. The active relation must remain visible
+# as typed incomplete context without making an unavailable node actionable.
 POINTBREAK_HOME="$pointbreak_home" \
   POINTBREAK_ACTOR_ID="actor:agent:pointbreak-browser-matrix" \
-  "$pointbreak_binary" change join "$replacement_change" "$primary_revision" \
-    --operation-id "change-operation:browser-replacement-context-join-v1" \
+  "$pointbreak_binary" change join "$graph_change" "$graph_context_revision" \
+    --operation-id "change-operation:browser-graph-context-join-v1" \
     --repo "$fixture_repo" --format json \
-    >"$log_dir/replacement-context-join.json" \
-    2>"$log_dir/replacement-context-join.log"
+    >"$log_dir/graph-context-join.json" \
+    2>"$log_dir/graph-context-join.log"
 POINTBREAK_HOME="$pointbreak_home" "$pointbreak_binary" change show \
-  "$replacement_change" --repo "$fixture_repo" --format json \
-  >"$log_dir/replacement-context-after-join.json"
-replacement_context_membership_claim="$(jq -er --arg revision "$primary_revision" '
+  "$graph_change" --repo "$fixture_repo" --format json \
+  >"$log_dir/graph-context-after-join.json"
+graph_context_membership_claim="$(jq -er --arg revision "$graph_context_revision" '
   [.membershipClaims[] | select(.revisionId == $revision and .active == true)]
   | if length == 1 then .[0].claimId
-    else error("expected one active replacement context membership claim") end
-' "$log_dir/replacement-context-after-join.json")"
+    else error("expected one active graph context membership claim") end
+' "$log_dir/graph-context-after-join.json")"
 POINTBREAK_HOME="$pointbreak_home" \
   POINTBREAK_ACTOR_ID="actor:agent:pointbreak-browser-matrix" \
-  "$pointbreak_binary" change assert-relation "$replacement_change" \
-    "$replacement_current_revision" "$primary_revision" \
-    --successor-artifact-hash "$replacement_current_artifact" \
-    --predecessor-artifact-hash "$primary_artifact" \
-    --operation-id "change-operation:browser-replacement-pending-nonmember-v1" \
+  "$pointbreak_binary" change assert-relation "$graph_change" \
+    "$graph_successor_revision" "$graph_context_revision" \
+    --successor-artifact-hash "$graph_successor_artifact" \
+    --predecessor-artifact-hash "$graph_context_artifact" \
+    --operation-id "change-operation:browser-graph-context-relation-v1" \
     --repo "$fixture_repo" --format json \
-    >"$log_dir/replacement-pending-nonmember.json" \
-    2>"$log_dir/replacement-pending-nonmember.log"
+    >"$log_dir/graph-context-relation.json" \
+    2>"$log_dir/graph-context-relation.log"
 POINTBREAK_HOME="$pointbreak_home" \
   POINTBREAK_ACTOR_ID="actor:agent:pointbreak-browser-matrix" \
-  "$pointbreak_binary" change withdraw-membership "$replacement_context_membership_claim" \
-    --operation-id "change-operation:browser-replacement-context-withdraw-v1" \
+  "$pointbreak_binary" change withdraw-membership "$graph_context_membership_claim" \
+    --operation-id "change-operation:browser-graph-context-withdraw-v1" \
     --repo "$fixture_repo" --format json \
-    >"$log_dir/replacement-context-withdraw.json" \
-    2>"$log_dir/replacement-context-withdraw.log"
+    >"$log_dir/graph-context-withdraw.json" \
+    2>"$log_dir/graph-context-withdraw.log"
+POINTBREAK_HOME="$pointbreak_home" "$pointbreak_binary" change show \
+  "$graph_change" --repo "$fixture_repo" --format json \
+  >"$log_dir/graph-context-final.json"
 
 POINTBREAK_HOME="$pointbreak_home" \
   POINTBREAK_ACTOR_ID="actor:agent:pointbreak-browser-matrix" \
@@ -449,20 +455,27 @@ for topology in replacement parallel_current replacement_divergent consolidation
     || die "topology fixture $topology omitted the shared exact Revision"
 done
 jq -e \
-  --arg successorRevision "$replacement_current_revision" \
-  --arg successorArtifact "$replacement_current_artifact" \
-  --arg predecessorRevision "$primary_revision" \
-  --arg predecessorArtifact "$primary_artifact" '
-    .summary.topology == "replacement" and
-    (.effectiveSupersedes | length) == 1 and
+  --arg change "$graph_change" \
+  --arg successorRevision "$graph_successor_revision" \
+  --arg successorArtifact "$graph_successor_artifact" \
+  --arg predecessorRevision "$graph_context_revision" \
+  --arg predecessorArtifact "$graph_context_artifact" '
+    .summary.changeId == $change and
+    .summary.topology == "incomplete" and
+    .summary.currentRevisionRefs == [{
+      revisionId: $successorRevision,
+      objectArtifactContentHash: $successorArtifact
+    }] and
+    (.effectiveSupersedes | length) == 0 and
     any(.pendingOrConflictingEdges[]?;
       .active == true and
       .successor.revisionId == $successorRevision and
       .successor.objectArtifactContentHash == $successorArtifact and
       .predecessor.revisionId == $predecessorRevision and
-      .predecessor.objectArtifactContentHash == $predecessorArtifact)
-  ' "$log_dir/topology-replacement.json" >/dev/null \
-  || die "replacement pending nonmember claim changed or disappeared from typed topology"
+      .predecessor.objectArtifactContentHash == $predecessorArtifact) and
+    any(.diagnostics[]?; . == "change_relation_membership_incomplete")
+  ' "$log_dir/graph-context-final.json" >/dev/null \
+  || die "pending nonmember graph context changed or disappeared from typed topology"
 
 rich_revision="$(jq -er '.primary_revision' "$log_dir/base-matrix.json")"
 rich_change="$(jq -er --arg revision "$rich_revision" '
@@ -503,6 +516,11 @@ jq -n \
   --arg correctionEvent "$correction_event" \
   --arg factPortId "$fact_port_id" \
   --arg factPortEvent "$fact_port_event" \
+  --arg graphChange "$graph_change" \
+  --arg graphSuccessorRevision "$graph_successor_revision" \
+  --arg graphSuccessorArtifact "$graph_successor_artifact" \
+  --arg graphContextRevision "$graph_context_revision" \
+  --arg graphContextArtifact "$graph_context_artifact" \
   --arg directChange "$primary_change" \
   --arg historicalChange "$historical_change" \
   --arg historicalRevision "$primary_revision" \
@@ -519,6 +537,9 @@ jq -n \
     rich: {changeId: $richChange, revisionId: $richRevision, artifactHash: $richArtifact},
     correction: {originObservationId: $correctionOrigin, eventId: $correctionEvent},
     factPort: {portId: $factPortId, eventId: $factPortEvent},
+    graph: {changeId: $graphChange,
+      successor: {revisionId: $graphSuccessorRevision, artifactHash: $graphSuccessorArtifact},
+      context: {revisionId: $graphContextRevision, artifactHash: $graphContextArtifact}},
     historicalMembership: {directChangeId: $directChange,
       historicalChangeId: $historicalChange, revisionId: $historicalRevision,
       artifactHash: $historicalArtifact, claimId: $historicalClaim,

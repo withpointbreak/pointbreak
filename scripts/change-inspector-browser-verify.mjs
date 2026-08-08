@@ -1047,7 +1047,7 @@
   // inference. It must preserve both its SVG relationship map and an exact
   // textual equivalent. Available nodes are keyboard-operable; claim-only
   // context remains readable but deliberately does not choose a peer.
-  const graphChange = topologyFixture.replacement.change;
+  const graphChange = config.fixture.graph.changeId;
   const graphRoute = `changes/${encodeURIComponent(graphChange)}?limit=100&order=change_id_asc`;
   await open(graphRoute, layouts[0], "Change Revision relationship graph");
   await page.waitForFunction(() => Boolean(document.querySelector("#detail-body .change-revision-graph")));
@@ -1057,6 +1057,13 @@
     edges: graph.querySelectorAll("g.change-revision-edge").length,
     effective: graph.querySelectorAll('g.change-revision-edge[data-edge-kind="effective-supersedes"]').length,
     claims: graph.querySelectorAll('g.change-revision-edge[data-edge-kind="pending-or-conflicting-claim"]').length,
+    edgePresentation: Array.from(graph.querySelectorAll("g.change-revision-edge")).map((edge) => ({
+      kind: edge.getAttribute("data-edge-kind") || "",
+      successorRevision: edge.getAttribute("data-revision-id") || "",
+      successorArtifact: edge.getAttribute("data-artifact-hash") || "",
+      predecessorRevision: edge.getAttribute("data-predecessor-revision-id") || "",
+      predecessorArtifact: edge.getAttribute("data-predecessor-artifact-hash") || "",
+    })),
     textual: graph.querySelectorAll("details[data-graph-textual-equivalent]").length,
     nodePresentation: Array.from(graph.querySelectorAll("g.change-revision-node")).map((node) => {
       const revision = node.getAttribute("data-revision-id") || "";
@@ -1080,21 +1087,45 @@
     .filter((node) => node.availability === "available");
   const changeGraphContextNodes = changeGraphMetrics.nodePresentation
     .filter((node) => node.availability === "relationship_context_only");
+  const graphSuccessor = config.fixture.graph.successor;
+  const graphContext = config.fixture.graph.context;
+  const expectedNodeIdentities = [
+    `${graphSuccessor.revisionId}@${graphSuccessor.artifactHash}`,
+    `${graphContext.revisionId}@${graphContext.artifactHash}`,
+  ].sort();
+  const actualNodeIdentities = changeGraphMetrics.nodePresentation
+    .map((node) => `${node.revision}@${node.artifact}`)
+    .sort();
+  const graphSuccessorNode = changeGraphMetrics.nodePresentation.find((node) =>
+    node.revision === graphSuccessor.revisionId && node.artifact === graphSuccessor.artifactHash);
+  const graphContextNode = changeGraphMetrics.nodePresentation.find((node) =>
+    node.revision === graphContext.revisionId && node.artifact === graphContext.artifactHash);
+  const graphClaim = changeGraphMetrics.edgePresentation[0];
   expect(
     changeGraphMetrics.svg === 1
-      && changeGraphMetrics.nodes >= 2
-      && changeGraphMetrics.edges >= 1
+      && changeGraphMetrics.nodes === 2
+      && changeGraphMetrics.edges === 1
+      && changeGraphMetrics.effective === 0
+      && changeGraphMetrics.claims === 1
       && changeGraphMetrics.effective + changeGraphMetrics.claims === changeGraphMetrics.edges
       && changeGraphMetrics.textual === 1
+      && JSON.stringify(actualNodeIdentities) === JSON.stringify(expectedNodeIdentities)
+      && graphClaim?.kind === "pending-or-conflicting-claim"
+      && graphClaim.successorRevision === graphSuccessor.revisionId
+      && graphClaim.successorArtifact === graphSuccessor.artifactHash
+      && graphClaim.predecessorRevision === graphContext.revisionId
+      && graphClaim.predecessorArtifact === graphContext.artifactHash
+      && graphSuccessorNode?.availability === "available"
+      && graphContextNode?.availability === "relationship_context_only"
       && changeGraphMetrics.nodePresentation.every((node) =>
         node.revision.length > 0 && node.artifact.length > 0
           && node.label.includes(node.revision) && node.label.includes(node.artifact))
       && changeGraphMetrics.textualNodes.length === changeGraphMetrics.nodes
-      && changeGraphAvailableNodes.length > 0
+      && changeGraphAvailableNodes.length === 1
       && changeGraphAvailableNodes.every((node) =>
         node.role === "link" && node.disabled.length === 0
           && changeGraphMetrics.textualNodes.some((item) => item.actionTitle === node.label))
-      && changeGraphContextNodes.length > 0
+      && changeGraphContextNodes.length === 1
       && changeGraphContextNodes.every((node) =>
         node.role === "group" && node.disabled === "true"
           && changeGraphMetrics.textualNodes.some((item) => item.text === node.label && item.actionTitle.length === 0)),

@@ -54,7 +54,7 @@ fn served_keyboard_help_lists_shipped_shortcuts() {
 }
 
 #[test]
-fn served_lens_buttons_do_not_use_selected_state_without_tab_semantics() {
+fn served_lens_switcher_uses_one_valid_selection_model() {
     let store = representative_store();
     let html = Inspector::spawn(store.repo.path()).get_text("/");
     let lens = html
@@ -64,9 +64,19 @@ fn served_lens_buttons_do_not_use_selected_state_without_tab_semantics() {
         .expect("lens switcher markup exists");
     let tab_model = lens.contains("role=\"tablist\"") && lens.contains("role=\"tab\"");
     let pressed_button_model = lens.contains("aria-pressed") && !lens.contains("aria-selected");
+    let routed_navigation_model = lens.matches("<a ").count() == 3
+        && ["timeline", "changes", "attention"]
+            .into_iter()
+            .all(|route| lens.contains(&format!("href=\"#/{route}\"")))
+        && lens.matches("aria-current=\"page\"").count() == 1
+        && !lens.contains("aria-selected");
+    let model_count = [tab_model, pressed_button_model, routed_navigation_model]
+        .into_iter()
+        .filter(|model| *model)
+        .count();
 
-    assert!(
-        tab_model || pressed_button_model,
-        "lens switcher should either be a real tablist or use pressed button state"
+    assert_eq!(
+        model_count, 1,
+        "lens switcher should be a real tablist, pressed buttons, or routed navigation links"
     );
 }
